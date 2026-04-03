@@ -174,3 +174,4 @@ for (const pool of testPools) {
     "Sharpe Ratio": result.sharpeRatio.toFixed(3),
   });
 }
+
