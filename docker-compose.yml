@@ -36,3 +36,4 @@ volumes:
 networks:
   meteora-net:
     driver: bridge
+
