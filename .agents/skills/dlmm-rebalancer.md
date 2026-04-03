@@ -47,3 +47,4 @@ Always write to memory AFTER forming your reasoning:
 - If you see an unusual pattern → `warning` category
 - If you confirm a recurring behaviour → `pattern` category
 - Outcomes are written automatically by the agent after execution
+
