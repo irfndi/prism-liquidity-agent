@@ -20,3 +20,4 @@ All notable changes to Mantis are documented here.
 - `pattern` — 90 days
 - `warning` — 60 days  
 - `outcome` — 180 days
+
