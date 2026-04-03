@@ -78,3 +78,4 @@ Entries with cosine similarity > 0.70 are merged instead of duplicated.
 4. Position size > 30% portfolio → cap and approve
 5. Invalid bin range → reject REBALANCE
 6. EXIT → always approved (capital protection)
+
