@@ -56,6 +56,9 @@ export class MeteoraAdapter {
     const dlmm = await DLMM.create(this.connection, pubkey);
 
     const activeBin = await dlmm.getActiveBin();
+    // ±20 bins: wide enough to cover typical rebalance targets without fetching the
+    // entire bin array. The DLMM SDK fetches bin arrays in account chunks — requesting
+    // too wide a range crosses multiple on-chain accounts and multiplies RPC calls.
     const halfRange = 20; // ±20 bins around active
     const lowerBinId = activeBin.binId - halfRange;
     const upperBinId = activeBin.binId + halfRange;
@@ -79,6 +82,7 @@ export class MeteoraAdapter {
       upperBinId,
       bins,
       activeBinId: activeBin.binId,
+      binStep: dlmm.lbPair.binStep,
     };
   }
 
