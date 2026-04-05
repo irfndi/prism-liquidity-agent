@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="540" viewBox="0 0 900 540">
+  <defs>
+    <style>text { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; }</style>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="540" fill="#0a0d14"/>
+
+  <!-- Title bar -->
+  <rect width="900" height="42" fill="#111827"/>
+  <rect width="900" height="1" y="42" fill="#1f2937"/>
+  <circle cx="18" cy="21" r="6" fill="#ff5f57"/>
+  <circle cx="36" cy="21" r="6" fill="#febc2e"/>
+  <circle cx="54" cy="21" r="6" fill="#28c840"/>
+  <text x="450" y="26" fill="#34d399" font-size="13" font-weight="bold" text-anchor="middle">◈ Mantis  —  DLMM Liquidity Rebalancer</text>
+  <text x="820" y="26" fill="#34d399" font-size="11" text-anchor="middle">● LIVE</text>
+  <text x="820" y="38" fill="#4b5563" font-size="10" text-anchor="middle">cycle #31  ·  10m</text>
+
+  <!-- ─── LEFT: Pool watchlist ────────────────────────────────── -->
+  <rect x="12" y="54" width="268" height="320" rx="4" fill="#111827" stroke="#1f2937" stroke-width="1"/>
+  <text x="22" y="72" fill="#4b5563" font-size="10" letter-spacing="1">WATCHLIST  ·  4 POOLS</text>
+
+  <!-- Pool 1 — BONK/SOL — HOLD -->
+  <rect x="22" y="80" width="248" height="56" rx="3" fill="#0a0d14" stroke="#1f2937" stroke-width="1"/>
+  <text x="32" y="95" fill="#e5e7eb" font-size="10" font-weight="bold">BONK/SOL</text>
+  <rect x="192" y="84" width="38" height="14" rx="2" fill="#1a3a2a"/>
+  <text x="211" y="95" fill="#34d399" font-size="9" text-anchor="middle">HOLD</text>
+  <text x="32" y="108" fill="#6b7280" font-size="9">TVL $2.41M  ·  vol $847k  ·  fee/IL 2.14</text>
+  <text x="32" y="120" fill="#6b7280" font-size="9">bin util 68%  ·  drift +3 bins  ·  auth 0.91</text>
+  <text x="248" y="120" fill="#34d399" font-size="9" text-anchor="end">conf 0.82</text>
+
+  <!-- Pool 2 — WIF/USDC — REBALANCE -->
+  <rect x="22" y="143" width="248" height="56" rx="3" fill="#0a0d14" stroke="#f59e0b" stroke-width="1"/>
+  <text x="32" y="158" fill="#e5e7eb" font-size="10" font-weight="bold">WIF/USDC</text>
+  <rect x="178" y="147" width="62" height="14" rx="2" fill="#3d2a0a"/>
+  <text x="209" y="158" fill="#f59e0b" font-size="9" text-anchor="middle">REBALANCE</text>
+  <text x="32" y="171" fill="#6b7280" font-size="9">TVL $1.87M  ·  vol $512k  ·  fee/IL 0.84</text>
+  <text x="32" y="183" fill="#6b7280" font-size="9">bin util 52%  ·  drift +14 bins  ·  auth 0.88</text>
+  <text x="248" y="183" fill="#f59e0b" font-size="9" text-anchor="end">conf 0.77</text>
+
+  <!-- Pool 3 — JUP/USDC — HOLD -->
+  <rect x="22" y="206" width="248" height="56" rx="3" fill="#0a0d14" stroke="#1f2937" stroke-width="1"/>
+  <text x="32" y="221" fill="#e5e7eb" font-size="10" font-weight="bold">JUP/USDC</text>
+  <rect x="192" y="210" width="38" height="14" rx="2" fill="#1a3a2a"/>
+  <text x="211" y="221" fill="#34d399" font-size="9" text-anchor="middle">HOLD</text>
+  <text x="32" y="234" fill="#6b7280" font-size="9">TVL $3.14M  ·  vol $1.2M  ·  fee/IL 3.41</text>
+  <text x="32" y="246" fill="#6b7280" font-size="9">bin util 74%  ·  drift −1 bin  ·  auth 0.95</text>
+  <text x="248" y="246" fill="#34d399" font-size="9" text-anchor="end">conf 0.91</text>
+
+  <!-- Pool 4 — POPCAT/SOL — EXIT -->
+  <rect x="22" y="269" width="248" height="56" rx="3" fill="#0a0d14" stroke="#ef4444" stroke-width="1"/>
+  <text x="32" y="284" fill="#e5e7eb" font-size="10" font-weight="bold">POPCAT/SOL</text>
+  <rect x="196" y="273" width="34" height="14" rx="2" fill="#3a0a0a"/>
+  <text x="213" y="284" fill="#ef4444" font-size="9" text-anchor="middle">EXIT</text>
+  <text x="32" y="297" fill="#6b7280" font-size="9">TVL $287k  ·  vol $41k  ·  fee/IL 0.21</text>
+  <text x="32" y="309" fill="#ef4444" font-size="9">TVL −38%  ·  bin util 18%  ·  auth 0.44</text>
+  <text x="248" y="309" fill="#ef4444" font-size="9" text-anchor="end">conf 0.88</text>
+
+  <!-- ─── CENTER: Active agent evaluation ─────────────────────── -->
+  <rect x="290" y="54" width="330" height="320" rx="4" fill="#111827" stroke="#1f2937" stroke-width="1"/>
+  <text x="300" y="72" fill="#4b5563" font-size="10" letter-spacing="1">AGENT  ·  WIF/USDC  EVALUATION</text>
+
+  <!-- memory_query -->
+  <rect x="300" y="80" width="310" height="42" rx="3" fill="#0a0d14" stroke="#1f2937" stroke-width="1"/>
+  <text x="310" y="95" fill="#818cf8" font-size="9.5">→ memory_query("WIF/USDC bin drift patterns")</text>
+  <text x="310" y="109" fill="#6b7280" font-size="9">↳ 2 matches: drift+12 → REBALANCE profit $41 (14d ago), drift+9 → HOLD loss −$8 (6d ago)</text>
+
+  <!-- meteora_get_pool_state -->
+  <rect x="300" y="129" width="310" height="42" rx="3" fill="#0a0d14" stroke="#1f2937" stroke-width="1"/>
+  <text x="310" y="144" fill="#818cf8" font-size="9.5">→ meteora_get_pool_state("WIF/USDC")</text>
+  <text x="310" y="158" fill="#6b7280" font-size="9">↳ TVL $1.87M, vol $512k, fees $1,840, APR 36.2%, binStep 10</text>
+
+  <!-- meteora_get_bin_array -->
+  <rect x="300" y="178" width="310" height="42" rx="3" fill="#0a0d14" stroke="#1f2937" stroke-width="1"/>
+  <text x="310" y="193" fill="#818cf8" font-size="9.5">→ meteora_get_bin_array("WIF/USDC")</text>
+  <text x="310" y="207" fill="#6b7280" font-size="9">↳ active bin 3721, range [3700–3740], drift +14, util 52%, IL est 0.31%</text>
+
+  <!-- meteora_simulate_rebalance -->
+  <rect x="300" y="227" width="310" height="42" rx="3" fill="#0a0d14" stroke="#1f2937" stroke-width="1"/>
+  <text x="310" y="242" fill="#818cf8" font-size="9.5">→ meteora_simulate_rebalance(3711, 3751)</text>
+  <text x="310" y="256" fill="#6b7280" font-size="9">↳ est fees +$312, est IL cost −$84, net +$228 over 7d — proceed</text>
+
+  <!-- memory_write -->
+  <rect x="300" y="276" width="310" height="28" rx="3" fill="#0a0d14" stroke="#1f2937" stroke-width="1"/>
+  <text x="310" y="294" fill="#818cf8" font-size="9.5">→ memory_write(pattern: "WIF drift +14, REBALANCE net +$228")</text>
+
+  <!-- Final decision -->
+  <rect x="300" y="311" width="310" height="50" rx="3" fill="#1a2a0d" stroke="#f59e0b" stroke-width="1"/>
+  <text x="310" y="327" fill="#f59e0b" font-size="10" font-weight="bold">→ meteora_decision</text>
+  <text x="310" y="341" fill="#e5e7eb" font-size="9.5">REBALANCE  ·  new range [3711–3751]  ·  conf 0.77</text>
+  <text x="310" y="354" fill="#6b7280" font-size="9">Risk gate: ✓ passed all 7 checks  ·  executing</text>
+
+  <!-- ─── RIGHT: Open positions + memory ──────────────────────── -->
+  <rect x="630" y="54" width="258" height="200" rx="4" fill="#111827" stroke="#1f2937" stroke-width="1"/>
+  <text x="640" y="72" fill="#4b5563" font-size="10" letter-spacing="1">OPEN POSITIONS</text>
+
+  <!-- header row -->
+  <text x="640" y="88" fill="#374151" font-size="9">Pool</text>
+  <text x="758" y="88" fill="#374151" font-size="9">Entry</text>
+  <text x="820" y="88" fill="#374151" font-size="9">P&amp;L</text>
+  <rect x="630" y="91" width="258" height="1" fill="#1f2937"/>
+
+  <text x="640" y="106" fill="#e5e7eb" font-size="9.5">BONK/SOL</text>
+  <text x="758" y="106" fill="#6b7280" font-size="9">$4,800</text>
+  <text x="876" y="106" fill="#34d399" font-size="9.5" text-anchor="end">+$312</text>
+
+  <text x="640" y="122" fill="#e5e7eb" font-size="9.5">WIF/USDC</text>
+  <text x="758" y="122" fill="#6b7280" font-size="9">$3,200</text>
+  <text x="876" y="122" fill="#ef4444" font-size="9.5" text-anchor="end">−$47</text>
+
+  <text x="640" y="138" fill="#e5e7eb" font-size="9.5">JUP/USDC</text>
+  <text x="758" y="138" fill="#6b7280" font-size="9">$5,100</text>
+  <text x="876" y="138" fill="#34d399" font-size="9.5" text-anchor="end">+$891</text>
+
+  <rect x="630" y="144" width="258" height="1" fill="#1f2937"/>
+  <text x="640" y="158" fill="#6b7280" font-size="9.5">Total deployed</text>
+  <text x="876" y="158" fill="#e5e7eb" font-size="9.5" text-anchor="end">$13,100</text>
+  <text x="640" y="172" fill="#6b7280" font-size="9.5">Session P&amp;L</text>
+  <text x="876" y="172" fill="#34d399" font-size="9.5" text-anchor="end">+$1,156</text>
+  <text x="640" y="186" fill="#6b7280" font-size="9.5">Fees earned (24h)</text>
+  <text x="876" y="186" fill="#34d399" font-size="9.5" text-anchor="end">+$248</text>
+  <text x="640" y="200" fill="#6b7280" font-size="9.5">Portfolio drawdown</text>
+  <text x="876" y="200" fill="#34d399" font-size="9.5" text-anchor="end">2.1%</text>
+  <text x="640" y="214" fill="#6b7280" font-size="9.5">Risk gate</text>
+  <text x="876" y="214" fill="#34d399" font-size="9.5" text-anchor="end">✓ clear</text>
+  <text x="640" y="228" fill="#6b7280" font-size="9.5">Memory entries</text>
+  <text x="876" y="228" fill="#e5e7eb" font-size="9.5" text-anchor="end">184</text>
+  <text x="640" y="242" fill="#6b7280" font-size="9.5">Pruned (expired)</text>
+  <text x="876" y="242" fill="#e5e7eb" font-size="9.5" text-anchor="end">12</text>
+
+  <!-- Memory store panel -->
+  <rect x="630" y="264" width="258" height="110" rx="4" fill="#111827" stroke="#1f2937" stroke-width="1"/>
+  <text x="640" y="282" fill="#4b5563" font-size="10" letter-spacing="1">MEMORY  ·  RECENT ENTRIES</text>
+  <text x="640" y="297" fill="#818cf8" font-size="9">pattern</text>
+  <text x="640" y="308" fill="#6b7280" font-size="9.5">WIF drift +14 → REBALANCE +$228 (now)</text>
+  <text x="640" y="321" fill="#34d399" font-size="9">outcome</text>
+  <text x="640" y="332" fill="#6b7280" font-size="9.5">BONK/SOL HOLD maintained fee/IL 2.1 (2h ago)</text>
+  <text x="640" y="345" fill="#ef4444" font-size="9">warning</text>
+  <text x="640" y="356" fill="#6b7280" font-size="9.5">POPCAT vol/tvl 11x — wash flag (8m ago)</text>
+  <text x="640" y="368" fill="#818cf8" font-size="9">pattern  ·  merged</text>
+  <text x="640" y="379" fill="#6b7280" font-size="9.5">WIF drift pattern merged (cosine dist 0.04)</text>
+
+  <!-- ─── BOTTOM: Cycle log ─────────────────────────────────── -->
+  <rect x="12" y="384" width="876" height="142" rx="4" fill="#111827" stroke="#1f2937" stroke-width="1"/>
+  <text x="22" y="401" fill="#4b5563" font-size="10" letter-spacing="1">CYCLE LOG</text>
+
+  <text x="22" y="418" fill="#34d399" font-size="9.5">14:22:07  BONK/SOL  HOLD  conf=0.82  fee/IL=2.14  drift=+3 bins  [memory: 2 patterns matched]</text>
+  <text x="22" y="431" fill="#f59e0b" font-size="9.5">14:22:19  WIF/USDC  REBALANCE  conf=0.77  range [3711–3751]  sim_net=+$228  risk=PASS  [executing]</text>
+  <text x="22" y="444" fill="#34d399" font-size="9.5">14:22:31  JUP/USDC  HOLD  conf=0.91  fee/IL=3.41  drift=−1 bin  auth=0.95</text>
+  <text x="22" y="457" fill="#ef4444" font-size="9.5">14:22:44  POPCAT/SOL  EXIT  conf=0.88  TVL drop=−38%  auth=0.44  bin_util=18%  [below MIN_BIN_UTILIZATION]</text>
+  <text x="22" y="470" fill="#4b5563" font-size="9.5">14:22:55  cycle complete  4 pools  8,091ms  memory writes=2  prune=0</text>
+
+  <rect x="12" y="476" width="876" height="1" fill="#1f2937"/>
+
+  <text x="22" y="492" fill="#4b5563" font-size="9.5">14:12:03  WIF/USDC  REBALANCE  conf=0.79  net sim=+$194  PASS</text>
+  <text x="22" y="505" fill="#4b5563" font-size="9.5">14:02:01  BONK/SOL  HOLD  conf=0.84  fee/IL=2.09</text>
+  <text x="22" y="518" fill="#4b5563" font-size="9.5">13:52:00  JUP/USDC  ENTER  conf=0.76  size $5,100  risk: dup check ✓  drawdown ✓  size cap ✓</text>
+
+  <!-- Paper mode badge -->
+  <rect x="790" y="388" width="88" height="16" rx="3" fill="#1a3060"/>
+  <text x="834" y="400" fill="#60a5fa" font-size="9.5" text-anchor="middle">PAPER MODE</text>
+</svg>
