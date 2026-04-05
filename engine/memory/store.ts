@@ -14,7 +14,13 @@ const TTL_MS: Record<MemoryCategory, number> = {
 };
 
 const COLLECTION_NAME = "mantis_memory";
-const SIMILARITY_MERGE_THRESHOLD = 0.7;
+
+// Chroma returns cosine distance (0 = identical, 2 = maximally dissimilar).
+// We want to merge entries with cosine *similarity* ≥ 0.92 — i.e. nearly duplicate observations.
+// Similarity = 1 − distance, so the merge check is: distance < 1 − 0.92 = 0.08.
+// Using 0.7 as the raw threshold was previously treating 0.7 as similarity (wrong);
+// the merge guard `topDistance < 1 - threshold` gives 0.3 — too loose, merging distinct patterns.
+const SIMILARITY_MERGE_THRESHOLD = 0.92;
 
 export class AgentMemory {
   private client: ChromaClient;
