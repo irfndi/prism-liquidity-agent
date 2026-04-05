@@ -145,7 +145,7 @@ export class DLMMStrategy {
   /**
    * Pre-filter: should this pool even be sent to the Claude agent?
    */
-  passesPreFilter(pool: PoolState, authScore: number): boolean {
+  passesPreFilter(pool: PoolState, authScore: number, binUtilization: number): boolean {
     if (pool.tvlUsd < config.MIN_POOL_TVL_USD) {
       log.debug("Pool filtered: TVL too low", {
         pool: pool.address,
@@ -158,6 +158,18 @@ export class DLMMStrategy {
       log.debug("Pool filtered: volume not authentic", {
         pool: pool.address,
         score: authScore,
+      });
+      return false;
+    }
+
+    // Pools with sparse bin utilization are one-sided or near-empty.
+    // The IL model assumes liquidity spread across the range — this breaks down
+    // when most bins are empty and all liquidity is concentrated in a few adjacent bins.
+    if (binUtilization < config.MIN_BIN_UTILIZATION) {
+      log.debug("Pool filtered: bin utilization too low", {
+        pool: pool.address,
+        utilization: binUtilization,
+        threshold: config.MIN_BIN_UTILIZATION,
       });
       return false;
     }
