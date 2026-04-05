@@ -31,6 +31,21 @@ export class RiskEngine {
       };
     }
 
+    // 2a. Duplicate pool guard — entering the same pool twice creates overlapping ranges
+    // that compound IL exposure without adding fee capture. The agent can REBALANCE
+    // an existing position; a second ENTER on the same pool is never correct.
+    if (decision.action === "ENTER" && decision.poolAddress) {
+      const duplicate = ctx.openPositions.find(
+        (p) => p.poolAddress === decision.poolAddress
+      );
+      if (duplicate) {
+        return {
+          approved: false,
+          reason: `Already holding position in pool ${decision.poolAddress} — use REBALANCE instead`,
+        };
+      }
+    }
+
     // 3. TVL drop exit validation
     if (decision.action === "EXIT") {
       // EXIT decisions are always allowed through — protecting capital
