@@ -40,7 +40,13 @@ export class DLMMStrategy {
 
   /**
    * Fee / IL ratio. > 1.0 means fees are covering impermanent loss.
-   * Uses a simplified model: fees 24h vs estimated IL from price drift.
+   *
+   * IL estimation uses the DLMM bin step to convert bin drift into a price ratio,
+   * then applies the standard CPMM IL formula: IL = 2√r/(1+r) − 1 where r is the
+   * price ratio between entry and current price. Each DLMM bin covers exactly
+   * (1 + binStep/10_000) of price, so d bins of drift → r = (1 + bs/10_000)^d.
+   * Prior model used a flat 0.2% per full drift which underestimates IL on
+   * high-step pools (binStep 25+) and overestimates on tight-step pairs.
    */
   computeFeeIlRatio(pool: PoolState, binArray: BinArray): number {
     if (pool.tvlUsd === 0) return 0;
@@ -48,13 +54,15 @@ export class DLMMStrategy {
     const activeBin = binArray.bins.find((b) => b.binId === binArray.activeBinId);
     if (!activeBin) return 0;
 
-    // Estimate IL from how far active bin has drifted from center of range
     const rangeCenter = (binArray.lowerBinId + binArray.upperBinId) / 2;
-    const driftRatio =
-      Math.abs(binArray.activeBinId - rangeCenter) /
-      ((binArray.upperBinId - binArray.lowerBinId) / 2 || 1);
+    const binsDrifted = Math.abs(binArray.activeBinId - rangeCenter);
+    const binStep = binArray.binStep ?? 10; // fallback to 10bps if missing
 
-    const estimatedIlUsd = pool.tvlUsd * driftRatio * 0.002; // 0.2% per full drift
+    // Price ratio at current active bin vs range center
+    const priceRatio = Math.pow(1 + binStep / 10_000, binsDrifted);
+    // Standard CPMM IL formula
+    const ilFraction = 2 * Math.sqrt(priceRatio) / (1 + priceRatio) - 1;
+    const estimatedIlUsd = pool.tvlUsd * Math.abs(ilFraction);
     const estimatedIlDaily = estimatedIlUsd / 365;
 
     if (estimatedIlDaily === 0) return pool.fees24hUsd > 0 ? 999 : 0;
