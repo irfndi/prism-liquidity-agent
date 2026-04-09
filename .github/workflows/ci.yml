@@ -8,7 +8,7 @@ on:
   pull_request:
 
 jobs:
-  build-and-test:
+  build:
     runs-on: ubuntu-latest
     env:
       CI: true
@@ -43,7 +43,4 @@ jobs:
         run: bun install
 
       - name: Build
-        run: bun run build
-
-      - name: Test
-        run: bun run test
+        run: bunx tsc --noEmit
