@@ -93,7 +93,7 @@ async function runBacktest(poolAddress: string, days = 30): Promise<BacktestResu
 
     // Pre-filter
     const auth = strategy.checkVolumeAuthenticity(tick.pool);
-    if (!strategy.passesPreFilter(tick.pool, auth.score)) {
+    if (!strategy.passesPreFilter(tick.pool, auth.score, metrics.binUtilization)) {
       previousTvl = tick.pool.tvlUsd;
       continue;
     }

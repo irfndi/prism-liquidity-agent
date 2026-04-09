@@ -1,15 +1,19 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "./config.js";
-import { createLogger } from "./core/logger.js";
-import type { AgentDecision, AgentCycle, PoolMetrics } from "./core/types.js";
-import { AgentMemory } from "./agent/memory.js";
+import { createLogger } from "./logger.js";
+import type { AgentDecision, AgentCycle, PoolMetrics } from "./types.js";
+import { AgentMemory } from "./memory/store.js";
 import { MeteoraAdapter } from "./adapters/meteora.js";
-import { DLMMStrategy } from "./strategies/dlmm.js";
-import { RiskEngine } from "./risk/engine.js";
-import { createMCPServer, METEORA_TOOLS } from "./mcp/server.js";
+import { DLMMStrategy } from "./probes/dlmm.js";
+import { RiskEngine } from "./risk/gate.js";
+import { createMCPServer, METEORA_TOOLS } from "./tools/index.js";
 import { randomUUID } from "crypto";
 
 const log = createLogger("Main");
+const trackedPaperPositions = new Map<
+  string,
+  PoolMetrics["pool"] & { currentValueUsd: number; depositedUsd: number }
+>();
 
 const SYSTEM_PROMPT = `You are an autonomous DLMM liquidity rebalancing agent for Meteora pools on Solana.
 
@@ -172,10 +176,32 @@ async function main() {
         });
 
         // Risk check
+        const openPositions = Array.from(trackedPaperPositions.values()).map((p) => ({
+          id: p.address,
+          poolAddress: p.address,
+          poolName: `${p.tokenXSymbol}/${p.tokenYSymbol}`,
+          lowerBinId: p.activeBinId - 10,
+          upperBinId: p.activeBinId + 10,
+          liquidityShares: 0n,
+          depositedUsd: p.depositedUsd,
+          currentValueUsd: p.currentValueUsd,
+          unrealizedPnlUsd: p.currentValueUsd - p.depositedUsd,
+          feesEarnedUsd: 0,
+          openedAt: p.timestamp,
+        }));
+        const portfolioValueUsd = Math.max(
+          config.PAPER_PORTFOLIO_USD,
+          openPositions.reduce((sum, position) => sum + position.currentValueUsd, 0)
+        );
+        const recentPnlUsd = openPositions.reduce(
+          (sum, position) => sum + position.unrealizedPnlUsd + position.feesEarnedUsd,
+          0
+        );
+
         const riskResult = risk.evaluate(decision, {
-          openPositions: [],
-          portfolioValueUsd: 10000, // TODO: fetch from wallet
-          recentPnlUsd: 0,
+          openPositions,
+          portfolioValueUsd,
+          recentPnlUsd,
         });
 
         if (!riskResult.approved) {
@@ -199,6 +225,22 @@ async function main() {
             action: decision.action,
             pool: poolAddress,
           });
+          if (decision.action === "ENTER" && decision.positionSizeUsd) {
+            const pool = await adapter.getPoolState(poolAddress);
+            trackedPaperPositions.set(poolAddress, {
+              ...pool,
+              depositedUsd: decision.positionSizeUsd,
+              currentValueUsd: decision.positionSizeUsd,
+            });
+          } else if (decision.action === "EXIT") {
+            trackedPaperPositions.delete(poolAddress);
+          } else if (decision.action === "REBALANCE" && trackedPaperPositions.has(poolAddress)) {
+            const current = trackedPaperPositions.get(poolAddress)!;
+            trackedPaperPositions.set(poolAddress, {
+              ...current,
+              currentValueUsd: current.currentValueUsd,
+            });
+          }
         } else {
           // Live execution would go here
           log.warn("Live trading not yet implemented — set PAPER_TRADING=true");
@@ -230,4 +272,3 @@ main().catch((err) => {
   console.error("Fatal error:", err);
   process.exit(1);
 });
-

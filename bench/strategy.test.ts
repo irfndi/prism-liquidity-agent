@@ -115,17 +115,17 @@ describe("DLMMStrategy", () => {
     it("rejects pools below minimum TVL", () => {
       // config.MIN_POOL_TVL_USD defaults to 50000
       const pool = makePool({ tvlUsd: 10_000 });
-      expect(strategy.passesPreFilter(pool, 0.9)).toBe(false);
+      expect(strategy.passesPreFilter(pool, 0.9, 0.8)).toBe(false);
     });
 
     it("rejects pools with low volume authenticity", () => {
       const pool = makePool({ tvlUsd: 100_000 });
-      expect(strategy.passesPreFilter(pool, 0.5)).toBe(false);
+      expect(strategy.passesPreFilter(pool, 0.5, 0.8)).toBe(false);
     });
 
     it("passes pools meeting all criteria", () => {
       const pool = makePool({ tvlUsd: 100_000 });
-      expect(strategy.passesPreFilter(pool, 0.9)).toBe(true);
+      expect(strategy.passesPreFilter(pool, 0.9, 0.8)).toBe(true);
     });
   });
 

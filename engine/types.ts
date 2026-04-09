@@ -13,6 +13,7 @@ export interface BinArray {
   upperBinId: number;
   bins: BinData[];
   activeBinId: number;
+  binStep?: number;
 }
 
 export interface PoolState {
