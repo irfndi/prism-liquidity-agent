@@ -134,6 +134,7 @@ export class AgentMemory {
       const meta = metas[i] as Record<string, unknown>;
       const expiresAt = Number(meta["expiresAt"] ?? 0);
 
+      entries.push({
         id: String(ids[i]),
         category: String(meta["category"] ?? "outcome") as MemoryCategory,
         content: String(docs[i] ?? ""),
