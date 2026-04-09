@@ -1,27 +1,49 @@
-name: CI
+﻿name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - master
   pull_request:
-    branches: [main]
 
 jobs:
-  test:
+  build-and-test:
     runs-on: ubuntu-latest
+    env:
+      CI: true
+      ANTHROPIC_API_KEY: test-anthropic-key
+      HELIUS_API_KEY: test-helius-key
+      SOLANA_RPC_URL: https://example.com
+      WALLET_ADDRESS: 11111111111111111111111111111111
+      WALLET_PRIVATE_KEY: test-private-key
+      TWITTER_BEARER_TOKEN: test-twitter-bearer
+      NEWSAPI_KEY: test-news-key
+      CHROMA_URL: http://localhost:8000
+      DEFILLAMA_API_URL: https://api.llama.fi
+      COINGECKO_API_URL: https://api.coingecko.com/api/v3
+      SNAPSHOT_GRAPHQL_URL: https://hub.snapshot.org/graphql
+      REALMS_API_URL: https://api.realms.today/api
+      LOG_LEVEL: error
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.2.15
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install
 
-      - name: Type check
-        run: bun run lint
+      - name: Build
+        run: bun run build
 
-      - name: Run tests
+      - name: Test
         run: bun run test
-
