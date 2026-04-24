@@ -93,7 +93,7 @@ export class RiskEngine {
       if (rangeWidth > config.MAX_REBALANCE_RANGE_BINS) {
         return {
           approved: false,
-          reason: `Rebalance range ${rangeWidth} bins exceeds MAX_REBALANCE_RANGE_BINS (${config.MAX_REBALANCE_RANGE_BINS}) — too much capital spread across inactive bins`,
+          reason: `Rebalance range ${rangeWidth} bins is too wide: exceeds MAX_REBALANCE_RANGE_BINS (${config.MAX_REBALANCE_RANGE_BINS}) — too much capital spread across inactive bins`,
         };
       }
     }
