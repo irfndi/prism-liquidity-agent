@@ -6,6 +6,18 @@
 
 An autonomous liquidity agent that watches Meteora DLMM pools, reasons over live on-chain data, and rebalances positions before they bleed.
 
+## Live Liquidity Board
+
+<img src="assets/preview-dashboard.png" alt="Mantis live liquidity board" width="100%" />
+
+Live operating view for Mantis: watched DLMM pools, fee/IL ratio, bin drift, volume authenticity, risk gates, and the agent's current HOLD, REBALANCE, EXIT, or ENTER decision.
+
+## Decision Flow
+
+<img src="assets/preview-decision.png" alt="Mantis decision flow" width="100%" />
+
+How Mantis decides: recall pool memory, observe on-chain state, reason over fee and impermanent-loss pressure, simulate the rebalance, record the outcome, and pass the final action through risk gates.
+
 ---
 
 ## The problem
