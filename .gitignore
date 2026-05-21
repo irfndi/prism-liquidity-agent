@@ -29,3 +29,7 @@ coverage/
 site/
 # Local env overrides
 .env.*.local
+
+# Test and TypeScript caches
+.vitest/
+*.tsbuildinfo
