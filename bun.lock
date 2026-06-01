@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "mantis",
+      "name": "prism-dlmm",
       "dependencies": {
         "@anthropic-ai/sdk": "^0.54.0",
         "@clack/prompts": "^0.9.0",
