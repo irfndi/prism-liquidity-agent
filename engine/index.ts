@@ -345,6 +345,25 @@ async function main() {
           }
 
           if (decision.action === "ENTER" && decision.positionSizeUsd) {
+            // Only enter ONE position per cycle to conserve capital
+            if (trackedPositions.size > 0) {
+              log.info("Skipping ENTER — already have an active position", {
+                pool: poolAddress,
+                existingPositions: trackedPositions.size,
+              });
+              continue;
+            }
+            
+            // Reserve 0.05 SOL for gas and position rent
+            const solBalance = await adapter.getConnection().getBalance(adapter.getWalletPublicKey()!);
+            if (solBalance < 0.05 * 1e9) {
+              log.warn("Insufficient SOL for gas/position rent — skipping ENTER", {
+                pool: poolAddress,
+                solBalance: (solBalance / 1e9).toFixed(4),
+              });
+              continue;
+            }
+            
             const pool = await adapter.getPoolState(poolAddress);
             const recommended = strategy.recommendBinRange(pool.activeBinId, pool.binStep);
             const result = await adapter.enterPosition(

@@ -32,6 +32,14 @@ export class MeteoraAdapter {
     return this.wallet?.publicKey.toBase58() ?? null;
   }
 
+  getConnection(): Connection {
+    return this.connection;
+  }
+
+  getWalletPublicKey(): PublicKey | null {
+    return this.wallet?.publicKey ?? null;
+  }
+
   async getWalletBalanceUsd(): Promise<number> {
     if (!this.wallet) return 0;
     
@@ -184,6 +192,22 @@ export class MeteoraAdapter {
 
   // ─── Live Trading Execution ─────────────────────────────────────────────────
 
+  private async getTokenBalance(mintAddress: string): Promise<bigint> {
+    if (!this.wallet) return 0n;
+    try {
+      const mint = new PublicKey(mintAddress);
+      const accounts = await this.connection.getTokenAccountsByOwner(
+        this.wallet!.publicKey,
+        { mint }
+      );
+      if (accounts.value.length === 0 || !accounts.value[0]) return 0n;
+      const bal = await this.connection.getTokenAccountBalance(accounts.value[0].pubkey);
+      return BigInt(bal.value.amount);
+    } catch {
+      return 0n;
+    }
+  }
+
   async enterPosition(
     poolAddress: string,
     lowerBinId: number,
@@ -221,8 +245,55 @@ export class MeteoraAdapter {
       const tokenXDecimals = await this.getTokenDecimals(pool.tokenX);
       const tokenYDecimals = await this.getTokenDecimals(pool.tokenY);
 
-      const totalXAmount = new BN(Math.floor((halfUsd / priceX) * Math.pow(10, tokenXDecimals)));
-      const totalYAmount = new BN(Math.floor((halfUsd / priceY) * Math.pow(10, tokenYDecimals)));
+      let totalXAmount = new BN(Math.floor((halfUsd / priceX) * Math.pow(10, tokenXDecimals)));
+      let totalYAmount = new BN(Math.floor((halfUsd / priceY) * Math.pow(10, tokenYDecimals)));
+
+      // Check actual token balances and cap deposit amounts
+      const balanceX = await this.getTokenBalance(pool.tokenX);
+      const balanceY = await this.getTokenBalance(pool.tokenY);
+      
+      // For wrapped SOL, also check native SOL balance
+      let nativeSolBalance = 0n;
+      if (pool.tokenX === 'So11111111111111111111111111111111111111112' || 
+          pool.tokenY === 'So11111111111111111111111111111111111111112') {
+        nativeSolBalance = BigInt(await this.connection.getBalance(this.wallet.publicKey));
+      }
+
+      // Cap X amount
+      const maxX = pool.tokenX === 'So11111111111111111111111111111111111111112' 
+        ? nativeSolBalance 
+        : balanceX;
+      if (BigInt(totalXAmount.toString()) > maxX) {
+        log.warn("Capping X deposit to available balance", { 
+          requested: totalXAmount.toString(), 
+          available: maxX.toString() 
+        });
+        totalXAmount = new BN(maxX.toString());
+      }
+
+      // Cap Y amount
+      const maxY = pool.tokenY === 'So11111111111111111111111111111111111111112' 
+        ? nativeSolBalance 
+        : balanceY;
+      if (BigInt(totalYAmount.toString()) > maxY) {
+        log.warn("Capping Y deposit to available balance", { 
+          requested: totalYAmount.toString(), 
+          available: maxY.toString() 
+        });
+        totalYAmount = new BN(maxY.toString());
+      }
+
+      // Skip if either side is zero
+      if (totalXAmount.eq(new BN(0)) || totalYAmount.eq(new BN(0))) {
+        log.error("Insufficient token balance to enter position", {
+          pool: poolAddress,
+          tokenX: pool.tokenX,
+          tokenY: pool.tokenY,
+          balanceX: maxX.toString(),
+          balanceY: maxY.toString(),
+        });
+        return null;
+      }
 
       const positionKeypair = new Keypair();
       const strategy = {
