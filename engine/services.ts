@@ -107,7 +107,14 @@ export interface StrategyApi {
     activeBinId: number,
     binStep: number,
   ) => { lowerBinId: number; upperBinId: number };
-  readonly passesPreFilter: (pool: PoolState, authScore: number, binUtilization: number) => boolean;
+  readonly passesPreFilter: (
+    pool: PoolState,
+    authScore: number,
+    binUtilization: number,
+    minTvlUsd?: number,
+    minAuthScore?: number,
+    minBinUtilization?: number,
+  ) => boolean;
 }
 
 export class StrategyService extends Context.Tag("StrategyService")<
@@ -125,6 +132,7 @@ export interface MemoryApi {
   readonly getRelevantContext: (
     query: string,
     topK?: number,
+    poolAddress?: string,
   ) => Effect.Effect<ReadonlyArray<MemoryEntry>, unknown>;
   readonly pruneExpired: () => Effect.Effect<number, unknown>;
   readonly recordOutcome: (
@@ -346,6 +354,7 @@ export interface DbApi {
   readonly queryMemory: (
     queryText: string,
     topK: number,
+    poolAddress?: string,
   ) => Effect.Effect<ReadonlyArray<MemoryEntry>, unknown>;
   readonly pruneMemory: () => Effect.Effect<number, unknown>;
 }

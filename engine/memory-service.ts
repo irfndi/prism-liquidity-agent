@@ -24,9 +24,9 @@ export const MemoryLive = Layer.effect(
           });
         }),
 
-      getRelevantContext: (query, topK = 5) =>
+      getRelevantContext: (query, topK = 5, poolAddress) =>
         Effect.gen(function* () {
-          return yield* db.queryMemory(query, topK);
+          return yield* db.queryMemory(query, topK, poolAddress);
         }),
 
       pruneExpired: () =>

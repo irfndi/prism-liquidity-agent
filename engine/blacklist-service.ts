@@ -41,16 +41,16 @@ export const BlacklistLive = (opts: {
           checkPool(poolAddress, tokenXMint, tokenYMint) {
             return Effect.gen(function* () {
               if (isTokenBlacklisted(tokenXMint)) {
-                return yield* new BlacklistError({
+                return yield* Effect.fail(new BlacklistError({
                   message: `Token X ${tokenXMint} is blacklisted`,
                   poolAddress,
-                });
+                }));
               }
               if (isTokenBlacklisted(tokenYMint)) {
-                return yield* new BlacklistError({
+                return yield* Effect.fail(new BlacklistError({
                   message: `Token Y ${tokenYMint} is blacklisted`,
                   poolAddress,
-                });
+                }));
               }
               return;
             });

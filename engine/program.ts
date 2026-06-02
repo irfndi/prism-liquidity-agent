@@ -1,4 +1,4 @@
-import { Effect, Layer, Option, pipe } from "effect";
+import { Effect, Layer } from "effect";
 import { ConfigService, ConfigLive, type AppConfig } from "./config-service.js";
 import { AdapterLive } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
@@ -19,7 +19,7 @@ import {
   ScreenerService,
   DbService,
 } from "./services.js";
-import type { AgentDecision, AgentCycle, PoolState, Position } from "./types.js";
+import type { AgentDecision, AgentCycle, PoolState } from "./types.js";
 import { randomUUID } from "crypto";
 
 // ─── Cycle state ───────────────────────────────────────────────
@@ -51,7 +51,7 @@ type AllServices =
   | ScreenerService
   | DbService;
 
-export function buildLayer(): Layer.Layer<AllServices, never, never> {
+export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, never> {
   const dbLayer = DbLive();
   const configLayer = ConfigLive;
 
@@ -62,24 +62,23 @@ export function buildLayer(): Layer.Layer<AllServices, never, never> {
   const screenerDeps = Layer.merge(adapter, StrategyLive);
   const screener = Layer.provide(
     ScreenerLive({
-      minTvlUsd: Number(process.env.DISCOVERY_MIN_TVL_USD ?? 100_000),
-      minFeeRatio: Number(process.env.DISCOVERY_MIN_FEE_RATIO ?? 1.5),
-      volumeAuthThreshold: Number(process.env.VOLUME_AUTH_THRESHOLD ?? 0.7),
-      minBinUtilization: Number(process.env.MIN_BIN_UTILIZATION ?? 0.3),
+      minTvlUsd: cfg?.discoveryMinTvlUsd ?? 100_000,
+      minFeeRatio: cfg?.discoveryMinFeeRatio ?? 1.5,
+      volumeAuthThreshold: cfg?.volumeAuthThreshold ?? 0.7,
+      minBinUtilization: cfg?.minBinUtilization ?? 0.3,
     }),
     screenerDeps,
   );
 
   const risk = RiskLive({
-    confidenceThreshold: 0.65,
-    maxConcurrentPositions: 5,
-    maxRebalanceRangeBins: 50,
-    stopLossPct: 0.15,
+    confidenceThreshold: cfg?.confidenceThreshold ?? 0.65,
+    maxConcurrentPositions: cfg?.maxConcurrentPositions ?? 5,
+    maxRebalanceRangeBins: cfg?.maxRebalanceRangeBins ?? 50,
+    stopLossPct: cfg?.stopLossPct ?? 0.15,
   });
   const blacklist = BlacklistLive({
-    deployerBlacklistPath:
-      process.env.DEPLOYER_BLACKLIST_PATH ?? "./engine/data/deployer-blacklist.json",
-    tokenBlacklistPath: process.env.TOKEN_BLACKLIST_PATH ?? "./engine/data/token-blacklist.json",
+    deployerBlacklistPath: cfg?.deployerBlacklistPath ?? "./engine/data/deployer-blacklist.json",
+    tokenBlacklistPath: cfg?.tokenBlacklistPath ?? "./engine/data/token-blacklist.json",
   });
 
   const merged = Layer.merge(adapter, StrategyLive);
@@ -116,14 +115,18 @@ export const program = Effect.gen(function* () {
 
   // ─── Pool discovery ────────────────────────────────────────────────────────
 
+  let poolsToScan = [...config.watchlistPools];
+
   if (config.enablePoolDiscovery) {
     const screened = yield* screener.screenPools().pipe(Effect.catchAll(() => Effect.succeed([])));
     if (screened.length > 0) {
       console.info(`Discovered ${screened.length} candidate pools`);
-      // Top 3 candidates added to watchlist
       const top3 = screened.slice(0, 3);
       for (const pool of top3) {
         console.info(`  Candidate: ${pool.address} (fee/IL: ${pool.feeIlRatio.toFixed(2)})`);
+        if (!poolsToScan.includes(pool.address)) {
+          poolsToScan.push(pool.address);
+        }
       }
     }
   }
@@ -143,8 +146,6 @@ export const program = Effect.gen(function* () {
       };
 
       console.info("Scan cycle started", { cycleId: cycle.cycleId });
-
-      const poolsToScan = config.watchlistPools.length > 0 ? config.watchlistPools : [];
 
       if (poolsToScan.length === 0) {
         console.info("No pools configured — skipping cycle");
@@ -191,23 +192,20 @@ export const program = Effect.gen(function* () {
       const binArray = yield* adapter.getBinArray(poolAddress);
 
       // Blacklist check
-      yield* blacklist.checkPool(poolAddress, pool.tokenX, pool.tokenY).pipe(
-        Effect.catchAll((err) => {
-          console.warn("Blacklist check failed", {
-            poolAddress,
-            reason: (err as { message?: string }).message ?? String(err),
-          });
-          return Effect.void;
-        }),
-      );
+      yield* blacklist.checkPool(poolAddress, pool.tokenX, pool.tokenY);
 
       const metrics = strategy.computeMetrics(pool, binArray, 0);
 
       // Pre-filter
       if (
-        pool.tvlUsd < config.minPoolTvlUsd ||
-        metrics.volumeAuthenticity < config.volumeAuthThreshold ||
-        metrics.binUtilization < config.minBinUtilization
+        !strategy.passesPreFilter(
+          pool,
+          metrics.volumeAuthenticity,
+          metrics.binUtilization,
+          config.minPoolTvlUsd,
+          config.volumeAuthThreshold,
+          config.minBinUtilization,
+        )
       ) {
         console.debug("Pool failed pre-filter", { pool: poolAddress });
         return null;
@@ -215,7 +213,7 @@ export const program = Effect.gen(function* () {
 
       // Check memory for warnings
       const warnings = yield* memory
-        .getRelevantContext(`warnings for pool ${poolAddress}`, 3)
+        .getRelevantContext(`warnings for pool ${poolAddress}`, 3, poolAddress)
         .pipe(Effect.catchAll(() => Effect.succeed([])));
       const hasRecentWarning = warnings.some(
         (w) => w.category === "warning" && w.createdAt > Date.now() - 7 * 24 * 60 * 60 * 1000,
@@ -413,27 +411,31 @@ export const program = Effect.gen(function* () {
         recentPnlUsd,
       });
 
-      // Audit decision
-      yield* audit
-        .recordDecision({
-          timestamp: Date.now(),
-          cycleId,
-          poolAddress,
-          action: decision.action,
-          confidence: decision.confidence,
-          reasoning: decision.reasoning,
-          metrics,
-          riskResult,
-          executed: riskResult.approved,
-          paperTrading: config.paperTrading,
-        })
-        .pipe(Effect.catchAll(() => Effect.void));
+      // Apply risk-adjusted position size cap
+      if (riskResult.adjustedSizeUsd && decision.action === "ENTER") {
+        decision.positionSizeUsd = riskResult.adjustedSizeUsd;
+        decision.reasoning += ` (size capped to $${riskResult.adjustedSizeUsd.toFixed(0)})`;
+      }
 
       if (!riskResult.approved) {
         console.warn("Risk engine rejected", {
           reason: riskResult.reason,
           pool: poolAddress,
         });
+        yield* audit
+          .recordDecision({
+            timestamp: Date.now(),
+            cycleId,
+            poolAddress,
+            action: decision.action,
+            confidence: decision.confidence,
+            reasoning: decision.reasoning,
+            metrics,
+            riskResult,
+            executed: false,
+            paperTrading: config.paperTrading,
+          })
+          .pipe(Effect.catchAll(() => Effect.void));
         yield* memory
           .upsert({
             category: "warning",
@@ -454,6 +456,22 @@ export const program = Effect.gen(function* () {
       } else {
         yield* executeLive(decision, pool);
       }
+
+      // Audit after execution
+      yield* audit
+        .recordDecision({
+          timestamp: Date.now(),
+          cycleId,
+          poolAddress,
+          action: decision.action,
+          confidence: decision.confidence,
+          reasoning: decision.reasoning,
+          metrics,
+          riskResult,
+          executed: true,
+          paperTrading: config.paperTrading,
+        })
+        .pipe(Effect.catchAll(() => Effect.void));
 
       return decision;
     });
@@ -681,6 +699,8 @@ export const program = Effect.gen(function* () {
   yield* runScanCycle();
 
   // Schedule periodic cycles
+  const layer = buildLayer(config);
+
   const interval = setInterval(() => {
     if (cycleInFlight) {
       skippedCycles++;
@@ -695,7 +715,7 @@ export const program = Effect.gen(function* () {
         yield* claimAllFees();
         yield* runScanCycle();
       }).pipe(
-        Effect.provide(buildLayer()),
+        Effect.provide(layer),
         Effect.catchAll((err) => {
           console.error("Cycle error:", err);
           return Effect.void;
@@ -711,6 +731,17 @@ export const program = Effect.gen(function* () {
       cycleInFlight = false;
     });
   }, config.scanIntervalMs);
+
+  process.on("SIGINT", () => {
+    clearInterval(interval);
+    console.info("Received SIGINT — shutting down");
+    process.exit(0);
+  });
+  process.on("SIGTERM", () => {
+    clearInterval(interval);
+    console.info("Received SIGTERM — shutting down");
+    process.exit(0);
+  });
 
   // Keep process alive
   yield* Effect.never;

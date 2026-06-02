@@ -106,6 +106,12 @@ describe("DLMMStrategy", () => {
       const pool = makePool({ tvlUsd: 100_000 });
       expect(DLMMStrategy.passesPreFilter(pool, 0.8, -0.1)).toBe(false);
     });
+
+    it("respects threshold parameters", () => {
+      const pool = makePool({ tvlUsd: 100_000 });
+      expect(DLMMStrategy.passesPreFilter(pool, 0.8, 0.5, 200_000, 0.7, 0.3)).toBe(false);
+      expect(DLMMStrategy.passesPreFilter(pool, 0.6, 0.2, 50_000, 0.5, 0.1)).toBe(true);
+    });
   });
 
   describe("computeBinUtilization", () => {

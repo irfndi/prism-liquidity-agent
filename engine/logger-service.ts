@@ -1,4 +1,4 @@
-import { Context, Effect, Logger } from "effect";
+import { Context, Effect } from "effect";
 
 export interface AppLogger {
   readonly debug: (msg: string, data?: Record<string, unknown>) => Effect.Effect<void>;

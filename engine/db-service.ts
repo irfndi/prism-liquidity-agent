@@ -45,6 +45,7 @@ export interface DbApi {
   readonly queryMemory: (
     queryText: string,
     topK: number,
+    poolAddress?: string,
   ) => Effect.Effect<ReadonlyArray<MemoryEntry>, unknown>;
   readonly pruneMemory: () => Effect.Effect<number, unknown>;
 }
@@ -284,22 +285,27 @@ export const DbLive = (dbPath?: string) =>
             );
           }),
 
-        queryMemory: (queryText, topK) =>
+        queryMemory: (queryText, topK, poolAddress) =>
           Effect.tryPromise(async () => {
             const now = Date.now();
             const embedding = await getEmbedding(queryText);
-            const rows = queryAll<Record<string, unknown>>(
-              db,
-              `SELECT
+            const sql = poolAddress
+              ? `SELECT
+              id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
+              distance
+             FROM vec_memory
+             WHERE embedding MATCH ? AND k = ? AND expiresAt > ? AND pool_address = ?
+             ORDER BY distance`
+              : `SELECT
               id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
               distance
              FROM vec_memory
              WHERE embedding MATCH ? AND k = ? AND expiresAt > ?
-             ORDER BY distance`,
-              JSON.stringify(embedding),
-              topK * 2,
-              now,
-            );
+             ORDER BY distance`;
+            const params = poolAddress
+              ? [JSON.stringify(embedding), topK * 2, now, poolAddress]
+              : [JSON.stringify(embedding), topK * 2, now];
+            const rows = queryAll<Record<string, unknown>>(db, sql, ...params);
 
             const RECENCY_HALFLIFE_MS = 30 * 24 * 60 * 60 * 1000;
             const ranked = rows

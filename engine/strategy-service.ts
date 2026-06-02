@@ -98,8 +98,20 @@ export const DLMMStrategy: StrategyApi = {
     };
   },
 
-  passesPreFilter(pool: PoolState, authScore: number, binUtilization: number): boolean {
-    return pool.tvlUsd > 0 && authScore >= 0 && binUtilization >= 0;
+  passesPreFilter(
+    pool: PoolState,
+    authScore: number,
+    binUtilization: number,
+    minTvlUsd = 0,
+    minAuthScore = 0,
+    minBinUtilization = 0,
+  ): boolean {
+    return (
+      pool.tvlUsd > 0 &&
+      pool.tvlUsd >= minTvlUsd &&
+      authScore >= minAuthScore &&
+      binUtilization >= minBinUtilization
+    );
   },
 };
 

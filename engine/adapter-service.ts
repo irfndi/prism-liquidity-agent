@@ -38,36 +38,34 @@ export const AdapterLive = Layer.effect(
         const cached = tokenMetaCache.get(mint);
         if (cached) return cached;
 
-        try {
-          const url = `https://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
-          const res = yield* Effect.tryPromise(() =>
-            fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                jsonrpc: "2.0",
-                id: "get-asset",
-                method: "getAsset",
-                params: { id: mint },
-              }),
+        const url = `https://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
+        const res = yield* Effect.tryPromise(() =>
+          fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: "get-asset",
+              method: "getAsset",
+              params: { id: mint },
             }),
-          );
-          const json = (yield* Effect.tryPromise(() => res.json())) as {
-            result?: {
-              content?: { metadata?: { symbol?: string } };
-              token_info?: { decimals?: number };
-            };
+          }),
+        );
+        const json = (yield* Effect.tryPromise(() => res.json())) as {
+          result?: {
+            content?: { metadata?: { symbol?: string } };
+            token_info?: { decimals?: number };
           };
-          const meta = {
-            symbol: json.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
-            decimals: json.result?.token_info?.decimals ?? 6,
-          };
-          tokenMetaCache.set(mint, meta);
-          return meta;
-        } catch (err) {
-          return { symbol: mint.slice(0, 4), decimals: 6 };
-        }
-      });
+        };
+        const meta = {
+          symbol: json.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
+          decimals: json.result?.token_info?.decimals ?? 6,
+        };
+        tokenMetaCache.set(mint, meta);
+        return meta;
+      }).pipe(
+        Effect.catchAll(() => Effect.succeed({ symbol: mint.slice(0, 4), decimals: 6 })),
+      );
     }
 
     // ─── Price fetching ────────────────────────────────────────────────────
@@ -155,72 +153,72 @@ export const AdapterLive = Layer.effect(
       unknown
     > {
       return Effect.gen(function* () {
-        try {
-          const pubkey = new PublicKey(poolAddress);
-          const dlmm = yield* Effect.tryPromise(() => DLMM.create(connection, pubkey));
-          const lbPair = dlmm.lbPair;
+        const pubkey = new PublicKey(poolAddress);
+        const dlmm = yield* Effect.tryPromise(() => DLMM.create(connection, pubkey));
+        const lbPair = dlmm.lbPair;
 
-          const tokenXMint = lbPair.tokenXMint.toBase58();
-          const tokenYMint = lbPair.tokenYMint.toBase58();
+        const tokenXMint = lbPair.tokenXMint.toBase58();
+        const tokenYMint = lbPair.tokenYMint.toBase58();
 
-          const [mintXInfo, mintYInfo] = yield* Effect.all([
-            Effect.tryPromise(() => connection.getParsedAccountInfo(lbPair.tokenXMint)),
-            Effect.tryPromise(() => connection.getParsedAccountInfo(lbPair.tokenYMint)),
-          ]);
+        const [mintXInfo, mintYInfo] = yield* Effect.all([
+          Effect.tryPromise(() => connection.getParsedAccountInfo(lbPair.tokenXMint)),
+          Effect.tryPromise(() => connection.getParsedAccountInfo(lbPair.tokenYMint)),
+        ]);
 
-          const tokenXDecimals =
-            (mintXInfo.value?.data as { parsed?: { info?: { decimals?: number } } })?.parsed?.info
-              ?.decimals ?? 9;
-          const tokenYDecimals =
-            (mintYInfo.value?.data as { parsed?: { info?: { decimals?: number } } })?.parsed?.info
-              ?.decimals ?? 6;
+        const tokenXDecimals =
+          (mintXInfo.value?.data as { parsed?: { info?: { decimals?: number } } })?.parsed?.info
+            ?.decimals ?? 9;
+        const tokenYDecimals =
+          (mintYInfo.value?.data as { parsed?: { info?: { decimals?: number } } })?.parsed?.info
+            ?.decimals ?? 6;
 
-          const vaultX = yield* Effect.tryPromise(() =>
-            connection.getTokenAccountsByOwner(pubkey, {
-              mint: lbPair.tokenXMint,
-            }),
+        const vaultX = yield* Effect.tryPromise(() =>
+          connection.getTokenAccountsByOwner(pubkey, {
+            mint: lbPair.tokenXMint,
+          }),
+        );
+        const vaultY = yield* Effect.tryPromise(() =>
+          connection.getTokenAccountsByOwner(pubkey, {
+            mint: lbPair.tokenYMint,
+          }),
+        );
+
+        let reserveX = 0;
+        let reserveY = 0;
+
+        if (vaultX.value.length > 0 && vaultX.value[0]) {
+          const firstVault = vaultX.value[0] as { pubkey: PublicKey };
+          const bal = yield* Effect.tryPromise(() =>
+            connection.getTokenAccountBalance(firstVault.pubkey),
           );
-          const vaultY = yield* Effect.tryPromise(() =>
-            connection.getTokenAccountsByOwner(pubkey, {
-              mint: lbPair.tokenYMint,
-            }),
-          );
-
-          let reserveX = 0;
-          let reserveY = 0;
-
-          if (vaultX.value.length > 0 && vaultX.value[0]) {
-            const firstVault = vaultX.value[0] as { pubkey: PublicKey };
-            const bal = yield* Effect.tryPromise(() =>
-              connection.getTokenAccountBalance(firstVault.pubkey),
-            );
-            reserveX = Number(bal.value.amount) / Math.pow(10, tokenXDecimals);
-          }
-          if (vaultY.value.length > 0 && vaultY.value[0]) {
-            const firstVault = vaultY.value[0] as { pubkey: PublicKey };
-            const bal = yield* Effect.tryPromise(() =>
-              connection.getTokenAccountBalance(firstVault.pubkey),
-            );
-            reserveY = Number(bal.value.amount) / Math.pow(10, tokenYDecimals);
-          }
-
-          const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint]);
-          const priceX = prices[tokenXMint] || 0;
-          const priceY = prices[tokenYMint] || 0;
-
-          const tvlUsd = reserveX * priceX + reserveY * priceY;
-          const binStep = Number(lbPair.binStep);
-          const turnoverRate = 0.3 + (binStep / 100) * 0.5;
-          const estimatedVolume24h = tvlUsd * turnoverRate;
-          const feeRate = 0.0025 + binStep / 10000;
-          const fees24hUsd = estimatedVolume24h * feeRate;
-          const apr = tvlUsd > 0 ? ((fees24hUsd * 365) / tvlUsd) * 100 : 0;
-
-          return { tvlUsd, volume24hUsd: estimatedVolume24h, fees24hUsd, apr };
-        } catch (err) {
-          return { tvlUsd: 0, volume24hUsd: 0, fees24hUsd: 0, apr: 0 };
+          reserveX = Number(bal.value.amount) / Math.pow(10, tokenXDecimals);
         }
-      });
+        if (vaultY.value.length > 0 && vaultY.value[0]) {
+          const firstVault = vaultY.value[0] as { pubkey: PublicKey };
+          const bal = yield* Effect.tryPromise(() =>
+            connection.getTokenAccountBalance(firstVault.pubkey),
+          );
+          reserveY = Number(bal.value.amount) / Math.pow(10, tokenYDecimals);
+        }
+
+        const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint]);
+        const priceX = prices[tokenXMint] || 0;
+        const priceY = prices[tokenYMint] || 0;
+
+        const tvlUsd = reserveX * priceX + reserveY * priceY;
+        const binStep = Number(lbPair.binStep);
+        const turnoverRate = 0.3 + (binStep / 100) * 0.5;
+        const estimatedVolume24h = tvlUsd * turnoverRate;
+        const feeRate = 0.0025 + binStep / 10000;
+        const fees24hUsd = estimatedVolume24h * feeRate;
+        const apr = tvlUsd > 0 ? ((fees24hUsd * 365) / tvlUsd) * 100 : 0;
+
+        return { tvlUsd, volume24hUsd: estimatedVolume24h, fees24hUsd, apr };
+      }).pipe(
+        Effect.catchAll(() =>
+          Effect.succeed({ tvlUsd: 0, volume24hUsd: 0, fees24hUsd: 0, apr: 0 }),
+        ),
+      );
     }
 
     // ─── API implementation ────────────────────────────────────────────────
@@ -233,33 +231,30 @@ export const AdapterLive = Layer.effect(
       getWalletBalanceUsd: () =>
         Effect.gen(function* () {
           if (!wallet) return 0;
-          try {
-            const solBal = yield* Effect.tryPromise(() => connection.getBalance(wallet.publicKey));
-            const solAmount = solBal / 1e9;
-            const solPrice = 165;
-            const solValue = solAmount * solPrice;
+          const solBal = yield* Effect.tryPromise(() => connection.getBalance(wallet.publicKey));
+          const solAmount = solBal / 1e9;
+          const prices = yield* fetchTokenPrices([SOL_MINT]);
+          const solPrice = prices[SOL_MINT] || 165;
+          const solValue = solAmount * solPrice;
 
-            const usdcMint = new PublicKey(USDC_MINT);
-            const tokenAccounts = yield* Effect.tryPromise(() =>
-              connection.getTokenAccountsByOwner(wallet.publicKey, {
-                mint: usdcMint,
-              }),
+          const usdcMint = new PublicKey(USDC_MINT);
+          const tokenAccounts = yield* Effect.tryPromise(() =>
+            connection.getTokenAccountsByOwner(wallet.publicKey, {
+              mint: usdcMint,
+            }),
+          );
+
+          let usdcValue = 0;
+          const firstAccount = tokenAccounts.value[0];
+          if (firstAccount) {
+            const bal = yield* Effect.tryPromise(() =>
+              connection.getTokenAccountBalance(firstAccount.pubkey),
             );
-
-            let usdcValue = 0;
-            const firstAccount = tokenAccounts.value[0];
-            if (firstAccount) {
-              const bal = yield* Effect.tryPromise(() =>
-                connection.getTokenAccountBalance(firstAccount.pubkey),
-              );
-              usdcValue = bal.value.uiAmount ?? 0;
-            }
-
-            return solValue + usdcValue;
-          } catch (err) {
-            return 0;
+            usdcValue = bal.value.uiAmount ?? 0;
           }
-        }),
+
+          return solValue + usdcValue;
+        }).pipe(Effect.catchAll(() => Effect.succeed(0))),
 
       getNativeSolBalance: () =>
         Effect.gen(function* () {
@@ -270,41 +265,43 @@ export const AdapterLive = Layer.effect(
 
       getPoolState: (poolAddress) =>
         Effect.gen(function* () {
-          try {
-            const pubkey = new PublicKey(poolAddress);
-            const dlmm = yield* Effect.tryPromise(() => DLMM.create(connection, pubkey));
-            const lbPair = dlmm.lbPair;
-            const activeBin = yield* Effect.tryPromise(() => dlmm.getActiveBin());
+          const pubkey = new PublicKey(poolAddress);
+          const dlmm = yield* Effect.tryPromise(() => DLMM.create(connection, pubkey));
+          const lbPair = dlmm.lbPair;
+          const activeBin = yield* Effect.tryPromise(() => dlmm.getActiveBin());
 
-            const [tokenXMeta, tokenYMeta, stats] = yield* Effect.all([
-              getTokenMeta(lbPair.tokenXMint.toBase58()),
-              getTokenMeta(lbPair.tokenYMint.toBase58()),
-              fetchPoolStats(poolAddress),
-            ]);
+          const [tokenXMeta, tokenYMeta, stats] = yield* Effect.all([
+            getTokenMeta(lbPair.tokenXMint.toBase58()),
+            getTokenMeta(lbPair.tokenYMint.toBase58()),
+            fetchPoolStats(poolAddress),
+          ]);
 
-            return {
-              address: poolAddress,
-              tokenX: lbPair.tokenXMint.toBase58(),
-              tokenY: lbPair.tokenYMint.toBase58(),
-              tokenXSymbol: tokenXMeta.symbol,
-              tokenYSymbol: tokenYMeta.symbol,
-              tvlUsd: stats.tvlUsd,
-              volume24hUsd: stats.volume24hUsd,
-              fees24hUsd: stats.fees24hUsd,
-              apr: stats.apr,
-              activeBinId: activeBin.binId,
-              binStep: lbPair.binStep,
-              currentPrice: Number(activeBin.price),
-              timestamp: Date.now(),
-            };
-          } catch (err) {
-            return yield* new AdapterError({
-              message: `Failed to get pool state: ${String(err)}`,
-              poolAddress,
-              cause: err,
-            });
-          }
-        }),
+          return {
+            address: poolAddress,
+            tokenX: lbPair.tokenXMint.toBase58(),
+            tokenY: lbPair.tokenYMint.toBase58(),
+            tokenXSymbol: tokenXMeta.symbol,
+            tokenYSymbol: tokenYMeta.symbol,
+            tvlUsd: stats.tvlUsd,
+            volume24hUsd: stats.volume24hUsd,
+            fees24hUsd: stats.fees24hUsd,
+            apr: stats.apr,
+            activeBinId: activeBin.binId,
+            binStep: lbPair.binStep,
+            currentPrice: Number(activeBin.price),
+            timestamp: Date.now(),
+          };
+        }).pipe(
+          Effect.catchAll((err) =>
+            Effect.fail(
+              new AdapterError({
+                message: `Failed to get pool state: ${String(err)}`,
+                poolAddress,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
 
       getBinArray: (poolAddress) =>
         Effect.gen(function* () {
@@ -385,9 +382,9 @@ export const AdapterLive = Layer.effect(
       enterPosition: (poolAddress, lowerBinId, upperBinId, positionSizeUsd) =>
         Effect.gen(function* () {
           if (!wallet) {
-            return yield* new AdapterError({
+            return yield* Effect.fail(new AdapterError({
               message: "No wallet configured",
-            });
+            }));
           }
 
           try {
@@ -400,10 +397,10 @@ export const AdapterLive = Layer.effect(
             const priceY = prices[pool.tokenY] ?? 0;
 
             if (!priceX || !priceY) {
-              return yield* new AdapterError({
+              return yield* Effect.fail(new AdapterError({
                 message: "Could not fetch token prices",
                 poolAddress,
-              });
+              }));
             }
 
             const halfUsd = positionSizeUsd / 2;
@@ -442,10 +439,10 @@ export const AdapterLive = Layer.effect(
             }
 
             if (totalXAmount.eq(new BN(0)) || totalYAmount.eq(new BN(0))) {
-              return yield* new AdapterError({
+              return yield* Effect.fail(new AdapterError({
                 message: "Insufficient token balance",
                 poolAddress,
-              });
+              }));
             }
 
             const positionKeypair = new Keypair();
@@ -485,20 +482,20 @@ export const AdapterLive = Layer.effect(
               txSignature: signature,
             };
           } catch (err) {
-            return yield* new AdapterError({
+            return yield* Effect.fail(new AdapterError({
               message: `Failed to enter position: ${String(err)}`,
               poolAddress,
               cause: err,
-            });
+            }));
           }
         }),
 
       exitPosition: (poolAddress, positionPubKey) =>
         Effect.gen(function* () {
           if (!wallet) {
-            return yield* new AdapterError({
+            return yield* Effect.fail(new AdapterError({
               message: "No wallet configured",
-            });
+            }));
           }
 
           try {
@@ -521,8 +518,8 @@ export const AdapterLive = Layer.effect(
               }),
             );
 
-            const { blockhash } = yield* Effect.tryPromise(() => connection.getLatestBlockhash());
             for (const tx of txs) {
+              const { blockhash } = yield* Effect.tryPromise(() => connection.getLatestBlockhash());
               tx.feePayer = wallet.publicKey;
               tx.recentBlockhash = blockhash;
               tx.sign(wallet);
@@ -538,16 +535,19 @@ export const AdapterLive = Layer.effect(
 
             return { txSignature: "batch-confirmed" };
           } catch (err) {
-            return yield* new AdapterError({
+            return yield* Effect.fail(new AdapterError({
               message: `Failed to exit position: ${String(err)}`,
               poolAddress,
               cause: err,
-            });
+            }));
           }
         }),
 
       rebalancePosition: (poolAddress, positionPubKey, newLowerBinId, newUpperBinId) =>
         Effect.gen(function* () {
+          // NOTE: Sequential exit-then-enter, not atomic. If enter fails after
+          // exit succeeds, the position is lost without rollback. Retaining
+          // position state for recovery would require significant refactoring.
           yield* api.exitPosition(poolAddress, positionPubKey);
           const pool = yield* api.getPoolState(poolAddress);
           const positionSizeUsd = Math.min(config.paperPortfolioUsd * 0.2, pool.tvlUsd * 0.01);
@@ -566,9 +566,9 @@ export const AdapterLive = Layer.effect(
       claimFees: (poolAddress, positionPubKey) =>
         Effect.gen(function* () {
           if (!wallet) {
-            return yield* new AdapterError({
+            return yield* Effect.fail(new AdapterError({
               message: "No wallet configured",
-            });
+            }));
           }
 
           try {
@@ -592,10 +592,9 @@ export const AdapterLive = Layer.effect(
               }),
             );
 
-            const { blockhash } = yield* Effect.tryPromise(() => connection.getLatestBlockhash());
-
             let lastSignature = "";
             for (const tx of txs) {
+              const { blockhash } = yield* Effect.tryPromise(() => connection.getLatestBlockhash());
               tx.feePayer = wallet.publicKey;
               tx.recentBlockhash = blockhash;
               tx.sign(wallet);
@@ -612,49 +611,44 @@ export const AdapterLive = Layer.effect(
 
             return { txSignature: lastSignature, feeX, feeY };
           } catch (err) {
-            return yield* new AdapterError({
+            return yield* Effect.fail(new AdapterError({
               message: `Failed to claim fees: ${String(err)}`,
               poolAddress,
               cause: err,
-            });
+            }));
           }
         }),
 
       discoverPools: () =>
         Effect.gen(function* () {
-          // Query all DLMM pools from Meteora
-          try {
-            const res = yield* Effect.tryPromise(() =>
-              fetch("https://dlmm-api.meteora.ag/pair/all"),
-            );
-            const pairs = (yield* Effect.tryPromise(() => res.json())) as ReadonlyArray<{
-              address: string;
-              bin_step: number;
-              base_mint: string;
-              quote_mint: string;
-              tvl: number;
-              volume_24h: number;
-              fees_24h: number;
-              apr: number;
-            }>;
+          const res = yield* Effect.tryPromise(() =>
+            fetch("https://dlmm-api.meteora.ag/pair/all"),
+          );
+          const pairs = (yield* Effect.tryPromise(() => res.json())) as ReadonlyArray<{
+            address: string;
+            bin_step: number;
+            base_mint: string;
+            quote_mint: string;
+            tvl: number;
+            volume_24h: number;
+            fees_24h: number;
+            apr: number;
+          }>;
 
-            return pairs
-              .filter((p) => p.tvl >= config.discoveryMinTvlUsd)
-              .map((p) => ({
-                address: p.address,
-                tvlUsd: p.tvl,
-                volume24hUsd: p.volume_24h,
-                fees24hUsd: p.fees_24h,
-                apr: p.apr,
-                binStep: p.bin_step,
-                tokenX: p.base_mint,
-                tokenY: p.quote_mint,
-              }))
-              .slice(0, 50);
-          } catch (err) {
-            return [];
-          }
-        }),
+          return pairs
+            .filter((p) => p.tvl >= config.discoveryMinTvlUsd)
+            .map((p) => ({
+              address: p.address,
+              tvlUsd: p.tvl,
+              volume24hUsd: p.volume_24h,
+              fees24hUsd: p.fees_24h,
+              apr: p.apr,
+              binStep: p.bin_step,
+              tokenX: p.base_mint,
+              tokenY: p.quote_mint,
+            }))
+            .slice(0, 50);
+        }).pipe(Effect.catchAll(() => Effect.succeed([]))),
     };
 
     return api;
@@ -664,21 +658,17 @@ export const AdapterLive = Layer.effect(
     function getTokenBalance(mintAddress: string): Effect.Effect<bigint, unknown> {
       if (!wallet) return Effect.succeed(0n);
       return Effect.gen(function* () {
-        try {
-          const mint = new PublicKey(mintAddress);
-          const accounts = yield* Effect.tryPromise(() =>
-            connection.getTokenAccountsByOwner(wallet!.publicKey, { mint }),
-          );
-          const firstAccount = accounts.value[0];
-          if (!firstAccount) return 0n;
-          const bal = yield* Effect.tryPromise(() =>
-            connection.getTokenAccountBalance(firstAccount.pubkey),
-          );
-          return BigInt(bal.value.amount);
-        } catch {
-          return 0n;
-        }
-      });
+        const mint = new PublicKey(mintAddress);
+        const accounts = yield* Effect.tryPromise(() =>
+          connection.getTokenAccountsByOwner(wallet!.publicKey, { mint }),
+        );
+        const firstAccount = accounts.value[0];
+        if (!firstAccount) return 0n;
+        const bal = yield* Effect.tryPromise(() =>
+          connection.getTokenAccountBalance(firstAccount.pubkey),
+        );
+        return BigInt(bal.value.amount);
+      }).pipe(Effect.catchAll(() => Effect.succeed(0n)));
     }
   }),
 );
