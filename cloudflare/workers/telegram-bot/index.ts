@@ -56,7 +56,7 @@ async function sendMessage(
   replyMarkup?: Record<string, unknown>,
 ): Promise<void> {
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-  await fetch(url, {
+  const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -66,6 +66,13 @@ async function sendMessage(
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
     }),
   });
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error(
+      `Telegram sendMessage failed: ${response.status} ${response.statusText}`,
+      errorBody,
+    );
+  }
 }
 
 // Helper to call Prism API
@@ -80,6 +87,12 @@ async function callPrismApi(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: `Prism API error: ${response.status} ${response.statusText}`,
+      };
+    }
     const data = (await response.json()) as { ok?: boolean; result?: unknown; error?: string };
     if (data.ok && data.result !== undefined) {
       return { ok: true, data: data.result };

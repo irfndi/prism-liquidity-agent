@@ -61,7 +61,7 @@ jobs:
           cat "${TARBALL_NAME}.sha256"
 
       - name: Sign tarball (GPG, optional)
-        if: env.GPG_PRIVATE_KEY != ''
+        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
@@ -75,30 +75,33 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          npx wrangler r2 object put "prism-backups/releases/v${GITHUB_REF_NAME}/prism-v${GITHUB_REF_NAME}.tar.gz" --file "prism-v${GITHUB_REF_NAME}.tar.gz"
+          VERSION=${GITHUB_REF_NAME#v}
+          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz" --file "prism-v${VERSION}.tar.gz"
 
       - name: Upload SHA-256 to R2
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          npx wrangler r2 object put "prism-backups/releases/v${GITHUB_REF_NAME}/prism-v${GITHUB_REF_NAME}.tar.gz.sha256" --file "prism-v${GITHUB_REF_NAME}.tar.gz.sha256"
+          VERSION=${GITHUB_REF_NAME#v}
+          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz.sha256" --file "prism-v${VERSION}.tar.gz.sha256"
 
       - name: Upload GPG signature to R2
-        if: env.GPG_PRIVATE_KEY != ''
+        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          npx wrangler r2 object put "prism-backups/releases/v${GITHUB_REF_NAME}/prism-v${GITHUB_REF_NAME}.tar.gz.asc" --file "prism-v${GITHUB_REF_NAME}.tar.gz.asc"
+          VERSION=${GITHUB_REF_NAME#v}
+          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz.asc" --file "prism-v${VERSION}.tar.gz.asc"
 
       - name: Update latest.json manifest
         env:
-          VERSION: ${{ github.ref_name }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          TARBALL_URL="https://r2.prism-agent.com/releases/${VERSION}/prism-v${VERSION}.tar.gz"
+          VERSION=${GITHUB_REF_NAME#v}
+          TARBALL_URL="https://r2.prism-agent.com/releases/v${VERSION}/prism-v${VERSION}.tar.gz"
           cat > latest.json << EOF
           {
             "version": "${VERSION}",
@@ -116,17 +119,20 @@ jobs:
       - name: Update beta channel manifest
         if: contains(github.ref, '-beta')
         env:
-          VERSION: ${{ github.ref_name }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          TARBALL_URL="https://r2.prism-agent.com/releases/${VERSION}/prism-v${VERSION}.tar.gz"
+          VERSION=${GITHUB_REF_NAME#v}
+          TARBALL_URL="https://r2.prism-agent.com/releases/v${VERSION}/prism-v${VERSION}.tar.gz"
           cat > beta.json << EOF
           {
             "version": "${VERSION}",
             "channel": "beta",
             "tarball_url": "${TARBALL_URL}",
-            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            "sha256_url": "${TARBALL_URL}.sha256",
+            "signature_url": "${TARBALL_URL}.asc",
+            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "min_cli_version": "1.0.0"
           }
           EOF
           npx wrangler r2 object put "prism-backups/releases/channel/beta.json" --file beta.json

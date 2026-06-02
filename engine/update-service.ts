@@ -1,5 +1,5 @@
 import { Effect, Context } from "effect";
-import { execSync, spawnSync } from "child_process";
+import { execSync } from "child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync } from "fs";
 import { pipeline } from "stream/promises";
 import { join } from "path";
