@@ -1,7 +1,7 @@
 {
-  "name": "prism-dlmm",
+  "name": "prism-liquidity-agent",
   "version": "1.0.0",
-  "description": "Autonomous DLMM rebalancing agent for Meteora pools on Solana",
+  "description": "Autonomous liquidity agent for Solana pools (currently Meteora DLMM)",
   "type": "module",
   "bin": {
     "prism": "./cli/index.ts"
@@ -56,7 +56,6 @@
     "defi",
     "rebalancing",
     "autonomous",
-    "mcp",
     "effect-ts"
   ],
   "license": "MIT"

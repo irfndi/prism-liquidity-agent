@@ -1,5 +1,5 @@
 {
-  "name": "@prism-dlmm/cloudflare",
+  "name": "@prism-liquidity-agent/cloudflare",
   "version": "1.0.0",
   "description": "Cloudflare Workers for Prism DLMM platform",
   "type": "module",

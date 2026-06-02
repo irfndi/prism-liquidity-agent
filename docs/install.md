@@ -34,8 +34,8 @@ prism dev
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/irfndi/prism-dlmm.git
-cd prism-dlmm
+git clone https://github.com/irfndi/prism-liquidity-agent.git
+cd prism-liquidity-agent
 bun install
 ```
 
