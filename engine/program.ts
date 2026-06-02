@@ -207,7 +207,12 @@ export const program = Effect.gen(function* () {
             tokenYSymbol: pool.tokenYSymbol,
             binArray: { ...binArray, binStep: pool.binStep },
           })
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(
+            Effect.catchAll((err) => {
+              console.warn("Snapshot save failed", { pool: poolAddress, err });
+              return Effect.void;
+            }),
+          );
       }
 
       // Blacklist check (token mints only; deployer info not yet fetched)

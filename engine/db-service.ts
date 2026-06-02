@@ -3,61 +3,8 @@ import { Database } from "bun:sqlite";
 import { createDatabase } from "./db.js";
 import { getEmbedding } from "./embeddings.js";
 import type { MemoryEntry, MemoryCategory, PoolSnapshot, Position, BinArray } from "./types.js";
+import { DbService, type DbApi } from "./services.js";
 import { randomUUID } from "crypto";
-
-export interface DbApi {
-  readonly db: Database;
-
-  // Positions
-  readonly savePosition: (pos: PositionRecord) => Effect.Effect<void, unknown>;
-  readonly getPosition: (poolAddress: string) => Effect.Effect<PositionRecord | null, unknown>;
-  readonly getAllPositions: () => Effect.Effect<ReadonlyArray<PositionRecord>, unknown>;
-  readonly deletePosition: (poolAddress: string) => Effect.Effect<void, unknown>;
-  readonly updatePositionValue: (
-    poolAddress: string,
-    currentValueUsd: number,
-    highestValueUsd?: number,
-  ) => Effect.Effect<void, unknown>;
-
-  // Audit
-  readonly saveAudit: (record: AuditRecord) => Effect.Effect<void, unknown>;
-  readonly getRecentAudit: (limit: number) => Effect.Effect<ReadonlyArray<AuditRecord>, unknown>;
-
-  // Blacklist cache
-  readonly cacheBlacklist: (
-    type: "deployer" | "token",
-    values: ReadonlyArray<string>,
-  ) => Effect.Effect<void, unknown>;
-  readonly isBlacklisted: (
-    type: "deployer" | "token",
-    value: string,
-  ) => Effect.Effect<boolean, unknown>;
-
-  // Memory (sqlite-vec)
-  readonly insertMemory: (entry: {
-    content: string;
-    category: MemoryCategory;
-    poolAddress?: string | undefined;
-    outcome?: MemoryEntry["outcome"];
-    pnlUsd?: number | undefined;
-    confidence?: number | undefined;
-  }) => Effect.Effect<void, unknown>;
-  readonly queryMemory: (
-    queryText: string,
-    topK: number,
-    poolAddress?: string,
-  ) => Effect.Effect<ReadonlyArray<MemoryEntry>, unknown>;
-  readonly pruneMemory: () => Effect.Effect<number, unknown>;
-
-  readonly saveSnapshot: (snapshot: PoolSnapshot) => Effect.Effect<void, unknown>;
-  readonly getSnapshots: (
-    poolAddress: string,
-    startMs: number,
-    endMs: number,
-  ) => Effect.Effect<ReadonlyArray<PoolSnapshot>, unknown>;
-  readonly getSnapshotPools: () => Effect.Effect<ReadonlyArray<string>, unknown>;
-  readonly getSnapshotCount: (poolAddress: string) => Effect.Effect<number, unknown>;
-}
 
 export interface PositionRecord {
   poolAddress: string;
@@ -94,8 +41,6 @@ export interface AuditRecord {
   error: string | null;
 }
 
-export class DbService extends Context.Tag("DbService")<DbService, DbApi>() {}
-
 function queryOne<T>(db: Database, sql: string, ...params: unknown[]): T | null {
   return (db.query(sql) as unknown as { get(...p: unknown[]): T | null }).get(...params);
 }
@@ -129,12 +74,12 @@ function serializeBinArray(binArray: BinArray): string {
 
 function deserializeBinArray(json: string): BinArray {
   const raw = JSON.parse(json) as { bins: Array<Record<string, unknown>> };
-  raw.bins = raw.bins.map((b) => ({
+    raw.bins = raw.bins.map((b) => ({
     binId: Number(b.binId),
     price: Number(b.price),
-    reserveX: BigInt(b.reserveX as string),
-    reserveY: BigInt(b.reserveY as string),
-    liquiditySupply: BigInt(b.liquiditySupply as string),
+    reserveX: BigInt(String(b.reserveX)),
+    reserveY: BigInt(String(b.reserveY)),
+    liquiditySupply: BigInt(String(b.liquiditySupply)),
   }));
   return raw as unknown as BinArray;
 }
@@ -437,6 +382,16 @@ export const DbLive = (dbPath?: string) =>
               db,
               "SELECT COUNT(*) as n FROM pool_snapshots WHERE pool_address = ?",
               poolAddress,
+            );
+            return row?.n ?? 0;
+          }),
+
+        pruneSnapshots: (olderThanMs) =>
+          Effect.sync(() => {
+            runOne(db, "DELETE FROM pool_snapshots WHERE timestamp < ?", olderThanMs);
+            const row = queryOne<{ n: number }>(
+              db,
+              "SELECT changes() as n",
             );
             return row?.n ?? 0;
           }),

@@ -145,9 +145,12 @@ async function loadSnapshots(
     const db = yield* DbService;
     return yield* db.getSnapshots(pool, startMs, endMs);
   });
-  return Effect.runPromise((Effect.provide as any)(effect, layer)) as Promise<
-    ReadonlyArray<PoolSnapshot>
-  >;
+  try {
+    return await Effect.runPromise(Effect.provide(effect, layer));
+  } catch (err) {
+    log.error("Failed to load snapshots", { pool, dbPath, err });
+    return [];
+  }
 }
 
 // ─── Strategy params + run loop (shared by both sources) ─────────────────────
@@ -186,7 +189,16 @@ function runBacktestFromTicks(
     const tick = ticks[i]!;
     const metrics = strategy.computeMetrics(tick.pool, tick.binArray, previousTvl);
     const auth = strategy.checkVolumeAuthenticity(tick.pool);
-    if (!strategy.passesPreFilter(tick.pool, auth.score, metrics.binUtilization, 0, 0, 0)) {
+    if (
+      !strategy.passesPreFilter(
+        tick.pool,
+        auth.score,
+        metrics.binUtilization,
+        50_000,
+        0.7,
+        0.3,
+      )
+    ) {
       previousTvl = tick.pool.tvlUsd;
       continue;
     }

@@ -368,6 +368,7 @@ export interface DbApi {
   ) => Effect.Effect<ReadonlyArray<PoolSnapshot>, unknown>;
   readonly getSnapshotPools: () => Effect.Effect<ReadonlyArray<string>, unknown>;
   readonly getSnapshotCount: (poolAddress: string) => Effect.Effect<number, unknown>;
+  readonly pruneSnapshots: (olderThanMs: number) => Effect.Effect<number, unknown>;
 }
 
 export class DbService extends Context.Tag("DbService")<DbService, DbApi>() {}
