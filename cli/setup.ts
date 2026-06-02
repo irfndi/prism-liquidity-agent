@@ -139,6 +139,11 @@ export const setupCommand = new Command("setup")
     ].join("\n");
 
     const envPath = path.resolve(".env");
+    if (fs.existsSync(envPath)) {
+      const backupPath = `${envPath}.backup.${Date.now()}`;
+      fs.copyFileSync(envPath, backupPath);
+      console.warn(`⚠ Existing .env found. Backup created at: ${backupPath}`);
+    }
     fs.writeFileSync(envPath, envContent, { mode: 0o600 });
     fs.chmodSync(envPath, 0o600);
 
