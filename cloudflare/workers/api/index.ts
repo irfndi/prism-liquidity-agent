@@ -1,6 +1,5 @@
 import { Effect, Layer, Context } from "effect";
 import { Hono } from "hono";
-import { handle } from "hono/cloudflare-workers";
 
 // Environment bindings interface
 interface Env {

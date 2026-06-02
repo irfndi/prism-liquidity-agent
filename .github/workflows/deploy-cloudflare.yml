@@ -30,7 +30,16 @@ jobs:
       - name: Type check
         run: bun run typecheck
 
-      - name: Deploy to Cloudflare
+      - name: Run D1 Migrations
+        if: github.ref == 'refs/heads/main'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: "cloudflare"
+          command: d1 migrations apply prism-db
+
+      - name: Deploy API Worker
         if: github.ref == 'refs/heads/main'
         uses: cloudflare/wrangler-action@v3
         with:
@@ -38,6 +47,15 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: "cloudflare"
           command: deploy
+
+      - name: Deploy Telegram Bot Worker
+        if: github.ref == 'refs/heads/main'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: "cloudflare"
+          command: deploy --config wrangler.telegram.toml
 
       - name: Deploy to Staging
         if: github.ref == 'refs/heads/develop'

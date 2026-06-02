@@ -1,0 +1,23 @@
+name = "prism-telegram-bot"
+main = "workers/telegram-bot/index.ts"
+compatibility_date = "2025-02-14"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 Database (shared with API)
+[[d1_databases]]
+binding = "DB"
+database_name = "prism-db"
+database_id = "0657c2b3-fdea-4b33-b11b-8d0a7b27cbc8"
+
+# KV Namespace (shared with API)
+[[kv_namespaces]]
+binding = "CACHE"
+id = "78d7fb5d3fab494dbc8f2940e524f22d"
+
+# Environment Variables
+[vars]
+API_BASE_URL = "https://prism-api.example.workers.dev"
+
+# Secrets (set via wrangler secret put)
+# wrangler secret put TELEGRAM_BOT_TOKEN
+# wrangler secret put TELEGRAM_WEBHOOK_SECRET
