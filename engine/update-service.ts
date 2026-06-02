@@ -2,6 +2,7 @@ import { Effect, Context } from "effect";
 import { execSync, spawnSync } from "child_process";
 import { getCurrentVersion } from "./version.js";
 import { ConfigService } from "./config-service.js";
+import { compareVersions, isValidVersion, fetchLatestRelease } from "./update-utils.js";
 
 export interface ReleaseInfo {
   readonly version: string;
@@ -17,24 +18,8 @@ export interface UpdateService {
   readonly getCurrentVersion: () => string;
 }
 
-export class UpdateServiceTag extends Context.Tag("UpdateService")<UpdateServiceTag, UpdateService>() {}
-
-function compareVersions(a: string, b: string): number {
-  const parse = (v: string) => v.replace(/^v/, "").split(".").map(Number);
-  const aa = parse(a);
-  const bb = parse(b);
-  for (let i = 0; i < Math.max(aa.length, bb.length); i++) {
-    const av = aa[i] || 0;
-    const bv = bb[i] || 0;
-    if (av > bv) return 1;
-    if (av < bv) return -1;
-  }
-  return 0;
-}
-
-function isValidVersion(version: string): boolean {
-  return /^v?[\d.]+$/.test(version);
-}
+export class UpdateServiceTag extends Context.Tag("UpdateService")
+  <UpdateServiceTag, UpdateService>() {}
 
 export const UpdateServiceLive = Effect.gen(function* () {
   const config = yield* ConfigService;
@@ -45,28 +30,13 @@ export const UpdateServiceLive = Effect.gen(function* () {
       const repo = config.updateGithubRepo;
       const channel = config.updateChannel;
 
-      const url = `https://api.github.com/repos/${repo}/releases/latest`;
-      const response = yield* Effect.tryPromise(() =>
-        fetch(url, {
-          headers: { "User-Agent": "prism-liquidity-agent" },
-        }).then((r) => {
-          if (!r.ok) throw new Error(`GitHub API error: ${r.status}`);
-          return r.json() as Promise<{
-            tag_name: string;
-            html_url: string;
-            body: string;
-            published_at: string;
-            prerelease: boolean;
-          }>;
-        }),
-      );
+      const release = yield* fetchLatestRelease(repo, channel);
 
-      // Respect channel
-      if (channel === "stable" && response.prerelease) {
+      if (!release) {
         return null;
       }
 
-      const latest = response.tag_name;
+      const latest = release.tag_name;
       if (!isValidVersion(latest)) {
         return yield* Effect.fail(new Error("Invalid version format from GitHub API"));
       }
@@ -77,10 +47,10 @@ export const UpdateServiceLive = Effect.gen(function* () {
 
       return {
         version: latest,
-        channel: response.prerelease ? "beta" : "stable",
-        releaseUrl: response.html_url,
-        releaseNotes: response.body,
-        publishedAt: response.published_at,
+        channel: release.prerelease ? "beta" : "stable",
+        releaseUrl: release.html_url,
+        releaseNotes: release.body,
+        publishedAt: release.published_at,
       };
     });
 
