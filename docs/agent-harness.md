@@ -48,7 +48,7 @@ Agents can set up Prism for users via the CLI:
 ```bash
 # Agent runs:
 prism register
-prism setup --non-interactive --helius-key=$HELIUS_KEY
+prism setup --non-interactive --helius-key=$HELIUS_API_KEY
 prism link-telegram
 
 # Agent tells user:
