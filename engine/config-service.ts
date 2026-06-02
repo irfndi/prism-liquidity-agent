@@ -32,6 +32,7 @@ export interface AppConfig {
   readonly discoveryMinFeeRatio: number;
   readonly deployerBlacklistPath: string;
   readonly tokenBlacklistPath: string;
+  readonly sqliteDbPath: string;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -113,6 +114,9 @@ const loadConfig = Effect.gen(function* () {
   const tokenBlacklistPath = yield* Config.string("TOKEN_BLACKLIST_PATH").pipe(
     Effect.orElseSucceed(() => "./engine/data/token-blacklist.json"),
   );
+  const sqliteDbPath = yield* Config.string("SQLITE_DB_PATH").pipe(
+    Effect.orElseSucceed(() => "./prism.db"),
+  );
 
   const watchlistPools = watchlistPoolsRaw
     .split(",")
@@ -149,6 +153,7 @@ const loadConfig = Effect.gen(function* () {
     discoveryMinFeeRatio,
     deployerBlacklistPath,
     tokenBlacklistPath,
+    sqliteDbPath,
   };
 
   return cfg;

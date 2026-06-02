@@ -330,7 +330,10 @@ export const AdapterLive = Layer.effect(
               price,
               reserveX: 0n,
               reserveY: 0n,
-              liquiditySupply: 0n,
+              // Synthetic bins lack real reserves; 1n is required so
+              // computeBinUtilization counts them as active. Without this,
+              // passesPreFilter rejects every pool (bin util == 0).
+              liquiditySupply: 1n,
             });
           }
 

@@ -52,7 +52,7 @@ type AllServices =
   | DbService;
 
 export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, never> {
-  const dbLayer = DbLive();
+  const dbLayer = DbLive(cfg?.sqliteDbPath);
   const configLayer = ConfigLive;
 
   const adapter = Layer.provide(AdapterLive, configLayer);

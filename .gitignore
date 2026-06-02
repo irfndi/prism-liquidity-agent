@@ -39,3 +39,6 @@ site/
 # Test and TypeScript caches
 .vitest/
 *.tsbuildinfo
+
+# Claude session files
+.claude/scheduled_tasks.lock
