@@ -1,7 +1,7 @@
 # Prism
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Runtime](https://img.shields.io/badge/runtime-Bun_1.2-black)
+![Runtime](https://img.shields.io/badge/runtime-Bun_1.4-black)
 ![Chain](https://img.shields.io/badge/chain-Solana-9945FF)
 
 An autonomous liquidity agent that watches Meteora DLMM pools, reasons over live on-chain data, and rebalances positions before they bleed.
