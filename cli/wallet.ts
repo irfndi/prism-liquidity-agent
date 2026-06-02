@@ -80,7 +80,13 @@ export const walletCommand = new Command("wallet")
           console.error("Error: Keypair required");
           process.exit(1);
         }
-        const keypair = Keypair.fromSecretKey(Uint8Array.from(secretKey));
+        let keypair: Keypair;
+        try {
+          keypair = Keypair.fromSecretKey(Uint8Array.from(secretKey));
+        } catch (err) {
+          console.error("Error: Invalid keypair. The secret key array may have the wrong length or format.");
+          process.exit(1);
+        }
         const walletData = {
           pubkey: keypair.publicKey.toBase58(),
           secretKey: Array.from(keypair.secretKey),

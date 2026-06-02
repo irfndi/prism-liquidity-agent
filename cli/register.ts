@@ -14,21 +14,17 @@ function ensureCredentialsDir() {
 
 function generateApiKey(): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  const randomBytes = new Uint8Array(48); // Extra bytes to avoid modulo bias
-  crypto.getRandomValues(randomBytes);
+  const maxUnbiased = 256 - (256 % chars.length);
   let result = "sk-prism-";
   for (let i = 0; i < 32; i++) {
-    // Rejection sampling: skip values that would cause modulo bias
-    const byte = randomBytes[i];
-    const maxUnbiased = 256 - (256 % chars.length);
-    if (byte >= maxUnbiased) {
-      // Get a replacement byte
-      const extraBytes = new Uint8Array(1);
-      crypto.getRandomValues(extraBytes);
-      result += chars.charAt(extraBytes[0] % chars.length);
-    } else {
-      result += chars.charAt(byte % chars.length);
-    }
+    // Rejection sampling: loop until we get an unbiased byte
+    let byte: number;
+    do {
+      const buf = new Uint8Array(1);
+      crypto.getRandomValues(buf);
+      byte = buf[0];
+    } while (byte >= maxUnbiased);
+    result += chars.charAt(byte % chars.length);
   }
   return result;
 }
