@@ -11,13 +11,13 @@ Run Prism unattended on a schedule.
 crontab -e
 
 # Add line:
-*/10 * * * * cd /path/to/prism-dlmm && bun run dev >> /var/log/prism.log 2>&1
+*/10 * * * * cd /path/to/prism-dlmm && prism dev >> /var/log/prism.log 2>&1
 ```
 
 ### Every hour (conservative)
 
 ```bash
-0 * * * * cd /path/to/prism-dlmm && bun run dev >> /var/log/prism.log 2>&1
+0 * * * * cd /path/to/prism-dlmm && prism dev >> /var/log/prism.log 2>&1
 ```
 
 ### With log rotation
@@ -47,8 +47,7 @@ Create `~/Library/LaunchAgents/com.prism.dlmm.plist`:
     <string>com.prism.dlmm</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/bun</string>
-        <string>run</string>
+        <string>/usr/local/bin/prism</string>
         <string>dev</string>
     </array>
     <key>WorkingDirectory</key>
@@ -56,9 +55,9 @@ Create `~/Library/LaunchAgents/com.prism.dlmm.plist`:
     <key>StartInterval</key>
     <integer>600</integer>
     <key>StandardOutPath</key>
-    <string>/var/log/prism.log</string>
+    <string>~/Library/Logs/prism.log</string>
     <key>StandardErrorPath</key>
-    <string>/var/log/prism.error.log</string>
+    <string>~/Library/Logs/prism.error.log</string>
 </dict>
 </plist>
 ```
@@ -83,7 +82,7 @@ After=network.target
 Type=simple
 User=prism
 WorkingDirectory=/path/to/prism-dlmm
-ExecStart=/usr/local/bin/bun run dev
+ExecStart=/usr/local/bin/prism dev
 Restart=always
 RestartSec=600
 StandardOutput=append:/var/log/prism.log
@@ -108,7 +107,7 @@ FROM oven/bun:1.2
 WORKDIR /app
 COPY . .
 RUN bun install
-CMD ["bun", "run", "dev"]
+CMD ["prism", "dev"]
 ```
 
 ```bash
@@ -122,7 +121,7 @@ Check if the agent is running:
 
 ```bash
 # Cron
-ps aux | grep "bun run dev"
+ps aux | grep "prism dev"
 
 # Launchd
 launchctl list | grep com.prism.dlmm
