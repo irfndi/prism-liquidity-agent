@@ -34,6 +34,12 @@ export interface AppConfig {
   readonly tokenBlacklistPath: string;
   readonly sqliteDbPath: string;
   readonly enableSnapshotCapture: boolean;
+  // Auto-update settings
+  readonly autoUpdate: boolean;
+  readonly updateCheckIntervalMs: number;
+  readonly updateChannel: "stable" | "beta" | "dev";
+  readonly updateGithubRepo: string;
+  readonly updateAllowDirty: boolean;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -122,6 +128,25 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => false),
   );
 
+  // Auto-update config
+  const autoUpdate = yield* Config.boolean("AUTO_UPDATE").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const updateCheckIntervalMs = yield* validatedNumber("UPDATE_CHECK_INTERVAL_MS", 60_000, 21_600_000);
+  const updateChannelRaw = yield* Config.string("UPDATE_CHANNEL").pipe(
+    Effect.orElseSucceed(() => "stable"),
+  );
+  const validChannels = ["stable", "beta", "dev"] as const;
+  const updateChannel = validChannels.includes(updateChannelRaw as typeof validChannels[number])
+    ? (updateChannelRaw as typeof validChannels[number])
+    : "stable";
+  const updateGithubRepo = yield* Config.string("UPDATE_GITHUB_REPO").pipe(
+    Effect.orElseSucceed(() => "irfndi/prism-liquidity-agent"),
+  );
+  const updateAllowDirty = yield* Config.boolean("UPDATE_ALLOW_DIRTY").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+
   const watchlistPools = watchlistPoolsRaw
     .split(",")
     .map((s) => s.trim())
@@ -159,6 +184,11 @@ const loadConfig = Effect.gen(function* () {
     tokenBlacklistPath,
     sqliteDbPath,
     enableSnapshotCapture,
+    autoUpdate,
+    updateCheckIntervalMs,
+    updateChannel,
+    updateGithubRepo,
+    updateAllowDirty,
   };
 
   return cfg;

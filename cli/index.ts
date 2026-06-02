@@ -10,13 +10,16 @@ import { subscriptionCommand } from "./subscription.js";
 import { issueCommand, supportCommand } from "./support.js";
 import { devCommand } from "./dev.js";
 import { backtestCommand } from "./backtest.js";
+import { updateCommand } from "./update.js";
+import { versionCommand } from "./version.js";
+import { getCurrentVersion } from "../engine/version.js";
 
 const program = new Command();
 
 program
   .name("prism")
-  .description("Prism DLMM — autonomous liquidity agent")
-  .version("1.0.0");
+  .description("Prism — autonomous liquidity agent")
+  .version(getCurrentVersion());
 
 program.addCommand(setupCommand);
 program.addCommand(registerCommand);
@@ -29,5 +32,7 @@ program.addCommand(issueCommand);
 program.addCommand(supportCommand);
 program.addCommand(devCommand);
 program.addCommand(backtestCommand);
+program.addCommand(updateCommand);
+program.addCommand(versionCommand);
 
 await program.parseAsync();
