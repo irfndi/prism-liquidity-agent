@@ -158,6 +158,17 @@ export const subscriptionCommand = new Command("subscription")
       .action((options) => {
         const nav = parseFloat(options.nav);
         const days = parseInt(options.days, 10);
+
+        if (Number.isNaN(nav) || nav < 0) {
+          console.error("Error: --nav must be a valid non-negative number");
+          process.exit(1);
+        }
+
+        if (Number.isNaN(days) || days < 0) {
+          console.error("Error: --days must be a valid non-negative integer");
+          process.exit(1);
+        }
+
         const tierName = options.tier;
 
         // Import revenue service
