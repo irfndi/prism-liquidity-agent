@@ -32,10 +32,12 @@
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
     "effect": "^3.21.2",
+    "semver": "^7.8.1",
     "sqlite-vec": "^0.1.9"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
+    "@types/semver": "^7.7.1",
     "@vitest/coverage-v8": "^4.1.8",
     "bun-types": "^1.2.0",
     "oxfmt": "^0.53.0",

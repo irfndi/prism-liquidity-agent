@@ -3,6 +3,9 @@ import { execSync, spawnSync } from "child_process";
 import { getCurrentVersion } from "../engine/version.js";
 import { compareVersions, isValidVersion, fetchLatestRelease } from "../engine/update-utils.js";
 import { Effect } from "effect";
+import { createLogger } from "../engine/logger.js";
+
+const logger = createLogger("update");
 
 export const updateCommand = new Command("update")
   .description("Check for and apply updates")
@@ -27,6 +30,7 @@ export const updateCommand = new Command("update")
       const latest = release.tag_name;
 
       if (!isValidVersion(latest)) {
+        logger.error("Invalid version format from GitHub API", { version: latest });
         console.error("Error: Invalid version format from GitHub API");
         process.exit(1);
       }
@@ -47,6 +51,7 @@ export const updateCommand = new Command("update")
       try {
         const status = execSync("git status --porcelain", { encoding: "utf-8" });
         if (status.trim()) {
+          logger.error("Local modifications detected, aborting update");
           console.error("Error: Local modifications detected. Commit or stash before updating.");
           process.exit(1);
         }
@@ -58,16 +63,20 @@ export const updateCommand = new Command("update")
       execSync("git fetch origin", { stdio: "inherit" });
       const checkoutResult = spawnSync("git", ["checkout", latest], { stdio: "inherit" });
       if (checkoutResult.status !== 0) {
+        logger.error("git checkout failed", { version: latest });
         console.error("Error: git checkout failed");
         process.exit(1);
       }
       execSync("bun install", { stdio: "inherit" });
 
+      logger.info(`Updated to ${latest}`);
       console.log(`✓ Updated to ${latest}`);
     } catch (err) {
       if (err instanceof Error) {
+        logger.error("Update failed", { error: err.message });
         console.error("Error:", err.message);
       } else {
+        logger.error("Update failed", { error: String(err) });
         console.error("Error checking for updates:", err);
       }
       process.exit(1);

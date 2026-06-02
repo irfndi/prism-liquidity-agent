@@ -1,20 +1,15 @@
 import { Effect } from "effect";
+import semver from "semver";
 
 export function compareVersions(a: string, b: string): number {
-  const parse = (v: string) => v.replace(/^v/, "").split(".").map(Number);
-  const aa = parse(a);
-  const bb = parse(b);
-  for (let i = 0; i < Math.max(aa.length, bb.length); i++) {
-    const av = aa[i] || 0;
-    const bv = bb[i] || 0;
-    if (av > bv) return 1;
-    if (av < bv) return -1;
-  }
-  return 0;
+  const cleanA = semver.clean(a) || a;
+  const cleanB = semver.clean(b) || b;
+  return semver.compare(cleanA, cleanB);
 }
 
 export function isValidVersion(version: string): boolean {
-  return /^v?[\d.]+$/.test(version);
+  const clean = semver.clean(version);
+  return clean !== null && semver.valid(clean) !== null;
 }
 
 export interface GitHubRelease {
@@ -30,8 +25,6 @@ export function fetchLatestRelease(
   channel: "stable" | "beta" | "dev",
 ): Effect.Effect<GitHubRelease | null | undefined, Error> {
   return Effect.gen(function* () {
-    // For stable channel, /releases/latest works and never returns prereleases
-    // For beta/dev, we need to fetch all releases and find the first matching one
     const url =
       channel === "stable"
         ? `https://api.github.com/repos/${repo}/releases/latest`
@@ -76,11 +69,10 @@ export function fetchLatestRelease(
       return release ?? null;
     }
 
-    // For beta/dev: fetch releases with pagination support
     const allReleases: GitHubRelease[] = [];
     let pageUrl: string | null = url;
     let pageCount = 0;
-    const maxPages = 3; // Limit to 3 pages (90 releases) to avoid excessive API calls
+    const maxPages = 3;
 
     while (pageUrl !== null && pageCount < maxPages) {
       pageCount++;
@@ -109,7 +101,6 @@ export function fetchLatestRelease(
 
       allReleases.push(...releases);
 
-      // Check for next page in Link header
       const linkHeader = pageResponse.headers.get("link");
       if (linkHeader) {
         const nextMatch = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
@@ -123,7 +114,6 @@ export function fetchLatestRelease(
       return null;
     }
 
-    // beta = prerelease, dev = all releases (including stable)
     const filtered =
       channel === "beta"
         ? allReleases.filter((r) => r.prerelease)

@@ -3,6 +3,9 @@ import { execSync, spawnSync } from "child_process";
 import { getCurrentVersion } from "./version.js";
 import { ConfigService } from "./config-service.js";
 import { compareVersions, isValidVersion, fetchLatestRelease } from "./update-utils.js";
+import { createLogger } from "./logger.js";
+
+const logger = createLogger("update-service");
 
 export interface ReleaseInfo {
   readonly version: string;
@@ -82,7 +85,7 @@ export const UpdateServiceLive = Effect.gen(function* () {
         execSync("bun install", { stdio: "inherit" });
       });
 
-      yield* Effect.log(`Updated to ${version}`);
+      logger.info(`Updated to ${version}`);
     });
 
   const service: UpdateService = {
