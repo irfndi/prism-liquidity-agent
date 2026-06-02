@@ -11,28 +11,26 @@ export const BlacklistLive = (opts: {
     BlacklistService,
     BlacklistService.of(
       ((): BlacklistApi => {
-        function isDeployerBlacklisted(deployer: string): boolean {
+        function loadSet(path: string): Set<string> {
           try {
-            if (!fs.existsSync(opts.deployerBlacklistPath)) return false;
-            const data = JSON.parse(
-              fs.readFileSync(opts.deployerBlacklistPath, "utf-8"),
-            ) as ReadonlyArray<string>;
-            return data.includes(deployer);
-          } catch {
-            return false;
+            if (!fs.existsSync(path)) return new Set();
+            const data = JSON.parse(fs.readFileSync(path, "utf-8")) as ReadonlyArray<string>;
+            return new Set(data);
+          } catch (err) {
+            console.error(`Failed to load blacklist from ${path}: ${String(err)}`);
+            return new Set();
           }
         }
 
+        const deployerSet = loadSet(opts.deployerBlacklistPath);
+        const tokenSet = loadSet(opts.tokenBlacklistPath);
+
+        function isDeployerBlacklisted(deployer: string): boolean {
+          return deployerSet.has(deployer);
+        }
+
         function isTokenBlacklisted(mint: string): boolean {
-          try {
-            if (!fs.existsSync(opts.tokenBlacklistPath)) return false;
-            const data = JSON.parse(
-              fs.readFileSync(opts.tokenBlacklistPath, "utf-8"),
-            ) as ReadonlyArray<string>;
-            return data.includes(mint);
-          } catch {
-            return false;
-          }
+          return tokenSet.has(mint);
         }
 
         return {

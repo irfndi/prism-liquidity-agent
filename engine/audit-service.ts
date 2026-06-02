@@ -1,6 +1,7 @@
 import { Context, Effect, Layer } from "effect";
 import { AuditService, type AuditApi, type DecisionRecord } from "./services.js";
 import { DbService } from "./services.js";
+import type { PoolMetrics } from "./types.js";
 
 export const AuditLive = Layer.effect(
   AuditService,
@@ -37,6 +38,9 @@ export const AuditLive = Layer.effect(
             action: row.action,
             confidence: row.confidence,
             reasoning: row.reasoning,
+            metrics: row.metricsJson
+              ? (JSON.parse(row.metricsJson) as PoolMetrics)
+              : undefined,
             riskResult: row.riskResultJson
               ? (JSON.parse(row.riskResultJson) as {
                   approved: boolean;

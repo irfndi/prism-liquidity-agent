@@ -369,11 +369,11 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     lowerBinId: Number(row.lower_bin_id ?? 0),
     upperBinId: Number(row.upper_bin_id ?? 0),
     timestamp: Number(row.timestamp ?? 0),
-    outOfRangeSince: row.out_of_range_since ? Number(row.out_of_range_since) : null,
+    outOfRangeSince: row.out_of_range_since != null ? Number(row.out_of_range_since) : null,
     oorCycleCount: Number(row.oor_cycle_count ?? 0),
     lastFeeClaimAt: Number(row.last_fee_claim_at ?? 0),
-    trailingStopThreshold: row.trailing_stop_threshold ? Number(row.trailing_stop_threshold) : null,
-    highestValueUsd: row.highest_value_usd ? Number(row.highest_value_usd) : null,
+    trailingStopThreshold: row.trailing_stop_threshold != null ? Number(row.trailing_stop_threshold) : null,
+    highestValueUsd: row.highest_value_usd != null ? Number(row.highest_value_usd) : null,
     lastRebalanceAt: Number(row.last_rebalance_at ?? 0),
   };
 }

@@ -193,7 +193,7 @@ export interface DecisionRecord {
   readonly action: string;
   readonly confidence: number;
   readonly reasoning: string;
-  readonly metrics?: PoolMetrics;
+  readonly metrics?: PoolMetrics | undefined;
   readonly riskResult: RiskResult;
   readonly executed: boolean;
   readonly paperTrading: boolean;

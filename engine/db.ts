@@ -3,8 +3,6 @@ import { load as loadVec } from "sqlite-vec";
 import path from "path";
 import fs from "fs";
 
-const DB_PATH = process.env.SQLITE_DB_PATH ?? "./prism.db";
-
 function setupCustomSQLite() {
   if (process.platform === "darwin") {
     try {
@@ -19,7 +17,7 @@ function setupCustomSQLite() {
   }
 }
 
-export function createDatabase(dbPath = DB_PATH): Database {
+export function createDatabase(dbPath = "./prism.db"): Database {
   setupCustomSQLite();
   fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   const db = new Database(dbPath);

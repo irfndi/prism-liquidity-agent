@@ -106,10 +106,18 @@ export const AdapterLive = Layer.effect(
             const json = (yield* Effect.tryPromise(() => res.json())) as {
               data?: Record<string, { price: number }>;
             };
+            const stillMissing: string[] = [];
             for (const mint of missing) {
-              prices[mint] = json.data?.[mint]?.price ?? 0;
+              const price = json.data?.[mint]?.price;
+              if (price != null) {
+                prices[mint] = price;
+              } else {
+                stillMissing.push(mint);
+              }
             }
-            return prices;
+            missing.length = 0;
+            missing.push(...stillMissing);
+            if (missing.length === 0) return prices;
           }
         } catch {
           // fall through
@@ -322,7 +330,7 @@ export const AdapterLive = Layer.effect(
               price,
               reserveX: 0n,
               reserveY: 0n,
-              liquiditySupply: 1n,
+              liquiditySupply: 0n,
             });
           }
 

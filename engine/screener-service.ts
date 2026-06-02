@@ -46,12 +46,14 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
                 const auth = strategy.checkVolumeAuthenticity(poolState);
                 if (auth.score < screenerConfig.volumeAuthThreshold) continue;
 
-                const feeIlRatio =
+                // Annualized fee-to-TVL heuristic for screening (not the same as
+                // StrategyService.computeFeeIlRatio which uses bin-drift IL)
+                const discoveryFeeToTvlRatio =
                   pool.fees24hUsd > 0 && pool.tvlUsd > 0
                     ? (pool.fees24hUsd * 365) / pool.tvlUsd
                     : 0;
 
-                if (feeIlRatio < screenerConfig.minFeeRatio) continue;
+                if (discoveryFeeToTvlRatio < screenerConfig.minFeeRatio) continue;
 
                 screened.push({
                   address: pool.address,
@@ -59,9 +61,9 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
                   volume24hUsd: pool.volume24hUsd,
                   fees24hUsd: pool.fees24hUsd,
                   apr: pool.apr,
-                  feeIlRatio,
+                  feeIlRatio: discoveryFeeToTvlRatio,
                   volumeAuth: auth.score,
-                  binUtilization: 0.5,
+                  binUtilization: 0,
                   tokenX: pool.tokenX,
                   tokenY: pool.tokenY,
                 });
