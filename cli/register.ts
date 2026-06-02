@@ -14,9 +14,21 @@ function ensureCredentialsDir() {
 
 function generateApiKey(): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const randomBytes = new Uint8Array(48); // Extra bytes to avoid modulo bias
+  crypto.getRandomValues(randomBytes);
   let result = "sk-prism-";
   for (let i = 0; i < 32; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
+    // Rejection sampling: skip values that would cause modulo bias
+    const byte = randomBytes[i];
+    const maxUnbiased = 256 - (256 % chars.length);
+    if (byte >= maxUnbiased) {
+      // Get a replacement byte
+      const extraBytes = new Uint8Array(1);
+      crypto.getRandomValues(extraBytes);
+      result += chars.charAt(extraBytes[0] % chars.length);
+    } else {
+      result += chars.charAt(byte % chars.length);
+    }
   }
   return result;
 }
@@ -40,6 +52,7 @@ export const registerCommand = new Command("register")
     fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(credentials, null, 2), {
       mode: 0o600,
     });
+    fs.chmodSync(CREDENTIALS_FILE, 0o600);
 
     console.log("✓ Registration successful");
     console.log(`  User ID: ${userId}`);

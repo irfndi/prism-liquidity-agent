@@ -30,4 +30,4 @@ program.addCommand(supportCommand);
 program.addCommand(devCommand);
 program.addCommand(backtestCommand);
 
-program.parse();
+await program.parseAsync();

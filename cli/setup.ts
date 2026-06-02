@@ -8,7 +8,7 @@ export const setupCommand = new Command("setup")
   .description("Configure Prism trading agent")
   .option("--non-interactive", "Run without prompts (for agents/CI)")
   .option("--helius-key <key>", "Helius API key")
-  .option("--wallet-key <key>", "Solana wallet private key (optional)")
+  .option("--wallet-key-file <path>", "Path to Solana wallet keypair file (optional)")
   .option("--watchlist <pools>", "Comma-separated pool addresses")
   .option("--paper-trading", "Enable paper trading (default: true)")
   .action(async (options) => {
@@ -26,9 +26,26 @@ export const setupCommand = new Command("setup")
         process.exit(1);
       }
       heliusKey = options.heliusKey;
-      walletKey = options.walletKey || "";
+      // Read wallet key from file if provided, otherwise from env
+      if (options.walletKeyFile) {
+        try {
+          walletKey = fs.readFileSync(options.walletKeyFile, "utf-8").trim();
+        } catch (err) {
+          console.error(`Error: Could not read wallet key file: ${options.walletKeyFile}`);
+          process.exit(1);
+        }
+      } else {
+        walletKey = process.env.WALLET_PRIVATE_KEY || "";
+      }
       watchlistPools = options.watchlist || "";
       paperTrading = options.paperTrading !== false;
+
+      // Validate: live trading requires wallet key
+      if (!paperTrading && !walletKey.trim()) {
+        console.error("Error: Wallet private key is required when paper trading is disabled.");
+        console.error("Provide via --wallet-key-file or WALLET_PRIVATE_KEY env var.");
+        process.exit(1);
+      }
     } else {
       // Interactive mode
       console.clear();
@@ -77,17 +94,31 @@ export const setupCommand = new Command("setup")
       walletKey = (answers.walletKey as string) || "";
       watchlistPools = (answers.watchlistPools as string) || "";
       paperTrading = answers.paperTrading as boolean;
+
+      // Validate: live trading requires wallet key
+      if (!paperTrading && !walletKey.trim()) {
+        p.cancel("Wallet private key is required when paper trading is disabled.");
+        process.exit(1);
+      }
     }
 
     const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`;
 
+    // Escape values to prevent .env injection
+    function escapeEnv(value: string): string {
+      if (value.includes("\n") || value.includes("\r")) {
+        throw new Error("Environment values cannot contain newlines");
+      }
+      return value;
+    }
+
     const envContent = [
       "# Required",
-      `HELIUS_API_KEY=${heliusKey}`,
-      `SOLANA_RPC_URL=${rpcUrl}`,
+      `HELIUS_API_KEY=${escapeEnv(heliusKey)}`,
+      `SOLANA_RPC_URL=${escapeEnv(rpcUrl)}`,
       "",
       "# Wallet (optional — leave empty for paper trading)",
-      `WALLET_PRIVATE_KEY=${walletKey}`,
+      `WALLET_PRIVATE_KEY=${escapeEnv(walletKey)}`,
       "",
       "# Trading mode",
       `PAPER_TRADING=${String(paperTrading)}`,
@@ -104,11 +135,12 @@ export const setupCommand = new Command("setup")
       "SQLITE_DB_PATH=./prism.db",
       "",
       "# Pools",
-      `WATCHLIST_POOLS=${watchlistPools}`,
+      `WATCHLIST_POOLS=${escapeEnv(watchlistPools)}`,
     ].join("\n");
 
     const envPath = path.resolve(".env");
-    fs.writeFileSync(envPath, envContent);
+    fs.writeFileSync(envPath, envContent, { mode: 0o600 });
+    fs.chmodSync(envPath, 0o600);
 
     if (!isNonInteractive) {
       p.note(
