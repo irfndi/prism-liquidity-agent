@@ -191,7 +191,8 @@ export const program = Effect.gen(function* () {
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
 
-      // Blacklist check
+      // Blacklist check (token mints only; deployer info not yet fetched)
+      // TODO: fetch token deployer/authority from on-chain metadata and pass to checkPool
       yield* blacklist.checkPool(poolAddress, pool.tokenX, pool.tokenY);
 
       const metrics = strategy.computeMetrics(pool, binArray, 0);
@@ -447,14 +448,15 @@ export const program = Effect.gen(function* () {
       }
 
       // Execute
+      let executed = false;
       if (config.paperTrading) {
         console.info("[PAPER] Would execute", {
           action: decision.action,
           pool: poolAddress,
         });
-        yield* executePaper(decision, pool);
+        executed = yield* executePaper(decision, pool);
       } else {
-        yield* executeLive(decision, pool);
+        executed = yield* executeLive(decision, pool);
       }
 
       // Audit after execution
@@ -468,7 +470,7 @@ export const program = Effect.gen(function* () {
           reasoning: decision.reasoning,
           metrics,
           riskResult,
-          executed: true,
+          executed,
           paperTrading: config.paperTrading,
         })
         .pipe(Effect.catchAll(() => Effect.void));
@@ -481,7 +483,7 @@ export const program = Effect.gen(function* () {
   const executePaper = (
     decision: AgentDecision,
     pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
-  ): Effect.Effect<void> =>
+  ): Effect.Effect<boolean> =>
     Effect.gen(function* () {
       if (decision.action === "ENTER" && decision.positionSizeUsd) {
         const pos: PositionRecord = {
@@ -522,6 +524,7 @@ export const program = Effect.gen(function* () {
         trackedPositions.set(decision.poolAddress, updated);
         yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
       }
+      return true;
     });
 
   // ─── Live execution ────────────────────────────────────────────────────────
@@ -529,17 +532,17 @@ export const program = Effect.gen(function* () {
   const executeLive = (
     decision: AgentDecision,
     pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
-  ): Effect.Effect<void> =>
+  ): Effect.Effect<boolean> =>
     Effect.gen(function* () {
       if (!adapter.hasWallet()) {
         console.error("Live trading enabled but no wallet configured");
-        return;
+        return false;
       }
 
       // One position per cycle limit
       if (decision.action === "ENTER" && trackedPositions.size > 0) {
         console.info("Skipping ENTER — already have active position");
-        return;
+        return false;
       }
 
       // SOL reserve check
@@ -550,7 +553,7 @@ export const program = Effect.gen(function* () {
         const solBalance = lamports / 1e9;
         if (solBalance < 0.03) {
           console.warn("Insufficient SOL for gas — skipping ENTER");
-          return;
+          return false;
         }
       }
 
@@ -601,7 +604,9 @@ export const program = Effect.gen(function* () {
           };
           trackedPositions.set(decision.poolAddress, pos);
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+          return true;
         }
+        return false;
       } else if (decision.action === "EXIT") {
         const pos = trackedPositions.get(decision.poolAddress);
         let exited = false;
@@ -628,6 +633,7 @@ export const program = Effect.gen(function* () {
           trackedPositions.delete(decision.poolAddress);
           yield* db.deletePosition(decision.poolAddress).pipe(Effect.catchAll(() => Effect.void));
         }
+        return exited;
       } else if (decision.action === "REBALANCE" && decision.rebalanceParams) {
         const pos = trackedPositions.get(decision.poolAddress);
         if (pos?.positionPubKey) {
@@ -670,9 +676,12 @@ export const program = Effect.gen(function* () {
             };
             trackedPositions.set(decision.poolAddress, updated);
             yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
+            return true;
           }
+          return false;
         }
       }
+      return false;
     });
 
   // ─── Periodic fee claiming ─────────────────────────────────────────────────
