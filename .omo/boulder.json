@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "active_work_id": "github-issues-from-dump-434f7fc3",
+  "works": {
+    "github-issues-from-dump-434f7fc3": {
+      "work_id": "github-issues-from-dump-434f7fc3",
+      "active_plan": "/Users/irfandi/Coding/2026/prism-dlmm/.omo/plans/github-issues-from-dump.md",
+      "plan_name": "github-issues-from-dump",
+      "status": "completed",
+      "started_at": "2026-06-02T08:40:30.154Z",
+      "updated_at": "2026-06-02T08:43:48.489Z",
+      "session_ids": [
+        "opencode:ses_178bb6615ffeUlmpvLDrrxCLV8"
+      ],
+      "session_origins": {
+        "opencode:ses_178bb6615ffeUlmpvLDrrxCLV8": "direct"
+      },
+      "agent": "atlas",
+      "task_sessions": {},
+      "ended_at": "2026-06-02T08:43:48.476Z",
+      "elapsed_ms": 198322
+    }
+  },
+  "active_plan": "/Users/irfandi/Coding/2026/prism-dlmm/.omo/plans/github-issues-from-dump.md",
+  "started_at": "2026-06-02T08:40:30.154Z",
+  "status": "completed",
+  "updated_at": "2026-06-02T08:43:48.489Z",
+  "session_ids": [
+    "opencode:ses_178bb6615ffeUlmpvLDrrxCLV8"
+  ],
+  "session_origins": {
+    "opencode:ses_178bb6615ffeUlmpvLDrrxCLV8": "direct"
+  },
+  "plan_name": "github-issues-from-dump",
+  "task_sessions": {},
+  "agent": "atlas",
+  "ended_at": "2026-06-02T08:43:48.476Z",
+  "elapsed_ms": 198322
+}

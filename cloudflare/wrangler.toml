@@ -1,0 +1,43 @@
+name = "prism-api"
+main = "workers/api/index.ts"
+compatibility_date = "2025-02-14"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 Database
+[[d1_databases]]
+binding = "DB"
+database_name = "prism-db"
+database_id = "0657c2b3-fdea-4b33-b11b-8d0a7b27cbc8"
+
+# KV Namespace
+[[kv_namespaces]]
+binding = "CACHE"
+id = "78d7fb5d3fab494dbc8f2940e524f22d"
+
+# R2 Bucket
+[[r2_buckets]]
+binding = "BACKUPS"
+bucket_name = "prism-backups"
+
+# Vectorize Index
+[[vectorize]]
+binding = "MEMORY"
+index_name = "prism-memory"
+
+# Environment Variables
+[vars]
+ENVIRONMENT = "production"
+
+# Secrets (set via wrangler secret put)
+# wrangler secret put FEE_WALLET_ADDRESS
+# wrangler secret put TELEGRAM_BOT_TOKEN
+# wrangler secret put GITHUB_TOKEN
+
+# Staging environment
+[env.staging]
+name = "prism-api-staging"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "prism-db-staging"
+database_id = "REPLACE_WITH_STAGING_DATABASE_ID"
