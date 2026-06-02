@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Autonomous DLMM rebalancing agent for Meteora pools on Solana",
   "type": "module",
+  "bin": {
+    "prism": "./cli/index.ts"
+  },
   "scripts": {
     "start": "node dist/engine/index.js",
     "dev": "bun run --watch engine/index.ts",
@@ -11,9 +14,9 @@
     "backtest": "bun run ops/backtest.ts",
     "test": "bunx --bun vitest run",
     "test:watch": "bunx --bun vitest",
-    "lint": "tsc --noEmit && oxlint engine ops bench",
-    "format": "oxfmt --write engine ops bench",
-    "format:check": "oxfmt --check engine ops bench",
+    "lint": "tsc --noEmit && oxlint engine ops bench cli",
+    "format": "oxfmt --write engine ops bench cli",
+    "format:check": "oxfmt --check engine ops bench cli",
     "coverage": "bunx --bun vitest run --coverage"
   },
   "dependencies": {
@@ -26,6 +29,7 @@
     "@solana/web3.js": "^1.98.4",
     "@xenova/transformers": "^2.17.2",
     "chalk": "^5.6.2",
+    "commander": "^15.0.0",
     "dotenv": "^17.4.2",
     "effect": "^3.21.2",
     "sqlite-vec": "^0.1.9"
