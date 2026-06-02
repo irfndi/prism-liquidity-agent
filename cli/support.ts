@@ -11,7 +11,7 @@ export const issueCommand = new Command("issue")
 export const supportCommand = new Command("support")
   .description("Get support contact info")
   .action(() => {
-    console.log("Docs: https://github.com/irfndi/prism-dlmm/tree/main/docs");
-    console.log("Issues: https://github.com/irfndi/prism-dlmm/issues");
+    console.log("Docs: https://github.com/irfndi/prism-liquidity-agent/tree/main/docs");
+    console.log("Issues: https://github.com/irfndi/prism-liquidity-agent/issues");
     console.log("Telegram: @prism_dlmm_bot");
   });

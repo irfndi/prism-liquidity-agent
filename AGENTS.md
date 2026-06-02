@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Notes for OpenCode sessions working in `prism-dlmm`. Read this before touching the codebase — several things in `README.md`, `CLAUDE.md`, `ARCHITECTURE.md`, and `CONTRIBUTING.md` are stale or wrong.
+Notes for OpenCode sessions working in `prism-liquidity-agent`. Read this before touching the codebase — several things in `README.md`, `CLAUDE.md`, `ARCHITECTURE.md`, and `CONTRIBUTING.md` are stale or wrong.
 
 ## Stack
 

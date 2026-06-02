@@ -173,7 +173,7 @@ File an issue to the Prism GitHub repo.
 
 ```bash
 prism issue "Getting timeout on pool fetch"
-# Output: Issue #42 created — https://github.com/irfndi/prism-dlmm/issues/42
+# Output: Issue #42 created — https://github.com/irfndi/prism-liquidity-agent/issues/42
 ```
 
 ### `prism support`
@@ -183,8 +183,8 @@ Get support contact info.
 ```bash
 prism support
 # Output:
-# Docs: https://github.com/irfndi/prism-dlmm/tree/main/docs
-# Issues: https://github.com/irfndi/prism-dlmm/issues
+# Docs: https://github.com/irfndi/prism-liquidity-agent/tree/main/docs
+# Issues: https://github.com/irfndi/prism-liquidity-agent/issues
 # Telegram: @prism_dlmm_bot
 ```
 

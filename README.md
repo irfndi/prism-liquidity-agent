@@ -4,7 +4,7 @@
 ![Runtime](https://img.shields.io/badge/runtime-Bun_1.4-black)
 ![Chain](https://img.shields.io/badge/chain-Solana-9945FF)
 
-An autonomous liquidity agent that watches Meteora DLMM pools, reasons over live on-chain data, and rebalances positions before they bleed.
+An autonomous liquidity agent that watches liquidity pools on Solana (currently Meteora DLMM), reasons over live on-chain data, and rebalances positions before they bleed.
 
 ## What it does
 
@@ -38,8 +38,8 @@ Before any decision, the agent scores each pool's volume on a 0-1 scale. Volume/
 ## Quickstart
 
 ```bash
-git clone https://github.com/irfndi/prism-dlmm
-cd prism-dlmm
+git clone https://github.com/irfndi/prism-liquidity-agent
+cd prism-liquidity-agent
 bun install
 bun run setup            # interactive .env wizard
 bun run dev              # paper trading by default

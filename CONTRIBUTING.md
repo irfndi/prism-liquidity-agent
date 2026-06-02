@@ -9,8 +9,8 @@
 ## Setup
 
 ```bash
-git clone https://github.com/irfndi/prism-dlmm
-cd prism-dlmm
+git clone https://github.com/irfndi/prism-liquidity-agent
+cd prism-liquidity-agent
 bun install
 bun run setup          # interactive .env wizard
 docker-compose up chromadb -d

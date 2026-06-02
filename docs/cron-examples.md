@@ -11,13 +11,13 @@ Run Prism unattended on a schedule.
 crontab -e
 
 # Add line:
-*/10 * * * * cd /path/to/prism-dlmm && bun run dev >> /var/log/prism.log 2>&1
+*/10 * * * * cd /path/to/prism-liquidity-agent && bun run dev >> /var/log/prism.log 2>&1
 ```
 
 ### Every hour (conservative)
 
 ```bash
-0 * * * * cd /path/to/prism-dlmm && bun run dev >> /var/log/prism.log 2>&1
+0 * * * * cd /path/to/prism-liquidity-agent && bun run dev >> /var/log/prism.log 2>&1
 ```
 
 ### With log rotation
@@ -52,7 +52,7 @@ Create `~/Library/LaunchAgents/com.prism.dlmm.plist`:
         <string>dev</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/path/to/prism-dlmm</string>
+    <string>/path/to/prism-liquidity-agent</string>
     <key>StartInterval</key>
     <integer>600</integer>
     <key>StandardOutPath</key>
@@ -72,7 +72,7 @@ launchctl start com.prism.dlmm
 
 ## Systemd (Linux)
 
-Create `/etc/systemd/system/prism-dlmm.service`:
+Create `/etc/systemd/system/prism-liquidity-agent.service`:
 
 ```ini
 [Unit]
@@ -82,7 +82,7 @@ After=network.target
 [Service]
 Type=simple
 User=prism
-WorkingDirectory=/path/to/prism-dlmm
+WorkingDirectory=/path/to/prism-liquidity-agent
 ExecStart=/usr/local/bin/bun run dev
 Restart=always
 RestartSec=600
@@ -97,8 +97,8 @@ Enable and start:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable prism-dlmm
-sudo systemctl start prism-dlmm
+sudo systemctl enable prism-liquidity-agent
+sudo systemctl start prism-liquidity-agent
 ```
 
 ## Docker (Optional)
@@ -112,8 +112,8 @@ CMD ["bun", "run", "dev"]
 ```
 
 ```bash
-docker build -t prism-dlmm .
-docker run -d --env-file .env -v $(pwd)/prism.db:/app/prism.db prism-dlmm
+docker build -t prism-liquidity-agent .
+docker run -d --env-file .env -v $(pwd)/prism.db:/app/prism.db prism-liquidity-agent
 ```
 
 ## Monitoring
@@ -128,5 +128,5 @@ ps aux | grep "bun run dev"
 launchctl list | grep com.prism.dlmm
 
 # Systemd
-sudo systemctl status prism-dlmm
+sudo systemctl status prism-liquidity-agent
 ```

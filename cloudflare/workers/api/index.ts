@@ -335,7 +335,7 @@ app.post("/v1/issue", async (c) => {
     return c.json({ error: "Title required" }, 400);
   }
 
-  const repo = GITHUB_REPO || "irfndi/prism-dlmm";
+  const repo = GITHUB_REPO || "irfndi/prism-liquidity-agent";
 
   try {
     // Create GitHub issue
