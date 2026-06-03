@@ -17,7 +17,11 @@ function ensureError(cause: unknown): Error {
 process.on("uncaughtException", (err) => {
   errorReporter.report(ensureError(err), { severity: "critical" });
   console.error("Uncaught exception:", err);
-  process.exit(1);
+  setImmediate(() => {
+    errorReporter.flushAsync().finally(() => {
+      process.exit(1);
+    });
+  });
 });
 
 const config = Effect.runSync(
@@ -33,7 +37,11 @@ Effect.runPromise(
       Effect.sync(() => {
         errorReporter.report(ensureError(err), { severity: "critical" });
         console.error("Fatal error:", err);
-        process.exit(1);
+        setImmediate(() => {
+          errorReporter.flushAsync().finally(() => {
+            process.exit(1);
+          });
+        });
       }),
     ),
   ),

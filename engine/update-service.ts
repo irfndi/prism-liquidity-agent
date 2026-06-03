@@ -202,7 +202,11 @@ export const UpdateServiceLive = Effect.gen(function* () {
             // Post-apply health check
             console.log("Running post-apply health check...");
             try {
-              execSync("bunx tsc --noEmit", { cwd: installRoot, stdio: "inherit", timeout: 5000 });
+              execSync("bunx tsc --noEmit", {
+                cwd: installRoot,
+                stdio: "inherit",
+                timeout: 30_000,
+              });
             } catch (healthErr) {
               console.error("Post-apply health check failed — rolling back");
               try {
@@ -217,9 +221,11 @@ export const UpdateServiceLive = Effect.gen(function* () {
                     `Previous version is at ${backupRoot}.`,
                 );
               }
+              const healthMessage =
+                healthErr instanceof Error ? healthErr.message : String(healthErr);
               throw new Error(
                 `Post-apply health check failed — rolled back to previous version. ` +
-                  `Error: ${(healthErr as Error).message}`,
+                  `Error: ${healthMessage}`,
               );
             }
             console.log("✓ Post-apply health check passed");

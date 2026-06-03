@@ -13,7 +13,9 @@ import {
  * via the vi.mocked API.
  */
 function mockFetch(): void {
-  globalThis.fetch = vi.fn() as unknown as typeof globalThis.fetch;
+  globalThis.fetch = vi.fn(() =>
+    Promise.resolve(new Response(null, { status: 200 })),
+  ) as unknown as typeof globalThis.fetch;
 }
 
 /**
@@ -33,12 +35,25 @@ function makeReporter(overrides?: Partial<ErrorReporterConfig>): ErrorReporter {
 
 // ─── Setup / Teardown ────────────────────────────────────────────────────────
 
+const ORIGINAL_ERROR_REPORTING = process.env.PRISM_ERROR_REPORTING;
+const ORIGINAL_ERROR_ENDPOINT = process.env.PRISM_ERROR_ENDPOINT;
+
 beforeEach(() => {
   mockFetch();
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  if (ORIGINAL_ERROR_REPORTING === undefined) {
+    delete process.env.PRISM_ERROR_REPORTING;
+  } else {
+    process.env.PRISM_ERROR_REPORTING = ORIGINAL_ERROR_REPORTING;
+  }
+  if (ORIGINAL_ERROR_ENDPOINT === undefined) {
+    delete process.env.PRISM_ERROR_ENDPOINT;
+  } else {
+    process.env.PRISM_ERROR_ENDPOINT = ORIGINAL_ERROR_ENDPOINT;
+  }
 });
 
 // ─── Sanitization ────────────────────────────────────────────────────────────
@@ -90,11 +105,11 @@ describe("sanitization", () => {
 
   it("redacts password= patterns", () => {
     const r = makeReporter();
-    const err = new Error("DB connection: password=supersecret!");
+    const err = new Error("DB connection: password=PLACEHOLDER_VALUE");
     r.report(err);
     const pending = r.getPending();
     expect(pending[0]?.message).toContain("[REDACTED]");
-    expect(pending[0]?.message).not.toContain("supersecret");
+    expect(pending[0]?.message).not.toContain("PLACEHOLDER_VALUE");
     r.dispose();
   });
 
@@ -112,16 +127,14 @@ describe("sanitization", () => {
 
   it("sanitizes stack traces too", () => {
     const r = makeReporter();
-    // Must be ≥64 base58 chars to trigger redaction
-    const secret =
-      "5K3NEQrLEqrEv8PByNoxGmmLXdRNY4hvoM7pBEiCwJFp5K3NEQrLEqrEv8PByNoxGmmLXdRNY4hvoM7pBEiCwJFp";
-    expect(secret.length).toBeGreaterThanOrEqual(64);
+    const longBase58 = "Abc123Xyz".repeat(8);
+    expect(longBase58.length).toBeGreaterThanOrEqual(64);
     const err = new Error("oops");
-    err.stack = `Error: oops\n    at foo (file.ts:10:5)\n    secret=${secret}`;
+    err.stack = `Error: oops\n    at foo (file.ts:10:5)\n    value=${longBase58}`;
     r.report(err);
     const pending = r.getPending();
     expect(pending[0]?.stack).toContain("[REDACTED]");
-    expect(pending[0]?.stack).not.toContain(secret);
+    expect(pending[0]?.stack).not.toContain(longBase58);
     r.dispose();
   });
 });
@@ -200,15 +213,13 @@ describe("buffering", () => {
     r.dispose();
   });
 
-  it("flushSync triggers async flush for testability", async () => {
+  it("flushAsync waits for the in-flight flush to complete", async () => {
     const r = makeReporter();
     r.report(new Error("e1"));
     r.report(new Error("e2"));
     expect(r.getPending()).toHaveLength(2);
 
-    r.flushSync();
-    // Wait for the async flush
-    await new Promise((res) => setTimeout(res, 10));
+    await r.flushAsync();
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalled();
     expect(r.getPending()).toHaveLength(0);
     r.dispose();
@@ -234,7 +245,7 @@ describe("no-op mode", () => {
     const r = makeReporter({ enabled: false });
     r.report(new Error("should be ignored"));
     expect(r.getPending()).toHaveLength(0);
-    r.flushSync();
+    r.flushAsync();
     expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
     r.dispose();
   });
@@ -297,7 +308,7 @@ describe("batch payload", () => {
 // ─── Failure resilience ──────────────────────────────────────────────────────
 
 describe("failure resilience", () => {
-  it("does not throw when fetch fails (network error)", async () => {
+  it("re-queues reports when fetch fails (network error)", async () => {
     vi.mocked(globalThis.fetch).mockImplementation(() =>
       Promise.reject(new Error("Network failure")),
     );
@@ -307,15 +318,12 @@ describe("failure resilience", () => {
       r.report(new Error("test"));
     }).not.toThrow();
 
-    // Wait for background flush
     await new Promise((res) => setTimeout(res, 10));
-
-    // Pending should be cleared even on failure
-    expect(r.getPending()).toHaveLength(0);
+    expect(r.getPending()).toHaveLength(1);
     r.dispose();
   });
 
-  it("does not throw when fetch returns non-OK status", async () => {
+  it("re-queues reports when fetch returns non-OK status", async () => {
     vi.mocked(globalThis.fetch).mockImplementation(() =>
       Promise.resolve(new Response(null, { status: 500, statusText: "Internal Server Error" })),
     );
@@ -326,17 +334,17 @@ describe("failure resilience", () => {
     }).not.toThrow();
 
     await new Promise((res) => setTimeout(res, 10));
-    expect(r.getPending()).toHaveLength(0);
+    expect(r.getPending()).toHaveLength(1);
     r.dispose();
   });
 
-  it("does not throw when no endpoint is configured", () => {
+  it("does not buffer reports when no endpoint is configured", () => {
     const r = createErrorReporter({ enabled: true });
     r.setAppVersion("1.0.0-test");
     expect(() => {
-      r.report(new Error("should be captured but not sent"));
+      r.report(new Error("should be dropped without an endpoint"));
     }).not.toThrow();
-    expect(r.getPending()).toHaveLength(1);
+    expect(r.getPending()).toHaveLength(0);
     r.dispose();
   });
 });
@@ -348,7 +356,7 @@ describe("createErrorReporter factory", () => {
     const r = createErrorReporter({ enabled: false });
     expect(r).toBeInstanceOf(Object);
     expect(typeof r.report).toBe("function");
-    expect(typeof r.flushSync).toBe("function");
+    expect(typeof r.flushAsync).toBe("function");
     expect(typeof r.getPending).toBe("function");
     expect(typeof r.dispose).toBe("function");
     r.dispose();

@@ -208,7 +208,7 @@ export const updateCommand = new Command("update")
         // Post-apply health check
         console.log("Running post-apply health check...");
         try {
-          execSync("bunx tsc --noEmit", { cwd: installRoot, stdio: "inherit", timeout: 5000 });
+          execSync("bunx tsc --noEmit", { cwd: installRoot, stdio: "inherit", timeout: 30_000 });
         } catch (healthErr) {
           console.error("Post-apply health check failed — rolling back");
           try {

@@ -1,6 +1,6 @@
 -- Migration: Error reporting table for privacy-first telemetry
 -- Created: 2026-06-03
--- See: https://github.com/fdnirkh/prism-liqudity-agent/issues/29
+-- See: https://github.com/irfndi/prism-liqudity-agent/issues/29
 
 -- Error logs table (agent-side error reports)
 CREATE TABLE IF NOT EXISTS error_logs (

@@ -14,6 +14,17 @@ export interface Env {
   ADMIN_API_KEY?: string;
 }
 
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i++) {
+    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
+const MAX_ERROR_MESSAGE_LENGTH = 4096;
+
 // Services
 class DbService extends Context.Tag("DbService")<DbService, { readonly db: D1Database }>() {}
 
@@ -520,6 +531,9 @@ app.post("/v1/errors/report", async (c) => {
       400,
     );
   }
+  if (body.message.length > MAX_ERROR_MESSAGE_LENGTH) {
+    return c.json({ error: `message exceeds ${MAX_ERROR_MESSAGE_LENGTH} characters` }, 400);
+  }
 
   // Rate limit: 100 reports per IP per hour
   if (CACHE) {
@@ -626,6 +640,15 @@ app.post("/v1/errors/batch", async (c) => {
         400,
       );
     }
+    if (r.message.length > MAX_ERROR_MESSAGE_LENGTH) {
+      return c.json(
+        {
+          error: `message exceeds ${MAX_ERROR_MESSAGE_LENGTH} characters`,
+          reportId: r.id,
+        },
+        400,
+      );
+    }
     validReports.push({
       id: r.id,
       agentId: r.agentId,
@@ -659,9 +682,14 @@ app.post("/v1/errors/batch", async (c) => {
       ),
     );
 
-    await DB.batch(batchStatements);
+    const results = await DB.batch(batchStatements);
+    const inserted = results.reduce(
+      (sum, r) => sum + (typeof r.meta.changes === "number" ? r.meta.changes : 0),
+      0,
+    );
+    const duplicates = validReports.length - inserted;
 
-    return c.json({ inserted: validReports.length });
+    return c.json({ inserted, duplicates });
   } catch {
     return c.json({ error: "Failed to store error reports" }, 500);
   }
@@ -675,7 +703,7 @@ app.get("/v1/errors/stats", async (c) => {
   const match = authHeader?.match(/^Bearer\s+(.+)$/);
   const token = match?.[1];
 
-  if (!token || token !== c.env.ADMIN_API_KEY) {
+  if (!token || !c.env.ADMIN_API_KEY || !constantTimeEqual(token, c.env.ADMIN_API_KEY)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 

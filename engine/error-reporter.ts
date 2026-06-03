@@ -7,7 +7,7 @@
  * - If the endpoint fetch fails, logs to console and drops the batch
  * - Classifies errors by string match
  * - If PRISM_ERROR_REPORTING env var is "false", the reporter is a no-op (opt-out)
- * - For testability: flushSync(), getPending(), and createErrorReporter(config) factory
+ * - For testability: flushAsync(), getPending(), and createErrorReporter(config) factory
  */
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -59,6 +59,7 @@ export interface BatchPayload {
 
 const DEFAULT_FLUSH_INTERVAL_MS = 60_000;
 const DEFAULT_BATCH_SIZE = 5;
+const MAX_PENDING_BUFFER = 1000;
 
 // ─── Sanitization patterns ───────────────────────────────────────────────────
 // Base58 chars (no 0/O/I/l): 1-9 A-H J-N P-Z a-k m-z
@@ -179,7 +180,7 @@ export class ErrorReporter {
   }
 
   report(error: Error, context?: ReportContext): void {
-    if (!this.enabled) {
+    if (!this.enabled || !this.endpoint) {
       return;
     }
 
@@ -193,11 +194,14 @@ export class ErrorReporter {
       message: sanitizedMessage,
       stack: sanitizedStack,
       category,
-      severity: (context?.severity ?? "medium") as ErrorSeverity,
+      severity: context?.severity ?? "medium",
       ...(context?.cycleId !== undefined ? { cycleId: context.cycleId } : {}),
       ...(context?.poolAddress !== undefined ? { poolAddress: context.poolAddress } : {}),
-    } as unknown as ErrorReport;
+    };
 
+    if (this.pending.length >= MAX_PENDING_BUFFER) {
+      this.pending.shift();
+    }
     this.pending.push(report);
 
     if (this.pending.length >= this.batchSize) {
@@ -214,7 +218,6 @@ export class ErrorReporter {
       return;
     }
 
-    // Take all pending reports as one batch
     const batch = this.pending.splice(0, this.pending.length);
     const payload: BatchPayload = {
       app: "prism-liquidity-agent",
@@ -229,26 +232,27 @@ export class ErrorReporter {
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
+        this.pending.unshift(...batch);
         console.error(
-          `[ErrorReporter] Failed to send batch: ${response.status} ${response.statusText}`,
+          `[ErrorReporter] Failed to send batch: ${response.status} ${response.statusText} (${batch.length} reports re-queued)`,
         );
       }
     } catch (err) {
-      console.error("[ErrorReporter] Failed to send error report batch:", err);
+      this.pending.unshift(...batch);
+      console.error("[ErrorReporter] Failed to send error report batch, re-queued:", err);
     }
   }
 
   /**
-   * Synchronous flush — best-effort for shutdown / test scenarios.
-   * Does NOT actually wait for the network; it triggers the async flush
-   * but returns immediately.
+   * Trigger an async flush and return a Promise that resolves when it
+   * completes. Useful for shutdown paths and tests that need to assert
+   * the network call happened.
    */
-  flushSync(): void {
+  flushAsync(): Promise<void> {
     if (!this.enabled) {
-      return;
+      return Promise.resolve();
     }
-    // Trigger an async flush but don't await it
-    this.flush();
+    return this.flush();
   }
 
   getPending(): ReadonlyArray<ErrorReport> {
