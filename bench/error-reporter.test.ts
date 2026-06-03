@@ -127,7 +127,7 @@ describe("sanitization", () => {
 
   it("sanitizes stack traces too", () => {
     const r = makeReporter();
-    const longBase58 = "Abc123Xyz".repeat(8);
+    const longBase58 = "z".repeat(80);
     expect(longBase58.length).toBeGreaterThanOrEqual(64);
     const err = new Error("oops");
     err.stack = `Error: oops\n    at foo (file.ts:10:5)\n    value=${longBase58}`;
