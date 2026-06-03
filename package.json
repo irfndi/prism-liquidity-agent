@@ -16,7 +16,7 @@
   ],
   "license": "MIT",
   "bin": {
-    "prism": "./cli/index.ts"
+    "prism": "./scripts/prism.sh"
   },
   "type": "module",
   "scripts": {
@@ -57,7 +57,7 @@
     "bun-types": "^1.2.0",
     "oxfmt": "^0.53.0",
     "oxlint": "^1.68.0",
-    "tsdown": "^0.22.1",
+    "tsdown": "^0.22.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.8"
   }
