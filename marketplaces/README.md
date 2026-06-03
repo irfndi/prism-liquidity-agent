@@ -6,11 +6,11 @@ This directory contains Prism installation skills for various agent harness mark
 
 | # | Marketplace | Status | Skill file | Local install path |
 |---|---|---|---|---|
-| 1 | **OpenCode** | ⏳ Pending | (added in PR #40, not in this branch) | `~/.opencode/skills/prism-install/SKILL.md` |
-| 1b | **OpenClaw** | ⏳ Pending | (added in PR #40, not in this branch) | `~/.openclaw/skills/prism-install/SKILL.md` |
-| 1c | **Hermes** | ⏳ Pending | (added in PR #40, not in this branch) | `~/.hermes/skills/software-development/prism-install/SKILL.md` |
-| 1d | **acpx / custom** | ⏳ Pending | (added in PR #40, not in this branch) | `~/.agents/skills/prism-install.md` |
-| 2 | Claude Desktop (MCP) | ✅ Ready | [`../mcp-server/README.md`](../mcp-server/README.md) | Configure in `claude_desktop_config.json` |
+| 1 | **OpenCode** | ✅ Ready | [`opencode/SKILL.md`](opencode/SKILL.md) | `~/.opencode/skills/prism-install/SKILL.md` |
+| 1b | **OpenClaw** | ✅ Ready | [`openclaw/SKILL.md`](openclaw/SKILL.md) | `~/.openclaw/skills/prism-install/SKILL.md` |
+| 1c | **Hermes** | ✅ Ready | [`hermes/SKILL.md`](hermes/SKILL.md) | `~/.hermes/skills/software-development/prism-install/SKILL.md` |
+| 1d | **acpx / custom** | ✅ Ready | [`.agents/skills/prism-install.md`](../.agents/skills/prism-install.md) | `~/.agents/skills/prism-install.md` |
+| 2 | Claude Desktop (MCP) | ❌ Not started | — | Requires `prism-mcp-server` npm package |
 | 3 | OpenAI GPTs | ❌ Not started | — | Requires OpenAI GPT Store submission (UI-only) |
 | 4 | AutoGPT | ❌ Not started | — | Requires `autogpt-prism` PyPI package |
 | 5 | LangChain | ❌ Not started | — | Requires `langchain-prism` PyPI package |
@@ -20,26 +20,31 @@ This directory contains Prism installation skills for various agent harness mark
 | 9 | ChatGPT Plugins (legacy) | ❌ Not started | — | Deprecated; OpenAI GPTs is the successor |
 | 10 | Custom agent harnesses | ✅ Ready | Same as 1d (acpx) | See [docs/agent-harness.md](../docs/agent-harness.md) |
 
-## What's Done (5/10)
+## What's Done (4/10)
 
-- **4 Markdown-based harnesses** (OpenCode, OpenClaw, Hermes, acpx) — copy-paste-ready skill files
-- **Claude Desktop (MCP)** — standalone `prism-mcp-server` npm package with 4 tools (status, positions, whoami, backtest)
+The four Markdown-based harnesses have copy-paste-ready skill files:
 
-## What's Not Done (5/10)
+- **OpenCode** uses YAML frontmatter (`name`, `description`)
+- **OpenClaw** uses plain Markdown with no frontmatter
+- **Hermes** uses a richer frontmatter with `metadata.hermes.{tags, related_skills, category}`
+- **acpx / custom** uses the project's own `.agents/skills/` format (plain Markdown, no frontmatter)
 
-The remaining five harnesses require code packages or platform submissions that are each multi-day projects:
+## What's Not Done (6/10)
 
+The remaining six harnesses require code packages or platform submissions that are each multi-day projects:
+
+- **MCP server** (Claude Desktop) — needs a new `prism-mcp-server` npm package exposing `prism_status`, `prism_positions`, `prism_start`, `prism_stop`, `prism_backtest` as MCP tools
 - **OpenAI GPTs** — UI-only submission to the GPT Store; can't be automated from this repo
 - **AutoGPT / LangChain / CrewAI** — each needs a separate PyPI package with a Python class wrapping the CLI
 - **Dify / Flowise** — each needs a platform-specific plugin format and submission
 
-These are tracked in the issue #33 phased plan. None of them block the core install path (the 5 ready harnesses cover all major agent ecosystems).
+These are tracked in the issue #33 phased plan. None of them block the core install path (the 4 ready harnesses cover all major agent ecosystems that use Markdown skills).
 
 ## How to Use
 
 ### Install via the ready skill files
 
-For each ready Markdown marketplace, copy the SKILL.md to the local path shown in the table above:
+For each ready marketplace, copy the SKILL.md to the local path shown in the table above:
 
 ```bash
 # OpenCode
@@ -61,26 +66,14 @@ cp .agents/skills/prism-install.md ~/.agents/skills/prism-install.md
 
 After copying, restart your agent harness so it picks up the new skill.
 
-### Configure the MCP server (Claude Desktop)
+### Verify the skill was discovered
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
+The exact command depends on the harness:
 
-```json
-{
-  "mcpServers": {
-    "prism": {
-      "command": "node",
-      "args": ["/absolute/path/to/mcp-server/dist/index.js"],
-      "env": {
-        "PRISM_BIN": "/absolute/path/to/prism",
-        "SQLITE_DB_PATH": "/absolute/path/to/prism.db"
-      }
-    }
-  }
-}
-```
-
-See [`../mcp-server/README.md`](../mcp-server/README.md) for the full configuration guide.
+- **OpenCode**: `skill()` then ask for `prism-install`
+- **OpenClaw**: restart the harness; skills in `~/.openclaw/skills/` are loaded automatically
+- **Hermes**: restart the harness; skills in `~/.hermes/skills/` are loaded automatically
+- **acpx**: the skill is in the standard `.agents/skills/` location; acpx discovers it on next run
 
 ## Adding a New Marketplace
 
@@ -95,7 +88,7 @@ The content can be adapted from the existing four skill files — the install/co
 
 ## See Also
 
-- [Issue #33](https://github.com/irfndi/prism-liquidity-agent/issues/33) — original phased plan
+- [Issue #33](https://github.com/irfndi/prism-liqudity-agent/issues/33) — original phased plan
 - [`docs/agent-harness.md`](../docs/agent-harness.md) — full agent integration guide
 - [`.agents/skills/`](../.agents/skills/) — the project's own skill directory (acpx format)
 - [`dlmm-rebalancer`](../.agents/skills/dlmm-rebalancer.md) — strategy-level reasoning skill

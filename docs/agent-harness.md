@@ -11,6 +11,21 @@ Prism is designed to be operated by AI agent harnesses (OpenClaw, Hermes, acpx, 
 | acpx          | ✅ Supported | CLI wrapper         |
 | Custom agents | ✅ Supported | HTTP API + CLI      |
 
+## Skills (auto-discovered by agent harnesses)
+
+Agent harnesses discover installation guides automatically when a skill file is placed in their skills directory. Prism ships copy-paste-ready skills for all four Markdown-based harnesses:
+
+| Harness | Local install path | Skill file |
+|---|---|---|
+| OpenCode | `~/.opencode/skills/prism-install/SKILL.md` | [`../marketplaces/opencode/SKILL.md`](../marketplaces/opencode/SKILL.md) |
+| OpenClaw | `~/.openclaw/skills/prism-install/SKILL.md` | [`../marketplaces/openclaw/SKILL.md`](../marketplaces/openclaw/SKILL.md) |
+| Hermes | `~/.hermes/skills/software-development/prism-install/SKILL.md` | [`../marketplaces/hermes/SKILL.md`](../marketplaces/hermes/SKILL.md) |
+| acpx / custom | `~/.agents/skills/prism-install.md` | [`../.agents/skills/prism-install.md`](../.agents/skills/prism-install.md) |
+
+The project's own strategy skill ([`../.agents/skills/dlmm-rebalancer.md`](../.agents/skills/dlmm-rebalancer.md)) covers HOLD/REBALANCE/EXIT/ENTER reasoning and is usable from any harness.
+
+For the full status of all 10 target marketplaces (including the 6 that still need code packages — MCP server, AutoGPT, LangChain, CrewAI, Dify, Flowise), see [`../marketplaces/README.md`](../marketplaces/README.md).
+
 ## Live Infrastructure (Already Deployed)
 
 Agents do **not** need to deploy Cloudflare workers. They are already running:
