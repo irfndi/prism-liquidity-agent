@@ -1,0 +1,41 @@
+{
+  "name": "prism-mcp-server",
+  "version": "0.0.2",
+  "description": "Model Context Protocol (MCP) server that exposes Prism liquidity agent commands as tools for Claude Desktop and other MCP clients",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "prism-mcp-server": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "test": "bun test test/"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "prism",
+    "solana",
+    "dlmm",
+    "liquidity",
+    "trading",
+    "agent"
+  ]
+}
