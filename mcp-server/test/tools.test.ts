@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -45,10 +45,41 @@ exit 2
   });
 
   it("runs the prism binary and returns stdout on success", async () => {
-    const result = await runPrism(["--version"], {});
-    assert.equal(result.exitCode, 0);
-    assert.equal(result.ok, true);
-    assert.ok(result.stdout.includes("prism 0.0.2"));
+    const prevBin = process.env.PRISM_BIN;
+    process.env.PRISM_BIN = fakePrism;
+    try {
+      const result = await runPrism(["--version"], {});
+      assert.equal(result.exitCode, 0);
+      assert.equal(result.ok, true);
+      assert.equal(result.timedOut, false);
+      assert.ok(result.stdout.includes("prism 0.0.2"));
+    } finally {
+      if (prevBin === undefined) delete process.env.PRISM_BIN;
+      else process.env.PRISM_BIN = prevBin;
+    }
+  });
+
+  it("sets timedOut=true when the command exceeds the timeout", async () => {
+    const prevBin = process.env.PRISM_BIN;
+    const slowBin = join(workDir, "slow-prism");
+    writeFileSync(
+      slowBin,
+      `#!/usr/bin/env bash
+sleep 10
+echo "should not get here"
+exit 0
+`,
+    );
+    chmodSync(slowBin, 0o755);
+    process.env.PRISM_BIN = slowBin;
+    try {
+      const result = await runPrism(["slow"], { timeoutMs: 200 });
+      assert.equal(result.ok, false);
+      assert.equal(result.timedOut, true);
+    } finally {
+      if (prevBin === undefined) delete process.env.PRISM_BIN;
+      else process.env.PRISM_BIN = prevBin;
+    }
   });
 
   it("returns ok=false with stderr on non-zero exit", async () => {

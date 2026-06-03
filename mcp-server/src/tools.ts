@@ -163,7 +163,7 @@ function registerPrismWhoami(server: McpServer): void {
     {},
     async () => {
       const result = await runPrism(["whoami"]);
-      if (!result.ok && result.exitCode !== 0) {
+      if (!result.ok) {
         if (result.stderr.includes("Not registered") || result.stderr.includes("Run 'prism register'")) {
           return {
             content: [
@@ -199,7 +199,8 @@ function registerPrismBacktest(server: McpServer): void {
   server.tool(
     "prism_backtest",
     "Run a Prism backtest. By default uses synthetic data for 7 days. " +
-      "Set `source` to `replay` and provide `dbPath` + `days` + `pools` to replay on-chain snapshots.",
+      "Set `source` to `replay` and provide `days` + optionally `pools` to replay on-chain snapshots. " +
+      "Note: the `pools` parameter is only used when `source` is `replay`; it is ignored otherwise.",
     {
       source: z.enum(["synthetic", "replay"]).default("synthetic").describe(
         "Data source: 'synthetic' (default) generates deterministic mock data; 'replay' reads from prism.db snapshots.",
@@ -208,7 +209,7 @@ function registerPrismBacktest(server: McpServer): void {
       pools: z
         .array(z.string())
         .optional()
-        .describe("Pool addresses to backtest (replay mode only). If empty, uses all pools with snapshots."),
+        .describe("Pool addresses to backtest (replay mode only — ignored if source is 'synthetic'). If empty, uses all pools with snapshots."),
     },
     async ({ source, days, pools }) => {
       const args = ["backtest", "--source", source, "--days", String(days)];
@@ -229,7 +230,7 @@ function registerPrismBacktest(server: McpServer): void {
       }
       return {
         content: [{ type: "text", text: result.stdout }],
-      }
+      };
     },
   );
 }

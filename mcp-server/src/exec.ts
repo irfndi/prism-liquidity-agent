@@ -31,6 +31,7 @@ export interface PrismExecResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  timedOut: boolean;
 }
 
 export async function runPrism(
@@ -50,6 +51,7 @@ export async function runPrism(
       stdout: result.stdout,
       stderr: result.stderr,
       exitCode: 0,
+      timedOut: false,
     };
   } catch (err) {
     const e = err as {
@@ -57,10 +59,13 @@ export async function runPrism(
       stderr?: string | Buffer;
       code?: number | string;
       message?: string;
+      killed?: boolean;
+      signal?: string;
     };
     const stdout = e.stdout ? e.stdout.toString() : "";
     const stderr = e.stderr ? e.stderr.toString() : e.message ?? String(err);
     const exitCode = typeof e.code === "number" ? e.code : 1;
-    return { ok: false, stdout, stderr, exitCode };
+    const timedOut = e.killed === true;
+    return { ok: false, stdout, stderr, exitCode, timedOut };
   }
 }
