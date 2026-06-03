@@ -59,8 +59,11 @@ prism dev
 ```bash
 git clone https://github.com/irfndi/prism-liquidity-agent.git
 cd prism-liquidity-agent
-bun install
+bun install  # postinstall writes a default .env next to package.json
 ```
+
+If the postinstall hook is disabled (`bun install --ignore-scripts`), run
+`bun run setup:env` manually to write the default `.env`.
 
 ### 2. Register (Get API Key)
 

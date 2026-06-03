@@ -22,15 +22,31 @@ fi
 # Clone or update the source
 if [ -d "$INSTALL_DIR/.git" ]; then
   echo "→ Updating existing install"
-  (cd "$INSTALL_DIR" && git pull --ff-only)
+  # Local modifications abort a plain --ff-only. Try a non-destructive path
+  # first, then fall back to a hard reset against origin/<default-branch>.
+  if ! (cd "$INSTALL_DIR" && git pull --ff-only 2>/dev/null); then
+    echo "⚠ Local changes blocked fast-forward; stashing and retrying"
+    if (cd "$INSTALL_DIR" && git stash && git pull --ff-only && git stash pop); then
+      :
+    else
+      echo "→ Stash failed; resetting to origin/$(git -C "$INSTALL_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|origin/||' || echo main)"
+      (cd "$INSTALL_DIR" && git fetch origin && git reset --hard "origin/$(git -C "$INSTALL_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|origin/||' || echo main)")
+    fi
+  fi
+elif [ -d "$INSTALL_DIR" ]; then
+  # Exists but not a git repo (e.g. partial previous install). Nuke and reclone.
+  echo "→ $INSTALL_DIR exists but is not a git repo; re-cloning"
+  rm -rf "$INSTALL_DIR"
+  git clone "https://github.com/$REPO.git" "$INSTALL_DIR"
 else
   echo "→ Cloning $REPO"
   git clone "https://github.com/$REPO.git" "$INSTALL_DIR"
 fi
 
-# Install dependencies and run postinstall setup
+# No --frozen-lockfile: an older Bun may fail to parse the current bun.lock
+# and abort the install before dependencies land.
 echo "→ Installing dependencies"
-(cd "$INSTALL_DIR" && bun install --frozen-lockfile)
+(cd "$INSTALL_DIR" && bun install)
 
 echo "→ Running postinstall setup"
 (cd "$INSTALL_DIR" && bun run setup:env || true)

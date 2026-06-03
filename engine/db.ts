@@ -22,10 +22,17 @@ function setupCustomSQLite() {
   if (process.platform === "linux") {
     const candidates = [
       "/usr/lib/x86_64-linux-gnu/libsqlite3.so",
+      "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0",
       "/usr/lib/aarch64-linux-gnu/libsqlite3.so",
+      "/usr/lib/aarch64-linux-gnu/libsqlite3.so.0",
+      "/usr/lib/libsqlite3.so",
+      "/usr/lib/libsqlite3.so.0",
       "/usr/lib64/libsqlite3.so",
+      "/usr/lib64/libsqlite3.so.0",
       "/lib/x86_64-linux-gnu/libsqlite3.so",
+      "/lib/x86_64-linux-gnu/libsqlite3.so.0",
       "/lib/aarch64-linux-gnu/libsqlite3.so",
+      "/lib/aarch64-linux-gnu/libsqlite3.so.0",
     ];
     for (const soPath of candidates) {
       if (fs.existsSync(soPath)) {
@@ -37,6 +44,10 @@ function setupCustomSQLite() {
         }
       }
     }
+    console.warn(
+      "[db] No system libsqlite3.so found on Linux; sqlite-vec may not work. " +
+        "Install libsqlite3-dev or set Database.setCustomSQLite() manually.",
+    );
   }
 }
 

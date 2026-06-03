@@ -25,6 +25,7 @@
     "build": "bunx --bun tsdown",
     "setup": "bun run ops/setup.ts",
     "setup:env": "bun run scripts/postinstall.js",
+    "postinstall": "bun run scripts/postinstall.js || true",
     "backtest": "bun run ops/backtest.ts",
     "test": "bunx --bun vitest run",
     "test:watch": "bunx --bun vitest",
