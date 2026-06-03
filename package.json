@@ -2,15 +2,30 @@
   "name": "prism-liquidity-agent",
   "version": "1.0.0",
   "description": "Autonomous liquidity agent for Solana pools (currently Meteora DLMM)",
-  "type": "module",
+  "keywords": [
+    "ai-agent",
+    "autonomous",
+    "claude",
+    "defi",
+    "dlmm",
+    "effect-ts",
+    "liquidity",
+    "meteora",
+    "rebalancing",
+    "solana"
+  ],
+  "license": "MIT",
   "bin": {
     "prism": "./cli/index.ts"
   },
+  "type": "module",
   "scripts": {
     "start": "node dist/engine/index.js",
     "dev": "bun run --watch engine/index.ts",
     "build": "bunx --bun tsdown",
     "setup": "bun run ops/setup.ts",
+    "setup:env": "bun run scripts/postinstall.js",
+    "postinstall": "bun run scripts/postinstall.js || true",
     "backtest": "bun run ops/backtest.ts",
     "test": "bunx --bun vitest run",
     "test:watch": "bunx --bun vitest",
@@ -45,18 +60,5 @@
     "tsdown": "^0.22.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.8"
-  },
-  "keywords": [
-    "solana",
-    "meteora",
-    "dlmm",
-    "liquidity",
-    "ai-agent",
-    "claude",
-    "defi",
-    "rebalancing",
-    "autonomous",
-    "effect-ts"
-  ],
-  "license": "MIT"
+  }
 }

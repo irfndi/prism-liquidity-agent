@@ -14,6 +14,29 @@ function setupCustomSQLite() {
     } catch {
       // ignore
     }
+    return;
+  }
+
+  // Bun's bundled SQLite lacks sqlite-vec (loadable extensions). On Linux
+  // we point at the system libsqlite3 so vec0 works out of the box.
+  if (process.platform === "linux") {
+    const candidates = [
+      "/usr/lib/x86_64-linux-gnu/libsqlite3.so",
+      "/usr/lib/aarch64-linux-gnu/libsqlite3.so",
+      "/usr/lib64/libsqlite3.so",
+      "/lib/x86_64-linux-gnu/libsqlite3.so",
+      "/lib/aarch64-linux-gnu/libsqlite3.so",
+    ];
+    for (const soPath of candidates) {
+      if (fs.existsSync(soPath)) {
+        try {
+          Database.setCustomSQLite(soPath);
+          return;
+        } catch {
+          // fall through to next candidate
+        }
+      }
+    }
   }
 }
 

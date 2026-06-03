@@ -2,6 +2,7 @@ import { Context, Effect, Layer } from "effect";
 import { AuditService, type AuditApi, type DecisionRecord } from "./services.js";
 import { DbService } from "./services.js";
 import type { PoolMetrics } from "./types.js";
+import { bigintReplacer, stringifySafe } from "./bigint-json.js";
 
 export const AuditLive = Layer.effect(
   AuditService,
@@ -19,8 +20,8 @@ export const AuditLive = Layer.effect(
             action: record.action,
             confidence: record.confidence,
             reasoning: record.reasoning,
-            metricsJson: record.metrics ? JSON.stringify(record.metrics) : null,
-            riskResultJson: JSON.stringify(record.riskResult),
+            metricsJson: record.metrics ? stringifySafe(record.metrics) : null,
+            riskResultJson: stringifySafe(record.riskResult),
             executed: record.executed,
             paperTrading: record.paperTrading,
             txSignature: record.txSignature ?? null,
@@ -39,7 +40,7 @@ export const AuditLive = Layer.effect(
             confidence: row.confidence,
             reasoning: row.reasoning,
             metrics: row.metricsJson
-              ? (JSON.parse(row.metricsJson) as PoolMetrics)
+              ? (JSON.parse(row.metricsJson, bigintReplacer) as PoolMetrics)
               : undefined,
             riskResult: row.riskResultJson
               ? (JSON.parse(row.riskResultJson) as {

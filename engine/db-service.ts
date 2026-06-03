@@ -1,9 +1,10 @@
 import { Context, Effect, Layer } from "effect";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { createDatabase } from "./db.js";
 import { getEmbedding } from "./embeddings.js";
 import type { MemoryEntry, MemoryCategory, PoolSnapshot, Position, BinArray } from "./types.js";
 import { DbService, type DbApi } from "./services.js";
+import { bigintReplacer } from "./bigint-json.js";
 import { randomUUID } from "crypto";
 
 export interface PositionRecord {
@@ -61,20 +62,15 @@ function serializeJson(value: unknown): string | null {
   }
 }
 
-// BinArray.bins[].reserveX/reserveY/liquiditySupply are bigint, which
-// JSON.stringify rejects with "TypeError: Do not know how to serialize a BigInt".
-// Use a replacer that encodes them as decimal strings; readSnapshot reverses it.
-function bigintReplacer(_key: string, value: unknown): unknown {
-  return typeof value === "bigint" ? value.toString() : value;
-}
-
+// BinArray.bins[].reserveX/reserveY/liquiditySupply are bigint; bigintReplacer
+// in ./bigint-json.ts encodes them as decimal strings (readSnapshot reverses it).
 function serializeBinArray(binArray: BinArray): string {
   return JSON.stringify(binArray, bigintReplacer);
 }
 
 function deserializeBinArray(json: string): BinArray {
   const raw = JSON.parse(json) as { bins: Array<Record<string, unknown>> };
-    raw.bins = raw.bins.map((b) => ({
+  raw.bins = raw.bins.map((b) => ({
     binId: Number(b.binId),
     price: Number(b.price),
     reserveX: BigInt(String(b.reserveX)),
@@ -389,10 +385,7 @@ export const DbLive = (dbPath?: string) =>
         pruneSnapshots: (olderThanMs) =>
           Effect.sync(() => {
             runOne(db, "DELETE FROM pool_snapshots WHERE timestamp < ?", olderThanMs);
-            const row = queryOne<{ n: number }>(
-              db,
-              "SELECT changes() as n",
-            );
+            const row = queryOne<{ n: number }>(db, "SELECT changes() as n");
             return row?.n ?? 0;
           }),
       };
@@ -416,7 +409,8 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     outOfRangeSince: row.out_of_range_since != null ? Number(row.out_of_range_since) : null,
     oorCycleCount: Number(row.oor_cycle_count ?? 0),
     lastFeeClaimAt: Number(row.last_fee_claim_at ?? 0),
-    trailingStopThreshold: row.trailing_stop_threshold != null ? Number(row.trailing_stop_threshold) : null,
+    trailingStopThreshold:
+      row.trailing_stop_threshold != null ? Number(row.trailing_stop_threshold) : null,
     highestValueUsd: row.highest_value_usd != null ? Number(row.highest_value_usd) : null,
     lastRebalanceAt: Number(row.last_rebalance_at ?? 0),
   };
