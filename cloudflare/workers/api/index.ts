@@ -25,6 +25,8 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 const MAX_ERROR_MESSAGE_LENGTH = 4096;
 
+const VALID_INSTALL_EVENTS = new Set(["install", "setup", "dev_start", "register"]);
+
 // Services
 class DbService extends Context.Tag("DbService")<DbService, { readonly db: D1Database }>() {}
 
@@ -721,6 +723,72 @@ app.get("/v1/errors/stats", async (c) => {
     return c.json({ stats: rows });
   } catch {
     return c.json({ error: "Failed to fetch stats" }, 500);
+  }
+});
+
+// ── Install Telemetry ───────────────────────────────────────────────────────
+// Privacy: install_id is a random UUID generated client-side; no PII.
+
+app.post("/v1/installs/ping", async (c) => {
+  const { DB, CACHE } = c.env;
+  const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    installId?: string;
+    event?: string;
+    version?: string;
+    channel?: string;
+    platform?: string;
+    userId?: string;
+  };
+
+  if (!body.installId || body.installId.length < 8 || body.installId.length > 128) {
+    return c.json(
+      { error: "installId is required and must be 8-128 chars" },
+      400,
+    );
+  }
+  if (!body.event || !VALID_INSTALL_EVENTS.has(body.event)) {
+    return c.json(
+      {
+        error: `event is required and must be one of: ${Array.from(VALID_INSTALL_EVENTS).join(", ")}`,
+      },
+      400,
+    );
+  }
+
+  // Rate limit: 100 pings per IP per hour (same as error reports).
+  if (CACHE) {
+    const rateKey = `rate_limit:install_ping:${clientIp}`;
+    const rateData = await CACHE.get(rateKey);
+    const count = rateData ? parseInt(rateData, 10) : 0;
+    if (count >= 100) {
+      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
+    }
+    await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
+  }
+
+  try {
+    const id = generateId();
+    await DB.prepare(
+      `INSERT INTO installs (id, install_id, event, version, channel, platform, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        id,
+        body.installId,
+        body.event,
+        body.version ?? null,
+        body.channel ?? null,
+        body.platform ?? null,
+        body.userId ?? null,
+      )
+      .run();
+
+    return c.json({ id });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: `Failed to store install ping: ${message}` }, 500);
   }
 });
 
