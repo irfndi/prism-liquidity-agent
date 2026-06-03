@@ -1,8 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
-import { ConfigService, ConfigLive } from "../engine/config-service.js";
+import { ConfigService } from "../engine/config-service.js";
+import { DbLive } from "../engine/db-service.js";
 import { FeedbackLive } from "../engine/feedback-service.js";
-import { FeedbackService, type AgentFeedback, type FeedbackContext } from "../engine/services.js";
+import {
+  FeedbackService,
+  type AgentFeedback,
+  type FeedbackContext,
+  type FeedbackResult,
+} from "../engine/services.js";
 
 const ctx = (): FeedbackContext => ({
   prismVersion: "1.2.3-test",
@@ -69,7 +75,8 @@ function buildLayer(
     githubRepo,
     feedbackOptOut: optOut,
   });
-  return Layer.provide(FeedbackLive, mockConfig) as Layer.Layer<FeedbackService, never, never>;
+  const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));
+  return Layer.provide(FeedbackLive, baseLayer) as Layer.Layer<FeedbackService, never, never>;
 }
 
 function mockFetch(impl: typeof fetch): void {
@@ -77,10 +84,10 @@ function mockFetch(impl: typeof fetch): void {
 }
 
 beforeEach(() => {
-  // Tests that touch rate-limit code need a known agentId; clear any
-  // previously persisted ~/.config/prism/agent-id file so detectAgentId
-  // regenerates a fresh one each test run.
-  // (intentionally a no-op — the in-memory store is fresh per Layer)
+  // Each test gets a fresh in-memory SQLite database via DbLive(":memory:").
+  // The persisted agentId in ~/.config/prism/agent-id is shared across tests
+  // but that's fine — the dedup/rate-limit logic uses the same agentId
+  // across the whole test file.
 });
 
 afterEach(() => {
@@ -287,19 +294,19 @@ describe("feedback service — rate limiting", () => {
     const layer = buildLayer("test-token");
     const program = Effect.gen(function* () {
       const fb = yield* FeedbackService;
-      const results: string[] = [];
+      const results: FeedbackResult[] = [];
       for (let i = 0; i < 7; i++) {
         const r = yield* fb.submit(
           makeFeedback({ summary: `Unique report ${i} about topic ${i}` }),
         );
-        results.push(r.kind);
+        results.push(r);
       }
       return results;
     }).pipe(Effect.provide(layer));
 
     const results = await Effect.runPromise(program);
-    const created = results.filter((k) => k === "created").length;
-    const rateLimited = results.filter((k) => k === "rate_limited").length;
+    const created = results.filter((r) => r.kind === "created").length;
+    const rateLimited = results.filter((r) => r.kind === "rate_limited").length;
     expect(created).toBeGreaterThan(0);
     expect(rateLimited).toBeGreaterThan(0);
     expect(created + rateLimited).toBe(7);

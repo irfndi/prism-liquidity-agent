@@ -50,8 +50,8 @@ function main() {
   }
 
   console.log("");
-  console.log("💬 Got feedback? Run:  prism feedback \"<your message>\"");
-  console.log("   (set GITHUB_TOKEN to file on GitHub; otherwise stored locally)");
+  console.log('💬 Got feedback? Run:  prism feedback "<your message>"');
+  console.log("   (set GITHUB_TOKEN to file issues on GitHub; otherwise stored locally)");
 }
 
 main();

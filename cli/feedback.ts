@@ -21,18 +21,20 @@ const VALID_CATEGORIES: ReadonlyArray<FeedbackCategory> = [
 ];
 const VALID_SEVERITIES: ReadonlyArray<FeedbackSeverity> = ["low", "medium", "high"];
 
-function parseCategory(raw: string): FeedbackCategory {
-  if (!VALID_CATEGORIES.includes(raw as FeedbackCategory)) {
-    throw new Error(`Invalid category '${raw}'. Valid: ${VALID_CATEGORIES.join(", ")}`);
+function parseCategory(raw: string | undefined, fallback: FeedbackCategory): FeedbackCategory {
+  const value = raw ?? fallback;
+  if (!VALID_CATEGORIES.includes(value as FeedbackCategory)) {
+    throw new Error(`Invalid category '${value}'. Valid: ${VALID_CATEGORIES.join(", ")}`);
   }
-  return raw as FeedbackCategory;
+  return value as FeedbackCategory;
 }
 
-function parseSeverity(raw: string): FeedbackSeverity {
-  if (!VALID_SEVERITIES.includes(raw as FeedbackSeverity)) {
-    throw new Error(`Invalid severity '${raw}'. Valid: ${VALID_SEVERITIES.join(", ")}`);
+function parseSeverity(raw: string | undefined, fallback: FeedbackSeverity): FeedbackSeverity {
+  const value = raw ?? fallback;
+  if (!VALID_SEVERITIES.includes(value as FeedbackSeverity)) {
+    throw new Error(`Invalid severity '${value}'. Valid: ${VALID_SEVERITIES.join(", ")}`);
   }
-  return raw as FeedbackSeverity;
+  return value as FeedbackSeverity;
 }
 
 function buildProgram(): Layer.Layer<FeedbackService | ConfigService, never, never> {
@@ -51,8 +53,6 @@ function formatResult(result: FeedbackResult): string {
       return `✓ +1 to existing issue #${result.issueNumber}: ${result.issueUrl}`;
     case "rate_limited":
       return `⚠ Rate limited: ${result.reason}`;
-    case "no_token":
-      return "⚠ GITHUB_TOKEN not set. Feedback stored locally only.";
     case "opt_out":
       return "ℹ Feedback is disabled. Run 'prism feedback enable' to re-enable.";
     case "local_only":
@@ -60,6 +60,49 @@ function formatResult(result: FeedbackResult): string {
     case "error":
       return `✗ Failed to submit feedback: ${result.error}`;
   }
+}
+
+interface SubmitOptions {
+  summary: string;
+  category: string | undefined;
+  severity: string | undefined;
+  details: string | undefined;
+  file: string | string[] | undefined;
+}
+
+function buildFeedback(opts: SubmitOptions): AgentFeedback {
+  const relatedFiles: string[] = Array.isArray(opts.file)
+    ? opts.file
+    : opts.file
+      ? [opts.file]
+      : [];
+  return {
+    category: parseCategory(opts.category, "friction"),
+    severity: parseSeverity(opts.severity, "medium"),
+    summary: opts.summary,
+    details: opts.details,
+    relatedFiles: relatedFiles.length > 0 ? relatedFiles : undefined,
+    context: {
+      prismVersion: "0.0.0",
+      installMethod: "unknown",
+      platform: "unknown",
+      runtime: "unknown",
+    },
+  };
+}
+
+async function runSubmit(feedback: AgentFeedback): Promise<FeedbackResult> {
+  const program = buildProgram();
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const service = yield* FeedbackService;
+      return yield* service.submit(feedback);
+    }).pipe(Effect.provide(program)),
+  ).catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error(`Feedback submission crashed: ${message}`);
+    return { kind: "error" as const, error: message } satisfies FeedbackResult;
+  });
 }
 
 export const feedbackCommand = new Command("feedback")
@@ -97,38 +140,8 @@ feedbackCommand
       return prev ? [...prev, value] : [value];
     },
   )
-  .action(async (summary: string, opts) => {
-    const category = parseCategory(opts.category);
-    const severity = parseSeverity(opts.severity);
-    const relatedFiles: string[] = Array.isArray(opts.file)
-      ? opts.file
-      : opts.file
-        ? [opts.file]
-        : [];
-    const feedback: AgentFeedback = {
-      category,
-      severity,
-      summary,
-      details: opts.details,
-      relatedFiles: relatedFiles.length > 0 ? relatedFiles : undefined,
-      context: {
-        prismVersion: "0.0.0",
-        installMethod: "unknown",
-        platform: "unknown",
-        runtime: "unknown",
-      },
-    };
-    const program = buildProgram();
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const service = yield* FeedbackService;
-        return yield* service.submit(feedback);
-      }).pipe(Effect.provide(program)),
-    ).catch((err: unknown) => {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error(`Feedback submission crashed: ${message}`);
-      return { kind: "error" as const, error: message } satisfies FeedbackResult;
-    });
+  .action(async (summary: string, opts: SubmitOptions) => {
+    const result = await runSubmit(buildFeedback({ ...opts, summary }));
     console.log(formatResult(result));
   });
 
@@ -142,7 +155,7 @@ feedbackCommand
         const config = yield* ConfigService;
         const feedback = yield* FeedbackService;
         const optOut = yield* feedback.getOptOut();
-        const recent = yield* feedback.listForAgent("self");
+        const recent = yield* feedback.list();
         console.log(`Agent feedback status:`);
         console.log(`  Opt-out:       ${optOut ? "yes" : "no"}`);
         console.log(`  GITHUB_TOKEN:  ${config.githubToken ? "set" : "UNSET (local-only mode)"}`);
@@ -170,7 +183,7 @@ feedbackCommand
     await Effect.runPromise(
       Effect.gen(function* () {
         const feedback = yield* FeedbackService;
-        const all = yield* feedback.listForAgent("self");
+        const all = yield* feedback.list();
         if (all.length === 0) {
           console.log("No feedback submitted yet from this agent.");
           return;
@@ -213,41 +226,11 @@ feedbackCommand
   });
 
 // Default action: if `prism feedback "summary"` is run, behave like `submit`.
-feedbackCommand.action(async (summary: string, opts) => {
+feedbackCommand.action(async (summary: string, opts: SubmitOptions) => {
   if (typeof summary !== "string") {
     feedbackCommand.help();
     return;
   }
-  const category = parseCategory(opts.category ?? "friction");
-  const severity = parseSeverity(opts.severity ?? "medium");
-  const relatedFiles: string[] = Array.isArray(opts.file)
-    ? opts.file
-    : opts.file
-      ? [opts.file]
-      : [];
-  const fb: AgentFeedback = {
-    category,
-    severity,
-    summary,
-    details: opts.details,
-    relatedFiles: relatedFiles.length > 0 ? relatedFiles : undefined,
-    context: {
-      prismVersion: "0.0.0",
-      installMethod: "unknown",
-      platform: "unknown",
-      runtime: "unknown",
-    },
-  };
-  const program = buildProgram();
-  const result = await Effect.runPromise(
-    Effect.gen(function* () {
-      const service = yield* FeedbackService;
-      return yield* service.submit(fb);
-    }).pipe(Effect.provide(program)),
-  ).catch((err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error(`Feedback submission crashed: ${message}`);
-    return { kind: "error" as const, error: message } satisfies FeedbackResult;
-  });
+  const result = await runSubmit(buildFeedback({ ...opts, summary }));
   console.log(formatResult(result));
 });

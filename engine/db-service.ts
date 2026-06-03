@@ -388,6 +388,71 @@ export const DbLive = (dbPath?: string) =>
             const row = queryOne<{ n: number }>(db, "SELECT changes() as n");
             return row?.n ?? 0;
           }),
+
+        saveFeedback: (entry) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              `INSERT OR REPLACE INTO agent_feedback (
+                id, agent_id, category, severity, summary, details,
+                related_files, context_json, github_issue_number, github_issue_url,
+                reported_at, hash
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              entry.id,
+              entry.agentId,
+              entry.category,
+              entry.severity,
+              entry.summary,
+              entry.details,
+              serializeJson(entry.relatedFiles),
+              entry.contextJson,
+              entry.githubIssueNumber,
+              entry.githubIssueUrl,
+              entry.reportedAt,
+              entry.hash,
+            );
+          }),
+
+        getFeedbackByHash: (hash) =>
+          Effect.sync(() => {
+            const row = queryOne<Record<string, unknown>>(
+              db,
+              "SELECT * FROM agent_feedback WHERE hash = ? LIMIT 1",
+              hash,
+            );
+            return row ? rowToFeedback(row) : null;
+          }),
+
+        getRecentFeedbackForAgent: (agentId, sinceMs) =>
+          Effect.sync(() => {
+            const rows = queryAll<Record<string, unknown>>(
+              db,
+              "SELECT * FROM agent_feedback WHERE agent_id = ? AND reported_at >= ? ORDER BY reported_at ASC",
+              agentId,
+              sinceMs,
+            );
+            return rows.map(rowToFeedback);
+          }),
+
+        getLastFeedbackForAgent: (agentId) =>
+          Effect.sync(() => {
+            const row = queryOne<Record<string, unknown>>(
+              db,
+              "SELECT * FROM agent_feedback WHERE agent_id = ? ORDER BY reported_at DESC LIMIT 1",
+              agentId,
+            );
+            return row ? rowToFeedback(row) : null;
+          }),
+
+        listFeedbackForAgent: (agentId) =>
+          Effect.sync(() => {
+            const rows = queryAll<Record<string, unknown>>(
+              db,
+              "SELECT * FROM agent_feedback WHERE agent_id = ? ORDER BY reported_at ASC",
+              agentId,
+            );
+            return rows.map(rowToFeedback);
+          }),
       };
 
       return api;
@@ -448,6 +513,48 @@ function rowToAudit(row: Record<string, unknown>): AuditRecord {
     paperTrading: Boolean(row.paper_trading),
     txSignature: row.tx_signature ? String(row.tx_signature) : null,
     error: row.error ? String(row.error) : null,
+  };
+}
+
+function rowToFeedback(row: Record<string, unknown>): {
+  id: string;
+  agentId: string;
+  category: string;
+  severity: string;
+  summary: string;
+  details: string | null;
+  relatedFiles: ReadonlyArray<string>;
+  contextJson: string;
+  githubIssueNumber: number | null;
+  githubIssueUrl: string | null;
+  reportedAt: number;
+  hash: string;
+} {
+  const relatedRaw = row.related_files ? String(row.related_files) : null;
+  let relatedFiles: ReadonlyArray<string> = [];
+  if (relatedRaw) {
+    try {
+      const parsed = JSON.parse(relatedRaw) as unknown;
+      if (Array.isArray(parsed)) {
+        relatedFiles = parsed.filter((x): x is string => typeof x === "string");
+      }
+    } catch {
+      // ignore malformed stored value
+    }
+  }
+  return {
+    id: String(row.id),
+    agentId: String(row.agent_id),
+    category: String(row.category),
+    severity: String(row.severity),
+    summary: String(row.summary),
+    details: row.details ? String(row.details) : null,
+    relatedFiles,
+    contextJson: String(row.context_json ?? "{}"),
+    githubIssueNumber: row.github_issue_number != null ? Number(row.github_issue_number) : null,
+    githubIssueUrl: row.github_issue_url ? String(row.github_issue_url) : null,
+    reportedAt: Number(row.reported_at ?? 0),
+    hash: String(row.hash),
   };
 }
 

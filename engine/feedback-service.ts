@@ -3,6 +3,7 @@ import { createHash } from "crypto";
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { ConfigService } from "./config-service.js";
+import { DbService } from "./services.js";
 import { createLogger } from "./logger.js";
 import {
   FeedbackService,
@@ -182,7 +183,7 @@ function searchGitHubIssues(
   );
   return Effect.tryPromise({
     try: () =>
-      fetch(`https://api.github.com/search/issues?q=${query}&per_page=10`, {
+      fetch(`https://api.github.com/search/issues?q=${query}&per_page=50`, {
         headers: ghHeaders(token),
       }).then(async (res) => {
         if (!res.ok) {
@@ -278,40 +279,33 @@ function formatCommentBody(feedback: AgentFeedback, agentId: string): string {
   return parts.join("\n");
 }
 
-interface FeedbackStore {
-  get(hash: string): FeedbackEntry | null;
-  put(entry: FeedbackEntry): void;
-  listForAgent(agentId: string): ReadonlyArray<FeedbackEntry>;
-  recentForAgent(agentId: string, sinceMs: number): ReadonlyArray<FeedbackEntry>;
-  lastForAgent(agentId: string): FeedbackEntry | null;
-}
-
-function createInMemoryStore(): FeedbackStore {
-  const byHash = new Map<string, FeedbackEntry>();
-  const entries: FeedbackEntry[] = [];
+function toFeedbackEntry(row: {
+  id: string;
+  agentId: string;
+  category: string;
+  severity: string;
+  summary: string;
+  details: string | null;
+  relatedFiles: ReadonlyArray<string>;
+  contextJson: string;
+  githubIssueNumber: number | null;
+  githubIssueUrl: string | null;
+  reportedAt: number;
+  hash: string;
+}): FeedbackEntry {
   return {
-    get(hash) {
-      return byHash.get(hash) ?? null;
-    },
-    put(entry) {
-      byHash.set(entry.hash, entry);
-      entries.push(entry);
-    },
-    listForAgent(agentId) {
-      return entries.filter((e) => e.agentId === agentId);
-    },
-    recentForAgent(agentId, sinceMs) {
-      return entries.filter((e) => e.agentId === agentId && e.reportedAt >= sinceMs);
-    },
-    lastForAgent(agentId) {
-      let last: FeedbackEntry | null = null;
-      for (const e of entries) {
-        if (e.agentId === agentId && (last === null || e.reportedAt > last.reportedAt)) {
-          last = e;
-        }
-      }
-      return last;
-    },
+    id: row.id,
+    agentId: row.agentId,
+    category: row.category as FeedbackEntry["category"],
+    severity: row.severity as FeedbackEntry["severity"],
+    summary: row.summary,
+    details: row.details,
+    relatedFiles: row.relatedFiles,
+    contextJson: row.contextJson,
+    githubIssueNumber: row.githubIssueNumber,
+    githubIssueUrl: row.githubIssueUrl,
+    reportedAt: row.reportedAt,
+    hash: row.hash,
   };
 }
 
@@ -319,8 +313,8 @@ export const FeedbackLive = Layer.effect(
   FeedbackService,
   Effect.gen(function* () {
     const config = yield* ConfigService;
+    const db = yield* DbService;
     const agentId = detectAgentId();
-    const inMemoryStore = createInMemoryStore();
     const state = { optOut: config.feedbackOptOut };
 
     const submit = (rawFeedback: AgentFeedback): Effect.Effect<FeedbackResult, never> =>
@@ -334,7 +328,8 @@ export const FeedbackLive = Layer.effect(
         };
         const hash = hashFeedback(feedback.summary, feedback.details, feedback.category);
 
-        const local = inMemoryStore.get(hash);
+        const localRow = yield* db.getFeedbackByHash(hash);
+        const local = localRow ? toFeedbackEntry(localRow) : null;
         if (local && local.githubIssueNumber !== null) {
           const ageMs = Date.now() - local.reportedAt;
           if (ageMs < FEEDBACK_LIMITS.duplicateCooldownMs) {
@@ -366,7 +361,7 @@ export const FeedbackLive = Layer.effect(
             reportedAt: Date.now(),
             hash,
           };
-          inMemoryStore.put(entry);
+          yield* db.saveFeedback(entry);
           logger.warn(
             "GITHUB_TOKEN unset — feedback stored locally only. " +
               "Set GITHUB_TOKEN to enable GitHub Issues filing.",
@@ -374,21 +369,28 @@ export const FeedbackLive = Layer.effect(
           return { kind: "local_only" as const, localId };
         }
 
-        const recentHour = inMemoryStore.recentForAgent(agentId, Date.now() - 60 * 60 * 1000);
+        const recentHour = yield* db.getRecentFeedbackForAgent(
+          agentId,
+          Date.now() - 60 * 60 * 1000,
+        );
         if (recentHour.length >= FEEDBACK_LIMITS.perHour) {
           return {
             kind: "rate_limited" as const,
             reason: `Exceeded ${FEEDBACK_LIMITS.perHour} feedback items per hour`,
           };
         }
-        const recentDay = inMemoryStore.recentForAgent(agentId, Date.now() - 24 * 60 * 60 * 1000);
+        const recentDay = yield* db.getRecentFeedbackForAgent(
+          agentId,
+          Date.now() - 24 * 60 * 60 * 1000,
+        );
         if (recentDay.length >= FEEDBACK_LIMITS.perDay) {
           return {
             kind: "rate_limited" as const,
             reason: `Exceeded ${FEEDBACK_LIMITS.perDay} feedback items per day`,
           };
         }
-        const last = inMemoryStore.lastForAgent(agentId);
+        const lastRow = yield* db.getLastFeedbackForAgent(agentId);
+        const last = lastRow ? toFeedbackEntry(lastRow) : null;
         if (last && Date.now() - last.reportedAt < FEEDBACK_LIMITS.minIntervalMs) {
           const wait = Math.round(
             (FEEDBACK_LIMITS.minIntervalMs - (Date.now() - last.reportedAt)) / 1000,
@@ -433,7 +435,7 @@ export const FeedbackLive = Layer.effect(
             reportedAt: Date.now(),
             hash,
           };
-          inMemoryStore.put(entry);
+          yield* db.saveFeedback(entry);
           logger.info(`Added +1 to existing issue #${existing.number} for: ${feedback.summary}`);
           return {
             kind: "duplicate" as const,
@@ -442,10 +444,12 @@ export const FeedbackLive = Layer.effect(
           };
         }
 
+        const issueTitle =
+          feedback.summary.length > 256 ? feedback.summary.slice(0, 253) + "..." : feedback.summary;
         const created = yield* createGitHubIssue(
           config.githubToken,
           config.githubRepo,
-          feedback.summary.slice(0, 200),
+          issueTitle,
           formatNewIssueBody(feedback, agentId),
         );
         const entry: FeedbackEntry = {
@@ -462,7 +466,7 @@ export const FeedbackLive = Layer.effect(
           reportedAt: Date.now(),
           hash,
         };
-        inMemoryStore.put(entry);
+        yield* db.saveFeedback(entry);
         logger.info(`Filed new issue #${created.number} for: ${feedback.summary}`);
         return {
           kind: "created" as const,
@@ -482,8 +486,13 @@ export const FeedbackLive = Layer.effect(
 
     return {
       submit,
-      listForAgent: (id: string) => Effect.sync(() => inMemoryStore.listForAgent(id)),
-      getByHash: (hash: string) => Effect.sync(() => inMemoryStore.get(hash)),
+      list: () => Effect.map(db.listFeedbackForAgent(agentId), (rows) => rows.map(toFeedbackEntry)),
+      listForAgent: (id: string) =>
+        Effect.map(db.listFeedbackForAgent(id), (rows) => rows.map(toFeedbackEntry)),
+      getByHash: (hash: string) =>
+        Effect.flatMap(db.getFeedbackByHash(hash), (row) =>
+          Effect.succeed(row ? toFeedbackEntry(row) : null),
+        ),
       setOptOut: (value: boolean) =>
         Effect.sync(() => {
           state.optOut = value;

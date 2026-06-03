@@ -369,6 +369,91 @@ export interface DbApi {
   readonly getSnapshotPools: () => Effect.Effect<ReadonlyArray<string>, unknown>;
   readonly getSnapshotCount: (poolAddress: string) => Effect.Effect<number, unknown>;
   readonly pruneSnapshots: (olderThanMs: number) => Effect.Effect<number, unknown>;
+  readonly saveFeedback: (entry: {
+    id: string;
+    agentId: string;
+    category: string;
+    severity: string;
+    summary: string;
+    details: string | null;
+    relatedFiles: ReadonlyArray<string>;
+    contextJson: string;
+    githubIssueNumber: number | null;
+    githubIssueUrl: string | null;
+    reportedAt: number;
+    hash: string;
+  }) => Effect.Effect<void, unknown>;
+  readonly getFeedbackByHash: (hash: string) => Effect.Effect<
+    {
+      id: string;
+      agentId: string;
+      category: string;
+      severity: string;
+      summary: string;
+      details: string | null;
+      relatedFiles: ReadonlyArray<string>;
+      contextJson: string;
+      githubIssueNumber: number | null;
+      githubIssueUrl: string | null;
+      reportedAt: number;
+      hash: string;
+    } | null,
+    unknown
+  >;
+  readonly getRecentFeedbackForAgent: (
+    agentId: string,
+    sinceMs: number,
+  ) => Effect.Effect<
+    ReadonlyArray<{
+      id: string;
+      agentId: string;
+      category: string;
+      severity: string;
+      summary: string;
+      details: string | null;
+      relatedFiles: ReadonlyArray<string>;
+      contextJson: string;
+      githubIssueNumber: number | null;
+      githubIssueUrl: string | null;
+      reportedAt: number;
+      hash: string;
+    }>,
+    unknown
+  >;
+  readonly getLastFeedbackForAgent: (agentId: string) => Effect.Effect<
+    {
+      id: string;
+      agentId: string;
+      category: string;
+      severity: string;
+      summary: string;
+      details: string | null;
+      relatedFiles: ReadonlyArray<string>;
+      contextJson: string;
+      githubIssueNumber: number | null;
+      githubIssueUrl: string | null;
+      reportedAt: number;
+      hash: string;
+    } | null,
+    unknown
+  >;
+  readonly listFeedbackForAgent: (agentId: string) => Effect.Effect<
+    ReadonlyArray<{
+      id: string;
+      agentId: string;
+      category: string;
+      severity: string;
+      summary: string;
+      details: string | null;
+      relatedFiles: ReadonlyArray<string>;
+      contextJson: string;
+      githubIssueNumber: number | null;
+      githubIssueUrl: string | null;
+      reportedAt: number;
+      hash: string;
+    }>,
+    unknown
+  >;
 }
 
 export class DbService extends Context.Tag("DbService")<DbService, DbApi>() {}
@@ -399,7 +484,6 @@ export type FeedbackResult =
   | { kind: "created"; issueNumber: number; issueUrl: string }
   | { kind: "duplicate"; issueNumber: number; issueUrl: string }
   | { kind: "rate_limited"; reason: string }
-  | { kind: "no_token" }
   | { kind: "opt_out" }
   | { kind: "local_only"; localId: string }
   | { kind: "error"; error: string };
@@ -421,6 +505,7 @@ export interface FeedbackEntry {
 
 export interface FeedbackApi {
   readonly submit: (feedback: AgentFeedback) => Effect.Effect<FeedbackResult, unknown>;
+  readonly list: () => Effect.Effect<ReadonlyArray<FeedbackEntry>, unknown>;
   readonly listForAgent: (agentId: string) => Effect.Effect<ReadonlyArray<FeedbackEntry>, unknown>;
   readonly getByHash: (hash: string) => Effect.Effect<FeedbackEntry | null, unknown>;
   readonly setOptOut: (optOut: boolean) => Effect.Effect<void, unknown>;
