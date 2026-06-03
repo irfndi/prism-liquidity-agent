@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { Effect, Layer } from "effect";
 import { ConfigService, ConfigLive } from "../engine/config-service.js";
+import { DbLive } from "../engine/db-service.js";
 import { FeedbackLive } from "../engine/feedback-service.js";
 import {
   FeedbackService,
@@ -38,11 +39,10 @@ function parseSeverity(raw: string | undefined, fallback: FeedbackSeverity): Fee
 }
 
 function buildProgram(): Layer.Layer<FeedbackService | ConfigService, never, never> {
-  return Layer.provide(FeedbackLive, ConfigLive) as Layer.Layer<
-    FeedbackService | ConfigService,
-    never,
-    never
-  >;
+  return Layer.merge(
+    Layer.provide(FeedbackLive, Layer.merge(ConfigLive, DbLive())),
+    ConfigLive,
+  ) as Layer.Layer<FeedbackService | ConfigService, never, never>;
 }
 
 function formatResult(result: FeedbackResult): string {
