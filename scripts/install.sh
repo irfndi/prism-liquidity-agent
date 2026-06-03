@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # One-liner installer for prism-liquidity-agent.
 # Usage: curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+# Or with a pinned release tarball (faster, no git history):
+#   PRISM_TARBALL_URL=<url> curl -fsSL .../install.sh | bash
 set -euo pipefail
 
 REPO="${PRISM_REPO:-irfndi/prism-liquidity-agent}"
 INSTALL_DIR="${PRISM_INSTALL_DIR:-$HOME/.prism}"
 BIN_DIR="${PRISM_BIN_DIR:-$HOME/.local/bin}"
+TARBALL_URL="${PRISM_TARBALL_URL:-}"
 
 echo "→ Installing prism to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
@@ -19,8 +22,25 @@ if ! command -v bun >/dev/null 2>&1; then
   BUN_INSTALLED=1
 fi
 
-# Clone or update the source
-if [ -d "$INSTALL_DIR/.git" ]; then
+if [ -n "$TARBALL_URL" ]; then
+  echo "→ Downloading tarball: $TARBALL_URL"
+  TMP_TARBALL="$(mktemp -t prism-install-XXXXXX.tar.gz)"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$TARBALL_URL" -o "$TMP_TARBALL"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$TARBALL_URL" -O "$TMP_TARBALL"
+  else
+    echo "✘ Neither curl nor wget found; install one and retry" >&2
+    exit 1
+  fi
+  echo "→ Extracting to $INSTALL_DIR"
+  rm -rf "$INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR"
+  tar -xzf "$TMP_TARBALL" -C "$INSTALL_DIR"
+  rm -f "$TMP_TARBALL"
+  # Marker so 'prism update' / 'prism --version' can detect a non-git install.
+  touch "$INSTALL_DIR/.tarball-install"
+elif [ -d "$INSTALL_DIR/.git" ]; then
   echo "→ Updating existing install"
   # Resolve the default branch once; the symbolic ref can shift between
   # invocations and we want a single consistent value.
@@ -84,8 +104,12 @@ fi
 
 echo ""
 echo "✓ Install complete."
-echo "  - Source: $INSTALL_DIR"
-echo "  - Run:    $BIN_DIR/prism --version"
+if [ -n "$TARBALL_URL" ]; then
+  echo "  - Source:   $INSTALL_DIR (tarball install — upgrade via 'prism update')"
+else
+  echo "  - Source:   $INSTALL_DIR (git install — upgrade via 'prism update' or rerun this script)"
+fi
+echo "  - Run:      $BIN_DIR/prism --version"
 echo ""
 echo "Next steps:"
 if [ "$BUN_INSTALLED" -eq 1 ]; then

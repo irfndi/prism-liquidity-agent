@@ -37,7 +37,7 @@ Before any decision, the agent scores each pool's volume on a 0-1 scale. Volume/
 
 ## Quickstart
 
-**One-liner install** (recommended — installs Bun, clones the repo, writes a default `.env`, and drops a `prism` wrapper on your PATH):
+**One-liner install — latest from default branch** (recommended for most users; installs Bun if needed, clones the repo, writes a default `.env`, and drops a `prism` wrapper on your PATH):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
@@ -46,26 +46,42 @@ prism setup --non-interactive --helius-key=YOUR_HELIUS_KEY
 prism dev                               # paper trading by default
 ```
 
-**Manual install** (if you'd rather clone yourself):
+**One-liner install — pinned release tarball** (faster, no git history, reproducible):
+
+```bash
+PRISM_TARBALL_URL=https://github.com/irfndi/prism-liquidity-agent/releases/download/v1.2.3/prism-v1.2.3.tar.gz \
+  curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+prism dev
+```
+
+Use the tarball form when you need a specific release version (CI, reproducible deploys, air-gapped networks without git). The `prism update` command will still pull newer release tarballs for you.
+
+**Manual install** (only if you're working ON Prism itself — contributors, CI):
 
 ```bash
 git clone https://github.com/irfndi/prism-liquidity-agent
 cd prism-liquidity-agent
 bun install
-prism setup            # interactive .env wizard
-prism dev              # paper trading by default
+bun run dev          # during development; production users use 'prism dev'
 ```
 
-Both paths produce the same result. The `prism` wrapper is a thin shim that `cd`s to the install root before exec'ing `bun cli/index.ts`, so the working directory always resolves correctly regardless of where you invoke it from.
+All three paths end up with the same `prism` wrapper on PATH. The wrapper is a thin shim that `cd`s to the install root before exec'ing `bun cli/index.ts`, so the working directory always resolves correctly regardless of where you invoke it from.
 
 ### For AI Agents (OpenClaw, Hermes, acpx, custom agents)
 
 Prism is agent-friendly by design. The CLI is the only required layer; the cloud API and Telegram bot are optional add-ons that you skip if you don't need them.
 
 ```bash
-git clone https://github.com/irfndi/prism-liquidity-agent
-cd prism-liquidity-agent
-bun install
+# Pinned release — reproducible, no git, fastest for agents
+PRISM_TARBALL_URL=https://github.com/irfndi/prism-liquidity-agent/releases/latest/download/prism-latest.tar.gz \
+  curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+
+# Or latest from default branch
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+
 prism register                                    # OPTIONAL — get API key from cloud
 prism setup --non-interactive --helius-key=$KEY    # required — Helius RPC key
 prism dev                                         # start paper trading
