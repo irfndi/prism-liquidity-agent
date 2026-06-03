@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { env, createExecutionContext } from "cloudflare:test";
-import worker from "./index";
+import worker, { type Env } from "./index";
+
+const testEnv = env as unknown as Env;
 
 function buildRequest(method: string, path: string, body?: unknown, token?: string): Request {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -52,7 +54,7 @@ describe("Error Reporting API", () => {
         severity: "error",
         isRecoverable: 1,
       });
-      const response = await worker.fetch(request, env, ctx);
+      const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(200);
       const body = (await response.json()) as { id: string };
       expect(body.id).toBe("test-uuid-1");
@@ -66,7 +68,7 @@ describe("Error Reporting API", () => {
         message: "BigInt serialization failed",
         prismVersion: "1.2.3",
       });
-      const response = await worker.fetch(request, env, ctx);
+      const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(400);
     });
 
@@ -78,7 +80,7 @@ describe("Error Reporting API", () => {
         message: "BigInt serialization failed",
         prismVersion: "1.2.3",
       });
-      const response = await worker.fetch(request, env, ctx);
+      const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(400);
     });
 
@@ -90,7 +92,7 @@ describe("Error Reporting API", () => {
         message: "BigInt serialization failed",
         prismVersion: "1.2.3",
       });
-      const response = await worker.fetch(request, env, ctx);
+      const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(400);
     });
 
@@ -102,7 +104,7 @@ describe("Error Reporting API", () => {
         errorType: "ONNX_BigInt",
         prismVersion: "1.2.3",
       });
-      const response = await worker.fetch(request, env, ctx);
+      const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(400);
     });
 
@@ -114,7 +116,7 @@ describe("Error Reporting API", () => {
         errorType: "ONNX_BigInt",
         message: "BigInt serialization failed",
       });
-      const response = await worker.fetch(request, env, ctx);
+      const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(400);
     });
 
@@ -129,12 +131,12 @@ describe("Error Reporting API", () => {
       };
       // Insert once
       const req1 = buildRequest("POST", "/v1/errors/report", report);
-      const res1 = await worker.fetch(req1, env, ctx);
+      const res1 = await worker.fetch(req1, testEnv, ctx);
       expect(res1.status).toBe(200);
 
       // Insert duplicate — should still return 200
       const req2 = buildRequest("POST", "/v1/errors/report", report);
-      const res2 = await worker.fetch(req2, env, ctx);
+      const res2 = await worker.fetch(req2, testEnv, ctx);
       expect(res2.status).toBe(200);
       const body = (await res2.json()) as { id: string };
       expect(body.id).toBe("dup-uuid");
@@ -156,7 +158,7 @@ describe("Error Reporting API", () => {
         prismVersion: "1.2.3",
       }));
       const request = buildRequest("POST", "/v1/errors/batch", { reports });
-      const response = await worker.fetch(request, env, ctx);
+      const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(200);
       const body = (await response.json()) as { inserted: number };
       expect(body.inserted).toBe(3);
@@ -165,7 +167,7 @@ describe("Error Reporting API", () => {
     it("should return 400 when no reports provided", async () => {
       const ctx = createExecutionContext();
       const request = buildRequest("POST", "/v1/errors/batch", { reports: [] });
-      const response = await worker.fetch(request, env, ctx);
+      const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(400);
     });
 
@@ -179,7 +181,7 @@ describe("Error Reporting API", () => {
         prismVersion: "1.2.3",
       }));
       const request = buildRequest("POST", "/v1/errors/batch", { reports });
-      const response = await worker.fetch(request, env, ctx);
+      const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(400);
     });
 
@@ -190,7 +192,7 @@ describe("Error Reporting API", () => {
         { id: "invalid-1", agentId: "hash", errorType: "TypeB", prismVersion: "1.0" }, // missing message
       ];
       const request = buildRequest("POST", "/v1/errors/batch", { reports });
-      const response = await worker.fetch(request, env, ctx);
+      const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(400);
     });
   });
@@ -251,14 +253,14 @@ describe("Error Reporting API", () => {
     it("should return 401 without bearer token", async () => {
       const ctx = createExecutionContext();
       const request = buildRequest("GET", "/v1/errors/stats");
-      const response = await worker.fetch(request, env, ctx);
+      const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(401);
     });
 
     it("should return 401 with invalid bearer token", async () => {
       const ctx = createExecutionContext();
       const request = buildRequest("GET", "/v1/errors/stats", undefined, "wrong-key");
-      const adminEnv = { ...env, ADMIN_API_KEY: adminKey };
+      const adminEnv = { ...testEnv, ADMIN_API_KEY: adminKey } as Env;
       const response = await worker.fetch(request, adminEnv, ctx);
       expect(response.status).toBe(401);
     });
@@ -266,7 +268,7 @@ describe("Error Reporting API", () => {
     it("should return aggregate stats with valid admin token", async () => {
       const ctx = createExecutionContext();
       const request = buildRequest("GET", "/v1/errors/stats", undefined, adminKey);
-      const adminEnv = { ...env, ADMIN_API_KEY: adminKey };
+      const adminEnv = { ...testEnv, ADMIN_API_KEY: adminKey } as Env;
       const response = await worker.fetch(request, adminEnv, ctx);
       expect(response.status).toBe(200);
       const body = (await response.json()) as {

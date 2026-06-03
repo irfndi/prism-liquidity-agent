@@ -2,7 +2,7 @@ import { Effect, Layer, Context } from "effect";
 import { Hono } from "hono";
 
 // Environment bindings interface
-interface Env {
+export interface Env {
   DB: D1Database;
   CACHE: KVNamespace;
   BACKUPS: R2Bucket;
@@ -195,14 +195,14 @@ const agentStatusHandler = (db: D1Database, telegramId: string) =>
   });
 
 // Main app
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { apiKey: string } }>();
 
 // Middleware to extract and validate API key
 app.use("/v1/*", async (c, next) => {
   const authHeader = c.req.header("Authorization");
   if (authHeader) {
     const match = authHeader.match(/^Bearer\s+(.+)$/);
-    if (match) {
+    if (match && match[1]) {
       c.set("apiKey", match[1]);
     }
   }
@@ -218,7 +218,7 @@ app.get("/health", async (c) => {
 app.post("/v1/register", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
-  const body = await c.req.json<{ telegram_id?: string }>().catch(() => ({}));
+  const body = (await c.req.json().catch(() => ({}))) as { telegram_id?: string };
 
   try {
     // Rate limiting: max 5 registrations per IP per hour
@@ -281,7 +281,9 @@ app.get("/v1/whoami", async (c) => {
 
   try {
     const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
-    const userResult = await Effect.runPromise(whoamiHandler(DB, loginResult.id as string));
+    const userResult = await Effect.runPromise(
+      whoamiHandler(DB, (loginResult as { id: string }).id),
+    );
     return c.json(userResult);
   } catch {
     return c.json({ error: "Unauthorized" }, 401);
@@ -298,7 +300,9 @@ app.post("/v1/link-telegram/start", async (c) => {
 
   try {
     const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
-    const result = await Effect.runPromise(linkTelegramStartHandler(DB, loginResult.id as string));
+    const result = await Effect.runPromise(
+      linkTelegramStartHandler(DB, (loginResult as { id: string }).id),
+    );
     return c.json(result);
   } catch {
     return c.json({ error: "Unauthorized" }, 401);
@@ -307,7 +311,7 @@ app.post("/v1/link-telegram/start", async (c) => {
 
 app.post("/v1/link-telegram/confirm", async (c) => {
   const { DB } = c.env;
-  const body = await c.req.json<{ code: string; telegram_id: string }>();
+  const body = (await c.req.json().catch(() => ({}))) as { code: string; telegram_id: string };
 
   if (!body.code || !body.telegram_id) {
     return c.json({ error: "Code and telegram_id required" }, 400);
@@ -372,7 +376,7 @@ app.post("/v1/link-telegram/confirm", async (c) => {
 
 app.post("/v1/whoami-telegram", async (c) => {
   const { DB } = c.env;
-  const body = await c.req.json<{ telegram_id?: string }>().catch(() => ({}));
+  const body = (await c.req.json().catch(() => ({}))) as { telegram_id?: string };
 
   if (!body.telegram_id) {
     return c.json({ error: "telegram_id required" }, 400);
@@ -401,7 +405,10 @@ app.post("/v1/whoami-telegram", async (c) => {
 app.post("/v1/register-telegram", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
-  const body = await c.req.json<{ telegram_id?: string; first_name?: string }>().catch(() => ({}));
+  const body = (await c.req.json().catch(() => ({}))) as {
+    telegram_id?: string;
+    first_name?: string;
+  };
 
   if (!body.telegram_id) {
     return c.json({ error: "telegram_id required" }, 400);
@@ -434,7 +441,7 @@ app.post("/v1/register-telegram", async (c) => {
 
 app.post("/v1/agent-status", async (c) => {
   const { DB } = c.env;
-  const body = await c.req.json<{ telegram_id?: string }>().catch(() => ({}));
+  const body = (await c.req.json().catch(() => ({}))) as { telegram_id?: string };
 
   if (!body.telegram_id) {
     return c.json({ error: "telegram_id required" }, 400);
@@ -452,7 +459,7 @@ app.post("/v1/agent-status", async (c) => {
 
 app.post("/v1/issue", async (c) => {
   const { GITHUB_TOKEN, GITHUB_REPO } = c.env;
-  const body = await c.req.json<{ title: string; body: string }>();
+  const body = (await c.req.json().catch(() => ({}))) as { title: string; body: string };
 
   if (!body.title) {
     return c.json({ error: "Title required" }, 400);
@@ -480,7 +487,7 @@ app.post("/v1/issue", async (c) => {
       throw new Error(`GitHub API error: ${response.status}`);
     }
 
-    const issue = await response.json();
+    const issue = (await response.json()) as { number?: number; html_url?: string };
     return c.json({ issue_number: issue.number, url: issue.html_url });
   } catch {
     return c.json({ error: "Failed to create issue" }, 500);
@@ -494,19 +501,17 @@ app.post("/v1/errors/report", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
 
-  const body = await c.req
-    .json<{
-      id?: string;
-      agentId?: string;
-      errorType?: string;
-      message?: string;
-      stackTrace?: string;
-      prismVersion?: string;
-      platform?: string;
-      severity?: string;
-      isRecoverable?: number;
-    }>()
-    .catch(() => ({}));
+  const body = (await c.req.json().catch(() => ({}))) as {
+    id?: string;
+    agentId?: string;
+    errorType?: string;
+    message?: string;
+    stackTrace?: string;
+    prismVersion?: string;
+    platform?: string;
+    severity?: string;
+    isRecoverable?: number;
+  };
 
   // Validate required fields
   if (!body.id || !body.agentId || !body.errorType || !body.message || !body.prismVersion) {
@@ -563,21 +568,19 @@ app.post("/v1/errors/batch", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
 
-  const body = await c.req
-    .json<{
-      reports?: Array<{
-        id?: string;
-        agentId?: string;
-        errorType?: string;
-        message?: string;
-        stackTrace?: string;
-        prismVersion?: string;
-        platform?: string;
-        severity?: string;
-        isRecoverable?: number;
-      }>;
-    }>()
-    .catch(() => ({}));
+  const body = (await c.req.json().catch(() => ({}))) as {
+    reports?: Array<{
+      id?: string;
+      agentId?: string;
+      errorType?: string;
+      message?: string;
+      stackTrace?: string;
+      prismVersion?: string;
+      platform?: string;
+      severity?: string;
+      isRecoverable?: number;
+    }>;
+  };
 
   const reports = body.reports ?? [];
 

@@ -4,7 +4,11 @@
     "module": "ES2022",
     "moduleResolution": "bundler",
     "lib": ["ES2022"],
-    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers", "vitest/globals"],
+    "types": [
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers/types",
+      "vitest/globals"
+    ],
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "strict": true,
@@ -16,5 +20,5 @@
     "isolatedModules": true,
     "noEmit": true
   },
-  "include": ["workers/**/*", "migrations/**/*"]
+  "include": ["workers/**/*", "migrations/**/*", "worker-configuration.d.ts"]
 }
