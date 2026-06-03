@@ -23,8 +23,7 @@ jobs:
 
       - name: Sync package.json version
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.version='${VERSION}';fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n');"
+          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n');"
           echo "→ package.json version set to ${VERSION}"
 
       - name: Setup Bun
