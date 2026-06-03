@@ -43,11 +43,15 @@ UPDATE_CHANNEL=stable
 function main() {
   if (fs.existsSync(ENV_PATH)) {
     console.log(`✓ ${ENV_PATH} already exists; leaving it untouched.`);
-    return;
+  } else {
+    fs.mkdirSync(path.dirname(ENV_PATH), { recursive: true });
+    fs.writeFileSync(ENV_PATH, DEFAULT_ENV, { mode: 0o600 });
+    console.log(`✓ Wrote default ${ENV_PATH}`);
   }
-  fs.mkdirSync(path.dirname(ENV_PATH), { recursive: true });
-  fs.writeFileSync(ENV_PATH, DEFAULT_ENV, { mode: 0o600 });
-  console.log(`✓ Wrote default ${ENV_PATH}`);
+
+  console.log("");
+  console.log("💬 Got feedback? Run:  prism feedback \"<your message>\"");
+  console.log("   (set GITHUB_TOKEN to file on GitHub; otherwise stored locally)");
 }
 
 main();
