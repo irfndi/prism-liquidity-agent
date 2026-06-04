@@ -73,7 +73,6 @@ This spawns the engine. Decisions are logged to `logs/audit-trail.jsonl`. To sto
 | `prism dev` | Start the trading engine |
 | `prism backtest` | Run a historical simulation (synthetic or replay from snapshots) |
 | `prism update` | Check for and apply updates from R2/GitHub releases |
-| `prism issue "<msg>"` | File a GitHub issue (auto-deduped) |
 | `prism wallet {generate,import,show}` | Manage the local Solana keypair (required for live trading) |
 | `prism link-telegram` | Link the cloud account to `@prism_agent_bot` |
 
@@ -82,7 +81,7 @@ This spawns the engine. Decisions are logged to `logs/audit-trail.jsonl`. To sto
 1. **Running `bun run dev` instead of `prism dev`.** Both start the engine, but `prism dev` goes through the CLI wrapper that resolves the install root and respects config. `bun run dev` bypasses that and may write `.env` to the wrong directory.
 2. **Manually editing `.env`.** Use `prism setup` to update config. Hand-edits work but skip validation.
 3. **Assuming `prism register` is required.** It isn't. Skip it for local-only setups.
-4. **Setting `PAPER_TRADING=false` without a wallet.** Live mode requires `WALLET_PRIVATE_KEY` in `.env`. Use `prism wallet generate` to create one.
+4. **Setting `PAPER_TRADING=false` without a wallet.** Live mode requires `WALLET_PRIVATE_KEY` in `.env`. Generate a keypair with `prism wallet generate` (saves to `~/.config/prism/wallet.json`) and copy the private key into `WALLET_PRIVATE_KEY=` in `.env`.
 5. **Forgetting to export `PATH`.** After the one-liner install, `~/.local/bin` must be on `PATH` for the `prism` wrapper to be found.
 
 ## Troubleshooting
