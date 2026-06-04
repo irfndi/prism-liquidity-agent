@@ -1,6 +1,8 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { getOrCreateInstallId } from "./install-id.js";
+import { getCurrentVersion } from "../engine/version.js";
 
 const DEFAULT_API_URL = "https://prism-api.irfndi.workers.dev";
 
@@ -20,7 +22,7 @@ export interface ApiResponse<T> {
 export async function prismApiPost<T = unknown>(
   path: string,
   body: Record<string, unknown>,
-  options: { apiKey?: string } = {},
+  options: { apiKey?: string; signal?: AbortSignal } = {},
 ): Promise<ApiResponse<T>> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -33,6 +35,7 @@ export async function prismApiPost<T = unknown>(
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: options.signal,
     });
     if (!response.ok) {
       return {
@@ -109,4 +112,29 @@ export function writeCredentials(creds: {
     mode: 0o600,
   });
   fs.chmodSync(CREDENTIALS_FILE, 0o600);
+}
+
+export function pingInstall(
+  event: "install" | "setup" | "dev_start" | "register",
+  options: { userId?: string } = {},
+): Promise<void> {
+  return (async () => {
+    try {
+      const body: Record<string, string> = {
+        installId: getOrCreateInstallId(),
+        event,
+        version: getCurrentVersion(),
+        channel: process.env.UPDATE_CHANNEL ?? "stable",
+        platform: process.platform,
+      };
+      if (options.userId) body.userId = options.userId;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      await prismApiPost("/v1/installs/ping", body, { signal: controller.signal }).finally(() =>
+        clearTimeout(timeout),
+      );
+    } catch {
+      return;
+    }
+  })();
 }

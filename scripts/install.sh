@@ -120,3 +120,32 @@ fi
 echo "  2. Register an account:      prism register"
 echo "  3. Configure:                prism setup --non-interactive --helius-key=your-helius-key"
 echo "  4. Start trading:            prism dev"
+
+INSTALL_ID_FILE="$HOME/.config/prism/install-id"
+mkdir -p "$(dirname "$INSTALL_ID_FILE")"
+if [ ! -s "$INSTALL_ID_FILE" ]; then
+  INSTALL_ID="$(bun -e 'console.log(crypto.randomUUID())' 2>/dev/null || echo "")"
+  if [ -z "$INSTALL_ID" ]; then
+    UUID_HEX="$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    if [ "${#UUID_HEX}" -eq 32 ]; then
+      INSTALL_ID="${UUID_HEX:0:8}-${UUID_HEX:8:4}-${UUID_HEX:12:4}-${UUID_HEX:16:4}-${UUID_HEX:20:12}"
+    fi
+  fi
+  if [ -n "$INSTALL_ID" ]; then
+    echo "$INSTALL_ID" > "$INSTALL_ID_FILE"
+    chmod 600 "$INSTALL_ID_FILE" 2>/dev/null || true
+  fi
+fi
+INSTALL_ID="$(cat "$INSTALL_ID_FILE" 2>/dev/null || echo "")"
+if [ -n "$INSTALL_ID" ]; then
+  PRISM_VERSION="$(bun -e "console.log(require('$INSTALL_DIR/package.json').version)" 2>/dev/null || echo "")"
+  PRISM_PLATFORM="$(uname -s | tr A-Z a-z)"
+  PRISM_PAYLOAD="{\"installId\":\"$INSTALL_ID\",\"event\":\"install\",\"channel\":\"stable\",\"platform\":\"$PRISM_PLATFORM\""
+  if [ -n "$PRISM_VERSION" ]; then
+    PRISM_PAYLOAD="$PRISM_PAYLOAD,\"version\":\"$PRISM_VERSION\""
+  fi
+  PRISM_PAYLOAD="$PRISM_PAYLOAD}"
+  curl -fsS --max-time 5 -X POST "${PRISM_API_URL:-https://prism-api.irfndi.workers.dev}/v1/installs/ping" \
+    -H "Content-Type: application/json" \
+    -d "$PRISM_PAYLOAD" >/dev/null 2>&1 &
+fi

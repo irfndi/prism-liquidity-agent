@@ -13,9 +13,12 @@ If you're an agent (OpenClaw, Hermes, acpx, or custom) being asked to set up or 
 You DO need to:
 
 - ✅ Clone the repo and install dependencies
-- ✅ Run `prism register` (calls the deployed API, returns an API key)
 - ✅ Run `prism setup` (configures Helius key + watchlist)
 - ✅ Run `prism dev` to start the trading agent
+
+You MAY want to (optional, for cloud features only):
+
+- ⭐ Run `prism register` (calls the deployed API, returns an API key) — only needed for `prism whoami`, Telegram bot linking, and subscription management. The CLI is fully functional without it.
 
 ```bash
 git clone https://github.com/irfndi/prism-liquidity-agent.git
@@ -398,6 +401,39 @@ _This issue was automatically created by a Prism agent. If you're a human, pleas
 ```
 
 Humans can review filed issues, add the `confirmed` label, or close as duplicate. The system is best-effort — if the GitHub API fails, the error is logged but the agent is not crashed.
+
+## Install telemetry (issue #36)
+
+Prism fires anonymous install pings at four points in the install/setup/dev lifecycle so the maintainer can count unique installations and see which versions are running — without forcing users through registration.
+
+### Privacy
+
+- `install_id` is a random UUID generated client-side and stored at `~/.config/prism/install-id` (0o600).
+- No PII, no fingerprinting, no cross-machine correlation.
+- The API only sees the user's `user_id` on the `register` event (which the user explicitly opted into by running `prism register`).
+
+### Events
+
+| Event | Emitted by | Includes user_id? |
+|---|---|---|
+| `install` | `scripts/install.sh` (end of script) and `scripts/postinstall.js` (only when `.env` was just created) | no |
+| `setup` | `cli/setup.ts` (after `.env` is written, both interactive and non-interactive paths) | no |
+| `dev_start` | `cli/dev.ts` (before spawning the engine) | no |
+| `register` | `cli/register.ts` (after `writeCredentials`) | yes |
+
+All events include `install_id`, `version` (from `package.json`), `channel` (from `UPDATE_CHANNEL` env, default `stable`), and `platform` (from `process.platform` / `uname -s`).
+
+### Storage
+
+D1 table `installs` (migration `0002_installs.sql`). To count unique installs: `SELECT COUNT(DISTINCT install_id) FROM installs`.
+
+### Opt-out
+
+Not yet implemented. The design is privacy-first by default (the `install_id` is a local random UUID with no PII). To block pings, set `PRISM_API_URL` to a non-existent host — the pings will fail silently and the CLI continues to work.
+
+### Rate limits
+
+100 pings per IP per hour (KV-backed). Same limit as the error reporting endpoint.
 
 ## Testing
 

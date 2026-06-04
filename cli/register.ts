@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { prismApiPost, writeCredentials } from "./api.js";
+import { pingInstall, prismApiPost, writeCredentials } from "./api.js";
 
 interface RegisterResult {
   user_id: string;
@@ -27,6 +27,7 @@ export const registerCommand = new Command("register")
       createdAt: new Date().toISOString(),
     };
     writeCredentials(credentials);
+    await pingInstall("register", { userId });
 
     console.log("✓ Registration successful");
     console.log(`  User ID: ${userId}`);
