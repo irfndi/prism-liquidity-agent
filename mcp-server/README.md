@@ -65,7 +65,7 @@ node /absolute/path/to/mcp-server/dist/index.js
 ```
 
 If it crashes immediately, check:
-1. `PRISM_BIN` points to a working `prism` binary — test with `$(PRISM_BIN) --version`
+1. `PRISM_BIN` points to a working `prism` binary — test with `$PRISM_BIN --version`
 2. `SQLITE_DB_PATH` points to a readable SQLite file (or omit to use `./prism.db`)
 3. `better-sqlite3` native binding is built — run `npm rebuild better-sqlite3` in the mcp-server directory
 

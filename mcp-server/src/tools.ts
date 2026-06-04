@@ -14,15 +14,6 @@ function openDb(): InstanceType<typeof Database> | null {
   return new Database(dbPath, { readonly: true, fileMustExist: true });
 }
 
-function formatPosition(row: Record<string, unknown>): string {
-  const pool = String(row.pool_address);
-  const tokens = `${row.token_x_symbol ?? "?"}/${row.token_y_symbol ?? "?"}`;
-  const deposited = Number(row.deposited_usd ?? 0).toFixed(2);
-  const current = Number(row.current_value_usd ?? 0).toFixed(2);
-  const range = `[${row.lower_bin_id ?? "?"}..${row.upper_bin_id ?? "?"}]`;
-  return `${pool} ${tokens} deposited=$${deposited} current=$${current} range=${range}`;
-}
-
 function registerPrismStatus(server: McpServer): void {
   server.tool(
     "prism_status",
@@ -94,6 +85,20 @@ function registerPrismStatus(server: McpServer): void {
             },
           ],
         };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                { error: `Failed to read SQLite database: ${err instanceof Error ? err.message : String(err)}` },
+                null,
+                2,
+              ),
+            },
+          ],
+          isError: true,
+        };
       } finally {
         db.close();
       }
@@ -148,6 +153,20 @@ function registerPrismPositions(server: McpServer): void {
             },
           ],
         };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                { error: `Failed to read positions: ${err instanceof Error ? err.message : String(err)}` },
+                null,
+                2,
+              ),
+            },
+          ],
+          isError: true,
+        };
       } finally {
         db.close();
       }
@@ -178,11 +197,14 @@ function registerPrismWhoami(server: McpServer): void {
             ],
           };
         }
+        const detail = result.timedOut
+          ? `Command timed out after 30s:\n${result.stderr}`
+          : `Error running \`prism whoami\` (exit ${result.exitCode}):\n${result.stderr}`;
         return {
           content: [
             {
               type: "text",
-              text: `Error running \`prism whoami\` (exit ${result.exitCode}):\n${result.stderr}`,
+              text: detail,
             },
           ],
           isError: true,
@@ -214,15 +236,18 @@ function registerPrismBacktest(server: McpServer): void {
     async ({ source, days, pools }) => {
       const args = ["backtest", "--source", source, "--days", String(days)];
       if (source === "replay" && pools && pools.length > 0) {
-        args.push("--pools", ...pools);
+        args.push("--pools", pools.join(","));
       }
       const result = await runPrism(args, { timeoutMs: 120_000 });
       if (!result.ok) {
+        const detail = result.timedOut
+          ? `Backtest timed out after 120s:\n${result.stderr || result.stdout}`
+          : `Error running \`prism backtest\` (exit ${result.exitCode}):\n${result.stderr || result.stdout}`;
         return {
           content: [
             {
               type: "text",
-              text: `Error running \`prism backtest\` (exit ${result.exitCode}):\n${result.stderr || result.stdout}`,
+              text: detail,
             },
           ],
           isError: true,

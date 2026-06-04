@@ -95,7 +95,7 @@ The content can be adapted from the existing four skill files — the install/co
 
 ## See Also
 
-- [Issue #33](https://github.com/irfndi/prism-liqudity-agent/issues/33) — original phased plan
+- [Issue #33](https://github.com/irfndi/prism-liquidity-agent/issues/33) — original phased plan
 - [`docs/agent-harness.md`](../docs/agent-harness.md) — full agent integration guide
 - [`.agents/skills/`](../.agents/skills/) — the project's own skill directory (acpx format)
 - [`dlmm-rebalancer`](../.agents/skills/dlmm-rebalancer.md) — strategy-level reasoning skill

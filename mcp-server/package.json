@@ -15,7 +15,10 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "lint": "oxlint src test",
+    "format": "oxfmt --write src test",
+    "format:check": "oxfmt --check src test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
