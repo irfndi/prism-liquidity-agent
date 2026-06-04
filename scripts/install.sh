@@ -123,7 +123,7 @@ echo "  4. Start trading:            prism dev"
 
 INSTALL_ID_FILE="$HOME/.config/prism/install-id"
 mkdir -p "$(dirname "$INSTALL_ID_FILE")"
-if [ ! -f "$INSTALL_ID_FILE" ]; then
+if [ ! -s "$INSTALL_ID_FILE" ]; then
   INSTALL_ID="$(bun -e 'console.log(crypto.randomUUID())' 2>/dev/null || echo "")"
   if [ -z "$INSTALL_ID" ]; then
     UUID_HEX="$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n')"

@@ -116,8 +116,8 @@ export function writeCredentials(creds: {
 export function pingInstall(
   event: "install" | "setup" | "dev_start" | "register",
   options: { userId?: string } = {},
-): void {
-  void (async () => {
+): Promise<void> {
+  return (async () => {
     try {
       const body: Record<string, string> = {
         installId: getOrCreateInstallId(),
@@ -127,7 +127,10 @@ export function pingInstall(
         platform: process.platform,
       };
       if (options.userId) body.userId = options.userId;
-      await prismApiPost("/v1/installs/ping", body);
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("ping timeout")), 3000),
+      );
+      await Promise.race([prismApiPost("/v1/installs/ping", body), timeout]);
     } catch {
       return;
     }

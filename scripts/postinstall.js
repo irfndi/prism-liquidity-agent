@@ -85,11 +85,14 @@ function pingInstall(event) {
         channel: process.env.UPDATE_CHANNEL ?? "stable",
         platform: process.platform,
       });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
       await fetch(`${API_URL}/v1/installs/ping`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,
-      });
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timeout));
     } catch {
       return;
     }

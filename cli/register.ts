@@ -27,7 +27,7 @@ export const registerCommand = new Command("register")
       createdAt: new Date().toISOString(),
     };
     writeCredentials(credentials);
-    pingInstall("register", { userId });
+    await pingInstall("register", { userId });
 
     console.log("✓ Registration successful");
     console.log(`  User ID: ${userId}`);

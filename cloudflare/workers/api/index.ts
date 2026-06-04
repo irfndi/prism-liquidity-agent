@@ -742,7 +742,7 @@ app.post("/v1/installs/ping", async (c) => {
     userId?: string;
   };
 
-  if (!body.installId || body.installId.length < 8 || body.installId.length > 128) {
+  if (typeof body.installId !== "string" || body.installId.length < 8 || body.installId.length > 128) {
     return c.json(
       { error: "installId is required and must be 8-128 chars" },
       400,
