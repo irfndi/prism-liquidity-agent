@@ -101,7 +101,7 @@ export const DbLive = (dbPath?: string) =>
               trailing_stop_threshold, highest_value_usd, last_rebalance_at, paper_exited_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pool_address) DO UPDATE SET
-              position_pubkey = excluded.position_pubkey,
+              position_pubkey = COALESCE(positions.position_pubkey, excluded.position_pubkey),
               deposited_usd = excluded.deposited_usd,
               current_value_usd = excluded.current_value_usd,
               token_x_symbol = excluded.token_x_symbol,
@@ -116,7 +116,7 @@ export const DbLive = (dbPath?: string) =>
               trailing_stop_threshold = excluded.trailing_stop_threshold,
               highest_value_usd = excluded.highest_value_usd,
               last_rebalance_at = excluded.last_rebalance_at,
-              paper_exited_at = excluded.paper_exited_at`,
+              paper_exited_at = COALESCE(positions.paper_exited_at, excluded.paper_exited_at)`,
               pos.poolAddress,
               pos.positionPubKey,
               pos.depositedUsd,

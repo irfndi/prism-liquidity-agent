@@ -120,8 +120,9 @@ export const program = Effect.gen(function* () {
     if (paperExited.length > 0) {
       console.warn(
         `Found ${paperExited.length} paper-exited position(s) from a previous paper-trading run. ` +
-          `If you entered these positions in live mode, close them manually — ` +
-          `the engine does not track on-chain state from paper trades.`,
+          `If you entered these in live mode, the on-chain position is NOT closed by the paper exit — ` +
+          `close it manually. The engine tracks these rows to prevent re-entering the same pool ` +
+          `while the on-chain position is still open.`,
       );
       for (const pos of paperExited) {
         console.warn(`  Paper-exited: ${pos.poolAddress}`);

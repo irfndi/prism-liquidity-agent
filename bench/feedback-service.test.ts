@@ -35,8 +35,6 @@ function buildLayer(
 ): Layer.Layer<FeedbackService, never, never> {
   const mockConfig = Layer.succeed(ConfigService, {
     walletPrivateKey: "",
-    anthropicBaseUrl: "",
-    anthropicApiKey: "",
     heliusApiKey: "",
     solanaRpcUrl: "",
     paperTrading: true,
@@ -53,7 +51,6 @@ function buildLayer(
     minBinUtilization: 0.3,
     maxRebalanceRangeBins: 50,
     watchlistPools: [],
-    claudeModel: "claude-sonnet",
     stopLossPct: 0.15,
     trailingStopPct: 0.1,
     oorGracePeriodCycles: 3,
