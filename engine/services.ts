@@ -1,6 +1,5 @@
 import { Context, Effect } from "effect";
 import type { AppConfig } from "./config-service.js";
-import type { AppLogger } from "./logger-service.js";
 import type {
   AgentDecision,
   AgentCycle,

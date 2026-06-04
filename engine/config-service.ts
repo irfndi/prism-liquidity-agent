@@ -3,8 +3,6 @@ import { ConfigError } from "./errors.js";
 
 export interface AppConfig {
   readonly walletPrivateKey: string;
-  readonly anthropicBaseUrl: string;
-  readonly anthropicApiKey: string;
   readonly heliusApiKey: string;
   readonly solanaRpcUrl: string;
   readonly paperTrading: boolean;
@@ -21,7 +19,6 @@ export interface AppConfig {
   readonly minBinUtilization: number;
   readonly maxRebalanceRangeBins: number;
   readonly watchlistPools: ReadonlyArray<string>;
-  readonly claudeModel: string;
   // New features
   readonly stopLossPct: number;
   readonly trailingStopPct: number;
@@ -59,12 +56,6 @@ const loadConfig = Effect.gen(function* () {
   const walletPrivateKey = yield* Config.string("WALLET_PRIVATE_KEY").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const anthropicBaseUrl = yield* Config.string("ANTHROPIC_BASE_URL").pipe(
-    Effect.orElseSucceed(() => "https://api.anthropic.com"),
-  );
-  const anthropicApiKey = yield* Config.string("ANTHROPIC_API_KEY").pipe(
-    Effect.orElseSucceed(() => (isTest ? "test-anthropic-key" : "")),
-  );
   const heliusApiKey = yield* Config.string("HELIUS_API_KEY").pipe(
     Effect.orElseSucceed(() => (isTest ? "test-helius-key" : "")),
   );
@@ -98,9 +89,6 @@ const loadConfig = Effect.gen(function* () {
   const maxRebalanceRangeBins = yield* validatedNumber("MAX_REBALANCE_RANGE_BINS", 1, 50);
   const watchlistPoolsRaw = yield* Config.string("WATCHLIST_POOLS").pipe(
     Effect.orElseSucceed(() => ""),
-  );
-  const claudeModel = yield* Config.string("CLAUDE_MODEL").pipe(
-    Effect.orElseSucceed(() => "claude-sonnet-4-5-20251001"),
   );
 
   // New feature configs
@@ -159,8 +147,6 @@ const loadConfig = Effect.gen(function* () {
 
   const cfg: AppConfig = {
     walletPrivateKey,
-    anthropicBaseUrl,
-    anthropicApiKey,
     heliusApiKey,
     solanaRpcUrl,
     paperTrading,
@@ -177,7 +163,6 @@ const loadConfig = Effect.gen(function* () {
     minBinUtilization,
     maxRebalanceRangeBins,
     watchlistPools,
-    claudeModel,
     stopLossPct,
     trailingStopPct,
     oorGracePeriodCycles,
