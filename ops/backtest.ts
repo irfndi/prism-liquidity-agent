@@ -179,11 +179,30 @@ function runBacktestFromTicks(
     throw new Error("Empty history");
   }
 
+  // Detect data frequency from first two ticks for Sharpe annualization
+  const tickIntervalMs = ticks.length >= 2
+    ? ticks[1]!.pool.timestamp - ticks[0]!.pool.timestamp
+    : 10 * 60 * 1000;
+  const ticksPerYear = (365 * 24 * 60 * 60 * 1000) / tickIntervalMs;
+
   let previousTvl = ticks[0]!.pool.tvlUsd;
   let currentLowerBinId = ticks[0]!.pool.activeBinId - cfg.halfWidth;
   let currentUpperBinId = ticks[0]!.pool.activeBinId + cfg.halfWidth;
   let hasPosition = true;
   let lastRebalanceTick = -cfg.minHoldTicks;
+
+  const strategyReturns: number[] = [0];
+  let prevPortfolioValue = initialValue;
+
+  // Helper: compute position's share of pool fees for this tick.
+  // fees24hUsd is a 24h aggregate; divide by tick count to get per-tick,
+  // then scale by position share of pool TVL.
+  function feesForTick(tick: HistoryTick): number {
+    const tvl = tick.pool.tvlUsd;
+    if (tvl <= 0) return 0;
+    const positionShare = Math.min(portfolioValue / tvl, 1);
+    return (tick.pool.fees24hUsd / ticksPerYear * 365) * positionShare;
+  }
 
   for (let i = 0; i < ticks.length; i++) {
     const tick = ticks[i]!;
@@ -200,12 +219,13 @@ function runBacktestFromTicks(
       )
     ) {
       previousTvl = tick.pool.tvlUsd;
+      strategyReturns.push(0);
       continue;
     }
 
     const inRange =
       tick.pool.activeBinId >= currentLowerBinId && tick.pool.activeBinId <= currentUpperBinId;
-    const feesThisTick = inRange ? tick.pool.fees24hUsd / (24 * 6) : 0;
+    const feesThisTick = inRange ? feesForTick(tick) : 0;
     totalFees += feesThisTick;
     portfolioValue += feesThisTick;
 
@@ -237,7 +257,7 @@ function runBacktestFromTicks(
           const nextInRange =
             nextTick.pool.activeBinId >= currentLowerBinId &&
             nextTick.pool.activeBinId <= currentUpperBinId;
-          if (nextInRange) feesInNextWindow += nextTick.pool.fees24hUsd / (24 * 6);
+          if (nextInRange) feesInNextWindow += feesForTick(nextTick);
         }
         if (feesInNextWindow > totalCost) wins++;
       }
@@ -245,18 +265,23 @@ function runBacktestFromTicks(
       totalIl += portfolioValue * 0.002;
       portfolioValue *= 0.998;
       hasPosition = false;
+    } else if (!hasPosition && binDrift < 0.3) {
+      hasPosition = true;
+      currentLowerBinId = tick.pool.activeBinId - cfg.halfWidth;
+      currentUpperBinId = tick.pool.activeBinId + cfg.halfWidth;
+      lastRebalanceTick = i;
     }
 
     previousTvl = tick.pool.tvlUsd;
+    strategyReturns.push(
+      prevPortfolioValue > 0 ? (portfolioValue - prevPortfolioValue) / prevPortfolioValue : 0,
+    );
+    prevPortfolioValue = portfolioValue;
   }
 
-  const returns = ticks.map((_, i) => {
-    if (i === 0) return 0;
-    return (ticks[i]?.pool.fees24hUsd ?? 0) / (ticks[i - 1]?.pool.tvlUsd ?? 1);
-  });
-  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-  const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / returns.length;
-  const sharpe = variance > 0 ? mean / Math.sqrt(variance) : 0;
+  const mean = strategyReturns.reduce((a, b) => a + b, 0) / strategyReturns.length;
+  const variance = strategyReturns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / strategyReturns.length;
+  const sharpe = variance > 0 ? (mean / Math.sqrt(variance)) * Math.sqrt(ticksPerYear) : 0;
 
   return {
     poolAddress: ticks[0]!.pool.address,
@@ -297,6 +322,20 @@ function snapshotsToTicks(snaps: ReadonlyArray<PoolSnapshot>): HistoryTick[] {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 const args = parseArgs(process.argv.slice(2));
+
+console.warn("═══════════════════════════════════════════════════════════════");
+console.warn("  BACKTEST LIMITATIONS — read before interpreting results");
+console.warn("═══════════════════════════════════════════════════════════════");
+console.warn("  • TVL is CONSTANT per pool (current snapshot, not historical).");
+console.warn("    Position share, APR, and volume-auth checks use stale TVL.");
+console.warn("  • This is a simplified rebalancing simulation, NOT the live");
+console.warn("    agent. Missing: EXIT on fee/IL, trailing stop, ENTER logic,");
+console.warn("    risk gates, memory, position sizing, dynamic bin ranges.");
+console.warn("  • Each pool runs independently with $10K. Total PnL is the");
+console.warn("    sum of 6 independent portfolios ($60K deployed, not $10K).");
+console.warn("  • Synthetic bins (all liquiditySupply=1n) make binUtil=1.0");
+console.warn("    always, so the binUtil pre-filter is a no-op.");
+console.warn("═══════════════════════════════════════════════════════════════\n");
 
 const configs: ReadonlyArray<{ name: string; cfg: BacktestConfig }> = [
   { name: "C1-conservative", cfg: { halfWidth: 25, driftThreshold: 0.75, minHoldTicks: 144, minNetBenefitUsd: 15, maxRebalances: 20 } },
