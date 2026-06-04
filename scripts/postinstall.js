@@ -117,7 +117,6 @@ function main() {
   if (isFirstRun) {
     pingInstall("install");
   }
->>>>>>> d0a7d14 (feat(scripts): emit install ping from install.sh and postinstall.js)
 }
 
 main();

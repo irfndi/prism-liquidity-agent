@@ -22,7 +22,7 @@ export interface ApiResponse<T> {
 export async function prismApiPost<T = unknown>(
   path: string,
   body: Record<string, unknown>,
-  options: { apiKey?: string } = {},
+  options: { apiKey?: string; signal?: AbortSignal } = {},
 ): Promise<ApiResponse<T>> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -35,6 +35,7 @@ export async function prismApiPost<T = unknown>(
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: options.signal,
     });
     if (!response.ok) {
       return {
@@ -127,10 +128,11 @@ export function pingInstall(
         platform: process.platform,
       };
       if (options.userId) body.userId = options.userId;
-      const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("ping timeout")), 3000),
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      await prismApiPost("/v1/installs/ping", body, { signal: controller.signal }).finally(() =>
+        clearTimeout(timeout),
       );
-      await Promise.race([prismApiPost("/v1/installs/ping", body), timeout]);
     } catch {
       return;
     }
