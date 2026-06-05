@@ -20,7 +20,7 @@
   },
   "type": "module",
   "scripts": {
-    "start": "node dist/engine/index.js",
+    "start": "bun dist/index.mjs",
     "dev": "bun run --watch engine/index.ts",
     "build": "bunx --bun tsdown",
     "setup": "bun run ops/setup.ts",

@@ -31,6 +31,21 @@ export const AdapterLive = Layer.effect(
 
     const tokenMetaCache = new Map<string, { symbol: string; decimals: number }>();
 
+    // Known mint decimals (avoids network roundtrips for common SPL tokens).
+    // If a mint is missing here and the RPC doesn't expose decimals via the
+    // standard SPL Token program (or via Helius DAS getAsset), getTokenMeta
+    // falls back to 6 — the historical default. For non-Helius RPCs we use
+    // the SPL Token program (parsed account info), which returns decimals
+    // for any valid SPL mint, instead of the Helius-specific getAsset RPC.
+    const KNOWN_MINT_DECIMALS: Record<string, { symbol: string; decimals: number }> = {
+      [SOL_MINT]: { symbol: "SOL", decimals: 9 },
+      [USDC_MINT]: { symbol: "USDC", decimals: 6 },
+      Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: { symbol: "USDT", decimals: 6 },
+      "7i5KKsX2weiTkry7jA4ZwSu2SmtUa4rCCi4t8U9b3bR2": { symbol: "USDS", decimals: 6 },
+      J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYk6U5Yf9sW: { symbol: "JitoSOL", decimals: 9 },
+      JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: { symbol: "JUP", decimals: 6 },
+    };
+
     function getTokenMeta(
       mint: string,
     ): Effect.Effect<{ symbol: string; decimals: number }, unknown> {
@@ -38,34 +53,66 @@ export const AdapterLive = Layer.effect(
         const cached = tokenMetaCache.get(mint);
         if (cached) return cached;
 
-        const url = `https://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
-        const res = yield* Effect.tryPromise(() =>
-          fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              jsonrpc: "2.0",
-              id: "get-asset",
-              method: "getAsset",
-              params: { id: mint },
+        // Fast path: known mints (SOL, USDC, USDT, etc.) — no network.
+        const known = KNOWN_MINT_DECIMALS[mint];
+        if (known) {
+          tokenMetaCache.set(mint, known);
+          return known;
+        }
+
+        // Helius path: DAS getAsset returns token_info.decimals for any
+        // mint Helius has indexed. Only available when heliusApiKey is set.
+        if (config.heliusApiKey) {
+          const url = `https://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
+          const res = yield* Effect.tryPromise(() =>
+            fetch(url, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: "get-asset",
+                method: "getAsset",
+                params: { id: mint },
+              }),
             }),
-          }),
-        );
-        const json = (yield* Effect.tryPromise(() => res.json())) as {
-          result?: {
-            content?: { metadata?: { symbol?: string } };
-            token_info?: { decimals?: number };
+          );
+          const json = (yield* Effect.tryPromise(() => res.json())) as {
+            result?: {
+              content?: { metadata?: { symbol?: string } };
+              token_info?: { decimals?: number };
+            };
           };
-        };
-        const meta = {
-          symbol: json.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
-          decimals: json.result?.token_info?.decimals ?? 6,
-        };
-        tokenMetaCache.set(mint, meta);
-        return meta;
-      }).pipe(
-        Effect.catchAll(() => Effect.succeed({ symbol: mint.slice(0, 4), decimals: 6 })),
-      );
+          const d = json.result?.token_info?.decimals;
+          if (typeof d === "number") {
+            const meta = {
+              symbol: json.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
+              decimals: d,
+            };
+            tokenMetaCache.set(mint, meta);
+            return meta;
+          }
+        }
+
+        // Standard Solana RPC path: parsed account info exposes decimals
+        // for any SPL mint via the Token Program (works on mainnet-beta and
+        // every other standard RPC). Does NOT call Helius DAS getAsset.
+        const mintPubkey = new PublicKey(mint);
+        const info = yield* Effect.tryPromise(() => connection.getParsedAccountInfo(mintPubkey));
+        const parsed = (info.value?.data as { parsed?: { info?: { decimals?: number } } })?.parsed
+          ?.info;
+        if (typeof parsed?.decimals === "number") {
+          const meta = { symbol: mint.slice(0, 4), decimals: parsed.decimals };
+          tokenMetaCache.set(mint, meta);
+          return meta;
+        }
+
+        // Last-resort fallback for non-SPL mints (e.g., Token-2022 with
+        // exotic extensions). Surface the failure so callers can decide
+        // rather than silently mis-sizing positions.
+        return yield* Effect.fail(
+          new Error(`Cannot resolve decimals for mint ${mint} via Helius or standard RPC`),
+        );
+      }).pipe(Effect.catchAll(() => Effect.succeed({ symbol: mint.slice(0, 4), decimals: 6 })));
     }
 
     // ─── Price fetching ────────────────────────────────────────────────────
@@ -393,9 +440,11 @@ export const AdapterLive = Layer.effect(
       enterPosition: (poolAddress, lowerBinId, upperBinId, positionSizeUsd) =>
         Effect.gen(function* () {
           if (!wallet) {
-            return yield* Effect.fail(new AdapterError({
-              message: "No wallet configured",
-            }));
+            return yield* Effect.fail(
+              new AdapterError({
+                message: "No wallet configured",
+              }),
+            );
           }
 
           try {
@@ -408,10 +457,12 @@ export const AdapterLive = Layer.effect(
             const priceY = prices[pool.tokenY] ?? 0;
 
             if (!priceX || !priceY) {
-              return yield* Effect.fail(new AdapterError({
-                message: "Could not fetch token prices",
-                poolAddress,
-              }));
+              return yield* Effect.fail(
+                new AdapterError({
+                  message: "Could not fetch token prices",
+                  poolAddress,
+                }),
+              );
             }
 
             const halfUsd = positionSizeUsd / 2;
@@ -450,10 +501,12 @@ export const AdapterLive = Layer.effect(
             }
 
             if (totalXAmount.eq(new BN(0)) || totalYAmount.eq(new BN(0))) {
-              return yield* Effect.fail(new AdapterError({
-                message: "Insufficient token balance",
-                poolAddress,
-              }));
+              return yield* Effect.fail(
+                new AdapterError({
+                  message: "Insufficient token balance",
+                  poolAddress,
+                }),
+              );
             }
 
             const positionKeypair = new Keypair();
@@ -493,20 +546,24 @@ export const AdapterLive = Layer.effect(
               txSignature: signature,
             };
           } catch (err) {
-            return yield* Effect.fail(new AdapterError({
-              message: `Failed to enter position: ${String(err)}`,
-              poolAddress,
-              cause: err,
-            }));
+            return yield* Effect.fail(
+              new AdapterError({
+                message: `Failed to enter position: ${String(err)}`,
+                poolAddress,
+                cause: err,
+              }),
+            );
           }
         }),
 
       exitPosition: (poolAddress, positionPubKey) =>
         Effect.gen(function* () {
           if (!wallet) {
-            return yield* Effect.fail(new AdapterError({
-              message: "No wallet configured",
-            }));
+            return yield* Effect.fail(
+              new AdapterError({
+                message: "No wallet configured",
+              }),
+            );
           }
 
           try {
@@ -546,11 +603,13 @@ export const AdapterLive = Layer.effect(
 
             return { txSignature: "batch-confirmed" };
           } catch (err) {
-            return yield* Effect.fail(new AdapterError({
-              message: `Failed to exit position: ${String(err)}`,
-              poolAddress,
-              cause: err,
-            }));
+            return yield* Effect.fail(
+              new AdapterError({
+                message: `Failed to exit position: ${String(err)}`,
+                poolAddress,
+                cause: err,
+              }),
+            );
           }
         }),
 
@@ -577,9 +636,11 @@ export const AdapterLive = Layer.effect(
       claimFees: (poolAddress, positionPubKey) =>
         Effect.gen(function* () {
           if (!wallet) {
-            return yield* Effect.fail(new AdapterError({
-              message: "No wallet configured",
-            }));
+            return yield* Effect.fail(
+              new AdapterError({
+                message: "No wallet configured",
+              }),
+            );
           }
 
           try {
@@ -622,19 +683,19 @@ export const AdapterLive = Layer.effect(
 
             return { txSignature: lastSignature, feeX, feeY };
           } catch (err) {
-            return yield* Effect.fail(new AdapterError({
-              message: `Failed to claim fees: ${String(err)}`,
-              poolAddress,
-              cause: err,
-            }));
+            return yield* Effect.fail(
+              new AdapterError({
+                message: `Failed to claim fees: ${String(err)}`,
+                poolAddress,
+                cause: err,
+              }),
+            );
           }
         }),
 
       discoverPools: () =>
         Effect.gen(function* () {
-          const res = yield* Effect.tryPromise(() =>
-            fetch("https://dlmm-api.meteora.ag/pair/all"),
-          );
+          const res = yield* Effect.tryPromise(() => fetch("https://dlmm-api.meteora.ag/pair/all"));
           const pairs = (yield* Effect.tryPromise(() => res.json())) as ReadonlyArray<{
             address: string;
             bin_step: number;

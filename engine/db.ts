@@ -240,6 +240,25 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       }
     },
   },
+  {
+    version: 7,
+    name: "pool_snapshots_unique_pool_time",
+    up(db) {
+      // Dedupe any rows that already exist before adding the unique index
+      // (idempotent re-imports of historical OHLCV via ops/fetch-history.ts).
+      db.exec(`
+        DELETE FROM pool_snapshots
+        WHERE id NOT IN (
+          SELECT MIN(id) FROM pool_snapshots
+          GROUP BY pool_address, timestamp
+        );
+      `);
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_snapshots_pool_time
+          ON pool_snapshots(pool_address, timestamp);
+      `);
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+**/node_modules/
+bun.lockb
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.backup.*
+.wrangler/
+**/.wrangler/
+.dev.vars*
+**/.dev.vars*
+
+# Logs
+logs/
+*.log
+
+# SQLite
+*.db
+*.db-shm
+*.db-wal
+/data/
+chroma-data/
+
+# Test coverage
+coverage/
+site/
+.vitest/
+bench/tmp-audit/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# OpenCode / Claude internal state
+.omo/
+.opencode/
+.claude/
+
+# Cloudflare subproject (separate build context)
+cloudflare/node_modules/
+cloudflare/.wrangler/
+cloudflare/dist/
+
+# MCP server (separate subdir, not part of main build)
+mcp-server/

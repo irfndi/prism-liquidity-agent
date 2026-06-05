@@ -74,7 +74,7 @@ prism link-telegram   # generates 6-char code
 
 ## Prerequisites
 
-- **Bun 1.3.14+** — [Install Bun](https://bun.sh/docs/installation) (the one-liner installer can do this for you)
+- **Bun 1.2+** — [Install Bun](https://bun.sh/docs/installation) (the one-liner installer can do this for you)
 - **Git** — for cloning the repository
 - **Solana wallet** (optional) — only needed for live trading; paper trading works without one
 - **Helius API key** (REQUIRED) — [Get one free at Helius](https://helius.xyz/)
@@ -224,16 +224,6 @@ To opt into the real model (downloads ~80MB ONNX weights on first use),
 set `EMBEDDINGS_BACKEND=onnx` in your `.env`. Note: the ONNX runtime
 can crash in Node.js with `BigInt` serialization errors; if that
 happens the agent falls back to hash embeddings and logs a warning.
-
-## What's Dead/Unused (Ignore These)
-
-The following env vars exist in the codebase but are **not used at runtime**:
-
-- `ANTHROPIC_API_KEY` — dead dependency, no Claude integration
-- `CLAUDE_MODEL` — dead dependency, no AI model calls
-- `CHROMA_URL` — dead dependency, replaced with sqlite-vec
-
-Do not set these. They are loaded for backward compatibility but never consumed.
 
 ## Next Steps
 

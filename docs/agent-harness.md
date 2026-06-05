@@ -94,10 +94,7 @@ prism link-telegram   # generates a 6-char code
 3. **Assuming `prism register` is required.** It's not. The CLI works without a
    cloud account. Skip it for local-only setups.
 
-4. **Setting `ANTHROPIC_API_KEY` or `CLAUDE_MODEL`.** These env vars are dead.
-   The engine has no AI/LLM integration. See "What's Dead/Unused" in `install.md`.
-
-5. **Expecting `LOG_LEVEL` to silence output.** The env var is loaded but never
+4. **Expecting `LOG_LEVEL` to silence output.** The env var is loaded but never
    checked. All log levels write to the audit trail regardless.
 
 ## Agent-Driven Onboarding Paths

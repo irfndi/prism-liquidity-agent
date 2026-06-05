@@ -7,6 +7,7 @@ dist/
 # Environment
 .env
 .env.local
+.env.backup.*
 
 # Logs
 logs/
@@ -39,6 +40,12 @@ site/
 # Test and TypeScript caches
 .vitest/
 *.tsbuildinfo
+
+# Test artifacts
+bench/tmp-audit/
+
+# OpenCode internal state
+.omo/
 
 # Claude session files
 .claude/scheduled_tasks.lock

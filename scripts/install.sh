@@ -137,7 +137,14 @@ if [ ! -s "$INSTALL_ID_FILE" ]; then
   fi
 fi
 INSTALL_ID="$(cat "$INSTALL_ID_FILE" 2>/dev/null || echo "")"
-if [ -n "$INSTALL_ID" ]; then
+# Parse PRISM_FEEDBACK_OPT_OUT as a real boolean (case-insensitive
+# 1/true/yes/on). Empty string or "false" both keep telemetry on, which
+# matches what users expect from a .env default of PRISM_FEEDBACK_OPT_OUT=false.
+IS_OPTED_OUT=0
+case "$(printf '%s' "${PRISM_FEEDBACK_OPT_OUT:-}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) IS_OPTED_OUT=1 ;;
+esac
+if [ -n "$INSTALL_ID" ] && [ "$IS_OPTED_OUT" -eq 0 ]; then
   PRISM_VERSION="$(bun -e "console.log(require('$INSTALL_DIR/package.json').version)" 2>/dev/null || echo "")"
   PRISM_PLATFORM="$(uname -s | tr A-Z a-z)"
   PRISM_PAYLOAD="{\"installId\":\"$INSTALL_ID\",\"event\":\"install\",\"channel\":\"stable\",\"platform\":\"$PRISM_PLATFORM\""

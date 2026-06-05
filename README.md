@@ -27,7 +27,7 @@ The decision is intercepted by a risk gate before anything happens on-chain. Con
 
 ## Memory
 
-The agent remembers. Every outcome -- fee earned, IL incurred, bad pool flagged -- gets stored in an SQLite vector table (`sqlite-vec`) and retrieved by cosine similarity on the next relevant cycle. Entries expire automatically (90 days for patterns, 60 for warnings, 180 for outcomes). Near-duplicate memories merge instead of pile up.
+The agent remembers. Every outcome -- fee earned, IL incurred, bad pool flagged -- gets stored in an SQLite vector table (`sqlite-vec`) and retrieved by cosine similarity on the next relevant cycle. Entries expire automatically (90 days for patterns, 60 for warnings, 180 for outcomes).
 
 This is what makes it self-improving: it gets slower to enter pools it has been burned by before, and faster to recognize patterns it has profited from.
 
@@ -148,17 +148,18 @@ Decisions pass through checks in order before any on-chain action:
 
 1. Confidence below `CONFIDENCE_THRESHOLD` -> reject
 2. Max concurrent positions reached -> reject ENTER
-3. **Duplicate pool guard** -> reject ENTER if same pool already held
+   - **Duplicate pool guard** -> reject ENTER if same pool already held
+3. EXIT -> always approved (capital protection)
 4. Portfolio drawdown > 10% -> pause new entries
-5. Position size > 30% of portfolio -> cap and allow
-6. Rebalance range > `MAX_REBALANCE_RANGE_BINS` -> reject REBALANCE
-7. EXIT -> always approved (capital protection)
+5. Stop-loss triggered (`STOP_LOSS_PCT` exceeded) -> reject HOLD/REBALANCE
+6. Position size > 30% of portfolio -> cap and allow
+7. Rebalance range > `MAX_REBALANCE_RANGE_BINS` -> reject REBALANCE
 
 ## Stack
 
 - **Runtime**: Bun 1.2
 - **Strategy**: Rule-based engine with DLMM probes
-- **Memory**: SQLite + sqlite-vec, cosine distance merge threshold 0.08, 30-day recency decay
+- **Memory**: SQLite + sqlite-vec, 30-day recency decay
 - **On-chain**: `@meteora-ag/dlmm` SDK, Helius RPC
 - **Config**: Effect-TS Config module with `orElseSucceed` fallbacks; every value has a sensible default and test mode auto-injects dummy API keys
 

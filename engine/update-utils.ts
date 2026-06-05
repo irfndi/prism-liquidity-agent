@@ -87,6 +87,7 @@ export function fetchR2Manifest(
 export function fetchGitHubRelease(
   repo: string,
   channel: "stable" | "beta" | "dev",
+  token?: string,
 ): Effect.Effect<GitHubRelease | null, Error> {
   return Effect.gen(function* () {
     const url =
@@ -94,13 +95,16 @@ export function fetchGitHubRelease(
         ? `https://api.github.com/repos/${repo}/releases/latest`
         : `https://api.github.com/repos/${repo}/releases`;
 
+    const headers: Record<string, string> = {
+      "User-Agent": "prism-liquidity-agent",
+      Accept: "application/vnd.github.v3+json",
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
     const response = yield* Effect.tryPromise(() =>
-      fetch(url, {
-        headers: {
-          "User-Agent": "prism-liquidity-agent",
-          Accept: "application/vnd.github.v3+json",
-        },
-      }),
+      fetch(url, { headers }),
     );
 
     if (response.status === 403 || response.status === 429) {
@@ -141,13 +145,15 @@ export function fetchGitHubRelease(
 
     while (pageUrl !== null && pageCount < maxPages) {
       pageCount++;
+      const pageHeaders: Record<string, string> = {
+        "User-Agent": "prism-liquidity-agent",
+        Accept: "application/vnd.github.v3+json",
+      };
+      if (token) {
+        pageHeaders.Authorization = `Bearer ${token}`;
+      }
       const pageResponse = yield* Effect.tryPromise(() =>
-        fetch(pageUrl!, {
-          headers: {
-            "User-Agent": "prism-liquidity-agent",
-            Accept: "application/vnd.github.v3+json",
-          },
-        }),
+        fetch(pageUrl!, { headers: pageHeaders }),
       );
 
       if (!pageResponse.ok) {
@@ -222,6 +228,7 @@ export function fetchLatestRelease(
   repo: string,
   channel: "stable" | "beta" | "dev",
   r2PublicUrl?: string,
+  token?: string,
 ): Effect.Effect<ReleaseInfo | null, Error> {
   return Effect.gen(function* () {
     const r2Result = yield* Effect.either(fetchR2Manifest(channel, r2PublicUrl));
@@ -233,7 +240,7 @@ export function fetchLatestRelease(
       }
     }
 
-    const ghRelease = yield* fetchGitHubRelease(repo, channel);
+    const ghRelease = yield* fetchGitHubRelease(repo, channel, token);
     if (!ghRelease) {
       return null;
     }

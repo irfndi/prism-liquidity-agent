@@ -107,6 +107,8 @@ function jaccardSimilarity(a: ReadonlyArray<string>, b: ReadonlyArray<string>): 
 }
 
 function detectInstallMethod(): string {
+  const prismDir = join(homedir(), ".prism");
+  if (existsSync(join(prismDir, ".tarball-install"))) return "tarball";
   if (process.env.PRISM_TARBALL_INSTALL === "1") return "tarball";
   const wrapperPath = join(homedir(), ".local", "bin", "prism");
   if (existsSync(wrapperPath)) return "curl";
@@ -152,14 +154,14 @@ function buildContext(): FeedbackContext {
 }
 
 function detectAgentId(): string {
-  const walletPath = join(process.env.HOME ?? "", ".config", "prism", "agent-id");
+  const walletPath = join(homedir(), ".config", "prism", "agent-id");
   if (existsSync(walletPath)) {
     return readFileSync(walletPath, "utf-8").trim();
   }
-  const fingerprint = `${process.platform}-${process.arch}-${process.env.HOME ?? ""}-${process.cwd()}`;
+  const fingerprint = `${process.platform}-${process.arch}-${homedir()}-${process.cwd()}`;
   const id = createHash("sha256").update(fingerprint).digest("hex").slice(0, 8);
   try {
-    const dir = join(process.env.HOME ?? "", ".config", "prism");
+    const dir = join(homedir(), ".config", "prism");
     mkdirSync(dir, { recursive: true });
     writeFileSync(walletPath, id, { mode: 0o600 });
   } catch {

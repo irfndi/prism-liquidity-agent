@@ -12,7 +12,6 @@ export default defineConfig({
         "engine/types.ts",
         "engine/services.ts",
         "engine/logger.ts",
-        "engine/logger-service.ts",
         "engine/adapter-service.ts",
         "engine/program.ts",
         "engine/config-service.ts",

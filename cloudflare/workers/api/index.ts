@@ -471,11 +471,31 @@ app.post("/v1/agent-status", async (c) => {
 });
 
 app.post("/v1/issue", async (c) => {
-  const { GITHUB_TOKEN, GITHUB_REPO } = c.env;
+  const { GITHUB_TOKEN, GITHUB_REPO, CACHE } = c.env;
+  const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
+
   const body = (await c.req.json().catch(() => ({}))) as { title: string; body: string };
 
   if (!body.title) {
     return c.json({ error: "Title required" }, 400);
+  }
+
+  // Rate limit: 10 issues per IP per hour.
+  // NOTE: Cloudflare KV is eventually consistent, so a burst of concurrent
+  // requests from the same IP can briefly exceed this limit (N-1 extra for
+  // N concurrent arrivals). This is acceptable for an abuse-prevention
+  // ceiling on issue filing, not a security-critical control. For strict
+  // limits, use Durable Objects or a D1 transaction.
+  // CACHE is null-checked so the handler still works in environments where
+  // the KV binding is intentionally not provisioned.
+  if (CACHE) {
+    const rateKey = `rate_limit:issue:${clientIp}`;
+    const current = await CACHE.get(rateKey);
+    const count = current ? parseInt(current, 10) : 0;
+    if (count >= 10) {
+      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
+    }
+    await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
   }
 
   const repo = GITHUB_REPO || "irfndi/prism-liquidity-agent";

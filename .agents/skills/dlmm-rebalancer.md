@@ -31,9 +31,9 @@ Use this skill when reasoning about Meteora DLMM pool rebalancing decisions.
 ## Bin Range Selection
 
 Optimal range width depends on bin step:
-- binStep ≤ 10: ±15 bins (tight range, low volatility pairs)
-- binStep 11–25: ±10 bins (medium range)
-- binStep > 25: ±7 bins (wide bins = volatile — stay narrow)
+- binStep ≤ 10: ±25 bins (tight range, low volatility pairs)
+- binStep 11–25: ±20 bins (medium range)
+- binStep > 25: ±15 bins (wide bins = volatile — stay narrow)
 
 ## Memory Usage Pattern
 

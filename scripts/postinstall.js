@@ -114,7 +114,13 @@ function main() {
   console.log('💬 Got feedback? Run:  prism feedback "<your message>"');
   console.log("   (set GITHUB_TOKEN to file issues on GitHub; otherwise stored locally)");
 
-  if (isFirstRun) {
+  // Parse PRISM_FEEDBACK_OPT_OUT as an explicit boolean
+  // (1/true/yes/on, case-insensitive). An empty string or "false" both
+  // keep telemetry on, matching the .env default of
+  // PRISM_FEEDBACK_OPT_OUT=false.
+  const optOutRaw = (process.env.PRISM_FEEDBACK_OPT_OUT ?? "").toLowerCase();
+  const isOptedOut = ["1", "true", "yes", "on"].includes(optOutRaw);
+  if (isFirstRun && !isOptedOut) {
     pingInstall("install");
   }
 }
