@@ -37,10 +37,11 @@ RUN mkdir -p /app/logs && chown -R agent:agent /app/logs
 
 USER agent
 
-# Bun-based healthcheck: the runtime image only ships Bun (no node), so
-# we use the existing Bun binary to verify the bundled `dist/index.mjs`
-# is present and importable. process.exit(0) is the success path.
+# Bun-based healthcheck: the runtime image only ships Bun (no node).
+# We use a side-effect-free fs probe to verify the bundled dist is in
+# place. Importing /app/dist/index.mjs would start the agent
+# (Effect.never), so we cannot use it as a probe.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD bun -e "import('/app/dist/index.mjs').catch(()=>process.exit(1))"
+  CMD bun -e "import('fs').then(({existsSync}) => process.exit(existsSync('/app/dist/index.mjs') ? 0 : 1))"
 
 CMD ["bun", "dist/index.mjs"]
