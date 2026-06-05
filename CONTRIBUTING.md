@@ -3,7 +3,6 @@
 ## Prerequisites
 
 - [Bun](https://bun.sh) >= 1.2
-- [Docker](https://docker.com) (for Chroma)
 - Node 22+ (runtime)
 
 ## Setup
@@ -13,7 +12,6 @@ git clone https://github.com/irfndi/prism-liquidity-agent
 cd prism-liquidity-agent
 bun install
 bun run setup          # interactive .env wizard
-docker-compose up chromadb -d
 ```
 
 ## Dev Commands
@@ -23,26 +21,28 @@ docker-compose up chromadb -d
 | `bun run dev` | Run agent with hot reload |
 | `bun run backtest` | Run historical simulation |
 | `bun run test` | Run vitest suite |
-| `bun run lint` | TypeScript type check |
-| `bun run build` | Compile to dist/ |
+| `bun run lint` | tsc --noEmit + oxlint (engine ops bench cli) |
+| `bun run format` | oxfmt --write (engine ops bench cli) |
+| `bun run build` | tsdown -> dist/index.mjs |
 
 ## Project Constraints
 
 - **No `any` types** — use `unknown` and narrow properly
-- **No console.log** — use `createLogger(component)` everywhere
+- **console.log vs createLogger** — prefer `createLogger(component)` from `engine/logger.ts`, but `console.info/warn/error` is used extensively in `program.ts` and `index.ts`. Match the file you're editing.
 - **Paper trading first** — all new execution paths must work in paper mode before live
-- **Tool call intercept pattern** — the `meteora_decision` tool is never executed by MCP; it is intercepted in `main.ts` and passed through the risk engine
 
-## Adding a New MCP Tool
+## Adding a New Service
 
-1. Add the `Tool` definition to `src/mcp/server.ts` `METEORA_TOOLS` array
-2. Add the `case` handler in `createMCPServer().executeTool()`
-3. Update `ARCHITECTURE.md` MCP Tools table
-4. Add a test in `tests/`
+Engine services follow the Effect-TS `Context.Tag` pattern:
+
+1. Define the service API in `engine/services.ts` with a `Context.Tag` class
+2. Implement `YourServiceLive` in a new `engine/your-service.ts` returning a `Layer`
+3. Add it to the `Layer.provide(...)` chain in `engine/program.ts` `buildLayer()` and to the `AllServices` union
+4. `yield* YourService` inside the `Effect.gen` block in `program.ts` to consume it
 
 ## Adding a New Risk Check
 
-Add a new numbered block in `src/risk/engine.ts` `evaluate()`.
+Add a new numbered block in `engine/risk-service.ts` `evaluateRisk()`.
 Always return early on rejection — do not accumulate risk flags.
 
 ## Memory Categories
@@ -51,7 +51,10 @@ Always return early on rejection — do not accumulate risk flags.
 - `warning` — red flag that should influence future decisions for this pool
 - `outcome` — result of a past action (PnL recorded automatically)
 
+## Tests
+
+Engine tests live in `bench/*.test.ts`. Build layers with `Layer.merge(AuditLive, DbLive(":memory:"))` for isolated service tests.
+
 ## License
 
-AGPL-3.0 — all derivative works must be open source.
-
+MIT

@@ -40,7 +40,7 @@ prism dev                                         # start paper trading
 - **Framework**: [Effect-TS](https://effect.website) for DI (`Context.Tag` + `Layer`). No MCP server, no Anthropic SDK calls in the hot path.
 - **Storage (engine)**: SQLite via `bun:sqlite` + `sqlite-vec` (NOT Chroma — see _Things docs get wrong_).
 - **Storage (cloudflare)**: D1 database + KV + R2 + Vectorize. Separate subproject.
-- **Build**: `tsdown` (entry: `engine/index.ts` → `dist/engine/index.js`).
+- **Build**: `tsdown` (entry: `engine/index.ts` → `dist/index.mjs`).
 - **Lint**: `oxlint` (NOT eslint) with `typescript`/`unicorn`/`oxc` plugins. Config at `.oxlintrc.json`. `correctness: error`, `no-unused-vars` and `require-yield` are explicitly off.
 - **Format**: `oxfmt` (NOT prettier). Config at `.oxfmtrc.json` (empty ignorePatterns).
 - **Test**: Vitest in two places:
@@ -52,9 +52,9 @@ prism dev                                         # start paper trading
 ```
 
 prism-liquidity-agent/
-├── engine/ Core agent: strategy, adapters, risk, DB, memory, scan loop (flat dir, ~23 files)
+├── engine/ Core agent: strategy, adapters, risk, DB, memory, scan loop (flat dir, ~24 files)
 ├── cloudflare/ SEPARATE SUBPROJECT. Own package.json, vitest, wrangler config. API + Telegram bot workers
-├── cli/ User-facing CLI (commander). 13 commands: register, login, whoami, wallet, telegram, etc.
+├── cli/ User-facing CLI (commander). 14 commands: register, login, whoami, wallet, telegram, etc.
 ├── ops/ Operational scripts: setup.ts (.env wizard), backtest.ts
 ├── bench/ Vitest tests for engine (pure logic only)
 ├── docs/ Markdown docs (install, CLI, cron, agent-harness)
@@ -79,7 +79,7 @@ bun run test:watch         # vitest TUI (no `run` — interactive)
 bun run lint               # tsc --noEmit && oxlint engine ops bench cli  (strict, slow)
 bun run format             # oxfmt --write engine ops bench cli
 bun run format:check       # oxfmt --check engine ops bench cli
-bun run build              # tsdown → dist/engine/index.js
+bun run build              # tsdown → dist/index.mjs
 bun run coverage           # vitest --coverage (see Coverage exclusions below)
 ```
 
@@ -97,7 +97,7 @@ wrangler deploy --config wrangler.telegram.toml  # deploy Telegram bot
 wrangler d1 migrations apply prism-db --remote # apply DB migrations
 wrangler d1 migrations apply prism-db --local  # apply to local D1
 bun run typecheck                              # tsc --noEmit
-bunx vitest run                                # 16 telegram bot tests (must use vitest 3.2.x for compatibility)
+bunx vitest run                                # 16 telegram bot tests (vitest 4.x with @cloudflare/vitest-pool-workers 0.16.x)
 ```
 
 CI (`.github/workflows/deploy-cloudflare.yml`) on push to `main` (when `cloudflare/**` changes): install → typecheck → D1 migrations → deploy API → deploy Telegram bot.
@@ -141,10 +141,13 @@ engine/
 ├── screener-service.ts  Pool discovery (when ENABLE_POOL_DISCOVERY=true)
 ├── embeddings.ts     @xenova/transformers wrapper (lazy ~80MB ONNX download on first use)
 ├── logger.ts         createLogger(component) → console + logs/audit-trail.jsonl
-├── logger-service.ts DEAD CODE — do not consume
-├── update-service.ts Auto-update mechanism
 ├── update-utils.ts   Update utilities (semver, GitHub API)
 ├── revenue-service.ts Subscription/fee modeling
+├── feedback-service.ts Agent feedback submission, dedup, rate-limiting, GitHub Issues filing
+├── error-reporter.ts Privacy-first error telemetry (sanitizes secrets)
+├── bigint-json.ts    BigInt-safe JSON serializer
+├── version.ts        Read version from package.json
+├── errors.ts         Shared error types
 ├── types.ts          Shared interfaces
 └── data/             deployer-blacklist.json, token-blacklist.json (both empty arrays)
 ```
@@ -189,6 +192,7 @@ Don't import service classes directly. The whole runtime is one `Effect.gen` blo
 - `backtest` — spawns `bun run backtest` (ops)
 - `update` — checks/auto-applies updates
 - `version` — current version
+- `feedback` — file structured agent feedback to GitHub Issues (dedup, rate limiting)
 
 All API-bound commands share `cli/api.ts` (`prismApiPost` / `prismApiGet` / `readCredentials` / `writeCredentials`).
 The base URL defaults to `https://prism-api.irfndi.workers.dev` and can be overridden with
@@ -200,34 +204,34 @@ The base URL defaults to `https://prism-api.irfndi.workers.dev` and can be overr
 
 These are the high-cost mistakes. Do not trust stale prose — verify in code.
 
-- **No MCP tools.** `engine/tools/index.ts` does not exist. The "intercept `meteora_decision`" pattern in `CLAUDE.md` and the "7 MCP tools" table in `ARCHITECTURE.md` describe an older design. The current engine decides directly inside `engine/program.ts`. `@anthropic-ai/sdk` is in `package.json` deps but unused at runtime.
-- **Memory is `sqlite-vec`, not Chroma.** `engine/db.ts` creates a `vec0` virtual table for embeddings. `chromadb` is a dead dependency. `CHROMA_URL` is loaded in `config-service.ts` but never read by any service. `docker-compose.yml` still exists and starts a `chromadb/chroma` container that the app does not connect to.
-- **Dockerfile is broken in three independent ways.** None of the dev workflow uses it, but a `docker build` will fail: (1) `COPY tsconfig.json tsup.config.ts ./` references `tsup.config.ts` which doesn't exist (migrated to `tsdown.config.ts`); (2) `COPY src ./src` copies a directory that doesn't exist; (3) `CMD ["node", "dist/main.js"]` points to a path that doesn't exist — `tsdown` outputs `dist/engine/index.js`. If you fix it, also note the runtime expects an `agent` user with `/app/logs` writable.
-- **`engine/logger-service.ts` is dead code.** It defines a `LoggerService` `Context.Tag` and an `AppLogger` interface, but no `Layer` in `buildLayer()` provides it and nothing `yield*`s it. The real logger is `createLogger(component)` from `engine/logger.ts` (synchronous, not Effect-based). Don't try to consume `LoggerService` from a service — it will fail at runtime.
+- **No MCP tools.** `engine/tools/index.ts` does not exist. The "intercept `meteora_decision`" pattern in `CLAUDE.md` and the "7 MCP tools" table in `ARCHITECTURE.md` describe an older design. The current engine decides directly inside `engine/program.ts`. `@anthropic-ai/sdk` has been removed from `package.json`.
+- **Memory is `sqlite-vec`, not Chroma.** `engine/db.ts` creates a `vec0` virtual table for embeddings. `CHROMA_URL` was removed from `config-service.ts`. `docker-compose.yml` has been removed (was deleted in commit `9a3c22a`) and used to start a `chromadb/chroma` container that the app does not connect to.
+- **Dockerfile has been fixed.** Earlier it was broken in three ways (referenced `tsup.config.ts`, copied `src/`, ran `node dist/main.js`); all three were replaced. The current `Dockerfile` uses `oven/bun:1.2-slim` for both stages, `bun.lock*` glob, copies `engine/` + `cli/` + `ops/` for the build, installs `libsqlite3-0` + `ca-certificates` at runtime (sqlite-vec ships glibc-only binaries), runs as non-root `agent` user, and CMD is `["bun", "dist/index.mjs"]`. A `.dockerignore` keeps the build context under 10MB. Note: the runtime image must stay Debian-based — switching back to Alpine breaks `db.loadExtension(vec0.so)` because musl can't load glibc ELFs.
+- **`engine/logger-service.ts` was deleted.** It previously defined a `LoggerService` `Context.Tag` and an `AppLogger` interface, but was never wired into `buildLayer()`. The real logger is `createLogger(component)` from `engine/logger.ts` (synchronous, not Effect-based).
 - **`@xenova/transformers` downloads a ~80MB ONNX model on first call.** `engine/embeddings.ts` now defaults to a deterministic hash-based fallback (set `EMBEDDINGS_BACKEND=onnx` to opt in). The ONNX path lazily calls `pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2")` on the first `getEmbedding()` and can also crash in Node.js with a `BigInt` serialization error — when that happens, the agent logs a warning and falls back to hash embeddings automatically. CI never exercises the ONNX path; a local run with `EMBEDDINGS_BACKEND=fallback` (the default) starts in under a second.
 - **`engine/bigint-json.ts` is the canonical BigInt-safe serializer.** Both `engine/audit-service.ts` and `engine/db-service.ts` use `stringifySafe()` to encode `PoolMetrics` / `BinArray` values that contain SDK-originated `bigint`s. Use this helper anywhere you'd otherwise call `JSON.stringify` on a value that might transitively contain a `bigint`.
 - **Bundled blacklist files are empty arrays.** `engine/data/deployer-blacklist.json` and `engine/data/token-blacklist.json` both ship as `[]`. With no custom path or entries, the blacklist service is effectively a no-op. Override via `DEPLOYER_BLACKLIST_PATH` / `TOKEN_BLACKLIST_PATH` if you want filtering.
-- **Deployer blacklist check is half-wired.** `blacklist.checkPool()` accepts a deployer arg, but `program.ts:219` has a `TODO: fetch token deployer/authority from on-chain metadata and pass to checkPool`. Deployer addresses are never actually checked. Only the token-level lookup runs.
-- **`@jup-ag/api` and `@anthropic-ai/sdk` are unused.** `package.json` lists both, but nothing imports them. Jupiter prices are fetched via raw `fetch("https://price.jup.ag/v6/...")`. The Anthropic SDK is fully dead — `CLAUDE_MODEL`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL` are loaded into config but never consumed at runtime. (`ANTHROPIC_BASE_URL` is even added to the loaded config but never read.)
-- **`CHANGELOG.md` describes a pre-rewrite product.** v1.0.0 (2026-04-02) claims "Claude Agent SDK integration via 7-tool MCP surface" and "Chroma-backed memory". Neither exists. The changelog has not been updated since the sqlite-vec / no-MCP rewrite. Read code, not CHANGELOG, for current architecture.
-- **`CONTRIBUTING.md` paths are wrong.** It references `src/mcp/server.ts`, `src/risk/engine.ts`, and `tests/` for new tests. None of these exist. The test dir is `bench/`, the service file is `engine/risk-service.ts`, etc.
-- **License mismatch.** `package.json` says MIT; `CONTRIBUTING.md` says AGPL-3.0. Do not regenerate either without checking intent.
+- **Deployer blacklist check is half-wired.** `blacklist.checkPool()` accepts a deployer arg, but `program.ts:244` has a `TODO: fetch token deployer/authority from on-chain metadata and pass to checkPool`. Deployer addresses are never actually checked. Only the token-level lookup runs.
+- **`@jup-ag/api` is unused.** Nothing imports it. Jupiter prices are fetched via raw `fetch("https://price.jup.ag/v6/...")`. The Anthropic SDK has been removed from `package.json` entirely — `CLAUDE_MODEL`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL` have been removed from `config-service.ts`.
+- **`CHANGELOG.md` has been updated.** v0.0.2 (2026-06-04) covers the sqlite-vec rewrite, no-MCP architecture, Effect-TS migration, and snapshot replay. Pre-rewrite release history (v0.0.x with Chroma + MCP) is omitted as no longer relevant.
+- **`CONTRIBUTING.md` has been rewritten.** It now references correct paths (`engine/risk-service.ts`, `bench/`), uses MIT license (matching `package.json`), and describes the Effect-TS service pattern instead of MCP tools.
 - **`CONTRIBUTING.md` says "no console.log — use `createLogger(component)`"**. `createLogger` is exported from `engine/logger.ts` and writes to `logs/audit-trail.jsonl`. The rule is aspirational — `engine/program.ts` and `engine/index.ts` use raw `console.info/warn/error/debug` extensively. Match the file you're editing.
 - **Position state is persisted to SQLite.** `program.ts` calls `db.getAllPositions()` at startup (line 110) to populate a `Map` for fast cycle access, and `db.savePosition(...)` on every state change (ENTER, EXIT, REBALANCE, trailing-stop value update, fee claim) — 6 call sites total. The `trackedPositions` Map is just an in-memory cache; restart now preserves OOR counters, `highestValueUsd`, and trailing-stop state.
 - **`LOG_LEVEL` env is a no-op.** CI sets `LOG_LEVEL: error` in `.github/workflows/ci.yml`, but `engine/logger.ts`'s `emit()` always writes regardless of level. Don't expect to silence CI logs with it.
 - **One ENTER per cycle in live mode.** `program.ts:569` silently skips `ENTER` if `trackedPositions.size > 0`. Easy to mistake for a bug.
 - **Live execution is a no-op without a wallet.** `WALLET_PRIVATE_KEY` is optional; with no key, `adapter.hasWallet()` returns false and `executeLive` exits early. Paper mode is the default and the only thing verified end-to-end.
 - **Coverage is misleading.** `vitest.config.ts` excludes `engine/index.ts`, `engine/program.ts`, `engine/adapter-service.ts`, `engine/services.ts`, `engine/types.ts`, `engine/logger*`, `engine/config-service.ts`, `engine/memory-service.ts`, `engine/screener-service.ts` from coverage. The 80% / 70% thresholds apply only to the remaining modules — not the whole engine.
-- **bin range widths.** `engine/strategy-service.ts:105` uses `±25` (binStep ≤ 10), `±20` (≤ 25), `±15` (otherwise). `CLAUDE.md` matches. `.agents/skills/dlmm-rebalancer.md` lists different numbers (`±15/±10/±7`) — the skill is wrong.
-- **Memory merge threshold.** README says "cosine distance < 0.08" (similarity > 0.92). ARCHITECTURE.md says "cosine similarity > 0.70". Code is the only source of truth here; if it matters, search `engine/memory-service.ts`/`engine/db-service.ts`.
+- **bin range widths.** `engine/strategy-service.ts:105` uses `±25` (binStep ≤ 10), `±20` (≤ 25), `±15` (otherwise). `CLAUDE.md` matches. `.agents/skills/dlmm-rebalancer.md` now matches the code.
+- **Memory merge guard is not implemented.** README, CLAUDE.md, and ARCHITECTURE.md used to claim a "cosine distance < 0.08" merge guard, but `engine/db-service.ts` `insertMemory()` does a raw INSERT with no dedup. `queryMemory()` returns by `ORDER BY distance` blended with recency decay but applies no threshold filter. Code is the source of truth.
 - **Memory TTLs are in code only.** `pattern` 90d, `warning` 60d, `outcome` 180d. The `ARCHITECTURE.md` table is correct; `README.md` only mentions patterns + warnings.
 - **Hono `handle` is not exported in v4.x.** `cloudflare/workers/api/index.ts` previously imported `handle` from `hono/cloudflare-workers` — that adapter no longer exports it. Use `app.fetch(request, env, ctx)` directly in the `default export`.
+- **R2 public URL is unreachable.** `r2.prism-agent.com` DNS resolves (85.131.197.31) but the HTTPS endpoint doesn't respond — a Cloudflare R2 public access config issue (missing `r2.dev` subdomain or custom domain CNAME). The bucket (`prism-backups`) exists. The update mechanism gracefully falls back to GitHub Releases, so `prism update` still works.
 
 ## Storage & data files
 
 - `prism.db` (SQLite, gitignored) — positions, audit, blacklists, vec0 memory, **pool_snapshots**. Override with `SQLITE_DB_PATH`. Tests use `:memory:`.
 - `logs/audit-trail.jsonl` — appended by `createLogger` from `engine/logger.ts` (gitignored).
-- `bench/tmp-audit/` — created and rewritten by `bench/audit.test.ts`. Not in `.gitignore` but should be (it appears in `git status` after running tests).
+- `bench/tmp-audit/` — created and rewritten by `bench/audit.test.ts`. In `.gitignore` (appears in `git status` after running tests).
 - `engine/data/deployer-blacklist.json`, `engine/data/token-blacklist.json` — default blacklist sources, override via `DEPLOYER_BLACKLIST_PATH` / `TOKEN_BLACKLIST_PATH`.
 - D1 (cloudflare): `users`, `api_keys`, `telegram_link_codes`, `wallets`, `subscriptions`, `audit_log` (schema in `cloudflare/migrations/0001_initial.sql`).
 
@@ -246,9 +250,9 @@ The agent can dump a full snapshot (pool state + bin array) into `pool_snapshots
 
 `.env.example` is incomplete. The full set `engine/config-service.ts` loads includes (with defaults):
 
-`PAPER_TRADING` (true), `SCAN_INTERVAL_MS` (600000), `MIN_POOL_TVL_USD` (50000), `MIN_FEE_IL_RATIO` (1.2), `TVL_DROP_EXIT_PCT` (0.30), `VOLUME_AUTH_THRESHOLD` (0.70), `MAX_CONCURRENT_POSITIONS` (5), `MIN_REBALANCE_INTERVAL_MS` (24h), `MIN_REBALANCE_NET_BENEFIT_USD` (10), `CONFIDENCE_THRESHOLD` (0.65), `PAPER_PORTFOLIO_USD` (10000), `MIN_BIN_UTILIZATION` (0.30), `MAX_REBALANCE_RANGE_BINS` (50), `WATCHLIST_POOLS` (comma-sep), `CLAUDE_MODEL`, `CHROMA_URL` (dead), `STOP_LOSS_PCT` (0.15), `TRAILING_STOP_PCT` (0.10), `OOR_GRACE_PERIOD_CYCLES` (3), `FEE_CLAIM_INTERVAL_MS` (24h), `ENABLE_POOL_DISCOVERY` (false), `DISCOVERY_MIN_TVL_USD` (100000), `DISCOVERY_MIN_FEE_RATIO` (1.5), `DEPLOYER_BLACKLIST_PATH`, `TOKEN_BLACKLIST_PATH`, `AUDIT_LOG_PATH` (`./logs/decision-audit.jsonl`), plus `ANTHROPIC_API_KEY`, `HELIUS_API_KEY`, `SOLANA_RPC_URL`, `WALLET_PRIVATE_KEY`, `AUTO_UPDATE` (true), `UPDATE_CHECK_INTERVAL_MS` (21600000), `UPDATE_CHANNEL` (stable), `UPDATE_GITHUB_REPO`, `UPDATE_ALLOW_DIRTY` (false).
+`PAPER_TRADING` (true), `SCAN_INTERVAL_MS` (600000), `MIN_POOL_TVL_USD` (50000), `MIN_FEE_IL_RATIO` (1.2), `TVL_DROP_EXIT_PCT` (0.30), `VOLUME_AUTH_THRESHOLD` (0.70), `MAX_CONCURRENT_POSITIONS` (5), `MIN_REBALANCE_INTERVAL_MS` (24h), `MIN_REBALANCE_NET_BENEFIT_USD` (10), `CONFIDENCE_THRESHOLD` (0.65), `PAPER_PORTFOLIO_USD` (10000), `MIN_BIN_UTILIZATION` (0.30), `MAX_REBALANCE_RANGE_BINS` (50), `WATCHLIST_POOLS` (comma-sep), `STOP_LOSS_PCT` (0.15), `TRAILING_STOP_PCT` (0.10), `OOR_GRACE_PERIOD_CYCLES` (3), `FEE_CLAIM_INTERVAL_MS` (24h), `ENABLE_POOL_DISCOVERY` (false), `DISCOVERY_MIN_TVL_USD` (100000), `DISCOVERY_MIN_FEE_RATIO` (1.5), `DEPLOYER_BLACKLIST_PATH`, `TOKEN_BLACKLIST_PATH`, plus `HELIUS_API_KEY`, `SOLANA_RPC_URL`, `WALLET_PRIVATE_KEY`, `AUTO_UPDATE` (true), `UPDATE_CHECK_INTERVAL_MS` (21600000), `UPDATE_CHANNEL` (stable), `UPDATE_GITHUB_REPO`, `UPDATE_ALLOW_DIRTY` (false).
 
-In test mode (`VITEST=true` or `NODE_ENV=test`), missing `ANTHROPIC_API_KEY` / `HELIUS_API_KEY` default to dummy values so the suite can run without real keys.
+In test mode (`VITEST=true` or `NODE_ENV=test`), missing `HELIUS_API_KEY` defaults to a dummy value so the suite can run without real keys.
 
 ## R2-based update mechanism (GitHub-independent)
 
@@ -442,7 +446,7 @@ Not yet implemented. The design is privacy-first by default (the `install_id` is
 - `bench/audit.test.ts` mutates `bench/tmp-audit/` — do not commit it.
 - Coverage thresholds (80% / 70%) apply only to _included_ files (see above). Don't read the coverage report as a project-wide signal.
 - Cloudflare tests live in `cloudflare/workers/**/*.test.ts` and run via `@cloudflare/vitest-pool-workers`. Must use `vitest@^3.2.0` (not 4.x) due to pool compatibility — enforced in `cloudflare/package.json`.
-- No integration tests, no mocks for Meteora SDK, no tests exercise the embedding pipeline or the main loop. `program.ts`, `adapter-service.ts`, and `engine/embeddings.ts` are all excluded from coverage and untested. The 4 engine test files cover pure logic only. CI passes with fake API keys because nothing real runs.
+- No integration tests, no mocks for Meteora SDK, no tests exercise the embedding pipeline or the main loop. `program.ts`, `adapter-service.ts`, and `engine/embeddings.ts` are all excluded from coverage and untested. The 11 engine test files cover pure logic only. CI passes with fake API keys because nothing real runs.
 
 ## Key constraints
 
