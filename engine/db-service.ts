@@ -354,7 +354,7 @@ export const DbLive = (dbPath?: string) =>
           Effect.sync(() => {
             runOne(
               db,
-              `INSERT INTO pool_snapshots (
+              `INSERT OR REPLACE INTO pool_snapshots (
               pool_address, timestamp, active_bin_id, tvl_usd, volume_24h_usd,
               fees_24h_usd, apr, current_price, bin_step,
               token_x_symbol, token_y_symbol, bin_array_json

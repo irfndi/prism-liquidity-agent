@@ -24,8 +24,9 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends libsqlite3-0 ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-# Non-root user
-RUN groupadd -g 1001 agent && useradd -u 1001 -g agent -s /bin/sh -m agent
+# Non-root user (Debian slim uses --system, not Alpine -S/-G flags)
+RUN groupadd --system --gid 1001 agent \
+  && useradd  --system --uid 1001 --gid agent --no-create-home --shell /sbin/nologin agent
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
@@ -36,7 +37,10 @@ RUN mkdir -p /app/logs && chown -R agent:agent /app/logs
 
 USER agent
 
+# Bun-based healthcheck: the runtime image only ships Bun (no node), so
+# we use the existing Bun binary to verify the bundled `dist/index.mjs`
+# is present and importable. process.exit(0) is the success path.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD bun -e "process.exit(0)"
+  CMD bun -e "import('/app/dist/index.mjs').catch(()=>process.exit(1))"
 
 CMD ["bun", "dist/index.mjs"]

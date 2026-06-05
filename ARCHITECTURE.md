@@ -2,7 +2,7 @@
 
 ## Component Map
 
-```
+```text
 engine/
 ├── index.ts             22-line bootstrap: Effect.runPromise(program)
 ├── program.ts           Scan loop + all decision logic (~820 lines)
@@ -34,7 +34,7 @@ All engine files are flat in `engine/`. No subdirectories for adapters, probes, 
 
 ## Agent Loop (per cycle, per pool)
 
-```
+```text
 SCAN (every SCAN_INTERVAL_MS, default 10 min)
   For each pool in WATCHLIST_POOLS:
     1. adapter.getPoolState + adapter.getBinArray  ← fetch on-chain
@@ -55,6 +55,7 @@ SCAN (every SCAN_INTERVAL_MS, default 10 min)
     9. audit.recordDecision                        ← JSONL log
     10. Execute: paper (Map.set/delete) or live (adapter.enterPosition etc.)
 ```
+
 
 ## Memory TTL Policy
 

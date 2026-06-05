@@ -109,9 +109,20 @@ describe("DbService — snapshots", () => {
     run(
       Effect.gen(function* () {
         const db = yield* DbService;
-        yield* db.saveSnapshot(makeSnapshot({ poolAddress: "PoolA" }));
-        yield* db.saveSnapshot(makeSnapshot({ poolAddress: "PoolA" }));
-        yield* db.saveSnapshot(makeSnapshot({ poolAddress: "PoolB" }));
+        // Distinct timestamps for distinct snapshots: the (pool_address,
+        // timestamp) UNIQUE index added in migration v7 enforces idempotent
+        // re-imports — re-saving the same (pool, ts) is an upsert, not a
+        // duplicate. Two snapshots for the same pool therefore need
+        // different timestamps to count as separate rows.
+        yield* db.saveSnapshot(
+          makeSnapshot({ poolAddress: "PoolA", timestamp: 1_700_000_000_000 }),
+        );
+        yield* db.saveSnapshot(
+          makeSnapshot({ poolAddress: "PoolA", timestamp: 1_700_000_100_000 }),
+        );
+        yield* db.saveSnapshot(
+          makeSnapshot({ poolAddress: "PoolB", timestamp: 1_700_000_000_000 }),
+        );
         const aCount = yield* db.getSnapshotCount("PoolA");
         const bCount = yield* db.getSnapshotCount("PoolB");
         const cCount = yield* db.getSnapshotCount("PoolC");
@@ -173,8 +184,7 @@ function replaySnapshots(snaps: ReadonlyArray<PoolSnapshot>, cfg: ReplayConfig):
     const halfW = (upper - lower) / 2 || 1;
     const drift = Math.abs(s.activeBinId - center) / halfW;
     const ticksSince = i - lastRebalance;
-    const canRebalance =
-      rebalances < cfg.maxRebalances && ticksSince >= cfg.minHoldTicks;
+    const canRebalance = rebalances < cfg.maxRebalances && ticksSince >= cfg.minHoldTicks;
 
     if (canRebalance && drift > cfg.driftThreshold) {
       const ilCost = portfolioValue * 0.001 * drift;

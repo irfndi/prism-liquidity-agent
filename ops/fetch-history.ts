@@ -10,7 +10,9 @@
  * What it produces per candle:
  *   - activeBinId   : computed from price via DLMM bin formula
  *   - tvlUsd        : current TVL (constant per pool; historical not available)
- *   - volume24hUsd  : REAL from GeckoTerminal OHLCV (not the live engine's estimate)
+ *   - volume24hUsd  : REAL rolling 24h sum from GeckoTerminal OHLCV (sum of
+ *                     the current hour plus the previous 23 hours, instead
+ *                     of multiplying a single hour by 24)
  *   - fees24hUsd    : volume * feeRate (same formula as live engine)
  *   - apr           : (fees * 365 / tvl) * 100 (same formula as live engine)
  *   - currentPrice  : from OHLCV close
@@ -44,8 +46,7 @@ const DEFAULT_POOLS = [
   "FksffEqnBRixYGR791Qw2MgdU7zNCpHVFYBL4Fa4qVuH", // ~$889K TVL
 ];
 
-const SOLANA_RPC =
-  process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
+const SOLANA_RPC = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
 const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
 const OHLCV_LIMIT = 1000; // GeckoTerminal free tier max
 const RATE_LIMIT_MS = 5000; // GeckoTerminal: 30 req/min → conservative 5s delay
@@ -78,7 +79,10 @@ function parseArgs(argv: ReadonlyArray<string>): CliArgs {
     const a = argv[i];
     const next = argv[i + 1];
     if (a === "--pools" && next) {
-      out.pools = next.split(",").map((s) => s.trim()).filter(Boolean);
+      out.pools = next
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
       i++;
     } else if (a === "--db" && next) {
       out.dbPath = next;
@@ -90,24 +94,17 @@ function parseArgs(argv: ReadonlyArray<string>): CliArgs {
   return out;
 }
 
-function fetchPoolMeta(
-  address: string,
-  connection: Connection,
-): Effect.Effect<PoolMeta, Error> {
+function fetchPoolMeta(address: string, connection: Connection): Effect.Effect<PoolMeta, Error> {
   return Effect.tryPromise({
     try: async () => {
       const dlmm = await DLMM.create(connection, new PublicKey(address));
       const lbPair = dlmm.lbPair;
       const activeBin = await dlmm.getActiveBin();
 
-      let poolRes = await fetch(
-        `${GECKO_BASE}/networks/solana/pools/${address}`,
-      );
+      let poolRes = await fetch(`${GECKO_BASE}/networks/solana/pools/${address}`);
       for (let attempt = 0; attempt < 3 && poolRes.status === 429; attempt++) {
         await new Promise((r) => setTimeout(r, RATE_LIMIT_MS * (attempt + 2)));
-        poolRes = await fetch(
-          `${GECKO_BASE}/networks/solana/pools/${address}`,
-        );
+        poolRes = await fetch(`${GECKO_BASE}/networks/solana/pools/${address}`);
       }
       if (!poolRes.ok) {
         throw new Error(`GeckoTerminal pool ${address}: HTTP ${poolRes.status}`);
@@ -175,11 +172,7 @@ function computeActiveBinId(
   return refBinId + Math.round(ratio);
 }
 
-function buildBinArray(
-  activeBinId: number,
-  currentPrice: number,
-  binStep: number,
-): BinArray {
+function buildBinArray(activeBinId: number, currentPrice: number, binStep: number): BinArray {
   const halfRange = 20;
   const lowerBinId = activeBinId - halfRange;
   const upperBinId = activeBinId + halfRange;
@@ -196,7 +189,16 @@ function buildBinArray(
   return { lowerBinId, upperBinId, bins, activeBinId, binStep };
 }
 
-function buildSnapshot(meta: PoolMeta, candle: OhlcvCandle): PoolSnapshot {
+function rollingVolume24h(candles: ReadonlyArray<OhlcvCandle>, index: number): number {
+  let sum = 0;
+  const end = Math.min(candles.length, index + 24);
+  for (let j = index; j < end; j++) {
+    sum += candles[j]!.volume;
+  }
+  return sum;
+}
+
+function buildSnapshot(meta: PoolMeta, candle: OhlcvCandle, volume24hUsd: number): PoolSnapshot {
   const activeBinId = computeActiveBinId(
     meta.refActiveBinId,
     meta.refPrice,
@@ -205,10 +207,8 @@ function buildSnapshot(meta: PoolMeta, candle: OhlcvCandle): PoolSnapshot {
   );
   const binArray = buildBinArray(activeBinId, candle.close, meta.binStep);
   const feeRate = 0.0025 + meta.binStep / 10000;
-  const volume24hUsd = candle.volume * 24;
   const fees24hUsd = volume24hUsd * feeRate;
-  const apr =
-    meta.tvlUsd > 0 ? ((fees24hUsd * 365) / meta.tvlUsd) * 100 : 0;
+  const apr = meta.tvlUsd > 0 ? ((fees24hUsd * 365) / meta.tvlUsd) * 100 : 0;
   return {
     poolAddress: meta.address,
     timestamp: candle.timestamp,
@@ -256,8 +256,10 @@ const program = Effect.gen(function* () {
     log.info(`  ${candles.length} candles: ${first} → ${last}`);
 
     let saved = 0;
-    for (const candle of candles) {
-      const snap = buildSnapshot(meta, candle);
+    for (let i = 0; i < candles.length; i++) {
+      const candle = candles[i]!;
+      const volume24hUsd = rollingVolume24h(candles, i);
+      const snap = buildSnapshot(meta, candle, volume24hUsd);
       yield* db.saveSnapshot(snap);
       saved++;
     }
@@ -271,9 +273,7 @@ const program = Effect.gen(function* () {
     log.info(`  ${p}: ${c} snapshots`);
     total += c;
   }
-  log.info(`done. ${pools.length} pool(s) in pool_snapshots, ${total} snapshots total`);
+  log.info(`done. ${pools.length} pool(s) in pool_snapshots, ${total} snapshot row(s) total`);
 });
 
-await Effect.runPromise(
-  program.pipe(Effect.provide(DbLive(args.dbPath))),
-);
+await Effect.runPromise(program.pipe(Effect.provide(DbLive(args.dbPath))));

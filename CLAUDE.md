@@ -95,7 +95,7 @@ Memory is now SQLite-backed via `sqlite-vec` instead of ChromaDB. Three TTL tier
 | `warning` | 60 days |
 | `outcome` | 180 days |
 
-`getRelevantContext()` reranks by blending similarity (70%) with recency decay (30%, 30-day half-life). Embeddings are generated with `@xenova/transformers`.
+`getRelevantContext()` reranks by blending similarity (70%) with recency decay (30%, 30-day half-life). The default embedding backend is a pure-JS fallback (set via `EMBEDDINGS_BACKEND=fallback`); `@xenova/transformers` (ONNX) is opt-in by setting `EMBEDDINGS_BACKEND=onnx` (note: ONNX has known issues serializing BigInt in Node, which is why it is no longer the default).
 
 ### Trailing Exit / Profit Protection (`engine/program.ts`)
 

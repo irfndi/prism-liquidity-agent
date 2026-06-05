@@ -480,6 +480,8 @@ app.post("/v1/issue", async (c) => {
   // N concurrent arrivals). This is acceptable for an abuse-prevention
   // ceiling on issue filing, not a security-critical control. For strict
   // limits, use Durable Objects or a D1 transaction.
+  // CACHE is null-checked so the handler still works in environments where
+  // the KV binding is intentionally not provisioned.
   if (CACHE) {
     const rateKey = `rate_limit:issue:${clientIp}`;
     const current = await CACHE.get(rateKey);

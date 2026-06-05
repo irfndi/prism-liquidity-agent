@@ -28,7 +28,7 @@ bun run setup          # interactive .env wizard
 ## Project Constraints
 
 - **No `any` types** — use `unknown` and narrow properly
-- **console.log vs createLogger** — prefer `createLogger(component)` from `engine/logger.ts`, but `console.info/warn/error` is used extensively in `program.ts` and `index.ts`. Match the file you're editing.
+- **Logging** — always use `createLogger(component)` from `engine/logger.ts`. This writes structured JSON to `logs/audit-trail.jsonl` (the audit-trail sink). Direct `console.*` calls are not allowed in new code; historical exceptions in `program.ts` / `index.ts` are tracked for incremental migration, not new precedent.
 - **Paper trading first** — all new execution paths must work in paper mode before live
 
 ## Adding a New Service

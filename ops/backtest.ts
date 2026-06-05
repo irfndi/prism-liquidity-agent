@@ -44,7 +44,10 @@ function parseArgs(argv: ReadonlyArray<string>): CliArgs {
       out.days = Number(next);
       i++;
     } else if (a === "--pools" && next) {
-      out.pools = next.split(",").map((s) => s.trim()).filter(Boolean);
+      out.pools = next
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
       i++;
     } else if (a === "--source" && (next === "synthetic" || next === "replay")) {
       out.source = next;
@@ -179,10 +182,19 @@ function runBacktestFromTicks(
     throw new Error("Empty history");
   }
 
-  // Detect data frequency from first two ticks for Sharpe annualization
-  const tickIntervalMs = ticks.length >= 2
-    ? ticks[1]!.pool.timestamp - ticks[0]!.pool.timestamp
-    : 10 * 60 * 1000;
+  // Detect data frequency from first two ticks for Sharpe annualization.
+  // Guard against non-positive intervals (duplicate or out-of-order
+  // timestamps) by scanning for the first positive adjacent diff;
+  // fall back to a 10-minute default if none is found.
+  let inferredIntervalMs = 10 * 60 * 1000;
+  for (let i = 1; i < ticks.length; i++) {
+    const diff = ticks[i]!.pool.timestamp - ticks[i - 1]!.pool.timestamp;
+    if (diff > 0) {
+      inferredIntervalMs = diff;
+      break;
+    }
+  }
+  const tickIntervalMs = inferredIntervalMs;
   const ticksPerYear = (365 * 24 * 60 * 60 * 1000) / tickIntervalMs;
 
   let previousTvl = ticks[0]!.pool.tvlUsd;
@@ -201,7 +213,7 @@ function runBacktestFromTicks(
     const tvl = tick.pool.tvlUsd;
     if (tvl <= 0) return 0;
     const positionShare = Math.min(portfolioValue / tvl, 1);
-    return (tick.pool.fees24hUsd / ticksPerYear * 365) * positionShare;
+    return (tick.pool.fees24hUsd / ticksPerYear) * 365 * positionShare;
   }
 
   for (let i = 0; i < ticks.length; i++) {
@@ -209,14 +221,7 @@ function runBacktestFromTicks(
     const metrics = strategy.computeMetrics(tick.pool, tick.binArray, previousTvl);
     const auth = strategy.checkVolumeAuthenticity(tick.pool);
     if (
-      !strategy.passesPreFilter(
-        tick.pool,
-        auth.score,
-        metrics.binUtilization,
-        50_000,
-        0.7,
-        0.3,
-      )
+      !strategy.passesPreFilter(tick.pool, auth.score, metrics.binUtilization, 50_000, 0.7, 0.3)
     ) {
       previousTvl = tick.pool.tvlUsd;
       strategyReturns.push(0);
@@ -280,7 +285,8 @@ function runBacktestFromTicks(
   }
 
   const mean = strategyReturns.reduce((a, b) => a + b, 0) / strategyReturns.length;
-  const variance = strategyReturns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / strategyReturns.length;
+  const variance =
+    strategyReturns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / strategyReturns.length;
   const sharpe = variance > 0 ? (mean / Math.sqrt(variance)) * Math.sqrt(ticksPerYear) : 0;
 
   return {
@@ -323,35 +329,71 @@ function snapshotsToTicks(snaps: ReadonlyArray<PoolSnapshot>): HistoryTick[] {
 
 const args = parseArgs(process.argv.slice(2));
 
-console.warn("═══════════════════════════════════════════════════════════════");
-console.warn("  BACKTEST LIMITATIONS — read before interpreting results");
-console.warn("═══════════════════════════════════════════════════════════════");
-console.warn("  • TVL is CONSTANT per pool (current snapshot, not historical).");
-console.warn("    Position share, APR, and volume-auth checks use stale TVL.");
-console.warn("  • This is a simplified rebalancing simulation, NOT the live");
-console.warn("    agent. Missing: EXIT on fee/IL, trailing stop, ENTER logic,");
-console.warn("    risk gates, memory, position sizing, dynamic bin ranges.");
-console.warn("  • Each pool runs independently with $10K. Total PnL is the");
-console.warn("    sum of 6 independent portfolios ($60K deployed, not $10K).");
-console.warn("  • Synthetic bins (all liquiditySupply=1n) make binUtil=1.0");
-console.warn("    always, so the binUtil pre-filter is a no-op.");
-console.warn("  • NO TOKEN PRICE DEPRECIATION: the backtest models no");
-console.warn("    mechanism for the underlying token value to decrease.");
-console.warn("    Portfolio value only changes through fee accrual (+),");
-console.warn("    rebalancing IL (-), and force-exit penalties (-). A pool");
-console.warn("    for a token that dropped 90% would still show positive");
-console.warn("    returns. The reported PnL is a meaningful overestimate.");
-console.warn("═══════════════════════════════════════════════════════════════\n");
+log.warn("═══════════════════════════════════════════════════════════════");
+log.warn("  BACKTEST LIMITATIONS — read before interpreting results");
+log.warn("═══════════════════════════════════════════════════════════════");
+log.warn("  • TVL is CONSTANT per pool (current snapshot, not historical).");
+log.warn("    Position share, APR, and volume-auth checks use stale TVL.");
+log.warn("  • This is a simplified rebalancing simulation, NOT the live");
+log.warn("    agent. Missing: EXIT on fee/IL, trailing stop, ENTER logic,");
+log.warn("    risk gates, memory, position sizing, dynamic bin ranges.");
+log.warn("  • Each pool runs independently with $10K. Total PnL is the");
+log.warn("    sum of 6 independent portfolios ($60K deployed, not $10K).");
+log.warn("  • Synthetic bins (all liquiditySupply=1n) make binUtil=1.0");
+log.warn("    always, so the binUtil pre-filter is a no-op.");
+log.warn("  • NO TOKEN PRICE DEPRECIATION: the backtest models no");
+log.warn("    mechanism for the underlying token value to decrease.");
+log.warn("    Portfolio value only changes through fee accrual (+),");
+log.warn("    rebalancing IL (-), and force-exit penalties (-). A pool");
+log.warn("    for a token that dropped 90% would still show positive");
+log.warn("    returns. The reported PnL is a meaningful overestimate.");
+log.warn("═══════════════════════════════════════════════════════════════");
 
 const configs: ReadonlyArray<{ name: string; cfg: BacktestConfig }> = [
-  { name: "C1-conservative", cfg: { halfWidth: 25, driftThreshold: 0.75, minHoldTicks: 144, minNetBenefitUsd: 15, maxRebalances: 20 } },
-  { name: "C2-balanced",     cfg: { halfWidth: 20, driftThreshold: 0.65, minHoldTicks: 72,  minNetBenefitUsd: 10, maxRebalances: 30 } },
-  { name: "C3-aggressive",   cfg: { halfWidth: 15, driftThreshold: 0.55, minHoldTicks: 36,  minNetBenefitUsd: 5,  maxRebalances: 50 } },
-  { name: "C4-wide-patient", cfg: { halfWidth: 35, driftThreshold: 0.8,  minHoldTicks: 288, minNetBenefitUsd: 25, maxRebalances: 10 } },
+  {
+    name: "C1-conservative",
+    cfg: {
+      halfWidth: 25,
+      driftThreshold: 0.75,
+      minHoldTicks: 144,
+      minNetBenefitUsd: 15,
+      maxRebalances: 20,
+    },
+  },
+  {
+    name: "C2-balanced",
+    cfg: {
+      halfWidth: 20,
+      driftThreshold: 0.65,
+      minHoldTicks: 72,
+      minNetBenefitUsd: 10,
+      maxRebalances: 30,
+    },
+  },
+  {
+    name: "C3-aggressive",
+    cfg: {
+      halfWidth: 15,
+      driftThreshold: 0.55,
+      minHoldTicks: 36,
+      minNetBenefitUsd: 5,
+      maxRebalances: 50,
+    },
+  },
+  {
+    name: "C4-wide-patient",
+    cfg: {
+      halfWidth: 35,
+      driftThreshold: 0.8,
+      minHoldTicks: 288,
+      minNetBenefitUsd: 25,
+      maxRebalances: 10,
+    },
+  },
 ];
 
 for (const pool of args.pools) {
-  console.log(`\n=== Pool: ${pool} (source=${args.source}, days=${args.days}) ===\n`);
+  log.info(`\n=== Pool: ${pool} (source=${args.source}, days=${args.days}) ===\n`);
 
   let ticks: HistoryTick[];
   if (args.source === "synthetic") {
@@ -360,14 +402,14 @@ for (const pool of args.pools) {
     const endMs = Date.now();
     const snaps = await loadSnapshots(args.dbPath, pool, endMs, args.days);
     if (snaps.length === 0) {
-      console.log(
+      log.info(
         `  no snapshots for ${pool} in last ${args.days}d (db=${args.dbPath}). ` +
           `Did you run the agent with ENABLE_SNAPSHOT_CAPTURE=true?`,
       );
       continue;
     }
     ticks = snapshotsToTicks(snaps);
-    console.log(`  loaded ${snaps.length} snapshots from ${args.dbPath}`);
+    log.info(`  loaded ${snaps.length} snapshots from ${args.dbPath}`);
   }
 
   const results = configs.map(({ name, cfg }) => ({
@@ -384,11 +426,14 @@ for (const pool of args.pools) {
     "Win %": `${(r.winRate * 100).toFixed(0)}%`,
     Sharpe: r.sharpeRatio.toFixed(2),
   }));
-  console.table(table);
+  log.info(`Results table: ${JSON.stringify(table)}`);
 
   const best = results.reduce((best, curr) => {
     if (curr.result.winRate > best.result.winRate) return curr;
-    if (curr.result.winRate === best.result.winRate && curr.result.netPnlUsd > best.result.netPnlUsd) {
+    if (
+      curr.result.winRate === best.result.winRate &&
+      curr.result.netPnlUsd > best.result.netPnlUsd
+    ) {
       return curr;
     }
     return best;
@@ -401,5 +446,5 @@ for (const pool of args.pools) {
     winRate: (best.result.winRate * 100).toFixed(1) + "%",
     rebalances: best.result.totalRebalances,
   });
-  console.log(`\n  Best: ${best.name} (net=$${best.result.netPnlUsd.toFixed(0)})`);
+  log.info(`  Best: ${best.name} (net=$${best.result.netPnlUsd.toFixed(0)})`);
 }

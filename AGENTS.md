@@ -97,7 +97,7 @@ wrangler deploy --config wrangler.telegram.toml  # deploy Telegram bot
 wrangler d1 migrations apply prism-db --remote # apply DB migrations
 wrangler d1 migrations apply prism-db --local  # apply to local D1
 bun run typecheck                              # tsc --noEmit
-bunx vitest run                                # 16 telegram bot tests (vitest 4.x with @cloudflare/vitest-pool-workers 0.16.x)
+bunx vitest run                                # telegram bot tests (vitest 4.1.x with @cloudflare/vitest-pool-workers 0.16.x)
 ```
 
 CI (`.github/workflows/deploy-cloudflare.yml`) on push to `main` (when `cloudflare/**` changes): install → typecheck → D1 migrations → deploy API → deploy Telegram bot.

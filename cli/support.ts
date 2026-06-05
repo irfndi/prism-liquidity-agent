@@ -1,17 +1,20 @@
 import { Command } from "commander";
+import { createLogger } from "../engine/logger.js";
+
+const log = createLogger("Support");
 
 export const issueCommand = new Command("issue")
   .description("File an issue to the Prism GitHub repo")
   .argument("<text>", "Issue description")
   .action((text) => {
-    console.log("Filing issue:", text);
-    console.log("(GitHub API integration coming in Issue #16)");
+    log.info(`Filing issue: ${text}`);
+    log.info("(GitHub API integration coming in Issue #16)");
   });
 
 export const supportCommand = new Command("support")
   .description("Get support contact info")
   .action(() => {
-    console.log("Docs: https://github.com/irfndi/prism-liquidity-agent/tree/main/docs");
-    console.log("Issues: https://github.com/irfndi/prism-liquidity-agent/issues");
-    console.log("Telegram: @prism_agent_bot");
+    log.info("Docs: https://github.com/irfndi/prism-liquidity-agent/tree/main/docs");
+    log.info("Issues: https://github.com/irfndi/prism-liquidity-agent/issues");
+    log.info("Telegram: @prism_agent_bot");
   });
