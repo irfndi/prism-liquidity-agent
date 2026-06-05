@@ -114,7 +114,7 @@ function main() {
   console.log('💬 Got feedback? Run:  prism feedback "<your message>"');
   console.log("   (set GITHUB_TOKEN to file issues on GitHub; otherwise stored locally)");
 
-  if (isFirstRun && !process.env.PRISM_FEEDBACK_OPT_OUT) {
+  if (isFirstRun && process.env.PRISM_FEEDBACK_OPT_OUT !== "true") {
     pingInstall("install");
   }
 }

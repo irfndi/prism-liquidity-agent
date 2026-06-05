@@ -480,13 +480,15 @@ app.post("/v1/issue", async (c) => {
   // N concurrent arrivals). This is acceptable for an abuse-prevention
   // ceiling on issue filing, not a security-critical control. For strict
   // limits, use Durable Objects or a D1 transaction.
-  const rateKey = `rate_limit:issue:${clientIp}`;
-  const current = await CACHE.get(rateKey);
-  const count = current ? parseInt(current) : 0;
-  if (count >= 10) {
-    return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
+  if (CACHE) {
+    const rateKey = `rate_limit:issue:${clientIp}`;
+    const current = await CACHE.get(rateKey);
+    const count = current ? parseInt(current, 10) : 0;
+    if (count >= 10) {
+      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
+    }
+    await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
   }
-  await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
 
   const body = (await c.req.json().catch(() => ({}))) as { title: string; body: string };
 

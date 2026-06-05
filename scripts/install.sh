@@ -137,7 +137,7 @@ if [ ! -s "$INSTALL_ID_FILE" ]; then
   fi
 fi
 INSTALL_ID="$(cat "$INSTALL_ID_FILE" 2>/dev/null || echo "")"
-if [ -n "$INSTALL_ID" ] && [ -z "$PRISM_FEEDBACK_OPT_OUT" ]; then
+if [ -n "$INSTALL_ID" ] && [ "$PRISM_FEEDBACK_OPT_OUT" != "true" ]; then
   PRISM_VERSION="$(bun -e "console.log(require('$INSTALL_DIR/package.json').version)" 2>/dev/null || echo "")"
   PRISM_PLATFORM="$(uname -s | tr A-Z a-z)"
   PRISM_PAYLOAD="{\"installId\":\"$INSTALL_ID\",\"event\":\"install\",\"channel\":\"stable\",\"platform\":\"$PRISM_PLATFORM\""

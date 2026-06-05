@@ -225,9 +225,10 @@ function buildSnapshot(meta: PoolMeta, candle: OhlcvCandle): PoolSnapshot {
   };
 }
 
+const args = parseArgs(process.argv.slice(2));
+
 const program = Effect.gen(function* () {
   const db = yield* DbService;
-  const args = parseArgs(process.argv.slice(2));
   const connection = new Connection(SOLANA_RPC, "confirmed");
 
   if (args.clean) {
@@ -274,5 +275,5 @@ const program = Effect.gen(function* () {
 });
 
 await Effect.runPromise(
-  program.pipe(Effect.provide(DbLive("./prism.db"))),
+  program.pipe(Effect.provide(DbLive(args.dbPath))),
 );

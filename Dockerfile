@@ -25,7 +25,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 # Non-root user
-RUN addgroup -g 1001 -S agent && adduser -u 1001 -S agent -G agent
+RUN groupadd -g 1001 agent && useradd -u 1001 -g agent -s /bin/sh -m agent
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
@@ -37,6 +37,6 @@ RUN mkdir -p /app/logs && chown -R agent:agent /app/logs
 USER agent
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD node -e "process.exit(0)"
+  CMD bun -e "process.exit(0)"
 
 CMD ["bun", "dist/index.mjs"]
