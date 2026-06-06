@@ -561,17 +561,6 @@ export interface ReferralApi {
   readonly validateCode: (code: string) => Effect.Effect<{ valid: boolean; referrerId?: string }, Error>;
   readonly applyReferral: (code: string, refereeId: string) => Effect.Effect<void, Error>;
   readonly getReferralCount: (userId: string) => Effect.Effect<number, Error>;
-  readonly getUserCredits: (userId: string) => Effect.Effect<number, Error>;
-  readonly addCredits: (
-    userId: string,
-    amount: number,
-    reason: string,
-  ) => Effect.Effect<void, Error>;
-  readonly deductCredits: (
-    userId: string,
-    amount: number,
-    reason: string,
-  ) => Effect.Effect<void, Error>;
 }
 
 export class ReferralService extends Context.Tag("ReferralService")<
