@@ -68,11 +68,11 @@ function generateReferralCode(): string {
   return code;
 }
 
-// Tier configuration for subscription features
+// Tier configuration - must match engine/revenue-service.ts
 const TIERS: Record<string, { platformFeeRate: number }> = {
-  free: { platformFeeRate: 0.01 },
-  pro: { platformFeeRate: 0.005 },
-  enterprise: { platformFeeRate: 0.0025 },
+  free: { platformFeeRate: 0 },
+  pro: { platformFeeRate: 0.05 },
+  fund: { platformFeeRate: 0.10 },
 };
 
 // Register handler
@@ -1036,6 +1036,7 @@ app.get("/v1/subscription/status", async (c) => {
       referralCount: (countResult as { count?: number })?.count ?? 0,
       credits: (creditsResult as { total?: number })?.total ?? 0,
       platformFeeRate: tierConfig?.platformFeeRate ?? 0,
+      _note: "walletSol requires Solana RPC; engine reads it via getNativeSolBalance()",
     });
   } catch {
     return c.json({ error: "Failed to get subscription status" }, 500);

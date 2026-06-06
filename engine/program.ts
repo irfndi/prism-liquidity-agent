@@ -765,7 +765,29 @@ export const program = Effect.gen(function* () {
     Effect.gen(function* () {
       for (const [poolAddress, pos] of trackedPositions) {
         if (pos.positionPubKey && Date.now() - pos.lastFeeClaimAt > config.feeClaimIntervalMs) {
-          const walletSol = 50;
+          const claimResult = yield* adapter
+            .claimFees(poolAddress, pos.positionPubKey)
+            .pipe(
+              Effect.tap((r) =>
+                console.info("Fees claimed", {
+                  pool: poolAddress,
+                  feeX: r.feeX,
+                  feeY: r.feeY,
+                  tx: r.txSignature,
+                }),
+              ),
+              Effect.catchAll(() => Effect.succeed(null)),
+            );
+
+          if (!claimResult) {
+            continue;
+          }
+
+          const walletBalance = yield* adapter.getNativeSolBalance().pipe(
+            Effect.catchAll(() => Effect.succeed(0)),
+          );
+          const walletSol = Number(walletBalance) / 1e9;
+
           const referralCount = yield* referral.getReferralCount("local_user").pipe(
             Effect.catchAll(() => Effect.succeed(0)),
           );
@@ -776,8 +798,8 @@ export const program = Effect.gen(function* () {
 
           const { platformFeeUsd } = revenue.calculatePlatformFee(
             tier,
-            0,
-            0,
+            claimResult.feeX,
+            claimResult.feeY,
             { x: 1, y: 1 },
           );
 
@@ -790,27 +812,18 @@ export const program = Effect.gen(function* () {
             );
           }
 
-          const result = yield* adapter
-            .claimFees(poolAddress, pos.positionPubKey, finalPlatformFee)
-            .pipe(
-              Effect.tap((r) =>
-                console.info("Fees claimed", {
-                  pool: poolAddress,
-                  feeX: r.feeX,
-                  feeY: r.feeY,
-                  platformFeeX: r.platformFeeX,
-                  platformFeeY: r.platformFeeY,
-                  netFeeX: r.netFeeX,
-                  netFeeY: r.netFeeY,
-                  tx: r.txSignature,
-                }),
-              ),
-              Effect.catchAll(() => Effect.succeed(null)),
-            );
-          if (result) {
-            pos.lastFeeClaimAt = Date.now();
-            yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+          if (finalPlatformFee > 0) {
+            console.info("Platform fee calculated", {
+              pool: poolAddress,
+              tier,
+              platformFeeUsd: finalPlatformFee,
+              feeX: claimResult.feeX,
+              feeY: claimResult.feeY,
+            });
           }
+
+          pos.lastFeeClaimAt = Date.now();
+          yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
         }
       }
     });
