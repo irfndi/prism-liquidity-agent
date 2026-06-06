@@ -695,9 +695,8 @@ export const AdapterLive = Layer.effect(
             let netFeeY = feeY;
 
             if (platformFeeRate && platformFeeRate > 0 && platformFeeRate <= 1) {
-              const clampedRate = Math.min(Math.max(platformFeeRate, 0), 1);
-              platformFeeX = feeX * clampedRate;
-              platformFeeY = feeY * clampedRate;
+              platformFeeX = feeX * platformFeeRate;
+              platformFeeY = feeY * platformFeeRate;
               netFeeX = feeX - platformFeeX;
               netFeeY = feeY - platformFeeY;
 

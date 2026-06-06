@@ -775,7 +775,8 @@ export const program = Effect.gen(function* () {
       );
       const tier = revenue.calculateTier(walletSol, referralCount);
       const platformFeeRate = TIERS[tier]?.platformFeeRate ?? 0;
-      const credits = yield* referral.getUserCredits("local_user").pipe(
+
+      let remainingCredits = yield* referral.getUserCredits("local_user").pipe(
         Effect.catchAll(() => Effect.succeed(0)),
       );
 
@@ -803,11 +804,14 @@ export const program = Effect.gen(function* () {
             continue;
           }
 
-          if (credits > 0 && (result.platformFeeX > 0 || result.platformFeeY > 0)) {
-            const grossPlatformFee = result.platformFeeX + result.platformFeeY;
-            const creditDiscount = revenue.calculateCreditDiscount(credits, grossPlatformFee);
-            if (creditDiscount > 0) {
-              yield* referral.deductCredits("local_user", creditDiscount, "platform_fee_discount").pipe(
+          if (remainingCredits > 0 && (result.platformFeeX > 0 || result.platformFeeY > 0)) {
+            const maxDiscountX = result.platformFeeX * 0.5;
+            const maxDiscountY = result.platformFeeY * 0.5;
+            const totalMaxDiscount = maxDiscountX + maxDiscountY;
+            const totalCreditDiscount = Math.min(remainingCredits, totalMaxDiscount);
+            if (totalCreditDiscount > 0) {
+              remainingCredits -= totalCreditDiscount;
+              yield* referral.deductCredits("local_user", totalCreditDiscount, "platform_fee_discount").pipe(
                 Effect.catchAll(() => Effect.void),
               );
             }

@@ -1036,7 +1036,6 @@ app.get("/v1/subscription/status", async (c) => {
       referralCount: (countResult as { count?: number })?.count ?? 0,
       credits: (creditsResult as { total?: number })?.total ?? 0,
       platformFeeRate: tierConfig?.platformFeeRate ?? 0,
-      _note: "walletSol requires Solana RPC; engine reads it via getNativeSolBalance()",
     });
   } catch {
     return c.json({ error: "Failed to get subscription status" }, 500);
