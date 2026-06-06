@@ -807,14 +807,9 @@ export const program = Effect.gen(function* () {
           if (remainingCredits > 0 && (result.platformFeeX > 0 || result.platformFeeY > 0)) {
             const totalPlatformFee = result.platformFeeX + result.platformFeeY;
             if (totalPlatformFee > 0) {
-              const xShare = result.platformFeeX / totalPlatformFee;
-              const yShare = result.platformFeeY / totalPlatformFee;
               const maxDiscount = totalPlatformFee * 0.5;
               const cappedDiscount = Math.min(remainingCredits, maxDiscount);
-              const creditX = cappedDiscount * xShare;
-              const creditY = cappedDiscount * yShare;
-              const totalCreditDiscount = creditX + creditY;
-              if (totalCreditDiscount > 0) {
+              if (cappedDiscount > 0) {
                 remainingCredits -= cappedDiscount;
                 yield* referral.deductCredits("local_user", cappedDiscount, "platform_fee_discount").pipe(
                   Effect.catchAll(() => Effect.void),
