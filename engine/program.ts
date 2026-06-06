@@ -8,7 +8,7 @@ import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
 import { ScreenerLive } from "./screener-service.js";
 import { DbLive } from "./db-service.js";
-import { RevenueLive } from "./revenue-service.js";
+import { RevenueLive, TIERS } from "./revenue-service.js";
 import { ReferralLive } from "./referral-service.js";
 import type { PositionRecord } from "./db-service.js";
 import {
@@ -761,65 +761,56 @@ export const program = Effect.gen(function* () {
 
   // ─── Periodic fee claiming ─────────────────────────────────────────────────
 
+  const LAMPORTS_PER_SOL = 1e9;
+
   const claimAllFees = (): Effect.Effect<void> =>
     Effect.gen(function* () {
+      const walletBalance = yield* adapter.getNativeSolBalance().pipe(
+        Effect.catchAll(() => Effect.succeed(0)),
+      );
+      const walletSol = Number(walletBalance) / LAMPORTS_PER_SOL;
+
+      const referralCount = yield* referral.getReferralCount("local_user").pipe(
+        Effect.catchAll(() => Effect.succeed(0)),
+      );
+      const tier = revenue.calculateTier(walletSol, referralCount);
+      const platformFeeRate = TIERS[tier]?.platformFeeRate ?? 0;
+      const credits = yield* referral.getUserCredits("local_user").pipe(
+        Effect.catchAll(() => Effect.succeed(0)),
+      );
+
       for (const [poolAddress, pos] of trackedPositions) {
         if (pos.positionPubKey && Date.now() - pos.lastFeeClaimAt > config.feeClaimIntervalMs) {
-          const claimResult = yield* adapter
-            .claimFees(poolAddress, pos.positionPubKey)
+          const result = yield* adapter
+            .claimFees(poolAddress, pos.positionPubKey, platformFeeRate)
             .pipe(
               Effect.tap((r) =>
                 console.info("Fees claimed", {
                   pool: poolAddress,
+                  tier,
                   feeX: r.feeX,
                   feeY: r.feeY,
+                  platformFeeX: r.platformFeeX,
+                  platformFeeY: r.platformFeeY,
+                  netFeeX: r.netFeeX,
+                  netFeeY: r.netFeeY,
                   tx: r.txSignature,
                 }),
               ),
               Effect.catchAll(() => Effect.succeed(null)),
             );
-
-          if (!claimResult) {
+          if (!result) {
             continue;
           }
 
-          const walletBalance = yield* adapter.getNativeSolBalance().pipe(
-            Effect.catchAll(() => Effect.succeed(0)),
-          );
-          const walletSol = Number(walletBalance) / 1e9;
-
-          const referralCount = yield* referral.getReferralCount("local_user").pipe(
-            Effect.catchAll(() => Effect.succeed(0)),
-          );
-          const tier = revenue.calculateTier(walletSol, referralCount);
-          const credits = yield* referral.getUserCredits("local_user").pipe(
-            Effect.catchAll(() => Effect.succeed(0)),
-          );
-
-          const { platformFeeUsd } = revenue.calculatePlatformFee(
-            tier,
-            claimResult.feeX,
-            claimResult.feeY,
-            { x: 1, y: 1 },
-          );
-
-          const creditDiscount = revenue.calculateCreditDiscount(credits, platformFeeUsd);
-          const finalPlatformFee = Math.max(0, platformFeeUsd - creditDiscount);
-
-          if (creditDiscount > 0) {
-            yield* referral.deductCredits("local_user", creditDiscount, "platform_fee_discount").pipe(
-              Effect.catchAll(() => Effect.void),
-            );
-          }
-
-          if (finalPlatformFee > 0) {
-            console.info("Platform fee calculated", {
-              pool: poolAddress,
-              tier,
-              platformFeeUsd: finalPlatformFee,
-              feeX: claimResult.feeX,
-              feeY: claimResult.feeY,
-            });
+          if (credits > 0 && (result.platformFeeX > 0 || result.platformFeeY > 0)) {
+            const grossPlatformFee = result.platformFeeX + result.platformFeeY;
+            const creditDiscount = revenue.calculateCreditDiscount(credits, grossPlatformFee);
+            if (creditDiscount > 0) {
+              yield* referral.deductCredits("local_user", creditDiscount, "platform_fee_discount").pipe(
+                Effect.catchAll(() => Effect.void),
+              );
+            }
           }
 
           pos.lastFeeClaimAt = Date.now();

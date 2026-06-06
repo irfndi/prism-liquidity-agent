@@ -633,7 +633,7 @@ export const AdapterLive = Layer.effect(
           };
         }),
 
-      claimFees: (poolAddress, positionPubKey, platformFeeUsd) =>
+      claimFees: (poolAddress, positionPubKey, platformFeeRate) =>
         Effect.gen(function* () {
           if (!wallet) {
             return yield* Effect.fail(
@@ -694,16 +694,10 @@ export const AdapterLive = Layer.effect(
             let netFeeX = feeX;
             let netFeeY = feeY;
 
-            if (platformFeeUsd && platformFeeUsd > 0) {
-              // TODO: Get actual token prices from on-chain or Jupiter
-              const tokenXPrice = 1;
-              const tokenYPrice = 1;
-
-              const totalFeeUsd = feeX * tokenXPrice + feeY * tokenYPrice;
-              const platformFeeRatio = totalFeeUsd > 0 ? platformFeeUsd / totalFeeUsd : 0;
-
-              platformFeeX = feeX * platformFeeRatio;
-              platformFeeY = feeY * platformFeeRatio;
+            if (platformFeeRate && platformFeeRate > 0 && platformFeeRate <= 1) {
+              const clampedRate = Math.min(Math.max(platformFeeRate, 0), 1);
+              platformFeeX = feeX * clampedRate;
+              platformFeeY = feeY * clampedRate;
               netFeeX = feeX - platformFeeX;
               netFeeY = feeY - platformFeeY;
 

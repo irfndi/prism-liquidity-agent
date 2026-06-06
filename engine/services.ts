@@ -71,7 +71,7 @@ export interface AdapterApi {
   readonly claimFees: (
     poolAddress: string,
     positionPubKey: string,
-    platformFeeUsd?: number,
+    platformFeeRate?: number,
   ) => Effect.Effect<
     {
       txSignature: string;
