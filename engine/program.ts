@@ -573,6 +573,12 @@ export const program = Effect.gen(function* () {
       } else if (decision.action === "EXIT") {
         const pos = trackedPositions.get(decision.poolAddress);
         if (pos?.positionPubKey) {
+          if (config.paperModeExitLive) {
+            console.warn(
+              `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${decision.poolAddress}`,
+            );
+            return yield* executeLive(decision, pool);
+          }
           // Live position — paper trading must not "exit" it without an on-chain tx.
           // Skip and warn so the user can switch to live mode to actually close it.
           console.warn(

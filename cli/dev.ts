@@ -2,9 +2,18 @@ import { Command } from "commander";
 import { spawn } from "child_process";
 import { pingInstall, readCredentials } from "./api.js";
 
+interface DevCommandOptions {
+  exitLive: boolean;
+}
+
 export const devCommand = new Command("dev")
   .description("Start the trading agent")
-  .action(() => {
+  .option(
+    "--exit-live",
+    "Execute live on-chain EXIT transactions even in paper mode (requires wallet — sends real transactions)",
+    false,
+  )
+  .action((options: DevCommandOptions) => {
     pingInstall("dev_start");
 
     const creds = readCredentials();
@@ -19,11 +28,20 @@ export const devCommand = new Command("dev")
       process.exit(1);
     }
 
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      PRISM_ALLOW_DIRECT: "true",
+    };
+    if (options.exitLive) {
+      console.warn("⚠️  PAPER_MODE_EXIT_LIVE enabled — paper mode will execute live transactions for EXIT");
+      env.PAPER_MODE_EXIT_LIVE = "true";
+    }
+
     console.log("Starting Prism trading agent...");
     const child = spawn("bun", ["run", "dev"], {
       stdio: "inherit",
       shell: false,
-      env: { ...process.env, PRISM_ALLOW_DIRECT: "true" },
+      env,
     });
 
     child.on("exit", (code) => {

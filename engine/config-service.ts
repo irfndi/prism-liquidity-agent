@@ -42,6 +42,8 @@ export interface AppConfig {
   readonly githubToken: string;
   readonly githubRepo: string;
   readonly feedbackOptOut: boolean;
+  // Allow paper mode to exit live positions (opt-in escape hatch)
+  readonly paperModeExitLive: boolean;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -148,6 +150,9 @@ const loadConfig = Effect.gen(function* () {
   const feedbackOptOut = yield* Config.boolean("PRISM_FEEDBACK_OPT_OUT").pipe(
     Effect.orElseSucceed(() => false),
   );
+  const paperModeExitLive = yield* Config.boolean("PAPER_MODE_EXIT_LIVE").pipe(
+    Effect.orElseSucceed(() => false),
+  );
 
   const watchlistPools = watchlistPoolsRaw
     .split(",")
@@ -192,6 +197,7 @@ const loadConfig = Effect.gen(function* () {
     githubToken,
     githubRepo,
     feedbackOptOut,
+    paperModeExitLive,
   };
 
   return cfg;

@@ -71,6 +71,7 @@ function buildLayer(
     githubToken,
     githubRepo,
     feedbackOptOut: optOut,
+    paperModeExitLive: false,
   });
   const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));
   return Layer.provide(FeedbackLive, baseLayer) as Layer.Layer<FeedbackService, never, never>;
