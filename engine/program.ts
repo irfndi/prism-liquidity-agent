@@ -289,6 +289,23 @@ export const program = Effect.gen(function* () {
 
       let decision: AgentDecision | null = null;
 
+      // OOR tracking must run before EXIT conditions so that out-of-range
+      // cycle counts accumulate even when fee/IL triggers an EXIT.
+      const pos = trackedPositions.get(poolAddress);
+      const hasPosition = !!pos;
+      if (hasPosition) {
+        const inRange = pool.activeBinId >= pos.lowerBinId && pool.activeBinId <= pos.upperBinId;
+        if (!inRange) {
+          if (pos.outOfRangeSince === null) {
+            pos.outOfRangeSince = Date.now();
+          }
+          pos.oorCycleCount++;
+        } else {
+          pos.outOfRangeSince = null;
+          pos.oorCycleCount = 0;
+        }
+      }
+
       // EXIT conditions (capital protection)
       if (tvlVelocity < -config.tvlDropExitPct) {
         decision = {
@@ -322,7 +339,6 @@ export const program = Effect.gen(function* () {
 
       // Trailing exit (profit protection)
       if (!decision) {
-        const pos = trackedPositions.get(poolAddress);
         if (pos) {
           const estimatedValue = estimatePositionValue(pos, pool);
           pos.currentValueUsd = estimatedValue;
@@ -346,8 +362,6 @@ export const program = Effect.gen(function* () {
 
       // REBALANCE check
       if (!decision) {
-        const pos = trackedPositions.get(poolAddress);
-        const hasPosition = !!pos;
         const currentLowerBinId = pos?.lowerBinId ?? pool.activeBinId - 20;
         const currentUpperBinId = pos?.upperBinId ?? pool.activeBinId + 20;
         const positionCenter = (currentLowerBinId + currentUpperBinId) / 2;
@@ -356,21 +370,7 @@ export const program = Effect.gen(function* () {
         const lastRebal = pos?.lastRebalanceAt ?? 0;
         const timeSinceRebal = Date.now() - lastRebal;
 
-        // Out-of-range tracking
-        if (hasPosition) {
-          const inRange = pool.activeBinId >= pos.lowerBinId && pool.activeBinId <= pos.upperBinId;
-          if (!inRange) {
-            if (pos.outOfRangeSince === null) {
-              pos.outOfRangeSince = Date.now();
-            }
-            pos.oorCycleCount++;
-          } else {
-            pos.outOfRangeSince = null;
-            pos.oorCycleCount = 0;
-          }
-        }
-
-        const oorGraceExpired = hasPosition && pos.oorCycleCount >= config.oorGracePeriodCycles;
+        const oorGraceExpired = hasPosition && pos && pos.oorCycleCount >= config.oorGracePeriodCycles;
 
         if (
           hasPosition &&

@@ -422,16 +422,20 @@ export const AdapterLive = Layer.effect(
 
       simulateRebalance: (poolAddress, newLowerBinId, newUpperBinId) =>
         Effect.gen(function* () {
-          const binArray = yield* api.getBinArray(poolAddress);
-          const activeBin = binArray.bins.find((b) => b.binId === binArray.activeBinId);
+          const pool = yield* api.getPoolState(poolAddress);
 
-          if (!activeBin) {
-            return { estimatedIlUsd: 0, estimatedFeesUsd: 0, netBenefitUsd: 0 };
-          }
+          const rangeWidth = Math.max(newUpperBinId - newLowerBinId, 0);
 
-          const rangeWidth = newUpperBinId - newLowerBinId;
-          const estimatedFeesUsd = (rangeWidth / 40) * 10;
-          const estimatedIlUsd = rangeWidth > 30 ? rangeWidth * 0.5 : 0;
+          // Fee estimate: proportional to pool's 24h fees, scaled by our range width
+          // A narrower range captures fewer fees but is more capital-efficient.
+          const feeCaptureRatio = Math.min(rangeWidth / 100, 1.0);
+          const estimatedFeesUsd = pool.fees24hUsd * feeCaptureRatio;
+
+          // IL estimate for rebalancing: small fixed cost (tx fees + temporary IL).
+          // The old heuristic (rangeWidth * 0.5) was wrong — rebalancing to center
+          // on the active bin eliminates OOR IL, it doesn't create new IL.
+          const estimatedIlUsd = 0.5;
+
           const netBenefitUsd = estimatedFeesUsd - estimatedIlUsd;
 
           return { estimatedIlUsd, estimatedFeesUsd, netBenefitUsd };
