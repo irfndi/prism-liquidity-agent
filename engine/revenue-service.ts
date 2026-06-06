@@ -1,45 +1,94 @@
-import { Effect, Context, Layer } from "effect";
+import { Layer } from "effect";
+import { RevenueService } from "./services.js";
 
-// Tier definitions
+// Tier definitions — based on wallet size and referral count
 export interface TierConfig {
   readonly name: string;
-  readonly maxFreeSol: number; // Max profit before fees kick in
-  readonly managementFeeRate: number; // Annual rate (e.g., 0.02 = 2%)
-  readonly performanceFeeRate: number; // Of profits above high watermark
-  readonly earlyRedemptionFeeRate: number; // Exit before lockup
-  readonly lockupDays: number;
-  readonly monthlyFeeSol: number; // Fixed monthly fee
+  readonly minWalletSol: number;
+  readonly minReferrals: number;
+  readonly platformFeeRate: number; // % of claimed LP fees
+  readonly managementFeeRate: number; // annual
+  readonly performanceFeeRate: number; // of profits
 }
 
 export const TIERS: Record<string, TierConfig> = {
   free: {
     name: "free",
-    maxFreeSol: 1.0,
+    minWalletSol: 0,
+    minReferrals: 0,
+    platformFeeRate: 0,
     managementFeeRate: 0,
     performanceFeeRate: 0,
-    earlyRedemptionFeeRate: 0,
-    lockupDays: 0,
-    monthlyFeeSol: 0,
   },
   pro: {
     name: "pro",
-    maxFreeSol: 10.0,
-    managementFeeRate: 0.02, // 2% annually
-    performanceFeeRate: 0.1, // 10% of profits
-    earlyRedemptionFeeRate: 0.05, // 5%
-    lockupDays: 30,
-    monthlyFeeSol: 0.5,
+    minWalletSol: 10,
+    minReferrals: 3,
+    platformFeeRate: 0.05, // 5%
+    managementFeeRate: 0.01, // 1% annual
+    performanceFeeRate: 0.05, // 5% of profits
   },
   fund: {
     name: "fund",
-    maxFreeSol: Number.MAX_SAFE_INTEGER,
-    managementFeeRate: 0.02, // 2% annually
-    performanceFeeRate: 0.2, // 20% of profits
-    earlyRedemptionFeeRate: 0.1, // 10%
-    lockupDays: 90,
-    monthlyFeeSol: 2.0,
+    minWalletSol: 100,
+    minReferrals: 10,
+    platformFeeRate: 0.1, // 10%
+    managementFeeRate: 0.015, // 1.5% annual
+    performanceFeeRate: 0.1, // 10% of profits
   },
 };
+
+export function calculateTier(
+  walletSol: number,
+  referralCount: number,
+): string {
+  const fund = TIERS.fund;
+  const pro = TIERS.pro;
+  if (!fund || !pro) return "free";
+  if (walletSol >= fund.minWalletSol || referralCount >= fund.minReferrals)
+    return "fund";
+  if (walletSol >= pro.minWalletSol || referralCount >= pro.minReferrals)
+    return "pro";
+  return "free";
+}
+
+// Calculate platform fee deduction from claimed fees
+export function calculatePlatformFee(
+  tier: string,
+  feeXAmount: number,
+  feeYAmount: number,
+  tokenPrices: { x: number; y: number },
+): { platformFeeUsd: number; netFeeX: number; netFeeY: number } {
+  const tierConfig = TIERS[tier];
+  if (!tierConfig) {
+    return { platformFeeUsd: 0, netFeeX: feeXAmount, netFeeY: feeYAmount };
+  }
+  const totalFeeUsd =
+    feeXAmount * tokenPrices.x + feeYAmount * tokenPrices.y;
+  const platformFeeUsd = totalFeeUsd * tierConfig.platformFeeRate;
+
+  const xShare =
+    totalFeeUsd > 0 ? (feeXAmount * tokenPrices.x) / totalFeeUsd : 0.5;
+  const yShare = 1 - xShare;
+
+  const platformFeeX = (platformFeeUsd * xShare) / tokenPrices.x;
+  const platformFeeY = (platformFeeUsd * yShare) / tokenPrices.y;
+
+  return {
+    platformFeeUsd,
+    netFeeX: Math.max(0, feeXAmount - platformFeeX),
+    netFeeY: Math.max(0, feeYAmount - platformFeeY),
+  };
+}
+
+// Calculate credit discount (max 50%)
+export function calculateCreditDiscount(
+  credits: number,
+  feeUsd: number,
+): number {
+  const maxDiscount = feeUsd * 0.5;
+  return Math.min(credits, maxDiscount);
+}
 
 // Revenue tracking state
 export interface RevenueState {
@@ -59,78 +108,8 @@ export interface FeeCalculation {
   readonly newHighWatermark: number;
 }
 
-export class RevenueService extends Context.Tag("RevenueService")<
-  RevenueService,
-  {
-    readonly calculateFees: (
-      state: RevenueState,
-      currentNav: number,
-      daysHeld: number,
-    ) => Effect.Effect<FeeCalculation, Error>;
-    readonly checkSubscription: (
-      userId: string,
-    ) => Effect.Effect<
-      { active: boolean; tier: string; expiresAt?: string },
-      Error
-    >;
-    readonly recordFeePayment: (
-      userId: string,
-      amount: number,
-      txSignature: string,
-    ) => Effect.Effect<void, Error>;
-  }
->() {}
-
-// Implementation
-const calculateFeesImpl = (
-  state: RevenueState,
-  currentNav: number,
-  daysHeld: number,
-): Effect.Effect<FeeCalculation, Error> =>
-  Effect.gen(function* () {
-    const tier = TIERS[state.tier];
-    if (!tier) {
-      return yield* Effect.fail(new Error(`Unknown tier: ${state.tier}`));
-    }
-
-    // Management fee: AUM * rate * (days / 365)
-    const managementFee =
-      currentNav * tier.managementFeeRate * (daysHeld / 365);
-
-    // Performance fee: only on profits above high watermark
-    const profitAboveHW = Math.max(0, currentNav - state.highWatermark);
-    const performanceFee = profitAboveHW * tier.performanceFeeRate;
-
-    // New high watermark
-    const newHighWatermark = Math.max(state.highWatermark, currentNav);
-
-    return {
-      managementFee,
-      performanceFee,
-      totalFee: managementFee + performanceFee,
-      newHighWatermark,
-    };
-  });
-
-const checkSubscriptionImpl = (
-  _userId: string,
-): Effect.Effect<
-  { active: boolean; tier: string; expiresAt?: string },
-  Error
-> =>
-  // TODO: Query D1 via Cloudflare Worker when Issue #16 is merged
-  Effect.succeed({ active: true, tier: "free" });
-
-const recordFeePaymentImpl = (
-  _userId: string,
-  _amount: number,
-  _txSignature: string,
-): Effect.Effect<void, Error> =>
-  // TODO: Record to D1 when Issue #16 is merged
-  Effect.void;
-
 export const RevenueLive = Layer.succeed(RevenueService, {
-  calculateFees: calculateFeesImpl,
-  checkSubscription: checkSubscriptionImpl,
-  recordFeePayment: recordFeePaymentImpl,
+  calculateTier,
+  calculatePlatformFee,
+  calculateCreditDiscount,
 });

@@ -633,7 +633,7 @@ export const AdapterLive = Layer.effect(
           };
         }),
 
-      claimFees: (poolAddress, positionPubKey) =>
+      claimFees: (poolAddress, positionPubKey, platformFeeUsd) =>
         Effect.gen(function* () {
           if (!wallet) {
             return yield* Effect.fail(
@@ -654,7 +654,15 @@ export const AdapterLive = Layer.effect(
             const feeY = Number(position.positionData.feeY.toString());
 
             if (feeX === 0 && feeY === 0) {
-              return { txSignature: "", feeX: 0, feeY: 0 };
+              return {
+                txSignature: "",
+                feeX: 0,
+                feeY: 0,
+                platformFeeX: 0,
+                platformFeeY: 0,
+                netFeeX: 0,
+                netFeeY: 0,
+              };
             }
 
             const txs = yield* Effect.tryPromise(() =>
@@ -681,7 +689,36 @@ export const AdapterLive = Layer.effect(
               lastSignature = signature;
             }
 
-            return { txSignature: lastSignature, feeX, feeY };
+            let platformFeeX = 0;
+            let platformFeeY = 0;
+            let netFeeX = feeX;
+            let netFeeY = feeY;
+
+            if (platformFeeUsd && platformFeeUsd > 0) {
+              // TODO: Get actual token prices from on-chain or Jupiter
+              const tokenXPrice = 1;
+              const tokenYPrice = 1;
+
+              const totalFeeUsd = feeX * tokenXPrice + feeY * tokenYPrice;
+              const platformFeeRatio = totalFeeUsd > 0 ? platformFeeUsd / totalFeeUsd : 0;
+
+              platformFeeX = feeX * platformFeeRatio;
+              platformFeeY = feeY * platformFeeRatio;
+              netFeeX = feeX - platformFeeX;
+              netFeeY = feeY - platformFeeY;
+
+              // TODO: Send platform fee to FEE_WALLET_ADDRESS (requires additional transaction)
+            }
+
+            return {
+              txSignature: lastSignature,
+              feeX,
+              feeY,
+              platformFeeX,
+              platformFeeY,
+              netFeeX,
+              netFeeY,
+            };
           } catch (err) {
             return yield* Effect.fail(
               new AdapterError({

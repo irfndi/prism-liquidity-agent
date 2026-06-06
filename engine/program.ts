@@ -8,6 +8,8 @@ import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
 import { ScreenerLive } from "./screener-service.js";
 import { DbLive } from "./db-service.js";
+import { RevenueLive } from "./revenue-service.js";
+import { ReferralLive } from "./referral-service.js";
 import type { PositionRecord } from "./db-service.js";
 import {
   AdapterService,
@@ -18,6 +20,8 @@ import {
   AuditService,
   ScreenerService,
   DbService,
+  RevenueService,
+  ReferralService,
 } from "./services.js";
 import type { AgentDecision, AgentCycle, PoolState } from "./types.js";
 import { randomUUID } from "crypto";
@@ -49,7 +53,9 @@ type AllServices =
   | BlacklistService
   | AuditService
   | ScreenerService
-  | DbService;
+  | DbService
+  | RevenueService
+  | ReferralService;
 
 export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, never> {
   const dbLayer = DbLive(cfg?.sqliteDbPath);
@@ -89,8 +95,10 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged6 = Layer.merge(merged5, audit);
   const merged7 = Layer.merge(merged6, screener);
   const merged8 = Layer.merge(merged7, configLayer);
+  const merged9 = Layer.merge(merged8, RevenueLive);
+  const merged10 = Layer.merge(merged9, ReferralLive);
 
-  return merged8 as Layer.Layer<AllServices, never, never>;
+  return merged10 as Layer.Layer<AllServices, never, never>;
 }
 
 // ─── Main program ────────────────────────────────────────────────────────────
@@ -105,6 +113,8 @@ export const program = Effect.gen(function* () {
   const audit = yield* AuditService;
   const screener = yield* ScreenerService;
   const db = yield* DbService;
+  const revenue = yield* RevenueService;
+  const referral = yield* ReferralService;
 
   // Load persisted positions at startup
   const allPositions = yield* db.getAllPositions().pipe(Effect.catchAll(() => Effect.succeed([])));
@@ -755,17 +765,48 @@ export const program = Effect.gen(function* () {
     Effect.gen(function* () {
       for (const [poolAddress, pos] of trackedPositions) {
         if (pos.positionPubKey && Date.now() - pos.lastFeeClaimAt > config.feeClaimIntervalMs) {
-          const result = yield* adapter.claimFees(poolAddress, pos.positionPubKey).pipe(
-            Effect.tap((r) =>
-              console.info("Fees claimed", {
-                pool: poolAddress,
-                feeX: r.feeX,
-                feeY: r.feeY,
-                tx: r.txSignature,
-              }),
-            ),
-            Effect.catchAll(() => Effect.succeed(null)),
+          const walletSol = 50;
+          const referralCount = yield* referral.getReferralCount("local_user").pipe(
+            Effect.catchAll(() => Effect.succeed(0)),
           );
+          const tier = revenue.calculateTier(walletSol, referralCount);
+          const credits = yield* referral.getUserCredits("local_user").pipe(
+            Effect.catchAll(() => Effect.succeed(0)),
+          );
+
+          const { platformFeeUsd } = revenue.calculatePlatformFee(
+            tier,
+            0,
+            0,
+            { x: 1, y: 1 },
+          );
+
+          const creditDiscount = revenue.calculateCreditDiscount(credits, platformFeeUsd);
+          const finalPlatformFee = Math.max(0, platformFeeUsd - creditDiscount);
+
+          if (creditDiscount > 0) {
+            yield* referral.deductCredits("local_user", creditDiscount, "platform_fee_discount").pipe(
+              Effect.catchAll(() => Effect.void),
+            );
+          }
+
+          const result = yield* adapter
+            .claimFees(poolAddress, pos.positionPubKey, finalPlatformFee)
+            .pipe(
+              Effect.tap((r) =>
+                console.info("Fees claimed", {
+                  pool: poolAddress,
+                  feeX: r.feeX,
+                  feeY: r.feeY,
+                  platformFeeX: r.platformFeeX,
+                  platformFeeY: r.platformFeeY,
+                  netFeeX: r.netFeeX,
+                  netFeeY: r.netFeeY,
+                  tx: r.txSignature,
+                }),
+              ),
+              Effect.catchAll(() => Effect.succeed(null)),
+            );
           if (result) {
             pos.lastFeeClaimAt = Date.now();
             yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));

@@ -58,6 +58,23 @@ const hashKey = async (key: string): Promise<string> => {
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 };
 
+// Helper to generate referral codes
+function generateReferralCode(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < 8; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return code;
+}
+
+// Tier configuration for subscription features
+const TIERS: Record<string, { platformFeeRate: number }> = {
+  free: { platformFeeRate: 0.01 },
+  pro: { platformFeeRate: 0.005 },
+  enterprise: { platformFeeRate: 0.0025 },
+};
+
 // Register handler
 const registerHandler = (db: D1Database) =>
   Effect.gen(function* () {
@@ -821,7 +838,210 @@ app.post("/v1/installs/ping", async (c) => {
   }
 });
 
-// Export handler for Cloudflare Workers
+app.get("/v1/referral/code", async (c) => {
+  const { DB } = c.env;
+  const apiKey = c.get("apiKey") as string;
+
+  if (!apiKey) {
+    return c.json({ error: "API key required" }, 401);
+  }
+
+  try {
+    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+    const userId = (loginResult as { id: string }).id;
+
+    let result = await DB.prepare("SELECT code FROM referral_codes WHERE user_id = ?")
+      .bind(userId)
+      .first();
+
+    if (!result) {
+      const code = generateReferralCode();
+      await DB.prepare("INSERT INTO referral_codes (code, user_id) VALUES (?, ?)")
+        .bind(code, userId)
+        .run();
+      result = { code };
+    }
+
+    const countResult = await DB.prepare(
+      "SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?",
+    )
+      .bind(userId)
+      .first();
+
+    return c.json({
+      code: result.code,
+      referralCount: countResult?.count ?? 0,
+    });
+  } catch {
+    return c.json({ error: "Failed to get referral code" }, 500);
+  }
+});
+
+app.post("/v1/referral/apply", async (c) => {
+  const { DB } = c.env;
+  const apiKey = c.get("apiKey") as string;
+  const body = (await c.req.json().catch(() => ({}))) as { code?: string };
+
+  if (!apiKey) {
+    return c.json({ error: "API key required" }, 401);
+  }
+
+  if (!body.code) {
+    return c.json({ error: "Code required" }, 400);
+  }
+
+  try {
+    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+    const userId = (loginResult as { id: string }).id;
+
+    const codeResult = await DB.prepare("SELECT user_id FROM referral_codes WHERE code = ?")
+      .bind(body.code)
+      .first();
+
+    if (!codeResult) {
+      return c.json({ error: "Invalid referral code" }, 400);
+    }
+
+    if (codeResult.user_id === userId) {
+      return c.json({ error: "Cannot refer yourself" }, 400);
+    }
+
+    const existing = await DB.prepare("SELECT id FROM referrals WHERE referee_user_id = ?")
+      .bind(userId)
+      .first();
+
+    if (existing) {
+      return c.json({ error: "Already referred" }, 400);
+    }
+
+    const referralId = generateId();
+    await DB.prepare(
+      "INSERT INTO referrals (id, referrer_user_id, referee_user_id, referral_code) VALUES (?, ?, ?, ?)",
+    )
+      .bind(referralId, codeResult.user_id, userId, body.code)
+      .run();
+
+    await DB.prepare(
+      "INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)",
+    )
+      .bind(generateId(), codeResult.user_id, 5, "referral_bonus")
+      .run();
+
+    await DB.prepare(
+      "INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)",
+    )
+      .bind(generateId(), userId, 10, "referee_bonus")
+      .run();
+
+    const countResult = await DB.prepare(
+      "SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?",
+    )
+      .bind(codeResult.user_id)
+      .first();
+
+    const referralCount = countResult?.count ?? 0;
+    let milestoneBonus = 0;
+
+    if (referralCount === 5) milestoneBonus = 25;
+    else if (referralCount === 10) milestoneBonus = 50;
+
+    if (milestoneBonus > 0) {
+      await DB.prepare(
+        "INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)",
+      )
+        .bind(generateId(), codeResult.user_id, milestoneBonus, `milestone_${referralCount}`)
+        .run();
+    }
+
+    return c.json({ success: true, credits: 10 });
+  } catch {
+    return c.json({ error: "Failed to apply referral" }, 500);
+  }
+});
+
+app.get("/v1/referral/stats", async (c) => {
+  const { DB } = c.env;
+  const apiKey = c.get("apiKey") as string;
+
+  if (!apiKey) {
+    return c.json({ error: "API key required" }, 401);
+  }
+
+  try {
+    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+    const userId = (loginResult as { id: string }).id;
+
+    const countResult = await DB.prepare(
+      "SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?",
+    )
+      .bind(userId)
+      .first();
+
+    const creditsResult = await DB.prepare(
+      "SELECT COALESCE(SUM(amount), 0) as total FROM user_credits WHERE user_id = ?",
+    )
+      .bind(userId)
+      .first();
+
+    const referralCount = (countResult as { count?: number })?.count ?? 0;
+    let milestone: string | null = null;
+    if (referralCount >= 10) milestone = "10 referrals - $50 bonus!";
+    else if (referralCount >= 5) milestone = "5 referrals - $25 bonus!";
+
+    return c.json({
+      referralCount,
+      credits: (creditsResult as { total?: number })?.total ?? 0,
+      milestone,
+    });
+  } catch {
+    return c.json({ error: "Failed to get referral stats" }, 500);
+  }
+});
+
+app.get("/v1/subscription/status", async (c) => {
+  const { DB } = c.env;
+  const apiKey = c.get("apiKey") as string;
+
+  if (!apiKey) {
+    return c.json({ error: "API key required" }, 401);
+  }
+
+  try {
+    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+    const userId = (loginResult as { id: string }).id;
+
+    const userResult = await DB.prepare("SELECT tier FROM users WHERE id = ?")
+      .bind(userId)
+      .first();
+
+    const tier = (userResult as { tier?: string })?.tier ?? "free";
+
+    const countResult = await DB.prepare(
+      "SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?",
+    )
+      .bind(userId)
+      .first();
+
+    const creditsResult = await DB.prepare(
+      "SELECT COALESCE(SUM(amount), 0) as total FROM user_credits WHERE user_id = ?",
+    )
+      .bind(userId)
+      .first();
+
+    const tierConfig = TIERS[tier as keyof typeof TIERS];
+
+    return c.json({
+      tier,
+      walletSol: 0,
+      referralCount: (countResult as { count?: number })?.count ?? 0,
+      credits: (creditsResult as { total?: number })?.total ?? 0,
+      platformFeeRate: tierConfig?.platformFeeRate ?? 0,
+    });
+  } catch {
+    return c.json({ error: "Failed to get subscription status" }, 500);
+  }
+});
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     return app.fetch(request, env, ctx);

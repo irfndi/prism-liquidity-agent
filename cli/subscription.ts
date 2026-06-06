@@ -2,6 +2,7 @@ import { Command } from "commander";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { prismApiGet } from "./api.js";
 
 const CREDENTIALS_FILE = path.join(os.homedir(), ".config", "prism", "credentials.json");
 
@@ -62,27 +63,38 @@ export const subscriptionCommand = new Command("subscription")
   .addCommand(
     new Command("status")
       .description("Show current tier and usage")
-      .action(() => {
+      .action(async () => {
         const creds = getCredentials();
         if (!creds) {
           console.error("Error: Not registered. Run 'prism register' first.");
           process.exit(1);
         }
 
-        // TODO: Fetch real subscription data from Cloudflare Worker
-        const currentTier = "free";
-        const info = TIER_INFO[currentTier];
+        const result = await prismApiGet<{
+          tier: string;
+          walletSol: number;
+          referralCount: number;
+          credits: number;
+          platformFeeRate: number;
+        }>("/v1/subscription/status", { apiKey: creds.apiKey });
+
+        if (!result.ok || !result.data) {
+          console.error("Error: Failed to fetch subscription status");
+          if (result.error) console.error(`  ${result.error}`);
+          process.exit(1);
+        }
+
+        const { tier, walletSol, referralCount, credits, platformFeeRate } = result.data;
+        const info = TIER_INFO[tier] ?? TIER_INFO.free;
 
         console.log(`Tier: ${info.name}`);
-        console.log(`Max profit: ${info.maxProfit}`);
-        console.log(`Monthly fee: ${info.monthlyFee}`);
+        console.log(`Wallet: ${walletSol.toFixed(2)} SOL`);
+        console.log(`Referrals: ${referralCount}`);
+        console.log(`Credits: $${credits}`);
+        console.log(`Platform fee: ${(platformFeeRate * 100).toFixed(0)}%`);
         console.log("");
         console.log("Features:");
         info.features.forEach((f) => { console.log(`  • ${f}`); });
-        console.log("");
-        console.log("Usage: 0 SOL (0%)");
-        console.log("High watermark: 0 SOL");
-        console.log("Total fees paid: 0 SOL");
       }),
   )
   .addCommand(

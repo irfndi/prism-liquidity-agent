@@ -71,7 +71,19 @@ export interface AdapterApi {
   readonly claimFees: (
     poolAddress: string,
     positionPubKey: string,
-  ) => Effect.Effect<{ txSignature: string; feeX: number; feeY: number }, unknown>;
+    platformFeeUsd?: number,
+  ) => Effect.Effect<
+    {
+      txSignature: string;
+      feeX: number;
+      feeY: number;
+      platformFeeX: number;
+      platformFeeY: number;
+      netFeeX: number;
+      netFeeY: number;
+    },
+    unknown
+  >;
   readonly discoverPools: () => Effect.Effect<
     ReadonlyArray<{
       address: string;
@@ -540,4 +552,47 @@ export interface FeedbackApi {
 export class FeedbackService extends Context.Tag("FeedbackService")<
   FeedbackService,
   FeedbackApi
+>() {}
+
+// ─── Referral Service ───────────────────────────────────────────────────────
+
+export interface ReferralApi {
+  readonly generateCode: (userId: string) => Effect.Effect<string, Error>;
+  readonly validateCode: (code: string) => Effect.Effect<{ valid: boolean; referrerId?: string }, Error>;
+  readonly applyReferral: (code: string, refereeId: string) => Effect.Effect<void, Error>;
+  readonly getReferralCount: (userId: string) => Effect.Effect<number, Error>;
+  readonly getUserCredits: (userId: string) => Effect.Effect<number, Error>;
+  readonly addCredits: (
+    userId: string,
+    amount: number,
+    reason: string,
+  ) => Effect.Effect<void, Error>;
+  readonly deductCredits: (
+    userId: string,
+    amount: number,
+    reason: string,
+  ) => Effect.Effect<void, Error>;
+}
+
+export class ReferralService extends Context.Tag("ReferralService")<
+  ReferralService,
+  ReferralApi
+>() {}
+
+// ─── Revenue Service ────────────────────────────────────────────────────────
+
+export interface RevenueApi {
+  readonly calculateTier: (walletSol: number, referralCount: number) => string;
+  readonly calculatePlatformFee: (
+    tier: string,
+    feeXAmount: number,
+    feeYAmount: number,
+    tokenPrices: { x: number; y: number },
+  ) => { platformFeeUsd: number; netFeeX: number; netFeeY: number };
+  readonly calculateCreditDiscount: (credits: number, feeUsd: number) => number;
+}
+
+export class RevenueService extends Context.Tag("RevenueService")<
+  RevenueService,
+  RevenueApi
 >() {}

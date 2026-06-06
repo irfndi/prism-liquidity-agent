@@ -13,6 +13,7 @@ import { backtestCommand } from "./backtest.js";
 import { updateCommand } from "./update.js";
 import { versionCommand } from "./version.js";
 import { feedbackCommand } from "./feedback.js";
+import { referralCommand } from "./referral.js";
 import { getCurrentVersion } from "../engine/version.js";
 
 const program = new Command();
@@ -36,5 +37,6 @@ program.addCommand(backtestCommand);
 program.addCommand(updateCommand);
 program.addCommand(versionCommand);
 program.addCommand(feedbackCommand);
+program.addCommand(referralCommand);
 
 await program.parseAsync();

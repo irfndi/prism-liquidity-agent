@@ -259,6 +259,41 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       `);
     },
   },
+  {
+    version: 8,
+    name: "referral_tables",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS referral_codes (
+          code TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          expires_at INTEGER
+        )
+      `);
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS referral_uses (
+          id TEXT PRIMARY KEY,
+          code TEXT NOT NULL,
+          used_by TEXT NOT NULL UNIQUE,
+          used_at INTEGER NOT NULL DEFAULT (unixepoch())
+        )
+      `);
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS user_credits (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          amount REAL NOT NULL,
+          reason TEXT NOT NULL,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          expires_at INTEGER
+        )
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_referral_codes_user ON referral_codes(user_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_referral_uses_code ON referral_uses(code)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_user_credits_user ON user_credits(user_id)`);
+    },
+  },
 ];
 
 function runMigrations(db: Database) {
