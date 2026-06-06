@@ -74,7 +74,7 @@ prism link-telegram   # generates 6-char code
 
 ## Prerequisites
 
-- **Bun 1.2+** — [Install Bun](https://bun.sh/docs/installation) (the one-liner installer can do this for you)
+- **Bun 1.4.0+** — [Install Bun](https://bun.sh/docs/installation) (the one-liner installer can do this for you)
 - **Git** — for cloning the repository
 - **Solana wallet** (optional) — only needed for live trading; paper trading works without one
 - **Helius API key** (REQUIRED) — [Get one free at Helius](https://helius.xyz/)

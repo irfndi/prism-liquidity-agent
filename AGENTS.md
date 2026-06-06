@@ -35,7 +35,7 @@ prism dev                                         # start paper trading
 
 ## Stack
 
-- **Runtime**: Bun 1.2+ (dev, tests, build). Node 20+ for Docker.
+- **Runtime**: Bun 1.4.0+ (dev, tests, build). Node 20+ for Docker.
 - **Language**: TypeScript with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`. Easy to trip over — read errors carefully.
 - **Framework**: [Effect-TS](https://effect.website) for DI (`Context.Tag` + `Layer`). No MCP server, no Anthropic SDK calls in the hot path.
 - **Storage (engine)**: SQLite via `bun:sqlite` + `sqlite-vec` (NOT Chroma — see _Things docs get wrong_).
@@ -384,7 +384,7 @@ When the limit is hit, `submit` returns `{ kind: "rate_limited", reason: "..." }
 **Version:** 1.2.3
 **Platform:** linux-x64
 **Install method:** curl
-**Runtime:** bun 1.3.14
+**Runtime:** bun 1.4.0
 
 ### Summary
 

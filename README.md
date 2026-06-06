@@ -157,7 +157,7 @@ Decisions pass through checks in order before any on-chain action:
 
 ## Stack
 
-- **Runtime**: Bun 1.2
+- **Runtime**: Bun 1.4.0
 - **Strategy**: Rule-based engine with DLMM probes
 - **Memory**: SQLite + sqlite-vec, 30-day recency decay
 - **On-chain**: `@meteora-ag/dlmm` SDK, Helius RPC

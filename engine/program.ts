@@ -561,6 +561,16 @@ export const program = Effect.gen(function* () {
         trackedPositions.set(decision.poolAddress, pos);
         yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
       } else if (decision.action === "EXIT") {
+        const pos = trackedPositions.get(decision.poolAddress);
+        if (pos?.positionPubKey) {
+          // Live position — paper trading must not "exit" it without an on-chain tx.
+          // Skip and warn so the user can switch to live mode to actually close it.
+          console.warn(
+            `[PAPER] Skipping EXIT for ${decision.poolAddress} — this is a live position ` +
+              `(pubKey: ${pos.positionPubKey}). Switch to live mode to close it on-chain.`,
+          );
+          return false;
+        }
         yield* db.markPaperExited(decision.poolAddress).pipe(Effect.catchAll(() => Effect.void));
         trackedPositions.delete(decision.poolAddress);
       } else if (

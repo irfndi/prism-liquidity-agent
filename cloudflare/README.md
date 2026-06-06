@@ -39,7 +39,7 @@ cloudflare/
 ### Prerequisites
 
 ```bash
-# Required: Bun 1.2+
+# Required: Bun 1.4.0+
 curl -fsSL https://bun.sh/install | bash
 
 # Required: wrangler CLI v4+

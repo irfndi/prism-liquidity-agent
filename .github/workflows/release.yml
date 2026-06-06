@@ -10,6 +10,10 @@ on:
 env:
   HAS_GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY != '' }}
 
+permissions:
+  contents: write
+  packages: read
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -29,7 +33,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun install
@@ -93,7 +97,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz" --file "prism-v${VERSION}.tar.gz"
+          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz" --file "prism-v${VERSION}.tar.gz" --remote
 
       - name: Upload SHA-256 to R2
         env:
@@ -101,7 +105,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz.sha256" --file "prism-v${VERSION}.tar.gz.sha256"
+          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz.sha256" --file "prism-v${VERSION}.tar.gz.sha256" --remote
 
       - name: Upload GPG signature to R2
         if: env.HAS_GPG_KEY == 'true'
@@ -110,7 +114,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz.asc" --file "prism-v${VERSION}.tar.gz.asc"
+          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz.asc" --file "prism-v${VERSION}.tar.gz.asc" --remote
 
       - name: Update latest.json manifest (stable channel only)
         if: "!contains(github.ref, '-beta') && !contains(github.ref, '-dev')"
@@ -132,7 +136,7 @@ jobs:
           }
           EOF
           cat latest.json
-          npx wrangler r2 object put "prism-backups/releases/latest.json" --file latest.json
+          npx wrangler r2 object put "prism-backups/releases/latest.json" --file latest.json --remote
 
       - name: Update beta channel manifest
         if: contains(github.ref, '-beta')
@@ -154,7 +158,7 @@ jobs:
           }
           EOF
           # Path must match R2_MANIFEST_PATHS.beta in engine/update-utils.ts
-          npx wrangler r2 object put "prism-backups/releases/channel/beta.json" --file beta.json
+          npx wrangler r2 object put "prism-backups/releases/channel/beta.json" --file beta.json --remote
 
       - name: Update dev channel manifest
         if: contains(github.ref, '-dev')
@@ -176,7 +180,7 @@ jobs:
           }
           EOF
           # Path must match R2_MANIFEST_PATHS.dev in engine/update-utils.ts
-          npx wrangler r2 object put "prism-backups/releases/channel/dev.json" --file dev.json
+          npx wrangler r2 object put "prism-backups/releases/channel/dev.json" --file dev.json --remote
 
       - name: Create GitHub Release (optional, for visibility)
         env:

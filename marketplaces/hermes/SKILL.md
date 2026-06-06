@@ -24,7 +24,7 @@ Use this skill when the user wants to install Prism for automated liquidity mana
 
 ## Prerequisites
 
-- Bun 1.2+ (auto-installed if missing)
+- Bun 1.4.0+ (auto-installed if missing)
 - Helius API key (get one at https://helius.dev)
 
 ## Installation Steps
