@@ -54,33 +54,9 @@ const applyReferralImpl = (
 const getReferralCountImpl = (_userId: string): Effect.Effect<number, Error> =>
   Effect.succeed(0);
 
-const getUserCreditsImpl = (_userId: string): Effect.Effect<number, Error> =>
-  Effect.succeed(0);
-
-const addCreditsImpl = (
-  userId: string,
-  amount: number,
-  reason: string,
-): Effect.Effect<void, Error> =>
-  Effect.sync(() => {
-    console.info("Added credits", { userId, amount, reason });
-  });
-
-const deductCreditsImpl = (
-  userId: string,
-  amount: number,
-  reason: string,
-): Effect.Effect<void, Error> =>
-  Effect.sync(() => {
-    console.info("Deducted credits", { userId, amount, reason });
-  });
-
 export const ReferralLive = Layer.succeed(ReferralService, {
   generateCode: generateCodeImpl,
   validateCode: validateCodeImpl,
   applyReferral: applyReferralImpl,
   getReferralCount: getReferralCountImpl,
-  getUserCredits: getUserCreditsImpl,
-  addCredits: addCreditsImpl,
-  deductCredits: deductCreditsImpl,
 } satisfies ReferralApi);
