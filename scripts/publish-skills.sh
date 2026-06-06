@@ -119,7 +119,7 @@ main() {
   echo "Next steps:"
   echo "  1. Verify packages on npmjs.com and pypi.org"
   echo "  2. Update marketplaces/README.md with published versions"
-  echo "  3. Tag release: git tag -a v$(node -p \"require('./package.json').version\") -m \"Release v$(node -p \"require('./package.json').version\")\""
+  echo "  3. Tag release: git tag -a v$(node -p 'require("./package.json").version') -m \"Release v$(node -p 'require("./package.json").version')\""
 }
 
 main "$@"

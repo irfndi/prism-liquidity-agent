@@ -86,7 +86,10 @@ def _find_prism_binary() -> str:
     if on_path:
         return on_path
 
-    return "prism"
+    raise FileNotFoundError(
+        "prism CLI not found. Install Prism first: "
+        "curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash"
+    )
 
 
 def run_prism(

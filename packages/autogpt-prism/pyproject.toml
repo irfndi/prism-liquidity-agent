@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "auto-gpt-plugin-template>=0.1.0",
+    "auto-gpt-plugin-template>=0.0.3",
 ]
 
 [project.optional-dependencies]
