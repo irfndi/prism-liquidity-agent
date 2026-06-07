@@ -1,245 +1,206 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { Effect, Layer } from "effect";
 import { AdapterService, DbService } from "../engine/services.js";
 import { DbLive } from "../engine/db-service.js";
+import { reconcilePositions } from "../engine/program.js";
+import type { AdapterApi, DbApi, MemoryApi } from "../engine/services.js";
+import type { PositionRecord } from "../engine/db-service.js";
 
 function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
   return Effect.runSync((Effect.provide as any)(effect, layer));
 }
 
-describe("Position reconciliation — adapter API", () => {
-  it("AdapterApi exposes getAllWalletPositions", () => {
-    const mockAdapter = {
-      hasWallet: () => true,
-      getWalletAddress: () => "Wallet111111111111111111111111111111111111111",
-      getWalletBalanceUsd: () => Effect.succeed(0),
-      getNativeSolBalance: () => Effect.succeed(0),
-      getPoolState: () => Effect.fail("not implemented"),
-      getBinArray: () => Effect.fail("not implemented"),
-      getPositions: () => Effect.succeed([]),
-      getAllWalletPositions: () =>
-        Effect.succeed([
-          {
-            poolAddress: "Pool111111111111111111111111111111111111111",
-            positionPubKey: "Pos1111111111111111111111111111111111111111",
-            lowerBinId: 4980,
-            upperBinId: 5020,
-          },
-        ]),
-      simulateRebalance: () => Effect.fail("not implemented"),
-      enterPosition: () => Effect.fail("not implemented"),
-      exitPosition: () => Effect.fail("not implemented"),
-      rebalancePosition: () => Effect.fail("not implemented"),
-      claimFees: () => Effect.fail("not implemented"),
-      discoverPools: () => Effect.succeed([]),
-      reportFeeCollection: () => {},
-      swapUSDCForSOL: () => Effect.void,
-    };
+function makeMockAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
+  return {
+    hasWallet: () => true,
+    getWalletAddress: () => "Wallet111111111111111111111111111111111111111",
+    getWalletBalanceUsd: () => Effect.succeed(0),
+    getNativeSolBalance: () => Effect.succeed(0),
+    getPoolState: () => Effect.fail("not implemented"),
+    getBinArray: () => Effect.fail("not implemented"),
+    getPositions: () => Effect.succeed([]),
+    getAllWalletPositions: () => Effect.succeed([]),
+    simulateRebalance: () => Effect.fail("not implemented"),
+    enterPosition: () => Effect.fail("not implemented"),
+    exitPosition: () => Effect.fail("not implemented"),
+    rebalancePosition: () => Effect.fail("not implemented"),
+    claimFees: () => Effect.fail("not implemented"),
+    discoverPools: () => Effect.succeed([]),
+    reportFeeCollection: () => {},
+    swapUSDCForSOL: () => Effect.void,
+    ...overrides,
+  };
+}
 
-    const layer = Layer.succeed(AdapterService, mockAdapter);
+function makeMockMemory(): MemoryApi {
+  return {
+    initialize: () => Effect.void,
+    upsert: () => Effect.void,
+    getRelevantContext: () => Effect.succeed([]),
+    pruneExpired: () => Effect.succeed(0),
+    recordOutcome: () => Effect.void,
+  };
+}
 
-    const result = run(
-      Effect.gen(function* () {
-        const adapter = yield* AdapterService;
-        const positions = yield* adapter.getAllWalletPositions("wallet");
-        return positions;
-      }),
-      layer,
-    );
+function makePosition(poolAddress: string, positionPubKey: string | null): PositionRecord {
+  return {
+    poolAddress,
+    positionPubKey,
+    depositedUsd: 1000,
+    currentValueUsd: 1000,
+    tokenXSymbol: "SOL",
+    tokenYSymbol: "USDC",
+    activeBinId: 5000,
+    lowerBinId: 4980,
+    upperBinId: 5020,
+    timestamp: Date.now(),
+    outOfRangeSince: null,
+    oorCycleCount: 0,
+    lastFeeClaimAt: Date.now(),
+    trailingStopThreshold: null,
+    highestValueUsd: null,
+    lastRebalanceAt: 0,
+    paperExitedAt: null,
+  };
+}
 
-    expect(result).toHaveLength(1);
-    const first = result[0];
-    expect(first).toBeDefined();
-    if (first) {
-      expect(first.poolAddress).toBe("Pool111111111111111111111111111111111111111");
-      expect(first.positionPubKey).toBe("Pos1111111111111111111111111111111111111111");
-    }
-  });
-
-  it("getAllWalletPositions returns empty array when no positions", () => {
-    const mockAdapter = {
-      hasWallet: () => true,
-      getWalletAddress: () => "wallet",
-      getWalletBalanceUsd: () => Effect.succeed(0),
-      getNativeSolBalance: () => Effect.succeed(0),
-      getPoolState: () => Effect.fail("not implemented"),
-      getBinArray: () => Effect.fail("not implemented"),
-      getPositions: () => Effect.succeed([]),
-      getAllWalletPositions: () => Effect.succeed([]),
-      simulateRebalance: () => Effect.fail("not implemented"),
-      enterPosition: () => Effect.fail("not implemented"),
-      exitPosition: () => Effect.fail("not implemented"),
-      rebalancePosition: () => Effect.fail("not implemented"),
-      claimFees: () => Effect.fail("not implemented"),
-      discoverPools: () => Effect.succeed([]),
-      reportFeeCollection: () => {},
-      swapUSDCForSOL: () => Effect.void,
-    };
-
-    const layer = Layer.succeed(AdapterService, mockAdapter);
-
-    const result = run(
-      Effect.gen(function* () {
-        const adapter = yield* AdapterService;
-        return yield* adapter.getAllWalletPositions("wallet");
-      }),
-      layer,
-    );
-
-    expect(result).toHaveLength(0);
-  });
-
-  it("does not delete positions on RPC failure (returns null, not empty)", () => {
-    const mockAdapter = {
-      hasWallet: () => true,
-      getWalletAddress: () => "wallet",
-      getWalletBalanceUsd: () => Effect.succeed(0),
-      getNativeSolBalance: () => Effect.succeed(0),
-      getPoolState: () => Effect.fail("not implemented"),
-      getBinArray: () => Effect.fail("not implemented"),
-      getPositions: () => Effect.fail("RPC timeout"),
-      getAllWalletPositions: () => Effect.fail("RPC timeout"),
-      simulateRebalance: () => Effect.fail("not implemented"),
-      enterPosition: () => Effect.fail("not implemented"),
-      exitPosition: () => Effect.fail("not implemented"),
-      rebalancePosition: () => Effect.fail("not implemented"),
-      claimFees: () => Effect.fail("not implemented"),
-      discoverPools: () => Effect.succeed([]),
-      reportFeeCollection: () => {},
-      swapUSDCForSOL: () => Effect.void,
-    };
-
-    const layer = Layer.succeed(AdapterService, mockAdapter);
-    let loggedError = false;
-    const originalError = console.error;
-    console.error = (...args: unknown[]) => {
-      if (args[0] === "Reconcile: failed to fetch on-chain positions — skipping") {
-        loggedError = true;
-      }
-    };
-
-    try {
-      run(
-        Effect.gen(function* () {
-          const adapter = yield* AdapterService;
-          const result = yield* adapter
-            .getAllWalletPositions("wallet")
-            .pipe(Effect.catchAll(() => Effect.succeed(null)));
-          return result;
-        }),
-        layer,
-      );
-    } finally {
-      console.error = originalError;
-    }
-
-    expect(loggedError).toBe(false);
-  });
-});
-
-describe("Position reconciliation — DB operations", () => {
-  it("deletes a tracked position from DB", () => {
-    const layer = DbLive(":memory:");
+describe("reconcilePositions — integration", () => {
+  it("removes tracked positions that no longer exist on-chain", () => {
+    const dbLayer = DbLive(":memory:");
 
     run(
       Effect.gen(function* () {
         const db = yield* DbService;
-        yield* db.savePosition({
-          poolAddress: "pool1",
-          positionPubKey: "pubkey1",
-          depositedUsd: 1000,
-          currentValueUsd: 1000,
-          tokenXSymbol: "SOL",
-          tokenYSymbol: "USDC",
-          activeBinId: 5000,
-          lowerBinId: 4980,
-          upperBinId: 5020,
-          timestamp: Date.now(),
-          outOfRangeSince: null,
-          oorCycleCount: 0,
-          lastFeeClaimAt: Date.now(),
-          trailingStopThreshold: null,
-          highestValueUsd: null,
-          lastRebalanceAt: 0,
-          paperExitedAt: null,
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () => Effect.succeed([]),
         });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+        trackedPositions.set("pool1", makePosition("pool1", "pubkey1"));
+        trackedPositions.set("pool2", makePosition("pool2", "pubkey2"));
 
-        const before = yield* db.getAllPositions();
-        expect(before).toHaveLength(1);
+        yield* db.savePosition(makePosition("pool1", "pubkey1"));
+        yield* db.savePosition(makePosition("pool2", "pubkey2"));
 
-        yield* db.deletePosition("pool1");
+        yield* reconcilePositions(adapter, db, memory, trackedPositions, ["pool1", "pool2"]);
 
-        const after = yield* db.getAllPositions();
-        expect(after).toHaveLength(0);
+        expect(trackedPositions.has("pool1")).toBe(false);
+        expect(trackedPositions.has("pool2")).toBe(false);
+
+        const all = yield* db.getAllPositions();
+        expect(all).toHaveLength(0);
       }),
-      layer,
+      dbLayer,
     );
   });
 
-  it("distinguishes tracked vs paper-exited positions", () => {
-    const layer = DbLive(":memory:");
+  it("does not delete positions on RPC failure", () => {
+    const dbLayer = DbLive(":memory:");
 
     run(
       Effect.gen(function* () {
         const db = yield* DbService;
-
-        yield* db.savePosition({
-          poolAddress: "pool-active",
-          positionPubKey: "pubkey1",
-          depositedUsd: 1000,
-          currentValueUsd: 1000,
-          tokenXSymbol: "SOL",
-          tokenYSymbol: "USDC",
-          activeBinId: 5000,
-          lowerBinId: 4980,
-          upperBinId: 5020,
-          timestamp: Date.now(),
-          outOfRangeSince: null,
-          oorCycleCount: 0,
-          lastFeeClaimAt: Date.now(),
-          trailingStopThreshold: null,
-          highestValueUsd: null,
-          lastRebalanceAt: 0,
-          paperExitedAt: null,
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () => Effect.fail("RPC timeout"),
         });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+        trackedPositions.set("pool1", makePosition("pool1", "pubkey1"));
 
-        yield* db.savePosition({
-          poolAddress: "pool-exited",
-          positionPubKey: "pubkey2",
-          depositedUsd: 500,
-          currentValueUsd: 500,
-          tokenXSymbol: "SOL",
-          tokenYSymbol: "USDC",
-          activeBinId: 5000,
-          lowerBinId: 4980,
-          upperBinId: 5020,
-          timestamp: Date.now(),
-          outOfRangeSince: null,
-          oorCycleCount: 0,
-          lastFeeClaimAt: Date.now(),
-          trailingStopThreshold: null,
-          highestValueUsd: null,
-          lastRebalanceAt: 0,
-          paperExitedAt: Date.now(),
-        });
+        yield* db.savePosition(makePosition("pool1", "pubkey1"));
+
+        yield* reconcilePositions(adapter, db, memory, trackedPositions, ["pool1"]);
+
+        expect(trackedPositions.has("pool1")).toBe(true);
 
         const all = yield* db.getAllPositions();
         expect(all).toHaveLength(1);
-        const active = all[0];
-        expect(active).toBeDefined();
-        if (active) {
-          expect(active.poolAddress).toBe("pool-active");
-        }
+      }),
+      dbLayer,
+    );
+  });
 
-        const exited = yield* db.getPaperExitedPositions();
-        expect(exited).toHaveLength(1);
-        const firstExited = exited[0];
-        expect(firstExited).toBeDefined();
-        if (firstExited) {
-          expect(firstExited.poolAddress).toBe("pool-exited");
+  it("discovers external positions in watched pools", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () =>
+            Effect.succeed([
+              {
+                poolAddress: "external-pool",
+                positionPubKey: "external-pubkey",
+                lowerBinId: 4980,
+                upperBinId: 5020,
+              },
+            ]),
+          getPoolState: () =>
+            Effect.succeed({
+              address: "external-pool",
+              tokenX: "SOL",
+              tokenY: "USDC",
+              tokenXSymbol: "SOL",
+              tokenYSymbol: "USDC",
+              tvlUsd: 100_000,
+              volume24hUsd: 30_000,
+              fees24hUsd: 300,
+              apr: 60,
+              activeBinId: 5000,
+              binStep: 10,
+              currentPrice: 150,
+              timestamp: Date.now(),
+            }),
+        });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+
+        yield* reconcilePositions(adapter, db, memory, trackedPositions, ["external-pool"]);
+
+        expect(trackedPositions.has("external-pool")).toBe(true);
+
+        const all = yield* db.getAllPositions();
+        expect(all).toHaveLength(1);
+        const first = all[0];
+        expect(first).toBeDefined();
+        if (first) {
+          expect(first.poolAddress).toBe("external-pool");
+          expect(first.positionPubKey).toBe("external-pubkey");
         }
       }),
-      layer,
+      dbLayer,
+    );
+  });
+
+  it("skips discovery for pools not in watchlist", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () =>
+            Effect.succeed([
+              {
+                poolAddress: "unwatched-pool",
+                positionPubKey: "external-pubkey",
+                lowerBinId: 4980,
+                upperBinId: 5020,
+              },
+            ]),
+        });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+
+        yield* reconcilePositions(adapter, db, memory, trackedPositions, ["watched-pool"]);
+
+        expect(trackedPositions.has("unwatched-pool")).toBe(false);
+
+        const all = yield* db.getAllPositions();
+        expect(all).toHaveLength(0);
+      }),
+      dbLayer,
     );
   });
 });
