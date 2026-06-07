@@ -957,7 +957,7 @@ export const AdapterLive = Layer.effect(
             };
 
             const swapResponse = yield* Effect.tryPromise(() =>
-              fetch("https://api.jup.ag/swap/v1/swap-instructions", {
+              fetch("https://api.jup.ag/swap/v1/swap", {
                 method: "POST",
                 headers,
                 body: JSON.stringify({
