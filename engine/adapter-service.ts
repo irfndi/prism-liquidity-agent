@@ -73,6 +73,7 @@ export const AdapterLive = Layer.effect(
 
     let cachedFeeWallet: { address: string; expiresAt: number } | null = null;
     const FEE_WALLET_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+    const FEE_WALLET_API_URL = "https://prism-api.irfndi.workers.dev";
 
     function fetchFeeWalletAddress(): Effect.Effect<string, never> {
       return Effect.gen(function* () {
@@ -81,26 +82,23 @@ export const AdapterLive = Layer.effect(
           return cachedFeeWallet.address;
         }
 
-        // Try API
-        if (config.feeWalletApiUrl) {
-          const res = yield* Effect.tryPromise(() =>
-            fetch(`${config.feeWalletApiUrl}/v1/fee-wallet`),
-          );
-          if (res.ok) {
-            const data = (yield* Effect.tryPromise(() => res.json())) as { address?: string };
-            if (data.address) {
-              cachedFeeWallet = {
-                address: data.address,
-                expiresAt: Date.now() + FEE_WALLET_CACHE_TTL_MS,
-              };
-              return data.address;
-            }
+        // Always fetch from API — users cannot override the fee wallet
+        const res = yield* Effect.tryPromise(() =>
+          fetch(`${FEE_WALLET_API_URL}/v1/fee-wallet`),
+        );
+        if (res.ok) {
+          const data = (yield* Effect.tryPromise(() => res.json())) as { address?: string };
+          if (data.address) {
+            cachedFeeWallet = {
+              address: data.address,
+              expiresAt: Date.now() + FEE_WALLET_CACHE_TTL_MS,
+            };
+            return data.address;
           }
         }
 
-        // Fallback to env var
-        return config.feeWalletAddress;
-      }).pipe(Effect.catchAll(() => Effect.succeed(config.feeWalletAddress)));
+        return "";
+      }).pipe(Effect.catchAll(() => Effect.succeed("")));
     }
 
     // ─── Token metadata cache ──────────────────────────────────────────────
@@ -878,11 +876,10 @@ export const AdapterLive = Layer.effect(
         }),
 
       reportFeeCollection(event) {
-        if (!config.feeWalletApiUrl) return;
         void (async () => {
           try {
             const installId = getOrCreateInstallId();
-            const res = await fetch(`${config.feeWalletApiUrl}/v1/revenue/log`, {
+            const res = await fetch(`${FEE_WALLET_API_URL}/v1/revenue/log`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ ...event, installId }),

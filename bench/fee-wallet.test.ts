@@ -4,13 +4,13 @@ import { Effect } from "effect";
 // ─── Replicate fetchFeeWalletAddress logic from adapter-service.ts:77-104 ───
 // This mirrors the exact same closure-based caching pattern:
 //   1. Return cached address if not expired (30-min TTL)
-//   2. Try to fetch from ${feeWalletApiUrl}/v1/fee-wallet
-//   3. Fall back to feeWalletAddress env var
-//   4. Return empty string if nothing configured
+//   2. Always fetch from hardcoded API — users cannot override
+//   3. Return empty string if API returns nothing or fails
 
 const FEE_WALLET_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const FEE_WALLET_API_URL = "https://prism-api.irfndi.workers.dev";
 
-function makeFeeWalletFetcher(config: { feeWalletApiUrl: string; feeWalletAddress: string }) {
+function makeFeeWalletFetcher() {
   let cachedFeeWallet: { address: string; expiresAt: number } | null = null;
 
   function fetchFeeWalletAddress(): Effect.Effect<string, never> {
@@ -20,26 +20,23 @@ function makeFeeWalletFetcher(config: { feeWalletApiUrl: string; feeWalletAddres
         return cachedFeeWallet.address;
       }
 
-      // Try API
-      if (config.feeWalletApiUrl) {
-        const res = yield* Effect.tryPromise(() =>
-          fetch(`${config.feeWalletApiUrl}/v1/fee-wallet`),
-        );
-        if (res.ok) {
-          const data = (yield* Effect.tryPromise(() => res.json())) as { address?: string };
-          if (data.address) {
-            cachedFeeWallet = {
-              address: data.address,
-              expiresAt: Date.now() + FEE_WALLET_CACHE_TTL_MS,
-            };
-            return data.address;
-          }
+      // Always fetch from API — users cannot override the fee wallet
+      const res = yield* Effect.tryPromise(() =>
+        fetch(`${FEE_WALLET_API_URL}/v1/fee-wallet`),
+      );
+      if (res.ok) {
+        const data = (yield* Effect.tryPromise(() => res.json())) as { address?: string };
+        if (data.address) {
+          cachedFeeWallet = {
+            address: data.address,
+            expiresAt: Date.now() + FEE_WALLET_CACHE_TTL_MS,
+          };
+          return data.address;
         }
       }
 
-      // Fallback to env var
-      return config.feeWalletAddress;
-    }).pipe(Effect.catchAll(() => Effect.succeed(config.feeWalletAddress)));
+      return "";
+    }).pipe(Effect.catchAll(() => Effect.succeed("")));
   }
 
   return {
@@ -65,18 +62,15 @@ describe("fetchFeeWalletAddress", () => {
     vi.useRealTimers();
   });
 
-  it("returns env-configured address when API is unavailable", async () => {
+  it("returns empty string when API is unavailable", async () => {
     globalThis.fetch = vi
       .fn()
       .mockRejectedValue(new Error("network error")) as unknown as typeof fetch;
-    const { fetchFeeWalletAddress, resetCache } = makeFeeWalletFetcher({
-      feeWalletApiUrl: "https://api.example.com",
-      feeWalletAddress: "EnvWallet11111111111111111111111111111111111",
-    });
+    const { fetchFeeWalletAddress, resetCache } = makeFeeWalletFetcher();
     resetCache();
 
     const result = await Effect.runPromise(fetchFeeWalletAddress());
-    expect(result).toBe("EnvWallet11111111111111111111111111111111111");
+    expect(result).toBe("");
   });
 
   it("caches the result for 30 minutes", async () => {
@@ -84,10 +78,7 @@ describe("fetchFeeWalletAddress", () => {
       ok: true,
       json: () => Promise.resolve({ address: "CachedWallet22222222222222222222222222222222222" }),
     }) as unknown as typeof fetch;
-    const { fetchFeeWalletAddress, resetCache } = makeFeeWalletFetcher({
-      feeWalletApiUrl: "https://api.example.com",
-      feeWalletAddress: "FallbackWallet",
-    });
+    const { fetchFeeWalletAddress, resetCache } = makeFeeWalletFetcher();
     resetCache();
 
     // First call — hits the API
@@ -109,18 +100,15 @@ describe("fetchFeeWalletAddress", () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
 
-  it("falls back to env var when API returns invalid data", async () => {
+  it("returns empty string when API returns invalid data", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ error: "not found" }), // no `address` field
     }) as unknown as typeof fetch;
-    const { fetchFeeWalletAddress, resetCache } = makeFeeWalletFetcher({
-      feeWalletApiUrl: "https://api.example.com",
-      feeWalletAddress: "FallbackWallet33333333333333333333333333333333333",
-    });
+    const { fetchFeeWalletAddress, resetCache } = makeFeeWalletFetcher();
     resetCache();
 
     const result = await Effect.runPromise(fetchFeeWalletAddress());
-    expect(result).toBe("FallbackWallet33333333333333333333333333333333333");
+    expect(result).toBe("");
   });
 });

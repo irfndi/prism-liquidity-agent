@@ -72,8 +72,6 @@ function buildLayer(
     githubRepo,
     feedbackOptOut: optOut,
     paperModeExitLive: false,
-    feeWalletAddress: "",
-    feeWalletApiUrl: "https://prism-api.irfndi.workers.dev",
   });
   const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));
   return Layer.provide(FeedbackLive, baseLayer) as Layer.Layer<FeedbackService, never, never>;

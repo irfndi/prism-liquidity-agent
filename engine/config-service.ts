@@ -44,9 +44,6 @@ export interface AppConfig {
   readonly feedbackOptOut: boolean;
   // Allow paper mode to exit live positions (opt-in escape hatch)
   readonly paperModeExitLive: boolean;
-  // Fee wallet settings for protocol revenue
-  readonly feeWalletAddress: string;
-  readonly feeWalletApiUrl: string;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -156,12 +153,6 @@ const loadConfig = Effect.gen(function* () {
   const paperModeExitLive = yield* Config.boolean("PAPER_MODE_EXIT_LIVE").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const feeWalletAddress = yield* Config.string("FEE_WALLET_ADDRESS").pipe(
-    Effect.orElseSucceed(() => ""),
-  );
-  const feeWalletApiUrl = yield* Config.string("FEE_WALLET_API_URL").pipe(
-    Effect.orElseSucceed(() => "https://prism-api.irfndi.workers.dev"),
-  );
 
   const watchlistPools = watchlistPoolsRaw
     .split(",")
@@ -207,8 +198,6 @@ const loadConfig = Effect.gen(function* () {
     githubRepo,
     feedbackOptOut,
     paperModeExitLive,
-    feeWalletAddress,
-    feeWalletApiUrl,
   };
 
   return cfg;

@@ -9,6 +9,8 @@ function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
   return Effect.runSync((Effect.provide as any)(effect, layer));
 }
 
+const FEE_WALLET_API_URL = "https://prism-api.irfndi.workers.dev";
+
 type FeeCollectionEvent = {
   poolAddress: string;
   positionPubkey: string;
@@ -26,11 +28,10 @@ type FeeCollectionEvent = {
  * behavior from adapter-service.ts:875-890.
  *
  * The real implementation:
- *   1. Returns early if config.feeWalletApiUrl is not set
- *   2. Fires an async fetch to POST /v1/revenue/log
- *   3. Logs warning on failure (does not throw)
+ *   1. Always fires an async fetch to POST /v1/revenue/log (hardcoded URL)
+ *   2. Logs warning on failure (does not throw)
  */
-function makeTestAdapterLayer(config: { feeWalletApiUrl: string }) {
+function makeTestAdapterLayer() {
   const mockAdapter: AdapterApi = {
     hasWallet: () => false,
     getWalletAddress: () => null,
@@ -47,10 +48,9 @@ function makeTestAdapterLayer(config: { feeWalletApiUrl: string }) {
     discoverPools: () => Effect.succeed([]),
 
     reportFeeCollection(event: FeeCollectionEvent) {
-      if (!config.feeWalletApiUrl) return;
       void (async () => {
         try {
-          const res = await fetch(`${config.feeWalletApiUrl}/v1/revenue/log`, {
+          const res = await fetch(`${FEE_WALLET_API_URL}/v1/revenue/log`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ...event, installId: "test-install-id" }),
@@ -95,7 +95,7 @@ describe("reportFeeCollection", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const layer = makeTestAdapterLayer({ feeWalletApiUrl: "https://api.example.com" });
+    const layer = makeTestAdapterLayer();
 
     run(
       Effect.gen(function* () {
@@ -110,7 +110,7 @@ describe("reportFeeCollection", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, options] = fetchMock.mock.calls[0]!;
-    expect(url).toBe("https://api.example.com/v1/revenue/log");
+    expect(url).toBe(`${FEE_WALLET_API_URL}/v1/revenue/log`);
     expect(options.method).toBe("POST");
     expect(options.headers).toEqual({ "Content-Type": "application/json" });
 
@@ -130,7 +130,7 @@ describe("reportFeeCollection", () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("network timeout"));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const layer = makeTestAdapterLayer({ feeWalletApiUrl: "https://api.example.com" });
+    const layer = makeTestAdapterLayer();
 
     // Should not throw
     expect(() => {
@@ -148,25 +148,5 @@ describe("reportFeeCollection", () => {
 
     // The fetch was attempted but failed — no throw, just a console.warn
     expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("is a no-op when feeWalletApiUrl is not configured", async () => {
-    const fetchMock = vi.fn();
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
-
-    const layer = makeTestAdapterLayer({ feeWalletApiUrl: "" });
-
-    run(
-      Effect.gen(function* () {
-        const adapter = yield* AdapterService;
-        adapter.reportFeeCollection(sampleEvent);
-      }),
-      layer,
-    );
-
-    await vi.advanceTimersByTimeAsync(0);
-
-    // fetch should never be called when the URL is empty
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
