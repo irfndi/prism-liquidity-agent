@@ -109,6 +109,10 @@ export interface AdapterApi {
     txSignature: string;
     feeTransferTxSignature?: string;
   }) => void;
+  readonly swapUSDCForSOL: (
+    minSolThreshold?: number,
+    swapAmountUSDC?: number,
+  ) => Effect.Effect<void, never>;
 }
 
 export class AdapterService extends Context.Tag("AdapterService")<AdapterService, AdapterApi>() {}

@@ -919,11 +919,84 @@ export const AdapterLive = Layer.effect(
             }))
             .slice(0, 50);
         }).pipe(Effect.catchAll(() => Effect.succeed([]))),
+
+      swapUSDCForSOL: (minSolThreshold = 0.05, swapAmountUSDC = 1.0) =>
+        Effect.gen(function* () {
+          if (!wallet) return;
+
+          const lamports = yield* Effect.tryPromise(() => connection.getBalance(wallet!.publicKey));
+          const solBalance = lamports / 1e9;
+
+          if (solBalance >= minSolThreshold) return;
+
+          console.info("Low SOL balance — swapping USDC → SOL for gas", {
+            solBalance: solBalance.toFixed(4),
+            minThreshold: minSolThreshold,
+            swapAmountUSDC,
+          });
+
+          try {
+            const quoteResponse = yield* Effect.tryPromise(() =>
+              fetch(
+                `https://quote-api.jup.ag/v6/quote?inputMint=${USDC_MINT}&outputMint=${SOL_MINT}&amount=${Math.round(swapAmountUSDC * 1e6)}&slippageBps=50`,
+              ),
+            );
+
+            if (!quoteResponse.ok) {
+              console.warn("Jupiter quote failed:", quoteResponse.status);
+              return;
+            }
+
+            const quoteData = (yield* Effect.tryPromise(() => quoteResponse.json())) as {
+              routePlan?: unknown;
+            };
+
+            const swapResponse = yield* Effect.tryPromise(() =>
+              fetch("https://quote-api.jup.ag/v6/swap", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  quoteResponse: quoteData,
+                  userPublicKey: wallet!.publicKey.toBase58(),
+                  wrapAndUnwrapSol: true,
+                }),
+              }),
+            );
+
+            if (!swapResponse.ok) {
+              console.warn("Jupiter swap build failed:", swapResponse.status);
+              return;
+            }
+
+            const swapData = (yield* Effect.tryPromise(() => swapResponse.json())) as {
+              swapTransaction?: string;
+            };
+
+            if (!swapData.swapTransaction) {
+              console.warn("Jupiter swap: no transaction returned");
+              return;
+            }
+
+            const swapTxBuf = Buffer.from(swapData.swapTransaction, "base64");
+            const swapTx = Transaction.from(swapTxBuf);
+            swapTx.sign(wallet!);
+
+            const sig = yield* Effect.tryPromise(() =>
+              connection.sendRawTransaction(swapTx.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: "confirmed",
+              }),
+            );
+
+            yield* Effect.tryPromise(() => connection.confirmTransaction(sig, "confirmed"));
+            console.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
+          } catch (err) {
+            console.warn("USDC → SOL swap failed (non-fatal):", String(err));
+          }
+        }).pipe(Effect.catchAll(() => Effect.void)),
     };
 
     return api;
-
-    // ─── Helpers ───────────────────────────────────────────────────────────
 
     function getTokenBalance(mintAddress: string): Effect.Effect<bigint, unknown> {
       if (!wallet) return Effect.succeed(0n);

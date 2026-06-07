@@ -61,6 +61,8 @@ function makeTestAdapterLayer() {
         }
       })();
     },
+
+    swapUSDCForSOL: () => Effect.void,
   };
 
   return Layer.succeed(AdapterService, mockAdapter);
