@@ -487,7 +487,7 @@ export const program = Effect.gen(function* () {
 
       // Trailing exit (profit protection)
       if (!decision) {
-        if (pos) {
+        if (pos && hasPosition) {
           const estimatedValue = estimatePositionValue(pos, pool);
           pos.currentValueUsd = estimatedValue;
           const highest = pos.highestValueUsd ?? pos.depositedUsd;
