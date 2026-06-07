@@ -178,7 +178,18 @@ export const program = Effect.gen(function* () {
 
       const onChainPositions = yield* adapter
         .getAllWalletPositions(walletAddress)
-        .pipe(Effect.catchAll(() => Effect.succeed([])));
+        .pipe(
+          Effect.catchAll((err) => {
+            console.error("Reconcile: failed to fetch on-chain positions — skipping", {
+              err: String(err),
+            });
+            return Effect.succeed(null);
+          }),
+        );
+
+      if (onChainPositions === null) {
+        return;
+      }
 
       const onChainPoolSet = new Set(onChainPositions.map((p) => p.poolAddress));
       const watchedPoolSet = new Set(poolsToScan);
@@ -207,7 +218,15 @@ export const program = Effect.gen(function* () {
           );
           const pool = yield* adapter
             .getPoolState(onChainPos.poolAddress)
-            .pipe(Effect.catchAll(() => Effect.succeed(null)));
+            .pipe(
+              Effect.catchAll((err) => {
+                console.error("Reconcile: failed to fetch pool state for external position", {
+                  pool: onChainPos.poolAddress,
+                  err: String(err),
+                });
+                return Effect.succeed(null);
+              }),
+            );
           if (pool) {
             const pos: PositionRecord = {
               poolAddress: onChainPos.poolAddress,
@@ -389,26 +408,36 @@ export const program = Effect.gen(function* () {
         if (walletAddress) {
           const onChainPositions = yield* adapter
             .getPositions(poolAddress, walletAddress)
-            .pipe(Effect.catchAll(() => Effect.succeed([])));
-          const stillOnChain = onChainPositions.some(
-            (p) => p.id === pos.positionPubKey,
-          );
-          if (!stillOnChain) {
-            console.warn(
-              `Per-cycle reconcile: position ${poolAddress} no longer on-chain — removing from tracking`,
+            .pipe(
+              Effect.catchAll((err) => {
+                console.error("Per-cycle reconcile: failed to fetch positions — skipping", {
+                  pool: poolAddress,
+                  err: String(err),
+                });
+                return Effect.succeed(null);
+              }),
             );
-            trackedPositions.delete(poolAddress);
-            yield* db.deletePosition(poolAddress).pipe(
-              Effect.catchAll(() => Effect.void),
+          if (onChainPositions !== null) {
+            const stillOnChain = onChainPositions.some(
+              (p) => p.id === pos.positionPubKey,
             );
-            yield* memory
-              .upsert({
-                category: "warning",
-                content: `Position ${poolAddress} was closed externally during this cycle. Removed from tracking.`,
-                poolAddress,
-              })
-              .pipe(Effect.catchAll(() => Effect.void));
-            hasPosition = false;
+            if (!stillOnChain) {
+              console.warn(
+                `Per-cycle reconcile: position ${poolAddress} no longer on-chain — removing from tracking`,
+              );
+              trackedPositions.delete(poolAddress);
+              yield* db.deletePosition(poolAddress).pipe(
+                Effect.catchAll(() => Effect.void),
+              );
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Position ${poolAddress} was closed externally during this cycle. Removed from tracking.`,
+                  poolAddress,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+              hasPosition = false;
+            }
           }
         }
       }
@@ -986,6 +1015,7 @@ export const program = Effect.gen(function* () {
     cycleInFlight = true;
     Effect.runPromise(
       Effect.gen(function* () {
+        yield* reconcilePositions();
         yield* claimAllFees();
         yield* runScanCycle();
       }).pipe(
