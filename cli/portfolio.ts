@@ -56,7 +56,7 @@ export function computePnl(depositedUsd: number, currentValueUsd: number): { pnl
 }
 
 function colorize(text: string, colorCode: string): string {
-  if (!process.stdout.isTTY) return text;
+  if (process.env.NO_COLOR || !process.stdout.isTTY) return text;
   return `${colorCode}${text}\x1b[0m`;
 }
 
@@ -86,12 +86,15 @@ function formatPosition(pos: PositionRecord): string {
 export function formatAge(timestampMs: number): string {
   const diffMs = Date.now() - timestampMs;
   if (diffMs < 0) return "just now";
-  const minutes = Math.floor(diffMs / (60 * 1000));
-  const hours = Math.floor(diffMs / (60 * 60 * 1000));
-  const days = Math.floor(diffMs / (24 * 60 * 60 * 1000));
 
-  if (days > 0) return `${days}d ${hours % 24}h`;
-  if (hours > 0) return `${hours}h ${minutes % 60}m`;
+  const totalMinutes = Math.floor(diffMs / (60 * 1000));
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const remainingMinutesAfterDays = totalMinutes % (24 * 60);
+  const hours = Math.floor(remainingMinutesAfterDays / 60);
+  const minutes = remainingMinutesAfterDays % 60;
+
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
   return `${minutes}m`;
 }
 
