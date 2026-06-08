@@ -3,6 +3,14 @@ import { Effect, Layer } from "effect";
 import { ConfigService } from "../engine/config-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
+
+function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
+  return Effect.runSync((Effect.provide as any)(effect, layer));
+}
+
+async function runAsync<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): Promise<T> {
+  return Effect.runPromise((Effect.provide as any)(effect, layer));
+}
 import {
   computeSummary,
   computePnl,
@@ -270,15 +278,14 @@ describe("portfolio — DB integration", () => {
 
   it("retrieves active positions from DB", async () => {
     const layer = buildLayer();
-    const program = Effect.gen(function* () {
+    const effect = Effect.gen(function* () {
       const db = yield* DbService;
       yield* db.savePosition(makePosition({ poolAddress: "pool1", depositedUsd: 1000, currentValueUsd: 1100 }));
       yield* db.savePosition(makePosition({ poolAddress: "pool2", depositedUsd: 2000, currentValueUsd: 1900 }));
       const positions = yield* db.getAllPositions();
       return positions;
-    }).pipe(Effect.provide(layer));
-
-    const positions = await Effect.runPromise(program);
+    });
+    const positions = await runAsync(effect, layer);
     expect(positions).toHaveLength(2);
     const addresses = positions.map((p) => p.poolAddress);
     expect(addresses).toContain("pool1");
@@ -287,7 +294,7 @@ describe("portfolio — DB integration", () => {
 
   it("excludes paper-exited positions from active list", async () => {
     const layer = buildLayer();
-    const program = Effect.gen(function* () {
+    const effect = Effect.gen(function* () {
       const db = yield* DbService;
       yield* db.savePosition(makePosition({ poolAddress: "active1" }));
       yield* db.savePosition(makePosition({ poolAddress: "active2" }));
@@ -295,9 +302,8 @@ describe("portfolio — DB integration", () => {
       const active = yield* db.getAllPositions();
       const exited = yield* db.getPaperExitedPositions();
       return { active, exited };
-    }).pipe(Effect.provide(layer));
-
-    const result = await Effect.runPromise(program);
+    });
+    const result = await runAsync(effect, layer);
     expect(result.active).toHaveLength(2);
     expect(result.exited).toHaveLength(1);
     expect(result.exited[0]).toBeDefined();
@@ -308,16 +314,15 @@ describe("portfolio — DB integration", () => {
 
   it("computes P&L from stored positions", async () => {
     const layer = buildLayer();
-    const program = Effect.gen(function* () {
+    const effect = Effect.gen(function* () {
       const db = yield* DbService;
       yield* db.savePosition(makePosition({ poolAddress: "pool1", depositedUsd: 1000, currentValueUsd: 1200 }));
       yield* db.savePosition(makePosition({ poolAddress: "pool2", depositedUsd: 2000, currentValueUsd: 1800 }));
       const positions = yield* db.getAllPositions();
       const summary = computeSummary(positions);
       return summary;
-    }).pipe(Effect.provide(layer));
-
-    const summary = await Effect.runPromise(program);
+    });
+    const summary = await runAsync(effect, layer);
     expect(summary.totalDepositedUsd).toBe(3000);
     expect(summary.totalCurrentValueUsd).toBe(3000);
     expect(summary.totalUnrealizedPnlUsd).toBe(0);
