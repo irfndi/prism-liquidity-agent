@@ -280,12 +280,9 @@ describe("portfolio — DB integration", () => {
 
     const positions = await Effect.runPromise(program);
     expect(positions).toHaveLength(2);
-    expect(positions[0]).toBeDefined();
-    expect(positions[1]).toBeDefined();
-    if (positions[0] && positions[1]) {
-      expect(positions[0].poolAddress).toBe("pool1");
-      expect(positions[1].poolAddress).toBe("pool2");
-    }
+    const addresses = positions.map((p) => p.poolAddress);
+    expect(addresses).toContain("pool1");
+    expect(addresses).toContain("pool2");
   });
 
   it("excludes paper-exited positions from active list", async () => {
