@@ -77,7 +77,7 @@ function formatPosition(pos: PositionRecord): string {
     `    P&L:        ${coloredPnl}`,
     `    Active bin: ${pos.activeBinId}`,
     `    Age:        ${age}`,
-    pos.outOfRangeSince ? `    ⚠ Out of range since ${formatAge(pos.outOfRangeSince)}` : "",
+    pos.outOfRangeSince != null ? `    ⚠ Out of range since ${formatAge(pos.outOfRangeSince)}` : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -145,7 +145,7 @@ function formatHistoryList(positions: ReadonlyArray<PositionRecord>): string {
     lines.push(`    Deposited:  ${formatCurrency(pos.depositedUsd)}`);
     lines.push(`    Exit Value: ${formatCurrency(pos.currentValueUsd)}`);
     lines.push(`    Realized P&L: ${coloredPnl}`);
-    lines.push(`    Exited:     ${pos.paperExitedAt ? new Date(pos.paperExitedAt).toISOString() : "N/A"}`);
+    lines.push(`    Exited:     ${pos.paperExitedAt != null ? new Date(pos.paperExitedAt).toISOString() : "N/A"}`);
     lines.push("");
   }
 
