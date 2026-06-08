@@ -55,10 +55,15 @@ export function computePnl(depositedUsd: number, currentValueUsd: number): { pnl
   return { pnlUsd, pnlPct };
 }
 
+function colorize(text: string, colorCode: string): string {
+  if (!process.stdout.isTTY) return text;
+  return `${colorCode}${text}\x1b[0m`;
+}
+
 function formatPosition(pos: PositionRecord): string {
   const { pnlUsd, pnlPct } = computePnl(pos.depositedUsd, pos.currentValueUsd);
-  const pnlColor = pnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m";
-  const reset = "\x1b[0m";
+  const pnlText = `${formatCurrency(pnlUsd)} (${formatPct(pnlPct)})`;
+  const coloredPnl = colorize(pnlText, pnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m");
 
   const poolName = `${pos.tokenXSymbol}/${pos.tokenYSymbol}`;
   const range = `[${pos.lowerBinId}–${pos.upperBinId}]`;
@@ -69,7 +74,7 @@ function formatPosition(pos: PositionRecord): string {
     `    Pool:     ${pos.poolAddress}`,
     `    Deposited:  ${formatCurrency(pos.depositedUsd)}`,
     `    Current:    ${formatCurrency(pos.currentValueUsd)}`,
-    `    P&L:        ${pnlColor}${formatCurrency(pnlUsd)} (${formatPct(pnlPct)})${reset}`,
+    `    P&L:        ${coloredPnl}`,
     `    Active bin: ${pos.activeBinId}`,
     `    Age:        ${age}`,
     pos.outOfRangeSince ? `    ⚠ Out of range since ${formatAge(pos.outOfRangeSince)}` : "",
@@ -91,8 +96,8 @@ export function formatAge(timestampMs: number): string {
 }
 
 function formatSummary(summary: PortfolioSummary): string {
-  const pnlColor = summary.totalUnrealizedPnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m";
-  const reset = "\x1b[0m";
+  const pnlText = `${formatCurrency(summary.totalUnrealizedPnlUsd)} (${formatPct(summary.totalUnrealizedPnlPct)})`;
+  const coloredPnl = colorize(pnlText, summary.totalUnrealizedPnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m");
 
   return [
     "Portfolio Summary",
@@ -100,7 +105,7 @@ function formatSummary(summary: PortfolioSummary): string {
     `  Positions:     ${summary.positionCount}`,
     `  Total Deposited:  ${formatCurrency(summary.totalDepositedUsd)}`,
     `  Total Current:    ${formatCurrency(summary.totalCurrentValueUsd)}`,
-    `  Unrealized P&L:   ${pnlColor}${formatCurrency(summary.totalUnrealizedPnlUsd)} (${formatPct(summary.totalUnrealizedPnlPct)})${reset}`,
+    `  Unrealized P&L:   ${coloredPnl}`,
   ].join("\n");
 }
 
@@ -132,14 +137,14 @@ function formatHistoryList(positions: ReadonlyArray<PositionRecord>): string {
 
   for (const pos of positions) {
     const { pnlUsd, pnlPct } = computePnl(pos.depositedUsd, pos.currentValueUsd);
-    const pnlColor = pnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m";
-    const reset = "\x1b[0m";
+    const pnlText = `${formatCurrency(pnlUsd)} (${formatPct(pnlPct)})`;
+    const coloredPnl = colorize(pnlText, pnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m");
 
     lines.push(`  ${pos.tokenXSymbol}/${pos.tokenYSymbol}`);
     lines.push(`    Pool:      ${pos.poolAddress}`);
     lines.push(`    Deposited:  ${formatCurrency(pos.depositedUsd)}`);
     lines.push(`    Exit Value: ${formatCurrency(pos.currentValueUsd)}`);
-    lines.push(`    Realized P&L: ${pnlColor}${formatCurrency(pnlUsd)} (${formatPct(pnlPct)})${reset}`);
+    lines.push(`    Realized P&L: ${coloredPnl}`);
     lines.push(`    Exited:     ${pos.paperExitedAt ? new Date(pos.paperExitedAt).toISOString() : "N/A"}`);
     lines.push("");
   }
@@ -273,8 +278,8 @@ portfolioCommand
   .option("-j, --json", "Output as JSON")
   .action(async function (this: Command, opts: { json?: boolean }) {
     await runPortfolioAction(async () => {
-      const parentOpts = (this as unknown as { parent?: { opts(): { json?: boolean } } }).parent?.opts();
-      const isJson = opts.json || parentOpts?.json;
+      const allOpts = this.optsWithGlobals();
+      const isJson = opts.json || allOpts.json;
 
       const program = buildProgram();
       await Effect.runPromise(
@@ -301,8 +306,8 @@ portfolioCommand
   .option("-j, --json", "Output as JSON")
   .action(async function (this: Command, opts: { json?: boolean }) {
     await runPortfolioAction(async () => {
-      const parentOpts = (this as unknown as { parent?: { opts(): { json?: boolean } } }).parent?.opts();
-      const isJson = opts.json || parentOpts?.json;
+      const allOpts = this.optsWithGlobals();
+      const isJson = opts.json || allOpts.json;
 
       const program = buildProgram();
       await Effect.runPromise(
