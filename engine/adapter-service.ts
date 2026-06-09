@@ -53,6 +53,71 @@ function getOrCreateInstallId(): string {
   return id;
 }
 
+export interface RevenueShareResult {
+  platformFeeX: number;
+  platformFeeY: number;
+  operatorFeeX: number;
+  operatorFeeY: number;
+  netFeeX: number;
+  netFeeY: number;
+  amountToTransferX: number;
+  amountToTransferY: number;
+  isCircular: boolean;
+}
+
+export function calculateRevenueShare(
+  feeX: number,
+  feeY: number,
+  platformFeeRate: number | undefined,
+  revenueShareEnabled: boolean,
+  revenueShareOperatorPct: number,
+  feeWallet: string | null,
+  operatorWalletAddress: string,
+): RevenueShareResult {
+  let platformFeeX = 0;
+  let platformFeeY = 0;
+  let operatorFeeX = 0;
+  let operatorFeeY = 0;
+  let netFeeX = feeX;
+  let netFeeY = feeY;
+  let amountToTransferX = 0;
+  let amountToTransferY = 0;
+  let isCircular = false;
+
+  if (platformFeeRate && platformFeeRate > 0 && platformFeeRate <= 1) {
+    platformFeeX = feeX * platformFeeRate;
+    platformFeeY = feeY * platformFeeRate;
+
+    if (revenueShareEnabled) {
+      const operatorPct = revenueShareOperatorPct / 100;
+      operatorFeeX = platformFeeX * operatorPct;
+      operatorFeeY = platformFeeY * operatorPct;
+    }
+
+    netFeeX = feeX - platformFeeX;
+    netFeeY = feeY - platformFeeY;
+
+    isCircular = feeWallet !== null && operatorWalletAddress === feeWallet;
+
+    if (!isCircular && feeWallet) {
+      amountToTransferX = platformFeeX - operatorFeeX;
+      amountToTransferY = platformFeeY - operatorFeeY;
+    }
+  }
+
+  return {
+    platformFeeX,
+    platformFeeY,
+    operatorFeeX,
+    operatorFeeY,
+    netFeeX,
+    netFeeY,
+    amountToTransferX,
+    amountToTransferY,
+    isCircular,
+  };
+}
+
 export const AdapterLive = Layer.effect(
   AdapterService,
   Effect.gen(function* () {
@@ -794,73 +859,79 @@ export const AdapterLive = Layer.effect(
               lastSignature = signature;
             }
 
-            let platformFeeX = 0;
-            let platformFeeY = 0;
-            let netFeeX = feeX;
-            let netFeeY = feeY;
+            const feeWallet = yield* fetchFeeWalletAddress();
+            const operatorWalletAddress = wallet.publicKey.toBase58();
+            const revenueShare = calculateRevenueShare(
+              feeX,
+              feeY,
+              platformFeeRate,
+              config.revenueShareEnabled,
+              config.revenueShareOperatorPct,
+              feeWallet,
+              operatorWalletAddress,
+            );
             let feeTransferTxSignature: string | undefined;
 
-            if (platformFeeRate && platformFeeRate > 0 && platformFeeRate <= 1) {
-              platformFeeX = feeX * platformFeeRate;
-              platformFeeY = feeY * platformFeeRate;
-              netFeeX = feeX - platformFeeX;
-              netFeeY = feeY - platformFeeY;
+            if (revenueShare.platformFeeX > 0 || revenueShare.platformFeeY > 0) {
+              if (revenueShare.isCircular) {
+                console.info(
+                  "Circular wallet detected — fees retained by operator",
+                  { pool: poolAddress, platformFeeX: revenueShare.platformFeeX, platformFeeY: revenueShare.platformFeeY },
+                );
+              } else if (feeWallet) {
+                try {
+                  const feeWalletPubkey = new PublicKey(feeWallet);
+                  const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
+                  const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
+                  const { blockhash } = yield* Effect.tryPromise(() =>
+                    connection.getLatestBlockhash(),
+                  );
+                  const transferTx = new Transaction();
+                  transferTx.feePayer = wallet.publicKey;
+                  transferTx.recentBlockhash = blockhash;
 
-              if (platformFeeX > 0 || platformFeeY > 0) {
-                const feeWallet = yield* fetchFeeWalletAddress();
-                if (!feeWallet) {
-                  console.warn("No fee wallet configured — skipping platform fee transfer", {
-                    pool: poolAddress,
-                  });
-                } else {
-                  try {
-                    const feeWalletPubkey = new PublicKey(feeWallet);
-                    const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
-                    const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
-                    const { blockhash } = yield* Effect.tryPromise(() =>
-                      connection.getLatestBlockhash(),
+                  const mints: Array<[PublicKey, number]> = [
+                    [tokenXMint, revenueShare.amountToTransferX],
+                    [tokenYMint, revenueShare.amountToTransferY],
+                  ];
+
+                  for (const [mint, amount] of mints) {
+                    if (amount < 1) continue;
+                    const fromAta = yield* Effect.tryPromise(() =>
+                      getAssociatedTokenAddress(mint, wallet!.publicKey),
                     );
-                    const transferTx = new Transaction();
-                    transferTx.feePayer = wallet.publicKey;
-                    transferTx.recentBlockhash = blockhash;
-
-                    const mints: Array<[PublicKey, number]> = [
-                      [tokenXMint, platformFeeX],
-                      [tokenYMint, platformFeeY],
-                    ];
-
-                    for (const [mint, amount] of mints) {
-                      if (amount < 1) continue;
-                      const fromAta = yield* Effect.tryPromise(() =>
-                        getAssociatedTokenAddress(mint, wallet!.publicKey),
-                      );
-                      const toAta = yield* Effect.tryPromise(() =>
-                        getAssociatedTokenAddress(mint, feeWalletPubkey),
-                      );
-                      // Check if destination ATA exists
-                      const toAtaInfo = yield* Effect.tryPromise(() =>
-                        connection.getAccountInfo(toAta),
-                      );
-                      if (!toAtaInfo) {
-                        transferTx.add(
-                          createAssociatedTokenAccountInstruction(
-                            wallet!.publicKey,
-                            toAta,
-                            feeWalletPubkey,
-                            mint,
-                          ),
-                        );
-                      }
+                    const toAta = yield* Effect.tryPromise(() =>
+                      getAssociatedTokenAddress(mint, feeWalletPubkey),
+                    );
+                    // Check if destination ATA exists
+                    const toAtaInfo = yield* Effect.tryPromise(() =>
+                      connection.getAccountInfo(toAta),
+                    );
+                    if (!toAtaInfo) {
                       transferTx.add(
-                        createTransferInstruction(
-                          fromAta,
-                          toAta,
+                        createAssociatedTokenAccountInstruction(
                           wallet!.publicKey,
-                          BigInt(Math.floor(amount)),
+                          toAta,
+                          feeWalletPubkey,
+                          mint,
                         ),
                       );
                     }
+                    transferTx.add(
+                      createTransferInstruction(
+                        fromAta,
+                        toAta,
+                        wallet!.publicKey,
+                        BigInt(Math.floor(amount)),
+                      ),
+                    );
+                  }
 
+                  if (transferTx.instructions.length === 0) {
+                    console.info("No platform fee to transfer — operator keeps full share", {
+                      pool: poolAddress,
+                    });
+                  } else {
                     transferTx.sign(wallet!);
                     const sig = yield* Effect.tryPromise(() =>
                       connection.sendRawTransaction(transferTx.serialize(), {
@@ -869,15 +940,19 @@ export const AdapterLive = Layer.effect(
                     );
                     yield* Effect.tryPromise(() => connection.confirmTransaction(sig, "confirmed"));
                     feeTransferTxSignature = sig;
-                  } catch (err) {
-                    console.error("Platform fee transfer failed (fees retained by user)", {
-                      pool: poolAddress,
-                      platformFeeX,
-                      platformFeeY,
-                      error: String(err),
-                    });
                   }
+                } catch (err) {
+                  console.error("Platform fee transfer failed (fees retained by user)", {
+                    pool: poolAddress,
+                    platformFeeX: revenueShare.platformFeeX,
+                    platformFeeY: revenueShare.platformFeeY,
+                    error: String(err),
+                  });
                 }
+              } else {
+                console.warn("No fee wallet configured — skipping platform fee transfer", {
+                  pool: poolAddress,
+                });
               }
             }
 
@@ -885,11 +960,14 @@ export const AdapterLive = Layer.effect(
               txSignature: lastSignature,
               feeX,
               feeY,
-              platformFeeX,
-              platformFeeY,
-              netFeeX,
-              netFeeY,
+              platformFeeX: revenueShare.platformFeeX,
+              platformFeeY: revenueShare.platformFeeY,
+              netFeeX: revenueShare.netFeeX,
+              netFeeY: revenueShare.netFeeY,
               ...(feeTransferTxSignature !== undefined ? { feeTransferTxSignature } : {}),
+              ...(revenueShare.operatorFeeX > 0 || revenueShare.operatorFeeY > 0
+                ? { operatorFeeX: revenueShare.operatorFeeX, operatorFeeY: revenueShare.operatorFeeY }
+                : {}),
             };
           } catch (err) {
             return yield* Effect.fail(

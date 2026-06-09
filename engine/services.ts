@@ -85,6 +85,8 @@ export interface AdapterApi {
       netFeeX: number;
       netFeeY: number;
       feeTransferTxSignature?: string;
+      operatorFeeX?: number;
+      operatorFeeY?: number;
     },
     unknown
   >;
@@ -108,6 +110,8 @@ export interface AdapterApi {
     feeY: number;
     platformFeeX: number;
     platformFeeY: number;
+    operatorFeeX?: number;
+    operatorFeeY?: number;
     tier: string;
     txSignature: string;
     feeTransferTxSignature?: string;
@@ -513,6 +517,8 @@ export interface DbApi {
     }>,
     unknown
   >;
+  readonly getMetadata: (key: string) => Effect.Effect<string | null, unknown>;
+  readonly setMetadata: (key: string, value: string) => Effect.Effect<void, unknown>;
 }
 
 export class DbService extends Context.Tag("DbService")<DbService, DbApi>() {}

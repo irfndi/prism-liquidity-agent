@@ -294,6 +294,19 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       db.exec(`CREATE INDEX IF NOT EXISTS idx_user_credits_user ON user_credits(user_id)`);
     },
   },
+  {
+    version: 9,
+    name: "metadata",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS metadata (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

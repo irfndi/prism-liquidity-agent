@@ -1,9 +1,9 @@
 import { Command } from "commander";
 import { execSync } from "child_process";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { pipeline } from "stream/promises";
 import { dirname, join, resolve } from "path";
-import { tmpdir } from "os";
+import { tmpdir, homedir } from "os";
 import { createHash } from "crypto";
 import { fileURLToPath } from "url";
 import { getCurrentVersion } from "../engine/version.js";
@@ -251,6 +251,16 @@ export const updateCommand = new Command("update")
 
       logger.info(`Updated to ${latest} from ${release.source}`);
       console.log(`✓ Updated to ${latest}`);
+
+      // Reset version install timestamp for force-update tracking
+      try {
+        const prismDir = join(homedir(), ".config", "prism");
+        if (!existsSync(prismDir)) mkdirSync(prismDir, { recursive: true, mode: 0o700 });
+        const timestampFile = join(prismDir, "version-installed-at");
+        writeFileSync(timestampFile, String(Date.now()), { mode: 0o600 });
+      } catch {
+        // non-fatal: timestamp reset failure doesn't block update
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const exitCode = err instanceof UpdateAbort ? err.exitCode : 1;
