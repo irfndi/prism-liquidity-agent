@@ -37,6 +37,9 @@ export interface AppConfig {
   readonly updateChannel: "stable" | "beta" | "dev";
   readonly updateGithubRepo: string;
   readonly updateAllowDirty: boolean;
+  // Force auto-update settings
+  readonly forceUpdateEnabled: boolean;
+  readonly forceUpdateAfterDays: number;
   // R2 release tarball source (GitHub-independent updates)
   readonly updateR2PublicUrl: string;
   readonly githubToken: string;
@@ -44,6 +47,9 @@ export interface AppConfig {
   readonly feedbackOptOut: boolean;
   // Allow paper mode to exit live positions (opt-in escape hatch)
   readonly paperModeExitLive: boolean;
+  // Revenue share settings
+  readonly revenueShareEnabled: boolean;
+  readonly revenueShareOperatorPct: number;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -139,6 +145,10 @@ const loadConfig = Effect.gen(function* () {
   const updateAllowDirty = yield* Config.boolean("UPDATE_ALLOW_DIRTY").pipe(
     Effect.orElseSucceed(() => false),
   );
+  const forceUpdateEnabled = yield* Config.boolean("FORCE_UPDATE_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const forceUpdateAfterDays = yield* validatedNumber("FORCE_UPDATE_AFTER_DAYS", 1, 14);
   const updateR2PublicUrl = yield* Config.string("UPDATE_R2_PUBLIC_URL").pipe(
     Effect.orElseSucceed(() => "https://r2.prism-agent.com"),
   );
@@ -153,6 +163,10 @@ const loadConfig = Effect.gen(function* () {
   const paperModeExitLive = yield* Config.boolean("PAPER_MODE_EXIT_LIVE").pipe(
     Effect.orElseSucceed(() => false),
   );
+  const revenueShareEnabled = yield* Config.boolean("REVENUE_SHARE_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const revenueShareOperatorPct = yield* validatedNumber("REVENUE_SHARE_OPERATOR_PCT", 0, 0);
 
   const watchlistPools = watchlistPoolsRaw
     .split(",")
@@ -193,11 +207,15 @@ const loadConfig = Effect.gen(function* () {
     updateChannel,
     updateGithubRepo,
     updateAllowDirty,
+    forceUpdateEnabled,
+    forceUpdateAfterDays,
     updateR2PublicUrl,
     githubToken,
     githubRepo,
     feedbackOptOut,
     paperModeExitLive,
+    revenueShareEnabled,
+    revenueShareOperatorPct,
   };
 
   return cfg;

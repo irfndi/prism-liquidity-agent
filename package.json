@@ -52,7 +52,7 @@
   "devDependencies": {
     "@types/node": "^25.9.1",
     "@types/semver": "^7.7.1",
-    "@vitest/coverage-v8": "^4.1.8",
+    "@vitest/coverage-istanbul": "^4.1.8",
     "bun-types": "1.4.0-canary.20260519T150915",
     "oxfmt": "^0.53.0",
     "oxlint": "^1.68.0",

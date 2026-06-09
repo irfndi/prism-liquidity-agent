@@ -10,6 +10,7 @@ import { Context, Effect, Layer } from "effect";
 import { AdapterService, type AdapterApi } from "./services.js";
 import { ConfigService } from "./config-service.js";
 import { AdapterError } from "./errors.js";
+import { createLogger } from "./logger.js";
 import type { BinArray, BinData, PoolState, Position } from "./types.js";
 import bs58 from "bs58";
 import fs from "fs";
@@ -19,6 +20,8 @@ import { randomUUID } from "crypto";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+const logger = createLogger("adapter-service");
 
 // ─── Install ID helper (engine-safe mirror of cli/install-id.ts) ───────────
 
@@ -53,6 +56,72 @@ function getOrCreateInstallId(): string {
   return id;
 }
 
+export interface RevenueShareResult {
+  platformFeeX: number;
+  platformFeeY: number;
+  operatorFeeX: number;
+  operatorFeeY: number;
+  netFeeX: number;
+  netFeeY: number;
+  amountToTransferX: number;
+  amountToTransferY: number;
+  isCircular: boolean;
+}
+
+export function calculateRevenueShare(
+  feeX: number,
+  feeY: number,
+  platformFeeRate: number | undefined,
+  revenueShareEnabled: boolean,
+  revenueShareOperatorPct: number,
+  feeWallet: string | null,
+  operatorWalletAddress: string,
+): RevenueShareResult {
+  let platformFeeX = 0;
+  let platformFeeY = 0;
+  let operatorFeeX = 0;
+  let operatorFeeY = 0;
+  let netFeeX = feeX;
+  let netFeeY = feeY;
+  let amountToTransferX = 0;
+  let amountToTransferY = 0;
+  let isCircular = false;
+
+  if (platformFeeRate && platformFeeRate > 0 && platformFeeRate <= 1) {
+    platformFeeX = Math.floor(feeX * platformFeeRate);
+    platformFeeY = Math.floor(feeY * platformFeeRate);
+
+    if (revenueShareEnabled) {
+      const clampedPct = Math.max(0, Math.min(revenueShareOperatorPct, 100));
+      const operatorPct = clampedPct / 100;
+      operatorFeeX = Math.floor(platformFeeX * operatorPct);
+      operatorFeeY = Math.floor(platformFeeY * operatorPct);
+    }
+
+    netFeeX = feeX - platformFeeX;
+    netFeeY = feeY - platformFeeY;
+
+    isCircular = feeWallet !== null && operatorWalletAddress === feeWallet;
+
+    if (!isCircular && feeWallet) {
+      amountToTransferX = platformFeeX - operatorFeeX;
+      amountToTransferY = platformFeeY - operatorFeeY;
+    }
+  }
+
+  return {
+    platformFeeX,
+    platformFeeY,
+    operatorFeeX,
+    operatorFeeY,
+    netFeeX,
+    netFeeY,
+    amountToTransferX,
+    amountToTransferY,
+    isCircular,
+  };
+}
+
 export const AdapterLive = Layer.effect(
   AdapterService,
   Effect.gen(function* () {
@@ -65,7 +134,8 @@ export const AdapterLive = Layer.effect(
       try {
         wallet = Keypair.fromSecretKey(bs58.decode(config.walletPrivateKey));
       } catch (err) {
-        console.error("Failed to load wallet", err);
+        logger.error("Failed to load wallet", err);
+        wallet = null;
       }
     }
 
@@ -794,90 +864,120 @@ export const AdapterLive = Layer.effect(
               lastSignature = signature;
             }
 
-            let platformFeeX = 0;
-            let platformFeeY = 0;
-            let netFeeX = feeX;
-            let netFeeY = feeY;
+            const feeWallet = yield* fetchFeeWalletAddress();
+            const operatorWalletAddress = wallet.publicKey.toBase58();
+            const revenueShare = calculateRevenueShare(
+              feeX,
+              feeY,
+              platformFeeRate,
+              config.revenueShareEnabled,
+              config.revenueShareOperatorPct,
+              feeWallet,
+              operatorWalletAddress,
+            );
             let feeTransferTxSignature: string | undefined;
+            let actualPlatformFeeX = 0;
+            let actualPlatformFeeY = 0;
+            let actualOperatorFeeX = 0;
+            let actualOperatorFeeY = 0;
 
-            if (platformFeeRate && platformFeeRate > 0 && platformFeeRate <= 1) {
-              platformFeeX = feeX * platformFeeRate;
-              platformFeeY = feeY * platformFeeRate;
-              netFeeX = feeX - platformFeeX;
-              netFeeY = feeY - platformFeeY;
+            if (revenueShare.platformFeeX > 0 || revenueShare.platformFeeY > 0) {
+              if (revenueShare.isCircular) {
+                logger.info(
+                  "Circular wallet detected — fees retained by operator",
+                  { pool: poolAddress, platformFeeX: revenueShare.platformFeeX, platformFeeY: revenueShare.platformFeeY },
+                );
+                actualOperatorFeeX = revenueShare.platformFeeX;
+                actualOperatorFeeY = revenueShare.platformFeeY;
+              } else if (feeWallet) {
+                const transferResult = yield* Effect.gen(function* () {
+                  const feeWalletPubkey = new PublicKey(feeWallet);
+                  const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
+                  const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
+                  const { blockhash } = yield* Effect.tryPromise(() =>
+                    connection.getLatestBlockhash(),
+                  );
+                  const transferTx = new Transaction();
+                  transferTx.feePayer = wallet.publicKey;
+                  transferTx.recentBlockhash = blockhash;
 
-              if (platformFeeX > 0 || platformFeeY > 0) {
-                const feeWallet = yield* fetchFeeWalletAddress();
-                if (!feeWallet) {
-                  console.warn("No fee wallet configured — skipping platform fee transfer", {
-                    pool: poolAddress,
-                  });
-                } else {
-                  try {
-                    const feeWalletPubkey = new PublicKey(feeWallet);
-                    const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
-                    const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
-                    const { blockhash } = yield* Effect.tryPromise(() =>
-                      connection.getLatestBlockhash(),
+                  const mints: Array<[PublicKey, number]> = [
+                    [tokenXMint, revenueShare.amountToTransferX],
+                    [tokenYMint, revenueShare.amountToTransferY],
+                  ];
+
+                  for (const [mint, amount] of mints) {
+                    if (amount < 1) continue;
+                    const fromAta = yield* Effect.tryPromise(() =>
+                      getAssociatedTokenAddress(mint, wallet!.publicKey),
                     );
-                    const transferTx = new Transaction();
-                    transferTx.feePayer = wallet.publicKey;
-                    transferTx.recentBlockhash = blockhash;
-
-                    const mints: Array<[PublicKey, number]> = [
-                      [tokenXMint, platformFeeX],
-                      [tokenYMint, platformFeeY],
-                    ];
-
-                    for (const [mint, amount] of mints) {
-                      if (amount < 1) continue;
-                      const fromAta = yield* Effect.tryPromise(() =>
-                        getAssociatedTokenAddress(mint, wallet!.publicKey),
-                      );
-                      const toAta = yield* Effect.tryPromise(() =>
-                        getAssociatedTokenAddress(mint, feeWalletPubkey),
-                      );
-                      // Check if destination ATA exists
-                      const toAtaInfo = yield* Effect.tryPromise(() =>
-                        connection.getAccountInfo(toAta),
-                      );
-                      if (!toAtaInfo) {
-                        transferTx.add(
-                          createAssociatedTokenAccountInstruction(
-                            wallet!.publicKey,
-                            toAta,
-                            feeWalletPubkey,
-                            mint,
-                          ),
-                        );
-                      }
+                    const toAta = yield* Effect.tryPromise(() =>
+                      getAssociatedTokenAddress(mint, feeWalletPubkey),
+                    );
+                    // Check if destination ATA exists
+                    const toAtaInfo = yield* Effect.tryPromise(() =>
+                      connection.getAccountInfo(toAta),
+                    );
+                    if (!toAtaInfo) {
                       transferTx.add(
-                        createTransferInstruction(
-                          fromAta,
-                          toAta,
+                        createAssociatedTokenAccountInstruction(
                           wallet!.publicKey,
-                          BigInt(Math.floor(amount)),
+                          toAta,
+                          feeWalletPubkey,
+                          mint,
                         ),
                       );
                     }
-
-                    transferTx.sign(wallet!);
-                    const sig = yield* Effect.tryPromise(() =>
-                      connection.sendRawTransaction(transferTx.serialize(), {
-                        skipPreflight: false,
-                      }),
+                    transferTx.add(
+                      createTransferInstruction(
+                        fromAta,
+                        toAta,
+                        wallet!.publicKey,
+                        BigInt(Math.floor(amount)),
+                      ),
                     );
-                    yield* Effect.tryPromise(() => connection.confirmTransaction(sig, "confirmed"));
-                    feeTransferTxSignature = sig;
-                  } catch (err) {
-                    console.error("Platform fee transfer failed (fees retained by user)", {
+                  }
+
+                  if (transferTx.instructions.length === 0) {
+                    logger.info("No platform fee to transfer — operator keeps full share", {
                       pool: poolAddress,
-                      platformFeeX,
-                      platformFeeY,
+                    });
+                    return undefined;
+                  }
+
+                  transferTx.sign(wallet!);
+                  const sig = yield* Effect.tryPromise(() =>
+                    connection.sendRawTransaction(transferTx.serialize(), {
+                      skipPreflight: false,
+                    }),
+                  );
+                  yield* Effect.tryPromise(() => connection.confirmTransaction(sig, "confirmed"));
+                  return sig;
+                }).pipe(
+                  Effect.catchAll((err) => {
+                    logger.error("Platform fee transfer failed (fees retained by user)", {
+                      pool: poolAddress,
+                      platformFeeX: revenueShare.platformFeeX,
+                      platformFeeY: revenueShare.platformFeeY,
                       error: String(err),
                     });
-                  }
+                    return Effect.succeed(undefined);
+                  }),
+                );
+                if (transferResult !== undefined) {
+                  feeTransferTxSignature = transferResult;
+                  actualPlatformFeeX = revenueShare.amountToTransferX;
+                  actualPlatformFeeY = revenueShare.amountToTransferY;
+                  actualOperatorFeeX = revenueShare.operatorFeeX;
+                  actualOperatorFeeY = revenueShare.operatorFeeY;
+                } else if (revenueShare.amountToTransferX === 0 && revenueShare.amountToTransferY === 0) {
+                  actualOperatorFeeX = revenueShare.operatorFeeX;
+                  actualOperatorFeeY = revenueShare.operatorFeeY;
                 }
+              } else {
+                logger.warn("No fee wallet configured — skipping platform fee transfer", {
+                  pool: poolAddress,
+                });
               }
             }
 
@@ -885,11 +985,14 @@ export const AdapterLive = Layer.effect(
               txSignature: lastSignature,
               feeX,
               feeY,
-              platformFeeX,
-              platformFeeY,
-              netFeeX,
-              netFeeY,
+              platformFeeX: actualPlatformFeeX,
+              platformFeeY: actualPlatformFeeY,
+              netFeeX: revenueShare.netFeeX,
+              netFeeY: revenueShare.netFeeY,
               ...(feeTransferTxSignature !== undefined ? { feeTransferTxSignature } : {}),
+              ...(actualOperatorFeeX > 0 || actualOperatorFeeY > 0
+                ? { operatorFeeX: actualOperatorFeeX, operatorFeeY: actualOperatorFeeY }
+                : {}),
             };
           } catch (err) {
             return yield* Effect.fail(
@@ -911,9 +1014,9 @@ export const AdapterLive = Layer.effect(
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ ...event, installId }),
             });
-            if (!res.ok) console.warn("Revenue report failed:", res.status);
+            if (!res.ok) logger.warn("Revenue report failed:", res.status);
           } catch (err) {
-            console.warn("Revenue report failed:", String(err));
+            logger.warn("Revenue report failed:", String(err));
           }
         })();
       },
@@ -956,7 +1059,7 @@ export const AdapterLive = Layer.effect(
 
           if (solBalance >= minSolThreshold) return;
 
-          console.info("Low SOL balance — swapping USDC → SOL for gas", {
+          logger.info("Low SOL balance — swapping USDC → SOL for gas", {
             solBalance: solBalance.toFixed(4),
             minThreshold: minSolThreshold,
             swapAmountUSDC,
@@ -975,7 +1078,7 @@ export const AdapterLive = Layer.effect(
             );
 
             if (!quoteResponse.ok) {
-              console.warn("Jupiter quote failed:", quoteResponse.status);
+              logger.warn("Jupiter quote failed:", quoteResponse.status);
               return;
             }
 
@@ -997,7 +1100,7 @@ export const AdapterLive = Layer.effect(
             );
 
             if (!swapResponse.ok) {
-              console.warn("Jupiter swap build failed:", swapResponse.status);
+              logger.warn("Jupiter swap build failed:", swapResponse.status);
               return;
             }
 
@@ -1006,7 +1109,7 @@ export const AdapterLive = Layer.effect(
             };
 
             if (!swapData.swapTransaction) {
-              console.warn("Jupiter swap: no transaction returned");
+              logger.warn("Jupiter swap: no transaction returned");
               return;
             }
 
@@ -1022,9 +1125,9 @@ export const AdapterLive = Layer.effect(
             );
 
             yield* Effect.tryPromise(() => connection.confirmTransaction(sig, "confirmed"));
-            console.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
+            logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
           } catch (err) {
-            console.warn("USDC → SOL swap failed (non-fatal):", String(err));
+            logger.warn("USDC → SOL swap failed (non-fatal):", String(err));
           }
         }).pipe(Effect.catchAll(() => Effect.void)),
     };

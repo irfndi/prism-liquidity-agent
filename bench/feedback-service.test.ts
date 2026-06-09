@@ -67,11 +67,15 @@ function buildLayer(
     updateChannel: "stable",
     updateGithubRepo: "",
     updateAllowDirty: false,
+    forceUpdateEnabled: false,
+    forceUpdateAfterDays: 14,
     updateR2PublicUrl: "",
     githubToken,
     githubRepo,
     feedbackOptOut: optOut,
     paperModeExitLive: false,
+    revenueShareEnabled: false,
+    revenueShareOperatorPct: 50,
   });
   const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));
   return Layer.provide(FeedbackLive, baseLayer) as Layer.Layer<FeedbackService, never, never>;

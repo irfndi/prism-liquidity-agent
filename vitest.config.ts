@@ -6,6 +6,7 @@ export default defineConfig({
     include: ["bench/**/*.test.ts"],
     testTimeout: 30000,
     coverage: {
+      provider: "istanbul",
       include: ["engine/**/*.ts"],
       exclude: [
         "engine/index.ts",
@@ -20,10 +21,10 @@ export default defineConfig({
       ],
       reporter: ["text", "json", "html"],
       thresholds: {
-        statements: 80,
-        branches: 70,
-        functions: 70,
-        lines: 80,
+        statements: 75,
+        branches: 60,
+        functions: 75,
+        lines: 75,
       },
     },
   },

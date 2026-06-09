@@ -10,6 +10,7 @@ import { ScreenerLive } from "./screener-service.js";
 import { DbLive } from "./db-service.js";
 import { RevenueLive, TIERS } from "./revenue-service.js";
 import { ReferralLive } from "./referral-service.js";
+import { checkForAutoUpdate } from "./update-check.js";
 import type { PositionRecord } from "./db-service.js";
 import {
   AdapterService,
@@ -885,7 +886,7 @@ export const program = Effect.gen(function* () {
             .claimFees(decision.poolAddress, pos.positionPubKey, platformFeeRate)
             .pipe(Effect.catchAll(() => Effect.succeed(null)));
 
-          if (claimResult && (claimResult.platformFeeX > 0 || claimResult.platformFeeY > 0)) {
+          if (claimResult && (claimResult.platformFeeX > 0 || claimResult.platformFeeY > 0 || (claimResult.operatorFeeX ?? 0) > 0 || (claimResult.operatorFeeY ?? 0) > 0)) {
             adapter.reportFeeCollection({
               poolAddress: decision.poolAddress,
               positionPubkey: pos.positionPubKey,
@@ -897,6 +898,12 @@ export const program = Effect.gen(function* () {
               txSignature: claimResult.txSignature,
               ...(claimResult.feeTransferTxSignature != null && {
                 feeTransferTxSignature: claimResult.feeTransferTxSignature,
+              }),
+              ...(claimResult.operatorFeeX != null && {
+                operatorFeeX: claimResult.operatorFeeX,
+              }),
+              ...(claimResult.operatorFeeY != null && {
+                operatorFeeY: claimResult.operatorFeeY,
               }),
             });
           }
@@ -984,7 +991,7 @@ export const program = Effect.gen(function* () {
             continue;
           }
 
-          if (result.platformFeeX > 0 || result.platformFeeY > 0) {
+          if (result.platformFeeX > 0 || result.platformFeeY > 0 || (result.operatorFeeX ?? 0) > 0 || (result.operatorFeeY ?? 0) > 0) {
             adapter.reportFeeCollection({
               poolAddress,
               positionPubkey: pos.positionPubKey,
@@ -996,6 +1003,12 @@ export const program = Effect.gen(function* () {
               txSignature: result.txSignature,
               ...(result.feeTransferTxSignature != null && {
                 feeTransferTxSignature: result.feeTransferTxSignature,
+              }),
+              ...(result.operatorFeeX != null && {
+                operatorFeeX: result.operatorFeeX,
+              }),
+              ...(result.operatorFeeY != null && {
+                operatorFeeY: result.operatorFeeY,
               }),
             });
           }
@@ -1029,6 +1042,7 @@ export const program = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* reconcilePositions(adapter, db, memory, trackedPositions, poolsToScan);
         yield* claimAllFees();
+        yield* checkForAutoUpdate(config, db);
         yield* runScanCycle();
       }).pipe(
         Effect.provide(layer),

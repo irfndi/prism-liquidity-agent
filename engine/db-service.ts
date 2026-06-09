@@ -479,6 +479,27 @@ export const DbLive = (dbPath?: string) =>
             );
             return rows.map(rowToFeedback);
           }),
+
+        getMetadata: (key) =>
+          Effect.sync(() => {
+            const row = queryOne<{ value: string }>(
+              db,
+              "SELECT value FROM metadata WHERE key = ?",
+              key,
+            );
+            return row?.value ?? null;
+          }),
+
+        setMetadata: (key, value) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, ?)",
+              key,
+              value,
+              Date.now(),
+            );
+          }),
       };
 
       return api;
