@@ -89,7 +89,8 @@ export function calculateRevenueShare(
     platformFeeY = feeY * platformFeeRate;
 
     if (revenueShareEnabled) {
-      const operatorPct = revenueShareOperatorPct / 100;
+      const clampedPct = Math.max(0, Math.min(revenueShareOperatorPct, 100));
+      const operatorPct = clampedPct / 100;
       operatorFeeX = platformFeeX * operatorPct;
       operatorFeeY = platformFeeY * operatorPct;
     }
@@ -879,7 +880,7 @@ export const AdapterLive = Layer.effect(
                   { pool: poolAddress, platformFeeX: revenueShare.platformFeeX, platformFeeY: revenueShare.platformFeeY },
                 );
               } else if (feeWallet) {
-                try {
+                const transferResult = yield* Effect.gen(function* () {
                   const feeWalletPubkey = new PublicKey(feeWallet);
                   const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
                   const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
@@ -931,24 +932,29 @@ export const AdapterLive = Layer.effect(
                     console.info("No platform fee to transfer — operator keeps full share", {
                       pool: poolAddress,
                     });
-                  } else {
-                    transferTx.sign(wallet!);
-                    const sig = yield* Effect.tryPromise(() =>
-                      connection.sendRawTransaction(transferTx.serialize(), {
-                        skipPreflight: false,
-                      }),
-                    );
-                    yield* Effect.tryPromise(() => connection.confirmTransaction(sig, "confirmed"));
-                    feeTransferTxSignature = sig;
+                    return undefined;
                   }
-                } catch (err) {
-                  console.error("Platform fee transfer failed (fees retained by user)", {
-                    pool: poolAddress,
-                    platformFeeX: revenueShare.platformFeeX,
-                    platformFeeY: revenueShare.platformFeeY,
-                    error: String(err),
-                  });
-                }
+
+                  transferTx.sign(wallet!);
+                  const sig = yield* Effect.tryPromise(() =>
+                    connection.sendRawTransaction(transferTx.serialize(), {
+                      skipPreflight: false,
+                    }),
+                  );
+                  yield* Effect.tryPromise(() => connection.confirmTransaction(sig, "confirmed"));
+                  return sig;
+                }).pipe(
+                  Effect.catchAll((err) => {
+                    console.error("Platform fee transfer failed (fees retained by user)", {
+                      pool: poolAddress,
+                      platformFeeX: revenueShare.platformFeeX,
+                      platformFeeY: revenueShare.platformFeeY,
+                      error: String(err),
+                    });
+                    return Effect.succeed(undefined);
+                  }),
+                );
+                feeTransferTxSignature = transferResult;
               } else {
                 console.warn("No fee wallet configured — skipping platform fee transfer", {
                   pool: poolAddress,

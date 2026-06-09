@@ -166,8 +166,7 @@ const loadConfig = Effect.gen(function* () {
   const revenueShareEnabled = yield* Config.boolean("REVENUE_SHARE_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const revenueShareOperatorPctRaw = yield* validatedNumber("REVENUE_SHARE_OPERATOR_PCT", 0, 50);
-  const revenueShareOperatorPct = Math.min(revenueShareOperatorPctRaw, 100);
+  const revenueShareOperatorPct = yield* validatedNumber("REVENUE_SHARE_OPERATOR_PCT", 0, 0);
 
   const watchlistPools = watchlistPoolsRaw
     .split(",")

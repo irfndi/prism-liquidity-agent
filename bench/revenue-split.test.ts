@@ -1,13 +1,12 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { Effect, Layer } from "effect";
 import { ConfigService } from "../engine/config-service.js";
 import { DbLive } from "../engine/db-service.js";
-import { DbService } from "../engine/services.js";
+import { AuditLive } from "../engine/audit-service.js";
+import { calculateRevenueShare } from "../engine/adapter-service.js";
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
-  return Effect.runSync((Effect.provide as any)(effect, layer));
+function runAsync<T>(effect: Effect.Effect<T, unknown, never>): Promise<T> {
+  return Effect.runPromise(effect);
 }
 
 function buildLayer(overrides: Partial<{
@@ -56,94 +55,83 @@ function buildLayer(overrides: Partial<{
     feedbackOptOut: false,
     paperModeExitLive: false,
     revenueShareEnabled: overrides.revenueShareEnabled ?? false,
-    revenueShareOperatorPct: overrides.revenueShareOperatorPct ?? 50,
+    revenueShareOperatorPct: overrides.revenueShareOperatorPct ?? 0,
   });
   return Layer.merge(mockConfig, DbLive(":memory:"));
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
-
 describe("revenue share configuration", () => {
-  it("defaults to disabled", () => {
+  it("defaults to disabled", async () => {
     const layer = buildLayer();
-    run(
+    await runAsync(
       Effect.gen(function* () {
         const config = yield* ConfigService;
         expect(config.revenueShareEnabled).toBe(false);
-        expect(config.revenueShareOperatorPct).toBe(50);
-      }),
-      layer,
+        expect(config.revenueShareOperatorPct).toBe(0);
+      }).pipe(Effect.provide(layer)),
     );
   });
 
-  it("can be enabled with custom percentage", () => {
+  it("can be enabled with custom percentage", async () => {
     const layer = buildLayer({ revenueShareEnabled: true, revenueShareOperatorPct: 75 });
-    run(
+    await runAsync(
       Effect.gen(function* () {
         const config = yield* ConfigService;
         expect(config.revenueShareEnabled).toBe(true);
         expect(config.revenueShareOperatorPct).toBe(75);
-      }),
-      layer,
+      }).pipe(Effect.provide(layer)),
     );
   });
 
-  it("accepts 0% operator share", () => {
+  it("accepts 0% operator share", async () => {
     const layer = buildLayer({ revenueShareEnabled: true, revenueShareOperatorPct: 0 });
-    run(
+    await runAsync(
       Effect.gen(function* () {
         const config = yield* ConfigService;
         expect(config.revenueShareOperatorPct).toBe(0);
-      }),
-      layer,
+      }).pipe(Effect.provide(layer)),
     );
   });
 });
 
 describe("revenue share fee calculation", () => {
+  const FEE_WALLET = "FeeWallet1111111111111111111111111111111111";
+  const OPERATOR_WALLET = "OperatorWallet111111111111111111111111111111";
+
   it("when disabled, operator gets 0%", () => {
-    const platformFeeX = 100;
-    const operatorPct = 50; // irrelevant when disabled
-    const enabled = false;
-
-    let operatorFeeX = 0;
-    if (enabled) {
-      operatorFeeX = platformFeeX * (operatorPct / 100);
-    }
-
-    expect(operatorFeeX).toBe(0);
+    const result = calculateRevenueShare(100, 200, 0.1, false, 50, FEE_WALLET, OPERATOR_WALLET);
+    expect(result.operatorFeeX).toBe(0);
+    expect(result.operatorFeeY).toBe(0);
+    expect(result.amountToTransferX).toBe(10); // full platform fee transferred
   });
 
   it("when enabled 50%, operator gets half", () => {
-    const platformFeeX = 100;
-    const operatorPct = 50;
-    const enabled = true;
-
-    const operatorFeeX = enabled ? platformFeeX * (operatorPct / 100) : 0;
-    expect(operatorFeeX).toBe(50);
+    const result = calculateRevenueShare(100, 200, 0.1, true, 50, FEE_WALLET, OPERATOR_WALLET);
+    expect(result.operatorFeeX).toBe(5); // 10 * 0.5
+    expect(result.operatorFeeY).toBe(10); // 20 * 0.5
+    expect(result.amountToTransferX).toBe(5); // 10 - 5
+    expect(result.amountToTransferY).toBe(10); // 20 - 10
   });
 
   it("when enabled 100%, operator gets all", () => {
-    const platformFeeX = 100;
-    const operatorPct = 100;
-    const enabled = true;
-
-    const operatorFeeX = enabled ? platformFeeX * (operatorPct / 100) : 0;
-    expect(operatorFeeX).toBe(100);
+    const result = calculateRevenueShare(100, 200, 0.1, true, 100, FEE_WALLET, OPERATOR_WALLET);
+    expect(result.operatorFeeX).toBe(10); // 10 * 1.0
+    expect(result.operatorFeeY).toBe(20); // 20 * 1.0
+    expect(result.amountToTransferX).toBe(0); // 10 - 10
+    expect(result.amountToTransferY).toBe(0); // 20 - 20
   });
 
   it("when enabled 0%, operator gets nothing", () => {
-    const platformFeeX = 100;
-    const operatorPct = 0;
-    const enabled = true;
-
-    const operatorFeeX = enabled ? platformFeeX * (operatorPct / 100) : 0;
-    expect(operatorFeeX).toBe(0);
+    const result = calculateRevenueShare(100, 200, 0.1, true, 0, FEE_WALLET, OPERATOR_WALLET);
+    expect(result.operatorFeeX).toBe(0);
+    expect(result.operatorFeeY).toBe(0);
+    expect(result.amountToTransferX).toBe(10); // full platform fee transferred
   });
 
   it("circular wallet detection: operator wallet == fee wallet", () => {
-    const operatorWallet = "Wallet111111111111111111111111111111111111";
-    const feeWallet = "Wallet111111111111111111111111111111111111";
-    expect(operatorWallet).toBe(feeWallet);
+    const result = calculateRevenueShare(100, 200, 0.1, true, 50, OPERATOR_WALLET, OPERATOR_WALLET);
+    expect(result.isCircular).toBe(true);
+    expect(result.amountToTransferX).toBe(0);
+    expect(result.amountToTransferY).toBe(0);
   });
 });

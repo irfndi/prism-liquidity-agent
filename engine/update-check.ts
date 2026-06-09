@@ -36,12 +36,26 @@ export function checkForAutoUpdate(
       return;
     }
 
+    if (!config.autoUpdate && !config.forceUpdateEnabled) {
+      yield* db.setMetadata("lastUpdateCheckAt", String(now));
+      return;
+    }
+
     let versionInstalledAt = yield* db.getMetadata("versionInstalledAt");
     const fileTimestamp = getVersionInstalledAtFromFile();
     if (fileTimestamp !== null) {
-      versionInstalledAt = String(fileTimestamp);
+      const fileTimestampString = String(fileTimestamp);
+      versionInstalledAt = fileTimestampString;
+      yield* db.setMetadata("versionInstalledAt", fileTimestampString);
     }
     if (versionInstalledAt === null) {
+      versionInstalledAt = String(now);
+      yield* db.setMetadata("versionInstalledAt", versionInstalledAt);
+    }
+
+    const installedAtMs = Number(versionInstalledAt);
+    if (!Number.isFinite(installedAtMs) || installedAtMs <= 0) {
+      log.warn("Invalid versionInstalledAt timestamp, resetting to now", { versionInstalledAt });
       versionInstalledAt = String(now);
       yield* db.setMetadata("versionInstalledAt", versionInstalledAt);
     }
@@ -66,7 +80,6 @@ export function checkForAutoUpdate(
       return;
     }
 
-    const installedAtMs = Number(versionInstalledAt);
     const daysSinceInstall = Math.floor((now - installedAtMs) / MS_PER_DAY);
     const daysUntilForce = config.forceUpdateAfterDays - daysSinceInstall;
 

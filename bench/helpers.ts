@@ -9,7 +9,7 @@ export function makePool(overrides: Partial<PoolState> = {}): PoolState {
   return {
     address: "TestPool111111111111111111111111111111111111",
     tokenX: "So11111111111111111111111111111111111111112",
-    tokenY: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    tokenY: "FakeToken1111111111111111111111111111111111",
     tokenXSymbol: "SOL",
     tokenYSymbol: "USDC",
     tvlUsd: 100_000,
@@ -34,7 +34,7 @@ export function makeBinArray(activeBinId = 5000, halfWidth = 20): BinArray {
   }));
   return {
     lowerBinId: activeBinId - halfWidth,
-    upperBinId: activeBinId + halfWidth,
+    upperBinId: activeBinId + halfWidth - 1,
     bins,
     activeBinId,
   };
