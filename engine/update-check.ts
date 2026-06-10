@@ -23,10 +23,7 @@ function getVersionInstalledAtFromFile(): number | null {
   }
 }
 
-export function checkForAutoUpdate(
-  config: AppConfig,
-  db: DbApi,
-): Effect.Effect<void, never> {
+export function checkForAutoUpdate(config: AppConfig, db: DbApi): Effect.Effect<void, never> {
   return Effect.gen(function* () {
     const now = Date.now();
 
@@ -84,10 +81,9 @@ export function checkForAutoUpdate(
     const daysSinceInstall = Math.floor((now - installedAtMs) / MS_PER_DAY);
     const daysUntilForce = config.forceUpdateAfterDays - daysSinceInstall;
 
-    log.info(
-      `New version available: ${release.version} (current: ${currentVersion})`,
-      { source: release.source },
-    );
+    log.info(`New version available: ${release.version} (current: ${currentVersion})`, {
+      source: release.source,
+    });
 
     if (config.forceUpdateEnabled && daysUntilForce <= 0) {
       log.error(
@@ -111,8 +107,10 @@ export function checkForAutoUpdate(
     }
 
     yield* db.setMetadata("lastUpdateCheckAt", String(now));
-  }).pipe(Effect.catchAll((err) => {
-    log.warn("Auto-update check failed (non-fatal)", { error: String(err) });
-    return Effect.void;
-  }));
+  }).pipe(
+    Effect.catchAll((err) => {
+      log.warn("Auto-update check failed (non-fatal)", { error: String(err) });
+      return Effect.void;
+    }),
+  );
 }

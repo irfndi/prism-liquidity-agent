@@ -57,8 +57,6 @@ function buildLayer(
     githubRepo: "",
     feedbackOptOut: false,
     paperModeExitLive: false,
-    revenueShareEnabled: false,
-    revenueShareOperatorPct: 50,
   });
   return Layer.merge(mockConfig, DbLive(":memory:"));
 }
@@ -189,7 +187,9 @@ describe("checkForAutoUpdate", () => {
   });
 
   it("survives network errors gracefully", async () => {
-    globalThis.fetch = vi.fn().mockRejectedValue(new Error("network timeout")) as unknown as typeof fetch;
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new Error("network timeout")) as unknown as typeof fetch;
 
     const layer = buildLayer({ updateCheckIntervalMs: 0 });
 

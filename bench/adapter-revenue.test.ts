@@ -6,7 +6,15 @@ describe("calculateRevenueShare", () => {
   const OPERATOR_WALLET = "OperatorWallet111111111111111111111111111111";
 
   it("returns zero fees when platformFeeRate is undefined", () => {
-    const result = calculateRevenueShare(1000, 2000, undefined, true, 50, FEE_WALLET, OPERATOR_WALLET);
+    const result = calculateRevenueShare(
+      1000,
+      2000,
+      undefined,
+      true,
+      50,
+      FEE_WALLET,
+      OPERATOR_WALLET,
+    );
     expect(result.platformFeeX).toBe(0);
     expect(result.platformFeeY).toBe(0);
     expect(result.netFeeX).toBe(1000);
@@ -82,7 +90,15 @@ describe("calculateRevenueShare", () => {
   });
 
   it("handles circular wallet (operator === fee wallet)", () => {
-    const result = calculateRevenueShare(1000, 2000, 0.1, true, 50, OPERATOR_WALLET, OPERATOR_WALLET);
+    const result = calculateRevenueShare(
+      1000,
+      2000,
+      0.1,
+      true,
+      50,
+      OPERATOR_WALLET,
+      OPERATOR_WALLET,
+    );
     expect(result.isCircular).toBe(true);
     expect(result.amountToTransferX).toBe(0);
     expect(result.amountToTransferY).toBe(0);
@@ -122,7 +138,15 @@ describe("calculateRevenueShare", () => {
   });
 
   it("handles fractional fees correctly", () => {
-    const result = calculateRevenueShare(123.45, 678.9, 0.075, true, 33, FEE_WALLET, OPERATOR_WALLET);
+    const result = calculateRevenueShare(
+      123.45,
+      678.9,
+      0.075,
+      true,
+      33,
+      FEE_WALLET,
+      OPERATOR_WALLET,
+    );
     expect(result.platformFeeX).toBe(9); // floor(123.45 * 0.075)
     expect(result.platformFeeY).toBe(50); // floor(678.9 * 0.075)
     expect(result.operatorFeeX).toBe(2); // floor(9 * 0.33)

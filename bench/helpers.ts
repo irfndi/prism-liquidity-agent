@@ -54,9 +54,7 @@ export function makeDecision(overrides: Partial<AgentDecision> = {}): AgentDecis
 
 // ─── Position (DB record) ────────────────────────────────────────────────────
 
-export function makePosition(
-  overrides: Partial<PositionRecord> = {},
-): PositionRecord {
+export function makePosition(overrides: Partial<PositionRecord> = {}): PositionRecord {
   return {
     poolAddress: overrides.poolAddress ?? "Pool111111111111111111111111111111111111111",
     positionPubKey: overrides.positionPubKey ?? null,
@@ -80,13 +78,14 @@ export function makePosition(
 
 // ─── Effect runners ──────────────────────────────────────────────────────────
 
-export function run<T, R>(effect: Effect.Effect<T, unknown, R>, layer: Layer.Layer<R, never, never>): T {
+export function run<T, R>(
+  effect: Effect.Effect<T, unknown, R>,
+  layer: Layer.Layer<R, never, never>,
+): T {
   return Effect.runSync(Effect.provide(effect, layer));
 }
 
-export async function runAsync<T>(
-  effect: Effect.Effect<T, unknown, never>,
-): Promise<T> {
+export async function runAsync<T>(effect: Effect.Effect<T, unknown, never>): Promise<T> {
   return Effect.runPromise(effect);
 }
 

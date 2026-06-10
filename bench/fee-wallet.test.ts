@@ -21,9 +21,7 @@ function makeFeeWalletFetcher() {
       }
 
       // Always fetch from API — users cannot override the fee wallet
-      const res = yield* Effect.tryPromise(() =>
-        fetch(`${FEE_WALLET_API_URL}/v1/fee-wallet`),
-      );
+      const res = yield* Effect.tryPromise(() => fetch(`${FEE_WALLET_API_URL}/v1/fee-wallet`));
       if (res.ok) {
         const data = (yield* Effect.tryPromise(() => res.json())) as { address?: string };
         if (data.address) {

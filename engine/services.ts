@@ -36,7 +36,15 @@ export interface AdapterApi {
   ) => Effect.Effect<ReadonlyArray<Position>, unknown>;
   readonly getAllWalletPositions: (
     walletAddress: string,
-  ) => Effect.Effect<ReadonlyArray<{ poolAddress: string; positionPubKey: string; lowerBinId: number; upperBinId: number }>, unknown>;
+  ) => Effect.Effect<
+    ReadonlyArray<{
+      poolAddress: string;
+      positionPubKey: string;
+      lowerBinId: number;
+      upperBinId: number;
+    }>,
+    unknown
+  >;
   readonly simulateRebalance: (
     poolAddress: string,
     newLowerBinId: number,
@@ -75,6 +83,8 @@ export interface AdapterApi {
     poolAddress: string,
     positionPubKey: string,
     platformFeeRate?: number,
+    revenueShareEnabled?: boolean,
+    revenueShareOperatorPct?: number,
   ) => Effect.Effect<
     {
       txSignature: string;
@@ -519,6 +529,40 @@ export interface DbApi {
   >;
   readonly getMetadata: (key: string) => Effect.Effect<string | null, unknown>;
   readonly setMetadata: (key: string, value: string) => Effect.Effect<void, unknown>;
+
+  readonly saveFeeClaim: (claim: {
+    id: string;
+    poolAddress: string;
+    positionPubkey: string;
+    feeX: number;
+    feeY: number;
+    platformFeeX: number;
+    platformFeeY: number;
+    netFeeX: number;
+    netFeeY: number;
+    txSignature: string | null;
+    feeTransferTxSignature: string | null;
+    reportedToApi: boolean;
+    createdAt: number;
+  }) => Effect.Effect<void, unknown>;
+
+  readonly getUnreportedFeeClaims: () => Effect.Effect<
+    ReadonlyArray<{
+      id: string;
+      poolAddress: string;
+      positionPubkey: string;
+      feeX: number;
+      feeY: number;
+      platformFeeX: number;
+      platformFeeY: number;
+      txSignature: string | null;
+      feeTransferTxSignature: string | null;
+      createdAt: number;
+    }>,
+    unknown
+  >;
+
+  readonly markFeeClaimReported: (id: string) => Effect.Effect<void, unknown>;
 }
 
 export class DbService extends Context.Tag("DbService")<DbService, DbApi>() {}
@@ -612,3 +656,23 @@ export interface RevenueApi {
 }
 
 export class RevenueService extends Context.Tag("RevenueService")<RevenueService, RevenueApi>() {}
+
+// ─── Revenue Config Service ─────────────────────────────────────────────────
+
+export interface RevenueConfig {
+  readonly tier: string;
+  readonly platformFeeRate: number;
+  readonly revenueShareEnabled: boolean;
+  readonly revenueShareOperatorPct: number;
+  readonly feeWalletAddress: string;
+}
+
+export interface RevenueConfigApi {
+  readonly getConfig: () => Effect.Effect<RevenueConfig, unknown>;
+  readonly refreshConfig: () => Effect.Effect<RevenueConfig, unknown>;
+}
+
+export class RevenueConfigService extends Context.Tag("RevenueConfigService")<
+  RevenueConfigService,
+  RevenueConfigApi
+>() {}

@@ -160,7 +160,8 @@ export class ErrorReporter {
       (typeof process !== "undefined" ? process.env.PRISM_ERROR_ENDPOINT : undefined);
     const reportingEnv =
       typeof process !== "undefined" ? process.env.PRISM_ERROR_REPORTING : undefined;
-    this.endpoint = explicitEndpoint ?? (reportingEnv === "true" ? DEFAULT_ERROR_ENDPOINT : undefined);
+    this.endpoint =
+      explicitEndpoint ?? (reportingEnv === "true" ? DEFAULT_ERROR_ENDPOINT : undefined);
     this.enabled = config.enabled !== undefined ? config.enabled : reportingEnv === "true";
     this.batchSize = config.batchSize ?? DEFAULT_BATCH_SIZE;
     this.flushIntervalMs = config.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;

@@ -500,6 +500,70 @@ export const DbLive = (dbPath?: string) =>
               Date.now(),
             );
           }),
+
+        saveFeeClaim: (claim) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              `INSERT INTO fee_claims (
+                id, pool_address, position_pubkey, fee_x, fee_y,
+                platform_fee_x, platform_fee_y, net_fee_x, net_fee_y,
+                tx_signature, fee_transfer_tx_signature, reported_to_api, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              claim.id,
+              claim.poolAddress,
+              claim.positionPubkey,
+              claim.feeX,
+              claim.feeY,
+              claim.platformFeeX,
+              claim.platformFeeY,
+              claim.netFeeX,
+              claim.netFeeY,
+              claim.txSignature,
+              claim.feeTransferTxSignature,
+              claim.reportedToApi ? 1 : 0,
+              claim.createdAt,
+            );
+          }),
+
+        getUnreportedFeeClaims: () =>
+          Effect.sync(() => {
+            return queryAll<{
+              id: string;
+              pool_address: string;
+              position_pubkey: string;
+              fee_x: number;
+              fee_y: number;
+              platform_fee_x: number;
+              platform_fee_y: number;
+              tx_signature: string | null;
+              fee_transfer_tx_signature: string | null;
+              created_at: number;
+            }>(
+              db,
+              `SELECT id, pool_address, position_pubkey, fee_x, fee_y,
+                platform_fee_x, platform_fee_y, tx_signature,
+                fee_transfer_tx_signature, created_at
+              FROM fee_claims WHERE reported_to_api = 0
+              ORDER BY created_at ASC`,
+            ).map((row) => ({
+              id: row.id,
+              poolAddress: row.pool_address,
+              positionPubkey: row.position_pubkey,
+              feeX: row.fee_x,
+              feeY: row.fee_y,
+              platformFeeX: row.platform_fee_x,
+              platformFeeY: row.platform_fee_y,
+              txSignature: row.tx_signature,
+              feeTransferTxSignature: row.fee_transfer_tx_signature,
+              createdAt: row.created_at,
+            }));
+          }),
+
+        markFeeClaimReported: (id) =>
+          Effect.sync(() => {
+            runOne(db, "UPDATE fee_claims SET reported_to_api = 1 WHERE id = ?", id);
+          }),
       };
 
       return api;

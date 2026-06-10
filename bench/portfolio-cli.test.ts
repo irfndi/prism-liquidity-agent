@@ -3,7 +3,10 @@ import { Effect, Layer } from "effect";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 
-async function runAsync<T>(effect: Effect.Effect<T, unknown, DbService>, layer: Layer.Layer<DbService, never, never>): Promise<T> {
+async function runAsync<T>(
+  effect: Effect.Effect<T, unknown, DbService>,
+  layer: Layer.Layer<DbService, never, never>,
+): Promise<T> {
   return Effect.runPromise(Effect.provide(effect, layer));
 }
 import {
@@ -240,8 +243,12 @@ describe("portfolio — DB integration", () => {
     const layer = buildLayer();
     const effect = Effect.gen(function* () {
       const db = yield* DbService;
-      yield* db.savePosition(makePosition({ poolAddress: "pool1", depositedUsd: 1000, currentValueUsd: 1100 }));
-      yield* db.savePosition(makePosition({ poolAddress: "pool2", depositedUsd: 2000, currentValueUsd: 1900 }));
+      yield* db.savePosition(
+        makePosition({ poolAddress: "pool1", depositedUsd: 1000, currentValueUsd: 1100 }),
+      );
+      yield* db.savePosition(
+        makePosition({ poolAddress: "pool2", depositedUsd: 2000, currentValueUsd: 1900 }),
+      );
       const positions = yield* db.getAllPositions();
       return positions;
     });
@@ -276,8 +283,12 @@ describe("portfolio — DB integration", () => {
     const layer = buildLayer();
     const effect = Effect.gen(function* () {
       const db = yield* DbService;
-      yield* db.savePosition(makePosition({ poolAddress: "pool1", depositedUsd: 1000, currentValueUsd: 1200 }));
-      yield* db.savePosition(makePosition({ poolAddress: "pool2", depositedUsd: 2000, currentValueUsd: 1800 }));
+      yield* db.savePosition(
+        makePosition({ poolAddress: "pool1", depositedUsd: 1000, currentValueUsd: 1200 }),
+      );
+      yield* db.savePosition(
+        makePosition({ poolAddress: "pool2", depositedUsd: 2000, currentValueUsd: 1800 }),
+      );
       const positions = yield* db.getAllPositions();
       const summary = computeSummary(positions);
       return summary;

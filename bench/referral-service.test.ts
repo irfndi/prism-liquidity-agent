@@ -70,9 +70,7 @@ describe("referral-service", () => {
   describe("REFERRAL_MILESTONES", () => {
     it("is sorted by count ascending", () => {
       for (let i = 1; i < REFERRAL_MILESTONES.length; i++) {
-        expect(REFERRAL_MILESTONES[i]!.count).toBeGreaterThan(
-          REFERRAL_MILESTONES[i - 1]!.count,
-        );
+        expect(REFERRAL_MILESTONES[i]!.count).toBeGreaterThan(REFERRAL_MILESTONES[i - 1]!.count);
       }
     });
   });

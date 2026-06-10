@@ -880,6 +880,45 @@ app.put("/v1/fee-wallet", async (c) => {
   return c.json({ address: body.address, updated: true });
 });
 
+app.get("/v1/config", async (c) => {
+  const { DB, CACHE } = c.env;
+  const apiKey = c.get("apiKey") as string;
+
+  if (!apiKey) {
+    return c.json({ error: "API key required" }, 401);
+  }
+
+  try {
+    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+    const userId = (loginResult as { id: string }).id;
+    const tier = (loginResult as { tier?: string }).tier ?? "free";
+
+    let feeWalletAddress: string | null = null;
+    if (CACHE) {
+      const kvAddress = await CACHE.get("fee_wallet_address");
+      if (kvAddress) {
+        feeWalletAddress = kvAddress;
+      }
+    }
+    if (!feeWalletAddress && c.env.FEE_WALLET_ADDRESS) {
+      feeWalletAddress = c.env.FEE_WALLET_ADDRESS;
+    }
+
+    await logAudit(DB, userId, "config_fetch", { tier });
+
+    return c.json({
+      tier,
+      platformFeeRate: TIERS[tier]?.platformFeeRate ?? 0,
+      revenueShareEnabled: true,
+      revenueShareOperatorPct: 0,
+      feeWalletAddress,
+      configVersion: 1,
+    });
+  } catch {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+});
+
 // ── Install Telemetry ───────────────────────────────────────────────────────
 // Privacy: install_id is a random UUID generated client-side; no PII.
 
@@ -1175,6 +1214,22 @@ app.get("/v1/subscription/status", async (c) => {
 
 app.post("/v1/revenue/log", async (c) => {
   const { DB, CACHE } = c.env;
+  const apiKey = c.get("apiKey") as string;
+
+  if (!apiKey) {
+    return c.json({ error: "API key required" }, 401);
+  }
+
+  let userId: string;
+  let tier: string;
+  try {
+    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+    userId = (loginResult as { id: string }).id;
+    tier = (loginResult as { tier?: string }).tier ?? "free";
+  } catch {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
 
   const body = (await c.req.json().catch(() => ({}))) as {
@@ -1184,14 +1239,11 @@ app.post("/v1/revenue/log", async (c) => {
     feeY?: number;
     platformFeeX?: number;
     platformFeeY?: number;
-    tier?: string;
     txSignature?: string;
     feeTransferTxSignature?: string;
-    userId?: string;
     installId?: string;
   };
 
-  // Validate required fields
   if (
     typeof body.poolAddress !== "string" ||
     body.poolAddress.length === 0 ||
@@ -1204,7 +1256,6 @@ app.post("/v1/revenue/log", async (c) => {
     );
   }
 
-  // Rate limit: 200 reports per IP per hour
   if (CACHE) {
     const rateKey = `rate_limit:revenue_log:${clientIp}`;
     const rateData = await CACHE.get(rateKey);
@@ -1229,8 +1280,8 @@ app.post("/v1/revenue/log", async (c) => {
         body.feeY ?? 0,
         body.platformFeeX,
         body.platformFeeY,
-        body.tier ?? "free",
-        body.userId ?? null,
+        tier,
+        userId,
         body.installId ?? null,
         body.txSignature ?? null,
         body.feeTransferTxSignature ?? null,

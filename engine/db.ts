@@ -307,6 +307,31 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       `);
     },
   },
+  {
+    version: 10,
+    name: "fee_claims",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS fee_claims (
+          id TEXT PRIMARY KEY,
+          pool_address TEXT NOT NULL,
+          position_pubkey TEXT NOT NULL,
+          fee_x REAL NOT NULL DEFAULT 0,
+          fee_y REAL NOT NULL DEFAULT 0,
+          platform_fee_x REAL NOT NULL DEFAULT 0,
+          platform_fee_y REAL NOT NULL DEFAULT 0,
+          net_fee_x REAL NOT NULL DEFAULT 0,
+          net_fee_y REAL NOT NULL DEFAULT 0,
+          tx_signature TEXT,
+          fee_transfer_tx_signature TEXT,
+          reported_to_api INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_fee_claims_pool ON fee_claims(pool_address)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_fee_claims_created ON fee_claims(created_at)`);
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

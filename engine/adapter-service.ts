@@ -1,4 +1,12 @@
-import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  Transaction,
+  TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
 import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountInstruction,
@@ -153,9 +161,7 @@ export const AdapterLive = Layer.effect(
         }
 
         // Always fetch from API — users cannot override the fee wallet
-        const res = yield* Effect.tryPromise(() =>
-          fetch(`${FEE_WALLET_API_URL}/v1/fee-wallet`),
-        );
+        const res = yield* Effect.tryPromise(() => fetch(`${FEE_WALLET_API_URL}/v1/fee-wallet`));
         if (res.ok) {
           const data = (yield* Effect.tryPromise(() => res.json())) as { address?: string };
           if (data.address) {
@@ -808,7 +814,13 @@ export const AdapterLive = Layer.effect(
           };
         }),
 
-      claimFees: (poolAddress, positionPubKey, platformFeeRate) =>
+      claimFees: (
+        poolAddress,
+        positionPubKey,
+        platformFeeRate,
+        revenueShareEnabled,
+        revenueShareOperatorPct,
+      ) =>
         Effect.gen(function* () {
           if (!wallet) {
             return yield* Effect.fail(
@@ -847,21 +859,18 @@ export const AdapterLive = Layer.effect(
               }),
             );
 
-            let lastSignature = "";
-            for (const tx of txs) {
-              const { blockhash } = yield* Effect.tryPromise(() => connection.getLatestBlockhash());
-              tx.feePayer = wallet.publicKey;
-              tx.recentBlockhash = blockhash;
-              tx.sign(wallet);
+            const claimInstructions = txs.flatMap((tx) => tx.instructions);
 
-              const signature = yield* Effect.tryPromise(() =>
-                connection.sendRawTransaction(tx.serialize(), {
-                  skipPreflight: false,
-                  preflightCommitment: "confirmed",
-                }),
-              );
-              yield* Effect.tryPromise(() => connection.confirmTransaction(signature, "confirmed"));
-              lastSignature = signature;
+            if (claimInstructions.length === 0) {
+              return {
+                txSignature: "",
+                feeX: 0,
+                feeY: 0,
+                platformFeeX: 0,
+                platformFeeY: 0,
+                netFeeX: 0,
+                netFeeY: 0,
+              };
             }
 
             const feeWallet = yield* fetchFeeWalletAddress();
@@ -870,12 +879,12 @@ export const AdapterLive = Layer.effect(
               feeX,
               feeY,
               platformFeeRate,
-              config.revenueShareEnabled,
-              config.revenueShareOperatorPct,
+              revenueShareEnabled ?? false,
+              revenueShareOperatorPct ?? 0,
               feeWallet,
               operatorWalletAddress,
             );
-            let feeTransferTxSignature: string | undefined;
+            let transferInstructions: TransactionInstruction[] = [];
             let actualPlatformFeeX = 0;
             let actualPlatformFeeY = 0;
             let actualOperatorFeeX = 0;
@@ -883,94 +892,64 @@ export const AdapterLive = Layer.effect(
 
             if (revenueShare.platformFeeX > 0 || revenueShare.platformFeeY > 0) {
               if (revenueShare.isCircular) {
-                logger.info(
-                  "Circular wallet detected — fees retained by operator",
-                  { pool: poolAddress, platformFeeX: revenueShare.platformFeeX, platformFeeY: revenueShare.platformFeeY },
-                );
+                logger.info("Circular wallet detected — fees retained by operator", {
+                  pool: poolAddress,
+                  platformFeeX: revenueShare.platformFeeX,
+                  platformFeeY: revenueShare.platformFeeY,
+                });
                 actualOperatorFeeX = revenueShare.platformFeeX;
                 actualOperatorFeeY = revenueShare.platformFeeY;
               } else if (feeWallet) {
-                const transferResult = yield* Effect.gen(function* () {
-                  const feeWalletPubkey = new PublicKey(feeWallet);
-                  const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
-                  const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
-                  const { blockhash } = yield* Effect.tryPromise(() =>
-                    connection.getLatestBlockhash(),
+                const feeWalletPubkey = new PublicKey(feeWallet);
+                const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
+                const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
+
+                const mints: Array<[PublicKey, number]> = [
+                  [tokenXMint, revenueShare.amountToTransferX],
+                  [tokenYMint, revenueShare.amountToTransferY],
+                ];
+
+                for (const [mint, amount] of mints) {
+                  if (amount < 1) continue;
+                  const fromAta = yield* Effect.tryPromise(() =>
+                    getAssociatedTokenAddress(mint, wallet!.publicKey),
                   );
-                  const transferTx = new Transaction();
-                  transferTx.feePayer = wallet.publicKey;
-                  transferTx.recentBlockhash = blockhash;
-
-                  const mints: Array<[PublicKey, number]> = [
-                    [tokenXMint, revenueShare.amountToTransferX],
-                    [tokenYMint, revenueShare.amountToTransferY],
-                  ];
-
-                  for (const [mint, amount] of mints) {
-                    if (amount < 1) continue;
-                    const fromAta = yield* Effect.tryPromise(() =>
-                      getAssociatedTokenAddress(mint, wallet!.publicKey),
-                    );
-                    const toAta = yield* Effect.tryPromise(() =>
-                      getAssociatedTokenAddress(mint, feeWalletPubkey),
-                    );
-                    // Check if destination ATA exists
-                    const toAtaInfo = yield* Effect.tryPromise(() =>
-                      connection.getAccountInfo(toAta),
-                    );
-                    if (!toAtaInfo) {
-                      transferTx.add(
-                        createAssociatedTokenAccountInstruction(
-                          wallet!.publicKey,
-                          toAta,
-                          feeWalletPubkey,
-                          mint,
-                        ),
-                      );
-                    }
-                    transferTx.add(
-                      createTransferInstruction(
-                        fromAta,
-                        toAta,
+                  const toAta = yield* Effect.tryPromise(() =>
+                    getAssociatedTokenAddress(mint, feeWalletPubkey),
+                  );
+                  // Check if destination ATA exists
+                  const toAtaInfo = yield* Effect.tryPromise(() =>
+                    connection.getAccountInfo(toAta),
+                  );
+                  if (!toAtaInfo) {
+                    transferInstructions.push(
+                      createAssociatedTokenAccountInstruction(
                         wallet!.publicKey,
-                        BigInt(Math.floor(amount)),
+                        toAta,
+                        feeWalletPubkey,
+                        mint,
                       ),
                     );
                   }
-
-                  if (transferTx.instructions.length === 0) {
-                    logger.info("No platform fee to transfer — operator keeps full share", {
-                      pool: poolAddress,
-                    });
-                    return undefined;
-                  }
-
-                  transferTx.sign(wallet!);
-                  const sig = yield* Effect.tryPromise(() =>
-                    connection.sendRawTransaction(transferTx.serialize(), {
-                      skipPreflight: false,
-                    }),
+                  transferInstructions.push(
+                    createTransferInstruction(
+                      fromAta,
+                      toAta,
+                      wallet!.publicKey,
+                      BigInt(Math.floor(amount)),
+                    ),
                   );
-                  yield* Effect.tryPromise(() => connection.confirmTransaction(sig, "confirmed"));
-                  return sig;
-                }).pipe(
-                  Effect.catchAll((err) => {
-                    logger.error("Platform fee transfer failed (fees retained by user)", {
-                      pool: poolAddress,
-                      platformFeeX: revenueShare.platformFeeX,
-                      platformFeeY: revenueShare.platformFeeY,
-                      error: String(err),
-                    });
-                    return Effect.succeed(undefined);
-                  }),
-                );
-                if (transferResult !== undefined) {
-                  feeTransferTxSignature = transferResult;
+                }
+
+                if (transferInstructions.length > 0) {
                   actualPlatformFeeX = revenueShare.amountToTransferX;
                   actualPlatformFeeY = revenueShare.amountToTransferY;
                   actualOperatorFeeX = revenueShare.operatorFeeX;
                   actualOperatorFeeY = revenueShare.operatorFeeY;
-                } else if (revenueShare.amountToTransferX === 0 && revenueShare.amountToTransferY === 0) {
+                } else {
+                  logger.info("No platform fee to transfer — operator keeps full share", {
+                    pool: poolAddress,
+                  });
                   actualOperatorFeeX = revenueShare.operatorFeeX;
                   actualOperatorFeeY = revenueShare.operatorFeeY;
                 }
@@ -981,15 +960,37 @@ export const AdapterLive = Layer.effect(
               }
             }
 
+            const allInstructions = [...claimInstructions, ...transferInstructions];
+
+            const { blockhash } = yield* Effect.tryPromise(() => connection.getLatestBlockhash());
+
+            const messageV0 = new TransactionMessage({
+              payerKey: wallet.publicKey,
+              recentBlockhash: blockhash,
+              instructions: allInstructions,
+            }).compileToV0Message();
+
+            const versionedTx = new VersionedTransaction(messageV0);
+            versionedTx.sign([wallet]);
+
+            const signature = yield* Effect.tryPromise(() =>
+              connection.sendRawTransaction(versionedTx.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: "confirmed",
+              }),
+            );
+
+            yield* Effect.tryPromise(() => connection.confirmTransaction(signature, "confirmed"));
+
             return {
-              txSignature: lastSignature,
+              txSignature: signature,
               feeX,
               feeY,
               platformFeeX: actualPlatformFeeX,
               platformFeeY: actualPlatformFeeY,
               netFeeX: revenueShare.netFeeX,
               netFeeY: revenueShare.netFeeY,
-              ...(feeTransferTxSignature !== undefined ? { feeTransferTxSignature } : {}),
+              ...(transferInstructions.length > 0 ? { feeTransferTxSignature: signature } : {}),
               ...(actualOperatorFeeX > 0 || actualOperatorFeeY > 0
                 ? { operatorFeeX: actualOperatorFeeX, operatorFeeY: actualOperatorFeeY }
                 : {}),

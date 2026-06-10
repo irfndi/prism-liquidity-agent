@@ -30,8 +30,27 @@ function withAdmin(req: Request): Request {
 
 describe("Revenue Tracking API", () => {
   const testEnv = { ...env, ADMIN_API_KEY: ADMIN_KEY } as unknown as Env;
+  let apiKey: string;
+  let userId: string;
 
   beforeAll(async () => {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        telegram_id TEXT UNIQUE,
+        tier TEXT NOT NULL DEFAULT 'free',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+    ).run();
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS api_keys (
+        key_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_used_at DATETIME
+      )`,
+    ).run();
     await env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS revenue_events (
         id TEXT PRIMARY KEY,
@@ -50,7 +69,24 @@ describe("Revenue Tracking API", () => {
     ).run();
     await env.DB.prepare(
       `ALTER TABLE revenue_events ADD COLUMN fee_transfer_tx_signature TEXT`,
+    ).run().catch(() => {});
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        details TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
     ).run();
+
+    const ctx = createExecutionContext();
+    const registerReq = buildRequest("POST", "/v1/register", {});
+    const registerRes = await worker.fetch(registerReq, testEnv, ctx);
+    expect(registerRes.status).toBe(200);
+    const regBody = (await registerRes.json()) as { user_id: string; api_key: string };
+    apiKey = regBody.api_key;
+    userId = regBody.user_id;
   });
 
   beforeEach(async () => {
@@ -62,27 +98,29 @@ describe("Revenue Tracking API", () => {
   describe("POST /v1/revenue/log", () => {
     it("stores a revenue event in D1", async () => {
       const ctx = createExecutionContext();
-      const request = buildRequest("POST", "/v1/revenue/log", {
-        poolAddress: "5JvD1TW5nqSz6gJtHfVnZKq3fZmBnL5xY7u9dR2wT4k",
-        platformFeeX: 1.5,
-        platformFeeY: 2.3,
-        feeX: 10.0,
-        feeY: 15.0,
-        tier: "pro",
-        positionPubkey: "PosK11111111111111111111111111111111111111",
-        userId: "user-001",
-        installId: "inst-001",
-        txSignature: "sig123abc",
-      });
+      const request = buildRequest(
+        "POST",
+        "/v1/revenue/log",
+        {
+          poolAddress: "5JvD1TW5nqSz6gJtHfVnZKq3fZmBnL5xY7u9dR2wT4k",
+          platformFeeX: 1.5,
+          platformFeeY: 2.3,
+          feeX: 10.0,
+          feeY: 15.0,
+          positionPubkey: "PosK11111111111111111111111111111111111111",
+          installId: "inst-001",
+          txSignature: "sig123abc",
+        },
+        { Authorization: `Bearer ${apiKey}` },
+      );
       const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(200);
 
       const body = (await response.json()) as { id: string };
       expect(body.id).toBeTruthy();
 
-      // Verify stored in D1
       const rows = await env.DB.prepare(
-        "SELECT pool_address, platform_fee_x, platform_fee_y, tier FROM revenue_events WHERE id = ?",
+        "SELECT pool_address, platform_fee_x, platform_fee_y, tier, user_id FROM revenue_events WHERE id = ?",
       )
         .bind(body.id)
         .all();
@@ -92,40 +130,58 @@ describe("Revenue Tracking API", () => {
       expect(row.pool_address).toBe("5JvD1TW5nqSz6gJtHfVnZKq3fZmBnL5xY7u9dR2wT4k");
       expect(row.platform_fee_x).toBe(1.5);
       expect(row.platform_fee_y).toBe(2.3);
-      expect(row.tier).toBe("pro");
+      expect(row.tier).toBe("free");
+      expect(row.user_id).toBe(userId);
+    });
+
+    it("returns 401 without API key", async () => {
+      const ctx = createExecutionContext();
+      const request = buildRequest("POST", "/v1/revenue/log", {
+        poolAddress: "5JvD1TW5nqSz6gJtHfVnZKq3fZmBnL5xY7u9dR2wT4k",
+        platformFeeX: 1.0,
+        platformFeeY: 2.0,
+      });
+      const response = await worker.fetch(request, testEnv, ctx);
+      expect(response.status).toBe(401);
     });
 
     it("returns 400 on missing required fields", async () => {
       const ctx = createExecutionContext();
-      // Missing poolAddress
-      const request1 = buildRequest("POST", "/v1/revenue/log", {
-        platformFeeX: 1.0,
-        platformFeeY: 2.0,
-      });
+      const request1 = buildRequest(
+        "POST",
+        "/v1/revenue/log",
+        { platformFeeX: 1.0, platformFeeY: 2.0 },
+        { Authorization: `Bearer ${apiKey}` },
+      );
       const response1 = await worker.fetch(request1, testEnv, ctx);
       expect(response1.status).toBe(400);
 
-      // Missing platformFeeX
-      const request2 = buildRequest("POST", "/v1/revenue/log", {
-        poolAddress: "5JvD1TW5nqSz6gJtHfVnZKq3fZmBnL5xY7u9dR2wT4k",
-        platformFeeY: 2.0,
-      });
+      const request2 = buildRequest(
+        "POST",
+        "/v1/revenue/log",
+        { poolAddress: "5JvD1TW5nqSz6gJtHfVnZKq3fZmBnL5xY7u9dR2wT4k", platformFeeY: 2.0 },
+        { Authorization: `Bearer ${apiKey}` },
+      );
       const response2 = await worker.fetch(request2, testEnv, ctx);
       expect(response2.status).toBe(400);
 
-      // Empty body
-      const request3 = buildRequest("POST", "/v1/revenue/log", {});
+      const request3 = buildRequest("POST", "/v1/revenue/log", {}, { Authorization: `Bearer ${apiKey}` });
       const response3 = await worker.fetch(request3, testEnv, ctx);
       expect(response3.status).toBe(400);
     });
 
     it("defaults optional fields when not provided", async () => {
       const ctx = createExecutionContext();
-      const request = buildRequest("POST", "/v1/revenue/log", {
-        poolAddress: "5JvD1TW5nqSz6gJtHfVnZKq3fZmBnL5xY7u9dR2wT4k",
-        platformFeeX: 0.5,
-        platformFeeY: 0.8,
-      });
+      const request = buildRequest(
+        "POST",
+        "/v1/revenue/log",
+        {
+          poolAddress: "5JvD1TW5nqSz6gJtHfVnZKq3fZmBnL5xY7u9dR2wT4k",
+          platformFeeX: 0.5,
+          platformFeeY: 0.8,
+        },
+        { Authorization: `Bearer ${apiKey}` },
+      );
       const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(200);
 
@@ -141,7 +197,7 @@ describe("Revenue Tracking API", () => {
       expect(row.fee_x).toBe(0);
       expect(row.fee_y).toBe(0);
       expect(row.tier).toBe("free");
-      expect(row.user_id).toBeNull();
+      expect(row.user_id).toBe(userId);
     });
   });
 

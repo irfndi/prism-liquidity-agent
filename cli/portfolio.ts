@@ -23,7 +23,8 @@ export function computeSummary(positions: ReadonlyArray<PositionRecord>): Portfo
   const totalDepositedUsd = positions.reduce((sum, p) => sum + p.depositedUsd, 0);
   const totalCurrentValueUsd = positions.reduce((sum, p) => sum + p.currentValueUsd, 0);
   const totalUnrealizedPnlUsd = totalCurrentValueUsd - totalDepositedUsd;
-  const totalUnrealizedPnlPct = totalDepositedUsd > 0 ? (totalUnrealizedPnlUsd / totalDepositedUsd) * 100 : 0;
+  const totalUnrealizedPnlPct =
+    totalDepositedUsd > 0 ? (totalUnrealizedPnlUsd / totalDepositedUsd) * 100 : 0;
 
   return {
     totalDepositedUsd,
@@ -48,7 +49,10 @@ function formatPct(value: number): string {
   return `${sign}${value.toFixed(2)}%`;
 }
 
-export function computePnl(depositedUsd: number, currentValueUsd: number): { pnlUsd: number; pnlPct: number } {
+export function computePnl(
+  depositedUsd: number,
+  currentValueUsd: number,
+): { pnlUsd: number; pnlPct: number } {
   const pnlUsd = currentValueUsd - depositedUsd;
   const pnlPct = depositedUsd > 0 ? (pnlUsd / depositedUsd) * 100 : 0;
   return { pnlUsd, pnlPct };
@@ -99,7 +103,10 @@ export function formatAge(timestampMs: number): string {
 
 function formatSummary(summary: PortfolioSummary): string {
   const pnlText = `${formatCurrency(summary.totalUnrealizedPnlUsd)} (${formatPct(summary.totalUnrealizedPnlPct)})`;
-  const coloredPnl = colorize(pnlText, summary.totalUnrealizedPnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m");
+  const coloredPnl = colorize(
+    pnlText,
+    summary.totalUnrealizedPnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m",
+  );
 
   return [
     "Portfolio Summary",
@@ -147,7 +154,9 @@ function formatHistoryList(positions: ReadonlyArray<PositionRecord>): string {
     lines.push(`    Deposited:  ${formatCurrency(pos.depositedUsd)}`);
     lines.push(`    Exit Value: ${formatCurrency(pos.currentValueUsd)}`);
     lines.push(`    Realized P&L: ${coloredPnl}`);
-    lines.push(`    Exited:     ${pos.paperExitedAt != null ? new Date(pos.paperExitedAt).toISOString() : "N/A"}`);
+    lines.push(
+      `    Exited:     ${pos.paperExitedAt != null ? new Date(pos.paperExitedAt).toISOString() : "N/A"}`,
+    );
     lines.push("");
   }
 

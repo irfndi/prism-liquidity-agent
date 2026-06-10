@@ -8,7 +8,8 @@ import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
 import { ScreenerLive } from "./screener-service.js";
 import { DbLive } from "./db-service.js";
-import { RevenueLive, TIERS } from "./revenue-service.js";
+import { RevenueLive } from "./revenue-service.js";
+import { RevenueConfigServiceLive } from "./revenue-config-service.js";
 import { ReferralLive } from "./referral-service.js";
 import { checkForAutoUpdate } from "./update-check.js";
 import type { PositionRecord } from "./db-service.js";
@@ -22,6 +23,7 @@ import {
   ScreenerService,
   DbService,
   RevenueService,
+  RevenueConfigService,
   ReferralService,
   type AdapterApi,
   type DbApi,
@@ -46,8 +48,6 @@ export function estimatePositionValue(pos: PositionRecord, pool: PoolState): num
   return pos.depositedUsd * ilFactor;
 }
 
-
-
 export function reconcilePositions(
   adapter: AdapterApi,
   db: DbApi,
@@ -64,16 +64,14 @@ export function reconcilePositions(
       return;
     }
 
-    const onChainPositions = yield* adapter
-      .getAllWalletPositions(walletAddress)
-      .pipe(
-        Effect.catchAll((err) => {
-          console.error("Reconcile: failed to fetch on-chain positions — skipping", {
-            err: String(err),
-          });
-          return Effect.succeed(null);
-        }),
-      );
+    const onChainPositions = yield* adapter.getAllWalletPositions(walletAddress).pipe(
+      Effect.catchAll((err) => {
+        console.error("Reconcile: failed to fetch on-chain positions — skipping", {
+          err: String(err),
+        });
+        return Effect.succeed(null);
+      }),
+    );
 
     if (onChainPositions === null) {
       return;
@@ -100,21 +98,22 @@ export function reconcilePositions(
     }
 
     for (const onChainPos of onChainPositions) {
-      if (!trackedPositions.has(onChainPos.poolAddress) && watchedPoolSet.has(onChainPos.poolAddress)) {
+      if (
+        !trackedPositions.has(onChainPos.poolAddress) &&
+        watchedPoolSet.has(onChainPos.poolAddress)
+      ) {
         console.warn(
           `Reconciling: discovered external position in ${onChainPos.poolAddress} — adding to tracking`,
         );
-        const pool = yield* adapter
-          .getPoolState(onChainPos.poolAddress)
-          .pipe(
-            Effect.catchAll((err) => {
-              console.error("Reconcile: failed to fetch pool state for external position", {
-                pool: onChainPos.poolAddress,
-                err: String(err),
-              });
-              return Effect.succeed(null);
-            }),
-          );
+        const pool = yield* adapter.getPoolState(onChainPos.poolAddress).pipe(
+          Effect.catchAll((err) => {
+            console.error("Reconcile: failed to fetch pool state for external position", {
+              pool: onChainPos.poolAddress,
+              err: String(err),
+            });
+            return Effect.succeed(null);
+          }),
+        );
         if (pool) {
           const pos: PositionRecord = {
             poolAddress: onChainPos.poolAddress,
@@ -163,6 +162,7 @@ type AllServices =
   | ScreenerService
   | DbService
   | RevenueService
+  | RevenueConfigService
   | ReferralService;
 
 export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, never> {
@@ -195,6 +195,9 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
     tokenBlacklistPath: cfg?.tokenBlacklistPath ?? "./engine/data/token-blacklist.json",
   });
 
+  const revenueConfigDeps = Layer.merge(dbLayer, configLayer);
+  const revenueConfig = Layer.provide(RevenueConfigServiceLive, revenueConfigDeps);
+
   const merged = Layer.merge(adapter, StrategyLive);
   const merged2 = Layer.merge(merged, dbLayer);
   const merged3 = Layer.merge(merged2, memory);
@@ -205,8 +208,9 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged8 = Layer.merge(merged7, configLayer);
   const merged9 = Layer.merge(merged8, RevenueLive);
   const merged10 = Layer.merge(merged9, ReferralLive);
+  const merged11 = Layer.merge(merged10, revenueConfig);
 
-  return merged10 as Layer.Layer<AllServices, never, never>;
+  return merged11 as Layer.Layer<AllServices, never, never>;
 }
 
 // ─── Main program ────────────────────────────────────────────────────────────
@@ -221,7 +225,7 @@ export const program = Effect.gen(function* () {
   const audit = yield* AuditService;
   const screener = yield* ScreenerService;
   const db = yield* DbService;
-  const revenue = yield* RevenueService;
+  const revenueConfigSvc = yield* RevenueConfigService;
   const referral = yield* ReferralService;
 
   // Load persisted positions at startup
@@ -419,29 +423,23 @@ export const program = Effect.gen(function* () {
       if (pos && pos.positionPubKey && adapter.hasWallet()) {
         const walletAddress = adapter.getWalletAddress();
         if (walletAddress) {
-          const onChainPositions = yield* adapter
-            .getPositions(poolAddress, walletAddress)
-            .pipe(
-              Effect.catchAll((err) => {
-                console.error("Per-cycle reconcile: failed to fetch positions — skipping", {
-                  pool: poolAddress,
-                  err: String(err),
-                });
-                return Effect.succeed(null);
-              }),
-            );
+          const onChainPositions = yield* adapter.getPositions(poolAddress, walletAddress).pipe(
+            Effect.catchAll((err) => {
+              console.error("Per-cycle reconcile: failed to fetch positions — skipping", {
+                pool: poolAddress,
+                err: String(err),
+              });
+              return Effect.succeed(null);
+            }),
+          );
           if (onChainPositions !== null) {
-            const stillOnChain = onChainPositions.some(
-              (p) => p.id === pos.positionPubKey,
-            );
+            const stillOnChain = onChainPositions.some((p) => p.id === pos.positionPubKey);
             if (!stillOnChain) {
               console.warn(
                 `Per-cycle reconcile: position ${poolAddress} no longer on-chain — removing from tracking`,
               );
               trackedPositions.delete(poolAddress);
-              yield* db.deletePosition(poolAddress).pipe(
-                Effect.catchAll(() => Effect.void),
-              );
+              yield* db.deletePosition(poolAddress).pipe(Effect.catchAll(() => Effect.void));
               yield* memory
                 .upsert({
                   category: "warning",
@@ -870,23 +868,32 @@ export const program = Effect.gen(function* () {
       } else if (decision.action === "REBALANCE" && decision.rebalanceParams) {
         const pos = trackedPositions.get(decision.poolAddress);
         if (pos?.positionPubKey) {
-          // Compute tier and platform fee rate for revenue collection
-          const walletBalance = yield* adapter
-            .getNativeSolBalance()
-            .pipe(Effect.catchAll(() => Effect.succeed(0)));
-          const walletSol = Number(walletBalance) / LAMPORTS_PER_SOL;
-          const referralCount = yield* referral
-            .getReferralCount("local_user")
-            .pipe(Effect.catchAll(() => Effect.succeed(0)));
-          const tier = revenue.calculateTier(walletSol, referralCount);
-          const platformFeeRate = TIERS[tier]?.platformFeeRate ?? 0;
+          const revenueConfigResult = yield* revenueConfigSvc
+            .getConfig()
+            .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          const platformFeeRate = revenueConfigResult?.platformFeeRate ?? 0;
+          const revenueShareEnabled = revenueConfigResult?.revenueShareEnabled ?? false;
+          const revenueShareOperatorPct = revenueConfigResult?.revenueShareOperatorPct ?? 0;
+          const tier = revenueConfigResult?.tier ?? "free";
 
           // Claim fees before rebalancing (with platform fee)
           const claimResult = yield* adapter
-            .claimFees(decision.poolAddress, pos.positionPubKey, platformFeeRate)
+            .claimFees(
+              decision.poolAddress,
+              pos.positionPubKey,
+              platformFeeRate,
+              revenueShareEnabled,
+              revenueShareOperatorPct,
+            )
             .pipe(Effect.catchAll(() => Effect.succeed(null)));
 
-          if (claimResult && (claimResult.platformFeeX > 0 || claimResult.platformFeeY > 0 || (claimResult.operatorFeeX ?? 0) > 0 || (claimResult.operatorFeeY ?? 0) > 0)) {
+          if (
+            claimResult &&
+            (claimResult.platformFeeX > 0 ||
+              claimResult.platformFeeY > 0 ||
+              (claimResult.operatorFeeX ?? 0) > 0 ||
+              (claimResult.operatorFeeY ?? 0) > 0)
+          ) {
             adapter.reportFeeCollection({
               poolAddress: decision.poolAddress,
               positionPubkey: pos.positionPubKey,
@@ -956,21 +963,24 @@ export const program = Effect.gen(function* () {
 
   const claimAllFees = (): Effect.Effect<void> =>
     Effect.gen(function* () {
-      const walletBalance = yield* adapter
-        .getNativeSolBalance()
-        .pipe(Effect.catchAll(() => Effect.succeed(0)));
-      const walletSol = Number(walletBalance) / LAMPORTS_PER_SOL;
-
-      const referralCount = yield* referral
-        .getReferralCount("local_user")
-        .pipe(Effect.catchAll(() => Effect.succeed(0)));
-      const tier = revenue.calculateTier(walletSol, referralCount);
-      const platformFeeRate = TIERS[tier]?.platformFeeRate ?? 0;
+      const revenueConfigResult = yield* revenueConfigSvc
+        .getConfig()
+        .pipe(Effect.catchAll(() => Effect.succeed(null)));
+      const platformFeeRate = revenueConfigResult?.platformFeeRate ?? 0;
+      const revenueShareEnabled = revenueConfigResult?.revenueShareEnabled ?? false;
+      const revenueShareOperatorPct = revenueConfigResult?.revenueShareOperatorPct ?? 0;
+      const tier = revenueConfigResult?.tier ?? "free";
 
       for (const [poolAddress, pos] of trackedPositions) {
         if (pos.positionPubKey && Date.now() - pos.lastFeeClaimAt > config.feeClaimIntervalMs) {
           const result = yield* adapter
-            .claimFees(poolAddress, pos.positionPubKey, platformFeeRate)
+            .claimFees(
+              poolAddress,
+              pos.positionPubKey,
+              platformFeeRate,
+              revenueShareEnabled,
+              revenueShareOperatorPct,
+            )
             .pipe(
               Effect.tap((r) =>
                 console.info("Fees claimed", {
@@ -991,7 +1001,12 @@ export const program = Effect.gen(function* () {
             continue;
           }
 
-          if (result.platformFeeX > 0 || result.platformFeeY > 0 || (result.operatorFeeX ?? 0) > 0 || (result.operatorFeeY ?? 0) > 0) {
+          if (
+            result.platformFeeX > 0 ||
+            result.platformFeeY > 0 ||
+            (result.operatorFeeX ?? 0) > 0 ||
+            (result.operatorFeeY ?? 0) > 0
+          ) {
             adapter.reportFeeCollection({
               poolAddress,
               positionPubkey: pos.positionPubKey,

@@ -10,11 +10,13 @@ function run<T, R>(effect: Effect.Effect<T, unknown, R>, layer: Layer.Layer<R, n
   return Effect.runSync(Effect.provide(effect, layer));
 }
 
-function buildLayer(overrides: Partial<{
-  forceUpdateEnabled: boolean;
-  forceUpdateAfterDays: number;
-  updateCheckIntervalMs: number;
-}> = {}) {
+function buildLayer(
+  overrides: Partial<{
+    forceUpdateEnabled: boolean;
+    forceUpdateAfterDays: number;
+    updateCheckIntervalMs: number;
+  }> = {},
+) {
   const mockConfig = Layer.succeed(ConfigService, {
     walletPrivateKey: "",
     heliusApiKey: "",
@@ -56,8 +58,6 @@ function buildLayer(overrides: Partial<{
     githubRepo: "",
     feedbackOptOut: false,
     paperModeExitLive: false,
-    revenueShareEnabled: false,
-    revenueShareOperatorPct: 50,
   });
   return Layer.merge(mockConfig, DbLive(":memory:"));
 }

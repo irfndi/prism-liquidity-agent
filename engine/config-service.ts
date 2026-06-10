@@ -47,9 +47,6 @@ export interface AppConfig {
   readonly feedbackOptOut: boolean;
   // Allow paper mode to exit live positions (opt-in escape hatch)
   readonly paperModeExitLive: boolean;
-  // Revenue share settings
-  readonly revenueShareEnabled: boolean;
-  readonly revenueShareOperatorPct: number;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -163,10 +160,6 @@ const loadConfig = Effect.gen(function* () {
   const paperModeExitLive = yield* Config.boolean("PAPER_MODE_EXIT_LIVE").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const revenueShareEnabled = yield* Config.boolean("REVENUE_SHARE_ENABLED").pipe(
-    Effect.orElseSucceed(() => false),
-  );
-  const revenueShareOperatorPct = yield* validatedNumber("REVENUE_SHARE_OPERATOR_PCT", 0, 0);
 
   const watchlistPools = watchlistPoolsRaw
     .split(",")
@@ -214,8 +207,6 @@ const loadConfig = Effect.gen(function* () {
     githubRepo,
     feedbackOptOut,
     paperModeExitLive,
-    revenueShareEnabled,
-    revenueShareOperatorPct,
   };
 
   return cfg;

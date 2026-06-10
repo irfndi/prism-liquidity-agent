@@ -339,7 +339,10 @@ describe("failure resilience", () => {
   });
 
   it("buffers reports with explicit endpoint", () => {
-    const r = createErrorReporter({ enabled: true, endpoint: "https://example.com/v1/errors/batch" });
+    const r = createErrorReporter({
+      enabled: true,
+      endpoint: "https://example.com/v1/errors/batch",
+    });
     r.setAppVersion("1.0.0-test");
     expect(() => {
       r.report(new Error("should be buffered with explicit endpoint"));

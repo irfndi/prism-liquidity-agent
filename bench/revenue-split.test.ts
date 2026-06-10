@@ -9,10 +9,7 @@ function runAsync<T>(effect: Effect.Effect<T, unknown, never>): Promise<T> {
   return Effect.runPromise(effect);
 }
 
-function buildLayer(overrides: Partial<{
-  revenueShareEnabled: boolean;
-  revenueShareOperatorPct: number;
-}> = {}) {
+function buildLayer() {
   const mockConfig = Layer.succeed(ConfigService, {
     walletPrivateKey: "",
     heliusApiKey: "",
@@ -54,46 +51,10 @@ function buildLayer(overrides: Partial<{
     githubRepo: "",
     feedbackOptOut: false,
     paperModeExitLive: false,
-    revenueShareEnabled: overrides.revenueShareEnabled ?? false,
-    revenueShareOperatorPct: overrides.revenueShareOperatorPct ?? 0,
   });
   const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));
   return Layer.merge(Layer.provide(AuditLive, DbLive(":memory:")), baseLayer);
 }
-
-describe("revenue share configuration", () => {
-  it("defaults to disabled", async () => {
-    const layer = buildLayer();
-    await runAsync(
-      Effect.gen(function* () {
-        const config = yield* ConfigService;
-        expect(config.revenueShareEnabled).toBe(false);
-        expect(config.revenueShareOperatorPct).toBe(0);
-      }).pipe(Effect.provide(layer)),
-    );
-  });
-
-  it("can be enabled with custom percentage", async () => {
-    const layer = buildLayer({ revenueShareEnabled: true, revenueShareOperatorPct: 75 });
-    await runAsync(
-      Effect.gen(function* () {
-        const config = yield* ConfigService;
-        expect(config.revenueShareEnabled).toBe(true);
-        expect(config.revenueShareOperatorPct).toBe(75);
-      }).pipe(Effect.provide(layer)),
-    );
-  });
-
-  it("accepts 0% operator share", async () => {
-    const layer = buildLayer({ revenueShareEnabled: true, revenueShareOperatorPct: 0 });
-    await runAsync(
-      Effect.gen(function* () {
-        const config = yield* ConfigService;
-        expect(config.revenueShareOperatorPct).toBe(0);
-      }).pipe(Effect.provide(layer)),
-    );
-  });
-});
 
 describe("revenue share fee calculation", () => {
   const FEE_WALLET = "FeeWallet1111111111111111111111111111111111";
