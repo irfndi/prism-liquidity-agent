@@ -85,6 +85,7 @@ export interface AdapterApi {
     platformFeeRate?: number,
     revenueShareEnabled?: boolean,
     revenueShareOperatorPct?: number,
+    feeWalletAddress?: string,
   ) => Effect.Effect<
     {
       txSignature: string;

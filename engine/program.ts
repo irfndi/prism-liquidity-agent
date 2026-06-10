@@ -882,6 +882,7 @@ export const program = Effect.gen(function* () {
               platformFeeRate,
               revenueShareEnabled,
               revenueShareOperatorPct,
+              revenueConfigResult.feeWalletAddress,
             )
             .pipe(Effect.catchAll(() => Effect.succeed(null)));
 
@@ -997,6 +998,7 @@ export const program = Effect.gen(function* () {
               platformFeeRate,
               revenueShareEnabled,
               revenueShareOperatorPct,
+              revenueConfigResult.feeWalletAddress,
             )
             .pipe(
               Effect.tap((r) =>

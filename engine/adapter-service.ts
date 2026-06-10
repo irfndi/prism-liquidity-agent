@@ -147,36 +147,6 @@ export const AdapterLive = Layer.effect(
       }
     }
 
-    // ─── Fee wallet address (cached) ────────────────────────────────────────
-
-    let cachedFeeWallet: { address: string; expiresAt: number } | null = null;
-    const FEE_WALLET_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
-    const FEE_WALLET_API_URL = "https://prism-api.irfndi.workers.dev";
-
-    function fetchFeeWalletAddress(): Effect.Effect<string, never> {
-      return Effect.gen(function* () {
-        // Return cached if valid
-        if (cachedFeeWallet && Date.now() < cachedFeeWallet.expiresAt) {
-          return cachedFeeWallet.address;
-        }
-
-        // Always fetch from API — users cannot override the fee wallet
-        const res = yield* Effect.tryPromise(() => fetch(`${FEE_WALLET_API_URL}/v1/fee-wallet`));
-        if (res.ok) {
-          const data = (yield* Effect.tryPromise(() => res.json())) as { address?: string };
-          if (data.address) {
-            cachedFeeWallet = {
-              address: data.address,
-              expiresAt: Date.now() + FEE_WALLET_CACHE_TTL_MS,
-            };
-            return data.address;
-          }
-        }
-
-        return "";
-      }).pipe(Effect.catchAll(() => Effect.succeed("")));
-    }
-
     // ─── Token metadata cache ──────────────────────────────────────────────
 
     const tokenMetaCache = new Map<string, { symbol: string; decimals: number }>();
@@ -820,6 +790,7 @@ export const AdapterLive = Layer.effect(
         platformFeeRate,
         revenueShareEnabled,
         revenueShareOperatorPct,
+        feeWalletAddress,
       ) =>
         Effect.gen(function* () {
           if (!wallet) {
@@ -873,7 +844,7 @@ export const AdapterLive = Layer.effect(
               };
             }
 
-            const feeWallet = yield* fetchFeeWalletAddress();
+            const feeWallet = feeWalletAddress ?? "";
             const operatorWalletAddress = wallet.publicKey.toBase58();
             const revenueShare = calculateRevenueShare(
               feeX,
@@ -902,8 +873,6 @@ export const AdapterLive = Layer.effect(
                 actualOperatorFeeX = revenueShare.platformFeeX;
                 actualOperatorFeeY = revenueShare.platformFeeY;
               } else if (feeWallet) {
-                actualPlatformFeeX = revenueShare.platformFeeX;
-                actualPlatformFeeY = revenueShare.platformFeeY;
                 const feeWalletPubkey = new PublicKey(feeWallet);
                 const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
                 const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
@@ -946,14 +915,14 @@ export const AdapterLive = Layer.effect(
                 }
 
                 if (transferInstructions.length > 0) {
+                  actualPlatformFeeX = revenueShare.platformFeeX;
+                  actualPlatformFeeY = revenueShare.platformFeeY;
                   actualOperatorFeeX = revenueShare.operatorFeeX;
                   actualOperatorFeeY = revenueShare.operatorFeeY;
                 } else {
                   logger.info("No platform fee to transfer — operator keeps full share", {
                     pool: poolAddress,
                   });
-                  actualOperatorFeeX = revenueShare.operatorFeeX;
-                  actualOperatorFeeY = revenueShare.operatorFeeY;
                 }
               } else {
                 logger.warn("No fee wallet configured — skipping platform fee transfer", {
@@ -1022,7 +991,7 @@ export const AdapterLive = Layer.effect(
             }
             const headers: Record<string, string> = { "Content-Type": "application/json" };
             if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-            const res = await fetch(`${FEE_WALLET_API_URL}/v1/revenue/log`, {
+            const res = await fetch("https://prism-api.irfndi.workers.dev/v1/revenue/log", {
               method: "POST",
               headers,
               body: JSON.stringify({ ...event, installId }),
