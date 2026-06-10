@@ -885,7 +885,7 @@ export const program = Effect.gen(function* () {
             )
             .pipe(Effect.catchAll(() => Effect.succeed(null)));
 
-          if (claimResult) {
+          if (claimResult && (claimResult.feeX > 0 || claimResult.feeY > 0)) {
             yield* db
               .saveFeeClaim({
                 id: randomUUID(),
@@ -1014,7 +1014,7 @@ export const program = Effect.gen(function* () {
               ),
               Effect.catchAll(() => Effect.succeed(null)),
             );
-          if (!result) {
+          if (!result || (result.feeX === 0 && result.feeY === 0)) {
             continue;
           }
 

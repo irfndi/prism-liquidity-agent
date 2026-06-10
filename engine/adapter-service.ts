@@ -897,9 +897,13 @@ export const AdapterLive = Layer.effect(
                   platformFeeX: revenueShare.platformFeeX,
                   platformFeeY: revenueShare.platformFeeY,
                 });
+                actualPlatformFeeX = revenueShare.platformFeeX;
+                actualPlatformFeeY = revenueShare.platformFeeY;
                 actualOperatorFeeX = revenueShare.platformFeeX;
                 actualOperatorFeeY = revenueShare.platformFeeY;
               } else if (feeWallet) {
+                actualPlatformFeeX = revenueShare.platformFeeX;
+                actualPlatformFeeY = revenueShare.platformFeeY;
                 const feeWalletPubkey = new PublicKey(feeWallet);
                 const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
                 const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
@@ -942,8 +946,6 @@ export const AdapterLive = Layer.effect(
                 }
 
                 if (transferInstructions.length > 0) {
-                  actualPlatformFeeX = revenueShare.amountToTransferX;
-                  actualPlatformFeeY = revenueShare.amountToTransferY;
                   actualOperatorFeeX = revenueShare.operatorFeeX;
                   actualOperatorFeeY = revenueShare.operatorFeeY;
                 } else {

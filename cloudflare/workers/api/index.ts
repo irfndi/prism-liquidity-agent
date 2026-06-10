@@ -1239,6 +1239,8 @@ app.post("/v1/revenue/log", async (c) => {
     feeY?: number;
     platformFeeX?: number;
     platformFeeY?: number;
+    operatorFeeX?: number;
+    operatorFeeY?: number;
     txSignature?: string;
     feeTransferTxSignature?: string;
     installId?: string;
@@ -1269,8 +1271,8 @@ app.post("/v1/revenue/log", async (c) => {
   try {
     const id = generateId();
     await DB.prepare(
-      `INSERT INTO revenue_events (id, pool_address, position_pubkey, fee_x, fee_y, platform_fee_x, platform_fee_y, tier, user_id, install_id, tx_signature, fee_transfer_tx_signature)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO revenue_events (id, pool_address, position_pubkey, fee_x, fee_y, platform_fee_x, platform_fee_y, operator_fee_x, operator_fee_y, tier, user_id, install_id, tx_signature, fee_transfer_tx_signature)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -1280,6 +1282,8 @@ app.post("/v1/revenue/log", async (c) => {
         body.feeY ?? 0,
         body.platformFeeX,
         body.platformFeeY,
+        body.operatorFeeX ?? 0,
+        body.operatorFeeY ?? 0,
         tier,
         userId,
         body.installId ?? null,
