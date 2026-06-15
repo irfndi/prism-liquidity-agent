@@ -274,6 +274,7 @@ describe("AdapterService.discoverPools", () => {
   });
 
   it("drops pool objects with invalid shape and returns the valid ones (with a logged warning)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const restore = mockFetch(
       (async () =>
         new Response(
@@ -317,12 +318,19 @@ describe("AdapterService.discoverPools", () => {
       expect(Array.isArray(result)).toBe(true);
       expect(result).toHaveLength(1);
       expect(result[0]?.address).toBe("PoolValid11111111111111111111111111111111111");
+      const shapeWarn = warnSpy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("some pool objects had invalid shape"),
+      );
+      expect(shapeWarn).toBeDefined();
+      expect(shapeWarn?.[1]).toMatchObject({ dropped: 2, kept: 1, total: 3, pages: 1 });
     } finally {
       restore();
+      warnSpy.mockRestore();
     }
   });
 
   it("returns empty array when the envelope itself is valid but ALL pool objects have invalid shape", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const restore = mockFetch(
       (async () =>
         new Response(
@@ -331,10 +339,7 @@ describe("AdapterService.discoverPools", () => {
             pages: 1,
             current_page: 1,
             page_size: 2,
-            data: [
-              { address: "Bad1" },
-              { address: "Bad2" },
-            ],
+            data: [{ address: "Bad1" }, { address: "Bad2" }],
           }),
           { status: 200 },
         )) as unknown as typeof fetch,
@@ -343,8 +348,14 @@ describe("AdapterService.discoverPools", () => {
       const layer = buildAdapterLayer();
       const result = await runDiscover(layer);
       expect(result).toEqual([]);
+      const shapeWarn = warnSpy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("some pool objects had invalid shape"),
+      );
+      expect(shapeWarn).toBeDefined();
+      expect(shapeWarn?.[1]).toMatchObject({ dropped: 2, kept: 0, total: 2, pages: 1 });
     } finally {
       restore();
+      warnSpy.mockRestore();
     }
   });
 });
