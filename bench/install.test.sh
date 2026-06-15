@@ -335,6 +335,23 @@ scenario_s10() {
   fi
 }
 
+scenario_s11() {
+  bold "S11: HOME default is exported so child installers inherit it (P2 review fix)"
+  local body; body="$(cat "$INSTALL_SH")"
+  local matched=0
+  case "$body" in
+    *'export HOME="${HOME:-/tmp}"'*|*'export HOME="${HOME:-'*) matched=1 ;;
+  esac
+  if [ "$matched" -eq 1 ]; then
+    PASS=$((PASS + 1))
+    printf "  %s HOME is exported (so curl | bash inherits the /tmp fallback)\n" "$(green PASS)"
+  else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES+=("S11: HOME default is exported")
+    printf "  %s S11: HOME default is exported\n" "$(red FAIL)"
+  fi
+}
+
 # ---- Main ----
 echo ""
 bold "Install script test suite"
@@ -351,6 +368,7 @@ scenario_s7
 scenario_s8
 scenario_s9
 scenario_s10
+scenario_s11
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

@@ -9,7 +9,10 @@ set -euo pipefail
 MIN_BUN_VERSION="${PRISM_MIN_BUN_VERSION:-1.4.0}"
 
 REPO="${PRISM_REPO:-irfndi/prism-liquidity-agent}"
-HOME="${HOME:-/tmp}"
+# `export HOME` is required so the child bash spawned by the
+# `curl ... | bash` bun installer below inherits the /tmp fallback
+# when the parent shell started with HOME unset.
+export HOME="${HOME:-/tmp}"
 SHELL_NAME="${SHELL##*/}"
 SHELL_NAME="${SHELL_NAME:-sh}"
 INSTALL_DIR="${PRISM_INSTALL_DIR:-$HOME/.prism}"
