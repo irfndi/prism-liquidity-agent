@@ -13,6 +13,7 @@ import { RevenueConfigServiceLive } from "./revenue-config-service.js";
 import { ReferralLive } from "./referral-service.js";
 import { checkForAutoUpdate } from "./update-check.js";
 import type { PositionRecord } from "./db-service.js";
+import { DiscoverPoolsError } from "./errors.js";
 import {
   AdapterService,
   StrategyService,
@@ -28,6 +29,7 @@ import {
   type AdapterApi,
   type DbApi,
   type MemoryApi,
+  type ScreenedPool,
 } from "./services.js";
 import type { AgentDecision, AgentCycle, PoolState } from "./types.js";
 import { randomUUID } from "crypto";
@@ -265,7 +267,20 @@ export const program = Effect.gen(function* () {
   let poolsToScan = [...config.watchlistPools];
 
   if (config.enablePoolDiscovery) {
-    const screened = yield* screener.screenPools().pipe(Effect.catchAll(() => Effect.succeed([])));
+    const screened = yield* screener.screenPools().pipe(
+      Effect.catchAll((err) => {
+        if (err instanceof DiscoverPoolsError || (err as { _tag?: string })?._tag === "DiscoverPoolsError") {
+          console.warn(
+            "Pool discovery failed; falling back to watchlist-only mode:",
+            err instanceof Error ? err.message : String(err),
+          );
+          return Effect.succeed([] as ReadonlyArray<ScreenedPool>);
+        }
+        // Non-discovery error: let it propagate so the cycle fails loudly
+        // instead of silently masking bugs as an empty discovery result.
+        return Effect.fail(err);
+      }),
+    );
     if (screened.length > 0) {
       console.info(`Discovered ${screened.length} candidate pools`);
       const top3 = screened.slice(0, 3);
