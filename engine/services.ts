@@ -16,6 +16,7 @@ import type {
   AdapterError,
   AuditError,
   BlacklistError,
+  DiscoverPoolsError,
   MemoryError,
   RiskError,
   ScreenerError,
@@ -112,7 +113,7 @@ export interface AdapterApi {
       tokenX: string;
       tokenY: string;
     }>,
-    unknown
+    DiscoverPoolsError
   >;
   readonly reportFeeCollection: (event: {
     poolAddress: string;

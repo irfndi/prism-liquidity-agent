@@ -18,6 +18,7 @@ import { Context, Effect, Layer } from "effect";
 import { AdapterService, type AdapterApi } from "./services.js";
 import { ConfigService } from "./config-service.js";
 import { AdapterError } from "./errors.js";
+import { DiscoverPoolsError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import type { BinArray, BinData, PoolState, Position } from "./types.js";
 import bs58 from "bs58";
@@ -1005,8 +1006,47 @@ export const AdapterLive = Layer.effect(
 
       discoverPools: () =>
         Effect.gen(function* () {
-          const res = yield* Effect.tryPromise(() => fetch("https://dlmm-api.meteora.ag/pair/all"));
-          const pairs = (yield* Effect.tryPromise(() => res.json())) as ReadonlyArray<{
+          const url = process.env.METEORA_POOLS_URL ?? "https://dlmm-api.meteora.ag/pair/all";
+          const res = yield* Effect.tryPromise({
+            try: () => fetch(url),
+            catch: (cause) =>
+              new DiscoverPoolsError({
+                message: `Network error fetching ${url}: ${String(cause)}`,
+                url,
+                cause,
+              }),
+          });
+          if (!res.ok) {
+            logger.warn("Pool discovery: Meteora API returned non-OK", {
+              url,
+              status: res.status,
+            });
+            return yield* Effect.fail(
+              new DiscoverPoolsError({
+                message: `Meteora API returned HTTP ${res.status} for ${url}. Pool discovery disabled for this cycle.`,
+                url,
+                status: res.status,
+              }),
+            );
+          }
+          const parsed: unknown = yield* Effect.tryPromise({
+            try: () => res.json(),
+            catch: (cause) =>
+              new DiscoverPoolsError({
+                message: `Invalid JSON from ${url}: ${String(cause)}`,
+                url,
+                cause,
+              }),
+          });
+          if (!Array.isArray(parsed)) {
+            return yield* Effect.fail(
+              new DiscoverPoolsError({
+                message: `Meteora API returned non-array payload (${typeof parsed}) from ${url}`,
+                url,
+              }),
+            );
+          }
+          const pairs = parsed as ReadonlyArray<{
             address: string;
             bin_step: number;
             base_mint: string;
@@ -1030,7 +1070,7 @@ export const AdapterLive = Layer.effect(
               tokenY: p.quote_mint,
             }))
             .slice(0, 50);
-        }).pipe(Effect.catchAll(() => Effect.succeed([]))),
+        }),
 
       swapUSDCForSOL: (minSolThreshold = 0.05, swapAmountUSDC = 1.0) =>
         Effect.gen(function* () {
