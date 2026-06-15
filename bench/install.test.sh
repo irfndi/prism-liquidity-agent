@@ -178,30 +178,33 @@ EOF
 scenario_s4() {
   bold "S4: install.sh runs bun --version and prism --version at the end"
   local body; body="$(cat "$INSTALL_SH")"
-  # The end-of-install verification must invoke both binaries explicitly.
-  # Allow any path, any quoting, but the literals must be present.
+  local bun_ok=0
   case "$body" in
-    *"bun --version"*)
-      PASS=$((PASS + 1))
-      printf "  %s calls 'bun --version' at end of install\n" "$(green PASS)"
-      ;;
-    *)
-      FAIL=$((FAIL + 1))
-      FAILED_NAMES+=("S4: bun --version check at end")
-      printf "  %s S4: bun --version check at end\n" "$(red FAIL)"
-      ;;
+    *'VERIFY_FAILED=0'*'if ! bun --version'*) bun_ok=1 ;;
+  esac
+  if [ "$bun_ok" -eq 1 ]; then
+    PASS=$((PASS + 1))
+    printf "  %s calls 'bun --version' inside verification block\n" "$(green PASS)"
+  else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES+=("S4: bun --version in verification block")
+    printf "  %s S4: bun --version in verification block\n" "$(red FAIL)"
+  fi
+  local prism_ok=0
+  case "$body" in
+    *'VERIFY_FAILED=0'*'"$WRAPPER" --version'*) prism_ok=1 ;;
   esac
   case "$body" in
-    *"--version"*"prism"*"--version"*|*"prism --version"*)
-      PASS=$((PASS + 1))
-      printf "  %s calls 'prism --version' at end of install\n" "$(green PASS)"
-      ;;
-    *)
-      FAIL=$((FAIL + 1))
-      FAILED_NAMES+=("S4: prism --version check at end")
-      printf "  %s S4: prism --version check at end\n" "$(red FAIL)"
-      ;;
+    *'VERIFY_FAILED=0'*'$WRAPPER --version'*) prism_ok=1 ;;
   esac
+  if [ "$prism_ok" -eq 1 ]; then
+    PASS=$((PASS + 1))
+    printf "  %s calls 'prism --version' inside verification block\n" "$(green PASS)"
+  else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES+=("S4: prism --version in verification block")
+    printf "  %s S4: prism --version in verification block\n" "$(red FAIL)"
+  fi
 }
 
 # ---- S5: PATH reminder is concrete ----
