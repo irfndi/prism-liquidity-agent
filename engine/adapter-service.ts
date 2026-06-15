@@ -134,7 +134,11 @@ function isValidPoolShape(v: unknown): v is MeteoraPool {
   const cfg = v["pool_config"] as Record<string, unknown>;
   if (typeof cfg["bin_step"] !== "number") return false;
   if (!isObject(v["volume"])) return false;
+  const vol = v["volume"] as Record<string, unknown>;
+  if (typeof vol["24h"] !== "number") return false;
   if (!isObject(v["fees"])) return false;
+  const fees = v["fees"] as Record<string, unknown>;
+  if (typeof fees["24h"] !== "number") return false;
   return true;
 }
 
@@ -1123,7 +1127,15 @@ export const AdapterLive = Layer.effect(
             config.meteoraPoolsUrl ||
             "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc";
           const res = yield* Effect.tryPromise({
-            try: () => fetch(url),
+            try: async () => {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 10_000);
+              try {
+                return await fetch(url, { signal: controller.signal });
+              } finally {
+                clearTimeout(timeout);
+              }
+            },
             catch: (cause) =>
               new DiscoverPoolsError({
                 message: `Network error fetching ${url}: ${String(cause)}`,
@@ -1174,8 +1186,8 @@ export const AdapterLive = Layer.effect(
             .map((p) => ({
               address: p.address,
               tvlUsd: p.tvl,
-              volume24hUsd: p.volume["24h"] ?? 0,
-              fees24hUsd: p.fees["24h"] ?? 0,
+              volume24hUsd: p.volume["24h"],
+              fees24hUsd: p.fees["24h"],
               apr: p.apr,
               binStep: p.pool_config.bin_step,
               tokenX: p.token_x.address,

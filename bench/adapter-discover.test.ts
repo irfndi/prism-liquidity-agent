@@ -358,4 +358,116 @@ describe("AdapterService.discoverPools", () => {
       warnSpy.mockRestore();
     }
   });
+
+  it("drops pools where volume['24h'] is not a number (gap 1 regression)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const restore = mockFetch(
+      (async () =>
+        new Response(
+          JSON.stringify({
+            total: 2,
+            pages: 1,
+            current_page: 1,
+            page_size: 2,
+            data: [
+              {
+                address: "PoolValid11111111111111111111111111111111111",
+                token_x: { address: "So11111111111111111111111111111111111111112" },
+                token_y: { address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+                pool_config: { bin_step: 10 },
+                tvl: 200_000,
+                apr: 60,
+                volume: { "24h": 50_000 },
+                fees: { "24h": 500 },
+              },
+              {
+                address: "PoolBadVolume11111111111111111111111111111111",
+                token_x: { address: "So11111111111111111111111111111111111111112" },
+                token_y: { address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+                pool_config: { bin_step: 10 },
+                tvl: 200_000,
+                apr: 60,
+                volume: { "24h": "not a number" },
+                fees: { "24h": 500 },
+              },
+            ],
+          }),
+          { status: 200 },
+        )) as unknown as typeof fetch,
+    );
+    try {
+      const layer = buildAdapterLayer();
+      const result = await runDiscover(layer);
+      expect(result).toHaveLength(1);
+      expect(result[0]?.address).toBe("PoolValid11111111111111111111111111111111111");
+    } finally {
+      restore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("drops pools where fees['24h'] is not a number (gap 1 regression)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const restore = mockFetch(
+      (async () =>
+        new Response(
+          JSON.stringify({
+            total: 2,
+            pages: 1,
+            current_page: 1,
+            page_size: 2,
+            data: [
+              {
+                address: "PoolValid11111111111111111111111111111111111",
+                token_x: { address: "So11111111111111111111111111111111111111112" },
+                token_y: { address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+                pool_config: { bin_step: 10 },
+                tvl: 200_000,
+                apr: 60,
+                volume: { "24h": 50_000 },
+                fees: { "24h": 500 },
+              },
+              {
+                address: "PoolBadFees111111111111111111111111111111111",
+                token_x: { address: "So11111111111111111111111111111111111111112" },
+                token_y: { address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+                pool_config: { bin_step: 10 },
+                tvl: 200_000,
+                apr: 60,
+                volume: { "24h": 50_000 },
+                fees: { "24h": null },
+              },
+            ],
+          }),
+          { status: 200 },
+        )) as unknown as typeof fetch,
+    );
+    try {
+      const layer = buildAdapterLayer();
+      const result = await runDiscover(layer);
+      expect(result).toHaveLength(1);
+      expect(result[0]?.address).toBe("PoolValid11111111111111111111111111111111111");
+    } finally {
+      restore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("maps an AbortError from fetch to a DiscoverPoolsError (gap 2 fetch timeout)", async () => {
+    const restore = mockFetch(
+      (async () => {
+        const err = new Error("The operation was aborted");
+        err.name = "AbortError";
+        throw err;
+      }) as unknown as typeof fetch,
+    );
+    try {
+      const layer = buildAdapterLayer();
+      const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
+      expect(err._tag).toBe("DiscoverPoolsError");
+      expect(err.message?.toLowerCase()).toContain("network error");
+    } finally {
+      restore();
+    }
+  });
 });
