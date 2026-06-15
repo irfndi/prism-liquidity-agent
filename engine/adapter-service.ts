@@ -1175,6 +1175,21 @@ export const AdapterLive = Layer.effect(
           }
           const { data, total, pages } = parsed;
           const valid = data.filter(isValidPoolShape);
+          if (data.length > 0 && valid.length === 0) {
+            // Every row failed shape validation: almost always a schema change
+            // upstream, not random data noise. Fail loud so the regression is
+            // visible instead of silently masking it as an empty result.
+            logger.warn(
+              "Pool discovery: ALL pool objects had invalid shape; treating as a schema error",
+              { dropped: data.length, kept: 0, total, pages },
+            );
+            return yield* Effect.fail(
+              new DiscoverPoolsError({
+                message: `Meteora API returned ${data.length} pool rows but none matched the expected shape. Likely a schema change. Pool discovery disabled for this cycle.`,
+                url,
+              }),
+            );
+          }
           if (valid.length < data.length) {
             logger.warn(
               "Pool discovery: some pool objects had invalid shape and were dropped",

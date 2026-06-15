@@ -3,6 +3,8 @@ import { Effect, Layer } from "effect";
 import { AdapterService } from "../engine/services.js";
 import { AdapterLive } from "../engine/adapter-service.js";
 import { ConfigService, type AppConfig } from "../engine/config-service.js";
+import { AuditLive } from "../engine/audit-service.js";
+import { DbLive } from "../engine/db-service.js";
 import { mockFetch } from "./helpers.js";
 
 function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -54,7 +56,11 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 
 function buildAdapterLayer(overrides: Partial<AppConfig> = {}): Layer.Layer<AdapterService, never, never> {
   const configLayer = Layer.succeed(ConfigService, makeConfig(overrides));
-  return Layer.provide(AdapterLive, configLayer) as Layer.Layer<AdapterService, never, never>;
+  // AuditLive requires DbService — use Layer.provide (not merge) so the dep
+  // is wired transitively into the merged harness below.
+  const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
+  const withDeps = Layer.provide(AdapterLive, Layer.merge(configLayer, auditLayer));
+  return withDeps as Layer.Layer<AdapterService, never, never>;
 }
 
 async function runDiscover(layer: Layer.Layer<AdapterService, never, never>) {
@@ -160,7 +166,9 @@ describe("AdapterService.discoverPools", () => {
     const restore = mockFetch((async () => new Response("not found", { status: 404 })) as unknown as typeof fetch);
     try {
       const layer = buildAdapterLayer();
-      await expect(runDiscover(layer)).rejects.toBeDefined();
+      const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
+      expect(err._tag).toBe("DiscoverPoolsError");
+      expect(err.message?.toLowerCase()).toContain("404");
     } finally {
       restore();
     }
@@ -170,7 +178,9 @@ describe("AdapterService.discoverPools", () => {
     const restore = mockFetch((async () => new Response("server error", { status: 500 })) as unknown as typeof fetch);
     try {
       const layer = buildAdapterLayer();
-      await expect(runDiscover(layer)).rejects.toBeDefined();
+      const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
+      expect(err._tag).toBe("DiscoverPoolsError");
+      expect(err.message?.toLowerCase()).toContain("500");
     } finally {
       restore();
     }
@@ -183,7 +193,9 @@ describe("AdapterService.discoverPools", () => {
     );
     try {
       const layer = buildAdapterLayer();
-      await expect(runDiscover(layer)).rejects.toBeDefined();
+      const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
+      expect(err._tag).toBe("DiscoverPoolsError");
+      expect(err.message?.toLowerCase()).toContain("json");
     } finally {
       restore();
     }
@@ -196,7 +208,9 @@ describe("AdapterService.discoverPools", () => {
     );
     try {
       const layer = buildAdapterLayer();
-      await expect(runDiscover(layer)).rejects.toBeDefined();
+      const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
+      expect(err._tag).toBe("DiscoverPoolsError");
+      expect(err.message?.toLowerCase()).toContain("envelope");
     } finally {
       restore();
     }
@@ -210,7 +224,9 @@ describe("AdapterService.discoverPools", () => {
     );
     try {
       const layer = buildAdapterLayer();
-      await expect(runDiscover(layer)).rejects.toBeDefined();
+      const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
+      expect(err._tag).toBe("DiscoverPoolsError");
+      expect(err.message?.toLowerCase()).toContain("network error");
     } finally {
       restore();
     }
@@ -329,7 +345,7 @@ describe("AdapterService.discoverPools", () => {
     }
   });
 
-  it("returns empty array when the envelope itself is valid but ALL pool objects have invalid shape", async () => {
+  it("fails with DiscoverPoolsError when the envelope is valid but ALL pool objects have invalid shape (P2 schema-error guard)", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const restore = mockFetch(
       (async () =>
@@ -346,13 +362,37 @@ describe("AdapterService.discoverPools", () => {
     );
     try {
       const layer = buildAdapterLayer();
-      const result = await runDiscover(layer);
-      expect(result).toEqual([]);
+      const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
+      expect(err._tag).toBe("DiscoverPoolsError");
+      expect(err.message?.toLowerCase()).toContain("none matched the expected shape");
       const shapeWarn = warnSpy.mock.calls.find(
-        (call) => typeof call[0] === "string" && call[0].includes("some pool objects had invalid shape"),
+        (call) => typeof call[0] === "string" && call[0].includes("ALL pool objects had invalid shape"),
       );
       expect(shapeWarn).toBeDefined();
       expect(shapeWarn?.[1]).toMatchObject({ dropped: 2, kept: 0, total: 2, pages: 1 });
+    } finally {
+      restore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("does NOT trigger the all-fail guard when the envelope has an empty data array (zero pools is fine)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const restore = mockFetch(
+      (async () =>
+        new Response(
+          JSON.stringify({ total: 0, pages: 0, current_page: 1, page_size: 0, data: [] }),
+          { status: 200 },
+        )) as unknown as typeof fetch,
+    );
+    try {
+      const layer = buildAdapterLayer();
+      const result = await runDiscover(layer);
+      expect(result).toEqual([]);
+      const allFailWarn = warnSpy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("ALL pool objects had invalid shape"),
+      );
+      expect(allFailWarn).toBeUndefined();
     } finally {
       restore();
       warnSpy.mockRestore();
