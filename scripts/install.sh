@@ -9,6 +9,9 @@ set -euo pipefail
 MIN_BUN_VERSION="${PRISM_MIN_BUN_VERSION:-1.4.0}"
 
 REPO="${PRISM_REPO:-irfndi/prism-liquidity-agent}"
+HOME="${HOME:-/tmp}"
+SHELL_NAME="${SHELL##*/}"
+SHELL_NAME="${SHELL_NAME:-sh}"
 INSTALL_DIR="${PRISM_INSTALL_DIR:-$HOME/.prism}"
 BIN_DIR="${PRISM_BIN_DIR:-$HOME/.local/bin}"
 TARBALL_URL="${PRISM_TARBALL_URL:-}"
@@ -192,7 +195,7 @@ fi
 # user can copy-paste. We test the literal BIN_DIR path so the hint
 # matches the actual install.
 PATH_HAS_BIN_DIR=0
-IFS=':' read -r -a _path_entries <<<"$PATH"
+IFS=':' read -r -a _path_entries <<<"${PATH:-}"
 for _entry in "${_path_entries[@]}"; do
   if [ "$_entry" = "$BIN_DIR" ]; then
     PATH_HAS_BIN_DIR=1
@@ -223,7 +226,7 @@ if [ "$PATH_HAS_BIN_DIR" -eq 0 ]; then
   echo ""
   log_warn "$BIN_DIR is not on your current PATH."
   log_warn "Run this in a new shell, or persist it in your shell rc:"
-  echo "    echo 'export PATH=\"\$PATH:$BIN_DIR\"' >> \"\$HOME/.${SHELL##*/}rc\""
+  echo "    echo 'export PATH=\"\$PATH:$BIN_DIR\"' >> \"\$HOME/.$SHELL_NAMERC\""
   echo "    export PATH=\"\$PATH:$BIN_DIR\""
 fi
 

@@ -253,6 +253,48 @@ scenario_s6() {
   esac
 }
 
+scenario_s7() {
+  bold "S7: install.sh survives unset HOME under set -u (no \$HOME crash)"
+  local tmp; tmp="$(mktemp -d -t prism-s7-XXXXXX)"
+  local out; out="$tmp/out.log"
+  env -i PATH="/usr/bin:/bin" \
+    bash "$INSTALL_SH" >"$out" 2>&1
+  local body; body="$(cat "$out")"
+  case "$body" in
+    *"HOME: unbound variable"*|*"HOME: parameter null or not set"*)
+      FAIL=$((FAIL + 1))
+      FAILED_NAMES+=("S7: HOME unset does not crash")
+      printf "  %s S7: HOME unset does not crash\n" "$(red FAIL)"
+      printf "       body: %s\n" "${body:0:300}"
+      ;;
+    *)
+      PASS=$((PASS + 1))
+      printf "  %s HOME unset does not crash on \$HOME\n" "$(green PASS)"
+      ;;
+  esac
+  rm -rf "$tmp"
+}
+
+scenario_s8() {
+  bold "S8: install.sh defensively reads \$PATH (no bare \$PATH under set -u)"
+  local body; body="$(cat "$INSTALL_SH")"
+  local matched=0
+  case "$body" in
+    *'${PATH:-}'*) matched=1 ;;
+  esac
+  case "$body" in
+    *'IFS=:'*'read -r -a _path_entries <<<"${PATH:-}"'*) matched=1 ;;
+  esac
+  if [ "$matched" -eq 1 ]; then
+    PASS=$((PASS + 1))
+    printf "  %s PATH read uses defensive \${PATH:-}\n" "$(green PASS)"
+  else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES+=("S8: PATH defensive read present")
+    printf "  %s S8: PATH defensive read present\n" "$(red FAIL)"
+  fi
+}
+
 # ---- Main ----
 echo ""
 bold "Install script test suite"
@@ -265,6 +307,8 @@ scenario_s3
 scenario_s4
 scenario_s5
 scenario_s6
+scenario_s7
+scenario_s8
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then
