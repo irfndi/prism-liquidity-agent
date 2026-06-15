@@ -1,8 +1,9 @@
 import { Context, Effect, Layer } from "effect";
 import { ScreenerService, type ScreenerApi, type ScreenedPool } from "./services.js";
-import { AdapterService } from "./services.js";
+import { AdapterService, type DiscoveredPool } from "./services.js";
 import { StrategyService } from "./services.js";
 import { createLogger } from "./logger.js";
+import { DiscoverPoolsError } from "./errors.js";
 
 const logger = createLogger("screener");
 
@@ -23,24 +24,16 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
       const api: ScreenerApi = {
         screenPools: () =>
           Effect.gen(function* () {
-            const pools = yield* adapter.discoverPools().pipe(
+            const pools: ReadonlyArray<DiscoveredPool> = yield* adapter.discoverPools().pipe(
               Effect.catchAll((err) => {
-                logger.warn(
-                  "Pool discovery failed; falling back to watchlist-only mode:",
-                  err.message,
-                );
-                return Effect.succeed(
-                  [] as ReadonlyArray<{
-                    address: string;
-                    tvlUsd: number;
-                    volume24hUsd: number;
-                    fees24hUsd: number;
-                    apr: number;
-                    binStep: number;
-                    tokenX: string;
-                    tokenY: string;
-                  }>,
-                );
+                if (err instanceof DiscoverPoolsError || (err as { _tag?: string })?._tag === "DiscoverPoolsError") {
+                  logger.warn(
+                    "Pool discovery failed; falling back to watchlist-only mode:",
+                    err.message,
+                  );
+                  return Effect.succeed([] as ReadonlyArray<DiscoveredPool>);
+                }
+                return Effect.fail(err);
               }),
             );
             const screened: ScreenedPool[] = [];

@@ -74,6 +74,8 @@ function buildLayer(
     githubRepo,
     feedbackOptOut: optOut,
     paperModeExitLive: false,
+    meteoraPoolsUrl:
+      "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc",
   });
   const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));
   return Layer.provide(FeedbackLive, baseLayer) as Layer.Layer<FeedbackService, never, never>;
