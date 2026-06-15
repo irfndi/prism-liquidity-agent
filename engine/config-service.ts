@@ -48,7 +48,8 @@ export interface AppConfig {
   // Allow paper mode to exit live positions (opt-in escape hatch)
   readonly paperModeExitLive: boolean;
   // Meteora DLMM pool-discovery API URL. Override with METEORA_POOLS_URL
-  // env var; falls back to the legacy public endpoint if unset/empty.
+  // env var; falls back to the official DLMM Data API (dlmm.datapi.meteora.ag)
+  // if the env var is unset or empty.
   readonly meteoraPoolsUrl: string;
 }
 

@@ -273,45 +273,76 @@ describe("AdapterService.discoverPools", () => {
     }
   });
 
-  it("surfaces an explicit failure when a pool object is missing required fields", async () => {
+  it("drops pool objects with invalid shape and returns the valid ones (with a logged warning)", async () => {
     const restore = mockFetch(
       (async () =>
         new Response(
-          JSON.stringify([
-            {
-              address: "Pool111111111111111111111111111111111111111",
-            },
-          ]),
+          JSON.stringify({
+            total: 3,
+            pages: 1,
+            current_page: 1,
+            page_size: 3,
+            data: [
+              {
+                address: "PoolValid11111111111111111111111111111111111",
+                token_x: { address: "So11111111111111111111111111111111111111112" },
+                token_y: { address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+                pool_config: { bin_step: 10 },
+                tvl: 200_000,
+                apr: 60,
+                volume: { "24h": 50_000 },
+                fees: { "24h": 500 },
+              },
+              {
+                address: "PoolMissingFields111111111111111111111111111111",
+              },
+              {
+                address: "PoolWrongTypes11111111111111111111111111111111",
+                token_x: { address: "So11111111111111111111111111111111111111112" },
+                token_y: { address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+                pool_config: { bin_step: 10 },
+                tvl: "not a number",
+                apr: 60,
+                volume: { "24h": 50_000 },
+                fees: { "24h": 500 },
+              },
+            ],
+          }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         )) as unknown as typeof fetch,
     );
     try {
       const layer = buildAdapterLayer();
-      await expect(runDiscover(layer)).rejects.toBeDefined();
+      const result = await runDiscover(layer);
+      expect(Array.isArray(result)).toBe(true);
+      expect(result).toHaveLength(1);
+      expect(result[0]?.address).toBe("PoolValid11111111111111111111111111111111111");
     } finally {
       restore();
     }
   });
 
-  it("surfaces an explicit failure when a pool object has wrong field types", async () => {
+  it("returns empty array when the envelope itself is valid but ALL pool objects have invalid shape", async () => {
     const restore = mockFetch(
       (async () =>
         new Response(
-          JSON.stringify([
-            {
-              address: "Pool111111111111111111111111111111111111111",
-              base_mint: "So11111111111111111111111111111111111111112",
-              quote_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-              tvl: "not a number",
-              bin_step: 10,
-            },
-          ]),
-          { status: 200, headers: { "Content-Type": "application/json" } },
+          JSON.stringify({
+            total: 2,
+            pages: 1,
+            current_page: 1,
+            page_size: 2,
+            data: [
+              { address: "Bad1" },
+              { address: "Bad2" },
+            ],
+          }),
+          { status: 200 },
         )) as unknown as typeof fetch,
     );
     try {
       const layer = buildAdapterLayer();
-      await expect(runDiscover(layer)).rejects.toBeDefined();
+      const result = await runDiscover(layer);
+      expect(result).toEqual([]);
     } finally {
       restore();
     }
