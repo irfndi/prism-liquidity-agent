@@ -15,6 +15,7 @@ SHELL_NAME="${SHELL_NAME:-sh}"
 INSTALL_DIR="${PRISM_INSTALL_DIR:-$HOME/.prism}"
 BIN_DIR="${PRISM_BIN_DIR:-$HOME/.local/bin}"
 TARBALL_URL="${PRISM_TARBALL_URL:-}"
+BUN_INSTALLED_BUN_SH=0
 
 # Defensive env reads: every ${PRISM_*} / user-supplied var must use
 # ${VAR:-} so `set -u` does not abort the one-liner on a clean shell
@@ -74,6 +75,7 @@ ensure_bun() {
       return 1
     fi
     BUN_BIN="$(command -v bun)"
+    BUN_INSTALLED_BUN_SH=1
   fi
 
   local current
@@ -226,7 +228,7 @@ if [ "$PATH_HAS_BIN_DIR" -eq 0 ]; then
   echo ""
   log_warn "$BIN_DIR is not on your current PATH."
   log_warn "Run this in a new shell, or persist it in your shell rc:"
-  echo "    echo 'export PATH=\"\$PATH:$BIN_DIR\"' >> \"\$HOME/.$SHELL_NAMERC\""
+  echo "    echo 'export PATH=\"\$PATH:$BIN_DIR\"' >> \"\$HOME/.${SHELL_NAME}rc\""
   echo "    export PATH=\"\$PATH:$BIN_DIR\""
 fi
 

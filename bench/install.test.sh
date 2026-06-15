@@ -295,6 +295,43 @@ scenario_s8() {
   fi
 }
 
+scenario_s9() {
+  bold "S9: PATH reminder heredoc uses \${SHELL_NAME}rc (no undefined SHELL_NAMERC)"
+  local body; body="$(cat "$INSTALL_SH")"
+  case "$body" in
+    *'SHELL_NAMERC'*)
+      FAIL=$((FAIL + 1))
+      FAILED_NAMES+=("S9: no undefined SHELL_NAMERC reference")
+      printf "  %s S9: no undefined SHELL_NAMERC reference\n" "$(red FAIL)"
+      ;;
+    *)
+      PASS=$((PASS + 1))
+      printf "  %s no undefined SHELL_NAMERC reference\n" "$(green PASS)"
+      ;;
+  esac
+}
+
+scenario_s10() {
+  bold "S10: ensure_bun() sets BUN_INSTALLED_BUN_SH=1 on fresh install"
+  local body; body="$(cat "$INSTALL_SH")"
+  local init_ok=0
+  local set_ok=0
+  case "$body" in
+    *'BUN_INSTALLED_BUN_SH=0'*) init_ok=1 ;;
+  esac
+  case "$body" in
+    *'BUN_INSTALLED_BUN_SH=1'*) set_ok=1 ;;
+  esac
+  if [ "$init_ok" -eq 1 ] && [ "$set_ok" -eq 1 ]; then
+    PASS=$((PASS + 1))
+    printf "  %s BUN_INSTALLED_BUN_SH initialised at 0 and set to 1 on fresh install\n" "$(green PASS)"
+  else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES+=("S10: BUN_INSTALLED_BUN_SH wiring")
+    printf "  %s S10: BUN_INSTALLED_BUN_SH wiring (init=%d, set=%d)\n" "$(red FAIL)" "$init_ok" "$set_ok"
+  fi
+}
+
 # ---- Main ----
 echo ""
 bold "Install script test suite"
@@ -309,6 +346,8 @@ scenario_s5
 scenario_s6
 scenario_s7
 scenario_s8
+scenario_s9
+scenario_s10
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then
