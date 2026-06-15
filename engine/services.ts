@@ -16,12 +16,24 @@ import type {
   AdapterError,
   AuditError,
   BlacklistError,
+  DiscoverPoolsError,
   MemoryError,
   RiskError,
   ScreenerError,
 } from "./errors.js";
 
 // ─── Adapter Service ─────────────────────────────────────────────────────────
+
+export interface DiscoveredPool {
+  readonly address: string;
+  readonly tvlUsd: number;
+  readonly volume24hUsd: number;
+  readonly fees24hUsd: number;
+  readonly apr: number;
+  readonly binStep: number;
+  readonly tokenX: string;
+  readonly tokenY: string;
+}
 
 export interface AdapterApi {
   readonly hasWallet: () => boolean;
@@ -101,19 +113,7 @@ export interface AdapterApi {
     },
     unknown
   >;
-  readonly discoverPools: () => Effect.Effect<
-    ReadonlyArray<{
-      address: string;
-      tvlUsd: number;
-      volume24hUsd: number;
-      fees24hUsd: number;
-      apr: number;
-      binStep: number;
-      tokenX: string;
-      tokenY: string;
-    }>,
-    unknown
-  >;
+  readonly discoverPools: () => Effect.Effect<ReadonlyArray<DiscoveredPool>, DiscoverPoolsError>;
   readonly reportFeeCollection: (event: {
     poolAddress: string;
     positionPubkey: string;

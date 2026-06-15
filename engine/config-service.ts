@@ -47,6 +47,10 @@ export interface AppConfig {
   readonly feedbackOptOut: boolean;
   // Allow paper mode to exit live positions (opt-in escape hatch)
   readonly paperModeExitLive: boolean;
+  // Meteora DLMM pool-discovery API URL. Override with METEORA_POOLS_URL
+  // env var; falls back to the official DLMM Data API (dlmm.datapi.meteora.ag)
+  // if the env var is unset or empty.
+  readonly meteoraPoolsUrl: string;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -160,6 +164,12 @@ const loadConfig = Effect.gen(function* () {
   const paperModeExitLive = yield* Config.boolean("PAPER_MODE_EXIT_LIVE").pipe(
     Effect.orElseSucceed(() => false),
   );
+  const meteoraPoolsUrlRaw = yield* Config.string("METEORA_POOLS_URL").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const meteoraPoolsUrl =
+    meteoraPoolsUrlRaw ||
+    "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc";
 
   const watchlistPools = watchlistPoolsRaw
     .split(",")
@@ -207,6 +217,7 @@ const loadConfig = Effect.gen(function* () {
     githubRepo,
     feedbackOptOut,
     paperModeExitLive,
+    meteoraPoolsUrl,
   };
 
   return cfg;

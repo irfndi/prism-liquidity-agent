@@ -35,3 +35,10 @@ export class AuditError extends Data.TaggedError("AuditError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
+
+export class DiscoverPoolsError extends Data.TaggedError("DiscoverPoolsError")<{
+  readonly message: string;
+  readonly url: string;
+  readonly status?: number;
+  readonly cause?: unknown;
+}> {}

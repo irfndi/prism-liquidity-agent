@@ -18,6 +18,7 @@ import { Context, Effect, Layer } from "effect";
 import { AdapterService, type AdapterApi } from "./services.js";
 import { ConfigService } from "./config-service.js";
 import { AdapterError } from "./errors.js";
+import { DiscoverPoolsError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import type { BinArray, BinData, PoolState, Position } from "./types.js";
 import bs58 from "bs58";
@@ -30,6 +31,123 @@ const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 const logger = createLogger("adapter-service");
+
+// ─── Meteora DLMM Data API response shape ────────────────────────────────────
+// Mirrors the schema in https://dlmm.datapi.meteora.ag/openapi.json (the file
+// at /openapi.json on the host is 404, but the live /pools endpoint and the
+// docs at docs.meteora.ag/developer-guides/dlmm/api-reference/ confirm this).
+// TimeWindowData is keyed by window string ("30m", "1h", "24h", ...) so we
+// use a Record at the type level.
+
+interface MeteoraTimeWindowData {
+  readonly "30m": number;
+  readonly "1h": number;
+  readonly "2h": number;
+  readonly "4h": number;
+  readonly "12h": number;
+  readonly "24h": number;
+  readonly [window: string]: number;
+}
+
+interface MeteoraTokenMetrics {
+  readonly address: string;
+  readonly name: string;
+  readonly symbol: string;
+  readonly decimals: number;
+  readonly is_verified: boolean;
+  readonly holders: number;
+  readonly freeze_authority_disabled: boolean;
+  readonly total_supply: number;
+  readonly price: number;
+  readonly market_cap: number;
+}
+
+interface MeteoraPoolConfig {
+  readonly bin_step: number;
+  readonly base_fee_pct: number;
+  readonly max_fee_pct: number;
+  readonly protocol_fee_pct: number;
+  readonly collect_fee_mode: number;
+}
+
+interface MeteoraPool {
+  readonly address: string;
+  readonly name: string;
+  readonly token_x: MeteoraTokenMetrics;
+  readonly token_y: MeteoraTokenMetrics;
+  readonly reserve_x: string;
+  readonly reserve_y: string;
+  readonly token_x_amount: number;
+  readonly token_y_amount: number;
+  readonly created_at: number;
+  readonly reward_mint_x: string;
+  readonly reward_mint_y: string;
+  readonly pool_config: MeteoraPoolConfig;
+  readonly dynamic_fee_pct: number;
+  readonly tvl: number;
+  readonly current_price: number;
+  readonly apr: number;
+  readonly apy: number;
+  readonly has_farm: boolean;
+  readonly farm_apr: number;
+  readonly farm_apy: number;
+  readonly volume: MeteoraTimeWindowData;
+  readonly fees: MeteoraTimeWindowData;
+  readonly protocol_fees: MeteoraTimeWindowData;
+  readonly fee_tvl_ratio: MeteoraTimeWindowData;
+  readonly cumulative_metrics: { readonly volume: number; readonly fees: number };
+  readonly is_blacklisted: boolean;
+  readonly tags: ReadonlyArray<string>;
+  readonly launchpad: string | null;
+}
+
+interface MeteoraPoolsEnvelope {
+  readonly total: number;
+  readonly pages: number;
+  readonly current_page: number;
+  readonly page_size: number;
+  readonly data: ReadonlyArray<MeteoraPool>;
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isPoolsEnvelope(v: unknown): v is MeteoraPoolsEnvelope {
+  if (!isObject(v)) return false;
+  if (typeof v["total"] !== "number") return false;
+  if (typeof v["pages"] !== "number") return false;
+  if (typeof v["current_page"] !== "number") return false;
+  if (typeof v["page_size"] !== "number") return false;
+  if (!Array.isArray(v["data"])) return false;
+  return true;
+}
+
+function isValidPoolShape(v: unknown): v is MeteoraPool {
+  if (!isObject(v)) return false;
+  if (typeof v["address"] !== "string") return false;
+  if (typeof v["tvl"] !== "number") return false;
+  if (typeof v["apr"] !== "number") return false;
+  if (!isObject(v["token_x"]) || typeof (v["token_x"] as Record<string, unknown>)["address"] !== "string") return false;
+  if (!isObject(v["token_y"]) || typeof (v["token_y"] as Record<string, unknown>)["address"] !== "string") return false;
+  if (!isObject(v["pool_config"])) return false;
+  const cfg = v["pool_config"] as Record<string, unknown>;
+  if (typeof cfg["bin_step"] !== "number") return false;
+  if (!isObject(v["volume"])) return false;
+  const vol = v["volume"] as Record<string, unknown>;
+  if (typeof vol["24h"] !== "number") return false;
+  if (!isObject(v["fees"])) return false;
+  const fees = v["fees"] as Record<string, unknown>;
+  if (typeof fees["24h"] !== "number") return false;
+  return true;
+}
+
+function describe(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return `array(length=${v.length})`;
+  if (typeof v === "object") return `object(keys=${Object.keys(v as object).slice(0, 5).join(",")})`;
+  return typeof v;
+}
 
 // ─── Install ID helper (engine-safe mirror of cli/install-id.ts) ───────────
 
@@ -1005,32 +1123,93 @@ export const AdapterLive = Layer.effect(
 
       discoverPools: () =>
         Effect.gen(function* () {
-          const res = yield* Effect.tryPromise(() => fetch("https://dlmm-api.meteora.ag/pair/all"));
-          const pairs = (yield* Effect.tryPromise(() => res.json())) as ReadonlyArray<{
-            address: string;
-            bin_step: number;
-            base_mint: string;
-            quote_mint: string;
-            tvl: number;
-            volume_24h: number;
-            fees_24h: number;
-            apr: number;
-          }>;
-
-          return pairs
+          const url =
+            config.meteoraPoolsUrl ||
+            "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc";
+          const res = yield* Effect.tryPromise({
+            try: async () => {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 10_000);
+              try {
+                return await fetch(url, { signal: controller.signal });
+              } finally {
+                clearTimeout(timeout);
+              }
+            },
+            catch: (cause) =>
+              new DiscoverPoolsError({
+                message: `Network error fetching ${url}: ${String(cause)}`,
+                url,
+                cause,
+              }),
+          });
+          if (!res.ok) {
+            logger.warn("Pool discovery: Meteora API returned non-OK", {
+              url,
+              status: res.status,
+            });
+            return yield* Effect.fail(
+              new DiscoverPoolsError({
+                message: `Meteora API returned HTTP ${res.status} for ${url}. Pool discovery disabled for this cycle.`,
+                url,
+                status: res.status,
+              }),
+            );
+          }
+          const parsed: unknown = yield* Effect.tryPromise({
+            try: () => res.json(),
+            catch: (cause) =>
+              new DiscoverPoolsError({
+                message: `Invalid JSON from ${url}: ${String(cause)}`,
+                url,
+                cause,
+              }),
+          });
+          if (!isPoolsEnvelope(parsed)) {
+            return yield* Effect.fail(
+              new DiscoverPoolsError({
+                message: `Meteora API returned non-envelope payload (${describe(parsed)}) from ${url}`,
+                url,
+              }),
+            );
+          }
+          const { data, total, pages } = parsed;
+          const valid = data.filter(isValidPoolShape);
+          if (data.length > 0 && valid.length === 0) {
+            // Every row failed shape validation: almost always a schema change
+            // upstream, not random data noise. Fail loud so the regression is
+            // visible instead of silently masking it as an empty result.
+            logger.warn(
+              "Pool discovery: ALL pool objects had invalid shape; treating as a schema error",
+              { dropped: data.length, kept: 0, total, pages },
+            );
+            return yield* Effect.fail(
+              new DiscoverPoolsError({
+                message: `Meteora API returned ${data.length} pool rows but none matched the expected shape. Likely a schema change. Pool discovery disabled for this cycle.`,
+                url,
+              }),
+            );
+          }
+          if (valid.length < data.length) {
+            logger.warn(
+              "Pool discovery: some pool objects had invalid shape and were dropped",
+              { dropped: data.length - valid.length, kept: valid.length, total, pages },
+            );
+          }
+          return valid
             .filter((p) => p.tvl >= config.discoveryMinTvlUsd)
             .map((p) => ({
               address: p.address,
               tvlUsd: p.tvl,
-              volume24hUsd: p.volume_24h,
-              fees24hUsd: p.fees_24h,
+              volume24hUsd: p.volume["24h"],
+              fees24hUsd: p.fees["24h"],
               apr: p.apr,
-              binStep: p.bin_step,
-              tokenX: p.base_mint,
-              tokenY: p.quote_mint,
+              binStep: p.pool_config.bin_step,
+              tokenX: p.token_x.address,
+              tokenY: p.token_y.address,
             }))
             .slice(0, 50);
-        }).pipe(Effect.catchAll(() => Effect.succeed([]))),
+        }),
 
       swapUSDCForSOL: (minSolThreshold = 0.05, swapAmountUSDC = 1.0) =>
         Effect.gen(function* () {
