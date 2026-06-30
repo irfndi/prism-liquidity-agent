@@ -722,12 +722,18 @@ export const program = Effect.gen(function* () {
                     paperTrading: config.paperTrading,
                   })
                   .pipe(Effect.catchAll(() => Effect.void));
-              } else if (sim.netBenefitUsd > config.minRebalanceNetBenefitUsd) {
+              } else if (
+                sim.netBenefitUsd > config.minRebalanceNetBenefitUsd ||
+                recoveryProb <= config.oorRecoveryForceRebalanceThreshold
+              ) {
+                const forceRebalance = recoveryProb <= config.oorRecoveryForceRebalanceThreshold;
                 decision = {
                   action: "REBALANCE",
                   poolAddress,
                   confidence: Math.min(0.7 + feeIlRatio * 0.1, 0.9),
-                  reasoning: `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${sim.netBenefitUsd.toFixed(2)}`,
+                  reasoning: forceRebalance
+                    ? `[recovery-gate] force-rebalance — probability ${recoveryProb.toFixed(2)} <= ${config.oorRecoveryForceRebalanceThreshold}. Drift ${(driftPct * 100).toFixed(0)}%`
+                    : `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${sim.netBenefitUsd.toFixed(2)}`,
                   rebalanceParams: {
                     newLowerBinId: recommended.lowerBinId,
                     newUpperBinId: recommended.upperBinId,
