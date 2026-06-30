@@ -289,3 +289,58 @@ export function evaluatePerPoolAllocation(
     adjustedDepositUsd: adjusted,
   };
 }
+
+// ─── F6: Paper-trading validation gate ───────────────────────────────────────
+
+export interface PaperValidationInput {
+  readonly paperTrading: boolean;
+  readonly paperDaysAccumulated: number;
+  readonly minDays: number;
+  readonly enforce: boolean;
+}
+
+export interface PaperValidationResult {
+  readonly approved: boolean;
+  readonly reason: string;
+  readonly warning?: string;
+}
+
+/**
+ * Block live ENTER until the user has run the agent in paper mode for at
+ * least `minDays` accumulated days. Skipped entirely in paper mode. When
+ * enforce=false, the gate emits a warning instead of rejecting — useful for
+ * opt-in enforcement during initial deployment.
+ */
+export function evaluatePaperValidation(input: PaperValidationInput): PaperValidationResult {
+  if (input.paperTrading) {
+    return {
+      approved: true,
+      reason: "Paper trading — validation does not apply",
+    };
+  }
+
+  if (input.paperDaysAccumulated >= input.minDays) {
+    return {
+      approved: true,
+      reason: `Paper validation passed (${input.paperDaysAccumulated}/${input.minDays} days)`,
+    };
+  }
+
+  if (!input.enforce) {
+    return {
+      approved: true,
+      reason: "Paper validation not enforced",
+      warning:
+        `Live trading with only ${input.paperDaysAccumulated} paper days — ` +
+        `consider running paper for ${input.minDays} days before going live`,
+    };
+  }
+
+  return {
+    approved: false,
+    reason:
+      `Paper validation gate: only ${input.paperDaysAccumulated}/${input.minDays} paper days accumulated. ` +
+      `Live ENTER requires at least ${input.minDays} days of paper trading. ` +
+      `Set PAPER_VALIDATION_ENFORCE=false to override (not recommended).`,
+  };
+}

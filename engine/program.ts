@@ -3,7 +3,7 @@ import { ConfigService, ConfigLive, type AppConfig } from "./config-service.js";
 import { AdapterLive } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
 import { MemoryLive } from "./memory-service.js";
-import { RiskLive, evaluateGasGate, evaluateCompoundGate, evaluatePerPoolAllocation } from "./risk-service.js";
+import { RiskLive, evaluateGasGate, evaluateCompoundGate, evaluatePerPoolAllocation, evaluatePaperValidation } from "./risk-service.js";
 import {
   computeBinVolatilityStddev,
   isHighVolatility,
@@ -253,6 +253,43 @@ export const program = Effect.gen(function* () {
     if (arr.length > cap) arr.shift();
     binHistory.set(poolAddress, arr);
   };
+
+  // F6: paper-trading day counter — persisted in metadata table so it
+  // survives restarts. Increments when the day boundary rolls over.
+  const PAPER_DAYS_KEY = "paperTradingDaysAccumulated";
+  const PAPER_DAYS_LAST_KEY = "paperTradingLastDayIso";
+  const todayIso = (): string => new Date().toISOString().slice(0, 10);
+
+  const tickPaperDays = Effect.gen(function* () {
+    if (!config.paperTrading) return 0;
+    const lastDay = yield* db
+      .getMetadata(PAPER_DAYS_LAST_KEY)
+      .pipe(Effect.catchAll(() => Effect.succeed(null)));
+    const today = todayIso();
+    if (lastDay === today) return 0;
+    const stored = yield* db
+      .getMetadata(PAPER_DAYS_KEY)
+      .pipe(Effect.catchAll(() => Effect.succeed("0")));
+    const current = Number(stored) || 0;
+    const next = current + 1;
+    yield* db
+      .setMetadata(PAPER_DAYS_KEY, String(next))
+      .pipe(Effect.catchAll(() => Effect.void));
+    yield* db
+      .setMetadata(PAPER_DAYS_LAST_KEY, today)
+      .pipe(Effect.catchAll(() => Effect.void));
+    if (next % 7 === 0) {
+      console.info(`[paper-validation] ${next} paper days accumulated`);
+    }
+    return next;
+  });
+
+  const readPaperDays = Effect.gen(function* () {
+    const stored = yield* db
+      .getMetadata(PAPER_DAYS_KEY)
+      .pipe(Effect.catchAll(() => Effect.succeed("0")));
+    return Number(stored) || 0;
+  });
 
   if (!config.paperTrading) {
     const paperExited = yield* db
@@ -802,7 +839,51 @@ export const program = Effect.gen(function* () {
 
       // Execute
       let executed = false;
+
+      // F6: paper-trading validation gate — only blocks ENTER, runs only in live mode
+      if (!config.paperTrading && decision.action === "ENTER") {
+        const paperDays = yield* readPaperDays;
+        const validation = evaluatePaperValidation({
+          paperTrading: false,
+          paperDaysAccumulated: paperDays,
+          minDays: config.paperValidationMinDays,
+          enforce: config.paperValidationEnforce,
+        });
+        if (validation.warning) {
+          console.warn(`[paper-validation] ${validation.warning}`);
+        }
+        if (!validation.approved) {
+          console.warn(
+            `[paper-validation] Blocking live ENTER on ${poolAddress} — ${validation.reason}`,
+          );
+          yield* memory
+            .upsert({
+              category: "warning",
+              content: `Paper validation gate blocked live ENTER on ${poolAddress}: ${validation.reason}`,
+              poolAddress,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          yield* audit
+            .recordDecision({
+              timestamp: Date.now(),
+              cycleId,
+              poolAddress,
+              action: decision.action,
+              confidence: decision.confidence,
+              reasoning: `[paper-validation] ${validation.reason}`,
+              metrics,
+              riskResult: { approved: false, reason: validation.reason },
+              executed: false,
+              paperTrading: false,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          return decision;
+        }
+      }
+
       if (config.paperTrading) {
+        // F6: tickPaperDays increments the day counter only in paper mode (live ticks don't affect it)
+        yield* tickPaperDays;
         console.info("[PAPER] Would execute", {
           action: decision.action,
           pool: poolAddress,
