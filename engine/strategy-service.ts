@@ -116,3 +116,41 @@ export const DLMMStrategy: StrategyApi = {
 };
 
 export const StrategyLive = Layer.succeed(StrategyService, StrategyService.of(DLMMStrategy));
+
+// ─── F2: Volatility-adjusted range sizing ────────────────────────────────────
+
+/**
+ * Sample standard deviation of the active bin over recent snapshots. Returns 0
+ * for empty or single-point series. Used as the "high-vol" detector.
+ */
+export function computeBinVolatilityStddev(activeBins: ReadonlyArray<number>): number {
+  if (activeBins.length < 2) return 0;
+  const mean = activeBins.reduce((s, v) => s + v, 0) / activeBins.length;
+  const variance =
+    activeBins.reduce((s, v) => s + (v - mean) * (v - mean), 0) / (activeBins.length - 1);
+  return Math.sqrt(variance);
+}
+
+/** Returns true when the stddev of recent bin moves exceeds the configured threshold. */
+export function isHighVolatility(stddev: number, threshold: number): boolean {
+  return stddev >= threshold;
+}
+
+/**
+ * Pick a bin-range half-width based on the bin step, widened when the pool is
+ * currently in a high-volatility regime. High-vol gets a much wider range to
+ * avoid constant rebalancing.
+ */
+export function recommendBinRangeForVolatility(
+  activeBinId: number,
+  binStep: number,
+  highVolatility: boolean,
+): { lowerBinId: number; upperBinId: number; halfWidth: number } {
+  const baseHalfWidth = binStep <= 10 ? 25 : binStep <= 25 ? 20 : 15;
+  const halfWidth = highVolatility ? Math.max(baseHalfWidth * 2, 50) : baseHalfWidth;
+  return {
+    lowerBinId: activeBinId - halfWidth,
+    upperBinId: activeBinId + halfWidth,
+    halfWidth,
+  };
+}

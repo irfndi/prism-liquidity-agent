@@ -4,6 +4,11 @@ import { AdapterLive } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
 import { MemoryLive } from "./memory-service.js";
 import { RiskLive, evaluateGasGate } from "./risk-service.js";
+import {
+  computeBinVolatilityStddev,
+  isHighVolatility,
+  recommendBinRangeForVolatility,
+} from "./strategy-service.js";
 import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
 import { ScreenerLive } from "./screener-service.js";
@@ -237,6 +242,16 @@ export const program = Effect.gen(function* () {
     trackedPositions.set(pos.poolAddress, pos);
   }
 
+  // F2: per-pool recent active-bin history (in-memory ring buffer; resets on restart)
+  const binHistory = new Map<string, number[]>();
+  const pushBinHistory = (poolAddress: string, activeBinId: number): void => {
+    const cap = Math.max(config.volatilityLookbackSnapshots, 2);
+    const arr = binHistory.get(poolAddress) ?? [];
+    arr.push(activeBinId);
+    if (arr.length > cap) arr.shift();
+    binHistory.set(poolAddress, arr);
+  };
+
   if (!config.paperTrading) {
     const paperExited = yield* db
       .getPaperExitedPositions()
@@ -354,6 +369,7 @@ export const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
+      pushBinHistory(poolAddress, pool.activeBinId);
 
       if (config.enableSnapshotCapture && config.paperTrading) {
         yield* db
@@ -535,40 +551,69 @@ export const program = Effect.gen(function* () {
         const oorGraceExpired =
           hasPosition && pos && pos.oorCycleCount >= config.oorGracePeriodCycles;
 
-        if (
-          hasPosition &&
-          (driftPct > 0.6 || oorGraceExpired) &&
-          (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
-        ) {
-          const recommended = strategy.recommendBinRange(pool.activeBinId, pool.binStep);
-          const sim = yield* adapter.simulateRebalance(
-            poolAddress,
-            recommended.lowerBinId,
-            recommended.upperBinId,
-          );
+        // F2: compute recent bin volatility
+          const recentBins = binHistory.get(poolAddress) ?? [];
+          const volatilityStddev = computeBinVolatilityStddev(recentBins);
+          const highVol = isHighVolatility(volatilityStddev, config.volatilityExitStddev);
 
-          // F1: gas-aware gate — skip rebalance when gas cost > N days of position fees
-          const positionSharePct =
-            pool.tvlUsd > 0 && pos ? Math.min(pos.depositedUsd / pool.tvlUsd, 1) : 0;
-          const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
-          const gasGate = evaluateGasGate({
-            rebalanceGasCostSol: config.rebalanceGasCostSol,
-            solPriceUsd: config.solPriceUsd,
-            positionDailyFeesUsd,
-            minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
-          });
-          if (!gasGate.approved) {
+          if (
+            hasPosition &&
+            highVol &&
+            driftPct > 0.6 &&
+            (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
+          ) {
             console.info(
-              `[gas-gate] Holding ${poolAddress} — ${gasGate.reason} (gas=$${gasGate.gasCostUsd.toFixed(2)}, threshold=$${gasGate.feesThresholdUsd.toFixed(2)})`,
+              `[vol-gate] EXITING ${poolAddress} — high volatility (stddev=${volatilityStddev.toFixed(2)}, threshold=${config.volatilityExitStddev}). Drift=${(driftPct * 100).toFixed(0)}%`,
             );
+            decision = {
+              action: "EXIT",
+              poolAddress,
+              confidence: 0.8,
+              reasoning: `High volatility (σ=${volatilityStddev.toFixed(2)}) + ${(driftPct * 100).toFixed(0)}% drift — exit to wallet rather than rebalancing into new range`,
+            };
             yield* memory
               .upsert({
                 category: "warning",
-                content: `Gas-aware rebalance gate held ${poolAddress}: ${gasGate.reason}`,
+                content: `Volatility-gate EXIT for ${poolAddress}: stddev=${volatilityStddev.toFixed(2)} over ${recentBins.length} snapshots`,
                 poolAddress,
               })
               .pipe(Effect.catchAll(() => Effect.void));
-          } else if (sim.netBenefitUsd > config.minRebalanceNetBenefitUsd) {
+          } else if (
+            hasPosition &&
+            (driftPct > 0.6 || oorGraceExpired) &&
+            (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
+          ) {
+            const recommended = highVol
+              ? recommendBinRangeForVolatility(pool.activeBinId, pool.binStep, true)
+              : strategy.recommendBinRange(pool.activeBinId, pool.binStep);
+            const sim = yield* adapter.simulateRebalance(
+              poolAddress,
+              recommended.lowerBinId,
+              recommended.upperBinId,
+            );
+
+            // F1: gas-aware gate — skip rebalance when gas cost > N days of position fees
+            const positionSharePct =
+              pool.tvlUsd > 0 && pos ? Math.min(pos.depositedUsd / pool.tvlUsd, 1) : 0;
+            const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
+            const gasGate = evaluateGasGate({
+              rebalanceGasCostSol: config.rebalanceGasCostSol,
+              solPriceUsd: config.solPriceUsd,
+              positionDailyFeesUsd,
+              minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
+            });
+            if (!gasGate.approved) {
+              console.info(
+                `[gas-gate] Holding ${poolAddress} — ${gasGate.reason} (gas=$${gasGate.gasCostUsd.toFixed(2)}, threshold=$${gasGate.feesThresholdUsd.toFixed(2)})`,
+              );
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Gas-aware rebalance gate held ${poolAddress}: ${gasGate.reason}`,
+                  poolAddress,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+            } else if (sim.netBenefitUsd > config.minRebalanceNetBenefitUsd) {
             decision = {
               action: "REBALANCE",
               poolAddress,
