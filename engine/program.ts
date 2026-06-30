@@ -3,7 +3,7 @@ import { ConfigService, ConfigLive, type AppConfig } from "./config-service.js";
 import { AdapterLive } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
 import { MemoryLive } from "./memory-service.js";
-import { RiskLive, evaluateGasGate, evaluateCompoundGate } from "./risk-service.js";
+import { RiskLive, evaluateGasGate, evaluateCompoundGate, evaluatePerPoolAllocation } from "./risk-service.js";
 import {
   computeBinVolatilityStddev,
   isHighVolatility,
@@ -679,7 +679,43 @@ export const program = Effect.gen(function* () {
                     .pipe(Effect.catchAll(() => Effect.succeed(config.paperPortfolioUsd)))
                 : config.paperPortfolioUsd;
               const maxPositionSize = Math.min(walletBalanceUsd * 0.5, pool.tvlUsd * 0.005, 500);
-              const positionSizeUsd = Math.max(maxPositionSize, 10);
+              const proposedSizeUsd = Math.max(maxPositionSize, 10);
+
+              // F5: per-pool allocation cap — split across maxOpenPositions pools
+              // so a single SOL/USDC exposure doesn't dominate the portfolio.
+              const allocation = evaluatePerPoolAllocation({
+                proposedDepositUsd: proposedSizeUsd,
+                portfolioValueUsd: config.paperPortfolioUsd,
+                openPositions: Array.from(trackedPositions.values()).map((p) => ({
+                  id: p.poolAddress,
+                  poolAddress: p.poolAddress,
+                  poolName: `${p.tokenXSymbol}/${p.tokenYSymbol}`,
+                  lowerBinId: p.lowerBinId,
+                  upperBinId: p.upperBinId,
+                  liquidityShares: 0n,
+                  depositedUsd: p.depositedUsd,
+                  currentValueUsd: p.currentValueUsd,
+                  unrealizedPnlUsd: p.currentValueUsd - p.depositedUsd,
+                  feesEarnedUsd: 0,
+                  openedAt: p.timestamp,
+                })),
+                maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+                maxOpenPositions: config.maxOpenPositions,
+              });
+              if (!allocation.approved) {
+                console.info(
+                  `[alloc-gate] Skipping ENTER ${poolAddress} — ${allocation.reason}`,
+                );
+                yield* memory
+                  .upsert({
+                    category: "pattern",
+                    content: `Allocation gate skipped ENTER on ${poolAddress}: ${allocation.reason}`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+                return null;
+              }
+              const positionSizeUsd = allocation.adjustedDepositUsd;
 
               decision = {
                 action: "ENTER",

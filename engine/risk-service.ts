@@ -234,3 +234,58 @@ export function evaluateCompoundGate(input: CompoundGateInput): CompoundGateResu
     savingsUsd,
   };
 }
+
+// ─── F5: Multi-pool allocation gate ──────────────────────────────────────────
+
+import type { Position } from "./types.js";
+
+export interface PerPoolAllocationInput {
+  readonly proposedDepositUsd: number;
+  readonly portfolioValueUsd: number;
+  readonly openPositions: ReadonlyArray<Position>;
+  readonly maxPerPoolAllocationPct: number;
+  readonly maxOpenPositions: number;
+}
+
+export interface PerPoolAllocationResult {
+  readonly approved: boolean;
+  readonly reason: string;
+  readonly adjustedDepositUsd: number;
+}
+
+/**
+ * Decide whether a proposed ENTER fits the per-pool allocation cap and the
+ * hard cap on simultaneously open positions. The deposit is capped to the
+ * per-pool limit; ENTER is rejected only when the position cap is reached.
+ */
+export function evaluatePerPoolAllocation(
+  input: PerPoolAllocationInput,
+): PerPoolAllocationResult {
+  if (input.openPositions.length >= input.maxOpenPositions) {
+    return {
+      approved: false,
+      reason: `Max open positions reached (${input.openPositions.length}/${input.maxOpenPositions}) — split across ${input.maxOpenPositions} pools max`,
+      adjustedDepositUsd: 0,
+    };
+  }
+
+  const perPoolCapUsd = Math.max(input.portfolioValueUsd * input.maxPerPoolAllocationPct, 0);
+  const adjusted = Math.min(input.proposedDepositUsd, perPoolCapUsd);
+
+  if (adjusted <= 0) {
+    return {
+      approved: false,
+      reason: `Per-pool cap $${perPoolCapUsd.toFixed(2)} would zero out the proposed $${input.proposedDepositUsd.toFixed(2)} deposit`,
+      adjustedDepositUsd: 0,
+    };
+  }
+
+  return {
+    approved: true,
+    reason:
+      adjusted < input.proposedDepositUsd
+        ? `Capped to ${(input.maxPerPoolAllocationPct * 100).toFixed(0)}% of portfolio ($${adjusted.toFixed(0)})`
+        : "Within per-pool allocation cap",
+    adjustedDepositUsd: adjusted,
+  };
+}
