@@ -154,3 +154,49 @@ export function recommendBinRangeForVolatility(
     halfWidth,
   };
 }
+
+// ─── F4: OOR recovery prediction ──────────────────────────────────────────────
+
+/**
+ * Estimate the probability that an OOR position recovers into its existing
+ * range. Heuristic: typical mean-reversion amplitude (mean |Δbin| over the
+ * recent history) divided by current drift distance. If the typical swing is
+ * at least as large as the current drift, the price is more likely to come
+ * back. Trending or runaway series score low; oscillating series score high.
+ * Returns 0.5 for empty history (no signal, fall through to defaults).
+ */
+export function estimateRecoveryProbability(
+  recentBins: ReadonlyArray<number>,
+  currentDriftBins: number,
+): number {
+  if (recentBins.length < 2) return 0.5;
+
+  let sumAbsDelta = 0;
+  for (let i = 1; i < recentBins.length; i++) {
+    sumAbsDelta += Math.abs((recentBins[i] ?? 0) - (recentBins[i - 1] ?? 0));
+  }
+  const meanAbsDelta = sumAbsDelta / (recentBins.length - 1);
+
+  if (meanAbsDelta <= 0) {
+    return currentDriftBins <= 0 ? 1 : 0;
+  }
+
+  const ratio = meanAbsDelta / (meanAbsDelta + currentDriftBins);
+  return Math.max(0, Math.min(1, ratio));
+}
+
+/**
+ * Decide whether to HOLD the position in expectation of recovery rather than
+ * REBALANCE. Returns true when the recovery probability is at/above the hold
+ * threshold (we believe the price will come back). Returns false otherwise
+ * (including in the gray zone — we rebalance rather than gamble).
+ */
+export function shouldHoldForRecovery(
+  recoveryProbability: number,
+  holdThreshold: number,
+  forceRebalanceThreshold: number,
+): boolean {
+  if (recoveryProbability >= holdThreshold) return true;
+  if (recoveryProbability <= forceRebalanceThreshold) return false;
+  return false;
+}

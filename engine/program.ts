@@ -8,6 +8,8 @@ import {
   computeBinVolatilityStddev,
   isHighVolatility,
   recommendBinRangeForVolatility,
+  estimateRecoveryProbability,
+  shouldHoldForRecovery,
 } from "./strategy-service.js";
 import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
@@ -613,20 +615,45 @@ export const program = Effect.gen(function* () {
                   poolAddress,
                 })
                 .pipe(Effect.catchAll(() => Effect.void));
-            } else if (sim.netBenefitUsd > config.minRebalanceNetBenefitUsd) {
-            decision = {
-              action: "REBALANCE",
-              poolAddress,
-              confidence: Math.min(0.7 + feeIlRatio * 0.1, 0.9),
-              reasoning: `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${sim.netBenefitUsd.toFixed(2)}`,
-              rebalanceParams: {
-                newLowerBinId: recommended.lowerBinId,
-                newUpperBinId: recommended.upperBinId,
-                slippageBps: 50,
-              },
-            };
+            } else {
+              // F4: OOR recovery probability — if the recent bin path is
+              // mean-reverting enough to plausibly recover, hold rather than
+              // rebalance. Otherwise rebalance as usual.
+              const recoveryProb = estimateRecoveryProbability(
+                recentBins,
+                Math.abs(pool.activeBinId - positionCenter),
+              );
+              const holdForRecovery = shouldHoldForRecovery(
+                recoveryProb,
+                config.oorRecoveryHoldThreshold,
+                config.oorRecoveryForceRebalanceThreshold,
+              );
+              if (holdForRecovery) {
+                console.info(
+                  `[recovery-gate] Holding ${poolAddress} — recovery prob ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold}`,
+                );
+                yield* memory
+                  .upsert({
+                    category: "pattern",
+                    content: `OOR recovery prediction held ${poolAddress}: probability ${recoveryProb.toFixed(2)}`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              } else if (sim.netBenefitUsd > config.minRebalanceNetBenefitUsd) {
+                decision = {
+                  action: "REBALANCE",
+                  poolAddress,
+                  confidence: Math.min(0.7 + feeIlRatio * 0.1, 0.9),
+                  reasoning: `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${sim.netBenefitUsd.toFixed(2)}`,
+                  rebalanceParams: {
+                    newLowerBinId: recommended.lowerBinId,
+                    newUpperBinId: recommended.upperBinId,
+                    slippageBps: 50,
+                  },
+                };
+              }
+            }
           }
-        }
 
         // HOLD or ENTER
         if (!decision) {
