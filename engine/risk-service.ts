@@ -179,3 +179,58 @@ export function evaluateGasGate(input: GasGateInput): GasGateResult {
     feesThresholdUsd,
   };
 }
+
+// ─── F3: Fee compounding gate ────────────────────────────────────────────────
+
+export interface CompoundGateInput {
+  readonly netFeesUsd: number;
+  readonly minCompoundFeesUsd: number;
+  readonly compoundGasBufferUsd: number;
+  readonly rebalanceGasCostUsd: number;
+}
+
+export interface CompoundGateResult {
+  readonly approved: boolean;
+  readonly reason: string;
+  readonly thresholdUsd: number;
+  readonly savingsUsd: number;
+}
+
+/**
+ * Decide whether the accrued fees are worth claiming + re-depositing into the
+ * same position. Reject if fees don't clear the gas cost + buffer + minimum
+ * threshold. Threshold = minCompound + buffer + rebalanceGas (compound tx costs
+ * roughly a rebalance's worth of gas).
+ */
+export function evaluateCompoundGate(input: CompoundGateInput): CompoundGateResult {
+  const thresholdUsd =
+    input.minCompoundFeesUsd + input.compoundGasBufferUsd + input.rebalanceGasCostUsd;
+  const savingsUsd = input.netFeesUsd - thresholdUsd;
+
+  if (input.netFeesUsd <= 0) {
+    return {
+      approved: false,
+      reason: `Net fees $${input.netFeesUsd.toFixed(4)} — nothing to compound`,
+      thresholdUsd,
+      savingsUsd,
+    };
+  }
+
+  if (savingsUsd <= 0) {
+    return {
+      approved: false,
+      reason:
+        `Net fees $${input.netFeesUsd.toFixed(2)} ≤ compound cost $${thresholdUsd.toFixed(2)} ` +
+        `(min $${input.minCompoundFeesUsd.toFixed(2)} + buffer $${input.compoundGasBufferUsd.toFixed(2)} + gas $${input.rebalanceGasCostUsd.toFixed(2)})`,
+      thresholdUsd,
+      savingsUsd,
+    };
+  }
+
+  return {
+    approved: true,
+    reason: `Net fees $${input.netFeesUsd.toFixed(2)} cover compound cost $${thresholdUsd.toFixed(2)} — savings $${savingsUsd.toFixed(2)}`,
+    thresholdUsd,
+    savingsUsd,
+  };
+}

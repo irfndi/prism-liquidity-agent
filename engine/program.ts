@@ -3,7 +3,7 @@ import { ConfigService, ConfigLive, type AppConfig } from "./config-service.js";
 import { AdapterLive } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
 import { MemoryLive } from "./memory-service.js";
-import { RiskLive, evaluateGasGate } from "./risk-service.js";
+import { RiskLive, evaluateGasGate, evaluateCompoundGate } from "./risk-service.js";
 import {
   computeBinVolatilityStddev,
   isHighVolatility,
@@ -1150,6 +1150,61 @@ export const program = Effect.gen(function* () {
 
           pos.lastFeeClaimAt = Date.now();
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+
+          // F3: fee compounding — if AUTO_COMPOUND_FEES is on and the net fees
+          // cleared the cost threshold, redeposit them into the same range.
+          // This closes + reopens the position around the same bins so the
+          // claimed fees become new liquidity instead of sitting in the wallet.
+          if (config.autoCompoundFees && config.paperTrading === false) {
+            const netFeesUsd = (result.netFeeX + result.netFeeY) * config.solPriceUsd;
+            const rebalanceGasCostUsd = config.rebalanceGasCostSol * config.solPriceUsd;
+            const compoundGate = evaluateCompoundGate({
+              netFeesUsd,
+              minCompoundFeesUsd: config.minCompoundFeesUsd,
+              compoundGasBufferUsd: config.compoundGasBufferUsd,
+              rebalanceGasCostUsd,
+            });
+            if (compoundGate.approved) {
+              console.info(
+                `[compound] Redeeming fees back into ${poolAddress} — ${compoundGate.reason}`,
+              );
+              const compoundResult = yield* adapter
+                .rebalancePosition(
+                  poolAddress,
+                  pos.positionPubKey,
+                  pos.lowerBinId,
+                  pos.upperBinId,
+                )
+                .pipe(
+                  Effect.tap((r) =>
+                    console.info("Compound rebalance succeeded", {
+                      pool: poolAddress,
+                      newPosition: r.newPositionPubKey,
+                    }),
+                  ),
+                  Effect.catchAll((err) => {
+                    console.warn("Compound rebalance failed", {
+                      pool: poolAddress,
+                      err: (err as { message?: string }).message ?? String(err),
+                    });
+                    return Effect.succeed(null);
+                  }),
+                );
+              if (compoundResult) {
+                pos.positionPubKey = compoundResult.newPositionPubKey;
+                pos.lastRebalanceAt = Date.now();
+                pos.depositedUsd += netFeesUsd;
+                yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+                yield* memory
+                  .upsert({
+                    category: "pattern",
+                    content: `Auto-compounded $${netFeesUsd.toFixed(2)} fees into ${poolAddress} (savings $${compoundGate.savingsUsd.toFixed(2)})`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              }
+            }
+          }
         }
       }
     });
