@@ -139,15 +139,17 @@ export function isHighVolatility(stddev: number, threshold: number): boolean {
 /**
  * Pick a bin-range half-width based on the bin step, widened when the pool is
  * currently in a high-volatility regime. High-vol gets a much wider range to
- * avoid constant rebalancing.
+ * avoid constant rebalancing. The widened width comes from the caller-supplied
+ * `wideHalfWidth` so users can tune it via VOLATILITY_WIDE_HALF_WIDTH_BINS.
  */
 export function recommendBinRangeForVolatility(
   activeBinId: number,
   binStep: number,
   highVolatility: boolean,
+  wideHalfWidth = 50,
 ): { lowerBinId: number; upperBinId: number; halfWidth: number } {
   const baseHalfWidth = binStep <= 10 ? 25 : binStep <= 25 ? 20 : 15;
-  const halfWidth = highVolatility ? Math.max(baseHalfWidth * 2, 50) : baseHalfWidth;
+  const halfWidth = highVolatility ? Math.max(baseHalfWidth * 2, wideHalfWidth) : baseHalfWidth;
   return {
     lowerBinId: activeBinId - halfWidth,
     upperBinId: activeBinId + halfWidth,
