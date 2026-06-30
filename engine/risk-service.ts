@@ -344,3 +344,64 @@ export function evaluatePaperValidation(input: PaperValidationInput): PaperValid
       `Set PAPER_VALIDATION_ENFORCE=false to override (not recommended).`,
   };
 }
+
+// ─── F3 fix: token-amount → USD conversion helpers ──────────────────────────
+
+/**
+ * Standard token decimals for the symbols we recognize. Unknown tokens
+ * default to 9 (SOL-like) — this is conservative (overestimates the USD
+ * value of an unknown token, which biases the compound gate toward rejection
+ * rather than approval).
+ */
+export function getTokenDecimals(symbol: string): number {
+  const upper = symbol.toUpperCase();
+  if (upper === "SOL" || upper === "WSOL") return 9;
+  if (upper === "USDC" || upper === "USDT") return 6;
+  return 9;
+}
+
+/**
+ * Convert a raw token base-unit amount to a USD estimate. SOL uses
+ * solPriceUsd; USDC/USDT use par ($1); unknown tokens conservatively use
+ * solPriceUsd as a fallback (overestimates → gates reject safely).
+ */
+export function tokenAmountToUsd(
+  rawAmount: number,
+  tokenSymbol: string,
+  solPriceUsd: number,
+): number {
+  if (rawAmount === 0) return 0;
+  const decimals = getTokenDecimals(tokenSymbol);
+  const human = rawAmount / Math.pow(10, decimals);
+  const upper = tokenSymbol.toUpperCase();
+  if (upper === "USDC" || upper === "USDT") return human;
+  return human * solPriceUsd;
+}
+
+export interface ClaimFeesUsdInput {
+  readonly netFeeXRaw: number;
+  readonly netFeeYRaw: number;
+  readonly tokenXSymbol: string;
+  readonly tokenYSymbol: string;
+  readonly solPriceUsd: number;
+}
+
+/**
+ * Convert both sides of a fee claim to USD using per-token decimals.
+ * Fixes the F3 USD-estimation bug where (rawX + rawY) * solPrice added
+ * lamports + base-units, producing multi-billion-dollar estimates that
+ * bypassed the compound gate.
+ */
+export function convertClaimFeesToUsd(input: ClaimFeesUsdInput): number {
+  const feeXUsd = tokenAmountToUsd(
+    input.netFeeXRaw,
+    input.tokenXSymbol,
+    input.solPriceUsd,
+  );
+  const feeYUsd = tokenAmountToUsd(
+    input.netFeeYRaw,
+    input.tokenYSymbol,
+    input.solPriceUsd,
+  );
+  return feeXUsd + feeYUsd;
+}

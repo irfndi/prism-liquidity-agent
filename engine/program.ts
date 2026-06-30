@@ -3,7 +3,7 @@ import { ConfigService, ConfigLive, type AppConfig } from "./config-service.js";
 import { AdapterLive } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
 import { MemoryLive } from "./memory-service.js";
-import { RiskLive, evaluateGasGate, evaluateCompoundGate, evaluatePerPoolAllocation, evaluatePaperValidation } from "./risk-service.js";
+import { RiskLive, evaluateGasGate, evaluateCompoundGate, evaluatePerPoolAllocation, evaluatePaperValidation, convertClaimFeesToUsd } from "./risk-service.js";
 import {
   computeBinVolatilityStddev,
   isHighVolatility,
@@ -595,6 +595,16 @@ export const program = Effect.gen(function* () {
           const volatilityStddev = computeBinVolatilityStddev(recentBins);
           const highVol = isHighVolatility(volatilityStddev, config.volatilityExitStddev);
 
+          // F4: slice the history to the configured recovery lookback window.
+          // The full ring buffer (capped by volatilityLookbackSnapshots) is
+          // used for volatility detection; recovery probability gets a
+          // potentially shorter window so recent behavior dominates the signal.
+          const recoveryLookback = Math.max(2, config.oorRecoveryLookbackCycles);
+          const recoveryBins =
+            recentBins.length > recoveryLookback
+              ? recentBins.slice(recentBins.length - recoveryLookback)
+              : recentBins;
+
           if (
             hasPosition &&
             highVol &&
@@ -623,7 +633,12 @@ export const program = Effect.gen(function* () {
             (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
           ) {
             const recommended = highVol
-              ? recommendBinRangeForVolatility(pool.activeBinId, pool.binStep, true)
+              ? recommendBinRangeForVolatility(
+                  pool.activeBinId,
+                  pool.binStep,
+                  true,
+                  config.volatilityWideHalfWidthBins,
+                )
               : strategy.recommendBinRange(pool.activeBinId, pool.binStep);
             const sim = yield* adapter.simulateRebalance(
               poolAddress,
@@ -652,12 +667,26 @@ export const program = Effect.gen(function* () {
                   poolAddress,
                 })
                 .pipe(Effect.catchAll(() => Effect.void));
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "HOLD",
+                  confidence: 0,
+                  reasoning: `[gas-gate] ${gasGate.reason}`,
+                  metrics,
+                  riskResult: { approved: false, reason: `[gas-gate] ${gasGate.reason}` },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
             } else {
               // F4: OOR recovery probability — if the recent bin path is
               // mean-reverting enough to plausibly recover, hold rather than
               // rebalance. Otherwise rebalance as usual.
               const recoveryProb = estimateRecoveryProbability(
-                recentBins,
+                recoveryBins,
                 Math.abs(pool.activeBinId - positionCenter),
               );
               const holdForRecovery = shouldHoldForRecovery(
@@ -674,6 +703,23 @@ export const program = Effect.gen(function* () {
                     category: "pattern",
                     content: `OOR recovery prediction held ${poolAddress}: probability ${recoveryProb.toFixed(2)}`,
                     poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+                yield* audit
+                  .recordDecision({
+                    timestamp: Date.now(),
+                    cycleId,
+                    poolAddress,
+                    action: "HOLD",
+                    confidence: recoveryProb,
+                    reasoning: `[recovery-gate] probability ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold} — expecting mean-reversion`,
+                    metrics,
+                    riskResult: {
+                      approved: false,
+                      reason: `[recovery-gate] probability ${recoveryProb.toFixed(2)} above hold threshold`,
+                    },
+                    executed: false,
+                    paperTrading: config.paperTrading,
                   })
                   .pipe(Effect.catchAll(() => Effect.void));
               } else if (sim.netBenefitUsd > config.minRebalanceNetBenefitUsd) {
@@ -720,9 +766,12 @@ export const program = Effect.gen(function* () {
 
               // F5: per-pool allocation cap — split across maxOpenPositions pools
               // so a single SOL/USDC exposure doesn't dominate the portfolio.
+              // F5 fix: use the actual fetched wallet balance (live) or paper
+              // portfolio default (paper) as portfolioValueUsd. Previously this
+              // hardcoded config.paperPortfolioUsd which made live caps wrong.
               const allocation = evaluatePerPoolAllocation({
                 proposedDepositUsd: proposedSizeUsd,
-                portfolioValueUsd: config.paperPortfolioUsd,
+                portfolioValueUsd: walletBalanceUsd,
                 openPositions: Array.from(trackedPositions.values()).map((p) => ({
                   id: p.poolAddress,
                   poolAddress: p.poolAddress,
@@ -748,6 +797,20 @@ export const program = Effect.gen(function* () {
                     category: "pattern",
                     content: `Allocation gate skipped ENTER on ${poolAddress}: ${allocation.reason}`,
                     poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+                yield* audit
+                  .recordDecision({
+                    timestamp: Date.now(),
+                    cycleId,
+                    poolAddress,
+                    action: "ENTER",
+                    confidence: 0,
+                    reasoning: `[alloc-gate] ${allocation.reason}`,
+                    metrics,
+                    riskResult: { approved: false, reason: `[alloc-gate] ${allocation.reason}` },
+                    executed: false,
+                    paperTrading: config.paperTrading,
                   })
                   .pipe(Effect.catchAll(() => Effect.void));
                 return null;
@@ -1204,8 +1267,6 @@ export const program = Effect.gen(function* () {
 
   // ─── Periodic fee claiming ─────────────────────────────────────────────────
 
-  const LAMPORTS_PER_SOL = 1e9;
-
   const claimAllFees = (): Effect.Effect<void> =>
     Effect.gen(function* () {
       const revenueConfigResult = yield* revenueConfigSvc.getConfig();
@@ -1300,7 +1361,13 @@ export const program = Effect.gen(function* () {
           // This closes + reopens the position around the same bins so the
           // claimed fees become new liquidity instead of sitting in the wallet.
           if (config.autoCompoundFees && config.paperTrading === false) {
-            const netFeesUsd = (result.netFeeX + result.netFeeY) * config.solPriceUsd;
+            const netFeesUsd = convertClaimFeesToUsd({
+              netFeeXRaw: result.netFeeX,
+              netFeeYRaw: result.netFeeY,
+              tokenXSymbol: pos.tokenXSymbol,
+              tokenYSymbol: pos.tokenYSymbol,
+              solPriceUsd: config.solPriceUsd,
+            });
             const rebalanceGasCostUsd = config.rebalanceGasCostSol * config.solPriceUsd;
             const compoundGate = evaluateCompoundGate({
               netFeesUsd,
