@@ -349,9 +349,12 @@ export function evaluatePaperValidation(input: PaperValidationInput): PaperValid
 
 /**
  * Standard token decimals for the symbols we recognize. Unknown tokens
- * default to 9 (SOL-like) — this is conservative (overestimates the USD
- * value of an unknown token, which biases the compound gate toward rejection
- * rather than approval).
+ * default to 9 (SOL-like) and are valued at solPriceUsd — this overestimates
+ * their USD value relative to typical SPL tokens, but that's acceptable
+ * because the compound gate already requires netFeesUsd > minCompoundFeesUsd
+ * + gas buffer, so small overestimates won't bypass it; and for genuinely
+ * valuable unknown tokens, erring toward compounding is better than never
+ * compounding.
  */
 export function getTokenDecimals(symbol: string): number {
   const upper = symbol.toUpperCase();
