@@ -3,7 +3,7 @@ import { ConfigService, ConfigLive, type AppConfig } from "./config-service.js";
 import { AdapterLive } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
 import { MemoryLive } from "./memory-service.js";
-import { RiskLive } from "./risk-service.js";
+import { RiskLive, evaluateGasGate } from "./risk-service.js";
 import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
 import { ScreenerLive } from "./screener-service.js";
@@ -547,7 +547,28 @@ export const program = Effect.gen(function* () {
             recommended.upperBinId,
           );
 
-          if (sim.netBenefitUsd > config.minRebalanceNetBenefitUsd) {
+          // F1: gas-aware gate — skip rebalance when gas cost > N days of position fees
+          const positionSharePct =
+            pool.tvlUsd > 0 && pos ? Math.min(pos.depositedUsd / pool.tvlUsd, 1) : 0;
+          const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
+          const gasGate = evaluateGasGate({
+            rebalanceGasCostSol: config.rebalanceGasCostSol,
+            solPriceUsd: config.solPriceUsd,
+            positionDailyFeesUsd,
+            minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
+          });
+          if (!gasGate.approved) {
+            console.info(
+              `[gas-gate] Holding ${poolAddress} — ${gasGate.reason} (gas=$${gasGate.gasCostUsd.toFixed(2)}, threshold=$${gasGate.feesThresholdUsd.toFixed(2)})`,
+            );
+            yield* memory
+              .upsert({
+                category: "warning",
+                content: `Gas-aware rebalance gate held ${poolAddress}: ${gasGate.reason}`,
+                poolAddress,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          } else if (sim.netBenefitUsd > config.minRebalanceNetBenefitUsd) {
             decision = {
               action: "REBALANCE",
               poolAddress,

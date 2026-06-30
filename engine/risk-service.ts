@@ -117,3 +117,65 @@ export const RiskLive = (riskConfig: RiskConfig) =>
       },
     } satisfies RiskApi),
   );
+
+// ─── F1: Gas-aware rebalancing gate ──────────────────────────────────────────
+
+export interface GasGateInput {
+  readonly rebalanceGasCostSol: number;
+  readonly solPriceUsd: number;
+  readonly positionDailyFeesUsd: number;
+  readonly minDaysOfFeesPaidAhead: number;
+}
+
+export interface GasGateResult {
+  readonly approved: boolean;
+  readonly reason: string;
+  readonly gasCostUsd: number;
+  readonly feesThresholdUsd: number;
+}
+
+/**
+ * Gate REBALANCE on a cost-vs-benefit check: only rebalance if the on-chain
+ * gas cost is recovered by N days of position fees. Zero-fee pools are always
+ * rejected (let downstream risk gates handle those).
+ */
+export function evaluateGasGate(input: GasGateInput): GasGateResult {
+  const gasCostUsd = input.rebalanceGasCostSol * input.solPriceUsd;
+  const feesThresholdUsd = input.positionDailyFeesUsd * input.minDaysOfFeesPaidAhead;
+
+  if (gasCostUsd <= 0) {
+    return {
+      approved: false,
+      reason: `Invalid gas cost ${input.rebalanceGasCostSol} SOL — refusing rebalance`,
+      gasCostUsd,
+      feesThresholdUsd,
+    };
+  }
+
+  if (input.positionDailyFeesUsd <= 0) {
+    return {
+      approved: false,
+      reason: `Position earns no fees ($${input.positionDailyFeesUsd.toFixed(4)}/day) — rebalance gas not justified`,
+      gasCostUsd,
+      feesThresholdUsd,
+    };
+  }
+
+  if (gasCostUsd > feesThresholdUsd) {
+    return {
+      approved: false,
+      reason:
+        `Gas cost $${gasCostUsd.toFixed(2)} > ${input.minDaysOfFeesPaidAhead}d fees $${feesThresholdUsd.toFixed(2)} ` +
+        `— wait for accrued fees before rebalancing`,
+      gasCostUsd,
+      feesThresholdUsd,
+    };
+  }
+
+  return {
+    approved: true,
+    reason: `Gas $${gasCostUsd.toFixed(2)} <= ${input.minDaysOfFeesPaidAhead}d fees $${feesThresholdUsd.toFixed(2)}`,
+    gasCostUsd,
+    feesThresholdUsd,
+  };
+}
