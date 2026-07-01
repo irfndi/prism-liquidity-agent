@@ -188,7 +188,7 @@ describe("DbService — paper-exit tracking", () => {
   });
 });
 
-describe("DbService — setMetadataBatch atomicity (Gemini review)", () => {
+describe("DbService — setMetadataBatch (Gemini review)", () => {
   it("writes all entries in a single transaction", () => {
     const layer = DbLive(":memory:");
     run(
@@ -207,7 +207,7 @@ describe("DbService — setMetadataBatch atomicity (Gemini review)", () => {
     );
   });
 
-  it("overwrites existing keys atomically (INSERT OR REPLACE)", () => {
+  it("overwrites existing keys (INSERT OR REPLACE)", () => {
     const layer = DbLive(":memory:");
     run(
       Effect.gen(function* () {
