@@ -236,4 +236,29 @@ describe("DbService — setMetadataBatch (Gemini review)", () => {
       layer,
     );
   });
+
+  it("rolls back the entire batch when a mid-batch entry fails (atomicity)", () => {
+    const layer = DbLive(":memory:");
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* db.setMetadata("preexisting", "untouched");
+        const result = yield* db
+          .setMetadataBatch([
+            { key: "first", value: "would_persist_if_no_rollback" },
+            { key: Symbol("bad") as unknown as string, value: "triggers_failure" },
+            { key: "third", value: "never_reached" },
+          ])
+          .pipe(Effect.either);
+        expect(result._tag).toBe("Left");
+        const first = yield* db.getMetadata("first");
+        const third = yield* db.getMetadata("third");
+        const preexisting = yield* db.getMetadata("preexisting");
+        expect(first).toBeNull();
+        expect(third).toBeNull();
+        expect(preexisting).toBe("untouched");
+      }),
+      layer,
+    );
+  });
 });
