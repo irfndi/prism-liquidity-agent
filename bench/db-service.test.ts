@@ -187,3 +187,53 @@ describe("DbService — paper-exit tracking", () => {
     expect(result).toEqual([]);
   });
 });
+
+describe("DbService — setMetadataBatch atomicity (Gemini review)", () => {
+  it("writes all entries in a single transaction", () => {
+    const layer = DbLive(":memory:");
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* db.setMetadataBatch([
+          { key: "paperTradingDaysAccumulated", value: "5" },
+          { key: "paperTradingLastDayIso", value: "2026-07-01" },
+        ]);
+        const days = yield* db.getMetadata("paperTradingDaysAccumulated");
+        const lastDay = yield* db.getMetadata("paperTradingLastDayIso");
+        expect(days).toBe("5");
+        expect(lastDay).toBe("2026-07-01");
+      }),
+      layer,
+    );
+  });
+
+  it("overwrites existing keys atomically (INSERT OR REPLACE)", () => {
+    const layer = DbLive(":memory:");
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* db.setMetadata("counter", "1");
+        yield* db.setMetadataBatch([
+          { key: "counter", value: "2" },
+          { key: "other", value: "x" },
+        ]);
+        const counter = yield* db.getMetadata("counter");
+        const other = yield* db.getMetadata("other");
+        expect(counter).toBe("2");
+        expect(other).toBe("x");
+      }),
+      layer,
+    );
+  });
+
+  it("handles empty array without error", () => {
+    const layer = DbLive(":memory:");
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* db.setMetadataBatch([]);
+      }),
+      layer,
+    );
+  });
+});

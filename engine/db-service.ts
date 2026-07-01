@@ -501,6 +501,22 @@ export const DbLive = (dbPath?: string) =>
             );
           }),
 
+        setMetadataBatch: (entries) =>
+          Effect.sync(() => {
+            const now = Date.now();
+            db.transaction(() => {
+              for (const { key, value } of entries) {
+                runOne(
+                  db,
+                  "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, ?)",
+                  key,
+                  value,
+                  now,
+                );
+              }
+            })();
+          }),
+
         saveFeeClaim: (claim) =>
           Effect.sync(() => {
             runOne(
