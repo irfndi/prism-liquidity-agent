@@ -594,16 +594,15 @@ export const program = Effect.gen(function* () {
         const oorGraceExpired =
           hasPosition && pos && pos.oorCycleCount >= config.oorGracePeriodCycles;
 
-        // F2: compute recent bin volatility
+        // F2: compute recent bin volatility (uses the full buffer)
         const recentBins = binHistory.get(poolAddress) ?? [];
         const volatilityStddev = computeBinVolatilityStddev(recentBins);
         const highVol = isHighVolatility(volatilityStddev, config.volatilityExitStddev);
 
         // F4: slice the history to the configured recovery lookback window.
         // The full ring buffer is sized to hold at least
-        // max(volatilityLookbackSnapshots, oorRecoveryLookbackCycles); each
-        // gate then slices the buffer to its own window so volatility and
-        // recovery can use different horizons.
+        // max(volatilityLookbackSnapshots, oorRecoveryLookbackCycles); volatility
+        // uses the full buffer while recovery slices to its own window.
         const recoveryLookback = Math.max(2, config.oorRecoveryLookbackCycles);
         const recoveryBins =
           recentBins.length > recoveryLookback
@@ -652,8 +651,14 @@ export const program = Effect.gen(function* () {
           );
 
           // F1: gas-aware gate — skip rebalance when gas cost > N days of position fees
+          // Use currentValueUsd (not depositedUsd) so the share reflects the
+          // position's present value, not its original deposit. If current
+          // value is unknown (reconciled positions), fall back to 0 which
+          // makes the gas gate reject — a conservative default.
           const positionSharePct =
-            pool.tvlUsd > 0 && pos ? Math.min(pos.depositedUsd / pool.tvlUsd, 1) : 0;
+            pool.tvlUsd > 0 && pos && pos.currentValueUsd > 0
+              ? Math.min(pos.currentValueUsd / pool.tvlUsd, 1)
+              : 0;
           const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
           const gasGate = evaluateGasGate({
             rebalanceGasCostSol: config.rebalanceGasCostSol,
@@ -1067,11 +1072,10 @@ export const program = Effect.gen(function* () {
         return false;
       }
 
-      // One position per cycle limit
-      if (decision.action === "ENTER" && trackedPositions.size > 0) {
-        console.info("Skipping ENTER — already have active position");
-        return false;
-      }
+      // F5 allocation gate already caps the number of simultaneously open
+      // positions via evaluatePerPoolAllocation (rejected in the decision
+      // flow before we reach executeLive). No additional hard cap here so
+      // live mode honors maxOpenPositions.
 
       if (decision.action === "ENTER") {
         yield* adapter.swapUSDCForSOL(0.05, 2.0).pipe(Effect.catchAll(() => Effect.void));
