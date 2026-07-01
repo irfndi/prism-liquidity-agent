@@ -610,65 +610,103 @@ export const program = Effect.gen(function* () {
               ? recentBins.slice(recentBins.length - recoveryLookback)
               : recentBins;
 
-          if (
-            hasPosition &&
-            highVol &&
-            driftPct > 0.6 &&
-            (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
-          ) {
-            console.info(
-              `[vol-gate] EXITING ${poolAddress} — high volatility (stddev=${volatilityStddev.toFixed(2)}, threshold=${config.volatilityExitStddev}). Drift=${(driftPct * 100).toFixed(0)}%`,
-            );
-            decision = {
-              action: "EXIT",
+        if (
+          hasPosition &&
+          highVol &&
+          driftPct > 0.6 &&
+          (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
+        ) {
+          console.info(
+            `[vol-gate] EXITING ${poolAddress} — high volatility (stddev=${volatilityStddev.toFixed(2)}, threshold=${config.volatilityExitStddev}). Drift=${(driftPct * 100).toFixed(0)}%`,
+          );
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            confidence: 0.8,
+            reasoning: `High volatility (σ=${volatilityStddev.toFixed(2)}) + ${(driftPct * 100).toFixed(0)}% drift — exit to wallet rather than rebalancing into new range`,
+          };
+          yield* memory
+            .upsert({
+              category: "warning",
+              content: `Volatility-gate EXIT for ${poolAddress}: stddev=${volatilityStddev.toFixed(2)} over ${recentBins.length} snapshots`,
               poolAddress,
-              confidence: 0.8,
-              reasoning: `High volatility (σ=${volatilityStddev.toFixed(2)}) + ${(driftPct * 100).toFixed(0)}% drift — exit to wallet rather than rebalancing into new range`,
-            };
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+        } else if (
+          hasPosition &&
+          (driftPct > 0.6 || oorGraceExpired) &&
+          (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
+        ) {
+          const recommended = highVol
+            ? recommendBinRangeForVolatility(
+                pool.activeBinId,
+                pool.binStep,
+                true,
+                config.volatilityWideHalfWidthBins,
+              )
+            : strategy.recommendBinRange(pool.activeBinId, pool.binStep);
+          const sim = yield* adapter.simulateRebalance(
+            poolAddress,
+            recommended.lowerBinId,
+            recommended.upperBinId,
+          );
+
+          // F1: gas-aware gate — skip rebalance when gas cost > N days of position fees
+          const positionSharePct =
+            pool.tvlUsd > 0 && pos ? Math.min(pos.depositedUsd / pool.tvlUsd, 1) : 0;
+          const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
+          const gasGate = evaluateGasGate({
+            rebalanceGasCostSol: config.rebalanceGasCostSol,
+            solPriceUsd: config.solPriceUsd,
+            positionDailyFeesUsd,
+            minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
+          });
+          if (!gasGate.approved) {
+            console.info(
+              `[gas-gate] Holding ${poolAddress} — ${gasGate.reason} (gas=$${gasGate.gasCostUsd.toFixed(2)}, threshold=$${gasGate.feesThresholdUsd.toFixed(2)})`,
+            );
             yield* memory
               .upsert({
                 category: "warning",
-                content: `Volatility-gate EXIT for ${poolAddress}: stddev=${volatilityStddev.toFixed(2)} over ${recentBins.length} snapshots`,
+                content: `Gas-aware rebalance gate held ${poolAddress}: ${gasGate.reason}`,
                 poolAddress,
               })
               .pipe(Effect.catchAll(() => Effect.void));
-          } else if (
-            hasPosition &&
-            (driftPct > 0.6 || oorGraceExpired) &&
-            (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
-          ) {
-            const recommended = highVol
-              ? recommendBinRangeForVolatility(
-                  pool.activeBinId,
-                  pool.binStep,
-                  true,
-                  config.volatilityWideHalfWidthBins,
-                )
-              : strategy.recommendBinRange(pool.activeBinId, pool.binStep);
-            const sim = yield* adapter.simulateRebalance(
-              poolAddress,
-              recommended.lowerBinId,
-              recommended.upperBinId,
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "HOLD",
+                confidence: 0,
+                reasoning: `[gas-gate] ${gasGate.reason}`,
+                metrics,
+                riskResult: { approved: false, reason: `[gas-gate] ${gasGate.reason}` },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          } else {
+            // F4: OOR recovery probability — if the recent bin path is
+            // mean-reverting enough to plausibly recover, hold rather than
+            // rebalance. Otherwise rebalance as usual.
+            const recoveryProb = estimateRecoveryProbability(
+              recoveryBins,
+              Math.abs(pool.activeBinId - positionCenter),
             );
-
-            // F1: gas-aware gate — skip rebalance when gas cost > N days of position fees
-            const positionSharePct =
-              pool.tvlUsd > 0 && pos ? Math.min(pos.depositedUsd / pool.tvlUsd, 1) : 0;
-            const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
-            const gasGate = evaluateGasGate({
-              rebalanceGasCostSol: config.rebalanceGasCostSol,
-              solPriceUsd: config.solPriceUsd,
-              positionDailyFeesUsd,
-              minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
-            });
-            if (!gasGate.approved) {
+            const holdForRecovery = shouldHoldForRecovery(
+              recoveryProb,
+              config.oorRecoveryHoldThreshold,
+              config.oorRecoveryForceRebalanceThreshold,
+            );
+            if (holdForRecovery) {
               console.info(
-                `[gas-gate] Holding ${poolAddress} — ${gasGate.reason} (gas=$${gasGate.gasCostUsd.toFixed(2)}, threshold=$${gasGate.feesThresholdUsd.toFixed(2)})`,
+                `[recovery-gate] Holding ${poolAddress} — recovery prob ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold}`,
               );
               yield* memory
                 .upsert({
-                  category: "warning",
-                  content: `Gas-aware rebalance gate held ${poolAddress}: ${gasGate.reason}`,
+                  category: "pattern",
+                  content: `OOR recovery prediction held ${poolAddress}: probability ${recoveryProb.toFixed(2)}`,
                   poolAddress,
                 })
                 .pipe(Effect.catchAll(() => Effect.void));
@@ -678,76 +716,38 @@ export const program = Effect.gen(function* () {
                   cycleId,
                   poolAddress,
                   action: "HOLD",
-                  confidence: 0,
-                  reasoning: `[gas-gate] ${gasGate.reason}`,
+                  confidence: recoveryProb,
+                  reasoning: `[recovery-gate] probability ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold} — expecting mean-reversion`,
                   metrics,
-                  riskResult: { approved: false, reason: `[gas-gate] ${gasGate.reason}` },
+                  riskResult: {
+                    approved: false,
+                    reason: `[recovery-gate] probability ${recoveryProb.toFixed(2)} above hold threshold`,
+                  },
                   executed: false,
                   paperTrading: config.paperTrading,
                 })
                 .pipe(Effect.catchAll(() => Effect.void));
-            } else {
-              // F4: OOR recovery probability — if the recent bin path is
-              // mean-reverting enough to plausibly recover, hold rather than
-              // rebalance. Otherwise rebalance as usual.
-              const recoveryProb = estimateRecoveryProbability(
-                recoveryBins,
-                Math.abs(pool.activeBinId - positionCenter),
-              );
-              const holdForRecovery = shouldHoldForRecovery(
-                recoveryProb,
-                config.oorRecoveryHoldThreshold,
-                config.oorRecoveryForceRebalanceThreshold,
-              );
-              if (holdForRecovery) {
-                console.info(
-                  `[recovery-gate] Holding ${poolAddress} — recovery prob ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold}`,
-                );
-                yield* memory
-                  .upsert({
-                    category: "pattern",
-                    content: `OOR recovery prediction held ${poolAddress}: probability ${recoveryProb.toFixed(2)}`,
-                    poolAddress,
-                  })
-                  .pipe(Effect.catchAll(() => Effect.void));
-                yield* audit
-                  .recordDecision({
-                    timestamp: Date.now(),
-                    cycleId,
-                    poolAddress,
-                    action: "HOLD",
-                    confidence: recoveryProb,
-                    reasoning: `[recovery-gate] probability ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold} — expecting mean-reversion`,
-                    metrics,
-                    riskResult: {
-                      approved: false,
-                      reason: `[recovery-gate] probability ${recoveryProb.toFixed(2)} above hold threshold`,
-                    },
-                    executed: false,
-                    paperTrading: config.paperTrading,
-                  })
-                  .pipe(Effect.catchAll(() => Effect.void));
-              } else if (
-                sim.netBenefitUsd > config.minRebalanceNetBenefitUsd ||
-                recoveryProb <= config.oorRecoveryForceRebalanceThreshold
-              ) {
-                const forceRebalance = recoveryProb <= config.oorRecoveryForceRebalanceThreshold;
-                decision = {
-                  action: "REBALANCE",
-                  poolAddress,
-                  confidence: Math.min(0.7 + feeIlRatio * 0.1, 0.9),
-                  reasoning: forceRebalance
-                    ? `[recovery-gate] force-rebalance — probability ${recoveryProb.toFixed(2)} <= ${config.oorRecoveryForceRebalanceThreshold}. Drift ${(driftPct * 100).toFixed(0)}%`
-                    : `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${sim.netBenefitUsd.toFixed(2)}`,
-                  rebalanceParams: {
-                    newLowerBinId: recommended.lowerBinId,
-                    newUpperBinId: recommended.upperBinId,
-                    slippageBps: 50,
-                  },
-                };
-              }
+            } else if (
+              sim.netBenefitUsd > config.minRebalanceNetBenefitUsd ||
+              recoveryProb <= config.oorRecoveryForceRebalanceThreshold
+            ) {
+              const forceRebalance = recoveryProb <= config.oorRecoveryForceRebalanceThreshold;
+              decision = {
+                action: "REBALANCE",
+                poolAddress,
+                confidence: Math.min(0.7 + feeIlRatio * 0.1, 0.9),
+                reasoning: forceRebalance
+                  ? `[recovery-gate] force-rebalance — probability ${recoveryProb.toFixed(2)} <= ${config.oorRecoveryForceRebalanceThreshold}. Drift ${(driftPct * 100).toFixed(0)}%`
+                  : `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${sim.netBenefitUsd.toFixed(2)}`,
+                rebalanceParams: {
+                  newLowerBinId: recommended.lowerBinId,
+                  newUpperBinId: recommended.upperBinId,
+                  slippageBps: 50,
+                },
+              };
             }
           }
+        }
 
         // HOLD or ENTER
         if (!decision) {
