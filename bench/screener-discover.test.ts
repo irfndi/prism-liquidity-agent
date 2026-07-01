@@ -78,6 +78,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     paperValidationMinDays: 7,
     paperValidationEnforce: false,
 
+    ...overrides,
   };
 }
 

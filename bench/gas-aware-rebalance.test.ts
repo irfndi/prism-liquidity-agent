@@ -28,7 +28,7 @@ describe("evaluateGasGate (F1 gas-aware rebalancing)", () => {
     expect(result.feesThresholdUsd).toBeCloseTo(1.2);
   });
 
-  it("approves when daily fees are zero (degenerate — let risk gate catch)", () => {
+  it("rejects when daily fees are zero (fail-closed for zero-fee pools)", () => {
     // 3 * 0 = 0, gas = $1.50 → reject (don't rebalance for zero-fee pool)
     const result = evaluateGasGate({
       rebalanceGasCostSol: 0.01,

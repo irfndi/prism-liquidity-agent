@@ -62,17 +62,18 @@ describe("evaluatePerPoolAllocation (F5 multi-pool allocation)", () => {
     expect(result.reason.toLowerCase()).toContain("max");
   });
 
-  it("rejects when adjusted deposit would round to zero", () => {
-    // portfolio=$100, requested=$1, cap=40% → cap = $40, but $1 is fine
+  it("rejects when per-pool cap rounds deposit to zero (zero-portfolio edge case)", () => {
+    // portfolio=$0, cap = 0 × 0.4 = 0 → any non-zero deposit rounds to 0
     const result = evaluatePerPoolAllocation({
-      proposedDepositUsd: 1,
-      portfolioValueUsd: 100,
+      proposedDepositUsd: 50,
+      portfolioValueUsd: 0,
       openPositions: [],
       maxPerPoolAllocationPct: 0.4,
       maxOpenPositions: 3,
     });
-    expect(result.approved).toBe(true);
-    expect(result.adjustedDepositUsd).toBe(1);
+    expect(result.approved).toBe(false);
+    expect(result.adjustedDepositUsd).toBe(0);
+    expect(result.reason.toLowerCase()).toContain("cap");
   });
 
   it("approves when ENTER keeps portfolio under open-position cap", () => {
