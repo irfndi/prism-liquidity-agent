@@ -4,7 +4,7 @@ import type { AgentDecision } from "./types.js";
 
 export interface RiskConfig {
   readonly confidenceThreshold: number;
-  readonly maxConcurrentPositions: number;
+  readonly maxOpenPositions: number;
   readonly maxRebalanceRangeBins: number;
   readonly stopLossPct: number;
 }
@@ -25,11 +25,11 @@ export function evaluateRisk(
   // 2. Concurrent positions cap
   if (
     decision.action === "ENTER" &&
-    ctx.openPositions.length >= riskConfig.maxConcurrentPositions
+    ctx.openPositions.length >= riskConfig.maxOpenPositions
   ) {
     return {
       approved: false,
-      reason: `Max concurrent positions reached (${riskConfig.maxConcurrentPositions})`,
+      reason: `Max concurrent positions reached (${riskConfig.maxOpenPositions})`,
     };
   }
 
@@ -349,24 +349,22 @@ export function evaluatePaperValidation(input: PaperValidationInput): PaperValid
 
 /**
  * Standard token decimals for the symbols we recognize. Unknown tokens
- * default to 9 (SOL-like) and are valued at solPriceUsd — this overestimates
- * their USD value relative to typical SPL tokens, but that's acceptable
- * because the compound gate already requires netFeesUsd > minCompoundFeesUsd
- * + gas buffer, so small overestimates won't bypass it; and for genuinely
- * valuable unknown tokens, erring toward compounding is better than never
- * compounding.
+ * return the sentinel `-1` so callers can fail closed rather than guessing
+ * decimals for an unrecognized asset. Only SOL/WSOL and USDC/USDT are
+ * supported today; the agent is intentionally conservative about pricing
+ * anything else because mis-pricing fees can bypass the compound gate.
  */
 export function getTokenDecimals(symbol: string): number {
   const upper = symbol.toUpperCase();
   if (upper === "SOL" || upper === "WSOL") return 9;
   if (upper === "USDC" || upper === "USDT") return 6;
-  return 9;
+  return -1;
 }
 
 /**
  * Convert a raw token base-unit amount to a USD estimate. SOL uses
- * solPriceUsd; USDC/USDT use par ($1); unknown tokens conservatively use
- * solPriceUsd as a fallback (overestimates → gates reject safely).
+ * solPriceUsd; USDC/USDT use par ($1). Unknown tokens return 0 (fail closed)
+ * so the compound gate rejects instead of compounding on a mis-priced fee.
  */
 export function tokenAmountToUsd(
   rawAmount: number,
@@ -375,6 +373,7 @@ export function tokenAmountToUsd(
 ): number {
   if (rawAmount === 0) return 0;
   const decimals = getTokenDecimals(tokenSymbol);
+  if (decimals < 0) return 0;
   const human = rawAmount / Math.pow(10, decimals);
   const upper = tokenSymbol.toUpperCase();
   if (upper === "USDC" || upper === "USDT") return human;
@@ -391,11 +390,15 @@ export interface ClaimFeesUsdInput {
 
 /**
  * Convert both sides of a fee claim to USD using per-token decimals.
- * Fixes the F3 USD-estimation bug where (rawX + rawY) * solPrice added
- * lamports + base-units, producing multi-billion-dollar estimates that
- * bypassed the compound gate.
+ * Returns 0 when either side is an unsupported token — this fails the
+ * compound gate closed. Also fixes the F3 USD-estimation bug where
+ * (rawX + rawY) * solPrice added lamports + base-units, producing
+ * multi-billion-dollar estimates that bypassed the gate.
  */
 export function convertClaimFeesToUsd(input: ClaimFeesUsdInput): number {
+  const xDecimals = getTokenDecimals(input.tokenXSymbol);
+  const yDecimals = getTokenDecimals(input.tokenYSymbol);
+  if (xDecimals < 0 || yDecimals < 0) return 0;
   const feeXUsd = tokenAmountToUsd(
     input.netFeeXRaw,
     input.tokenXSymbol,

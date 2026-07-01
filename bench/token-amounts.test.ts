@@ -12,9 +12,10 @@ describe("getTokenDecimals", () => {
     expect(getTokenDecimals("USDT")).toBe(6);
   });
 
-  it("defaults to 9 for unknown tokens (conservative)", () => {
-    expect(getTokenDecimals("???")).toBe(9);
-    expect(getTokenDecimals("")).toBe(9);
+  it("returns -1 sentinel for unknown tokens (fail-closed)", () => {
+    expect(getTokenDecimals("???")).toBe(-1);
+    expect(getTokenDecimals("")).toBe(-1);
+    expect(getTokenDecimals("BONK")).toBe(-1);
   });
 });
 
@@ -33,9 +34,9 @@ describe("tokenAmountToUsd", () => {
     expect(tokenAmountToUsd(50_000_000, "USDT", 150)).toBeCloseTo(50);
   });
 
-  it("falls back to solPrice for unknown tokens (conservative)", () => {
-    // 2e9 of unknown token → 2 units × $150 = $300
-    expect(tokenAmountToUsd(2_000_000_000, "???", 150)).toBeCloseTo(300);
+  it("returns 0 for unknown tokens (fail-closed — do not estimate)", () => {
+    expect(tokenAmountToUsd(2_000_000_000, "???", 150)).toBe(0);
+    expect(tokenAmountToUsd(1_000_000_000, "BONK", 150)).toBe(0);
   });
 
   it("returns 0 for zero raw amount", () => {
@@ -93,5 +94,27 @@ describe("convertClaimFeesToUsd", () => {
     });
     expect(usd).toBeLessThan(1000); // proves we're not producing billions
     expect(usd).toBeCloseTo(250);
+  });
+
+  it("returns 0 when X token is unknown (fail-closed)", () => {
+    const usd = convertClaimFeesToUsd({
+      netFeeXRaw: 1_000_000_000,
+      netFeeYRaw: 100_000_000,
+      tokenXSymbol: "BONK",
+      tokenYSymbol: "USDC",
+      solPriceUsd: 150,
+    });
+    expect(usd).toBe(0);
+  });
+
+  it("returns 0 when Y token is unknown (fail-closed)", () => {
+    const usd = convertClaimFeesToUsd({
+      netFeeXRaw: 1_000_000_000,
+      netFeeYRaw: 100_000_000,
+      tokenXSymbol: "SOL",
+      tokenYSymbol: "WIF",
+      solPriceUsd: 150,
+    });
+    expect(usd).toBe(0);
   });
 });
