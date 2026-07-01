@@ -43,7 +43,6 @@ function buildLayer(
     minFeeIlRatio: 1.2,
     tvlDropExitPct: 0.3,
     volumeAuthThreshold: 0.7,
-    maxConcurrentPositions: 5,
     minRebalanceIntervalMs: 86_400_000,
     minRebalanceNetBenefitUsd: 10,
     confidenceThreshold: 0.65,

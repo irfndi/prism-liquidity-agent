@@ -195,7 +195,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
 
   const risk = RiskLive({
     confidenceThreshold: cfg?.confidenceThreshold ?? 0.65,
-    maxConcurrentPositions: cfg?.maxConcurrentPositions ?? 5,
+    maxOpenPositions: cfg?.maxOpenPositions ?? 3,
     maxRebalanceRangeBins: cfg?.maxRebalanceRangeBins ?? 50,
     stopLossPct: cfg?.stopLossPct ?? 0.15,
   });
@@ -245,12 +245,16 @@ export const program = Effect.gen(function* () {
   }
 
   // F2: per-pool recent active-bin history (in-memory ring buffer; resets on restart)
+  const binHistoryCap = Math.max(
+    config.volatilityLookbackSnapshots,
+    config.oorRecoveryLookbackCycles,
+    2,
+  );
   const binHistory = new Map<string, number[]>();
   const pushBinHistory = (poolAddress: string, activeBinId: number): void => {
-    const cap = Math.max(config.volatilityLookbackSnapshots, 2);
     const arr = binHistory.get(poolAddress) ?? [];
     arr.push(activeBinId);
-    if (arr.length > cap) arr.shift();
+    if (arr.length > binHistoryCap) arr.shift();
     binHistory.set(poolAddress, arr);
   };
 
@@ -273,10 +277,10 @@ export const program = Effect.gen(function* () {
     const current = Number(stored) || 0;
     const next = current + 1;
     yield* db
-      .setMetadata(PAPER_DAYS_KEY, String(next))
-      .pipe(Effect.catchAll(() => Effect.void));
-    yield* db
-      .setMetadata(PAPER_DAYS_LAST_KEY, today)
+      .setMetadataBatch([
+        { key: PAPER_DAYS_KEY, value: String(next) },
+        { key: PAPER_DAYS_LAST_KEY, value: today },
+      ])
       .pipe(Effect.catchAll(() => Effect.void));
     if (next % 7 === 0) {
       console.info(`[paper-validation] ${next} paper days accumulated`);
@@ -591,17 +595,18 @@ export const program = Effect.gen(function* () {
           hasPosition && pos && pos.oorCycleCount >= config.oorGracePeriodCycles;
 
         // F2: compute recent bin volatility
-          const recentBins = binHistory.get(poolAddress) ?? [];
-          const volatilityStddev = computeBinVolatilityStddev(recentBins);
-          const highVol = isHighVolatility(volatilityStddev, config.volatilityExitStddev);
+        const recentBins = binHistory.get(poolAddress) ?? [];
+        const volatilityStddev = computeBinVolatilityStddev(recentBins);
+        const highVol = isHighVolatility(volatilityStddev, config.volatilityExitStddev);
 
-          // F4: slice the history to the configured recovery lookback window.
-          // The full ring buffer (capped by volatilityLookbackSnapshots) is
-          // used for volatility detection; recovery probability gets a
-          // potentially shorter window so recent behavior dominates the signal.
-          const recoveryLookback = Math.max(2, config.oorRecoveryLookbackCycles);
-          const recoveryBins =
-            recentBins.length > recoveryLookback
+        // F4: slice the history to the configured recovery lookback window.
+        // The full ring buffer is sized to hold at least
+        // max(volatilityLookbackSnapshots, oorRecoveryLookbackCycles); each
+        // gate then slices the buffer to its own window so volatility and
+        // recovery can use different horizons.
+        const recoveryLookback = Math.max(2, config.oorRecoveryLookbackCycles);
+        const recoveryBins =
+          recentBins.length > recoveryLookback
               ? recentBins.slice(recentBins.length - recoveryLookback)
               : recentBins;
 

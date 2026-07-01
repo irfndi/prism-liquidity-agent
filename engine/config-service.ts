@@ -11,7 +11,6 @@ export interface AppConfig {
   readonly minFeeIlRatio: number;
   readonly tvlDropExitPct: number;
   readonly volumeAuthThreshold: number;
-  readonly maxConcurrentPositions: number;
   readonly minRebalanceIntervalMs: number;
   readonly minRebalanceNetBenefitUsd: number;
   readonly confidenceThreshold: number;
@@ -128,7 +127,6 @@ const loadConfig = Effect.gen(function* () {
   const minFeeIlRatio = yield* validatedNumber("MIN_FEE_IL_RATIO", 0, 1.2);
   const tvlDropExitPct = yield* validatedNumber("TVL_DROP_EXIT_PCT", 0, 0.3);
   const volumeAuthThreshold = yield* validatedNumber("VOLUME_AUTH_THRESHOLD", 0, 0.7);
-  const maxConcurrentPositions = yield* validatedNumber("MAX_CONCURRENT_POSITIONS", 1, 5);
   const minRebalanceIntervalMs = yield* validatedNumber(
     "MIN_REBALANCE_INTERVAL_MS",
     0,
@@ -286,7 +284,6 @@ const loadConfig = Effect.gen(function* () {
     minFeeIlRatio,
     tvlDropExitPct,
     volumeAuthThreshold,
-    maxConcurrentPositions,
     minRebalanceIntervalMs,
     minRebalanceNetBenefitUsd,
     confidenceThreshold,

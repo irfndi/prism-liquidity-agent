@@ -30,7 +30,7 @@ function makeContext(
 describe("RiskEngine", () => {
   const riskConfig = {
     confidenceThreshold: 0.65,
-    maxConcurrentPositions: 5,
+    maxOpenPositions: 5,
     maxRebalanceRangeBins: 50,
     stopLossPct: 0.15,
   };
