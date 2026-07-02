@@ -196,9 +196,6 @@ export function estimateRecoveryProbability(
 export function shouldHoldForRecovery(
   recoveryProbability: number,
   holdThreshold: number,
-  forceRebalanceThreshold: number,
 ): boolean {
-  if (recoveryProbability >= holdThreshold) return true;
-  if (recoveryProbability <= forceRebalanceThreshold) return false;
-  return false;
+  return recoveryProbability >= holdThreshold;
 }

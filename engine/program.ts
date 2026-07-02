@@ -702,7 +702,6 @@ export const program = Effect.gen(function* () {
             const holdForRecovery = shouldHoldForRecovery(
               recoveryProb,
               config.oorRecoveryHoldThreshold,
-              config.oorRecoveryForceRebalanceThreshold,
             );
             if (holdForRecovery) {
               console.info(
