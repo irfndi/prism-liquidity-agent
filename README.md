@@ -160,7 +160,8 @@ Decisions pass through checks in order before any on-chain action:
 - **Gas-aware** (`GAS_AWARE_MIN_DAYS_OF_FEES_PAID_AHEAD`): skip REBALANCE when the on-chain gas cost would not be repaid by N days of position fees (default 3 days)
 - **Volatility-adjusted sizing** (`VOLATILITY_EXIT_STDDEV`): if recent active-bin stddev exceeds the threshold AND drift > 60%, EXIT to wallet instead of REBALANCE
 - **OOR recovery prediction** (`OOR_RECOVERY_HOLD_THRESHOLD`): if mean-reversion probability > threshold, HOLD and wait for the price to come back; below `OOR_RECOVERY_FORCE_REBALANCE_THRESHOLD`, REBALANCE regardless
-- **Multi-pool allocation** (`MAX_PER_POOL_ALLOCATION_PCT` × `MAX_OPEN_POSITIONS`): ENTER is capped to the per-pool allocation; rejected when N positions are already open
+- **Multi-pool allocation** (`MAX_PER_POOL_ALLOCATION_PCT`): ENTER is capped so a single pool cannot exceed this percentage of the portfolio.
+- **Open-positions concurrency** (`MAX_OPEN_POSITIONS`): ENTER is rejected when this many positions are already open.
 
 ### Live-trading gate
 
