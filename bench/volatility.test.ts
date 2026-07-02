@@ -62,4 +62,32 @@ describe("recommendBinRangeForVolatility (F2)", () => {
     expect(r.lowerBinId).toBeLessThan(4975);
     expect(r.upperBinId).toBeGreaterThan(5025);
   });
+
+  it("uses ±20 base width for binStep at the 25 breakpoint (low volatility)", () => {
+    const r = recommendBinRangeForVolatility(5000, 25, false);
+    expect(r.halfWidth).toBe(20);
+    expect(r.lowerBinId).toBe(4980);
+    expect(r.upperBinId).toBe(5020);
+  });
+
+  it("widens to the configured wideHalfWidth for binStep at the 25 breakpoint (high volatility)", () => {
+    const r = recommendBinRangeForVolatility(5000, 25, true, 50);
+    expect(r.halfWidth).toBe(50);
+    expect(r.lowerBinId).toBe(4950);
+    expect(r.upperBinId).toBe(5050);
+  });
+
+  it("uses ±15 base width for binStep just above the 25 breakpoint (low volatility)", () => {
+    const r = recommendBinRangeForVolatility(5000, 26, false);
+    expect(r.halfWidth).toBe(15);
+    expect(r.lowerBinId).toBe(4985);
+    expect(r.upperBinId).toBe(5015);
+  });
+
+  it("widens to the configured wideHalfWidth for binStep just above the 25 breakpoint (high volatility)", () => {
+    const r = recommendBinRangeForVolatility(5000, 26, true, 50);
+    expect(r.halfWidth).toBe(50);
+    expect(r.lowerBinId).toBe(4950);
+    expect(r.upperBinId).toBe(5050);
+  });
 });
