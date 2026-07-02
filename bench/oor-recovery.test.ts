@@ -36,18 +36,22 @@ describe("estimateRecoveryProbability (F4 OOR recovery)", () => {
 
 describe("shouldHoldForRecovery (F4 decision helper)", () => {
   it("returns HOLD when probability exceeds hold threshold", () => {
-    expect(shouldHoldForRecovery(0.7, 0.6, 0.2)).toBe(true);
+    expect(shouldHoldForRecovery(0.7, 0.6)).toBe(true);
   });
 
-  it("returns REBALANCE when probability below force threshold", () => {
-    expect(shouldHoldForRecovery(0.1, 0.6, 0.2)).toBe(false);
+  it("returns REBALANCE when probability below hold threshold", () => {
+    expect(shouldHoldForRecovery(0.1, 0.6)).toBe(false);
   });
 
   it("returns REBALANCE when probability is in the gray zone", () => {
-    expect(shouldHoldForRecovery(0.4, 0.6, 0.2)).toBe(false);
+    expect(shouldHoldForRecovery(0.4, 0.6)).toBe(false);
   });
 
   it("HOLD wins ties at hold threshold", () => {
-    expect(shouldHoldForRecovery(0.6, 0.6, 0.2)).toBe(true);
+    expect(shouldHoldForRecovery(0.6, 0.6)).toBe(true);
+  });
+
+  it("returns REBALANCE for a probability that previously triggered the force-rebalance threshold", () => {
+    expect(shouldHoldForRecovery(0.2, 0.6)).toBe(false);
   });
 });
