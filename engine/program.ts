@@ -594,9 +594,14 @@ export const program = Effect.gen(function* () {
         const oorGraceExpired =
           hasPosition && pos && pos.oorCycleCount >= config.oorGracePeriodCycles;
 
-        // F2: compute recent bin volatility (uses the full buffer)
+        // F2: compute recent bin volatility
         const recentBins = binHistory.get(poolAddress) ?? [];
-        const volatilityStddev = computeBinVolatilityStddev(recentBins);
+        const volatilityLookback = Math.max(2, config.volatilityLookbackSnapshots);
+        const volatilityBins =
+          recentBins.length > volatilityLookback
+            ? recentBins.slice(recentBins.length - volatilityLookback)
+            : recentBins;
+        const volatilityStddev = computeBinVolatilityStddev(volatilityBins);
         const highVol = isHighVolatility(volatilityStddev, config.volatilityExitStddev);
 
         // F4: slice the history to the configured recovery lookback window.
@@ -627,7 +632,7 @@ export const program = Effect.gen(function* () {
           yield* memory
             .upsert({
               category: "warning",
-              content: `Volatility-gate EXIT for ${poolAddress}: stddev=${volatilityStddev.toFixed(2)} over ${recentBins.length} snapshots`,
+              content: `Volatility-gate EXIT for ${poolAddress}: stddev=${volatilityStddev.toFixed(2)} over ${volatilityBins.length} snapshots`,
               poolAddress,
             })
             .pipe(Effect.catchAll(() => Effect.void));
