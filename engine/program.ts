@@ -581,6 +581,12 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      const walletBalanceUsd = adapter.hasWallet()
+        ? yield* adapter
+            .getWalletBalanceUsd()
+            .pipe(Effect.catchAll(() => Effect.succeed(config.paperPortfolioUsd)))
+        : config.paperPortfolioUsd;
+
       // REBALANCE check
       if (!decision) {
         const currentLowerBinId = pos?.lowerBinId ?? pool.activeBinId - 20;
@@ -776,11 +782,6 @@ export const program = Effect.gen(function* () {
               binUtilization > 0.4 &&
               pool.tvlUsd > config.minPoolTvlUsd * 2
             ) {
-              const walletBalanceUsd = adapter.hasWallet()
-                ? yield* adapter
-                    .getWalletBalanceUsd()
-                    .pipe(Effect.catchAll(() => Effect.succeed(config.paperPortfolioUsd)))
-                : config.paperPortfolioUsd;
               const maxPositionSize = Math.min(walletBalanceUsd * 0.5, pool.tvlUsd * 0.005, 500);
               const proposedSizeUsd = Math.max(maxPositionSize, 10);
 
@@ -873,10 +874,7 @@ export const program = Effect.gen(function* () {
         openedAt: p.timestamp,
       }));
 
-      const portfolioValueUsd = Math.max(
-        config.paperPortfolioUsd,
-        openPositions.reduce((sum, pos) => sum + pos.currentValueUsd, 0),
-      );
+      const portfolioValueUsd = walletBalanceUsd;
       const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
 
       const riskResult = risk.evaluate(decision, {
