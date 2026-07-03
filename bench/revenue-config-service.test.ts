@@ -1,66 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
-import { ConfigService, type AppConfig } from "../engine/config-service.js";
+import { ConfigService } from "../engine/config-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService, RevenueConfigService } from "../engine/services.js";
+import { defaultAppConfig } from "./helpers.js";
 import fs from "fs";
 
 let RevenueConfigServiceLive: typeof import("../engine/revenue-config-service.js").RevenueConfigServiceLive;
 
 const originalFetch = globalThis.fetch;
 
-function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
-  return {
-    walletPrivateKey: "",
-    heliusApiKey: "",
-    solanaRpcUrl: "",
-    paperTrading: true,
-    scanIntervalMs: 600_000,
-    minPoolTvlUsd: 50_000,
-    minFeeIlRatio: 1.2,
-    tvlDropExitPct: 0.3,
-    volumeAuthThreshold: 0.7,
-    maxConcurrentPositions: 5,
-    minRebalanceIntervalMs: 86_400_000,
-    minRebalanceNetBenefitUsd: 10,
-    confidenceThreshold: 0.65,
-    paperPortfolioUsd: 10_000,
-    minBinUtilization: 0.3,
-    maxRebalanceRangeBins: 50,
-    watchlistPools: [],
-    stopLossPct: 0.15,
-    trailingStopPct: 0.1,
-    oorGracePeriodCycles: 3,
-    feeClaimIntervalMs: 86_400_000,
-    enablePoolDiscovery: false,
-    discoveryMinTvlUsd: 100_000,
-    discoveryMinFeeRatio: 1.5,
-    deployerBlacklistPath: "",
-    tokenBlacklistPath: "",
-    sqliteDbPath: "",
-    enableSnapshotCapture: false,
-    autoUpdate: true,
-    updateCheckIntervalMs: 21_600_000,
-    updateChannel: "stable" as const,
-    updateGithubRepo: "",
-    updateAllowDirty: false,
-    forceUpdateEnabled: false,
-    forceUpdateAfterDays: 14,
-    updateR2PublicUrl: "",
-    githubToken: "",
-    githubRepo: "",
-    feedbackOptOut: false,
-    paperModeExitLive: false,
-    meteoraPoolsUrl:
-      "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc",
-    ...overrides,
-  };
-}
-
 function buildLayer(
-  overrides: Partial<AppConfig> = {},
+  overrides: Parameters<typeof defaultAppConfig>[0] = {},
 ): Layer.Layer<RevenueConfigService | DbService, never, never> {
-  const mockConfig = Layer.succeed(ConfigService, makeConfig(overrides));
+  const mockConfig = Layer.succeed(ConfigService, defaultAppConfig(overrides));
   const dbLayer = DbLive(":memory:");
   const revenueConfigDeps = Layer.merge(mockConfig, dbLayer);
   const revenueConfig = Layer.provide(RevenueConfigServiceLive, revenueConfigDeps);

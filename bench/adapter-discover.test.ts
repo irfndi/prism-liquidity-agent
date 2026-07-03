@@ -2,60 +2,26 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
 import { AdapterService } from "../engine/services.js";
 import { AdapterLive } from "../engine/adapter-service.js";
-import { ConfigService, type AppConfig } from "../engine/config-service.js";
+import { ConfigService } from "../engine/config-service.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { DbLive } from "../engine/db-service.js";
-import { mockFetch } from "./helpers.js";
+import { defaultAppConfig, mockFetch } from "./helpers.js";
 
-function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
-  const base: AppConfig = {
-    walletPrivateKey: "",
-    heliusApiKey: "",
-    solanaRpcUrl: "https://api.mainnet.helius-rpc.com",
-    paperTrading: true,
-    scanIntervalMs: 600_000,
-    minPoolTvlUsd: 50_000,
-    minFeeIlRatio: 1.2,
-    tvlDropExitPct: 0.3,
-    volumeAuthThreshold: 0.7,
-    maxConcurrentPositions: 5,
-    minRebalanceIntervalMs: 86_400_000,
-    minRebalanceNetBenefitUsd: 10,
-    confidenceThreshold: 0.65,
-    paperPortfolioUsd: 10_000,
-    minBinUtilization: 0.3,
-    maxRebalanceRangeBins: 50,
-    watchlistPools: [],
-    stopLossPct: 0.15,
-    trailingStopPct: 0.1,
-    oorGracePeriodCycles: 3,
-    feeClaimIntervalMs: 86_400_000,
-    enablePoolDiscovery: true,
-    discoveryMinTvlUsd: 100_000,
-    discoveryMinFeeRatio: 1.5,
-    deployerBlacklistPath: "",
-    tokenBlacklistPath: "",
-    sqliteDbPath: ":memory:",
-    enableSnapshotCapture: false,
-    autoUpdate: false,
-    updateCheckIntervalMs: 216_000_000,
-    updateChannel: "stable",
-    updateGithubRepo: "irfndi/prism-liquidity-agent",
-    updateAllowDirty: false,
-    forceUpdateEnabled: false,
-    forceUpdateAfterDays: 14,
-    updateR2PublicUrl: "https://r2.prism-agent.com",
-    githubToken: "",
-    githubRepo: "irfndi/prism-liquidity-agent",
-    feedbackOptOut: false,
-    paperModeExitLive: false,
-    meteoraPoolsUrl: "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc",
-  };
-  return { ...base, ...overrides };
-}
-
-function buildAdapterLayer(overrides: Partial<AppConfig> = {}): Layer.Layer<AdapterService, never, never> {
-  const configLayer = Layer.succeed(ConfigService, makeConfig(overrides));
+function buildAdapterLayer(overrides: Parameters<typeof defaultAppConfig>[0] = {}): Layer.Layer<AdapterService, never, never> {
+  const configLayer = Layer.succeed(
+    ConfigService,
+    defaultAppConfig({
+      solanaRpcUrl: "https://api.mainnet.helius-rpc.com",
+      enablePoolDiscovery: true,
+      sqliteDbPath: ":memory:",
+      autoUpdate: false,
+      updateCheckIntervalMs: 216_000_000,
+      updateGithubRepo: "irfndi/prism-liquidity-agent",
+      updateR2PublicUrl: "https://r2.prism-agent.com",
+      githubRepo: "irfndi/prism-liquidity-agent",
+      ...overrides,
+    }),
+  );
   // AuditLive requires DbService — use Layer.provide (not merge) so the dep
   // is wired transitively into the merged harness below.
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));

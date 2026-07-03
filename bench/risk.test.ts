@@ -30,7 +30,6 @@ function makeContext(
 describe("RiskEngine", () => {
   const riskConfig = {
     confidenceThreshold: 0.65,
-    maxConcurrentPositions: 5,
     maxRebalanceRangeBins: 50,
     stopLossPct: 0.15,
   };
@@ -47,28 +46,6 @@ describe("RiskEngine", () => {
       const decision = makeDecision({ confidence: 0.65 });
       const result = evaluateRisk(riskConfig, decision, makeContext());
       expect(result.approved).toBe(true);
-    });
-  });
-
-  describe("concurrent positions cap", () => {
-    it("rejects ENTER when max positions reached", () => {
-      const positions: ReadonlyArray<Position> = Array.from({ length: 5 }, (_, i) => ({
-        id: `pos-${i}`,
-        poolAddress: `Pool${i}`,
-        poolName: `Pool${i}`,
-        lowerBinId: 4990,
-        upperBinId: 5010,
-        liquidityShares: 1000n,
-        depositedUsd: 2000,
-        currentValueUsd: 2100,
-        unrealizedPnlUsd: 100,
-        feesEarnedUsd: 50,
-        openedAt: Date.now(),
-      }));
-      const decision = makeDecision({ action: "ENTER", confidence: 0.8 });
-      const result = evaluateRisk(riskConfig, decision, makeContext({ openPositions: positions }));
-      expect(result.approved).toBe(false);
-      expect(result.reason).toContain("Max concurrent");
     });
   });
 

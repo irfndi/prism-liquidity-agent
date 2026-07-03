@@ -126,7 +126,7 @@ export const setupCommand = new Command("setup")
       "MIN_FEE_IL_RATIO=1.2",
       "TVL_DROP_EXIT_PCT=0.30",
       "VOLUME_AUTH_THRESHOLD=0.70",
-      "MAX_CONCURRENT_POSITIONS=5",
+      "MAX_OPEN_POSITIONS=3",
       "CONFIDENCE_THRESHOLD=0.65",
       "TRAILING_STOP_PCT=0.10",
       "",

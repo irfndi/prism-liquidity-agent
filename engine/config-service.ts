@@ -11,7 +11,6 @@ export interface AppConfig {
   readonly minFeeIlRatio: number;
   readonly tvlDropExitPct: number;
   readonly volumeAuthThreshold: number;
-  readonly maxConcurrentPositions: number;
   readonly minRebalanceIntervalMs: number;
   readonly minRebalanceNetBenefitUsd: number;
   readonly confidenceThreshold: number;
@@ -51,13 +50,60 @@ export interface AppConfig {
   // env var; falls back to the official DLMM Data API (dlmm.datapi.meteora.ag)
   // if the env var is unset or empty.
   readonly meteoraPoolsUrl: string;
+
+  // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
+  /** Estimated SOL cost of a single rebalance tx (entry + close). */
+  readonly rebalanceGasCostSol: number;
+  /** USD price of 1 SOL, used to convert gas to USD. */
+  readonly solPriceUsd: number;
+  /** Skip REBALANCE when gas cost > daysOfFeesPaidAhead × position's 24h fees. */
+  readonly gasAwareMinDaysOfFeesPaidAhead: number;
+
+  // ─── F2: Volatility-adjusted range sizing ───────────────────────────────────
+  /** Stddev of active bin over recent snapshots above this ⇒ high-vol. */
+  readonly volatilityExitStddev: number;
+  /** # snapshots to use for the volatility window. */
+  readonly volatilityLookbackSnapshots: number;
+  /** High-vol bin range width (bins each side). Wider = more breathing room. */
+  readonly volatilityWideHalfWidthBins: number;
+
+  // ─── F3: Fee compounding / auto-reinvest ─────────────────────────────────────
+  /** Master switch for auto-reinvest of accrued fees. */
+  readonly autoCompoundFees: boolean;
+  /** Minimum net fee (USD) required to trigger a compound cycle. */
+  readonly minCompoundFeesUsd: number;
+  /** Buffer (USD) added to the gas cost when evaluating compound worth-it. */
+  readonly compoundGasBufferUsd: number;
+
+  // ─── F4: OOR recovery prediction ─────────────────────────────────────────────
+  /** # cycles of bin history used to estimate mean-reversion. */
+  readonly oorRecoveryLookbackCycles: number;
+  /** Above this probability → skip REBALANCE, hold & wait. */
+  readonly oorRecoveryHoldThreshold: number;
+  /** Below this probability → REBALANCE regardless of cost. */
+  readonly oorRecoveryForceRebalanceThreshold: number;
+
+  // ─── F5: Multi-pool allocation ──────────────────────────────────────────────
+  /** Max % of portfolio that any single pool can absorb. */
+  readonly maxPerPoolAllocationPct: number;
+  /** Hard cap on number of simultaneously open positions. */
+  readonly maxOpenPositions: number;
+
+  // ─── F6: Paper-trading validation period ────────────────────────────────────
+  /** Require N days of paper trading before allowing live ENTER. */
+  readonly paperValidationMinDays: number;
+  /** Hard-block live ENTER if validation not met (vs warn only). */
+  readonly paperValidationEnforce: boolean;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
 
-function validatedNumber(name: string, min: number, fallback: number) {
+function validatedNumber(name: string, min: number, fallback: number, max?: number) {
   return Config.number(name).pipe(
-    Effect.map((n) => (Number.isFinite(n) && n >= min ? n : fallback)),
+    Effect.map((n) => {
+      if (!Number.isFinite(n) || n < min) return fallback;
+      return max !== undefined && n > max ? max : n;
+    }),
     Effect.orElseSucceed(() => fallback),
   );
 }
@@ -84,7 +130,6 @@ const loadConfig = Effect.gen(function* () {
   const minFeeIlRatio = yield* validatedNumber("MIN_FEE_IL_RATIO", 0, 1.2);
   const tvlDropExitPct = yield* validatedNumber("TVL_DROP_EXIT_PCT", 0, 0.3);
   const volumeAuthThreshold = yield* validatedNumber("VOLUME_AUTH_THRESHOLD", 0, 0.7);
-  const maxConcurrentPositions = yield* validatedNumber("MAX_CONCURRENT_POSITIONS", 1, 5);
   const minRebalanceIntervalMs = yield* validatedNumber(
     "MIN_REBALANCE_INTERVAL_MS",
     0,
@@ -97,6 +142,59 @@ const loadConfig = Effect.gen(function* () {
   const maxRebalanceRangeBins = yield* validatedNumber("MAX_REBALANCE_RANGE_BINS", 1, 50);
   const watchlistPoolsRaw = yield* Config.string("WATCHLIST_POOLS").pipe(
     Effect.orElseSucceed(() => ""),
+  );
+
+  // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
+  const rebalanceGasCostSol = yield* validatedNumber("REBALANCE_GAS_COST_SOL", 0, 0.01);
+  const solPriceUsd = yield* validatedNumber("SOL_PRICE_USD", 0, 150, 10_000);
+  const gasAwareMinDaysOfFeesPaidAhead = yield* validatedNumber(
+    "GAS_AWARE_MIN_DAYS_OF_FEES_PAID_AHEAD",
+    0,
+    3,
+  );
+
+  // ─── F2: Volatility-adjusted range sizing ───────────────────────────────────
+  const volatilityExitStddev = yield* validatedNumber("VOLATILITY_EXIT_STDDEV", 0, 5);
+  const volatilityLookbackSnapshots = yield* validatedNumber(
+    "VOLATILITY_LOOKBACK_SNAPSHOTS",
+    3,
+    12,
+  );
+  const volatilityWideHalfWidthBins = yield* validatedNumber(
+    "VOLATILITY_WIDE_HALF_WIDTH_BINS",
+    5,
+    50,
+  );
+
+  // ─── F3: Fee compounding / auto-reinvest ─────────────────────────────────────
+  const autoCompoundFees = yield* Config.boolean("AUTO_COMPOUND_FEES").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const minCompoundFeesUsd = yield* validatedNumber("MIN_COMPOUND_FEES_USD", 0, 0.5);
+  const compoundGasBufferUsd = yield* validatedNumber("COMPOUND_GAS_BUFFER_USD", 0, 0.05);
+
+  // ─── F4: OOR recovery prediction ─────────────────────────────────────────────
+  const oorRecoveryLookbackCycles = yield* validatedNumber("OOR_RECOVERY_LOOKBACK_CYCLES", 3, 10);
+  const oorRecoveryHoldThreshold = yield* validatedNumber("OOR_RECOVERY_HOLD_THRESHOLD", 0, 0.6);
+  const oorRecoveryForceRebalanceThreshold = yield* validatedNumber(
+    "OOR_RECOVERY_FORCE_REBALANCE_THRESHOLD",
+    0,
+    0.2,
+  );
+
+  // ─── F5: Multi-pool allocation ──────────────────────────────────────────────
+  const maxPerPoolAllocationPct = yield* validatedNumber(
+    "MAX_PER_POOL_ALLOCATION_PCT",
+    0,
+    0.4,
+    1.0,
+  );
+  const maxOpenPositions = yield* validatedNumber("MAX_OPEN_POSITIONS", 1, 3);
+
+  // ─── F6: Paper-trading validation period ────────────────────────────────────
+  const paperValidationMinDays = yield* validatedNumber("PAPER_VALIDATION_MIN_DAYS", 0, 7);
+  const paperValidationEnforce = yield* Config.boolean("PAPER_VALIDATION_ENFORCE").pipe(
+    Effect.orElseSucceed(() => false),
   );
 
   // New feature configs
@@ -186,7 +284,6 @@ const loadConfig = Effect.gen(function* () {
     minFeeIlRatio,
     tvlDropExitPct,
     volumeAuthThreshold,
-    maxConcurrentPositions,
     minRebalanceIntervalMs,
     minRebalanceNetBenefitUsd,
     confidenceThreshold,
@@ -218,6 +315,23 @@ const loadConfig = Effect.gen(function* () {
     feedbackOptOut,
     paperModeExitLive,
     meteoraPoolsUrl,
+
+    rebalanceGasCostSol,
+    solPriceUsd,
+    gasAwareMinDaysOfFeesPaidAhead,
+    volatilityExitStddev,
+    volatilityLookbackSnapshots,
+    volatilityWideHalfWidthBins,
+    autoCompoundFees,
+    minCompoundFeesUsd,
+    compoundGasBufferUsd,
+    oorRecoveryLookbackCycles,
+    oorRecoveryHoldThreshold,
+    oorRecoveryForceRebalanceThreshold,
+    maxPerPoolAllocationPct,
+    maxOpenPositions,
+    paperValidationMinDays,
+    paperValidationEnforce,
   };
 
   return cfg;

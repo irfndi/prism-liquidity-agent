@@ -116,3 +116,86 @@ export const DLMMStrategy: StrategyApi = {
 };
 
 export const StrategyLive = Layer.succeed(StrategyService, StrategyService.of(DLMMStrategy));
+
+// ─── F2: Volatility-adjusted range sizing ────────────────────────────────────
+
+/**
+ * Sample standard deviation of the active bin over recent snapshots. Returns 0
+ * for empty or single-point series. Used as the "high-vol" detector.
+ */
+export function computeBinVolatilityStddev(activeBins: ReadonlyArray<number>): number {
+  if (activeBins.length < 2) return 0;
+  const mean = activeBins.reduce((s, v) => s + v, 0) / activeBins.length;
+  const variance =
+    activeBins.reduce((s, v) => s + (v - mean) * (v - mean), 0) / (activeBins.length - 1);
+  return Math.sqrt(variance);
+}
+
+/** Returns true when the stddev of recent bin moves exceeds the configured threshold. */
+export function isHighVolatility(stddev: number, threshold: number): boolean {
+  return stddev >= threshold;
+}
+
+/**
+ * Pick a bin-range half-width based on the bin step, widened when the pool is
+ * currently in a high-volatility regime. High-vol gets a much wider range to
+ * avoid constant rebalancing. The widened width comes from the caller-supplied
+ * `wideHalfWidth` so users can tune it via VOLATILITY_WIDE_HALF_WIDTH_BINS.
+ */
+export function recommendBinRangeForVolatility(
+  activeBinId: number,
+  binStep: number,
+  highVolatility: boolean,
+  wideHalfWidth = 50,
+): { lowerBinId: number; upperBinId: number; halfWidth: number } {
+  const baseHalfWidth = binStep <= 10 ? 25 : binStep <= 25 ? 20 : 15;
+  const halfWidth = highVolatility ? Math.max(baseHalfWidth * 2, wideHalfWidth) : baseHalfWidth;
+  return {
+    lowerBinId: activeBinId - halfWidth,
+    upperBinId: activeBinId + halfWidth,
+    halfWidth,
+  };
+}
+
+// ─── F4: OOR recovery prediction ──────────────────────────────────────────────
+
+/**
+ * Estimate the probability that an OOR position recovers into its existing
+ * range. Heuristic: typical mean-reversion amplitude (mean |Δbin| over the
+ * recent history) divided by current drift distance. If the typical swing is
+ * at least as large as the current drift, the price is more likely to come
+ * back. Trending or runaway series score low; oscillating series score high.
+ * Returns 0.5 for empty history (no signal, fall through to defaults).
+ */
+export function estimateRecoveryProbability(
+  recentBins: ReadonlyArray<number>,
+  currentDriftBins: number,
+): number {
+  if (recentBins.length < 2) return 0.5;
+
+  let sumAbsDelta = 0;
+  for (let i = 1; i < recentBins.length; i++) {
+    sumAbsDelta += Math.abs((recentBins[i] ?? 0) - (recentBins[i - 1] ?? 0));
+  }
+  const meanAbsDelta = sumAbsDelta / (recentBins.length - 1);
+
+  if (meanAbsDelta <= 0) {
+    return currentDriftBins <= 0 ? 1 : 0;
+  }
+
+  const ratio = meanAbsDelta / (meanAbsDelta + currentDriftBins);
+  return Math.max(0, Math.min(1, ratio));
+}
+
+/**
+ * Decide whether to HOLD the position in expectation of recovery rather than
+ * REBALANCE. Returns true when the recovery probability is at/above the hold
+ * threshold (we believe the price will come back). Returns false otherwise
+ * (including in the gray zone — we rebalance rather than gamble).
+ */
+export function shouldHoldForRecovery(
+  recoveryProbability: number,
+  holdThreshold: number,
+): boolean {
+  return recoveryProbability >= holdThreshold;
+}

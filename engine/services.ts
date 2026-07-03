@@ -530,6 +530,9 @@ export interface DbApi {
   >;
   readonly getMetadata: (key: string) => Effect.Effect<string | null, unknown>;
   readonly setMetadata: (key: string, value: string) => Effect.Effect<void, unknown>;
+  readonly setMetadataBatch: (
+    entries: ReadonlyArray<{ key: string; value: string }>,
+  ) => Effect.Effect<void, unknown>;
 
   readonly saveFeeClaim: (claim: {
     id: string;

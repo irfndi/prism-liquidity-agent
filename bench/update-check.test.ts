@@ -26,7 +26,6 @@ function buildLayer(
     minFeeIlRatio: 1.2,
     tvlDropExitPct: 0.3,
     volumeAuthThreshold: 0.7,
-    maxConcurrentPositions: 5,
     minRebalanceIntervalMs: 86_400_000,
     minRebalanceNetBenefitUsd: 10,
     confidenceThreshold: 0.65,
@@ -59,6 +58,23 @@ function buildLayer(
     paperModeExitLive: false,
     meteoraPoolsUrl:
       "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc",
+    rebalanceGasCostSol: 0.01,
+    solPriceUsd: 150,
+    gasAwareMinDaysOfFeesPaidAhead: 3,
+    volatilityExitStddev: 5,
+    volatilityLookbackSnapshots: 12,
+    volatilityWideHalfWidthBins: 50,
+    autoCompoundFees: false,
+    minCompoundFeesUsd: 0.5,
+    compoundGasBufferUsd: 0.05,
+    oorRecoveryLookbackCycles: 10,
+    oorRecoveryHoldThreshold: 0.6,
+    oorRecoveryForceRebalanceThreshold: 0.2,
+    maxPerPoolAllocationPct: 0.4,
+    maxOpenPositions: 3,
+    paperValidationMinDays: 7,
+    paperValidationEnforce: false,
+
   });
   return Layer.merge(mockConfig, DbLive(":memory:"));
 }

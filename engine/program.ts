@@ -3,7 +3,21 @@ import { ConfigService, ConfigLive, type AppConfig } from "./config-service.js";
 import { AdapterLive } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
 import { MemoryLive } from "./memory-service.js";
-import { RiskLive } from "./risk-service.js";
+import {
+  RiskLive,
+  evaluateGasGate,
+  evaluateCompoundGate,
+  evaluatePerPoolAllocation,
+  evaluatePaperValidation,
+  convertClaimFeesToUsd,
+} from "./risk-service.js";
+import {
+  computeBinVolatilityStddev,
+  isHighVolatility,
+  recommendBinRangeForVolatility,
+  estimateRecoveryProbability,
+  shouldHoldForRecovery,
+} from "./strategy-service.js";
 import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
 import { ScreenerLive } from "./screener-service.js";
@@ -31,7 +45,7 @@ import {
   type MemoryApi,
   type ScreenedPool,
 } from "./services.js";
-import type { AgentDecision, AgentCycle, PoolState } from "./types.js";
+import type { AgentDecision, AgentCycle, PoolState, Position } from "./types.js";
 import { randomUUID } from "crypto";
 
 // ─── Cycle state ───────────────────────────────────────────────
@@ -48,6 +62,22 @@ export function estimatePositionValue(pos: PositionRecord, pool: PoolState): num
   const driftPct = Math.min(drift / maxDrift, 1);
   const ilFactor = 1 - driftPct * 0.5;
   return pos.depositedUsd * ilFactor;
+}
+
+function toRiskPosition(pos: PositionRecord): Position {
+  return {
+    id: pos.poolAddress,
+    poolAddress: pos.poolAddress,
+    poolName: `${pos.tokenXSymbol}/${pos.tokenYSymbol}`,
+    lowerBinId: pos.lowerBinId,
+    upperBinId: pos.upperBinId,
+    liquidityShares: 0n,
+    depositedUsd: pos.depositedUsd,
+    currentValueUsd: pos.currentValueUsd,
+    unrealizedPnlUsd: pos.currentValueUsd - pos.depositedUsd,
+    feesEarnedUsd: 0,
+    openedAt: pos.timestamp,
+  };
 }
 
 export function reconcilePositions(
@@ -188,7 +218,6 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
 
   const risk = RiskLive({
     confidenceThreshold: cfg?.confidenceThreshold ?? 0.65,
-    maxConcurrentPositions: cfg?.maxConcurrentPositions ?? 5,
     maxRebalanceRangeBins: cfg?.maxRebalanceRangeBins ?? 50,
     stopLossPct: cfg?.stopLossPct ?? 0.15,
   });
@@ -237,6 +266,57 @@ export const program = Effect.gen(function* () {
     trackedPositions.set(pos.poolAddress, pos);
   }
 
+  // F2: per-pool recent active-bin history (in-memory ring buffer; resets on restart)
+  const binHistoryCap = Math.max(
+    config.volatilityLookbackSnapshots,
+    config.oorRecoveryLookbackCycles,
+    2,
+  );
+  const binHistory = new Map<string, number[]>();
+  const pushBinHistory = (poolAddress: string, activeBinId: number): void => {
+    const arr = binHistory.get(poolAddress) ?? [];
+    arr.push(activeBinId);
+    if (arr.length > binHistoryCap) arr.shift();
+    binHistory.set(poolAddress, arr);
+  };
+
+  // F6: paper-trading day counter — persisted in metadata table so it
+  // survives restarts. Increments when the day boundary rolls over.
+  const PAPER_DAYS_KEY = "paperTradingDaysAccumulated";
+  const PAPER_DAYS_LAST_KEY = "paperTradingLastDayIso";
+  const todayIso = (): string => new Date().toISOString().slice(0, 10);
+
+  const tickPaperDays = Effect.gen(function* () {
+    if (!config.paperTrading) return 0;
+    const lastDay = yield* db
+      .getMetadata(PAPER_DAYS_LAST_KEY)
+      .pipe(Effect.catchAll(() => Effect.succeed(null)));
+    const today = todayIso();
+    if (lastDay === today) return 0;
+    const stored = yield* db
+      .getMetadata(PAPER_DAYS_KEY)
+      .pipe(Effect.catchAll(() => Effect.succeed("0")));
+    const current = Number(stored) || 0;
+    const next = current + 1;
+    yield* db
+      .setMetadataBatch([
+        { key: PAPER_DAYS_KEY, value: String(next) },
+        { key: PAPER_DAYS_LAST_KEY, value: today },
+      ])
+      .pipe(Effect.catchAll(() => Effect.void));
+    if (next % 7 === 0) {
+      console.info(`[paper-validation] ${next} paper days accumulated`);
+    }
+    return next;
+  });
+
+  const readPaperDays = Effect.gen(function* () {
+    const stored = yield* db
+      .getMetadata(PAPER_DAYS_KEY)
+      .pipe(Effect.catchAll(() => Effect.succeed("0")));
+    return Number(stored) || 0;
+  });
+
   if (!config.paperTrading) {
     const paperExited = yield* db
       .getPaperExitedPositions()
@@ -269,7 +349,10 @@ export const program = Effect.gen(function* () {
   if (config.enablePoolDiscovery) {
     const screened = yield* screener.screenPools().pipe(
       Effect.catchAll((err) => {
-        if (err instanceof DiscoverPoolsError || (err as { _tag?: string })?._tag === "DiscoverPoolsError") {
+        if (
+          err instanceof DiscoverPoolsError ||
+          (err as { _tag?: string })?._tag === "DiscoverPoolsError"
+        ) {
           console.warn(
             "Pool discovery failed; falling back to watchlist-only mode:",
             err instanceof Error ? err.message : String(err),
@@ -317,6 +400,11 @@ export const program = Effect.gen(function* () {
         return;
       }
 
+      // F6: tick paper-trading day counter once per cycle.
+      if (config.paperTrading) {
+        yield* tickPaperDays;
+      }
+
       for (const poolAddress of poolsToScan) {
         const decision = yield* evaluatePool(poolAddress, cycle.cycleId).pipe(
           Effect.catchAll((err) => {
@@ -354,6 +442,7 @@ export const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
+      pushBinHistory(poolAddress, pool.activeBinId);
 
       if (config.enableSnapshotCapture && config.paperTrading) {
         yield* db
@@ -522,6 +611,15 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      // Use the live wallet value when available. Fall back to the configured
+      // paper portfolio on RPC failure so a transient balance read does not
+      // abort the entire pool evaluation.
+      const walletBalanceUsd = adapter.hasWallet()
+        ? yield* adapter
+            .getWalletBalanceUsd()
+            .pipe(Effect.catchAll(() => Effect.succeed(config.paperPortfolioUsd)))
+        : config.paperPortfolioUsd;
+
       // REBALANCE check
       if (!decision) {
         const currentLowerBinId = pos?.lowerBinId ?? pool.activeBinId - 20;
@@ -535,30 +633,167 @@ export const program = Effect.gen(function* () {
         const oorGraceExpired =
           hasPosition && pos && pos.oorCycleCount >= config.oorGracePeriodCycles;
 
+        // F2: compute recent bin volatility
+        const recentBins = binHistory.get(poolAddress) ?? [];
+        const volatilityLookback = Math.max(2, config.volatilityLookbackSnapshots);
+        const volatilityBins =
+          recentBins.length > volatilityLookback
+            ? recentBins.slice(recentBins.length - volatilityLookback)
+            : recentBins;
+        const volatilityStddev = computeBinVolatilityStddev(volatilityBins);
+        const highVol = isHighVolatility(volatilityStddev, config.volatilityExitStddev);
+
+        // F4: slice the history to the configured recovery lookback window.
+        // The full ring buffer is sized to hold at least
+        // max(volatilityLookbackSnapshots, oorRecoveryLookbackCycles); volatility
+        // uses the full buffer while recovery slices to its own window.
+        const recoveryLookback = Math.max(2, config.oorRecoveryLookbackCycles);
+        const recoveryBins =
+          recentBins.length > recoveryLookback
+            ? recentBins.slice(recentBins.length - recoveryLookback)
+            : recentBins;
+
         if (
+          hasPosition &&
+          highVol &&
+          driftPct > 0.6 &&
+          (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
+        ) {
+          console.info(
+            `[vol-gate] EXITING ${poolAddress} — high volatility (stddev=${volatilityStddev.toFixed(2)}, threshold=${config.volatilityExitStddev}). Drift=${(driftPct * 100).toFixed(0)}%`,
+          );
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            confidence: 0.8,
+            reasoning: `High volatility (σ=${volatilityStddev.toFixed(2)}) + ${(driftPct * 100).toFixed(0)}% drift — exit to wallet rather than rebalancing into new range`,
+          };
+          yield* memory
+            .upsert({
+              category: "warning",
+              content: `Volatility-gate EXIT for ${poolAddress}: stddev=${volatilityStddev.toFixed(2)} over ${volatilityBins.length} snapshots`,
+              poolAddress,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+        } else if (
           hasPosition &&
           (driftPct > 0.6 || oorGraceExpired) &&
           (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
         ) {
-          const recommended = strategy.recommendBinRange(pool.activeBinId, pool.binStep);
+          const recommended = highVol
+            ? recommendBinRangeForVolatility(
+                pool.activeBinId,
+                pool.binStep,
+                true,
+                config.volatilityWideHalfWidthBins,
+              )
+            : strategy.recommendBinRange(pool.activeBinId, pool.binStep);
           const sim = yield* adapter.simulateRebalance(
             poolAddress,
             recommended.lowerBinId,
             recommended.upperBinId,
           );
 
-          if (sim.netBenefitUsd > config.minRebalanceNetBenefitUsd) {
-            decision = {
-              action: "REBALANCE",
-              poolAddress,
-              confidence: Math.min(0.7 + feeIlRatio * 0.1, 0.9),
-              reasoning: `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${sim.netBenefitUsd.toFixed(2)}`,
-              rebalanceParams: {
-                newLowerBinId: recommended.lowerBinId,
-                newUpperBinId: recommended.upperBinId,
-                slippageBps: 50,
-              },
-            };
+          // F1: gas-aware gate — skip rebalance when gas cost > N days of position fees
+          // Use currentValueUsd (not depositedUsd) so the share reflects the
+          // position's present value, not its original deposit. If current
+          // value is unknown (reconciled positions), fall back to 0 which
+          // makes the gas gate reject — a conservative default.
+          const positionSharePct =
+            pool.tvlUsd > 0 && pos && pos.currentValueUsd > 0
+              ? Math.min(pos.currentValueUsd / pool.tvlUsd, 1)
+              : 0;
+          const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
+          const gasGate = evaluateGasGate({
+            rebalanceGasCostSol: config.rebalanceGasCostSol,
+            solPriceUsd: config.solPriceUsd,
+            positionDailyFeesUsd,
+            minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
+          });
+          if (!gasGate.approved) {
+            console.info(
+              `[gas-gate] Holding ${poolAddress} — ${gasGate.reason} (gas=$${gasGate.gasCostUsd.toFixed(2)}, threshold=$${gasGate.feesThresholdUsd.toFixed(2)})`,
+            );
+            yield* memory
+              .upsert({
+                category: "warning",
+                content: `Gas-aware rebalance gate held ${poolAddress}: ${gasGate.reason}`,
+                poolAddress,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "HOLD",
+                confidence: 0,
+                reasoning: `[gas-gate] ${gasGate.reason}`,
+                metrics,
+                riskResult: { approved: false, reason: `[gas-gate] ${gasGate.reason}` },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          } else {
+            // F4: OOR recovery probability — if the recent bin path is
+            // mean-reverting enough to plausibly recover, hold rather than
+            // rebalance. Otherwise rebalance as usual.
+            const recoveryProb = estimateRecoveryProbability(
+              recoveryBins,
+              Math.abs(pool.activeBinId - positionCenter),
+            );
+            const holdForRecovery = shouldHoldForRecovery(
+              recoveryProb,
+              config.oorRecoveryHoldThreshold,
+            );
+            if (holdForRecovery) {
+              console.info(
+                `[recovery-gate] Holding ${poolAddress} — recovery prob ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold}`,
+              );
+              yield* memory
+                .upsert({
+                  category: "pattern",
+                  content: `OOR recovery prediction held ${poolAddress}: probability ${recoveryProb.toFixed(2)}`,
+                  poolAddress,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "HOLD",
+                  confidence: recoveryProb,
+                  reasoning: `[recovery-gate] probability ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold} — expecting mean-reversion`,
+                  metrics,
+                  riskResult: {
+                    approved: false,
+                    reason: `[recovery-gate] probability ${recoveryProb.toFixed(2)} above hold threshold`,
+                  },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+            } else if (
+              sim.netBenefitUsd > config.minRebalanceNetBenefitUsd ||
+              recoveryProb <= config.oorRecoveryForceRebalanceThreshold
+            ) {
+              const forceRebalance = recoveryProb <= config.oorRecoveryForceRebalanceThreshold;
+              decision = {
+                action: "REBALANCE",
+                poolAddress,
+                confidence: Math.min(0.7 + feeIlRatio * 0.1, 0.9),
+                reasoning: forceRebalance
+                  ? `[recovery-gate] force-rebalance — probability ${recoveryProb.toFixed(2)} <= ${config.oorRecoveryForceRebalanceThreshold}. Drift ${(driftPct * 100).toFixed(0)}%`
+                  : `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${sim.netBenefitUsd.toFixed(2)}`,
+                rebalanceParams: {
+                  newLowerBinId: recommended.lowerBinId,
+                  newUpperBinId: recommended.upperBinId,
+                  slippageBps: 50,
+                },
+              };
+            }
           }
         }
 
@@ -580,13 +815,47 @@ export const program = Effect.gen(function* () {
               binUtilization > 0.4 &&
               pool.tvlUsd > config.minPoolTvlUsd * 2
             ) {
-              const walletBalanceUsd = adapter.hasWallet()
-                ? yield* adapter
-                    .getWalletBalanceUsd()
-                    .pipe(Effect.catchAll(() => Effect.succeed(config.paperPortfolioUsd)))
-                : config.paperPortfolioUsd;
               const maxPositionSize = Math.min(walletBalanceUsd * 0.5, pool.tvlUsd * 0.005, 500);
-              const positionSizeUsd = Math.max(maxPositionSize, 10);
+              const proposedSizeUsd = Math.max(maxPositionSize, 10);
+
+              // F5: per-pool allocation cap — split across maxOpenPositions pools
+              // so a single SOL/USDC exposure doesn't dominate the portfolio.
+              // F5 fix: use the actual fetched wallet balance (live) or paper
+              // portfolio default (paper) as portfolioValueUsd. Previously this
+              // hardcoded config.paperPortfolioUsd which made live caps wrong.
+              const allocation = evaluatePerPoolAllocation({
+                proposedDepositUsd: proposedSizeUsd,
+                portfolioValueUsd: walletBalanceUsd,
+                openPositions: Array.from(trackedPositions.values()).map(toRiskPosition),
+                maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+                maxOpenPositions: config.maxOpenPositions,
+              });
+              if (!allocation.approved) {
+                console.info(`[alloc-gate] Skipping ENTER ${poolAddress} — ${allocation.reason}`);
+                yield* memory
+                  .upsert({
+                    category: "pattern",
+                    content: `Allocation gate skipped ENTER on ${poolAddress}: ${allocation.reason}`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+                yield* audit
+                  .recordDecision({
+                    timestamp: Date.now(),
+                    cycleId,
+                    poolAddress,
+                    action: "ENTER",
+                    confidence: 0,
+                    reasoning: `[alloc-gate] ${allocation.reason}`,
+                    metrics,
+                    riskResult: { approved: false, reason: `[alloc-gate] ${allocation.reason}` },
+                    executed: false,
+                    paperTrading: config.paperTrading,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+                return null;
+              }
+              const positionSizeUsd = allocation.adjustedDepositUsd;
 
               decision = {
                 action: "ENTER",
@@ -610,24 +879,9 @@ export const program = Effect.gen(function* () {
       }
 
       // Risk evaluation
-      const openPositions = Array.from(trackedPositions.values()).map((p) => ({
-        id: p.poolAddress,
-        poolAddress: p.poolAddress,
-        poolName: `${p.tokenXSymbol}/${p.tokenYSymbol}`,
-        lowerBinId: p.lowerBinId,
-        upperBinId: p.upperBinId,
-        liquidityShares: 0n,
-        depositedUsd: p.depositedUsd,
-        currentValueUsd: p.currentValueUsd,
-        unrealizedPnlUsd: p.currentValueUsd - p.depositedUsd,
-        feesEarnedUsd: 0,
-        openedAt: p.timestamp,
-      }));
+      const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
 
-      const portfolioValueUsd = Math.max(
-        config.paperPortfolioUsd,
-        openPositions.reduce((sum, pos) => sum + pos.currentValueUsd, 0),
-      );
+      const portfolioValueUsd = walletBalanceUsd;
       const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
 
       const riskResult = risk.evaluate(decision, {
@@ -673,6 +927,48 @@ export const program = Effect.gen(function* () {
 
       // Execute
       let executed = false;
+
+      // F6: paper-trading validation gate — only blocks ENTER, runs only in live mode
+      if (!config.paperTrading && decision.action === "ENTER") {
+        const paperDays = yield* readPaperDays;
+        const validation = evaluatePaperValidation({
+          paperTrading: false,
+          paperDaysAccumulated: paperDays,
+          minDays: config.paperValidationMinDays,
+          enforce: config.paperValidationEnforce,
+        });
+        if (validation.warning) {
+          console.warn(`[paper-validation] ${validation.warning}`);
+        }
+        if (!validation.approved) {
+          console.warn(
+            `[paper-validation] Blocking live ENTER on ${poolAddress} — ${validation.reason}`,
+          );
+          yield* memory
+            .upsert({
+              category: "warning",
+              content: `Paper validation gate blocked live ENTER on ${poolAddress}: ${validation.reason}`,
+              poolAddress,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          yield* audit
+            .recordDecision({
+              timestamp: Date.now(),
+              cycleId,
+              poolAddress,
+              action: decision.action,
+              confidence: decision.confidence,
+              reasoning: `[paper-validation] ${validation.reason}`,
+              metrics,
+              riskResult: { approved: false, reason: validation.reason },
+              executed: false,
+              paperTrading: false,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          return decision;
+        }
+      }
+
       if (config.paperTrading) {
         console.info("[PAPER] Would execute", {
           action: decision.action,
@@ -783,11 +1079,10 @@ export const program = Effect.gen(function* () {
         return false;
       }
 
-      // One position per cycle limit
-      if (decision.action === "ENTER" && trackedPositions.size > 0) {
-        console.info("Skipping ENTER — already have active position");
-        return false;
-      }
+      // F5 allocation gate already caps the number of simultaneously open
+      // positions via evaluatePerPoolAllocation (rejected in the decision
+      // flow before we reach executeLive). No additional hard cap here so
+      // live mode honors maxOpenPositions.
 
       if (decision.action === "ENTER") {
         yield* adapter.swapUSDCForSOL(0.05, 2.0).pipe(Effect.catchAll(() => Effect.void));
@@ -994,8 +1289,6 @@ export const program = Effect.gen(function* () {
 
   // ─── Periodic fee claiming ─────────────────────────────────────────────────
 
-  const LAMPORTS_PER_SOL = 1e9;
-
   const claimAllFees = (): Effect.Effect<void> =>
     Effect.gen(function* () {
       const revenueConfigResult = yield* revenueConfigSvc.getConfig();
@@ -1084,6 +1377,62 @@ export const program = Effect.gen(function* () {
 
           pos.lastFeeClaimAt = Date.now();
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+
+          // F3: fee compounding — if AUTO_COMPOUND_FEES is on and the net fees
+          // cleared the cost threshold, redeposit them into the same range.
+          // This closes + reopens the position around the same bins so the
+          // claimed fees become new liquidity instead of sitting in the wallet.
+          if (config.autoCompoundFees && config.paperTrading === false) {
+            const netFeesUsd = convertClaimFeesToUsd({
+              netFeeXRaw: result.netFeeX,
+              netFeeYRaw: result.netFeeY,
+              tokenXSymbol: pos.tokenXSymbol,
+              tokenYSymbol: pos.tokenYSymbol,
+              solPriceUsd: config.solPriceUsd,
+            });
+            const rebalanceGasCostUsd = config.rebalanceGasCostSol * config.solPriceUsd;
+            const compoundGate = evaluateCompoundGate({
+              netFeesUsd,
+              minCompoundFeesUsd: config.minCompoundFeesUsd,
+              compoundGasBufferUsd: config.compoundGasBufferUsd,
+              rebalanceGasCostUsd,
+            });
+            if (compoundGate.approved) {
+              console.info(
+                `[compound] Redeeming fees back into ${poolAddress} — ${compoundGate.reason}`,
+              );
+              const compoundResult = yield* adapter
+                .rebalancePosition(poolAddress, pos.positionPubKey, pos.lowerBinId, pos.upperBinId)
+                .pipe(
+                  Effect.tap((r) =>
+                    console.info("Compound rebalance succeeded", {
+                      pool: poolAddress,
+                      newPosition: r.newPositionPubKey,
+                    }),
+                  ),
+                  Effect.catchAll((err) => {
+                    console.warn("Compound rebalance failed", {
+                      pool: poolAddress,
+                      err: (err as { message?: string }).message ?? String(err),
+                    });
+                    return Effect.succeed(null);
+                  }),
+                );
+              if (compoundResult) {
+                pos.positionPubKey = compoundResult.newPositionPubKey;
+                pos.lastRebalanceAt = Date.now();
+                pos.depositedUsd += netFeesUsd;
+                yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+                yield* memory
+                  .upsert({
+                    category: "pattern",
+                    content: `Auto-compounded $${netFeesUsd.toFixed(2)} fees into ${poolAddress} (savings $${compoundGate.savingsUsd.toFixed(2)})`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              }
+            }
+          }
         }
       }
     });
