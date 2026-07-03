@@ -3,7 +3,14 @@ import { ConfigService, ConfigLive, type AppConfig } from "./config-service.js";
 import { AdapterLive } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
 import { MemoryLive } from "./memory-service.js";
-import { RiskLive, evaluateGasGate, evaluateCompoundGate, evaluatePerPoolAllocation, evaluatePaperValidation, convertClaimFeesToUsd } from "./risk-service.js";
+import {
+  RiskLive,
+  evaluateGasGate,
+  evaluateCompoundGate,
+  evaluatePerPoolAllocation,
+  evaluatePaperValidation,
+  convertClaimFeesToUsd,
+} from "./risk-service.js";
 import {
   computeBinVolatilityStddev,
   isHighVolatility,
@@ -38,7 +45,7 @@ import {
   type MemoryApi,
   type ScreenedPool,
 } from "./services.js";
-import type { AgentDecision, AgentCycle, PoolState } from "./types.js";
+import type { AgentDecision, AgentCycle, PoolState, Position } from "./types.js";
 import { randomUUID } from "crypto";
 
 // ─── Cycle state ───────────────────────────────────────────────
@@ -55,6 +62,22 @@ export function estimatePositionValue(pos: PositionRecord, pool: PoolState): num
   const driftPct = Math.min(drift / maxDrift, 1);
   const ilFactor = 1 - driftPct * 0.5;
   return pos.depositedUsd * ilFactor;
+}
+
+function toRiskPosition(pos: PositionRecord): Position {
+  return {
+    id: pos.poolAddress,
+    poolAddress: pos.poolAddress,
+    poolName: `${pos.tokenXSymbol}/${pos.tokenYSymbol}`,
+    lowerBinId: pos.lowerBinId,
+    upperBinId: pos.upperBinId,
+    liquidityShares: 0n,
+    depositedUsd: pos.depositedUsd,
+    currentValueUsd: pos.currentValueUsd,
+    unrealizedPnlUsd: pos.currentValueUsd - pos.depositedUsd,
+    feesEarnedUsd: 0,
+    openedAt: pos.timestamp,
+  };
 }
 
 export function reconcilePositions(
@@ -195,7 +218,6 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
 
   const risk = RiskLive({
     confidenceThreshold: cfg?.confidenceThreshold ?? 0.65,
-    maxOpenPositions: cfg?.maxOpenPositions ?? 3,
     maxRebalanceRangeBins: cfg?.maxRebalanceRangeBins ?? 50,
     stopLossPct: cfg?.stopLossPct ?? 0.15,
   });
@@ -327,7 +349,10 @@ export const program = Effect.gen(function* () {
   if (config.enablePoolDiscovery) {
     const screened = yield* screener.screenPools().pipe(
       Effect.catchAll((err) => {
-        if (err instanceof DiscoverPoolsError || (err as { _tag?: string })?._tag === "DiscoverPoolsError") {
+        if (
+          err instanceof DiscoverPoolsError ||
+          (err as { _tag?: string })?._tag === "DiscoverPoolsError"
+        ) {
           console.warn(
             "Pool discovery failed; falling back to watchlist-only mode:",
             err instanceof Error ? err.message : String(err),
@@ -373,6 +398,11 @@ export const program = Effect.gen(function* () {
         console.info("No pools configured — skipping cycle");
         cycle.completedAt = Date.now();
         return;
+      }
+
+      // F6: tick paper-trading day counter once per cycle.
+      if (config.paperTrading) {
+        yield* tickPaperDays;
       }
 
       for (const poolAddress of poolsToScan) {
@@ -582,9 +612,7 @@ export const program = Effect.gen(function* () {
       }
 
       const walletBalanceUsd = adapter.hasWallet()
-        ? yield* adapter
-            .getWalletBalanceUsd()
-            .pipe(Effect.catchAll(() => Effect.succeed(config.paperPortfolioUsd)))
+        ? yield* adapter.getWalletBalanceUsd()
         : config.paperPortfolioUsd;
 
       // REBALANCE check
@@ -617,8 +645,8 @@ export const program = Effect.gen(function* () {
         const recoveryLookback = Math.max(2, config.oorRecoveryLookbackCycles);
         const recoveryBins =
           recentBins.length > recoveryLookback
-              ? recentBins.slice(recentBins.length - recoveryLookback)
-              : recentBins;
+            ? recentBins.slice(recentBins.length - recoveryLookback)
+            : recentBins;
 
         if (
           hasPosition &&
@@ -793,26 +821,12 @@ export const program = Effect.gen(function* () {
               const allocation = evaluatePerPoolAllocation({
                 proposedDepositUsd: proposedSizeUsd,
                 portfolioValueUsd: walletBalanceUsd,
-                openPositions: Array.from(trackedPositions.values()).map((p) => ({
-                  id: p.poolAddress,
-                  poolAddress: p.poolAddress,
-                  poolName: `${p.tokenXSymbol}/${p.tokenYSymbol}`,
-                  lowerBinId: p.lowerBinId,
-                  upperBinId: p.upperBinId,
-                  liquidityShares: 0n,
-                  depositedUsd: p.depositedUsd,
-                  currentValueUsd: p.currentValueUsd,
-                  unrealizedPnlUsd: p.currentValueUsd - p.depositedUsd,
-                  feesEarnedUsd: 0,
-                  openedAt: p.timestamp,
-                })),
+                openPositions: Array.from(trackedPositions.values()).map(toRiskPosition),
                 maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
                 maxOpenPositions: config.maxOpenPositions,
               });
               if (!allocation.approved) {
-                console.info(
-                  `[alloc-gate] Skipping ENTER ${poolAddress} — ${allocation.reason}`,
-                );
+                console.info(`[alloc-gate] Skipping ENTER ${poolAddress} — ${allocation.reason}`);
                 yield* memory
                   .upsert({
                     category: "pattern",
@@ -860,19 +874,7 @@ export const program = Effect.gen(function* () {
       }
 
       // Risk evaluation
-      const openPositions = Array.from(trackedPositions.values()).map((p) => ({
-        id: p.poolAddress,
-        poolAddress: p.poolAddress,
-        poolName: `${p.tokenXSymbol}/${p.tokenYSymbol}`,
-        lowerBinId: p.lowerBinId,
-        upperBinId: p.upperBinId,
-        liquidityShares: 0n,
-        depositedUsd: p.depositedUsd,
-        currentValueUsd: p.currentValueUsd,
-        unrealizedPnlUsd: p.currentValueUsd - p.depositedUsd,
-        feesEarnedUsd: 0,
-        openedAt: p.timestamp,
-      }));
+      const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
 
       const portfolioValueUsd = walletBalanceUsd;
       const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
@@ -963,8 +965,6 @@ export const program = Effect.gen(function* () {
       }
 
       if (config.paperTrading) {
-        // F6: tickPaperDays increments the day counter only in paper mode (live ticks don't affect it)
-        yield* tickPaperDays;
         console.info("[PAPER] Would execute", {
           action: decision.action,
           pool: poolAddress,
@@ -1397,12 +1397,7 @@ export const program = Effect.gen(function* () {
                 `[compound] Redeeming fees back into ${poolAddress} — ${compoundGate.reason}`,
               );
               const compoundResult = yield* adapter
-                .rebalancePosition(
-                  poolAddress,
-                  pos.positionPubKey,
-                  pos.lowerBinId,
-                  pos.upperBinId,
-                )
+                .rebalancePosition(poolAddress, pos.positionPubKey, pos.lowerBinId, pos.upperBinId)
                 .pipe(
                   Effect.tap((r) =>
                     console.info("Compound rebalance succeeded", {
