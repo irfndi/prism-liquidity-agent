@@ -2,7 +2,8 @@ import { Context, Effect, Layer } from "effect";
 import type { Database } from "bun:sqlite";
 import { createDatabase } from "./db.js";
 import { getEmbedding } from "./embeddings.js";
-import type { MemoryEntry, MemoryCategory, PoolSnapshot, Position, BinArray } from "./types.js";
+import type { MemoryEntry, MemoryCategory, PoolSnapshot, PoolCooldown, Position, BinArray, SignalSnapshot, SignalWeights } from "./types.js";
+import type { EvolvableThresholds, OutcomeRecord } from "./strategy-service.js";
 import { DbService, type DbApi } from "./services.js";
 import { bigintReplacer } from "./bigint-json.js";
 import { randomUUID } from "crypto";
@@ -25,6 +26,7 @@ export interface PositionRecord {
   highestValueUsd: number | null;
   lastRebalanceAt: number;
   paperExitedAt: number | null;
+  entrySignalTimestamp: number | null;
 }
 
 export interface AuditRecord {
@@ -98,8 +100,9 @@ export const DbLive = (dbPath?: string) =>
               pool_address, position_pubkey, deposited_usd, current_value_usd,
               token_x_symbol, token_y_symbol, active_bin_id, lower_bin_id, upper_bin_id,
               timestamp, out_of_range_since, oor_cycle_count, last_fee_claim_at,
-              trailing_stop_threshold, highest_value_usd, last_rebalance_at, paper_exited_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              trailing_stop_threshold, highest_value_usd, last_rebalance_at, paper_exited_at,
+              entry_signal_timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pool_address) DO UPDATE SET
               position_pubkey = COALESCE(excluded.position_pubkey, positions.position_pubkey),
               deposited_usd = excluded.deposited_usd,
@@ -116,7 +119,8 @@ export const DbLive = (dbPath?: string) =>
               trailing_stop_threshold = excluded.trailing_stop_threshold,
               highest_value_usd = excluded.highest_value_usd,
               last_rebalance_at = excluded.last_rebalance_at,
-              paper_exited_at = excluded.paper_exited_at`,
+              paper_exited_at = excluded.paper_exited_at,
+              entry_signal_timestamp = excluded.entry_signal_timestamp`,
               pos.poolAddress,
               pos.positionPubKey,
               pos.depositedUsd,
@@ -134,6 +138,7 @@ export const DbLive = (dbPath?: string) =>
               pos.highestValueUsd,
               pos.lastRebalanceAt,
               pos.paperExitedAt,
+              pos.entrySignalTimestamp,
             );
           }),
 
@@ -586,6 +591,237 @@ export const DbLive = (dbPath?: string) =>
           Effect.sync(() => {
             runOne(db, "UPDATE fee_claims SET reported_to_api = 1 WHERE id = ?", id);
           }),
+
+        saveSignalSnapshot: (snapshot) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              `INSERT INTO signal_snapshots (pool_address, timestamp, fee_il_ratio, volume_authenticity, bin_utilization, tvl_usd, tvl_velocity, volatility_stddev, bin_step, action, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              snapshot.poolAddress,
+              snapshot.timestamp,
+              snapshot.feeIlRatio,
+              snapshot.volumeAuthenticity,
+              snapshot.binUtilization,
+              snapshot.tvlUsd,
+              snapshot.tvlVelocity,
+              snapshot.volatilityStddev,
+              snapshot.binStep,
+              snapshot.action,
+              snapshot.confidence,
+            );
+          }),
+
+        getSignalSnapshots: (poolAddress, startMs, endMs) =>
+          Effect.sync(() => {
+            const rows = queryAll<Record<string, unknown>>(
+              db,
+              `SELECT pool_address as poolAddress, timestamp, fee_il_ratio as feeIlRatio,
+                volume_authenticity as volumeAuthenticity, bin_utilization as binUtilization,
+                tvl_usd as tvlUsd, tvl_velocity as tvlVelocity,
+                volatility_stddev as volatilityStddev, bin_step as binStep,
+                action, confidence, outcome_pnl_usd as outcomePnlUsd,
+                outcome_recorded_at as outcomeRecordedAt
+              FROM signal_snapshots
+              WHERE pool_address = ? AND timestamp BETWEEN ? AND ?
+              ORDER BY timestamp ASC`,
+              poolAddress,
+              startMs,
+              endMs,
+            );
+            return rows.map((r) => ({
+              poolAddress: String(r.poolAddress),
+              timestamp: Number(r.timestamp),
+              feeIlRatio: Number(r.feeIlRatio),
+              volumeAuthenticity: Number(r.volumeAuthenticity),
+              binUtilization: Number(r.binUtilization),
+              tvlUsd: Number(r.tvlUsd),
+              tvlVelocity: Number(r.tvlVelocity),
+              volatilityStddev: Number(r.volatilityStddev),
+              binStep: Number(r.binStep),
+              action: String(r.action) as SignalSnapshot["action"],
+              confidence: Number(r.confidence),
+              outcomePnlUsd: r.outcomePnlUsd != null ? Number(r.outcomePnlUsd) : null,
+              outcomeRecordedAt: r.outcomeRecordedAt != null ? Number(r.outcomeRecordedAt) : null,
+            }));
+          }),
+
+        recordSignalOutcome: (poolAddress, entryTimestamp, pnlUsd) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              `UPDATE signal_snapshots SET outcome_pnl_usd = ?, outcome_recorded_at = ? WHERE pool_address = ? AND timestamp = ?`,
+              pnlUsd,
+              Date.now(),
+              poolAddress,
+              entryTimestamp,
+            );
+          }),
+
+        getRecentOutcomes: (limit) =>
+          Effect.sync(() => {
+            const rows = queryAll<Record<string, unknown>>(
+              db,
+              `SELECT pool_address as poolAddress, timestamp, fee_il_ratio as feeIlRatio,
+                volume_authenticity as volumeAuthenticity, bin_utilization as binUtilization,
+                tvl_usd as tvlUsd, tvl_velocity as tvlVelocity,
+                volatility_stddev as volatilityStddev, bin_step as binStep,
+                action, confidence, outcome_pnl_usd as outcomePnlUsd,
+                outcome_recorded_at as outcomeRecordedAt
+              FROM signal_snapshots
+              WHERE outcome_pnl_usd IS NOT NULL
+              ORDER BY outcome_recorded_at DESC LIMIT ?`,
+              limit,
+            );
+            return rows.map((r) => ({
+              poolAddress: String(r.poolAddress),
+              timestamp: Number(r.timestamp),
+              feeIlRatio: Number(r.feeIlRatio),
+              volumeAuthenticity: Number(r.volumeAuthenticity),
+              binUtilization: Number(r.binUtilization),
+              tvlUsd: Number(r.tvlUsd),
+              tvlVelocity: Number(r.tvlVelocity),
+              volatilityStddev: Number(r.volatilityStddev),
+              binStep: Number(r.binStep),
+              action: String(r.action),
+              confidence: Number(r.confidence),
+              outcomePnlUsd: r.outcomePnlUsd != null ? Number(r.outcomePnlUsd) : null,
+              outcomeRecordedAt: r.outcomeRecordedAt != null ? Number(r.outcomeRecordedAt) : null,
+            }));
+          }),
+
+        getEvolvedThresholds: () =>
+          Effect.sync(() => {
+            const feeRow = queryOne<{ value: string }>(
+              db,
+              "SELECT value FROM metadata WHERE key = ?",
+              "evolved_min_fee_il_ratio",
+            );
+            const authRow = queryOne<{ value: string }>(
+              db,
+              "SELECT value FROM metadata WHERE key = ?",
+              "evolved_volume_auth_threshold",
+            );
+            const utilRow = queryOne<{ value: string }>(
+              db,
+              "SELECT value FROM metadata WHERE key = ?",
+              "evolved_min_bin_utilization",
+            );
+            if (!feeRow || !authRow || !utilRow) return null;
+            return {
+              minFeeIlRatio: Number(feeRow.value),
+              volumeAuthThreshold: Number(authRow.value),
+              minBinUtilization: Number(utilRow.value),
+            };
+          }),
+
+        saveEvolvedThresholds: (thresholds) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, ?)",
+              "evolved_min_fee_il_ratio",
+              String(thresholds.minFeeIlRatio),
+              Date.now(),
+            );
+            runOne(
+              db,
+              "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, ?)",
+              "evolved_volume_auth_threshold",
+              String(thresholds.volumeAuthThreshold),
+              Date.now(),
+            );
+            runOne(
+              db,
+              "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, ?)",
+              "evolved_min_bin_utilization",
+              String(thresholds.minBinUtilization),
+              Date.now(),
+            );
+          }),
+
+        getClosedPositionOutcomes: (limit) =>
+          Effect.sync(() => {
+            const rows = queryAll<Record<string, unknown>>(
+              db,
+              `SELECT fee_il_ratio as feeIlRatio,
+                volume_authenticity as volumeAuthenticity,
+                bin_utilization as binUtilization,
+                outcome_pnl_usd as pnlUsd
+              FROM signal_snapshots
+              WHERE outcome_recorded_at IS NOT NULL
+                AND outcome_pnl_usd IS NOT NULL
+                AND (action = 'ENTER' OR action = 'HOLD')
+              ORDER BY outcome_recorded_at DESC
+              LIMIT ?`,
+              limit,
+            );
+            return rows.map((r) => ({
+              feeIlRatio: Number(r.feeIlRatio),
+              volumeAuthenticity: Number(r.volumeAuthenticity),
+              binUtilization: Number(r.binUtilization),
+              pnlUsd: Number(r.pnlUsd),
+            }));
+          }),
+
+        getSignalWeights: () =>
+          Effect.sync(() => {
+            const row = queryOne<{ value: string }>(
+              db,
+              "SELECT value FROM metadata WHERE key = ?",
+              "signal_weights",
+            );
+            if (!row) return null;
+            try {
+              return JSON.parse(row.value) as SignalWeights;
+            } catch {
+              return null;
+            }
+          }),
+
+        saveSignalWeights: (weights) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, ?)",
+              "signal_weights",
+              JSON.stringify(weights),
+              Date.now(),
+            );
+          }),
+
+        getPoolCooldown: (poolAddress) =>
+          Effect.sync(() => {
+            const row = queryOne<Record<string, unknown>>(
+              db,
+              "SELECT * FROM pool_cooldowns WHERE pool_address = ?",
+              poolAddress,
+            );
+            if (!row) return null;
+            return {
+              poolAddress: String(row.pool_address),
+              cooldownUntil: Number(row.cooldown_until),
+              reason: String(row.reason),
+              consecutiveOorExits: Number(row.consecutive_oor_exits),
+            };
+          }),
+
+        setPoolCooldown: (cooldown) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              `INSERT OR REPLACE INTO pool_cooldowns (pool_address, cooldown_until, reason, consecutive_oor_exits)
+               VALUES (?, ?, ?, ?)`,
+              cooldown.poolAddress,
+              cooldown.cooldownUntil,
+              cooldown.reason,
+              cooldown.consecutiveOorExits,
+            );
+          }),
+
+        clearPoolCooldown: (poolAddress) =>
+          Effect.sync(() => {
+            runOne(db, "DELETE FROM pool_cooldowns WHERE pool_address = ?", poolAddress);
+          }),
       };
 
       return api;
@@ -612,6 +848,8 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     highestValueUsd: row.highest_value_usd != null ? Number(row.highest_value_usd) : null,
     lastRebalanceAt: Number(row.last_rebalance_at ?? 0),
     paperExitedAt: row.paper_exited_at != null ? Number(row.paper_exited_at) : null,
+    entrySignalTimestamp:
+      row.entry_signal_timestamp != null ? Number(row.entry_signal_timestamp) : null,
   };
 }
 

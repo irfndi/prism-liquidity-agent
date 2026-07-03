@@ -17,6 +17,7 @@ function makePosition(
     trailingStopThreshold: number | null;
     lastRebalanceAt: number;
     paperExitedAt: number | null;
+    entrySignalTimestamp: number | null;
   }> = {},
 ) {
   return {
@@ -37,6 +38,7 @@ function makePosition(
     highestValueUsd: overrides.highestValueUsd ?? null,
     lastRebalanceAt: overrides.lastRebalanceAt ?? 0,
     paperExitedAt: overrides.paperExitedAt ?? null,
+    entrySignalTimestamp: overrides.entrySignalTimestamp ?? null,
   };
 }
 

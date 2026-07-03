@@ -94,6 +94,38 @@ export interface AppConfig {
   readonly paperValidationMinDays: number;
   /** Hard-block live ENTER if validation not met (vs warn only). */
   readonly paperValidationEnforce: boolean;
+
+  // ─── F7: Pool cooldown after failed exits ───────────────────────────────────
+  readonly oorCooldownMs: number;
+  readonly repeatOorCooldownMs: number;
+  readonly maxOorCooldownExits: number;
+
+  // ─── Agentic mode / LLM overlay ──────────────────────────────────────
+  /** Enable non-deterministic LLM reasoning overlay. Only active when Prism runs as an agent skill. Default false. */
+  readonly agentiveMode: boolean;
+  /** LLM API key (OpenAI-compatible endpoint). Empty string = disabled. */
+  readonly llmApiKey: string;
+  /** LLM model name. Default "gpt-4o". */
+  readonly llmModel: string;
+  /** LLM base URL for OpenAI-compatible APIs. Default "https://api.openai.com/v1". */
+  readonly llmBaseUrl: string;
+  /** Maximum tokens for LLM reasoning response. Default 1024. */
+  readonly llmMaxTokens: number;
+
+  // ─── Threshold evolution ─────────────────────────────────────────────
+  /** How many closed positions between evolution rounds. Default 5. */
+  readonly evolutionInterval: number;
+  /** Max percentage change per evolution round. Default 0.20. */
+  readonly evolutionMaxChangePct: number;
+
+  // ─── Darwinian signal weighting ─────────────────────────────────────
+  readonly signalWeightWindowDays: number;
+  readonly signalWeightMinOutcomes: number;
+  readonly signalWeightBoostFactor: number;
+  readonly signalWeightDecayFactor: number;
+  readonly signalWeightFloor: number;
+  readonly signalWeightCeiling: number;
+  readonly weightedEntryScoreThreshold: number;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -195,6 +227,57 @@ const loadConfig = Effect.gen(function* () {
   const paperValidationMinDays = yield* validatedNumber("PAPER_VALIDATION_MIN_DAYS", 0, 7);
   const paperValidationEnforce = yield* Config.boolean("PAPER_VALIDATION_ENFORCE").pipe(
     Effect.orElseSucceed(() => false),
+  );
+
+  // ─── F7: Pool cooldown after failed exits ───────────────────────────────────
+  const oorCooldownMs = yield* validatedNumber("OOR_COOLDOWN_MS", 0, 4 * 60 * 60 * 1000);
+  const repeatOorCooldownMs = yield* validatedNumber("REPEAT_OOR_COOLDOWN_MS", 0, 12 * 60 * 60 * 1000);
+  const maxOorCooldownExits = yield* validatedNumber("MAX_OOR_COOLDOWN_EXITS", 1, 3);
+
+  // ─── Agentic mode / LLM overlay ──────────────────────────────────────
+  const agentiveMode = yield* Config.boolean("AGENTIC_MODE").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const llmApiKey = yield* Config.string("LLM_API_KEY").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const llmModel = yield* Config.string("LLM_MODEL").pipe(
+    Effect.orElseSucceed(() => "gpt-4o"),
+  );
+  const llmBaseUrl = yield* Config.string("LLM_BASE_URL").pipe(
+    Effect.orElseSucceed(() => "https://api.openai.com/v1"),
+  );
+  const llmMaxTokens = yield* validatedNumber("LLM_MAX_TOKENS", 256, 1024, 8192);
+
+  // ─── Threshold evolution ─────────────────────────────────────────────
+  const evolutionInterval = yield* validatedNumber("EVOLUTION_INTERVAL", 1, 5, 100);
+  const evolutionMaxChangePct = yield* validatedNumber(
+    "EVOLUTION_MAX_CHANGE_PCT",
+    0.01,
+    0.20,
+    1.0,
+  );
+
+  const signalWeightWindowDays = yield* validatedNumber("SIGNAL_WEIGHT_WINDOW_DAYS", 7, 60);
+  const signalWeightMinOutcomes = yield* validatedNumber("SIGNAL_WEIGHT_MIN_OUTCOMES", 3, 10);
+  const signalWeightBoostFactor = yield* validatedNumber(
+    "SIGNAL_WEIGHT_BOOST_FACTOR",
+    1.0,
+    1.05,
+    2.0,
+  );
+  const signalWeightDecayFactor = yield* validatedNumber(
+    "SIGNAL_WEIGHT_DECAY_FACTOR",
+    0.5,
+    0.95,
+    1.0,
+  );
+  const signalWeightFloor = yield* validatedNumber("SIGNAL_WEIGHT_FLOOR", 0.1, 0.3, 1.0);
+  const signalWeightCeiling = yield* validatedNumber("SIGNAL_WEIGHT_CEILING", 1.0, 2.5, 5.0);
+  const weightedEntryScoreThreshold = yield* validatedNumber(
+    "WEIGHTED_ENTRY_SCORE_THRESHOLD",
+    0.1,
+    1.8,
   );
 
   // New feature configs
@@ -332,6 +415,23 @@ const loadConfig = Effect.gen(function* () {
     maxOpenPositions,
     paperValidationMinDays,
     paperValidationEnforce,
+    oorCooldownMs,
+    repeatOorCooldownMs,
+    maxOorCooldownExits,
+    agentiveMode,
+    llmApiKey,
+    llmModel,
+    llmBaseUrl,
+    llmMaxTokens,
+    evolutionInterval,
+    evolutionMaxChangePct,
+    signalWeightWindowDays,
+    signalWeightMinOutcomes,
+    signalWeightBoostFactor,
+    signalWeightDecayFactor,
+    signalWeightFloor,
+    signalWeightCeiling,
+    weightedEntryScoreThreshold,
   };
 
   return cfg;

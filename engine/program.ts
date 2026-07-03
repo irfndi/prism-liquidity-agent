@@ -17,7 +17,11 @@ import {
   recommendBinRangeForVolatility,
   estimateRecoveryProbability,
   shouldHoldForRecovery,
+  evolveThresholds,
+  computeSignalWeights,
+  weightedEntryScore,
 } from "./strategy-service.js";
+import type { EvolvableThresholds } from "./strategy-service.js";
 import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
 import { ScreenerLive } from "./screener-service.js";
@@ -25,6 +29,7 @@ import { DbLive } from "./db-service.js";
 import { RevenueLive } from "./revenue-service.js";
 import { RevenueConfigServiceLive } from "./revenue-config-service.js";
 import { ReferralLive } from "./referral-service.js";
+import { LlmLive, LlmNoOp } from "./llm-service.js";
 import { checkForAutoUpdate } from "./update-check.js";
 import type { PositionRecord } from "./db-service.js";
 import { DiscoverPoolsError } from "./errors.js";
@@ -40,12 +45,13 @@ import {
   RevenueService,
   RevenueConfigService,
   ReferralService,
+  LlmService,
   type AdapterApi,
   type DbApi,
   type MemoryApi,
   type ScreenedPool,
 } from "./services.js";
-import type { AgentDecision, AgentCycle, PoolState, Position } from "./types.js";
+import type { AgentDecision, AgentCycle, PoolState, Position, SignalWeights } from "./types.js";
 import { randomUUID } from "crypto";
 
 // ─── Cycle state ───────────────────────────────────────────────
@@ -165,6 +171,7 @@ export function reconcilePositions(
             highestValueUsd: null,
             lastRebalanceAt: 0,
             paperExitedAt: null,
+            entrySignalTimestamp: null,
           };
           trackedPositions.set(onChainPos.poolAddress, pos);
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
@@ -195,7 +202,8 @@ type AllServices =
   | DbService
   | RevenueService
   | RevenueConfigService
-  | ReferralService;
+  | ReferralService
+  | LlmService;
 
 export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, never> {
   const dbLayer = DbLive(cfg?.sqliteDbPath);
@@ -241,7 +249,14 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged10 = Layer.merge(merged9, ReferralLive);
   const merged11 = Layer.merge(merged10, revenueConfig);
 
-  return merged11 as Layer.Layer<AllServices, never, never>;
+  const llmLayer =
+    cfg?.agentiveMode && cfg?.llmApiKey
+      ? LlmLive(cfg)
+      : Layer.succeed(LlmService, LlmNoOp);
+
+  const merged12 = Layer.merge(merged11, llmLayer);
+
+  return merged12 as Layer.Layer<AllServices, never, never>;
 }
 
 // ─── Main program ────────────────────────────────────────────────────────────
@@ -258,6 +273,7 @@ export const program = Effect.gen(function* () {
   const db = yield* DbService;
   const revenueConfigSvc = yield* RevenueConfigService;
   const referral = yield* ReferralService;
+  const llm = yield* LlmService;
 
   // Load persisted positions at startup
   const allPositions = yield* db.getAllPositions().pipe(Effect.catchAll(() => Effect.succeed([])));
@@ -316,6 +332,107 @@ export const program = Effect.gen(function* () {
       .pipe(Effect.catchAll(() => Effect.succeed("0")));
     return Number(stored) || 0;
   });
+
+  // ─── Threshold evolution state ────────────────────────────────────────
+  const EVOLUTION_COUNT_KEY = "threshold_evolution_count";
+  let evolvedThresholds: EvolvableThresholds = {
+    minFeeIlRatio: config.minFeeIlRatio,
+    volumeAuthThreshold: config.volumeAuthThreshold,
+    minBinUtilization: config.minBinUtilization,
+  };
+
+  const loadEvolvedThresholds = Effect.gen(function* () {
+    const stored = yield* db.getEvolvedThresholds().pipe(Effect.catchAll(() => Effect.succeed(null)));
+    if (stored) {
+      evolvedThresholds = stored;
+    }
+  });
+
+  yield* loadEvolvedThresholds;
+
+  const tryEvolveThresholds = Effect.gen(function* () {
+    const countStr = yield* db
+      .getMetadata(EVOLUTION_COUNT_KEY)
+      .pipe(Effect.catchAll(() => Effect.succeed("0")));
+    const count = Number(countStr) || 0;
+
+    if (count < config.evolutionInterval) return;
+
+    const outcomes = yield* db
+      .getClosedPositionOutcomes(config.evolutionInterval * 3)
+      .pipe(Effect.catchAll(() => Effect.succeed([])));
+
+    const result = evolveThresholds(outcomes, evolvedThresholds, {
+      evolutionInterval: config.evolutionInterval,
+      maxChangePct: config.evolutionMaxChangePct,
+      minOutcomes: config.evolutionInterval,
+    });
+
+    if (result.changed) {
+      evolvedThresholds = result.thresholds;
+      yield* db.saveEvolvedThresholds(result.thresholds).pipe(Effect.catchAll(() => Effect.void));
+      console.info("[threshold-evolution] Evolved thresholds", {
+        minFeeIlRatio: result.thresholds.minFeeIlRatio.toFixed(3),
+        volumeAuthThreshold: result.thresholds.volumeAuthThreshold.toFixed(3),
+        minBinUtilization: result.thresholds.minBinUtilization.toFixed(3),
+      });
+
+      // Recompute signal weights alongside threshold evolution
+      const outcomeRecords = yield* db
+        .getClosedPositionOutcomes(config.evolutionInterval * 3)
+        .pipe(Effect.catchAll(() => Effect.succeed([])));
+      const newWeights = computeSignalWeights(outcomeRecords, signalWeights, {
+        windowDays: config.signalWeightWindowDays,
+        minOutcomes: config.signalWeightMinOutcomes,
+        boostFactor: config.signalWeightBoostFactor,
+        decayFactor: config.signalWeightDecayFactor,
+        weightFloor: config.signalWeightFloor,
+        weightCeiling: config.signalWeightCeiling,
+      });
+      if (newWeights.updatedAt !== signalWeights.updatedAt) {
+        signalWeights = newWeights;
+        yield* db.saveSignalWeights(newWeights).pipe(Effect.catchAll(() => Effect.void));
+        console.info("[signal-weights] Recomputed weights", {
+          feeIlRatio: newWeights.feeIlRatio.toFixed(3),
+          volumeAuthenticity: newWeights.volumeAuthenticity.toFixed(3),
+          binUtilization: newWeights.binUtilization.toFixed(3),
+          tvlUsd: newWeights.tvlUsd.toFixed(3),
+          tvlVelocity: newWeights.tvlVelocity.toFixed(3),
+        });
+      }
+    }
+    yield* db.setMetadata(EVOLUTION_COUNT_KEY, "0").pipe(Effect.catchAll(() => Effect.void));
+  });
+
+  const incrementEvolutionCount = Effect.gen(function* () {
+    const countStr = yield* db
+      .getMetadata(EVOLUTION_COUNT_KEY)
+      .pipe(Effect.catchAll(() => Effect.succeed("0")));
+    const count = Number(countStr) || 0;
+    yield* db
+      .setMetadata(EVOLUTION_COUNT_KEY, String(count + 1))
+      .pipe(Effect.catchAll(() => Effect.void));
+  });
+
+  // ─── Signal weights state ─────────────────────────────────────────────
+  const DEFAULT_SIGNAL_WEIGHTS: SignalWeights = {
+    feeIlRatio: 1.0,
+    volumeAuthenticity: 1.0,
+    binUtilization: 1.0,
+    tvlUsd: 1.0,
+    tvlVelocity: 1.0,
+    updatedAt: Date.now(),
+  };
+  let signalWeights: SignalWeights = DEFAULT_SIGNAL_WEIGHTS;
+
+  const loadSignalWeights = Effect.gen(function* () {
+    const stored = yield* db.getSignalWeights().pipe(Effect.catchAll(() => Effect.succeed(null)));
+    if (stored) {
+      signalWeights = stored;
+    }
+  });
+
+  yield* loadSignalWeights;
 
   if (!config.paperTrading) {
     const paperExited = yield* db
@@ -483,8 +600,8 @@ export const program = Effect.gen(function* () {
           metrics.volumeAuthenticity,
           metrics.binUtilization,
           config.minPoolTvlUsd,
-          config.volumeAuthThreshold,
-          config.minBinUtilization,
+          evolvedThresholds.volumeAuthThreshold,
+          evolvedThresholds.minBinUtilization,
         )
       ) {
         console.debug("Pool failed pre-filter", { pool: poolAddress });
@@ -557,6 +674,14 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      const recentBins = binHistory.get(poolAddress) ?? [];
+      const volatilityLookback = Math.max(2, config.volatilityLookbackSnapshots);
+      const volatilityBins =
+        recentBins.length > volatilityLookback
+          ? recentBins.slice(recentBins.length - volatilityLookback)
+          : recentBins;
+      const volatilityStddev = computeBinVolatilityStddev(volatilityBins);
+
       // EXIT conditions (capital protection)
       if (tvlVelocity < -config.tvlDropExitPct) {
         decision = {
@@ -572,7 +697,7 @@ export const program = Effect.gen(function* () {
             poolAddress,
           })
           .pipe(Effect.catchAll(() => Effect.void));
-      } else if (volumeAuth < config.volumeAuthThreshold) {
+      } else if (volumeAuth < evolvedThresholds.volumeAuthThreshold) {
         decision = {
           action: "EXIT",
           poolAddress,
@@ -611,6 +736,55 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      // F7: update pool cooldown after EXIT decisions
+      if (decision && decision.action === "EXIT") {
+        const existingCooldown = yield* db.getPoolCooldown(poolAddress).pipe(
+          Effect.catchAll(() => Effect.succeed(null)),
+        );
+        const existingOorCount = existingCooldown?.consecutiveOorExits ?? 0;
+        const isOorExit = decision.reasoning.includes("Volatility-gate") ||
+          decision.reasoning.includes("volatility") ||
+          (pos && pos.oorCycleCount >= config.oorGracePeriodCycles && pos.oorCycleCount > 0);
+        const isLowYieldExit = decision.reasoning.includes("Fee/IL ratio") ||
+          decision.reasoning.includes("Volume authenticity");
+
+        if (isOorExit) {
+          const newOorCount = existingOorCount + 1;
+          const cooldownDuration =
+            newOorCount >= config.maxOorCooldownExits
+              ? config.repeatOorCooldownMs
+              : config.oorCooldownMs;
+          const cooldownUntil = Date.now() + cooldownDuration;
+          yield* db
+            .setPoolCooldown({
+              poolAddress,
+              cooldownUntil,
+              reason: `OOR exit (#${newOorCount})`,
+              consecutiveOorExits: newOorCount,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          const hours = (cooldownDuration / 3_600_000).toFixed(1);
+          console.info(
+            `[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — OOR exit #${newOorCount}`,
+          );
+        } else if (isLowYieldExit) {
+          const cooldownDuration = config.oorCooldownMs;
+          const cooldownUntil = Date.now() + cooldownDuration;
+          yield* db
+            .setPoolCooldown({
+              poolAddress,
+              cooldownUntil,
+              reason: `Low yield exit`,
+              consecutiveOorExits: 0,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          const hours = (cooldownDuration / 3_600_000).toFixed(1);
+          console.info(
+            `[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — low yield exit`,
+          );
+        }
+      }
+
       // Use the live wallet value when available. Fall back to the configured
       // paper portfolio on RPC failure so a transient balance read does not
       // abort the entire pool evaluation.
@@ -633,14 +807,6 @@ export const program = Effect.gen(function* () {
         const oorGraceExpired =
           hasPosition && pos && pos.oorCycleCount >= config.oorGracePeriodCycles;
 
-        // F2: compute recent bin volatility
-        const recentBins = binHistory.get(poolAddress) ?? [];
-        const volatilityLookback = Math.max(2, config.volatilityLookbackSnapshots);
-        const volatilityBins =
-          recentBins.length > volatilityLookback
-            ? recentBins.slice(recentBins.length - volatilityLookback)
-            : recentBins;
-        const volatilityStddev = computeBinVolatilityStddev(volatilityBins);
         const highVol = isHighVolatility(volatilityStddev, config.volatilityExitStddev);
 
         // F4: slice the history to the configured recovery lookback window.
@@ -800,7 +966,7 @@ export const program = Effect.gen(function* () {
         // HOLD or ENTER
         if (!decision) {
           if (hasPosition) {
-            if (feeIlRatio > config.minFeeIlRatio && !hasRecentWarning) {
+            if (feeIlRatio > evolvedThresholds.minFeeIlRatio && !hasRecentWarning) {
               decision = {
                 action: "HOLD",
                 poolAddress,
@@ -809,12 +975,63 @@ export const program = Effect.gen(function* () {
               };
             }
           } else {
+            // F7: pool cooldown check — skip ENTER if this pool is on cooldown
+            const cooldown = yield* db.getPoolCooldown(poolAddress).pipe(
+              Effect.catchAll(() => Effect.succeed(null)),
+            );
+            if (cooldown && Date.now() < cooldown.cooldownUntil) {
+              const remainingH = ((cooldown.cooldownUntil - Date.now()) / 3_600_000).toFixed(1);
+              console.info(
+                `[cooldown-gate] Skipping ENTER ${poolAddress} — on cooldown for ${remainingH}h (reason: ${cooldown.reason})`,
+              );
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Pool cooldown blocked ENTER on ${poolAddress}: ${cooldown.reason} (cooldown for ${remainingH}h more)`,
+                  poolAddress,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: 0,
+                  reasoning: `[cooldown-gate] ${cooldown.reason} — cooldown active for ${remainingH}h`,
+                  metrics,
+                  riskResult: { approved: false, reason: `[cooldown-gate] ${cooldown.reason}` },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+              return null;
+            }
+
             if (
               feeIlRatio > config.minFeeIlRatio * 1.5 &&
               volumeAuth > 0.8 &&
               binUtilization > 0.4 &&
               pool.tvlUsd > config.minPoolTvlUsd * 2
             ) {
+              const entryScore = weightedEntryScore(metrics, signalWeights);
+              if (entryScore <= config.weightedEntryScoreThreshold) {
+                yield* audit
+                  .recordDecision({
+                    timestamp: Date.now(),
+                    cycleId,
+                    poolAddress,
+                    action: "ENTER",
+                    confidence: 0,
+                    reasoning: `[weighted-score] score ${entryScore.toFixed(3)} <= threshold ${config.weightedEntryScoreThreshold}`,
+                    metrics,
+                    riskResult: { approved: false, reason: `[weighted-score] ${entryScore.toFixed(3)} <= ${config.weightedEntryScoreThreshold}` },
+                    executed: false,
+                    paperTrading: config.paperTrading,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+                return null;
+              }
               const maxPositionSize = Math.min(walletBalanceUsd * 0.5, pool.tvlUsd * 0.005, 500);
               const proposedSizeUsd = Math.max(maxPositionSize, 10);
 
@@ -878,6 +1095,25 @@ export const program = Effect.gen(function* () {
         };
       }
 
+      // Agentic-mode overlay (optional LLM review)
+      if (config.agentiveMode) {
+        const enhanced = yield* llm.enhanceDecision(decision, {
+          pool,
+          metrics,
+          warnings,
+          recentDecisions: yield* audit.getRecentDecisions(10).pipe(
+            Effect.catchAll(() => Effect.succeed([])),
+          ),
+        }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+        if (enhanced) {
+          console.info(
+            `[agentic] ${decision.action} → ${enhanced.action} ` +
+            `(confidence ${decision.confidence.toFixed(2)} → ${enhanced.confidence.toFixed(2)})`,
+          );
+          decision = enhanced;
+        }
+      }
+
       // Risk evaluation
       const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
 
@@ -924,6 +1160,23 @@ export const program = Effect.gen(function* () {
           .pipe(Effect.catchAll(() => Effect.void));
         return decision;
       }
+
+      const signalTimestamp = Date.now();
+      yield* db
+        .saveSignalSnapshot({
+          poolAddress,
+          timestamp: signalTimestamp,
+          feeIlRatio: metrics.feeIlRatio,
+          volumeAuthenticity: metrics.volumeAuthenticity,
+          binUtilization: metrics.binUtilization,
+          tvlUsd: pool.tvlUsd,
+          tvlVelocity: metrics.tvlVelocity,
+          volatilityStddev,
+          binStep: pool.binStep,
+          action: decision.action,
+          confidence: decision.confidence,
+        })
+        .pipe(Effect.catchAll(() => Effect.void));
 
       // Execute
       let executed = false;
@@ -974,9 +1227,9 @@ export const program = Effect.gen(function* () {
           action: decision.action,
           pool: poolAddress,
         });
-        executed = yield* executePaper(decision, pool);
+        executed = yield* executePaper(decision, pool, signalTimestamp);
       } else {
-        executed = yield* executeLive(decision, pool);
+        executed = yield* executeLive(decision, pool, signalTimestamp);
       }
 
       // Audit after execution
@@ -995,6 +1248,12 @@ export const program = Effect.gen(function* () {
         })
         .pipe(Effect.catchAll(() => Effect.void));
 
+      // Threshold evolution: increment counter on EXIT, try evolve at interval
+      if (decision.action === "EXIT" && executed) {
+        yield* incrementEvolutionCount.pipe(Effect.catchAll(() => Effect.void));
+        yield* tryEvolveThresholds.pipe(Effect.catchAll(() => Effect.void));
+      }
+
       return decision;
     });
 
@@ -1003,6 +1262,7 @@ export const program = Effect.gen(function* () {
   const executePaper = (
     decision: AgentDecision,
     pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
+    signalTimestamp?: number,
   ): Effect.Effect<boolean> =>
     Effect.gen(function* () {
       if (decision.action === "ENTER" && decision.positionSizeUsd) {
@@ -1027,6 +1287,7 @@ export const program = Effect.gen(function* () {
           highestValueUsd: null,
           lastRebalanceAt: 0,
           paperExitedAt: liveExited ? existing!.paperExitedAt : null,
+          entrySignalTimestamp: signalTimestamp ?? null,
         };
         trackedPositions.set(decision.poolAddress, pos);
         yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
@@ -1037,7 +1298,7 @@ export const program = Effect.gen(function* () {
             console.warn(
               `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${decision.poolAddress}`,
             );
-            return yield* executeLive(decision, pool);
+            return yield* executeLive(decision, pool, signalTimestamp);
           }
           // Live position — paper trading must not "exit" it without an on-chain tx.
           // Skip and warn so the user can switch to live mode to actually close it.
@@ -1046,6 +1307,12 @@ export const program = Effect.gen(function* () {
               `(pubKey: ${pos.positionPubKey}). Switch to live mode to close it on-chain.`,
           );
           return false;
+        }
+        if (pos?.entrySignalTimestamp != null) {
+          const pnlUsd = pos.currentValueUsd - pos.depositedUsd;
+          yield* db
+            .recordSignalOutcome(decision.poolAddress, pos.entrySignalTimestamp, pnlUsd)
+            .pipe(Effect.catchAll(() => Effect.void));
         }
         yield* db.markPaperExited(decision.poolAddress).pipe(Effect.catchAll(() => Effect.void));
         trackedPositions.delete(decision.poolAddress);
@@ -1072,6 +1339,7 @@ export const program = Effect.gen(function* () {
   const executeLive = (
     decision: AgentDecision,
     pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
+    signalTimestamp?: number,
   ): Effect.Effect<boolean> =>
     Effect.gen(function* () {
       if (!adapter.hasWallet()) {
@@ -1137,18 +1405,19 @@ export const program = Effect.gen(function* () {
             timestamp: Date.now(),
             outOfRangeSince: null,
             oorCycleCount: 0,
-            lastFeeClaimAt: Date.now(),
-            trailingStopThreshold: null,
-            highestValueUsd: null,
-            lastRebalanceAt: 0,
-            paperExitedAt: null,
-          };
-          trackedPositions.set(decision.poolAddress, pos);
-          yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
-          return true;
-        }
-        return false;
-      } else if (decision.action === "EXIT") {
+          lastFeeClaimAt: Date.now(),
+          trailingStopThreshold: null,
+          highestValueUsd: null,
+          lastRebalanceAt: 0,
+          paperExitedAt: null,
+          entrySignalTimestamp: signalTimestamp ?? null,
+        };
+        trackedPositions.set(decision.poolAddress, pos);
+        yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+        return true;
+      }
+      return false;
+    } else if (decision.action === "EXIT") {
         const pos = trackedPositions.get(decision.poolAddress);
         let exited = false;
         if (pos?.positionPubKey) {
@@ -1171,6 +1440,12 @@ export const program = Effect.gen(function* () {
           exited = true;
         }
         if (exited) {
+          if (pos?.entrySignalTimestamp != null) {
+            const pnlUsd = pos.currentValueUsd - pos.depositedUsd;
+            yield* db
+              .recordSignalOutcome(decision.poolAddress, pos.entrySignalTimestamp, pnlUsd)
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
           trackedPositions.delete(decision.poolAddress);
           yield* db.deletePosition(decision.poolAddress).pipe(Effect.catchAll(() => Effect.void));
         }

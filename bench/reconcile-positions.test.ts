@@ -61,6 +61,7 @@ function makePosition(poolAddress: string, positionPubKey: string | null): Posit
     highestValueUsd: null,
     lastRebalanceAt: 0,
     paperExitedAt: null,
+    entrySignalTimestamp: null,
   };
 }
 

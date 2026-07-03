@@ -74,6 +74,7 @@ export function makePosition(overrides: Partial<PositionRecord> = {}): PositionR
     highestValueUsd: overrides.highestValueUsd ?? null,
     lastRebalanceAt: overrides.lastRebalanceAt ?? 0,
     paperExitedAt: overrides.paperExitedAt ?? null,
+    entrySignalTimestamp: overrides.entrySignalTimestamp ?? null,
   };
 }
 
@@ -138,6 +139,23 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     maxOpenPositions: 3,
     paperValidationMinDays: 7,
     paperValidationEnforce: false,
+    agentiveMode: false,
+    llmApiKey: "",
+    llmModel: "gpt-4o",
+    llmBaseUrl: "https://api.openai.com/v1",
+    llmMaxTokens: 1024,
+    oorCooldownMs: 4 * 60 * 60 * 1000,
+    repeatOorCooldownMs: 12 * 60 * 60 * 1000,
+    maxOorCooldownExits: 3,
+    evolutionInterval: 5,
+    evolutionMaxChangePct: 0.20,
+    signalWeightWindowDays: 60,
+    signalWeightMinOutcomes: 10,
+    signalWeightBoostFactor: 1.05,
+    signalWeightDecayFactor: 0.95,
+    signalWeightFloor: 0.3,
+    signalWeightCeiling: 2.5,
+    weightedEntryScoreThreshold: 1.8,
     ...overrides,
   };
 }

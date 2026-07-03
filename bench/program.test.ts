@@ -59,6 +59,7 @@ describe("estimatePositionValue", () => {
       highestValueUsd: null,
       lastRebalanceAt: 0,
       paperExitedAt: null,
+      entrySignalTimestamp: null,
     };
   }
 

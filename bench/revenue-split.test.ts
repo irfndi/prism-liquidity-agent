@@ -68,6 +68,23 @@ function buildLayer() {
     maxOpenPositions: 3,
     paperValidationMinDays: 7,
     paperValidationEnforce: false,
+    agentiveMode: false,
+    llmApiKey: "",
+    llmModel: "gpt-4o",
+    llmBaseUrl: "https://api.openai.com/v1",
+    llmMaxTokens: 1024,
+    oorCooldownMs: 4 * 60 * 60 * 1000,
+    repeatOorCooldownMs: 12 * 60 * 60 * 1000,
+    maxOorCooldownExits: 3,
+    evolutionInterval: 5,
+    evolutionMaxChangePct: 0.20,
+    signalWeightWindowDays: 60,
+    signalWeightMinOutcomes: 10,
+    signalWeightBoostFactor: 1.05,
+    signalWeightDecayFactor: 0.95,
+    signalWeightFloor: 0.3,
+    signalWeightCeiling: 2.5,
+    weightedEntryScoreThreshold: 1.8,
 
   });
   const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));

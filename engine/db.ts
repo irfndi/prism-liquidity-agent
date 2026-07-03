@@ -340,6 +340,61 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       db.exec(`ALTER TABLE fee_claims ADD COLUMN operator_fee_y REAL NOT NULL DEFAULT 0`);
     },
   },
+  {
+    version: 12,
+    name: "signal_snapshots",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS signal_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          pool_address TEXT NOT NULL,
+          timestamp INTEGER NOT NULL,
+          fee_il_ratio REAL NOT NULL,
+          volume_authenticity REAL NOT NULL,
+          bin_utilization REAL NOT NULL,
+          tvl_usd REAL NOT NULL,
+          tvl_velocity REAL NOT NULL,
+          volatility_stddev REAL NOT NULL,
+          bin_step INTEGER NOT NULL,
+          action TEXT NOT NULL,
+          confidence REAL NOT NULL,
+          outcome_pnl_usd REAL,
+          outcome_recorded_at INTEGER
+        );
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_signal_snapshots_pool_time
+          ON signal_snapshots(pool_address, timestamp);
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_signal_snapshots_outcome
+          ON signal_snapshots(outcome_recorded_at);
+      `);
+    },
+  },
+  {
+    version: 13,
+    name: "pool_cooldowns",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS pool_cooldowns (
+          pool_address TEXT PRIMARY KEY,
+          cooldown_until INTEGER NOT NULL,
+          reason TEXT NOT NULL,
+          consecutive_oor_exits INTEGER NOT NULL DEFAULT 0
+        );
+      `);
+    },
+  },
+  {
+    version: 14,
+    name: "add_entry_signal_timestamp",
+    up(db) {
+      if (!hasColumn(db, "positions", "entry_signal_timestamp")) {
+        db.exec("ALTER TABLE positions ADD COLUMN entry_signal_timestamp INTEGER");
+      }
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

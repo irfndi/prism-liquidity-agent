@@ -7,11 +7,15 @@ import type {
   BinArray,
   MemoryCategory,
   MemoryEntry,
+  PoolCooldown,
   PoolMetrics,
   PoolSnapshot,
   PoolState,
   Position,
+  SignalSnapshot,
+  SignalWeights,
 } from "./types.js";
+import type { EvolvableThresholds, OutcomeRecord } from "./strategy-service.js";
 import type {
   AdapterError,
   AuditError,
@@ -302,6 +306,7 @@ export interface DbApi {
     highestValueUsd: number | null;
     lastRebalanceAt: number;
     paperExitedAt: number | null;
+    entrySignalTimestamp: number | null;
   }) => Effect.Effect<void, unknown>;
   readonly getPosition: (poolAddress: string) => Effect.Effect<
     {
@@ -320,11 +325,12 @@ export interface DbApi {
       lastFeeClaimAt: number;
       trailingStopThreshold: number | null;
       highestValueUsd: number | null;
-      lastRebalanceAt: number;
-      paperExitedAt: number | null;
-    } | null,
-    unknown
-  >;
+    lastRebalanceAt: number;
+    paperExitedAt: number | null;
+    entrySignalTimestamp: number | null;
+  } | null,
+  unknown
+>;
   readonly getAllPositions: () => Effect.Effect<
     ReadonlyArray<{
       poolAddress: string;
@@ -342,11 +348,12 @@ export interface DbApi {
       lastFeeClaimAt: number;
       trailingStopThreshold: number | null;
       highestValueUsd: number | null;
-      lastRebalanceAt: number;
-      paperExitedAt: number | null;
-    }>,
-    unknown
-  >;
+    lastRebalanceAt: number;
+    paperExitedAt: number | null;
+    entrySignalTimestamp: number | null;
+  }>,
+  unknown
+>;
   readonly getPaperExitedPositions: () => Effect.Effect<
     ReadonlyArray<{
       poolAddress: string;
@@ -364,11 +371,12 @@ export interface DbApi {
       lastFeeClaimAt: number;
       trailingStopThreshold: number | null;
       highestValueUsd: number | null;
-      lastRebalanceAt: number;
-      paperExitedAt: number | null;
-    }>,
-    unknown
-  >;
+    lastRebalanceAt: number;
+    paperExitedAt: number | null;
+    entrySignalTimestamp: number | null;
+  }>,
+  unknown
+>;
   readonly deletePosition: (poolAddress: string) => Effect.Effect<void, unknown>;
   readonly markPaperExited: (poolAddress: string) => Effect.Effect<void, unknown>;
   readonly updatePositionValue: (
@@ -569,6 +577,58 @@ export interface DbApi {
   >;
 
   readonly markFeeClaimReported: (id: string) => Effect.Effect<void, unknown>;
+
+  readonly saveSignalSnapshot: (snapshot: SignalSnapshot) => Effect.Effect<void, unknown>;
+  readonly getSignalSnapshots: (
+    poolAddress: string,
+    startMs: number,
+    endMs: number,
+  ) => Effect.Effect<
+    ReadonlyArray<SignalSnapshot & { outcomePnlUsd: number | null; outcomeRecordedAt: number | null }>,
+    unknown
+  >;
+  readonly recordSignalOutcome: (
+    poolAddress: string,
+    entryTimestamp: number,
+    pnlUsd: number,
+  ) => Effect.Effect<void, unknown>;
+  readonly getRecentOutcomes: (
+    limit: number,
+  ) => Effect.Effect<
+    ReadonlyArray<{
+      poolAddress: string;
+      timestamp: number;
+      feeIlRatio: number;
+      volumeAuthenticity: number;
+      binUtilization: number;
+      tvlUsd: number;
+      tvlVelocity: number;
+      volatilityStddev: number;
+      binStep: number;
+      action: string;
+      confidence: number;
+      outcomePnlUsd: number | null;
+      outcomeRecordedAt: number | null;
+    }>,
+    unknown
+  >;
+
+  readonly getEvolvedThresholds: () => Effect.Effect<EvolvableThresholds | null, unknown>;
+  readonly saveEvolvedThresholds: (
+    thresholds: EvolvableThresholds,
+  ) => Effect.Effect<void, unknown>;
+  readonly getClosedPositionOutcomes: (
+    limit: number,
+  ) => Effect.Effect<ReadonlyArray<OutcomeRecord>, unknown>;
+
+  readonly getSignalWeights: () => Effect.Effect<SignalWeights | null, unknown>;
+  readonly saveSignalWeights: (weights: SignalWeights) => Effect.Effect<void, unknown>;
+
+  readonly getPoolCooldown: (
+    poolAddress: string,
+  ) => Effect.Effect<PoolCooldown | null, unknown>;
+  readonly setPoolCooldown: (cooldown: PoolCooldown) => Effect.Effect<void, unknown>;
+  readonly clearPoolCooldown: (poolAddress: string) => Effect.Effect<void, unknown>;
 }
 
 export class DbService extends Context.Tag("DbService")<DbService, DbApi>() {}
@@ -682,3 +742,19 @@ export class RevenueConfigService extends Context.Tag("RevenueConfigService")<
   RevenueConfigService,
   RevenueConfigApi
 >() {}
+
+// ─── LLM Service (agentic-mode overlay) ────────────────────────────────────
+
+export interface LlmApi {
+  readonly enhanceDecision: (
+    decision: AgentDecision,
+    context: {
+      readonly pool: PoolState;
+      readonly metrics: PoolMetrics;
+      readonly warnings: ReadonlyArray<MemoryEntry>;
+      readonly recentDecisions: ReadonlyArray<DecisionRecord>;
+    },
+  ) => Effect.Effect<AgentDecision | null, unknown>;
+}
+
+export class LlmService extends Context.Tag("LlmService")<LlmService, LlmApi>() {}
