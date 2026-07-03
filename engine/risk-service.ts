@@ -4,7 +4,6 @@ import type { AgentDecision } from "./types.js";
 
 export interface RiskConfig {
   readonly confidenceThreshold: number;
-  readonly maxOpenPositions: number;
   readonly maxRebalanceRangeBins: number;
   readonly stopLossPct: number;
 }
@@ -22,16 +21,7 @@ export function evaluateRisk(
     };
   }
 
-  // 2. Concurrent positions cap
-  if (
-    decision.action === "ENTER" &&
-    ctx.openPositions.length >= riskConfig.maxOpenPositions
-  ) {
-    return {
-      approved: false,
-      reason: `Max concurrent positions reached (${riskConfig.maxOpenPositions})`,
-    };
-  }
+  // 2. Concurrent positions cap is enforced upstream by evaluatePerPoolAllocation.
 
   // 2a. Duplicate pool guard
   if (decision.action === "ENTER" && decision.poolAddress) {
@@ -146,7 +136,7 @@ export function evaluateGasGate(input: GasGateInput): GasGateResult {
   if (gasCostUsd <= 0) {
     return {
       approved: false,
-      reason: `Invalid gas cost ${input.rebalanceGasCostSol} SOL — refusing rebalance`,
+      reason: `Gas cost must be positive (configured ${input.rebalanceGasCostSol} SOL) — refusing rebalance`,
       gasCostUsd,
       feesThresholdUsd,
     };
@@ -258,9 +248,7 @@ export interface PerPoolAllocationResult {
  * hard cap on simultaneously open positions. The deposit is capped to the
  * per-pool limit; ENTER is rejected only when the position cap is reached.
  */
-export function evaluatePerPoolAllocation(
-  input: PerPoolAllocationInput,
-): PerPoolAllocationResult {
+export function evaluatePerPoolAllocation(input: PerPoolAllocationInput): PerPoolAllocationResult {
   if (input.openPositions.length >= input.maxOpenPositions) {
     return {
       approved: false,
@@ -399,15 +387,7 @@ export function convertClaimFeesToUsd(input: ClaimFeesUsdInput): number {
   const xDecimals = getTokenDecimals(input.tokenXSymbol);
   const yDecimals = getTokenDecimals(input.tokenYSymbol);
   if (xDecimals < 0 || yDecimals < 0) return 0;
-  const feeXUsd = tokenAmountToUsd(
-    input.netFeeXRaw,
-    input.tokenXSymbol,
-    input.solPriceUsd,
-  );
-  const feeYUsd = tokenAmountToUsd(
-    input.netFeeYRaw,
-    input.tokenYSymbol,
-    input.solPriceUsd,
-  );
+  const feeXUsd = tokenAmountToUsd(input.netFeeXRaw, input.tokenXSymbol, input.solPriceUsd);
+  const feeYUsd = tokenAmountToUsd(input.netFeeYRaw, input.tokenYSymbol, input.solPriceUsd);
   return feeXUsd + feeYUsd;
 }
