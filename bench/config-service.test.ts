@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { Effect } from "effect";
 import { ConfigService, ConfigLive } from "../engine/config-service.js";
 
@@ -14,6 +14,10 @@ async function loadConfig() {
 }
 
 describe("ConfigService upper-bound clamping", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("clamps SOL_PRICE_USD above 10000", async () => {
     vi.stubEnv("SOL_PRICE_USD", "50000");
     const cfg = await loadConfig();
