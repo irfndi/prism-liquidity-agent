@@ -611,8 +611,13 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      // Use the live wallet value when available. Fall back to the configured
+      // paper portfolio on RPC failure so a transient balance read does not
+      // abort the entire pool evaluation.
       const walletBalanceUsd = adapter.hasWallet()
-        ? yield* adapter.getWalletBalanceUsd()
+        ? yield* adapter
+            .getWalletBalanceUsd()
+            .pipe(Effect.catchAll(() => Effect.succeed(config.paperPortfolioUsd)))
         : config.paperPortfolioUsd;
 
       // REBALANCE check
