@@ -98,9 +98,12 @@ export interface AppConfig {
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
 
-function validatedNumber(name: string, min: number, fallback: number) {
+function validatedNumber(name: string, min: number, fallback: number, max?: number) {
   return Config.number(name).pipe(
-    Effect.map((n) => (Number.isFinite(n) && n >= min ? n : fallback)),
+    Effect.map((n) => {
+      if (!Number.isFinite(n) || n < min) return fallback;
+      return max !== undefined && n > max ? max : n;
+    }),
     Effect.orElseSucceed(() => fallback),
   );
 }
@@ -143,7 +146,7 @@ const loadConfig = Effect.gen(function* () {
 
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
   const rebalanceGasCostSol = yield* validatedNumber("REBALANCE_GAS_COST_SOL", 0, 0.01);
-  const solPriceUsd = yield* validatedNumber("SOL_PRICE_USD", 0, 150);
+  const solPriceUsd = yield* validatedNumber("SOL_PRICE_USD", 0, 150, 10_000);
   const gasAwareMinDaysOfFeesPaidAhead = yield* validatedNumber(
     "GAS_AWARE_MIN_DAYS_OF_FEES_PAID_AHEAD",
     0,
@@ -171,16 +174,8 @@ const loadConfig = Effect.gen(function* () {
   const compoundGasBufferUsd = yield* validatedNumber("COMPOUND_GAS_BUFFER_USD", 0, 0.05);
 
   // ─── F4: OOR recovery prediction ─────────────────────────────────────────────
-  const oorRecoveryLookbackCycles = yield* validatedNumber(
-    "OOR_RECOVERY_LOOKBACK_CYCLES",
-    3,
-    10,
-  );
-  const oorRecoveryHoldThreshold = yield* validatedNumber(
-    "OOR_RECOVERY_HOLD_THRESHOLD",
-    0,
-    0.6,
-  );
+  const oorRecoveryLookbackCycles = yield* validatedNumber("OOR_RECOVERY_LOOKBACK_CYCLES", 3, 10);
+  const oorRecoveryHoldThreshold = yield* validatedNumber("OOR_RECOVERY_HOLD_THRESHOLD", 0, 0.6);
   const oorRecoveryForceRebalanceThreshold = yield* validatedNumber(
     "OOR_RECOVERY_FORCE_REBALANCE_THRESHOLD",
     0,
@@ -188,7 +183,12 @@ const loadConfig = Effect.gen(function* () {
   );
 
   // ─── F5: Multi-pool allocation ──────────────────────────────────────────────
-  const maxPerPoolAllocationPct = yield* validatedNumber("MAX_PER_POOL_ALLOCATION_PCT", 0, 0.4);
+  const maxPerPoolAllocationPct = yield* validatedNumber(
+    "MAX_PER_POOL_ALLOCATION_PCT",
+    0,
+    0.4,
+    1.0,
+  );
   const maxOpenPositions = yield* validatedNumber("MAX_OPEN_POSITIONS", 1, 3);
 
   // ─── F6: Paper-trading validation period ────────────────────────────────────
