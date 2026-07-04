@@ -56,7 +56,14 @@ export function createDatabase(dbPath = "./prism.db"): Database {
   fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   const db = new Database(dbPath);
   db.exec("PRAGMA journal_mode = WAL;");
-  loadVec(db);
+  try {
+    loadVec(db);
+  } catch (e) {
+    console.warn(
+      "[db] sqlite-vec extension could not be loaded:",
+      e instanceof Error ? e.message : String(e),
+    );
+  }
   runMigrations(db);
   return db;
 }
@@ -74,6 +81,10 @@ function hasTable(db: Database, name: string): boolean {
     .query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
     .get(name) as { "1": number } | null;
   return !!row;
+}
+
+export function hasVecMemoryTable(db: Database): boolean {
+  return hasTable(db, "vec_memory");
 }
 
 function hasColumn(db: Database, table: string, column: string): boolean {
@@ -136,21 +147,29 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
         );
       `);
 
-      // Memory vector table with sqlite-vec
-      db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory USING vec0(
-          embedding float[384],
-          +id TEXT,
-          +category TEXT,
-          +content TEXT,
-          +pool_address TEXT,
-          +outcome TEXT,
-          +pnlUsd REAL,
-          +confidence REAL,
-          +createdAt INTEGER,
-          +expiresAt INTEGER
+      // Memory vector table with sqlite-vec — guarded so the other
+      // tables above are still created if the vec0 extension fails.
+      try {
+        db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory USING vec0(
+            embedding float[384],
+            +id TEXT,
+            +category TEXT,
+            +content TEXT,
+            +pool_address TEXT,
+            +outcome TEXT,
+            +pnlUsd REAL,
+            +confidence REAL,
+            +createdAt INTEGER,
+            +expiresAt INTEGER
+          );
+        `);
+      } catch (e) {
+        console.warn(
+          "[db] sqlite-vec vec_memory table could not be created:",
+          e instanceof Error ? e.message : String(e),
         );
-      `);
+      }
     },
   },
   {
