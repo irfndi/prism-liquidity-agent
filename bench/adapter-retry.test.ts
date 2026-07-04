@@ -1,0 +1,152 @@
+import { describe, it, expect, vi, afterEach } from "vitest";
+import {
+  isRetriableError,
+  retryWithBackoff,
+  CircuitBreaker,
+  CircuitBreakerOpenError,
+} from "../engine/adapter-retry.js";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+// ── isRetriableError ──────────────────────────────────────────────
+
+describe("isRetriableError", () => {
+  it("returns true for error with code 429", () => {
+    expect(isRetriableError({ code: 429 })).toBe(true);
+  });
+
+  it("returns true for error whose message contains 429", () => {
+    expect(isRetriableError({ message: "status 429 too many requests" })).toBe(true);
+  });
+
+  it("returns false for unrelated errors", () => {
+    expect(isRetriableError(new Error("connection refused"))).toBe(false);
+    expect(isRetriableError({ code: 500 })).toBe(false);
+    expect(isRetriableError(null)).toBe(false);
+    expect(isRetriableError(undefined)).toBe(false);
+    expect(isRetriableError("string error")).toBe(false);
+  });
+});
+
+// ── retryWithBackoff ──────────────────────────────────────────────
+
+describe("retryWithBackoff", () => {
+  it("succeeds on first attempt", async () => {
+    const fn = vi.fn(async () => "ok");
+    const result = await retryWithBackoff(fn, { baseDelayMs: 10 });
+    expect(result).toBe("ok");
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries on retriable error then succeeds", async () => {
+    let call = 0;
+    const fn = vi.fn(async () => {
+      call++;
+      if (call <= 2) {
+        throw Object.assign(new Error("rate limited"), { code: 429 });
+      }
+      return "ok";
+    });
+    const result = await retryWithBackoff(fn, { baseDelayMs: 100, maxRetries: 5 });
+    expect(result).toBe("ok");
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it("throws after maxRetries exhausted", async () => {
+    const fn = vi.fn(async () => {
+      throw Object.assign(new Error("rate limited"), { code: 429 });
+    });
+    await expect(retryWithBackoff(fn, { maxRetries: 3, baseDelayMs: 10 })).rejects.toThrow();
+    // attempts: 0,1,2,3 = 4 total (maxRetries+1)
+    expect(fn).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not retry on non-retriable error", async () => {
+    const fn = vi.fn(async () => {
+      throw new Error("bad input");
+    });
+    await expect(retryWithBackoff(fn, { baseDelayMs: 10 })).rejects.toThrow("bad input");
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── CircuitBreaker ────────────────────────────────────────────────
+
+describe("CircuitBreaker", () => {
+  it("executes normally when closed", async () => {
+    const cb = new CircuitBreaker({ failureThreshold: 3 });
+    const result = await cb.execute(async () => 42);
+    expect(result).toBe(42);
+    expect(cb.getState()).toBe("CLOSED");
+  });
+
+  it("opens after threshold failures", async () => {
+    const cb = new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 60_000 });
+    const fail = async () => {
+      throw new Error("fail");
+    };
+
+    for (let i = 0; i < 3; i++) {
+      await cb.execute(fail).catch(() => {});
+    }
+
+    expect(cb.getState()).toBe("OPEN");
+
+    // Next call should throw CircuitBreakerOpenError without invoking fn
+    const fn = vi.fn(async () => "never");
+    await expect(cb.execute(fn)).rejects.toBeInstanceOf(CircuitBreakerOpenError);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("transitions to HALF_OPEN after reset timeout", async () => {
+    vi.useFakeTimers();
+    const cb = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 1000 });
+    const fail = async () => {
+      throw new Error("fail");
+    };
+
+    // Open the breaker
+    await cb.execute(fail).catch(() => {});
+    await cb.execute(fail).catch(() => {});
+    expect(cb.getState()).toBe("OPEN");
+
+    // Advance time past resetTimeout
+    vi.advanceTimersByTime(1100);
+    expect(cb.getState()).toBe("HALF_OPEN");
+  });
+
+  it("closes on successful half-open call", async () => {
+    vi.useFakeTimers();
+    const cb = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 1000 });
+    const fail = async () => {
+      throw new Error("fail");
+    };
+
+    await cb.execute(fail).catch(() => {});
+    await cb.execute(fail).catch(() => {});
+    vi.advanceTimersByTime(1100);
+    expect(cb.getState()).toBe("HALF_OPEN");
+
+    const result = await cb.execute(async () => "recovered");
+    expect(result).toBe("recovered");
+    expect(cb.getState()).toBe("CLOSED");
+  });
+
+  it("reopens on half-open failure", async () => {
+    vi.useFakeTimers();
+    const cb = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 1000 });
+    const fail = async () => {
+      throw new Error("fail");
+    };
+
+    await cb.execute(fail).catch(() => {});
+    await cb.execute(fail).catch(() => {});
+    vi.advanceTimersByTime(1100);
+    expect(cb.getState()).toBe("HALF_OPEN");
+
+    await cb.execute(fail).catch(() => {});
+    expect(cb.getState()).toBe("OPEN");
+  });
+});
