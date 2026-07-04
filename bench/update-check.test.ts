@@ -74,7 +74,6 @@ function buildLayer(
     maxOpenPositions: 3,
     paperValidationMinDays: 7,
     paperValidationEnforce: false,
-
   });
   return Layer.merge(mockConfig, DbLive(":memory:"));
 }

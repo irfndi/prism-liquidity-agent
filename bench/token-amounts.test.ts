@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { convertClaimFeesToUsd, tokenAmountToUsd, getTokenDecimals } from "../engine/risk-service.js";
+import {
+  convertClaimFeesToUsd,
+  tokenAmountToUsd,
+  getTokenDecimals,
+} from "../engine/risk-service.js";
 
 describe("getTokenDecimals", () => {
   it("returns 9 for SOL and wrapped SOL", () => {

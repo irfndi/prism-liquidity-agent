@@ -193,9 +193,6 @@ export function estimateRecoveryProbability(
  * threshold (we believe the price will come back). Returns false otherwise
  * (including in the gray zone — we rebalance rather than gamble).
  */
-export function shouldHoldForRecovery(
-  recoveryProbability: number,
-  holdThreshold: number,
-): boolean {
+export function shouldHoldForRecovery(recoveryProbability: number, holdThreshold: number): boolean {
   return recoveryProbability >= holdThreshold;
 }
