@@ -76,7 +76,7 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
 
           if (opts.json) {
             const json: StatusJsonOutput = {
-              running: hasDb,
+              running: running,
               dbPath: process.env.SQLITE_DB_PATH ?? "./prism.db",
               timestamp: new Date().toISOString(),
               agentRuntime: {

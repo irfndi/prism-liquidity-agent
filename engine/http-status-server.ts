@@ -76,7 +76,10 @@ export class HttpStatusServer {
 
           if (url.pathname === "/decisions") {
             const limitParam = parseInt(url.searchParams.get("limit") ?? "10", 10);
-            const limit = Number.isFinite(limitParam) && limitParam >= 0 ? limitParam : 10;
+            const limit = Math.min(
+              Math.max(0, Number.isFinite(limitParam) && limitParam >= 0 ? limitParam : 10),
+              100,
+            );
             const pool = url.searchParams.get("pool");
             let decisions = snapshot.recentDecisions;
             if (pool) {

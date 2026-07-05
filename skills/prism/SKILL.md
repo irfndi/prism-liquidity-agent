@@ -125,8 +125,8 @@ Supported runtimes:
 
 When `AGENTIC_MODE=true`, Prism exposes agent pull interfaces:
 
-- **MCP server** (stdio): tools `prism_status`, `prism_positions`, `prism_decisions`, `prism_config`. Enable with `AGENT_MCP_ENABLED=true` (default).
-- **HTTP fallback** on `127.0.0.1:AGENT_HTTP_PORT` (default `18790`): `GET /status`, `/positions`, `/decisions`, `/config`, `/health`. Set `AGENT_HTTP_PORT=0` to disable.
+- **MCP server** (stdio): tools `prism_status`, `prism_positions`, `prism_decisions`, `prism_config`. Enable with `AGENT_MCP_ENABLED=true` (disabled by default).
+- **HTTP fallback** on `127.0.0.1:AGENT_HTTP_PORT` (default `0`, disabled): `GET /status`, `/positions`, `/decisions`, `/config`, `/health`. Set `AGENT_HTTP_PORT` to a non-zero port to enable.
 
 Agent runtimes can query these on demand instead of waiting for push check-ins.
 

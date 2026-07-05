@@ -148,8 +148,8 @@ When Prism runs under a local agent harness (Hermes or OpenClaw), enable `AGENTI
 
 Prism also exposes pull interfaces for agent runtimes to query state on demand:
 
-- **MCP server** (stdio): tools `prism_status`, `prism_positions`, `prism_decisions`, `prism_config`. Enable with `AGENT_MCP_ENABLED=true` (default).
-- **HTTP fallback** on `127.0.0.1:AGENT_HTTP_PORT` (default `18790`): `GET /status`, `/positions`, `/decisions`, `/config`, `/health`. Set `AGENT_HTTP_PORT=0` to disable.
+- **MCP server** (stdio): tools `prism_status`, `prism_positions`, `prism_decisions`, `prism_config`. Enable with `AGENT_MCP_ENABLED=true` (disabled by default).
+- **HTTP fallback** on `127.0.0.1:AGENT_HTTP_PORT` (default `0`, disabled): `GET /status`, `/positions`, `/decisions`, `/config`, `/health`. Set `AGENT_HTTP_PORT` to a non-zero port to enable.
 
 | Variable                        | Default                    | Description                                          |
 | ------------------------------- | -------------------------- | ---------------------------------------------------- |
@@ -164,8 +164,8 @@ Prism also exposes pull interfaces for agent runtimes to query state on demand:
 | `AGENT_CHECKIN_ON_EVENTS`       | `true`                     | Check-in on ENTER/EXIT/REBALANCE                     |
 | `AGENT_CHECKIN_INCLUDE_HISTORY` | `true`                     | Include recent decisions/warnings                    |
 | `AGENT_CHECKIN_MAX_POSITIONS`   | `10`                       | Max positions in check-in summary                    |
-| `AGENT_HTTP_PORT`               | `18790`                    | Local HTTP status API port (`0` disables)            |
-| `AGENT_MCP_ENABLED`             | `true`                     | Expose MCP tools over stdio                          |
+| `AGENT_HTTP_PORT`               | `0`                        | Local HTTP status API port (`0` disables)            |
+| `AGENT_MCP_ENABLED`             | `false`                    | Expose MCP tools over stdio                          |
 
 ## Messaging summary
 

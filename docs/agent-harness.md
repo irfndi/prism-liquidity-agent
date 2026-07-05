@@ -222,8 +222,8 @@ export AGENT_CHECKIN_INTERVAL_MS="3600000"
 export AGENT_CHECKIN_ON_EVENTS="true"
 export AGENT_CHECKIN_INCLUDE_HISTORY="true"
 export AGENT_CHECKIN_MAX_POSITIONS="10"
-export AGENT_HTTP_PORT="18790"                  # local HTTP status API; 0 disables
-export AGENT_MCP_ENABLED="true"                 # expose MCP tools to agent runtime
+export AGENT_HTTP_PORT="0"                      # local HTTP status API; non-zero enables, 0 disables
+export AGENT_MCP_ENABLED="false"                # expose MCP tools to agent runtime; true enables
 ```
 
 The overlay can only reduce confidence or change an action to `HOLD`. No remote LLM API keys are used.
@@ -234,7 +234,7 @@ When `AGENTIC_MODE=true`, Prism exposes two pull interfaces so the agent runtime
 
 ### MCP Server (stdio)
 
-Enabled by default (`AGENT_MCP_ENABLED=true`). Prism implements a minimal MCP server over stdio with these tools:
+Disabled by default (`AGENT_MCP_ENABLED=false`). Prism implements a minimal MCP server over stdio with these tools:
 
 | Tool | Input | Output |
 |------|-------|--------|
@@ -247,7 +247,7 @@ Both Hermes and OpenClaw can connect to Prism as an MCP client. When the agent r
 
 ### HTTP Fallback
 
-Enabled when `AGENT_HTTP_PORT` is non-zero (default `18790`). Runs on `127.0.0.1` only:
+Enabled when `AGENT_HTTP_PORT` is non-zero (default `0`, disabled). Runs on `127.0.0.1` only:
 
 | Endpoint | Description |
 |----------|-------------|

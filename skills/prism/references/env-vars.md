@@ -47,8 +47,8 @@ value not set in `.env`.
 | `AGENT_CHECKIN_MAX_POSITIONS` | `10` | Max positions in check-in summary. |
 | `AGENT_OPENCLAW_WEBHOOK_URL` | — | OpenClaw webhook URL for alerts. |
 | `AGENT_HERMES_API_URL` | — | Hermes HTTP API URL for alerts. |
-| `AGENT_HTTP_PORT` | `18790` | Local HTTP status API port (`0` disables). |
-| `AGENT_MCP_ENABLED` | `true` | Expose MCP tools over stdio. |
+| `AGENT_HTTP_PORT` | `0` | Local HTTP status API port (`0` disables). |
+| `AGENT_MCP_ENABLED` | `false` | Expose MCP tools over stdio. |
 
 ## Optional features
 
