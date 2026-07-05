@@ -78,6 +78,7 @@ export class CircuitBreaker {
   private state: CircuitBreakerState = "CLOSED";
   private consecutiveFailures = 0;
   private openedAt = 0;
+  private halfOpenTrialInFlight = false;
   private readonly failureThreshold: number;
   private readonly resetTimeoutMs: number;
 
@@ -103,6 +104,14 @@ export class CircuitBreaker {
         message: `Circuit breaker is OPEN — ${this.consecutiveFailures} consecutive failures. Reset in ${Math.max(0, this.resetTimeoutMs - (Date.now() - this.openedAt))}ms`,
       });
     }
+    if (current === "HALF_OPEN" && this.halfOpenTrialInFlight) {
+      throw new CircuitBreakerOpenError({
+        message: `Circuit breaker is HALF_OPEN — a trial is already in flight`,
+      });
+    }
+    if (current === "HALF_OPEN") {
+      this.halfOpenTrialInFlight = true;
+    }
     try {
       const result = await fn();
       this.onSuccess();
@@ -110,6 +119,8 @@ export class CircuitBreaker {
     } catch (err) {
       this.onFailure();
       throw err;
+    } finally {
+      this.halfOpenTrialInFlight = false;
     }
   }
 
@@ -133,5 +144,6 @@ export class CircuitBreaker {
   reset(): void {
     this.state = "CLOSED";
     this.consecutiveFailures = 0;
+    this.halfOpenTrialInFlight = false;
   }
 }

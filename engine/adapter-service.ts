@@ -283,9 +283,20 @@ export const AdapterLive = Layer.effect(
     const dlmmCache = new Map<string, { dlmm: DLMM; timestamp: number }>();
     const rpcCircuitBreaker = new CircuitBreaker();
 
+    const evictionInterval = setInterval(() => {
+      const cutoff = Date.now() - DLMM_CACHE_TTL_MS;
+      for (const [key, entry] of dlmmCache) {
+        if (entry.timestamp <= cutoff) {
+          dlmmCache.delete(key);
+        }
+      }
+    }, DLMM_CACHE_TTL_MS);
+    evictionInterval.unref();
+
     async function getDlmm(poolAddress: string): Promise<DLMM> {
       const cached = dlmmCache.get(poolAddress);
       if (cached && Date.now() - cached.timestamp < DLMM_CACHE_TTL_MS) {
+        cached.timestamp = Date.now();
         return cached.dlmm;
       }
       const pubkey = new PublicKey(poolAddress);

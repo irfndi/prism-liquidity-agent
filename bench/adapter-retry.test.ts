@@ -117,7 +117,7 @@ describe("CircuitBreaker", () => {
     expect(cb.getState()).toBe("HALF_OPEN");
   });
 
-  it("closes on successful half-open call", async () => {
+  it("rejects concurrent callers in HALF_OPEN state", async () => {
     vi.useFakeTimers();
     const cb = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 1000 });
     const fail = async () => {
@@ -129,7 +129,20 @@ describe("CircuitBreaker", () => {
     vi.advanceTimersByTime(1100);
     expect(cb.getState()).toBe("HALF_OPEN");
 
-    const result = await cb.execute(async () => "recovered");
+    let resolveTrial: ((value: string) => void) | undefined;
+    const trial = new Promise<string>((resolve) => {
+      resolveTrial = resolve;
+    });
+
+    const first = cb.execute(() => trial);
+    await Promise.resolve();
+    expect(cb.getState()).toBe("HALF_OPEN");
+
+    const second = cb.execute(async () => "never");
+    await expect(second).rejects.toBeInstanceOf(CircuitBreakerOpenError);
+
+    resolveTrial!("recovered");
+    const result = await first;
     expect(result).toBe("recovered");
     expect(cb.getState()).toBe("CLOSED");
   });
