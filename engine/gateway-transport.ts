@@ -271,13 +271,9 @@ export class GatewayTransport implements AgentRuntimeTransport {
     try {
       parsed = JSON.parse(data) as { id?: string; text?: string; error?: string };
     } catch {
-      const first = this.pending.keys().next().value;
-      if (typeof first === "string") {
-        const p = this.pending.get(first)!;
-        this.pending.delete(first);
-        clearTimeout(p.timer);
-        p.resolve(data);
-      }
+      // Non-JSON messages (binary frames, server broadcasts, partial frames)
+      // cannot be correlated with a pending request; drop them safely.
+      logger.warn("Gateway received non-JSON message; ignoring", { data: data.slice(0, 200) });
       return;
     }
 

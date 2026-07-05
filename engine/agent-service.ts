@@ -39,6 +39,7 @@ export const AgentNoOp: AgentApi = {
       lastPromptAt: null,
       errorCount: 0,
     }),
+  disconnect: () => Effect.void,
 };
 
 function buildPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
@@ -314,11 +315,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
       }
 
       for (const t of alertTransports) {
-        yield* connectTransport(t).pipe(
-          Effect.tap(() => {
-            connected = true;
-          }),
-        );
+        yield* connectTransport(t);
       }
 
       return {
@@ -378,6 +375,22 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             lastPromptAt,
             errorCount,
           }),
+
+        disconnect: () =>
+          Effect.all(
+            allTransports.map((t) =>
+              t.disconnect().pipe(
+                Effect.catchAll((err) => {
+                  logger.warn("Failed to disconnect transport", {
+                    transport: t.name,
+                    error: String(err),
+                  });
+                  return Effect.void;
+                }),
+              ),
+            ),
+            { discard: true },
+          ),
       };
     }).pipe(
       Effect.catchAll((err) => {

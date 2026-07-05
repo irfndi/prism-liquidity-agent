@@ -767,6 +767,7 @@ export interface AgentApi {
     },
     unknown
   >;
+  readonly disconnect: () => Effect.Effect<void, unknown>;
 }
 
 export class AgentService extends Context.Tag("AgentService")<AgentService, AgentApi>() {}

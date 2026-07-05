@@ -2046,16 +2046,16 @@ export const program = Effect.gen(function* () {
     });
   }, config.scanIntervalMs);
 
-  process.on("SIGINT", () => {
+  const gracefulShutdown = (signal: string) => {
     clearInterval(interval);
-    console.info("Received SIGINT — shutting down");
-    process.exit(0);
-  });
-  process.on("SIGTERM", () => {
-    clearInterval(interval);
-    console.info("Received SIGTERM — shutting down");
-    process.exit(0);
-  });
+    console.info(`Received ${signal} — shutting down`);
+    Effect.runPromise(agent.disconnect()).finally(() => {
+      process.exit(0);
+    });
+  };
+
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
   // Keep process alive
   yield* Effect.never;

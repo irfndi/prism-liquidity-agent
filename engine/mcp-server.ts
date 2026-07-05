@@ -5,6 +5,7 @@ import { AgentStateService, McpServerService } from "./services.js";
 import type { AppConfig } from "./config-service.js";
 
 const logger = createLogger("McpServer");
+const MAX_STDIN_BUFFER_LENGTH = 65536;
 
 interface McpRequest {
   readonly jsonrpc: "2.0";
@@ -256,6 +257,10 @@ export class McpServer {
               });
             }
           } else {
+            if (buffer.length >= MAX_STDIN_BUFFER_LENGTH) {
+              logger.error("MCP stdin buffer exceeded max length; discarding");
+              buffer.length = 0;
+            }
             buffer.push(char);
           }
         }
