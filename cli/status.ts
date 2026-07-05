@@ -71,6 +71,8 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
 
           const activePositions = positions.filter((p) => p.paperExitedAt === null);
           const hasDb = positions.length > 0 || recentAudit.length > 0;
+          const lastActivityAt = recentAudit[0]?.timestamp ?? 0;
+          const running = hasDb && Date.now() - lastActivityAt < config.scanIntervalMs * 2;
 
           if (opts.json) {
             const json: StatusJsonOutput = {

@@ -12,7 +12,7 @@ Hermes Agent is a Python-based autonomous AI agent with a synchronous core loop 
 
 ### Entry Points
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Entry Points                                  │
 │                                                                      │
@@ -89,7 +89,7 @@ ACP is an **open standard** (Apache 2.0, by Zed Industries) that standardizes co
 
 ACP uses **JSON-RPC 2.0 over stdio** (newline-delimited JSON). The editor spawns the agent as a subprocess:
 
-```
+```text
 1. initialize      — Negotiate protocol version & capabilities
 2. session/new     — Create a new conversation (receives CWD, MCP configs)
 3. session/prompt  — Client sends user message as ContentBlock[] (text, image, audio)
@@ -130,7 +130,7 @@ ACP mode uses a curated toolset:
 
 ### ACP Adapter File Structure
 
-```
+```text
 acp_adapter/
 ├── entry.py        # Entry point for `hermes acp`
 ├── server.py       # HermesACPAgent — JSON-RPC handler
@@ -143,7 +143,7 @@ acp_adapter/
 
 ### Session Lifecycle
 
-```
+```text
 new_session(cwd)
   → create SessionState
   → create AIAgent(platform="acp", enabled_toolsets=["hermes-acp"])
@@ -170,7 +170,7 @@ Hermes aligns with the **[agentskills.io](https://agentskills.io/specification)*
 
 ### Directory Structure
 
-```
+```text
 ~/.hermes/skills/                  # Single source of truth
 ├── mlops/                         # Category directory
 │   ├── axolotl/
@@ -270,7 +270,7 @@ Known failure modes and fixes.
 
 ### Progressive Disclosure (Token Efficiency)
 
-```
+```text
 Level 0: skills_list()           → [{name, description, category}]   (~3k tokens)
 Level 1: skill_view(name)        → Full SKILL.md content + metadata  (varies)
 Level 2: skill_view(name, path)  → Specific reference file            (varies)
@@ -291,7 +291,7 @@ Hermes expands these in SKILL.md body at load time:
 
 The gateway is a **single long-running background process** that connects to 20+ platforms simultaneously:
 
-```
+```text
 Platform Adapters → Session Store (per-chat) → AIAgent → Response
                          ↑
                     Cron Scheduler (ticks every 60s)
@@ -303,7 +303,7 @@ Platform Adapters → Session Store (per-chat) → AIAgent → Response
 
 ### Message Flow
 
-```
+```text
 Platform event → Adapter.on_message() → MessageEvent
   → GatewayRunner._handle_message()
     → authorize user
@@ -367,7 +367,7 @@ The gateway has a hook system (`gateway/hooks.py`) for lifecycle events:
 
 ### Discovery Pipeline
 
-```
+```text
 On disk:
   ~/.hermes/skills/**/SKILL.md     (local)
   skills.external_dirs              (config-defined external dirs)
@@ -512,7 +512,7 @@ hermes send --to telegram "Pool SOL/USDC entered out-of-range"
 
 Create a Hermes skill that wraps Prism's trading agent functionality:
 
-```
+```text
 ~/.hermes/skills/defi/prism-dlmm/
 ├── SKILL.md
 ├── references/

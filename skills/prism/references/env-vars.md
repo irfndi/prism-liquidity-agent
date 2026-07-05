@@ -34,7 +34,7 @@ value not set in `.env`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENTIVE_MODE` | `false` | Enable agent runtime overlay. |
+| `AGENTIC_MODE` | `false` | Enable agent runtime overlay. |
 | `AGENT_RUNTIME` | `auto` | `auto`, `hermes`, `openclaw`, or `none`. |
 | `AGENT_ACP_COMMAND` | `hermes` | Hermes binary for ACP. |
 | `AGENT_ACP_ARGS` | `acp` | Arguments passed to ACP command. |

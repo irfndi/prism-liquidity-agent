@@ -127,9 +127,9 @@ export interface AppConfig {
   readonly agentOpenclawWebhookUrl: string;
   /** Hermes HTTP API URL for one-way agent alerts. Empty = disabled. Default "". */
   readonly agentHermesApiUrl: string;
-  /** Port for the local agent HTTP status API. 0 = disabled. Default 18790. */
+  /** Port for the local agent HTTP status API. 0 = disabled. Default 0 (disabled unless explicitly enabled). */
   readonly agentHttpPort: number;
-  /** Enable the MCP server for agent runtime tool discovery. Default true. */
+  /** Enable the MCP server for agent runtime tool discovery. Default false (enable only when stdout is isolated). */
   readonly agentMcpEnabled: boolean;
 
   // ─── Threshold evolution ─────────────────────────────────────────────
@@ -259,7 +259,7 @@ const loadConfig = Effect.gen(function* () {
   const maxOorCooldownExits = yield* validatedNumber("MAX_OOR_COOLDOWN_EXITS", 1, 3);
 
   // ─── Agentic mode / agent runtime overlay ────────────────────────────
-  const agentiveMode = yield* Config.boolean("AGENTIVE_MODE").pipe(
+  const agentiveMode = yield* Config.boolean("AGENTIC_MODE").pipe(
     Effect.orElseSucceed(() => false),
   );
   const agentRuntimeRaw = yield* Config.string("AGENT_RUNTIME").pipe(
@@ -306,9 +306,9 @@ const loadConfig = Effect.gen(function* () {
   const agentHermesApiUrl = yield* Config.string("AGENT_HERMES_API_URL").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const agentHttpPort = yield* validatedNumber("AGENT_HTTP_PORT", 0, 18_790, 65_535);
+  const agentHttpPort = yield* validatedNumber("AGENT_HTTP_PORT", 0, 0, 65_535);
   const agentMcpEnabled = yield* Config.boolean("AGENT_MCP_ENABLED").pipe(
-    Effect.orElseSucceed(() => true),
+    Effect.orElseSucceed(() => false),
   );
 
   // ─── Threshold evolution ─────────────────────────────────────────────

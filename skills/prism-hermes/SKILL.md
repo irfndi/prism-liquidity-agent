@@ -42,7 +42,7 @@ review positions on a schedule.
 prism setup --non-interactive --helius-key=$HELIUS_API_KEY
 
 # Start with Hermes overlay enabled
-export AGENTIVE_MODE=true
+export AGENTIC_MODE=true
 export AGENT_RUNTIME=hermes
 export AGENT_ACP_COMMAND=hermes
 export AGENT_ACP_ARGS=acp
@@ -81,8 +81,8 @@ For each pool on each scan cycle:
 
 When Prism sends an alert through ACP, surface it according to priority:
 
-- `critical` — immediate notification (stop-loss, TVL collapse).
-- `warning` — batched or quiet notification (EXIT, volume auth drop).
+- `critical` — immediate notification (TVL collapse, trailing stop, stop-loss).
+- `warning` — batched or quiet notification (volume auth drop, fee/IL drop, large unrealized loss).
 - `info` — included in the next hourly summary (ENTER, REBALANCE).
 
 ## Files

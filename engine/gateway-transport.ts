@@ -31,6 +31,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
   readonly name = "gateway";
 
   private ws: WebSocket | null = null;
+  private connectPromise: Promise<void> | null = null;
   private eventHandler?: (event: AgentRuntimeEvent) => void;
   private pending = new Map<
     string,
@@ -107,79 +108,78 @@ export class GatewayTransport implements AgentRuntimeTransport {
   }
 
   connect(): Effect.Effect<void, unknown> {
-    return Effect.async((resume) => {
-      if (this.ws) {
-        resume(Effect.void);
-        return;
-      }
+    return Effect.tryPromise(async () => {
+      if (this.ws?.readyState === WebSocket.OPEN) return;
+      if (this.connectPromise) return this.connectPromise;
 
-      this.emit({ type: "connecting", transport: this.name });
+      this.connectPromise = new Promise<void>((resolve, reject) => {
+        this.emit({ type: "connecting", transport: this.name });
 
-      let settled = false;
-      const settleOk = () => {
-        if (settled) return;
-        settled = true;
-        this.emit({ type: "connected", transport: this.name });
-        resume(Effect.void);
-      };
-      const settleErr = (err: Error) => {
-        if (settled) return;
-        settled = true;
-        this.emit({ type: "error", transport: this.name, error: err.message });
-        resume(Effect.fail(err));
-      };
-
-      const timer = setTimeout(() => {
-        settleErr(new Error("Gateway connection timeout"));
-      }, 5_000);
-
-      try {
-        this.ws = new WebSocket(this.options.url);
-
-        this.ws.addEventListener("open", () => {
-          clearTimeout(timer);
-          if (this.options.token && this.ws) {
-            try {
-              const auth: GatewayAuthMessage = { type: "auth", token: this.options.token };
-              this.ws.send(JSON.stringify(auth));
-            } catch (err) {
-              logger.warn("Failed to send gateway auth token", {
-                error: err instanceof Error ? err.message : String(err),
-              });
-            }
-          }
-          settleOk();
-        });
-
-        this.ws.addEventListener("message", (event) => {
-          this.handleMessage(String(event.data));
-        });
-
-        this.ws.addEventListener("error", () => {
-          clearTimeout(timer);
-          if (!settled) {
-            settleErr(new Error("Gateway WebSocket error"));
-          }
-        });
-
-        this.ws.addEventListener("close", () => {
-          clearTimeout(timer);
-          this.emit({ type: "disconnected", transport: this.name });
+        let settled = false;
+        const settleOk = () => {
+          if (settled) return;
+          settled = true;
+          this.emit({ type: "connected", transport: this.name });
+          this.connectPromise = null;
+          resolve();
+        };
+        const settleErr = (err: Error) => {
+          if (settled) return;
+          settled = true;
+          this.emit({ type: "error", transport: this.name, error: err.message });
+          this.connectPromise = null;
           this.ws = null;
-          if (!settled) {
-            settleErr(new Error("Gateway connection closed"));
-          }
-        });
-      } catch (err) {
-        clearTimeout(timer);
-        settleErr(err instanceof Error ? err : new Error(String(err)));
-      }
+          reject(err);
+        };
 
-      return Effect.sync(() => {
-        clearTimeout(timer);
-        this.ws?.close();
-        this.ws = null;
+        const timer = setTimeout(() => {
+          settleErr(new Error("Gateway connection timeout"));
+        }, 5_000);
+
+        try {
+          this.ws = new WebSocket(this.options.url);
+
+          this.ws.addEventListener("open", () => {
+            clearTimeout(timer);
+            if (this.options.token && this.ws) {
+              try {
+                const auth: GatewayAuthMessage = { type: "auth", token: this.options.token };
+                this.ws.send(JSON.stringify(auth));
+              } catch (err) {
+                logger.warn("Failed to send gateway auth token", {
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
+            settleOk();
+          });
+
+          this.ws.addEventListener("message", (event) => {
+            this.handleMessage(String(event.data));
+          });
+
+          this.ws.addEventListener("error", () => {
+            clearTimeout(timer);
+            if (!settled) {
+              settleErr(new Error("Gateway WebSocket error"));
+            }
+          });
+
+          this.ws.addEventListener("close", () => {
+            clearTimeout(timer);
+            this.emit({ type: "disconnected", transport: this.name });
+            if (!settled) {
+              settleErr(new Error("Gateway connection closed"));
+            }
+            this.ws = null;
+          });
+        } catch (err) {
+          clearTimeout(timer);
+          settleErr(err instanceof Error ? err : new Error(String(err)));
+        }
       });
+
+      return this.connectPromise;
     });
   }
 
@@ -229,7 +229,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
 
   private sendAndWait(id: string, message: GatewayMessage): Effect.Effect<string, unknown> {
     return Effect.async((resume) => {
-      if (!this.ws) {
+      if (this.ws?.readyState !== WebSocket.OPEN) {
         resume(Effect.fail(new Error("Gateway not connected")));
         return;
       }

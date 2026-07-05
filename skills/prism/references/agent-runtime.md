@@ -5,7 +5,7 @@ This guide is for users who want Prism to communicate with a local agent runtime
 
 ## What the overlay does
 
-When `AGENTIVE_MODE=true`, Prism asks the local agent runtime to review decisions
+When `AGENTIC_MODE=true`, Prism asks the local agent runtime to review decisions
 and sends proactive check-ins. The overlay is **safety-bounded**:
 
 - It can only reduce confidence or change an action to `HOLD`.
@@ -18,7 +18,7 @@ and sends proactive check-ins. The overlay is **safety-bounded**:
 3. Set in `.env`:
 
 ```bash
-AGENTIVE_MODE=true
+AGENTIC_MODE=true
 AGENT_RUNTIME=hermes
 AGENT_ACP_COMMAND=hermes
 AGENT_ACP_ARGS=acp
@@ -36,7 +36,7 @@ stdin/stdout.
 3. Set in `.env`:
 
 ```bash
-AGENTIVE_MODE=true
+AGENTIC_MODE=true
 AGENT_RUNTIME=openclaw
 AGENT_GATEWAY_URL=ws://127.0.0.1:18789
 AGENT_GATEWAY_TOKEN=your-token

@@ -1,5 +1,6 @@
 import { Effect } from "effect";
 import { createLogger } from "./logger.js";
+import { stringifySafe } from "./bigint-json.js";
 import type {
   AgentRuntimeCheckin,
   AgentRuntimeContext,
@@ -132,7 +133,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
         const response = await fetch(this.options.url, {
           method: "POST",
           headers: this.authHeaders(),
-          body: JSON.stringify(body),
+          body: stringifySafe(body),
           signal: controller.signal,
         });
         const text = await response.text();

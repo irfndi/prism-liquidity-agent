@@ -42,7 +42,7 @@ lets OpenClaw query Prism, receive alerts, and remind the user to check position
 prism setup --non-interactive --helius-key=$HELIUS_API_KEY
 
 # Start with OpenClaw overlay enabled
-export AGENTIVE_MODE=true
+export AGENTIC_MODE=true
 export AGENT_RUNTIME=openclaw
 export AGENT_GATEWAY_URL=ws://127.0.0.1:18789
 prism dev
@@ -82,8 +82,8 @@ For each pool on each scan cycle:
 
 When Prism sends an alert through the Gateway, surface it according to priority:
 
-- `critical` — immediate notification (stop-loss, TVL collapse).
-- `warning` — batched or quiet notification (EXIT, volume auth drop).
+- `critical` — immediate notification (TVL collapse, trailing stop, stop-loss).
+- `warning` — batched or quiet notification (volume auth drop, fee/IL drop, large unrealized loss).
 - `info` — included in the next hourly summary (ENTER, REBALANCE).
 
 ## Files

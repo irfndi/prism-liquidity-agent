@@ -128,21 +128,31 @@ export class AcpTransport implements AgentRuntimeTransport {
       });
       this.process.on("close", () => {
         this.emit({ type: "disconnected", transport: this.name });
+        this.pending.forEach((p) => p.reject(new Error("ACP process closed")));
+        this.pending.clear();
         this.process = null;
         this.sessionId = null;
       });
 
-      yield* this.request("agent/initialize", {
-        protocolVersion: "2025-06-30",
-        clientCapabilities: {},
-      });
+      try {
+        yield* this.request("agent/initialize", {
+          protocolVersion: "2025-06-30",
+          clientCapabilities: {},
+        });
 
-      const session = yield* this.request("agent/session/new", {
-        cwd: process.cwd(),
-      });
-      this.sessionId = (session as { sessionId?: string })?.sessionId ?? null;
+        const session = yield* this.request("agent/session/new", {
+          cwd: process.cwd(),
+        });
+        this.sessionId = (session as { sessionId?: string })?.sessionId ?? null;
 
-      this.emit({ type: "connected", transport: this.name });
+        this.emit({ type: "connected", transport: this.name });
+      } catch (err) {
+        logger.error("ACP handshake failed; tearing down process", { error: String(err) });
+        this.process?.kill("SIGTERM");
+        this.process = null;
+        this.sessionId = null;
+        throw err;
+      }
     });
   }
 

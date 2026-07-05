@@ -183,7 +183,7 @@ export class McpServer {
     }
   }
 
-  private async handleRequest(request: McpRequest): Promise<McpResponse> {
+  private async handleRequest(request: McpRequest): Promise<McpResponse | undefined> {
     const id = request.id ?? null;
     if (request.jsonrpc !== "2.0") {
       return {
@@ -194,19 +194,20 @@ export class McpServer {
     }
 
     try {
-      let result: unknown;
       switch (request.method) {
         case "initialize":
-          result = await this.handleInitialize();
-          break;
+          return { jsonrpc: "2.0", id: id ?? 0, result: await this.handleInitialize() };
         case "tools/list":
-          result = await this.handleToolsList();
-          break;
+          return { jsonrpc: "2.0", id: id ?? 0, result: await this.handleToolsList() };
         case "tools/call":
-          result = await this.handleToolsCall(request.params);
-          break;
+          return {
+            jsonrpc: "2.0",
+            id: id ?? 0,
+            result: await this.handleToolsCall(request.params),
+          };
         case "notifications/initialized":
-          return { jsonrpc: "2.0", id: id ?? 0, result: {} };
+          // JSON-RPC notifications are one-way; do not send a response.
+          return undefined;
         default:
           return {
             jsonrpc: "2.0",
@@ -214,11 +215,6 @@ export class McpServer {
             error: { code: -32601, message: `Method not found: ${request.method}` },
           };
       }
-
-      if (id === null) {
-        return { jsonrpc: "2.0", id: 0, result: {} };
-      }
-      return { jsonrpc: "2.0", id, result };
     } catch (err) {
       logger.error("MCP request failed", { error: String(err) });
       return {
@@ -247,7 +243,9 @@ export class McpServer {
             try {
               const request = JSON.parse(line) as McpRequest;
               const response = await this.handleRequest(request);
-              this.send(response);
+              if (response !== undefined) {
+                this.send(response);
+              }
             } catch (err) {
               logger.error("Failed to parse MCP request", { error: String(err) });
               this.send({

@@ -144,7 +144,7 @@ Key `.env` variables:
 
 ## Agent runtime overlay
 
-When Prism runs under a local agent harness (Hermes or OpenClaw), enable `AGENTIVE_MODE=true` to let the harness review decisions and receive proactive check-ins. No remote LLM API keys are used; communication happens over local ACP (Hermes) or Gateway WebSocket (OpenClaw). The overlay can only reduce confidence or change an action to `HOLD`.
+When Prism runs under a local agent harness (Hermes or OpenClaw), enable `AGENTIC_MODE=true` to let the harness review decisions and receive proactive check-ins. No remote LLM API keys are used; communication happens over local ACP (Hermes) or Gateway WebSocket (OpenClaw). The overlay can only reduce confidence or change an action to `HOLD`.
 
 Prism also exposes pull interfaces for agent runtimes to query state on demand:
 
@@ -153,7 +153,7 @@ Prism also exposes pull interfaces for agent runtimes to query state on demand:
 
 | Variable                        | Default                    | Description                                          |
 | ------------------------------- | -------------------------- | ---------------------------------------------------- |
-| `AGENTIVE_MODE`                 | `false`                    | Enable agent runtime overlay                         |
+| `AGENTIC_MODE`                 | `false`                    | Enable agent runtime overlay                         |
 | `AGENT_RUNTIME`                 | `auto`                     | `auto`, `hermes`, `openclaw`, or `none`              |
 | `AGENT_ACP_COMMAND`             | `hermes`                   | Hermes binary for ACP                                |
 | `AGENT_ACP_ARGS`                | `acp`                      | Arguments passed to ACP command                      |

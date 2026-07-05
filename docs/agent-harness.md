@@ -211,7 +211,7 @@ export WALLET_PRIVATE_KEY="..."                    # OPTIONAL (for live trading 
 Optional agent-runtime overlay (lets a local Hermes/OpenClaw harness review decisions):
 
 ```bash
-export AGENTIVE_MODE="true"
+export AGENTIC_MODE="true"
 export AGENT_RUNTIME="auto"                      # auto | hermes | openclaw | none
 export AGENT_ACP_COMMAND="hermes"
 export AGENT_ACP_ARGS="acp"
@@ -230,7 +230,7 @@ The overlay can only reduce confidence or change an action to `HOLD`. No remote 
 
 ## Agent Pull Interfaces (MCP + HTTP)
 
-When `AGENTIVE_MODE=true`, Prism exposes two pull interfaces so the agent runtime can query state on demand instead of waiting for push check-ins.
+When `AGENTIC_MODE=true`, Prism exposes two pull interfaces so the agent runtime can query state on demand instead of waiting for push check-ins.
 
 ### MCP Server (stdio)
 

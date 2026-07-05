@@ -316,7 +316,7 @@ export interface AgentRuntimeTransport {
 
 ### 2. MCP Server (Phase 2)
 
-A minimal MCP server exposing Prism's state as tools. Runs as a stdio subprocess when `AGENTIVE_MODE=true`.
+A minimal MCP server exposing Prism's state as tools. Runs as a stdio subprocess when `AGENTIC_MODE=true`.
 
 **Tools exposed:**
 
@@ -331,7 +331,7 @@ A minimal MCP server exposing Prism's state as tools. Runs as a stdio subprocess
 
 **Implementation location**: `engine/mcp-server.ts`
 
-**Startup**: When `AGENTIVE_MODE=true`, `engine/index.ts` spawns the MCP server as a child process. The agent runtime connects to it via stdio.
+**Startup**: When `AGENTIC_MODE=true`, `engine/index.ts` spawns the MCP server as a child process. The agent runtime connects to it via stdio.
 
 ### 3. Alert System (Phase 1)
 

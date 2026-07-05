@@ -13,7 +13,7 @@ For every pool in the watchlist:
 5. Evaluate EXIT conditions.
 6. Evaluate REBALANCE conditions.
 7. HOLD or ENTER.
-8. Apply agent-runtime overlay if `AGENTIVE_MODE=true`.
+8. Apply agent-runtime overlay if `AGENTIC_MODE=true`.
 9. Run risk gates.
 10. Execute (paper or live).
 11. Record audit, snapshot, and agent check-in.

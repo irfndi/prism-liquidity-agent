@@ -108,7 +108,7 @@ For each pool on each scan cycle:
 
 ## Agent runtime integration
 
-When Prism runs as a skill under an agent runtime, set `AGENTIVE_MODE=true`.
+When Prism runs as a skill under an agent runtime, set `AGENTIC_MODE=true`.
 Prism will:
 
 - Ask the agent runtime to review high-confidence decisions.
@@ -123,7 +123,7 @@ Supported runtimes:
 
 ### Pull queries (MCP + HTTP)
 
-When `AGENTIVE_MODE=true`, Prism exposes agent pull interfaces:
+When `AGENTIC_MODE=true`, Prism exposes agent pull interfaces:
 
 - **MCP server** (stdio): tools `prism_status`, `prism_positions`, `prism_decisions`, `prism_config`. Enable with `AGENT_MCP_ENABLED=true` (default).
 - **HTTP fallback** on `127.0.0.1:AGENT_HTTP_PORT` (default `18790`): `GET /status`, `/positions`, `/decisions`, `/config`, `/health`. Set `AGENT_HTTP_PORT=0` to disable.
