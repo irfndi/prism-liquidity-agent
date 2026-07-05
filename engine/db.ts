@@ -98,26 +98,28 @@ function vecMemoryTableIsQueryable(db: Database): boolean {
   }
 }
 
+const VEC_MEMORY_TABLE_SQL = `
+  CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory USING vec0(
+    embedding float[384],
+    +id TEXT,
+    +category TEXT,
+    +content TEXT,
+    +pool_address TEXT,
+    +outcome TEXT,
+    +pnlUsd REAL,
+    +confidence REAL,
+    +createdAt INTEGER,
+    +expiresAt INTEGER
+  );
+`;
+
 export function hasVecMemoryTable(db: Database): boolean {
   return hasTable(db, "vec_memory") && vecMemoryTableIsQueryable(db);
 }
 
 function tryCreateVecMemoryTable(db: Database): void {
   try {
-    db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory USING vec0(
-        embedding float[384],
-        +id TEXT,
-        +category TEXT,
-        +content TEXT,
-        +pool_address TEXT,
-        +outcome TEXT,
-        +pnlUsd REAL,
-        +confidence REAL,
-        +createdAt INTEGER,
-        +expiresAt INTEGER
-      );
-    `);
+    db.exec(VEC_MEMORY_TABLE_SQL);
     logger.info("sqlite-vec vec_memory table created on self-heal attempt");
   } catch (e) {
     logger.warn("sqlite-vec vec_memory table could not be created on self-heal attempt", {
@@ -189,20 +191,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       // Memory vector table with sqlite-vec — guarded so the other
       // tables above are still created if the vec0 extension fails.
       try {
-        db.exec(`
-          CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory USING vec0(
-            embedding float[384],
-            +id TEXT,
-            +category TEXT,
-            +content TEXT,
-            +pool_address TEXT,
-            +outcome TEXT,
-            +pnlUsd REAL,
-            +confidence REAL,
-            +createdAt INTEGER,
-            +expiresAt INTEGER
-          );
-        `);
+        db.exec(VEC_MEMORY_TABLE_SQL);
       } catch (e) {
         logger.warn("sqlite-vec vec_memory table could not be created during migration", {
           error: e instanceof Error ? e.message : String(e),

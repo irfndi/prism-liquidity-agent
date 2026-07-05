@@ -5,11 +5,13 @@ import { createDatabase, hasVecMemoryTable } from "../engine/db.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 
-function run<T, R>(
+async function run<T, R>(
   effect: Effect.Effect<T, unknown, R>,
   layer: Layer.Layer<R, unknown, unknown>,
-): T {
-  return Effect.runSync(Effect.provide(effect, layer) as Effect.Effect<T, unknown, never>);
+): Promise<T> {
+  return Effect.runPromise(
+    (Effect.provide as any)(effect, layer) as Effect.Effect<T, unknown, never>,
+  );
 }
 
 /**
@@ -132,11 +134,11 @@ describe("migration 1 creates core tables even when vec0 is missing", () => {
 // ─── Guard behavior when vec_memory is absent ────────────────────────────────
 
 describe("DbService memory operations when vec_memory is absent", () => {
-  it("pruneMemory returns 0 without throwing", () => {
+  it("pruneMemory returns 0 without throwing", async () => {
     const db = new Database(":memory:");
     const layer = DbLive(":memory:");
 
-    const result = run(
+    const result = await run(
       Effect.gen(function* () {
         const dbService = yield* DbService;
         return yield* dbService.pruneMemory();
@@ -147,11 +149,11 @@ describe("DbService memory operations when vec_memory is absent", () => {
     db.close();
   });
 
-  it("queryMemory returns empty array without throwing", () => {
+  it("queryMemory returns empty array without throwing", async () => {
     const db = new Database(":memory:");
     const layer = DbLive(":memory:");
 
-    const result = run(
+    const result = await run(
       Effect.gen(function* () {
         const dbService = yield* DbService;
         return yield* dbService.queryMemory("test query", 5);
@@ -162,11 +164,11 @@ describe("DbService memory operations when vec_memory is absent", () => {
     db.close();
   });
 
-  it("insertMemory is a no-op and does not throw", () => {
+  it("insertMemory is a no-op and does not throw", async () => {
     const db = new Database(":memory:");
     const layer = DbLive(":memory:");
 
-    run(
+    await run(
       Effect.gen(function* () {
         const dbService = yield* DbService;
         yield* dbService.insertMemory({
@@ -188,13 +190,13 @@ describe("DbService memory operations when vec_memory is absent", () => {
 // ─── Memory operations via DbLive (table present) ───────────────────────────
 
 describe("DbService memory operations (vec_memory present)", () => {
-  it("insertMemory + queryMemory roundtrip", () => {
+  it("insertMemory + queryMemory roundtrip", async () => {
     const db = tryCreateVecDatabase();
     if (!db) return; // Skip if sqlite-vec unavailable.
     db.close();
 
     const layer = DbLive(":memory:");
-    const result = run(
+    const result = await run(
       Effect.gen(function* () {
         const dbService = yield* DbService;
         yield* dbService.insertMemory({
