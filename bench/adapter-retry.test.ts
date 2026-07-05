@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   isRetriableError,
+  isRpcNetworkError,
   retryWithBackoff,
   CircuitBreaker,
   CircuitBreakerOpenError,
@@ -161,5 +162,167 @@ describe("CircuitBreaker", () => {
 
     await cb.execute(fail).catch(() => {});
     expect(cb.getState()).toBe("OPEN");
+  });
+
+  it("does NOT trip on non-retriable business-logic errors when classifier provided", async () => {
+    const cb = new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 60_000 });
+    const businessError = new Error("insufficient token balance");
+
+    for (let i = 0; i < 5; i++) {
+      await cb
+        .execute(
+          async () => {
+            throw businessError;
+          },
+          () => false,
+        )
+        .catch(() => {});
+    }
+
+    expect(cb.getState()).toBe("CLOSED");
+    expect(cb["consecutiveFailures"]).toBe(0);
+  });
+
+  it("DOES trip on retriable network errors when classifier provided", async () => {
+    const cb = new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 60_000 });
+    const networkError = Object.assign(new Error("connect ECONNREFUSED"), {
+      code: "ECONNREFUSED",
+    });
+
+    for (let i = 0; i < 3; i++) {
+      await cb
+        .execute(
+          async () => {
+            throw networkError;
+          },
+          () => true,
+        )
+        .catch(() => {});
+    }
+
+    expect(cb.getState()).toBe("OPEN");
+  });
+
+  it("classifier defaults to counting all errors when omitted", async () => {
+    const cb = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 60_000 });
+
+    for (let i = 0; i < 2; i++) {
+      await cb
+        .execute(async () => {
+          throw new Error("any error");
+        })
+        .catch(() => {});
+    }
+
+    expect(cb.getState()).toBe("OPEN");
+  });
+
+  it("resets failure count on success even after retriable failures", async () => {
+    const cb = new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 60_000 });
+    const networkError = Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" });
+
+    await cb
+      .execute(
+        async () => {
+          throw networkError;
+        },
+        () => true,
+      )
+      .catch(() => {});
+    await cb
+      .execute(
+        async () => {
+          throw networkError;
+        },
+        () => true,
+      )
+      .catch(() => {});
+
+    expect(cb["consecutiveFailures"]).toBe(2);
+
+    await cb.execute(
+      async () => "recovered",
+      () => true,
+    );
+    expect(cb["consecutiveFailures"]).toBe(0);
+    expect(cb.getState()).toBe("CLOSED");
+  });
+});
+
+// ── isRpcNetworkError ─────────────────────────────────────────────
+
+describe("isRpcNetworkError", () => {
+  it("returns true for ECONNREFUSED", () => {
+    const err = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+    expect(isRpcNetworkError(err)).toBe(true);
+  });
+
+  it("returns true for ETIMEDOUT", () => {
+    const err = Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" });
+    expect(isRpcNetworkError(err)).toBe(true);
+  });
+
+  it("returns true for ENOTFOUND", () => {
+    const err = Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" });
+    expect(isRpcNetworkError(err)).toBe(true);
+  });
+
+  it("returns true for ECONNRESET", () => {
+    const err = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+    expect(isRpcNetworkError(err)).toBe(true);
+  });
+
+  it("returns true for HTTP 429", () => {
+    expect(isRpcNetworkError({ code: 429 })).toBe(true);
+  });
+
+  it("returns true for HTTP 500", () => {
+    expect(isRpcNetworkError({ code: 500 })).toBe(true);
+  });
+
+  it("returns true for HTTP 503", () => {
+    expect(isRpcNetworkError({ code: 503 })).toBe(true);
+  });
+
+  it("returns true for error message containing 429", () => {
+    expect(isRpcNetworkError(new Error("rate limited: HTTP 429"))).toBe(true);
+  });
+
+  it("returns true for error message containing HTTP 5xx", () => {
+    expect(isRpcNetworkError(new Error("HTTP 502 Bad Gateway"))).toBe(true);
+  });
+
+  it("returns true for fetch failed TypeError", () => {
+    expect(isRpcNetworkError(new TypeError("fetch failed"))).toBe(true);
+  });
+
+  it("returns true for network TypeError", () => {
+    expect(isRpcNetworkError(new TypeError("Network request failed"))).toBe(true);
+  });
+
+  it("returns false for business-logic errors", () => {
+    expect(isRpcNetworkError(new Error("insufficient token balance"))).toBe(false);
+  });
+
+  it("returns false for AdapterError-like objects", () => {
+    expect(isRpcNetworkError({ _tag: "AdapterError", message: "No wallet configured" })).toBe(
+      false,
+    );
+  });
+
+  it("returns false for HTTP 400", () => {
+    expect(isRpcNetworkError({ code: 400 })).toBe(false);
+  });
+
+  it("returns false for HTTP 404", () => {
+    expect(isRpcNetworkError({ code: 404 })).toBe(false);
+  });
+
+  it("returns false for null", () => {
+    expect(isRpcNetworkError(null)).toBe(false);
+  });
+
+  it("returns false for undefined", () => {
+    expect(isRpcNetworkError(undefined)).toBe(false);
   });
 });

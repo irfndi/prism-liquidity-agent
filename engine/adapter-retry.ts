@@ -20,6 +20,49 @@ export function isRetriableError(err: unknown): boolean {
   return false;
 }
 
+// ─── RPC / network error classifier ──────────────────────────────────────────
+// Returns true for errors that indicate transient RPC or network unavailability.
+// These should trip the circuit breaker; business-logic / validation errors should not.
+
+const NETWORK_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "ENETUNREACH",
+  "EPIPE",
+  "EAI_AGAIN",
+]);
+
+export function isRpcNetworkError(err: unknown): boolean {
+  // Node.js system errors with a code like ECONNREFUSED, ETIMEDOUT, etc.
+  if (isObject(err) && typeof err.code === "string" && NETWORK_ERROR_CODES.has(err.code)) {
+    return true;
+  }
+
+  // HTTP-level: 429 (rate limit) and 5xx (server errors)
+  if (hasCode(err) && (err.code === 429 || (err.code >= 500 && err.code < 600))) return true;
+  if (hasMessage(err)) {
+    if (err.message.includes("429")) return true;
+    if (/HTTP\s+5\d{2}/.test(err.message)) return true;
+  }
+
+  // TypeError from fetch when the network request itself fails (no connection)
+  if (err instanceof TypeError) {
+    const msg = err.message.toLowerCase();
+    if (
+      msg.includes("fetch failed") ||
+      msg.includes("network") ||
+      msg.includes("econnrefused") ||
+      msg.includes("enotfound")
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export interface RetryOptions {
   readonly maxRetries?: number;
   readonly baseDelayMs?: number;
@@ -97,7 +140,7 @@ export class CircuitBreaker {
     return this.state;
   }
 
-  async execute<T>(fn: () => Promise<T>): Promise<T> {
+  async execute<T>(fn: () => Promise<T>, isRetriable?: (err: unknown) => boolean): Promise<T> {
     const current = this.getState();
     if (current === "OPEN") {
       throw new CircuitBreakerOpenError({
@@ -117,7 +160,9 @@ export class CircuitBreaker {
       this.onSuccess();
       return result;
     } catch (err) {
-      this.onFailure();
+      if (!isRetriable || isRetriable(err)) {
+        this.onFailure();
+      }
       throw err;
     } finally {
       this.halfOpenTrialInFlight = false;

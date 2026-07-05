@@ -21,7 +21,7 @@ import { AdapterError } from "./errors.js";
 import { DiscoverPoolsError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import type { BinArray, BinData, PoolState, Position } from "./types.js";
-import { CircuitBreaker, retryWithBackoff } from "./adapter-retry.js";
+import { CircuitBreaker, isRpcNetworkError, retryWithBackoff } from "./adapter-retry.js";
 import bs58 from "bs58";
 import fs from "fs";
 import path from "path";
@@ -277,10 +277,10 @@ export const AdapterLive = Layer.effect(
       }
     }
 
-    // ─── DLMM instance cache (5-minute TTL) ───────────────────────────────
+    // ─── DLMM instance cache (5-minute TTL, promise-based for dedup) ────
 
     const DLMM_CACHE_TTL_MS = 5 * 60 * 1000;
-    const dlmmCache = new Map<string, { dlmm: DLMM; timestamp: number }>();
+    const dlmmCache = new Map<string, { promise: Promise<DLMM>; timestamp: number }>();
     const rpcCircuitBreaker = new CircuitBreaker();
 
     const evictionInterval = setInterval(() => {
@@ -297,20 +297,23 @@ export const AdapterLive = Layer.effect(
       const cached = dlmmCache.get(poolAddress);
       if (cached && Date.now() - cached.timestamp < DLMM_CACHE_TTL_MS) {
         cached.timestamp = Date.now();
-        return cached.dlmm;
+        return cached.promise;
       }
       const pubkey = new PublicKey(poolAddress);
-      const dlmm = await rpcCall(() => DLMM.create(connection, pubkey));
-      dlmmCache.set(poolAddress, { dlmm, timestamp: Date.now() });
-      return dlmm;
+      const promise = rpcCall(() => DLMM.create(connection, pubkey)).catch((err) => {
+        dlmmCache.delete(poolAddress);
+        throw err;
+      });
+      dlmmCache.set(poolAddress, { promise, timestamp: Date.now() });
+      return promise;
     }
 
     async function rpcCall<T>(fn: () => Promise<T>): Promise<T> {
-      return rpcCircuitBreaker.execute(() => retryWithBackoff(fn));
+      return rpcCircuitBreaker.execute(() => retryWithBackoff(fn), isRpcNetworkError);
     }
 
     async function rpcGated<T>(fn: () => Promise<T>): Promise<T> {
-      return rpcCircuitBreaker.execute(fn);
+      return rpcCircuitBreaker.execute(fn, isRpcNetworkError);
     }
 
     // ─── Token metadata cache ──────────────────────────────────────────────
