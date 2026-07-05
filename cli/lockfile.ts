@@ -112,7 +112,16 @@ export function acquireLock(
   }
 
   const second = tryAtomicCreate();
-  if (second.acquired) return second;
+  if (second.acquired) {
+    // Re-validate ownership: another concurrent launcher may have created
+    // the lock between our unlink and create. Fail closed if the file does
+    // not contain our PID.
+    const reRead = readLockfile(lockfilePath);
+    if (reRead && reRead.pid === process.pid) {
+      return second;
+    }
+    return { acquired: false, pid: reRead?.pid ?? 0 };
+  }
   if (second.existing) {
     return { acquired: false, pid: second.existing.pid };
   }
