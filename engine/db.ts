@@ -82,8 +82,6 @@ interface Migration {
   readonly up: (db: Database) => void;
 }
 
-const VEC_MEMORY_CACHE = new WeakMap<Database, boolean>();
-
 function hasTable(db: Database, name: string): boolean {
   const row = db
     .query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -91,25 +89,17 @@ function hasTable(db: Database, name: string): boolean {
   return !!row;
 }
 
-export function hasVecMemoryTable(db: Database): boolean {
-  const cached = VEC_MEMORY_CACHE.get(db);
-  if (cached !== undefined) return cached;
-  if (!hasTable(db, "vec_memory")) {
-    VEC_MEMORY_CACHE.set(db, false);
-    return false;
-  }
+function vecMemoryTableIsQueryable(db: Database): boolean {
   try {
-    db.query("SELECT rowid FROM vec_memory WHERE expiresAt <= ? LIMIT 1").all(Date.now());
-    VEC_MEMORY_CACHE.set(db, true);
+    db.query("SELECT 1 FROM vec_memory LIMIT 1").get();
     return true;
   } catch {
-    VEC_MEMORY_CACHE.set(db, false);
     return false;
   }
 }
 
-function setVecMemoryCached(db: Database, value: boolean): void {
-  VEC_MEMORY_CACHE.set(db, value);
+export function hasVecMemoryTable(db: Database): boolean {
+  return hasTable(db, "vec_memory") && vecMemoryTableIsQueryable(db);
 }
 
 function tryCreateVecMemoryTable(db: Database): void {
@@ -128,10 +118,8 @@ function tryCreateVecMemoryTable(db: Database): void {
         +expiresAt INTEGER
       );
     `);
-    setVecMemoryCached(db, true);
     logger.info("sqlite-vec vec_memory table created on self-heal attempt");
   } catch (e) {
-    setVecMemoryCached(db, false);
     logger.warn("sqlite-vec vec_memory table could not be created on self-heal attempt", {
       error: e instanceof Error ? e.message : String(e),
     });

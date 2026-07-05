@@ -55,6 +55,10 @@ function runOne(db: Database, sql: string, ...params: unknown[]): void {
   (db.run as (sql: string, ...params: unknown[]) => void)(sql, ...params);
 }
 
+function isVecMemoryMissingError(e: unknown): boolean {
+  return e instanceof Error && e.message.includes("no such table: vec_memory");
+}
+
 function serializeJson(value: unknown): string | null {
   try {
     return JSON.stringify(value);
@@ -262,102 +266,111 @@ export const DbLive = (dbPath?: string) =>
 
         insertMemory: (entry) =>
           hasVecMemoryTable(db)
-            ? Effect.tryPromise(async () => {
-                const id = randomUUID();
-                const now = Date.now();
-                const expiresAt = now + ttlMs(entry.category);
-                const embedding = await getEmbedding(entry.content);
-                runOne(
-                  db,
-                  `INSERT INTO vec_memory (embedding, id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt)
+            ? Effect.catchAll(
+                Effect.tryPromise(async () => {
+                  const id = randomUUID();
+                  const now = Date.now();
+                  const expiresAt = now + ttlMs(entry.category);
+                  const embedding = await getEmbedding(entry.content);
+                  runOne(
+                    db,
+                    `INSERT INTO vec_memory (embedding, id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                  JSON.stringify(embedding),
-                  id,
-                  entry.category,
-                  entry.content,
-                  entry.poolAddress ?? null,
-                  entry.outcome ?? null,
-                  entry.pnlUsd ?? null,
-                  entry.confidence ?? null,
-                  now,
-                  expiresAt,
-                );
-              })
+                    JSON.stringify(embedding),
+                    id,
+                    entry.category,
+                    entry.content,
+                    entry.poolAddress ?? null,
+                    entry.outcome ?? null,
+                    entry.pnlUsd ?? null,
+                    entry.confidence ?? null,
+                    now,
+                    expiresAt,
+                  );
+                }),
+                (e) => (isVecMemoryMissingError(e) ? Effect.void : Effect.fail(e)),
+              )
             : Effect.void,
 
         queryMemory: (queryText, topK, poolAddress) =>
           hasVecMemoryTable(db)
-            ? Effect.tryPromise(async () => {
-                const now = Date.now();
-                const embedding = await getEmbedding(queryText);
-                const sql = poolAddress
-                  ? `SELECT
-                  id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
-                  distance
-                 FROM vec_memory
-                 WHERE embedding MATCH ? AND k = ? AND expiresAt > ? AND pool_address = ?
-                 ORDER BY distance`
-                  : `SELECT
-                  id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
-                  distance
-                 FROM vec_memory
-                 WHERE embedding MATCH ? AND k = ? AND expiresAt > ?
-                 ORDER BY distance`;
-                const params = poolAddress
-                  ? [JSON.stringify(embedding), topK * 2, now, poolAddress]
-                  : [JSON.stringify(embedding), topK * 2, now];
-                const rows = queryAll<Record<string, unknown>>(db, sql, ...params);
+            ? Effect.catchAll(
+                Effect.tryPromise(async () => {
+                  const now = Date.now();
+                  const embedding = await getEmbedding(queryText);
+                  const sql = poolAddress
+                    ? `SELECT
+                    id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
+                    distance
+                   FROM vec_memory
+                   WHERE embedding MATCH ? AND k = ? AND expiresAt > ? AND pool_address = ?
+                   ORDER BY distance`
+                    : `SELECT
+                    id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
+                    distance
+                   FROM vec_memory
+                   WHERE embedding MATCH ? AND k = ? AND expiresAt > ?
+                   ORDER BY distance`;
+                  const params = poolAddress
+                    ? [JSON.stringify(embedding), topK * 2, now, poolAddress]
+                    : [JSON.stringify(embedding), topK * 2, now];
+                  const rows = queryAll<Record<string, unknown>>(db, sql, ...params);
 
-                const RECENCY_HALFLIFE_MS = 30 * 24 * 60 * 60 * 1000;
-                const ranked = rows
-                  .map((row) => {
-                    const simScore = 1 - (Number(row.distance) || 1);
-                    const age = now - Number(row.createdAt ?? 0);
-                    const recencyScore = Math.exp(-age / RECENCY_HALFLIFE_MS);
-                    const blended = simScore * 0.7 + recencyScore * 0.3;
-                    return { row, blended };
-                  })
-                  .sort((a, b) => b.blended - a.blended)
-                  .slice(0, topK);
+                  const RECENCY_HALFLIFE_MS = 30 * 24 * 60 * 60 * 1000;
+                  const ranked = rows
+                    .map((row) => {
+                      const simScore = 1 - (Number(row.distance) || 1);
+                      const age = now - Number(row.createdAt ?? 0);
+                      const recencyScore = Math.exp(-age / RECENCY_HALFLIFE_MS);
+                      const blended = simScore * 0.7 + recencyScore * 0.3;
+                      return { row, blended };
+                    })
+                    .sort((a, b) => b.blended - a.blended)
+                    .slice(0, topK);
 
-                return ranked.map(({ row }) => ({
-                  id: String(row.id),
-                  category: String(row.category) as MemoryCategory,
-                  content: String(row.content ?? ""),
-                  poolAddress: row.pool_address ? String(row.pool_address) : undefined,
-                  outcome: row.outcome
-                    ? (String(row.outcome) as MemoryEntry["outcome"])
-                    : undefined,
-                  pnlUsd:
-                    row.pnlUsd !== undefined && row.pnlUsd !== null
-                      ? Number(row.pnlUsd)
+                  return ranked.map(({ row }) => ({
+                    id: String(row.id),
+                    category: String(row.category) as MemoryCategory,
+                    content: String(row.content ?? ""),
+                    poolAddress: row.pool_address ? String(row.pool_address) : undefined,
+                    outcome: row.outcome
+                      ? (String(row.outcome) as MemoryEntry["outcome"])
                       : undefined,
-                  confidence:
-                    row.confidence !== undefined && row.confidence !== null
-                      ? Number(row.confidence)
-                      : undefined,
-                  createdAt: Number(row.createdAt ?? 0),
-                  expiresAt: Number(row.expiresAt ?? 0),
-                }));
-              })
+                    pnlUsd:
+                      row.pnlUsd !== undefined && row.pnlUsd !== null
+                        ? Number(row.pnlUsd)
+                        : undefined,
+                    confidence:
+                      row.confidence !== undefined && row.confidence !== null
+                        ? Number(row.confidence)
+                        : undefined,
+                    createdAt: Number(row.createdAt ?? 0),
+                    expiresAt: Number(row.expiresAt ?? 0),
+                  }));
+                }),
+                (e) => (isVecMemoryMissingError(e) ? Effect.succeed([]) : Effect.fail(e)),
+              )
             : Effect.succeed([]),
 
         pruneMemory: () =>
           hasVecMemoryTable(db)
-            ? Effect.sync(() => {
-                const now = Date.now();
-                // sqlite-vec doesn't support DELETE with WHERE on virtual tables directly in all versions,
-                // so we find expired IDs and delete them
-                const rows = queryAll<{ rowid: number }>(
-                  db,
-                  "SELECT rowid FROM vec_memory WHERE expiresAt <= ?",
-                  now,
-                );
-                for (const { rowid } of rows) {
-                  runOne(db, "DELETE FROM vec_memory WHERE rowid = ?", rowid);
-                }
-                return rows.length;
-              })
+            ? Effect.catchAll(
+                Effect.sync(() => {
+                  const now = Date.now();
+                  // sqlite-vec doesn't support DELETE with WHERE on virtual tables directly in all versions,
+                  // so we find expired IDs and delete them
+                  const rows = queryAll<{ rowid: number }>(
+                    db,
+                    "SELECT rowid FROM vec_memory WHERE expiresAt <= ?",
+                    now,
+                  );
+                  for (const { rowid } of rows) {
+                    runOne(db, "DELETE FROM vec_memory WHERE rowid = ?", rowid);
+                  }
+                  return rows.length;
+                }),
+                (e) => (isVecMemoryMissingError(e) ? Effect.succeed(0) : Effect.fail(e)),
+              )
             : Effect.succeed(0),
 
         saveSnapshot: (snapshot) =>
