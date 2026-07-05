@@ -2,7 +2,16 @@ import { Context, Effect, Layer } from "effect";
 import type { Database } from "bun:sqlite";
 import { createDatabase } from "./db.js";
 import { getEmbedding } from "./embeddings.js";
-import type { MemoryEntry, MemoryCategory, PoolSnapshot, PoolCooldown, Position, BinArray, SignalSnapshot, SignalWeights } from "./types.js";
+import type {
+  MemoryEntry,
+  MemoryCategory,
+  PoolSnapshot,
+  PoolCooldown,
+  Position,
+  BinArray,
+  SignalSnapshot,
+  SignalWeights,
+} from "./types.js";
 import type { EvolvableThresholds, OutcomeRecord } from "./strategy-service.js";
 import { DbService, type DbApi } from "./services.js";
 import { bigintReplacer } from "./bigint-json.js";
@@ -522,7 +531,8 @@ export const DbLive = (dbPath?: string) =>
                 }
               })();
             },
-            catch: (e) => new Error(`setMetadataBatch failed: ${e instanceof Error ? e.message : String(e)}`),
+            catch: (e) =>
+              new Error(`setMetadataBatch failed: ${e instanceof Error ? e.message : String(e)}`),
           }),
 
         saveFeeClaim: (claim) =>
@@ -746,7 +756,8 @@ export const DbLive = (dbPath?: string) =>
               `SELECT fee_il_ratio as feeIlRatio,
                 volume_authenticity as volumeAuthenticity,
                 bin_utilization as binUtilization,
-                outcome_pnl_usd as pnlUsd
+                outcome_pnl_usd as pnlUsd,
+                outcome_recorded_at as outcomeRecordedAt
               FROM signal_snapshots
               WHERE outcome_recorded_at IS NOT NULL
                 AND outcome_pnl_usd IS NOT NULL
@@ -760,6 +771,7 @@ export const DbLive = (dbPath?: string) =>
               volumeAuthenticity: Number(r.volumeAuthenticity),
               binUtilization: Number(r.binUtilization),
               pnlUsd: Number(r.pnlUsd),
+              outcomeRecordedAt: Number(r.outcomeRecordedAt),
             }));
           }),
 

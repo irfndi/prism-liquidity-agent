@@ -170,6 +170,7 @@ export interface OutcomeRecord {
   readonly volumeAuthenticity: number;
   readonly binUtilization: number;
   readonly pnlUsd: number;
+  readonly outcomeRecordedAt: number;
 }
 
 /**
@@ -193,7 +194,7 @@ export function nudgeThreshold(current: number, target: number, maxChangePct: nu
  */
 export function computeSignalLift(
   outcomes: ReadonlyArray<OutcomeRecord>,
-  signalKey: keyof Omit<OutcomeRecord, "pnlUsd">,
+  signalKey: keyof Omit<OutcomeRecord, "pnlUsd" | "outcomeRecordedAt">,
 ): number {
   const winners: number[] = [];
   const losers: number[] = [];
@@ -225,7 +226,6 @@ export function evolveThresholds(
   outcomes: ReadonlyArray<OutcomeRecord>,
   current: EvolvableThresholds,
   options?: {
-    readonly evolutionInterval?: number;
     readonly maxChangePct?: number;
     readonly minOutcomes?: number;
   },
@@ -235,7 +235,7 @@ export function evolveThresholds(
     return { thresholds: current, changed: false };
   }
 
-  const maxChangePct = options?.maxChangePct ?? 0.20;
+  const maxChangePct = options?.maxChangePct ?? 0.2;
 
   const feeLift = computeSignalLift(outcomes, "feeIlRatio");
   const authLift = computeSignalLift(outcomes, "volumeAuthenticity");
@@ -303,10 +303,7 @@ export function estimateRecoveryProbability(
  * threshold (we believe the price will come back). Returns false otherwise
  * (including in the gray zone — we rebalance rather than gamble).
  */
-export function shouldHoldForRecovery(
-  recoveryProbability: number,
-  holdThreshold: number,
-): boolean {
+export function shouldHoldForRecovery(recoveryProbability: number, holdThreshold: number): boolean {
   return recoveryProbability >= holdThreshold;
 }
 
@@ -332,15 +329,13 @@ export function computeSignalWeights(
   const weightCeiling = options?.weightCeiling ?? 2.5;
 
   const cutoff = Date.now() - windowDays * 24 * 60 * 60 * 1000;
-  const recent = outcomes.filter(
-    (_, i) => Date.now() - i * 24 * 60 * 60 * 1000 > cutoff,
-  );
+  const recent = outcomes.filter((o) => o.outcomeRecordedAt > cutoff);
 
   if (recent.length < minOutcomes) {
     return current;
   }
 
-  const signals: ReadonlyArray<keyof Omit<OutcomeRecord, "pnlUsd">> = [
+  const signals: ReadonlyArray<keyof Omit<OutcomeRecord, "pnlUsd" | "outcomeRecordedAt">> = [
     "feeIlRatio",
     "volumeAuthenticity",
     "binUtilization",
@@ -371,15 +366,13 @@ export function computeSignalWeights(
 
 function computeQuartile(
   outcomes: ReadonlyArray<OutcomeRecord>,
-  signalKey: keyof Omit<OutcomeRecord, "pnlUsd">,
+  signalKey: keyof Omit<OutcomeRecord, "pnlUsd" | "outcomeRecordedAt">,
 ): number {
-  const sorted = [...outcomes]
-    .map((o) => o[signalKey])
-    .sort((a, b) => a - b);
+  const sorted = [...outcomes].map((o) => o[signalKey]).sort((a, b) => a - b);
   const lastValue = sorted[sorted.length - 1] ?? 0;
   const q3Threshold = sorted[Math.floor(sorted.length * 0.75)] ?? lastValue;
   const q0Threshold = sorted[Math.floor(sorted.length * 0.25)] ?? 0;
-  const latest = outcomes[outcomes.length - 1]?.[signalKey] ?? 0;
+  const latest = outcomes[0]?.[signalKey] ?? 0;
 
   if (latest >= q3Threshold) return 3;
   if (latest <= q0Threshold) return 0;
@@ -391,16 +384,15 @@ function clampWeight(value: number, floor: number, ceiling: number): number {
   return Math.max(floor, Math.min(ceiling, value));
 }
 
-export function weightedEntryScore(
-  metrics: PoolMetrics,
-  weights: SignalWeights,
-): number {
-  const feeContrib = metrics.feeIlRatio * weights.feeIlRatio;
+const MAX_FEE_IL_RATIO = 20;
+
+export function weightedEntryScore(metrics: PoolMetrics, weights: SignalWeights): number {
+  const cappedFeeIlRatio = Math.min(metrics.feeIlRatio, MAX_FEE_IL_RATIO);
+  const feeContrib = cappedFeeIlRatio * weights.feeIlRatio;
   const authContrib = metrics.volumeAuthenticity * weights.volumeAuthenticity;
   const binContrib = metrics.binUtilization * weights.binUtilization;
   const tvlContrib = Math.min(metrics.pool.tvlUsd / 1_000_000, 1) * weights.tvlUsd;
-  const velContrib =
-    (1 / (1 + Math.abs(metrics.tvlVelocity))) * weights.tvlVelocity * 0.1;
+  const velContrib = (1 / (1 + Math.abs(metrics.tvlVelocity))) * weights.tvlVelocity * 0.1;
 
   return feeContrib + authContrib + binContrib + tvlContrib + velContrib;
 }
