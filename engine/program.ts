@@ -559,7 +559,6 @@ export const program = Effect.gen(function* () {
 
       if (pos && hasPosition) {
         pos.currentValueUsd = estimatePositionValue(pos, pool);
-        yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
       }
 
       // EXIT conditions (capital protection)
@@ -611,9 +610,12 @@ export const program = Effect.gen(function* () {
               reasoning: `Trailing stop: value dropped ${(drawdown * 100).toFixed(1)}% from peak $${highest.toFixed(2)}`,
             };
           }
-          // Persist updated values
-          yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
         }
+      }
+
+      // Single persist point: trailing-exit above may update highestValueUsd/currentValueUsd.
+      if (pos && hasPosition) {
+        yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
       }
 
       // Use the live wallet value when available. Fall back to the configured
