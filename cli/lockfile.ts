@@ -56,25 +56,60 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-const STALE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
-
 export function acquireLock(
   lockfilePath = LOCKFILE_PATH,
 ): { readonly acquired: true } | { readonly acquired: false; readonly pid: number } {
   ensureLockfileDir(path.dirname(lockfilePath));
 
-  const existing = readLockfile(lockfilePath);
-  if (existing) {
-    const isStale = Date.now() - existing.timestamp > STALE_THRESHOLD_MS;
-    if (!isStale && isProcessAlive(existing.pid)) {
-      return { acquired: false, pid: existing.pid };
+  const tryAtomicCreate = ():
+    | { readonly acquired: true }
+    | { readonly acquired: false; readonly existing: LockfileData | null } => {
+    try {
+      const data: LockfileData = { pid: process.pid, timestamp: Date.now() };
+      const fd = fs.openSync(lockfilePath, "wx", 0o600);
+      try {
+        fs.writeFileSync(fd, JSON.stringify(data));
+      } finally {
+        fs.closeSync(fd);
+      }
+      return { acquired: true };
+    } catch (err) {
+      if (isNodeError(err) && err.code === "EEXIST") {
+        const existing = readLockfile(lockfilePath);
+        return { acquired: false, existing };
+      }
+      throw err;
     }
-    // Stale lock or dead process — overwrite
+  };
+
+  const first = tryAtomicCreate();
+  if (first.acquired) return first;
+
+  let existing = first.existing;
+  if (!existing) {
+    const retry = tryAtomicCreate();
+    if (retry.acquired) return retry;
+    existing = retry.existing;
   }
 
-  const data: LockfileData = { pid: process.pid, timestamp: Date.now() };
-  fs.writeFileSync(lockfilePath, JSON.stringify(data), { mode: 0o600 });
-  return { acquired: true };
+  if (existing && isProcessAlive(existing.pid)) {
+    return { acquired: false, pid: existing.pid };
+  }
+
+  try {
+    fs.unlinkSync(lockfilePath);
+  } catch (err) {
+    if (!isNodeError(err) || err.code !== "ENOENT") {
+      throw err;
+    }
+  }
+
+  const second = tryAtomicCreate();
+  if (second.acquired) return second;
+  if (second.existing) {
+    return { acquired: false, pid: second.existing.pid };
+  }
+  return { acquired: false, pid: 0 };
 }
 
 export function releaseLock(lockfilePath = LOCKFILE_PATH): void {

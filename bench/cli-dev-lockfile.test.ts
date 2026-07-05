@@ -51,12 +51,38 @@ describe("cli/lockfile", () => {
     expect(data?.pid).toBe(process.pid);
   });
 
-  it("acquireLock succeeds when lockfile is stale", () => {
+  it("acquireLock rejects a live owner even if the lockfile is stale", () => {
     tmpDir = makeTmpDir();
     const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
     writeLockfile(tmpDir, process.pid, twoHoursAgo);
     const result = acquireLock(lockfilePath(tmpDir));
+    expect(result).toEqual({ acquired: false, pid: process.pid });
+  });
+
+  it("acquireLock succeeds when lockfile owner is dead, even if not stale", () => {
+    tmpDir = makeTmpDir();
+    writeLockfile(tmpDir, 99999999, Date.now());
+    const result = acquireLock(lockfilePath(tmpDir));
     expect(result).toEqual({ acquired: true });
+    const data = readLockfile(lockfilePath(tmpDir));
+    expect(data?.pid).toBe(process.pid);
+  });
+
+  it("acquireLock succeeds when lockfile is stale and owner is dead", () => {
+    tmpDir = makeTmpDir();
+    const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+    writeLockfile(tmpDir, 99999999, twoHoursAgo);
+    const result = acquireLock(lockfilePath(tmpDir));
+    expect(result).toEqual({ acquired: true });
+    const data = readLockfile(lockfilePath(tmpDir));
+    expect(data?.pid).toBe(process.pid);
+  });
+
+  it("acquireLock does not steal from a live owner between atomic create and read", () => {
+    tmpDir = makeTmpDir();
+    writeLockfile(tmpDir, process.pid, Date.now());
+    const result = acquireLock(lockfilePath(tmpDir));
+    expect(result).toEqual({ acquired: false, pid: process.pid });
     const data = readLockfile(lockfilePath(tmpDir));
     expect(data?.pid).toBe(process.pid);
   });

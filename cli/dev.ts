@@ -49,18 +49,28 @@ export const devCommand = new Command("dev")
       env.PAPER_MODE_EXIT_LIVE = "true";
     }
 
-    const cleanup = (): void => {
+    const cleanup = (code?: number): void => {
       releaseLock();
+      if (code !== undefined) {
+        process.exit(code);
+      }
     };
 
-    process.on("exit", cleanup);
+    let cleanedUp = false;
+    const doCleanup = (code?: number): void => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      cleanup(code);
+    };
+
+    process.on("exit", () => cleanup());
     process.on("SIGINT", () => {
-      cleanup();
-      process.exit(130);
+      child.kill("SIGINT");
+      doCleanup(130);
     });
     process.on("SIGTERM", () => {
-      cleanup();
-      process.exit(143);
+      child.kill("SIGTERM");
+      doCleanup(143);
     });
 
     console.log("Starting Prism trading agent...");
@@ -71,7 +81,6 @@ export const devCommand = new Command("dev")
     });
 
     child.on("exit", (code) => {
-      cleanup();
-      process.exit(code ?? 0);
+      doCleanup(code ?? 0);
     });
   });
