@@ -1,9 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
-import {
-  ConfigService,
-  type AppConfig,
-} from "../engine/config-service.js";
+import { ConfigService, type AppConfig } from "../engine/config-service.js";
 import {
   AdapterService,
   AuditService,
@@ -78,15 +75,25 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     paperValidationMinDays: 7,
     paperValidationEnforce: false,
     agentiveMode: false,
-    llmApiKey: "",
-    llmModel: "gpt-4o",
-    llmBaseUrl: "https://api.openai.com/v1",
-    llmMaxTokens: 1024,
+    agentRuntime: "none",
+    agentAcpCommand: "hermes",
+    agentAcpArgs: ["acp"],
+    agentGatewayUrl: "ws://127.0.0.1:18789",
+    agentGatewayToken: "",
+    agentPromptTimeoutMs: 15_000,
+    agentCheckinIntervalMs: 3_600_000,
+    agentCheckinOnEvents: true,
+    agentCheckinIncludeHistory: true,
+    agentCheckinMaxPositions: 10,
+    agentOpenclawWebhookUrl: "",
+    agentHermesApiUrl: "",
+    agentHttpPort: 18_790,
+    agentMcpEnabled: true,
     oorCooldownMs: 4 * 60 * 60 * 1000,
     repeatOorCooldownMs: 12 * 60 * 60 * 1000,
     maxOorCooldownExits: 3,
     evolutionInterval: 5,
-    evolutionMaxChangePct: 0.20,
+    evolutionMaxChangePct: 0.2,
     signalWeightWindowDays: 60,
     signalWeightMinOutcomes: 10,
     signalWeightBoostFactor: 1.05,
@@ -106,10 +113,7 @@ function buildScreenerLayer(
   const configLayer = Layer.succeed(ConfigService, makeConfig(overrides));
   const dbLayer = DbLive(":memory:");
   const auditLayer = Layer.provide(AuditLive, dbLayer);
-  const strategyLayer = Layer.provide(
-    StrategyLive,
-    Layer.merge(configLayer, auditLayer),
-  );
+  const strategyLayer = Layer.provide(StrategyLive, Layer.merge(configLayer, auditLayer));
   const adapterLayer: Layer.Layer<AdapterService, never, never> = (() => {
     if (adapterFailure === "discoverPoolsError") {
       return Layer.succeed(AdapterService, {
@@ -199,15 +203,14 @@ describe("ScreenerService.screenPools", () => {
       const screener = yield* ScreenerService;
       return yield* screener.screenPools();
     });
-    await expect(
-      Effect.runPromise(Effect.provide(program, layer)),
-    ).rejects.toThrow(/out of memory/);
+    await expect(Effect.runPromise(Effect.provide(program, layer))).rejects.toThrow(
+      /out of memory/,
+    );
   });
 
   it("returns empty array on a JSON parse error (DiscoverPoolsError from JSON failure)", async () => {
     const restore = mockFetch(
-      (async () =>
-        new Response("not json at all", { status: 200 })) as unknown as typeof fetch,
+      (async () => new Response("not json at all", { status: 200 })) as unknown as typeof fetch,
     );
     try {
       const layer = buildScreenerLayer();

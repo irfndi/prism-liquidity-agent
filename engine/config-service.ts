@@ -100,17 +100,37 @@ export interface AppConfig {
   readonly repeatOorCooldownMs: number;
   readonly maxOorCooldownExits: number;
 
-  // ─── Agentic mode / LLM overlay ──────────────────────────────────────
-  /** Enable non-deterministic LLM reasoning overlay. Only active when Prism runs as an agent skill. Default false. */
+  // ─── Agentic mode / agent runtime overlay ────────────────────────────
+  /** Enable non-deterministic agent reasoning overlay. Only active when Prism runs under an agent runtime (Hermes/OpenClaw). Default false. */
   readonly agentiveMode: boolean;
-  /** LLM API key (OpenAI-compatible endpoint). Empty string = disabled. */
-  readonly llmApiKey: string;
-  /** LLM model name. Default "gpt-4o". */
-  readonly llmModel: string;
-  /** LLM base URL for OpenAI-compatible APIs. Default "https://api.openai.com/v1". */
-  readonly llmBaseUrl: string;
-  /** Maximum tokens for LLM reasoning response. Default 1024. */
-  readonly llmMaxTokens: number;
+  /** Which agent runtime to use. `auto` detects Hermes or OpenClaw; `none` disables agent overlay. Default "auto". */
+  readonly agentRuntime: "auto" | "hermes" | "openclaw" | "none";
+  /** Command or binary name for the ACP agent runtime (Hermes). Default "hermes". */
+  readonly agentAcpCommand: string;
+  /** Arguments passed to the ACP command. Default ["acp"]. */
+  readonly agentAcpArgs: ReadonlyArray<string>;
+  /** OpenClaw Gateway WebSocket URL. Default "ws://127.0.0.1:18789". */
+  readonly agentGatewayUrl: string;
+  /** Auth token for OpenClaw Gateway. Empty string = no auth. Default "". */
+  readonly agentGatewayToken: string;
+  /** Timeout for agent prompt responses. Default 15000 ms. */
+  readonly agentPromptTimeoutMs: number;
+  /** Interval between periodic agent check-ins. Default 3600000 ms (1 hour). */
+  readonly agentCheckinIntervalMs: number;
+  /** Send check-ins on significant trade/position events. Default true. */
+  readonly agentCheckinOnEvents: boolean;
+  /** Include recent decision history in check-ins. Default true. */
+  readonly agentCheckinIncludeHistory: boolean;
+  /** Max positions to include in check-in summary. Default 10. */
+  readonly agentCheckinMaxPositions: number;
+  /** OpenClaw webhook URL for one-way agent alerts. Empty = disabled. Default "". */
+  readonly agentOpenclawWebhookUrl: string;
+  /** Hermes HTTP API URL for one-way agent alerts. Empty = disabled. Default "". */
+  readonly agentHermesApiUrl: string;
+  /** Port for the local agent HTTP status API. 0 = disabled. Default 18790. */
+  readonly agentHttpPort: number;
+  /** Enable the MCP server for agent runtime tool discovery. Default true. */
+  readonly agentMcpEnabled: boolean;
 
   // ─── Threshold evolution ─────────────────────────────────────────────
   /** How many closed positions between evolution rounds. Default 5. */
@@ -231,32 +251,69 @@ const loadConfig = Effect.gen(function* () {
 
   // ─── F7: Pool cooldown after failed exits ───────────────────────────────────
   const oorCooldownMs = yield* validatedNumber("OOR_COOLDOWN_MS", 0, 4 * 60 * 60 * 1000);
-  const repeatOorCooldownMs = yield* validatedNumber("REPEAT_OOR_COOLDOWN_MS", 0, 12 * 60 * 60 * 1000);
+  const repeatOorCooldownMs = yield* validatedNumber(
+    "REPEAT_OOR_COOLDOWN_MS",
+    0,
+    12 * 60 * 60 * 1000,
+  );
   const maxOorCooldownExits = yield* validatedNumber("MAX_OOR_COOLDOWN_EXITS", 1, 3);
 
-  // ─── Agentic mode / LLM overlay ──────────────────────────────────────
-  const agentiveMode = yield* Config.boolean("AGENTIC_MODE").pipe(
+  // ─── Agentic mode / agent runtime overlay ────────────────────────────
+  const agentiveMode = yield* Config.boolean("AGENTIVE_MODE").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const llmApiKey = yield* Config.string("LLM_API_KEY").pipe(
+  const agentRuntimeRaw = yield* Config.string("AGENT_RUNTIME").pipe(
+    Effect.orElseSucceed(() => "auto"),
+  );
+  const validAgentRuntimes = ["auto", "hermes", "openclaw", "none"] as const;
+  const agentRuntime = validAgentRuntimes.includes(
+    agentRuntimeRaw as (typeof validAgentRuntimes)[number],
+  )
+    ? (agentRuntimeRaw as (typeof validAgentRuntimes)[number])
+    : "auto";
+  const agentAcpCommand = yield* Config.string("AGENT_ACP_COMMAND").pipe(
+    Effect.orElseSucceed(() => "hermes"),
+  );
+  const agentAcpArgsRaw = yield* Config.string("AGENT_ACP_ARGS").pipe(
+    Effect.orElseSucceed(() => "acp"),
+  );
+  const agentAcpArgs = agentAcpArgsRaw
+    .split(" ")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const agentGatewayUrl = yield* Config.string("AGENT_GATEWAY_URL").pipe(
+    Effect.orElseSucceed(() => "ws://127.0.0.1:18789"),
+  );
+  const agentGatewayToken = yield* Config.string("AGENT_GATEWAY_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const llmModel = yield* Config.string("LLM_MODEL").pipe(
-    Effect.orElseSucceed(() => "gpt-4o"),
+  const agentPromptTimeoutMs = yield* validatedNumber("AGENT_PROMPT_TIMEOUT_MS", 1_000, 15_000);
+  const agentCheckinIntervalMs = yield* validatedNumber(
+    "AGENT_CHECKIN_INTERVAL_MS",
+    0,
+    60 * 60 * 1000,
   );
-  const llmBaseUrl = yield* Config.string("LLM_BASE_URL").pipe(
-    Effect.orElseSucceed(() => "https://api.openai.com/v1"),
+  const agentCheckinOnEvents = yield* Config.boolean("AGENT_CHECKIN_ON_EVENTS").pipe(
+    Effect.orElseSucceed(() => true),
   );
-  const llmMaxTokens = yield* validatedNumber("LLM_MAX_TOKENS", 256, 1024, 8192);
+  const agentCheckinIncludeHistory = yield* Config.boolean("AGENT_CHECKIN_INCLUDE_HISTORY").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const agentCheckinMaxPositions = yield* validatedNumber("AGENT_CHECKIN_MAX_POSITIONS", 0, 10);
+  const agentOpenclawWebhookUrl = yield* Config.string("AGENT_OPENCLAW_WEBHOOK_URL").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const agentHermesApiUrl = yield* Config.string("AGENT_HERMES_API_URL").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const agentHttpPort = yield* validatedNumber("AGENT_HTTP_PORT", 0, 18_790, 65_535);
+  const agentMcpEnabled = yield* Config.boolean("AGENT_MCP_ENABLED").pipe(
+    Effect.orElseSucceed(() => true),
+  );
 
   // ─── Threshold evolution ─────────────────────────────────────────────
   const evolutionInterval = yield* validatedNumber("EVOLUTION_INTERVAL", 1, 5, 100);
-  const evolutionMaxChangePct = yield* validatedNumber(
-    "EVOLUTION_MAX_CHANGE_PCT",
-    0.01,
-    0.20,
-    1.0,
-  );
+  const evolutionMaxChangePct = yield* validatedNumber("EVOLUTION_MAX_CHANGE_PCT", 0.01, 0.2, 1.0);
 
   const signalWeightWindowDays = yield* validatedNumber("SIGNAL_WEIGHT_WINDOW_DAYS", 7, 60);
   const signalWeightMinOutcomes = yield* validatedNumber("SIGNAL_WEIGHT_MIN_OUTCOMES", 3, 10);
@@ -419,10 +476,20 @@ const loadConfig = Effect.gen(function* () {
     repeatOorCooldownMs,
     maxOorCooldownExits,
     agentiveMode,
-    llmApiKey,
-    llmModel,
-    llmBaseUrl,
-    llmMaxTokens,
+    agentRuntime,
+    agentAcpCommand,
+    agentAcpArgs,
+    agentGatewayUrl,
+    agentGatewayToken,
+    agentPromptTimeoutMs,
+    agentCheckinIntervalMs,
+    agentCheckinOnEvents,
+    agentCheckinIncludeHistory,
+    agentCheckinMaxPositions,
+    agentOpenclawWebhookUrl,
+    agentHermesApiUrl,
+    agentHttpPort,
+    agentMcpEnabled,
     evolutionInterval,
     evolutionMaxChangePct,
     signalWeightWindowDays,

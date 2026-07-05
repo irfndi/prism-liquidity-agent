@@ -9,7 +9,14 @@ function makeLayer() {
 }
 
 function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
-  return Effect.runSync((Effect.provide as (e: Effect.Effect<T, unknown, unknown>, l: unknown) => Effect.Effect<T, unknown, never>)(effect, layer));
+  return Effect.runSync(
+    (
+      Effect.provide as (
+        e: Effect.Effect<T, unknown, unknown>,
+        l: unknown,
+      ) => Effect.Effect<T, unknown, never>
+    )(effect, layer),
+  );
 }
 
 function makeSnapshot(overrides: Partial<SignalSnapshot> = {}): SignalSnapshot {
@@ -40,11 +47,7 @@ describe("Signal staging", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.saveSignalSnapshot(snapshot);
-        const results = yield* db.getSignalSnapshots(
-          snapshot.poolAddress,
-          0,
-          2_000_000,
-        );
+        const results = yield* db.getSignalSnapshots(snapshot.poolAddress, 0, 2_000_000);
         expect(results).toHaveLength(1);
         expect(results[0]!.poolAddress).toBe(snapshot.poolAddress);
         expect(results[0]!.timestamp).toBe(snapshot.timestamp);
@@ -65,11 +68,7 @@ describe("Signal staging", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.saveSignalSnapshot(snapshot);
-        const results = yield* db.getSignalSnapshots(
-          snapshot.poolAddress,
-          0,
-          1_000_000,
-        );
+        const results = yield* db.getSignalSnapshots(snapshot.poolAddress, 0, 1_000_000);
         expect(results).toHaveLength(0);
       }),
       layer,
@@ -162,21 +161,9 @@ describe("Signal staging", () => {
         yield* db.saveSignalSnapshot(makeSnapshot({ timestamp: 1_000_000 }));
         yield* db.saveSignalSnapshot(makeSnapshot({ timestamp: 2_000_000 }));
         yield* db.saveSignalSnapshot(makeSnapshot({ timestamp: 3_000_000 }));
-        yield* db.recordSignalOutcome(
-          "Pool111111111111111111111111111111111111111",
-          1_000_000,
-          10,
-        );
-        yield* db.recordSignalOutcome(
-          "Pool111111111111111111111111111111111111111",
-          2_000_000,
-          20,
-        );
-        yield* db.recordSignalOutcome(
-          "Pool111111111111111111111111111111111111111",
-          3_000_000,
-          30,
-        );
+        yield* db.recordSignalOutcome("Pool111111111111111111111111111111111111111", 1_000_000, 10);
+        yield* db.recordSignalOutcome("Pool111111111111111111111111111111111111111", 2_000_000, 20);
+        yield* db.recordSignalOutcome("Pool111111111111111111111111111111111111111", 3_000_000, 30);
         const outcomes = yield* db.getRecentOutcomes(2);
         expect(outcomes).toHaveLength(2);
         // ordered by outcome_recorded_at DESC — most recent first

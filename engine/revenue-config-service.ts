@@ -25,7 +25,7 @@ const DEFAULT_CONFIG: RevenueConfig = {
 
 const FAIL_CLOSED_CONFIG: RevenueConfig = {
   tier: "fund",
-  platformFeeRate: 0.10,
+  platformFeeRate: 0.1,
   revenueShareEnabled: true,
   revenueShareOperatorPct: 0,
   feeWalletAddress: "",

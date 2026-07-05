@@ -8,4 +8,5 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   dts: true,
+  external: ["bun:sqlite"],
 });

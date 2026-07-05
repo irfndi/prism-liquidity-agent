@@ -13,16 +13,40 @@ Prism is designed to be operated by AI agent harnesses (OpenClaw, Hermes, acpx, 
 
 ## Skills (auto-discovered by agent harnesses)
 
-Agent harnesses discover installation guides automatically when a skill file is placed in their skills directory. Prism ships copy-paste-ready skills for all four Markdown-based harnesses:
+Prism ships two kinds of skill files:
+
+1. **Installation guide skills** — teach the agent harness how to install Prism. These live in [`marketplaces/`](../marketplaces/) and [`.agents/skills/`](../.agents/skills/).
+2. **Runtime skills** — let the agent harness query and receive alerts from a running Prism instance. These live in [`skills/prism/`](../skills/prism/), [`skills/prism-openclaw/`](../skills/prism-openclaw/), and [`skills/prism-hermes/`](../skills/prism-hermes/).
+
+### Installation guide skills
 
 | Harness | Local install path | Skill file |
 |---|---|---|
-| OpenCode | `~/.config/opencode/skills/prism-install/SKILL.md` | [`../marketplaces/opencode/SKILL.md`](../marketplaces/opencode/SKILL.md) |
-| OpenClaw | `~/.openclaw/skills/prism-install/SKILL.md` | [`../marketplaces/openclaw/SKILL.md`](../marketplaces/openclaw/SKILL.md) |
-| Hermes | `~/.hermes/skills/software-development/prism-install/SKILL.md` | [`../marketplaces/hermes/SKILL.md`](../marketplaces/hermes/SKILL.md) |
-| acpx / custom | `~/.agents/skills/prism-install.md` | [`../.agents/skills/prism-install.md`](../.agents/skills/prism-install.md) |
+| OpenCode | `~/.config/opencode/skills/prism-install/SKILL.md` | [`marketplaces/opencode/SKILL.md`](../marketplaces/opencode/SKILL.md) |
+| OpenClaw | `~/.openclaw/skills/prism-install/SKILL.md` | [`marketplaces/openclaw/SKILL.md`](../marketplaces/openclaw/SKILL.md) |
+| Hermes | `~/.hermes/skills/software-development/prism-install/SKILL.md` | [`marketplaces/hermes/SKILL.md`](../marketplaces/hermes/SKILL.md) |
+| acpx / custom | `~/.agents/skills/prism-install.md` | [`.agents/skills/prism-install.md`](../.agents/skills/prism-install.md) |
 
-The project's own strategy skill ([`../.agents/skills/dlmm-rebalancer.md`](../.agents/skills/dlmm-rebalancer.md)) covers HOLD/REBALANCE/EXIT/ENTER reasoning and is usable from any harness.
+### Runtime skills
+
+Place these in the harness's runtime skills directory after Prism is installed and configured:
+
+| Skill | Runtime | Local install path | When to install |
+|-------|---------|-------------------|-----------------|
+| `skills/prism/` | Universal | `~/.agents/skills/prism` or `~/.hermes/skills/prism` | Works with any AgentSkills-compatible runtime |
+| `skills/prism-openclaw/` | OpenClaw | `~/.agents/skills/prism-openclaw` | Best OpenClaw integration |
+| `skills/prism-hermes/` | Hermes | `~/.hermes/skills/prism-hermes` | Enables hourly blueprint check-ins |
+
+```bash
+# OpenClaw runtime skill
+ln -s $(pwd)/skills/prism-openclaw ~/.agents/skills/prism-openclaw
+
+# Hermes runtime skill
+ln -s $(pwd)/skills/prism-hermes ~/.hermes/skills/prism-hermes
+
+# Universal runtime skill (fallback)
+ln -s $(pwd)/skills/prism ~/.agents/skills/prism
+```
 
 For the full status of all 10 target marketplaces (including the 6 that still need code packages — MCP server, AutoGPT, LangChain, CrewAI, Dify, Flowise), see [`../marketplaces/README.md`](../marketplaces/README.md).
 
@@ -184,9 +208,88 @@ export HELIUS_API_KEY="your-helius-key"          # REQUIRED
 export WALLET_PRIVATE_KEY="..."                    # OPTIONAL (for live trading only)
 ```
 
-The `prism register` command returns an API key that's stored locally in `~/.config/prism/credentials.json`. Subsequent commands (`prism whoami`, `prism wallet`, etc.) read it automatically.
+Optional agent-runtime overlay (lets a local Hermes/OpenClaw harness review decisions):
+
+```bash
+export AGENTIVE_MODE="true"
+export AGENT_RUNTIME="auto"                      # auto | hermes | openclaw | none
+export AGENT_ACP_COMMAND="hermes"
+export AGENT_ACP_ARGS="acp"
+export AGENT_GATEWAY_URL="ws://127.0.0.1:18789"
+export AGENT_GATEWAY_TOKEN=""                    # optional Gateway auth token
+export AGENT_PROMPT_TIMEOUT_MS="15000"
+export AGENT_CHECKIN_INTERVAL_MS="3600000"
+export AGENT_CHECKIN_ON_EVENTS="true"
+export AGENT_CHECKIN_INCLUDE_HISTORY="true"
+export AGENT_CHECKIN_MAX_POSITIONS="10"
+export AGENT_HTTP_PORT="18790"                  # local HTTP status API; 0 disables
+export AGENT_MCP_ENABLED="true"                 # expose MCP tools to agent runtime
+```
+
+The overlay can only reduce confidence or change an action to `HOLD`. No remote LLM API keys are used.
+
+## Agent Pull Interfaces (MCP + HTTP)
+
+When `AGENTIVE_MODE=true`, Prism exposes two pull interfaces so the agent runtime can query state on demand instead of waiting for push check-ins.
+
+### MCP Server (stdio)
+
+Enabled by default (`AGENT_MCP_ENABLED=true`). Prism implements a minimal MCP server over stdio with these tools:
+
+| Tool | Input | Output |
+|------|-------|--------|
+| `prism_status` | `{}` | Uptime, scan count, portfolio summary |
+| `prism_positions` | `{pool?: string}` | Open positions with deposited/current value and bin ranges |
+| `prism_decisions` | `{limit?: number, pool?: string}` | Recent decision history |
+| `prism_config` | `{}` | Sanitized config (no secrets) |
+
+Both Hermes and OpenClaw can connect to Prism as an MCP client. When the agent runtime launches Prism via `prism dev`, the MCP server is available on the same stdio pipe.
+
+### HTTP Fallback
+
+Enabled when `AGENT_HTTP_PORT` is non-zero (default `18790`). Runs on `127.0.0.1` only:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | `{ok: true, uptimeMs, version}` |
+| `GET /status` | Portfolio summary, scan count, uptime |
+| `GET /positions?pool=...` | Open positions (optionally filtered by pool) |
+| `GET /decisions?limit=...&pool=...` | Recent decisions |
+| `GET /config` | Sanitized config (no secrets) |
+
+Example:
+
+```bash
+curl http://127.0.0.1:18790/status | jq .
+```
+
+The HTTP server is a fallback for runtimes that do not yet support MCP. Runtimes that support MCP should prefer the MCP tools.
 
 ## Skills Matrix
+
+Prism ships runtime skills for agent harnesses. See [Skills](#skills-auto-discovered-by-agent-harnesses) above for install paths.
+
+| Skill | Runtime | Purpose |
+|-------|---------|---------|
+| `skills/prism/` | Universal | Works with any AgentSkills-compatible runtime |
+| `skills/prism-openclaw/` | OpenClaw | OpenClaw-specific metadata and hourly check-in script |
+| `skills/prism-hermes/` | Hermes | Hermes blueprint for hourly scheduled check-ins |
+
+To publish to skills.sh, submit the `skills/prism/` directory (or the runtime-specific variants) following the [AgentSkills specification](https://agentskills.io).
+
+## Scheduled check-ins (cron / blueprint)
+
+Hermes users get hourly check-ins automatically via the `metadata.hermes.blueprint` schedule declared in `skills/prism-hermes/SKILL.md`.
+
+OpenClaw and other runtimes can use a cron job or built-in scheduler to call:
+
+```bash
+prism status --message
+```
+
+This returns a short markdown summary suitable for Telegram, WhatsApp, Discord, Slack, or any messaging channel the runtime owns.
+
+## acpx Integration
 
 Prism works with the following OpenCode skills (for OpenCode-based agents):
 

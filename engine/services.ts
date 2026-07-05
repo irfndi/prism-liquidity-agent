@@ -15,6 +15,18 @@ import type {
   SignalSnapshot,
   SignalWeights,
 } from "./types.js";
+import type {
+  AgentRuntimeContext,
+  AgentRuntimeCheckin,
+  AgentRuntimeAlert,
+  AgentRuntimeTransport,
+} from "./agent-transport.js";
+import type {
+  PositionSnapshot,
+  DecisionSnapshot,
+  PortfolioSnapshot,
+  PrismStateSnapshot,
+} from "./state-service.js";
 import type { EvolvableThresholds, OutcomeRecord } from "./strategy-service.js";
 import type {
   AdapterError,
@@ -50,9 +62,7 @@ export interface AdapterApi {
     poolAddress: string,
     walletAddress: string,
   ) => Effect.Effect<ReadonlyArray<Position>, unknown>;
-  readonly getAllWalletPositions: (
-    walletAddress: string,
-  ) => Effect.Effect<
+  readonly getAllWalletPositions: (walletAddress: string) => Effect.Effect<
     ReadonlyArray<{
       poolAddress: string;
       positionPubKey: string;
@@ -325,12 +335,12 @@ export interface DbApi {
       lastFeeClaimAt: number;
       trailingStopThreshold: number | null;
       highestValueUsd: number | null;
-    lastRebalanceAt: number;
-    paperExitedAt: number | null;
-    entrySignalTimestamp: number | null;
-  } | null,
-  unknown
->;
+      lastRebalanceAt: number;
+      paperExitedAt: number | null;
+      entrySignalTimestamp: number | null;
+    } | null,
+    unknown
+  >;
   readonly getAllPositions: () => Effect.Effect<
     ReadonlyArray<{
       poolAddress: string;
@@ -348,12 +358,12 @@ export interface DbApi {
       lastFeeClaimAt: number;
       trailingStopThreshold: number | null;
       highestValueUsd: number | null;
-    lastRebalanceAt: number;
-    paperExitedAt: number | null;
-    entrySignalTimestamp: number | null;
-  }>,
-  unknown
->;
+      lastRebalanceAt: number;
+      paperExitedAt: number | null;
+      entrySignalTimestamp: number | null;
+    }>,
+    unknown
+  >;
   readonly getPaperExitedPositions: () => Effect.Effect<
     ReadonlyArray<{
       poolAddress: string;
@@ -371,12 +381,12 @@ export interface DbApi {
       lastFeeClaimAt: number;
       trailingStopThreshold: number | null;
       highestValueUsd: number | null;
-    lastRebalanceAt: number;
-    paperExitedAt: number | null;
-    entrySignalTimestamp: number | null;
-  }>,
-  unknown
->;
+      lastRebalanceAt: number;
+      paperExitedAt: number | null;
+      entrySignalTimestamp: number | null;
+    }>,
+    unknown
+  >;
   readonly deletePosition: (poolAddress: string) => Effect.Effect<void, unknown>;
   readonly markPaperExited: (poolAddress: string) => Effect.Effect<void, unknown>;
   readonly updatePositionValue: (
@@ -584,7 +594,9 @@ export interface DbApi {
     startMs: number,
     endMs: number,
   ) => Effect.Effect<
-    ReadonlyArray<SignalSnapshot & { outcomePnlUsd: number | null; outcomeRecordedAt: number | null }>,
+    ReadonlyArray<
+      SignalSnapshot & { outcomePnlUsd: number | null; outcomeRecordedAt: number | null }
+    >,
     unknown
   >;
   readonly recordSignalOutcome: (
@@ -592,9 +604,7 @@ export interface DbApi {
     entryTimestamp: number,
     pnlUsd: number,
   ) => Effect.Effect<void, unknown>;
-  readonly getRecentOutcomes: (
-    limit: number,
-  ) => Effect.Effect<
+  readonly getRecentOutcomes: (limit: number) => Effect.Effect<
     ReadonlyArray<{
       poolAddress: string;
       timestamp: number;
@@ -614,9 +624,7 @@ export interface DbApi {
   >;
 
   readonly getEvolvedThresholds: () => Effect.Effect<EvolvableThresholds | null, unknown>;
-  readonly saveEvolvedThresholds: (
-    thresholds: EvolvableThresholds,
-  ) => Effect.Effect<void, unknown>;
+  readonly saveEvolvedThresholds: (thresholds: EvolvableThresholds) => Effect.Effect<void, unknown>;
   readonly getClosedPositionOutcomes: (
     limit: number,
   ) => Effect.Effect<ReadonlyArray<OutcomeRecord>, unknown>;
@@ -624,9 +632,7 @@ export interface DbApi {
   readonly getSignalWeights: () => Effect.Effect<SignalWeights | null, unknown>;
   readonly saveSignalWeights: (weights: SignalWeights) => Effect.Effect<void, unknown>;
 
-  readonly getPoolCooldown: (
-    poolAddress: string,
-  ) => Effect.Effect<PoolCooldown | null, unknown>;
+  readonly getPoolCooldown: (poolAddress: string) => Effect.Effect<PoolCooldown | null, unknown>;
   readonly setPoolCooldown: (cooldown: PoolCooldown) => Effect.Effect<void, unknown>;
   readonly clearPoolCooldown: (poolAddress: string) => Effect.Effect<void, unknown>;
 }
@@ -743,18 +749,60 @@ export class RevenueConfigService extends Context.Tag("RevenueConfigService")<
   RevenueConfigApi
 >() {}
 
-// ─── LLM Service (agentic-mode overlay) ────────────────────────────────────
+// ─── Agent Service (agentic-mode overlay) ──────────────────────────────────
 
-export interface LlmApi {
+export interface AgentApi {
   readonly enhanceDecision: (
     decision: AgentDecision,
-    context: {
-      readonly pool: PoolState;
-      readonly metrics: PoolMetrics;
-      readonly warnings: ReadonlyArray<MemoryEntry>;
-      readonly recentDecisions: ReadonlyArray<DecisionRecord>;
-    },
+    context: AgentRuntimeContext,
   ) => Effect.Effect<AgentDecision | null, unknown>;
+  readonly sendCheckin: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, unknown>;
+  readonly sendAlert: (alert: AgentRuntimeAlert) => Effect.Effect<void, unknown>;
+  readonly getStatus: () => Effect.Effect<
+    {
+      readonly connected: boolean;
+      readonly transport: string | null;
+      readonly lastPromptAt: number | null;
+      readonly errorCount: number;
+    },
+    unknown
+  >;
 }
 
-export class LlmService extends Context.Tag("LlmService")<LlmService, LlmApi>() {}
+export class AgentService extends Context.Tag("AgentService")<AgentService, AgentApi>() {}
+
+// ─── Agent State Service (shared mutable state for MCP/HTTP servers) ─────────
+
+export interface AgentStateApi {
+  readonly getSnapshot: () => Effect.Effect<PrismStateSnapshot, never>;
+  readonly updateSnapshot: (patch: Partial<PrismStateSnapshot>) => Effect.Effect<void, never>;
+}
+
+export class AgentStateService extends Context.Tag("AgentStateService")<
+  AgentStateService,
+  AgentStateApi
+>() {}
+
+// ─── MCP Server Service ──────────────────────────────────────────────────────
+
+export interface McpServerApi {
+  readonly start: () => Effect.Effect<void, unknown>;
+  readonly stop: () => Effect.Effect<void, unknown>;
+}
+
+export class McpServerService extends Context.Tag("McpServerService")<
+  McpServerService,
+  McpServerApi
+>() {}
+
+// ─── HTTP Status Server Service ──────────────────────────────────────────────
+
+export interface HttpStatusServerApi {
+  readonly start: () => Effect.Effect<void, unknown>;
+  readonly stop: () => Effect.Effect<void, unknown>;
+}
+
+export class HttpStatusServerService extends Context.Tag("HttpStatusServerService")<
+  HttpStatusServerService,
+  HttpStatusServerApi
+>() {}

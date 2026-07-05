@@ -128,8 +128,16 @@ function isValidPoolShape(v: unknown): v is MeteoraPool {
   if (typeof v["address"] !== "string") return false;
   if (typeof v["tvl"] !== "number") return false;
   if (typeof v["apr"] !== "number") return false;
-  if (!isObject(v["token_x"]) || typeof (v["token_x"] as Record<string, unknown>)["address"] !== "string") return false;
-  if (!isObject(v["token_y"]) || typeof (v["token_y"] as Record<string, unknown>)["address"] !== "string") return false;
+  if (
+    !isObject(v["token_x"]) ||
+    typeof (v["token_x"] as Record<string, unknown>)["address"] !== "string"
+  )
+    return false;
+  if (
+    !isObject(v["token_y"]) ||
+    typeof (v["token_y"] as Record<string, unknown>)["address"] !== "string"
+  )
+    return false;
   if (!isObject(v["pool_config"])) return false;
   const cfg = v["pool_config"] as Record<string, unknown>;
   if (typeof cfg["bin_step"] !== "number") return false;
@@ -145,7 +153,10 @@ function isValidPoolShape(v: unknown): v is MeteoraPool {
 function describe(v: unknown): string {
   if (v === null) return "null";
   if (Array.isArray(v)) return `array(length=${v.length})`;
-  if (typeof v === "object") return `object(keys=${Object.keys(v as object).slice(0, 5).join(",")})`;
+  if (typeof v === "object")
+    return `object(keys=${Object.keys(v as object)
+      .slice(0, 5)
+      .join(",")})`;
   return typeof v;
 }
 
@@ -1191,10 +1202,12 @@ export const AdapterLive = Layer.effect(
             );
           }
           if (valid.length < data.length) {
-            logger.warn(
-              "Pool discovery: some pool objects had invalid shape and were dropped",
-              { dropped: data.length - valid.length, kept: valid.length, total, pages },
-            );
+            logger.warn("Pool discovery: some pool objects had invalid shape and were dropped", {
+              dropped: data.length - valid.length,
+              kept: valid.length,
+              total,
+              pages,
+            });
           }
           return valid
             .filter((p) => p.tvl >= config.discoveryMinTvlUsd)

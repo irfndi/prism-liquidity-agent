@@ -142,6 +142,41 @@ Key `.env` variables:
 | `SQLITE_DB_PATH`          | `./prism.db` | SQLite database file path                |
 | `ENABLE_SNAPSHOT_CAPTURE` | `false`      | Dump pool snapshots to DB (paper only)   |
 
+## Agent runtime overlay
+
+When Prism runs under a local agent harness (Hermes or OpenClaw), enable `AGENTIVE_MODE=true` to let the harness review decisions and receive proactive check-ins. No remote LLM API keys are used; communication happens over local ACP (Hermes) or Gateway WebSocket (OpenClaw). The overlay can only reduce confidence or change an action to `HOLD`.
+
+Prism also exposes pull interfaces for agent runtimes to query state on demand:
+
+- **MCP server** (stdio): tools `prism_status`, `prism_positions`, `prism_decisions`, `prism_config`. Enable with `AGENT_MCP_ENABLED=true` (default).
+- **HTTP fallback** on `127.0.0.1:AGENT_HTTP_PORT` (default `18790`): `GET /status`, `/positions`, `/decisions`, `/config`, `/health`. Set `AGENT_HTTP_PORT=0` to disable.
+
+| Variable                        | Default                    | Description                                          |
+| ------------------------------- | -------------------------- | ---------------------------------------------------- |
+| `AGENTIVE_MODE`                 | `false`                    | Enable agent runtime overlay                         |
+| `AGENT_RUNTIME`                 | `auto`                     | `auto`, `hermes`, `openclaw`, or `none`              |
+| `AGENT_ACP_COMMAND`             | `hermes`                   | Hermes binary for ACP                                |
+| `AGENT_ACP_ARGS`                | `acp`                      | Arguments passed to ACP command                      |
+| `AGENT_GATEWAY_URL`             | `ws://127.0.0.1:18789`     | OpenClaw Gateway WebSocket URL                       |
+| `AGENT_GATEWAY_TOKEN`           | ``                         | Optional Gateway auth token                          |
+| `AGENT_PROMPT_TIMEOUT_MS`       | `15000`                    | Prompt/check-in timeout                              |
+| `AGENT_CHECKIN_INTERVAL_MS`     | `3600000`                  | Periodic check-in interval                           |
+| `AGENT_CHECKIN_ON_EVENTS`       | `true`                     | Check-in on ENTER/EXIT/REBALANCE                     |
+| `AGENT_CHECKIN_INCLUDE_HISTORY` | `true`                     | Include recent decisions/warnings                    |
+| `AGENT_CHECKIN_MAX_POSITIONS`   | `10`                       | Max positions in check-in summary                    |
+| `AGENT_HTTP_PORT`               | `18790`                    | Local HTTP status API port (`0` disables)            |
+| `AGENT_MCP_ENABLED`             | `true`                     | Expose MCP tools over stdio                          |
+
+## Messaging summary
+
+When Prism runs under an agent runtime that owns messaging channels (Telegram, WhatsApp, Discord, Slack, etc.), the runtime can call:
+
+```bash
+prism status --message
+```
+
+This returns a short markdown summary with emojis and bullets, formatted for chat apps. Prism never sends messages directly; the agent runtime forwards summaries and alerts to the user's preferred channel.
+
 ## Risk gates
 
 Decisions pass through checks in order before any on-chain action:

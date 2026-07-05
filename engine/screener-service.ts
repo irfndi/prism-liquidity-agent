@@ -26,7 +26,10 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
           Effect.gen(function* () {
             const pools: ReadonlyArray<DiscoveredPool> = yield* adapter.discoverPools().pipe(
               Effect.catchAll((err) => {
-                if (err instanceof DiscoverPoolsError || (err as { _tag?: string })?._tag === "DiscoverPoolsError") {
+                if (
+                  err instanceof DiscoverPoolsError ||
+                  (err as { _tag?: string })?._tag === "DiscoverPoolsError"
+                ) {
                   logger.warn(
                     "Pool discovery failed; falling back to watchlist-only mode:",
                     err.message,

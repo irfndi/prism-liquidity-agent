@@ -9,7 +9,14 @@ function makeLayer() {
 }
 
 function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
-  return Effect.runSync((Effect.provide as (e: Effect.Effect<T, unknown, unknown>, l: unknown) => Effect.Effect<T, unknown, never>)(effect, layer));
+  return Effect.runSync(
+    (
+      Effect.provide as (
+        e: Effect.Effect<T, unknown, unknown>,
+        l: unknown,
+      ) => Effect.Effect<T, unknown, never>
+    )(effect, layer),
+  );
 }
 
 describe("Pool cooldown", () => {
@@ -19,9 +26,7 @@ describe("Pool cooldown", () => {
     run(
       Effect.gen(function* () {
         const db = yield* DbService;
-        const result = yield* db.getPoolCooldown(
-          "Pool111111111111111111111111111111111111111",
-        );
+        const result = yield* db.getPoolCooldown("Pool111111111111111111111111111111111111111");
         expect(result).toBeNull();
       }),
       layer,

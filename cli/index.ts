@@ -15,6 +15,7 @@ import { versionCommand } from "./version.js";
 import { feedbackCommand } from "./feedback.js";
 import { referralCommand } from "./referral.js";
 import { portfolioCommand } from "./portfolio.js";
+import { statusCommand } from "./status.js";
 import { getCurrentVersion } from "../engine/version.js";
 
 const program = new Command();
@@ -40,5 +41,6 @@ program.addCommand(versionCommand);
 program.addCommand(feedbackCommand);
 program.addCommand(referralCommand);
 program.addCommand(portfolioCommand);
+program.addCommand(statusCommand);
 
 await program.parseAsync();

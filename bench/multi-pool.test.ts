@@ -46,11 +46,7 @@ describe("evaluatePerPoolAllocation (F5 multi-pool allocation)", () => {
   });
 
   it("rejects when already at maxOpenPositions", () => {
-    const positions = [
-      makePos("Pool1", 1000),
-      makePos("Pool2", 1000),
-      makePos("Pool3", 1000),
-    ];
+    const positions = [makePos("Pool1", 1000), makePos("Pool2", 1000), makePos("Pool3", 1000)];
     const result = evaluatePerPoolAllocation({
       proposedDepositUsd: 500,
       portfolioValueUsd: 10_000,
