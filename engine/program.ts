@@ -557,6 +557,11 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      if (pos && hasPosition) {
+        pos.currentValueUsd = estimatePositionValue(pos, pool);
+        yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+      }
+
       // EXIT conditions (capital protection)
       if (tvlVelocity < -config.tvlDropExitPct) {
         decision = {
