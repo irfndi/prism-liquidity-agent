@@ -2,6 +2,9 @@ import { Database } from "bun:sqlite";
 import { load as loadVec } from "sqlite-vec";
 import path from "path";
 import fs from "fs";
+import { createLogger } from "./logger.js";
+
+const logger = createLogger("db");
 
 function setupCustomSQLite() {
   if (process.platform === "darwin") {
@@ -44,10 +47,9 @@ function setupCustomSQLite() {
         }
       }
     }
-    console.warn(
-      "[db] No system libsqlite3.so found on Linux; sqlite-vec may not work. " +
-        "Install libsqlite3-dev or set Database.setCustomSQLite() manually.",
-    );
+    logger.warn("No system libsqlite3.so found on Linux; sqlite-vec may not work", {
+      hint: "Install libsqlite3-dev or set Database.setCustomSQLite() manually.",
+    });
   }
 }
 
@@ -56,15 +58,19 @@ export function createDatabase(dbPath = "./prism.db"): Database {
   fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   const db = new Database(dbPath);
   db.exec("PRAGMA journal_mode = WAL;");
+  let vecLoaded = false;
   try {
     loadVec(db);
+    vecLoaded = true;
   } catch (e) {
-    console.warn(
-      "[db] sqlite-vec extension could not be loaded:",
-      e instanceof Error ? e.message : String(e),
-    );
+    logger.warn("sqlite-vec extension could not be loaded", {
+      error: e instanceof Error ? e.message : String(e),
+    });
   }
   runMigrations(db);
+  if (vecLoaded && !hasVecMemoryTable(db)) {
+    tryCreateVecMemoryTable(db);
+  }
   return db;
 }
 
@@ -76,6 +82,8 @@ interface Migration {
   readonly up: (db: Database) => void;
 }
 
+const VEC_MEMORY_CACHE = new WeakMap<Database, boolean>();
+
 function hasTable(db: Database, name: string): boolean {
   const row = db
     .query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -84,7 +92,50 @@ function hasTable(db: Database, name: string): boolean {
 }
 
 export function hasVecMemoryTable(db: Database): boolean {
-  return hasTable(db, "vec_memory");
+  const cached = VEC_MEMORY_CACHE.get(db);
+  if (cached !== undefined) return cached;
+  if (!hasTable(db, "vec_memory")) {
+    VEC_MEMORY_CACHE.set(db, false);
+    return false;
+  }
+  try {
+    db.query("SELECT rowid FROM vec_memory WHERE expiresAt <= ? LIMIT 1").all(Date.now());
+    VEC_MEMORY_CACHE.set(db, true);
+    return true;
+  } catch {
+    VEC_MEMORY_CACHE.set(db, false);
+    return false;
+  }
+}
+
+function setVecMemoryCached(db: Database, value: boolean): void {
+  VEC_MEMORY_CACHE.set(db, value);
+}
+
+function tryCreateVecMemoryTable(db: Database): void {
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory USING vec0(
+        embedding float[384],
+        +id TEXT,
+        +category TEXT,
+        +content TEXT,
+        +pool_address TEXT,
+        +outcome TEXT,
+        +pnlUsd REAL,
+        +confidence REAL,
+        +createdAt INTEGER,
+        +expiresAt INTEGER
+      );
+    `);
+    setVecMemoryCached(db, true);
+    logger.info("sqlite-vec vec_memory table created on self-heal attempt");
+  } catch (e) {
+    setVecMemoryCached(db, false);
+    logger.warn("sqlite-vec vec_memory table could not be created on self-heal attempt", {
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
 }
 
 function hasColumn(db: Database, table: string, column: string): boolean {
@@ -165,10 +216,9 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
           );
         `);
       } catch (e) {
-        console.warn(
-          "[db] sqlite-vec vec_memory table could not be created:",
-          e instanceof Error ? e.message : String(e),
-        );
+        logger.warn("sqlite-vec vec_memory table could not be created during migration", {
+          error: e instanceof Error ? e.message : String(e),
+        });
       }
     },
   },

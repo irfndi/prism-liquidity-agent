@@ -38,6 +38,14 @@ describe("hasVecMemoryTable", () => {
     db.close();
   });
 
+  it("returns a consistent result on repeated calls", () => {
+    const db = new Database(":memory:");
+    const first = hasVecMemoryTable(db);
+    const second = hasVecMemoryTable(db);
+    expect(second).toBe(first);
+    db.close();
+  });
+
   it("returns true after createDatabase when sqlite-vec is available", () => {
     const db = tryCreateVecDatabase();
     if (!db) {
@@ -45,6 +53,12 @@ describe("hasVecMemoryTable", () => {
       return;
     }
     expect(hasVecMemoryTable(db)).toBe(true);
+    db.close();
+  });
+
+  it("createDatabase completes without error regardless of sqlite-vec availability", () => {
+    const db = createDatabase(":memory:");
+    expect(() => hasVecMemoryTable(db)).not.toThrow();
     db.close();
   });
 });
