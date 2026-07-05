@@ -96,6 +96,13 @@ export function acquireLock(
     return { acquired: false, pid: existing.pid };
   }
 
+  if (!existing) {
+    // Lockfile exists but couldn't be parsed after two attempts.
+    // Another process may be mid-write. Fail closed — don't unlink.
+    return { acquired: false, pid: 0 };
+  }
+
+  // existing is valid and PID is dead — safe to replace
   try {
     fs.unlinkSync(lockfilePath);
   } catch (err) {

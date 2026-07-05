@@ -59,15 +59,6 @@ describe("cli/lockfile", () => {
     expect(result).toEqual({ acquired: false, pid: process.pid });
   });
 
-  it("acquireLock succeeds when lockfile owner is dead, even if not stale", () => {
-    tmpDir = makeTmpDir();
-    writeLockfile(tmpDir, 99999999, Date.now());
-    const result = acquireLock(lockfilePath(tmpDir));
-    expect(result).toEqual({ acquired: true });
-    const data = readLockfile(lockfilePath(tmpDir));
-    expect(data?.pid).toBe(process.pid);
-  });
-
   it("acquireLock succeeds when lockfile is stale and owner is dead", () => {
     tmpDir = makeTmpDir();
     const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
@@ -85,6 +76,14 @@ describe("cli/lockfile", () => {
     expect(result).toEqual({ acquired: false, pid: process.pid });
     const data = readLockfile(lockfilePath(tmpDir));
     expect(data?.pid).toBe(process.pid);
+  });
+
+  it("acquireLock does not unlink unparsable lockfile (fail closed)", () => {
+    tmpDir = makeTmpDir();
+    fs.writeFileSync(lockfilePath(tmpDir), '{ "pid": 123', { mode: 0o600 });
+    const result = acquireLock(lockfilePath(tmpDir));
+    expect(result).toEqual({ acquired: false, pid: 0 });
+    expect(fs.existsSync(lockfilePath(tmpDir))).toBe(true);
   });
 
   it("releaseLock removes lockfile when PID matches", () => {
