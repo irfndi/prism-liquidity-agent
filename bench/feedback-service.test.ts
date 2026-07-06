@@ -91,7 +91,6 @@ function buildLayer(
     maxOpenPositions: 3,
     paperValidationMinDays: 7,
     paperValidationEnforce: false,
-
   });
   const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));
   return Layer.provide(FeedbackLive, baseLayer) as Layer.Layer<FeedbackService, never, never>;

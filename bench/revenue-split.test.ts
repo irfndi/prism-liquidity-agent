@@ -68,7 +68,6 @@ function buildLayer() {
     maxOpenPositions: 3,
     paperValidationMinDays: 7,
     paperValidationEnforce: false,
-
   });
   const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));
   return Layer.merge(Layer.provide(AuditLive, DbLive(":memory:")), baseLayer);
