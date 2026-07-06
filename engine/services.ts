@@ -317,6 +317,7 @@ export interface DbApi {
     lastRebalanceAt: number;
     paperExitedAt: number | null;
     entrySignalTimestamp: number | null;
+    entrySignalSnapshotId: number | null;
   }) => Effect.Effect<void, unknown>;
   readonly getPosition: (poolAddress: string) => Effect.Effect<
     {
@@ -338,6 +339,7 @@ export interface DbApi {
       lastRebalanceAt: number;
       paperExitedAt: number | null;
       entrySignalTimestamp: number | null;
+    entrySignalSnapshotId: number | null;
     } | null,
     unknown
   >;
@@ -361,6 +363,7 @@ export interface DbApi {
       lastRebalanceAt: number;
       paperExitedAt: number | null;
       entrySignalTimestamp: number | null;
+    entrySignalSnapshotId: number | null;
     }>,
     unknown
   >;
@@ -384,6 +387,7 @@ export interface DbApi {
       lastRebalanceAt: number;
       paperExitedAt: number | null;
       entrySignalTimestamp: number | null;
+    entrySignalSnapshotId: number | null;
     }>,
     unknown
   >;
@@ -588,7 +592,7 @@ export interface DbApi {
 
   readonly markFeeClaimReported: (id: string) => Effect.Effect<void, unknown>;
 
-  readonly saveSignalSnapshot: (snapshot: SignalSnapshot) => Effect.Effect<void, unknown>;
+  readonly saveSignalSnapshot: (snapshot: SignalSnapshot) => Effect.Effect<number, unknown>;
   readonly getSignalSnapshots: (
     poolAddress: string,
     startMs: number,
@@ -600,8 +604,7 @@ export interface DbApi {
     unknown
   >;
   readonly recordSignalOutcome: (
-    poolAddress: string,
-    entryTimestamp: number,
+    snapshotId: number,
     pnlUsd: number,
   ) => Effect.Effect<void, unknown>;
   readonly getRecentOutcomes: (limit: number) => Effect.Effect<

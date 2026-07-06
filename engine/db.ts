@@ -441,6 +441,15 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       }
     },
   },
+  {
+    version: 15,
+    name: "add_entry_signal_snapshot_id",
+    up(db) {
+      if (!hasColumn(db, "positions", "entry_signal_snapshot_id")) {
+        db.exec("ALTER TABLE positions ADD COLUMN entry_signal_snapshot_id INTEGER");
+      }
+    },
+  },
 ];
 
 function runMigrations(db: Database) {
