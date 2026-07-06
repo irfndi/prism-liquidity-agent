@@ -187,7 +187,7 @@ export const updateCommand = new Command("update")
 
         console.log("Running test suite smoke test...");
         try {
-          execSync("bunx vitest run --reporter=default", { cwd: extractedDir, stdio: "inherit" });
+          execSync("bunx --bun vitest run", { cwd: extractedDir, stdio: "inherit" });
           console.log("✓ Test suite smoke test passed");
         } catch {
           console.error("⚠ Test suite smoke test failed — continuing anyway");
