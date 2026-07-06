@@ -187,6 +187,7 @@ export function reconcilePositions(
             lastRebalanceAt: 0,
             paperExitedAt: null,
             entrySignalTimestamp: null,
+            entrySignalSnapshotId: null,
           };
           trackedPositions.set(onChainPos.poolAddress, pos);
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
@@ -1448,7 +1449,7 @@ export const program = Effect.gen(function* () {
       }
 
       const signalTimestamp = Date.now();
-      yield* db
+      const signalSnapshotId = yield* db
         .saveSignalSnapshot({
           poolAddress,
           timestamp: signalTimestamp,
@@ -1462,7 +1463,7 @@ export const program = Effect.gen(function* () {
           action: decision.action,
           confidence: decision.confidence,
         })
-        .pipe(Effect.catchAll(() => Effect.void));
+        .pipe(Effect.catchAll(() => Effect.succeed(null)));
 
       // Execute
       let executed = false;
@@ -1513,9 +1514,9 @@ export const program = Effect.gen(function* () {
           action: decision.action,
           pool: poolAddress,
         });
-        executed = yield* executePaper(decision, pool, signalTimestamp);
+        executed = yield* executePaper(decision, pool, signalTimestamp, signalSnapshotId ?? undefined);
       } else {
-        executed = yield* executeLive(decision, pool, signalTimestamp);
+        executed = yield* executeLive(decision, pool, signalTimestamp, signalSnapshotId ?? undefined);
       }
 
       // Audit after execution
@@ -1559,6 +1560,7 @@ export const program = Effect.gen(function* () {
     decision: AgentDecision,
     pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
     signalTimestamp?: number,
+    signalSnapshotId?: number,
   ): Effect.Effect<boolean> =>
     Effect.gen(function* () {
       if (decision.action === "ENTER" && decision.positionSizeUsd) {
@@ -1584,6 +1586,7 @@ export const program = Effect.gen(function* () {
           lastRebalanceAt: 0,
           paperExitedAt: liveExited ? existing!.paperExitedAt : null,
           entrySignalTimestamp: signalTimestamp ?? null,
+          entrySignalSnapshotId: signalSnapshotId ?? null,
         };
         trackedPositions.set(decision.poolAddress, pos);
         yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
@@ -1594,7 +1597,7 @@ export const program = Effect.gen(function* () {
             console.warn(
               `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${decision.poolAddress}`,
             );
-            return yield* executeLive(decision, pool, signalTimestamp);
+            return yield* executeLive(decision, pool, signalTimestamp, signalSnapshotId);
           }
           // Live position — paper trading must not "exit" it without an on-chain tx.
           // Skip and warn so the user can switch to live mode to actually close it.
@@ -1604,10 +1607,10 @@ export const program = Effect.gen(function* () {
           );
           return false;
         }
-        if (pos?.entrySignalTimestamp != null) {
+        if (pos?.entrySignalSnapshotId != null) {
           const pnlUsd = pos.currentValueUsd - pos.depositedUsd;
           yield* db
-            .recordSignalOutcome(decision.poolAddress, pos.entrySignalTimestamp, pnlUsd)
+            .recordSignalOutcome(pos.entrySignalSnapshotId, pnlUsd)
             .pipe(Effect.catchAll(() => Effect.void));
         }
         yield* db.markPaperExited(decision.poolAddress).pipe(Effect.catchAll(() => Effect.void));
@@ -1636,6 +1639,7 @@ export const program = Effect.gen(function* () {
     decision: AgentDecision,
     pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
     signalTimestamp?: number,
+    signalSnapshotId?: number,
   ): Effect.Effect<boolean> =>
     Effect.gen(function* () {
       if (!adapter.hasWallet()) {
@@ -1704,10 +1708,11 @@ export const program = Effect.gen(function* () {
             lastFeeClaimAt: Date.now(),
             trailingStopThreshold: null,
             highestValueUsd: null,
-            lastRebalanceAt: 0,
-            paperExitedAt: null,
-            entrySignalTimestamp: signalTimestamp ?? null,
-          };
+          lastRebalanceAt: 0,
+          paperExitedAt: null,
+          entrySignalTimestamp: signalTimestamp ?? null,
+          entrySignalSnapshotId: signalSnapshotId ?? null,
+        };
           trackedPositions.set(decision.poolAddress, pos);
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
           return true;
@@ -1736,10 +1741,10 @@ export const program = Effect.gen(function* () {
           exited = true;
         }
         if (exited) {
-          if (pos?.entrySignalTimestamp != null) {
+          if (pos?.entrySignalSnapshotId != null) {
             const pnlUsd = pos.currentValueUsd - pos.depositedUsd;
             yield* db
-              .recordSignalOutcome(decision.poolAddress, pos.entrySignalTimestamp, pnlUsd)
+              .recordSignalOutcome(pos.entrySignalSnapshotId, pnlUsd)
               .pipe(Effect.catchAll(() => Effect.void));
           }
           trackedPositions.delete(decision.poolAddress);
