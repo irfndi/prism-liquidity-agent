@@ -75,6 +75,7 @@ export function makePosition(overrides: Partial<PositionRecord> = {}): PositionR
     lastRebalanceAt: overrides.lastRebalanceAt ?? 0,
     paperExitedAt: overrides.paperExitedAt ?? null,
     entrySignalTimestamp: overrides.entrySignalTimestamp ?? null,
+    entrySignalSnapshotId: overrides.entrySignalSnapshotId ?? null,
   };
 }
 

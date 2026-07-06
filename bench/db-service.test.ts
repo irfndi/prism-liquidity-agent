@@ -32,6 +32,7 @@ function makePosition(
   lastRebalanceAt: number;
   paperExitedAt: number | null;
   entrySignalTimestamp: number | null;
+  entrySignalSnapshotId: number | null;
 } {
   return {
     poolAddress,
@@ -52,6 +53,7 @@ function makePosition(
     lastRebalanceAt: 0,
     paperExitedAt,
     entrySignalTimestamp: null,
+    entrySignalSnapshotId: null,
   };
 }
 
