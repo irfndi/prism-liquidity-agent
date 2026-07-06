@@ -36,6 +36,7 @@ export interface PositionRecord {
   lastRebalanceAt: number;
   paperExitedAt: number | null;
   entrySignalTimestamp: number | null;
+  entrySignalSnapshotId: number | null;
 }
 
 export interface AuditRecord {
@@ -114,8 +115,9 @@ export const DbLive = (dbPath?: string) =>
               token_x_symbol, token_y_symbol, active_bin_id, lower_bin_id, upper_bin_id,
               timestamp, out_of_range_since, oor_cycle_count, last_fee_claim_at,
               trailing_stop_threshold, highest_value_usd, last_rebalance_at, paper_exited_at,
-              entry_signal_timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              entry_signal_timestamp,
+              entry_signal_snapshot_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pool_address) DO UPDATE SET
               position_pubkey = COALESCE(excluded.position_pubkey, positions.position_pubkey),
               deposited_usd = excluded.deposited_usd,
@@ -133,7 +135,8 @@ export const DbLive = (dbPath?: string) =>
               highest_value_usd = excluded.highest_value_usd,
               last_rebalance_at = excluded.last_rebalance_at,
               paper_exited_at = excluded.paper_exited_at,
-              entry_signal_timestamp = excluded.entry_signal_timestamp`,
+              entry_signal_timestamp = excluded.entry_signal_timestamp,
+              entry_signal_snapshot_id = excluded.entry_signal_snapshot_id`,
               pos.poolAddress,
               pos.positionPubKey,
               pos.depositedUsd,
@@ -152,6 +155,7 @@ export const DbLive = (dbPath?: string) =>
               pos.lastRebalanceAt,
               pos.paperExitedAt,
               pos.entrySignalTimestamp,
+              pos.entrySignalSnapshotId,
             );
           }),
 
@@ -632,8 +636,12 @@ export const DbLive = (dbPath?: string) =>
 
         saveSignalSnapshot: (snapshot) =>
           Effect.sync(() => {
-            runOne(
-              db,
+            const result = (
+              db.run as (
+                sql: string,
+                ...params: unknown[]
+              ) => { lastInsertRowid: number | bigint }
+            )(
               `INSERT INTO signal_snapshots (pool_address, timestamp, fee_il_ratio, volume_authenticity, bin_utilization, tvl_usd, tvl_velocity, volatility_stddev, bin_step, action, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               snapshot.poolAddress,
               snapshot.timestamp,
@@ -647,6 +655,7 @@ export const DbLive = (dbPath?: string) =>
               snapshot.action,
               snapshot.confidence,
             );
+            return Number(result.lastInsertRowid);
           }),
 
         getSignalSnapshots: (poolAddress, startMs, endMs) =>
@@ -683,15 +692,14 @@ export const DbLive = (dbPath?: string) =>
             }));
           }),
 
-        recordSignalOutcome: (poolAddress, entryTimestamp, pnlUsd) =>
+        recordSignalOutcome: (snapshotId, pnlUsd) =>
           Effect.sync(() => {
             runOne(
               db,
-              `UPDATE signal_snapshots SET outcome_pnl_usd = ?, outcome_recorded_at = ? WHERE pool_address = ? AND timestamp = ?`,
+              `UPDATE signal_snapshots SET outcome_pnl_usd = ?, outcome_recorded_at = ? WHERE id = ?`,
               pnlUsd,
               Date.now(),
-              poolAddress,
-              entryTimestamp,
+              snapshotId,
             );
           }),
 
@@ -890,6 +898,8 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     paperExitedAt: row.paper_exited_at != null ? Number(row.paper_exited_at) : null,
     entrySignalTimestamp:
       row.entry_signal_timestamp != null ? Number(row.entry_signal_timestamp) : null,
+    entrySignalSnapshotId:
+      row.entry_signal_snapshot_id != null ? Number(row.entry_signal_snapshot_id) : null,
   };
 }
 
