@@ -126,8 +126,8 @@ describe("Signal staging", () => {
     run(
       Effect.gen(function* () {
         const db = yield* DbService;
-        yield* db.saveSignalSnapshot(snapshot);
-        yield* db.recordSignalOutcome(snapshot.poolAddress, snapshot.timestamp, 42.5);
+        const id = yield* db.saveSignalSnapshot(snapshot);
+        yield* db.recordSignalOutcome(id, 42.5);
         const outcomes = yield* db.getRecentOutcomes(10);
         expect(outcomes).toHaveLength(1);
         expect(outcomes[0]!.outcomePnlUsd).toBe(42.5);
@@ -158,17 +158,44 @@ describe("Signal staging", () => {
     run(
       Effect.gen(function* () {
         const db = yield* DbService;
-        yield* db.saveSignalSnapshot(makeSnapshot({ timestamp: 1_000_000 }));
-        yield* db.saveSignalSnapshot(makeSnapshot({ timestamp: 2_000_000 }));
-        yield* db.saveSignalSnapshot(makeSnapshot({ timestamp: 3_000_000 }));
-        yield* db.recordSignalOutcome("Pool111111111111111111111111111111111111111", 1_000_000, 10);
-        yield* db.recordSignalOutcome("Pool111111111111111111111111111111111111111", 2_000_000, 20);
-        yield* db.recordSignalOutcome("Pool111111111111111111111111111111111111111", 3_000_000, 30);
+        const id1 = yield* db.saveSignalSnapshot(makeSnapshot({ timestamp: 1_000_000 }));
+        const id2 = yield* db.saveSignalSnapshot(makeSnapshot({ timestamp: 2_000_000 }));
+        const id3 = yield* db.saveSignalSnapshot(makeSnapshot({ timestamp: 3_000_000 }));
+        yield* db.recordSignalOutcome(id1, 10);
+        yield* db.recordSignalOutcome(id2, 20);
+        yield* db.recordSignalOutcome(id3, 30);
         const outcomes = yield* db.getRecentOutcomes(2);
         expect(outcomes).toHaveLength(2);
         // ordered by outcome_recorded_at DESC — most recent first
         expect(outcomes[0]!.outcomePnlUsd).toBe(30);
         expect(outcomes[1]!.outcomePnlUsd).toBe(20);
+      }),
+      layer,
+    );
+  });
+
+  it("records outcome only on the targeted snapshot when timestamps collide", () => {
+    const layer = makeLayer();
+    const timestamp = 1_000_000;
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const idA = yield* db.saveSignalSnapshot(makeSnapshot({ timestamp, feeIlRatio: 1.5 }));
+        const idB = yield* db.saveSignalSnapshot(makeSnapshot({ timestamp, feeIlRatio: 2.0 }));
+        yield* db.recordSignalOutcome(idA, 100);
+        const all = yield* db.getSignalSnapshots(
+          "Pool111111111111111111111111111111111111111",
+          0,
+          2_000_000,
+        );
+        expect(all).toHaveLength(2);
+        const a = all.find((s) => s.feeIlRatio === 1.5);
+        const b = all.find((s) => s.feeIlRatio === 2.0);
+        expect(a).toBeDefined();
+        expect(b).toBeDefined();
+        expect(a!.outcomePnlUsd).toBe(100);
+        expect(b!.outcomePnlUsd).toBeNull();
       }),
       layer,
     );
@@ -256,15 +283,15 @@ describe("Signal staging", () => {
           confidence: 0.7,
         };
 
-        yield* db.saveSignalSnapshot({ ...base, timestamp: 1, action: "ENTER" });
-        yield* db.saveSignalSnapshot({ ...base, timestamp: 2, action: "HOLD" });
-        yield* db.saveSignalSnapshot({ ...base, timestamp: 3, action: "REBALANCE" });
-        yield* db.saveSignalSnapshot({ ...base, timestamp: 4, action: "EXIT" });
+        const id1 = yield* db.saveSignalSnapshot({ ...base, timestamp: 1, action: "ENTER" });
+        const id2 = yield* db.saveSignalSnapshot({ ...base, timestamp: 2, action: "HOLD" });
+        const id3 = yield* db.saveSignalSnapshot({ ...base, timestamp: 3, action: "REBALANCE" });
+        const id4 = yield* db.saveSignalSnapshot({ ...base, timestamp: 4, action: "EXIT" });
 
-        yield* db.recordSignalOutcome("Pool111111111111111111111111111111111111111", 1, 50);
-        yield* db.recordSignalOutcome("Pool111111111111111111111111111111111111111", 2, 30);
-        yield* db.recordSignalOutcome("Pool111111111111111111111111111111111111111", 3, -10);
-        yield* db.recordSignalOutcome("Pool111111111111111111111111111111111111111", 4, -20);
+        yield* db.recordSignalOutcome(id1, 50);
+        yield* db.recordSignalOutcome(id2, 30);
+        yield* db.recordSignalOutcome(id3, -10);
+        yield* db.recordSignalOutcome(id4, -20);
 
         const outcomes = yield* db.getClosedPositionOutcomes(10);
         expect(outcomes).toHaveLength(2);
