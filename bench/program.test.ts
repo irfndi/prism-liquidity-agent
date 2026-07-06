@@ -60,6 +60,7 @@ describe("estimatePositionValue", () => {
       lastRebalanceAt: 0,
       paperExitedAt: null,
       entrySignalTimestamp: null,
+      entrySignalSnapshotId: null,
     };
   }
 
