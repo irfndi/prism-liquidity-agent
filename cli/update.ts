@@ -203,11 +203,24 @@ export const updateCommand = new Command("update")
       const backupRoot = join(installRoot, "..", `.prism-update-backup`);
       const currentBackup = join(installRoot, "..", `.prism-prev-${installName}`);
 
+      const userFilesToPreserve = [".env", "prism.db", "logs"];
+
       try {
         if (existsSync(stagedRoot)) {
           rmSync(stagedRoot, { recursive: true, force: true });
         }
         execSync(`cp -R "${extractedDir}/." "${stagedRoot}/"`, { stdio: "inherit" });
+
+        for (const file of userFilesToPreserve) {
+          const source = join(installRoot, file);
+          const dest = join(stagedRoot, file);
+          if (existsSync(source)) {
+            if (existsSync(dest)) {
+              rmSync(dest, { recursive: true, force: true });
+            }
+            execSync(`cp -R "${source}" "${dest}"`, { stdio: "inherit" });
+          }
+        }
 
         if (existsSync(backupRoot)) {
           rmSync(backupRoot, { recursive: true, force: true });
