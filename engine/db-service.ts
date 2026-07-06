@@ -333,7 +333,12 @@ export const DbLive = (dbPath?: string) =>
                   const RECENCY_HALFLIFE_MS = 30 * 24 * 60 * 60 * 1000;
                   const ranked = rows
                     .map((row) => {
-                      const simScore = 1 - (Number(row.distance) || 1);
+                      const rawDistance = row.distance;
+                      const distance =
+                        rawDistance === undefined || rawDistance === null || Number.isNaN(rawDistance)
+                          ? 1
+                          : Number(rawDistance);
+                      const simScore = 1 - distance;
                       const age = now - Number(row.createdAt ?? 0);
                       const recencyScore = Math.exp(-age / RECENCY_HALFLIFE_MS);
                       const blended = simScore * 0.7 + recencyScore * 0.3;
