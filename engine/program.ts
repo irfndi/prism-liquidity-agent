@@ -1045,6 +1045,11 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      // Single persist point: trailing-exit above may update highestValueUsd/currentValueUsd.
+      if (pos && hasPosition) {
+        yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+      }
+
       // Use the live wallet value when available. Fall back to the configured
       // paper portfolio on RPC failure so a transient balance read does not
       // abort the entire pool evaluation.

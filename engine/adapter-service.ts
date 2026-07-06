@@ -21,6 +21,7 @@ import { AdapterError } from "./errors.js";
 import { DiscoverPoolsError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import type { BinArray, BinData, PoolState, Position } from "./types.js";
+import { CircuitBreaker, isRpcNetworkError, retryWithBackoff } from "./adapter-retry.js";
 import bs58 from "bs58";
 import fs from "fs";
 import path from "path";
@@ -276,6 +277,45 @@ export const AdapterLive = Layer.effect(
       }
     }
 
+    // ─── DLMM instance cache (5-minute TTL, promise-based for dedup) ────
+
+    const DLMM_CACHE_TTL_MS = 5 * 60 * 1000;
+    const dlmmCache = new Map<string, { promise: Promise<DLMM>; timestamp: number }>();
+    const rpcCircuitBreaker = new CircuitBreaker();
+
+    const evictionInterval = setInterval(() => {
+      const cutoff = Date.now() - DLMM_CACHE_TTL_MS;
+      for (const [key, entry] of dlmmCache) {
+        if (entry.timestamp <= cutoff) {
+          dlmmCache.delete(key);
+        }
+      }
+    }, DLMM_CACHE_TTL_MS);
+    evictionInterval.unref();
+
+    async function getDlmm(poolAddress: string): Promise<DLMM> {
+      const cached = dlmmCache.get(poolAddress);
+      if (cached && Date.now() - cached.timestamp < DLMM_CACHE_TTL_MS) {
+        cached.timestamp = Date.now();
+        return cached.promise;
+      }
+      const pubkey = new PublicKey(poolAddress);
+      const promise = rpcCall(() => DLMM.create(connection, pubkey)).catch((err) => {
+        dlmmCache.delete(poolAddress);
+        throw err;
+      });
+      dlmmCache.set(poolAddress, { promise, timestamp: Date.now() });
+      return promise;
+    }
+
+    async function rpcCall<T>(fn: () => Promise<T>): Promise<T> {
+      return rpcCircuitBreaker.execute(() => retryWithBackoff(fn), isRpcNetworkError);
+    }
+
+    async function rpcGated<T>(fn: () => Promise<T>): Promise<T> {
+      return rpcCircuitBreaker.execute(fn, isRpcNetworkError);
+    }
+
     // ─── Token metadata cache ──────────────────────────────────────────────
 
     const tokenMetaCache = new Map<string, { symbol: string; decimals: number }>();
@@ -346,7 +386,9 @@ export const AdapterLive = Layer.effect(
         // for any SPL mint via the Token Program (works on mainnet-beta and
         // every other standard RPC). Does NOT call Helius DAS getAsset.
         const mintPubkey = new PublicKey(mint);
-        const info = yield* Effect.tryPromise(() => connection.getParsedAccountInfo(mintPubkey));
+        const info = yield* Effect.tryPromise(() =>
+          rpcCall(() => connection.getParsedAccountInfo(mintPubkey)),
+        );
         const parsed = (info.value?.data as { parsed?: { info?: { decimals?: number } } })?.parsed
           ?.info;
         if (typeof parsed?.decimals === "number") {
@@ -457,16 +499,20 @@ export const AdapterLive = Layer.effect(
       unknown
     > {
       return Effect.gen(function* () {
-        const pubkey = new PublicKey(poolAddress);
-        const dlmm = yield* Effect.tryPromise(() => DLMM.create(connection, pubkey));
+        const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
         const lbPair = dlmm.lbPair;
+        const pubkey = new PublicKey(poolAddress);
 
         const tokenXMint = lbPair.tokenXMint.toBase58();
         const tokenYMint = lbPair.tokenYMint.toBase58();
 
         const [mintXInfo, mintYInfo] = yield* Effect.all([
-          Effect.tryPromise(() => connection.getParsedAccountInfo(lbPair.tokenXMint)),
-          Effect.tryPromise(() => connection.getParsedAccountInfo(lbPair.tokenYMint)),
+          Effect.tryPromise(() =>
+            rpcCall(() => connection.getParsedAccountInfo(lbPair.tokenXMint)),
+          ),
+          Effect.tryPromise(() =>
+            rpcCall(() => connection.getParsedAccountInfo(lbPair.tokenYMint)),
+          ),
         ]);
 
         const tokenXDecimals =
@@ -477,14 +523,18 @@ export const AdapterLive = Layer.effect(
             ?.decimals ?? 6;
 
         const vaultX = yield* Effect.tryPromise(() =>
-          connection.getTokenAccountsByOwner(pubkey, {
-            mint: lbPair.tokenXMint,
-          }),
+          rpcCall(() =>
+            connection.getTokenAccountsByOwner(pubkey, {
+              mint: lbPair.tokenXMint,
+            }),
+          ),
         );
         const vaultY = yield* Effect.tryPromise(() =>
-          connection.getTokenAccountsByOwner(pubkey, {
-            mint: lbPair.tokenYMint,
-          }),
+          rpcCall(() =>
+            connection.getTokenAccountsByOwner(pubkey, {
+              mint: lbPair.tokenYMint,
+            }),
+          ),
         );
 
         let reserveX = 0;
@@ -493,14 +543,14 @@ export const AdapterLive = Layer.effect(
         if (vaultX.value.length > 0 && vaultX.value[0]) {
           const firstVault = vaultX.value[0] as { pubkey: PublicKey };
           const bal = yield* Effect.tryPromise(() =>
-            connection.getTokenAccountBalance(firstVault.pubkey),
+            rpcCall(() => connection.getTokenAccountBalance(firstVault.pubkey)),
           );
           reserveX = Number(bal.value.amount) / Math.pow(10, tokenXDecimals);
         }
         if (vaultY.value.length > 0 && vaultY.value[0]) {
           const firstVault = vaultY.value[0] as { pubkey: PublicKey };
           const bal = yield* Effect.tryPromise(() =>
-            connection.getTokenAccountBalance(firstVault.pubkey),
+            rpcCall(() => connection.getTokenAccountBalance(firstVault.pubkey)),
           );
           reserveY = Number(bal.value.amount) / Math.pow(10, tokenYDecimals);
         }
@@ -535,7 +585,9 @@ export const AdapterLive = Layer.effect(
       getWalletBalanceUsd: () =>
         Effect.gen(function* () {
           if (!wallet) return 0;
-          const solBal = yield* Effect.tryPromise(() => connection.getBalance(wallet.publicKey));
+          const solBal = yield* Effect.tryPromise(() =>
+            rpcCall(() => connection.getBalance(wallet.publicKey)),
+          );
           const solAmount = solBal / 1e9;
           const prices = yield* fetchTokenPrices([SOL_MINT]);
           const solPrice = prices[SOL_MINT] || 165;
@@ -543,16 +595,18 @@ export const AdapterLive = Layer.effect(
 
           const usdcMint = new PublicKey(USDC_MINT);
           const tokenAccounts = yield* Effect.tryPromise(() =>
-            connection.getTokenAccountsByOwner(wallet.publicKey, {
-              mint: usdcMint,
-            }),
+            rpcCall(() =>
+              connection.getTokenAccountsByOwner(wallet.publicKey, {
+                mint: usdcMint,
+              }),
+            ),
           );
 
           let usdcValue = 0;
           const firstAccount = tokenAccounts.value[0];
           if (firstAccount) {
             const bal = yield* Effect.tryPromise(() =>
-              connection.getTokenAccountBalance(firstAccount.pubkey),
+              rpcCall(() => connection.getTokenAccountBalance(firstAccount.pubkey)),
             );
             usdcValue = bal.value.uiAmount ?? 0;
           }
@@ -563,14 +617,15 @@ export const AdapterLive = Layer.effect(
       getNativeSolBalance: () =>
         Effect.gen(function* () {
           if (!wallet) return 0;
-          const lamports = yield* Effect.tryPromise(() => connection.getBalance(wallet.publicKey));
+          const lamports = yield* Effect.tryPromise(() =>
+            rpcCall(() => connection.getBalance(wallet.publicKey)),
+          );
           return lamports;
         }),
 
       getPoolState: (poolAddress) =>
         Effect.gen(function* () {
-          const pubkey = new PublicKey(poolAddress);
-          const dlmm = yield* Effect.tryPromise(() => DLMM.create(connection, pubkey));
+          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
           const lbPair = dlmm.lbPair;
           const activeBin = yield* Effect.tryPromise(() => dlmm.getActiveBin());
 
@@ -609,8 +664,7 @@ export const AdapterLive = Layer.effect(
 
       getBinArray: (poolAddress) =>
         Effect.gen(function* () {
-          const pubkey = new PublicKey(poolAddress);
-          const dlmm = yield* Effect.tryPromise(() => DLMM.create(connection, pubkey));
+          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
           const activeBin = yield* Effect.tryPromise(() => dlmm.getActiveBin());
           const halfRange = 20;
           const lowerBinId = activeBin.binId - halfRange;
@@ -644,9 +698,8 @@ export const AdapterLive = Layer.effect(
 
       getPositions: (poolAddress, walletAddress) =>
         Effect.gen(function* () {
-          const pubkey = new PublicKey(poolAddress);
           const wallet = new PublicKey(walletAddress);
-          const dlmm = yield* Effect.tryPromise(() => DLMM.create(connection, pubkey));
+          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
           const { userPositions } = yield* Effect.tryPromise(() =>
             dlmm.getPositionsByUserAndLbPair(wallet),
           );
@@ -728,8 +781,7 @@ export const AdapterLive = Layer.effect(
           }
 
           try {
-            const poolPubkey = new PublicKey(poolAddress);
-            const dlmm = yield* Effect.tryPromise(() => DLMM.create(connection, poolPubkey));
+            const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
             const pool = yield* api.getPoolState(poolAddress);
 
             const prices = yield* fetchTokenPrices([pool.tokenX, pool.tokenY]);
@@ -766,7 +818,9 @@ export const AdapterLive = Layer.effect(
             let nativeSolBalance = 0n;
             if (pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT) {
               nativeSolBalance = BigInt(
-                yield* Effect.tryPromise(() => connection.getBalance(wallet.publicKey)),
+                yield* Effect.tryPromise(() =>
+                  rpcCall(() => connection.getBalance(wallet.publicKey)),
+                ),
               );
             }
 
@@ -808,18 +862,24 @@ export const AdapterLive = Layer.effect(
             );
 
             tx.feePayer = wallet.publicKey;
-            const { blockhash } = yield* Effect.tryPromise(() => connection.getLatestBlockhash());
+            const { blockhash } = yield* Effect.tryPromise(() =>
+              rpcGated(() => connection.getLatestBlockhash()),
+            );
             tx.recentBlockhash = blockhash;
             tx.sign(wallet, positionKeypair);
 
             const signature = yield* Effect.tryPromise(() =>
-              connection.sendRawTransaction(tx.serialize(), {
-                skipPreflight: false,
-                preflightCommitment: "confirmed",
-              }),
+              rpcGated(() =>
+                connection.sendRawTransaction(tx.serialize(), {
+                  skipPreflight: false,
+                  preflightCommitment: "confirmed",
+                }),
+              ),
             );
 
-            yield* Effect.tryPromise(() => connection.confirmTransaction(signature, "confirmed"));
+            yield* Effect.tryPromise(() =>
+              rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
+            );
 
             return {
               positionPubKey: positionKeypair.publicKey.toBase58(),
@@ -847,9 +907,8 @@ export const AdapterLive = Layer.effect(
           }
 
           try {
-            const poolPubkey = new PublicKey(poolAddress);
             const positionPubkey = new PublicKey(positionPubKey);
-            const dlmm = yield* Effect.tryPromise(() => DLMM.create(connection, poolPubkey));
+            const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
 
             const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
             const lowerBinId = position.positionData.lowerBinId;
@@ -867,18 +926,24 @@ export const AdapterLive = Layer.effect(
             );
 
             for (const tx of txs) {
-              const { blockhash } = yield* Effect.tryPromise(() => connection.getLatestBlockhash());
+              const { blockhash } = yield* Effect.tryPromise(() =>
+                rpcGated(() => connection.getLatestBlockhash()),
+              );
               tx.feePayer = wallet.publicKey;
               tx.recentBlockhash = blockhash;
               tx.sign(wallet);
 
               const signature = yield* Effect.tryPromise(() =>
-                connection.sendRawTransaction(tx.serialize(), {
-                  skipPreflight: false,
-                  preflightCommitment: "confirmed",
-                }),
+                rpcGated(() =>
+                  connection.sendRawTransaction(tx.serialize(), {
+                    skipPreflight: false,
+                    preflightCommitment: "confirmed",
+                  }),
+                ),
               );
-              yield* Effect.tryPromise(() => connection.confirmTransaction(signature, "confirmed"));
+              yield* Effect.tryPromise(() =>
+                rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
+              );
             }
 
             return { txSignature: "batch-confirmed" };
@@ -931,9 +996,8 @@ export const AdapterLive = Layer.effect(
           }
 
           try {
-            const poolPubkey = new PublicKey(poolAddress);
             const positionPubkey = new PublicKey(positionPubKey);
-            const dlmm = yield* Effect.tryPromise(() => DLMM.create(connection, poolPubkey));
+            const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
 
             const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
 
@@ -1021,7 +1085,7 @@ export const AdapterLive = Layer.effect(
                   );
                   // Check if destination ATA exists
                   const toAtaInfo = yield* Effect.tryPromise(() =>
-                    connection.getAccountInfo(toAta),
+                    rpcCall(() => connection.getAccountInfo(toAta)),
                   );
                   if (!toAtaInfo) {
                     transferInstructions.push(
@@ -1062,7 +1126,9 @@ export const AdapterLive = Layer.effect(
 
             const allInstructions = [...claimInstructions, ...transferInstructions];
 
-            const { blockhash } = yield* Effect.tryPromise(() => connection.getLatestBlockhash());
+            const { blockhash } = yield* Effect.tryPromise(() =>
+              rpcGated(() => connection.getLatestBlockhash()),
+            );
 
             const messageV0 = new TransactionMessage({
               payerKey: wallet.publicKey,
@@ -1074,13 +1140,17 @@ export const AdapterLive = Layer.effect(
             versionedTx.sign([wallet]);
 
             const signature = yield* Effect.tryPromise(() =>
-              connection.sendRawTransaction(versionedTx.serialize(), {
-                skipPreflight: false,
-                preflightCommitment: "confirmed",
-              }),
+              rpcGated(() =>
+                connection.sendRawTransaction(versionedTx.serialize(), {
+                  skipPreflight: false,
+                  preflightCommitment: "confirmed",
+                }),
+              ),
             );
 
-            yield* Effect.tryPromise(() => connection.confirmTransaction(signature, "confirmed"));
+            yield* Effect.tryPromise(() =>
+              rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
+            );
 
             return {
               txSignature: signature,
@@ -1228,7 +1298,9 @@ export const AdapterLive = Layer.effect(
         Effect.gen(function* () {
           if (!wallet) return;
 
-          const lamports = yield* Effect.tryPromise(() => connection.getBalance(wallet!.publicKey));
+          const lamports = yield* Effect.tryPromise(() =>
+            rpcCall(() => connection.getBalance(wallet!.publicKey)),
+          );
           const solBalance = lamports / 1e9;
 
           if (solBalance >= minSolThreshold) return;
@@ -1292,13 +1364,17 @@ export const AdapterLive = Layer.effect(
             swapTx.sign(wallet!);
 
             const sig = yield* Effect.tryPromise(() =>
-              connection.sendRawTransaction(swapTx.serialize(), {
-                skipPreflight: false,
-                preflightCommitment: "confirmed",
-              }),
+              rpcGated(() =>
+                connection.sendRawTransaction(swapTx.serialize(), {
+                  skipPreflight: false,
+                  preflightCommitment: "confirmed",
+                }),
+              ),
             );
 
-            yield* Effect.tryPromise(() => connection.confirmTransaction(sig, "confirmed"));
+            yield* Effect.tryPromise(() =>
+              rpcGated(() => connection.confirmTransaction(sig, "confirmed")),
+            );
             logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
           } catch (err) {
             logger.warn("USDC → SOL swap failed (non-fatal):", String(err));
@@ -1313,12 +1389,12 @@ export const AdapterLive = Layer.effect(
       return Effect.gen(function* () {
         const mint = new PublicKey(mintAddress);
         const accounts = yield* Effect.tryPromise(() =>
-          connection.getTokenAccountsByOwner(wallet!.publicKey, { mint }),
+          rpcCall(() => connection.getTokenAccountsByOwner(wallet!.publicKey, { mint })),
         );
         const firstAccount = accounts.value[0];
         if (!firstAccount) return 0n;
         const bal = yield* Effect.tryPromise(() =>
-          connection.getTokenAccountBalance(firstAccount.pubkey),
+          rpcCall(() => connection.getTokenAccountBalance(firstAccount.pubkey)),
         );
         return BigInt(bal.value.amount);
       }).pipe(Effect.catchAll(() => Effect.succeed(0n)));

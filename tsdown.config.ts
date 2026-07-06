@@ -8,5 +8,7 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   dts: true,
-  external: ["bun:sqlite"],
+  deps: {
+    neverBundle: ["bun:sqlite"],
+  },
 });
