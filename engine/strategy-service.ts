@@ -1,6 +1,6 @@
 import { Context, Layer } from "effect";
 import { StrategyService, type StrategyApi } from "./services.js";
-import type { BinArray, PoolMetrics, PoolState } from "./types.js";
+import type { BinArray, PoolMetrics, PoolState, SignalWeights } from "./types.js";
 
 export const DLMMStrategy: StrategyApi = {
   computeMetrics(pool: PoolState, binArray: BinArray, previousTvlUsd: number): PoolMetrics {
@@ -157,6 +157,116 @@ export function recommendBinRangeForVolatility(
   };
 }
 
+// ─── Adaptive threshold evolution ────────────────────────────────────────────
+
+export interface EvolvableThresholds {
+  readonly minFeeIlRatio: number;
+  readonly volumeAuthThreshold: number;
+  readonly minBinUtilization: number;
+}
+
+export interface OutcomeRecord {
+  readonly feeIlRatio: number;
+  readonly volumeAuthenticity: number;
+  readonly binUtilization: number;
+  readonly pnlUsd: number;
+  readonly outcomeRecordedAt: number;
+}
+
+/**
+ * Clamp a threshold nudge to ±maxChangePct of the current value.
+ * When target > current, nudge upward but never exceed current × (1 + maxChangePct).
+ * When target < current, nudge downward but never go below current × (1 - maxChangePct).
+ * When target === current, no change.
+ */
+export function nudgeThreshold(current: number, target: number, maxChangePct: number): number {
+  if (current === 0) return target;
+  const maxDelta = Math.abs(current) * maxChangePct;
+  const rawDelta = target - current;
+  const clampedDelta = Math.max(-maxDelta, Math.min(maxDelta, rawDelta));
+  return current + clampedDelta;
+}
+
+/**
+ * Compute mean-normalized difference between winners (pnlUsd > 0) and losers
+ * (pnlUsd <= 0) for a given signal key. Returns 0 when either group is empty
+ * or when the winner mean equals the loser mean (no discriminative signal).
+ */
+export function computeSignalLift(
+  outcomes: ReadonlyArray<OutcomeRecord>,
+  signalKey: keyof Omit<OutcomeRecord, "pnlUsd" | "outcomeRecordedAt">,
+): number {
+  const winners: number[] = [];
+  const losers: number[] = [];
+  for (const o of outcomes) {
+    const val = o[signalKey];
+    if (o.pnlUsd > 0) {
+      winners.push(val);
+    } else {
+      losers.push(val);
+    }
+  }
+  if (winners.length === 0 || losers.length === 0) return 0;
+
+  const winMean = winners.reduce((s, v) => s + v, 0) / winners.length;
+  const loseMean = losers.reduce((s, v) => s + v, 0) / losers.length;
+
+  // Normalise by the range to keep lift in a comparable scale.
+  const range = Math.max(Math.abs(winMean), Math.abs(loseMean), 1e-9);
+  return (winMean - loseMean) / range;
+}
+
+/**
+ * Evolve thresholds based on closed-position outcomes.
+ *
+ * Returns the (possibly updated) thresholds and whether any changed.
+ * Defaults: evolutionInterval=5, maxChangePct=0.20, minOutcomes=5.
+ */
+export function evolveThresholds(
+  outcomes: ReadonlyArray<OutcomeRecord>,
+  current: EvolvableThresholds,
+  options?: {
+    readonly maxChangePct?: number;
+    readonly minOutcomes?: number;
+  },
+): { readonly thresholds: EvolvableThresholds; readonly changed: boolean } {
+  const minOutcomes = options?.minOutcomes ?? 5;
+  if (outcomes.length < minOutcomes) {
+    return { thresholds: current, changed: false };
+  }
+
+  const maxChangePct = options?.maxChangePct ?? 0.2;
+
+  const feeLift = computeSignalLift(outcomes, "feeIlRatio");
+  const authLift = computeSignalLift(outcomes, "volumeAuthenticity");
+  const utilLift = computeSignalLift(outcomes, "binUtilization");
+
+  // Positive lift means higher signal values correlate with wins → raise the
+  // threshold to prefer stronger signals. Negative lift means the opposite.
+  // Target nudges the current value toward a direction proportional to lift.
+  const feeTarget = current.minFeeIlRatio * (1 + feeLift);
+  const authTarget = current.volumeAuthThreshold * (1 + authLift);
+  const utilTarget = current.minBinUtilization * (1 + utilLift);
+
+  const newFeeIl = nudgeThreshold(current.minFeeIlRatio, feeTarget, maxChangePct);
+  const newAuth = nudgeThreshold(current.volumeAuthThreshold, authTarget, maxChangePct);
+  const newUtil = nudgeThreshold(current.minBinUtilization, utilTarget, maxChangePct);
+
+  const changed =
+    newFeeIl !== current.minFeeIlRatio ||
+    newAuth !== current.volumeAuthThreshold ||
+    newUtil !== current.minBinUtilization;
+
+  return {
+    thresholds: {
+      minFeeIlRatio: newFeeIl,
+      volumeAuthThreshold: newAuth,
+      minBinUtilization: newUtil,
+    },
+    changed,
+  };
+}
+
 // ─── F4: OOR recovery prediction ──────────────────────────────────────────────
 
 /**
@@ -195,4 +305,94 @@ export function estimateRecoveryProbability(
  */
 export function shouldHoldForRecovery(recoveryProbability: number, holdThreshold: number): boolean {
   return recoveryProbability >= holdThreshold;
+}
+
+// ─── Darwinian signal weighting ─────────────────────────────────────────────
+
+export function computeSignalWeights(
+  outcomes: ReadonlyArray<OutcomeRecord>,
+  current: SignalWeights,
+  options?: {
+    readonly windowDays?: number;
+    readonly minOutcomes?: number;
+    readonly boostFactor?: number;
+    readonly decayFactor?: number;
+    readonly weightFloor?: number;
+    readonly weightCeiling?: number;
+  },
+): SignalWeights {
+  const windowDays = options?.windowDays ?? 60;
+  const minOutcomes = options?.minOutcomes ?? 10;
+  const boostFactor = options?.boostFactor ?? 1.05;
+  const decayFactor = options?.decayFactor ?? 0.95;
+  const weightFloor = options?.weightFloor ?? 0.3;
+  const weightCeiling = options?.weightCeiling ?? 2.5;
+
+  const cutoff = Date.now() - windowDays * 24 * 60 * 60 * 1000;
+  const recent = outcomes.filter((o) => o.outcomeRecordedAt > cutoff);
+
+  if (recent.length < minOutcomes) {
+    return current;
+  }
+
+  const signals: ReadonlyArray<keyof Omit<OutcomeRecord, "pnlUsd" | "outcomeRecordedAt">> = [
+    "feeIlRatio",
+    "volumeAuthenticity",
+    "binUtilization",
+  ];
+
+  let updated = { ...current, updatedAt: Date.now() };
+
+  for (const signal of signals) {
+    const lift = computeSignalLift(recent, signal);
+    const quartile = computeQuartile(recent, signal);
+
+    let nudge = 1;
+    if (quartile === 0) {
+      nudge = decayFactor;
+    } else if (quartile === 3) {
+      nudge = boostFactor;
+    } else {
+      nudge = 1 + lift * 0.05;
+    }
+
+    const currentWeight = updated[signal];
+    const newWeight = clampWeight(currentWeight * nudge, weightFloor, weightCeiling);
+    updated = { ...updated, [signal]: newWeight };
+  }
+
+  return updated;
+}
+
+function computeQuartile(
+  outcomes: ReadonlyArray<OutcomeRecord>,
+  signalKey: keyof Omit<OutcomeRecord, "pnlUsd" | "outcomeRecordedAt">,
+): number {
+  const sorted = [...outcomes].map((o) => o[signalKey]).sort((a, b) => a - b);
+  const lastValue = sorted[sorted.length - 1] ?? 0;
+  const q3Threshold = sorted[Math.floor(sorted.length * 0.75)] ?? lastValue;
+  const q0Threshold = sorted[Math.floor(sorted.length * 0.25)] ?? 0;
+  const latest = outcomes[0]?.[signalKey] ?? 0;
+
+  if (latest >= q3Threshold) return 3;
+  if (latest <= q0Threshold) return 0;
+  if (latest >= (q0Threshold + q3Threshold) / 2) return 2;
+  return 1;
+}
+
+function clampWeight(value: number, floor: number, ceiling: number): number {
+  return Math.max(floor, Math.min(ceiling, value));
+}
+
+const MAX_FEE_IL_RATIO = 20;
+
+export function weightedEntryScore(metrics: PoolMetrics, weights: SignalWeights): number {
+  const cappedFeeIlRatio = Math.min(metrics.feeIlRatio, MAX_FEE_IL_RATIO);
+  const feeContrib = cappedFeeIlRatio * weights.feeIlRatio;
+  const authContrib = metrics.volumeAuthenticity * weights.volumeAuthenticity;
+  const binContrib = metrics.binUtilization * weights.binUtilization;
+  const tvlContrib = Math.min(metrics.pool.tvlUsd / 1_000_000, 1) * weights.tvlUsd;
+  const velContrib = (1 / (1 + Math.abs(metrics.tvlVelocity))) * weights.tvlVelocity * 0.1;
+
+  return feeContrib + authContrib + binContrib + tvlContrib + velContrib;
 }

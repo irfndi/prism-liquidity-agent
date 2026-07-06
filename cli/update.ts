@@ -13,6 +13,7 @@ import {
   fetchLatestRelease,
   R2_PUBLIC_URL,
 } from "../engine/update-utils.js";
+import semver from "semver";
 import { Effect } from "effect";
 import { createLogger } from "../engine/logger.js";
 
@@ -156,6 +157,17 @@ export const updateCommand = new Command("update")
       }
 
       console.log("Installing dependencies...");
+
+      // Guard against running on Bun < 1.4 which cannot parse lockfileVersion 2
+      const bunVersion = typeof Bun !== "undefined" ? Bun.version : "0.0.0";
+      const cleanBunVersion = semver.clean(bunVersion) || bunVersion;
+      if (!semver.gte(cleanBunVersion, "1.4.0")) {
+        throw new UpdateAbort(
+          `Prism requires Bun >= 1.4.0 to install dependencies. ` +
+            `Current Bun version is ${bunVersion}. Please upgrade Bun and retry.`,
+        );
+      }
+
       execSync("bun install", { cwd: extractedDir, stdio: "inherit" });
 
       // === Pre-apply smoke tests ===
@@ -175,7 +187,7 @@ export const updateCommand = new Command("update")
 
         console.log("Running test suite smoke test...");
         try {
-          execSync("bunx vitest run --reporter=basic", { cwd: extractedDir, stdio: "inherit" });
+          execSync("bunx vitest run --reporter=default", { cwd: extractedDir, stdio: "inherit" });
           console.log("✓ Test suite smoke test passed");
         } catch {
           console.error("⚠ Test suite smoke test failed — continuing anyway");

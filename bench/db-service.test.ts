@@ -31,6 +31,8 @@ function makePosition(
   highestValueUsd: number | null;
   lastRebalanceAt: number;
   paperExitedAt: number | null;
+  entrySignalTimestamp: number | null;
+  entrySignalSnapshotId: number | null;
 } {
   return {
     poolAddress,
@@ -50,6 +52,8 @@ function makePosition(
     highestValueUsd: null,
     lastRebalanceAt: 0,
     paperExitedAt,
+    entrySignalTimestamp: null,
+    entrySignalSnapshotId: null,
   };
 }
 

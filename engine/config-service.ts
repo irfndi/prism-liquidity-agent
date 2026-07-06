@@ -94,6 +94,58 @@ export interface AppConfig {
   readonly paperValidationMinDays: number;
   /** Hard-block live ENTER if validation not met (vs warn only). */
   readonly paperValidationEnforce: boolean;
+
+  // ─── F7: Pool cooldown after failed exits ───────────────────────────────────
+  readonly oorCooldownMs: number;
+  readonly repeatOorCooldownMs: number;
+  readonly maxOorCooldownExits: number;
+
+  // ─── Agentic mode / agent runtime overlay ────────────────────────────
+  /** Enable non-deterministic agent reasoning overlay. Only active when Prism runs under an agent runtime (Hermes/OpenClaw). Default false. */
+  readonly agentiveMode: boolean;
+  /** Which agent runtime to use. `auto` detects Hermes or OpenClaw; `none` disables agent overlay. Default "auto". */
+  readonly agentRuntime: "auto" | "hermes" | "openclaw" | "none";
+  /** Command or binary name for the ACP agent runtime (Hermes). Default "hermes". */
+  readonly agentAcpCommand: string;
+  /** Arguments passed to the ACP command. Default ["acp"]. */
+  readonly agentAcpArgs: ReadonlyArray<string>;
+  /** OpenClaw Gateway WebSocket URL. Default "ws://127.0.0.1:18789". */
+  readonly agentGatewayUrl: string;
+  /** Auth token for OpenClaw Gateway. Empty string = no auth. Default "". */
+  readonly agentGatewayToken: string;
+  /** Timeout for agent prompt responses. Default 15000 ms. */
+  readonly agentPromptTimeoutMs: number;
+  /** Interval between periodic agent check-ins. Default 3600000 ms (1 hour). */
+  readonly agentCheckinIntervalMs: number;
+  /** Send check-ins on significant trade/position events. Default true. */
+  readonly agentCheckinOnEvents: boolean;
+  /** Include recent decision history in check-ins. Default true. */
+  readonly agentCheckinIncludeHistory: boolean;
+  /** Max positions to include in check-in summary. Default 10. */
+  readonly agentCheckinMaxPositions: number;
+  /** OpenClaw webhook URL for one-way agent alerts. Empty = disabled. Default "". */
+  readonly agentOpenclawWebhookUrl: string;
+  /** Hermes HTTP API URL for one-way agent alerts. Empty = disabled. Default "". */
+  readonly agentHermesApiUrl: string;
+  /** Port for the local agent HTTP status API. 0 = disabled. Default 0 (disabled unless explicitly enabled). */
+  readonly agentHttpPort: number;
+  /** Enable the MCP server for agent runtime tool discovery. Default false (enable only when stdout is isolated). */
+  readonly agentMcpEnabled: boolean;
+
+  // ─── Threshold evolution ─────────────────────────────────────────────
+  /** How many closed positions between evolution rounds. Default 5. */
+  readonly evolutionInterval: number;
+  /** Max percentage change per evolution round. Default 0.20. */
+  readonly evolutionMaxChangePct: number;
+
+  // ─── Darwinian signal weighting ─────────────────────────────────────
+  readonly signalWeightWindowDays: number;
+  readonly signalWeightMinOutcomes: number;
+  readonly signalWeightBoostFactor: number;
+  readonly signalWeightDecayFactor: number;
+  readonly signalWeightFloor: number;
+  readonly signalWeightCeiling: number;
+  readonly weightedEntryScoreThreshold: number;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -195,6 +247,94 @@ const loadConfig = Effect.gen(function* () {
   const paperValidationMinDays = yield* validatedNumber("PAPER_VALIDATION_MIN_DAYS", 0, 7);
   const paperValidationEnforce = yield* Config.boolean("PAPER_VALIDATION_ENFORCE").pipe(
     Effect.orElseSucceed(() => false),
+  );
+
+  // ─── F7: Pool cooldown after failed exits ───────────────────────────────────
+  const oorCooldownMs = yield* validatedNumber("OOR_COOLDOWN_MS", 0, 4 * 60 * 60 * 1000);
+  const repeatOorCooldownMs = yield* validatedNumber(
+    "REPEAT_OOR_COOLDOWN_MS",
+    0,
+    12 * 60 * 60 * 1000,
+  );
+  const maxOorCooldownExits = yield* validatedNumber("MAX_OOR_COOLDOWN_EXITS", 1, 3);
+
+  // ─── Agentic mode / agent runtime overlay ────────────────────────────
+  const agentiveMode = yield* Config.boolean("AGENTIC_MODE").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const agentRuntimeRaw = yield* Config.string("AGENT_RUNTIME").pipe(
+    Effect.orElseSucceed(() => "auto"),
+  );
+  const validAgentRuntimes = ["auto", "hermes", "openclaw", "none"] as const;
+  const agentRuntime = validAgentRuntimes.includes(
+    agentRuntimeRaw as (typeof validAgentRuntimes)[number],
+  )
+    ? (agentRuntimeRaw as (typeof validAgentRuntimes)[number])
+    : "auto";
+  const agentAcpCommand = yield* Config.string("AGENT_ACP_COMMAND").pipe(
+    Effect.orElseSucceed(() => "hermes"),
+  );
+  const agentAcpArgsRaw = yield* Config.string("AGENT_ACP_ARGS").pipe(
+    Effect.orElseSucceed(() => "acp"),
+  );
+  const agentAcpArgs = agentAcpArgsRaw
+    .split(" ")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const agentGatewayUrl = yield* Config.string("AGENT_GATEWAY_URL").pipe(
+    Effect.orElseSucceed(() => "ws://127.0.0.1:18789"),
+  );
+  const agentGatewayToken = yield* Config.string("AGENT_GATEWAY_TOKEN").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const agentPromptTimeoutMs = yield* validatedNumber("AGENT_PROMPT_TIMEOUT_MS", 1_000, 15_000);
+  const agentCheckinIntervalMs = yield* validatedNumber(
+    "AGENT_CHECKIN_INTERVAL_MS",
+    0,
+    60 * 60 * 1000,
+  );
+  const agentCheckinOnEvents = yield* Config.boolean("AGENT_CHECKIN_ON_EVENTS").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const agentCheckinIncludeHistory = yield* Config.boolean("AGENT_CHECKIN_INCLUDE_HISTORY").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const agentCheckinMaxPositions = yield* validatedNumber("AGENT_CHECKIN_MAX_POSITIONS", 0, 10);
+  const agentOpenclawWebhookUrl = yield* Config.string("AGENT_OPENCLAW_WEBHOOK_URL").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const agentHermesApiUrl = yield* Config.string("AGENT_HERMES_API_URL").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const agentHttpPort = yield* validatedNumber("AGENT_HTTP_PORT", 0, 0, 65_535);
+  const agentMcpEnabled = yield* Config.boolean("AGENT_MCP_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+
+  // ─── Threshold evolution ─────────────────────────────────────────────
+  const evolutionInterval = yield* validatedNumber("EVOLUTION_INTERVAL", 1, 5, 100);
+  const evolutionMaxChangePct = yield* validatedNumber("EVOLUTION_MAX_CHANGE_PCT", 0.01, 0.2, 1.0);
+
+  const signalWeightWindowDays = yield* validatedNumber("SIGNAL_WEIGHT_WINDOW_DAYS", 7, 60);
+  const signalWeightMinOutcomes = yield* validatedNumber("SIGNAL_WEIGHT_MIN_OUTCOMES", 3, 10);
+  const signalWeightBoostFactor = yield* validatedNumber(
+    "SIGNAL_WEIGHT_BOOST_FACTOR",
+    1.0,
+    1.05,
+    2.0,
+  );
+  const signalWeightDecayFactor = yield* validatedNumber(
+    "SIGNAL_WEIGHT_DECAY_FACTOR",
+    0.5,
+    0.95,
+    1.0,
+  );
+  const signalWeightFloor = yield* validatedNumber("SIGNAL_WEIGHT_FLOOR", 0.1, 0.3, 1.0);
+  const signalWeightCeiling = yield* validatedNumber("SIGNAL_WEIGHT_CEILING", 1.0, 2.5, 5.0);
+  const weightedEntryScoreThreshold = yield* validatedNumber(
+    "WEIGHTED_ENTRY_SCORE_THRESHOLD",
+    0.1,
+    1.8,
   );
 
   // New feature configs
@@ -332,6 +472,33 @@ const loadConfig = Effect.gen(function* () {
     maxOpenPositions,
     paperValidationMinDays,
     paperValidationEnforce,
+    oorCooldownMs,
+    repeatOorCooldownMs,
+    maxOorCooldownExits,
+    agentiveMode,
+    agentRuntime,
+    agentAcpCommand,
+    agentAcpArgs,
+    agentGatewayUrl,
+    agentGatewayToken,
+    agentPromptTimeoutMs,
+    agentCheckinIntervalMs,
+    agentCheckinOnEvents,
+    agentCheckinIncludeHistory,
+    agentCheckinMaxPositions,
+    agentOpenclawWebhookUrl,
+    agentHermesApiUrl,
+    agentHttpPort,
+    agentMcpEnabled,
+    evolutionInterval,
+    evolutionMaxChangePct,
+    signalWeightWindowDays,
+    signalWeightMinOutcomes,
+    signalWeightBoostFactor,
+    signalWeightDecayFactor,
+    signalWeightFloor,
+    signalWeightCeiling,
+    weightedEntryScoreThreshold,
   };
 
   return cfg;

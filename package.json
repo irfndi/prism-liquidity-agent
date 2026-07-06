@@ -19,6 +19,9 @@
     "prism": "./scripts/prism.sh"
   },
   "type": "module",
+  "engines": {
+    "bun": ">=1.4.0"
+  },
   "scripts": {
     "start": "bun dist/index.mjs",
     "dev": "bun run --watch engine/index.ts",

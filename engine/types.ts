@@ -56,6 +56,22 @@ export interface PoolMetrics {
   binUtilization: number; // active bins / total bins
 }
 
+// ─── Signal Staging ──────────────────────────────────────────────────────────
+
+export interface SignalSnapshot {
+  readonly poolAddress: string;
+  readonly timestamp: number;
+  readonly feeIlRatio: number;
+  readonly volumeAuthenticity: number;
+  readonly binUtilization: number;
+  readonly tvlUsd: number;
+  readonly tvlVelocity: number;
+  readonly volatilityStddev: number;
+  readonly binStep: number;
+  readonly action: ActionType;
+  readonly confidence: number;
+}
+
 // ─── Position ────────────────────────────────────────────────────────────────
 
 export interface Position {
@@ -142,6 +158,26 @@ export interface BacktestResult {
   totalRebalances: number;
   winRate: number;
   sharpeRatio: number;
+}
+
+// ─── Signal Weights (Darwinian weighting) ────────────────────────────────────
+
+export interface SignalWeights {
+  readonly feeIlRatio: number;
+  readonly volumeAuthenticity: number;
+  readonly binUtilization: number;
+  readonly tvlUsd: number;
+  readonly tvlVelocity: number;
+  readonly updatedAt: number;
+}
+
+// ─── Pool Cooldown ──────────────────────────────────────────────────────────
+
+export interface PoolCooldown {
+  readonly poolAddress: string;
+  readonly cooldownUntil: number;
+  readonly reason: string;
+  readonly consecutiveOorExits: number;
 }
 
 // ─── Revenue ────────────────────────────────────────────────────────────────

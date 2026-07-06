@@ -37,6 +37,8 @@ function makePosition(overrides: Partial<PositionRecord> = {}): PositionRecord {
     highestValueUsd: overrides.highestValueUsd ?? null,
     lastRebalanceAt: overrides.lastRebalanceAt ?? 0,
     paperExitedAt: overrides.paperExitedAt ?? null,
+    entrySignalTimestamp: overrides.entrySignalTimestamp ?? null,
+    entrySignalSnapshotId: overrides.entrySignalSnapshotId ?? null,
   };
 }
 
