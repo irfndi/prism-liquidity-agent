@@ -51,11 +51,13 @@ function submitCloudFeedback(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(10_000),
       }),
     );
     if (!res.ok) return null;
-    const json = (yield* Effect.tryPromise(() => res.json())) as { id?: string };
-    return json.id ? { id: json.id } : null;
+    const json = (yield* Effect.tryPromise(() => res.json())) as Record<string, unknown>;
+    if (typeof json.id !== "string") return null;
+    return { id: json.id };
   }).pipe(Effect.catchAll(() => Effect.succeed(null)));
 }
 const STOP_WORDS = new Set([

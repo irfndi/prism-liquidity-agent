@@ -509,13 +509,11 @@ export const AdapterLive = Layer.effect(
         const prices: Record<string, number> = {};
         const missing: string[] = [];
 
+        // 1. Cache only — never use hardcoded fallback here
         for (const mint of mints) {
           const cached = getCachedPrice(mint);
           if (cached !== undefined) {
             prices[mint] = cached;
-          } else if (fallbackPrices[mint]) {
-            prices[mint] = fallbackPrices[mint];
-            setCachedPrice(mint, fallbackPrices[mint]);
           } else {
             missing.push(mint);
           }
@@ -523,6 +521,7 @@ export const AdapterLive = Layer.effect(
 
         if (missing.length === 0) return prices;
 
+        // 2. Jupiter (live prices are cached inside fetchJupiterPrices)
         const jupiterPrices = yield* fetchJupiterPrices(missing);
         const stillMissing: string[] = [];
         for (const mint of missing) {
@@ -534,11 +533,24 @@ export const AdapterLive = Layer.effect(
           }
         }
 
-        if (stillMissing.length > 0) {
-          const cgPrices = yield* fetchCoinGeckoPrices(stillMissing);
-          for (const mint of stillMissing) {
-            prices[mint] = cgPrices[mint] ?? 0;
+        if (stillMissing.length === 0) return prices;
+
+        // 3. CoinGecko (live prices are cached inside fetchCoinGeckoPrices)
+        const cgPrices = yield* fetchCoinGeckoPrices(stillMissing);
+        const unresolved: string[] = [];
+        for (const mint of stillMissing) {
+          const cgPrice = cgPrices[mint];
+          if (cgPrice != null) {
+            prices[mint] = cgPrice;
+          } else {
+            unresolved.push(mint);
           }
+        }
+
+        // 4. Hardcoded fallback — NOT cached (stale values must not pollute
+        //    the live price cache; next cycle will re-attempt live sources)
+        for (const mint of unresolved) {
+          prices[mint] = fallbackPrices[mint] ?? 0;
         }
 
         return prices;

@@ -74,12 +74,16 @@ export function findRunningEngineProcess(
   spawner: (
     command: string,
     args: ReadonlyArray<string>,
-    options: { encoding: "utf-8"; shell: false },
+    options: { encoding: "utf-8"; shell: false; timeout?: number },
   ) => { readonly stdout?: string | Buffer; readonly error?: Error } = spawnSync,
 ): { readonly pid: number; readonly command: string } | null {
   if (process.platform === "win32") return null;
   try {
-    const result = spawner("ps", ["-eo", "pid,args"], { encoding: "utf-8", shell: false });
+    const result = spawner("ps", ["-eo", "pid,args"], {
+      encoding: "utf-8",
+      shell: false,
+      timeout: 3000,
+    });
     if (result.error || !result.stdout) return null;
     const stdout =
       typeof result.stdout === "string" ? result.stdout : result.stdout.toString("utf-8");
