@@ -339,7 +339,9 @@ export const DbLive = (dbPath?: string) =>
                     .map((row) => {
                       const rawDistance = row.distance;
                       const distance =
-                        rawDistance === undefined || rawDistance === null || Number.isNaN(rawDistance)
+                        rawDistance === undefined ||
+                        rawDistance === null ||
+                        Number.isNaN(rawDistance)
                           ? 1
                           : Number(rawDistance);
                       const simScore = 1 - distance;
@@ -637,10 +639,7 @@ export const DbLive = (dbPath?: string) =>
         saveSignalSnapshot: (snapshot) =>
           Effect.sync(() => {
             const result = (
-              db.run as (
-                sql: string,
-                ...params: unknown[]
-              ) => { lastInsertRowid: number | bigint }
+              db.run as (sql: string, ...params: unknown[]) => { lastInsertRowid: number | bigint }
             )(
               `INSERT INTO signal_snapshots (pool_address, timestamp, fee_il_ratio, volume_authenticity, bin_utilization, tvl_usd, tvl_velocity, volatility_stddev, bin_step, action, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               snapshot.poolAddress,

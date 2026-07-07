@@ -57,8 +57,12 @@ function formatResult(result: FeedbackResult): string {
       return "ℹ Feedback is disabled. Run 'prism feedback enable' to re-enable.";
     case "local_only":
       return `✓ Feedback stored locally (id: ${result.localId}). Set GITHUB_TOKEN to file GitHub issues.`;
+    case "cloud":
+      return `✓ Feedback submitted to Prism cloud (id: ${result.id}).`;
     case "error":
       return `✗ Failed to submit feedback: ${result.error}`;
+    default:
+      return `✗ Unknown feedback result: ${String((result as { kind: string }).kind)}`;
   }
 }
 
@@ -125,10 +129,11 @@ export const feedbackCommand = new Command("feedback")
 Environment:
   GITHUB_TOKEN              Personal access token with 'repo' scope
   GITHUB_REPO               Target repo (default: irfndi/prism-liquidity-agent)
+  PRISM_API_URL             Cloud feedback endpoint override
   PRISM_FEEDBACK_OPT_OUT    Set to 'true' to disable automatic feedback
 
-Requires GITHUB_TOKEN for GitHub Issues filing. Without it, feedback is stored
-locally in ~/.config/prism/agent-id and logged but not uploaded.`,
+Requires GITHUB_TOKEN for GitHub Issues filing. Without it, Prism first tries the
+cloud /v1/feedback endpoint, then falls back to local storage.`,
   );
 
 feedbackCommand
@@ -163,7 +168,9 @@ feedbackCommand
         const recent = yield* feedback.list();
         console.log(`Agent feedback status:`);
         console.log(`  Opt-out:       ${optOut ? "yes" : "no"}`);
-        console.log(`  GITHUB_TOKEN:  ${config.githubToken ? "set" : "UNSET (local-only mode)"}`);
+        console.log(
+          `  GITHUB_TOKEN:  ${config.githubToken ? "set" : "UNSET (cloud/local fallback)"}`,
+        );
         console.log(`  GITHUB_REPO:   ${config.githubRepo}`);
         console.log(`  Total reports: ${recent.length}`);
         if (recent.length > 0) {

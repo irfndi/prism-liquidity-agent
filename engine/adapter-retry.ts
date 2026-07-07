@@ -20,6 +20,15 @@ export function isRetriableError(err: unknown): boolean {
   return false;
 }
 
+function isRateLimitError(err: unknown): boolean {
+  if (hasCode(err) && err.code === 429) return true;
+  if (hasMessage(err)) {
+    const msg = err.message.toLowerCase();
+    return msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests");
+  }
+  return false;
+}
+
 // ─── RPC / network error classifier ──────────────────────────────────────────
 // Returns true for errors that indicate transient RPC or network unavailability.
 // These should trip the circuit breaker; business-logic / validation errors should not.
@@ -67,16 +76,23 @@ export interface RetryOptions {
   readonly maxRetries?: number;
   readonly baseDelayMs?: number;
   readonly maxDelayMs?: number;
+  readonly rateLimitBaseDelayMs?: number;
 }
 
-const DEFAULT_RETRY_OPTIONS: Required<RetryOptions> = {
+const DEFAULT_RETRY_OPTIONS: Required<Omit<RetryOptions, "rateLimitBaseDelayMs">> & {
+  readonly rateLimitBaseDelayMs: number;
+} = {
   maxRetries: 5,
   baseDelayMs: 1000,
   maxDelayMs: 30000,
+  rateLimitBaseDelayMs: 5_000,
 };
 
 export async function retryWithBackoff<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise<T> {
-  const { maxRetries, baseDelayMs, maxDelayMs } = { ...DEFAULT_RETRY_OPTIONS, ...opts };
+  const { maxRetries, baseDelayMs, maxDelayMs, rateLimitBaseDelayMs } = {
+    ...DEFAULT_RETRY_OPTIONS,
+    ...opts,
+  };
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -86,7 +102,8 @@ export async function retryWithBackoff<T>(fn: () => Promise<T>, opts?: RetryOpti
       if (attempt >= maxRetries || !isRetriableError(err)) {
         throw lastError;
       }
-      const exponentialDelay = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
+      const effectiveBase = isRateLimitError(err) ? rateLimitBaseDelayMs : baseDelayMs;
+      const exponentialDelay = Math.min(maxDelayMs, effectiveBase * 2 ** attempt);
       const jitter = Math.random() * exponentialDelay * 0.5;
       const delay = Math.floor(exponentialDelay + jitter);
       logger.warn(

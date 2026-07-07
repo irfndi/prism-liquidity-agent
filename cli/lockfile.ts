@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { spawnSync } from "child_process";
 
 export const LOCKFILE_DIR = path.join(os.homedir(), ".config", "prism");
 export const LOCKFILE_PATH = path.join(LOCKFILE_DIR, "dev.lock");
@@ -54,6 +55,58 @@ export function isProcessAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+const EXCLUDED_PATTERNS = [
+  "bun install",
+  "bun add",
+  "bun remove",
+  "bun update",
+  "bun test",
+  "bun run test",
+  "bun run lint",
+  "bun run format",
+  "bun run setup",
+  "bun run backtest",
+];
+
+export function findRunningEngineProcess(
+  spawner: (
+    command: string,
+    args: ReadonlyArray<string>,
+    options: { encoding: "utf-8"; shell: false },
+  ) => { readonly stdout?: string | Buffer; readonly error?: Error } = spawnSync,
+): { readonly pid: number; readonly command: string } | null {
+  if (process.platform === "win32") return null;
+  try {
+    const result = spawner("ps", ["-eo", "pid,args"], { encoding: "utf-8", shell: false });
+    if (result.error || !result.stdout) return null;
+    const stdout =
+      typeof result.stdout === "string" ? result.stdout : result.stdout.toString("utf-8");
+    const lines = stdout.trim().split("\n").slice(1);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      const match = trimmed.match(/^(\d+)\s+(.+)$/);
+      if (!match) continue;
+      const pidStr = match[1];
+      const args = match[2];
+      if (pidStr === undefined || args === undefined) continue;
+      const pid = Number.parseInt(pidStr, 10);
+      if (pid === process.pid) continue;
+      if (!args.includes("bun")) continue;
+      if (EXCLUDED_PATTERNS.some((pattern) => args.includes(pattern))) continue;
+      if (
+        args.includes("engine/index.ts") ||
+        args.includes("run dev") ||
+        args.includes("cli/dev.ts")
+      ) {
+        return { pid, command: args };
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export function acquireLock(

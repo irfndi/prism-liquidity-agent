@@ -417,53 +417,65 @@ export const AdapterLive = Layer.effect(
       JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: 1.0,
     };
 
-    function fetchTokenPrices(
-      mints: ReadonlyArray<string>,
-    ): Effect.Effect<Record<string, number>, unknown> {
+    const PRICE_CACHE_TTL_MS = 60_000;
+    const COINGECKO_BATCH_SIZE = 25;
+    const COINGECKO_DELAY_MS = 1_200;
+
+    interface PriceCacheEntry {
+      readonly price: number;
+      readonly fetchedAt: number;
+    }
+
+    const priceCache = new Map<string, PriceCacheEntry>();
+
+    function getCachedPrice(mint: string): number | undefined {
+      const entry = priceCache.get(mint);
+      if (!entry) return undefined;
+      if (Date.now() - entry.fetchedAt > PRICE_CACHE_TTL_MS) {
+        priceCache.delete(mint);
+        return undefined;
+      }
+      return entry.price;
+    }
+
+    function setCachedPrice(mint: string, price: number): void {
+      priceCache.set(mint, { price, fetchedAt: Date.now() });
+    }
+
+    function fetchJupiterPrices(
+      missing: ReadonlyArray<string>,
+    ): Effect.Effect<Record<string, number>, never> {
+      if (missing.length === 0) return Effect.succeed({});
       return Effect.gen(function* () {
-        const prices: Record<string, number> = {};
-        const missing: string[] = [];
-
-        for (const mint of mints) {
-          if (fallbackPrices[mint]) {
-            prices[mint] = fallbackPrices[mint];
-          } else {
-            missing.push(mint);
+        const ids = missing.join(",");
+        const res = yield* Effect.tryPromise(() =>
+          fetch(`https://price.jup.ag/v6/price?ids=${ids}`),
+        );
+        if (!res.ok) return {};
+        const json = (yield* Effect.tryPromise(() => res.json())) as {
+          data?: Record<string, { price: number }>;
+        };
+        const result: Record<string, number> = {};
+        for (const mint of missing) {
+          const price = json.data?.[mint]?.price;
+          if (price != null) {
+            result[mint] = price;
+            setCachedPrice(mint, price);
           }
         }
+        return result;
+      }).pipe(Effect.catchAll(() => Effect.succeed({})));
+    }
 
-        if (missing.length === 0) return prices;
-
-        // Try Jupiter Price API
-        try {
-          const ids = missing.join(",");
-          const res = yield* Effect.tryPromise(() =>
-            fetch(`https://price.jup.ag/v6/price?ids=${ids}`),
-          );
-          if (res.ok) {
-            const json = (yield* Effect.tryPromise(() => res.json())) as {
-              data?: Record<string, { price: number }>;
-            };
-            const stillMissing: string[] = [];
-            for (const mint of missing) {
-              const price = json.data?.[mint]?.price;
-              if (price != null) {
-                prices[mint] = price;
-              } else {
-                stillMissing.push(mint);
-              }
-            }
-            missing.length = 0;
-            missing.push(...stillMissing);
-            if (missing.length === 0) return prices;
-          }
-        } catch {
-          // fall through
-        }
-
-        // Fallback to CoinGecko
-        try {
-          const ids = missing.join(",");
+    function fetchCoinGeckoPrices(
+      missing: ReadonlyArray<string>,
+    ): Effect.Effect<Record<string, number>, never> {
+      if (missing.length === 0) return Effect.succeed({});
+      return Effect.gen(function* () {
+        const result: Record<string, number> = {};
+        for (let i = 0; i < missing.length; i += COINGECKO_BATCH_SIZE) {
+          const batch = missing.slice(i, i + COINGECKO_BATCH_SIZE);
+          const ids = batch.join(",");
           const res = yield* Effect.tryPromise(() =>
             fetch(
               `https://api.coingecko.com/api/v3/simple/token_price/solana?contract_addresses=${ids}&vs_currencies=usd`,
@@ -474,18 +486,61 @@ export const AdapterLive = Layer.effect(
               string,
               { usd: number }
             >;
-            for (const mint of missing) {
-              prices[mint] = json[mint]?.usd ?? 0;
+            for (const mint of batch) {
+              const price = json[mint]?.usd;
+              if (price != null) {
+                result[mint] = price;
+                setCachedPrice(mint, price);
+              }
             }
-            return prices;
           }
-        } catch {
-          // fall through
+          if (i + COINGECKO_BATCH_SIZE < missing.length) {
+            yield* Effect.sleep(COINGECKO_DELAY_MS);
+          }
+        }
+        return result;
+      }).pipe(Effect.catchAll(() => Effect.succeed({})));
+    }
+
+    function fetchTokenPrices(
+      mints: ReadonlyArray<string>,
+    ): Effect.Effect<Record<string, number>, unknown> {
+      return Effect.gen(function* () {
+        const prices: Record<string, number> = {};
+        const missing: string[] = [];
+
+        for (const mint of mints) {
+          const cached = getCachedPrice(mint);
+          if (cached !== undefined) {
+            prices[mint] = cached;
+          } else if (fallbackPrices[mint]) {
+            prices[mint] = fallbackPrices[mint];
+            setCachedPrice(mint, fallbackPrices[mint]);
+          } else {
+            missing.push(mint);
+          }
         }
 
+        if (missing.length === 0) return prices;
+
+        const jupiterPrices = yield* fetchJupiterPrices(missing);
+        const stillMissing: string[] = [];
         for (const mint of missing) {
-          prices[mint] = 0;
+          const price = jupiterPrices[mint];
+          if (price != null) {
+            prices[mint] = price;
+          } else {
+            stillMissing.push(mint);
+          }
         }
+
+        if (stillMissing.length > 0) {
+          const cgPrices = yield* fetchCoinGeckoPrices(stillMissing);
+          for (const mint of stillMissing) {
+            prices[mint] = cgPrices[mint] ?? 0;
+          }
+        }
+
         return prices;
       });
     }
@@ -522,38 +577,17 @@ export const AdapterLive = Layer.effect(
           (mintYInfo.value?.data as { parsed?: { info?: { decimals?: number } } })?.parsed?.info
             ?.decimals ?? 6;
 
-        const vaultX = yield* Effect.tryPromise(() =>
-          rpcCall(() =>
-            connection.getTokenAccountsByOwner(pubkey, {
-              mint: lbPair.tokenXMint,
-            }),
+        const [balX, balY] = yield* Effect.all([
+          Effect.tryPromise(() =>
+            rpcCall(() => connection.getTokenAccountBalance(lbPair.reserveX)),
           ),
-        );
-        const vaultY = yield* Effect.tryPromise(() =>
-          rpcCall(() =>
-            connection.getTokenAccountsByOwner(pubkey, {
-              mint: lbPair.tokenYMint,
-            }),
+          Effect.tryPromise(() =>
+            rpcCall(() => connection.getTokenAccountBalance(lbPair.reserveY)),
           ),
-        );
+        ]);
 
-        let reserveX = 0;
-        let reserveY = 0;
-
-        if (vaultX.value.length > 0 && vaultX.value[0]) {
-          const firstVault = vaultX.value[0] as { pubkey: PublicKey };
-          const bal = yield* Effect.tryPromise(() =>
-            rpcCall(() => connection.getTokenAccountBalance(firstVault.pubkey)),
-          );
-          reserveX = Number(bal.value.amount) / Math.pow(10, tokenXDecimals);
-        }
-        if (vaultY.value.length > 0 && vaultY.value[0]) {
-          const firstVault = vaultY.value[0] as { pubkey: PublicKey };
-          const bal = yield* Effect.tryPromise(() =>
-            rpcCall(() => connection.getTokenAccountBalance(firstVault.pubkey)),
-          );
-          reserveY = Number(bal.value.amount) / Math.pow(10, tokenYDecimals);
-        }
+        const reserveX = Number(balX.value.amount) / Math.pow(10, tokenXDecimals);
+        const reserveY = Number(balY.value.amount) / Math.pow(10, tokenYDecimals);
 
         const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint]);
         const priceX = prices[tokenXMint] || 0;
@@ -780,121 +814,117 @@ export const AdapterLive = Layer.effect(
             );
           }
 
-          try {
-            const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
-            const pool = yield* api.getPoolState(poolAddress);
+          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
+          const pool = yield* api.getPoolState(poolAddress);
 
-            const prices = yield* fetchTokenPrices([pool.tokenX, pool.tokenY]);
-            const priceX = prices[pool.tokenX] ?? 0;
-            const priceY = prices[pool.tokenY] ?? 0;
+          const prices = yield* fetchTokenPrices([pool.tokenX, pool.tokenY]);
+          const priceX = prices[pool.tokenX] ?? 0;
+          const priceY = prices[pool.tokenY] ?? 0;
 
-            if (!priceX || !priceY) {
-              return yield* Effect.fail(
-                new AdapterError({
-                  message: "Could not fetch token prices",
-                  poolAddress,
-                }),
-              );
-            }
-
-            const halfUsd = positionSizeUsd / 2;
-            const tokenXDecimals = yield* getTokenMeta(pool.tokenX).pipe(
-              Effect.map((m) => m.decimals),
-            );
-            const tokenYDecimals = yield* getTokenMeta(pool.tokenY).pipe(
-              Effect.map((m) => m.decimals),
-            );
-
-            let totalXAmount = new BN(
-              Math.floor((halfUsd / priceX) * Math.pow(10, tokenXDecimals)),
-            );
-            let totalYAmount = new BN(
-              Math.floor((halfUsd / priceY) * Math.pow(10, tokenYDecimals)),
-            );
-
-            // Check balances
-            const balanceX = yield* getTokenBalance(pool.tokenX);
-            const balanceY = yield* getTokenBalance(pool.tokenY);
-            let nativeSolBalance = 0n;
-            if (pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT) {
-              nativeSolBalance = BigInt(
-                yield* Effect.tryPromise(() =>
-                  rpcCall(() => connection.getBalance(wallet.publicKey)),
-                ),
-              );
-            }
-
-            const maxX = pool.tokenX === SOL_MINT ? nativeSolBalance : balanceX;
-            if (BigInt(totalXAmount.toString()) > maxX) {
-              totalXAmount = new BN(maxX.toString());
-            }
-
-            const maxY = pool.tokenY === SOL_MINT ? nativeSolBalance : balanceY;
-            if (BigInt(totalYAmount.toString()) > maxY) {
-              totalYAmount = new BN(maxY.toString());
-            }
-
-            if (totalXAmount.eq(new BN(0)) || totalYAmount.eq(new BN(0))) {
-              return yield* Effect.fail(
-                new AdapterError({
-                  message: "Insufficient token balance",
-                  poolAddress,
-                }),
-              );
-            }
-
-            const positionKeypair = new Keypair();
-            const strategy = {
-              minBinId: lowerBinId,
-              maxBinId: upperBinId,
-              strategyType: 0,
-            };
-
-            const tx = yield* Effect.tryPromise(() =>
-              dlmm.initializePositionAndAddLiquidityByStrategy({
-                positionPubKey: positionKeypair.publicKey,
-                totalXAmount,
-                totalYAmount,
-                strategy,
-                user: wallet.publicKey,
-                slippage: 50,
+          if (!priceX || !priceY) {
+            return yield* Effect.fail(
+              new AdapterError({
+                message: "Could not fetch token prices",
+                poolAddress,
               }),
             );
+          }
 
-            tx.feePayer = wallet.publicKey;
-            const { blockhash } = yield* Effect.tryPromise(() =>
-              rpcGated(() => connection.getLatestBlockhash()),
-            );
-            tx.recentBlockhash = blockhash;
-            tx.sign(wallet, positionKeypair);
+          const halfUsd = positionSizeUsd / 2;
+          const tokenXDecimals = yield* getTokenMeta(pool.tokenX).pipe(
+            Effect.map((m) => m.decimals),
+          );
+          const tokenYDecimals = yield* getTokenMeta(pool.tokenY).pipe(
+            Effect.map((m) => m.decimals),
+          );
 
-            const signature = yield* Effect.tryPromise(() =>
-              rpcGated(() =>
-                connection.sendRawTransaction(tx.serialize(), {
-                  skipPreflight: false,
-                  preflightCommitment: "confirmed",
-                }),
+          let totalXAmount = new BN(Math.floor((halfUsd / priceX) * Math.pow(10, tokenXDecimals)));
+          let totalYAmount = new BN(Math.floor((halfUsd / priceY) * Math.pow(10, tokenYDecimals)));
+
+          // Check balances
+          const balanceX = yield* getTokenBalance(pool.tokenX);
+          const balanceY = yield* getTokenBalance(pool.tokenY);
+          let nativeSolBalance = 0n;
+          if (pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT) {
+            nativeSolBalance = BigInt(
+              yield* Effect.tryPromise(() =>
+                rpcCall(() => connection.getBalance(wallet.publicKey)),
               ),
             );
+          }
 
-            yield* Effect.tryPromise(() =>
-              rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
-            );
+          const maxX = pool.tokenX === SOL_MINT ? nativeSolBalance : balanceX;
+          if (BigInt(totalXAmount.toString()) > maxX) {
+            totalXAmount = new BN(maxX.toString());
+          }
 
-            return {
-              positionPubKey: positionKeypair.publicKey.toBase58(),
-              txSignature: signature,
-            };
-          } catch (err) {
+          const maxY = pool.tokenY === SOL_MINT ? nativeSolBalance : balanceY;
+          if (BigInt(totalYAmount.toString()) > maxY) {
+            totalYAmount = new BN(maxY.toString());
+          }
+
+          if (totalXAmount.eq(new BN(0)) || totalYAmount.eq(new BN(0))) {
             return yield* Effect.fail(
+              new AdapterError({
+                message: "Insufficient token balance",
+                poolAddress,
+              }),
+            );
+          }
+
+          const positionKeypair = new Keypair();
+          const strategy = {
+            minBinId: lowerBinId,
+            maxBinId: upperBinId,
+            strategyType: 0,
+          };
+
+          const tx = yield* Effect.tryPromise(() =>
+            dlmm.initializePositionAndAddLiquidityByStrategy({
+              positionPubKey: positionKeypair.publicKey,
+              totalXAmount,
+              totalYAmount,
+              strategy,
+              user: wallet.publicKey,
+              slippage: 50,
+            }),
+          );
+
+          tx.feePayer = wallet.publicKey;
+          const { blockhash } = yield* Effect.tryPromise(() =>
+            rpcGated(() => connection.getLatestBlockhash()),
+          );
+          tx.recentBlockhash = blockhash;
+          tx.sign(wallet, positionKeypair);
+
+          const signature = yield* Effect.tryPromise(() =>
+            rpcGated(() =>
+              connection.sendRawTransaction(tx.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: "confirmed",
+              }),
+            ),
+          );
+
+          yield* Effect.tryPromise(() =>
+            rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
+          );
+
+          return {
+            positionPubKey: positionKeypair.publicKey.toBase58(),
+            txSignature: signature,
+          };
+        }).pipe(
+          Effect.catchAll((err: unknown) =>
+            Effect.fail(
               new AdapterError({
                 message: `Failed to enter position: ${String(err)}`,
                 poolAddress,
                 cause: err,
               }),
-            );
-          }
-        }),
+            ),
+          ),
+        ),
 
       exitPosition: (poolAddress, positionPubKey) =>
         Effect.gen(function* () {
@@ -906,57 +936,57 @@ export const AdapterLive = Layer.effect(
             );
           }
 
-          try {
-            const positionPubkey = new PublicKey(positionPubKey);
-            const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
+          const positionPubkey = new PublicKey(positionPubKey);
+          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
 
-            const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
-            const lowerBinId = position.positionData.lowerBinId;
-            const upperBinId = position.positionData.upperBinId;
+          const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
+          const lowerBinId = position.positionData.lowerBinId;
+          const upperBinId = position.positionData.upperBinId;
 
-            const txs = yield* Effect.tryPromise(() =>
-              dlmm.removeLiquidity({
-                user: wallet.publicKey,
-                position: positionPubkey,
-                fromBinId: lowerBinId,
-                toBinId: upperBinId,
-                bps: new BN(10000),
-                shouldClaimAndClose: true,
-              }),
+          const txs = yield* Effect.tryPromise(() =>
+            dlmm.removeLiquidity({
+              user: wallet.publicKey,
+              position: positionPubkey,
+              fromBinId: lowerBinId,
+              toBinId: upperBinId,
+              bps: new BN(10000),
+              shouldClaimAndClose: true,
+            }),
+          );
+
+          for (const tx of txs) {
+            const { blockhash } = yield* Effect.tryPromise(() =>
+              rpcGated(() => connection.getLatestBlockhash()),
             );
+            tx.feePayer = wallet.publicKey;
+            tx.recentBlockhash = blockhash;
+            tx.sign(wallet);
 
-            for (const tx of txs) {
-              const { blockhash } = yield* Effect.tryPromise(() =>
-                rpcGated(() => connection.getLatestBlockhash()),
-              );
-              tx.feePayer = wallet.publicKey;
-              tx.recentBlockhash = blockhash;
-              tx.sign(wallet);
+            const signature = yield* Effect.tryPromise(() =>
+              rpcGated(() =>
+                connection.sendRawTransaction(tx.serialize(), {
+                  skipPreflight: false,
+                  preflightCommitment: "confirmed",
+                }),
+              ),
+            );
+            yield* Effect.tryPromise(() =>
+              rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
+            );
+          }
 
-              const signature = yield* Effect.tryPromise(() =>
-                rpcGated(() =>
-                  connection.sendRawTransaction(tx.serialize(), {
-                    skipPreflight: false,
-                    preflightCommitment: "confirmed",
-                  }),
-                ),
-              );
-              yield* Effect.tryPromise(() =>
-                rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
-              );
-            }
-
-            return { txSignature: "batch-confirmed" };
-          } catch (err) {
-            return yield* Effect.fail(
+          return { txSignature: "batch-confirmed" };
+        }).pipe(
+          Effect.catchAll((err: unknown) =>
+            Effect.fail(
               new AdapterError({
                 message: `Failed to exit position: ${String(err)}`,
                 poolAddress,
                 cause: err,
               }),
-            );
-          }
-        }),
+            ),
+          ),
+        ),
 
       rebalancePosition: (poolAddress, positionPubKey, newLowerBinId, newUpperBinId) =>
         Effect.gen(function* () {
@@ -995,186 +1025,186 @@ export const AdapterLive = Layer.effect(
             );
           }
 
-          try {
-            const positionPubkey = new PublicKey(positionPubKey);
-            const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
+          const positionPubkey = new PublicKey(positionPubKey);
+          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
 
-            const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
+          const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
 
-            const feeX = Number(position.positionData.feeX.toString());
-            const feeY = Number(position.positionData.feeY.toString());
+          const feeX = Number(position.positionData.feeX.toString());
+          const feeY = Number(position.positionData.feeY.toString());
 
-            if (feeX === 0 && feeY === 0) {
-              return {
-                txSignature: "",
-                feeX: 0,
-                feeY: 0,
-                platformFeeX: 0,
-                platformFeeY: 0,
-                netFeeX: 0,
-                netFeeY: 0,
-              };
-            }
+          if (feeX === 0 && feeY === 0) {
+            return {
+              txSignature: "",
+              feeX: 0,
+              feeY: 0,
+              platformFeeX: 0,
+              platformFeeY: 0,
+              netFeeX: 0,
+              netFeeY: 0,
+            };
+          }
 
-            const txs = yield* Effect.tryPromise(() =>
-              dlmm.claimSwapFee({
-                owner: wallet.publicKey,
-                position: position,
-              }),
-            );
+          const txs = yield* Effect.tryPromise(() =>
+            dlmm.claimSwapFee({
+              owner: wallet.publicKey,
+              position: position,
+            }),
+          );
 
-            const claimInstructions = txs.flatMap((tx) => tx.instructions);
+          const claimInstructions = txs.flatMap((tx) => tx.instructions);
 
-            if (claimInstructions.length === 0) {
-              return {
-                txSignature: "",
-                feeX: 0,
-                feeY: 0,
-                platformFeeX: 0,
-                platformFeeY: 0,
-                netFeeX: 0,
-                netFeeY: 0,
-              };
-            }
+          if (claimInstructions.length === 0) {
+            return {
+              txSignature: "",
+              feeX: 0,
+              feeY: 0,
+              platformFeeX: 0,
+              platformFeeY: 0,
+              netFeeX: 0,
+              netFeeY: 0,
+            };
+          }
 
-            const feeWallet = feeWalletAddress ?? "";
-            const operatorWalletAddress = wallet.publicKey.toBase58();
-            const revenueShare = calculateRevenueShare(
-              feeX,
-              feeY,
-              platformFeeRate,
-              revenueShareEnabled ?? false,
-              revenueShareOperatorPct ?? 0,
-              feeWallet,
-              operatorWalletAddress,
-            );
-            let transferInstructions: TransactionInstruction[] = [];
-            let actualPlatformFeeX = 0;
-            let actualPlatformFeeY = 0;
-            let actualOperatorFeeX = 0;
-            let actualOperatorFeeY = 0;
+          const feeWallet = feeWalletAddress ?? "";
+          const operatorWalletAddress = wallet.publicKey.toBase58();
+          const revenueShare = calculateRevenueShare(
+            feeX,
+            feeY,
+            platformFeeRate,
+            revenueShareEnabled ?? false,
+            revenueShareOperatorPct ?? 0,
+            feeWallet,
+            operatorWalletAddress,
+          );
+          let transferInstructions: TransactionInstruction[] = [];
+          let actualPlatformFeeX = 0;
+          let actualPlatformFeeY = 0;
+          let actualOperatorFeeX = 0;
+          let actualOperatorFeeY = 0;
 
-            if (revenueShare.platformFeeX > 0 || revenueShare.platformFeeY > 0) {
-              if (revenueShare.isCircular) {
-                logger.info("Circular wallet detected — fees retained by operator", {
-                  pool: poolAddress,
-                  platformFeeX: revenueShare.platformFeeX,
-                  platformFeeY: revenueShare.platformFeeY,
-                });
-                actualPlatformFeeX = revenueShare.platformFeeX;
-                actualPlatformFeeY = revenueShare.platformFeeY;
-                actualOperatorFeeX = revenueShare.platformFeeX;
-                actualOperatorFeeY = revenueShare.platformFeeY;
-              } else if (feeWallet) {
-                const feeWalletPubkey = new PublicKey(feeWallet);
-                const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
-                const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
+          if (revenueShare.platformFeeX > 0 || revenueShare.platformFeeY > 0) {
+            if (revenueShare.isCircular) {
+              logger.info("Circular wallet detected — fees retained by operator", {
+                pool: poolAddress,
+                platformFeeX: revenueShare.platformFeeX,
+                platformFeeY: revenueShare.platformFeeY,
+              });
+              actualPlatformFeeX = revenueShare.platformFeeX;
+              actualPlatformFeeY = revenueShare.platformFeeY;
+              actualOperatorFeeX = revenueShare.platformFeeX;
+              actualOperatorFeeY = revenueShare.platformFeeY;
+            } else if (feeWallet) {
+              const feeWalletPubkey = new PublicKey(feeWallet);
+              const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
+              const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
 
-                const mints: Array<[PublicKey, number]> = [
-                  [tokenXMint, revenueShare.amountToTransferX],
-                  [tokenYMint, revenueShare.amountToTransferY],
-                ];
+              const mints: Array<[PublicKey, number]> = [
+                [tokenXMint, revenueShare.amountToTransferX],
+                [tokenYMint, revenueShare.amountToTransferY],
+              ];
 
-                for (const [mint, amount] of mints) {
-                  if (amount < 1) continue;
-                  const fromAta = yield* Effect.tryPromise(() =>
-                    getAssociatedTokenAddress(mint, wallet!.publicKey),
-                  );
-                  const toAta = yield* Effect.tryPromise(() =>
-                    getAssociatedTokenAddress(mint, feeWalletPubkey),
-                  );
-                  // Check if destination ATA exists
-                  const toAtaInfo = yield* Effect.tryPromise(() =>
-                    rpcCall(() => connection.getAccountInfo(toAta)),
-                  );
-                  if (!toAtaInfo) {
-                    transferInstructions.push(
-                      createAssociatedTokenAccountInstruction(
-                        wallet!.publicKey,
-                        toAta,
-                        feeWalletPubkey,
-                        mint,
-                      ),
-                    );
-                  }
+              for (const [mint, amount] of mints) {
+                if (amount < 1) continue;
+                const fromAta = yield* Effect.tryPromise(() =>
+                  getAssociatedTokenAddress(mint, wallet!.publicKey),
+                );
+                const toAta = yield* Effect.tryPromise(() =>
+                  getAssociatedTokenAddress(mint, feeWalletPubkey),
+                );
+                // Check if destination ATA exists
+                const toAtaInfo = yield* Effect.tryPromise(() =>
+                  rpcCall(() => connection.getAccountInfo(toAta)),
+                );
+                if (!toAtaInfo) {
                   transferInstructions.push(
-                    createTransferInstruction(
-                      fromAta,
-                      toAta,
+                    createAssociatedTokenAccountInstruction(
                       wallet!.publicKey,
-                      BigInt(Math.floor(amount)),
+                      toAta,
+                      feeWalletPubkey,
+                      mint,
                     ),
                   );
                 }
+                transferInstructions.push(
+                  createTransferInstruction(
+                    fromAta,
+                    toAta,
+                    wallet!.publicKey,
+                    BigInt(Math.floor(amount)),
+                  ),
+                );
+              }
 
-                if (transferInstructions.length > 0) {
-                  actualPlatformFeeX = revenueShare.platformFeeX;
-                  actualPlatformFeeY = revenueShare.platformFeeY;
-                  actualOperatorFeeX = revenueShare.operatorFeeX;
-                  actualOperatorFeeY = revenueShare.operatorFeeY;
-                } else {
-                  logger.info("No platform fee to transfer — operator keeps full share", {
-                    pool: poolAddress,
-                  });
-                }
+              if (transferInstructions.length > 0) {
+                actualPlatformFeeX = revenueShare.platformFeeX;
+                actualPlatformFeeY = revenueShare.platformFeeY;
+                actualOperatorFeeX = revenueShare.operatorFeeX;
+                actualOperatorFeeY = revenueShare.operatorFeeY;
               } else {
-                logger.warn("No fee wallet configured — skipping platform fee transfer", {
+                logger.info("No platform fee to transfer — operator keeps full share", {
                   pool: poolAddress,
                 });
               }
+            } else {
+              logger.warn("No fee wallet configured — skipping platform fee transfer", {
+                pool: poolAddress,
+              });
             }
+          }
 
-            const allInstructions = [...claimInstructions, ...transferInstructions];
+          const allInstructions = [...claimInstructions, ...transferInstructions];
 
-            const { blockhash } = yield* Effect.tryPromise(() =>
-              rpcGated(() => connection.getLatestBlockhash()),
-            );
+          const { blockhash } = yield* Effect.tryPromise(() =>
+            rpcGated(() => connection.getLatestBlockhash()),
+          );
 
-            const messageV0 = new TransactionMessage({
-              payerKey: wallet.publicKey,
-              recentBlockhash: blockhash,
-              instructions: allInstructions,
-            }).compileToV0Message();
+          const messageV0 = new TransactionMessage({
+            payerKey: wallet.publicKey,
+            recentBlockhash: blockhash,
+            instructions: allInstructions,
+          }).compileToV0Message();
 
-            const versionedTx = new VersionedTransaction(messageV0);
-            versionedTx.sign([wallet]);
+          const versionedTx = new VersionedTransaction(messageV0);
+          versionedTx.sign([wallet]);
 
-            const signature = yield* Effect.tryPromise(() =>
-              rpcGated(() =>
-                connection.sendRawTransaction(versionedTx.serialize(), {
-                  skipPreflight: false,
-                  preflightCommitment: "confirmed",
-                }),
-              ),
-            );
+          const signature = yield* Effect.tryPromise(() =>
+            rpcGated(() =>
+              connection.sendRawTransaction(versionedTx.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: "confirmed",
+              }),
+            ),
+          );
 
-            yield* Effect.tryPromise(() =>
-              rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
-            );
+          yield* Effect.tryPromise(() =>
+            rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
+          );
 
-            return {
-              txSignature: signature,
-              feeX,
-              feeY,
-              platformFeeX: actualPlatformFeeX,
-              platformFeeY: actualPlatformFeeY,
-              netFeeX: feeX - actualPlatformFeeX,
-              netFeeY: feeY - actualPlatformFeeY,
-              ...(transferInstructions.length > 0 ? { feeTransferTxSignature: signature } : {}),
-              ...(actualOperatorFeeX > 0 || actualOperatorFeeY > 0
-                ? { operatorFeeX: actualOperatorFeeX, operatorFeeY: actualOperatorFeeY }
-                : {}),
-            };
-          } catch (err) {
-            return yield* Effect.fail(
+          return {
+            txSignature: signature,
+            feeX,
+            feeY,
+            platformFeeX: actualPlatformFeeX,
+            platformFeeY: actualPlatformFeeY,
+            netFeeX: feeX - actualPlatformFeeX,
+            netFeeY: feeY - actualPlatformFeeY,
+            ...(transferInstructions.length > 0 ? { feeTransferTxSignature: signature } : {}),
+            ...(actualOperatorFeeX > 0 || actualOperatorFeeY > 0
+              ? { operatorFeeX: actualOperatorFeeX, operatorFeeY: actualOperatorFeeY }
+              : {}),
+          };
+        }).pipe(
+          Effect.catchAll((err: unknown) =>
+            Effect.fail(
               new AdapterError({
                 message: `Failed to claim fees: ${String(err)}`,
                 poolAddress,
                 cause: err,
               }),
-            );
-          }
-        }),
+            ),
+          ),
+        ),
 
       reportFeeCollection(event) {
         void (async () => {

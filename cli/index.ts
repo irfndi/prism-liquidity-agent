@@ -37,6 +37,7 @@ program.addCommand(supportCommand);
 program.addCommand(devCommand);
 program.addCommand(backtestCommand);
 program.addCommand(updateCommand);
+updateCommand.alias("upgrade");
 program.addCommand(versionCommand);
 program.addCommand(feedbackCommand);
 program.addCommand(referralCommand);

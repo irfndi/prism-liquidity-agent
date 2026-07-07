@@ -1,5 +1,5 @@
 import { Effect, Layer } from "effect";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
@@ -26,6 +26,38 @@ const FEEDBACK_LIMITS = {
 
 const SIMILARITY_THRESHOLD = 0.7;
 const MAX_KEYWORDS = 5;
+const DEFAULT_CLOUD_FEEDBACK_URL = "https://prism-api.irfndi.workers.dev/v1/feedback";
+
+interface CloudFeedbackPayload {
+  id: string;
+  agentId: string;
+  category: string;
+  severity: string;
+  summary: string;
+  details?: string | undefined;
+  relatedFiles?: string[] | undefined;
+  context: FeedbackContext;
+  hash: string;
+  reportedAt: number;
+}
+
+function submitCloudFeedback(
+  apiUrl: string,
+  payload: CloudFeedbackPayload,
+): Effect.Effect<{ readonly id: string } | null, never> {
+  return Effect.gen(function* () {
+    const res = yield* Effect.tryPromise(() =>
+      fetch(apiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }),
+    );
+    if (!res.ok) return null;
+    const json = (yield* Effect.tryPromise(() => res.json())) as { id?: string };
+    return json.id ? { id: json.id } : null;
+  }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+}
 const STOP_WORDS = new Set([
   "the",
   "a",
@@ -411,6 +443,44 @@ export const FeedbackLive = Layer.effect(
         }
 
         if (!config.githubToken) {
+          const cloudUrl = process.env.PRISM_API_URL
+            ? `${process.env.PRISM_API_URL}/v1/feedback`
+            : DEFAULT_CLOUD_FEEDBACK_URL;
+          const reportedAt = Date.now();
+          const cloudId = randomUUID();
+          const cloudResult = yield* submitCloudFeedback(cloudUrl, {
+            id: cloudId,
+            agentId,
+            category: feedback.category,
+            severity: feedback.severity,
+            summary: feedback.summary,
+            details: feedback.details,
+            relatedFiles: feedback.relatedFiles ? [...feedback.relatedFiles] : undefined,
+            context,
+            hash,
+            reportedAt,
+          });
+
+          if (cloudResult) {
+            const entry: FeedbackEntry = {
+              id: cloudResult.id,
+              agentId,
+              category: feedback.category,
+              severity: feedback.severity,
+              summary: feedback.summary,
+              details: feedback.details ?? null,
+              relatedFiles: feedback.relatedFiles ?? [],
+              contextJson: JSON.stringify(context),
+              githubIssueNumber: null,
+              githubIssueUrl: null,
+              reportedAt,
+              hash,
+            };
+            yield* db.saveFeedback(entry);
+            logger.info(`Submitted feedback to Prism cloud: ${feedback.summary}`);
+            return { kind: "cloud" as const, id: cloudResult.id };
+          }
+
           const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           const entry: FeedbackEntry = {
             id: localId,
@@ -420,7 +490,7 @@ export const FeedbackLive = Layer.effect(
             summary: feedback.summary,
             details: feedback.details ?? null,
             relatedFiles: feedback.relatedFiles ?? [],
-            contextJson: JSON.stringify(feedback.context),
+            contextJson: JSON.stringify(context),
             githubIssueNumber: null,
             githubIssueUrl: null,
             reportedAt: Date.now(),
@@ -428,7 +498,7 @@ export const FeedbackLive = Layer.effect(
           };
           yield* db.saveFeedback(entry);
           logger.warn(
-            "GITHUB_TOKEN unset — feedback stored locally only. " +
+            "GITHUB_TOKEN unset and cloud feedback unavailable — feedback stored locally only. " +
               "Set GITHUB_TOKEN to enable GitHub Issues filing.",
           );
           return { kind: "local_only" as const, localId };

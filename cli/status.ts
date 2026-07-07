@@ -8,7 +8,7 @@ import type { PositionRecord } from "../engine/db-service.js";
 import { computeSummary, toJsonOutput, type PortfolioSummary } from "./portfolio.js";
 import { createLogger } from "../engine/logger.js";
 
-import { readLockfile, isProcessAlive } from "./lockfile.js";
+import { readLockfile, isProcessAlive, findRunningEngineProcess } from "./lockfile.js";
 
 const logger = createLogger("status-cli");
 
@@ -75,8 +75,10 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
           const hasDb = positions.length > 0 || recentAudit.length > 0;
           const lastActivityAt = recentAudit[0]?.timestamp ?? 0;
           const lock = readLockfile();
+          const runningProcess = findRunningEngineProcess();
           const running =
             (lock !== null && isProcessAlive(lock.pid)) ||
+            runningProcess !== null ||
             (hasDb && Date.now() - lastActivityAt < config.scanIntervalMs * 2);
 
           if (opts.json) {
