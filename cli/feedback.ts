@@ -84,12 +84,6 @@ function buildFeedback(opts: SubmitOptions): AgentFeedback {
     category: parseCategory(opts.category, "friction"),
     severity: parseSeverity(opts.severity, "medium"),
     summary: opts.summary,
-    context: {
-      prismVersion: "0.0.0",
-      installMethod: "unknown",
-      platform: "unknown",
-      runtime: "unknown",
-    },
   };
   if (opts.details) {
     Object.assign(feedback, { details: opts.details });
