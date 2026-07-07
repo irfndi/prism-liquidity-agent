@@ -648,6 +648,9 @@ app.post("/v1/feedback", async (c) => {
   if (!body.summary || typeof body.summary !== "string") {
     return c.json({ error: "summary is required" }, 400);
   }
+  if (!body.hash || typeof body.hash !== "string") {
+    return c.json({ error: "hash is required" }, 400);
+  }
 
   // Rate limit: 10 feedback submissions per IP per hour.
   if (CACHE) {
@@ -681,16 +684,20 @@ app.post("/v1/feedback", async (c) => {
         context.platform ?? null,
         context.installMethod ?? null,
         context.runtime ?? null,
-        body.hash ?? null,
+        body.hash,
         body.reportedAt ?? Date.now(),
       )
       .run();
 
-    if (CACHE) {
-      const rateKey = `rate_limit:feedback:${clientIp}`;
-      const rateData = await CACHE.get(rateKey);
-      const count = rateData ? parseInt(rateData, 10) : 0;
-      await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
+    try {
+      if (CACHE) {
+        const rateKey = `rate_limit:feedback:${clientIp}`;
+        const rateData = await CACHE.get(rateKey);
+        const count = rateData ? parseInt(rateData, 10) : 0;
+        await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
+      }
+    } catch (kvErr) {
+      console.warn("Failed to update rate-limit counter (non-fatal):", kvErr);
     }
 
     return c.json({ id: body.id });

@@ -118,6 +118,35 @@ describe("Feedback API", () => {
       expect(response.status).toBe(400);
     });
 
+    it("returns 400 when hash is missing", async () => {
+      const ctx = createExecutionContext();
+      const request = buildRequest("POST", "/v1/feedback", {
+        id: "fb-uuid-5",
+        agentId: "agent-abc",
+        category: "observation",
+        severity: "low",
+        summary: "Missing hash field",
+      });
+      const response = await worker.fetch(request, testEnv, ctx);
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("hash");
+    });
+
+    it("returns 400 when hash is not a string", async () => {
+      const ctx = createExecutionContext();
+      const request = buildRequest("POST", "/v1/feedback", {
+        id: "fb-uuid-6",
+        agentId: "agent-abc",
+        category: "observation",
+        severity: "low",
+        summary: "Non-string hash",
+        hash: 12345,
+      });
+      const response = await worker.fetch(request, testEnv, ctx);
+      expect(response.status).toBe(400);
+    });
+
     it("returns 200 on duplicate id (idempotency)", async () => {
       const ctx = createExecutionContext();
       const payload = {
@@ -126,6 +155,7 @@ describe("Feedback API", () => {
         category: "friction",
         severity: "high",
         summary: "Setup is slow",
+        hash: "aabbccdd",
       };
       const first = await worker.fetch(buildRequest("POST", "/v1/feedback", payload), testEnv, ctx);
       expect(first.status).toBe(200);
