@@ -37,18 +37,16 @@ describe("AdapterService price resolution", () => {
   });
 
   it("uses the live Jupiter price for SOL instead of the hardcoded fallback", async () => {
-    const restore = mockFetch(
-      vi.fn(async (url: string | URL | Request) => {
-        const u = url.toString();
-        if (u.includes("price.jup.ag/v6/price") && u.includes(SOL_MINT)) {
-          return new Response(JSON.stringify({ data: { [SOL_MINT]: { price: 200 } } }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return new Response("unexpected", { status: 500 });
-      }) as unknown as typeof fetch,
-    );
+    const restore = mockFetch((async (url: string | URL | Request) => {
+      const u = url.toString();
+      if (u.includes("price.jup.ag/v6/price") && u.includes(SOL_MINT)) {
+        return new Response(JSON.stringify({ data: { [SOL_MINT]: { price: 200 } } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch);
 
     vi.spyOn(Connection.prototype, "getBalance").mockResolvedValue(1_000_000_000);
     vi.spyOn(Connection.prototype, "getTokenAccountsByOwner").mockResolvedValue({
