@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { pipeline } from "stream/promises";
 import { dirname, join, resolve } from "path";
@@ -143,7 +143,7 @@ export const updateCommand = new Command("update")
       console.log("✓ SHA-256 checksum verified");
 
       console.log("Extracting tarball...");
-      execSync(`tar -xzf "${tarballPath}" -C "${workDir}"`, { stdio: "inherit" });
+      execFileSync("tar", ["-xzf", tarballPath, "-C", workDir], { stdio: "inherit" });
 
       // R2 tarballs extract at top level; legacy ones had a subdir.
       const candidateRoots = [workDir, join(workDir, "prism-liquidity-agent")];
@@ -168,7 +168,7 @@ export const updateCommand = new Command("update")
         );
       }
 
-      execSync("bun install", { cwd: extractedDir, stdio: "inherit" });
+      execFileSync("bun", ["install"], { cwd: extractedDir, stdio: "inherit" });
 
       // === Pre-apply smoke tests ===
       const skipSmokeTest = options.skipSmokeTest as boolean;
@@ -178,7 +178,7 @@ export const updateCommand = new Command("update")
       } else {
         console.log("Running TypeScript smoke test...");
         try {
-          execSync("bunx tsc --noEmit", { cwd: extractedDir, stdio: "inherit" });
+          execFileSync("bunx", ["tsc", "--noEmit"], { cwd: extractedDir, stdio: "inherit" });
           console.log("✓ TypeScript smoke test passed");
         } catch {
           console.error("⚠ TypeScript smoke test failed — continuing anyway");
@@ -187,7 +187,7 @@ export const updateCommand = new Command("update")
 
         console.log("Running test suite smoke test...");
         try {
-          execSync("bunx vitest run --reporter=default", { cwd: extractedDir, stdio: "inherit" });
+          execFileSync("bunx", ["--bun", "vitest", "run"], { cwd: extractedDir, stdio: "inherit" });
           console.log("✓ Test suite smoke test passed");
         } catch {
           console.error("⚠ Test suite smoke test failed — continuing anyway");
@@ -203,39 +203,56 @@ export const updateCommand = new Command("update")
       const backupRoot = join(installRoot, "..", `.prism-update-backup`);
       const currentBackup = join(installRoot, "..", `.prism-prev-${installName}`);
 
+      const userFilesToPreserve = [".env", "prism.db", "logs"];
+
       try {
         if (existsSync(stagedRoot)) {
           rmSync(stagedRoot, { recursive: true, force: true });
         }
-        execSync(`cp -R "${extractedDir}/." "${stagedRoot}/"`, { stdio: "inherit" });
+        execFileSync("cp", ["-R", `${extractedDir}/.`, `${stagedRoot}/`], { stdio: "inherit" });
+
+        for (const file of userFilesToPreserve) {
+          const source = join(installRoot, file);
+          const dest = join(stagedRoot, file);
+          if (existsSync(source)) {
+            if (existsSync(dest)) {
+              rmSync(dest, { recursive: true, force: true });
+            }
+            execFileSync("cp", ["-R", source, dest], { stdio: "inherit" });
+          }
+        }
 
         if (existsSync(backupRoot)) {
           rmSync(backupRoot, { recursive: true, force: true });
         }
 
-        execSync(`mv "${installRoot}" "${currentBackup}"`, { stdio: "inherit" });
+        execFileSync("mv", [installRoot, currentBackup], { stdio: "inherit" });
         try {
-          execSync(`mv "${stagedRoot}" "${installRoot}"`, { stdio: "inherit" });
+          execFileSync("mv", [stagedRoot, installRoot], { stdio: "inherit" });
         } catch (swapErr) {
           if (existsSync(currentBackup) && !existsSync(installRoot)) {
-            execSync(`mv "${currentBackup}" "${installRoot}"`);
+            execFileSync("mv", [currentBackup, installRoot]);
           }
           throw swapErr;
         }
         if (existsSync(currentBackup)) {
-          execSync(`mv "${currentBackup}" "${backupRoot}"`, { stdio: "inherit" });
+          execFileSync("mv", [currentBackup, backupRoot], { stdio: "inherit" });
         }
 
         // Post-apply health check
         console.log("Running post-apply health check...");
         try {
-          execSync("bunx tsc --noEmit", { cwd: installRoot, stdio: "inherit", timeout: 30_000 });
+          execFileSync("bunx", ["tsc", "--noEmit"], {
+            cwd: installRoot,
+            stdio: "inherit",
+            timeout: 30_000,
+          });
         } catch (healthErr) {
           console.error("Post-apply health check failed — rolling back");
           try {
             rmSync(installRoot, { recursive: true, force: true });
             if (existsSync(backupRoot)) {
-              execSync(`mv "${backupRoot}" "${installRoot}"`, { stdio: "inherit" });
+              execFileSync("mv", [backupRoot, installRoot], { stdio: "inherit" });
             }
           } catch (rollbackErr) {
             throw new UpdateAbort(

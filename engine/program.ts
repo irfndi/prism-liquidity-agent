@@ -1514,9 +1514,19 @@ export const program = Effect.gen(function* () {
           action: decision.action,
           pool: poolAddress,
         });
-        executed = yield* executePaper(decision, pool, signalTimestamp, signalSnapshotId ?? undefined);
+        executed = yield* executePaper(
+          decision,
+          pool,
+          signalTimestamp,
+          signalSnapshotId ?? undefined,
+        );
       } else {
-        executed = yield* executeLive(decision, pool, signalTimestamp, signalSnapshotId ?? undefined);
+        executed = yield* executeLive(
+          decision,
+          pool,
+          signalTimestamp,
+          signalSnapshotId ?? undefined,
+        );
       }
 
       // Audit after execution
@@ -1708,11 +1718,11 @@ export const program = Effect.gen(function* () {
             lastFeeClaimAt: Date.now(),
             trailingStopThreshold: null,
             highestValueUsd: null,
-          lastRebalanceAt: 0,
-          paperExitedAt: null,
-          entrySignalTimestamp: signalTimestamp ?? null,
-          entrySignalSnapshotId: signalSnapshotId ?? null,
-        };
+            lastRebalanceAt: 0,
+            paperExitedAt: null,
+            entrySignalTimestamp: signalTimestamp ?? null,
+            entrySignalSnapshotId: signalSnapshotId ?? null,
+          };
           trackedPositions.set(decision.poolAddress, pos);
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
           return true;

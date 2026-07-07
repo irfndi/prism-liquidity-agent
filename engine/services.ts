@@ -339,7 +339,7 @@ export interface DbApi {
       lastRebalanceAt: number;
       paperExitedAt: number | null;
       entrySignalTimestamp: number | null;
-    entrySignalSnapshotId: number | null;
+      entrySignalSnapshotId: number | null;
     } | null,
     unknown
   >;
@@ -363,7 +363,7 @@ export interface DbApi {
       lastRebalanceAt: number;
       paperExitedAt: number | null;
       entrySignalTimestamp: number | null;
-    entrySignalSnapshotId: number | null;
+      entrySignalSnapshotId: number | null;
     }>,
     unknown
   >;
@@ -387,7 +387,7 @@ export interface DbApi {
       lastRebalanceAt: number;
       paperExitedAt: number | null;
       entrySignalTimestamp: number | null;
-    entrySignalSnapshotId: number | null;
+      entrySignalSnapshotId: number | null;
     }>,
     unknown
   >;
@@ -670,6 +670,7 @@ export type FeedbackResult =
   | { kind: "rate_limited"; reason: string }
   | { kind: "opt_out" }
   | { kind: "local_only"; localId: string }
+  | { kind: "cloud"; id: string }
   | { kind: "error"; error: string };
 
 export interface FeedbackEntry {

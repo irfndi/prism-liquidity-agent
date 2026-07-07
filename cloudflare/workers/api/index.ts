@@ -602,6 +602,151 @@ app.post("/v1/issue", async (c) => {
   }
 });
 
+// ── Agent Feedback ───────────────────────────────────────────────────────────
+// Stores agent/user feedback in D1 when no GitHub token is configured.
+
+const VALID_FEEDBACK_CATEGORIES = new Set(["friction", "suggestion", "observation", "praise"]);
+const VALID_FEEDBACK_SEVERITIES = new Set(["low", "medium", "high"]);
+
+app.post("/v1/feedback", async (c) => {
+  const { DB, CACHE } = c.env;
+  const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    id?: string;
+    agentId?: string;
+    category?: string;
+    severity?: string;
+    summary?: string;
+    details?: string;
+    relatedFiles?: string[];
+    context?: {
+      prismVersion?: string;
+      platform?: string;
+      installMethod?: string;
+      runtime?: string;
+    };
+    hash?: string;
+    reportedAt?: number;
+  };
+
+  if (!body.id || typeof body.id !== "string") {
+    return c.json({ error: "id is required" }, 400);
+  }
+  if (!body.agentId || typeof body.agentId !== "string") {
+    return c.json({ error: "agentId is required" }, 400);
+  }
+  if (!body.category || !VALID_FEEDBACK_CATEGORIES.has(body.category)) {
+    return c.json(
+      { error: "category must be one of: friction, suggestion, observation, praise" },
+      400,
+    );
+  }
+  if (!body.severity || !VALID_FEEDBACK_SEVERITIES.has(body.severity)) {
+    return c.json({ error: "severity must be one of: low, medium, high" }, 400);
+  }
+  if (!body.summary || typeof body.summary !== "string") {
+    return c.json({ error: "summary is required" }, 400);
+  }
+  if (!body.hash || typeof body.hash !== "string") {
+    return c.json({ error: "hash is required" }, 400);
+  }
+
+  // Rate limit: 10 feedback submissions per IP per hour.
+  if (CACHE) {
+    const rateKey = `rate_limit:feedback:${clientIp}`;
+    const rateData = await CACHE.get(rateKey);
+    const count = rateData ? parseInt(rateData, 10) : 0;
+    if (count >= 10) {
+      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
+    }
+  }
+
+  try {
+    const context = body.context ?? {};
+    await DB.prepare(
+      `INSERT OR IGNORE INTO feedback (
+        id, agent_id, category, severity, summary, details, related_files,
+        context_json, prism_version, platform, install_method, runtime,
+        hash, reported_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        body.id,
+        body.agentId,
+        body.category,
+        body.severity,
+        body.summary,
+        body.details ?? null,
+        body.relatedFiles ? JSON.stringify(body.relatedFiles) : null,
+        JSON.stringify(context),
+        context.prismVersion ?? null,
+        context.platform ?? null,
+        context.installMethod ?? null,
+        context.runtime ?? null,
+        body.hash,
+        body.reportedAt ?? Date.now(),
+      )
+      .run();
+
+    try {
+      if (CACHE) {
+        const rateKey = `rate_limit:feedback:${clientIp}`;
+        const rateData = await CACHE.get(rateKey);
+        const count = rateData ? parseInt(rateData, 10) : 0;
+        await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
+      }
+    } catch (kvErr) {
+      console.warn("Failed to update rate-limit counter (non-fatal):", kvErr);
+    }
+
+    return c.json({ id: body.id });
+  } catch (err) {
+    console.error("Failed to store feedback:", err);
+    return c.json({ error: "Failed to store feedback" }, 500);
+  }
+});
+
+app.get("/v1/feedback", async (c) => {
+  const { DB } = c.env;
+
+  const authHeader = c.req.header("Authorization");
+  const match = authHeader?.match(/^Bearer\s+(.+)$/);
+  const token = match?.[1];
+
+  if (!token || !c.env.ADMIN_API_KEY || !constantTimeEqual(token, c.env.ADMIN_API_KEY)) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const category = c.req.query("category");
+  const agentId = c.req.query("agentId");
+  const rawLimit = c.req.query("limit");
+  let limit = rawLimit ? Number.parseInt(rawLimit, 10) : 50;
+  if (!Number.isFinite(limit) || limit < 1) limit = 50;
+  if (limit > 200) limit = 200;
+
+  try {
+    let sql = "SELECT * FROM feedback WHERE 1=1";
+    const params: (string | number)[] = [];
+
+    if (category) {
+      sql += " AND category = ?";
+      params.push(category);
+    }
+    if (agentId) {
+      sql += " AND agent_id = ?";
+      params.push(agentId);
+    }
+    sql += " ORDER BY reported_at DESC LIMIT ?";
+    params.push(limit);
+
+    const result = await DB.prepare(sql).bind(...params).all();
+    return c.json({ feedback: result.results ?? [] });
+  } catch {
+    return c.json({ error: "Failed to fetch feedback" }, 500);
+  }
+});
+
 // ── Error Reporting ──────────────────────────────────────────────────────────
 // Privacy-first error telemetry (opt-in, no auth required for ingestion)
 

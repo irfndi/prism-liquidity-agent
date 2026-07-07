@@ -124,7 +124,7 @@ function buildLayer(
 }
 
 function mockFetch(impl: typeof fetch): void {
-  globalThis.fetch = vi.fn(impl) as unknown as typeof globalThis.fetch;
+  vi.stubGlobal("fetch", vi.fn(impl));
 }
 
 beforeEach(() => {
@@ -136,6 +136,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 // ─── Submission without GITHUB_TOKEN (local-only mode) ─────────────────────
@@ -167,6 +168,49 @@ describe("feedback service — no GITHUB_TOKEN", () => {
         context: ctx(),
       });
       return result;
+    }).pipe(Effect.provide(layer));
+
+    const result = await Effect.runPromise(program);
+    expect(result.kind).toBe("local_only");
+  });
+});
+
+// ─── Cloud feedback fallback ───────────────────────────────────────────────
+
+describe("feedback service — cloud fallback", () => {
+  it("submits to the cloud endpoint when GITHUB_TOKEN is unset", async () => {
+    mockFetch(
+      vi.fn(async (url: string | URL | Request) => {
+        const u = url.toString();
+        if (u.includes("/v1/feedback")) {
+          return new Response(JSON.stringify({ id: "cloud-test-id" }), { status: 200 });
+        }
+        return new Response("unexpected", { status: 500 });
+      }) as unknown as typeof fetch,
+    );
+
+    const layer = buildLayer("");
+    const program = Effect.gen(function* () {
+      const fb = yield* FeedbackService;
+      return yield* fb.submit(makeFeedback({ summary: "Cloud fallback success test" }));
+    }).pipe(Effect.provide(layer));
+
+    const result = await Effect.runPromise(program);
+    expect(result.kind).toBe("cloud");
+    if (result.kind === "cloud") {
+      expect(result.id).toBe("cloud-test-id");
+    }
+  });
+
+  it("falls back to local storage when the cloud endpoint fails", async () => {
+    mockFetch(
+      (async () => new Response("service unavailable", { status: 500 })) as unknown as typeof fetch,
+    );
+
+    const layer = buildLayer("");
+    const program = Effect.gen(function* () {
+      const fb = yield* FeedbackService;
+      return yield* fb.submit(makeFeedback({ summary: "Cloud fallback failure test" }));
     }).pipe(Effect.provide(layer));
 
     const result = await Effect.runPromise(program);

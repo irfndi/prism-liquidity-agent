@@ -169,11 +169,17 @@ const loadConfig = Effect.gen(function* () {
   const heliusApiKey = yield* Config.string("HELIUS_API_KEY").pipe(
     Effect.orElseSucceed(() => (isTest ? "test-helius-key" : "")),
   );
-  const solanaRpcUrl = yield* Config.string("SOLANA_RPC_URL").pipe(
+  let solanaRpcUrl = yield* Config.string("SOLANA_RPC_URL").pipe(
     Effect.orElseSucceed(() =>
       isTest ? "https://example.com" : "https://api.mainnet-beta.solana.com",
     ),
   );
+
+  // If no SOLANA_RPC_URL is configured but a Helius key is present, prefer
+  // Helius over the public Solana RPC for reliability.
+  if (!isTest && !process.env.SOLANA_RPC_URL && heliusApiKey.length > 0) {
+    solanaRpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}`;
+  }
   const paperTrading = yield* Config.boolean("PAPER_TRADING").pipe(
     Effect.orElseSucceed(() => true),
   );

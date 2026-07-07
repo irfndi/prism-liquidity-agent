@@ -18,17 +18,14 @@ export const devCommand = new Command("dev")
     const creds = readCredentials();
 
     if (!creds) {
-      console.error("Error: Registration required to start the trading agent.");
-      console.error("Run 'prism register' first to create an account.");
-      console.error("");
-      console.error("The trading agent requires a valid API key for:");
-      console.error("  - Subscription/tier management");
-      console.error("  - Referral tracking");
-      console.error("  - Platform fee processing");
-      process.exit(1);
+      console.warn(
+        "Warning: No Prism account found. Run 'prism register' to enable cloud features.",
+      );
+      console.warn("Continuing in local-only mode (paper trading works without registration).");
+      console.warn("");
     }
 
-    await pingInstall("dev_start", { userId: creds.userId });
+    await pingInstall("dev_start", creds ? { userId: creds.userId } : {});
 
     const lock = acquireLock();
     if (!lock.acquired) {

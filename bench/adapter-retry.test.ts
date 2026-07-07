@@ -50,7 +50,11 @@ describe("retryWithBackoff", () => {
       }
       return "ok";
     });
-    const result = await retryWithBackoff(fn, { baseDelayMs: 100, maxRetries: 5 });
+    const result = await retryWithBackoff(fn, {
+      baseDelayMs: 100,
+      rateLimitBaseDelayMs: 10,
+      maxRetries: 5,
+    });
     expect(result).toBe("ok");
     expect(fn).toHaveBeenCalledTimes(3);
   });
@@ -59,7 +63,9 @@ describe("retryWithBackoff", () => {
     const fn = vi.fn(async () => {
       throw Object.assign(new Error("rate limited"), { code: 429 });
     });
-    await expect(retryWithBackoff(fn, { maxRetries: 3, baseDelayMs: 10 })).rejects.toThrow();
+    await expect(
+      retryWithBackoff(fn, { maxRetries: 3, baseDelayMs: 10, rateLimitBaseDelayMs: 10 }),
+    ).rejects.toThrow();
     // attempts: 0,1,2,3 = 4 total (maxRetries+1)
     expect(fn).toHaveBeenCalledTimes(4);
   });
