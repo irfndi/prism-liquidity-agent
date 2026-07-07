@@ -17,6 +17,11 @@ import semver from "semver";
 import { Effect } from "effect";
 import { createLogger } from "../engine/logger.js";
 
+if (typeof Bun === "undefined") {
+  console.error("The prism update command requires the Bun runtime.");
+  process.exit(1);
+}
+
 const logger = createLogger("update");
 
 class UpdateAbort extends Error {

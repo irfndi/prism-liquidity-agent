@@ -101,7 +101,7 @@ function sanitizeStack(stack: string): string {
 // ─── Error classification ────────────────────────────────────────────────────
 
 function classifyError(error: Error): ErrorCategory {
-  const msg = error.message;
+  const msg = error.message ?? "";
   const stack = error.stack ?? "";
   const combined = `${msg} ${stack}`.toLowerCase();
 
