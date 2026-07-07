@@ -29,6 +29,20 @@ class UpdateAbort extends Error {
   }
 }
 
+/**
+ * Resolve a command to an absolute path using Bun.which. Passing absolute
+ * paths to execFileSync avoids ENOENT surprises when the target environment
+ * has a restricted PATH or when Bun's internal fallback tries to spawn a
+ * shell that does not exist (e.g. `/bin/sh` in minimal containers).
+ */
+function resolveBin(name: string): string {
+  const resolved = Bun.which(name);
+  if (!resolved) {
+    throw new UpdateAbort(`${name} not found in PATH. Ensure Bun is installed and on your PATH.`);
+  }
+  return resolved;
+}
+
 // Walk up from this CLI's location to the Prism install root. Required so
 // that `prism update` is safe to run from any directory — using process.cwd()
 // would let the swap clobber an unrelated working dir.
@@ -143,7 +157,7 @@ export const updateCommand = new Command("update")
       console.log("✓ SHA-256 checksum verified");
 
       console.log("Extracting tarball...");
-      execFileSync("tar", ["-xzf", tarballPath, "-C", workDir], { stdio: "inherit" });
+      execFileSync(resolveBin("tar"), ["-xzf", tarballPath, "-C", workDir], { stdio: "inherit" });
 
       // R2 tarballs extract at top level; legacy ones had a subdir.
       const candidateRoots = [workDir, join(workDir, "prism-liquidity-agent")];
@@ -168,7 +182,7 @@ export const updateCommand = new Command("update")
         );
       }
 
-      execFileSync("bun", ["install"], { cwd: extractedDir, stdio: "inherit" });
+      execFileSync(resolveBin("bun"), ["install"], { cwd: extractedDir, stdio: "inherit" });
 
       // === Pre-apply smoke tests ===
       const skipSmokeTest = options.skipSmokeTest as boolean;
@@ -178,7 +192,10 @@ export const updateCommand = new Command("update")
       } else {
         console.log("Running TypeScript smoke test...");
         try {
-          execFileSync("bunx", ["tsc", "--noEmit"], { cwd: extractedDir, stdio: "inherit" });
+          execFileSync(resolveBin("bunx"), ["tsc", "--noEmit"], {
+            cwd: extractedDir,
+            stdio: "inherit",
+          });
           console.log("✓ TypeScript smoke test passed");
         } catch {
           console.error("⚠ TypeScript smoke test failed — continuing anyway");
@@ -187,7 +204,10 @@ export const updateCommand = new Command("update")
 
         console.log("Running test suite smoke test...");
         try {
-          execFileSync("bunx", ["--bun", "vitest", "run"], { cwd: extractedDir, stdio: "inherit" });
+          execFileSync(resolveBin("bunx"), ["--bun", "vitest", "run"], {
+            cwd: extractedDir,
+            stdio: "inherit",
+          });
           console.log("✓ Test suite smoke test passed");
         } catch {
           console.error("⚠ Test suite smoke test failed — continuing anyway");
@@ -209,7 +229,9 @@ export const updateCommand = new Command("update")
         if (existsSync(stagedRoot)) {
           rmSync(stagedRoot, { recursive: true, force: true });
         }
-        execFileSync("cp", ["-R", `${extractedDir}/.`, `${stagedRoot}/`], { stdio: "inherit" });
+        execFileSync(resolveBin("cp"), ["-R", `${extractedDir}/.`, `${stagedRoot}/`], {
+          stdio: "inherit",
+        });
 
         for (const file of userFilesToPreserve) {
           const source = join(installRoot, file);
@@ -218,7 +240,7 @@ export const updateCommand = new Command("update")
             if (existsSync(dest)) {
               rmSync(dest, { recursive: true, force: true });
             }
-            execFileSync("cp", ["-R", source, dest], { stdio: "inherit" });
+            execFileSync(resolveBin("cp"), ["-R", source, dest], { stdio: "inherit" });
           }
         }
 
@@ -226,23 +248,23 @@ export const updateCommand = new Command("update")
           rmSync(backupRoot, { recursive: true, force: true });
         }
 
-        execFileSync("mv", [installRoot, currentBackup], { stdio: "inherit" });
+        execFileSync(resolveBin("mv"), [installRoot, currentBackup], { stdio: "inherit" });
         try {
-          execFileSync("mv", [stagedRoot, installRoot], { stdio: "inherit" });
+          execFileSync(resolveBin("mv"), [stagedRoot, installRoot], { stdio: "inherit" });
         } catch (swapErr) {
           if (existsSync(currentBackup) && !existsSync(installRoot)) {
-            execFileSync("mv", [currentBackup, installRoot]);
+            execFileSync(resolveBin("mv"), [currentBackup, installRoot]);
           }
           throw swapErr;
         }
         if (existsSync(currentBackup)) {
-          execFileSync("mv", [currentBackup, backupRoot], { stdio: "inherit" });
+          execFileSync(resolveBin("mv"), [currentBackup, backupRoot], { stdio: "inherit" });
         }
 
         // Post-apply health check
         console.log("Running post-apply health check...");
         try {
-          execFileSync("bunx", ["tsc", "--noEmit"], {
+          execFileSync(resolveBin("bunx"), ["tsc", "--noEmit"], {
             cwd: installRoot,
             stdio: "inherit",
             timeout: 30_000,
@@ -252,7 +274,7 @@ export const updateCommand = new Command("update")
           try {
             rmSync(installRoot, { recursive: true, force: true });
             if (existsSync(backupRoot)) {
-              execFileSync("mv", [backupRoot, installRoot], { stdio: "inherit" });
+              execFileSync(resolveBin("mv"), [backupRoot, installRoot], { stdio: "inherit" });
             }
           } catch (rollbackErr) {
             throw new UpdateAbort(
