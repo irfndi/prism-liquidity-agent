@@ -38,7 +38,11 @@ class UpdateAbort extends Error {
 function resolveBin(name: string): string {
   const resolved = Bun.which(name);
   if (!resolved) {
-    throw new UpdateAbort(`${name} not found in PATH. Ensure Bun is installed and on your PATH.`);
+    const hint =
+      name === "bun" || name === "bunx"
+        ? "Ensure Bun is installed and on your PATH."
+        : "Ensure it is installed and on your PATH.";
+    throw new UpdateAbort(`${name} not found in PATH. ${hint}`);
   }
   return resolved;
 }
@@ -253,7 +257,7 @@ export const updateCommand = new Command("update")
           execFileSync(resolveBin("mv"), [stagedRoot, installRoot], { stdio: "inherit" });
         } catch (swapErr) {
           if (existsSync(currentBackup) && !existsSync(installRoot)) {
-            execFileSync(resolveBin("mv"), [currentBackup, installRoot]);
+            execFileSync(resolveBin("mv"), [currentBackup, installRoot], { stdio: "inherit" });
           }
           throw swapErr;
         }
