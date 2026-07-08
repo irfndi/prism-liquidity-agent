@@ -3,8 +3,7 @@ import { defineConfig } from "vitest/config";
 // Prism's tests depend on Bun-only APIs (bun:sqlite, Bun.serve). Running under
 // Node produces dozens of cryptic import errors; fail fast with a clear message.
 if (typeof Bun === "undefined") {
-  console.error("Prism tests require the Bun runtime. Run: bun run test");
-  process.exit(1);
+  throw new Error("Prism tests require the Bun runtime. Run: bun run test");
 }
 
 export default defineConfig({
