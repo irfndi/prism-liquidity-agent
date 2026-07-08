@@ -23,6 +23,8 @@ if (typeof Bun === "undefined") {
 
 const logger = createLogger("update");
 
+const TSC_TIMEOUT_MS = 120_000; // 2 minutes — tsc on a large install can take >30s
+
 class UpdateAbort extends Error {
   constructor(
     message: string,
@@ -227,6 +229,7 @@ export const updateCommand = new Command("update")
         try {
           runCommand("bun", [join(extractedDir, "node_modules/typescript/bin/tsc"), "--noEmit"], {
             cwd: extractedDir,
+            timeout: TSC_TIMEOUT_MS,
           });
           console.log("✓ TypeScript smoke test passed");
         } catch {
@@ -253,6 +256,10 @@ export const updateCommand = new Command("update")
       const stagedRoot = join(installRoot, "..", `.prism-update-stage`);
       const backupRoot = join(installRoot, "..", `.prism-update-backup`);
       const currentBackup = join(installRoot, "..", `.prism-prev-${installName}`);
+      // The wrapper runs with cwd = installRoot. When we rename installRoot,
+      // that cwd becomes invalid for this process, so every spawn in the swap
+      // must use a stable working directory (the parent of installRoot).
+      const swapCwd = dirname(installRoot);
 
       const userFilesToPreserve = [".env", "prism.db", "logs"];
 
@@ -260,7 +267,7 @@ export const updateCommand = new Command("update")
         if (existsSync(stagedRoot)) {
           rmSync(stagedRoot, { recursive: true, force: true });
         }
-        runCommand("cp", ["-R", `${extractedDir}/.`, `${stagedRoot}/`]);
+        runCommand("cp", ["-R", `${extractedDir}/.`, `${stagedRoot}/`], { cwd: swapCwd });
 
         for (const file of userFilesToPreserve) {
           const source = join(installRoot, file);
@@ -269,7 +276,7 @@ export const updateCommand = new Command("update")
             if (existsSync(dest)) {
               rmSync(dest, { recursive: true, force: true });
             }
-            runCommand("cp", ["-R", source, dest]);
+            runCommand("cp", ["-R", source, dest], { cwd: swapCwd });
           }
         }
 
@@ -284,17 +291,17 @@ export const updateCommand = new Command("update")
           rmSync(currentBackup, { recursive: true, force: true });
         }
 
-        runCommand("mv", [installRoot, currentBackup]);
+        runCommand("mv", [installRoot, currentBackup], { cwd: swapCwd });
         try {
-          runCommand("mv", [stagedRoot, installRoot]);
+          runCommand("mv", [stagedRoot, installRoot], { cwd: swapCwd });
         } catch (swapErr) {
           if (existsSync(currentBackup) && !existsSync(installRoot)) {
-            runCommand("mv", [currentBackup, installRoot]);
+            runCommand("mv", [currentBackup, installRoot], { cwd: swapCwd });
           }
           throw swapErr;
         }
         if (existsSync(currentBackup)) {
-          runCommand("mv", [currentBackup, backupRoot]);
+          runCommand("mv", [currentBackup, backupRoot], { cwd: swapCwd });
         }
 
         // Post-apply health check
@@ -302,14 +309,14 @@ export const updateCommand = new Command("update")
         try {
           runCommand("bun", [join(installRoot, "node_modules/typescript/bin/tsc"), "--noEmit"], {
             cwd: installRoot,
-            timeout: 30_000,
+            timeout: TSC_TIMEOUT_MS,
           });
         } catch (healthErr) {
           console.error("Post-apply health check failed — rolling back");
           try {
             rmSync(installRoot, { recursive: true, force: true });
             if (existsSync(backupRoot)) {
-              runCommand("mv", [backupRoot, installRoot]);
+              runCommand("mv", [backupRoot, installRoot], { cwd: swapCwd });
             }
           } catch (rollbackErr) {
             throw new UpdateAbort(
