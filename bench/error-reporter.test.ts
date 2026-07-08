@@ -183,6 +183,16 @@ describe("classification", () => {
     expect(r.getPending()[0]?.category).toBe("Unknown");
     r.dispose();
   });
+
+  it("classifies unknown patterns as Unknown even when stack contains 'update'", () => {
+    const r = makeReporter();
+    const err = new Error("Something completely unexpected happened");
+    err.stack =
+      "Error: Something completely unexpected happened\n    at updateSnapshot (file.ts:1:1)";
+    r.report(err);
+    expect(r.getPending()[0]?.category).toBe("Unknown");
+    r.dispose();
+  });
 });
 
 // ─── Buffering ───────────────────────────────────────────────────────────────

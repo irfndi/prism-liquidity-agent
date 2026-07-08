@@ -101,7 +101,7 @@ function sanitizeStack(stack: string): string {
 // ─── Error classification ────────────────────────────────────────────────────
 
 function classifyError(error: Error): ErrorCategory {
-  const msg = error.message;
+  const msg = error.message ?? "";
   const stack = error.stack ?? "";
   const combined = `${msg} ${stack}`.toLowerCase();
 
@@ -123,10 +123,14 @@ function classifyError(error: Error): ErrorCategory {
   if (combined.includes("config")) {
     return "Config_Error";
   }
+  // Only inspect the error message for update-related keywords; stack traces
+  // from test frameworks or Vitest internals (e.g. "updateSnapshot") must not
+  // cause unrelated errors to be classified as UpdateFailure.
+  const lowerMsg = msg.toLowerCase();
   if (
-    combined.includes("update") ||
-    combined.includes("tarball") ||
-    combined.includes("download")
+    lowerMsg.includes("update") ||
+    lowerMsg.includes("tarball") ||
+    lowerMsg.includes("download")
   ) {
     return "UpdateFailure";
   }
