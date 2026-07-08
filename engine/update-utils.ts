@@ -1,6 +1,14 @@
 import { Effect } from "effect";
 import semver from "semver";
 
+function tryNetwork<T>(promise: () => Promise<T>, description: string): Effect.Effect<T, Error> {
+  return Effect.tryPromise({
+    try: promise,
+    catch: (error) =>
+      new Error(`${description}: ${error instanceof Error ? error.message : String(error)}`),
+  });
+}
+
 export function compareVersions(a: string, b: string): number {
   const cleanA = semver.clean(a) || a;
   const cleanB = semver.clean(b) || b;
@@ -61,13 +69,15 @@ export function fetchR2Manifest(
     const path = R2_MANIFEST_PATHS[channel];
     const url = `${r2PublicUrl}/${path}`;
 
-    const response = yield* Effect.tryPromise(() =>
-      fetch(url, {
-        headers: {
-          "User-Agent": "prism-liquidity-agent",
-          Accept: "application/json",
-        },
-      }),
+    const response = yield* tryNetwork(
+      () =>
+        fetch(url, {
+          headers: {
+            "User-Agent": "prism-liquidity-agent",
+            Accept: "application/json",
+          },
+        }),
+      `Failed to fetch R2 manifest from ${url}`,
     );
 
     if (!response.ok) {
@@ -79,7 +89,10 @@ export function fetchR2Manifest(
       );
     }
 
-    const manifest = (yield* Effect.tryPromise(() => response.json())) as R2Manifest;
+    const manifest = (yield* tryNetwork(
+      () => response.json(),
+      "Failed to parse R2 manifest JSON",
+    )) as R2Manifest;
     return manifest;
   });
 }
@@ -103,7 +116,10 @@ export function fetchGitHubRelease(
       headers.Authorization = `Bearer ${token}`;
     }
 
-    const response = yield* Effect.tryPromise(() => fetch(url, { headers }));
+    const response = yield* tryNetwork(
+      () => fetch(url, { headers }),
+      `Failed to fetch GitHub release from ${url}`,
+    );
 
     if (response.status === 403 || response.status === 429) {
       const rateLimitRemaining = response.headers.get("x-ratelimit-remaining");
@@ -123,13 +139,17 @@ export function fetchGitHubRelease(
     }
 
     if (channel === "stable") {
-      const release = (yield* Effect.tryPromise(() => response.json())) as
-        | GitHubRelease
-        | undefined;
+      const release = (yield* tryNetwork(
+        () => response.json(),
+        "Failed to parse GitHub release JSON",
+      )) as GitHubRelease | undefined;
       return release ?? null;
     }
 
-    const firstPageReleases = (yield* Effect.tryPromise(() => response.json())) as GitHubRelease[];
+    const firstPageReleases = (yield* tryNetwork(
+      () => response.json(),
+      "Failed to parse GitHub releases JSON",
+    )) as GitHubRelease[];
 
     const allReleases: GitHubRelease[] = Array.isArray(firstPageReleases)
       ? [...firstPageReleases]
@@ -150,8 +170,9 @@ export function fetchGitHubRelease(
       if (token) {
         pageHeaders.Authorization = `Bearer ${token}`;
       }
-      const pageResponse = yield* Effect.tryPromise(() =>
-        fetch(pageUrl!, { headers: pageHeaders }),
+      const pageResponse = yield* tryNetwork(
+        () => fetch(pageUrl!, { headers: pageHeaders }),
+        "Failed to fetch GitHub releases page",
       );
 
       if (!pageResponse.ok) {
@@ -160,7 +181,10 @@ export function fetchGitHubRelease(
         );
       }
 
-      const releases = (yield* Effect.tryPromise(() => pageResponse.json())) as GitHubRelease[];
+      const releases = (yield* tryNetwork(
+        () => pageResponse.json(),
+        "Failed to parse GitHub releases page JSON",
+      )) as GitHubRelease[];
 
       if (!Array.isArray(releases) || releases.length === 0) {
         break;
@@ -237,11 +261,22 @@ export function fetchLatestRelease(
         return r2ManifestToInfo(manifest);
       }
     }
+    const r2Error = r2Result._tag === "Left" ? r2Result.left : null;
 
-    const ghRelease = yield* fetchGitHubRelease(repo, channel, token);
-    if (!ghRelease) {
+    const ghResult = yield* Effect.either(fetchGitHubRelease(repo, channel, token));
+    if (ghResult._tag === "Right") {
+      if (ghResult.right) {
+        return githubReleaseToInfo(ghResult.right, channel);
+      }
       return null;
     }
-    return githubReleaseToInfo(ghRelease, channel);
+
+    const ghError = ghResult.left;
+    if (r2Error) {
+      return yield* Effect.fail(
+        new Error(`Update check failed. R2: ${r2Error.message}; GitHub: ${ghError.message}`),
+      );
+    }
+    return yield* Effect.fail(new Error(`Update check failed: ${ghError.message}`));
   });
 }

@@ -1,5 +1,4 @@
 import { Command } from "commander";
-import { execFileSync } from "child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { pipeline } from "stream/promises";
 import { dirname, join, resolve } from "path";
@@ -36,7 +35,7 @@ class UpdateAbort extends Error {
 
 /**
  * Resolve a command to an absolute path using Bun.which. Passing absolute
- * paths to execFileSync avoids ENOENT surprises when the target environment
+ * paths to the runner avoids ENOENT surprises when the target environment
  * has a restricted PATH or when Bun's internal fallback tries to spawn a
  * shell that does not exist (e.g. `/bin/sh` in minimal containers).
  */
@@ -50,6 +49,31 @@ function resolveBin(name: string): string {
     throw new UpdateAbort(`${name} not found in PATH. ${hint}`);
   }
   return resolved;
+}
+
+/**
+ * Run an external command with Bun.spawnSync. Avoids child_process.execFileSync,
+ * which can fall back to a shell spawn and fail with
+ * `ENOENT posix_spawn '/bin/sh'` in some environments.
+ *
+ * @see https://github.com/oven-sh/bun/issues/33729
+ */
+function runCommand(
+  name: string,
+  args: string[],
+  options?: { cwd?: string; timeout?: number },
+): void {
+  const bin = resolveBin(name);
+  const result = Bun.spawnSync([bin, ...args], {
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+    ...(options?.cwd ? { cwd: options.cwd } : {}),
+    ...(options?.timeout ? { timeout: options.timeout } : {}),
+  });
+  if (!result.success) {
+    throw new UpdateAbort(`Command failed: ${name} ${args.join(" ")} (exit ${result.exitCode})`);
+  }
 }
 
 // Walk up from this CLI's location to the Prism install root. Required so
@@ -166,7 +190,7 @@ export const updateCommand = new Command("update")
       console.log("✓ SHA-256 checksum verified");
 
       console.log("Extracting tarball...");
-      execFileSync(resolveBin("tar"), ["-xzf", tarballPath, "-C", workDir], { stdio: "inherit" });
+      runCommand("tar", ["-xzf", tarballPath, "-C", workDir]);
 
       // R2 tarballs extract at top level; legacy ones had a subdir.
       const candidateRoots = [workDir, join(workDir, "prism-liquidity-agent")];
@@ -191,7 +215,7 @@ export const updateCommand = new Command("update")
         );
       }
 
-      execFileSync(resolveBin("bun"), ["install"], { cwd: extractedDir, stdio: "inherit" });
+      runCommand("bun", ["install"], { cwd: extractedDir });
 
       // === Pre-apply smoke tests ===
       const skipSmokeTest = options.skipSmokeTest as boolean;
@@ -201,9 +225,8 @@ export const updateCommand = new Command("update")
       } else {
         console.log("Running TypeScript smoke test...");
         try {
-          execFileSync(resolveBin("bunx"), ["tsc", "--noEmit"], {
+          runCommand("bun", [join(extractedDir, "node_modules/typescript/bin/tsc"), "--noEmit"], {
             cwd: extractedDir,
-            stdio: "inherit",
           });
           console.log("✓ TypeScript smoke test passed");
         } catch {
@@ -213,9 +236,8 @@ export const updateCommand = new Command("update")
 
         console.log("Running test suite smoke test...");
         try {
-          execFileSync(resolveBin("bunx"), ["--bun", "vitest", "run"], {
+          runCommand("bun", [join(extractedDir, "node_modules/vitest/vitest.mjs"), "run"], {
             cwd: extractedDir,
-            stdio: "inherit",
           });
           console.log("✓ Test suite smoke test passed");
         } catch {
@@ -238,9 +260,7 @@ export const updateCommand = new Command("update")
         if (existsSync(stagedRoot)) {
           rmSync(stagedRoot, { recursive: true, force: true });
         }
-        execFileSync(resolveBin("cp"), ["-R", `${extractedDir}/.`, `${stagedRoot}/`], {
-          stdio: "inherit",
-        });
+        runCommand("cp", ["-R", `${extractedDir}/.`, `${stagedRoot}/`]);
 
         for (const file of userFilesToPreserve) {
           const source = join(installRoot, file);
@@ -249,7 +269,7 @@ export const updateCommand = new Command("update")
             if (existsSync(dest)) {
               rmSync(dest, { recursive: true, force: true });
             }
-            execFileSync(resolveBin("cp"), ["-R", source, dest], { stdio: "inherit" });
+            runCommand("cp", ["-R", source, dest]);
           }
         }
 
@@ -257,25 +277,31 @@ export const updateCommand = new Command("update")
           rmSync(backupRoot, { recursive: true, force: true });
         }
 
-        execFileSync(resolveBin("mv"), [installRoot, currentBackup], { stdio: "inherit" });
+        // A previous failed update may have left the current backup behind.
+        // Remove it so `mv installRoot currentBackup` does not fail with
+        // "Directory not empty".
+        if (existsSync(currentBackup)) {
+          rmSync(currentBackup, { recursive: true, force: true });
+        }
+
+        runCommand("mv", [installRoot, currentBackup]);
         try {
-          execFileSync(resolveBin("mv"), [stagedRoot, installRoot], { stdio: "inherit" });
+          runCommand("mv", [stagedRoot, installRoot]);
         } catch (swapErr) {
           if (existsSync(currentBackup) && !existsSync(installRoot)) {
-            execFileSync(resolveBin("mv"), [currentBackup, installRoot], { stdio: "inherit" });
+            runCommand("mv", [currentBackup, installRoot]);
           }
           throw swapErr;
         }
         if (existsSync(currentBackup)) {
-          execFileSync(resolveBin("mv"), [currentBackup, backupRoot], { stdio: "inherit" });
+          runCommand("mv", [currentBackup, backupRoot]);
         }
 
         // Post-apply health check
         console.log("Running post-apply health check...");
         try {
-          execFileSync(resolveBin("bunx"), ["tsc", "--noEmit"], {
+          runCommand("bun", [join(installRoot, "node_modules/typescript/bin/tsc"), "--noEmit"], {
             cwd: installRoot,
-            stdio: "inherit",
             timeout: 30_000,
           });
         } catch (healthErr) {
@@ -283,7 +309,7 @@ export const updateCommand = new Command("update")
           try {
             rmSync(installRoot, { recursive: true, force: true });
             if (existsSync(backupRoot)) {
-              execFileSync(resolveBin("mv"), [backupRoot, installRoot], { stdio: "inherit" });
+              runCommand("mv", [backupRoot, installRoot]);
             }
           } catch (rollbackErr) {
             throw new UpdateAbort(
