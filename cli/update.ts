@@ -37,9 +37,9 @@ class UpdateAbort extends Error {
 
 /**
  * Resolve a command to an absolute path using Bun.which. Passing absolute
- * paths to the runner avoids ENOENT surprises when the target environment
- * has a restricted PATH or when Bun's internal fallback tries to spawn a
- * shell that does not exist (e.g. `/bin/sh` in minimal containers).
+ * paths to the runner avoids ENOENT surprises when the process cwd has been
+ * renamed to an invalid inode or when the target environment has a restricted
+ * PATH.
  */
 function resolveBin(name: string): string {
   const resolved = Bun.which(name);
@@ -55,10 +55,10 @@ function resolveBin(name: string): string {
 
 /**
  * Run an external command with Bun.spawnSync. Avoids child_process.execFileSync,
- * which can fall back to a shell spawn and fail with
- * `ENOENT posix_spawn '/bin/sh'` in some environments.
+ * which fails with `ENOENT posix_spawn ...` when the process cwd has been
+ * renamed to an invalid inode (e.g. during a self-update atomic swap).
  *
- * @see https://github.com/oven-sh/bun/issues/33729
+ * @see https://github.com/oven-sh/bun/issues/33819
  */
 function runCommand(
   name: string,
@@ -241,6 +241,7 @@ export const updateCommand = new Command("update")
         try {
           runCommand("bun", [join(extractedDir, "node_modules/vitest/vitest.mjs"), "run"], {
             cwd: extractedDir,
+            timeout: TSC_TIMEOUT_MS,
           });
           console.log("✓ Test suite smoke test passed");
         } catch {
