@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { pingInstall, readCredentials } from "./api.js";
+import { ensurePrismConfigDir, getPrismEnvPath, getPrismDbPath } from "../engine/paths.js";
 
 export const setupCommand = new Command("setup")
   .description("Configure Prism trading agent")
@@ -131,13 +132,14 @@ export const setupCommand = new Command("setup")
       "TRAILING_STOP_PCT=0.10",
       "",
       "# SQLite",
-      "SQLITE_DB_PATH=./prism.db",
+      `SQLITE_DB_PATH=${escapeEnv(getPrismDbPath())}`,
       "",
       "# Pools",
       `WATCHLIST_POOLS=${escapeEnv(watchlistPools)}`,
     ].join("\n");
 
-    const envPath = path.resolve(".env");
+    ensurePrismConfigDir();
+    const envPath = getPrismEnvPath();
     if (fs.existsSync(envPath)) {
       const backupPath = `${envPath}.backup.${Date.now()}`;
       fs.copyFileSync(envPath, backupPath);

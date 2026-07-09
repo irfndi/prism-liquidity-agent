@@ -1,10 +1,18 @@
 import { Command } from "commander";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import {
+  createWriteStream,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "fs";
 import { pipeline } from "stream/promises";
-import { dirname, join, resolve } from "path";
+import { dirname, join } from "path";
 import { tmpdir, homedir } from "os";
 import { createHash } from "crypto";
-import { fileURLToPath } from "url";
 import { getCurrentVersion } from "../engine/version.js";
 import {
   compareVersions,
@@ -12,7 +20,6 @@ import {
   fetchLatestRelease,
   R2_PUBLIC_URL,
 } from "../engine/update-utils.js";
-import semver from "semver";
 import { Effect } from "effect";
 import { createLogger } from "../engine/logger.js";
 
@@ -23,7 +30,7 @@ if (typeof Bun === "undefined") {
 
 const logger = createLogger("update");
 
-const TSC_TIMEOUT_MS = 120_000; // 2 minutes — tsc on a large install can take >30s
+const SMOKE_TIMEOUT_MS = 60_000;
 
 class UpdateAbort extends Error {
   constructor(
@@ -35,12 +42,6 @@ class UpdateAbort extends Error {
   }
 }
 
-/**
- * Resolve a command to an absolute path using Bun.which. Passing absolute
- * paths to the runner avoids ENOENT surprises when the process cwd has been
- * renamed to an invalid inode or when the target environment has a restricted
- * PATH.
- */
 function resolveBin(name: string): string {
   const resolved = Bun.which(name);
   if (!resolved) {
@@ -53,13 +54,18 @@ function resolveBin(name: string): string {
   return resolved;
 }
 
-/**
- * Run an external command with Bun.spawnSync. Avoids child_process.execFileSync,
- * which fails with `ENOENT posix_spawn ...` when the process cwd has been
- * renamed to an invalid inode (e.g. during a self-update atomic swap).
- *
- * @see https://github.com/oven-sh/bun/issues/33819
- */
+function resolveInstallDir(): string {
+  return process.env.PRISM_INSTALL_DIR ?? join(homedir(), ".prism");
+}
+
+function resolveWrapperBin(): string {
+  const fromEnv = process.env.PRISM_WRAPPER_BIN;
+  if (fromEnv) return fromEnv;
+  const fromPath = Bun.which("prism");
+  if (fromPath) return fromPath;
+  return join(homedir(), ".local", "bin", "prism");
+}
+
 function runCommand(
   name: string,
   args: string[],
@@ -78,39 +84,110 @@ function runCommand(
   }
 }
 
-// Walk up from this CLI's location to the Prism install root. Required so
-// that `prism update` is safe to run from any directory — using process.cwd()
-// would let the swap clobber an unrelated working dir.
-function resolveInstallRoot(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  let dir = resolve(here);
-  for (let i = 0; i < 10; i++) {
-    const pkgPath = join(dir, "package.json");
-    if (existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
-          name?: string;
-        };
-        if (pkg.name === "prism-liquidity-agent" || pkg.name === "prism") {
-          return dir;
-        }
-      } catch {
-        // fall through to keep walking
-      }
-    }
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
+function runCommandOutput(
+  name: string,
+  args: string[],
+  options?: { cwd?: string; timeout?: number },
+): string {
+  const bin = resolveBin(name);
+  const result = Bun.spawnSync([bin, ...args], {
+    stdin: "inherit",
+    stdout: "pipe",
+    stderr: "inherit",
+    ...(options?.cwd ? { cwd: options.cwd } : {}),
+    ...(options?.timeout ? { timeout: options.timeout } : {}),
+  });
+  if (!result.success) {
+    throw new UpdateAbort(`Command failed: ${name} ${args.join(" ")} (exit ${result.exitCode})`);
   }
-  return resolve(here);
+  return result.stdout.toString().trim();
+}
+
+async function downloadFile(url: string, dest: string): Promise<void> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new UpdateAbort(`Download failed: ${response.status} ${response.statusText}`);
+  }
+  if (!response.body) {
+    throw new UpdateAbort("Download response has no body");
+  }
+  await pipeline(response.body, createWriteStream(dest));
+}
+
+function verifyChecksum(bundlePath: string, expectedHash: string): void {
+  const fileBuffer = readFileSync(bundlePath);
+  const actualHash = createHash("sha256").update(fileBuffer).digest("hex");
+  if (actualHash !== expectedHash) {
+    throw new UpdateAbort(`SHA-256 mismatch: expected ${expectedHash}, got ${actualHash}`);
+  }
+}
+
+function extractTarball(tarballPath: string, destDir: string): void {
+  mkdirSync(destDir, { recursive: true });
+  runCommand("tar", ["-xzf", tarballPath, "-C", destDir]);
+}
+
+function findBundleRoot(extractedDir: string): string {
+  // The bundle tarball contains `dist/` and `lib/` at its root. Some tar
+  // tools add a single top-level prefix; tolerate that.
+  const candidates = [
+    extractedDir,
+    join(extractedDir, "prism"),
+    join(extractedDir, "prism-liquidity-agent"),
+  ];
+  for (const dir of candidates) {
+    if (existsSync(join(dir, "dist", "cli", "index.mjs"))) {
+      return dir;
+    }
+  }
+  throw new UpdateAbort(
+    "Extracted bundle does not contain dist/cli/index.mjs — cannot determine install root",
+  );
+}
+
+function atomicReplaceInstall(installDir: string, newDir: string): string {
+  const parent = dirname(installDir);
+  const backupDir = join(parent, `.prism-update-backup-${Date.now()}`);
+  if (existsSync(backupDir)) {
+    rmSync(backupDir, { recursive: true, force: true });
+  }
+  if (existsSync(installDir)) {
+    renameSync(installDir, backupDir);
+  }
+  try {
+    cpSync(newDir, installDir, { recursive: true });
+  } catch (err) {
+    if (existsSync(installDir)) {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+    if (existsSync(backupDir)) {
+      renameSync(backupDir, installDir);
+    }
+    throw err;
+  }
+  return backupDir;
+}
+
+function smokeTest(wrapperBin: string, skipSmokeTest: boolean): void {
+  if (skipSmokeTest) {
+    console.log("⚠ Skipping smoke test (--skip-smoke-test)");
+    return;
+  }
+  console.log("Running smoke test...");
+  const versionOutput = runCommandOutput(wrapperBin, ["--version"], {
+    timeout: SMOKE_TIMEOUT_MS,
+  });
+  console.log(`  version: ${versionOutput}`);
+  runCommand(wrapperBin, ["--help"], { timeout: SMOKE_TIMEOUT_MS });
+  console.log("✓ Smoke test passed");
 }
 
 export const updateCommand = new Command("update")
   .description("Check for and apply updates")
   .option("--check-only", "Only check for updates, don't apply")
   .option("--channel <channel>", "Release channel (stable, beta, dev)", "stable")
-  .option("--r2-url <url>", "R2 public URL for release tarballs", R2_PUBLIC_URL)
-  .option("--skip-smoke-test", "Skip pre-install smoke tests (lint + test suite)")
+  .option("--r2-url <url>", "R2 public URL for release bundles", R2_PUBLIC_URL)
+  .option("--skip-smoke-test", "Skip post-install smoke test")
   .action(async (options) => {
     const current = getCurrentVersion();
     console.log(`Current version: ${current}`);
@@ -141,206 +218,74 @@ export const updateCommand = new Command("update")
 
       console.log(`Update available: ${current} → ${latest}`);
       console.log(`Source: ${release.source === "r2" ? "Cloudflare R2" : "GitHub Releases"}`);
-      if (release.tarballUrl) {
-        console.log(`Download: ${release.tarballUrl}`);
+      if (release.bundleUrl) {
+        console.log(`Download: ${release.bundleUrl}`);
       }
 
       if (options.checkOnly) {
         return;
       }
 
-      if (!release.tarballUrl) {
-        throw new UpdateAbort(`No tarball URL available for version ${latest}`);
+      if (!release.bundleUrl) {
+        throw new UpdateAbort(
+          `No bundle URL available for version ${latest}. ` +
+            `Please reinstall with the latest install script.`,
+        );
       }
 
       workDir = join(tmpdir(), `prism-update-${Date.now()}`);
       mkdirSync(workDir, { recursive: true });
-      const tarballName = `prism-v${latest}.tar.gz`;
-      const tarballPath = join(workDir, tarballName);
+      const bundleName = `prism-v${latest}.tar.gz`;
+      const bundlePath = join(workDir, bundleName);
 
       console.log(`Downloading from ${release.source === "r2" ? "R2" : "GitHub"}...`);
-      const downloadResponse = await fetch(release.tarballUrl);
-      if (!downloadResponse.ok) {
-        throw new UpdateAbort(
-          `Download failed: ${downloadResponse.status} ${downloadResponse.statusText}`,
-        );
-      }
-      if (!downloadResponse.body) {
-        throw new UpdateAbort("Download response has no body");
-      }
-      await pipeline(downloadResponse.body, createWriteStream(tarballPath));
-      console.log(`✓ Downloaded to ${tarballPath}`);
+      await downloadFile(release.bundleUrl, bundlePath);
+      console.log(`✓ Downloaded to ${bundlePath}`);
 
-      if (!release.sha256Url) {
+      if (!release.bundleSha256Url) {
         throw new UpdateAbort(
-          `Release manifest missing sha256Url — refusing to install ${latest} without integrity check`,
+          `Release manifest missing bundleSha256Url — refusing to install ${latest} without integrity check`,
         );
       }
       console.log("Verifying SHA-256 checksum...");
-      const expectedHashResponse = await fetch(release.sha256Url);
+      const expectedHashResponse = await fetch(release.bundleSha256Url);
       if (!expectedHashResponse.ok) {
         throw new UpdateAbort(
           `Failed to fetch SHA-256 checksum: ${expectedHashResponse.status} ${expectedHashResponse.statusText}`,
         );
       }
       const expectedHash = (await expectedHashResponse.text()).trim().split(/\s+/)[0] ?? "";
-      const fileBuffer = readFileSync(tarballPath);
-      const actualHash = createHash("sha256").update(fileBuffer).digest("hex");
-      if (actualHash !== expectedHash) {
-        throw new UpdateAbort(`SHA-256 mismatch: expected ${expectedHash}, got ${actualHash}`);
-      }
+      verifyChecksum(bundlePath, expectedHash);
       console.log("✓ SHA-256 checksum verified");
 
-      console.log("Extracting tarball...");
-      runCommand("tar", ["-xzf", tarballPath, "-C", workDir]);
+      console.log("Extracting bundle...");
+      const extractedDir = join(workDir, "extracted");
+      extractTarball(bundlePath, extractedDir);
+      const bundleRoot = findBundleRoot(extractedDir);
 
-      // R2 tarballs extract at top level; legacy ones had a subdir.
-      const candidateRoots = [workDir, join(workDir, "prism-liquidity-agent")];
-      const extractedDir = candidateRoots.find(
-        (p) => existsSync(p) && existsSync(join(p, "package.json")),
-      );
-      if (!extractedDir) {
-        throw new UpdateAbort(
-          "Extracted tarball missing package.json — cannot determine install root",
-        );
-      }
+      console.log("Installing bundle...");
+      const installDir = resolveInstallDir();
+      const backupDir = atomicReplaceInstall(installDir, bundleRoot);
 
-      console.log("Installing dependencies...");
-
-      // Guard against running on Bun < 1.4 which cannot parse lockfileVersion 2
-      const bunVersion = typeof Bun !== "undefined" ? Bun.version : "0.0.0";
-      const cleanBunVersion = semver.clean(bunVersion) || bunVersion;
-      if (!semver.gte(cleanBunVersion, "1.4.0")) {
-        throw new UpdateAbort(
-          `Prism requires Bun >= 1.4.0 to install dependencies. ` +
-            `Current Bun version is ${bunVersion}. Please upgrade Bun and retry.`,
-        );
-      }
-
-      runCommand("bun", ["install"], { cwd: extractedDir });
-
-      // === Pre-apply smoke tests ===
-      const skipSmokeTest = options.skipSmokeTest as boolean;
-
-      if (skipSmokeTest) {
-        console.log("⚠ Skipping smoke tests (--skip-smoke-test)");
-      } else {
-        console.log("Running TypeScript smoke test...");
-        try {
-          runCommand("bun", [join(extractedDir, "node_modules/typescript/bin/tsc"), "--noEmit"], {
-            cwd: extractedDir,
-            timeout: TSC_TIMEOUT_MS,
-          });
-          console.log("✓ TypeScript smoke test passed");
-        } catch {
-          console.error("⚠ TypeScript smoke test failed — continuing anyway");
-          console.error("  Use --skip-smoke-test to bypass this check");
-        }
-
-        console.log("Running test suite smoke test...");
-        try {
-          runCommand("bun", [join(extractedDir, "node_modules/vitest/vitest.mjs"), "run"], {
-            cwd: extractedDir,
-            timeout: TSC_TIMEOUT_MS,
-          });
-          console.log("✓ Test suite smoke test passed");
-        } catch {
-          console.error("⚠ Test suite smoke test failed — continuing anyway");
-          console.error("  Use --skip-smoke-test to bypass this check");
-        }
-      }
-
-      // Atomic swap: stage new files alongside the install root, then rename.
-      // A direct copy into the live install can leave it half-updated on failure.
-      const installRoot = resolveInstallRoot();
-      const installName = installRoot.split("/").pop() ?? "prism-liquidity-agent";
-      const stagedRoot = join(installRoot, "..", `.prism-update-stage`);
-      const backupRoot = join(installRoot, "..", `.prism-update-backup`);
-      const currentBackup = join(installRoot, "..", `.prism-prev-${installName}`);
-      // The wrapper runs with cwd = installRoot. When we rename installRoot,
-      // that cwd becomes invalid for this process, so every spawn in the swap
-      // must use a stable working directory (the parent of installRoot).
-      const swapCwd = dirname(installRoot);
-
-      const userFilesToPreserve = [".env", "prism.db", "logs"];
-
+      const wrapperBin = resolveWrapperBin();
       try {
-        if (existsSync(stagedRoot)) {
-          rmSync(stagedRoot, { recursive: true, force: true });
+        smokeTest(wrapperBin, options.skipSmokeTest as boolean);
+      } catch (smokeErr) {
+        console.error("Smoke test failed — rolling back");
+        if (existsSync(installDir)) {
+          rmSync(installDir, { recursive: true, force: true });
         }
-        runCommand("cp", ["-R", `${extractedDir}/.`, `${stagedRoot}/`], { cwd: swapCwd });
+        if (existsSync(backupDir)) {
+          renameSync(backupDir, installDir);
+        }
+        throw new UpdateAbort(
+          `Smoke test failed — rolled back to previous version. ` +
+            `Error: ${smokeErr instanceof Error ? smokeErr.message : String(smokeErr)}`,
+        );
+      }
 
-        for (const file of userFilesToPreserve) {
-          const source = join(installRoot, file);
-          const dest = join(stagedRoot, file);
-          if (existsSync(source)) {
-            if (existsSync(dest)) {
-              rmSync(dest, { recursive: true, force: true });
-            }
-            runCommand("cp", ["-R", source, dest], { cwd: swapCwd });
-          }
-        }
-
-        if (existsSync(backupRoot)) {
-          rmSync(backupRoot, { recursive: true, force: true });
-        }
-
-        // A previous failed update may have left the current backup behind.
-        // Remove it so `mv installRoot currentBackup` does not fail with
-        // "Directory not empty".
-        if (existsSync(currentBackup)) {
-          rmSync(currentBackup, { recursive: true, force: true });
-        }
-
-        runCommand("mv", [installRoot, currentBackup], { cwd: swapCwd });
-        try {
-          runCommand("mv", [stagedRoot, installRoot], { cwd: swapCwd });
-        } catch (swapErr) {
-          if (existsSync(currentBackup) && !existsSync(installRoot)) {
-            runCommand("mv", [currentBackup, installRoot], { cwd: swapCwd });
-          }
-          throw swapErr;
-        }
-        if (existsSync(currentBackup)) {
-          runCommand("mv", [currentBackup, backupRoot], { cwd: swapCwd });
-        }
-
-        // Post-apply health check
-        console.log("Running post-apply health check...");
-        try {
-          runCommand("bun", [join(installRoot, "node_modules/typescript/bin/tsc"), "--noEmit"], {
-            cwd: installRoot,
-            timeout: TSC_TIMEOUT_MS,
-          });
-        } catch (healthErr) {
-          console.error("Post-apply health check failed — rolling back");
-          try {
-            rmSync(installRoot, { recursive: true, force: true });
-            if (existsSync(backupRoot)) {
-              runCommand("mv", [backupRoot, installRoot], { cwd: swapCwd });
-            }
-          } catch (rollbackErr) {
-            throw new UpdateAbort(
-              "Update failed: health check did not pass AND rollback failed. " +
-                `Your install at ${installRoot} may be in an inconsistent state. ` +
-                `Previous version is at ${backupRoot}.`,
-            );
-          }
-          throw new UpdateAbort(
-            `Post-apply health check failed — rolled back to previous version. ` +
-              `Error: ${healthErr instanceof Error ? healthErr.message : String(healthErr)}`,
-          );
-        }
-        console.log("✓ Post-apply health check passed");
-      } catch (swapErr) {
-        if (existsSync(stagedRoot)) {
-          try {
-            rmSync(stagedRoot, { recursive: true, force: true });
-          } catch {
-            // ignore cleanup failure
-          }
-        }
-        throw swapErr;
+      if (existsSync(backupDir)) {
+        rmSync(backupDir, { recursive: true, force: true });
       }
 
       logger.info(`Updated to ${latest} from ${release.source}`);

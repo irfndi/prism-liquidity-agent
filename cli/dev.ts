@@ -1,7 +1,7 @@
 import { Command } from "commander";
-import { spawn } from "child_process";
 import { pingInstall, readCredentials } from "./api.js";
 import { acquireLock, releaseLock, LOCKFILE_PATH } from "./lockfile.js";
+import { runEngine } from "../engine/run-engine.js";
 
 interface DevCommandOptions {
   exitLive: boolean;
@@ -35,23 +35,20 @@ export const devCommand = new Command("dev")
       process.exit(1);
     }
 
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      PRISM_ALLOW_DIRECT: "true",
-    };
     if (options.exitLive) {
       console.warn(
         "⚠️  PAPER_MODE_EXIT_LIVE enabled — paper mode will execute live transactions for EXIT",
       );
-      env.PAPER_MODE_EXIT_LIVE = "true";
+      process.env.PAPER_MODE_EXIT_LIVE = "true";
     }
+    process.env.PRISM_ALLOW_DIRECT = "true";
 
-    const cleanup = (code?: number): void => {
+    function cleanup(code?: number): void {
       releaseLock();
       if (code !== undefined) {
         process.exit(code);
       }
-    };
+    }
 
     let cleanedUp = false;
     const doCleanup = (code?: number): void => {
@@ -61,23 +58,12 @@ export const devCommand = new Command("dev")
     };
 
     process.on("exit", () => cleanup());
-    process.on("SIGINT", () => {
-      child.kill("SIGINT");
-      doCleanup(130);
-    });
-    process.on("SIGTERM", () => {
-      child.kill("SIGTERM");
-      doCleanup(143);
-    });
+    process.on("SIGINT", () => doCleanup(130));
+    process.on("SIGTERM", () => doCleanup(143));
 
     console.log("Starting Prism trading agent...");
-    const child = spawn("bun", ["run", "dev"], {
-      stdio: "inherit",
-      shell: false,
-      env,
-    });
-
-    child.on("exit", (code) => {
-      doCleanup(code ?? 0);
-    });
+    runEngine();
+    // runEngine blocks until the engine exits; the following line is only
+    // reached if it returns without a fatal error.
+    doCleanup(0);
   });
