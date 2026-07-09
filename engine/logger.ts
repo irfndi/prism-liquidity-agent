@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { getPrismLogsPath } from "./paths.js";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -11,7 +12,7 @@ export interface LogEntry {
   data?: unknown;
 }
 
-const AUDIT_PATH = path.resolve("logs/audit-trail.jsonl");
+const AUDIT_PATH = getPrismLogsPath();
 let auditStream: fs.WriteStream | null = null;
 
 function getAuditStream(): fs.WriteStream {

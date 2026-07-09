@@ -29,6 +29,13 @@ export interface ReleaseInfo {
   readonly publishedAt: string;
   readonly minCliVersion: string;
   readonly source: "r2" | "github";
+  readonly bundleUrl: string;
+  readonly bundleSha256Url: string;
+}
+
+export interface BundleManifest {
+  readonly url: string;
+  readonly sha256_url: string;
 }
 
 export interface R2Manifest {
@@ -39,6 +46,7 @@ export interface R2Manifest {
   readonly signature_url?: string;
   readonly published_at: string;
   readonly min_cli_version: string;
+  readonly bundles?: Record<string, BundleManifest>;
 }
 
 export interface GitHubRelease {
@@ -53,7 +61,7 @@ export interface GitHubRelease {
   }>;
 }
 
-export const R2_PUBLIC_URL = "https://r2.prism-agent.com";
+export const R2_PUBLIC_URL = "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev";
 export const R2_RELEASES_BUCKET = "prism-backups";
 export const R2_MANIFEST_PATHS: Record<"stable" | "beta" | "dev", string> = {
   stable: "releases/latest.json",
@@ -211,15 +219,30 @@ export function fetchGitHubRelease(
   });
 }
 
+function getPlatformKey(): string {
+  const os = process.platform === "win32" ? "windows" : process.platform;
+  const arch = process.arch === "x64" ? "x64" : process.arch === "arm64" ? "arm64" : process.arch;
+  return `${os}-${arch}`;
+}
+
 export function githubReleaseToInfo(
   release: GitHubRelease,
   channel: "stable" | "beta" | "dev",
 ): ReleaseInfo {
+  const platformKey = getPlatformKey();
   const tarballAsset = release.assets.find(
     (a) => a.name.endsWith(".tar.gz") && !a.name.endsWith(".sha256") && !a.name.endsWith(".asc"),
   );
   const sha256Asset = release.assets.find((a) => a.name.endsWith(".sha256"));
   const sigAsset = release.assets.find((a) => a.name.endsWith(".asc"));
+  const bundleAsset = release.assets.find((a) =>
+    a.name.startsWith(`prism-v${release.tag_name.replace(/^v/, "")}-${platformKey}`),
+  );
+  const bundleSha256Asset = release.assets.find(
+    (a) =>
+      a.name.startsWith(`prism-v${release.tag_name.replace(/^v/, "")}-${platformKey}`) &&
+      a.name.endsWith(".sha256"),
+  );
 
   return {
     version: release.tag_name,
@@ -230,10 +253,14 @@ export function githubReleaseToInfo(
     publishedAt: release.published_at,
     minCliVersion: "1.0.0",
     source: "github",
+    bundleUrl: bundleAsset?.browser_download_url ?? "",
+    bundleSha256Url: bundleSha256Asset?.browser_download_url ?? "",
   };
 }
 
 export function r2ManifestToInfo(manifest: R2Manifest): ReleaseInfo {
+  const platformKey = getPlatformKey();
+  const bundle = manifest.bundles?.[platformKey];
   return {
     version: manifest.version,
     channel: manifest.channel,
@@ -243,6 +270,8 @@ export function r2ManifestToInfo(manifest: R2Manifest): ReleaseInfo {
     publishedAt: manifest.published_at,
     minCliVersion: manifest.min_cli_version,
     source: "r2",
+    bundleUrl: bundle?.url ?? "",
+    bundleSha256Url: bundle?.sha256_url ?? "",
   };
 }
 
