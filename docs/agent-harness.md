@@ -68,10 +68,9 @@ optional. See [`install.md`](install.md) for the full architecture explanation.
 ### Layer 1: CLI (Local) — Required
 
 ```bash
-# Clone and install
-git clone https://github.com/irfndi/prism-liquidity-agent.git
-cd prism-liquidity-agent
-bun install
+# Install the compiled bundle for your platform (auto-installs Bun if needed)
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
 
 # Setup (writes .env, no API call)
 prism setup --non-interactive --helius-key=$HELIUS_KEY

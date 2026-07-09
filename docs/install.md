@@ -27,9 +27,8 @@ Pick the option that matches your use case:
 **Option A: Minimal (CLI only)** — Local-only trading, no cloud account.
 
 ```bash
-git clone https://github.com/irfndi/prism-liquidity-agent.git
-cd prism-liquidity-agent
-bun install
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
 prism setup --non-interactive --helius-key=$HELIUS_KEY   # wizard, no API call
 prism dev                                                  # start paper trading
 ```
@@ -38,9 +37,8 @@ prism dev                                                  # start paper trading
 management, and multi-device support.
 
 ```bash
-git clone https://github.com/irfndi/prism-liquidity-agent.git
-cd prism-liquidity-agent
-bun install
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
 prism register                                              # get API key from cloud
 prism setup --non-interactive --helius-key=$HELIUS_KEY
 prism dev
@@ -88,10 +86,12 @@ curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/s
 What the installer does:
 
 1. Installs Bun if it's not already on `PATH`
-2. Clones (or updates) the repo to `~/.prism`
-3. Runs `bun install` (no `--frozen-lockfile` so older Bun versions work)
-4. Writes a default `.env` (idempotent — leaves existing `.env` untouched)
-5. Writes a wrapper script at `~/.local/bin/prism` that runs the CLI from the install directory
+2. Detects your OS and architecture (`linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`)
+3. Downloads the matching compiled bundle (`dist/` engine + CLI, `lib/` native sqlite-vec extension) from Cloudflare R2
+4. Verifies the bundle's SHA-256 checksum
+5. Extracts it to `~/.prism` (override with `PRISM_INSTALL_DIR`)
+6. Writes a `prism` wrapper at `~/.local/bin/prism` that sets `PRISM_INSTALL_DIR` and `PRISM_VEC0_PATH`, then runs the bundle with Bun
+7. Runs `prism setup` to write the initial `.env`
 
 Then:
 
@@ -108,14 +108,14 @@ prism dev                               # start paper trading
 
 ## Quick Start (Manual)
 
-Choose your path based on the architecture above:
+Choose your path based on the architecture above. The recommended path is the one-liner installer; the manual source path is for contributors.
 
 **CLI only (no cloud account):**
 
 ```bash
-git clone https://github.com/irfndi/prism-liquidity-agent.git
-cd prism-liquidity-agent
-bun install
+# One-liner installer (recommended)
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
 prism setup     # interactive .env wizard (local, no API call)
 prism dev       # start paper trading
 ```
@@ -123,17 +123,36 @@ prism dev       # start paper trading
 **With cloud account (for whoami, Telegram, subscriptions):**
 
 ```bash
-git clone https://github.com/irfndi/prism-liquidity-agent.git
-cd prism-liquidity-agent
-bun install
+# One-liner installer (recommended)
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
 prism register  # get API key from Cloudflare API
 prism setup     # configure Helius key + watchlist
 prism dev       # start paper trading
 ```
 
+**Manual source install** (for contributors or CI — not needed for users):
+
+```bash
+git clone https://github.com/irfndi/prism-liquidity-agent.git
+cd prism-liquidity-agent
+bun install
+bun run dev     # during development only; use `prism dev` for production
+```
+
 ## Step-by-Step Setup
 
-### 1. Clone and Install
+### 1. Install Prism
+
+**Recommended — one-liner:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+```
+
+This downloads a compiled bundle for your platform, verifies its checksum, and writes the `prism` wrapper to `~/.local/bin/prism`.
+
+**Manual source install (contributors only):**
 
 ```bash
 git clone https://github.com/irfndi/prism-liquidity-agent.git
