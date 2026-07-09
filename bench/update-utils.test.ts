@@ -101,6 +101,7 @@ describe("update-utils", () => {
 
   describe("r2ManifestToInfo", () => {
     it("maps R2 manifest to ReleaseInfo correctly", () => {
+      const platformKey = `${process.platform}-${process.arch}`;
       const manifest = {
         version: "1.2.3",
         channel: "stable" as const,
@@ -109,9 +110,16 @@ describe("update-utils", () => {
         signature_url: "https://r2.example.com/prism-v1.2.3.tar.gz.asc",
         published_at: "2024-01-01T00:00:00Z",
         min_cli_version: "1.0.0",
+        bundles: {
+          [platformKey]: {
+            url: "https://r2.example.com/prism-v1.2.3-darwin-arm64.tar.gz",
+            sha256_url: "https://r2.example.com/prism-v1.2.3-darwin-arm64.tar.gz.sha256",
+          },
+        },
       };
 
       const info = r2ManifestToInfo(manifest);
+      const bundle = manifest.bundles[platformKey]!;
       expect(info.version).toBe("1.2.3");
       expect(info.channel).toBe("stable");
       expect(info.tarballUrl).toBe("https://r2.example.com/prism-v1.2.3.tar.gz");
@@ -119,9 +127,12 @@ describe("update-utils", () => {
       expect(info.signatureUrl).toBe("https://r2.example.com/prism-v1.2.3.tar.gz.asc");
       expect(info.source).toBe("r2");
       expect(info.minCliVersion).toBe("1.0.0");
+      expect(info.bundleUrl).toBe(bundle.url);
+      expect(info.bundleSha256Url).toBe(bundle.sha256_url);
     });
 
     it("handles missing optional signature_url", () => {
+      const platformKey = `${process.platform}-${process.arch}`;
       const manifest = {
         version: "1.0.0",
         channel: "dev" as const,
@@ -129,11 +140,19 @@ describe("update-utils", () => {
         sha256_url: "https://r2.example.com/prism-v1.0.0.tar.gz.sha256",
         published_at: "2024-01-01T00:00:00Z",
         min_cli_version: "1.0.0",
+        bundles: {
+          [platformKey]: {
+            url: "https://r2.example.com/prism-v1.0.0-darwin-arm64.tar.gz",
+            sha256_url: "https://r2.example.com/prism-v1.0.0-darwin-arm64.tar.gz.sha256",
+          },
+        },
       };
 
       const info = r2ManifestToInfo(manifest);
+      const bundle = manifest.bundles[platformKey]!;
       expect(info.signatureUrl).toBe("");
       expect(info.channel).toBe("dev");
+      expect(info.bundleUrl).toBe(bundle.url);
     });
   });
 });
