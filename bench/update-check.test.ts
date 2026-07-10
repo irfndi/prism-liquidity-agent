@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
-import { rmSync } from "fs";
-import { homedir } from "os";
+import { rmSync, mkdtempSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
 import { ConfigService } from "../engine/config-service.js";
 import { DbLive } from "../engine/db-service.js";
@@ -111,19 +111,22 @@ function buildLayer(
 describe("checkForAutoUpdate", () => {
   const originalFetch = globalThis.fetch;
   let exitSpy: ReturnType<typeof vi.spyOn>;
+  let tempHome: string;
 
   beforeEach(() => {
+    tempHome = mkdtempSync(join(tmpdir(), "prism-update-check-"));
+    vi.stubEnv("HOME", tempHome);
+    vi.stubEnv("USERPROFILE", tempHome);
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
-    try {
-      rmSync(join(homedir(), ".config", "prism", "version-installed-at"));
-    } catch {
-      // ignore if file does not exist
-    }
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    if (tempHome) {
+      rmSync(tempHome, { recursive: true, force: true });
+    }
   });
 
   it("respects check interval (skips if recent)", async () => {

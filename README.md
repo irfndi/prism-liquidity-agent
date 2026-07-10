@@ -112,7 +112,7 @@ Common agent commands:
 | `prism update`                                                   | Self-update from R2/GitHub releases (with smoke tests + rollback) |
 | `prism wallet {generate,import,show}`                            | Non-custodial local keypair (required for live trading)           |
 
-Do NOT manually edit `.env` or run `bun run dev` directly — always go through the `prism` wrapper so the working directory and config are resolved consistently. See [docs/agent-harness.md](docs/agent-harness.md) for the full agent guide and common anti-patterns.
+For the bundle-install paths (one-liner and pinned release), do NOT manually edit `.env` or bypass the `prism` wrapper — always invoke `prism` so the install root and config directories are resolved consistently. If you are developing on Prism from source, use `bun run dev` directly instead; the source workflow does not create `~/.local/bin/prism` or run `install.sh`. See [docs/agent-harness.md](docs/agent-harness.md) for the full agent guide and common anti-patterns.
 
 To run the historical simulation:
 
