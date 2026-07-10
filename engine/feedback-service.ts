@@ -14,6 +14,7 @@ import {
   type FeedbackResult,
 } from "./services.js";
 import { getCurrentVersion } from "./version.js";
+import { detectInstallMethod } from "./install-method.js";
 
 const logger = createLogger("feedback");
 
@@ -138,16 +139,6 @@ function jaccardSimilarity(a: ReadonlyArray<string>, b: ReadonlyArray<string>): 
   const intersection = [...setA].filter((x) => setB.has(x)).length;
   const union = new Set([...a, ...b]).size;
   return union === 0 ? 0 : intersection / union;
-}
-
-function detectInstallMethod(): string {
-  const prismDir = join(homedir(), ".prism");
-  if (existsSync(join(prismDir, ".tarball-install"))) return "tarball";
-  if (process.env.PRISM_TARBALL_INSTALL === "1") return "tarball";
-  const wrapperPath = join(homedir(), ".local", "bin", "prism");
-  if (existsSync(wrapperPath)) return "curl";
-  if (existsSync(join(process.cwd(), ".git"))) return "git";
-  return "unknown";
 }
 
 const OPT_OUT_FILE = join(homedir(), ".config", "prism", "feedback-opt-out");
