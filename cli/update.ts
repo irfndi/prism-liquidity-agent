@@ -104,7 +104,7 @@ function runCommandOutput(
 }
 
 async function downloadFile(url: string, dest: string): Promise<void> {
-  const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+  const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
   if (!response.ok) {
     throw new UpdateAbort(`Download failed: ${response.status} ${response.statusText}`);
   }
