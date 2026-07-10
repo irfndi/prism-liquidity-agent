@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -45,7 +47,7 @@ jobs:
             platform-key: linux-x64
           - os: ubuntu-24.04-arm
             platform-key: linux-arm64
-          - os: macos-13
+          - os: macos-15-intel
             platform-key: darwin-x64
           - os: macos-latest
             platform-key: darwin-arm64
@@ -53,6 +55,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -165,7 +169,7 @@ jobs:
 
       - name: Generate release manifest
         env:
-          R2_BASE_URL: https://r2.prism-agent.com
+          R2_BASE_URL: https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev
         run: |
           cd release-assets
           bun run ../scripts/generate-release-manifest.ts
