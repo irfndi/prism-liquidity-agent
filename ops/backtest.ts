@@ -461,5 +461,8 @@ const isDirectBacktestExecution =
   typeof Bun !== "undefined" &&
   (Bun.main?.endsWith("ops/backtest.ts") || Bun.main?.endsWith("ops/backtest.js"));
 if (isDirectBacktestExecution) {
-  runBacktest(process.argv.slice(2));
+  runBacktest(process.argv.slice(2)).catch((err) => {
+    log.error("Backtest failed", { error: err instanceof Error ? err.message : String(err) });
+    process.exitCode = 1;
+  });
 }
