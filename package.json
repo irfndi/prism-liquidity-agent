@@ -62,5 +62,8 @@
     "tsdown": "^0.22.4",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "typescript": "$typescript"
   }
 }
