@@ -46,11 +46,14 @@ prism setup --non-interactive --helius-key=YOUR_HELIUS_KEY
 prism dev                               # paper trading by default
 ```
 
+> **Security note:** the `main` branch URL is mutable. For reproducible installs, use the pinned release version below (which runs the installer from a tagged release) or download the installer and verify its SHA-256 against the release notes before executing it.
+
 **One-liner install — pinned release version** (reproducible; no git required):
 
 ```bash
-PRISM_VERSION=1.2.3 \
-  curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+# Replace 1.2.3 with the released version you want (omit PRISM_VERSION for latest)
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh \
+  | PRISM_VERSION=1.2.3 bash
 export PATH="$HOME/.local/bin:$PATH"
 prism dev
 ```
@@ -63,10 +66,10 @@ Use the pinned form when you need a specific release version (CI, reproducible d
 git clone https://github.com/irfndi/prism-liquidity-agent
 cd prism-liquidity-agent
 bun install
-bun run dev          # during development; production users use 'prism dev'
+bun run dev          # during development; uses the local source, no wrapper needed
 ```
 
-All three paths end up with the same `prism` wrapper on PATH. The wrapper is a thin shim that sets `PRISM_INSTALL_DIR` and `PRISM_VEC0_PATH`, then runs the compiled bundle with `bun`, so the install root and config are resolved consistently regardless of where you invoke it from.
+The bundle-install paths (one-liner and pinned release) create a `prism` wrapper on `PATH`. The wrapper is a thin shim that sets `PRISM_INSTALL_DIR` and `PRISM_VEC0_PATH`, then runs the compiled bundle with `bun`, so the install root and config are resolved consistently regardless of where you invoke it from. The source workflow runs `bun run dev` directly and does not create `~/.local/bin/prism`.
 
 ### For AI Agents (OpenClaw, Hermes, acpx, custom agents)
 
@@ -74,8 +77,9 @@ Prism is agent-friendly by design. The CLI is the only required layer; the cloud
 
 ```bash
 # Pinned release — reproducible, no git, fastest for agents
-PRISM_VERSION=1.2.3 \
-  curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+# Replace 1.2.3 with the released version you want
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh \
+  | PRISM_VERSION=1.2.3 bash
 export PATH="$HOME/.local/bin:$PATH"
 
 # Or latest stable bundle
