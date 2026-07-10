@@ -12,16 +12,16 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "effect": "^3.21.2",
-    "hono": "^4.12.23"
+    "effect": "^3.21.4",
+    "hono": "^4.12.29"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.12",
-    "@cloudflare/workers-types": "^4.20250214.0",
-    "@vitest/runner": "^4.1.0",
-    "@vitest/snapshot": "^4.1.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.0",
-    "wrangler": "^4.96.0"
+    "@cloudflare/vitest-pool-workers": "^0.18.4",
+    "@cloudflare/workers-types": "^5.20260710.1",
+    "@vitest/runner": "^4.1.10",
+    "@vitest/snapshot": "^4.1.10",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.110.0"
   }
 }

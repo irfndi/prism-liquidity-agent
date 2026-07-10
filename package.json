@@ -1,6 +1,6 @@
 {
   "name": "prism-liquidity-agent",
-  "version": "0.0.20",
+  "version": "0.0.25",
   "description": "Autonomous liquidity agent for Solana pools (currently Meteora DLMM)",
   "keywords": [
     "ai-agent",
@@ -38,29 +38,32 @@
     "coverage": "bunx --bun vitest run --coverage"
   },
   "dependencies": {
-    "@clack/prompts": "^1.5.0",
-    "@effect/platform": "^0.96.1",
+    "@clack/prompts": "^1.7.0",
+    "@effect/platform": "^0.96.2",
     "@effect/platform-node": "^0.107.0",
-    "@meteora-ag/dlmm": "^1.9.10",
-    "@solana/spl-token": "^0.4.14",
+    "@meteora-ag/dlmm": "^1.9.13",
+    "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.98.4",
     "@xenova/transformers": "^2.17.2",
     "chalk": "^5.6.2",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
-    "effect": "^3.21.2",
-    "semver": "^7.8.1",
+    "effect": "^3.21.4",
+    "semver": "^7.8.5",
     "sqlite-vec": "^0.1.9"
   },
   "devDependencies": {
-    "@types/node": "^26.0.1",
+    "@types/node": "^26.1.1",
     "@types/semver": "^7.7.1",
-    "@vitest/coverage-istanbul": "^4.1.8",
+    "@vitest/coverage-istanbul": "^4.1.10",
     "bun-types": "1.4.0-canary.20260519T150915",
-    "oxfmt": "^0.57.0",
-    "oxlint": "^1.68.0",
-    "tsdown": "^0.22.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.8"
+    "oxfmt": "^0.58.0",
+    "oxlint": "^1.73.0",
+    "tsdown": "^0.22.4",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "typescript": "$typescript"
   }
 }
