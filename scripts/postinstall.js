@@ -6,7 +6,7 @@ import path from "path";
 import os from "os";
 import { randomUUID } from "crypto";
 import { fileURLToPath } from "url";
-import { execSync } from "child_process";
+import { spawnSync } from "child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -118,11 +118,19 @@ function main() {
   const vecEmbedPath = path.join(engineDir, "sqlite-vec-embedded.ts");
   if (fs.existsSync(engineDir) && !fs.existsSync(vecEmbedPath)) {
     try {
-      execSync(
-        `bun run ${path.join(REPO_ROOT, "scripts", "generate-vec-embed.ts")} ${process.platform} ${process.arch}`,
+      const result = spawnSync(
+        "bun",
+        [
+          "run",
+          path.join(REPO_ROOT, "scripts", "generate-vec-embed.ts"),
+          process.platform,
+          process.arch,
+        ],
         { cwd: REPO_ROOT, stdio: "ignore" },
       );
-      console.log("✓ Generated embedded sqlite-vec extension for source build");
+      if (result.status === 0) {
+        console.log("✓ Generated embedded sqlite-vec extension for source build");
+      }
     } catch {
       // Non-fatal: engine/db.ts has fallback chains for missing vec-embed.
     }
