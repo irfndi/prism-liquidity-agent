@@ -12,7 +12,7 @@ function ensureError(cause: unknown): Error {
   return new Error(String(cause));
 }
 
-export function runEngine(): void {
+export function runEngine(): Promise<void> {
   errorReporter.setAppVersion(getCurrentVersion());
 
   process.on("uncaughtException", (err) => {
@@ -31,7 +31,7 @@ export function runEngine(): void {
     }).pipe(Effect.provide(ConfigLive)),
   );
 
-  Effect.runPromise(
+  return Effect.runPromise(
     program.pipe(
       Effect.provide(buildLayer(config)),
       Effect.catchAll((err) =>

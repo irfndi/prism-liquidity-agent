@@ -62,7 +62,7 @@ export const devCommand = new Command("dev")
     process.on("SIGTERM", () => doCleanup(143));
 
     console.log("Starting Prism trading agent...");
-    runEngine();
+    await runEngine();
     // runEngine blocks until the engine exits; the following line is only
     // reached if it returns without a fatal error.
     doCleanup(0);
