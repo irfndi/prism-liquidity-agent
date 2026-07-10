@@ -50,9 +50,10 @@ fs.mkdirSync(stageDir, { recursive: true });
 
 fs.cpSync(path.join(repoRoot, "dist"), path.join(stageDir, "dist"), { recursive: true });
 
+const libDir = path.join(stageDir, "lib");
+fs.mkdirSync(libDir, { recursive: true });
+
 if (fs.existsSync(vec0Path)) {
-  const libDir = path.join(stageDir, "lib");
-  fs.mkdirSync(libDir, { recursive: true });
   fs.copyFileSync(vec0Path, path.join(libDir, `vec0.${extensionSuffix}`));
 }
 
