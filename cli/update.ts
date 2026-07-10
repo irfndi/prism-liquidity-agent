@@ -80,7 +80,10 @@ function runCommand(
     ...(options?.timeout ? { timeout: options.timeout } : {}),
   });
   if (!result.success) {
-    throw new UpdateAbort(`Command failed: ${name} ${args.join(" ")} (exit ${result.exitCode})`);
+    const cwdMsg = options?.cwd ? ` in ${options.cwd}` : "";
+    throw new UpdateAbort(
+      `Command failed: ${name} ${args.join(" ")}${cwdMsg} (exit ${result.exitCode})`,
+    );
   }
 }
 
@@ -98,7 +101,10 @@ function runCommandOutput(
     ...(options?.timeout ? { timeout: options.timeout } : {}),
   });
   if (!result.success) {
-    throw new UpdateAbort(`Command failed: ${name} ${args.join(" ")} (exit ${result.exitCode})`);
+    const cwdMsg = options?.cwd ? ` in ${options.cwd}` : "";
+    throw new UpdateAbort(
+      `Command failed: ${name} ${args.join(" ")}${cwdMsg} (exit ${result.exitCode})`,
+    );
   }
   return result.stdout.toString().trim();
 }

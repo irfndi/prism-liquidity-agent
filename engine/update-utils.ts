@@ -5,7 +5,10 @@ function tryNetwork<T>(promise: () => Promise<T>, description: string): Effect.E
   return Effect.tryPromise({
     try: promise,
     catch: (error) =>
-      new Error(`${description}: ${error instanceof Error ? error.message : String(error)}`),
+      new Error(
+        `${description}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      ),
   });
 }
 
