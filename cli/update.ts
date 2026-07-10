@@ -36,6 +36,7 @@ if (typeof Bun === "undefined") {
 const logger = createLogger("update");
 
 const SMOKE_TIMEOUT_MS = 60_000;
+const BUILD_TIMEOUT_MS = 600_000;
 
 class UpdateAbort extends Error {
   constructor(
@@ -338,10 +339,10 @@ async function updateFromSource(
   preserveUserData(currentDir, sourceRoot);
 
   console.log("Installing dependencies in new source tree...");
-  runCommand("bun", ["install"], { cwd: sourceRoot, timeout: SMOKE_TIMEOUT_MS });
+  runCommand("bun", ["install"], { cwd: sourceRoot, timeout: BUILD_TIMEOUT_MS });
 
   console.log("Building new source tree...");
-  runCommand("bun", ["run", "build"], { cwd: sourceRoot, timeout: SMOKE_TIMEOUT_MS });
+  runCommand("bun", ["run", "build"], { cwd: sourceRoot, timeout: BUILD_TIMEOUT_MS });
 
   const wrapperBin = resolveWrapperBin();
   const isSymlink = isWrapperSymlink(wrapperBin);
