@@ -219,7 +219,7 @@ export function fetchGitHubRelease(
   });
 }
 
-function getPlatformKey(): string {
+export function getPlatformKey(): string {
   const os = process.platform === "win32" ? "windows" : process.platform;
   const arch = process.arch === "x64" ? "x64" : process.arch === "arm64" ? "arm64" : process.arch;
   return `${os}-${arch}`;
@@ -235,8 +235,11 @@ export function githubReleaseToInfo(
   );
   const sha256Asset = release.assets.find((a) => a.name.endsWith(".sha256"));
   const sigAsset = release.assets.find((a) => a.name.endsWith(".asc"));
-  const bundleAsset = release.assets.find((a) =>
-    a.name.startsWith(`prism-v${release.tag_name.replace(/^v/, "")}-${platformKey}`),
+  const bundleAsset = release.assets.find(
+    (a) =>
+      a.name.startsWith(`prism-v${release.tag_name.replace(/^v/, "")}-${platformKey}`) &&
+      a.name.endsWith(".tar.gz") &&
+      !a.name.endsWith(".sha256"),
   );
   const bundleSha256Asset = release.assets.find(
     (a) =>

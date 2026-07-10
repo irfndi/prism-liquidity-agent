@@ -17,7 +17,7 @@ let auditStream: fs.WriteStream | null = null;
 
 function getAuditStream(): fs.WriteStream {
   if (!auditStream) {
-    fs.mkdirSync(path.dirname(AUDIT_PATH), { recursive: true });
+    fs.mkdirSync(path.dirname(AUDIT_PATH), { recursive: true, mode: 0o700 });
     auditStream = fs.createWriteStream(AUDIT_PATH, { flags: "a" });
   }
   return auditStream;
