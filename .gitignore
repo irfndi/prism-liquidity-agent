@@ -44,6 +44,12 @@ site/
 # Test artifacts
 bench/tmp-audit/
 
+# Bundle build artifacts
+prism-v*.tar.gz
+prism-v*.tar.gz.sha256
+.prism-bundle-stage/
+engine/sqlite-vec-embedded.ts
+
 # OpenCode internal state
 .omo/
 

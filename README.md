@@ -37,7 +37,7 @@ Before any decision, the agent scores each pool's volume on a 0-1 scale. Volume/
 
 ## Quickstart
 
-**One-liner install — latest from default branch** (recommended for most users; installs Bun if needed, clones the repo, writes a default `.env`, and drops a `prism` wrapper on your PATH):
+**One-liner install — latest stable bundle** (recommended for most users; installs Bun if needed, downloads a compiled bundle for your platform, and drops a `prism` wrapper on your PATH):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
@@ -46,27 +46,30 @@ prism setup --non-interactive --helius-key=YOUR_HELIUS_KEY
 prism dev                               # paper trading by default
 ```
 
-**One-liner install — pinned release tarball** (faster, no git history, reproducible):
+> **Security note:** the `main` branch URL is mutable. For reproducible installs, use the pinned release version below (which runs the installer from a tagged release) or download the installer and verify its SHA-256 against the release notes before executing it.
+
+**One-liner install — pinned release version** (reproducible; no git required):
 
 ```bash
-PRISM_TARBALL_URL=https://github.com/irfndi/prism-liquidity-agent/releases/download/v1.2.3/prism-v1.2.3.tar.gz \
-  curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+# Replace 1.2.3 with the released version you want (omit PRISM_VERSION for latest)
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh \
+  | PRISM_VERSION=1.2.3 bash
 export PATH="$HOME/.local/bin:$PATH"
 prism dev
 ```
 
-Use the tarball form when you need a specific release version (CI, reproducible deploys, air-gapped networks without git). The `prism update` command will still pull newer release tarballs for you.
+Use the pinned form when you need a specific release version (CI, reproducible deploys, air-gapped networks without git). The `prism update` command will still pull newer release bundles for you.
 
-**Manual install** (only if you're working ON Prism itself — contributors, CI):
+**Manual install from source** (only if you're working ON Prism itself — contributors, CI):
 
 ```bash
 git clone https://github.com/irfndi/prism-liquidity-agent
 cd prism-liquidity-agent
 bun install
-bun run dev          # during development; production users use 'prism dev'
+bun run dev          # during development; uses the local source, no wrapper needed
 ```
 
-All three paths end up with the same `prism` wrapper on PATH. The wrapper is a thin shim that `cd`s to the install root before exec'ing `bun cli/index.ts`, so the working directory always resolves correctly regardless of where you invoke it from.
+The bundle-install paths (one-liner and pinned release) create a `prism` wrapper on `PATH`. The wrapper is a thin shim that sets `PRISM_INSTALL_DIR` and `PRISM_VEC0_PATH`, then runs the compiled bundle with `bun`, so the install root and config are resolved consistently regardless of where you invoke it from. The source workflow runs `bun run dev` directly and does not create `~/.local/bin/prism`.
 
 ### For AI Agents (OpenClaw, Hermes, acpx, custom agents)
 
@@ -74,11 +77,12 @@ Prism is agent-friendly by design. The CLI is the only required layer; the cloud
 
 ```bash
 # Pinned release — reproducible, no git, fastest for agents
-PRISM_TARBALL_URL=https://github.com/irfndi/prism-liquidity-agent/releases/latest/download/prism-latest.tar.gz \
-  curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+# Replace 1.2.3 with the released version you want
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh \
+  | PRISM_VERSION=1.2.3 bash
 export PATH="$HOME/.local/bin:$PATH"
 
-# Or latest from default branch
+# Or latest stable bundle
 curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 

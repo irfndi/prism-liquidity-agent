@@ -36,6 +36,9 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Generate embedded sqlite-vec extension
+        run: bun run scripts/generate-vec-embed.ts linux x64
+
       - name: Type check
         run: bun run lint
 

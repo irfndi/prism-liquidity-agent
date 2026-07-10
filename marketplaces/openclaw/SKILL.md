@@ -16,7 +16,7 @@ Install and run Prism for automated Meteora DLMM rebalancing on Solana.
 
 ## Installation
 
-The one-liner installer handles Bun (installs if missing), clones the repo, installs dependencies, runs postinstall, and writes a `prism` wrapper to `~/.local/bin/`.
+The one-liner installer handles Bun (installs if missing), detects your OS/architecture, downloads a compiled bundle from Cloudflare R2, verifies its SHA-256 checksum, extracts it to `~/.prism`, and writes a `prism` wrapper to `~/.local/bin/`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash

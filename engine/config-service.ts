@@ -1,5 +1,6 @@
 import { Config, Context, Effect, Layer, Option, pipe } from "effect";
 import { ConfigError } from "./errors.js";
+import { getPrismDbPath } from "./paths.js";
 
 export interface AppConfig {
   readonly walletPrivateKey: string;
@@ -364,7 +365,7 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => "./engine/data/token-blacklist.json"),
   );
   const sqliteDbPath = yield* Config.string("SQLITE_DB_PATH").pipe(
-    Effect.orElseSucceed(() => "./prism.db"),
+    Effect.orElseSucceed(() => getPrismDbPath()),
   );
   const enableSnapshotCapture = yield* Config.boolean("ENABLE_SNAPSHOT_CAPTURE").pipe(
     Effect.orElseSucceed(() => false),
@@ -395,7 +396,7 @@ const loadConfig = Effect.gen(function* () {
   );
   const forceUpdateAfterDays = yield* validatedNumber("FORCE_UPDATE_AFTER_DAYS", 1, 14);
   const updateR2PublicUrl = yield* Config.string("UPDATE_R2_PUBLIC_URL").pipe(
-    Effect.orElseSucceed(() => "https://r2.prism-agent.com"),
+    Effect.orElseSucceed(() => "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev"),
   );
 
   const githubToken = yield* Config.string("GITHUB_TOKEN").pipe(Effect.orElseSucceed(() => ""));

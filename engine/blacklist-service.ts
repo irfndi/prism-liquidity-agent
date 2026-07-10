@@ -2,6 +2,8 @@ import fs from "fs";
 import { Context, Effect, Layer } from "effect";
 import { BlacklistService, type BlacklistApi } from "./services.js";
 import { BlacklistError } from "./errors.js";
+import defaultDeployerBlacklist from "./data/deployer-blacklist.json" with { type: "json" };
+import defaultTokenBlacklist from "./data/token-blacklist.json" with { type: "json" };
 
 export const BlacklistLive = (opts: {
   deployerBlacklistPath: string;
@@ -11,19 +13,19 @@ export const BlacklistLive = (opts: {
     BlacklistService,
     BlacklistService.of(
       ((): BlacklistApi => {
-        function loadSet(path: string): Set<string> {
+        function loadSet(path: string, defaultSet: ReadonlyArray<string>): Set<string> {
           try {
-            if (!fs.existsSync(path)) return new Set();
+            if (!fs.existsSync(path)) return new Set(defaultSet);
             const data = JSON.parse(fs.readFileSync(path, "utf-8")) as ReadonlyArray<string>;
             return new Set(data);
           } catch (err) {
             console.error(`Failed to load blacklist from ${path}: ${String(err)}`);
-            return new Set();
+            return new Set(defaultSet);
           }
         }
 
-        const deployerSet = loadSet(opts.deployerBlacklistPath);
-        const tokenSet = loadSet(opts.tokenBlacklistPath);
+        const deployerSet = loadSet(opts.deployerBlacklistPath, defaultDeployerBlacklist);
+        const tokenSet = loadSet(opts.tokenBlacklistPath, defaultTokenBlacklist);
 
         function isDeployerBlacklisted(deployer: string): boolean {
           return deployerSet.has(deployer);

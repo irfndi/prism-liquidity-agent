@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import "../engine/load-env.js";
 import { Command } from "commander";
 import { setupCommand } from "./setup.js";
 import { registerCommand } from "./register.js";

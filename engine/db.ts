@@ -3,6 +3,7 @@ import { load as loadVec } from "sqlite-vec";
 import path from "path";
 import fs from "fs";
 import { createLogger } from "./logger.js";
+import { getEmbeddedVec0Path } from "./sqlite-vec-embedded.js";
 
 const logger = createLogger("db");
 
@@ -63,9 +64,35 @@ export function createDatabase(dbPath = "./prism.db"): Database {
     loadVec(db);
     vecLoaded = true;
   } catch (e) {
-    logger.warn("sqlite-vec extension could not be loaded", {
-      error: e instanceof Error ? e.message : String(e),
-    });
+    const envPath = process.env.PRISM_VEC0_PATH;
+    if (envPath) {
+      try {
+        db.loadExtension(envPath);
+        vecLoaded = true;
+      } catch (envErr) {
+        logger.warn("PRISM_VEC0_PATH sqlite-vec extension could not be loaded", {
+          error: envErr instanceof Error ? envErr.message : String(envErr),
+        });
+      }
+    }
+    if (!vecLoaded) {
+      const embeddedPath = getEmbeddedVec0Path();
+      if (embeddedPath) {
+        try {
+          db.loadExtension(embeddedPath);
+          vecLoaded = true;
+        } catch (embeddedErr) {
+          logger.warn("Embedded sqlite-vec extension could not be loaded", {
+            error: embeddedErr instanceof Error ? embeddedErr.message : String(embeddedErr),
+          });
+        }
+      }
+    }
+    if (!vecLoaded) {
+      logger.warn("sqlite-vec extension could not be loaded", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
   }
   runMigrations(db);
   if (vecLoaded && !hasVecMemoryTable(db)) {

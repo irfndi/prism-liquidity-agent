@@ -1,6 +1,14 @@
 import { Effect } from "effect";
 import semver from "semver";
 
+function tryNetwork<T>(promise: () => Promise<T>, description: string): Effect.Effect<T, Error> {
+  return Effect.tryPromise({
+    try: promise,
+    catch: (error) =>
+      new Error(`${description}: ${error instanceof Error ? error.message : String(error)}`),
+  });
+}
+
 export function compareVersions(a: string, b: string): number {
   const cleanA = semver.clean(a) || a;
   const cleanB = semver.clean(b) || b;
@@ -21,6 +29,13 @@ export interface ReleaseInfo {
   readonly publishedAt: string;
   readonly minCliVersion: string;
   readonly source: "r2" | "github";
+  readonly bundleUrl: string;
+  readonly bundleSha256Url: string;
+}
+
+export interface BundleManifest {
+  readonly url: string;
+  readonly sha256_url: string;
 }
 
 export interface R2Manifest {
@@ -31,6 +46,7 @@ export interface R2Manifest {
   readonly signature_url?: string;
   readonly published_at: string;
   readonly min_cli_version: string;
+  readonly bundles?: Record<string, BundleManifest>;
 }
 
 export interface GitHubRelease {
@@ -45,7 +61,7 @@ export interface GitHubRelease {
   }>;
 }
 
-export const R2_PUBLIC_URL = "https://r2.prism-agent.com";
+export const R2_PUBLIC_URL = "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev";
 export const R2_RELEASES_BUCKET = "prism-backups";
 export const R2_MANIFEST_PATHS: Record<"stable" | "beta" | "dev", string> = {
   stable: "releases/latest.json",
@@ -61,13 +77,15 @@ export function fetchR2Manifest(
     const path = R2_MANIFEST_PATHS[channel];
     const url = `${r2PublicUrl}/${path}`;
 
-    const response = yield* Effect.tryPromise(() =>
-      fetch(url, {
-        headers: {
-          "User-Agent": "prism-liquidity-agent",
-          Accept: "application/json",
-        },
-      }),
+    const response = yield* tryNetwork(
+      () =>
+        fetch(url, {
+          headers: {
+            "User-Agent": "prism-liquidity-agent",
+            Accept: "application/json",
+          },
+        }),
+      `Failed to fetch R2 manifest from ${url}`,
     );
 
     if (!response.ok) {
@@ -79,7 +97,10 @@ export function fetchR2Manifest(
       );
     }
 
-    const manifest = (yield* Effect.tryPromise(() => response.json())) as R2Manifest;
+    const manifest = (yield* tryNetwork(
+      () => response.json(),
+      "Failed to parse R2 manifest JSON",
+    )) as R2Manifest;
     return manifest;
   });
 }
@@ -103,7 +124,10 @@ export function fetchGitHubRelease(
       headers.Authorization = `Bearer ${token}`;
     }
 
-    const response = yield* Effect.tryPromise(() => fetch(url, { headers }));
+    const response = yield* tryNetwork(
+      () => fetch(url, { headers }),
+      `Failed to fetch GitHub release from ${url}`,
+    );
 
     if (response.status === 403 || response.status === 429) {
       const rateLimitRemaining = response.headers.get("x-ratelimit-remaining");
@@ -123,13 +147,17 @@ export function fetchGitHubRelease(
     }
 
     if (channel === "stable") {
-      const release = (yield* Effect.tryPromise(() => response.json())) as
-        | GitHubRelease
-        | undefined;
+      const release = (yield* tryNetwork(
+        () => response.json(),
+        "Failed to parse GitHub release JSON",
+      )) as GitHubRelease | undefined;
       return release ?? null;
     }
 
-    const firstPageReleases = (yield* Effect.tryPromise(() => response.json())) as GitHubRelease[];
+    const firstPageReleases = (yield* tryNetwork(
+      () => response.json(),
+      "Failed to parse GitHub releases JSON",
+    )) as GitHubRelease[];
 
     const allReleases: GitHubRelease[] = Array.isArray(firstPageReleases)
       ? [...firstPageReleases]
@@ -150,8 +178,9 @@ export function fetchGitHubRelease(
       if (token) {
         pageHeaders.Authorization = `Bearer ${token}`;
       }
-      const pageResponse = yield* Effect.tryPromise(() =>
-        fetch(pageUrl!, { headers: pageHeaders }),
+      const pageResponse = yield* tryNetwork(
+        () => fetch(pageUrl!, { headers: pageHeaders }),
+        "Failed to fetch GitHub releases page",
       );
 
       if (!pageResponse.ok) {
@@ -160,7 +189,10 @@ export function fetchGitHubRelease(
         );
       }
 
-      const releases = (yield* Effect.tryPromise(() => pageResponse.json())) as GitHubRelease[];
+      const releases = (yield* tryNetwork(
+        () => pageResponse.json(),
+        "Failed to parse GitHub releases page JSON",
+      )) as GitHubRelease[];
 
       if (!Array.isArray(releases) || releases.length === 0) {
         break;
@@ -187,15 +219,35 @@ export function fetchGitHubRelease(
   });
 }
 
+export function getPlatformKey(): string {
+  const os = process.platform === "win32" ? "windows" : process.platform;
+  const arch = process.arch === "x64" ? "x64" : process.arch === "arm64" ? "arm64" : process.arch;
+  return `${os}-${arch}`;
+}
+
 export function githubReleaseToInfo(
   release: GitHubRelease,
   channel: "stable" | "beta" | "dev",
 ): ReleaseInfo {
+  const platformKey = getPlatformKey();
   const tarballAsset = release.assets.find(
     (a) => a.name.endsWith(".tar.gz") && !a.name.endsWith(".sha256") && !a.name.endsWith(".asc"),
   );
-  const sha256Asset = release.assets.find((a) => a.name.endsWith(".sha256"));
+  const sha256Asset = tarballAsset
+    ? release.assets.find((a) => a.name === `${tarballAsset.name}.sha256`)
+    : release.assets.find((a) => a.name.endsWith(".sha256"));
   const sigAsset = release.assets.find((a) => a.name.endsWith(".asc"));
+  const bundleAsset = release.assets.find(
+    (a) =>
+      a.name.startsWith(`prism-v${release.tag_name.replace(/^v/, "")}-${platformKey}`) &&
+      a.name.endsWith(".tar.gz") &&
+      !a.name.endsWith(".sha256"),
+  );
+  const bundleSha256Asset = release.assets.find(
+    (a) =>
+      a.name.startsWith(`prism-v${release.tag_name.replace(/^v/, "")}-${platformKey}`) &&
+      a.name.endsWith(".sha256"),
+  );
 
   return {
     version: release.tag_name,
@@ -206,10 +258,14 @@ export function githubReleaseToInfo(
     publishedAt: release.published_at,
     minCliVersion: "1.0.0",
     source: "github",
+    bundleUrl: bundleAsset?.browser_download_url ?? "",
+    bundleSha256Url: bundleSha256Asset?.browser_download_url ?? "",
   };
 }
 
 export function r2ManifestToInfo(manifest: R2Manifest): ReleaseInfo {
+  const platformKey = getPlatformKey();
+  const bundle = manifest.bundles?.[platformKey];
   return {
     version: manifest.version,
     channel: manifest.channel,
@@ -219,6 +275,8 @@ export function r2ManifestToInfo(manifest: R2Manifest): ReleaseInfo {
     publishedAt: manifest.published_at,
     minCliVersion: manifest.min_cli_version,
     source: "r2",
+    bundleUrl: bundle?.url ?? "",
+    bundleSha256Url: bundle?.sha256_url ?? "",
   };
 }
 
@@ -237,11 +295,22 @@ export function fetchLatestRelease(
         return r2ManifestToInfo(manifest);
       }
     }
+    const r2Error = r2Result._tag === "Left" ? r2Result.left : null;
 
-    const ghRelease = yield* fetchGitHubRelease(repo, channel, token);
-    if (!ghRelease) {
+    const ghResult = yield* Effect.either(fetchGitHubRelease(repo, channel, token));
+    if (ghResult._tag === "Right") {
+      if (ghResult.right) {
+        return githubReleaseToInfo(ghResult.right, channel);
+      }
       return null;
     }
-    return githubReleaseToInfo(ghRelease, channel);
+
+    const ghError = ghResult.left;
+    if (r2Error) {
+      return yield* Effect.fail(
+        new Error(`Update check failed. R2: ${r2Error.message}; GitHub: ${ghError.message}`),
+      );
+    }
+    return yield* Effect.fail(new Error(`Update check failed: ${ghError.message}`));
   });
 }

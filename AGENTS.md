@@ -227,7 +227,7 @@ These are the high-cost mistakes. Do not trust stale prose — verify in code.
 - **Memory merge guard is not implemented.** README, CLAUDE.md, and ARCHITECTURE.md used to claim a "cosine distance < 0.08" merge guard, but `engine/db-service.ts` `insertMemory()` does a raw INSERT with no dedup. `queryMemory()` returns by `ORDER BY distance` blended with recency decay but applies no threshold filter. Code is the source of truth.
 - **Memory TTLs are in code only.** `pattern` 90d, `warning` 60d, `outcome` 180d. The `ARCHITECTURE.md` table is correct; `README.md` only mentions patterns + warnings.
 - **Hono `handle` is not exported in v4.x.** `cloudflare/workers/api/index.ts` previously imported `handle` from `hono/cloudflare-workers` — that adapter no longer exports it. Use `app.fetch(request, env, ctx)` directly in the `default export`.
-- **R2 public URL is unreachable.** `r2.prism-agent.com` DNS resolves (85.131.197.31) but the HTTPS endpoint doesn't respond — a Cloudflare R2 public access config issue (missing `r2.dev` subdomain or custom domain CNAME). The bucket (`prism-backups`) exists. The update mechanism gracefully falls back to GitHub Releases, so `prism update` still works.
+- **R2 public URL.** The bucket's public development URL is `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev`. This is the URL `prism update` uses for the release manifest and bundle downloads. `https://r2.prism-agent.com` is not configured as a custom domain and should not be used.
 
 ## Storage & data files
 
@@ -262,7 +262,7 @@ In test mode (`VITEST=true` or `NODE_ENV=test`), missing `HELIUS_API_KEY` defaul
 
 ### Flow
 
-1. `prism update` fetches `https://r2.prism-agent.com/releases/latest.json` (R2 manifest) — or per-channel `releases/channel/{beta,dev}.json`
+1. `prism update` fetches `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev/releases/latest.json` (R2 manifest) — or per-channel `releases/channel/{beta,dev}.json`
 2. Compares `manifest.version` with the locally installed version (from `package.json`)
 3. If newer, downloads the tarball from `manifest.tarball_url`
 4. Verifies SHA-256 against `manifest.sha256_url` (mandatory, mismatch aborts)
@@ -296,7 +296,7 @@ If R2 is unreachable, `fetchLatestRelease()` automatically falls back to GitHub 
 
 ### Config
 
-- `UPDATE_R2_PUBLIC_URL` (default `https://r2.prism-agent.com`) — R2 public URL
+- `UPDATE_R2_PUBLIC_URL` (default `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev`) — R2 public URL
 - `UPDATE_GITHUB_REPO` (default `irfndi/prism-liquidity-agent`) — fallback repo
 - `UPDATE_CHANNEL` (`stable` | `beta` | `dev`, default `stable`)
 

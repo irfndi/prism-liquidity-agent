@@ -15,20 +15,13 @@ permissions:
   packages: read
 
 jobs:
-  release:
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set VERSION
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-
-      - name: Sync package.json version
-        run: |
-          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n');"
-          echo "→ package.json version set to ${VERSION}"
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -44,13 +37,94 @@ jobs:
       - name: Run tests
         run: bun run test
 
-      - name: Build tarball
+  build-bundles:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform-key: linux-x64
+          - os: ubuntu-24.04-arm
+            platform-key: linux-arm64
+          - os: macos-15-intel
+            platform-key: darwin-x64
+          - os: macos-latest
+            platform-key: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: canary
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build bundle
+        run: bun run scripts/build-bundle.ts
+
+      - name: List bundle artifacts
+        run: ls -lh prism-v*.tar.gz*
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.platform-key }}
+          path: |
+            prism-v*.tar.gz
+            prism-v*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build-bundles
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set VERSION and CHANNEL
         run: |
           VERSION=${GITHUB_REF_NAME#v}
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          if [[ "${GITHUB_REF_NAME}" == *-beta* ]]; then
+            echo "CHANNEL=beta" >> "$GITHUB_ENV"
+          elif [[ "${GITHUB_REF_NAME}" == *-dev* ]]; then
+            echo "CHANNEL=dev" >> "$GITHUB_ENV"
+          else
+            echo "CHANNEL=stable" >> "$GITHUB_ENV"
+          fi
+          echo "→ VERSION=${VERSION} CHANNEL=${CHANNEL}"
+
+      - name: Sync package.json version
+        run: |
+          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n');"
+          echo "→ package.json version set to ${VERSION}"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: canary
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Download bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bundles
+          pattern: bundle-*
+          merge-multiple: false
+
+      - name: Build source tarball
+        run: |
           TARBALL_NAME="prism-v${VERSION}.tar.gz"
           echo "Building ${TARBALL_NAME}"
-          # Write tarball outside the source tree to prevent tar reading
-          # its own output file, which triggers "file changed as we read it".
           mkdir -p /tmp/prism-release
           tar -czf "/tmp/prism-release/${TARBALL_NAME}" \
             --warning=no-file-changed \
@@ -74,128 +148,123 @@ jobs:
           cp "/tmp/prism-release/${TARBALL_NAME}" "./${TARBALL_NAME}"
           ls -lh "${TARBALL_NAME}"
 
-      - name: Generate SHA-256 checksum
+      - name: Generate SHA-256 for source tarball
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
           TARBALL_NAME="prism-v${VERSION}.tar.gz"
           sha256sum "${TARBALL_NAME}" > "${TARBALL_NAME}.sha256"
           cat "${TARBALL_NAME}.sha256"
 
-      - name: Sign tarball (GPG, optional)
+      - name: Collect release assets
+        run: |
+          mkdir -p release-assets
+          cp "prism-v${VERSION}.tar.gz" release-assets/
+          cp "prism-v${VERSION}.tar.gz.sha256" release-assets/
+          for dir in bundles/bundle-*/; do
+            if [ -d "$dir" ]; then
+              cp "$dir"/*.tar.gz release-assets/ 2>/dev/null || true
+              cp "$dir"/*.tar.gz.sha256 release-assets/ 2>/dev/null || true
+            fi
+          done
+          ls -lh release-assets/
+
+      - name: Generate release manifest
+        env:
+          R2_BASE_URL: https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev
+        run: |
+          cd release-assets
+          bun run ../scripts/generate-release-manifest.ts
+          cd ..
+          cp "release-assets/manifest.json" "manifest.json"
+          cat manifest.json
+
+      - name: Sign tarball and bundles (GPG, optional)
         if: env.HAS_GPG_KEY == 'true'
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          TARBALL_NAME="prism-v${VERSION}.tar.gz"
           echo "$GPG_PRIVATE_KEY" | gpg --import
-          gpg --batch --yes --armor --detach-sign "${TARBALL_NAME}"
+          for f in release-assets/prism-v${VERSION}*.tar.gz; do
+            gpg --batch --yes --armor --detach-sign "$f"
+          done
 
-      - name: Upload tarball to R2
+      - name: Upload source tarball to R2
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
           npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz" --file "prism-v${VERSION}.tar.gz" --remote
 
-      - name: Upload SHA-256 to R2
+      - name: Upload source SHA-256 to R2
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
           npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz.sha256" --file "prism-v${VERSION}.tar.gz.sha256" --remote
 
-      - name: Upload GPG signature to R2
+      - name: Upload bundle tarballs to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for f in release-assets/prism-v${VERSION}-*.tar.gz; do
+            [ -e "$f" ] || continue
+            npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
+          done
+
+      - name: Upload bundle SHA-256 checksums to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for f in release-assets/prism-v${VERSION}-*.tar.gz.sha256; do
+            [ -e "$f" ] || continue
+            npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
+          done
+
+      - name: Upload GPG signatures to R2
         if: env.HAS_GPG_KEY == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz.asc" --file "prism-v${VERSION}.tar.gz.asc" --remote
+          for f in release-assets/prism-v${VERSION}*.tar.gz.asc; do
+            [ -e "$f" ] || continue
+            npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
+          done
 
-      - name: Update latest.json manifest (stable channel only)
-        if: "!contains(github.ref, '-beta') && !contains(github.ref, '-dev')"
+      - name: Upload manifest to R2
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          TARBALL_URL="https://r2.prism-agent.com/releases/v${VERSION}/prism-v${VERSION}.tar.gz"
-          cat > latest.json << EOF
-          {
-            "version": "${VERSION}",
-            "channel": "stable",
-            "tarball_url": "${TARBALL_URL}",
-            "sha256_url": "${TARBALL_URL}.sha256",
-            "signature_url": "${TARBALL_URL}.asc",
-            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "min_cli_version": "1.0.0"
-          }
-          EOF
-          cat latest.json
-          npx wrangler r2 object put "prism-backups/releases/latest.json" --file latest.json --remote
-
-      - name: Update beta channel manifest
-        if: contains(github.ref, '-beta')
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          TARBALL_URL="https://r2.prism-agent.com/releases/v${VERSION}/prism-v${VERSION}.tar.gz"
-          cat > beta.json << EOF
-          {
-            "version": "${VERSION}",
-            "channel": "beta",
-            "tarball_url": "${TARBALL_URL}",
-            "sha256_url": "${TARBALL_URL}.sha256",
-            "signature_url": "${TARBALL_URL}.asc",
-            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "min_cli_version": "1.0.0"
-          }
-          EOF
-          # Path must match R2_MANIFEST_PATHS.beta in engine/update-utils.ts
-          npx wrangler r2 object put "prism-backups/releases/channel/beta.json" --file beta.json --remote
-
-      - name: Update dev channel manifest
-        if: contains(github.ref, '-dev')
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          TARBALL_URL="https://r2.prism-agent.com/releases/v${VERSION}/prism-v${VERSION}.tar.gz"
-          cat > dev.json << EOF
-          {
-            "version": "${VERSION}",
-            "channel": "dev",
-            "tarball_url": "${TARBALL_URL}",
-            "sha256_url": "${TARBALL_URL}.sha256",
-            "signature_url": "${TARBALL_URL}.asc",
-            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "min_cli_version": "1.0.0"
-          }
-          EOF
-          # Path must match R2_MANIFEST_PATHS.dev in engine/update-utils.ts
-          npx wrangler r2 object put "prism-backups/releases/channel/dev.json" --file dev.json --remote
+          case "${CHANNEL}" in
+            stable)
+              MANIFEST_PATH="prism-backups/releases/latest.json"
+              ;;
+            beta)
+              MANIFEST_PATH="prism-backups/releases/channel/beta.json"
+              ;;
+            dev)
+              MANIFEST_PATH="prism-backups/releases/channel/dev.json"
+              ;;
+            *)
+              echo "Unknown channel: ${CHANNEL}"
+              exit 1
+              ;;
+          esac
+          npx wrangler r2 object put "${MANIFEST_PATH}" --file manifest.json --remote
 
       - name: Create or update GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          # Create release if it doesn't exist, then upload assets
+          ASSETS=$(ls release-assets/* | tr '\n' ' ')
           gh release create "${GITHUB_REF_NAME}" \
             --title "Release ${GITHUB_REF_NAME}" \
             --generate-notes \
             --verify-tag \
-            "prism-v${VERSION}.tar.gz" \
-            "prism-v${VERSION}.tar.gz.sha256" \
+            ${ASSETS} \
             2>/dev/null || \
           gh release upload "${GITHUB_REF_NAME}" \
-            "prism-v${VERSION}.tar.gz" \
-            "prism-v${VERSION}.tar.gz.sha256" \
+            release-assets/* \
             --clobber

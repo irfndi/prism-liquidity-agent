@@ -331,124 +331,138 @@ function snapshotsToTicks(snaps: ReadonlyArray<PoolSnapshot>): HistoryTick[] {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
-const args = parseArgs(process.argv.slice(2));
+async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
+  const args = parseArgs(argv);
 
-log.warn("═══════════════════════════════════════════════════════════════");
-log.warn("  BACKTEST LIMITATIONS — read before interpreting results");
-log.warn("═══════════════════════════════════════════════════════════════");
-log.warn("  • TVL is CONSTANT per pool (current snapshot, not historical).");
-log.warn("    Position share, APR, and volume-auth checks use stale TVL.");
-log.warn("  • This is a simplified rebalancing simulation, NOT the live");
-log.warn("    agent. Missing: EXIT on fee/IL, trailing stop, ENTER logic,");
-log.warn("    risk gates, memory, position sizing, dynamic bin ranges.");
-log.warn("  • Each pool runs independently with $10K. Total PnL is the");
-log.warn("    sum of 6 independent portfolios ($60K deployed, not $10K).");
-log.warn("  • Synthetic bins (all liquiditySupply=1n) make binUtil=1.0");
-log.warn("    always, so the binUtil pre-filter is a no-op.");
-log.warn("  • NO TOKEN PRICE DEPRECIATION: the backtest models no");
-log.warn("    mechanism for the underlying token value to decrease.");
-log.warn("    Portfolio value only changes through fee accrual (+),");
-log.warn("    rebalancing IL (-), and force-exit penalties (-). A pool");
-log.warn("    for a token that dropped 90% would still show positive");
-log.warn("    returns. The reported PnL is a meaningful overestimate.");
-log.warn("═══════════════════════════════════════════════════════════════");
+  log.warn("═══════════════════════════════════════════════════════════════");
+  log.warn("  BACKTEST LIMITATIONS — read before interpreting results");
+  log.warn("═══════════════════════════════════════════════════════════════");
+  log.warn("  • TVL is CONSTANT per pool (current snapshot, not historical).");
+  log.warn("    Position share, APR, and volume-auth checks use stale TVL.");
+  log.warn("  • This is a simplified rebalancing simulation, NOT the live");
+  log.warn("    agent. Missing: EXIT on fee/IL, trailing stop, ENTER logic,");
+  log.warn("    risk gates, memory, position sizing, dynamic bin ranges.");
+  log.warn("  • Each pool runs independently with $10K. Total PnL is the");
+  log.warn("    sum of 6 independent portfolios ($60K deployed, not $10K).");
+  log.warn("  • Synthetic bins (all liquiditySupply=1n) make binUtil=1.0");
+  log.warn("    always, so the binUtil pre-filter is a no-op.");
+  log.warn("  • NO TOKEN PRICE DEPRECIATION: the backtest models no");
+  log.warn("    mechanism for the underlying token value to decrease.");
+  log.warn("    Portfolio value only changes through fee accrual (+),");
+  log.warn("    rebalancing IL (-), and force-exit penalties (-). A pool");
+  log.warn("    for a token that dropped 90% would still show positive");
+  log.warn("    returns. The reported PnL is a meaningful overestimate.");
+  log.warn("═══════════════════════════════════════════════════════════════");
 
-const configs: ReadonlyArray<{ name: string; cfg: BacktestConfig }> = [
-  {
-    name: "C1-conservative",
-    cfg: {
-      halfWidth: 25,
-      driftThreshold: 0.75,
-      minHoldTicks: 144,
-      minNetBenefitUsd: 15,
-      maxRebalances: 20,
+  const configs: ReadonlyArray<{ name: string; cfg: BacktestConfig }> = [
+    {
+      name: "C1-conservative",
+      cfg: {
+        halfWidth: 25,
+        driftThreshold: 0.75,
+        minHoldTicks: 144,
+        minNetBenefitUsd: 15,
+        maxRebalances: 20,
+      },
     },
-  },
-  {
-    name: "C2-balanced",
-    cfg: {
-      halfWidth: 20,
-      driftThreshold: 0.65,
-      minHoldTicks: 72,
-      minNetBenefitUsd: 10,
-      maxRebalances: 30,
+    {
+      name: "C2-balanced",
+      cfg: {
+        halfWidth: 20,
+        driftThreshold: 0.65,
+        minHoldTicks: 72,
+        minNetBenefitUsd: 10,
+        maxRebalances: 30,
+      },
     },
-  },
-  {
-    name: "C3-aggressive",
-    cfg: {
-      halfWidth: 15,
-      driftThreshold: 0.55,
-      minHoldTicks: 36,
-      minNetBenefitUsd: 5,
-      maxRebalances: 50,
+    {
+      name: "C3-aggressive",
+      cfg: {
+        halfWidth: 15,
+        driftThreshold: 0.55,
+        minHoldTicks: 36,
+        minNetBenefitUsd: 5,
+        maxRebalances: 50,
+      },
     },
-  },
-  {
-    name: "C4-wide-patient",
-    cfg: {
-      halfWidth: 35,
-      driftThreshold: 0.8,
-      minHoldTicks: 288,
-      minNetBenefitUsd: 25,
-      maxRebalances: 10,
+    {
+      name: "C4-wide-patient",
+      cfg: {
+        halfWidth: 35,
+        driftThreshold: 0.8,
+        minHoldTicks: 288,
+        minNetBenefitUsd: 25,
+        maxRebalances: 10,
+      },
     },
-  },
-];
+  ];
 
-for (const pool of args.pools) {
-  log.info(`\n=== Pool: ${pool} (source=${args.source}, days=${args.days}) ===\n`);
+  for (const pool of args.pools) {
+    log.info(`\n=== Pool: ${pool} (source=${args.source}, days=${args.days}) ===\n`);
 
-  let ticks: HistoryTick[];
-  if (args.source === "synthetic") {
-    ticks = generateMockHistory(pool, args.days, 100_000);
-  } else {
-    const endMs = Date.now();
-    const snaps = await loadSnapshots(args.dbPath, pool, endMs, args.days);
-    if (snaps.length === 0) {
-      log.info(
-        `  no snapshots for ${pool} in last ${args.days}d (db=${args.dbPath}). ` +
-          `Did you run the agent with ENABLE_SNAPSHOT_CAPTURE=true?`,
-      );
-      continue;
+    let ticks: HistoryTick[];
+    if (args.source === "synthetic") {
+      ticks = generateMockHistory(pool, args.days, 100_000);
+    } else {
+      const endMs = Date.now();
+      const snaps = await loadSnapshots(args.dbPath, pool, endMs, args.days);
+      if (snaps.length === 0) {
+        log.info(
+          `  no snapshots for ${pool} in last ${args.days}d (db=${args.dbPath}). ` +
+            `Did you run the agent with ENABLE_SNAPSHOT_CAPTURE=true?`,
+        );
+        continue;
+      }
+      ticks = snapshotsToTicks(snaps);
+      log.info(`  loaded ${snaps.length} snapshots from ${args.dbPath}`);
     }
-    ticks = snapshotsToTicks(snaps);
-    log.info(`  loaded ${snaps.length} snapshots from ${args.dbPath}`);
+
+    const results = configs.map(({ name, cfg }) => ({
+      name,
+      result: runBacktestFromTicks(ticks, cfg),
+    }));
+
+    const table = results.map(({ name, result: r }) => ({
+      Config: name,
+      "Net PnL": `$${r.netPnlUsd.toFixed(0)}`,
+      Fees: `$${r.totalFeesUsd.toFixed(0)}`,
+      IL: `$${r.totalIlUsd.toFixed(0)}`,
+      Rebal: r.totalRebalances,
+      "Win %": `${(r.winRate * 100).toFixed(0)}%`,
+      Sharpe: r.sharpeRatio.toFixed(2),
+    }));
+    log.info(`Results table: ${JSON.stringify(table)}`);
+
+    const best = results.reduce((best, curr) => {
+      if (curr.result.winRate > best.result.winRate) return curr;
+      if (
+        curr.result.winRate === best.result.winRate &&
+        curr.result.netPnlUsd > best.result.netPnlUsd
+      ) {
+        return curr;
+      }
+      return best;
+    });
+
+    log.info("Best config", {
+      pool,
+      config: best.name,
+      netPnlUsd: best.result.netPnlUsd.toFixed(2),
+      winRate: (best.result.winRate * 100).toFixed(1) + "%",
+      rebalances: best.result.totalRebalances,
+    });
+    log.info(`  Best: ${best.name} (net=$${best.result.netPnlUsd.toFixed(0)})`);
   }
+}
 
-  const results = configs.map(({ name, cfg }) => ({
-    name,
-    result: runBacktestFromTicks(ticks, cfg),
-  }));
+export { runBacktest };
 
-  const table = results.map(({ name, result: r }) => ({
-    Config: name,
-    "Net PnL": `$${r.netPnlUsd.toFixed(0)}`,
-    Fees: `$${r.totalFeesUsd.toFixed(0)}`,
-    IL: `$${r.totalIlUsd.toFixed(0)}`,
-    Rebal: r.totalRebalances,
-    "Win %": `${(r.winRate * 100).toFixed(0)}%`,
-    Sharpe: r.sharpeRatio.toFixed(2),
-  }));
-  log.info(`Results table: ${JSON.stringify(table)}`);
-
-  const best = results.reduce((best, curr) => {
-    if (curr.result.winRate > best.result.winRate) return curr;
-    if (
-      curr.result.winRate === best.result.winRate &&
-      curr.result.netPnlUsd > best.result.netPnlUsd
-    ) {
-      return curr;
-    }
-    return best;
+const isDirectBacktestExecution =
+  typeof Bun !== "undefined" &&
+  (Bun.main?.endsWith("ops/backtest.ts") || Bun.main?.endsWith("ops/backtest.js"));
+if (isDirectBacktestExecution) {
+  runBacktest(process.argv.slice(2)).catch((err) => {
+    log.error("Backtest failed", { error: err instanceof Error ? err.message : String(err) });
+    process.exitCode = 1;
   });
-
-  log.info("Best config", {
-    pool,
-    config: best.name,
-    netPnlUsd: best.result.netPnlUsd.toFixed(2),
-    winRate: (best.result.winRate * 100).toFixed(1) + "%",
-    rebalances: best.result.totalRebalances,
-  });
-  log.info(`  Best: ${best.name} (net=$${best.result.netPnlUsd.toFixed(0)})`);
 }
