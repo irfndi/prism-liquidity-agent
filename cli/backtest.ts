@@ -1,5 +1,8 @@
 import { Command } from "commander";
+import { createLogger } from "../engine/logger.js";
 import { runBacktest } from "../ops/backtest.js";
+
+const logger = createLogger("backtest");
 
 export const backtestCommand = new Command("backtest")
   .description("Run historical simulation")
@@ -8,7 +11,7 @@ export const backtestCommand = new Command("backtest")
   .option("-s, --source <type>", 'Data source: "synthetic" or "replay"', "synthetic")
   .option("--db <path>", "SQLite database path for replay source", "./prism.db")
   .action(async () => {
-    console.log("Starting backtest...");
+    logger.info("Starting backtest...");
     // Filter out the subcommand name so the underlying backtest parser sees only
     // its own flags (e.g. --days, --pools).
     const args = process.argv.slice(2).filter((a) => a !== "backtest");

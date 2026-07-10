@@ -104,7 +104,7 @@ function runCommandOutput(
 }
 
 async function downloadFile(url: string, dest: string): Promise<void> {
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
   if (!response.ok) {
     throw new UpdateAbort(`Download failed: ${response.status} ${response.statusText}`);
   }
@@ -248,7 +248,9 @@ export const updateCommand = new Command("update")
         );
       }
       console.log("Verifying SHA-256 checksum...");
-      const expectedHashResponse = await fetch(release.bundleSha256Url);
+      const expectedHashResponse = await fetch(release.bundleSha256Url, {
+        signal: AbortSignal.timeout(15_000),
+      });
       if (!expectedHashResponse.ok) {
         throw new UpdateAbort(
           `Failed to fetch SHA-256 checksum: ${expectedHashResponse.status} ${expectedHashResponse.statusText}`,
