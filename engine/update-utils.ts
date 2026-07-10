@@ -233,7 +233,9 @@ export function githubReleaseToInfo(
   const tarballAsset = release.assets.find(
     (a) => a.name.endsWith(".tar.gz") && !a.name.endsWith(".sha256") && !a.name.endsWith(".asc"),
   );
-  const sha256Asset = release.assets.find((a) => a.name.endsWith(".sha256"));
+  const sha256Asset = tarballAsset
+    ? release.assets.find((a) => a.name === `${tarballAsset.name}.sha256`)
+    : release.assets.find((a) => a.name.endsWith(".sha256"));
   const sigAsset = release.assets.find((a) => a.name.endsWith(".asc"));
   const bundleAsset = release.assets.find(
     (a) =>

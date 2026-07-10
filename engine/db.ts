@@ -4,8 +4,6 @@ import path from "path";
 import fs from "fs";
 import { createLogger } from "./logger.js";
 import { getEmbeddedVec0Path } from "./sqlite-vec-embedded.js";
-import { tmpdir } from "os";
-import { createHash } from "crypto";
 
 const logger = createLogger("db");
 
