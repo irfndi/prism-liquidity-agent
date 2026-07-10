@@ -4,6 +4,7 @@ import {
   isValidVersion,
   githubReleaseToInfo,
   r2ManifestToInfo,
+  getPlatformKey,
 } from "../engine/update-utils.js";
 
 describe("update-utils", () => {
@@ -97,11 +98,49 @@ describe("update-utils", () => {
       expect(info.signatureUrl).toBe("");
       expect(info.channel).toBe("beta");
     });
+
+    it("selects platform-specific bundle asset even when .sha256 appears first", () => {
+      const platformKey = getPlatformKey();
+      const release = {
+        tag_name: "v1.2.3",
+        html_url: "https://github.com/irfndi/prism-liquidity-agent/releases/tag/v1.2.3",
+        body: "Release notes",
+        published_at: "2024-01-01T00:00:00Z",
+        prerelease: false,
+        assets: [
+          {
+            name: "prism-v1.2.3.tar.gz",
+            browser_download_url: "https://example.com/prism-v1.2.3.tar.gz",
+          },
+          {
+            name: "prism-v1.2.3.tar.gz.sha256",
+            browser_download_url: "https://example.com/prism-v1.2.3.tar.gz.sha256",
+          },
+          {
+            name: `prism-v1.2.3-${platformKey}.tar.gz.sha256`,
+            browser_download_url: `https://example.com/prism-v1.2.3-${platformKey}.tar.gz.sha256`,
+          },
+          {
+            name: `prism-v1.2.3-${platformKey}.tar.gz`,
+            browser_download_url: `https://example.com/prism-v1.2.3-${platformKey}.tar.gz`,
+          },
+        ],
+      };
+
+      const info = githubReleaseToInfo(release, "stable");
+      expect(info.bundleUrl).toBe(`https://example.com/prism-v1.2.3-${platformKey}.tar.gz`);
+      expect(info.bundleSha256Url).toBe(
+        `https://example.com/prism-v1.2.3-${platformKey}.tar.gz.sha256`,
+      );
+      expect(info.tarballUrl).toBe("https://example.com/prism-v1.2.3.tar.gz");
+      expect(info.sha256Url).toBe("https://example.com/prism-v1.2.3.tar.gz.sha256");
+      expect(info.signatureUrl).toBe("");
+    });
   });
 
   describe("r2ManifestToInfo", () => {
     it("maps R2 manifest to ReleaseInfo correctly", () => {
-      const platformKey = `${process.platform}-${process.arch}`;
+      const platformKey = getPlatformKey();
       const manifest = {
         version: "1.2.3",
         channel: "stable" as const,
@@ -132,7 +171,7 @@ describe("update-utils", () => {
     });
 
     it("handles missing optional signature_url", () => {
-      const platformKey = `${process.platform}-${process.arch}`;
+      const platformKey = getPlatformKey();
       const manifest = {
         version: "1.0.0",
         channel: "dev" as const,
