@@ -15,7 +15,30 @@ permissions:
   packages: read
 
 jobs:
+  version-guard:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify package.json version matches tag
+        id: extract
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::package.json version ($PKG_VERSION) does not match tag ($GITHUB_REF_NAME). Bump package.json before tagging."
+            exit 1
+          fi
+          echo "→ package.json version matches tag: ${VERSION}"
+
   test:
+    needs: version-guard
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -41,7 +64,9 @@ jobs:
         run: bun run test
 
   build-bundles:
-    needs: test
+    needs: [version-guard, test]
+    env:
+      VERSION: ${{ needs.version-guard.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -85,18 +110,18 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build-bundles
+    needs: [version-guard, build-bundles]
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version-guard.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Set VERSION and CHANNEL
+      - name: Set CHANNEL
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
           if [[ "${GITHUB_REF_NAME}" == *-beta* ]]; then
             echo "CHANNEL=beta" >> "$GITHUB_ENV"
           elif [[ "${GITHUB_REF_NAME}" == *-dev* ]]; then
@@ -126,6 +151,9 @@ jobs:
           pattern: bundle-*
           merge-multiple: false
 
+      - name: Generate embedded sqlite-vec extension
+        run: bun run scripts/generate-vec-embed.ts linux x64
+
       - name: Build source tarball
         run: |
           TARBALL_NAME="prism-v${VERSION}.tar.gz"
@@ -135,6 +163,7 @@ jobs:
             --warning=no-file-changed \
             --exclude=node_modules \
             --exclude=dist \
+            --exclude=engine/sqlite-vec-embedded.ts \
             --exclude=.git \
             --exclude=*.db \
             --exclude=*.db-journal \
@@ -175,12 +204,23 @@ jobs:
       - name: Generate release manifest
         env:
           R2_BASE_URL: https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev
+          REQUIRE_ALL_BUNDLES: "true"
         run: |
           cd release-assets
           bun run ../scripts/generate-release-manifest.ts
           cd ..
           cp "release-assets/manifest.json" "manifest.json"
           cat manifest.json
+
+      - name: Verify release manifest completeness
+        run: |
+          BUNDLE_COUNT=$(jq '.bundles | length' manifest.json)
+          if [ "$BUNDLE_COUNT" -lt 4 ]; then
+            echo "::error::Manifest has only ${BUNDLE_COUNT} platform bundles; expected 4"
+            jq '.bundles | keys' manifest.json
+            exit 1
+          fi
+          echo "✓ Manifest has ${BUNDLE_COUNT} platform bundles"
 
       - name: Sign tarball and bundles (GPG, optional)
         if: env.HAS_GPG_KEY == 'true'

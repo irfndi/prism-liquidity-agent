@@ -28,7 +28,9 @@ function sha256(file: string): string {
 
 const pkgPath = path.join(repoRoot, "package.json");
 const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as { version: string };
-const version = pkg.version;
+// In CI the git tag is the source of truth; package.json may be stale at the
+// tagged commit. Prefer VERSION env so bundles are named after the release.
+const version = process.env.VERSION ?? pkg.version;
 
 // Generate embedded sqlite-vec fallback for the current platform.
 if (fs.existsSync(vec0Path)) {

@@ -3,10 +3,13 @@ import {
   createWriteStream,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "fs";
 import { pipeline } from "stream/promises";
@@ -14,11 +17,13 @@ import { dirname, join } from "path";
 import { tmpdir, homedir } from "os";
 import { createHash } from "crypto";
 import { getCurrentVersion } from "../engine/version.js";
+import { isSourceInstall } from "../engine/install-method.js";
 import {
   compareVersions,
   isValidVersion,
   fetchLatestRelease,
   R2_PUBLIC_URL,
+  type ReleaseInfo,
 } from "../engine/update-utils.js";
 import { Effect } from "effect";
 import { createLogger } from "../engine/logger.js";
@@ -31,6 +36,7 @@ if (typeof Bun === "undefined") {
 const logger = createLogger("update");
 
 const SMOKE_TIMEOUT_MS = 60_000;
+const BUILD_TIMEOUT_MS = 600_000;
 
 class UpdateAbort extends Error {
   constructor(
@@ -128,6 +134,48 @@ function verifyChecksum(bundlePath: string, expectedHash: string): void {
   }
 }
 
+async function fetchAndValidateChecksum(url: string): Promise<string> {
+  const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+  if (!response.ok) {
+    throw new UpdateAbort(
+      `Failed to fetch SHA-256 checksum: ${response.status} ${response.statusText}`,
+    );
+  }
+  const checksumText = (await response.text()).trim();
+  if (!checksumText) {
+    throw new UpdateAbort("SHA-256 checksum file is empty");
+  }
+  const [expectedHash] = checksumText.split(/\s+/);
+  if (!expectedHash || !/^[a-fA-F0-9]{64}$/.test(expectedHash)) {
+    throw new UpdateAbort(
+      `SHA-256 checksum file is malformed: ${checksumText.slice(0, 32)}`,
+    );
+  }
+  return expectedHash;
+}
+
+async function downloadAndVerify(
+  url: string,
+  sha256Url: string | undefined,
+  bundlePath: string,
+  source: "r2" | "github",
+): Promise<void> {
+  console.log(`Downloading from ${source === "r2" ? "R2" : "GitHub"}...`);
+  await downloadFile(url, bundlePath);
+  console.log(`✓ Downloaded to ${bundlePath}`);
+
+  if (!sha256Url) {
+    throw new UpdateAbort(
+      "Release manifest missing SHA-256 URL — refusing to install without integrity check",
+    );
+  }
+
+  console.log("Verifying SHA-256 checksum...");
+  const expectedHash = await fetchAndValidateChecksum(sha256Url);
+  verifyChecksum(bundlePath, expectedHash);
+  console.log("✓ SHA-256 checksum verified");
+}
+
 function extractTarball(tarballPath: string, destDir: string): void {
   mkdirSync(destDir, { recursive: true });
   runCommand("tar", ["-xzf", tarballPath, "-C", destDir]);
@@ -188,6 +236,193 @@ function smokeTest(wrapperBin: string, skipSmokeTest: boolean): void {
   console.log("✓ Smoke test passed");
 }
 
+function resolveInstallRoot(): string {
+  try {
+    const wrapperBin = resolveWrapperBin();
+    const realPath = realpathSync(wrapperBin);
+    const candidate = dirname(dirname(realPath));
+    if (isSourceInstall(candidate)) return candidate;
+  } catch {
+    // Fall through to argv[1] fallback and finally the default install dir.
+  }
+
+  const main = process.argv[1] ?? "";
+  if (main) {
+    try {
+      const mainReal = realpathSync(main);
+      const mainCandidate = dirname(dirname(mainReal));
+      if (isSourceInstall(mainCandidate)) return mainCandidate;
+    } catch {
+      // Fall through to default install dir.
+    }
+  }
+
+  return resolveInstallDir();
+}
+
+function isWrapperSymlink(wrapperBin: string): boolean {
+  try {
+    return lstatSync(wrapperBin).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function rewriteWrapperSymlink(wrapperBin: string, sourceDir: string): void {
+  try {
+    if (!lstatSync(wrapperBin).isSymbolicLink()) return;
+    rmSync(wrapperBin);
+    symlinkSync(join(sourceDir, "cli", "index.ts"), wrapperBin);
+  } catch {
+    // Best-effort: if the wrapper isn't a symlink or can't be rewritten,
+    // leave it for the user to fix.
+  }
+}
+
+function findSourceRoot(extractedDir: string): string {
+  const candidates = [
+    extractedDir,
+    join(extractedDir, "prism"),
+    join(extractedDir, "prism-liquidity-agent"),
+  ];
+  for (const dir of candidates) {
+    if (
+      existsSync(join(dir, "package.json")) &&
+      existsSync(join(dir, "engine")) &&
+      existsSync(join(dir, "cli", "index.ts"))
+    ) {
+      return dir;
+    }
+  }
+  throw new UpdateAbort(
+    "Extracted source tarball does not contain a valid Prism source tree",
+  );
+}
+
+function preserveUserData(sourceDir: string, destDir: string): void {
+  const items = [".env", "prism.db", "prism.db-wal", "prism.db-shm", "logs"];
+  for (const item of items) {
+    const src = join(sourceDir, item);
+    const dest = join(destDir, item);
+    if (existsSync(src)) {
+      cpSync(src, dest, { recursive: true });
+    }
+  }
+}
+
+async function updateFromSource(
+  release: ReleaseInfo,
+  currentDir: string,
+  workDir: string,
+  skipSmokeTest: boolean,
+): Promise<void> {
+  console.log("Source install detected; updating from source tarball...");
+
+  if (!release.tarballUrl) {
+    throw new UpdateAbort(
+      `No source tarball URL available for version ${release.version}. ` +
+        `Please reinstall with the latest install script.`,
+    );
+  }
+
+  const bundleName = `prism-v${release.version}.tar.gz`;
+  const bundlePath = join(workDir, bundleName);
+
+  await downloadAndVerify(release.tarballUrl, release.sha256Url, bundlePath, release.source);
+
+  console.log("Extracting source tarball...");
+  const extractedDir = join(workDir, "extracted");
+  extractTarball(bundlePath, extractedDir);
+  const sourceRoot = findSourceRoot(extractedDir);
+
+  console.log("Preserving user data (.env, prism.db, logs)...");
+  preserveUserData(currentDir, sourceRoot);
+
+  console.log("Installing dependencies in new source tree...");
+  runCommand("bun", ["install"], { cwd: sourceRoot, timeout: BUILD_TIMEOUT_MS });
+
+  console.log("Building new source tree...");
+  runCommand("bun", ["run", "build"], { cwd: sourceRoot, timeout: BUILD_TIMEOUT_MS });
+
+  const wrapperBin = resolveWrapperBin();
+  const isSymlink = isWrapperSymlink(wrapperBin);
+  const backupDir = atomicReplaceInstall(currentDir, sourceRoot);
+
+  try {
+    rewriteWrapperSymlink(wrapperBin, currentDir);
+    smokeTest(wrapperBin, skipSmokeTest);
+  } catch (smokeErr) {
+    console.error("Smoke test failed — rolling back");
+    if (existsSync(currentDir)) {
+      rmSync(currentDir, { recursive: true, force: true });
+    }
+    if (existsSync(backupDir)) {
+      renameSync(backupDir, currentDir);
+    }
+    if (isSymlink && existsSync(wrapperBin)) {
+      rewriteWrapperSymlink(wrapperBin, currentDir);
+    }
+    throw new UpdateAbort(
+      `Smoke test failed — rolled back to previous version. ` +
+        `Error: ${smokeErr instanceof Error ? smokeErr.message : String(smokeErr)}`,
+    );
+  }
+
+  if (existsSync(backupDir)) {
+    rmSync(backupDir, { recursive: true, force: true });
+  }
+}
+
+async function updateFromBundle(
+  release: ReleaseInfo,
+  workDir: string,
+  skipSmokeTest: boolean,
+): Promise<void> {
+  if (!release.bundleUrl) {
+    throw new UpdateAbort(
+      `No bundle URL available for version ${release.version}. ` +
+        `Please reinstall with the latest install script.`,
+    );
+  }
+
+  const bundleName = `prism-v${release.version}.tar.gz`;
+  const bundlePath = join(workDir, bundleName);
+
+  await downloadAndVerify(release.bundleUrl, release.bundleSha256Url, bundlePath, release.source);
+
+  console.log("Extracting bundle...");
+  const extractedDir = join(workDir, "extracted");
+  extractTarball(bundlePath, extractedDir);
+  const bundleRoot = findBundleRoot(extractedDir);
+
+  const installDir = resolveInstallDir();
+  preserveUserData(installDir, bundleRoot);
+
+  console.log("Installing bundle...");
+  const backupDir = atomicReplaceInstall(installDir, bundleRoot);
+
+  const wrapperBin = resolveWrapperBin();
+  try {
+    smokeTest(wrapperBin, skipSmokeTest);
+  } catch (smokeErr) {
+    console.error("Smoke test failed — rolling back");
+    if (existsSync(installDir)) {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+    if (existsSync(backupDir)) {
+      renameSync(backupDir, installDir);
+    }
+    throw new UpdateAbort(
+      `Smoke test failed — rolled back to previous version. ` +
+        `Error: ${smokeErr instanceof Error ? smokeErr.message : String(smokeErr)}`,
+    );
+  }
+
+  if (existsSync(backupDir)) {
+    rmSync(backupDir, { recursive: true, force: true });
+  }
+}
+
 export const updateCommand = new Command("update")
   .description("Check for and apply updates")
   .option("--check-only", "Only check for updates, don't apply")
@@ -232,68 +467,15 @@ export const updateCommand = new Command("update")
         return;
       }
 
-      if (!release.bundleUrl) {
-        throw new UpdateAbort(
-          `No bundle URL available for version ${latest}. ` +
-            `Please reinstall with the latest install script.`,
-        );
-      }
-
       workDir = join(tmpdir(), `prism-update-${Date.now()}`);
       mkdirSync(workDir, { recursive: true });
-      const bundleName = `prism-v${latest}.tar.gz`;
-      const bundlePath = join(workDir, bundleName);
 
-      console.log(`Downloading from ${release.source === "r2" ? "R2" : "GitHub"}...`);
-      await downloadFile(release.bundleUrl, bundlePath);
-      console.log(`✓ Downloaded to ${bundlePath}`);
-
-      if (!release.bundleSha256Url) {
-        throw new UpdateAbort(
-          `Release manifest missing bundleSha256Url — refusing to install ${latest} without integrity check`,
-        );
-      }
-      console.log("Verifying SHA-256 checksum...");
-      const expectedHashResponse = await fetch(release.bundleSha256Url, {
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!expectedHashResponse.ok) {
-        throw new UpdateAbort(
-          `Failed to fetch SHA-256 checksum: ${expectedHashResponse.status} ${expectedHashResponse.statusText}`,
-        );
-      }
-      const expectedHash = (await expectedHashResponse.text()).trim().split(/\s+/)[0] ?? "";
-      verifyChecksum(bundlePath, expectedHash);
-      console.log("✓ SHA-256 checksum verified");
-
-      console.log("Extracting bundle...");
-      const extractedDir = join(workDir, "extracted");
-      extractTarball(bundlePath, extractedDir);
-      const bundleRoot = findBundleRoot(extractedDir);
-
-      console.log("Installing bundle...");
-      const installDir = resolveInstallDir();
-      const backupDir = atomicReplaceInstall(installDir, bundleRoot);
-
-      const wrapperBin = resolveWrapperBin();
-      try {
-        smokeTest(wrapperBin, options.skipSmokeTest as boolean);
-      } catch (smokeErr) {
-        console.error("Smoke test failed — rolling back");
-        if (existsSync(installDir)) {
-          rmSync(installDir, { recursive: true, force: true });
-        }
-        if (existsSync(backupDir)) {
-          renameSync(backupDir, installDir);
-        }
-        throw new UpdateAbort(
-          `Smoke test failed — rolled back to previous version. ` +
-            `Error: ${smokeErr instanceof Error ? smokeErr.message : String(smokeErr)}`,
-        );
-      }
-
-      if (existsSync(backupDir)) {
-        rmSync(backupDir, { recursive: true, force: true });
+      const installRoot = resolveInstallRoot();
+      const fromSource = isSourceInstall(installRoot);
+      if (fromSource) {
+        await updateFromSource(release, installRoot, workDir, options.skipSmokeTest as boolean);
+      } else {
+        await updateFromBundle(release, workDir, options.skipSmokeTest as boolean);
       }
 
       logger.info(`Updated to ${latest} from ${release.source}`);

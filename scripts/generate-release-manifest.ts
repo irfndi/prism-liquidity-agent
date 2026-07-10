@@ -5,7 +5,7 @@ const version = process.env.VERSION ?? "";
 const channel = (process.env.CHANNEL ?? "stable") as "stable" | "beta" | "dev";
 const r2Base = process.env.R2_BASE_URL ?? "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev";
 const outFile = process.env.OUT_FILE ?? "manifest.json";
-const requireAllBundles = (process.env.REQUIRE_ALL_BUNDLES ?? "false") === "true";
+const requireAllBundles = (process.env.REQUIRE_ALL_BUNDLES ?? "true") === "true";
 
 if (!version) {
   console.error("VERSION env is required");
