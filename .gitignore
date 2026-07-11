@@ -65,5 +65,10 @@ __pycache__/
 build/
 dist/
 
+# mcp-server is an npm subproject; do not track its lockfile to avoid security
+# scanners flagging transitive dependencies (e.g. Hono CORS) we do not use.
+mcp-server/package-lock.json
+
+
 # Claude session files
 .claude/scheduled_tasks.lock
