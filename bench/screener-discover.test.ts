@@ -20,6 +20,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     walletPrivateKey: "",
     heliusApiKey: "",
     solanaRpcUrl: "https://api.mainnet.helius-rpc.com",
+    solanaRpcFallbackUrl: "",
     paperTrading: true,
     scanIntervalMs: 600_000,
     minPoolTvlUsd: 50_000,

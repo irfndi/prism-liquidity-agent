@@ -6,13 +6,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { runPrism } from "./exec.js";
 
-const PRISM_DATA_DIR = process.env.PRISM_DATA_DIR ?? path.join(os.homedir(), ".local", "share", "prism");
+function getPrismDataDir(): string {
+  if (process.env.PRISM_DATA_DIR) return process.env.PRISM_DATA_DIR;
+  if (existsSync(path.resolve(".env"))) return process.cwd();
+  return path.join(os.homedir(), ".local", "share", "prism");
+}
 
 function getPrismDbPath(): string {
+  // Keep in sync with engine/paths.ts::getPrismDbPath
   if (process.env.SQLITE_DB_PATH) return process.env.SQLITE_DB_PATH;
-  if (process.env.PRISM_DATA_DIR) return path.join(process.env.PRISM_DATA_DIR, "prism.db");
-  if (existsSync(path.resolve(".env"))) return path.resolve("prism.db");
-  return path.join(PRISM_DATA_DIR, "prism.db");
+  return path.join(getPrismDataDir(), "prism.db");
 }
 
 function openDb(): InstanceType<typeof Database> | null {

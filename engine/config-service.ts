@@ -6,6 +6,7 @@ export interface AppConfig {
   readonly walletPrivateKey: string;
   readonly heliusApiKey: string;
   readonly solanaRpcUrl: string;
+  readonly solanaRpcFallbackUrl: string;
   readonly paperTrading: boolean;
   readonly scanIntervalMs: number;
   readonly minPoolTvlUsd: number;
@@ -174,6 +175,9 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() =>
       isTest ? "https://example.com" : "https://api.mainnet-beta.solana.com",
     ),
+  );
+  const solanaRpcFallbackUrl = yield* Config.string("SOLANA_RPC_FALLBACK_URL").pipe(
+    Effect.orElseSucceed(() => ""),
   );
 
   // If no SOLANA_RPC_URL is configured but a Helius key is present, prefer
@@ -425,6 +429,7 @@ const loadConfig = Effect.gen(function* () {
     walletPrivateKey,
     heliusApiKey,
     solanaRpcUrl,
+    solanaRpcFallbackUrl,
     paperTrading,
     scanIntervalMs,
     minPoolTvlUsd,

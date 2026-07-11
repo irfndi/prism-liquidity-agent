@@ -150,7 +150,13 @@ export function hasVecMemoryTable(db: Database): boolean {
 }
 
 function tryCreateVecMemoryTable(db: Database): void {
-  db.exec(VEC_MEMORY_TABLE_SQL);
+  try {
+    db.exec(VEC_MEMORY_TABLE_SQL);
+  } catch (err) {
+    logger.warn("Failed to create vec_memory table during self-heal", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 function hasColumn(db: Database, table: string, column: string): boolean {

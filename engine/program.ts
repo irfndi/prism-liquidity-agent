@@ -1739,6 +1739,8 @@ export const program = Effect.gen(function* () {
           return { executed: true, error: undefined };
         }
         return { executed: false, error: enterResult.error };
+      } else if (decision.action === "ENTER") {
+        return { executed: false, error: "ENTER decision missing position size" };
       } else if (decision.action === "EXIT") {
         const pos = trackedPositions.get(decision.poolAddress);
         let exited = false;
@@ -1887,8 +1889,9 @@ export const program = Effect.gen(function* () {
           }
           return { executed: false, error: rebalanceResult.error };
         }
+        return { executed: false, error: "REBALANCE requires an existing live position" };
       }
-      return { executed: false, error: undefined };
+      return { executed: false, error: `No live execution path for action: ${decision.action}` };
     });
 
   // ─── Periodic fee claiming ─────────────────────────────────────────────────
