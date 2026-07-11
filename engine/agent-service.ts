@@ -176,7 +176,7 @@ function selectTransport(
     });
   }
 
-  if (runtime === "openclaw" && (detection.openclaw.gatewayRunning || detection.openclaw.available)) {
+  if (runtime === "openclaw" && detection.openclaw.gatewayRunning) {
     return new GatewayTransport({
       url: config.agentGatewayUrl,
       token: config.agentGatewayToken,

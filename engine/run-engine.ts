@@ -4,9 +4,10 @@ import path from "path";
 import { Effect } from "effect";
 import { program, buildLayer } from "./program.js";
 import { ConfigService, ConfigLive } from "./config-service.js";
+import { createLogger } from "./logger.js";
 import { errorReporter } from "./error-reporter.js";
 import { getCurrentVersion } from "./version.js";
-import { getPrismLogsDir } from "./paths.js";
+import { getPrismConfigDir, getPrismDataDir, getPrismDbPath, getPrismEnvPath, getPrismLogsDir } from "./paths.js";
 
 function redirectStdoutStderrToFile(): void {
   const logsDir = getPrismLogsDir();
@@ -30,7 +31,19 @@ function redirectStdoutStderrToFile(): void {
     cb?: unknown,
   ) => boolean;
 
+  let streamBroken = false;
+
+  stream.on("error", (err) => {
+    if (streamBroken) return;
+    streamBroken = true;
+    // Restore original writers so a broken stream doesn't keep swallowing output.
+    process.stdout.write = originalStdoutWrite as typeof process.stdout.write;
+    process.stderr.write = originalStderrWrite as typeof process.stderr.write;
+    process.stderr.write(`[run-engine] log stream error: ${err.message}\n`);
+  });
+
   function safeStreamWrite(chunk: unknown, encoding?: unknown, cb?: unknown): void {
+    if (streamBroken) return;
     try {
       streamWrite(chunk, encoding, cb);
     } catch {
@@ -61,6 +74,10 @@ function ensureError(cause: unknown): Error {
 
 export function runEngine(): Promise<void> {
   errorReporter.setAppVersion(getCurrentVersion());
+
+  const logger = createLogger("run-engine");
+  logger.info(`Prism engine starting — version ${getCurrentVersion()}`);
+  logger.info(`Resolved paths: installDir=${process.env.PRISM_INSTALL_DIR ?? "(not set)"} configDir=${getPrismConfigDir()} dataDir=${getPrismDataDir()} envPath=${getPrismEnvPath()} dbPath=${getPrismDbPath()} logsDir=${getPrismLogsDir()}`);
 
   process.on("uncaughtException", (err) => {
     errorReporter.report(ensureError(err), { severity: "critical" });

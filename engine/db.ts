@@ -6,6 +6,7 @@ import { createLogger } from "./logger.js";
 import { getEmbeddedVec0Path } from "./sqlite-vec-embedded.js";
 
 const logger = createLogger("db");
+let sqliteVecEverFailed = false;
 
 function setupCustomSQLite() {
   if (process.platform === "darwin") {
@@ -59,50 +60,62 @@ export function createDatabase(dbPath = "./prism.db"): Database {
   fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   const db = new Database(dbPath);
   db.exec("PRAGMA journal_mode = WAL;");
+
+  // Load sqlite-vec before migrations so migration v1 can create the vec_memory
+  // virtual table without warning. Extension availability is determined by the
+  // runtime environment and won't change within a process, so a process-wide
+  // flag is used to skip repeated failing attempts.
   let vecLoaded = false;
-  try {
-    loadVec(db);
-    vecLoaded = true;
-  } catch (e) {
-    const envPath = process.env.PRISM_VEC0_PATH;
-    if (envPath) {
-      try {
-        db.loadExtension(envPath);
-        vecLoaded = true;
-      } catch (envErr) {
-        logger.warn("PRISM_VEC0_PATH sqlite-vec extension could not be loaded", {
-          error: envErr instanceof Error ? envErr.message : String(envErr),
-        });
-      }
-    }
-    if (!vecLoaded) {
-      const embeddedPath = getEmbeddedVec0Path();
-      if (embeddedPath) {
+  if (!sqliteVecEverFailed) {
+    try {
+      loadVec(db);
+      vecLoaded = true;
+    } catch (e) {
+      const envPath = process.env.PRISM_VEC0_PATH;
+      if (envPath) {
         try {
-          db.loadExtension(embeddedPath);
+          db.loadExtension(envPath);
           vecLoaded = true;
-        } catch (embeddedErr) {
-          logger.warn("Embedded sqlite-vec extension could not be loaded", {
-            error: embeddedErr instanceof Error ? embeddedErr.message : String(embeddedErr),
+        } catch (envErr) {
+          logger.warn("PRISM_VEC0_PATH sqlite-vec extension could not be loaded", {
+            error: envErr instanceof Error ? envErr.message : String(envErr),
           });
         }
       }
-    }
-    if (!vecLoaded) {
-      logger.warn("sqlite-vec extension could not be loaded", {
-        error: e instanceof Error ? e.message : String(e),
-      });
+      if (!vecLoaded) {
+        const embeddedPath = getEmbeddedVec0Path();
+        if (embeddedPath) {
+          try {
+            db.loadExtension(embeddedPath);
+            vecLoaded = true;
+          } catch (embeddedErr) {
+            logger.warn("Embedded sqlite-vec extension could not be loaded", {
+              error: embeddedErr instanceof Error ? embeddedErr.message : String(embeddedErr),
+            });
+          }
+        }
+      }
+      if (!vecLoaded) {
+        logger.warn("sqlite-vec extension could not be loaded; memory will be disabled", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+        sqliteVecEverFailed = true;
+      }
     }
   }
+
   runMigrations(db);
+
   if (vecLoaded && !hasVecMemoryTable(db)) {
     tryCreateVecMemoryTable(db);
     if (hasVecMemoryTable(db)) {
       logger.info("sqlite-vec vec_memory table self-healed");
     } else {
-      logger.warn("sqlite-vec vec_memory table not queryable after self-heal attempt");
+      logger.warn("sqlite-vec vec_memory table not queryable; memory disabled");
+      sqliteVecEverFailed = true;
     }
   }
+
   return db;
 }
 
