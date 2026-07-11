@@ -23,6 +23,7 @@ function buildLayer(
     walletPrivateKey: "",
     heliusApiKey: "",
     solanaRpcUrl: "",
+    solanaRpcFallbackUrl: "",
     paperTrading: true,
     scanIntervalMs: 600_000,
     minPoolTvlUsd: 50_000,

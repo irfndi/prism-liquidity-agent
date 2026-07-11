@@ -54,6 +54,8 @@ export function getPrismEnvPath(): string {
 }
 
 export function getPrismDbPath(): string {
+  // Keep in sync with mcp-server/src/tools.ts::getPrismDbPath
+  if (process.env.SQLITE_DB_PATH) return process.env.SQLITE_DB_PATH;
   return path.join(getPrismDataDir(), "prism.db");
 }
 

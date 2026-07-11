@@ -97,6 +97,11 @@ export function createDatabase(dbPath = "./prism.db"): Database {
   runMigrations(db);
   if (vecLoaded && !hasVecMemoryTable(db)) {
     tryCreateVecMemoryTable(db);
+    if (hasVecMemoryTable(db)) {
+      logger.info("sqlite-vec vec_memory table self-healed");
+    } else {
+      logger.warn("sqlite-vec vec_memory table not queryable after self-heal attempt");
+    }
   }
   return db;
 }
@@ -147,10 +152,9 @@ export function hasVecMemoryTable(db: Database): boolean {
 function tryCreateVecMemoryTable(db: Database): void {
   try {
     db.exec(VEC_MEMORY_TABLE_SQL);
-    logger.info("sqlite-vec vec_memory table created on self-heal attempt");
-  } catch (e) {
-    logger.warn("sqlite-vec vec_memory table could not be created on self-heal attempt", {
-      error: e instanceof Error ? e.message : String(e),
+  } catch (err) {
+    logger.warn("Failed to create vec_memory table during self-heal", {
+      error: err instanceof Error ? err.message : String(err),
     });
   }
 }

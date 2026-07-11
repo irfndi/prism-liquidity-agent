@@ -11,6 +11,7 @@ import {
   type FeedbackSeverity,
 } from "../engine/services.js";
 import { createLogger } from "../engine/logger.js";
+import { getPrismDbPath } from "../engine/paths.js";
 
 const logger = createLogger("feedback-cli");
 
@@ -40,7 +41,10 @@ function parseSeverity(raw: string | undefined, fallback: FeedbackSeverity): Fee
 
 function buildProgram(): Layer.Layer<FeedbackService | ConfigService, never, never> {
   return Layer.merge(
-    Layer.provide(FeedbackLive, Layer.merge(ConfigLive, DbLive(process.env.SQLITE_DB_PATH))),
+    Layer.provide(
+      FeedbackLive,
+      Layer.merge(ConfigLive, DbLive(process.env.SQLITE_DB_PATH ?? getPrismDbPath())),
+    ),
     ConfigLive,
   );
 }

@@ -14,6 +14,7 @@ function buildAdapterLayer(
     ConfigService,
     defaultAppConfig({
       solanaRpcUrl: "https://api.mainnet.helius-rpc.com",
+    solanaRpcFallbackUrl: "",
       enablePoolDiscovery: true,
       sqliteDbPath: ":memory:",
       autoUpdate: false,

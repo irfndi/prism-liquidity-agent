@@ -18,6 +18,7 @@ function buildAdapterLayerWithWallet(): Layer.Layer<AdapterService, never, never
     defaultAppConfig({
       walletPrivateKey,
       solanaRpcUrl: "https://example.com",
+    solanaRpcFallbackUrl: "",
       sqliteDbPath: ":memory:",
       autoUpdate: false,
       updateCheckIntervalMs: 216_000_000,

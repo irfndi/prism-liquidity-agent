@@ -4,11 +4,12 @@ import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 import type { PositionRecord } from "../engine/db-service.js";
 import { createLogger } from "../engine/logger.js";
+import { getPrismDbPath } from "../engine/paths.js";
 
 const logger = createLogger("portfolio-cli");
 
 function buildProgram(): Layer.Layer<DbService, never, never> {
-  return DbLive(process.env.SQLITE_DB_PATH);
+  return DbLive(process.env.SQLITE_DB_PATH ?? getPrismDbPath());
 }
 
 export interface PortfolioSummary {
