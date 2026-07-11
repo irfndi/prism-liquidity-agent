@@ -30,13 +30,22 @@ function redirectStdoutStderrToFile(): void {
     cb?: unknown,
   ) => boolean;
 
+  function safeStreamWrite(chunk: unknown, encoding?: unknown, cb?: unknown): void {
+    try {
+      streamWrite(chunk, encoding, cb);
+    } catch {
+      // If the log stream write fails, continue so the original stdout/stderr
+      // write below still emits the message.
+    }
+  }
+
   process.stdout.write = function (chunk: unknown, encoding?: unknown, cb?: unknown): boolean {
-    streamWrite(chunk, encoding, cb);
+    safeStreamWrite(chunk, encoding, cb);
     return originalStdoutWrite(chunk, encoding, cb);
   } as typeof process.stdout.write;
 
   process.stderr.write = function (chunk: unknown, encoding?: unknown, cb?: unknown): boolean {
-    streamWrite(chunk, encoding, cb);
+    safeStreamWrite(chunk, encoding, cb);
     return originalStderrWrite(chunk, encoding, cb);
   } as typeof process.stderr.write;
 }
