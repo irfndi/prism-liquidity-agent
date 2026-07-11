@@ -4,6 +4,7 @@ import path from "path";
 import { Effect } from "effect";
 import { program, buildLayer } from "./program.js";
 import { ConfigService, ConfigLive } from "./config-service.js";
+import { createLogger } from "./logger.js";
 import { errorReporter } from "./error-reporter.js";
 import { getCurrentVersion } from "./version.js";
 import { getPrismConfigDir, getPrismDataDir, getPrismDbPath, getPrismEnvPath, getPrismLogsDir } from "./paths.js";
@@ -74,8 +75,9 @@ function ensureError(cause: unknown): Error {
 export function runEngine(): Promise<void> {
   errorReporter.setAppVersion(getCurrentVersion());
 
-  console.info(`Prism engine starting — version ${getCurrentVersion()}`);
-  console.info(`Resolved paths: installDir=${process.env.PRISM_INSTALL_DIR ?? "(not set)"} configDir=${getPrismConfigDir()} dataDir=${getPrismDataDir()} envPath=${getPrismEnvPath()} dbPath=${getPrismDbPath()} logsDir=${getPrismLogsDir()}`);
+  const logger = createLogger("run-engine");
+  logger.info(`Prism engine starting — version ${getCurrentVersion()}`);
+  logger.info(`Resolved paths: installDir=${process.env.PRISM_INSTALL_DIR ?? "(not set)"} configDir=${getPrismConfigDir()} dataDir=${getPrismDataDir()} envPath=${getPrismEnvPath()} dbPath=${getPrismDbPath()} logsDir=${getPrismLogsDir()}`);
 
   process.on("uncaughtException", (err) => {
     errorReporter.report(ensureError(err), { severity: "critical" });
