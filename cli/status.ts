@@ -9,6 +9,7 @@ import { computeSummary, toJsonOutput, type PortfolioSummary } from "./portfolio
 import { createLogger } from "../engine/logger.js";
 
 import { readLockfile, isProcessAlive, findRunningEngineProcess } from "./lockfile.js";
+import { getPrismDbPath } from "../engine/paths.js";
 
 const logger = createLogger("status-cli");
 
@@ -38,7 +39,8 @@ export interface StatusJsonOutput {
 }
 
 function buildProgram(): Layer.Layer<DbService | AuditService | ConfigService, never, never> {
-  const dbLayer = DbLive(process.env.SQLITE_DB_PATH);
+  const dbPath = process.env.SQLITE_DB_PATH ?? getPrismDbPath();
+  const dbLayer = DbLive(dbPath);
   const auditLayer = Layer.provide(AuditLive, dbLayer);
   const configLayer = ConfigLive;
   return Layer.merge(auditLayer, Layer.merge(dbLayer, configLayer));
@@ -84,7 +86,7 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
           if (opts.json) {
             const json: StatusJsonOutput = {
               running: running,
-              dbPath: process.env.SQLITE_DB_PATH ?? "./prism.db",
+              dbPath: process.env.SQLITE_DB_PATH ?? getPrismDbPath(),
               timestamp: new Date().toISOString(),
               agentRuntime: {
                 enabled: config.agentiveMode,
@@ -157,7 +159,7 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
             [
               "Prism Status",
               "============",
-              `  Database:    ${process.env.SQLITE_DB_PATH ?? "./prism.db"}`,
+              `  Database:    ${process.env.SQLITE_DB_PATH ?? getPrismDbPath()}`,
               `  Positions:   ${activePositions.length} active`,
               `  Deposited:   $${summary.totalDepositedUsd.toFixed(2)}`,
               `  Current:     $${summary.totalCurrentValueUsd.toFixed(2)}`,

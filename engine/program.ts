@@ -1467,6 +1467,7 @@ export const program = Effect.gen(function* () {
 
       // Execute
       let executed = false;
+      let executionError: string | undefined = undefined;
 
       // F6: paper-trading validation gate — only blocks ENTER, runs only in live mode
       if (!config.paperTrading && decision.action === "ENTER") {
@@ -1514,19 +1515,23 @@ export const program = Effect.gen(function* () {
           action: decision.action,
           pool: poolAddress,
         });
-        executed = yield* executePaper(
+        const paperResult = yield* executePaper(
           decision,
           pool,
           signalTimestamp,
           signalSnapshotId ?? undefined,
         );
+        executed = paperResult.executed;
+        executionError = paperResult.error;
       } else {
-        executed = yield* executeLive(
+        const liveResult = yield* executeLive(
           decision,
           pool,
           signalTimestamp,
           signalSnapshotId ?? undefined,
         );
+        executed = liveResult.executed;
+        executionError = liveResult.error;
       }
 
       // Audit after execution
@@ -1541,6 +1546,7 @@ export const program = Effect.gen(function* () {
           metrics,
           riskResult,
           executed,
+          error: executionError,
           paperTrading: config.paperTrading,
         })
         .pipe(Effect.catchAll(() => Effect.void));
@@ -1571,7 +1577,7 @@ export const program = Effect.gen(function* () {
     pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
     signalTimestamp?: number,
     signalSnapshotId?: number,
-  ): Effect.Effect<boolean> =>
+  ): Effect.Effect<{ executed: boolean; error: string | undefined }> =>
     Effect.gen(function* () {
       if (decision.action === "ENTER" && decision.positionSizeUsd) {
         const existing = trackedPositions.get(decision.poolAddress);
@@ -1615,7 +1621,10 @@ export const program = Effect.gen(function* () {
             `[PAPER] Skipping EXIT for ${decision.poolAddress} — this is a live position ` +
               `(pubKey: ${pos.positionPubKey}). Switch to live mode to close it on-chain.`,
           );
-          return false;
+          return {
+            executed: false,
+            error: `Skipping EXIT for live position in paper mode: ${decision.poolAddress}`,
+          };
         }
         if (pos?.entrySignalSnapshotId != null) {
           const pnlUsd = pos.currentValueUsd - pos.depositedUsd;
@@ -1640,7 +1649,7 @@ export const program = Effect.gen(function* () {
         trackedPositions.set(decision.poolAddress, updated);
         yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
       }
-      return true;
+      return { executed: true, error: undefined };
     });
 
   // ─── Live execution ────────────────────────────────────────────────────────
@@ -1650,11 +1659,11 @@ export const program = Effect.gen(function* () {
     pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
     signalTimestamp?: number,
     signalSnapshotId?: number,
-  ): Effect.Effect<boolean> =>
+  ): Effect.Effect<{ executed: boolean; error: string | undefined }> =>
     Effect.gen(function* () {
       if (!adapter.hasWallet()) {
         console.error("Live trading enabled but no wallet configured");
-        return false;
+        return { executed: false, error: "Live trading enabled but no wallet configured" };
       }
 
       // F5 allocation gate already caps the number of simultaneously open
@@ -1671,13 +1680,13 @@ export const program = Effect.gen(function* () {
         const solBalance = lamports / 1e9;
         if (solBalance < 0.03) {
           console.warn("Insufficient SOL for gas — skipping ENTER");
-          return false;
+          return { executed: false, error: "Insufficient SOL for gas — skipping ENTER" };
         }
       }
 
       if (decision.action === "ENTER" && decision.positionSizeUsd) {
         const recommended = strategy.recommendBinRange(pool.activeBinId, pool.binStep);
-        const result = yield* adapter
+        const enterResult = yield* adapter
           .enterPosition(
             decision.poolAddress,
             recommended.lowerBinId,
@@ -1692,19 +1701,21 @@ export const program = Effect.gen(function* () {
                 tx: r.txSignature,
               }),
             ),
+            Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
             Effect.catchAll((err) => {
+              const msg = (err as { message?: string }).message ?? String(err);
               console.error("Live ENTER failed", {
                 pool: decision.poolAddress,
-                err: (err as { message?: string }).message ?? String(err),
+                err: msg,
               });
-              return Effect.succeed(null);
+              return Effect.succeed({ result: null, error: msg });
             }),
           );
 
-        if (result) {
+        if (enterResult.result) {
           const pos: PositionRecord = {
             poolAddress: decision.poolAddress,
-            positionPubKey: result.positionPubKey,
+            positionPubKey: enterResult.result.positionPubKey,
             depositedUsd: decision.positionSizeUsd,
             currentValueUsd: decision.positionSizeUsd,
             tokenXSymbol: pool.tokenXSymbol,
@@ -1725,28 +1736,32 @@ export const program = Effect.gen(function* () {
           };
           trackedPositions.set(decision.poolAddress, pos);
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
-          return true;
+          return { executed: true, error: undefined };
         }
-        return false;
+        return { executed: false, error: enterResult.error };
       } else if (decision.action === "EXIT") {
         const pos = trackedPositions.get(decision.poolAddress);
         let exited = false;
+        let exitError: string | undefined = undefined;
         if (pos?.positionPubKey) {
-          const result = yield* adapter.exitPosition(decision.poolAddress, pos.positionPubKey).pipe(
+          const exitResult = yield* adapter.exitPosition(decision.poolAddress, pos.positionPubKey).pipe(
             Effect.tap(() =>
               console.info("Live position exited", {
                 pool: decision.poolAddress,
               }),
             ),
+            Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
             Effect.catchAll((err) => {
+              const msg = (err as { message?: string }).message ?? String(err);
               console.error("Live EXIT failed", {
                 pool: decision.poolAddress,
-                err: (err as { message?: string }).message ?? String(err),
+                err: msg,
               });
-              return Effect.succeed(null);
+              return Effect.succeed({ result: null, error: msg });
             }),
           );
-          exited = result !== null;
+          exited = exitResult.result !== null;
+          exitError = exitResult.error;
         } else {
           exited = true;
         }
@@ -1759,8 +1774,9 @@ export const program = Effect.gen(function* () {
           }
           trackedPositions.delete(decision.poolAddress);
           yield* db.deletePosition(decision.poolAddress).pipe(Effect.catchAll(() => Effect.void));
+          return { executed: true, error: undefined };
         }
-        return exited;
+        return { executed: false, error: exitError };
       } else if (decision.action === "REBALANCE" && decision.rebalanceParams) {
         const pos = trackedPositions.get(decision.poolAddress);
         if (pos?.positionPubKey) {
@@ -1831,7 +1847,7 @@ export const program = Effect.gen(function* () {
             }
           }
 
-          const result = yield* adapter
+          const rebalanceResult = yield* adapter
             .rebalancePosition(
               decision.poolAddress,
               pos.positionPubKey,
@@ -1845,19 +1861,21 @@ export const program = Effect.gen(function* () {
                   newPosition: r.newPositionPubKey,
                 }),
               ),
+              Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
               Effect.catchAll((err) => {
+                const msg = (err as { message?: string }).message ?? String(err);
                 console.error("Live REBALANCE failed", {
                   pool: decision.poolAddress,
-                  err: (err as { message?: string }).message ?? String(err),
+                  err: msg,
                 });
-                return Effect.succeed(null);
+                return Effect.succeed({ result: null, error: msg });
               }),
             );
 
-          if (result) {
+          if (rebalanceResult.result) {
             const updated: PositionRecord = {
               ...pos,
-              positionPubKey: result.newPositionPubKey,
+              positionPubKey: rebalanceResult.result.newPositionPubKey,
               lowerBinId: decision.rebalanceParams.newLowerBinId,
               upperBinId: decision.rebalanceParams.newUpperBinId,
               lastFeeClaimAt: Date.now(),
@@ -1865,12 +1883,12 @@ export const program = Effect.gen(function* () {
             };
             trackedPositions.set(decision.poolAddress, updated);
             yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
-            return true;
+            return { executed: true, error: undefined };
           }
-          return false;
+          return { executed: false, error: rebalanceResult.error };
         }
       }
-      return false;
+      return { executed: false, error: undefined };
     });
 
   // ─── Periodic fee claiming ─────────────────────────────────────────────────

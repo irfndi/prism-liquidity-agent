@@ -30,6 +30,7 @@ import { randomUUID } from "crypto";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const GAS_RESERVE_LAMPORTS = 20_000_000n; // 0.02 SOL reserved for transaction fees
 
 const logger = createLogger("adapter-service");
 
@@ -865,12 +866,22 @@ export const AdapterLive = Layer.effect(
             );
           }
 
-          const maxX = pool.tokenX === SOL_MINT ? nativeSolBalance : balanceX;
+          const maxX =
+            pool.tokenX === SOL_MINT
+              ? nativeSolBalance > GAS_RESERVE_LAMPORTS
+                ? nativeSolBalance - GAS_RESERVE_LAMPORTS
+                : 0n
+              : balanceX;
           if (BigInt(totalXAmount.toString()) > maxX) {
             totalXAmount = new BN(maxX.toString());
           }
 
-          const maxY = pool.tokenY === SOL_MINT ? nativeSolBalance : balanceY;
+          const maxY =
+            pool.tokenY === SOL_MINT
+              ? nativeSolBalance > GAS_RESERVE_LAMPORTS
+                ? nativeSolBalance - GAS_RESERVE_LAMPORTS
+                : 0n
+              : balanceY;
           if (BigInt(totalYAmount.toString()) > maxY) {
             totalYAmount = new BN(maxY.toString());
           }
@@ -904,13 +915,13 @@ export const AdapterLive = Layer.effect(
 
           tx.feePayer = wallet.publicKey;
           const { blockhash } = yield* Effect.tryPromise(() =>
-            rpcGated(() => connection.getLatestBlockhash()),
+            rpcCall(() => connection.getLatestBlockhash()),
           );
           tx.recentBlockhash = blockhash;
           tx.sign(wallet, positionKeypair);
 
           const signature = yield* Effect.tryPromise(() =>
-            rpcGated(() =>
+            rpcCall(() =>
               connection.sendRawTransaction(tx.serialize(), {
                 skipPreflight: false,
                 preflightCommitment: "confirmed",
@@ -919,7 +930,7 @@ export const AdapterLive = Layer.effect(
           );
 
           yield* Effect.tryPromise(() =>
-            rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
+            rpcCall(() => connection.confirmTransaction(signature, "confirmed")),
           );
 
           return {
@@ -968,14 +979,14 @@ export const AdapterLive = Layer.effect(
 
           for (const tx of txs) {
             const { blockhash } = yield* Effect.tryPromise(() =>
-              rpcGated(() => connection.getLatestBlockhash()),
+              rpcCall(() => connection.getLatestBlockhash()),
             );
             tx.feePayer = wallet.publicKey;
             tx.recentBlockhash = blockhash;
             tx.sign(wallet);
 
             const signature = yield* Effect.tryPromise(() =>
-              rpcGated(() =>
+              rpcCall(() =>
                 connection.sendRawTransaction(tx.serialize(), {
                   skipPreflight: false,
                   preflightCommitment: "confirmed",
@@ -983,7 +994,7 @@ export const AdapterLive = Layer.effect(
               ),
             );
             yield* Effect.tryPromise(() =>
-              rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
+              rpcCall(() => connection.confirmTransaction(signature, "confirmed")),
             );
           }
 
@@ -1168,7 +1179,7 @@ export const AdapterLive = Layer.effect(
           const allInstructions = [...claimInstructions, ...transferInstructions];
 
           const { blockhash } = yield* Effect.tryPromise(() =>
-            rpcGated(() => connection.getLatestBlockhash()),
+            rpcCall(() => connection.getLatestBlockhash()),
           );
 
           const messageV0 = new TransactionMessage({
@@ -1181,7 +1192,7 @@ export const AdapterLive = Layer.effect(
           versionedTx.sign([wallet]);
 
           const signature = yield* Effect.tryPromise(() =>
-            rpcGated(() =>
+            rpcCall(() =>
               connection.sendRawTransaction(versionedTx.serialize(), {
                 skipPreflight: false,
                 preflightCommitment: "confirmed",
@@ -1190,7 +1201,7 @@ export const AdapterLive = Layer.effect(
           );
 
           yield* Effect.tryPromise(() =>
-            rpcGated(() => connection.confirmTransaction(signature, "confirmed")),
+            rpcCall(() => connection.confirmTransaction(signature, "confirmed")),
           );
 
           return {
@@ -1406,7 +1417,7 @@ export const AdapterLive = Layer.effect(
             swapTx.sign(wallet!);
 
             const sig = yield* Effect.tryPromise(() =>
-              rpcGated(() =>
+              rpcCall(() =>
                 connection.sendRawTransaction(swapTx.serialize(), {
                   skipPreflight: false,
                   preflightCommitment: "confirmed",
@@ -1415,7 +1426,7 @@ export const AdapterLive = Layer.effect(
             );
 
             yield* Effect.tryPromise(() =>
-              rpcGated(() => connection.confirmTransaction(sig, "confirmed")),
+              rpcCall(() => connection.confirmTransaction(sig, "confirmed")),
             );
             logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
           } catch (err) {

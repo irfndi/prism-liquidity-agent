@@ -1,13 +1,22 @@
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { runPrism } from "./exec.js";
 
-const DEFAULT_DB_PATH = "./prism.db";
+const PRISM_DATA_DIR = process.env.PRISM_DATA_DIR ?? path.join(os.homedir(), ".local", "share", "prism");
+
+function getPrismDbPath(): string {
+  if (process.env.SQLITE_DB_PATH) return process.env.SQLITE_DB_PATH;
+  if (process.env.PRISM_DATA_DIR) return path.join(process.env.PRISM_DATA_DIR, "prism.db");
+  if (existsSync(path.resolve(".env"))) return path.resolve("prism.db");
+  return path.join(PRISM_DATA_DIR, "prism.db");
+}
 
 function openDb(): InstanceType<typeof Database> | null {
-  const dbPath = process.env.SQLITE_DB_PATH ?? DEFAULT_DB_PATH;
+  const dbPath = getPrismDbPath();
   if (!existsSync(dbPath)) {
     return null;
   }
@@ -67,7 +76,7 @@ function registerPrismStatus(server: McpServer): void {
               text: JSON.stringify(
                 {
                   running: true,
-                  dbPath: process.env.SQLITE_DB_PATH ?? DEFAULT_DB_PATH,
+                  dbPath: getPrismDbPath(),
                   positionCount,
                   totalDepositedUsd: totals.total_deposited,
                   totalCurrentValueUsd: totals.total_current,
