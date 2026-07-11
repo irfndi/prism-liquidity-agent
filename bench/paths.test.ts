@@ -38,10 +38,11 @@ describe("paths", () => {
 
     setPrismEntryScriptOverride(path.join(projectRoot, "cli", "index.ts"));
 
-    expect(getPrismConfigDir()).toBe(projectRoot);
-    expect(getPrismDataDir()).toBe(projectRoot);
-    expect(getPrismEnvPath()).toBe(path.join(projectRoot, ".env"));
-    expect(getPrismDbPath()).toBe(path.join(projectRoot, "prism.db"));
+    const realProjectRoot = fs.realpathSync(projectRoot);
+    expect(getPrismConfigDir()).toBe(realProjectRoot);
+    expect(getPrismDataDir()).toBe(realProjectRoot);
+    expect(getPrismEnvPath()).toBe(path.join(realProjectRoot, ".env"));
+    expect(getPrismDbPath()).toBe(path.join(realProjectRoot, "prism.db"));
   });
 
   it("falls back to home dirs when a source project has no .env", () => {

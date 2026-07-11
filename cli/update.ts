@@ -242,7 +242,7 @@ function resolveInstallRoot(): string {
     const realPath = realpathSync(wrapperBin);
     const candidate = dirname(dirname(realPath));
     if (isSourceInstall(candidate)) {
-      console.log(`Detected source install via wrapper: ${candidate}`);
+      logger.debug(`Detected source install via wrapper: ${candidate}`);
       return candidate;
     }
   } catch {
@@ -254,7 +254,7 @@ function resolveInstallRoot(): string {
       const mainReal = realpathSync(main);
       const mainCandidate = dirname(dirname(mainReal));
       if (isSourceInstall(mainCandidate)) {
-        console.log(`Detected source install via entry script: ${mainCandidate}`);
+        logger.debug(`Detected source install via entry script: ${mainCandidate}`);
         return mainCandidate;
       }
     }
@@ -262,7 +262,7 @@ function resolveInstallRoot(): string {
   }
 
   const installDir = resolveInstallDir();
-  console.log(`Falling back to bundle install dir: ${installDir}`);
+  logger.debug(`Falling back to bundle install dir: ${installDir}`);
   return installDir;
 }
 
@@ -275,20 +275,50 @@ function isWrapperSymlink(wrapperBin: string): boolean {
 }
 
 function rewriteWrapperSymlink(wrapperBin: string, sourceDir: string): void {
+  let tempLink: string | undefined;
   try {
     if (!lstatSync(wrapperBin).isSymbolicLink()) return;
-    rmSync(wrapperBin);
-    symlinkSync(join(sourceDir, "cli", "index.ts"), wrapperBin);
-  } catch {
+    const target = join(sourceDir, "cli", "index.ts");
+    tempLink = `${wrapperBin}.tmp-${Date.now()}`;
+    symlinkSync(target, tempLink);
+    renameSync(tempLink, wrapperBin);
+  } catch (error) {
+    const target = join(sourceDir, "cli", "index.ts");
+    logger.warn(
+      `Failed to rewrite source wrapper symlink at "${wrapperBin}" to "${target}"`,
+      { error: error instanceof Error ? error.message : String(error) },
+    );
+    if (tempLink) {
+      try {
+        rmSync(tempLink, { force: true });
+      } catch {
+        // ignore cleanup errors
+      }
+    }
   }
 }
 
 function rewriteBundleWrapperSymlink(wrapperBin: string, installDir: string): void {
+  let tempLink: string | undefined;
   try {
     if (!lstatSync(wrapperBin).isSymbolicLink()) return;
-    rmSync(wrapperBin);
-    symlinkSync(join(installDir, "dist", "cli", "index.mjs"), wrapperBin);
-  } catch {
+    const target = join(installDir, "dist", "cli", "index.mjs");
+    tempLink = `${wrapperBin}.tmp-${Date.now()}`;
+    symlinkSync(target, tempLink);
+    renameSync(tempLink, wrapperBin);
+  } catch (error) {
+    const target = join(installDir, "dist", "cli", "index.mjs");
+    logger.warn(
+      `Failed to rewrite bundle wrapper symlink at "${wrapperBin}" to "${target}"`,
+      { error: error instanceof Error ? error.message : String(error) },
+    );
+    if (tempLink) {
+      try {
+        rmSync(tempLink, { force: true });
+      } catch {
+        // ignore cleanup errors
+      }
+    }
   }
 }
 

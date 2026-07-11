@@ -32,7 +32,36 @@ function resolveEntryScript(): string {
 function resolveProjectRoot(): string {
   const entry = resolveEntryScript();
   if (!entry) return process.cwd();
-  return path.resolve(path.dirname(path.dirname(entry)));
+
+  const realEntry = path.resolve(fs.realpathSync(entry));
+  const entryDir = path.dirname(realEntry);
+  const entryDirName = path.basename(entryDir);
+  const parentDir = path.dirname(entryDir);
+
+  // Explicitly support the two known entry layouts so we don't rely on a
+  // blind two-level dirname assumption that breaks for bundled installs.
+  const entryFile = path.basename(realEntry);
+  if (entryFile === "index.ts" && entryDirName === "cli") {
+    return parentDir;
+  }
+  if (
+    entryFile === "index.mjs" &&
+    entryDirName === "cli" &&
+    path.basename(parentDir) === "dist"
+  ) {
+    return path.dirname(parentDir);
+  }
+
+  // Fallback: walk up from the entry script looking for a Prism source tree.
+  let dir = entryDir;
+  while (dir !== path.dirname(dir)) {
+    if (isSourceInstall(dir)) {
+      return dir;
+    }
+    dir = path.dirname(dir);
+  }
+
+  return process.cwd();
 }
 
 function isRunningFromSource(): boolean {
