@@ -13,18 +13,25 @@ import {
 describe("paths", () => {
   const originalConfigDir = process.env.PRISM_CONFIG_DIR;
   const originalDataDir = process.env.PRISM_DATA_DIR;
+  const originalSqliteDbPath = process.env.SQLITE_DB_PATH;
   let tmpHome: string;
 
   beforeEach(() => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "prism-paths-"));
     process.env.PRISM_CONFIG_DIR = path.join(tmpHome, ".config", "prism");
     process.env.PRISM_DATA_DIR = path.join(tmpHome, ".local", "share", "prism");
+    delete process.env.SQLITE_DB_PATH;
     setPrismEntryScriptOverride(undefined);
   });
 
   afterEach(() => {
     process.env.PRISM_CONFIG_DIR = originalConfigDir;
     process.env.PRISM_DATA_DIR = originalDataDir;
+    if (originalSqliteDbPath === undefined) {
+      delete process.env.SQLITE_DB_PATH;
+    } else {
+      process.env.SQLITE_DB_PATH = originalSqliteDbPath;
+    }
     setPrismEntryScriptOverride(undefined);
   });
 
