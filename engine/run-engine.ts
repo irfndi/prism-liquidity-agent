@@ -14,11 +14,6 @@ function redirectStdoutStderrToFile(): void {
   const logPath = path.join(logsDir, "engine.log");
   const stream = fs.createWriteStream(logPath, { flags: "a" });
 
-  stream.on("error", (err) => {
-    // Use original stderr to avoid recursive failure if the audit stream is broken.
-    process.stderr.write(`[run-engine] log stream error: ${err.message}\n`);
-  });
-
   const originalStdoutWrite = process.stdout.write.bind(process.stdout) as (
     chunk: unknown,
     encoding?: unknown,
@@ -35,7 +30,19 @@ function redirectStdoutStderrToFile(): void {
     cb?: unknown,
   ) => boolean;
 
+  let streamBroken = false;
+
+  stream.on("error", (err) => {
+    if (streamBroken) return;
+    streamBroken = true;
+    // Restore original writers so a broken stream doesn't keep swallowing output.
+    process.stdout.write = originalStdoutWrite as typeof process.stdout.write;
+    process.stderr.write = originalStderrWrite as typeof process.stderr.write;
+    process.stderr.write(`[run-engine] log stream error: ${err.message}\n`);
+  });
+
   function safeStreamWrite(chunk: unknown, encoding?: unknown, cb?: unknown): void {
+    if (streamBroken) return;
     try {
       streamWrite(chunk, encoding, cb);
     } catch {

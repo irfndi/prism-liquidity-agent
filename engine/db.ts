@@ -60,12 +60,13 @@ export function createDatabase(dbPath = "./prism.db"): Database {
   fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   const db = new Database(dbPath);
   db.exec("PRAGMA journal_mode = WAL;");
-  runMigrations(db);
 
-  // If a previous attempt in this process showed sqlite-vec cannot work,
-  // skip it entirely to avoid repeated warnings on every DB open.
+  // Load sqlite-vec before migrations so migration v1 can create the vec_memory
+  // virtual table without warning. Extension availability is determined by the
+  // runtime environment and won't change within a process, so a process-wide
+  // flag is used to skip repeated failing attempts.
+  let vecLoaded = false;
   if (!sqliteVecEverFailed) {
-    let vecLoaded = false;
     try {
       loadVec(db);
       vecLoaded = true;
@@ -101,15 +102,17 @@ export function createDatabase(dbPath = "./prism.db"): Database {
         sqliteVecEverFailed = true;
       }
     }
+  }
 
-    if (vecLoaded && !hasVecMemoryTable(db)) {
-      tryCreateVecMemoryTable(db);
-      if (hasVecMemoryTable(db)) {
-        logger.info("sqlite-vec vec_memory table self-healed");
-      } else {
-        logger.warn("sqlite-vec vec_memory table not queryable; memory disabled");
-        sqliteVecEverFailed = true;
-      }
+  runMigrations(db);
+
+  if (vecLoaded && !hasVecMemoryTable(db)) {
+    tryCreateVecMemoryTable(db);
+    if (hasVecMemoryTable(db)) {
+      logger.info("sqlite-vec vec_memory table self-healed");
+    } else {
+      logger.warn("sqlite-vec vec_memory table not queryable; memory disabled");
+      sqliteVecEverFailed = true;
     }
   }
 
