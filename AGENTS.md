@@ -1,469 +1,323 @@
 # AGENTS.md
 
-Notes for AI agent harnesses (OpenClaw, Hermes, acpx, custom agents) and OpenCode sessions working in `prism-liquidity-agent` (the rename from `prism-dlmm` is in PR #24). Read this before touching the codebase — several things in `README.md`, `CLAUDE.md`, `ARCHITECTURE.md`, and `CONTRIBUTING.md` are stale or wrong.
+Notes for AI agent harnesses (OpenClaw, Hermes, acpx, custom agents) and OpenCode sessions working in `prism-liquidity-agent`. Read this before editing — several older docs (`README.md`, `CLAUDE.md`, `ARCHITECTURE.md`) describe stale designs (MCP hot path, Chroma, etc.). The current code is the source of truth.
 
 ## TL;DR for agent harnesses
 
-If you're an agent (OpenClaw, Hermes, acpx, or custom) being asked to set up or operate Prism for a user, you do NOT need to:
-
-- ❌ Deploy Cloudflare workers (already deployed — see [Live deployment](#live-deployment-production))
-- ❌ Create D1/KV/R2/Vectorize resources (already exist)
-- ❌ Set Cloudflare secrets (already configured)
-
-You DO need to:
-
-- ✅ Clone the repo and install dependencies
-- ✅ Run `prism setup` (configures Helius key + watchlist)
-- ✅ Run `prism dev` to start the trading agent
-
-You MAY want to (optional, for cloud features only):
-
-- ⭐ Run `prism register` (calls the deployed API, returns an API key) — only needed for `prism whoami`, Telegram bot linking, and subscription management. The CLI is fully functional without it.
-
-> **Registration is optional.** The core trading agent (scan, decide, execute) works without it. Register only if you want cloud features (Telegram bot, cross-device sync, subscription management).
+You do **not** need to deploy Cloudflare resources — the API Worker, Telegram bot, D1, KV, R2 and Vectorize resources are already live. You **do** need a Helius API key.
 
 ```bash
 git clone https://github.com/irfndi/prism-liquidity-agent.git
 cd prism-liquidity-agent
 bun install
-prism register                                    # gets API key from deployed API
-prism setup --non-interactive --helius-key=$KEY    # configures trading agent
-prism dev                                         # start paper trading
+
+# Optional — only for cloud features (whoami, Telegram, subscriptions)
+prism register
+
+# Required — writes .env and configures the agent
+prism setup --non-interactive --helius-key=$HELIUS_KEY
+
+# Start paper trading
+prism dev
 ```
 
-> **3-Layer Architecture:** Prism has 3 layers — CLI (required, runs locally),
-> API (optional cloud service), and Telegram (optional chat interface).
-> See [`docs/install.md`](docs/install.md) for the breakdown and quickstart options.
+The core trading agent works without registration. Register only if you want cloud features.
 
-## Stack
+## Project overview
 
-- **Runtime**: Bun 1.4.0+ (dev, tests, build). Node 20+ for Docker.
-- **Language**: TypeScript with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`. Easy to trip over — read errors carefully.
-- **Framework**: [Effect-TS](https://effect.website) for DI (`Context.Tag` + `Layer`). No MCP server, no Anthropic SDK calls in the hot path.
-- **Storage (engine)**: SQLite via `bun:sqlite` + `sqlite-vec` (NOT Chroma — see _Things docs get wrong_).
-- **Storage (cloudflare)**: D1 database + KV + R2 + Vectorize. Separate subproject.
-- **Build**: `tsdown` (entry: `engine/index.ts` → `dist/index.mjs`).
-- **Lint**: `oxlint` (NOT eslint) with `typescript`/`unicorn`/`oxc` plugins. Config at `.oxlintrc.json`. `correctness: error`, `no-unused-vars` and `require-yield` are explicitly off.
-- **Format**: `oxfmt` (NOT prettier). Config at `.oxfmtrc.json` (empty ignorePatterns).
-- **Test**: Vitest in two places:
-  - Engine: `bench/**/*.test.ts` (uses `bun:sqlite`)
-  - Cloudflare: `cloudflare/workers/**/*.test.ts` (uses `@cloudflare/vitest-pool-workers`)
+Prism is an autonomous liquidity agent for Solana (currently Meteora DLMM). It scans a watchlist of pools on a configurable interval, evaluates each pool with a rule-based strategy, and decides to **HOLD**, **ENTER**, **REBALANCE** or **EXIT**. By default it runs in paper-trading mode; live on-chain execution requires an explicit wallet private key and `PAPER_TRADING=false`.
+
+The project has three independent layers:
+
+1. **CLI / engine** (local, required) — strategy, risk, memory, execution, backtesting, wallet management.
+2. **Cloudflare Workers** (cloud, optional) — user accounts, API keys, subscriptions, Telegram linking, GitHub issue filing.
+3. **Telegram bot** (chat, optional) — monitoring via `@prism_agent_bot`; requires the API layer.
+
+There are also optional peripheral subprojects:
+
+- `mcp-server/` — a standalone Node-based MCP server that reads the SQLite DB and shells out to `prism`.
+- `packages/autogpt-prism/` and `packages/langchain-prism/` — Python plugin skeletons with their own `pyproject.toml`.
+- `skills/` and `marketplaces/` — skill definitions for agent harnesses.
+
+## Technology stack
+
+- **Runtime:** Bun `>=1.4.0-canary.1` for development, tests and engine builds. Node 22+ is used only by the Docker image and the `mcp-server` subproject.
+- **Language:** TypeScript with strict settings: `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride`, `exactOptionalPropertyTypes`, `noFallthroughCasesInSwitch`.
+- **Framework / DI:** [Effect-TS](https://effect.website) (`Context.Tag` + `Layer`). All side effects go through services.
+- **On-chain:** `@meteora-ag/dlmm` SDK + Helius RPC (`SOLANA_RPC_URL`).
+- **Local storage:** SQLite via `bun:sqlite` + `sqlite-vec` for vector memory.
+- **Cloud storage:** Cloudflare D1, KV, R2, Vectorize.
+- **Cloud API:** Hono 4.x inside Cloudflare Workers.
+- **Build:** `tsdown` (root engine entry → `dist/index.mjs`).
+- **Lint:** `oxlint` with `typescript`/`unicorn`/`oxc` plugins; config in `.oxlintrc.json`.
+- **Format:** `oxfmt`; config in `.oxfmtrc.json`.
+- **Test:** Vitest 4.x. Engine tests require Bun and fail fast if run under Node.
+
+## Key configuration files
+
+| File | Purpose |
+|------|---------|
+| `package.json` | Root manifest, scripts, dependencies. Current version `0.0.29`. |
+| `tsconfig.json` | Strict TypeScript config for `engine/`, `ops/`, `bench/`, `cli/`, `types/`. |
+| `vitest.config.ts` | Engine test config; coverage thresholds and exclusions. |
+| `tsdown.config.ts` | Build config for the engine bundle (`engine/index.ts` → `dist/index.mjs`). |
+| `tsdown.cli.config.ts` | Build config for the CLI bundle (`cli/index.ts` → `dist/cli/`). |
+| `.oxlintrc.json` | `oxlint` rules: `correctness: error`, `no-unused-vars` and `require-yield` off. |
+| `.oxfmtrc.json` | `oxfmt` config (empty `ignorePatterns`). |
+| `.env.example` | Example env file. **Incomplete** — canonical defaults and full env set live in `engine/config-service.ts`. |
+| `Dockerfile` | Multi-stage Bun-based image; runtime uses `oven/bun:canary-slim`, installs `libsqlite3-0` + `ca-certificates`, runs as non-root `agent` user. |
+| `scripts/prism.sh` | The `prism` binary wrapper; resolves install root, sets `PRISM_INSTALL_DIR`, then runs `cli/index.ts`. |
+| `cloudflare/package.json` | Separate subproject for API + Telegram workers. |
+| `cloudflare/wrangler.toml` / `wrangler.telegram.toml` | Cloudflare Worker configs. |
+| `mcp-server/package.json` | Node-based MCP server subproject. |
+| `packages/*/pyproject.toml` | Python plugin skeletons (not part of the Bun build). |
 
 ## Repo layout
 
 ```
-
 prism-liquidity-agent/
-├── engine/ Core agent: strategy, adapters, risk, DB, memory, scan loop (flat dir, ~24 files)
-├── cloudflare/ SEPARATE SUBPROJECT. Own package.json, vitest, wrangler config. API + Telegram bot workers
-├── cli/ User-facing CLI (commander). 14 commands: register, login, whoami, wallet, telegram, etc.
-├── ops/ Operational scripts: setup.ts (.env wizard), backtest.ts
-├── bench/ Vitest tests for engine (pure logic only)
-├── docs/ Markdown docs (install, CLI, cron, agent-harness)
-├── types/ Type declarations (bs58)
-└── .github/workflows/ ci.yml (engine) + deploy-cloudflare.yml (workers)
-
+├── engine/            # Core agent: strategy, adapters, risk, DB, memory, scan loop (~45 flat files)
+├── cli/               # Commander-based user-facing commands
+├── ops/               # Operational scripts: setup wizard, backtest, fetch-history
+├── bench/             # Engine tests (Vitest, Bun-only)
+├── cloudflare/        # Separate subproject: API Worker + Telegram bot
+├── mcp-server/        # Separate Node subproject: stdio MCP server
+├── packages/          # Python plugin skeletons (AutoGPT, LangChain)
+├── scripts/           # install.sh, postinstall.js, build-bundle.ts, generate-vec-embed.ts, etc.
+├── skills/            # Runtime skill definitions for agent harnesses
+├── marketplaces/      # Marketplace skill listings
+├── docs/              # User and agent-harness documentation
+└── types/             # Type declarations (bs58)
 ```
 
-**There is no `probes/`, `tools/`, `adapters/`, `risk/`, or `memory/` directory.** `ARCHITECTURE.md`'s component map is fictional. Every engine file is flat in `engine/`.
+There is no `src/`, `adapters/`, `risk/`, `memory/` or `tools/` directory inside the engine. Every engine module is flat in `engine/`.
 
-## Commands (engine / root)
+## Build, run and test commands
+
+### Root (engine + CLI)
 
 ```bash
-bun install                # install
-bun run setup              # interactive .env wizard (writes .env)
-bun run dev                # bun --watch engine/index.ts
-bun run backtest           # bun run ops/backtest.ts
-bun run test               # vitest run (bench/**/*.test.ts)
-bun run test -- -t "<name>"# single test by name
-bun run test -- bench/risk.test.ts  # single file
-bun run test:watch         # vitest TUI (no `run` — interactive)
-bun run lint               # tsc --noEmit && oxlint engine ops bench cli  (strict, slow)
-bun run format             # oxfmt --write engine ops bench cli
-bun run format:check       # oxfmt --check engine ops bench cli
-bun run build              # tsdown → dist/index.mjs
-bun run coverage           # vitest --coverage (see Coverage exclusions below)
+bun install                 # installs deps + runs postinstall (writes default .env, generates sqlite-vec embed)
+bun run setup               # interactive .env wizard (also available as `prism setup`)
+bun run lint                # tsc --noEmit && oxlint engine ops bench cli
+bun run format              # oxfmt --write engine ops bench cli
+bun run format:check        # oxfmt --check engine ops bench cli
+bun run build               # tsdown engine/index.ts -> dist/index.mjs
+bun run test                # vitest run (bench/**/*.test.ts); REQUIRES Bun
+bun run test -- -t "name"   # single test by name
+bun run test -- bench/risk.test.ts
+bun run test:watch          # vitest interactive TUI
+bun run coverage            # vitest --coverage
+bun run backtest            # bun run ops/backtest.ts
+bun run dev                 # bun --watch engine/index.ts (see Direct-execution guard below)
 ```
 
-CI runs `bun install` → `bun run lint` → `bun run build` → `bun run test` on Bun canary / Node 20 (`.github/workflows/ci.yml`).
-
-## Commands (cloudflare subproject)
+### Cloudflare subproject
 
 ```bash
 cd cloudflare
-bun install                                    # install CF deps
-wrangler dev                                   # local dev of API worker
-wrangler dev --config wrangler.telegram.toml   # local dev of Telegram bot
-wrangler deploy                                # deploy API worker
+bun install
+bun run typecheck              # tsc --noEmit
+wrangler dev                   # API worker local dev
+wrangler dev --config wrangler.telegram.toml   # Telegram bot local dev
+wrangler deploy                # deploy API worker
 wrangler deploy --config wrangler.telegram.toml  # deploy Telegram bot
-wrangler d1 migrations apply prism-db --remote # apply DB migrations
-wrangler d1 migrations apply prism-db --local  # apply to local D1
-bun run typecheck                              # tsc --noEmit
-bunx vitest run                                # telegram bot tests (vitest 4.1.x with @cloudflare/vitest-pool-workers 0.16.x)
+wrangler d1 migrations apply prism-db --remote
+bunx vitest run                # Cloudflare worker tests
 ```
 
-CI (`.github/workflows/deploy-cloudflare.yml`) on push to `main` (when `cloudflare/**` changes): install → typecheck → D1 migrations → deploy API → deploy Telegram bot.
+### MCP server subproject
 
-## Live deployment (production)
-
-| Resource              | Value                                               | Status    |
-| --------------------- | --------------------------------------------------- | --------- |
-| API Worker            | `https://prism-api.irfndi.workers.dev`              | ✅ Live   |
-| Telegram Bot          | `https://prism-telegram-bot.irfndi.workers.dev`     | ✅ Live   |
-| Bot username          | `@prism_agent_bot`                                  | ✅ Active |
-| Cloudflare Account ID | `a37da71c38a2f7ab732057d87d5d0f6e`                  | Active    |
-| D1 database           | `prism-db` (`0657c2b3-fdea-4b33-b11b-8d0a7b27cbc8`) | Active    |
-| KV namespace          | `prism-cache` (`78d7fb5d3fab494dbc8f2940e524f22d`)  | Active    |
-| R2 bucket             | `prism-backups`                                     | Active    |
-| Vectorize index       | `prism-memory` (384d cosine)                        | Active    |
-
-GitHub secrets required for CI/CD:
-
-- `CLOUDFLARE_API_TOKEN` — Cloudflare API token with Workers, D1, KV, R2, Vectorize write access
-- `CLOUDFLARE_ACCOUNT_ID` — `a37da71c38a2f7ab732057d87d5d0f6e`
-
-CLI commands call the Cloudflare API. Telegram bot calls the API Worker via `fetch(API_BASE_URL + path)`.
-
-## Engine architecture (start here)
-
-```
-engine/
-├── index.ts          22-line bootstrap: Effect.runPromise(program) with buildLayer
-├── program.ts        THE SCAN LOOP. All decision logic lives here (~792 lines).
-├── services.ts       All Context.Tag definitions (one per service)
-├── config-service.ts Env loader (Effect Config.string/.number/.boolean)
-├── adapter-service.ts Meteora SDK + Helius calls (685 lines, biggest file)
-├── strategy-service.ts Pure strategy math (fee/IL, vol auth, bin util)
-├── risk-service.ts   Pre-execution gates
-├── memory-service.ts Thin wrapper over db-service for memory ops
-├── db-service.ts     SQLite queries (positions, audit, blacklists, memory, snapshots)
-├── db.ts             Schema + sqlite-vec setup, 4-migration auto-migration system
-├── audit-service.ts  JSONL audit logger
-├── blacklist-service.ts Deployer/token blacklist checks
-├── screener-service.ts  Pool discovery (when ENABLE_POOL_DISCOVERY=true)
-├── embeddings.ts     @xenova/transformers wrapper (lazy ~80MB ONNX download on first use)
-├── logger.ts         createLogger(component) → console + logs/audit-trail.jsonl
-├── update-utils.ts   Update utilities (semver, GitHub API)
-├── revenue-service.ts Subscription/fee modeling
-├── feedback-service.ts Agent feedback submission, dedup, rate-limiting, GitHub Issues filing
-├── error-reporter.ts Privacy-first error telemetry (sanitizes secrets)
-├── bigint-json.ts    BigInt-safe JSON serializer
-├── version.ts        Read version from package.json
-├── errors.ts         Shared error types
-├── types.ts          Shared interfaces
-└── data/             deployer-blacklist.json, token-blacklist.json (both empty arrays)
+```bash
+cd mcp-server
+npm install
+npm run build                  # tsc
+npm test                       # node --import tsx --test test/*.test.ts
 ```
 
-### Effect-TS wiring pattern
+### CLI entry points
 
-All side effects go through services defined as `Context.Tag` in `engine/services.ts`. The wiring lives in `buildLayer()` in `engine/program.ts` (lines 60–86). To add a service:
+- `prism <command>` — the supported user entry point. The wrapper resolves the install root and runs `cli/index.ts`.
+- `bun cli/index.ts <command>` — source development entry point.
+- `bun run dev` runs `engine/index.ts` directly, but `engine/index.ts` refuses direct execution unless `PRISM_ALLOW_DIRECT=true`. The CLI `prism dev` sets this flag and calls `runEngine()` from `engine/run-engine.ts`.
 
-1. Define the API in `engine/services.ts` with a `Context.Tag` class.
+## Runtime architecture
+
+### Entry points
+
+- `engine/index.ts` — short bootstrap that imports `run-engine.js` and blocks accidental direct execution.
+- `engine/run-engine.ts` — loads config, sets up error reporting, redirects stdout/stderr to `logs/engine.log`, and runs `program` with `buildLayer(config)`.
+- `engine/program.ts` — the main scan loop and decision logic. It is a single large `Effect.gen` block.
+- `cli/index.ts` — Commander program that registers all subcommands.
+
+### Effect-TS service wiring
+
+All engine side effects are exposed through `Context.Tag` services defined in `engine/services.ts`.
+
+To add a service:
+
+1. Define the API in `engine/services.ts` as a `Context.Tag` class.
 2. Implement `YourServiceLive` in a new `engine/your-service.ts` returning a `Layer`.
-3. Add it to the `Layer.provide(...)` chain in `buildLayer()` (explicit `provide` is required because `merge` does NOT resolve cross-layer deps) and to the `AllServices` union.
-4. `yield* YourService` inside the `Effect.gen` block in `program.ts` to consume it.
+3. Add it to the `AllServices` union and to the `Layer.merge` chain in `engine/program.ts` `buildLayer()`.
+4. Consume it with `yield* YourService` inside the `Effect.gen` block.
 
-Don't import service classes directly. The whole runtime is one `Effect.gen` block.
+Do not import service implementations directly in program logic. `Layer.provide` is used where cross-layer dependencies exist; `Layer.merge` does **not** resolve cross-layer dependencies.
 
-### Decision flow (per cycle, per pool)
+### Decision loop (per cycle, per pool)
 
-1. `adapter.getPoolState` + `adapter.getBinArray` — fetch on-chain
-2. `blacklist.checkPool` — early reject (errors are swallowed, not raised)
-3. `strategy.computeMetrics` — pure, no IO
-4. Pre-filter: `tvlUsd < MIN_POOL_TVL_USD || volumeAuth < threshold || binUtil < threshold` → skip
-5. `memory.getRelevantContext` for recent warnings (errors swallowed)
-6. Decision rules in order: `EXIT` (TVL drop / vol auth / fee-IL<0.5) → `REBALANCE` (drift > 60% OR out-of-range grace expired) → `HOLD` (existing position) → `ENTER` (new pool, strict thresholds: `feeIlRatio > min*1.5`, `volAuth > 0.8`, `binUtil > 0.4`, `tvlUsd > min*2`)
-7. `risk.evaluate` — gates execution
-8. `audit.recordDecision` — every decision is logged (errors swallowed)
-9. Execute: paper (`trackedPositions.set/delete`) or live (`adapter.enterPosition`/etc.)
+1. `adapter.getPoolState` + `adapter.getBinArray` fetch on-chain data.
+2. `blacklist.checkPool` early-rejects disallowed pools (errors swallowed).
+3. `strategy.computeMetrics` produces pure metrics (fee/IL, volume authenticity, bin utilization, TVL velocity).
+4. Pre-filter skips pools below `MIN_POOL_TVL_USD`, `VOLUME_AUTH_THRESHOLD` or `MIN_BIN_UTILIZATION`.
+5. `memory.getRelevantContext` recalls recent warnings/patterns (errors swallowed).
+6. Decision rules evaluate, in order: `EXIT` → `REBALANCE` → `HOLD` → `ENTER`.
+7. `risk.evaluate` gates execution.
+8. `audit.recordDecision` logs every decision (errors swallowed).
+9. Execution updates the in-memory `trackedPositions` Map and persists to SQLite via `db.savePosition` / `db.deletePosition`.
 
-## CLI commands (commander)
+### Position persistence
 
-14 subcommands, all in `cli/`. Most spawn the engine or call the Cloudflare API:
+`trackedPositions` is only an in-memory cache. At startup `program.ts` loads all rows from `positions` into the Map, and every state change (ENTER, EXIT, REBALANCE, trailing-stop update, fee claim) is written back to SQLite.
 
-- `setup` — interactive `.env` wizard (was `ops/setup.ts`)
-- `register` — calls `POST /v1/register`, stores API key locally
-- `login` — validates existing API key via `POST /v1/login`
-- `whoami` — calls `GET /v1/whoami`
-- `wallet {generate,import,show}` — non-custodial local keypair
-- `link-telegram` — calls `POST /v1/link-telegram/start` to issue a 6-char code
-- `subscription {status,renew}` — tier info
-- `issue` — file GitHub issue via Cloudflare
-- `support` — contact info
-- `dev` — spawns `bun run dev` (engine)
-- `backtest` — spawns `bun run backtest` (ops)
-- `update` — checks/auto-applies updates
-- `version` — current version
-- `feedback` — file structured agent feedback to GitHub Issues (dedup, rate limiting)
+### Agent runtime overlay
 
-All API-bound commands share `cli/api.ts` (`prismApiPost` / `prismApiGet` / `readCredentials` / `writeCredentials`).
-The base URL defaults to `https://prism-api.irfndi.workers.dev` and can be overridden with
-`PRISM_API_URL`. Credentials are stored at `~/.config/prism/credentials.json` with `0o600` perms.
+When `AGENTIC_MODE=true`, the engine can talk to a local agent harness (Hermes via ACP, OpenClaw via Gateway WebSocket). It exposes:
 
-`prism` binary is `./cli/index.ts` (run via `bun run dev` or built CLI).
+- **MCP server** over stdio — tools `prism_status`, `prism_positions`, `prism_decisions`, `prism_config`. Enable with `AGENT_MCP_ENABLED=true`.
+- **HTTP fallback** on `127.0.0.1:AGENT_HTTP_PORT` — endpoints `/health`, `/status`, `/positions`, `/decisions`, `/config`.
 
-## Things docs get wrong
+The overlay can only **reduce confidence** or change an action to `HOLD`. No remote LLM API keys are used.
 
-These are the high-cost mistakes. Do not trust stale prose — verify in code.
+## Code style and conventions
 
-- **No MCP tools.** `engine/tools/index.ts` does not exist. The "intercept `meteora_decision`" pattern in `CLAUDE.md` and the "7 MCP tools" table in `ARCHITECTURE.md` describe an older design. The current engine decides directly inside `engine/program.ts`. `@anthropic-ai/sdk` has been removed from `package.json`.
-- **Memory is `sqlite-vec`, not Chroma.** `engine/db.ts` creates a `vec0` virtual table for embeddings. `CHROMA_URL` was removed from `config-service.ts`. `docker-compose.yml` has been removed (was deleted in commit `9a3c22a`) and used to start a `chromadb/chroma` container that the app does not connect to.
-- **Dockerfile has been fixed.** Earlier it was broken in three ways (referenced `tsup.config.ts`, copied `src/`, ran `node dist/main.js`); all three were replaced. The current `Dockerfile` uses `oven/bun:1.2-slim` for both stages, `bun.lock*` glob, copies `engine/` + `cli/` + `ops/` for the build, installs `libsqlite3-0` + `ca-certificates` at runtime (sqlite-vec ships glibc-only binaries), runs as non-root `agent` user, and CMD is `["bun", "dist/index.mjs"]`. A `.dockerignore` keeps the build context under 10MB. Note: the runtime image must stay Debian-based — switching back to Alpine breaks `db.loadExtension(vec0.so)` because musl can't load glibc ELFs.
-- **`engine/logger-service.ts` was deleted.** It previously defined a `LoggerService` `Context.Tag` and an `AppLogger` interface, but was never wired into `buildLayer()`. The real logger is `createLogger(component)` from `engine/logger.ts` (synchronous, not Effect-based).
-- **`@xenova/transformers` downloads a ~80MB ONNX model on first call.** `engine/embeddings.ts` now defaults to a deterministic hash-based fallback (set `EMBEDDINGS_BACKEND=onnx` to opt in). The ONNX path lazily calls `pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2")` on the first `getEmbedding()` and can also crash in Node.js with a `BigInt` serialization error — when that happens, the agent logs a warning and falls back to hash embeddings automatically. CI never exercises the ONNX path; a local run with `EMBEDDINGS_BACKEND=fallback` (the default) starts in under a second.
-- **`engine/bigint-json.ts` is the canonical BigInt-safe serializer.** Both `engine/audit-service.ts` and `engine/db-service.ts` use `stringifySafe()` to encode `PoolMetrics` / `BinArray` values that contain SDK-originated `bigint`s. Use this helper anywhere you'd otherwise call `JSON.stringify` on a value that might transitively contain a `bigint`.
-- **Bundled blacklist files are empty arrays.** `engine/data/deployer-blacklist.json` and `engine/data/token-blacklist.json` both ship as `[]`. With no custom path or entries, the blacklist service is effectively a no-op. Override via `DEPLOYER_BLACKLIST_PATH` / `TOKEN_BLACKLIST_PATH` if you want filtering.
-- **Deployer blacklist check is half-wired.** `blacklist.checkPool()` accepts a deployer arg, but `program.ts:244` has a `TODO: fetch token deployer/authority from on-chain metadata and pass to checkPool`. Deployer addresses are never actually checked. Only the token-level lookup runs.
-- **`@jup-ag/api` is unused.** Nothing imports it. Jupiter prices are fetched via raw `fetch("https://price.jup.ag/v6/...")`. The Anthropic SDK has been removed from `package.json` entirely — `CLAUDE_MODEL`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL` have been removed from `config-service.ts`.
-- **`CHANGELOG.md` has been updated.** v0.0.2 (2026-06-04) covers the sqlite-vec rewrite, no-MCP architecture, Effect-TS migration, and snapshot replay. v0.0.3 (2026-06-06) fixes the release workflow, backtest CLI args, and wallet import security. Pre-rewrite release history (v0.0.x with Chroma + MCP) is omitted as no longer relevant.
-- **`CONTRIBUTING.md` has been rewritten.** It now references correct paths (`engine/risk-service.ts`, `bench/`), uses MIT license (matching `package.json`), and describes the Effect-TS service pattern instead of MCP tools.
-- **`CONTRIBUTING.md` says "no console.log — use `createLogger(component)`"**. `createLogger` is exported from `engine/logger.ts` and writes to `logs/audit-trail.jsonl`. The rule is aspirational — `engine/program.ts` and `engine/index.ts` use raw `console.info/warn/error/debug` extensively. Match the file you're editing.
-- **Position state is persisted to SQLite.** `program.ts` calls `db.getAllPositions()` at startup (line 110) to populate a `Map` for fast cycle access, and `db.savePosition(...)` on every state change (ENTER, EXIT, REBALANCE, trailing-stop value update, fee claim) — 6 call sites total. The `trackedPositions` Map is just an in-memory cache; restart now preserves OOR counters, `highestValueUsd`, and trailing-stop state.
-- **`LOG_LEVEL` env is a no-op.** CI sets `LOG_LEVEL: error` in `.github/workflows/ci.yml`, but `engine/logger.ts`'s `emit()` always writes regardless of level. Don't expect to silence CI logs with it.
-- **One ENTER per cycle in live mode.** `program.ts:569` silently skips `ENTER` if `trackedPositions.size > 0`. Easy to mistake for a bug.
-- **Live execution is a no-op without a wallet.** `WALLET_PRIVATE_KEY` is optional; with no key, `adapter.hasWallet()` returns false and `executeLive` exits early. Paper mode is the default and the only thing verified end-to-end.
-- **Coverage is misleading.** `vitest.config.ts` excludes `engine/index.ts`, `engine/program.ts`, `engine/adapter-service.ts`, `engine/services.ts`, `engine/types.ts`, `engine/logger*`, `engine/config-service.ts`, `engine/memory-service.ts`, `engine/screener-service.ts` from coverage. The 80% / 70% thresholds apply only to the remaining modules — not the whole engine.
-- **bin range widths.** `engine/strategy-service.ts:105` uses `±25` (binStep ≤ 10), `±20` (≤ 25), `±15` (otherwise). `CLAUDE.md` matches. `.agents/skills/dlmm-rebalancer.md` now matches the code.
-- **Memory merge guard is not implemented.** README, CLAUDE.md, and ARCHITECTURE.md used to claim a "cosine distance < 0.08" merge guard, but `engine/db-service.ts` `insertMemory()` does a raw INSERT with no dedup. `queryMemory()` returns by `ORDER BY distance` blended with recency decay but applies no threshold filter. Code is the source of truth.
-- **Memory TTLs are in code only.** `pattern` 90d, `warning` 60d, `outcome` 180d. The `ARCHITECTURE.md` table is correct; `README.md` only mentions patterns + warnings.
-- **Hono `handle` is not exported in v4.x.** `cloudflare/workers/api/index.ts` previously imported `handle` from `hono/cloudflare-workers` — that adapter no longer exports it. Use `app.fetch(request, env, ctx)` directly in the `default export`.
-- **R2 public URL.** The bucket's public development URL is `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev`. This is the URL `prism update` uses for the release manifest and bundle downloads. `https://r2.prism-agent.com` is not configured as a custom domain and should not be used.
-
-## Storage & data files
-
-- `prism.db` (SQLite, gitignored) — positions, audit, blacklists, vec0 memory, **pool_snapshots**. Override with `SQLITE_DB_PATH`. Tests use `:memory:`.
-- `logs/audit-trail.jsonl` — appended by `createLogger` from `engine/logger.ts` (gitignored).
-- `bench/tmp-audit/` — created and rewritten by `bench/audit.test.ts`. In `.gitignore` (appears in `git status` after running tests).
-- `engine/data/deployer-blacklist.json`, `engine/data/token-blacklist.json` — default blacklist sources, override via `DEPLOYER_BLACKLIST_PATH` / `TOKEN_BLACKLIST_PATH`.
-- D1 (cloudflare): `users`, `api_keys`, `telegram_link_codes`, `wallets`, `subscriptions`, `audit_log` (schema in `cloudflare/migrations/0001_initial.sql`).
-
-## Snapshot capture & replay backtest
-
-The agent can dump a full snapshot (pool state + bin array) into `pool_snapshots` on every cycle. This lets you replay real on-chain data through the strategy offline.
-
-- **Enable**: set `ENABLE_SNAPSHOT_CAPTURE=true` in `.env` (only works when `PAPER_TRADING=true`).
-- **Table**: `pool_snapshots` (migration v4). Fields: `pool_address`, `timestamp`, `active_bin_id`, `tvl_usd`, `volume_24h_usd`, `fees_24h_usd`, `apr`, `current_price`, `bin_step`, `token_x_symbol`, `token_y_symbol`, `bin_array_json`.
-- **Bigints in bin arrays** are serialized via a custom `bigintReplacer` and deserialized back to `BigInt` — round-trip is verified in `bench/snapshot-replay.test.ts`.
-- **Backtest replay**: `bun run backtest --source replay --db ./prism.db --days 7 --pools <addr>`. Reads snapshots from the DB and runs the same strategy loop as the synthetic baseline.
-- **Backtest synthetic**: `bun run backtest --source synthetic --days 7` (default). Deterministic mock generator, kept as regression baseline.
-- **API**: `DbApi.saveSnapshot`, `getSnapshots(pool, startMs, endMs)`, `getSnapshotPools()`, `getSnapshotCount(pool)` — defined in both `services.ts` (consumer) and `db-service.ts` (implementation).
-
-## Env vars
-
-`.env.example` is incomplete. The full set `engine/config-service.ts` loads includes (with defaults):
-
-`PAPER_TRADING` (true), `SCAN_INTERVAL_MS` (600000), `MIN_POOL_TVL_USD` (50000), `MIN_FEE_IL_RATIO` (1.2), `TVL_DROP_EXIT_PCT` (0.30), `VOLUME_AUTH_THRESHOLD` (0.70), `MAX_OPEN_POSITIONS` (3), `MIN_REBALANCE_INTERVAL_MS` (24h), `MIN_REBALANCE_NET_BENEFIT_USD` (10), `CONFIDENCE_THRESHOLD` (0.65), `PAPER_PORTFOLIO_USD` (10000), `MIN_BIN_UTILIZATION` (0.30), `MAX_REBALANCE_RANGE_BINS` (50), `WATCHLIST_POOLS` (comma-sep), `STOP_LOSS_PCT` (0.15), `TRAILING_STOP_PCT` (0.10), `OOR_GRACE_PERIOD_CYCLES` (3), `FEE_CLAIM_INTERVAL_MS` (24h), `ENABLE_POOL_DISCOVERY` (false), `DISCOVERY_MIN_TVL_USD` (100000), `DISCOVERY_MIN_FEE_RATIO` (1.5), `DEPLOYER_BLACKLIST_PATH`, `TOKEN_BLACKLIST_PATH`, plus `HELIUS_API_KEY`, `SOLANA_RPC_URL`, `WALLET_PRIVATE_KEY`, `AUTO_UPDATE` (true), `UPDATE_CHECK_INTERVAL_MS` (21600000), `UPDATE_CHANNEL` (stable), `UPDATE_GITHUB_REPO`, `UPDATE_ALLOW_DIRTY` (false). F1–F6 additions (all default-conservative): `REBALANCE_GAS_COST_SOL` (0.01), `SOL_PRICE_USD` (150), `GAS_AWARE_MIN_DAYS_OF_FEES_PAID_AHEAD` (3), `VOLATILITY_EXIT_STDDEV` (5), `VOLATILITY_LOOKBACK_SNAPSHOTS` (12), `VOLATILITY_WIDE_HALF_WIDTH_BINS` (50), `AUTO_COMPOUND_FEES` (false), `MIN_COMPOUND_FEES_USD` (0.5), `COMPOUND_GAS_BUFFER_USD` (0.05), `OOR_RECOVERY_LOOKBACK_CYCLES` (10), `OOR_RECOVERY_HOLD_THRESHOLD` (0.6), `OOR_RECOVERY_FORCE_REBALANCE_THRESHOLD` (0.2), `MAX_PER_POOL_ALLOCATION_PCT` (0.4), `PAPER_VALIDATION_MIN_DAYS` (7), `PAPER_VALIDATION_ENFORCE` (false).
-
-In test mode (`VITEST=true` or `NODE_ENV=test`), missing `HELIUS_API_KEY` defaults to a dummy value so the suite can run without real keys.
-
-## R2-based update mechanism (GitHub-independent)
-
-`prism update` does **not** use `git fetch` or `git checkout`. Releases are tarballs hosted on **Cloudflare R2** (bucket `prism-backups`), so updates work even if GitHub is private or blocked.
-
-### Flow
-
-1. `prism update` fetches `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev/releases/latest.json` (R2 manifest) — or per-channel `releases/channel/{beta,dev}.json`
-2. Compares `manifest.version` with the locally installed version (from `package.json`)
-3. If newer, downloads the tarball from `manifest.tarball_url`
-4. Verifies SHA-256 against `manifest.sha256_url` (mandatory, mismatch aborts)
-5. Extracts to a temp dir, runs `bun install`, then copies the files over the current install
-6. Cleans up temp dir
-
-> **GPG signing is not yet verified client-side.** The release workflow optionally
-> uploads a `.asc` signature (when the `GPG_PRIVATE_KEY` secret is configured),
-> and the manifest points to it, but the updater does not currently call `gpg
---verify`. Treat the `.asc` as audit metadata until verification is wired in.
-
-### Release process (`.github/workflows/release.yml`)
-
-On push of a tag matching `v*.*.*`:
-
-1. Checkout, install Bun, run `bun install`, `bun run lint`, `bun run test`
-2. Build tarball (excludes `node_modules`, `dist`, `.git`, `*.db`, `logs`, `.env`, etc.)
-3. Generate SHA-256 checksum
-4. Sign with GPG (if `GPG_PRIVATE_KEY` secret is configured)
-5. Upload tarball + checksum + signature to `prism-backups/releases/v{tag}/`
-6. Update `prism-backups/releases/latest.json` (and per-channel manifests for `beta`/`dev`)
-7. Optionally create a GitHub Release for visibility (falls back gracefully if GitHub is down)
-
-### Fallback to GitHub Releases
-
-If R2 is unreachable, `fetchLatestRelease()` automatically falls back to GitHub Releases API and extracts the same `prism-v*.tar.gz` asset. This means the update mechanism is resilient to:
-
-- R2 outage (falls back to GitHub)
-- GitHub private/blocked (R2 still works)
-- Network issues (user can manually download from either)
-
-### Config
-
-- `UPDATE_R2_PUBLIC_URL` (default `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev`) — R2 public URL
-- `UPDATE_GITHUB_REPO` (default `irfndi/prism-liquidity-agent`) — fallback repo
-- `UPDATE_CHANNEL` (`stable` | `beta` | `dev`, default `stable`)
-
-### CLI flags
-
-```bash
-prism update                          # check + apply latest stable from R2
-prism update --check-only             # just check, don't apply
-prism update --channel beta           # use beta channel
-prism update --r2-url https://my-r2.example.com  # custom R2 URL
-```
-
-### R2 bucket structure
-
-```
-prism-backups/
-├── releases/
-│   ├── latest.json                    # latest stable manifest
-│   ├── v1.2.3/
-│   │   ├── prism-v1.2.3.tar.gz
-│   │   ├── prism-v1.2.3.tar.gz.sha256
-│   │   └── prism-v1.2.3.tar.gz.asc    # GPG signature (if configured)
-│   ├── v1.2.4/
-│   │   └── ...
-│   └── channel/
-│       ├── beta.json
-│       └── dev.json
-```
-
-### Required GitHub secrets
-
-- `CLOUDFLARE_API_TOKEN` — Cloudflare API token with R2 write access
-- `CLOUDFLARE_ACCOUNT_ID` — `a37da71c38a2f7ab732057d87d5d0f6e`
-- `GPG_PRIVATE_KEY` — (optional) GPG key for tarball signing
-- `GITHUB_TOKEN` — (optional) for creating GitHub Releases
-
-## Agent feedback system (issue #32)
-
-Prism agents can file structured feedback to the project's GitHub Issues as a canonical channel. Without `GITHUB_TOKEN` set, feedback is stored locally in `~/.config/prism/agent-id` and logged but not uploaded.
-
-### Env vars
-
-- `GITHUB_TOKEN` (recommended) — Personal access token with `repo` scope. Enables GitHub Issues filing.
-- `GITHUB_REPO` (default `irfndi/prism-liquidity-agent`) — Target repo for filed issues.
-- `PRISM_FEEDBACK_OPT_OUT` (default `false`) — Set to `true` to disable automatic feedback for this agent.
-
-### CLI
-
-```bash
-prism feedback "Install process requires manual Bun install" --category friction
-prism feedback "Add --yes flag to setup prompts"          --category suggestion
-prism feedback "Scan cycle is 30s on first run"           --category observation
-prism feedback "Backtest output is very clear"            --category praise
-prism feedback status    # show this agent's history + rate-limit state
-prism feedback list      # alias for status
-prism feedback disable   # opt out (persists for the agent)
-prism feedback enable    # re-enable
-```
-
-Valid categories: `friction | suggestion | observation | praise`. Valid severities: `low | medium | high` (default `medium`).
-
-### Dedup algorithm
-
-Each feedback is hashed (category + normalized summary + normalized details, first 16 hex of SHA-256). Before creating a new GitHub issue:
-
-1. **Local cooldown**: if the same hash was reported by this agent in the last 24h, comment on the existing local-stored issue number instead of re-filing.
-2. **GitHub search**: extract up to 5 keywords (≥4 chars, stop words filtered), search `repo:<GITHUB_REPO> label:agent-feedback is:open <keywords>`.
-3. **Jaccard similarity**: for each candidate, compute Jaccard similarity between feedback keywords and issue title+body keywords. If ≥ 0.7, add a "+1" comment to the existing issue instead of creating a duplicate.
-4. **No match**: create a new issue labeled `agent-feedback` with the full context block.
-
-### Rate limits
-
-- 5 feedback items per hour per agent
-- 10 per day per agent
-- 60s minimum interval between consecutive feedback items
-
-When the limit is hit, `submit` returns `{ kind: "rate_limited", reason: "..." }` and the feedback is NOT stored locally (it would only be deduped against the local store, which is fine — re-trying after the cooldown works).
-
-### Issue format
-
-```markdown
-## Agent Feedback
-
-**Category:** Friction
-**Severity:** Medium
-**Agent ID:** a1b2c3d4 (hashed)
-**Version:** 1.2.3
-**Platform:** linux-x64
-**Install method:** curl
-**Runtime:** bun 1.4.0
-
-### Summary
-
-Install process requires manual Bun installation
-
-### Details
-
-After the curl installer ran, had to manually install Bun via
-`curl -fsSL https://bun.sh/install | bash` and re-source PATH.
-
-### Related files
-
-- `scripts/install.sh`
-
----
-
-_This issue was automatically created by a Prism agent. If you're a human, please add the `confirmed` label if this is valid._
-```
-
-Humans can review filed issues, add the `confirmed` label, or close as duplicate. The system is best-effort — if the GitHub API fails, the error is logged but the agent is not crashed.
-
-## Install telemetry (issue #36)
-
-Prism fires anonymous install pings at four points in the install/setup/dev lifecycle so the maintainer can count unique installations and see which versions are running — without forcing users through registration.
-
-### Privacy
-
-- `install_id` is a random UUID generated client-side and stored at `~/.config/prism/install-id` (0o600).
-- No PII, no fingerprinting, no cross-machine correlation.
-- The API only sees the user's `user_id` on the `register` event (which the user explicitly opted into by running `prism register`).
-
-### Events
-
-| Event | Emitted by | Includes user_id? |
-|---|---|---|
-| `install` | `scripts/install.sh` (end of script) and `scripts/postinstall.js` (only when `.env` was just created) | no |
-| `setup` | `cli/setup.ts` (after `.env` is written, both interactive and non-interactive paths) | no |
-| `dev_start` | `cli/dev.ts` (before spawning the engine) | no |
-| `register` | `cli/register.ts` (after `writeCredentials`) | yes |
-
-All events include `install_id`, `version` (from `package.json`), `channel` (from `UPDATE_CHANNEL` env, default `stable`), and `platform` (from `process.platform` / `uname -s`).
-
-### Storage
-
-D1 table `installs` (migration `0002_installs.sql`). To count unique installs: `SELECT COUNT(DISTINCT install_id) FROM installs`.
-
-### Opt-out
-
-Not yet implemented. The design is privacy-first by default (the `install_id` is a local random UUID with no PII). To block pings, set `PRISM_API_URL` to a non-existent host — the pings will fail silently and the CLI continues to work.
-
-### Rate limits
-
-100 pings per IP per hour (KV-backed). Same limit as the error reporting endpoint.
+- **No `any` types.** Use `unknown` and narrow. The repo intentionally contains one `as any` in `engine/adapter-service.ts` for parsed mint account data; do not add more.
+- **Strict TypeScript.** Read compiler errors carefully — `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` and `noImplicitOverride` are enabled.
+- **Logging.** Prefer `createLogger(component)` from `engine/logger.ts`. It writes structured JSON to `logs/audit-trail.jsonl`. Some legacy files still use raw `console.*`; match the file you are editing, and do not introduce new raw `console.log` in new code.
+- **Effect patterns.** Keep side effects inside services. Use `Effect.catchAll` / `Effect.catchAllCause` for recoverable errors. Use `Effect.gen` for sequential logic.
+- **Risk gates.** Add new checks as numbered blocks in `engine/risk-service.ts` `evaluateRisk()` and return early on the first rejection. Do not accumulate flags.
+- **Paper trading first.** Any new execution path must work in paper mode before being wired to live on-chain code.
+- **BigInt JSON.** Use `stringifySafe` from `engine/bigint-json.ts` whenever serializing values that may contain SDK-originated `bigint`s.
+- **Formatting.** Run `bun run format` before finishing. CI enforces `oxfmt --check`.
 
 ## Testing
 
-- Engine tests live in `bench/*.test.ts`. There is no `tests/` directory.
-- Engine suite is Effect-Layer based: each test builds a `Layer.merge(AuditLive, DbLive(":memory:"))` and provides it to the system under test. Use this pattern for new tests.
-- `bench/audit.test.ts` mutates `bench/tmp-audit/` — do not commit it.
-- Coverage thresholds (80% / 70%) apply only to _included_ files (see above). Don't read the coverage report as a project-wide signal.
-- Cloudflare tests live in `cloudflare/workers/**/*.test.ts` and run via `@cloudflare/vitest-pool-workers@^0.16.12` on `vitest@^4.x`. The vitest version is enforced in `cloudflare/package.json`.
-- No integration tests, no mocks for Meteora SDK, no tests exercise the embedding pipeline or the main loop. `program.ts`, `adapter-service.ts`, and `engine/embeddings.ts` are all excluded from coverage and untested. The 11 engine test files cover pure logic only. CI passes with fake API keys because nothing real runs.
+- Engine tests live in `bench/**/*.test.ts`. There is no `tests/` directory for the engine.
+- Engine tests **require Bun**. `vitest.config.ts` throws a clear error if `typeof Bun === "undefined"`.
+- Most engine tests build isolated Effect layers, e.g. `Layer.merge(AuditLive, DbLive(":memory:"))`.
+- `bench/audit.test.ts` writes to `bench/tmp-audit/` — do not commit it.
+- Coverage is configured in `vitest.config.ts`:
+  - Thresholds: `statements 75`, `branches 60`, `functions 75`, `lines 75`.
+  - Excluded from coverage: `engine/index.ts`, `engine/program.ts`, `engine/adapter-service.ts`, `engine/services.ts`, `engine/types.ts`, `engine/logger.ts`, `engine/config-service.ts`, `engine/memory-service.ts`, `engine/screener-service.ts`.
+- Cloudflare tests live in `cloudflare/workers/**/*.test.ts` and run with `@cloudflare/vitest-pool-workers`.
+- The `mcp-server` subproject uses Node's built-in test runner with `tsx`.
 
-## Key constraints
+## Deployment and release
 
-- **No `any` types.** Use `unknown` and narrow. The repo has one intentional `as any` in `engine/adapter-service.ts` (parsed mint account data). Don't add more.
-- **No commits without explicit request.**
-- **Paper trading first** — wire all new execution paths to work in paper mode before live.
-- **Risk gates run in order with early return** in `engine/risk-service.ts`. Add new gates as numbered blocks and return on first rejection — do not accumulate flags.
-- **Use `app.fetch` not `handle(app)`** in Cloudflare Workers — Hono 4.x removed the `handle` export from `hono/cloudflare-workers`.
+### CI (engine)
+
+`.github/workflows/ci.yml` runs on pushes/PRs to `main`/`master`:
+
+1. `bun install`
+2. `bun run scripts/generate-vec-embed.ts linux x64`
+3. `bun run lint`
+4. `bun run build`
+5. `bun run test`
+
+### Cloudflare deploy
+
+`.github/workflows/deploy-cloudflare.yml` runs when `cloudflare/**` changes on `main`:
+
+1. `bun install` inside `cloudflare/`
+2. `bun run typecheck`
+3. Apply D1 migrations (`--remote`)
+4. Deploy API worker
+5. Deploy Telegram bot worker
+
+Required secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
+
+### Release
+
+`.github/workflows/release.yml` runs on `v*.*.*` tags:
+
+1. Verifies `package.json` version matches the tag.
+2. Runs lint + tests.
+3. Builds platform bundles for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64` via `scripts/build-bundle.ts`.
+4. Builds a source tarball.
+5. Generates SHA-256 checksums and optional GPG signatures.
+6. Uploads assets to Cloudflare R2 (`prism-backups/releases/v{VERSION}/`).
+7. Updates `prism-backups/releases/latest.json` and per-channel manifests (`beta`, `dev`).
+8. Creates or updates a GitHub Release.
+
+`prism update` downloads from R2 and verifies SHA-256; it falls back to GitHub Releases if R2 is unreachable.
+
+### Docker
+
+The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copies `dist/`, `node_modules/` and `package.json` into a runtime stage that installs `libsqlite3-0` and `ca-certificates`. The container runs as the `agent` user and executes `bun dist/index.mjs`.
+
+## Security and privacy
+
+- **`.env` permissions.** `setup.ts` writes `.env` with mode `0o600` and backs up any existing file.
+- **Credentials.** API keys are stored in `~/.config/prism/credentials.json` with `0o600`.
+- **Wallet keys.** `WALLET_PRIVATE_KEY` is optional. Without it, `adapter.hasWallet()` returns false and live execution is a no-op. Paper trading is the default and is the only path verified end-to-end.
+- **Direct-execution guard.** `engine/index.ts` exits unless invoked through the CLI (`prism dev` / `bun cli/index.ts dev`) or `PRISM_ALLOW_DIRECT=true` is set.
+- **Install telemetry.** Anonymous install pings are sent at install, setup, dev-start and register. They use a random local UUID stored in `~/.config/prism/install-id` and include no PII. Set `PRISM_API_URL` to a non-existent host to block pings.
+- **Feedback.** `prism feedback` can file GitHub issues if `GITHUB_TOKEN` is set; otherwise feedback is stored locally. Opt out with `PRISM_FEEDBACK_OPT_OUT=true`.
+- **Auto-update integrity.** The updater verifies SHA-256 checksums before applying a release. GPG signatures are generated but **not yet verified client-side**.
+- **Secret sanitization.** `engine/error-reporter.ts` strips sensitive values from telemetry.
+
+## Important environment variables
+
+`.env.example` is a partial reference. `engine/config-service.ts` is the canonical source of defaults and validation.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `HELIUS_API_KEY` | — | Required for Solana RPC. In test mode defaults to a dummy value. |
+| `SOLANA_RPC_URL` | Helius URL if key present | RPC endpoint. Falls back to public Solana RPC if absent. |
+| `WALLET_PRIVATE_KEY` | — | Optional; required only for live trading. |
+| `PAPER_TRADING` | `true` | Simulated positions by default. |
+| `SCAN_INTERVAL_MS` | `600000` | Time between scan cycles (10 min). |
+| `WATCHLIST_POOLS` | — | Comma-separated Meteora DLMM pool addresses. |
+| `ENABLE_POOL_DISCOVERY` | `true` (postinstall default) / `false` (code fallback) | Discover pools when watchlist is empty. |
+| `MIN_POOL_TVL_USD` | `50000` | Skip pools below this TVL. |
+| `VOLUME_AUTH_THRESHOLD` | `0.70` | Minimum volume authenticity score. |
+| `CONFIDENCE_THRESHOLD` | `0.65` | Minimum confidence to act. |
+| `STOP_LOSS_PCT` | `0.15` | Drawdown that blocks HOLD/REBALANCE. |
+| `TRAILING_STOP_PCT` | `0.10` | Drawdown from peak that triggers EXIT. |
+| `MAX_OPEN_POSITIONS` | `3` | Concurrent positions cap. |
+| `MAX_PER_POOL_ALLOCATION_PCT` | `0.4` | Max portfolio share for one pool. |
+| `SQLITE_DB_PATH` | `~/.local/share/prism/prism.db` (bundled) or `./prism.db` (source) | SQLite database path. |
+| `ENABLE_SNAPSHOT_CAPTURE` | `false` | Dump full snapshots every cycle (paper only). |
+| `EMBEDDINGS_BACKEND` | `fallback` | `fallback` = deterministic hash vectors; `onnx` = Xenova/MiniLM (downloads ~80MB). |
+| `AGENTIC_MODE` | `false` | Enable agent runtime overlay. |
+| `AGENT_MCP_ENABLED` | `false` | Expose stdio MCP server. |
+| `AGENT_HTTP_PORT` | `0` | Local HTTP status port (`0` = disabled). |
+| `AUTO_UPDATE` | `true` | Check for releases periodically. |
+| `UPDATE_CHANNEL` | `stable` | `stable`, `beta` or `dev`. |
+| `UPDATE_R2_PUBLIC_URL` | `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev` | Release CDN. `.env.example` contains a stale `r2.prism-agent.com` value; the code fallback is the source of truth. |
+| `GITHUB_TOKEN` | — | Optional PAT for filing feedback issues. |
+| `PRISM_FEEDBACK_OPT_OUT` | `false` | Disable automatic feedback. |
+
+In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaults to `test-helius-key` and `SOLANA_RPC_URL` defaults to `https://example.com`.
+
+## Common gotchas
+
+- **`bun run dev` is guarded.** Use `prism dev` or `bun cli/index.ts dev`. Set `PRISM_ALLOW_DIRECT=true` only if you deliberately need direct execution.
+- **`LOG_LEVEL` does not silence output.** `engine/logger.ts` always emits and writes to `logs/audit-trail.jsonl` regardless of level.
+- **Coverage thresholds apply only to included files.** Several large engine modules are excluded from coverage.
+- **Embeddings default to fallback.** The ONNX backend downloads ~80MB on first use and can crash with BigInt serialization errors in Node; the engine automatically falls back.
+- **Bundled blacklists are empty.** `engine/data/deployer-blacklist.json` and `engine/data/token-blacklist.json` ship as `[]`. Override with `DEPLOYER_BLACKLIST_PATH` / `TOKEN_BLACKLIST_PATH`.
+- **Deployer blacklist is half-wired.** `blacklist.checkPool()` accepts deployer addresses, but deployers are not currently fetched from on-chain metadata.
+- **One ENTER per live cycle.** In live mode, `ENTER` is silently skipped if any position is already open.
+- **sqlite-vec extension.** Source installs rely on `scripts/generate-vec-embed.ts` to create `engine/sqlite-vec-embedded.ts`; bundled installs provide the native extension via `PRISM_VEC0_PATH`.
+- **Backtest is a simplified simulation.** It does not replicate the full decision loop (no risk gates, memory, dynamic ENTER/EXIT sizing, trailing stop). Use it as a regression baseline, not a performance forecast.
+- **`.env.example` is stale in places.** For example, its `UPDATE_R2_PUBLIC_URL` default does not match the code fallback. Always verify against `engine/config-service.ts`.
 
 ## Where to look first
 
-- New to the codebase: `engine/index.ts` → `engine/program.ts` → `engine/services.ts` → `engine/config-service.ts`.
-- Adding an engine service: `engine/services.ts` (Tag) + new `engine/x-service.ts` (Live Layer) + `buildLayer()` in `program.ts`.
-- Adding a risk check: `engine/risk-service.ts` `evaluateRisk()`, plus add a `RiskConfig` field in `program.ts` `buildLayer()`.
-- Changing decision rules: `evaluatePool` inside `engine/program.ts` `Effect.gen` (the logic is one ~280-line block, not split into helpers).
+- New to the codebase: `engine/index.ts` → `engine/run-engine.ts` → `engine/program.ts` → `engine/services.ts` → `engine/config-service.ts`.
+- Adding a service: `engine/services.ts` (Tag) + new `engine/x-service.ts` (Layer) + `buildLayer()` in `engine/program.ts`.
+- Adding a risk check: `engine/risk-service.ts` `evaluateRisk()`.
+- Changing decision rules: the `evaluatePool` block inside `engine/program.ts`.
 - Adding a Cloudflare route: `cloudflare/workers/api/index.ts`.
-- Adding a Telegram command: `cloudflare/workers/telegram-bot/index.ts` (add handler + dispatch in `processUpdate`).
-- Deploying: see `cloudflare/README.md` for full step-by-step.
+- Adding a Telegram command: `cloudflare/workers/telegram-bot/index.ts`.
+- Deploying Cloudflare: `cloudflare/README.md`.
