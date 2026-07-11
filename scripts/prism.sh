@@ -15,5 +15,6 @@ done
 PACKAGE_ROOT=$(cd -- "$(dirname -- "$SOURCE")/.." && pwd)
 
 cd "$PACKAGE_ROOT"
+export PRISM_INSTALL_DIR="$PACKAGE_ROOT"
 exec bun "$PACKAGE_ROOT/cli/index.ts" "$@"
 

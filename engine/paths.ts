@@ -30,6 +30,12 @@ function resolveEntryScript(): string {
 }
 
 function resolveProjectRoot(): string {
+  // The wrapper sets this so bundled/source installs resolve consistently
+  // regardless of how the binary was invoked or where the caller's CWD is.
+  if (process.env.PRISM_INSTALL_DIR) {
+    return path.resolve(process.env.PRISM_INSTALL_DIR);
+  }
+
   const entry = resolveEntryScript();
   if (!entry) return process.cwd();
 

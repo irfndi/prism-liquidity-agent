@@ -6,13 +6,18 @@ import { program, buildLayer } from "./program.js";
 import { ConfigService, ConfigLive } from "./config-service.js";
 import { errorReporter } from "./error-reporter.js";
 import { getCurrentVersion } from "./version.js";
-import { getPrismLogsDir } from "./paths.js";
+import { getPrismConfigDir, getPrismDataDir, getPrismDbPath, getPrismEnvPath, getPrismLogsDir } from "./paths.js";
 
 function redirectStdoutStderrToFile(): void {
   const logsDir = getPrismLogsDir();
   fs.mkdirSync(logsDir, { recursive: true, mode: 0o700 });
   const logPath = path.join(logsDir, "engine.log");
   const stream = fs.createWriteStream(logPath, { flags: "a" });
+
+  stream.on("error", (err) => {
+    // Use original stderr to avoid recursive failure if the audit stream is broken.
+    process.stderr.write(`[run-engine] log stream error: ${err.message}\n`);
+  });
 
   const originalStdoutWrite = process.stdout.write.bind(process.stdout) as (
     chunk: unknown,
@@ -61,6 +66,9 @@ function ensureError(cause: unknown): Error {
 
 export function runEngine(): Promise<void> {
   errorReporter.setAppVersion(getCurrentVersion());
+
+  console.info(`Prism engine starting — version ${getCurrentVersion()}`);
+  console.info(`Resolved paths: installDir=${process.env.PRISM_INSTALL_DIR ?? "(not set)"} configDir=${getPrismConfigDir()} dataDir=${getPrismDataDir()} envPath=${getPrismEnvPath()} dbPath=${getPrismDbPath()} logsDir=${getPrismLogsDir()}`);
 
   process.on("uncaughtException", (err) => {
     errorReporter.report(ensureError(err), { severity: "critical" });
