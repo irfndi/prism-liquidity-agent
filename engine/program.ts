@@ -2061,7 +2061,9 @@ export const program = Effect.gen(function* () {
   // Run first cycle
   yield* runScanCycle();
 
+  let shuttingDown = false;
   const runScheduledCycle = Effect.gen(function* () {
+    if (shuttingDown) return;
     yield* reconcilePositions(adapter, db, memory, trackedPositions, poolsToScan);
     yield* claimAllFees();
     yield* checkForAutoUpdate(config, db);
@@ -2075,6 +2077,8 @@ export const program = Effect.gen(function* () {
   );
 
   const gracefulShutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.info(`Received ${signal} — shutting down`);
     Effect.runPromise(agent.disconnect()).finally(() => {
       process.exit(0);

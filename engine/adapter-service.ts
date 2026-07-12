@@ -733,11 +733,6 @@ export const AdapterLive = Layer.effect(
     }
 
     const WALLET_BALANCE_CACHE_TTL_MS = 30_000;
-    let walletBalanceCache: { readonly value: number; readonly fetchedAt: number } | null = null;
-
-    function invalidateWalletBalanceCache(): void {
-      walletBalanceCache = null;
-    }
 
     async function readTokenBalance(mintAddress: string): Promise<bigint> {
       const activeWallet = wallet;
@@ -775,6 +770,11 @@ export const AdapterLive = Layer.effect(
         return (lamports / 1e9) * solPrice + Number(usdcRaw) / 1e6;
       });
     }
+
+    const [cachedWalletBalance, invalidateWalletBalance] = yield* Effect.cachedInvalidateWithTTL(
+      readWalletBalanceUsd(),
+      WALLET_BALANCE_CACHE_TTL_MS,
+    );
 
     // ─── Pool stats ────────────────────────────────────────────────────────
 
@@ -839,20 +839,7 @@ export const AdapterLive = Layer.effect(
 
       getWalletAddress: () => wallet?.publicKey.toBase58() ?? null,
 
-      getWalletBalanceUsd: () =>
-        Effect.gen(function* () {
-          if (!wallet) return 0;
-          const now = Date.now();
-          if (
-            walletBalanceCache &&
-            now - walletBalanceCache.fetchedAt < WALLET_BALANCE_CACHE_TTL_MS
-          ) {
-            return walletBalanceCache.value;
-          }
-          const value = yield* readWalletBalanceUsd();
-          walletBalanceCache = { value, fetchedAt: Date.now() };
-          return value;
-        }),
+      getWalletBalanceUsd: () => cachedWalletBalance,
 
       getNativeSolBalance: () =>
         Effect.gen(function* () {
@@ -1159,7 +1146,7 @@ export const AdapterLive = Layer.effect(
           yield* Effect.tryPromise(() =>
             rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")),
           );
-          invalidateWalletBalanceCache();
+          yield* invalidateWalletBalance;
 
           return {
             positionPubKey: positionKeypair.publicKey.toBase58(),
@@ -1225,7 +1212,7 @@ export const AdapterLive = Layer.effect(
               rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")),
             );
           }
-          invalidateWalletBalanceCache();
+          yield* invalidateWalletBalance;
 
           return { txSignature: "batch-confirmed" };
         }).pipe(
@@ -1432,7 +1419,7 @@ export const AdapterLive = Layer.effect(
           yield* Effect.tryPromise(() =>
             rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")),
           );
-          invalidateWalletBalanceCache();
+          yield* invalidateWalletBalance;
 
           return {
             txSignature: signature,
@@ -1659,7 +1646,7 @@ export const AdapterLive = Layer.effect(
             yield* Effect.tryPromise(() =>
               rpcCall((conn) => conn.confirmTransaction(sig, "confirmed")),
             );
-            invalidateWalletBalanceCache();
+            yield* invalidateWalletBalance;
             logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
           });
 
