@@ -51,6 +51,22 @@ function readJsonBody<T>(request: { json: () => Promise<unknown> }): Effect.Effe
   );
 }
 
+function isTelegramUpdate(value: unknown): value is TelegramUpdate {
+  if (typeof value !== "object" || value === null) return false;
+  const message = (value as { message?: unknown }).message;
+  if (message === undefined) return true;
+  if (typeof message !== "object" || message === null) return false;
+  const candidate = message as {
+    chat?: { id?: unknown };
+    from?: { id?: unknown; first_name?: unknown };
+  };
+  return (
+    typeof candidate.chat?.id === "number" &&
+    typeof candidate.from?.id === "number" &&
+    typeof candidate.from?.first_name === "string"
+  );
+}
+
 function sendMessage(
   botToken: string,
   chatId: number,
@@ -260,7 +276,7 @@ function processUpdate(
   env: Env,
   update: TelegramUpdate,
 ): Effect.Effect<void, never> {
-  if (!update.message) return Effect.void;
+  if (!isTelegramUpdate(update) || !update.message) return Effect.void;
 
   const message = update.message;
   const chatId = message.chat.id;
@@ -346,7 +362,11 @@ app.post("/webhook", async (c) => {
   return await Effect.runPromise(
     Effect.gen(function* () {
       const update = yield* readJsonBody<TelegramUpdate>(c.req);
-      yield* processUpdate(c.env.DB, c.env, update);
+      yield* processUpdate(c.env.DB, c.env, update).pipe(
+        Effect.catchAllCause((cause) =>
+          Effect.sync(() => console.error("processUpdate failed", cause)),
+        ),
+      );
       return c.json({ ok: true });
     }),
   );

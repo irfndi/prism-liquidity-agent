@@ -113,16 +113,26 @@ export function retryWithBackoff<T>(
   fn: () => Promise<T>,
   opts?: RetryOptions,
 ): Effect.Effect<T, unknown> {
+  return retryEffectWithBackoff(
+    Effect.tryPromise({
+      try: () => fn(),
+      catch: (cause) => cause,
+    }),
+    opts,
+  );
+}
+
+export function retryEffectWithBackoff<T>(
+  effect: Effect.Effect<T, unknown>,
+  opts?: RetryOptions,
+): Effect.Effect<T, unknown> {
   const { maxRetries, baseDelayMs, maxDelayMs, rateLimitBaseDelayMs } = {
     ...DEFAULT_RETRY_OPTIONS,
     ...opts,
   };
 
   const attempt = (attemptNumber: number): Effect.Effect<T, unknown> =>
-    Effect.tryPromise({
-      try: () => fn(),
-      catch: (cause) => cause,
-    }).pipe(
+    effect.pipe(
       Effect.catchAll((err) => {
         if (attemptNumber >= maxRetries || !isRetriableError(err)) {
           return Effect.fail(err);

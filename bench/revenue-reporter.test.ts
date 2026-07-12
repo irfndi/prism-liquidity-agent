@@ -13,7 +13,7 @@ const FEE_WALLET_API_URL = "https://prism-api.irfndi.workers.dev";
 
 type FeeCollectionEvent = {
   poolAddress: string;
-  positionPubkey: string;
+  positionPubkey?: string;
   feeX: number;
   feeY: number;
   platformFeeX: number;

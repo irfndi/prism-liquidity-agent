@@ -130,7 +130,7 @@ export interface AdapterApi {
   readonly discoverPools: () => Effect.Effect<ReadonlyArray<DiscoveredPool>, DiscoverPoolsError>;
   readonly reportFeeCollection: (event: {
     poolAddress: string;
-    positionPubkey: string;
+    positionPubkey?: string;
     feeX: number;
     feeY: number;
     platformFeeX: number;

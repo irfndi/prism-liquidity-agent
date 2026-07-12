@@ -1837,24 +1837,28 @@ export const program = Effect.gen(function* () {
               (claimResult.operatorFeeX ?? 0) > 0 ||
               (claimResult.operatorFeeY ?? 0) > 0
             ) {
-              yield* adapter.reportFeeCollection({
-                poolAddress: decision.poolAddress,
-                positionPubkey: pos.positionPubKey,
-                feeX: claimResult.feeX,
-                feeY: claimResult.feeY,
-                platformFeeX: claimResult.platformFeeX,
-                platformFeeY: claimResult.platformFeeY,
-                tier,
-                txSignature: claimResult.txSignature,
-                ...(claimResult.feeTransferTxSignature != null && {
-                  feeTransferTxSignature: claimResult.feeTransferTxSignature,
-                }),
-                ...(claimResult.operatorFeeX != null && {
-                  operatorFeeX: claimResult.operatorFeeX,
-                }),
-                ...(claimResult.operatorFeeY != null && {
-                  operatorFeeY: claimResult.operatorFeeY,
-                }),
+              yield* Effect.sync(() => {
+                Effect.runFork(
+                  adapter.reportFeeCollection({
+                    poolAddress: decision.poolAddress,
+                    ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
+                    feeX: claimResult.feeX,
+                    feeY: claimResult.feeY,
+                    platformFeeX: claimResult.platformFeeX,
+                    platformFeeY: claimResult.platformFeeY,
+                    tier,
+                    txSignature: claimResult.txSignature,
+                    ...(claimResult.feeTransferTxSignature != null && {
+                      feeTransferTxSignature: claimResult.feeTransferTxSignature,
+                    }),
+                    ...(claimResult.operatorFeeX != null && {
+                      operatorFeeX: claimResult.operatorFeeX,
+                    }),
+                    ...(claimResult.operatorFeeY != null && {
+                      operatorFeeY: claimResult.operatorFeeY,
+                    }),
+                  }),
+                );
               });
             }
           }
@@ -1971,24 +1975,28 @@ export const program = Effect.gen(function* () {
             (result.operatorFeeX ?? 0) > 0 ||
             (result.operatorFeeY ?? 0) > 0
           ) {
-            yield* adapter.reportFeeCollection({
-              poolAddress,
-              positionPubkey: pos.positionPubKey,
-              feeX: result.feeX,
-              feeY: result.feeY,
-              platformFeeX: result.platformFeeX,
-              platformFeeY: result.platformFeeY,
-              tier,
-              txSignature: result.txSignature,
-              ...(result.feeTransferTxSignature != null && {
-                feeTransferTxSignature: result.feeTransferTxSignature,
-              }),
-              ...(result.operatorFeeX != null && {
-                operatorFeeX: result.operatorFeeX,
-              }),
-              ...(result.operatorFeeY != null && {
-                operatorFeeY: result.operatorFeeY,
-              }),
+            yield* Effect.sync(() => {
+              Effect.runFork(
+                adapter.reportFeeCollection({
+                  poolAddress,
+                  ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
+                  feeX: result.feeX,
+                  feeY: result.feeY,
+                  platformFeeX: result.platformFeeX,
+                  platformFeeY: result.platformFeeY,
+                  tier,
+                  txSignature: result.txSignature,
+                  ...(result.feeTransferTxSignature != null && {
+                    feeTransferTxSignature: result.feeTransferTxSignature,
+                  }),
+                  ...(result.operatorFeeX != null && {
+                    operatorFeeX: result.operatorFeeX,
+                  }),
+                  ...(result.operatorFeeY != null && {
+                    operatorFeeY: result.operatorFeeY,
+                  }),
+                }),
+              );
             });
           }
 
@@ -2080,9 +2088,7 @@ export const program = Effect.gen(function* () {
     if (shuttingDown) return;
     shuttingDown = true;
     console.info(`Received ${signal} — shutting down`);
-    Effect.runPromise(agent.disconnect()).finally(() => {
-      process.exit(0);
-    });
+    Effect.runFork(agent.disconnect().pipe(Effect.ensuring(Effect.sync(() => process.exit(0)))));
   };
 
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));

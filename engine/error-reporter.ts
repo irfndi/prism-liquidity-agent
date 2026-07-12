@@ -69,19 +69,17 @@ const DEFAULT_BATCH_SIZE = 5;
 const MAX_PENDING_BUFFER = 1000;
 const CREDENTIALS_FILE = join(homedir(), ".config", "prism", "credentials.json");
 
-function readPrismApiKey(): string | null {
-  return Effect.runSync(
-    Effect.try({
-      try: () => {
-        if (!existsSync(CREDENTIALS_FILE)) return null;
-        const value = JSON.parse(readFileSync(CREDENTIALS_FILE, "utf-8")) as {
-          apiKey?: unknown;
-        };
-        return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
-      },
-      catch: (cause) => cause,
-    }).pipe(Effect.catchAll(() => Effect.succeed(null))),
-  );
+function readPrismApiKey(): Effect.Effect<string | null, never> {
+  return Effect.try({
+    try: () => {
+      if (!existsSync(CREDENTIALS_FILE)) return null;
+      const value = JSON.parse(readFileSync(CREDENTIALS_FILE, "utf-8")) as {
+        apiKey?: unknown;
+      };
+      return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
+    },
+    catch: (cause) => cause,
+  }).pipe(Effect.catchAll(() => Effect.succeed(null)));
 }
 
 // ─── Sanitization patterns ───────────────────────────────────────────────────
@@ -248,20 +246,19 @@ export class ErrorReporter {
     }
 
     const batch = this.pending.splice(0, this.pending.length);
-    const apiKey = readPrismApiKey();
-    if (!apiKey && this.endpoint.includes("prism-api.irfndi.workers.dev")) {
-      return Effect.void;
-    }
-    const payload: BatchPayload = {
-      app: "prism-liquidity-agent",
-      version: this.appVersion,
-      reports: batch,
-    };
+    const endpoint = this.endpoint;
 
     return Effect.gen(this, function* () {
+      const apiKey = yield* readPrismApiKey();
+      if (!apiKey && endpoint.includes("prism-api.irfndi.workers.dev")) return;
+      const payload: BatchPayload = {
+        app: "prism-liquidity-agent",
+        version: this.appVersion,
+        reports: batch,
+      };
       const response = yield* Effect.tryPromise({
         try: () =>
-          fetch(this.endpoint!, {
+          fetch(endpoint, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",

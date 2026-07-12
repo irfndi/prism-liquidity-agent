@@ -8,25 +8,35 @@ const VECTOR_DIM = 384;
 
 type Embedder = (text: string) => Effect.Effect<number[], unknown>;
 
-let onnxEffect: Effect.Effect<Embedder, unknown> | null = null;
+let onnxCache: Effect.Effect<
+  [Effect.Effect<Embedder, unknown>, Effect.Effect<void>],
+  never
+> | null = null;
+
+function loadOnnxUncached(): Effect.Effect<Embedder, unknown> {
+  return Effect.gen(function* () {
+    const mod = yield* Effect.tryPromise(() => import("@xenova/transformers"));
+    const extractor = yield* Effect.tryPromise(() =>
+      mod.pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2"),
+    );
+    return (text: string) =>
+      Effect.tryPromise(() =>
+        extractor(text, {
+          pooling: "mean",
+          normalize: true,
+        }),
+      ).pipe(Effect.map((output) => Array.from(output.data as Float32Array)));
+  });
+}
 
 function loadOnnx(): Effect.Effect<Embedder, unknown> {
-  if (onnxEffect === null) {
-    onnxEffect = Effect.gen(function* () {
-      const mod = yield* Effect.tryPromise(() => import("@xenova/transformers"));
-      const extractor = yield* Effect.tryPromise(() =>
-        mod.pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2"),
-      );
-      return (text: string) =>
-        Effect.tryPromise(() =>
-          extractor(text, {
-            pooling: "mean",
-            normalize: true,
-          }),
-        ).pipe(Effect.map((output) => Array.from(output.data as Float32Array)));
-    });
+  if (onnxCache === null) {
+    onnxCache = Effect.cachedInvalidateWithTTL(loadOnnxUncached(), "1 day");
   }
-  return onnxEffect;
+  return Effect.gen(function* () {
+    const [cached, invalidate] = yield* onnxCache!;
+    return yield* cached.pipe(Effect.tapError(() => invalidate));
+  });
 }
 
 function fallbackEmbedding(text: string): number[] {

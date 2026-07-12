@@ -21,7 +21,12 @@ import { AdapterError } from "./errors.js";
 import { DiscoverPoolsError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import type { BinArray, BinData, PoolState, Position } from "./types.js";
-import { CircuitBreaker, isRpcNetworkError, retryWithBackoff } from "./adapter-retry.js";
+import {
+  CircuitBreaker,
+  isRpcNetworkError,
+  retryEffectWithBackoff,
+  retryWithBackoff,
+} from "./adapter-retry.js";
 import bs58 from "bs58";
 import fs from "fs";
 import path from "path";
@@ -338,10 +343,16 @@ export const AdapterLive = Layer.effect(
     }
 
     const getDlmmCached = yield* Effect.cachedFunction((poolAddress: string) => {
-      const pubkey = new PublicKey(poolAddress);
-      return Effect.cachedInvalidateWithTTL(
-        rpcCall((conn) => DLMM.create(conn, pubkey)),
-        DLMM_CACHE_TTL_MS,
+      return Effect.try({
+        try: () => new PublicKey(poolAddress),
+        catch: (cause) => cause,
+      }).pipe(
+        Effect.flatMap((pubkey) =>
+          Effect.cachedInvalidateWithTTL(
+            rpcCall((conn) => DLMM.create(conn, pubkey)),
+            DLMM_CACHE_TTL_MS,
+          ),
+        ),
       );
     });
 
@@ -395,7 +406,7 @@ export const AdapterLive = Layer.effect(
 
     const fetchHeliusAssetCached = yield* Effect.cachedFunction((mint: string) => {
       const url = `https://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
-      const asset = Effect.gen(function* () {
+      const assetRequest = Effect.gen(function* () {
         const res = yield* Effect.tryPromise(() =>
           fetch(url, {
             method: "POST",
@@ -426,7 +437,10 @@ export const AdapterLive = Layer.effect(
         }
         return json;
       });
-      return Effect.cachedInvalidateWithTTL(asset, HELIUS_ASSET_CACHE_TTL_MS);
+      return Effect.cachedInvalidateWithTTL(
+        retryEffectWithBackoff(assetRequest, RPC_RETRY_OPTIONS),
+        HELIUS_ASSET_CACHE_TTL_MS,
+      );
     });
 
     function fetchHeliusAsset(mint: string): Effect.Effect<HeliusAssetResponse | null, unknown> {

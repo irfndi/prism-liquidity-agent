@@ -606,9 +606,14 @@ app.post("/v1/register-telegram", async (c) => {
     registration.pipe(
       Effect.match({
         onFailure: (cause) => {
-          const message = causeMessage(cause) || "Registration failed";
-          const status = message.includes("already registered") ? 409 : 400;
-          return c.json({ error: message }, status);
+          const message = causeMessage(cause);
+          if (message.includes("already registered")) {
+            return c.json({ error: message }, 409);
+          }
+          if (message.includes("Invalid telegram_id format")) {
+            return c.json({ error: message }, 400);
+          }
+          return c.json({ error: "Registration failed" }, 500);
         },
         onSuccess: (response) => response,
       }),
@@ -628,9 +633,10 @@ app.post("/v1/agent-status", async (c) => {
     agentStatusHandler(DB, body.telegram_id).pipe(
       Effect.match({
         onFailure: (cause) => {
-          const message = causeMessage(cause) || "Status unavailable";
-          const status = message.includes("not found") ? 404 : 500;
-          return c.json({ error: message }, status);
+          const message = causeMessage(cause);
+          return message.includes("not found")
+            ? c.json({ error: "User not found" }, 404)
+            : c.json({ error: "Status unavailable" }, 500);
         },
         onSuccess: (result) => c.json(result),
       }),
@@ -1594,6 +1600,14 @@ app.post("/v1/revenue/log", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
+  const authentication = await Effect.runPromise(loginHandler(DB, apiKey).pipe(Effect.either));
+  if (authentication._tag === "Left") {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+  const authenticatedUser = authentication.right as { id: string; tier?: string };
+  const userId = authenticatedUser.id;
+  const tier = authenticatedUser.tier ?? "free";
+
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
 
   const body = await Effect.runPromise(
@@ -1638,9 +1652,6 @@ app.post("/v1/revenue/log", async (c) => {
   }
 
   const revenue = Effect.gen(function* () {
-    const loginResult = yield* loginHandler(DB, apiKey);
-    const userId = (loginResult as { id: string }).id;
-    const tier = (loginResult as { tier?: string }).tier ?? "free";
     const id = generateId();
     yield* Effect.tryPromise(() =>
       DB.prepare(
