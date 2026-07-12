@@ -282,16 +282,17 @@ export const AdapterLive = Layer.effect(
       config.solanaRpcFallbackUrl.trim() !== config.solanaRpcUrl.trim()
         ? new Connection(config.solanaRpcFallbackUrl, "confirmed")
         : null;
-    let wallet: Keypair | null = null;
-
-    if (config.walletPrivateKey) {
-      try {
-        wallet = Keypair.fromSecretKey(bs58.decode(config.walletPrivateKey));
-      } catch (err) {
-        logger.error("Failed to load wallet", err);
-        wallet = null;
-      }
-    }
+    const wallet = config.walletPrivateKey
+      ? yield* Effect.try({
+          try: () => Keypair.fromSecretKey(bs58.decode(config.walletPrivateKey)),
+          catch: (cause) => cause,
+        }).pipe(
+          Effect.catchAll((err) => {
+            logger.error("Failed to load wallet", err);
+            return Effect.succeed(null);
+          }),
+        )
+      : null;
 
     // ─── DLMM instance cache (5-minute TTL, promise-based for dedup) ────
 
@@ -733,7 +734,6 @@ export const AdapterLive = Layer.effect(
 
     const WALLET_BALANCE_CACHE_TTL_MS = 30_000;
     let walletBalanceCache: { readonly value: number; readonly fetchedAt: number } | null = null;
-    let walletBalanceInFlight: Promise<number> | null = null;
 
     function invalidateWalletBalanceCache(): void {
       walletBalanceCache = null;
@@ -762,14 +762,18 @@ export const AdapterLive = Layer.effect(
       return total;
     }
 
-    async function readWalletBalanceUsd(): Promise<number> {
-      const activeWallet = wallet;
-      if (!activeWallet) return 0;
-      const lamports = await rpcCall((conn) => conn.getBalance(activeWallet.publicKey));
-      const prices = await Effect.runPromise(fetchTokenPrices([SOL_MINT]));
-      const solPrice = prices[SOL_MINT] ?? fallbackPrices[SOL_MINT] ?? 0;
-      const usdcRaw = await readTokenBalance(USDC_MINT);
-      return (lamports / 1e9) * solPrice + Number(usdcRaw) / 1e6;
+    function readWalletBalanceUsd(): Effect.Effect<number, unknown> {
+      return Effect.gen(function* () {
+        const activeWallet = wallet;
+        if (!activeWallet) return 0;
+        const lamports = yield* Effect.tryPromise(() =>
+          rpcCall((conn) => conn.getBalance(activeWallet.publicKey)),
+        );
+        const prices = yield* fetchTokenPrices([SOL_MINT]);
+        const solPrice = prices[SOL_MINT] ?? fallbackPrices[SOL_MINT] ?? 0;
+        const usdcRaw = yield* Effect.tryPromise(() => readTokenBalance(USDC_MINT));
+        return (lamports / 1e9) * solPrice + Number(usdcRaw) / 1e6;
+      });
     }
 
     // ─── Pool stats ────────────────────────────────────────────────────────
@@ -836,26 +840,18 @@ export const AdapterLive = Layer.effect(
       getWalletAddress: () => wallet?.publicKey.toBase58() ?? null,
 
       getWalletBalanceUsd: () =>
-        Effect.tryPromise(() => {
-          if (!wallet) return Promise.resolve(0);
+        Effect.gen(function* () {
+          if (!wallet) return 0;
           const now = Date.now();
           if (
             walletBalanceCache &&
             now - walletBalanceCache.fetchedAt < WALLET_BALANCE_CACHE_TTL_MS
           ) {
-            return Promise.resolve(walletBalanceCache.value);
+            return walletBalanceCache.value;
           }
-          if (walletBalanceInFlight) return walletBalanceInFlight;
-          const promise = readWalletBalanceUsd()
-            .then((value) => {
-              walletBalanceCache = { value, fetchedAt: Date.now() };
-              return value;
-            })
-            .finally(() => {
-              walletBalanceInFlight = null;
-            });
-          walletBalanceInFlight = promise;
-          return promise;
+          const value = yield* readWalletBalanceUsd();
+          walletBalanceCache = { value, fetchedAt: Date.now() };
+          return value;
         }),
 
       getNativeSolBalance: () =>
@@ -1583,10 +1579,11 @@ export const AdapterLive = Layer.effect(
 
       swapUSDCForSOL: (minSolThreshold = 0.05, swapAmountUSDC = 1.0) =>
         Effect.gen(function* () {
-          if (!wallet) return;
+          const activeWallet = wallet;
+          if (!activeWallet) return;
 
           const lamports = yield* Effect.tryPromise(() =>
-            rpcCall((conn) => conn.getBalance(wallet!.publicKey)),
+            rpcCall((conn) => conn.getBalance(activeWallet.publicKey)),
           );
           const solBalance = lamports / 1e9;
 
@@ -1598,7 +1595,7 @@ export const AdapterLive = Layer.effect(
             swapAmountUSDC,
           });
 
-          try {
+          const swap = Effect.gen(function* () {
             const jupiterApiKey = process.env.JUPITER_API_KEY ?? "";
             const headers: Record<string, string> = { "Content-Type": "application/json" };
             if (jupiterApiKey) headers["x-api-key"] = jupiterApiKey;
@@ -1625,7 +1622,7 @@ export const AdapterLive = Layer.effect(
                 headers,
                 body: JSON.stringify({
                   quoteResponse: quoteData,
-                  userPublicKey: wallet!.publicKey.toBase58(),
+                  userPublicKey: activeWallet.publicKey.toBase58(),
                   wrapAndUnwrapSol: true,
                   asLegacyTransaction: true,
                 }),
@@ -1648,7 +1645,7 @@ export const AdapterLive = Layer.effect(
 
             const swapTxBuf = Buffer.from(swapData.swapTransaction, "base64");
             const swapTx = Transaction.from(swapTxBuf);
-            swapTx.sign(wallet!);
+            swapTx.sign(activeWallet);
 
             const sig = yield* Effect.tryPromise(() =>
               rpcCall((conn) =>
@@ -1664,9 +1661,13 @@ export const AdapterLive = Layer.effect(
             );
             invalidateWalletBalanceCache();
             logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
-          } catch (err) {
-            logger.warn("USDC → SOL swap failed (non-fatal):", String(err));
-          }
+          });
+
+          yield* swap.pipe(
+            Effect.catchAll((err) =>
+              Effect.sync(() => logger.warn("USDC → SOL swap failed (non-fatal):", String(err))),
+            ),
+          );
         }).pipe(Effect.catchAll(() => Effect.void)),
     };
 

@@ -69,11 +69,6 @@ import type { AgentRuntimeAlert, AgentRuntimeCheckin } from "./agent-transport.j
 import { randomUUID } from "crypto";
 import { AgentLive, AgentNoOp } from "./agent-service.js";
 
-// ─── Cycle state ───────────────────────────────────────────────
-
-let cycleInFlight = false;
-let skippedCycles = 0;
-
 // ─── Position value estimation (rough heuristic) ───────────────
 
 export function estimatePositionValue(pos: PositionRecord, pool: PoolState): number {
@@ -2066,44 +2061,20 @@ export const program = Effect.gen(function* () {
   // Run first cycle
   yield* runScanCycle();
 
-  // Schedule periodic cycles
-  const layer = buildLayer(config);
-
-  const interval = setInterval(() => {
-    if (cycleInFlight) {
-      skippedCycles++;
-      console.warn("Skipping cycle — previous still running", {
-        skippedCycles,
-      });
-      return;
-    }
-    cycleInFlight = true;
-    Effect.runPromise(
-      Effect.gen(function* () {
-        yield* reconcilePositions(adapter, db, memory, trackedPositions, poolsToScan);
-        yield* claimAllFees();
-        yield* checkForAutoUpdate(config, db);
-        yield* runScanCycle();
-      }).pipe(
-        Effect.provide(layer),
-        Effect.catchAll((err) => {
-          console.error("Cycle error:", err);
-          return Effect.void;
-        }),
-        Effect.tap(() =>
-          Effect.sync(() => {
-            cycleInFlight = false;
-          }),
-        ),
-      ),
-    ).catch((err) => {
-      console.error("Fatal cycle error:", err);
-      cycleInFlight = false;
-    });
-  }, config.scanIntervalMs);
+  const runScheduledCycle = Effect.gen(function* () {
+    yield* reconcilePositions(adapter, db, memory, trackedPositions, poolsToScan);
+    yield* claimAllFees();
+    yield* checkForAutoUpdate(config, db);
+    yield* runScanCycle();
+  }).pipe(
+    Effect.catchAll((err) =>
+      Effect.sync(() => {
+        console.error("Cycle error:", err);
+      }),
+    ),
+  );
 
   const gracefulShutdown = (signal: string) => {
-    clearInterval(interval);
     console.info(`Received ${signal} — shutting down`);
     Effect.runPromise(agent.disconnect()).finally(() => {
       process.exit(0);
@@ -2113,6 +2084,7 @@ export const program = Effect.gen(function* () {
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
   process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
-  // Keep process alive
-  yield* Effect.never;
+  yield* Effect.forever(
+    Effect.sleep(config.scanIntervalMs).pipe(Effect.zipRight(runScheduledCycle)),
+  );
 });

@@ -68,44 +68,57 @@ function generateReferralCode(): string {
 }
 
 // Audit logging helper
-async function logAudit(
+function logAudit(
   db: D1Database,
   userId: string,
   action: string,
   details?: Record<string, unknown>,
-): Promise<void> {
-  if (!AUDIT_ACTIONS.has(action)) return;
-  const detailsJson = details ? JSON.stringify(details) : null;
-  const eventKey = (await hashKey(`${action}:${detailsJson ?? ""}`)).slice(0, 32);
-  try {
-    await db
-      .prepare(
-        `INSERT INTO audit_event_summary
-          (user_id, action, event_key, details, first_seen_at, last_seen_at, occurrence_count)
-         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
-         ON CONFLICT(user_id, action, event_key) DO UPDATE SET
-           details = excluded.details,
-           last_seen_at = CURRENT_TIMESTAMP,
-           occurrence_count = audit_event_summary.occurrence_count + 1`,
-      )
-      .bind(userId, action, eventKey, detailsJson)
-      .run();
-  } catch (err) {
-    try {
-      await db
-        .prepare("INSERT INTO audit_log (user_id, action, details) VALUES (?, ?, ?)")
-        .bind(userId, action, detailsJson)
-        .run();
-    } catch (fallbackErr) {
-      console.error("[Audit] Failed to log audit entry:", err, fallbackErr);
-    }
-  }
+): Effect.Effect<void, never> {
+  if (!AUDIT_ACTIONS.has(action)) return Effect.void;
+  return Effect.gen(function* () {
+    const detailsJson = details ? JSON.stringify(details) : null;
+    const eventKey = (yield* Effect.tryPromise(() =>
+      hashKey(`${action}:${detailsJson ?? ""}`),
+    )).slice(0, 32);
+    const summaryWrite = Effect.tryPromise(() =>
+      db
+        .prepare(
+          `INSERT INTO audit_event_summary
+            (user_id, action, event_key, details, first_seen_at, last_seen_at, occurrence_count)
+           VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+           ON CONFLICT(user_id, action, event_key) DO UPDATE SET
+             details = excluded.details,
+             last_seen_at = CURRENT_TIMESTAMP,
+             occurrence_count = audit_event_summary.occurrence_count + 1`,
+        )
+        .bind(userId, action, eventKey, detailsJson)
+        .run(),
+    ).pipe(
+      Effect.catchAll((summaryError: unknown) =>
+        Effect.tryPromise(() =>
+          db
+            .prepare("INSERT INTO audit_log (user_id, action, details) VALUES (?, ?, ?)")
+            .bind(userId, action, detailsJson)
+            .run(),
+        ).pipe(
+          Effect.catchAll((fallbackError: unknown) =>
+            Effect.sync(() =>
+              console.error("[Audit] Failed to log audit entry:", summaryError, fallbackError),
+            ),
+          ),
+          Effect.asVoid,
+        ),
+      ),
+      Effect.asVoid,
+    );
+    yield* summaryWrite;
+  }).pipe(Effect.catchAll(() => Effect.void));
 }
 
 // Helper to create a free subscription (used by both registration paths)
-async function createFreeSubscription(db: D1Database, userId: string): Promise<void> {
-  try {
-    await db
+function createFreeSubscription(db: D1Database, userId: string): Effect.Effect<void, never> {
+  return Effect.tryPromise(() =>
+    db
       .prepare(
         "INSERT INTO subscriptions (id, user_id, tier, period_start, period_end) VALUES (?, ?, ?, ?, ?)",
       )
@@ -116,10 +129,15 @@ async function createFreeSubscription(db: D1Database, userId: string): Promise<v
         new Date().toISOString(),
         new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
       )
-      .run();
-  } catch (err) {
-    console.error("[Subscription] Failed to create free subscription for user:", userId, err);
-  }
+      .run(),
+  ).pipe(
+    Effect.catchAll((err) =>
+      Effect.sync(() =>
+        console.error("[Subscription] Failed to create free subscription for user:", userId, err),
+      ),
+    ),
+    Effect.asVoid,
+  );
 }
 
 // Tier configuration - must match engine/revenue-service.ts
@@ -134,20 +152,20 @@ const registerHandler = (db: D1Database) =>
   Effect.gen(function* () {
     const userId = generateId();
     const apiKey = `sk-prism-${generateId()}`;
-    const keyHash = yield* Effect.promise(() => hashKey(apiKey));
+    const keyHash = yield* Effect.tryPromise(() => hashKey(apiKey));
 
-    yield* Effect.promise(() =>
+    yield* Effect.tryPromise(() =>
       db.prepare("INSERT INTO users (id, tier) VALUES (?, ?)").bind(userId, "free").run(),
     );
 
-    yield* Effect.promise(() =>
+    yield* Effect.tryPromise(() =>
       db
         .prepare("INSERT INTO api_keys (key_hash, user_id) VALUES (?, ?)")
         .bind(keyHash, userId)
         .run(),
     );
 
-    yield* Effect.promise(() => createFreeSubscription(db, userId));
+    yield* createFreeSubscription(db, userId);
 
     return { userId, apiKey };
   });
@@ -155,9 +173,9 @@ const registerHandler = (db: D1Database) =>
 // Login handler
 const loginHandler = (db: D1Database, apiKey: string) =>
   Effect.gen(function* () {
-    const keyHash = yield* Effect.promise(() => hashKey(apiKey));
+    const keyHash = yield* Effect.tryPromise(() => hashKey(apiKey));
 
-    const result = yield* Effect.promise(() =>
+    const result = yield* Effect.tryPromise(() =>
       db
         .prepare(
           `SELECT u.id, u.tier, u.telegram_id, u.created_at
@@ -174,7 +192,7 @@ const loginHandler = (db: D1Database, apiKey: string) =>
     }
 
     // Update last_used_at
-    yield* Effect.promise(() =>
+    yield* Effect.tryPromise(() =>
       db
         .prepare("UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE key_hash = ?")
         .bind(keyHash)
@@ -189,26 +207,26 @@ interface AuthenticatedUser {
   readonly tier: string;
 }
 
-async function authenticateUser(
+function authenticateUser(
   db: D1Database,
   apiKey: string | undefined,
-): Promise<AuthenticatedUser | null> {
-  if (!apiKey) return null;
-  try {
-    const result = await Effect.runPromise(loginHandler(db, apiKey));
-    if (!result || typeof result !== "object") return null;
-    const row = result as { id?: unknown; tier?: unknown };
-    if (typeof row.id !== "string") return null;
-    return { id: row.id, tier: typeof row.tier === "string" ? row.tier : "free" };
-  } catch {
-    return null;
-  }
+): Effect.Effect<AuthenticatedUser | null, never> {
+  if (!apiKey) return Effect.succeed(null);
+  return loginHandler(db, apiKey).pipe(
+    Effect.map((result) => {
+      if (!result || typeof result !== "object") return null;
+      const row = result as { id?: unknown; tier?: unknown };
+      if (typeof row.id !== "string") return null;
+      return { id: row.id, tier: typeof row.tier === "string" ? row.tier : "free" };
+    }),
+    Effect.catchAll(() => Effect.succeed(null)),
+  );
 }
 
 // Whoami handler
 const whoamiHandler = (db: D1Database, userId: string) =>
   Effect.gen(function* () {
-    const result = yield* Effect.promise(() =>
+    const result = yield* Effect.tryPromise(() =>
       db
         .prepare("SELECT id, tier, telegram_id, created_at FROM users WHERE id = ?")
         .bind(userId)
@@ -234,7 +252,7 @@ const linkTelegramStartHandler = (db: D1Database, userId: string) =>
       .slice(0, 6)}`;
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
 
-    yield* Effect.promise(() =>
+    yield* Effect.tryPromise(() =>
       db
         .prepare("INSERT INTO telegram_link_codes (code, user_id, expires_at) VALUES (?, ?, ?)")
         .bind(code, userId, expiresAt)
@@ -254,7 +272,7 @@ const registerTelegramHandler = (db: D1Database, telegramId: string, firstName: 
       return yield* Effect.fail(new Error("Invalid telegram_id format. Must be numeric."));
     }
 
-    const existing = yield* Effect.promise(() =>
+    const existing = yield* Effect.tryPromise(() =>
       db
         .prepare("SELECT id, tier, telegram_id FROM users WHERE telegram_id = ?")
         .bind(telegramId)
@@ -267,23 +285,23 @@ const registerTelegramHandler = (db: D1Database, telegramId: string, firstName: 
 
     const userId = generateId();
     const apiKey = `sk-prism-${generateId()}`;
-    const keyHash = yield* Effect.promise(() => hashKey(apiKey));
+    const keyHash = yield* Effect.tryPromise(() => hashKey(apiKey));
 
-    yield* Effect.promise(() =>
+    yield* Effect.tryPromise(() =>
       db
         .prepare("INSERT INTO users (id, tier, telegram_id) VALUES (?, ?, ?)")
         .bind(userId, "free", telegramId)
         .run(),
     );
 
-    yield* Effect.promise(() =>
+    yield* Effect.tryPromise(() =>
       db
         .prepare("INSERT INTO api_keys (key_hash, user_id) VALUES (?, ?)")
         .bind(keyHash, userId)
         .run(),
     );
 
-    yield* Effect.promise(() => createFreeSubscription(db, userId));
+    yield* createFreeSubscription(db, userId);
 
     return { user_id: userId, api_key: apiKey, first_name: firstName };
   });
@@ -292,7 +310,7 @@ const registerTelegramHandler = (db: D1Database, telegramId: string, firstName: 
 // runtime exposes telemetry; real numbers can replace this later.
 const agentStatusHandler = (db: D1Database, telegramId: string) =>
   Effect.gen(function* () {
-    const result = yield* Effect.promise(() =>
+    const result = yield* Effect.tryPromise(() =>
       db.prepare("SELECT id FROM users WHERE telegram_id = ?").bind(telegramId).first(),
     );
 
@@ -354,7 +372,7 @@ app.post("/v1/register", async (c) => {
         .run();
     }
 
-    await logAudit(DB, result.userId, "register", { tier: "free" });
+    await Effect.runPromise(logAudit(DB, result.userId, "register", { tier: "free" }));
 
     return c.json({
       user_id: result.userId,
@@ -479,9 +497,11 @@ app.post("/v1/link-telegram/confirm", async (c) => {
       .bind(body.telegram_id, codeResult?.user_id)
       .run();
 
-    await logAudit(DB, codeResult?.user_id as string, "telegram_link", {
-      telegram_id: body.telegram_id,
-    });
+    await Effect.runPromise(
+      logAudit(DB, codeResult?.user_id as string, "telegram_link", {
+        telegram_id: body.telegram_id,
+      }),
+    );
 
     return c.json({ success: true, user_id: codeResult?.user_id });
   } catch {
@@ -542,7 +562,9 @@ app.post("/v1/register-telegram", async (c) => {
       registerTelegramHandler(DB, body.telegram_id, body.first_name ?? ""),
     );
     await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
-    await logAudit(DB, result.user_id, "register", { tier: "free", source: "telegram" });
+    await Effect.runPromise(
+      logAudit(DB, result.user_id, "register", { tier: "free", source: "telegram" }),
+    );
     return c.json({
       user_id: result.user_id,
       api_key: result.api_key,
@@ -646,7 +668,7 @@ async function storeFeedback(
 app.post("/v1/issue", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
-  const user = await authenticateUser(DB, c.get("apiKey") as string | undefined);
+  const user = await Effect.runPromise(authenticateUser(DB, c.get("apiKey") as string | undefined));
   if (!user) return c.json({ error: "API key required" }, 401);
 
   const body = (await c.req.json().catch(() => ({}))) as {
@@ -697,7 +719,7 @@ app.post("/v1/issue", async (c) => {
 app.post("/v1/feedback", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
-  const user = await authenticateUser(DB, c.get("apiKey") as string | undefined);
+  const user = await Effect.runPromise(authenticateUser(DB, c.get("apiKey") as string | undefined));
   if (!user) return c.json({ error: "API key required" }, 401);
 
   const body = (await c.req.json().catch(() => ({}))) as {
@@ -853,7 +875,7 @@ app.get("/v1/audit", async (c) => {
 app.post("/v1/errors/report", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
-  const user = await authenticateUser(DB, c.get("apiKey") as string | undefined);
+  const user = await Effect.runPromise(authenticateUser(DB, c.get("apiKey") as string | undefined));
   if (!user) return c.json({ error: "API key required" }, 401);
 
   const body = (await c.req.json().catch(() => ({}))) as {
@@ -926,7 +948,7 @@ app.post("/v1/errors/report", async (c) => {
 app.post("/v1/errors/batch", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
-  const user = await authenticateUser(DB, c.get("apiKey") as string | undefined);
+  const user = await Effect.runPromise(authenticateUser(DB, c.get("apiKey") as string | undefined));
   if (!user) return c.json({ error: "API key required" }, 401);
 
   const body = (await c.req.json().catch(() => ({}))) as {
@@ -1204,7 +1226,7 @@ app.post("/v1/installs/ping", async (c) => {
   const user =
     body.event === "install"
       ? null
-      : await authenticateUser(DB, c.get("apiKey") as string | undefined);
+      : await Effect.runPromise(authenticateUser(DB, c.get("apiKey") as string | undefined));
   if (body.event !== "install" && !user) {
     return c.json({ error: "API key required for registered telemetry" }, 401);
   }
@@ -1628,7 +1650,7 @@ app.post("/v1/wallet", async (c) => {
       ),
     ]);
 
-    await logAudit(DB, userId, "wallet_sync", { pubkey: body.pubkey });
+    await Effect.runPromise(logAudit(DB, userId, "wallet_sync", { pubkey: body.pubkey }));
 
     return c.json({ success: true, pubkey: body.pubkey });
   } catch (err) {
