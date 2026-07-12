@@ -14,6 +14,7 @@
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { Effect } from "effect";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -69,13 +70,18 @@ const MAX_PENDING_BUFFER = 1000;
 const CREDENTIALS_FILE = join(homedir(), ".config", "prism", "credentials.json");
 
 function readPrismApiKey(): string | null {
-  try {
-    if (!existsSync(CREDENTIALS_FILE)) return null;
-    const value = JSON.parse(readFileSync(CREDENTIALS_FILE, "utf-8")) as { apiKey?: unknown };
-    return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
-  } catch {
-    return null;
-  }
+  return Effect.runSync(
+    Effect.try({
+      try: () => {
+        if (!existsSync(CREDENTIALS_FILE)) return null;
+        const value = JSON.parse(readFileSync(CREDENTIALS_FILE, "utf-8")) as {
+          apiKey?: unknown;
+        };
+        return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
+      },
+      catch: (cause) => cause,
+    }).pipe(Effect.catchAll(() => Effect.succeed(null))),
+  );
 }
 
 // ─── Sanitization patterns ───────────────────────────────────────────────────
@@ -191,9 +197,7 @@ export class ErrorReporter {
 
     if (this.enabled && this.endpoint) {
       this.timerId = setInterval(() => {
-        this.flush().catch(() => {
-          /* swallow background flush errors */
-        });
+        Effect.runFork(this.flushEffect());
       }, this.flushIntervalMs);
       // Allow the process to exit even if the timer is still active
       if (typeof this.timerId === "object" && this.timerId !== null && "unref" in this.timerId) {
@@ -232,23 +236,21 @@ export class ErrorReporter {
     this.pending.push(report);
 
     if (this.pending.length >= this.batchSize) {
-      this.flush().catch(() => {
-        /* swallow background flush errors */
-      });
+      Effect.runFork(this.flushEffect());
     }
 
     console.error(`[ErrorReporter] ${category}: ${sanitizedMessage}`);
   }
 
-  async flush(timeoutMs = 10_000): Promise<void> {
+  flushEffect(timeoutMs = 10_000): Effect.Effect<void, never> {
     if (!this.enabled || !this.endpoint || this.pending.length === 0) {
-      return;
+      return Effect.void;
     }
 
     const batch = this.pending.splice(0, this.pending.length);
     const apiKey = readPrismApiKey();
     if (!apiKey && this.endpoint.includes("prism-api.irfndi.workers.dev")) {
-      return;
+      return Effect.void;
     }
     const payload: BatchPayload = {
       app: "prism-liquidity-agent",
@@ -256,17 +258,19 @@ export class ErrorReporter {
       reports: batch,
     };
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetch(this.endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
+    return Effect.gen(this, function* () {
+      const response = yield* Effect.tryPromise({
+        try: () =>
+          fetch(this.endpoint!, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+            },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(timeoutMs),
+          }),
+        catch: (cause) => cause,
       });
       if (!response.ok) {
         this.requeueBatch(batch);
@@ -274,12 +278,14 @@ export class ErrorReporter {
           `[ErrorReporter] Failed to send batch: ${response.status} ${response.statusText} (${batch.length} reports re-queued)`,
         );
       }
-    } catch (err) {
-      this.requeueBatch(batch);
-      console.error("[ErrorReporter] Failed to send error report batch, re-queued:", err);
-    } finally {
-      clearTimeout(timer);
-    }
+    }).pipe(
+      Effect.catchAll((err) =>
+        Effect.sync(() => {
+          this.requeueBatch(batch);
+          console.error("[ErrorReporter] Failed to send error report batch, re-queued:", err);
+        }),
+      ),
+    );
   }
 
   private requeueBatch(batch: ReadonlyArray<ErrorReport>): void {
@@ -297,22 +303,25 @@ export class ErrorReporter {
    * hung endpoint cannot block process exit.
    */
   flushAsync(timeoutMs = 10_000): Promise<void> {
-    if (!this.enabled) {
-      return Promise.resolve();
-    }
-    return this.flush(timeoutMs);
+    return Effect.runPromise(this.flushEffect(timeoutMs));
   }
 
   getPending(): ReadonlyArray<ErrorReport> {
     return [...this.pending];
   }
 
-  async dispose(): Promise<void> {
-    if (this.timerId !== null) {
-      clearInterval(this.timerId);
-      this.timerId = null;
-    }
-    await this.flushAsync(2_000);
+  disposeEffect(): Effect.Effect<void, never> {
+    return Effect.gen(this, function* () {
+      if (this.timerId !== null) {
+        clearInterval(this.timerId);
+        this.timerId = null;
+      }
+      yield* this.flushEffect(2_000);
+    });
+  }
+
+  dispose(): Promise<void> {
+    return Effect.runPromise(this.disposeEffect());
   }
 }
 

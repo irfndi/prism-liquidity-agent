@@ -76,4 +76,38 @@ describe("AdapterService price resolution", () => {
       restore();
     }
   });
+
+  it("shares concurrent wallet balance reads", async () => {
+    const restore = mockFetch((async (url: string | URL | Request) => {
+      if (url.toString().includes("api.jup.ag/price/v3")) {
+        return new Response(JSON.stringify({ [SOL_MINT]: { usdPrice: 200 } }), { status: 200 });
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch);
+    let balanceCalls = 0;
+
+    vi.spyOn(Connection.prototype, "getBalance").mockImplementation(async () => {
+      balanceCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return 1_000_000_000;
+    });
+    vi.spyOn(Connection.prototype, "getParsedTokenAccountsByOwner").mockResolvedValue({
+      value: [],
+    } as unknown as Awaited<ReturnType<Connection["getParsedTokenAccountsByOwner"]>>);
+
+    try {
+      const layer = buildAdapterLayerWithWallet();
+      const program = Effect.gen(function* () {
+        const adapter = yield* AdapterService;
+        return yield* Effect.all([adapter.getWalletBalanceUsd(), adapter.getWalletBalanceUsd()]);
+      }).pipe(Effect.provide(layer));
+
+      const [first, second] = await Effect.runPromise(program);
+      expect(first).toBe(200);
+      expect(second).toBe(200);
+      expect(balanceCalls).toBe(1);
+    } finally {
+      restore();
+    }
+  });
 });

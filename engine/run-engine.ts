@@ -7,7 +7,13 @@ import { ConfigService, ConfigLive } from "./config-service.js";
 import { createLogger } from "./logger.js";
 import { errorReporter } from "./error-reporter.js";
 import { getCurrentVersion } from "./version.js";
-import { getPrismConfigDir, getPrismDataDir, getPrismDbPath, getPrismEnvPath, getPrismLogsDir } from "./paths.js";
+import {
+  getPrismConfigDir,
+  getPrismDataDir,
+  getPrismDbPath,
+  getPrismEnvPath,
+  getPrismLogsDir,
+} from "./paths.js";
 
 function redirectStdoutStderrToFile(): void {
   const logsDir = getPrismLogsDir();
@@ -44,12 +50,12 @@ function redirectStdoutStderrToFile(): void {
 
   function safeStreamWrite(chunk: unknown, encoding?: unknown, cb?: unknown): void {
     if (streamBroken) return;
-    try {
-      streamWrite(chunk, encoding, cb);
-    } catch {
-      // If the log stream write fails, continue so the original stdout/stderr
-      // write below still emits the message.
-    }
+    Effect.runSync(
+      Effect.try({
+        try: () => streamWrite(chunk, encoding, cb),
+        catch: () => undefined,
+      }),
+    );
   }
 
   process.stdout.write = function (chunk: unknown, encoding?: unknown, cb?: unknown): boolean {
@@ -77,16 +83,18 @@ export function runEngine(): Promise<void> {
 
   const logger = createLogger("run-engine");
   logger.info(`Prism engine starting — version ${getCurrentVersion()}`);
-  logger.info(`Resolved paths: installDir=${process.env.PRISM_INSTALL_DIR ?? "(not set)"} configDir=${getPrismConfigDir()} dataDir=${getPrismDataDir()} envPath=${getPrismEnvPath()} dbPath=${getPrismDbPath()} logsDir=${getPrismLogsDir()}`);
+  logger.info(
+    `Resolved paths: installDir=${process.env.PRISM_INSTALL_DIR ?? "(not set)"} configDir=${getPrismConfigDir()} dataDir=${getPrismDataDir()} envPath=${getPrismEnvPath()} dbPath=${getPrismDbPath()} logsDir=${getPrismLogsDir()}`,
+  );
 
   process.on("uncaughtException", (err) => {
     errorReporter.report(ensureError(err), { severity: "critical" });
     console.error("Uncaught exception:", err);
-    setImmediate(() => {
-      errorReporter.flushAsync(2_000).finally(() => {
-        process.exit(1);
-      });
-    });
+    setImmediate(() =>
+      Effect.runFork(
+        errorReporter.flushEffect(2_000).pipe(Effect.ensuring(Effect.sync(() => process.exit(1)))),
+      ),
+    );
   });
 
   const config = Effect.runSync(
@@ -102,11 +110,13 @@ export function runEngine(): Promise<void> {
         Effect.sync(() => {
           errorReporter.report(ensureError(err), { severity: "critical" });
           console.error("Fatal error:", err);
-          setImmediate(() => {
-            errorReporter.flushAsync(2_000).finally(() => {
-              process.exit(1);
-            });
-          });
+          setImmediate(() =>
+            Effect.runFork(
+              errorReporter
+                .flushEffect(2_000)
+                .pipe(Effect.ensuring(Effect.sync(() => process.exit(1)))),
+            ),
+          );
         }),
       ),
     ),

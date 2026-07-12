@@ -26,7 +26,7 @@ function makeMockAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
     rebalancePosition: () => Effect.fail("not implemented"),
     claimFees: () => Effect.fail("not implemented"),
     discoverPools: () => Effect.succeed([]),
-    reportFeeCollection: () => {},
+    reportFeeCollection: () => Effect.void,
     swapUSDCForSOL: () => Effect.void,
     ...overrides,
   };

@@ -140,7 +140,7 @@ export interface AdapterApi {
     tier: string;
     txSignature: string;
     feeTransferTxSignature?: string;
-  }) => void;
+  }) => Effect.Effect<void, never>;
   readonly swapUSDCForSOL: (
     minSolThreshold?: number,
     swapAmountUSDC?: number,

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { Effect } from "effect";
 import {
   isRetriableError,
   isRpcNetworkError,
@@ -6,6 +7,8 @@ import {
   CircuitBreaker,
   CircuitBreakerOpenError,
 } from "../engine/adapter-retry.js";
+
+const fromPromise = <T>(fn: () => Promise<T>): Effect.Effect<T, unknown> => Effect.tryPromise(fn);
 
 afterEach(() => {
   vi.useRealTimers();
@@ -44,7 +47,7 @@ describe("isRetriableError", () => {
 describe("retryWithBackoff", () => {
   it("succeeds on first attempt", async () => {
     const fn = vi.fn(async () => "ok");
-    const result = await retryWithBackoff(fn, { baseDelayMs: 10 });
+    const result = await Effect.runPromise(retryWithBackoff(fn, { baseDelayMs: 10 }));
     expect(result).toBe("ok");
     expect(fn).toHaveBeenCalledTimes(1);
   });
@@ -58,11 +61,13 @@ describe("retryWithBackoff", () => {
       }
       return "ok";
     });
-    const result = await retryWithBackoff(fn, {
-      baseDelayMs: 100,
-      rateLimitBaseDelayMs: 10,
-      maxRetries: 5,
-    });
+    const result = await Effect.runPromise(
+      retryWithBackoff(fn, {
+        baseDelayMs: 100,
+        rateLimitBaseDelayMs: 10,
+        maxRetries: 5,
+      }),
+    );
     expect(result).toBe("ok");
     expect(fn).toHaveBeenCalledTimes(3);
   });
@@ -72,7 +77,9 @@ describe("retryWithBackoff", () => {
       throw Object.assign(new Error("rate limited"), { code: 429 });
     });
     await expect(
-      retryWithBackoff(fn, { maxRetries: 3, baseDelayMs: 10, rateLimitBaseDelayMs: 10 }),
+      Effect.runPromise(
+        retryWithBackoff(fn, { maxRetries: 3, baseDelayMs: 10, rateLimitBaseDelayMs: 10 }),
+      ),
     ).rejects.toThrow();
     // attempts: 0,1,2,3 = 4 total (maxRetries+1)
     expect(fn).toHaveBeenCalledTimes(4);
@@ -82,7 +89,9 @@ describe("retryWithBackoff", () => {
     const fn = vi.fn(async () => {
       throw new Error("bad input");
     });
-    await expect(retryWithBackoff(fn, { baseDelayMs: 10 })).rejects.toThrow("bad input");
+    await expect(Effect.runPromise(retryWithBackoff(fn, { baseDelayMs: 10 }))).rejects.toThrow(
+      "bad input",
+    );
     expect(fn).toHaveBeenCalledTimes(1);
   });
 });
@@ -92,7 +101,7 @@ describe("retryWithBackoff", () => {
 describe("CircuitBreaker", () => {
   it("executes normally when closed", async () => {
     const cb = new CircuitBreaker({ failureThreshold: 3 });
-    const result = await cb.execute(async () => 42);
+    const result = await Effect.runPromise(cb.execute(fromPromise(async () => 42)));
     expect(result).toBe(42);
     expect(cb.getState()).toBe("CLOSED");
   });
@@ -104,14 +113,18 @@ describe("CircuitBreaker", () => {
     };
 
     for (let i = 0; i < 3; i++) {
-      await cb.execute(fail).catch(() => {});
+      await Effect.runPromise(
+        cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)),
+      );
     }
 
     expect(cb.getState()).toBe("OPEN");
 
     // Next call should throw CircuitBreakerOpenError without invoking fn
     const fn = vi.fn(async () => "never");
-    await expect(cb.execute(fn)).rejects.toBeInstanceOf(CircuitBreakerOpenError);
+    await expect(Effect.runPromise(cb.execute(fromPromise(fn)))).rejects.toThrow(
+      "Circuit breaker is OPEN",
+    );
     expect(fn).not.toHaveBeenCalled();
   });
 
@@ -123,8 +136,8 @@ describe("CircuitBreaker", () => {
     };
 
     // Open the breaker
-    await cb.execute(fail).catch(() => {});
-    await cb.execute(fail).catch(() => {});
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
     expect(cb.getState()).toBe("OPEN");
 
     // Advance time past resetTimeout
@@ -139,8 +152,8 @@ describe("CircuitBreaker", () => {
       throw new Error("fail");
     };
 
-    await cb.execute(fail).catch(() => {});
-    await cb.execute(fail).catch(() => {});
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
     vi.advanceTimersByTime(1100);
     expect(cb.getState()).toBe("HALF_OPEN");
 
@@ -149,12 +162,12 @@ describe("CircuitBreaker", () => {
       resolveTrial = resolve;
     });
 
-    const first = cb.execute(() => trial);
+    const first = Effect.runPromise(cb.execute(fromPromise(() => trial)));
     await Promise.resolve();
     expect(cb.getState()).toBe("HALF_OPEN");
 
-    const second = cb.execute(async () => "never");
-    await expect(second).rejects.toBeInstanceOf(CircuitBreakerOpenError);
+    const second = cb.execute(fromPromise(async () => "never"));
+    await expect(Effect.runPromise(second)).rejects.toThrow("Circuit breaker is HALF_OPEN");
 
     resolveTrial!("recovered");
     const result = await first;
@@ -169,12 +182,12 @@ describe("CircuitBreaker", () => {
       throw new Error("fail");
     };
 
-    await cb.execute(fail).catch(() => {});
-    await cb.execute(fail).catch(() => {});
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
     vi.advanceTimersByTime(1100);
     expect(cb.getState()).toBe("HALF_OPEN");
 
-    await cb.execute(fail).catch(() => {});
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
     expect(cb.getState()).toBe("OPEN");
   });
 
@@ -183,14 +196,16 @@ describe("CircuitBreaker", () => {
     const businessError = new Error("insufficient token balance");
 
     for (let i = 0; i < 5; i++) {
-      await cb
-        .execute(
-          async () => {
-            throw businessError;
-          },
-          () => false,
-        )
-        .catch(() => {});
+      await Effect.runPromise(
+        cb
+          .execute(
+            fromPromise(async () => {
+              throw businessError;
+            }),
+            () => false,
+          )
+          .pipe(Effect.catchAll(() => Effect.void)),
+      );
     }
 
     expect(cb.getState()).toBe("CLOSED");
@@ -204,14 +219,16 @@ describe("CircuitBreaker", () => {
     });
 
     for (let i = 0; i < 3; i++) {
-      await cb
-        .execute(
-          async () => {
-            throw networkError;
-          },
-          () => true,
-        )
-        .catch(() => {});
+      await Effect.runPromise(
+        cb
+          .execute(
+            fromPromise(async () => {
+              throw networkError;
+            }),
+            () => true,
+          )
+          .pipe(Effect.catchAll(() => Effect.void)),
+      );
     }
 
     expect(cb.getState()).toBe("OPEN");
@@ -221,11 +238,15 @@ describe("CircuitBreaker", () => {
     const cb = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 60_000 });
 
     for (let i = 0; i < 2; i++) {
-      await cb
-        .execute(async () => {
-          throw new Error("any error");
-        })
-        .catch(() => {});
+      await Effect.runPromise(
+        cb
+          .execute(
+            fromPromise(async () => {
+              throw new Error("any error");
+            }),
+          )
+          .pipe(Effect.catchAll(() => Effect.void)),
+      );
     }
 
     expect(cb.getState()).toBe("OPEN");
@@ -235,28 +256,34 @@ describe("CircuitBreaker", () => {
     const cb = new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 60_000 });
     const networkError = Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" });
 
-    await cb
-      .execute(
-        async () => {
-          throw networkError;
-        },
-        () => true,
-      )
-      .catch(() => {});
-    await cb
-      .execute(
-        async () => {
-          throw networkError;
-        },
-        () => true,
-      )
-      .catch(() => {});
+    await Effect.runPromise(
+      cb
+        .execute(
+          fromPromise(async () => {
+            throw networkError;
+          }),
+          () => true,
+        )
+        .pipe(Effect.catchAll(() => Effect.void)),
+    );
+    await Effect.runPromise(
+      cb
+        .execute(
+          fromPromise(async () => {
+            throw networkError;
+          }),
+          () => true,
+        )
+        .pipe(Effect.catchAll(() => Effect.void)),
+    );
 
     expect(cb["consecutiveFailures"]).toBe(2);
 
-    await cb.execute(
-      async () => "recovered",
-      () => true,
+    await Effect.runPromise(
+      cb.execute(
+        fromPromise(async () => "recovered"),
+        () => true,
+      ),
     );
     expect(cb["consecutiveFailures"]).toBe(0);
     expect(cb.getState()).toBe("CLOSED");

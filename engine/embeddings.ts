@@ -1,30 +1,32 @@
 // Fallback is default: @xenova/transformers crashes in Node when
 // serializing BigInt. Set EMBEDDINGS_BACKEND=onnx to opt back into ONNX.
+import { Effect } from "effect";
 import { createLogger } from "./logger.js";
 
 const logger = createLogger("embeddings");
 const VECTOR_DIM = 384;
 
-let onnxPromise: Promise<(text: string) => Promise<number[]>> | null = null;
+type Embedder = (text: string) => Effect.Effect<number[], unknown>;
 
-async function loadOnnx(): Promise<(text: string) => Promise<number[]>> {
-  if (!onnxPromise) {
-    onnxPromise = (async () => {
-      const mod = await import("@xenova/transformers");
-      const extractor = await mod.pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
-      return async (text: string) => {
-        const output = await extractor(text, {
-          pooling: "mean",
-          normalize: true,
-        });
-        return Array.from(output.data as Float32Array);
-      };
-    })();
-    onnxPromise.catch(() => {
-      onnxPromise = null;
+let onnxEffect: Effect.Effect<Embedder, unknown> | null = null;
+
+function loadOnnx(): Effect.Effect<Embedder, unknown> {
+  if (onnxEffect === null) {
+    onnxEffect = Effect.gen(function* () {
+      const mod = yield* Effect.tryPromise(() => import("@xenova/transformers"));
+      const extractor = yield* Effect.tryPromise(() =>
+        mod.pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2"),
+      );
+      return (text: string) =>
+        Effect.tryPromise(() =>
+          extractor(text, {
+            pooling: "mean",
+            normalize: true,
+          }),
+        ).pipe(Effect.map((output) => Array.from(output.data as Float32Array)));
     });
   }
-  return onnxPromise;
+  return onnxEffect;
 }
 
 function fallbackEmbedding(text: string): number[] {
@@ -51,20 +53,22 @@ function fallbackEmbedding(text: string): number[] {
   return vec;
 }
 
-export async function getEmbedding(text: string): Promise<number[]> {
+export function getEmbedding(text: string): Effect.Effect<number[], never> {
   if (process.env.EMBEDDINGS_BACKEND !== "onnx") {
-    return fallbackEmbedding(text);
+    return Effect.succeed(fallbackEmbedding(text));
   }
-  try {
-    const embed = await loadOnnx();
-    return await embed(text);
-  } catch (err) {
-    logger.warn(
-      "ONNX embedding model unavailable; falling back to deterministic hash vectors. Memory similarity will be reduced.",
-      { error: err instanceof Error ? err.message : String(err) },
-    );
-    return fallbackEmbedding(text);
-  }
+  return loadOnnx().pipe(
+    Effect.flatMap((embed) => embed(text)),
+    Effect.catchAll((err) =>
+      Effect.sync(() => {
+        logger.warn(
+          "ONNX embedding model unavailable; falling back to deterministic hash vectors. Memory similarity will be reduced.",
+          { error: err instanceof Error ? err.message : String(err) },
+        );
+        return fallbackEmbedding(text);
+      }),
+    ),
+  );
 }
 
 export const EMBEDDING_DIM = VECTOR_DIM;

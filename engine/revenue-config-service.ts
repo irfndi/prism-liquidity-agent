@@ -36,18 +36,17 @@ interface CachedConfig {
   readonly expiresAt: number;
 }
 
-function readApiKey(): string | null {
-  try {
-    const raw = fs.readFileSync(CREDENTIALS_FILE, "utf-8");
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed === "object" && parsed !== null && "apiKey" in parsed) {
+function readApiKey(): Effect.Effect<string | null, never> {
+  return Effect.try({
+    try: () => {
+      const raw = fs.readFileSync(CREDENTIALS_FILE, "utf-8");
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed !== "object" || parsed === null || !("apiKey" in parsed)) return null;
       const key = (parsed as { apiKey: unknown }).apiKey;
-      if (typeof key === "string" && key.length > 0) return key;
-    }
-    return null;
-  } catch {
-    return null;
-  }
+      return typeof key === "string" && key.length > 0 ? key : null;
+    },
+    catch: (cause) => cause,
+  }).pipe(Effect.catchAll(() => Effect.succeed(null)));
 }
 
 function parseRevenueConfig(data: unknown): RevenueConfig | null {
@@ -89,11 +88,11 @@ function loadFromDb(db: DbApi): Effect.Effect<RevenueConfig | null, unknown> {
   return Effect.gen(function* () {
     const raw = yield* db.getMetadata(METADATA_KEY);
     if (raw === null) return null;
-    try {
-      return parseRevenueConfig(JSON.parse(raw));
-    } catch {
-      return null;
-    }
+    const parsed = yield* Effect.try({
+      try: () => JSON.parse(raw) as unknown,
+      catch: () => null,
+    });
+    return parseRevenueConfig(parsed);
   });
 }
 
@@ -111,7 +110,7 @@ function fetchWithRetry(apiKey: string): Effect.Effect<RevenueConfig, unknown> {
       }
       lastError = result.left;
       if (attempt < MAX_RETRIES - 1) {
-        yield* Effect.tryPromise(() => new Promise((r) => setTimeout(r, RETRY_DELAY_MS)));
+        yield* Effect.sleep(RETRY_DELAY_MS);
       }
     }
     return yield* Effect.fail(lastError);
@@ -124,7 +123,7 @@ function resolveConfig(db: DbApi, paperTrading: boolean): Effect.Effect<RevenueC
       return cached.config;
     }
 
-    const apiKey = readApiKey();
+    const apiKey = yield* readApiKey();
     if (apiKey === null) {
       log.warn("No API key found, using default revenue config");
       return DEFAULT_CONFIG;
@@ -158,7 +157,7 @@ function forceRefresh(db: DbApi, paperTrading: boolean): Effect.Effect<RevenueCo
   return Effect.gen(function* () {
     cached = null;
 
-    const apiKey = readApiKey();
+    const apiKey = yield* readApiKey();
     if (apiKey === null) {
       return DEFAULT_CONFIG;
     }

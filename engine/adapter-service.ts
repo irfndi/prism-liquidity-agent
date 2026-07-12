@@ -177,32 +177,37 @@ function describe(v: unknown): string {
 const INSTALL_ID_FILE = path.join(os.homedir(), ".config", "prism", "install-id");
 let cachedInstallId: string | null = null;
 
-function getOrCreateInstallId(): string {
-  if (cachedInstallId) return cachedInstallId;
-  try {
-    if (fs.existsSync(INSTALL_ID_FILE)) {
-      const existing = fs.readFileSync(INSTALL_ID_FILE, "utf-8").trim();
-      if (existing.length >= 8 && existing.length <= 128) {
-        cachedInstallId = existing;
-        return cachedInstallId;
-      }
+function getOrCreateInstallId(): Effect.Effect<string, never> {
+  return Effect.gen(function* () {
+    if (cachedInstallId) return cachedInstallId;
+    const existing = yield* Effect.try({
+      try: () => {
+        if (!fs.existsSync(INSTALL_ID_FILE)) return null;
+        const value = fs.readFileSync(INSTALL_ID_FILE, "utf-8").trim();
+        return value.length >= 8 && value.length <= 128 ? value : null;
+      },
+      catch: (cause) => cause,
+    }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+    if (existing) {
+      cachedInstallId = existing;
+      return existing;
     }
-  } catch {
-    // fall through to generate
-  }
-  const id = randomUUID();
-  try {
-    const dir = path.dirname(INSTALL_ID_FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    }
-    fs.writeFileSync(INSTALL_ID_FILE, id, { mode: 0o600 });
-    fs.chmodSync(INSTALL_ID_FILE, 0o600);
-  } catch {
-    // keep in memory for this session even if persistence failed
-  }
-  cachedInstallId = id;
-  return id;
+
+    const id = randomUUID();
+    yield* Effect.try({
+      try: () => {
+        const dir = path.dirname(INSTALL_ID_FILE);
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        }
+        fs.writeFileSync(INSTALL_ID_FILE, id, { mode: 0o600 });
+        fs.chmodSync(INSTALL_ID_FILE, 0o600);
+      },
+      catch: (cause) => cause,
+    }).pipe(Effect.catchAll(() => Effect.void));
+    cachedInstallId = id;
+    return id;
+  });
 }
 
 export interface RevenueShareResult {
@@ -294,10 +299,7 @@ export const AdapterLive = Layer.effect(
         )
       : null;
 
-    // ─── DLMM instance cache (5-minute TTL, promise-based for dedup) ────
-
     const DLMM_CACHE_TTL_MS = 5 * 60 * 1000;
-    const dlmmCache = new Map<string, { promise: Promise<DLMM>; timestamp: number }>();
     const primaryRpcCircuitBreaker = new CircuitBreaker({
       failureThreshold: 3,
       resetTimeoutMs: 30_000,
@@ -306,57 +308,48 @@ export const AdapterLive = Layer.effect(
       ? new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 30_000 })
       : null;
 
-    const evictionInterval = setInterval(() => {
-      const cutoff = Date.now() - DLMM_CACHE_TTL_MS;
-      for (const [key, entry] of dlmmCache) {
-        if (entry.timestamp <= cutoff) {
-          dlmmCache.delete(key);
-        }
-      }
-    }, DLMM_CACHE_TTL_MS);
-    evictionInterval.unref();
-
-    async function getDlmm(poolAddress: string): Promise<DLMM> {
-      const cached = dlmmCache.get(poolAddress);
-      if (cached && Date.now() - cached.timestamp < DLMM_CACHE_TTL_MS) {
-        cached.timestamp = Date.now();
-        return cached.promise;
-      }
-      const pubkey = new PublicKey(poolAddress);
-      const promise = rpcCall((conn) => DLMM.create(conn, pubkey)).catch((err) => {
-        dlmmCache.delete(poolAddress);
-        throw err;
-      });
-      dlmmCache.set(poolAddress, { promise, timestamp: Date.now() });
-      return promise;
-    }
-
-    async function rpcCall<T>(
+    function rpcCall<T>(
       fn: (conn: Connection) => Promise<T>,
       primaryConn: Connection = connection,
-    ): Promise<T> {
-      const run = (conn: Connection, breaker: CircuitBreaker): Promise<T> =>
+    ): Effect.Effect<T, unknown> {
+      const run = (conn: Connection, breaker: CircuitBreaker): Effect.Effect<T, unknown> =>
         breaker.execute(
-          () => retryWithBackoff(() => fn(conn), RPC_RETRY_OPTIONS),
+          retryWithBackoff(() => fn(conn), RPC_RETRY_OPTIONS),
           isRpcNetworkError,
         );
 
-      try {
-        return await run(primaryConn, primaryRpcCircuitBreaker);
-      } catch (err) {
-        if (
-          fallbackConnection &&
-          fallbackRpcCircuitBreaker &&
-          primaryConn === connection &&
-          isRpcNetworkError(err)
-        ) {
-          logger.warn("Primary RPC failed, trying fallback RPC", {
-            error: err instanceof Error ? err.message : String(err),
-          });
-          return await run(fallbackConnection, fallbackRpcCircuitBreaker);
-        }
-        throw err;
-      }
+      return run(primaryConn, primaryRpcCircuitBreaker).pipe(
+        Effect.catchAll((err) => {
+          if (
+            fallbackConnection &&
+            fallbackRpcCircuitBreaker &&
+            primaryConn === connection &&
+            isRpcNetworkError(err)
+          ) {
+            return Effect.sync(() =>
+              logger.warn("Primary RPC failed, trying fallback RPC", {
+                error: err instanceof Error ? err.message : String(err),
+              }),
+            ).pipe(Effect.zipRight(run(fallbackConnection, fallbackRpcCircuitBreaker)));
+          }
+          return Effect.fail(err);
+        }),
+      );
+    }
+
+    const getDlmmCached = yield* Effect.cachedFunction((poolAddress: string) => {
+      const pubkey = new PublicKey(poolAddress);
+      return Effect.cachedInvalidateWithTTL(
+        rpcCall((conn) => DLMM.create(conn, pubkey)),
+        DLMM_CACHE_TTL_MS,
+      );
+    });
+
+    function getDlmm(poolAddress: string): Effect.Effect<DLMM, unknown> {
+      return Effect.gen(function* () {
+        const [cached, invalidate] = yield* getDlmmCached(poolAddress);
+        return yield* cached.pipe(Effect.tapError(() => invalidate));
+      });
     }
 
     // ─── Token metadata cache ──────────────────────────────────────────────
@@ -384,10 +377,6 @@ export const AdapterLive = Layer.effect(
 
     const tokenMetaCache = new Map<string, TokenMeta>();
     const HELIUS_ASSET_CACHE_TTL_MS = 5 * 60 * 1000;
-    const heliusAssetCache = new Map<
-      string,
-      { readonly promise: Promise<HeliusAssetResponse>; readonly fetchedAt: number }
-    >();
 
     function readHeliusPrice(asset: HeliusAssetResponse): number | undefined {
       const priceInfo = asset.result?.token_info?.price_info;
@@ -404,46 +393,48 @@ export const AdapterLive = Layer.effect(
       return price;
     }
 
-    async function fetchHeliusAsset(mint: string): Promise<HeliusAssetResponse | null> {
-      if (!config.heliusApiKey) return null;
-
-      const cached = heliusAssetCache.get(mint);
-      if (cached && Date.now() - cached.fetchedAt < HELIUS_ASSET_CACHE_TTL_MS) {
-        return cached.promise;
-      }
-
+    const fetchHeliusAssetCached = yield* Effect.cachedFunction((mint: string) => {
       const url = `https://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
-      const promise = retryWithBackoff(async () => {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: "get-asset",
-            method: "getAsset",
-            params: { id: mint },
+      const asset = Effect.gen(function* () {
+        const res = yield* Effect.tryPromise(() =>
+          fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: "get-asset",
+              method: "getAsset",
+              params: { id: mint },
+            }),
+            signal: AbortSignal.timeout(10_000),
           }),
-          signal: AbortSignal.timeout(10_000),
-        });
-        const json = (await res.json()) as HeliusAssetResponse;
+        );
+        const json = (yield* Effect.tryPromise(() => res.json())) as HeliusAssetResponse;
         if (!res.ok) {
-          throw Object.assign(new Error(`Helius getAsset returned HTTP ${res.status}`), {
-            code: res.status,
-          });
+          return yield* Effect.fail(
+            Object.assign(new Error(`Helius getAsset returned HTTP ${res.status}`), {
+              code: res.status,
+            }),
+          );
         }
         if (json.error) {
-          throw Object.assign(new Error(json.error.message ?? "Helius getAsset failed"), {
-            code: json.error.code ?? -32005,
-          });
+          return yield* Effect.fail(
+            Object.assign(new Error(json.error.message ?? "Helius getAsset failed"), {
+              code: json.error.code ?? -32005,
+            }),
+          );
         }
         return json;
-      }, RPC_RETRY_OPTIONS).catch((err: unknown) => {
-        heliusAssetCache.delete(mint);
-        throw err;
       });
+      return Effect.cachedInvalidateWithTTL(asset, HELIUS_ASSET_CACHE_TTL_MS);
+    });
 
-      heliusAssetCache.set(mint, { promise, fetchedAt: Date.now() });
-      return promise;
+    function fetchHeliusAsset(mint: string): Effect.Effect<HeliusAssetResponse | null, unknown> {
+      if (!config.heliusApiKey) return Effect.succeed(null);
+      return Effect.gen(function* () {
+        const [cached, invalidate] = yield* fetchHeliusAssetCached(mint);
+        return yield* cached.pipe(Effect.tapError(() => invalidate));
+      });
     }
 
     // Known mint decimals (avoids network roundtrips for common SPL tokens).
@@ -476,7 +467,7 @@ export const AdapterLive = Layer.effect(
         // Helius path: DAS getAsset returns token_info.decimals for any
         // mint Helius has indexed. Only available when heliusApiKey is set.
         if (config.heliusApiKey) {
-          const json = yield* Effect.tryPromise(() => fetchHeliusAsset(mint)).pipe(
+          const json = yield* fetchHeliusAsset(mint).pipe(
             Effect.catchAll(() => Effect.succeed(null)),
           );
           const d = json?.result?.token_info?.decimals;
@@ -496,9 +487,7 @@ export const AdapterLive = Layer.effect(
         // for any SPL mint via the Token Program (works on mainnet-beta and
         // every other standard RPC). Does NOT call Helius DAS getAsset.
         const mintPubkey = new PublicKey(mint);
-        const info = yield* Effect.tryPromise(() =>
-          rpcCall((conn) => conn.getParsedAccountInfo(mintPubkey)),
-        );
+        const info = yield* rpcCall((conn) => conn.getParsedAccountInfo(mintPubkey));
         const parsed = (info.value?.data as { parsed?: { info?: { decimals?: number } } })?.parsed
           ?.info;
         if (typeof parsed?.decimals === "number") {
@@ -562,7 +551,7 @@ export const AdapterLive = Layer.effect(
       return Effect.gen(function* () {
         const result: Record<string, number> = {};
         for (const mint of missing) {
-          const asset = yield* Effect.tryPromise(() => fetchHeliusAsset(mint)).pipe(
+          const asset = yield* fetchHeliusAsset(mint).pipe(
             Effect.catchAll((err) => {
               logger.debug("Helius asset price unavailable", {
                 mint,
@@ -734,39 +723,39 @@ export const AdapterLive = Layer.effect(
 
     const WALLET_BALANCE_CACHE_TTL_MS = 30_000;
 
-    async function readTokenBalance(mintAddress: string): Promise<bigint> {
-      const activeWallet = wallet;
-      if (!activeWallet) return 0n;
-      const mint = new PublicKey(mintAddress);
-      const accounts = await rpcCall((conn) =>
-        conn.getParsedTokenAccountsByOwner(activeWallet.publicKey, { mint }),
-      );
-      let total = 0n;
-      for (const account of accounts.value) {
-        const data = account.account.data;
-        if (!isObject(data)) continue;
-        const parsed = data["parsed"];
-        if (!isObject(parsed)) continue;
-        const info = parsed["info"];
-        if (!isObject(info)) continue;
-        const tokenAmount = info["tokenAmount"];
-        if (!isObject(tokenAmount)) continue;
-        const amount = tokenAmount["amount"];
-        if (typeof amount === "string") total += BigInt(amount);
-      }
-      return total;
+    function readTokenBalance(mintAddress: string): Effect.Effect<bigint, unknown> {
+      return Effect.gen(function* () {
+        const activeWallet = wallet;
+        if (!activeWallet) return 0n;
+        const mint = new PublicKey(mintAddress);
+        const accounts = yield* rpcCall((conn) =>
+          conn.getParsedTokenAccountsByOwner(activeWallet.publicKey, { mint }),
+        );
+        let total = 0n;
+        for (const account of accounts.value) {
+          const data = account.account.data;
+          if (!isObject(data)) continue;
+          const parsed = data["parsed"];
+          if (!isObject(parsed)) continue;
+          const info = parsed["info"];
+          if (!isObject(info)) continue;
+          const tokenAmount = info["tokenAmount"];
+          if (!isObject(tokenAmount)) continue;
+          const amount = tokenAmount["amount"];
+          if (typeof amount === "string") total += BigInt(amount);
+        }
+        return total;
+      });
     }
 
     function readWalletBalanceUsd(): Effect.Effect<number, unknown> {
       return Effect.gen(function* () {
         const activeWallet = wallet;
         if (!activeWallet) return 0;
-        const lamports = yield* Effect.tryPromise(() =>
-          rpcCall((conn) => conn.getBalance(activeWallet.publicKey)),
-        );
+        const lamports = yield* rpcCall((conn) => conn.getBalance(activeWallet.publicKey));
         const prices = yield* fetchTokenPrices([SOL_MINT]);
         const solPrice = prices[SOL_MINT] ?? fallbackPrices[SOL_MINT] ?? 0;
-        const usdcRaw = yield* Effect.tryPromise(() => readTokenBalance(USDC_MINT));
+        const usdcRaw = yield* readTokenBalance(USDC_MINT);
         return (lamports / 1e9) * solPrice + Number(usdcRaw) / 1e6;
       });
     }
@@ -785,7 +774,7 @@ export const AdapterLive = Layer.effect(
       unknown
     > {
       return Effect.gen(function* () {
-        const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
+        const dlmm = yield* getDlmm(poolAddress);
         const lbPair = dlmm.lbPair;
         const pubkey = new PublicKey(poolAddress);
 
@@ -793,8 +782,8 @@ export const AdapterLive = Layer.effect(
         const tokenYMint = lbPair.tokenYMint.toBase58();
 
         const [mintXInfo, mintYInfo] = yield* Effect.all([
-          Effect.tryPromise(() => rpcCall((conn) => conn.getParsedAccountInfo(lbPair.tokenXMint))),
-          Effect.tryPromise(() => rpcCall((conn) => conn.getParsedAccountInfo(lbPair.tokenYMint))),
+          rpcCall((conn) => conn.getParsedAccountInfo(lbPair.tokenXMint)),
+          rpcCall((conn) => conn.getParsedAccountInfo(lbPair.tokenYMint)),
         ]);
 
         const tokenXDecimals =
@@ -805,8 +794,8 @@ export const AdapterLive = Layer.effect(
             ?.decimals ?? 6;
 
         const [balX, balY] = yield* Effect.all([
-          Effect.tryPromise(() => rpcCall((conn) => conn.getTokenAccountBalance(lbPair.reserveX))),
-          Effect.tryPromise(() => rpcCall((conn) => conn.getTokenAccountBalance(lbPair.reserveY))),
+          rpcCall((conn) => conn.getTokenAccountBalance(lbPair.reserveX)),
+          rpcCall((conn) => conn.getTokenAccountBalance(lbPair.reserveY)),
         ]);
 
         const reserveX = Number(balX.value.amount) / Math.pow(10, tokenXDecimals);
@@ -844,15 +833,13 @@ export const AdapterLive = Layer.effect(
       getNativeSolBalance: () =>
         Effect.gen(function* () {
           if (!wallet) return 0;
-          const lamports = yield* Effect.tryPromise(() =>
-            rpcCall((conn) => conn.getBalance(wallet.publicKey)),
-          );
+          const lamports = yield* rpcCall((conn) => conn.getBalance(wallet.publicKey));
           return lamports;
         }),
 
       getPoolState: (poolAddress) =>
         Effect.gen(function* () {
-          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
+          const dlmm = yield* getDlmm(poolAddress);
           const lbPair = dlmm.lbPair;
           const activeBin = yield* Effect.tryPromise(() => dlmm.getActiveBin());
 
@@ -891,7 +878,7 @@ export const AdapterLive = Layer.effect(
 
       getBinArray: (poolAddress) =>
         Effect.gen(function* () {
-          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
+          const dlmm = yield* getDlmm(poolAddress);
           const activeBin = yield* Effect.tryPromise(() => dlmm.getActiveBin());
           const halfRange = 20;
           const lowerBinId = activeBin.binId - halfRange;
@@ -926,7 +913,7 @@ export const AdapterLive = Layer.effect(
       getPositions: (poolAddress, walletAddress) =>
         Effect.gen(function* () {
           const wallet = new PublicKey(walletAddress);
-          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
+          const dlmm = yield* getDlmm(poolAddress);
           const { userPositions } = yield* Effect.tryPromise(() =>
             dlmm.getPositionsByUserAndLbPair(wallet),
           );
@@ -953,8 +940,8 @@ export const AdapterLive = Layer.effect(
         Effect.gen(function* () {
           const wallet = new PublicKey(walletAddress);
           // DLMM.getAllLbPairPositionsByUser returns a Map<poolAddress, PositionInfo> for all pools
-          const allPositions = yield* Effect.tryPromise(() =>
-            rpcCall((conn) => DLMM.getAllLbPairPositionsByUser(conn, wallet)),
+          const allPositions = yield* rpcCall((conn) =>
+            DLMM.getAllLbPairPositionsByUser(conn, wallet),
           );
 
           const result: Array<{
@@ -1007,7 +994,7 @@ export const AdapterLive = Layer.effect(
             );
           }
 
-          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
+          const dlmm = yield* getDlmm(poolAddress);
           const pool = yield* api.getPoolState(poolAddress);
 
           const prices = yield* fetchTokenPrices([pool.tokenX, pool.tokenY]);
@@ -1041,9 +1028,7 @@ export const AdapterLive = Layer.effect(
           const balanceY = yield* getTokenBalance(pool.tokenY);
           let nativeSolBalance = 0n;
           if (pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT) {
-            nativeSolBalance = BigInt(
-              yield* Effect.tryPromise(() => rpcCall((conn) => conn.getBalance(wallet.publicKey))),
-            );
+            nativeSolBalance = BigInt(yield* rpcCall((conn) => conn.getBalance(wallet.publicKey)));
           }
 
           const maxX =
@@ -1128,24 +1113,18 @@ export const AdapterLive = Layer.effect(
           );
 
           tx.feePayer = wallet.publicKey;
-          const { blockhash } = yield* Effect.tryPromise(() =>
-            rpcCall((conn) => conn.getLatestBlockhash()),
-          );
+          const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
           tx.recentBlockhash = blockhash;
           tx.sign(wallet, positionKeypair);
 
-          const signature = yield* Effect.tryPromise(() =>
-            rpcCall((conn) =>
-              conn.sendRawTransaction(tx.serialize(), {
-                skipPreflight: false,
-                preflightCommitment: "confirmed",
-              }),
-            ),
+          const signature = yield* rpcCall((conn) =>
+            conn.sendRawTransaction(tx.serialize(), {
+              skipPreflight: false,
+              preflightCommitment: "confirmed",
+            }),
           );
 
-          yield* Effect.tryPromise(() =>
-            rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")),
-          );
+          yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
           yield* invalidateWalletBalance;
 
           return {
@@ -1175,7 +1154,7 @@ export const AdapterLive = Layer.effect(
           }
 
           const positionPubkey = new PublicKey(positionPubKey);
-          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
+          const dlmm = yield* getDlmm(poolAddress);
 
           const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
           const lowerBinId = position.positionData.lowerBinId;
@@ -1193,24 +1172,18 @@ export const AdapterLive = Layer.effect(
           );
 
           for (const tx of txs) {
-            const { blockhash } = yield* Effect.tryPromise(() =>
-              rpcCall((conn) => conn.getLatestBlockhash()),
-            );
+            const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
             tx.feePayer = wallet.publicKey;
             tx.recentBlockhash = blockhash;
             tx.sign(wallet);
 
-            const signature = yield* Effect.tryPromise(() =>
-              rpcCall((conn) =>
-                conn.sendRawTransaction(tx.serialize(), {
-                  skipPreflight: false,
-                  preflightCommitment: "confirmed",
-                }),
-              ),
+            const signature = yield* rpcCall((conn) =>
+              conn.sendRawTransaction(tx.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: "confirmed",
+              }),
             );
-            yield* Effect.tryPromise(() =>
-              rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")),
-            );
+            yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
           }
           yield* invalidateWalletBalance;
 
@@ -1265,7 +1238,7 @@ export const AdapterLive = Layer.effect(
           }
 
           const positionPubkey = new PublicKey(positionPubKey);
-          const dlmm = yield* Effect.tryPromise(() => getDlmm(poolAddress));
+          const dlmm = yield* getDlmm(poolAddress);
 
           const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
 
@@ -1352,9 +1325,7 @@ export const AdapterLive = Layer.effect(
                   getAssociatedTokenAddress(mint, feeWalletPubkey),
                 );
                 // Check if destination ATA exists
-                const toAtaInfo = yield* Effect.tryPromise(() =>
-                  rpcCall((conn) => conn.getAccountInfo(toAta)),
-                );
+                const toAtaInfo = yield* rpcCall((conn) => conn.getAccountInfo(toAta));
                 if (!toAtaInfo) {
                   transferInstructions.push(
                     createAssociatedTokenAccountInstruction(
@@ -1394,9 +1365,7 @@ export const AdapterLive = Layer.effect(
 
           const allInstructions = [...claimInstructions, ...transferInstructions];
 
-          const { blockhash } = yield* Effect.tryPromise(() =>
-            rpcCall((conn) => conn.getLatestBlockhash()),
-          );
+          const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
 
           const messageV0 = new TransactionMessage({
             payerKey: wallet.publicKey,
@@ -1407,18 +1376,14 @@ export const AdapterLive = Layer.effect(
           const versionedTx = new VersionedTransaction(messageV0);
           versionedTx.sign([wallet]);
 
-          const signature = yield* Effect.tryPromise(() =>
-            rpcCall((conn) =>
-              conn.sendRawTransaction(versionedTx.serialize(), {
-                skipPreflight: false,
-                preflightCommitment: "confirmed",
-              }),
-            ),
+          const signature = yield* rpcCall((conn) =>
+            conn.sendRawTransaction(versionedTx.serialize(), {
+              skipPreflight: false,
+              preflightCommitment: "confirmed",
+            }),
           );
 
-          yield* Effect.tryPromise(() =>
-            rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")),
-          );
+          yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
           yield* invalidateWalletBalance;
 
           return {
@@ -1447,29 +1412,38 @@ export const AdapterLive = Layer.effect(
         ),
 
       reportFeeCollection(event) {
-        void (async () => {
-          try {
-            const installId = getOrCreateInstallId();
-            let apiKey = "";
-            try {
+        return Effect.gen(function* () {
+          const installId = yield* getOrCreateInstallId();
+          const apiKey = yield* Effect.try({
+            try: () => {
               const credsPath = path.join(os.homedir(), ".config", "prism", "credentials.json");
-              const creds = JSON.parse(fs.readFileSync(credsPath, "utf-8"));
-              apiKey = creds.apiKey ?? "";
-            } catch {
-              apiKey = "";
-            }
-            const headers: Record<string, string> = { "Content-Type": "application/json" };
-            if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-            const res = await fetch("https://prism-api.irfndi.workers.dev/v1/revenue/log", {
-              method: "POST",
-              headers,
-              body: JSON.stringify({ ...event, installId }),
-            });
-            if (!res.ok) logger.warn("Revenue report failed:", res.status);
-          } catch (err) {
-            logger.warn("Revenue report failed:", String(err));
+              const creds = JSON.parse(fs.readFileSync(credsPath, "utf-8")) as {
+                apiKey?: unknown;
+              };
+              return typeof creds.apiKey === "string" ? creds.apiKey : "";
+            },
+            catch: () => "",
+          });
+          const headers: Record<string, string> = { "Content-Type": "application/json" };
+          if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+          const res = yield* Effect.tryPromise({
+            try: () =>
+              fetch("https://prism-api.irfndi.workers.dev/v1/revenue/log", {
+                method: "POST",
+                headers,
+                body: JSON.stringify({ ...event, installId }),
+                signal: AbortSignal.timeout(10_000),
+              }),
+            catch: (cause) => cause,
+          });
+          if (!res.ok) {
+            logger.warn("Revenue report failed:", res.status);
           }
-        })();
+        }).pipe(
+          Effect.catchAll((err) =>
+            Effect.sync(() => logger.warn("Revenue report failed:", String(err))),
+          ),
+        );
       },
 
       discoverPools: () =>
@@ -1478,15 +1452,7 @@ export const AdapterLive = Layer.effect(
             config.meteoraPoolsUrl ||
             "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc";
           const res = yield* Effect.tryPromise({
-            try: async () => {
-              const controller = new AbortController();
-              const timeout = setTimeout(() => controller.abort(), 10_000);
-              try {
-                return await fetch(url, { signal: controller.signal });
-              } finally {
-                clearTimeout(timeout);
-              }
-            },
+            try: () => fetch(url, { signal: AbortSignal.timeout(10_000) }),
             catch: (cause) =>
               new DiscoverPoolsError({
                 message: `Network error fetching ${url}: ${String(cause)}`,
@@ -1569,9 +1535,7 @@ export const AdapterLive = Layer.effect(
           const activeWallet = wallet;
           if (!activeWallet) return;
 
-          const lamports = yield* Effect.tryPromise(() =>
-            rpcCall((conn) => conn.getBalance(activeWallet.publicKey)),
-          );
+          const lamports = yield* rpcCall((conn) => conn.getBalance(activeWallet.publicKey));
           const solBalance = lamports / 1e9;
 
           if (solBalance >= minSolThreshold) return;
@@ -1634,18 +1598,14 @@ export const AdapterLive = Layer.effect(
             const swapTx = Transaction.from(swapTxBuf);
             swapTx.sign(activeWallet);
 
-            const sig = yield* Effect.tryPromise(() =>
-              rpcCall((conn) =>
-                conn.sendRawTransaction(swapTx.serialize(), {
-                  skipPreflight: false,
-                  preflightCommitment: "confirmed",
-                }),
-              ),
+            const sig = yield* rpcCall((conn) =>
+              conn.sendRawTransaction(swapTx.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: "confirmed",
+              }),
             );
 
-            yield* Effect.tryPromise(() =>
-              rpcCall((conn) => conn.confirmTransaction(sig, "confirmed")),
-            );
+            yield* rpcCall((conn) => conn.confirmTransaction(sig, "confirmed"));
             yield* invalidateWalletBalance;
             logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
           });
@@ -1661,7 +1621,7 @@ export const AdapterLive = Layer.effect(
     return api;
 
     function getTokenBalance(mintAddress: string): Effect.Effect<bigint, unknown> {
-      return Effect.tryPromise(() => readTokenBalance(mintAddress));
+      return readTokenBalance(mintAddress);
     }
   }),
 );

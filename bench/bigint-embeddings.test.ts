@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { Effect } from "effect";
 import {
   bigintReplacer,
   bigintReviver,
@@ -86,7 +87,7 @@ describe("getEmbedding fallback", () => {
     const prev = process.env.EMBEDDINGS_BACKEND;
     clearEnv();
     try {
-      const vec = await getEmbedding("hello world");
+      const vec = await Effect.runPromise(getEmbedding("hello world"));
       expect(vec).toHaveLength(EMBEDDING_DIM);
       const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
       expect(norm).toBeCloseTo(1, 5);
@@ -99,8 +100,8 @@ describe("getEmbedding fallback", () => {
     const prev = process.env.EMBEDDINGS_BACKEND;
     clearEnv();
     try {
-      const a = await getEmbedding("solana pool rebalance");
-      const b = await getEmbedding("solana pool rebalance");
+      const a = await Effect.runPromise(getEmbedding("solana pool rebalance"));
+      const b = await Effect.runPromise(getEmbedding("solana pool rebalance"));
       expect(a).toEqual(b);
     } finally {
       restoreEnv(prev);
@@ -111,7 +112,7 @@ describe("getEmbedding fallback", () => {
     const prev = process.env.EMBEDDINGS_BACKEND;
     clearEnv();
     try {
-      const vec = await getEmbedding("solana");
+      const vec = await Effect.runPromise(getEmbedding("solana"));
       expect(vec.some((v) => v !== 0)).toBe(true);
     } finally {
       restoreEnv(prev);

@@ -1837,7 +1837,7 @@ export const program = Effect.gen(function* () {
               (claimResult.operatorFeeX ?? 0) > 0 ||
               (claimResult.operatorFeeY ?? 0) > 0
             ) {
-              adapter.reportFeeCollection({
+              yield* adapter.reportFeeCollection({
                 poolAddress: decision.poolAddress,
                 positionPubkey: pos.positionPubKey,
                 feeX: claimResult.feeX,
@@ -1971,7 +1971,7 @@ export const program = Effect.gen(function* () {
             (result.operatorFeeX ?? 0) > 0 ||
             (result.operatorFeeY ?? 0) > 0
           ) {
-            adapter.reportFeeCollection({
+            yield* adapter.reportFeeCollection({
               poolAddress,
               positionPubkey: pos.positionPubKey,
               feeX: result.feeX,

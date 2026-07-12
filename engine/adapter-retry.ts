@@ -1,3 +1,4 @@
+import { Effect } from "effect";
 import { createLogger } from "./logger.js";
 
 const logger = createLogger("adapter-retry");
@@ -108,34 +109,41 @@ const DEFAULT_RETRY_OPTIONS: Required<Omit<RetryOptions, "rateLimitBaseDelayMs">
   rateLimitBaseDelayMs: 5_000,
 };
 
-export async function retryWithBackoff<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise<T> {
+export function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  opts?: RetryOptions,
+): Effect.Effect<T, unknown> {
   const { maxRetries, baseDelayMs, maxDelayMs, rateLimitBaseDelayMs } = {
     ...DEFAULT_RETRY_OPTIONS,
     ...opts,
   };
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastError = err;
-      if (attempt >= maxRetries || !isRetriableError(err)) {
-        throw lastError;
-      }
-      const effectiveBase = isRateLimitError(err) ? rateLimitBaseDelayMs : baseDelayMs;
-      const exponentialDelay = Math.min(maxDelayMs, effectiveBase * 2 ** attempt);
-      const jitter = Math.random() * exponentialDelay * 0.5;
-      const delay = Math.floor(exponentialDelay + jitter);
-      logger.warn(
-        `Retriable RPC error (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms`,
-        {
-          error: String(err),
-        },
-      );
-      await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-  }
-  throw lastError;
+
+  const attempt = (attemptNumber: number): Effect.Effect<T, unknown> =>
+    Effect.tryPromise({
+      try: () => fn(),
+      catch: (cause) => cause,
+    }).pipe(
+      Effect.catchAll((err) => {
+        if (attemptNumber >= maxRetries || !isRetriableError(err)) {
+          return Effect.fail(err);
+        }
+        const effectiveBase = isRateLimitError(err) ? rateLimitBaseDelayMs : baseDelayMs;
+        const exponentialDelay = Math.min(maxDelayMs, effectiveBase * 2 ** attemptNumber);
+        const jitter = Math.random() * exponentialDelay * 0.5;
+        const delay = Math.floor(exponentialDelay + jitter);
+        return Effect.sync(() =>
+          logger.warn(
+            `Retriable RPC error (attempt ${attemptNumber + 1}/${maxRetries}), retrying in ${delay}ms`,
+            { error: String(err) },
+          ),
+        ).pipe(
+          Effect.zipRight(Effect.sleep(delay)),
+          Effect.zipRight(Effect.suspend(() => attempt(attemptNumber + 1))),
+        );
+      }),
+    );
+
+  return Effect.suspend(() => attempt(0));
 }
 
 export class CircuitBreakerOpenError extends Error {
@@ -177,33 +185,45 @@ export class CircuitBreaker {
     return this.state;
   }
 
-  async execute<T>(fn: () => Promise<T>, isRetriable?: (err: unknown) => boolean): Promise<T> {
-    const current = this.getState();
-    if (current === "OPEN") {
-      throw new CircuitBreakerOpenError({
-        message: `Circuit breaker is OPEN — ${this.consecutiveFailures} consecutive failures. Reset in ${Math.max(0, this.resetTimeoutMs - (Date.now() - this.openedAt))}ms`,
-      });
-    }
-    if (current === "HALF_OPEN" && this.halfOpenTrialInFlight) {
-      throw new CircuitBreakerOpenError({
-        message: `Circuit breaker is HALF_OPEN — a trial is already in flight`,
-      });
-    }
-    if (current === "HALF_OPEN") {
-      this.halfOpenTrialInFlight = true;
-    }
-    try {
-      const result = await fn();
-      this.onSuccess();
-      return result;
-    } catch (err) {
-      if (!isRetriable || isRetriable(err)) {
-        this.onFailure();
+  execute<T>(
+    effect: Effect.Effect<T, unknown>,
+    isRetriable?: (err: unknown) => boolean,
+  ): Effect.Effect<T, unknown> {
+    return Effect.gen(this, function* () {
+      const current = this.getState();
+      if (current === "OPEN") {
+        return yield* Effect.fail(
+          new CircuitBreakerOpenError({
+            message: `Circuit breaker is OPEN — ${this.consecutiveFailures} consecutive failures. Reset in ${Math.max(0, this.resetTimeoutMs - (Date.now() - this.openedAt))}ms`,
+          }),
+        );
       }
-      throw err;
-    } finally {
-      this.halfOpenTrialInFlight = false;
-    }
+      if (current === "HALF_OPEN" && this.halfOpenTrialInFlight) {
+        return yield* Effect.fail(
+          new CircuitBreakerOpenError({
+            message: "Circuit breaker is HALF_OPEN — a trial is already in flight",
+          }),
+        );
+      }
+      if (current === "HALF_OPEN") {
+        this.halfOpenTrialInFlight = true;
+      }
+      return yield* effect.pipe(
+        Effect.tap(() => Effect.sync(() => this.onSuccess())),
+        Effect.tapError((err) =>
+          Effect.sync(() => {
+            if (!isRetriable || isRetriable(err)) {
+              this.onFailure();
+            }
+          }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            this.halfOpenTrialInFlight = false;
+          }),
+        ),
+      );
+    });
   }
 
   private onSuccess(): void {

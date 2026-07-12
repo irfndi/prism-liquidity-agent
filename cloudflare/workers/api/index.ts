@@ -26,6 +26,15 @@ const MAX_ERROR_MESSAGE_LENGTH = 4096;
 const VALID_INSTALL_EVENTS = new Set(["install", "setup", "dev_start", "register"]);
 const AUDIT_ACTIONS = new Set(["register", "telegram_link", "wallet_sync"]);
 
+function causeMessage(cause: unknown): string {
+  if (typeof cause === "object" && cause !== null) {
+    if ("error" in cause) return causeMessage((cause as { error: unknown }).error);
+    if ("cause" in cause) return causeMessage((cause as { cause: unknown }).cause);
+  }
+  if (cause instanceof Error) return cause.message;
+  return String(cause);
+}
+
 // Services
 class DbService extends Context.Tag("DbService")<DbService, { readonly db: D1Database }>() {}
 
@@ -48,14 +57,37 @@ const generateId = () => {
     .join("")}`;
 };
 
+function readJsonBody<T>(request: { json: () => Promise<unknown> }): Effect.Effect<T, never> {
+  return Effect.tryPromise({
+    try: () => request.json(),
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.map((body) => body as T),
+    Effect.catchAll(() => Effect.succeed({} as T)),
+  );
+}
+
+const cacheGet = (cache: KVNamespace, key: string) => Effect.tryPromise(() => cache.get(key));
+
+const cachePut = (
+  cache: KVNamespace,
+  key: string,
+  value: string,
+  options?: KVNamespacePutOptions,
+) => Effect.tryPromise(() => cache.put(key, value, options));
+
 // Helper to hash API keys
-const hashKey = async (key: string): Promise<string> => {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(key);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
-};
+const hashKey = (key: string): Effect.Effect<string, unknown> =>
+  Effect.tryPromise(() => {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(key);
+    return crypto.subtle.digest("SHA-256", data);
+  }).pipe(
+    Effect.map((hashBuffer) => {
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+    }),
+  );
 
 // Helper to generate referral codes
 function generateReferralCode(): string {
@@ -77,9 +109,7 @@ function logAudit(
   if (!AUDIT_ACTIONS.has(action)) return Effect.void;
   return Effect.gen(function* () {
     const detailsJson = details ? JSON.stringify(details) : null;
-    const eventKey = (yield* Effect.tryPromise(() =>
-      hashKey(`${action}:${detailsJson ?? ""}`),
-    )).slice(0, 32);
+    const eventKey = (yield* hashKey(`${action}:${detailsJson ?? ""}`)).slice(0, 32);
     const summaryWrite = Effect.tryPromise(() =>
       db
         .prepare(
@@ -152,7 +182,7 @@ const registerHandler = (db: D1Database) =>
   Effect.gen(function* () {
     const userId = generateId();
     const apiKey = `sk-prism-${generateId()}`;
-    const keyHash = yield* Effect.tryPromise(() => hashKey(apiKey));
+    const keyHash = yield* hashKey(apiKey);
 
     yield* Effect.tryPromise(() =>
       db.prepare("INSERT INTO users (id, tier) VALUES (?, ?)").bind(userId, "free").run(),
@@ -173,7 +203,7 @@ const registerHandler = (db: D1Database) =>
 // Login handler
 const loginHandler = (db: D1Database, apiKey: string) =>
   Effect.gen(function* () {
-    const keyHash = yield* Effect.tryPromise(() => hashKey(apiKey));
+    const keyHash = yield* hashKey(apiKey);
 
     const result = yield* Effect.tryPromise(() =>
       db
@@ -285,7 +315,7 @@ const registerTelegramHandler = (db: D1Database, telegramId: string, firstName: 
 
     const userId = generateId();
     const apiKey = `sk-prism-${generateId()}`;
-    const keyHash = yield* Effect.tryPromise(() => hashKey(apiKey));
+    const keyHash = yield* hashKey(apiKey);
 
     yield* Effect.tryPromise(() =>
       db
@@ -345,43 +375,42 @@ app.get("/health", async (c) => {
 app.post("/v1/register", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
-  const body = (await c.req.json().catch(() => ({}))) as { telegram_id?: string };
-
-  try {
-    // Rate limiting: max 5 registrations per IP per hour
+  const registration = Effect.gen(function* () {
+    const body = (yield* Effect.tryPromise({
+      try: () => c.req.json(),
+      catch: (cause) => cause,
+    }).pipe(Effect.catchAll(() => Effect.succeed({})))) as { telegram_id?: string };
     const rateKey = `rate_limit:register:${clientIp}`;
-    const rateData = await CACHE.get(rateKey);
+    const rateData = yield* Effect.tryPromise(() => CACHE.get(rateKey));
     const count = rateData ? parseInt(rateData, 10) : 0;
 
     if (count >= 5) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
 
-    const result = await Effect.runPromise(registerHandler(DB));
+    const result = yield* registerHandler(DB);
+    yield* Effect.tryPromise(() => CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }));
 
-    // Increment rate limit counter
-    await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
-
-    // If telegram_id provided, validate and link immediately
     if (body.telegram_id) {
       if (!/^\d+$/.test(body.telegram_id)) {
         return c.json({ error: "Invalid telegram_id format. Must be numeric." }, 400);
       }
-      await DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?")
-        .bind(body.telegram_id, result.userId)
-        .run();
+      yield* Effect.tryPromise(() =>
+        DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?")
+          .bind(body.telegram_id, result.userId)
+          .run(),
+      );
     }
 
-    await Effect.runPromise(logAudit(DB, result.userId, "register", { tier: "free" }));
+    yield* logAudit(DB, result.userId, "register", { tier: "free" });
+    return c.json({ user_id: result.userId, api_key: result.apiKey, tier: "free" });
+  });
 
-    return c.json({
-      user_id: result.userId,
-      api_key: result.apiKey,
-      tier: "free",
-    });
-  } catch (error) {
-    return c.json({ error: "Registration failed" }, 500);
-  }
+  return Effect.runPromise(
+    registration.pipe(
+      Effect.catchAll(() => Effect.succeed(c.json({ error: "Registration failed" }, 500))),
+    ),
+  );
 });
 
 app.post("/v1/login", async (c) => {
@@ -392,12 +421,14 @@ app.post("/v1/login", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
-  try {
-    const result = await Effect.runPromise(loginHandler(DB, apiKey));
-    return c.json(result);
-  } catch {
-    return c.json({ error: "Invalid API key" }, 401);
-  }
+  return Effect.runPromise(
+    loginHandler(DB, apiKey).pipe(
+      Effect.match({
+        onFailure: () => c.json({ error: "Invalid API key" }, 401),
+        onSuccess: (result) => c.json(result),
+      }),
+    ),
+  );
 });
 
 app.get("/v1/whoami", async (c) => {
@@ -408,15 +439,17 @@ app.get("/v1/whoami", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
-  try {
-    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
-    const userResult = await Effect.runPromise(
-      whoamiHandler(DB, (loginResult as { id: string }).id),
-    );
-    return c.json(userResult);
-  } catch {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const loginResult = yield* loginHandler(DB, apiKey);
+      return yield* whoamiHandler(DB, (loginResult as { id: string }).id);
+    }).pipe(
+      Effect.match({
+        onFailure: () => c.json({ error: "Unauthorized" }, 401),
+        onSuccess: (result) => c.json(result),
+      }),
+    ),
+  );
 });
 
 app.post("/v1/link-telegram/start", async (c) => {
@@ -427,20 +460,22 @@ app.post("/v1/link-telegram/start", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
-  try {
-    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
-    const result = await Effect.runPromise(
-      linkTelegramStartHandler(DB, (loginResult as { id: string }).id),
-    );
-    return c.json(result);
-  } catch {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const loginResult = yield* loginHandler(DB, apiKey);
+      return yield* linkTelegramStartHandler(DB, (loginResult as { id: string }).id);
+    }).pipe(
+      Effect.match({
+        onFailure: () => c.json({ error: "Unauthorized" }, 401),
+        onSuccess: (result) => c.json(result),
+      }),
+    ),
+  );
 });
 
 app.post("/v1/link-telegram/confirm", async (c) => {
   const { DB } = c.env;
-  const body = (await c.req.json().catch(() => ({}))) as { code: string; telegram_id: string };
+  const body = await Effect.runPromise(readJsonBody<{ code: string; telegram_id: string }>(c.req));
 
   if (!body.code || !body.telegram_id) {
     return c.json({ error: "Code and telegram_id required" }, 400);
@@ -450,68 +485,62 @@ app.post("/v1/link-telegram/confirm", async (c) => {
     return c.json({ error: "Invalid telegram_id format. Must be numeric." }, 400);
   }
 
-  try {
-    // Atomic update: mark code as used only if not already used and not expired
-    const updateResult = await DB.prepare(
-      `UPDATE telegram_link_codes
-       SET used_at = CURRENT_TIMESTAMP
-       WHERE code = ?
-         AND used_at IS NULL
-         AND expires_at > CURRENT_TIMESTAMP`,
-    )
-      .bind(body.code)
-      .run();
-
-    if (!updateResult.success || updateResult.meta.changes === 0) {
-      // Check why it failed
-      const codeResult = await DB.prepare(
-        `SELECT used_at, expires_at
-         FROM telegram_link_codes
-         WHERE code = ?`,
+  const linking = Effect.gen(function* () {
+    const updateResult = yield* Effect.tryPromise(() =>
+      DB.prepare(
+        `UPDATE telegram_link_codes
+         SET used_at = CURRENT_TIMESTAMP
+         WHERE code = ?
+           AND used_at IS NULL
+           AND expires_at > CURRENT_TIMESTAMP`,
       )
         .bind(body.code)
-        .first();
+        .run(),
+    );
 
-      if (!codeResult) {
-        return c.json({ error: "Invalid code" }, 400);
-      }
+    if (!updateResult.success || updateResult.meta.changes === 0) {
+      const codeResult = yield* Effect.tryPromise(() =>
+        DB.prepare(
+          `SELECT used_at, expires_at
+           FROM telegram_link_codes
+           WHERE code = ?`,
+        )
+          .bind(body.code)
+          .first(),
+      );
 
-      if (codeResult.used_at) {
-        return c.json({ error: "Code already used" }, 400);
-      }
-
+      if (!codeResult) return c.json({ error: "Invalid code" }, 400);
+      if (codeResult.used_at) return c.json({ error: "Code already used" }, 400);
       if (new Date(codeResult.expires_at as string) < new Date()) {
         return c.json({ error: "Code expired" }, 400);
       }
-
       return c.json({ error: "Linking failed" }, 500);
     }
 
-    // Get user_id from the code
-    const codeResult = await DB.prepare(`SELECT user_id FROM telegram_link_codes WHERE code = ?`)
-      .bind(body.code)
-      .first();
-
-    // Link telegram
-    await DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?")
-      .bind(body.telegram_id, codeResult?.user_id)
-      .run();
-
-    await Effect.runPromise(
-      logAudit(DB, codeResult?.user_id as string, "telegram_link", {
-        telegram_id: body.telegram_id,
-      }),
+    const codeResult = yield* Effect.tryPromise(() =>
+      DB.prepare(`SELECT user_id FROM telegram_link_codes WHERE code = ?`).bind(body.code).first(),
     );
+    const userId = typeof codeResult?.user_id === "string" ? codeResult.user_id : null;
+    if (!userId) return c.json({ error: "Linking failed" }, 500);
 
-    return c.json({ success: true, user_id: codeResult?.user_id });
-  } catch {
-    return c.json({ error: "Linking failed" }, 500);
-  }
+    yield* Effect.tryPromise(() =>
+      DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?")
+        .bind(body.telegram_id, userId)
+        .run(),
+    );
+    yield* logAudit(DB, userId, "telegram_link", { telegram_id: body.telegram_id });
+
+    return c.json({ success: true, user_id: userId });
+  });
+
+  return Effect.runPromise(
+    linking.pipe(Effect.catchAll(() => Effect.succeed(c.json({ error: "Linking failed" }, 500)))),
+  );
 });
 
 app.post("/v1/whoami-telegram", async (c) => {
   const { DB } = c.env;
-  const body = (await c.req.json().catch(() => ({}))) as { telegram_id?: string };
+  const body = await Effect.runPromise(readJsonBody<{ telegram_id?: string }>(c.req));
 
   if (!body.telegram_id) {
     return c.json({ error: "telegram_id required" }, 400);
@@ -520,79 +549,93 @@ app.post("/v1/whoami-telegram", async (c) => {
     return c.json({ error: "Invalid telegram_id format. Must be numeric." }, 400);
   }
 
-  const result = await c.env.DB.prepare(
-    "SELECT id, tier, telegram_id, created_at FROM users WHERE telegram_id = ?",
-  )
-    .bind(body.telegram_id)
-    .first();
-
-  if (!result) {
-    return c.json({ error: "User not found" }, 404);
-  }
-  return c.json({
-    user_id: result.id,
-    tier: result.tier,
-    telegram_id: result.telegram_id,
-    created_at: result.created_at,
-  });
+  return Effect.runPromise(
+    Effect.tryPromise(() =>
+      c.env.DB.prepare("SELECT id, tier, telegram_id, created_at FROM users WHERE telegram_id = ?")
+        .bind(body.telegram_id)
+        .first(),
+    ).pipe(
+      Effect.match({
+        onFailure: () => c.json({ error: "Failed to fetch user" }, 500),
+        onSuccess: (result) =>
+          result
+            ? c.json({
+                user_id: result.id,
+                tier: result.tier,
+                telegram_id: result.telegram_id,
+                created_at: result.created_at,
+              })
+            : c.json({ error: "User not found" }, 404),
+      }),
+    ),
+  );
 });
 
 app.post("/v1/register-telegram", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
-  const body = (await c.req.json().catch(() => ({}))) as {
-    telegram_id?: string;
-    first_name?: string;
-  };
+  const body = await Effect.runPromise(
+    readJsonBody<{ telegram_id?: string; first_name?: string }>(c.req),
+  );
 
   if (!body.telegram_id) {
     return c.json({ error: "telegram_id required" }, 400);
   }
+  const telegramId = body.telegram_id;
 
   // Same 5/hour/IP rate limit as /v1/register.
   const rateKey = `rate_limit:register_telegram:${clientIp}`;
-  const rateData = await CACHE.get(rateKey);
+  const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
   const count = rateData ? parseInt(rateData, 10) : 0;
   if (count >= 5) {
     return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
-  try {
-    const result = await Effect.runPromise(
-      registerTelegramHandler(DB, body.telegram_id, body.first_name ?? ""),
-    );
-    await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
-    await Effect.runPromise(
-      logAudit(DB, result.user_id, "register", { tier: "free", source: "telegram" }),
-    );
+  const registration = Effect.gen(function* () {
+    const result = yield* registerTelegramHandler(DB, telegramId, body.first_name ?? "");
+    yield* Effect.tryPromise(() => CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }));
+    yield* logAudit(DB, result.user_id, "register", { tier: "free", source: "telegram" });
     return c.json({
       user_id: result.user_id,
       api_key: result.api_key,
       tier: "free",
     });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Registration failed";
-    const status = message.includes("already registered") ? 409 : 400;
-    return c.json({ error: message }, status);
-  }
+  });
+
+  return Effect.runPromise(
+    registration.pipe(
+      Effect.match({
+        onFailure: (cause) => {
+          const message = causeMessage(cause) || "Registration failed";
+          const status = message.includes("already registered") ? 409 : 400;
+          return c.json({ error: message }, status);
+        },
+        onSuccess: (response) => response,
+      }),
+    ),
+  );
 });
 
 app.post("/v1/agent-status", async (c) => {
   const { DB } = c.env;
-  const body = (await c.req.json().catch(() => ({}))) as { telegram_id?: string };
+  const body = await Effect.runPromise(readJsonBody<{ telegram_id?: string }>(c.req));
 
   if (!body.telegram_id) {
     return c.json({ error: "telegram_id required" }, 400);
   }
 
-  try {
-    const result = await Effect.runPromise(agentStatusHandler(DB, body.telegram_id));
-    return c.json(result);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Status unavailable";
-    const status = message.includes("not found") ? 404 : 500;
-    return c.json({ error: message }, status);
-  }
+  return Effect.runPromise(
+    agentStatusHandler(DB, body.telegram_id).pipe(
+      Effect.match({
+        onFailure: (cause) => {
+          const message = causeMessage(cause) || "Status unavailable";
+          const status = message.includes("not found") ? 404 : 500;
+          return c.json({ error: message }, status);
+        },
+        onSuccess: (result) => c.json(result),
+      }),
+    ),
+  );
 });
 
 const VALID_FEEDBACK_CATEGORIES = new Set(["friction", "suggestion", "observation", "praise"]);
@@ -619,51 +662,56 @@ interface FeedbackStoreInput {
   reportedAt: number;
 }
 
-async function storeFeedback(
+const storeFeedback = (
   db: D1Database,
   input: FeedbackStoreInput,
-): Promise<{ id: string; duplicate: boolean }> {
-  const existing = await db
-    .prepare(
-      `SELECT id FROM feedback
-       WHERE user_id = ? AND agent_id = ? AND hash = ?
-       ORDER BY reported_at DESC LIMIT 1`,
-    )
-    .bind(input.userId, input.agentId, input.hash)
-    .first();
-  if (existing && typeof existing.id === "string") {
-    return { id: existing.id, duplicate: true };
-  }
+): Effect.Effect<{ id: string; duplicate: boolean }, unknown> =>
+  Effect.gen(function* () {
+    const existing = yield* Effect.tryPromise(() =>
+      db
+        .prepare(
+          `SELECT id FROM feedback
+           WHERE user_id = ? AND agent_id = ? AND hash = ?
+           ORDER BY reported_at DESC LIMIT 1`,
+        )
+        .bind(input.userId, input.agentId, input.hash)
+        .first(),
+    );
+    if (existing && typeof existing.id === "string") {
+      return { id: existing.id, duplicate: true };
+    }
 
-  await db
-    .prepare(
-      `INSERT INTO feedback (
-        id, user_id, agent_id, category, severity, summary, details, related_files,
-        context_json, prism_version, platform, install_method, runtime,
-        hash, reported_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      input.id,
-      input.userId,
-      input.agentId,
-      input.category,
-      input.severity,
-      input.summary,
-      input.details ?? null,
-      input.relatedFiles ? JSON.stringify(input.relatedFiles) : null,
-      JSON.stringify(input.context),
-      input.context.prismVersion ?? null,
-      input.context.platform ?? null,
-      input.context.installMethod ?? null,
-      input.context.runtime ?? null,
-      input.hash,
-      input.reportedAt,
-    )
-    .run();
+    yield* Effect.tryPromise(() =>
+      db
+        .prepare(
+          `INSERT INTO feedback (
+            id, user_id, agent_id, category, severity, summary, details, related_files,
+            context_json, prism_version, platform, install_method, runtime,
+            hash, reported_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          input.id,
+          input.userId,
+          input.agentId,
+          input.category,
+          input.severity,
+          input.summary,
+          input.details ?? null,
+          input.relatedFiles ? JSON.stringify(input.relatedFiles) : null,
+          JSON.stringify(input.context),
+          input.context.prismVersion ?? null,
+          input.context.platform ?? null,
+          input.context.installMethod ?? null,
+          input.context.runtime ?? null,
+          input.hash,
+          input.reportedAt,
+        )
+        .run(),
+    );
 
-  return { id: input.id, duplicate: false };
-}
+    return { id: input.id, duplicate: false };
+  });
 
 app.post("/v1/issue", async (c) => {
   const { DB, CACHE } = c.env;
@@ -671,33 +719,36 @@ app.post("/v1/issue", async (c) => {
   const user = await Effect.runPromise(authenticateUser(DB, c.get("apiKey") as string | undefined));
   if (!user) return c.json({ error: "API key required" }, 401);
 
-  const body = (await c.req.json().catch(() => ({}))) as {
-    title?: string;
-    body?: string;
-    agentId?: string;
-    context?: FeedbackContextPayload;
-  };
+  const body = await Effect.runPromise(
+    readJsonBody<{
+      title?: string;
+      body?: string;
+      agentId?: string;
+      context?: FeedbackContextPayload;
+    }>(c.req),
+  );
   if (!body.title || typeof body.title !== "string") {
     return c.json({ error: "Title required" }, 400);
   }
+  const title = body.title;
 
   if (CACHE) {
     const rateKey = `rate_limit:feedback:${clientIp}`;
-    const current = await CACHE.get(rateKey);
+    const current = await Effect.runPromise(cacheGet(CACHE, rateKey));
     const count = current ? parseInt(current, 10) : 0;
     if (count >= 10) return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
-  try {
+  const issue = Effect.gen(function* () {
     const details = body.body ?? "";
-    const hash = (await hashKey(`issue:${body.title}:${details}`)).slice(0, 16);
-    const result = await storeFeedback(DB, {
+    const hash = (yield* hashKey(`issue:${title}:${details}`)).slice(0, 16);
+    const result = yield* storeFeedback(DB, {
       id: generateId(),
       userId: user.id,
       agentId: body.agentId ?? "cli",
       category: "friction",
       severity: "high",
-      summary: body.title,
+      summary: title,
       details,
       context: body.context ?? {},
       hash,
@@ -705,15 +756,20 @@ app.post("/v1/issue", async (c) => {
     });
     if (CACHE && !result.duplicate) {
       const rateKey = `rate_limit:feedback:${clientIp}`;
-      const current = await CACHE.get(rateKey);
+      const current = yield* Effect.tryPromise(() => CACHE.get(rateKey));
       const count = current ? parseInt(current, 10) : 0;
-      await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
+      yield* Effect.tryPromise(() =>
+        CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }),
+      );
     }
     return c.json(result);
-  } catch (err) {
-    console.error("Failed to store issue:", err);
-    return c.json({ error: "Failed to store issue" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    issue.pipe(
+      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to store issue" }, 500))),
+    ),
+  );
 });
 
 app.post("/v1/feedback", async (c) => {
@@ -722,18 +778,20 @@ app.post("/v1/feedback", async (c) => {
   const user = await Effect.runPromise(authenticateUser(DB, c.get("apiKey") as string | undefined));
   if (!user) return c.json({ error: "API key required" }, 401);
 
-  const body = (await c.req.json().catch(() => ({}))) as {
-    id?: string;
-    agentId?: string;
-    category?: string;
-    severity?: string;
-    summary?: string;
-    details?: string;
-    relatedFiles?: string[];
-    context?: FeedbackContextPayload;
-    hash?: string;
-    reportedAt?: number;
-  };
+  const body = await Effect.runPromise(
+    readJsonBody<{
+      id?: string;
+      agentId?: string;
+      category?: string;
+      severity?: string;
+      summary?: string;
+      details?: string;
+      relatedFiles?: string[];
+      context?: FeedbackContextPayload;
+      hash?: string;
+      reportedAt?: number;
+    }>(c.req),
+  );
 
   if (!body.id || typeof body.id !== "string") {
     return c.json({ error: "id is required" }, 400);
@@ -756,40 +814,51 @@ app.post("/v1/feedback", async (c) => {
   if (!body.hash || typeof body.hash !== "string") {
     return c.json({ error: "hash is required" }, 400);
   }
+  const feedbackId = body.id;
+  const feedbackAgentId = body.agentId;
+  const feedbackCategory = body.category;
+  const feedbackSeverity = body.severity;
+  const feedbackSummary = body.summary;
+  const feedbackHash = body.hash;
 
   if (CACHE) {
     const rateKey = `rate_limit:feedback:${clientIp}`;
-    const rateData = await CACHE.get(rateKey);
+    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
     const count = rateData ? parseInt(rateData, 10) : 0;
     if (count >= 10) return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
-  try {
-    const result = await storeFeedback(DB, {
-      id: body.id,
+  const feedback = Effect.gen(function* () {
+    const result = yield* storeFeedback(DB, {
+      id: feedbackId,
       userId: user.id,
-      agentId: body.agentId,
-      category: body.category,
-      severity: body.severity,
-      summary: body.summary,
+      agentId: feedbackAgentId,
+      category: feedbackCategory,
+      severity: feedbackSeverity,
+      summary: feedbackSummary,
       details: body.details,
       relatedFiles: body.relatedFiles,
       context: body.context ?? {},
-      hash: body.hash,
+      hash: feedbackHash,
       reportedAt: body.reportedAt ?? Date.now(),
     });
 
     if (CACHE && !result.duplicate) {
       const rateKey = `rate_limit:feedback:${clientIp}`;
-      const rateData = await CACHE.get(rateKey);
+      const rateData = yield* Effect.tryPromise(() => CACHE.get(rateKey));
       const count = rateData ? parseInt(rateData, 10) : 0;
-      await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
+      yield* Effect.tryPromise(() =>
+        CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }),
+      );
     }
     return c.json(result);
-  } catch (err) {
-    console.error("Failed to store feedback:", err);
-    return c.json({ error: "Failed to store feedback" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    feedback.pipe(
+      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to store feedback" }, 500))),
+    ),
+  );
 });
 
 app.get("/v1/feedback", async (c) => {
@@ -810,7 +879,7 @@ app.get("/v1/feedback", async (c) => {
   if (!Number.isFinite(limit) || limit < 1) limit = 50;
   if (limit > 200) limit = 200;
 
-  try {
+  const query = Effect.gen(function* () {
     let sql = "SELECT * FROM feedback WHERE 1=1";
     const params: (string | number)[] = [];
 
@@ -825,13 +894,19 @@ app.get("/v1/feedback", async (c) => {
     sql += " ORDER BY reported_at DESC LIMIT ?";
     params.push(limit);
 
-    const result = await DB.prepare(sql)
-      .bind(...params)
-      .all();
+    const result = yield* Effect.tryPromise(() =>
+      DB.prepare(sql)
+        .bind(...params)
+        .all(),
+    );
     return c.json({ feedback: result.results ?? [] });
-  } catch {
-    return c.json({ error: "Failed to fetch feedback" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    query.pipe(
+      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to fetch feedback" }, 500))),
+    ),
+  );
 });
 
 app.get("/v1/audit", async (c) => {
@@ -850,7 +925,7 @@ app.get("/v1/audit", async (c) => {
   if (!Number.isFinite(limit) || limit < 1) limit = 100;
   if (limit > 500) limit = 500;
 
-  try {
+  const query = Effect.gen(function* () {
     let sql = "SELECT * FROM audit_event_summary WHERE 1=1";
     const params: (string | number)[] = [];
     if (userId) {
@@ -863,13 +938,19 @@ app.get("/v1/audit", async (c) => {
     }
     sql += " ORDER BY last_seen_at DESC LIMIT ?";
     params.push(limit);
-    const result = await DB.prepare(sql)
-      .bind(...params)
-      .all();
+    const result = yield* Effect.tryPromise(() =>
+      DB.prepare(sql)
+        .bind(...params)
+        .all(),
+    );
     return c.json({ events: result.results ?? [] });
-  } catch {
-    return c.json({ error: "Failed to fetch audit events" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    query.pipe(
+      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to fetch audit events" }, 500))),
+    ),
+  );
 });
 
 app.post("/v1/errors/report", async (c) => {
@@ -878,17 +959,19 @@ app.post("/v1/errors/report", async (c) => {
   const user = await Effect.runPromise(authenticateUser(DB, c.get("apiKey") as string | undefined));
   if (!user) return c.json({ error: "API key required" }, 401);
 
-  const body = (await c.req.json().catch(() => ({}))) as {
-    id?: string;
-    agentId?: string;
-    errorType?: string;
-    message?: string;
-    stackTrace?: string;
-    prismVersion?: string;
-    platform?: string;
-    severity?: string;
-    isRecoverable?: number;
-  };
+  const body = await Effect.runPromise(
+    readJsonBody<{
+      id?: string;
+      agentId?: string;
+      errorType?: string;
+      message?: string;
+      stackTrace?: string;
+      prismVersion?: string;
+      platform?: string;
+      severity?: string;
+      isRecoverable?: number;
+    }>(c.req),
+  );
 
   // Validate required fields
   if (!body.id || !body.agentId || !body.errorType || !body.message || !body.prismVersion) {
@@ -904,45 +987,53 @@ app.post("/v1/errors/report", async (c) => {
   // Rate limit: 100 reports per IP per hour
   if (CACHE) {
     const rateKey = `rate_limit:error_report:${clientIp}`;
-    const rateData = await CACHE.get(rateKey);
+    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
     const count = rateData ? parseInt(rateData, 10) : 0;
     if (count >= 100) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
-    await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
+    await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
   }
 
-  try {
+  const report = Effect.gen(function* () {
     const severity = body.severity ?? "error";
     const isRecoverable = body.isRecoverable ? 1 : 0;
 
-    await DB.prepare(
-      `INSERT INTO error_logs (user_id, id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(
-        user.id,
-        body.id,
-        body.agentId,
-        body.errorType,
-        body.message,
-        body.stackTrace ?? null,
-        body.prismVersion,
-        body.platform ?? null,
-        severity,
-        isRecoverable,
+    yield* Effect.tryPromise(() =>
+      DB.prepare(
+        `INSERT INTO error_logs (user_id, id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run();
+        .bind(
+          user.id,
+          body.id,
+          body.agentId,
+          body.errorType,
+          body.message,
+          body.stackTrace ?? null,
+          body.prismVersion,
+          body.platform ?? null,
+          severity,
+          isRecoverable,
+        )
+        .run(),
+    );
 
     return c.json({ id: body.id });
-  } catch (err) {
-    // Duplicate id is expected (agent retries) — return 200 for idempotency
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("UNIQUE constraint")) {
-      return c.json({ id: body.id });
-    }
-    return c.json({ error: "Failed to store error report" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    report.pipe(
+      Effect.catchAll((cause) => {
+        const message = causeMessage(cause);
+        return Effect.succeed(
+          message.includes("UNIQUE constraint")
+            ? c.json({ id: body.id })
+            : c.json({ error: "Failed to store error report" }, 500),
+        );
+      }),
+    ),
+  );
 });
 
 app.post("/v1/errors/batch", async (c) => {
@@ -951,23 +1042,25 @@ app.post("/v1/errors/batch", async (c) => {
   const user = await Effect.runPromise(authenticateUser(DB, c.get("apiKey") as string | undefined));
   if (!user) return c.json({ error: "API key required" }, 401);
 
-  const body = (await c.req.json().catch(() => ({}))) as {
-    app?: string;
-    version?: string;
-    reports?: Array<{
-      id?: string;
-      agentId?: string;
-      errorType?: string;
-      category?: string;
-      message?: string;
-      stackTrace?: string;
-      stack?: string;
-      prismVersion?: string;
-      platform?: string;
-      severity?: string;
-      isRecoverable?: number;
-    }>;
-  };
+  const body = await Effect.runPromise(
+    readJsonBody<{
+      app?: string;
+      version?: string;
+      reports?: Array<{
+        id?: string;
+        agentId?: string;
+        errorType?: string;
+        category?: string;
+        message?: string;
+        stackTrace?: string;
+        stack?: string;
+        prismVersion?: string;
+        platform?: string;
+        severity?: string;
+        isRecoverable?: number;
+      }>;
+    }>(c.req),
+  );
 
   const reports = body.reports ?? [];
 
@@ -982,12 +1075,12 @@ app.post("/v1/errors/batch", async (c) => {
   // Rate limit: 50 batches per IP per hour
   if (CACHE) {
     const rateKey = `rate_limit:error_batch:${clientIp}`;
-    const rateData = await CACHE.get(rateKey);
+    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
     const count = rateData ? parseInt(rateData, 10) : 0;
     if (count >= 50) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
-    await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
+    await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
   }
 
   // Validate all reports — accept both engine format (category, stack, version top-level)
@@ -1042,7 +1135,7 @@ app.post("/v1/errors/batch", async (c) => {
     });
   }
 
-  try {
+  const batch = Effect.gen(function* () {
     const stmt = DB.prepare(
       `INSERT OR IGNORE INTO error_logs (user_id, id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1063,7 +1156,7 @@ app.post("/v1/errors/batch", async (c) => {
       ),
     );
 
-    const results = await DB.batch(batchStatements);
+    const results = yield* Effect.tryPromise(() => DB.batch(batchStatements));
     const inserted = results.reduce(
       (sum, r) => sum + (typeof r.meta.changes === "number" ? r.meta.changes : 0),
       0,
@@ -1071,9 +1164,15 @@ app.post("/v1/errors/batch", async (c) => {
     const duplicates = validReports.length - inserted;
 
     return c.json({ inserted, duplicates });
-  } catch {
-    return c.json({ error: "Failed to store error reports" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    batch.pipe(
+      Effect.catchAll(() =>
+        Effect.succeed(c.json({ error: "Failed to store error reports" }, 500)),
+      ),
+    ),
+  );
 });
 
 app.get("/v1/errors/stats", async (c) => {
@@ -1088,21 +1187,20 @@ app.get("/v1/errors/stats", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  try {
-    const result = await DB.prepare(
+  const stats = Effect.tryPromise(() =>
+    DB.prepare(
       `SELECT error_type, COUNT(*) as count
        FROM error_logs
        WHERE created_at >= datetime('now', '-1 day')
        GROUP BY error_type
        ORDER BY count DESC`,
-    ).all();
+    ).all(),
+  ).pipe(
+    Effect.map((result) => c.json({ stats: result.results ?? [] })),
+    Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to fetch stats" }, 500))),
+  );
 
-    const rows = result.results ?? [];
-
-    return c.json({ stats: rows });
-  } catch {
-    return c.json({ error: "Failed to fetch stats" }, 500);
-  }
+  return Effect.runPromise(stats);
 });
 
 // ── Fee Wallet ───────────────────────────────────────────────────────────────
@@ -1113,7 +1211,7 @@ app.get("/v1/fee-wallet", async (c) => {
   const { CACHE } = c.env;
 
   if (CACHE) {
-    const kvAddress = await CACHE.get("fee_wallet_address");
+    const kvAddress = await Effect.runPromise(cacheGet(CACHE, "fee_wallet_address"));
     if (kvAddress) {
       return c.json({ address: kvAddress, source: "kv" });
     }
@@ -1135,7 +1233,7 @@ app.put("/v1/fee-wallet", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const body = (await c.req.json().catch(() => ({}))) as { address?: string };
+  const body = await Effect.runPromise(readJsonBody<{ address?: string }>(c.req));
 
   if (!body.address || typeof body.address !== "string") {
     return c.json({ error: "address is required" }, 400);
@@ -1150,7 +1248,7 @@ app.put("/v1/fee-wallet", async (c) => {
     return c.json({ error: "KV not available" }, 500);
   }
 
-  await CACHE.put("fee_wallet_address", body.address);
+  await Effect.runPromise(cachePut(CACHE, "fee_wallet_address", body.address));
   return c.json({ address: body.address, updated: true });
 });
 
@@ -1162,21 +1260,13 @@ app.get("/v1/config", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
-  try {
-    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
-    const userId = (loginResult as { id: string }).id;
+  const config = Effect.gen(function* () {
+    const loginResult = yield* loginHandler(DB, apiKey);
     const tier = (loginResult as { tier?: string }).tier ?? "free";
-
-    let feeWalletAddress: string | null = null;
-    if (CACHE) {
-      const kvAddress = await CACHE.get("fee_wallet_address");
-      if (kvAddress) {
-        feeWalletAddress = kvAddress;
-      }
-    }
-    if (!feeWalletAddress && c.env.FEE_WALLET_ADDRESS) {
-      feeWalletAddress = c.env.FEE_WALLET_ADDRESS;
-    }
+    const kvAddress = CACHE
+      ? yield* Effect.tryPromise(() => CACHE.get("fee_wallet_address"))
+      : null;
+    const feeWalletAddress = kvAddress ?? c.env.FEE_WALLET_ADDRESS ?? null;
 
     return c.json({
       tier,
@@ -1186,9 +1276,11 @@ app.get("/v1/config", async (c) => {
       feeWalletAddress,
       configVersion: 1,
     });
-  } catch {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+  });
+
+  return Effect.runPromise(
+    config.pipe(Effect.catchAll(() => Effect.succeed(c.json({ error: "Unauthorized" }, 401)))),
+  );
 });
 
 // ── Install Telemetry ───────────────────────────────────────────────────────
@@ -1198,14 +1290,16 @@ app.post("/v1/installs/ping", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
 
-  const body = (await c.req.json().catch(() => ({}))) as {
-    installId?: string;
-    event?: string;
-    version?: string;
-    channel?: string;
-    platform?: string;
-    userId?: string;
-  };
+  const body = await Effect.runPromise(
+    readJsonBody<{
+      installId?: string;
+      event?: string;
+      version?: string;
+      channel?: string;
+      platform?: string;
+      userId?: string;
+    }>(c.req),
+  );
 
   if (
     typeof body.installId !== "string" ||
@@ -1234,17 +1328,17 @@ app.post("/v1/installs/ping", async (c) => {
   // Rate limit: 100 pings per IP per hour (same as error reports).
   if (CACHE) {
     const rateKey = `rate_limit:install_ping:${clientIp}`;
-    const rateData = await CACHE.get(rateKey);
+    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
     const count = rateData ? parseInt(rateData, 10) : 0;
     if (count >= 100) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
-    await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
+    await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
   }
 
-  try {
-    const id = generateId();
-    await DB.prepare(
+  const id = generateId();
+  const ping = Effect.tryPromise(() =>
+    DB.prepare(
       `INSERT INTO installs (id, install_id, event, version, channel, platform, user_id)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
@@ -1257,13 +1351,13 @@ app.post("/v1/installs/ping", async (c) => {
         body.platform ?? null,
         user?.id ?? null,
       )
-      .run();
+      .run(),
+  ).pipe(
+    Effect.map(() => c.json({ id })),
+    Effect.catchAll(() => Effect.succeed(c.json({ error: "Internal server error" }, 500))),
+  );
 
-    return c.json({ id });
-  } catch (err) {
-    console.error("Failed to store install ping:", err);
-    return c.json({ error: "Internal server error" }, 500);
-  }
+  return Effect.runPromise(ping);
 });
 
 app.get("/v1/referral/code", async (c) => {
@@ -1274,41 +1368,44 @@ app.get("/v1/referral/code", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
-  try {
-    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+  const referral = Effect.gen(function* () {
+    const loginResult = yield* loginHandler(DB, apiKey);
     const userId = (loginResult as { id: string }).id;
 
-    let result = await DB.prepare("SELECT code FROM referral_codes WHERE user_id = ?")
-      .bind(userId)
-      .first();
+    let result = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT code FROM referral_codes WHERE user_id = ?").bind(userId).first(),
+    );
 
     if (!result) {
       const code = generateReferralCode();
-      await DB.prepare("INSERT INTO referral_codes (code, user_id) VALUES (?, ?)")
-        .bind(code, userId)
-        .run();
+      yield* Effect.tryPromise(() =>
+        DB.prepare("INSERT INTO referral_codes (code, user_id) VALUES (?, ?)")
+          .bind(code, userId)
+          .run(),
+      );
       result = { code };
     }
 
-    const countResult = await DB.prepare(
-      "SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?",
-    )
-      .bind(userId)
-      .first();
+    const countResult = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?")
+        .bind(userId)
+        .first(),
+    );
 
-    return c.json({
-      code: result.code,
-      referralCount: countResult?.count ?? 0,
-    });
-  } catch {
-    return c.json({ error: "Failed to get referral code" }, 500);
-  }
+    return c.json({ code: result.code, referralCount: countResult?.count ?? 0 });
+  });
+
+  return Effect.runPromise(
+    referral.pipe(
+      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to get referral code" }, 500))),
+    ),
+  );
 });
 
 app.post("/v1/referral/apply", async (c) => {
   const { DB } = c.env;
   const apiKey = c.get("apiKey") as string;
-  const body = (await c.req.json().catch(() => ({}))) as { code?: string };
+  const body = await Effect.runPromise(readJsonBody<{ code?: string }>(c.req));
 
   if (!apiKey) {
     return c.json({ error: "API key required" }, 401);
@@ -1318,67 +1415,62 @@ app.post("/v1/referral/apply", async (c) => {
     return c.json({ error: "Code required" }, 400);
   }
 
-  try {
-    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+  const referral = Effect.gen(function* () {
+    const loginResult = yield* loginHandler(DB, apiKey);
     const userId = (loginResult as { id: string }).id;
+    const codeResult = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT user_id FROM referral_codes WHERE code = ?").bind(body.code).first(),
+    );
 
-    const codeResult = await DB.prepare("SELECT user_id FROM referral_codes WHERE code = ?")
-      .bind(body.code)
-      .first();
+    if (!codeResult) return c.json({ error: "Invalid referral code" }, 400);
+    if (codeResult.user_id === userId) return c.json({ error: "Cannot refer yourself" }, 400);
 
-    if (!codeResult) {
-      return c.json({ error: "Invalid referral code" }, 400);
-    }
+    const existing = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT id FROM referrals WHERE referee_user_id = ?").bind(userId).first(),
+    );
+    if (existing) return c.json({ error: "Already referred" }, 400);
 
-    if (codeResult.user_id === userId) {
-      return c.json({ error: "Cannot refer yourself" }, 400);
-    }
+    yield* Effect.tryPromise(() =>
+      DB.prepare(
+        "INSERT INTO referrals (id, referrer_user_id, referee_user_id, referral_code) VALUES (?, ?, ?, ?)",
+      )
+        .bind(generateId(), codeResult.user_id, userId, body.code)
+        .run(),
+    );
+    yield* Effect.tryPromise(() =>
+      DB.prepare("INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)")
+        .bind(generateId(), codeResult.user_id, 5, "referral_bonus")
+        .run(),
+    );
+    yield* Effect.tryPromise(() =>
+      DB.prepare("INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)")
+        .bind(generateId(), userId, 10, "referee_bonus")
+        .run(),
+    );
 
-    const existing = await DB.prepare("SELECT id FROM referrals WHERE referee_user_id = ?")
-      .bind(userId)
-      .first();
-
-    if (existing) {
-      return c.json({ error: "Already referred" }, 400);
-    }
-
-    const referralId = generateId();
-    await DB.prepare(
-      "INSERT INTO referrals (id, referrer_user_id, referee_user_id, referral_code) VALUES (?, ?, ?, ?)",
-    )
-      .bind(referralId, codeResult.user_id, userId, body.code)
-      .run();
-
-    await DB.prepare("INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)")
-      .bind(generateId(), codeResult.user_id, 5, "referral_bonus")
-      .run();
-
-    await DB.prepare("INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)")
-      .bind(generateId(), userId, 10, "referee_bonus")
-      .run();
-
-    const countResult = await DB.prepare(
-      "SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?",
-    )
-      .bind(codeResult.user_id)
-      .first();
-
+    const countResult = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?")
+        .bind(codeResult.user_id)
+        .first(),
+    );
     const referralCount = countResult?.count ?? 0;
-    let milestoneBonus = 0;
-
-    if (referralCount === 5) milestoneBonus = 25;
-    else if (referralCount === 10) milestoneBonus = 50;
-
+    const milestoneBonus = referralCount === 5 ? 25 : referralCount === 10 ? 50 : 0;
     if (milestoneBonus > 0) {
-      await DB.prepare("INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)")
-        .bind(generateId(), codeResult.user_id, milestoneBonus, `milestone_${referralCount}`)
-        .run();
+      yield* Effect.tryPromise(() =>
+        DB.prepare("INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)")
+          .bind(generateId(), codeResult.user_id, milestoneBonus, `milestone_${referralCount}`)
+          .run(),
+      );
     }
 
     return c.json({ success: true, credits: 10 });
-  } catch {
-    return c.json({ error: "Failed to apply referral" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    referral.pipe(
+      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to apply referral" }, 500))),
+    ),
+  );
 });
 
 app.get("/v1/referral/stats", async (c) => {
@@ -1389,35 +1481,39 @@ app.get("/v1/referral/stats", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
-  try {
-    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+  const stats = Effect.gen(function* () {
+    const loginResult = yield* loginHandler(DB, apiKey);
     const userId = (loginResult as { id: string }).id;
-
-    const countResult = await DB.prepare(
-      "SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?",
-    )
-      .bind(userId)
-      .first();
-
-    const creditsResult = await DB.prepare(
-      "SELECT COALESCE(SUM(amount), 0) as total FROM user_credits WHERE user_id = ?",
-    )
-      .bind(userId)
-      .first();
-
+    const countResult = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?")
+        .bind(userId)
+        .first(),
+    );
+    const creditsResult = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM user_credits WHERE user_id = ?")
+        .bind(userId)
+        .first(),
+    );
     const referralCount = (countResult as { count?: number })?.count ?? 0;
-    let milestone: string | null = null;
-    if (referralCount >= 10) milestone = "10 referrals - $50 bonus!";
-    else if (referralCount >= 5) milestone = "5 referrals - $25 bonus!";
+    const milestone =
+      referralCount >= 10
+        ? "10 referrals - $50 bonus!"
+        : referralCount >= 5
+          ? "5 referrals - $25 bonus!"
+          : null;
 
     return c.json({
       referralCount,
       credits: (creditsResult as { total?: number })?.total ?? 0,
       milestone,
     });
-  } catch {
-    return c.json({ error: "Failed to get referral stats" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    stats.pipe(
+      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to get referral stats" }, 500))),
+    ),
+  );
 });
 
 app.get("/v1/subscription/status", async (c) => {
@@ -1428,46 +1524,45 @@ app.get("/v1/subscription/status", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
-  try {
-    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+  const subscription = Effect.gen(function* () {
+    const loginResult = yield* loginHandler(DB, apiKey);
     const userId = (loginResult as { id: string }).id;
-
-    const userResult = await DB.prepare("SELECT tier FROM users WHERE id = ?").bind(userId).first();
-
+    const userResult = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT tier FROM users WHERE id = ?").bind(userId).first(),
+    );
     const tier = (userResult as { tier?: string })?.tier ?? "free";
 
-    // Backfill subscription if missing (for users created before this fix)
-    const subResult = await DB.prepare(
-      "SELECT id FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
-    )
-      .bind(userId)
-      .first();
+    const subResult = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT id FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1")
+        .bind(userId)
+        .first(),
+    );
     if (!subResult) {
-      await DB.prepare(
-        "INSERT OR IGNORE INTO subscriptions (id, user_id, tier, period_start, period_end) VALUES (?, ?, ?, ?, ?)",
-      )
-        .bind(
-          generateId(),
-          userId,
-          tier,
-          new Date().toISOString(),
-          new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      yield* Effect.tryPromise(() =>
+        DB.prepare(
+          "INSERT OR IGNORE INTO subscriptions (id, user_id, tier, period_start, period_end) VALUES (?, ?, ?, ?, ?)",
         )
-        .run();
+          .bind(
+            generateId(),
+            userId,
+            tier,
+            new Date().toISOString(),
+            new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+          )
+          .run(),
+      );
     }
 
-    const countResult = await DB.prepare(
-      "SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?",
-    )
-      .bind(userId)
-      .first();
-
-    const creditsResult = await DB.prepare(
-      "SELECT COALESCE(SUM(amount), 0) as total FROM user_credits WHERE user_id = ?",
-    )
-      .bind(userId)
-      .first();
-
+    const countResult = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT COUNT(*) as count FROM referrals WHERE referrer_user_id = ?")
+        .bind(userId)
+        .first(),
+    );
+    const creditsResult = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM user_credits WHERE user_id = ?")
+        .bind(userId)
+        .first(),
+    );
     const tierConfig = TIERS[tier as keyof typeof TIERS];
 
     return c.json({
@@ -1477,9 +1572,15 @@ app.get("/v1/subscription/status", async (c) => {
       credits: (creditsResult as { total?: number })?.total ?? 0,
       platformFeeRate: tierConfig?.platformFeeRate ?? 0,
     });
-  } catch {
-    return c.json({ error: "Failed to get subscription status" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    subscription.pipe(
+      Effect.catchAll(() =>
+        Effect.succeed(c.json({ error: "Failed to get subscription status" }, 500)),
+      ),
+    ),
+  );
 });
 
 // ── Revenue Tracking ─────────────────────────────────────────────────────────
@@ -1493,31 +1594,23 @@ app.post("/v1/revenue/log", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
-  let userId: string;
-  let tier: string;
-  try {
-    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
-    userId = (loginResult as { id: string }).id;
-    tier = (loginResult as { tier?: string }).tier ?? "free";
-  } catch {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
-
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
 
-  const body = (await c.req.json().catch(() => ({}))) as {
-    poolAddress?: string;
-    positionPubkey?: string;
-    feeX?: number;
-    feeY?: number;
-    platformFeeX?: number;
-    platformFeeY?: number;
-    operatorFeeX?: number;
-    operatorFeeY?: number;
-    txSignature?: string;
-    feeTransferTxSignature?: string;
-    installId?: string;
-  };
+  const body = await Effect.runPromise(
+    readJsonBody<{
+      poolAddress?: string;
+      positionPubkey?: string;
+      feeX?: number;
+      feeY?: number;
+      platformFeeX?: number;
+      platformFeeY?: number;
+      operatorFeeX?: number;
+      operatorFeeY?: number;
+      txSignature?: string;
+      feeTransferTxSignature?: string;
+      installId?: string;
+    }>(c.req),
+  );
 
   if (
     typeof body.poolAddress !== "string" ||
@@ -1536,43 +1629,56 @@ app.post("/v1/revenue/log", async (c) => {
 
   if (CACHE) {
     const rateKey = `rate_limit:revenue_log:${clientIp}`;
-    const rateData = await CACHE.get(rateKey);
+    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
     const count = rateData ? parseInt(rateData, 10) : 0;
     if (count >= 200) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
-    await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
+    await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
   }
 
-  try {
+  const revenue = Effect.gen(function* () {
+    const loginResult = yield* loginHandler(DB, apiKey);
+    const userId = (loginResult as { id: string }).id;
+    const tier = (loginResult as { tier?: string }).tier ?? "free";
     const id = generateId();
-    await DB.prepare(
-      `INSERT INTO revenue_events (id, pool_address, position_pubkey, fee_x, fee_y, platform_fee_x, platform_fee_y, operator_fee_x, operator_fee_y, tier, user_id, install_id, tx_signature, fee_transfer_tx_signature)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(
-        id,
-        body.poolAddress,
-        body.positionPubkey ?? null,
-        body.feeX ?? 0,
-        body.feeY ?? 0,
-        body.platformFeeX,
-        body.platformFeeY,
-        body.operatorFeeX ?? 0,
-        body.operatorFeeY ?? 0,
-        tier,
-        userId,
-        body.installId ?? null,
-        body.txSignature ?? null,
-        body.feeTransferTxSignature ?? null,
+    yield* Effect.tryPromise(() =>
+      DB.prepare(
+        `INSERT INTO revenue_events (id, pool_address, position_pubkey, fee_x, fee_y, platform_fee_x, platform_fee_y, operator_fee_x, operator_fee_y, tier, user_id, install_id, tx_signature, fee_transfer_tx_signature)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run();
-
+        .bind(
+          id,
+          body.poolAddress,
+          body.positionPubkey ?? null,
+          body.feeX ?? 0,
+          body.feeY ?? 0,
+          body.platformFeeX,
+          body.platformFeeY,
+          body.operatorFeeX ?? 0,
+          body.operatorFeeY ?? 0,
+          tier,
+          userId,
+          body.installId ?? null,
+          body.txSignature ?? null,
+          body.feeTransferTxSignature ?? null,
+        )
+        .run(),
+    );
     return c.json({ id });
-  } catch (err) {
-    console.error("Failed to store revenue event:", err);
-    return c.json({ error: "Internal server error" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    revenue.pipe(
+      Effect.match({
+        onFailure: (cause) =>
+          causeMessage(cause).includes("Invalid API key")
+            ? c.json({ error: "Unauthorized" }, 401)
+            : c.json({ error: "Internal server error" }, 500),
+        onSuccess: (response) => response,
+      }),
+    ),
+  );
 });
 
 app.get("/v1/revenue", async (c) => {
@@ -1587,33 +1693,35 @@ app.get("/v1/revenue", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  try {
-    // Total events
-    const totalResult = await DB.prepare("SELECT COUNT(*) as total FROM revenue_events").first();
-    const total = (totalResult as { total?: number })?.total ?? 0;
-
-    // By tier
-    const tierResult = await DB.prepare(
-      `SELECT tier, COUNT(*) as count, SUM(platform_fee_x + platform_fee_y) as totalFee
-       FROM revenue_events
-       GROUP BY tier`,
-    ).all();
-    const byTier = tierResult.results ?? [];
-
-    // Recent events (last 20)
-    const recentResult = await DB.prepare(
-      "SELECT * FROM revenue_events ORDER BY created_at DESC LIMIT 20",
-    ).all();
-    const recent = recentResult.results ?? [];
+  const revenue = Effect.gen(function* () {
+    const totalResult = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT COUNT(*) as total FROM revenue_events").first(),
+    );
+    const tierResult = yield* Effect.tryPromise(() =>
+      DB.prepare(
+        `SELECT tier, COUNT(*) as count, SUM(platform_fee_x + platform_fee_y) as totalFee
+         FROM revenue_events
+         GROUP BY tier`,
+      ).all(),
+    );
+    const recentResult = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT * FROM revenue_events ORDER BY created_at DESC LIMIT 20").all(),
+    );
 
     return c.json({
-      total,
-      byTier,
-      recent,
+      total: (totalResult as { total?: number })?.total ?? 0,
+      byTier: tierResult.results ?? [],
+      recent: recentResult.results ?? [],
     });
-  } catch {
-    return c.json({ error: "Failed to fetch revenue stats" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    revenue.pipe(
+      Effect.catchAll(() =>
+        Effect.succeed(c.json({ error: "Failed to fetch revenue stats" }, 500)),
+      ),
+    ),
+  );
 });
 
 // ── Wallet management ────────────────────────────────────────────────────
@@ -1626,7 +1734,7 @@ app.post("/v1/wallet", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
-  const body = (await c.req.json().catch(() => ({}))) as { pubkey?: string };
+  const body = await Effect.runPromise(readJsonBody<{ pubkey?: string }>(c.req));
 
   if (!body.pubkey || typeof body.pubkey !== "string") {
     return c.json({ error: "pubkey is required" }, 400);
@@ -1637,29 +1745,38 @@ app.post("/v1/wallet", async (c) => {
     return c.json({ error: "Invalid Solana address (must be base58, 32-44 chars)" }, 400);
   }
 
-  try {
-    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+  const wallet = Effect.gen(function* () {
+    const loginResult = yield* loginHandler(DB, apiKey);
     const userId = (loginResult as { id: string }).id;
 
-    await DB.batch([
-      DB.prepare("DELETE FROM wallets WHERE user_id = ?").bind(userId),
-      DB.prepare("INSERT INTO wallets (id, user_id, pubkey) VALUES (?, ?, ?)").bind(
-        generateId(),
-        userId,
-        body.pubkey,
-      ),
-    ]);
-
-    await Effect.runPromise(logAudit(DB, userId, "wallet_sync", { pubkey: body.pubkey }));
+    yield* Effect.tryPromise(() =>
+      DB.batch([
+        DB.prepare("DELETE FROM wallets WHERE user_id = ?").bind(userId),
+        DB.prepare("INSERT INTO wallets (id, user_id, pubkey) VALUES (?, ?, ?)").bind(
+          generateId(),
+          userId,
+          body.pubkey,
+        ),
+      ]),
+    );
+    yield* logAudit(DB, userId, "wallet_sync", { pubkey: body.pubkey });
 
     return c.json({ success: true, pubkey: body.pubkey });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("Invalid API key") || message.includes("User not found")) {
-      return c.json({ error: "Unauthorized" }, 401);
-    }
-    return c.json({ error: "Failed to store wallet" }, 500);
-  }
+  });
+
+  return Effect.runPromise(
+    wallet.pipe(
+      Effect.match({
+        onFailure: (cause) => {
+          const message = causeMessage(cause);
+          return message.includes("Invalid API key") || message.includes("User not found")
+            ? c.json({ error: "Unauthorized" }, 401)
+            : c.json({ error: "Failed to store wallet" }, 500);
+        },
+        onSuccess: (response) => response,
+      }),
+    ),
+  );
 });
 
 app.get("/v1/wallet", async (c) => {
@@ -1670,26 +1787,29 @@ app.get("/v1/wallet", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
-  try {
-    const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
+  const wallet = Effect.gen(function* () {
+    const loginResult = yield* loginHandler(DB, apiKey);
     const userId = (loginResult as { id: string }).id;
+    const result = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT pubkey FROM wallets WHERE user_id = ?").bind(userId).first(),
+    );
 
-    const result = await DB.prepare("SELECT pubkey FROM wallets WHERE user_id = ?")
-      .bind(userId)
-      .first();
+    return result ? c.json({ pubkey: result.pubkey }) : c.json({ error: "No wallet found" }, 404);
+  });
 
-    if (!result) {
-      return c.json({ error: "No wallet found" }, 404);
-    }
-
-    return c.json({ pubkey: result.pubkey });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("Invalid API key") || message.includes("User not found")) {
-      return c.json({ error: "Unauthorized" }, 401);
-    }
-    return c.json({ error: "Failed to fetch wallet" }, 500);
-  }
+  return Effect.runPromise(
+    wallet.pipe(
+      Effect.match({
+        onFailure: (cause) => {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          return message.includes("Invalid API key") || message.includes("User not found")
+            ? c.json({ error: "Unauthorized" }, 401)
+            : c.json({ error: "Failed to fetch wallet" }, 500);
+        },
+        onSuccess: (response) => response,
+      }),
+    ),
+  );
 });
 
 export default {

@@ -72,20 +72,24 @@ function hashFeedback(summary: string, details: string | undefined, category: st
 
 const OPT_OUT_FILE = join(homedir(), ".config", "prism", "feedback-opt-out");
 
-function readOptOut(): boolean {
-  try {
-    if (existsSync(OPT_OUT_FILE)) {
-      return readFileSync(OPT_OUT_FILE, "utf-8").trim() === "true";
-    }
-  } catch {}
-  return false;
+function readOptOut(): Effect.Effect<boolean, never> {
+  return Effect.try({
+    try: () => existsSync(OPT_OUT_FILE) && readFileSync(OPT_OUT_FILE, "utf-8").trim() === "true",
+    catch: (cause) => cause,
+  }).pipe(Effect.catchAll(() => Effect.succeed(false)));
 }
 
-function writeOptOut(value: boolean): void {
-  try {
-    mkdirSync(join(homedir(), ".config", "prism"), { recursive: true });
-    writeFileSync(OPT_OUT_FILE, value ? "true" : "false");
-  } catch {}
+function writeOptOut(value: boolean): Effect.Effect<void, never> {
+  return Effect.try({
+    try: () => {
+      mkdirSync(join(homedir(), ".config", "prism"), { recursive: true });
+      writeFileSync(OPT_OUT_FILE, value ? "true" : "false");
+    },
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catchAll(() => Effect.void),
+    Effect.asVoid,
+  );
 }
 
 function buildContext(): FeedbackContext {
@@ -107,34 +111,41 @@ function buildContext(): FeedbackContext {
   return ctx;
 }
 
-function detectAgentId(): string {
+function detectAgentId(): Effect.Effect<string, never> {
   const walletPath = join(homedir(), ".config", "prism", "agent-id");
-  if (existsSync(walletPath)) {
-    return readFileSync(walletPath, "utf-8").trim();
-  }
-  const fingerprint = `${process.platform}-${process.arch}-${homedir()}-${process.cwd()}`;
-  const id = createHash("sha256").update(fingerprint).digest("hex").slice(0, 8);
-  try {
-    const dir = join(homedir(), ".config", "prism");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(walletPath, id, { mode: 0o600 });
-  } catch {
-    // best-effort
-  }
-  return id;
+  return Effect.gen(function* () {
+    const existing = yield* Effect.try({
+      try: () => (existsSync(walletPath) ? readFileSync(walletPath, "utf-8").trim() : null),
+      catch: (cause) => cause,
+    }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+    if (existing) return existing;
+
+    const fingerprint = `${process.platform}-${process.arch}-${homedir()}-${process.cwd()}`;
+    const id = createHash("sha256").update(fingerprint).digest("hex").slice(0, 8);
+    yield* Effect.try({
+      try: () => {
+        const dir = join(homedir(), ".config", "prism");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(walletPath, id, { mode: 0o600 });
+      },
+      catch: (cause) => cause,
+    }).pipe(Effect.catchAll(() => Effect.void));
+    return id;
+  });
 }
 
-function readPrismApiKey(): string | null {
-  try {
-    const credentialsFile = process.env.PRISM_CREDENTIALS_FILE ?? CREDENTIALS_FILE;
-    if (!existsSync(credentialsFile)) return null;
-    const value = JSON.parse(readFileSync(credentialsFile, "utf-8")) as {
-      apiKey?: unknown;
-    };
-    return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
-  } catch {
-    return null;
-  }
+function readPrismApiKey(): Effect.Effect<string | null, never> {
+  return Effect.try({
+    try: () => {
+      const credentialsFile = process.env.PRISM_CREDENTIALS_FILE ?? CREDENTIALS_FILE;
+      if (!existsSync(credentialsFile)) return null;
+      const value = JSON.parse(readFileSync(credentialsFile, "utf-8")) as {
+        apiKey?: unknown;
+      };
+      return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
+    },
+    catch: (cause) => cause,
+  }).pipe(Effect.catchAll(() => Effect.succeed(null)));
 }
 
 function toFeedbackEntry(row: {
@@ -172,8 +183,8 @@ export const FeedbackLive = Layer.effect(
   Effect.gen(function* () {
     const config = yield* ConfigService;
     const db = yield* DbService;
-    const agentId = detectAgentId();
-    const state = { optOut: config.feedbackOptOut || readOptOut() };
+    const agentId = yield* detectAgentId();
+    const state = { optOut: config.feedbackOptOut || (yield* readOptOut()) };
 
     const submit = (rawFeedback: AgentFeedback): Effect.Effect<FeedbackResult, never> =>
       Effect.gen(function* () {
@@ -186,7 +197,7 @@ export const FeedbackLive = Layer.effect(
           context,
         };
         const hash = hashFeedback(feedback.summary, feedback.details, feedback.category);
-        const apiKey = readPrismApiKey();
+        const apiKey = yield* readPrismApiKey();
         if (!apiKey) {
           return {
             kind: "error" as const,
@@ -316,9 +327,9 @@ export const FeedbackLive = Layer.effect(
           Effect.succeed(row ? toFeedbackEntry(row) : null),
         ),
       setOptOut: (value: boolean) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           state.optOut = value;
-          writeOptOut(value);
+          yield* writeOptOut(value);
         }),
       getOptOut: () => Effect.sync(() => state.optOut),
     };
