@@ -3,31 +3,50 @@ import * as p from "@clack/prompts";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { pingInstall, readCredentials } from "./api.js";
+import { pingInstall, requireRegistered, type PrismCredentials } from "./api.js";
 import { ensurePrismConfigDir, getPrismEnvPath, getPrismDbPath } from "../engine/paths.js";
 
 export const setupCommand = new Command("setup")
   .description("Configure Prism trading agent")
   .option("--non-interactive", "Run without prompts (for agents/CI)")
-  .option("--helius-key <key>", "Helius API key")
+  .option("--helius-key <key>", "Optional Helius API key")
+  .option("--rpc-url <url>", "Primary Solana RPC URL")
+  .option("--rpc-fallback-url <url>", "Optional fallback Solana RPC URL")
+  .option("--jupiter-api-key <key>", "Optional Jupiter API key")
   .option("--wallet-key-file <path>", "Path to Solana wallet keypair file (optional)")
   .option("--watchlist <pools>", "Comma-separated pool addresses")
   .option("--paper-trading", "Enable paper trading (default: true)")
   .action(async (options) => {
     const isNonInteractive = options.nonInteractive;
+    let credentials: PrismCredentials;
+    try {
+      credentials = await requireRegistered(true);
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
 
     let heliusKey: string;
     let walletKey: string;
     let watchlistPools: string;
     let paperTrading: boolean;
+    let rpcUrl: string;
+    let rpcFallbackUrl: string;
+    let jupiterApiKey: string;
 
     if (isNonInteractive) {
-      // Non-interactive mode (agent-driven)
-      if (!options.heliusKey) {
-        console.error("Error: --helius-key is required in non-interactive mode");
+      const configuredHeliusKey = options.heliusKey || process.env.HELIUS_API_KEY || "";
+      rpcUrl = options.rpcUrl || process.env.SOLANA_RPC_URL || "";
+      if (!rpcUrl && configuredHeliusKey) {
+        rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${configuredHeliusKey}`;
+      }
+      if (!rpcUrl) {
+        console.error("Error: provide --rpc-url or --helius-key in non-interactive mode");
         process.exit(1);
       }
-      heliusKey = options.heliusKey;
+      heliusKey = configuredHeliusKey;
+      rpcFallbackUrl = options.rpcFallbackUrl || process.env.SOLANA_RPC_FALLBACK_URL || "";
+      jupiterApiKey = options.jupiterApiKey || process.env.JUPITER_API_KEY || "";
       // Read wallet key from file if provided, otherwise from env
       if (options.walletKeyFile) {
         try {
@@ -57,9 +76,31 @@ export const setupCommand = new Command("setup")
         {
           heliusKey: () =>
             p.text({
-              message: "Helius API key",
-              placeholder: "your-helius-api-key",
-              validate: (v) => (v && v.length > 8 ? undefined : "Key too short"),
+              message: "Helius API key (optional with a custom RPC)",
+              placeholder: "leave blank when using another RPC",
+              initialValue: process.env.HELIUS_API_KEY ?? "",
+              validate: (v) => (v && v.length <= 8 ? "Key too short" : undefined),
+            }),
+
+          rpcUrl: () =>
+            p.text({
+              message: "Primary Solana RPC URL (optional with Helius key)",
+              placeholder: "https://...",
+              initialValue: process.env.SOLANA_RPC_URL ?? "",
+            }),
+
+          rpcFallbackUrl: () =>
+            p.text({
+              message: "Fallback Solana RPC URL (optional)",
+              placeholder: "https://...",
+              initialValue: process.env.SOLANA_RPC_FALLBACK_URL ?? "",
+            }),
+
+          jupiterApiKey: () =>
+            p.text({
+              message: "Jupiter API key (optional, improves price API limits)",
+              placeholder: "leave blank to use public fallback",
+              initialValue: process.env.JUPITER_API_KEY ?? "",
             }),
 
           walletKey: () =>
@@ -91,6 +132,16 @@ export const setupCommand = new Command("setup")
       );
 
       heliusKey = answers.heliusKey as string;
+      rpcUrl = (answers.rpcUrl as string) || "";
+      rpcFallbackUrl = (answers.rpcFallbackUrl as string) || "";
+      jupiterApiKey = (answers.jupiterApiKey as string) || "";
+      if (!rpcUrl.trim() && heliusKey.trim()) {
+        rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`;
+      }
+      if (!rpcUrl.trim()) {
+        p.cancel("A primary RPC URL or Helius API key is required.");
+        process.exit(1);
+      }
       walletKey = (answers.walletKey as string) || "";
       watchlistPools = (answers.watchlistPools as string) || "";
       paperTrading = answers.paperTrading as boolean;
@@ -102,8 +153,6 @@ export const setupCommand = new Command("setup")
       }
     }
 
-    const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`;
-
     // Escape values to prevent .env injection
     function escapeEnv(value: string): string {
       if (value.includes("\n") || value.includes("\r")) {
@@ -113,9 +162,11 @@ export const setupCommand = new Command("setup")
     }
 
     const envContent = [
-      "# Required",
+      "# RPC providers",
       `HELIUS_API_KEY=${escapeEnv(heliusKey)}`,
       `SOLANA_RPC_URL=${escapeEnv(rpcUrl)}`,
+      `SOLANA_RPC_FALLBACK_URL=${escapeEnv(rpcFallbackUrl)}`,
+      `JUPITER_API_KEY=${escapeEnv(jupiterApiKey)}`,
       "",
       "# Wallet (optional — leave empty for paper trading)",
       `WALLET_PRIVATE_KEY=${escapeEnv(walletKey)}`,
@@ -147,8 +198,7 @@ export const setupCommand = new Command("setup")
     }
     fs.writeFileSync(envPath, envContent, { mode: 0o600 });
     fs.chmodSync(envPath, 0o600);
-    const creds = readCredentials();
-    await pingInstall("setup", creds ? { userId: creds.userId } : {});
+    await pingInstall("setup", { userId: credentials.userId });
 
     if (!isNonInteractive) {
       p.note(

@@ -2,6 +2,16 @@ import * as p from "@clack/prompts";
 import fs from "fs";
 import path from "path";
 
+const isDirectSetupExecution =
+  typeof Bun !== "undefined" &&
+  (Bun.main?.endsWith("ops/setup.ts") || Bun.main?.endsWith("ops/setup.js"));
+
+if (isDirectSetupExecution && process.env.PRISM_ALLOW_DIRECT !== "true") {
+  console.error("Error: Direct setup execution is not allowed.");
+  console.error('Use "prism setup" instead.');
+  process.exit(1);
+}
+
 async function main() {
   console.clear();
 
@@ -11,9 +21,31 @@ async function main() {
     {
       heliusKey: () =>
         p.text({
-          message: "Helius API key",
-          placeholder: "your-helius-api-key",
-          validate: (v) => (v && v.length > 8 ? undefined : "Key too short"),
+          message: "Helius API key (optional with a custom RPC)",
+          placeholder: "leave blank when using another RPC",
+          initialValue: process.env.HELIUS_API_KEY ?? "",
+          validate: (v) => (v && v.length <= 8 ? "Key too short" : undefined),
+        }),
+
+      rpcUrl: () =>
+        p.text({
+          message: "Primary Solana RPC URL (optional with Helius key)",
+          placeholder: "https://...",
+          initialValue: process.env.SOLANA_RPC_URL ?? "",
+        }),
+
+      rpcFallbackUrl: () =>
+        p.text({
+          message: "Fallback Solana RPC URL (optional)",
+          placeholder: "https://...",
+          initialValue: process.env.SOLANA_RPC_FALLBACK_URL ?? "",
+        }),
+
+      jupiterApiKey: () =>
+        p.text({
+          message: "Jupiter API key (optional)",
+          placeholder: "leave blank to use public fallback",
+          initialValue: process.env.JUPITER_API_KEY ?? "",
         }),
 
       paperTrading: () =>
@@ -45,12 +77,20 @@ async function main() {
     },
   );
 
-  const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${answers.heliusKey as string}`;
+  const heliusKey = (answers.heliusKey as string) || "";
+  const rpcUrl =
+    (answers.rpcUrl as string) ||
+    (heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : "");
+  if (!rpcUrl.trim()) {
+    throw new Error("A primary RPC URL or Helius API key is required");
+  }
 
   const envContent = [
-    "# Required",
-    `HELIUS_API_KEY=${answers.heliusKey as string}`,
+    "# RPC providers",
+    `HELIUS_API_KEY=${heliusKey}`,
     `SOLANA_RPC_URL=${rpcUrl}`,
+    `SOLANA_RPC_FALLBACK_URL=${(answers.rpcFallbackUrl as string) || ""}`,
+    `JUPITER_API_KEY=${(answers.jupiterApiKey as string) || ""}`,
     "",
     "# Strategy",
     `PAPER_TRADING=${String(answers.paperTrading)}`,

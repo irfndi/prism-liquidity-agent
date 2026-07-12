@@ -1051,13 +1051,17 @@ export const program = Effect.gen(function* () {
         yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
       }
 
-      // Use the live wallet value when available. Fall back to the configured
-      // paper portfolio on RPC failure so a transient balance read does not
-      // abort the entire pool evaluation.
       const walletBalanceUsd = adapter.hasWallet()
-        ? yield* adapter
-            .getWalletBalanceUsd()
-            .pipe(Effect.catchAll(() => Effect.succeed(config.paperPortfolioUsd)))
+        ? yield* adapter.getWalletBalanceUsd().pipe(
+            Effect.catchAll((err) => {
+              if (config.paperTrading) return Effect.succeed(config.paperPortfolioUsd);
+              console.error("Live wallet balance unavailable; skipping pool", {
+                pool: poolAddress,
+                error: String(err),
+              });
+              return Effect.fail(err);
+            }),
+          )
         : config.paperPortfolioUsd;
       lastWalletBalanceUsd = walletBalanceUsd;
 
@@ -1674,10 +1678,19 @@ export const program = Effect.gen(function* () {
       if (decision.action === "ENTER") {
         yield* adapter.swapUSDCForSOL(0.05, 2.0).pipe(Effect.catchAll(() => Effect.void));
 
-        const lamports = yield* adapter
-          .getNativeSolBalance()
-          .pipe(Effect.catchAll(() => Effect.succeed(0)));
-        const solBalance = lamports / 1e9;
+        const nativeBalance = yield* adapter.getNativeSolBalance().pipe(
+          Effect.map((lamports) => ({ value: lamports, error: undefined as string | undefined })),
+          Effect.catchAll((err) =>
+            Effect.succeed({
+              value: null,
+              error: `Unable to read native SOL balance: ${err instanceof Error ? err.message : String(err)}`,
+            }),
+          ),
+        );
+        if (nativeBalance.value === null) {
+          return { executed: false, error: nativeBalance.error };
+        }
+        const solBalance = nativeBalance.value / 1e9;
         if (solBalance < 0.03) {
           console.warn("Insufficient SOL for gas — skipping ENTER");
           return { executed: false, error: "Insufficient SOL for gas — skipping ENTER" };
@@ -1746,22 +1759,24 @@ export const program = Effect.gen(function* () {
         let exited = false;
         let exitError: string | undefined = undefined;
         if (pos?.positionPubKey) {
-          const exitResult = yield* adapter.exitPosition(decision.poolAddress, pos.positionPubKey).pipe(
-            Effect.tap(() =>
-              console.info("Live position exited", {
-                pool: decision.poolAddress,
+          const exitResult = yield* adapter
+            .exitPosition(decision.poolAddress, pos.positionPubKey)
+            .pipe(
+              Effect.tap(() =>
+                console.info("Live position exited", {
+                  pool: decision.poolAddress,
+                }),
+              ),
+              Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
+              Effect.catchAll((err) => {
+                const msg = (err as { message?: string }).message ?? String(err);
+                console.error("Live EXIT failed", {
+                  pool: decision.poolAddress,
+                  err: msg,
+                });
+                return Effect.succeed({ result: null, error: msg });
               }),
-            ),
-            Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
-            Effect.catchAll((err) => {
-              const msg = (err as { message?: string }).message ?? String(err);
-              console.error("Live EXIT failed", {
-                pool: decision.poolAddress,
-                err: msg,
-              });
-              return Effect.succeed({ result: null, error: msg });
-            }),
-          );
+            );
           exited = exitResult.result !== null;
           exitError = exitResult.error;
         } else {

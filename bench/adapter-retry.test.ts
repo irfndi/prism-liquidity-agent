@@ -18,6 +18,14 @@ describe("isRetriableError", () => {
     expect(isRetriableError({ code: 429 })).toBe(true);
   });
 
+  it("returns true for Helius JSON-RPC rate-limit code -32005", () => {
+    expect(isRetriableError({ code: -32005 })).toBe(true);
+  });
+
+  it("returns true for a too-many-requests message", () => {
+    expect(isRetriableError({ message: "Too many requests" })).toBe(true);
+  });
+
   it("returns true for error whose message contains 429", () => {
     expect(isRetriableError({ message: "status 429 too many requests" })).toBe(true);
   });
@@ -280,6 +288,10 @@ describe("isRpcNetworkError", () => {
 
   it("returns true for HTTP 429", () => {
     expect(isRpcNetworkError({ code: 429 })).toBe(true);
+  });
+
+  it("returns true for Helius JSON-RPC rate-limit code -32005", () => {
+    expect(isRpcNetworkError({ code: -32005 })).toBe(true);
   });
 
   it("returns true for HTTP 500", () => {

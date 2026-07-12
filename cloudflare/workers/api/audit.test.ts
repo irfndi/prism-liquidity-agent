@@ -79,10 +79,23 @@ describe("Audit Logging API", () => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
     ).run();
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS audit_event_summary (
+        user_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        event_key TEXT NOT NULL,
+        details TEXT,
+        first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        occurrence_count INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (user_id, action, event_key)
+      )`,
+    ).run();
   });
 
   beforeEach(async () => {
     await env.DB.prepare("DELETE FROM audit_log").run();
+    await env.DB.prepare("DELETE FROM audit_event_summary").run();
     await env.DB.prepare("DELETE FROM wallets").run();
     await env.DB.prepare("DELETE FROM subscriptions").run();
     await env.DB.prepare("DELETE FROM telegram_link_codes").run();
@@ -104,9 +117,8 @@ describe("Audit Logging API", () => {
   });
 
   it("logs register event", async () => {
-    // The beforeEach already registered a user, so audit_log should have an entry
     const rows = await env.DB.prepare(
-      "SELECT * FROM audit_log WHERE user_id = ? AND action = ?",
+      "SELECT * FROM audit_event_summary WHERE user_id = ? AND action = ?",
     )
       .bind(userId, "register")
       .all();
@@ -118,23 +130,26 @@ describe("Audit Logging API", () => {
     expect(details).toMatchObject({ tier: "free" });
   });
 
-  it("logs login event", async () => {
+  it("does not log login noise", async () => {
     const ctx = createExecutionContext();
-    const request = buildRequest("POST", "/v1/login", {}, {
-      Authorization: `Bearer ${apiKey}`,
-    });
+    const request = buildRequest(
+      "POST",
+      "/v1/login",
+      {},
+      {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    );
     const response = await worker.fetch(request, testEnv, ctx);
     expect(response.status).toBe(200);
 
     const rows = await env.DB.prepare(
-      "SELECT * FROM audit_log WHERE user_id = ? AND action = ?",
+      "SELECT * FROM audit_event_summary WHERE user_id = ? AND action = ?",
     )
       .bind(userId, "login")
       .all();
     const results = rows.results ?? [];
-    expect(results).toHaveLength(1);
-    const row = results[0] as Record<string, unknown>;
-    expect(row.action).toBe("login");
+    expect(results).toHaveLength(0);
   });
 
   it("logs wallet_sync event", async () => {
@@ -148,8 +163,19 @@ describe("Audit Logging API", () => {
     const response = await worker.fetch(request, testEnv, ctx);
     expect(response.status).toBe(200);
 
+    await worker.fetch(
+      buildRequest(
+        "POST",
+        "/v1/wallet",
+        { pubkey: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU" },
+        { Authorization: `Bearer ${apiKey}` },
+      ),
+      testEnv,
+      createExecutionContext(),
+    );
+
     const rows = await env.DB.prepare(
-      "SELECT * FROM audit_log WHERE user_id = ? AND action = ?",
+      "SELECT * FROM audit_event_summary WHERE user_id = ? AND action = ?",
     )
       .bind(userId, "wallet_sync")
       .all();
@@ -159,6 +185,7 @@ describe("Audit Logging API", () => {
     expect(row.action).toBe("wallet_sync");
     const details = JSON.parse(row.details as string);
     expect(details).toMatchObject({ pubkey: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU" });
+    expect(row.occurrence_count).toBe(2);
   });
 
   it("logs telegram_link event", async () => {
@@ -177,7 +204,7 @@ describe("Audit Logging API", () => {
     expect(response.status).toBe(200);
 
     const rows = await env.DB.prepare(
-      "SELECT * FROM audit_log WHERE user_id = ? AND action = ?",
+      "SELECT * FROM audit_event_summary WHERE user_id = ? AND action = ?",
     )
       .bind(userId, "telegram_link")
       .all();

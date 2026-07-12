@@ -15,13 +15,18 @@ function hasMessage(err: unknown): err is { readonly message: string } {
 }
 
 export function isRetriableError(err: unknown): boolean {
-  if (hasCode(err) && err.code === 429) return true;
-  if (hasMessage(err) && err.message.includes("429")) return true;
+  if (hasCode(err) && (err.code === 429 || err.code === -32005)) return true;
+  if (hasMessage(err)) {
+    const msg = err.message.toLowerCase();
+    if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests")) {
+      return true;
+    }
+  }
   return false;
 }
 
 function isRateLimitError(err: unknown): boolean {
-  if (hasCode(err) && err.code === 429) return true;
+  if (hasCode(err) && (err.code === 429 || err.code === -32005)) return true;
   if (hasMessage(err)) {
     const msg = err.message.toLowerCase();
     return msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests");
@@ -44,15 +49,30 @@ const NETWORK_ERROR_CODES = new Set([
 ]);
 
 export function isRpcNetworkError(err: unknown): boolean {
+  if (
+    isObject(err) &&
+    (err["tag"] === "CircuitBreakerOpenError" || err["name"] === "CircuitBreakerOpenError")
+  ) {
+    return true;
+  }
+
   // Node.js system errors with a code like ECONNREFUSED, ETIMEDOUT, etc.
   if (isObject(err) && typeof err.code === "string" && NETWORK_ERROR_CODES.has(err.code)) {
     return true;
   }
 
   // HTTP-level: 429 (rate limit) and 5xx (server errors)
-  if (hasCode(err) && (err.code === 429 || (err.code >= 500 && err.code < 600))) return true;
+  if (
+    hasCode(err) &&
+    (err.code === 429 || err.code === -32005 || (err.code >= 500 && err.code < 600))
+  ) {
+    return true;
+  }
   if (hasMessage(err)) {
-    if (err.message.includes("429")) return true;
+    const msg = err.message.toLowerCase();
+    if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests")) {
+      return true;
+    }
     if (/HTTP\s+5\d{2}/.test(err.message)) return true;
   }
 

@@ -19,6 +19,12 @@ export interface ApiResponse<T> {
   error?: string;
 }
 
+export interface PrismCredentials {
+  apiKey: string;
+  userId: string;
+  createdAt: string;
+}
+
 export async function prismApiPost<T = unknown>(
   path: string,
   body: Record<string, unknown>,
@@ -102,6 +108,24 @@ export function readCredentials(): {
   }
 }
 
+export async function requireRegistered(validate = false): Promise<PrismCredentials> {
+  const credentials = readCredentials();
+  if (!credentials?.apiKey || !credentials.userId) {
+    throw new Error("Prism account required. Run 'prism register' first.");
+  }
+  if (validate) {
+    const result = await prismApiPost("/v1/login", {}, { apiKey: credentials.apiKey });
+    if (!result.ok) {
+      throw new Error(
+        `Stored Prism credentials are invalid or unavailable. Run 'prism login <key>'.${
+          result.error ? ` ${result.error}` : ""
+        }`,
+      );
+    }
+  }
+  return credentials;
+}
+
 export function writeCredentials(creds: {
   apiKey: string;
   userId: string;
@@ -120,7 +144,7 @@ export function writeCredentials(creds: {
 export function pingInstall(
   event: "install" | "setup" | "dev_start" | "register",
   options: { userId?: string } = {},
-): Promise<void> {
+): Promise<boolean> {
   return (async () => {
     try {
       const body: Record<string, string> = {
@@ -130,14 +154,21 @@ export function pingInstall(
         channel: process.env.UPDATE_CHANNEL ?? "stable",
         platform: process.platform,
       };
-      if (options.userId) body.userId = options.userId;
+      const credentials = readCredentials();
+      if (event !== "install" && !credentials?.apiKey) return false;
+      if (options.userId && credentials?.userId !== options.userId) return false;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 3000);
-      await prismApiPost("/v1/installs/ping", body, { signal: controller.signal }).finally(() =>
+      const requestOptions: { apiKey?: string; signal: AbortSignal } = {
+        signal: controller.signal,
+      };
+      if (credentials?.apiKey) requestOptions.apiKey = credentials.apiKey;
+      const result = await prismApiPost("/v1/installs/ping", body, requestOptions).finally(() =>
         clearTimeout(timeout),
       );
+      return result.ok;
     } catch {
-      return;
+      return false;
     }
   })();
 }

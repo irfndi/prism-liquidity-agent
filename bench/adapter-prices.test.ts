@@ -18,7 +18,7 @@ function buildAdapterLayerWithWallet(): Layer.Layer<AdapterService, never, never
     defaultAppConfig({
       walletPrivateKey,
       solanaRpcUrl: "https://example.com",
-    solanaRpcFallbackUrl: "",
+      solanaRpcFallbackUrl: "",
       sqliteDbPath: ":memory:",
       autoUpdate: false,
       updateCheckIntervalMs: 216_000_000,
@@ -40,8 +40,8 @@ describe("AdapterService price resolution", () => {
   it("uses the live Jupiter price for SOL instead of the hardcoded fallback", async () => {
     const restore = mockFetch((async (url: string | URL | Request) => {
       const u = url.toString();
-      if (u.includes("price.jup.ag/v6/price") && u.includes(SOL_MINT)) {
-        return new Response(JSON.stringify({ data: { [SOL_MINT]: { price: 200 } } }), {
+      if (u.includes("api.jup.ag/price/v3") && u.includes(SOL_MINT)) {
+        return new Response(JSON.stringify({ [SOL_MINT]: { usdPrice: 200 } }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -50,9 +50,18 @@ describe("AdapterService price resolution", () => {
     }) as unknown as typeof fetch);
 
     vi.spyOn(Connection.prototype, "getBalance").mockResolvedValue(1_000_000_000);
-    vi.spyOn(Connection.prototype, "getTokenAccountsByOwner").mockResolvedValue({
-      value: [],
-    } as unknown as Awaited<ReturnType<Connection["getTokenAccountsByOwner"]>>);
+    vi.spyOn(Connection.prototype, "getParsedTokenAccountsByOwner").mockResolvedValue({
+      value: [
+        {
+          pubkey: Keypair.generate().publicKey,
+          account: { data: { parsed: { info: { tokenAmount: { amount: "1000000" } } } } },
+        },
+        {
+          pubkey: Keypair.generate().publicKey,
+          account: { data: { parsed: { info: { tokenAmount: { amount: "2000000" } } } } },
+        },
+      ],
+    } as unknown as Awaited<ReturnType<Connection["getParsedTokenAccountsByOwner"]>>);
 
     try {
       const layer = buildAdapterLayerWithWallet();
@@ -62,8 +71,7 @@ describe("AdapterService price resolution", () => {
       }).pipe(Effect.provide(layer));
 
       const balanceUsd = await Effect.runPromise(program);
-      // 1 SOL at the mocked Jupiter price of $200 (no USDC balance).
-      expect(balanceUsd).toBeCloseTo(200, 1);
+      expect(balanceUsd).toBeCloseTo(203, 1);
     } finally {
       restore();
     }

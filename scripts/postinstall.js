@@ -138,7 +138,7 @@ function main() {
 
   console.log("");
   console.log('💬 Got feedback? Run:  prism feedback "<your message>"');
-  console.log("   (set GITHUB_TOKEN to file issues on GitHub; otherwise stored locally)");
+  console.log("   (requires a registered Prism account; D1 is the system of record)");
 
   // Parse PRISM_FEEDBACK_OPT_OUT as an explicit boolean
   // (1/true/yes/on, case-insensitive). An empty string or "false" both

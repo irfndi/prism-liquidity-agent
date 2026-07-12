@@ -461,6 +461,11 @@ const isDirectBacktestExecution =
   typeof Bun !== "undefined" &&
   (Bun.main?.endsWith("ops/backtest.ts") || Bun.main?.endsWith("ops/backtest.js"));
 if (isDirectBacktestExecution) {
+  if (process.env.PRISM_ALLOW_DIRECT !== "true") {
+    console.error("Error: Direct backtest execution is not allowed.");
+    console.error('Use "prism backtest" instead.');
+    process.exit(1);
+  }
   runBacktest(process.argv.slice(2)).catch((err) => {
     log.error("Backtest failed", { error: err instanceof Error ? err.message : String(err) });
     process.exitCode = 1;

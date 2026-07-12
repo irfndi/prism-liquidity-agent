@@ -9,8 +9,6 @@ export interface Env {
   MEMORY: VectorizeIndex;
   FEE_WALLET_ADDRESS: string;
   TELEGRAM_BOT_TOKEN: string;
-  GITHUB_TOKEN: string;
-  GITHUB_REPO: string;
   ADMIN_API_KEY?: string;
 }
 
@@ -26,6 +24,7 @@ function constantTimeEqual(a: string, b: string): boolean {
 const MAX_ERROR_MESSAGE_LENGTH = 4096;
 
 const VALID_INSTALL_EVENTS = new Set(["install", "setup", "dev_start", "register"]);
+const AUDIT_ACTIONS = new Set(["register", "telegram_link", "wallet_sync"]);
 
 // Services
 class DbService extends Context.Tag("DbService")<DbService, { readonly db: D1Database }>() {}
@@ -75,13 +74,31 @@ async function logAudit(
   action: string,
   details?: Record<string, unknown>,
 ): Promise<void> {
+  if (!AUDIT_ACTIONS.has(action)) return;
+  const detailsJson = details ? JSON.stringify(details) : null;
+  const eventKey = (await hashKey(`${action}:${detailsJson ?? ""}`)).slice(0, 32);
   try {
     await db
-      .prepare("INSERT INTO audit_log (user_id, action, details) VALUES (?, ?, ?)")
-      .bind(userId, action, details ? JSON.stringify(details) : null)
+      .prepare(
+        `INSERT INTO audit_event_summary
+          (user_id, action, event_key, details, first_seen_at, last_seen_at, occurrence_count)
+         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+         ON CONFLICT(user_id, action, event_key) DO UPDATE SET
+           details = excluded.details,
+           last_seen_at = CURRENT_TIMESTAMP,
+           occurrence_count = audit_event_summary.occurrence_count + 1`,
+      )
+      .bind(userId, action, eventKey, detailsJson)
       .run();
   } catch (err) {
-    console.error("[Audit] Failed to log audit entry:", err);
+    try {
+      await db
+        .prepare("INSERT INTO audit_log (user_id, action, details) VALUES (?, ?, ?)")
+        .bind(userId, action, detailsJson)
+        .run();
+    } catch (fallbackErr) {
+      console.error("[Audit] Failed to log audit entry:", err, fallbackErr);
+    }
   }
 }
 
@@ -109,7 +126,7 @@ async function createFreeSubscription(db: D1Database, userId: string): Promise<v
 const TIERS: Record<string, { platformFeeRate: number }> = {
   free: { platformFeeRate: 0 },
   pro: { platformFeeRate: 0.05 },
-  fund: { platformFeeRate: 0.10 },
+  fund: { platformFeeRate: 0.1 },
 };
 
 // Register handler
@@ -166,6 +183,27 @@ const loginHandler = (db: D1Database, apiKey: string) =>
 
     return result;
   });
+
+interface AuthenticatedUser {
+  readonly id: string;
+  readonly tier: string;
+}
+
+async function authenticateUser(
+  db: D1Database,
+  apiKey: string | undefined,
+): Promise<AuthenticatedUser | null> {
+  if (!apiKey) return null;
+  try {
+    const result = await Effect.runPromise(loginHandler(db, apiKey));
+    if (!result || typeof result !== "object") return null;
+    const row = result as { id?: unknown; tier?: unknown };
+    if (typeof row.id !== "string") return null;
+    return { id: row.id, tier: typeof row.tier === "string" ? row.tier : "free" };
+  } catch {
+    return null;
+  }
+}
 
 // Whoami handler
 const whoamiHandler = (db: D1Database, userId: string) =>
@@ -338,7 +376,6 @@ app.post("/v1/login", async (c) => {
 
   try {
     const result = await Effect.runPromise(loginHandler(DB, apiKey));
-    await logAudit(DB, (result as { id: string }).id, "login");
     return c.json(result);
   } catch {
     return c.json({ error: "Invalid API key" }, 401);
@@ -536,81 +573,132 @@ app.post("/v1/agent-status", async (c) => {
   }
 });
 
+const VALID_FEEDBACK_CATEGORIES = new Set(["friction", "suggestion", "observation", "praise"]);
+const VALID_FEEDBACK_SEVERITIES = new Set(["low", "medium", "high"]);
+
+interface FeedbackContextPayload {
+  prismVersion?: string;
+  platform?: string;
+  installMethod?: string;
+  runtime?: string;
+}
+
+interface FeedbackStoreInput {
+  id: string;
+  userId: string;
+  agentId: string;
+  category: string;
+  severity: string;
+  summary: string;
+  details?: string | undefined;
+  relatedFiles?: string[] | undefined;
+  context: FeedbackContextPayload;
+  hash: string;
+  reportedAt: number;
+}
+
+async function storeFeedback(
+  db: D1Database,
+  input: FeedbackStoreInput,
+): Promise<{ id: string; duplicate: boolean }> {
+  const existing = await db
+    .prepare(
+      `SELECT id FROM feedback
+       WHERE user_id = ? AND agent_id = ? AND hash = ?
+       ORDER BY reported_at DESC LIMIT 1`,
+    )
+    .bind(input.userId, input.agentId, input.hash)
+    .first();
+  if (existing && typeof existing.id === "string") {
+    return { id: existing.id, duplicate: true };
+  }
+
+  await db
+    .prepare(
+      `INSERT INTO feedback (
+        id, user_id, agent_id, category, severity, summary, details, related_files,
+        context_json, prism_version, platform, install_method, runtime,
+        hash, reported_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      input.id,
+      input.userId,
+      input.agentId,
+      input.category,
+      input.severity,
+      input.summary,
+      input.details ?? null,
+      input.relatedFiles ? JSON.stringify(input.relatedFiles) : null,
+      JSON.stringify(input.context),
+      input.context.prismVersion ?? null,
+      input.context.platform ?? null,
+      input.context.installMethod ?? null,
+      input.context.runtime ?? null,
+      input.hash,
+      input.reportedAt,
+    )
+    .run();
+
+  return { id: input.id, duplicate: false };
+}
+
 app.post("/v1/issue", async (c) => {
-  const { GITHUB_TOKEN, GITHUB_REPO, CACHE } = c.env;
+  const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
+  const user = await authenticateUser(DB, c.get("apiKey") as string | undefined);
+  if (!user) return c.json({ error: "API key required" }, 401);
 
-  const body = (await c.req.json().catch(() => ({}))) as { title: string; body: string };
-
-  if (!body.title) {
+  const body = (await c.req.json().catch(() => ({}))) as {
+    title?: string;
+    body?: string;
+    agentId?: string;
+    context?: FeedbackContextPayload;
+  };
+  if (!body.title || typeof body.title !== "string") {
     return c.json({ error: "Title required" }, 400);
   }
 
-  // Rate limit: 10 issues per IP per hour.
-  // NOTE: Cloudflare KV is eventually consistent, so a burst of concurrent
-  // requests from the same IP can briefly exceed this limit (N-1 extra for
-  // N concurrent arrivals). This is acceptable for an abuse-prevention
-  // ceiling on issue filing, not a security-critical control. For strict
-  // limits, use Durable Objects or a D1 transaction.
-  // CACHE is null-checked so the handler still works in environments where
-  // the KV binding is intentionally not provisioned.
   if (CACHE) {
-    const rateKey = `rate_limit:issue:${clientIp}`;
+    const rateKey = `rate_limit:feedback:${clientIp}`;
     const current = await CACHE.get(rateKey);
     const count = current ? parseInt(current, 10) : 0;
-    if (count >= 10) {
-      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
-    }
+    if (count >= 10) return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
-  const repo = GITHUB_REPO || "irfndi/prism-liquidity-agent";
-
   try {
-    // Create GitHub issue
-    const response = await fetch(`https://api.github.com/repos/${repo}/issues`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        "Content-Type": "application/json",
-        Accept: "application/vnd.github.v3+json",
-      },
-      body: JSON.stringify({
-        title: body.title,
-        body: body.body || "",
-        labels: ["user-reported"],
-      }),
+    const details = body.body ?? "";
+    const hash = (await hashKey(`issue:${body.title}:${details}`)).slice(0, 16);
+    const result = await storeFeedback(DB, {
+      id: generateId(),
+      userId: user.id,
+      agentId: body.agentId ?? "cli",
+      category: "friction",
+      severity: "high",
+      summary: body.title,
+      details,
+      context: body.context ?? {},
+      hash,
+      reportedAt: Date.now(),
     });
-
-    if (!response.ok) {
-      throw new Error(`GitHub API error: ${response.status}`);
-    }
-
-    // Only consume the rate-limit slot on successful GitHub creation.
-    // A failed API call (network error, 5xx, auth failure) does not burn
-    // the user's budget.
-    if (CACHE) {
-      const rateKey = `rate_limit:issue:${clientIp}`;
+    if (CACHE && !result.duplicate) {
+      const rateKey = `rate_limit:feedback:${clientIp}`;
       const current = await CACHE.get(rateKey);
       const count = current ? parseInt(current, 10) : 0;
       await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
     }
-
-    const issue = (await response.json()) as { number?: number; html_url?: string };
-    return c.json({ issue_number: issue.number, url: issue.html_url });
-  } catch {
-    return c.json({ error: "Failed to create issue" }, 500);
+    return c.json(result);
+  } catch (err) {
+    console.error("Failed to store issue:", err);
+    return c.json({ error: "Failed to store issue" }, 500);
   }
 });
-
-// ── Agent Feedback ───────────────────────────────────────────────────────────
-// Stores agent/user feedback in D1 when no GitHub token is configured.
-
-const VALID_FEEDBACK_CATEGORIES = new Set(["friction", "suggestion", "observation", "praise"]);
-const VALID_FEEDBACK_SEVERITIES = new Set(["low", "medium", "high"]);
 
 app.post("/v1/feedback", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
+  const user = await authenticateUser(DB, c.get("apiKey") as string | undefined);
+  if (!user) return c.json({ error: "API key required" }, 401);
 
   const body = (await c.req.json().catch(() => ({}))) as {
     id?: string;
@@ -620,12 +708,7 @@ app.post("/v1/feedback", async (c) => {
     summary?: string;
     details?: string;
     relatedFiles?: string[];
-    context?: {
-      prismVersion?: string;
-      platform?: string;
-      installMethod?: string;
-      runtime?: string;
-    };
+    context?: FeedbackContextPayload;
     hash?: string;
     reportedAt?: number;
   };
@@ -652,55 +735,35 @@ app.post("/v1/feedback", async (c) => {
     return c.json({ error: "hash is required" }, 400);
   }
 
-  // Rate limit: 10 feedback submissions per IP per hour.
   if (CACHE) {
     const rateKey = `rate_limit:feedback:${clientIp}`;
     const rateData = await CACHE.get(rateKey);
     const count = rateData ? parseInt(rateData, 10) : 0;
-    if (count >= 10) {
-      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
-    }
+    if (count >= 10) return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
   try {
-    const context = body.context ?? {};
-    await DB.prepare(
-      `INSERT OR IGNORE INTO feedback (
-        id, agent_id, category, severity, summary, details, related_files,
-        context_json, prism_version, platform, install_method, runtime,
-        hash, reported_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(
-        body.id,
-        body.agentId,
-        body.category,
-        body.severity,
-        body.summary,
-        body.details ?? null,
-        body.relatedFiles ? JSON.stringify(body.relatedFiles) : null,
-        JSON.stringify(context),
-        context.prismVersion ?? null,
-        context.platform ?? null,
-        context.installMethod ?? null,
-        context.runtime ?? null,
-        body.hash,
-        body.reportedAt ?? Date.now(),
-      )
-      .run();
+    const result = await storeFeedback(DB, {
+      id: body.id,
+      userId: user.id,
+      agentId: body.agentId,
+      category: body.category,
+      severity: body.severity,
+      summary: body.summary,
+      details: body.details,
+      relatedFiles: body.relatedFiles,
+      context: body.context ?? {},
+      hash: body.hash,
+      reportedAt: body.reportedAt ?? Date.now(),
+    });
 
-    try {
-      if (CACHE) {
-        const rateKey = `rate_limit:feedback:${clientIp}`;
-        const rateData = await CACHE.get(rateKey);
-        const count = rateData ? parseInt(rateData, 10) : 0;
-        await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
-      }
-    } catch (kvErr) {
-      console.warn("Failed to update rate-limit counter (non-fatal):", kvErr);
+    if (CACHE && !result.duplicate) {
+      const rateKey = `rate_limit:feedback:${clientIp}`;
+      const rateData = await CACHE.get(rateKey);
+      const count = rateData ? parseInt(rateData, 10) : 0;
+      await CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 });
     }
-
-    return c.json({ id: body.id });
+    return c.json(result);
   } catch (err) {
     console.error("Failed to store feedback:", err);
     return c.json({ error: "Failed to store feedback" }, 500);
@@ -740,19 +803,58 @@ app.get("/v1/feedback", async (c) => {
     sql += " ORDER BY reported_at DESC LIMIT ?";
     params.push(limit);
 
-    const result = await DB.prepare(sql).bind(...params).all();
+    const result = await DB.prepare(sql)
+      .bind(...params)
+      .all();
     return c.json({ feedback: result.results ?? [] });
   } catch {
     return c.json({ error: "Failed to fetch feedback" }, 500);
   }
 });
 
-// ── Error Reporting ──────────────────────────────────────────────────────────
-// Privacy-first error telemetry (opt-in, no auth required for ingestion)
+app.get("/v1/audit", async (c) => {
+  const { DB } = c.env;
+  const authHeader = c.req.header("Authorization");
+  const match = authHeader?.match(/^Bearer\s+(.+)$/);
+  const token = match?.[1];
+  if (!token || !c.env.ADMIN_API_KEY || !constantTimeEqual(token, c.env.ADMIN_API_KEY)) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const userId = c.req.query("userId");
+  const action = c.req.query("action");
+  const rawLimit = c.req.query("limit");
+  let limit = rawLimit ? Number.parseInt(rawLimit, 10) : 100;
+  if (!Number.isFinite(limit) || limit < 1) limit = 100;
+  if (limit > 500) limit = 500;
+
+  try {
+    let sql = "SELECT * FROM audit_event_summary WHERE 1=1";
+    const params: (string | number)[] = [];
+    if (userId) {
+      sql += " AND user_id = ?";
+      params.push(userId);
+    }
+    if (action) {
+      sql += " AND action = ?";
+      params.push(action);
+    }
+    sql += " ORDER BY last_seen_at DESC LIMIT ?";
+    params.push(limit);
+    const result = await DB.prepare(sql)
+      .bind(...params)
+      .all();
+    return c.json({ events: result.results ?? [] });
+  } catch {
+    return c.json({ error: "Failed to fetch audit events" }, 500);
+  }
+});
 
 app.post("/v1/errors/report", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
+  const user = await authenticateUser(DB, c.get("apiKey") as string | undefined);
+  if (!user) return c.json({ error: "API key required" }, 401);
 
   const body = (await c.req.json().catch(() => ({}))) as {
     id?: string;
@@ -793,10 +895,11 @@ app.post("/v1/errors/report", async (c) => {
     const isRecoverable = body.isRecoverable ? 1 : 0;
 
     await DB.prepare(
-      `INSERT INTO error_logs (id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO error_logs (user_id, id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
+        user.id,
         body.id,
         body.agentId,
         body.errorType,
@@ -823,6 +926,8 @@ app.post("/v1/errors/report", async (c) => {
 app.post("/v1/errors/batch", async (c) => {
   const { DB, CACHE } = c.env;
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
+  const user = await authenticateUser(DB, c.get("apiKey") as string | undefined);
+  if (!user) return c.json({ error: "API key required" }, 401);
 
   const body = (await c.req.json().catch(() => ({}))) as {
     app?: string;
@@ -886,7 +991,8 @@ app.post("/v1/errors/batch", async (c) => {
     if (!r.id || !errorType || !r.message || !prismVersion) {
       return c.json(
         {
-          error: "Each report requires id, message, and either errorType/category with prismVersion/version",
+          error:
+            "Each report requires id, message, and either errorType/category with prismVersion/version",
           reportId: r.id ?? "(missing id)",
         },
         400,
@@ -916,12 +1022,13 @@ app.post("/v1/errors/batch", async (c) => {
 
   try {
     const stmt = DB.prepare(
-      `INSERT OR IGNORE INTO error_logs (id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO error_logs (user_id, id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
     const batchStatements = validReports.map((r) =>
       stmt.bind(
+        user.id,
         r.id,
         r.agentId,
         r.errorType,
@@ -1049,8 +1156,6 @@ app.get("/v1/config", async (c) => {
       feeWalletAddress = c.env.FEE_WALLET_ADDRESS;
     }
 
-    await logAudit(DB, userId, "config_fetch", { tier });
-
     return c.json({
       tier,
       platformFeeRate: TIERS[tier]?.platformFeeRate ?? 0,
@@ -1080,11 +1185,12 @@ app.post("/v1/installs/ping", async (c) => {
     userId?: string;
   };
 
-  if (typeof body.installId !== "string" || body.installId.length < 8 || body.installId.length > 128) {
-    return c.json(
-      { error: "installId is required and must be 8-128 chars" },
-      400,
-    );
+  if (
+    typeof body.installId !== "string" ||
+    body.installId.length < 8 ||
+    body.installId.length > 128
+  ) {
+    return c.json({ error: "installId is required and must be 8-128 chars" }, 400);
   }
   if (!body.event || !VALID_INSTALL_EVENTS.has(body.event)) {
     return c.json(
@@ -1093,6 +1199,14 @@ app.post("/v1/installs/ping", async (c) => {
       },
       400,
     );
+  }
+
+  const user =
+    body.event === "install"
+      ? null
+      : await authenticateUser(DB, c.get("apiKey") as string | undefined);
+  if (body.event !== "install" && !user) {
+    return c.json({ error: "API key required for registered telemetry" }, 401);
   }
 
   // Rate limit: 100 pings per IP per hour (same as error reports).
@@ -1119,7 +1233,7 @@ app.post("/v1/installs/ping", async (c) => {
         body.version ?? null,
         body.channel ?? null,
         body.platform ?? null,
-        body.userId ?? null,
+        user?.id ?? null,
       )
       .run();
 
@@ -1213,15 +1327,11 @@ app.post("/v1/referral/apply", async (c) => {
       .bind(referralId, codeResult.user_id, userId, body.code)
       .run();
 
-    await DB.prepare(
-      "INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)",
-    )
+    await DB.prepare("INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)")
       .bind(generateId(), codeResult.user_id, 5, "referral_bonus")
       .run();
 
-    await DB.prepare(
-      "INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)",
-    )
+    await DB.prepare("INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)")
       .bind(generateId(), userId, 10, "referee_bonus")
       .run();
 
@@ -1238,9 +1348,7 @@ app.post("/v1/referral/apply", async (c) => {
     else if (referralCount === 10) milestoneBonus = 50;
 
     if (milestoneBonus > 0) {
-      await DB.prepare(
-        "INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)",
-      )
+      await DB.prepare("INSERT INTO user_credits (id, user_id, amount, reason) VALUES (?, ?, ?, ?)")
         .bind(generateId(), codeResult.user_id, milestoneBonus, `milestone_${referralCount}`)
         .run();
     }
@@ -1302,9 +1410,7 @@ app.get("/v1/subscription/status", async (c) => {
     const loginResult = await Effect.runPromise(loginHandler(DB, apiKey));
     const userId = (loginResult as { id: string }).id;
 
-    const userResult = await DB.prepare("SELECT tier FROM users WHERE id = ?")
-      .bind(userId)
-      .first();
+    const userResult = await DB.prepare("SELECT tier FROM users WHERE id = ?").bind(userId).first();
 
     const tier = (userResult as { tier?: string })?.tier ?? "free";
 
@@ -1398,7 +1504,10 @@ app.post("/v1/revenue/log", async (c) => {
     typeof body.platformFeeY !== "number"
   ) {
     return c.json(
-      { error: "Missing required fields: poolAddress (string), platformFeeX (number), platformFeeY (number)" },
+      {
+        error:
+          "Missing required fields: poolAddress (string), platformFeeX (number), platformFeeY (number)",
+      },
       400,
     );
   }
@@ -1458,9 +1567,7 @@ app.get("/v1/revenue", async (c) => {
 
   try {
     // Total events
-    const totalResult = await DB.prepare(
-      "SELECT COUNT(*) as total FROM revenue_events",
-    ).first();
+    const totalResult = await DB.prepare("SELECT COUNT(*) as total FROM revenue_events").first();
     const total = (totalResult as { total?: number })?.total ?? 0;
 
     // By tier
@@ -1514,7 +1621,11 @@ app.post("/v1/wallet", async (c) => {
 
     await DB.batch([
       DB.prepare("DELETE FROM wallets WHERE user_id = ?").bind(userId),
-      DB.prepare("INSERT INTO wallets (id, user_id, pubkey) VALUES (?, ?, ?)").bind(generateId(), userId, body.pubkey),
+      DB.prepare("INSERT INTO wallets (id, user_id, pubkey) VALUES (?, ?, ?)").bind(
+        generateId(),
+        userId,
+        body.pubkey,
+      ),
     ]);
 
     await logAudit(DB, userId, "wallet_sync", { pubkey: body.pubkey });
@@ -1564,7 +1675,3 @@ export default {
     return app.fetch(request, env, ctx);
   },
 };
-
-
-
-

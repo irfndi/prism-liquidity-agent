@@ -62,18 +62,25 @@ Agents do **not** need to deploy Cloudflare workers. They are already running:
 
 ## Quick Start for Agents (3-layer approach)
 
-Prism has 3 layers. Only the CLI is required. The API (cloud) and Telegram are
-optional. See [`install.md`](install.md) for the full architecture explanation.
+Prism has 3 layers. The CLI is the operating boundary, and the API account is
+required before setup or agent execution so usage, error telemetry, and feedback
+have an owner. Telegram is optional. See [`install.md`](install.md) for details.
 
 ### Layer 1: CLI (Local) — Required
 
 ```bash
 # Install the compiled bundle for your platform (auto-installs Bun if needed)
-curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh \
+  | PRISM_SKIP_SETUP=1 bash
 export PATH="$HOME/.local/bin:$PATH"
 
-# Setup (writes .env, no API call)
-prism setup --non-interactive --helius-key=$HELIUS_KEY
+# Register before setup so telemetry and error capture are associated with this agent
+prism register
+
+# Setup (writes .env)
+prism setup --non-interactive \
+  --rpc-url="$SOLANA_RPC_URL" \
+  --rpc-fallback-url="${SOLANA_RPC_FALLBACK_URL:-}"
 
 # Start trading
 prism dev
@@ -81,9 +88,10 @@ prism dev
 
 Validate: the agent starts scanning. Check `logs/audit-trail.jsonl` for decisions.
 
-### Layer 2: API (Cloud) — Optional
+### Layer 2: API (Cloud) — Required for agent operation
 
-Adds cloud account features (whoami, subscription, Telegram linking):
+Registration enables setup, dev telemetry, error capture, feedback, whoami,
+subscription, and Telegram linking:
 
 ```bash
 # Register with the cloud API
@@ -93,7 +101,7 @@ prism register
 prism whoami   # should show your user ID and tier
 ```
 
-Skip this layer for local-only setups. The trading engine works fine without it.
+Do not start an agent without this layer; `prism setup` and `prism dev` validate it.
 
 ### Layer 3: Telegram (Chat) — Optional
 
@@ -114,11 +122,22 @@ prism link-telegram   # generates a 6-char code
    `prism dev` goes through the CLI layer and respects credentials, config paths,
    and update checks. `bun run dev` bypasses all of that. Always use `prism dev`.
 
-3. **Assuming `prism register` is required.** It's not. The CLI works without a
-   cloud account. Skip it for local-only setups.
+3. **Skipping `prism register`.** Registration is required before setup and dev so
+   telemetry, errors, and feedback can be associated with the agent.
 
 4. **Expecting `LOG_LEVEL` to silence output.** The env var is loaded but never
    checked. All log levels write to the audit trail regardless.
+
+5. **Editing the Prism checkout while operating the agent.** Use the installed
+   `prism` wrapper and `prism update` instead. `bun install`, `bun run dev`, and
+   source edits belong to Prism development work only.
+
+6. **Using `bun add --global prism`.** Prism is not published under that npm
+   name. The release installer is the supported global install and writes a
+   checksum-verified bundle under `~/.prism`.
+
+7. **Skipping `prism doctor`.** Run `prism doctor` before `prism dev`; use
+   `prism doctor --fix` only for missing directories or permissions.
 
 ## Agent-Driven Onboarding Paths
 
@@ -127,7 +146,7 @@ prism link-telegram   # generates a 6-char code
 ```bash
 # Agent runs:
 prism register
-prism setup --non-interactive --helius-key=$HELIUS_KEY
+prism setup --non-interactive --rpc-url="$SOLANA_RPC_URL" --rpc-fallback-url="${SOLANA_RPC_FALLBACK_URL:-}"
 prism link-telegram
 # Returns: 6-char code (e.g., ABC123)
 
@@ -143,8 +162,8 @@ prism link-telegram
 # 2. Bot replies: /register → returns API key
 
 # Then agent runs:
-prism setup --non-interactive --helius-key=$HELIUS_KEY
 prism login $API_KEY_FROM_BOT
+prism setup --non-interactive --rpc-url="$SOLANA_RPC_URL" --rpc-fallback-url="${SOLANA_RPC_FALLBACK_URL:-}"
 ```
 
 ### Path C: Agent-driven full setup (most common)
@@ -152,7 +171,7 @@ prism login $API_KEY_FROM_BOT
 ```bash
 # Agent runs (all non-interactive):
 prism register
-prism setup --non-interactive --helius-key=$HELIUS_KEY
+prism setup --non-interactive --rpc-url="$SOLANA_RPC_URL" --rpc-fallback-url="${SOLANA_RPC_FALLBACK_URL:-}"
 
 # User then uses the CLI directly:
 prism whoami  # see their account info
@@ -162,7 +181,7 @@ prism whoami  # see their account info
 
 ```bash
 prism register
-prism setup --non-interactive --helius-key=$HELIUS_KEY
+prism setup --non-interactive --rpc-url="$SOLANA_RPC_URL" --rpc-fallback-url="${SOLANA_RPC_FALLBACK_URL:-}"
 prism wallet generate
 prism dev
 ```
@@ -203,7 +222,9 @@ curl -X POST https://prism-api.irfndi.workers.dev/v1/link-telegram/start \
 Agents should set these env vars before running prism commands:
 
 ```bash
-export HELIUS_API_KEY="your-helius-key"          # REQUIRED
+export HELIUS_API_KEY="your-helius-key"          # OPTIONAL with custom RPC
+export SOLANA_RPC_URL="https://your-paid-rpc.example.com"
+export SOLANA_RPC_FALLBACK_URL="https://your-second-rpc.example.com" # OPTIONAL
 export WALLET_PRIVATE_KEY="..."                    # OPTIONAL (for live trading only)
 ```
 
@@ -312,11 +333,13 @@ commands:
     description: Register with Prism and get an API key
 
   prism-setup:
-    cmd: prism setup --non-interactive --helius-key={{helius_key}}
-    description: Configure Prism with Helius API key
+    cmd: prism setup --non-interactive --rpc-url={{rpc_url}} --rpc-fallback-url={{rpc_fallback_url}}
+    description: Configure Prism with private RPC providers
     args:
-      helius_key:
+      rpc_url:
         required: true
+      rpc_fallback_url:
+        required: false
 
   prism-dev:
     cmd: prism dev

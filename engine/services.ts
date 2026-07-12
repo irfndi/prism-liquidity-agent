@@ -665,12 +665,10 @@ export interface AgentFeedback {
 }
 
 export type FeedbackResult =
-  | { kind: "created"; issueNumber: number; issueUrl: string }
-  | { kind: "duplicate"; issueNumber: number; issueUrl: string }
   | { kind: "rate_limited"; reason: string }
   | { kind: "opt_out" }
   | { kind: "local_only"; localId: string }
-  | { kind: "cloud"; id: string }
+  | { kind: "cloud"; id: string; duplicate?: boolean }
   | { kind: "error"; error: string };
 
 export interface FeedbackEntry {

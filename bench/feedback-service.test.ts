@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { unlinkSync, writeFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import { Effect, Layer } from "effect";
 import { ConfigService } from "../engine/config-service.js";
 import { DbLive } from "../engine/db-service.js";
@@ -128,22 +131,36 @@ function mockFetch(impl: typeof fetch): void {
   vi.stubGlobal("fetch", vi.fn(impl));
 }
 
+const credentialsFile = join(tmpdir(), "prism-feedback-service-test-credentials.json");
+
+function enableCredentials(): void {
+  writeFileSync(
+    credentialsFile,
+    JSON.stringify({
+      apiKey: "test-prism-api-key",
+      userId: "test-user",
+      createdAt: new Date().toISOString(),
+    }),
+    { mode: 0o600 },
+  );
+  process.env.PRISM_CREDENTIALS_FILE = credentialsFile;
+}
+
 beforeEach(() => {
-  // Each test gets a fresh in-memory SQLite database via DbLive(":memory:").
-  // The persisted agentId in ~/.config/prism/agent-id is shared across tests
-  // but that's fine — the dedup/rate-limit logic uses the same agentId
-  // across the whole test file.
+  process.env.PRISM_CREDENTIALS_FILE = credentialsFile;
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  delete process.env.PRISM_CREDENTIALS_FILE;
+  try {
+    unlinkSync(credentialsFile);
+  } catch {}
 });
 
-// ─── Submission without GITHUB_TOKEN (local-only mode) ─────────────────────
-
-describe("feedback service — no GITHUB_TOKEN", () => {
-  it("stores feedback locally and returns local_only when token is unset", async () => {
+describe("feedback service — no credentials", () => {
+  it("requires a registered Prism account", async () => {
     const layer = buildLayer("");
     const program = Effect.gen(function* () {
       const fb = yield* FeedbackService;
@@ -152,10 +169,8 @@ describe("feedback service — no GITHUB_TOKEN", () => {
     }).pipe(Effect.provide(layer));
 
     const result = await Effect.runPromise(program);
-    expect(result.kind).toBe("local_only");
-    if (result.kind === "local_only") {
-      expect(result.localId).toMatch(/^local-/);
-    }
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.error).toContain("prism register");
   });
 
   it("still works when no feedback context is provided (builds a default)", async () => {
@@ -172,14 +187,15 @@ describe("feedback service — no GITHUB_TOKEN", () => {
     }).pipe(Effect.provide(layer));
 
     const result = await Effect.runPromise(program);
-    expect(result.kind).toBe("local_only");
+    expect(result.kind).toBe("error");
   });
 });
 
 // ─── Cloud feedback fallback ───────────────────────────────────────────────
 
 describe("feedback service — cloud fallback", () => {
-  it("submits to the cloud endpoint when GITHUB_TOKEN is unset", async () => {
+  it("submits to the D1-backed cloud endpoint", async () => {
+    enableCredentials();
     mockFetch(
       vi.fn(async (url: string | URL | Request) => {
         const u = url.toString();
@@ -204,6 +220,7 @@ describe("feedback service — cloud fallback", () => {
   });
 
   it("falls back to local storage when the cloud endpoint fails", async () => {
+    enableCredentials();
     mockFetch(
       (async () => new Response("service unavailable", { status: 500 })) as unknown as typeof fetch,
     );
@@ -255,69 +272,42 @@ describe("feedback service — opt-out", () => {
 
 // ─── Submission with GITHUB_TOKEN (mocked) ────────────────────────────────
 
-describe("feedback service — with GITHUB_TOKEN (mocked)", () => {
-  it("creates a new GitHub issue when no duplicate found", async () => {
+describe("feedback service — D1 cloud submissions", () => {
+  it("stores a new feedback item in the cloud", async () => {
+    enableCredentials();
     mockFetch(
-      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-        const u = url.toString();
-        if (u.includes("/search/issues")) {
-          return new Response(JSON.stringify({ items: [] }), { status: 200 });
-        }
-        if (u.includes("/repos/") && init?.method === "POST") {
-          return new Response(
-            JSON.stringify({ number: 42, html_url: "https://github.com/x/y/issues/42" }),
-            { status: 201 },
-          );
-        }
-        return new Response("unexpected", { status: 500 });
-      }) as unknown as typeof fetch,
+      vi.fn(async (url: string | URL | Request) =>
+        url.toString().includes("/v1/feedback")
+          ? new Response(JSON.stringify({ id: "cloud-new" }), { status: 200 })
+          : new Response("unexpected", { status: 500 }),
+      ) as unknown as typeof fetch,
     );
 
-    const layer = buildLayer("test-token");
+    const layer = buildLayer("");
     const program = Effect.gen(function* () {
       const fb = yield* FeedbackService;
-      const result = yield* fb.submit(makeFeedback({ summary: "Brand new issue" }));
+      const result = yield* fb.submit(makeFeedback({ summary: "Brand new feedback" }));
       return result;
     }).pipe(Effect.provide(layer));
 
     const result = await Effect.runPromise(program);
-    expect(result.kind).toBe("created");
-    if (result.kind === "created") {
-      expect(result.issueNumber).toBe(42);
-      expect(result.issueUrl).toContain("issues/42");
+    expect(result.kind).toBe("cloud");
+    if (result.kind === "cloud") {
+      expect(result.id).toBe("cloud-new");
+      expect(result.duplicate).toBe(false);
     }
   });
 
-  it("adds +1 comment to existing similar issue (Jaccard ≥ 0.7)", async () => {
-    let commentCalled = false;
+  it("preserves the D1 duplicate marker", async () => {
+    enableCredentials();
     mockFetch(
-      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-        const u = url.toString();
-        if (u.includes("/search/issues")) {
-          return new Response(
-            JSON.stringify({
-              items: [
-                {
-                  number: 7,
-                  title: "Install process requires manual Bun installation",
-                  body: "After curl installer, had to manually install Bun. Same friction here too.",
-                  html_url: "https://github.com/x/y/issues/7",
-                  state: "open",
-                },
-              ],
-            }),
-            { status: 200 },
-          );
-        }
-        if (u.includes("/comments") && init?.method === "POST") {
-          commentCalled = true;
-          return new Response(JSON.stringify({ id: 1 }), { status: 201 });
-        }
-        return new Response("unexpected", { status: 500 });
-      }) as unknown as typeof fetch,
+      (async () =>
+        new Response(JSON.stringify({ id: "cloud-existing", duplicate: true }), {
+          status: 200,
+        })) as unknown as typeof fetch,
     );
 
-    const layer = buildLayer("test-token");
+    const layer = buildLayer("");
     const program = Effect.gen(function* () {
       const fb = yield* FeedbackService;
       const result = yield* fb.submit(makeFeedback());
@@ -325,28 +315,20 @@ describe("feedback service — with GITHUB_TOKEN (mocked)", () => {
     }).pipe(Effect.provide(layer));
 
     const result = await Effect.runPromise(program);
-    expect(commentCalled).toBe(true);
-    expect(result.kind).toBe("duplicate");
-    if (result.kind === "duplicate") {
-      expect(result.issueNumber).toBe(7);
+    expect(result.kind).toBe("cloud");
+    if (result.kind === "cloud") {
+      expect(result.id).toBe("cloud-existing");
+      expect(result.duplicate).toBe(true);
     }
   });
 
-  it("returns error kind when GitHub API returns non-OK on create", async () => {
+  it("falls back to local storage when D1 returns an error", async () => {
+    enableCredentials();
     mockFetch(
-      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-        const u = url.toString();
-        if (u.includes("/search/issues")) {
-          return new Response(JSON.stringify({ items: [] }), { status: 200 });
-        }
-        if (u.includes("/repos/") && init?.method === "POST") {
-          return new Response("server error", { status: 500 });
-        }
-        return new Response("unexpected", { status: 500 });
-      }) as unknown as typeof fetch,
+      (async () => new Response("server error", { status: 500 })) as unknown as typeof fetch,
     );
 
-    const layer = buildLayer("test-token");
+    const layer = buildLayer("");
     const program = Effect.gen(function* () {
       const fb = yield* FeedbackService;
       const result = yield* fb.submit(makeFeedback());
@@ -354,7 +336,7 @@ describe("feedback service — with GITHUB_TOKEN (mocked)", () => {
     }).pipe(Effect.provide(layer));
 
     const result = await Effect.runPromise(program);
-    expect(result.kind).toBe("error");
+    expect(result.kind).toBe("local_only");
   });
 });
 
@@ -362,25 +344,15 @@ describe("feedback service — with GITHUB_TOKEN (mocked)", () => {
 
 describe("feedback service — rate limiting", () => {
   it("rejects when exceeding per-hour limit (5)", async () => {
-    let count = 0;
+    enableCredentials();
     mockFetch(
-      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-        const u = url.toString();
-        if (u.includes("/search/issues")) {
-          return new Response(JSON.stringify({ items: [] }), { status: 200 });
-        }
-        if (u.includes("/repos/") && init?.method === "POST") {
-          count++;
-          return new Response(
-            JSON.stringify({ number: 100 + count, html_url: `https://x/y/issues/${100 + count}` }),
-            { status: 201 },
-          );
-        }
-        return new Response("unexpected", { status: 500 });
-      }) as unknown as typeof fetch,
+      (async () =>
+        new Response(JSON.stringify({ id: "cloud-rate" }), {
+          status: 200,
+        })) as unknown as typeof fetch,
     );
 
-    const layer = buildLayer("test-token");
+    const layer = buildLayer("");
     const program = Effect.gen(function* () {
       const fb = yield* FeedbackService;
       const results: FeedbackResult[] = [];
@@ -394,7 +366,7 @@ describe("feedback service — rate limiting", () => {
     }).pipe(Effect.provide(layer));
 
     const results = await Effect.runPromise(program);
-    const created = results.filter((r) => r.kind === "created").length;
+    const created = results.filter((r) => r.kind === "cloud").length;
     const rateLimited = results.filter((r) => r.kind === "rate_limited").length;
     expect(created).toBeGreaterThan(0);
     expect(rateLimited).toBeGreaterThan(0);
@@ -402,25 +374,15 @@ describe("feedback service — rate limiting", () => {
   });
 
   it("rejects when minimum interval (60s) not elapsed since last feedback", async () => {
-    let count = 0;
+    enableCredentials();
     mockFetch(
-      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-        const u = url.toString();
-        if (u.includes("/search/issues")) {
-          return new Response(JSON.stringify({ items: [] }), { status: 200 });
-        }
-        if (u.includes("/repos/") && init?.method === "POST") {
-          count++;
-          return new Response(
-            JSON.stringify({ number: 200 + count, html_url: `https://x/y/issues/${200 + count}` }),
-            { status: 201 },
-          );
-        }
-        return new Response("unexpected", { status: 500 });
-      }) as unknown as typeof fetch,
+      (async () =>
+        new Response(JSON.stringify({ id: "cloud-interval" }), {
+          status: 200,
+        })) as unknown as typeof fetch,
     );
 
-    const layer = buildLayer("test-token");
+    const layer = buildLayer("");
     const program = Effect.gen(function* () {
       const fb = yield* FeedbackService;
       const first = yield* fb.submit(makeFeedback({ summary: "First feedback thing" }));
@@ -429,7 +391,7 @@ describe("feedback service — rate limiting", () => {
     }).pipe(Effect.provide(layer));
 
     const { first, second } = await Effect.runPromise(program);
-    expect(first).toBe("created");
+    expect(first).toBe("cloud");
     expect(second).toBe("rate_limited");
   });
 });
@@ -438,25 +400,15 @@ describe("feedback service — rate limiting", () => {
 
 describe("feedback service — local dedup cooldown", () => {
   it("returns duplicate for the same hash within 24h (after one successful submit)", async () => {
-    let count = 0;
+    enableCredentials();
     mockFetch(
-      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-        const u = url.toString();
-        if (u.includes("/search/issues")) {
-          return new Response(JSON.stringify({ items: [] }), { status: 200 });
-        }
-        if (u.includes("/repos/") && init?.method === "POST") {
-          count++;
-          return new Response(
-            JSON.stringify({ number: 300 + count, html_url: `https://x/y/issues/${300 + count}` }),
-            { status: 201 },
-          );
-        }
-        return new Response("unexpected", { status: 500 });
-      }) as unknown as typeof fetch,
+      (async () =>
+        new Response(JSON.stringify({ id: "cloud-dedup" }), {
+          status: 200,
+        })) as unknown as typeof fetch,
     );
 
-    const layer = buildLayer("test-token");
+    const layer = buildLayer("");
     const program = Effect.gen(function* () {
       const fb = yield* FeedbackService;
       const first = yield* fb.submit(makeFeedback({ summary: "Same thing again" }));
@@ -465,8 +417,8 @@ describe("feedback service — local dedup cooldown", () => {
     }).pipe(Effect.provide(layer));
 
     const { first, second } = await Effect.runPromise(program);
-    expect(first).toBe("created");
-    expect(second).toBe("duplicate");
+    expect(first).toBe("cloud");
+    expect(second).toBe("local_only");
   });
 });
 
@@ -486,6 +438,13 @@ describe("feedback service — getByHash", () => {
 
   it("returns the stored entry for a known hash", async () => {
     const { createHash } = await import("crypto");
+    enableCredentials();
+    mockFetch(
+      (async () =>
+        new Response(JSON.stringify({ id: "cloud-hash" }), {
+          status: 200,
+        })) as unknown as typeof fetch,
+    );
     const layer = buildLayer("");
     const knownSummary = "Get by hash test thing";
     const knownDetails = "Test details";
@@ -507,6 +466,13 @@ describe("feedback service — getByHash", () => {
 
 describe("feedback service — details round-trip", () => {
   it("preserves empty-string details as '' (not null) on read-back", async () => {
+    enableCredentials();
+    mockFetch(
+      (async () =>
+        new Response(JSON.stringify({ id: "cloud-empty-details" }), {
+          status: 200,
+        })) as unknown as typeof fetch,
+    );
     const layer = buildLayer("");
     const program = Effect.gen(function* () {
       const fb = yield* FeedbackService;
@@ -519,12 +485,19 @@ describe("feedback service — details round-trip", () => {
     }).pipe(Effect.provide(layer));
 
     const { result, entry } = await Effect.runPromise(program);
-    expect(result.kind).toBe("local_only");
+    expect(result.kind).toBe("cloud");
     expect(entry).toBeDefined();
     expect(entry!.details).toBe("");
   });
 
   it("preserves null details as null when details is omitted", async () => {
+    enableCredentials();
+    mockFetch(
+      (async () =>
+        new Response(JSON.stringify({ id: "cloud-null-details" }), {
+          status: 200,
+        })) as unknown as typeof fetch,
+    );
     const layer = buildLayer("");
     const program = Effect.gen(function* () {
       const fb = yield* FeedbackService;
@@ -540,7 +513,7 @@ describe("feedback service — details round-trip", () => {
     }).pipe(Effect.provide(layer));
 
     const { result, entry } = await Effect.runPromise(program);
-    expect(result.kind).toBe("local_only");
+    expect(result.kind).toBe("cloud");
     expect(entry).toBeDefined();
     expect(entry!.details).toBeNull();
   });

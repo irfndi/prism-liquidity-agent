@@ -143,9 +143,28 @@ log_done "Checksum verified"
 
 log_step "Installing Prism to ${INSTALL_DIR}"
 mkdir -p "$BIN_DIR" "$INSTALL_DIR"
+PRESERVE_DIR="${TMP_DIR}/preserve"
+mkdir -p "$PRESERVE_DIR"
+for _state_file in .env prism.db; do
+  if [ -e "${INSTALL_DIR}/${_state_file}" ]; then
+    cp -p "${INSTALL_DIR}/${_state_file}" "${PRESERVE_DIR}/${_state_file}"
+  fi
+done
+if [ -d "${INSTALL_DIR}/logs" ]; then
+  cp -R "${INSTALL_DIR}/logs" "${PRESERVE_DIR}/logs"
+fi
 rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 tar -xzf "${TMP_DIR}/${TARBALL_NAME}" -C "$INSTALL_DIR"
+for _state_file in .env prism.db; do
+  if [ -e "${PRESERVE_DIR}/${_state_file}" ]; then
+    cp -p "${PRESERVE_DIR}/${_state_file}" "${INSTALL_DIR}/${_state_file}"
+  fi
+done
+if [ -d "${PRESERVE_DIR}/logs" ]; then
+  mkdir -p "${INSTALL_DIR}/logs"
+  cp -R "${PRESERVE_DIR}/logs/." "${INSTALL_DIR}/logs/"
+fi
 
 if ! ensure_bun; then
   exit 1
@@ -187,8 +206,16 @@ if [ "$PATH_HAS_BIN_DIR" -eq 0 ]; then
 fi
 
 if [ -z "$SKIP_SETUP" ]; then
-  log_step "Running Prism setup..."
-  "$WRAPPER" setup
+  CREDENTIALS_FILE="$HOME/.config/prism/credentials.json"
+  CONFIG_ENV_FILE="$HOME/.config/prism/.env"
+  if [ -s "$CONFIG_ENV_FILE" ] || [ -s "${INSTALL_DIR}/.env" ]; then
+    log_step "Existing Prism environment preserved; setup not requested."
+  elif [ -s "$CREDENTIALS_FILE" ]; then
+    log_step "Running Prism setup..."
+    "$WRAPPER" setup
+  else
+    log_step "Setup deferred until registration. Run 'prism register' then 'prism setup'."
+  fi
 fi
 
 # Anonymous install telemetry (opt-out via PRISM_FEEDBACK_OPT_OUT).

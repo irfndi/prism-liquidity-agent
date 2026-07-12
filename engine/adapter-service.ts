@@ -31,6 +31,16 @@ import { randomUUID } from "crypto";
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const GAS_RESERVE_LAMPORTS = 20_000_000n; // 0.02 SOL reserved for transaction fees
+const RPC_RETRY_OPTIONS = {
+  maxRetries: 2,
+  baseDelayMs: 1_000,
+  maxDelayMs: 30_000,
+  rateLimitBaseDelayMs: 5_000,
+} as const;
+
+function formatTokenAmount(amount: bigint, decimals: number): string {
+  return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
+}
 
 const logger = createLogger("adapter-service");
 
@@ -267,9 +277,11 @@ export const AdapterLive = Layer.effect(
     const config = yield* ConfigService;
 
     const connection = new Connection(config.solanaRpcUrl, "confirmed");
-    const fallbackConnection = config.solanaRpcFallbackUrl
-      ? new Connection(config.solanaRpcFallbackUrl, "confirmed")
-      : null;
+    const fallbackConnection =
+      config.solanaRpcFallbackUrl.trim() &&
+      config.solanaRpcFallbackUrl.trim() !== config.solanaRpcUrl.trim()
+        ? new Connection(config.solanaRpcFallbackUrl, "confirmed")
+        : null;
     let wallet: Keypair | null = null;
 
     if (config.walletPrivateKey) {
@@ -285,7 +297,13 @@ export const AdapterLive = Layer.effect(
 
     const DLMM_CACHE_TTL_MS = 5 * 60 * 1000;
     const dlmmCache = new Map<string, { promise: Promise<DLMM>; timestamp: number }>();
-    const rpcCircuitBreaker = new CircuitBreaker();
+    const primaryRpcCircuitBreaker = new CircuitBreaker({
+      failureThreshold: 3,
+      resetTimeoutMs: 30_000,
+    });
+    const fallbackRpcCircuitBreaker = fallbackConnection
+      ? new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 30_000 })
+      : null;
 
     const evictionInterval = setInterval(() => {
       const cutoff = Date.now() - DLMM_CACHE_TTL_MS;
@@ -316,20 +334,25 @@ export const AdapterLive = Layer.effect(
       fn: (conn: Connection) => Promise<T>,
       primaryConn: Connection = connection,
     ): Promise<T> {
-      try {
-        return await rpcCircuitBreaker.execute(
-          () => retryWithBackoff(() => fn(primaryConn)),
+      const run = (conn: Connection, breaker: CircuitBreaker): Promise<T> =>
+        breaker.execute(
+          () => retryWithBackoff(() => fn(conn), RPC_RETRY_OPTIONS),
           isRpcNetworkError,
         );
+
+      try {
+        return await run(primaryConn, primaryRpcCircuitBreaker);
       } catch (err) {
-        if (fallbackConnection && isRpcNetworkError(err)) {
+        if (
+          fallbackConnection &&
+          fallbackRpcCircuitBreaker &&
+          primaryConn === connection &&
+          isRpcNetworkError(err)
+        ) {
           logger.warn("Primary RPC failed, trying fallback RPC", {
             error: err instanceof Error ? err.message : String(err),
           });
-          return await rpcCircuitBreaker.execute(
-            () => retryWithBackoff(() => fn(fallbackConnection)),
-            isRpcNetworkError,
-          );
+          return await run(fallbackConnection, fallbackRpcCircuitBreaker);
         }
         throw err;
       }
@@ -337,7 +360,90 @@ export const AdapterLive = Layer.effect(
 
     // ─── Token metadata cache ──────────────────────────────────────────────
 
-    const tokenMetaCache = new Map<string, { symbol: string; decimals: number }>();
+    interface TokenMeta {
+      readonly symbol: string;
+      readonly decimals: number;
+      readonly priceUsd?: number;
+      readonly priceFetchedAt?: number;
+    }
+
+    interface HeliusAssetResponse {
+      readonly result?: {
+        readonly content?: { readonly metadata?: { readonly symbol?: string } };
+        readonly token_info?: {
+          readonly decimals?: number;
+          readonly price_info?: {
+            readonly price_per_token?: number;
+            readonly currency?: string;
+          };
+        };
+      };
+      readonly error?: { readonly code?: number; readonly message?: string };
+    }
+
+    const tokenMetaCache = new Map<string, TokenMeta>();
+    const HELIUS_ASSET_CACHE_TTL_MS = 5 * 60 * 1000;
+    const heliusAssetCache = new Map<
+      string,
+      { readonly promise: Promise<HeliusAssetResponse>; readonly fetchedAt: number }
+    >();
+
+    function readHeliusPrice(asset: HeliusAssetResponse): number | undefined {
+      const priceInfo = asset.result?.token_info?.price_info;
+      const price = priceInfo?.price_per_token;
+      const currency = priceInfo?.currency?.toUpperCase();
+      if (
+        typeof price !== "number" ||
+        !Number.isFinite(price) ||
+        price <= 0 ||
+        (currency !== "USDC" && currency !== "USD")
+      ) {
+        return undefined;
+      }
+      return price;
+    }
+
+    async function fetchHeliusAsset(mint: string): Promise<HeliusAssetResponse | null> {
+      if (!config.heliusApiKey) return null;
+
+      const cached = heliusAssetCache.get(mint);
+      if (cached && Date.now() - cached.fetchedAt < HELIUS_ASSET_CACHE_TTL_MS) {
+        return cached.promise;
+      }
+
+      const url = `https://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
+      const promise = retryWithBackoff(async () => {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "get-asset",
+            method: "getAsset",
+            params: { id: mint },
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        const json = (await res.json()) as HeliusAssetResponse;
+        if (!res.ok) {
+          throw Object.assign(new Error(`Helius getAsset returned HTTP ${res.status}`), {
+            code: res.status,
+          });
+        }
+        if (json.error) {
+          throw Object.assign(new Error(json.error.message ?? "Helius getAsset failed"), {
+            code: json.error.code ?? -32005,
+          });
+        }
+        return json;
+      }, RPC_RETRY_OPTIONS).catch((err: unknown) => {
+        heliusAssetCache.delete(mint);
+        throw err;
+      });
+
+      heliusAssetCache.set(mint, { promise, fetchedAt: Date.now() });
+      return promise;
+    }
 
     // Known mint decimals (avoids network roundtrips for common SPL tokens).
     // If a mint is missing here and the RPC doesn't expose decimals via the
@@ -354,9 +460,7 @@ export const AdapterLive = Layer.effect(
       JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: { symbol: "JUP", decimals: 6 },
     };
 
-    function getTokenMeta(
-      mint: string,
-    ): Effect.Effect<{ symbol: string; decimals: number }, unknown> {
+    function getTokenMeta(mint: string): Effect.Effect<TokenMeta, unknown> {
       return Effect.gen(function* () {
         const cached = tokenMetaCache.get(mint);
         if (cached) return cached;
@@ -371,30 +475,16 @@ export const AdapterLive = Layer.effect(
         // Helius path: DAS getAsset returns token_info.decimals for any
         // mint Helius has indexed. Only available when heliusApiKey is set.
         if (config.heliusApiKey) {
-          const url = `https://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
-          const res = yield* Effect.tryPromise(() =>
-            fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                jsonrpc: "2.0",
-                id: "get-asset",
-                method: "getAsset",
-                params: { id: mint },
-              }),
-            }),
+          const json = yield* Effect.tryPromise(() => fetchHeliusAsset(mint)).pipe(
+            Effect.catchAll(() => Effect.succeed(null)),
           );
-          const json = (yield* Effect.tryPromise(() => res.json())) as {
-            result?: {
-              content?: { metadata?: { symbol?: string } };
-              token_info?: { decimals?: number };
-            };
-          };
-          const d = json.result?.token_info?.decimals;
+          const d = json?.result?.token_info?.decimals;
           if (typeof d === "number") {
+            const priceUsd = json ? readHeliusPrice(json) : undefined;
             const meta = {
-              symbol: json.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
+              symbol: json?.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
               decimals: d,
+              ...(priceUsd !== undefined ? { priceUsd, priceFetchedAt: Date.now() } : {}),
             };
             tokenMetaCache.set(mint, meta);
             return meta;
@@ -437,6 +527,7 @@ export const AdapterLive = Layer.effect(
     };
 
     const PRICE_CACHE_TTL_MS = 60_000;
+    const PRICE_MISS_CACHE_TTL_MS = 10 * 60_000;
     const COINGECKO_BATCH_SIZE = 25;
     const COINGECKO_DELAY_MS = 1_200;
 
@@ -446,6 +537,7 @@ export const AdapterLive = Layer.effect(
     }
 
     const priceCache = new Map<string, PriceCacheEntry>();
+    const negativePriceCache = new Map<string, number>();
 
     function getCachedPrice(mint: string): number | undefined {
       const entry = priceCache.get(mint);
@@ -459,6 +551,33 @@ export const AdapterLive = Layer.effect(
 
     function setCachedPrice(mint: string, price: number): void {
       priceCache.set(mint, { price, fetchedAt: Date.now() });
+      negativePriceCache.delete(mint);
+    }
+
+    function fetchHeliusPrices(
+      missing: ReadonlyArray<string>,
+    ): Effect.Effect<Record<string, number>, never> {
+      if (missing.length === 0 || !config.heliusApiKey) return Effect.succeed({});
+      return Effect.gen(function* () {
+        const result: Record<string, number> = {};
+        for (const mint of missing) {
+          const asset = yield* Effect.tryPromise(() => fetchHeliusAsset(mint)).pipe(
+            Effect.catchAll((err) => {
+              logger.debug("Helius asset price unavailable", {
+                mint,
+                error: String(err),
+              });
+              return Effect.succeed(null);
+            }),
+          );
+          const price = asset ? readHeliusPrice(asset) : undefined;
+          if (price !== undefined) {
+            result[mint] = price;
+            setCachedPrice(mint, price);
+          }
+        }
+        return result;
+      });
     }
 
     function fetchJupiterPrices(
@@ -466,18 +585,24 @@ export const AdapterLive = Layer.effect(
     ): Effect.Effect<Record<string, number>, never> {
       if (missing.length === 0) return Effect.succeed({});
       return Effect.gen(function* () {
-        const ids = missing.join(",");
+        const ids = encodeURIComponent(missing.join(","));
+        const jupiterApiKey = process.env.JUPITER_API_KEY?.trim() ?? "";
+        const requestInit: RequestInit = { signal: AbortSignal.timeout(10_000) };
+        if (jupiterApiKey) requestInit.headers = { "x-api-key": jupiterApiKey };
         const res = yield* Effect.tryPromise(() =>
-          fetch(`https://price.jup.ag/v6/price?ids=${ids}`),
+          fetch(`https://api.jup.ag/price/v3?ids=${ids}`, requestInit),
         );
         if (!res.ok) return {};
-        const json = (yield* Effect.tryPromise(() => res.json())) as {
-          data?: Record<string, { price: number }>;
+        const json = (yield* Effect.tryPromise(() => res.json())) as Record<
+          string,
+          { readonly usdPrice?: number; readonly price?: number } | undefined
+        > & {
+          readonly data?: Record<string, { readonly price?: number } | undefined>;
         };
         const result: Record<string, number> = {};
         for (const mint of missing) {
-          const price = json.data?.[mint]?.price;
-          if (price != null) {
+          const price = json[mint]?.usdPrice ?? json.data?.[mint]?.price;
+          if (typeof price === "number" && Number.isFinite(price) && price > 0) {
             result[mint] = price;
             setCachedPrice(mint, price);
           }
@@ -492,22 +617,31 @@ export const AdapterLive = Layer.effect(
       if (missing.length === 0) return Effect.succeed({});
       return Effect.gen(function* () {
         const result: Record<string, number> = {};
+        const coinGeckoApiKey = process.env.COINGECKO_API_KEY?.trim() ?? "";
         for (let i = 0; i < missing.length; i += COINGECKO_BATCH_SIZE) {
           const batch = missing.slice(i, i + COINGECKO_BATCH_SIZE);
-          const ids = batch.join(",");
+          const ids = encodeURIComponent(batch.join(","));
+          const requestInit: RequestInit = { signal: AbortSignal.timeout(10_000) };
+          if (coinGeckoApiKey) {
+            requestInit.headers = { "x-cg-pro-api-key": coinGeckoApiKey };
+          }
+          const baseUrl = coinGeckoApiKey
+            ? "https://pro-api.coingecko.com"
+            : "https://api.coingecko.com";
           const res = yield* Effect.tryPromise(() =>
             fetch(
-              `https://api.coingecko.com/api/v3/simple/token_price/solana?contract_addresses=${ids}&vs_currencies=usd`,
+              `${baseUrl}/api/v3/simple/token_price/solana?contract_addresses=${ids}&vs_currencies=usd`,
+              requestInit,
             ),
           );
           if (res.ok) {
             const json = (yield* Effect.tryPromise(() => res.json())) as Record<
               string,
-              { usd: number }
+              { readonly usd?: number } | undefined
             >;
             for (const mint of batch) {
               const price = json[mint]?.usd;
-              if (price != null) {
+              if (typeof price === "number" && Number.isFinite(price) && price > 0) {
                 result[mint] = price;
                 setCachedPrice(mint, price);
               }
@@ -528,24 +662,36 @@ export const AdapterLive = Layer.effect(
         const prices: Record<string, number> = {};
         const missing: string[] = [];
 
-        // 1. Cache only — never use hardcoded fallback here
-        for (const mint of mints) {
+        for (const mint of new Set(mints)) {
           const cached = getCachedPrice(mint);
           if (cached !== undefined) {
             prices[mint] = cached;
-          } else {
-            missing.push(mint);
+            continue;
           }
+          const metadataPrice = tokenMetaCache.get(mint)?.priceUsd;
+          if (metadataPrice !== undefined && Number.isFinite(metadataPrice) && metadataPrice > 0) {
+            setCachedPrice(mint, metadataPrice);
+            prices[mint] = metadataPrice;
+            continue;
+          }
+          const missFetchedAt = negativePriceCache.get(mint);
+          if (missFetchedAt !== undefined) {
+            if (Date.now() - missFetchedAt < PRICE_MISS_CACHE_TTL_MS) {
+              prices[mint] = fallbackPrices[mint] ?? 0;
+              continue;
+            }
+            negativePriceCache.delete(mint);
+          }
+          missing.push(mint);
         }
 
         if (missing.length === 0) return prices;
 
-        // 2. Jupiter (live prices are cached inside fetchJupiterPrices)
-        const jupiterPrices = yield* fetchJupiterPrices(missing);
+        const heliusPrices = yield* fetchHeliusPrices(missing);
         const stillMissing: string[] = [];
         for (const mint of missing) {
-          const price = jupiterPrices[mint];
-          if (price != null) {
+          const price = heliusPrices[mint];
+          if (price !== undefined) {
             prices[mint] = price;
           } else {
             stillMissing.push(mint);
@@ -554,26 +700,76 @@ export const AdapterLive = Layer.effect(
 
         if (stillMissing.length === 0) return prices;
 
-        // 3. CoinGecko (live prices are cached inside fetchCoinGeckoPrices)
-        const cgPrices = yield* fetchCoinGeckoPrices(stillMissing);
-        const unresolved: string[] = [];
+        const jupiterPrices = yield* fetchJupiterPrices(stillMissing);
+        const coinGeckoMissing: string[] = [];
         for (const mint of stillMissing) {
+          const price = jupiterPrices[mint];
+          if (price !== undefined) {
+            prices[mint] = price;
+          } else {
+            coinGeckoMissing.push(mint);
+          }
+        }
+
+        const cgPrices = yield* fetchCoinGeckoPrices(coinGeckoMissing);
+        const unresolved: string[] = [];
+        for (const mint of coinGeckoMissing) {
           const cgPrice = cgPrices[mint];
-          if (cgPrice != null) {
+          if (cgPrice !== undefined) {
             prices[mint] = cgPrice;
           } else {
             unresolved.push(mint);
           }
         }
 
-        // 4. Hardcoded fallback — NOT cached (stale values must not pollute
-        //    the live price cache; next cycle will re-attempt live sources)
         for (const mint of unresolved) {
+          negativePriceCache.set(mint, Date.now());
           prices[mint] = fallbackPrices[mint] ?? 0;
         }
 
         return prices;
       });
+    }
+
+    const WALLET_BALANCE_CACHE_TTL_MS = 30_000;
+    let walletBalanceCache: { readonly value: number; readonly fetchedAt: number } | null = null;
+    let walletBalanceInFlight: Promise<number> | null = null;
+
+    function invalidateWalletBalanceCache(): void {
+      walletBalanceCache = null;
+    }
+
+    async function readTokenBalance(mintAddress: string): Promise<bigint> {
+      const activeWallet = wallet;
+      if (!activeWallet) return 0n;
+      const mint = new PublicKey(mintAddress);
+      const accounts = await rpcCall((conn) =>
+        conn.getParsedTokenAccountsByOwner(activeWallet.publicKey, { mint }),
+      );
+      let total = 0n;
+      for (const account of accounts.value) {
+        const data = account.account.data;
+        if (!isObject(data)) continue;
+        const parsed = data["parsed"];
+        if (!isObject(parsed)) continue;
+        const info = parsed["info"];
+        if (!isObject(info)) continue;
+        const tokenAmount = info["tokenAmount"];
+        if (!isObject(tokenAmount)) continue;
+        const amount = tokenAmount["amount"];
+        if (typeof amount === "string") total += BigInt(amount);
+      }
+      return total;
+    }
+
+    async function readWalletBalanceUsd(): Promise<number> {
+      const activeWallet = wallet;
+      if (!activeWallet) return 0;
+      const lamports = await rpcCall((conn) => conn.getBalance(activeWallet.publicKey));
+      const prices = await Effect.runPromise(fetchTokenPrices([SOL_MINT]));
+      const solPrice = prices[SOL_MINT] ?? fallbackPrices[SOL_MINT] ?? 0;
+      const usdcRaw = await readTokenBalance(USDC_MINT);
+      return (lamports / 1e9) * solPrice + Number(usdcRaw) / 1e6;
     }
 
     // ─── Pool stats ────────────────────────────────────────────────────────
@@ -593,12 +789,8 @@ export const AdapterLive = Layer.effect(
         const tokenYMint = lbPair.tokenYMint.toBase58();
 
         const [mintXInfo, mintYInfo] = yield* Effect.all([
-          Effect.tryPromise(() =>
-            rpcCall((conn) => conn.getParsedAccountInfo(lbPair.tokenXMint)),
-          ),
-          Effect.tryPromise(() =>
-            rpcCall((conn) => conn.getParsedAccountInfo(lbPair.tokenYMint)),
-          ),
+          Effect.tryPromise(() => rpcCall((conn) => conn.getParsedAccountInfo(lbPair.tokenXMint))),
+          Effect.tryPromise(() => rpcCall((conn) => conn.getParsedAccountInfo(lbPair.tokenYMint))),
         ]);
 
         const tokenXDecimals =
@@ -609,12 +801,8 @@ export const AdapterLive = Layer.effect(
             ?.decimals ?? 6;
 
         const [balX, balY] = yield* Effect.all([
-          Effect.tryPromise(() =>
-            rpcCall((conn) => conn.getTokenAccountBalance(lbPair.reserveX)),
-          ),
-          Effect.tryPromise(() =>
-            rpcCall((conn) => conn.getTokenAccountBalance(lbPair.reserveY)),
-          ),
+          Effect.tryPromise(() => rpcCall((conn) => conn.getTokenAccountBalance(lbPair.reserveX))),
+          Effect.tryPromise(() => rpcCall((conn) => conn.getTokenAccountBalance(lbPair.reserveY))),
         ]);
 
         const reserveX = Number(balX.value.amount) / Math.pow(10, tokenXDecimals);
@@ -648,36 +836,27 @@ export const AdapterLive = Layer.effect(
       getWalletAddress: () => wallet?.publicKey.toBase58() ?? null,
 
       getWalletBalanceUsd: () =>
-        Effect.gen(function* () {
-          if (!wallet) return 0;
-          const solBal = yield* Effect.tryPromise(() =>
-            rpcCall((conn) => conn.getBalance(wallet.publicKey)),
-          );
-          const solAmount = solBal / 1e9;
-          const prices = yield* fetchTokenPrices([SOL_MINT]);
-          const solPrice = prices[SOL_MINT] || 165;
-          const solValue = solAmount * solPrice;
-
-          const usdcMint = new PublicKey(USDC_MINT);
-          const tokenAccounts = yield* Effect.tryPromise(() =>
-            rpcCall(() =>
-              connection.getTokenAccountsByOwner(wallet.publicKey, {
-                mint: usdcMint,
-              }),
-            ),
-          );
-
-          let usdcValue = 0;
-          const firstAccount = tokenAccounts.value[0];
-          if (firstAccount) {
-            const bal = yield* Effect.tryPromise(() =>
-              rpcCall((conn) => conn.getTokenAccountBalance(firstAccount.pubkey)),
-            );
-            usdcValue = bal.value.uiAmount ?? 0;
+        Effect.tryPromise(() => {
+          if (!wallet) return Promise.resolve(0);
+          const now = Date.now();
+          if (
+            walletBalanceCache &&
+            now - walletBalanceCache.fetchedAt < WALLET_BALANCE_CACHE_TTL_MS
+          ) {
+            return Promise.resolve(walletBalanceCache.value);
           }
-
-          return solValue + usdcValue;
-        }).pipe(Effect.catchAll(() => Effect.succeed(0))),
+          if (walletBalanceInFlight) return walletBalanceInFlight;
+          const promise = readWalletBalanceUsd()
+            .then((value) => {
+              walletBalanceCache = { value, fetchedAt: Date.now() };
+              return value;
+            })
+            .finally(() => {
+              walletBalanceInFlight = null;
+            });
+          walletBalanceInFlight = promise;
+          return promise;
+        }),
 
       getNativeSolBalance: () =>
         Effect.gen(function* () {
@@ -792,7 +971,7 @@ export const AdapterLive = Layer.effect(
           const wallet = new PublicKey(walletAddress);
           // DLMM.getAllLbPairPositionsByUser returns a Map<poolAddress, PositionInfo> for all pools
           const allPositions = yield* Effect.tryPromise(() =>
-            DLMM.getAllLbPairPositionsByUser(connection, wallet),
+            rpcCall((conn) => DLMM.getAllLbPairPositionsByUser(conn, wallet)),
           );
 
           const result: Array<{
@@ -855,7 +1034,7 @@ export const AdapterLive = Layer.effect(
           if (!priceX || !priceY) {
             return yield* Effect.fail(
               new AdapterError({
-                message: "Could not fetch token prices",
+                message: `Could not fetch token prices for ${pool.tokenX} and ${pool.tokenY}`,
                 poolAddress,
               }),
             );
@@ -871,6 +1050,8 @@ export const AdapterLive = Layer.effect(
 
           let totalXAmount = new BN(Math.floor((halfUsd / priceX) * Math.pow(10, tokenXDecimals)));
           let totalYAmount = new BN(Math.floor((halfUsd / priceY) * Math.pow(10, tokenYDecimals)));
+          const requestedXAmount = BigInt(totalXAmount.toString());
+          const requestedYAmount = BigInt(totalYAmount.toString());
 
           // Check balances
           const balanceX = yield* getTokenBalance(pool.tokenX);
@@ -878,9 +1059,7 @@ export const AdapterLive = Layer.effect(
           let nativeSolBalance = 0n;
           if (pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT) {
             nativeSolBalance = BigInt(
-              yield* Effect.tryPromise(() =>
-                rpcCall((conn) => conn.getBalance(wallet.publicKey)),
-              ),
+              yield* Effect.tryPromise(() => rpcCall((conn) => conn.getBalance(wallet.publicKey))),
             );
           }
 
@@ -908,18 +1087,40 @@ export const AdapterLive = Layer.effect(
             (pool.tokenX === SOL_MINT && maxX === 0n) ||
             (pool.tokenY === SOL_MINT && maxY === 0n)
           ) {
+            const shortages: string[] = [];
+            if (pool.tokenX === SOL_MINT && maxX === 0n) {
+              shortages.push(
+                `${pool.tokenX} required ${formatTokenAmount(requestedXAmount, tokenXDecimals)}, available ${formatTokenAmount(maxX, tokenXDecimals)} after gas reserve`,
+              );
+            }
+            if (pool.tokenY === SOL_MINT && maxY === 0n) {
+              shortages.push(
+                `${pool.tokenY} required ${formatTokenAmount(requestedYAmount, tokenYDecimals)}, available ${formatTokenAmount(maxY, tokenYDecimals)} after gas reserve`,
+              );
+            }
             return yield* Effect.fail(
               new AdapterError({
-                message: "Insufficient native SOL balance after reserving gas",
+                message: `Insufficient native SOL balance after reserving gas: ${shortages.join("; ")}`,
                 poolAddress,
               }),
             );
           }
 
           if (totalXAmount.eq(new BN(0)) || totalYAmount.eq(new BN(0))) {
+            const shortages: string[] = [];
+            if (totalXAmount.eq(new BN(0))) {
+              shortages.push(
+                `${pool.tokenX} required ${formatTokenAmount(requestedXAmount, tokenXDecimals)}, available ${formatTokenAmount(maxX, tokenXDecimals)}`,
+              );
+            }
+            if (totalYAmount.eq(new BN(0))) {
+              shortages.push(
+                `${pool.tokenY} required ${formatTokenAmount(requestedYAmount, tokenYDecimals)}, available ${formatTokenAmount(maxY, tokenYDecimals)}`,
+              );
+            }
             return yield* Effect.fail(
               new AdapterError({
-                message: "Insufficient token balance",
+                message: `Insufficient token balance: ${shortages.join("; ")}. Wallet must hold both pool tokens before live entry.`,
                 poolAddress,
               }),
             );
@@ -951,8 +1152,8 @@ export const AdapterLive = Layer.effect(
           tx.sign(wallet, positionKeypair);
 
           const signature = yield* Effect.tryPromise(() =>
-            rpcCall(() =>
-              connection.sendRawTransaction(tx.serialize(), {
+            rpcCall((conn) =>
+              conn.sendRawTransaction(tx.serialize(), {
                 skipPreflight: false,
                 preflightCommitment: "confirmed",
               }),
@@ -962,6 +1163,7 @@ export const AdapterLive = Layer.effect(
           yield* Effect.tryPromise(() =>
             rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")),
           );
+          invalidateWalletBalanceCache();
 
           return {
             positionPubKey: positionKeypair.publicKey.toBase58(),
@@ -1016,8 +1218,8 @@ export const AdapterLive = Layer.effect(
             tx.sign(wallet);
 
             const signature = yield* Effect.tryPromise(() =>
-              rpcCall(() =>
-                connection.sendRawTransaction(tx.serialize(), {
+              rpcCall((conn) =>
+                conn.sendRawTransaction(tx.serialize(), {
                   skipPreflight: false,
                   preflightCommitment: "confirmed",
                 }),
@@ -1027,6 +1229,7 @@ export const AdapterLive = Layer.effect(
               rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")),
             );
           }
+          invalidateWalletBalanceCache();
 
           return { txSignature: "batch-confirmed" };
         }).pipe(
@@ -1222,8 +1425,8 @@ export const AdapterLive = Layer.effect(
           versionedTx.sign([wallet]);
 
           const signature = yield* Effect.tryPromise(() =>
-            rpcCall(() =>
-              connection.sendRawTransaction(versionedTx.serialize(), {
+            rpcCall((conn) =>
+              conn.sendRawTransaction(versionedTx.serialize(), {
                 skipPreflight: false,
                 preflightCommitment: "confirmed",
               }),
@@ -1233,6 +1436,7 @@ export const AdapterLive = Layer.effect(
           yield* Effect.tryPromise(() =>
             rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")),
           );
+          invalidateWalletBalanceCache();
 
           return {
             txSignature: signature,
@@ -1447,8 +1651,8 @@ export const AdapterLive = Layer.effect(
             swapTx.sign(wallet!);
 
             const sig = yield* Effect.tryPromise(() =>
-              rpcCall(() =>
-                connection.sendRawTransaction(swapTx.serialize(), {
+              rpcCall((conn) =>
+                conn.sendRawTransaction(swapTx.serialize(), {
                   skipPreflight: false,
                   preflightCommitment: "confirmed",
                 }),
@@ -1458,6 +1662,7 @@ export const AdapterLive = Layer.effect(
             yield* Effect.tryPromise(() =>
               rpcCall((conn) => conn.confirmTransaction(sig, "confirmed")),
             );
+            invalidateWalletBalanceCache();
             logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
           } catch (err) {
             logger.warn("USDC → SOL swap failed (non-fatal):", String(err));
@@ -1468,19 +1673,7 @@ export const AdapterLive = Layer.effect(
     return api;
 
     function getTokenBalance(mintAddress: string): Effect.Effect<bigint, unknown> {
-      if (!wallet) return Effect.succeed(0n);
-      return Effect.gen(function* () {
-        const mint = new PublicKey(mintAddress);
-        const accounts = yield* Effect.tryPromise(() =>
-          rpcCall((conn) => conn.getTokenAccountsByOwner(wallet!.publicKey, { mint })),
-        );
-        const firstAccount = accounts.value[0];
-        if (!firstAccount) return 0n;
-        const bal = yield* Effect.tryPromise(() =>
-          rpcCall((conn) => conn.getTokenAccountBalance(firstAccount.pubkey)),
-        );
-        return BigInt(bal.value.amount);
-      }).pipe(Effect.catchAll(() => Effect.succeed(0n)));
+      return Effect.tryPromise(() => readTokenBalance(mintAddress));
     }
   }),
 );

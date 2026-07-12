@@ -11,6 +11,10 @@
  * - For testability: flushAsync(), getPending(), and createErrorReporter(config) factory
  */
 
+import { existsSync, readFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export type ErrorCategory =
@@ -62,6 +66,17 @@ const DEFAULT_ERROR_ENDPOINT = "https://prism-api.irfndi.workers.dev/v1/errors/b
 const DEFAULT_FLUSH_INTERVAL_MS = 60_000;
 const DEFAULT_BATCH_SIZE = 5;
 const MAX_PENDING_BUFFER = 1000;
+const CREDENTIALS_FILE = join(homedir(), ".config", "prism", "credentials.json");
+
+function readPrismApiKey(): string | null {
+  try {
+    if (!existsSync(CREDENTIALS_FILE)) return null;
+    const value = JSON.parse(readFileSync(CREDENTIALS_FILE, "utf-8")) as { apiKey?: unknown };
+    return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
+  } catch {
+    return null;
+  }
+}
 
 // ─── Sanitization patterns ───────────────────────────────────────────────────
 // Base58 chars (no 0/O/I/l): 1-9 A-H J-N P-Z a-k m-z
@@ -164,9 +179,13 @@ export class ErrorReporter {
       (typeof process !== "undefined" ? process.env.PRISM_ERROR_ENDPOINT : undefined);
     const reportingEnv =
       typeof process !== "undefined" ? process.env.PRISM_ERROR_REPORTING : undefined;
+    const hasCredentials = readPrismApiKey() !== null;
+    const implicitReporting =
+      reportingEnv !== "false" && (reportingEnv === "true" || hasCredentials);
     this.endpoint =
-      explicitEndpoint ?? (reportingEnv === "true" ? DEFAULT_ERROR_ENDPOINT : undefined);
-    this.enabled = config.enabled !== undefined ? config.enabled : reportingEnv === "true";
+      explicitEndpoint ??
+      (config.enabled === undefined && implicitReporting ? DEFAULT_ERROR_ENDPOINT : undefined);
+    this.enabled = config.enabled !== undefined ? config.enabled : implicitReporting;
     this.batchSize = config.batchSize ?? DEFAULT_BATCH_SIZE;
     this.flushIntervalMs = config.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
 
@@ -227,6 +246,10 @@ export class ErrorReporter {
     }
 
     const batch = this.pending.splice(0, this.pending.length);
+    const apiKey = readPrismApiKey();
+    if (!apiKey && this.endpoint.includes("prism-api.irfndi.workers.dev")) {
+      return;
+    }
     const payload: BatchPayload = {
       app: "prism-liquidity-agent",
       version: this.appVersion,
@@ -238,7 +261,10 @@ export class ErrorReporter {
     try {
       const response = await fetch(this.endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        },
         body: JSON.stringify(payload),
         signal: controller.signal,
       });

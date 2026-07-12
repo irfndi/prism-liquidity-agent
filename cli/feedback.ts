@@ -12,6 +12,7 @@ import {
 } from "../engine/services.js";
 import { createLogger } from "../engine/logger.js";
 import { getPrismDbPath } from "../engine/paths.js";
+import { requireRegistered } from "./api.js";
 
 const logger = createLogger("feedback-cli");
 
@@ -51,18 +52,16 @@ function buildProgram(): Layer.Layer<FeedbackService | ConfigService, never, nev
 
 function formatResult(result: FeedbackResult): string {
   switch (result.kind) {
-    case "created":
-      return `✓ Filed new issue #${result.issueNumber}: ${result.issueUrl}`;
-    case "duplicate":
-      return `✓ +1 to existing issue #${result.issueNumber}: ${result.issueUrl}`;
     case "rate_limited":
       return `⚠ Rate limited: ${result.reason}`;
     case "opt_out":
       return "ℹ Feedback is disabled. Run 'prism feedback enable' to re-enable.";
     case "local_only":
-      return `✓ Feedback stored locally (id: ${result.localId}). Set GITHUB_TOKEN to file GitHub issues.`;
+      return `✓ Cloud unavailable; feedback stored locally (id: ${result.localId}).`;
     case "cloud":
-      return `✓ Feedback submitted to Prism cloud (id: ${result.id}).`;
+      return result.duplicate
+        ? `✓ Feedback already exists in Prism cloud (id: ${result.id}).`
+        : `✓ Feedback submitted to Prism cloud (id: ${result.id}).`;
     case "error":
       return `✗ Failed to submit feedback: ${result.error}`;
     default:
@@ -99,6 +98,14 @@ function buildFeedback(opts: SubmitOptions): AgentFeedback {
 }
 
 async function runSubmit(feedback: AgentFeedback): Promise<FeedbackResult> {
+  try {
+    await requireRegistered(true);
+  } catch (err) {
+    return {
+      kind: "error",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
   const program = buildProgram();
   return Effect.runPromise(
     Effect.gen(function* () {
@@ -114,6 +121,7 @@ async function runSubmit(feedback: AgentFeedback): Promise<FeedbackResult> {
 
 export const feedbackCommand = new Command("feedback")
   .description("Submit or manage agent feedback (friction, suggestions, observations, praise)")
+  .argument("[summary]", "One-line summary when no subcommand is used")
   .addHelpText(
     "after",
     `\nExamples:
@@ -125,13 +133,11 @@ export const feedbackCommand = new Command("feedback")
   $ prism feedback disable
 
 Environment:
-  GITHUB_TOKEN              Personal access token with 'repo' scope
-  GITHUB_REPO               Target repo (default: irfndi/prism-liquidity-agent)
   PRISM_API_URL             Cloud feedback endpoint override
   PRISM_FEEDBACK_OPT_OUT    Set to 'true' to disable automatic feedback
 
-Requires GITHUB_TOKEN for GitHub Issues filing. Without it, Prism first tries the
-cloud /v1/feedback endpoint, then falls back to local storage.`,
+Feedback requires a registered Prism account. Submissions are stored in the
+Prism Cloud D1 feedback store, with local storage used only during an outage.`,
   );
 
 feedbackCommand
@@ -157,27 +163,27 @@ feedbackCommand
   .command("status")
   .description("Show this agent's feedback history and rate-limit state")
   .action(async () => {
+    try {
+      await requireRegistered(true);
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
     const program = buildProgram();
     await Effect.runPromise(
       Effect.gen(function* () {
-        const config = yield* ConfigService;
         const feedback = yield* FeedbackService;
         const optOut = yield* feedback.getOptOut();
         const recent = yield* feedback.list();
         console.log(`Agent feedback status:`);
         console.log(`  Opt-out:       ${optOut ? "yes" : "no"}`);
-        console.log(
-          `  GITHUB_TOKEN:  ${config.githubToken ? "set" : "UNSET (cloud/local fallback)"}`,
-        );
-        console.log(`  GITHUB_REPO:   ${config.githubRepo}`);
         console.log(`  Total reports: ${recent.length}`);
         if (recent.length > 0) {
           console.log("");
           console.log("Recent feedback:");
           for (const r of recent.slice(-10)) {
             const ts = new Date(r.reportedAt).toISOString();
-            const target = r.githubIssueNumber ? `→ issue #${r.githubIssueNumber}` : "(local only)";
-            console.log(`  [${ts}] ${r.category}/${r.severity} ${target}`);
+            console.log(`  [${ts}] ${r.category}/${r.severity} ${r.id}`);
             console.log(`    ${r.summary}`);
           }
         }
@@ -189,6 +195,12 @@ feedbackCommand
   .command("list")
   .description("Alias for 'status'")
   .action(async () => {
+    try {
+      await requireRegistered(true);
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
     const program = buildProgram();
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -200,8 +212,7 @@ feedbackCommand
         }
         for (const r of all) {
           const ts = new Date(r.reportedAt).toISOString();
-          const target = r.githubIssueNumber ? `→ #${r.githubIssueNumber}` : "(local)";
-          console.log(`[${ts}] ${r.category} ${target}  ${r.summary}`);
+          console.log(`[${ts}] ${r.category} ${r.id}  ${r.summary}`);
         }
       }).pipe(Effect.provide(program)),
     );

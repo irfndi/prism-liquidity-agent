@@ -13,8 +13,6 @@ declare namespace Cloudflare {
     FEE_WALLET_ADDRESS?: string;
     TELEGRAM_BOT_TOKEN?: string;
     TELEGRAM_WEBHOOK_SECRET?: string;
-    GITHUB_TOKEN?: string;
-    GITHUB_REPO?: string;
     ADMIN_API_KEY?: string;
   }
 }

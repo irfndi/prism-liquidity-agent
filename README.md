@@ -42,7 +42,8 @@ Before any decision, the agent scores each pool's volume on a 0-1 scale. Volume/
 ```bash
 curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"   # if not already on PATH
-prism setup --non-interactive --helius-key=YOUR_HELIUS_KEY
+prism register
+prism setup --non-interactive --rpc-url=https://your-paid-rpc.example.com
 prism dev                               # paper trading by default
 ```
 
@@ -55,6 +56,8 @@ prism dev                               # paper trading by default
 curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh \
   | PRISM_VERSION=1.2.3 bash
 export PATH="$HOME/.local/bin:$PATH"
+prism register
+prism setup --non-interactive --rpc-url=https://your-paid-rpc.example.com
 prism dev
 ```
 
@@ -71,9 +74,28 @@ bun run dev          # during development; uses the local source, no wrapper nee
 
 The bundle-install paths (one-liner and pinned release) create a `prism` wrapper on `PATH`. The wrapper is a thin shim that sets `PRISM_INSTALL_DIR` and `PRISM_VEC0_PATH`, then runs the compiled bundle with `bun`, so the install root and config are resolved consistently regardless of where you invoke it from. The source workflow runs `bun run dev` directly and does not create `~/.local/bin/prism`.
 
+### Agent operating contract
+
+Agents operating Prism should use the installed `prism` wrapper as the product boundary. The installer is the supported global install: it places a verified platform bundle under `~/.prism` and the command under `~/.local/bin/prism`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh \
+  | PRISM_SKIP_SETUP=1 bash
+export PATH="$HOME/.local/bin:$PATH"
+prism register
+prism version
+prism doctor
+prism setup --non-interactive --rpc-url=https://your-paid-rpc.example.com
+prism dev
+```
+
+Use `prism update --check-only` and `prism update` for upgrades. Do not edit the checkout, run `bun run dev`, or run `bun install` while operating an installed agent. `bun install` and source edits are for Prism development only.
+
+`bun add --global prism` is not a supported command because this project is not published as an npm package named `prism`. A GitHub global install such as `bun add --global github:irfndi/prism-liquidity-agent#<release-tag>` is a source fallback, not the production path; it does not provide the platform bundle or the release installer's checksum guarantee.
+
 ### For AI Agents (OpenClaw, Hermes, acpx, custom agents)
 
-Prism is agent-friendly by design. The CLI is the only required layer; the cloud API and Telegram bot are optional add-ons that you skip if you don't need them.
+Prism is agent-friendly by design. The CLI is the operating boundary; registration is required before setup/dev so usage, errors, and feedback are tied to the agent account. Telegram remains optional.
 
 ```bash
 # Pinned release — reproducible, no git, fastest for agents
@@ -86,27 +108,33 @@ export PATH="$HOME/.local/bin:$PATH"
 curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 
-prism register                                    # OPTIONAL — get API key from cloud
-prism setup --non-interactive --helius-key=$KEY    # required — Helius RPC key
+prism register                                    # required — creates the agent account
+prism setup --non-interactive --rpc-url="$SOLANA_RPC_URL" # Helius is optional
+prism doctor
 prism dev                                         # start paper trading
 ```
 
 If `prism` is not on `PATH` after the one-liner install, invoke the CLI directly:
 
 ```bash
-bun cli/index.ts setup --non-interactive --helius-key=$KEY
-bun cli/index.ts dev
+prism register
+prism setup --non-interactive --rpc-url="$SOLANA_RPC_URL"
+prism doctor
+prism dev
 ```
 
 Common agent commands:
 
 | Command                                                          | Purpose                                                           |
 | ---------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `prism setup` / `prism setup --non-interactive --helius-key=...` | Write `.env` (Helius key, watchlist, optional API key)            |
-| `prism dev`                                                      | Start the trading agent (paper by default)                        |
+| `prism setup` / `prism setup --non-interactive --rpc-url=...` | Write `.env` (RPC providers, watchlist, optional API key)       |
+| `prism doctor [--fix]`                                           | Validate registration, environment, providers, and local state  |
+| `prism dev`                                                      | Start the registered trading agent (paper by default)             |
 | `prism backtest --days 7`                                        | Run a historical simulation against synthetic data                |
 | `prism backtest --source replay --days 7 --pools <addr>`         | Replay live on-chain snapshots through the strategy               |
-| `prism register`                                                 | Create a cloud account, returns an API key (optional)             |
+| `prism register`                                                 | Create the required cloud account and store its API key          |
+| `prism feedback "..."`                                          | Store structured feedback in Prism Cloud D1                      |
+| `prism issue "..."`                                             | Store an issue in Prism Cloud D1                                  |
 | `prism whoami`                                                   | Show current user / API key info (requires `register`)            |
 | `prism link-telegram`                                            | Issue a 6-char code to link `@prism_agent_bot` (optional)         |
 | `prism update`                                                   | Self-update from R2/GitHub releases (with smoke tests + rollback) |
