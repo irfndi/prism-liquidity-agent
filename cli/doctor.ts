@@ -9,6 +9,7 @@ import {
   getPrismEnvPath,
   getPrismLogsDir,
 } from "../engine/paths.js";
+import { isSourceInstall } from "../engine/install-method.js";
 import { getApiBaseUrl, prismApiPost, readCredentials } from "./api.js";
 
 type DoctorStatus = "pass" | "warn" | "fail";
@@ -143,10 +144,11 @@ function checkPriceProviders(): DoctorCheck {
 
 export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
   const fix = options.fix === true;
+  const sourceInstall = isSourceInstall(getPrismConfigDir());
   const checks: DoctorCheck[] = [checkRuntime()];
-  checks.push(checkDirectory("config", getPrismConfigDir(), fix));
-  checks.push(checkDirectory("data", getPrismDataDir(), fix));
-  checks.push(checkDirectory("logs", getPrismLogsDir(), fix));
+  checks.push(checkDirectory("config", getPrismConfigDir(), fix && !sourceInstall));
+  checks.push(checkDirectory("data", getPrismDataDir(), fix && !sourceInstall));
+  checks.push(checkDirectory("logs", getPrismLogsDir(), fix && !sourceInstall));
 
   const envPath = getPrismEnvPath();
   checks.push(

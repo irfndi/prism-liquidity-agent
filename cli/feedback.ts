@@ -69,6 +69,11 @@ function formatResult(result: FeedbackResult): string {
   }
 }
 
+function printResult(result: FeedbackResult): void {
+  console.log(formatResult(result));
+  if (result.kind === "error") process.exitCode = 1;
+}
+
 interface SubmitOptions {
   summary: string;
   category: string | undefined;
@@ -156,7 +161,7 @@ feedbackCommand
   )
   .action(async (summary: string, opts: SubmitOptions) => {
     const result = await runSubmit(buildFeedback({ ...opts, summary }));
-    console.log(formatResult(result));
+    printResult(result);
   });
 
 feedbackCommand
@@ -253,5 +258,5 @@ feedbackCommand.action(async (summary: string, opts: SubmitOptions) => {
     return;
   }
   const result = await runSubmit(buildFeedback({ ...opts, summary }));
-  console.log(formatResult(result));
+  printResult(result);
 });
