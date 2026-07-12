@@ -353,6 +353,26 @@ function preserveUserData(sourceDir: string, destDir: string): void {
   }
 }
 
+function migrateBundleStateToUserDirs(installDir: string): void {
+  const configDir = process.env.PRISM_CONFIG_DIR ?? join(homedir(), ".config", "prism");
+  const dataDir = process.env.PRISM_DATA_DIR ?? join(homedir(), ".local", "share", "prism");
+
+  const legacyEnv = join(installDir, ".env");
+  const configEnv = join(configDir, ".env");
+  if (existsSync(legacyEnv) && !existsSync(configEnv)) {
+    mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    cpSync(legacyEnv, configEnv);
+  }
+
+  for (const item of ["prism.db", "prism.db-wal", "prism.db-shm", "logs"]) {
+    const legacyPath = join(installDir, item);
+    const dataPath = join(dataDir, item);
+    if (!existsSync(legacyPath) || existsSync(dataPath)) continue;
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    cpSync(legacyPath, dataPath, { recursive: true });
+  }
+}
+
 async function updateFromSource(
   release: ReleaseInfo,
   currentDir: string,
@@ -439,6 +459,7 @@ async function updateFromBundle(
   const bundleRoot = findBundleRoot(extractedDir);
 
   const installDir = resolveInstallDir();
+  migrateBundleStateToUserDirs(installDir);
   preserveUserData(installDir, bundleRoot);
 
   console.log("Installing bundle...");

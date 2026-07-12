@@ -10,6 +10,8 @@ SHELL_NAME="${SHELL_NAME:-sh}"
 REPO="${PRISM_REPO:-irfndi/prism-liquidity-agent}"
 BIN_DIR="${PRISM_BIN_DIR:-$HOME/.local/bin}"
 INSTALL_DIR="${PRISM_INSTALL_DIR:-$HOME/.prism}"
+CONFIG_DIR="${PRISM_CONFIG_DIR:-$HOME/.config/prism}"
+DATA_DIR="${PRISM_DATA_DIR:-$HOME/.local/share/prism}"
 R2_BASE_URL="${PRISM_R2_URL:-https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev}"
 VERSION="${PRISM_VERSION:-}"
 CHANNEL="${PRISM_CHANNEL:-stable}"
@@ -166,6 +168,17 @@ if [ -d "${PRESERVE_DIR}/logs" ]; then
   cp -R "${PRESERVE_DIR}/logs/." "${INSTALL_DIR}/logs/"
 fi
 
+mkdir -p "$CONFIG_DIR" "$DATA_DIR"
+if [ ! -e "${CONFIG_DIR}/.env" ] && [ -e "${INSTALL_DIR}/.env" ]; then
+  cp -p "${INSTALL_DIR}/.env" "${CONFIG_DIR}/.env"
+fi
+if [ ! -e "${DATA_DIR}/prism.db" ] && [ -e "${INSTALL_DIR}/prism.db" ]; then
+  cp -p "${INSTALL_DIR}/prism.db" "${DATA_DIR}/prism.db"
+fi
+if [ ! -d "${DATA_DIR}/logs" ] && [ -d "${INSTALL_DIR}/logs" ]; then
+  cp -R "${INSTALL_DIR}/logs" "${DATA_DIR}/logs"
+fi
+
 if ! ensure_bun; then
   exit 1
 fi
@@ -181,7 +194,7 @@ exec bun "$INSTALL_DIR/dist/cli/index.mjs" "\$@"
 EOF
 chmod +x "$WRAPPER"
 
-mkdir -p "$HOME/.config/prism" "$HOME/.local/share/prism"
+mkdir -p "$CONFIG_DIR" "$DATA_DIR"
 
 PATH_HAS_BIN_DIR=0
 IFS=':' read -r -a _path_entries <<<"${PATH:-}"
@@ -206,8 +219,8 @@ if [ "$PATH_HAS_BIN_DIR" -eq 0 ]; then
 fi
 
 if [ -z "$SKIP_SETUP" ]; then
-  CREDENTIALS_FILE="$HOME/.config/prism/credentials.json"
-  CONFIG_ENV_FILE="$HOME/.config/prism/.env"
+  CREDENTIALS_FILE="$CONFIG_DIR/credentials.json"
+  CONFIG_ENV_FILE="$CONFIG_DIR/.env"
   if [ -s "$CONFIG_ENV_FILE" ] || [ -s "${INSTALL_DIR}/.env" ]; then
     log_step "Existing Prism environment preserved; setup not requested."
   elif [ -s "$CREDENTIALS_FILE" ]; then
