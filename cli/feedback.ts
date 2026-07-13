@@ -12,7 +12,6 @@ import {
 } from "../engine/services.js";
 import { createLogger } from "../engine/logger.js";
 import { getPrismDbPath } from "../engine/paths.js";
-import { requireRegistered } from "./api.js";
 
 const logger = createLogger("feedback-cli");
 
@@ -103,14 +102,6 @@ function buildFeedback(opts: SubmitOptions): AgentFeedback {
 }
 
 async function runSubmit(feedback: AgentFeedback): Promise<FeedbackResult> {
-  try {
-    await requireRegistered(true);
-  } catch (err) {
-    return {
-      kind: "error",
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
   const program = buildProgram();
   return Effect.runPromise(
     Effect.gen(function* () {
@@ -168,12 +159,6 @@ feedbackCommand
   .command("status")
   .description("Show this agent's feedback history and rate-limit state")
   .action(async () => {
-    try {
-      await requireRegistered(false);
-    } catch (err) {
-      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    }
     const program = buildProgram();
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -200,12 +185,6 @@ feedbackCommand
   .command("list")
   .description("Alias for 'status'")
   .action(async () => {
-    try {
-      await requireRegistered(false);
-    } catch (err) {
-      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    }
     const program = buildProgram();
     await Effect.runPromise(
       Effect.gen(function* () {
