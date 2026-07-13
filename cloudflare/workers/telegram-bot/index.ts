@@ -124,10 +124,9 @@ function callPrismApi(
       };
     }
     const data = yield* Effect.tryPromise(() => response.json()).pipe(
-      Effect.map((body) => body as { ok?: boolean; result?: unknown; error?: string }),
+      Effect.map((body) => body as Record<string, unknown>),
     );
-    if (data.ok && data.result !== undefined) return { ok: true, data: data.result };
-    return { ok: false, error: data.error ?? "Unknown error" };
+    return { ok: true, data };
   }).pipe(
     Effect.catchAll((error) =>
       Effect.succeed({

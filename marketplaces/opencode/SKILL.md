@@ -68,29 +68,29 @@ Decisions are logged to `logs/audit-trail.jsonl`. To stop, send SIGINT (Ctrl+C).
 
 ## Available Commands
 
-| Command | Purpose |
-|---|---|
-| `prism dev` | Start the trading engine |
-| `prism setup` | Interactive `.env` wizard |
-| `prism register` | Create the required cloud account |
-| `prism doctor [--fix]` | Validate registration, providers, and local state |
-| `prism whoami` | Show cloud account info (requires `prism register`) |
-| `prism backtest` | Run a historical simulation |
-| `prism update` | Check for and apply updates |
-| `prism issue "<msg>"` | Store an issue in Prism Cloud D1 |
-| `prism wallet {generate,import,show}` | Manage the local Solana keypair |
-| `prism link-telegram` | Link the cloud account to `@prism_agent_bot` |
+| Command                               | Purpose                                             |
+| ------------------------------------- | --------------------------------------------------- |
+| `prism dev`                           | Start the trading engine                            |
+| `prism setup`                         | Interactive `.env` wizard                           |
+| `prism register`                      | Create the required cloud account                   |
+| `prism doctor [--fix]`                | Validate registration, providers, and local state   |
+| `prism whoami`                        | Show cloud account info (requires `prism register`) |
+| `prism backtest`                      | Run a historical simulation                         |
+| `prism update`                        | Check for and apply updates                         |
+| `prism issue "<msg>"`                 | Store an issue in Prism Cloud D1                    |
+| `prism wallet {generate,import,show}` | Manage the local Solana keypair                     |
+| `prism link-telegram`                 | Link the cloud account to `@prism_agent_bot`        |
 
 ## Three Layers (CLI boundary plus required account)
 
 The API account is required before `prism setup` and `prism dev` so telemetry,
 errors, feedback, and usage have an owner. Telegram remains optional.
 
-| Layer | Purpose | Required? |
-|---|---|---|
-| CLI (local) | Runs the trading engine, persists positions to SQLite | **Yes** |
-| API (cloud) | Account, telemetry, errors, feedback, whoami, subscription | **Yes for agents** |
-| Telegram (chat) | Monitor and control the agent from `@prism_agent_bot` | No |
+| Layer           | Purpose                                                    | Required?          |
+| --------------- | ---------------------------------------------------------- | ------------------ |
+| CLI (local)     | Runs the trading engine, persists positions to SQLite      | **Yes**            |
+| API (cloud)     | Account, telemetry, errors, feedback, whoami, subscription | **Yes for agents** |
+| Telegram (chat) | Monitor and control the agent from `@prism_agent_bot`      | No                 |
 
 ## Common Mistakes
 
@@ -102,14 +102,14 @@ errors, feedback, and usage have an owner. Telegram remains optional.
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| `prism: command not found` | `~/.local/bin` not on PATH | `export PATH="$HOME/.local/bin:$PATH"` |
-| `Bun not found` during install | Bun not installed | Installer auto-installs Bun; check `$HOME/.bun/bin` |
-| `sqlite-vec` fails on Linux | Bundled SQLite lacks extensions | Engine falls back to system `libsqlite3.so` automatically |
-| `BigInt` serialization error from embeddings | ONNX runtime issue in Node.js | Set `EMBEDDINGS_BACKEND=fallback` in `.env` (default) |
-| Helius 401/403 | Invalid API key | Re-run `prism setup` with a valid key or custom RPC URL |
-| Engine starts but makes no decisions | Empty watchlist and `ENABLE_POOL_DISCOVERY=false` | Set `ENABLE_POOL_DISCOVERY=true` in `.env` |
+| Symptom                                      | Cause                                             | Fix                                                       |
+| -------------------------------------------- | ------------------------------------------------- | --------------------------------------------------------- |
+| `prism: command not found`                   | `~/.local/bin` not on PATH                        | `export PATH="$HOME/.local/bin:$PATH"`                    |
+| `Bun not found` during install               | Bun not installed                                 | Installer auto-installs Bun; check `$HOME/.bun/bin`       |
+| `sqlite-vec` fails on Linux                  | Bundled SQLite lacks extensions                   | Engine falls back to system `libsqlite3.so` automatically |
+| `BigInt` serialization error from embeddings | ONNX runtime issue in Node.js                     | Set `EMBEDDINGS_BACKEND=fallback` in `.env` (default)     |
+| Helius 401/403                               | Invalid API key                                   | Re-run `prism setup` with a valid key or custom RPC URL   |
+| Engine starts but makes no decisions         | Empty watchlist and `ENABLE_POOL_DISCOVERY=false` | Set `ENABLE_POOL_DISCOVERY=true` in `.env`                |
 
 ## Verify Installation
 

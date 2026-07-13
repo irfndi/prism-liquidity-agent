@@ -22,5 +22,10 @@ export const backtestCommand = new Command("backtest")
     // Filter out the subcommand name so the underlying backtest parser sees only
     // its own flags (e.g. --days, --pools).
     const args = process.argv.slice(2).filter((a) => a !== "backtest");
-    await runBacktest(args);
+    try {
+      await runBacktest(args);
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
   });

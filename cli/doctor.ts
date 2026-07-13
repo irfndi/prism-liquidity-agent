@@ -85,10 +85,16 @@ async function checkRegistration(): Promise<DoctorCheck> {
 }
 
 function checkRuntime(): DoctorCheck {
-  const runtime = typeof Bun !== "undefined" ? Bun.version : process.version;
-  return gte(runtime, "1.4.0-canary.1")
-    ? check("runtime", "pass", `Bun ${runtime}`)
-    : check("runtime", "fail", `Bun ${runtime} is below 1.4.0-canary.1`);
+  if (typeof Bun === "undefined") {
+    return check(
+      "runtime",
+      "fail",
+      `Bun runtime not detected (running under Node ${process.version})`,
+    );
+  }
+  return gte(Bun.version, "1.4.0-canary.1")
+    ? check("runtime", "pass", `Bun ${Bun.version}`)
+    : check("runtime", "fail", `Bun ${Bun.version} is below 1.4.0-canary.1`);
 }
 
 function checkRpc(): DoctorCheck {

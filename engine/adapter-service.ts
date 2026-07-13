@@ -420,7 +420,6 @@ export const AdapterLive = Layer.effect(
             signal: AbortSignal.timeout(10_000),
           }),
         );
-        const json = (yield* Effect.tryPromise(() => res.json())) as HeliusAssetResponse;
         if (!res.ok) {
           return yield* Effect.fail(
             Object.assign(new Error(`Helius getAsset returned HTTP ${res.status}`), {
@@ -428,6 +427,7 @@ export const AdapterLive = Layer.effect(
             }),
           );
         }
+        const json = (yield* Effect.tryPromise(() => res.json())) as HeliusAssetResponse;
         if (json.error) {
           return yield* Effect.fail(
             Object.assign(new Error(json.error.message ?? "Helius getAsset failed"), {
@@ -516,7 +516,7 @@ export const AdapterLive = Layer.effect(
         return yield* Effect.fail(
           new Error(`Cannot resolve decimals for mint ${mint} via Helius or standard RPC`),
         );
-      }).pipe(Effect.catchAll(() => Effect.succeed({ symbol: mint.slice(0, 4), decimals: 6 })));
+      });
     }
 
     // ─── Price fetching ────────────────────────────────────────────────────

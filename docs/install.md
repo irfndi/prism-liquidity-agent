@@ -129,6 +129,7 @@ curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/s
 export PATH="$HOME/.local/bin:$PATH"
 prism register  # get API key from Cloudflare API
 prism setup     # configure RPC providers + watchlist
+prism doctor    # validate registration, providers, and local state
 prism dev       # start paper trading
 ```
 
@@ -187,13 +188,13 @@ never asks an already configured install to repeat setup during upgrade.
 
 Interactive wizard that asks for:
 
-| Prompt             | Required | Default                    |
-| ------------------ | -------- | -------------------------- |
+| Prompt             | Required | Default                     |
+| ------------------ | -------- | --------------------------- |
 | Helius API key     | NO       | empty when using custom RPC |
-| Primary RPC URL    | NO       | derived from Helius key    |
-| Fallback RPC URL   | NO       | empty                      |
-| Wallet private key | NO       | empty (paper trading)      |
-| Watchlist pools    | NO       | empty (use pool discovery) |
+| Primary RPC URL    | NO       | derived from Helius key     |
+| Fallback RPC URL   | NO       | empty                       |
+| Wallet private key | NO       | empty (paper trading)       |
+| Watchlist pools    | NO       | empty (use pool discovery)  |
 
 Everything else is **preconfigured** with sensible defaults:
 

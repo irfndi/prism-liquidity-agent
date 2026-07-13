@@ -164,8 +164,8 @@ for _state_file in .env prism.db; do
   fi
 done
 if [ -d "${PRESERVE_DIR}/logs" ]; then
-  mkdir -p "${INSTALL_DIR}/logs"
-  cp -R "${PRESERVE_DIR}/logs/." "${INSTALL_DIR}/logs/"
+  rm -rf "${INSTALL_DIR}/logs"
+  cp -R "${PRESERVE_DIR}/logs" "${INSTALL_DIR}/"
 fi
 
 mkdir -p "$CONFIG_DIR" "$DATA_DIR"

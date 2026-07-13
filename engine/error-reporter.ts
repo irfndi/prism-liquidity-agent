@@ -12,9 +12,9 @@
  */
 
 import { existsSync, readFileSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
 import { Effect } from "effect";
+import { join } from "path";
+import { getPrismConfigDir } from "./paths.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -67,13 +67,12 @@ const DEFAULT_ERROR_ENDPOINT = "https://prism-api.irfndi.workers.dev/v1/errors/b
 const DEFAULT_FLUSH_INTERVAL_MS = 60_000;
 const DEFAULT_BATCH_SIZE = 5;
 const MAX_PENDING_BUFFER = 1000;
-const CREDENTIALS_FILE = join(homedir(), ".config", "prism", "credentials.json");
-
 function readPrismApiKey(): Effect.Effect<string | null, never> {
   return Effect.try({
     try: () => {
-      if (!existsSync(CREDENTIALS_FILE)) return null;
-      const value = JSON.parse(readFileSync(CREDENTIALS_FILE, "utf-8")) as {
+      const credentialsFile = join(getPrismConfigDir(), "credentials.json");
+      if (!existsSync(credentialsFile)) return null;
+      const value = JSON.parse(readFileSync(credentialsFile, "utf-8")) as {
         apiKey?: unknown;
       };
       return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
@@ -183,12 +182,14 @@ export class ErrorReporter {
       (typeof process !== "undefined" ? process.env.PRISM_ERROR_ENDPOINT : undefined);
     const reportingEnv =
       typeof process !== "undefined" ? process.env.PRISM_ERROR_REPORTING : undefined;
-    const hasCredentials = readPrismApiKey() !== null;
+    const hasCredentials = Effect.runSync(readPrismApiKey()) !== null;
     const implicitReporting =
       reportingEnv !== "false" && (reportingEnv === "true" || hasCredentials);
     this.endpoint =
       explicitEndpoint ??
-      (config.enabled === undefined && implicitReporting ? DEFAULT_ERROR_ENDPOINT : undefined);
+      (config.enabled === true || (config.enabled === undefined && implicitReporting)
+        ? DEFAULT_ERROR_ENDPOINT
+        : undefined);
     this.enabled = config.enabled !== undefined ? config.enabled : implicitReporting;
     this.batchSize = config.batchSize ?? DEFAULT_BATCH_SIZE;
     this.flushIntervalMs = config.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;

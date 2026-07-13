@@ -131,7 +131,7 @@ export const setupCommand = new Command("setup")
         },
       );
 
-      heliusKey = answers.heliusKey as string;
+      heliusKey = (answers.heliusKey as string) || "";
       rpcUrl = (answers.rpcUrl as string) || "";
       rpcFallbackUrl = (answers.rpcFallbackUrl as string) || "";
       jupiterApiKey = (answers.jupiterApiKey as string) || "";

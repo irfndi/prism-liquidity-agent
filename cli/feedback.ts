@@ -169,7 +169,7 @@ feedbackCommand
   .description("Show this agent's feedback history and rate-limit state")
   .action(async () => {
     try {
-      await requireRegistered(true);
+      await requireRegistered(false);
     } catch (err) {
       console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
@@ -201,7 +201,7 @@ feedbackCommand
   .description("Alias for 'status'")
   .action(async () => {
     try {
-      await requireRegistered(true);
+      await requireRegistered(false);
     } catch (err) {
       console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);

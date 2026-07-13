@@ -15,6 +15,7 @@ import {
 } from "./services.js";
 import { getCurrentVersion } from "./version.js";
 import { detectInstallMethod } from "./install-method.js";
+import { getPrismConfigDir } from "./paths.js";
 
 const logger = createLogger("feedback");
 
@@ -26,7 +27,6 @@ const FEEDBACK_LIMITS = {
 } as const;
 
 const DEFAULT_CLOUD_FEEDBACK_URL = "https://prism-api.irfndi.workers.dev/v1/feedback";
-const CREDENTIALS_FILE = join(homedir(), ".config", "prism", "credentials.json");
 
 interface CloudFeedbackPayload {
   id: string;
@@ -45,7 +45,10 @@ function submitCloudFeedback(
   apiUrl: string,
   payload: CloudFeedbackPayload,
   apiKey: string,
-): Effect.Effect<{ readonly id: string; readonly duplicate: boolean } | null, never> {
+): Effect.Effect<
+  { readonly id: string; readonly duplicate: boolean } | { readonly authFailure: true } | null,
+  never
+> {
   return Effect.gen(function* () {
     const res = yield* Effect.tryPromise(() =>
       fetch(apiUrl, {
@@ -58,6 +61,7 @@ function submitCloudFeedback(
         signal: AbortSignal.timeout(10_000),
       }),
     );
+    if (res.status === 401 || res.status === 403) return { authFailure: true as const };
     if (!res.ok) return null;
     const json = (yield* Effect.tryPromise(() => res.json())) as Record<string, unknown>;
     if (typeof json.id !== "string") return null;
@@ -137,7 +141,8 @@ function detectAgentId(): Effect.Effect<string, never> {
 function readPrismApiKey(): Effect.Effect<string | null, never> {
   return Effect.try({
     try: () => {
-      const credentialsFile = process.env.PRISM_CREDENTIALS_FILE ?? CREDENTIALS_FILE;
+      const credentialsFile =
+        process.env.PRISM_CREDENTIALS_FILE ?? join(getPrismConfigDir(), "credentials.json");
       if (!existsSync(credentialsFile)) return null;
       const value = JSON.parse(readFileSync(credentialsFile, "utf-8")) as {
         apiKey?: unknown;
@@ -267,6 +272,13 @@ export const FeedbackLive = Layer.effect(
           },
           apiKey,
         );
+
+        if (cloudResult && "authFailure" in cloudResult) {
+          return {
+            kind: "error" as const,
+            error: "Prism cloud rejected the stored credentials. Run 'prism login' again.",
+          } satisfies FeedbackResult;
+        }
 
         if (cloudResult) {
           const entry: FeedbackEntry = {

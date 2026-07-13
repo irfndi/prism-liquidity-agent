@@ -361,13 +361,13 @@ describe("failure resilience", () => {
     r.dispose();
   });
 
-  it("does not buffer reports without explicit endpoint", () => {
+  it("uses the default endpoint when explicitly enabled", () => {
     const r = createErrorReporter({ enabled: true });
     r.setAppVersion("1.0.0-test");
     expect(() => {
-      r.report(new Error("should be dropped without endpoint"));
+      r.report(new Error("should use the default endpoint"));
     }).not.toThrow();
-    expect(r.getPending()).toHaveLength(0);
+    expect(r.getPending()).toHaveLength(1);
     r.dispose();
   });
 });

@@ -114,7 +114,8 @@ async function main() {
   ].join("\n");
 
   const envPath = path.resolve(".env");
-  fs.writeFileSync(envPath, envContent);
+  fs.writeFileSync(envPath, envContent, { mode: 0o600 });
+  fs.chmodSync(envPath, 0o600);
 
   p.note(
     [

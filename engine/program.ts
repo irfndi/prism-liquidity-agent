@@ -1,4 +1,4 @@
-import { Effect, Layer } from "effect";
+import { Effect, Fiber, Layer } from "effect";
 import { ConfigService, ConfigLive, type AppConfig } from "./config-service.js";
 import { AdapterLive } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
@@ -993,6 +993,13 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      let pendingCooldown: {
+        poolAddress: string;
+        cooldownUntil: number;
+        reason: string;
+        consecutiveOorExits: number;
+      } | null = null;
+
       // F7: update pool cooldown after EXIT decisions
       if (decision && decision.action === "EXIT") {
         const existingCooldown = yield* db
@@ -1013,14 +1020,12 @@ export const program = Effect.gen(function* () {
               ? config.repeatOorCooldownMs
               : config.oorCooldownMs;
           const cooldownUntil = Date.now() + cooldownDuration;
-          yield* db
-            .setPoolCooldown({
-              poolAddress,
-              cooldownUntil,
-              reason: `OOR exit (#${newOorCount})`,
-              consecutiveOorExits: newOorCount,
-            })
-            .pipe(Effect.catchAll(() => Effect.void));
+          pendingCooldown = {
+            poolAddress,
+            cooldownUntil,
+            reason: `OOR exit (#${newOorCount})`,
+            consecutiveOorExits: newOorCount,
+          };
           const hours = (cooldownDuration / 3_600_000).toFixed(1);
           console.info(
             `[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — OOR exit #${newOorCount}`,
@@ -1028,14 +1033,12 @@ export const program = Effect.gen(function* () {
         } else if (isLowYieldExit) {
           const cooldownDuration = config.oorCooldownMs;
           const cooldownUntil = Date.now() + cooldownDuration;
-          yield* db
-            .setPoolCooldown({
-              poolAddress,
-              cooldownUntil,
-              reason: `Low yield exit`,
-              consecutiveOorExits: 0,
-            })
-            .pipe(Effect.catchAll(() => Effect.void));
+          pendingCooldown = {
+            poolAddress,
+            cooldownUntil,
+            reason: `Low yield exit`,
+            consecutiveOorExits: 0,
+          };
           const hours = (cooldownDuration / 3_600_000).toFixed(1);
           console.info(`[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — low yield exit`);
         }
@@ -1059,6 +1062,10 @@ export const program = Effect.gen(function* () {
           )
         : config.paperPortfolioUsd;
       lastWalletBalanceUsd = walletBalanceUsd;
+
+      if (pendingCooldown) {
+        yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catchAll(() => Effect.void));
+      }
 
       // REBALANCE check
       if (!decision) {
@@ -1837,29 +1844,27 @@ export const program = Effect.gen(function* () {
               (claimResult.operatorFeeX ?? 0) > 0 ||
               (claimResult.operatorFeeY ?? 0) > 0
             ) {
-              yield* Effect.sync(() => {
-                Effect.runFork(
-                  adapter.reportFeeCollection({
-                    poolAddress: decision.poolAddress,
-                    ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
-                    feeX: claimResult.feeX,
-                    feeY: claimResult.feeY,
-                    platformFeeX: claimResult.platformFeeX,
-                    platformFeeY: claimResult.platformFeeY,
-                    tier,
-                    txSignature: claimResult.txSignature,
-                    ...(claimResult.feeTransferTxSignature != null && {
-                      feeTransferTxSignature: claimResult.feeTransferTxSignature,
-                    }),
-                    ...(claimResult.operatorFeeX != null && {
-                      operatorFeeX: claimResult.operatorFeeX,
-                    }),
-                    ...(claimResult.operatorFeeY != null && {
-                      operatorFeeY: claimResult.operatorFeeY,
-                    }),
+              yield* Effect.fork(
+                adapter.reportFeeCollection({
+                  poolAddress: decision.poolAddress,
+                  ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
+                  feeX: claimResult.feeX,
+                  feeY: claimResult.feeY,
+                  platformFeeX: claimResult.platformFeeX,
+                  platformFeeY: claimResult.platformFeeY,
+                  tier,
+                  txSignature: claimResult.txSignature,
+                  ...(claimResult.feeTransferTxSignature != null && {
+                    feeTransferTxSignature: claimResult.feeTransferTxSignature,
                   }),
-                );
-              });
+                  ...(claimResult.operatorFeeX != null && {
+                    operatorFeeX: claimResult.operatorFeeX,
+                  }),
+                  ...(claimResult.operatorFeeY != null && {
+                    operatorFeeY: claimResult.operatorFeeY,
+                  }),
+                }),
+              ).pipe(Effect.asVoid);
             }
           }
 
@@ -1975,29 +1980,27 @@ export const program = Effect.gen(function* () {
             (result.operatorFeeX ?? 0) > 0 ||
             (result.operatorFeeY ?? 0) > 0
           ) {
-            yield* Effect.sync(() => {
-              Effect.runFork(
-                adapter.reportFeeCollection({
-                  poolAddress,
-                  ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
-                  feeX: result.feeX,
-                  feeY: result.feeY,
-                  platformFeeX: result.platformFeeX,
-                  platformFeeY: result.platformFeeY,
-                  tier,
-                  txSignature: result.txSignature,
-                  ...(result.feeTransferTxSignature != null && {
-                    feeTransferTxSignature: result.feeTransferTxSignature,
-                  }),
-                  ...(result.operatorFeeX != null && {
-                    operatorFeeX: result.operatorFeeX,
-                  }),
-                  ...(result.operatorFeeY != null && {
-                    operatorFeeY: result.operatorFeeY,
-                  }),
+            yield* Effect.fork(
+              adapter.reportFeeCollection({
+                poolAddress,
+                ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
+                feeX: result.feeX,
+                feeY: result.feeY,
+                platformFeeX: result.platformFeeX,
+                platformFeeY: result.platformFeeY,
+                tier,
+                txSignature: result.txSignature,
+                ...(result.feeTransferTxSignature != null && {
+                  feeTransferTxSignature: result.feeTransferTxSignature,
                 }),
-              );
-            });
+                ...(result.operatorFeeX != null && {
+                  operatorFeeX: result.operatorFeeX,
+                }),
+                ...(result.operatorFeeY != null && {
+                  operatorFeeY: result.operatorFeeY,
+                }),
+              }),
+            ).pipe(Effect.asVoid);
           }
 
           pos.lastFeeClaimAt = Date.now();
@@ -2084,17 +2087,24 @@ export const program = Effect.gen(function* () {
     ),
   );
 
+  const schedulerFiber = yield* Effect.fork(
+    Effect.forever(Effect.sleep(config.scanIntervalMs).pipe(Effect.zipRight(runScheduledCycle))),
+  );
+
   const gracefulShutdown = (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.info(`Received ${signal} — shutting down`);
-    Effect.runFork(agent.disconnect().pipe(Effect.ensuring(Effect.sync(() => process.exit(0)))));
+    Effect.runFork(
+      Fiber.interrupt(schedulerFiber).pipe(
+        Effect.zipRight(agent.disconnect()),
+        Effect.ensuring(Effect.sync(() => process.exit(0))),
+      ),
+    );
   };
 
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
   process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
-  yield* Effect.forever(
-    Effect.sleep(config.scanIntervalMs).pipe(Effect.zipRight(runScheduledCycle)),
-  );
+  yield* Fiber.join(schedulerFiber);
 });

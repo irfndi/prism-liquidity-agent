@@ -11,7 +11,7 @@ git clone https://github.com/irfndi/prism-liquidity-agent.git
 cd prism-liquidity-agent
 bun install
 
-# Optional — only for cloud features (whoami, Telegram, subscriptions)
+# Required before setup and dev so telemetry, errors, and feedback have an owner
 prism register
 
 # Required — writes .env and configures the agent
@@ -21,7 +21,8 @@ prism setup --non-interactive --helius-key=$HELIUS_KEY
 prism dev
 ```
 
-The core trading agent works without registration. Register only if you want cloud features.
+Registration is required before setup and dev. The API account owns telemetry,
+errors, feedback, and cloud account operations; Telegram remains optional.
 
 ## Project overview
 
@@ -30,7 +31,7 @@ Prism is an autonomous liquidity agent for Solana (currently Meteora DLMM). It s
 The project has three independent layers:
 
 1. **CLI / engine** (local, required) — strategy, risk, memory, execution, backtesting, wallet management.
-2. **Cloudflare Workers** (cloud, optional) — user accounts, API keys, subscriptions, Telegram linking, GitHub issue filing.
+2. **Cloudflare Workers** (cloud, required for setup/dev) — user accounts, API keys, subscriptions, Telegram linking, and authenticated D1 telemetry/feedback.
 3. **Telegram bot** (chat, optional) — monitoring via `@prism_agent_bot`; requires the API layer.
 
 There are also optional peripheral subprojects:
@@ -55,26 +56,26 @@ There are also optional peripheral subprojects:
 
 ## Key configuration files
 
-| File | Purpose |
-|------|---------|
-| `package.json` | Root manifest, scripts, dependencies. Current version `0.0.29`. |
-| `tsconfig.json` | Strict TypeScript config for `engine/`, `ops/`, `bench/`, `cli/`, `types/`. |
-| `vitest.config.ts` | Engine test config; coverage thresholds and exclusions. |
-| `tsdown.config.ts` | Build config for the engine bundle (`engine/index.ts` → `dist/index.mjs`). |
-| `tsdown.cli.config.ts` | Build config for the CLI bundle (`cli/index.ts` → `dist/cli/`). |
-| `.oxlintrc.json` | `oxlint` rules: `correctness: error`, `no-unused-vars` and `require-yield` off. |
-| `.oxfmtrc.json` | `oxfmt` config (empty `ignorePatterns`). |
-| `.env.example` | Example env file. **Incomplete** — canonical defaults and full env set live in `engine/config-service.ts`. |
-| `Dockerfile` | Multi-stage Bun-based image; runtime uses `oven/bun:canary-slim`, installs `libsqlite3-0` + `ca-certificates`, runs as non-root `agent` user. |
-| `scripts/prism.sh` | The `prism` binary wrapper; resolves install root, sets `PRISM_INSTALL_DIR`, then runs `cli/index.ts`. |
-| `cloudflare/package.json` | Separate subproject for API + Telegram workers. |
-| `cloudflare/wrangler.toml` / `wrangler.telegram.toml` | Cloudflare Worker configs. |
-| `mcp-server/package.json` | Node-based MCP server subproject. |
-| `packages/*/pyproject.toml` | Python plugin skeletons (not part of the Bun build). |
+| File                                                  | Purpose                                                                                                                                       |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `package.json`                                        | Root manifest, scripts, dependencies. Current version `0.0.29`.                                                                               |
+| `tsconfig.json`                                       | Strict TypeScript config for `engine/`, `ops/`, `bench/`, `cli/`, `types/`.                                                                   |
+| `vitest.config.ts`                                    | Engine test config; coverage thresholds and exclusions.                                                                                       |
+| `tsdown.config.ts`                                    | Build config for the engine bundle (`engine/index.ts` → `dist/index.mjs`).                                                                    |
+| `tsdown.cli.config.ts`                                | Build config for the CLI bundle (`cli/index.ts` → `dist/cli/`).                                                                               |
+| `.oxlintrc.json`                                      | `oxlint` rules: `correctness: error`, `no-unused-vars` and `require-yield` off.                                                               |
+| `.oxfmtrc.json`                                       | `oxfmt` config (empty `ignorePatterns`).                                                                                                      |
+| `.env.example`                                        | Example env file. **Incomplete** — canonical defaults and full env set live in `engine/config-service.ts`.                                    |
+| `Dockerfile`                                          | Multi-stage Bun-based image; runtime uses `oven/bun:canary-slim`, installs `libsqlite3-0` + `ca-certificates`, runs as non-root `agent` user. |
+| `scripts/prism.sh`                                    | The `prism` binary wrapper; resolves install root, sets `PRISM_INSTALL_DIR`, then runs `cli/index.ts`.                                        |
+| `cloudflare/package.json`                             | Separate subproject for API + Telegram workers.                                                                                               |
+| `cloudflare/wrangler.toml` / `wrangler.telegram.toml` | Cloudflare Worker configs.                                                                                                                    |
+| `mcp-server/package.json`                             | Node-based MCP server subproject.                                                                                                             |
+| `packages/*/pyproject.toml`                           | Python plugin skeletons (not part of the Bun build).                                                                                          |
 
 ## Repo layout
 
-```
+```text
 prism-liquidity-agent/
 ├── engine/            # Core agent: strategy, adapters, risk, DB, memory, scan loop (~45 flat files)
 ├── cli/               # Commander-based user-facing commands
@@ -257,11 +258,11 @@ The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copi
 ## Security and privacy
 
 - **`.env` permissions.** `setup.ts` writes `.env` with mode `0o600` and backs up any existing file.
-- **Credentials.** API keys are stored in `~/.config/prism/credentials.json` with `0o600`.
+- **Credentials.** API keys are stored in `${PRISM_CONFIG_DIR:-~/.config/prism}/credentials.json` with `0o600`.
 - **Wallet keys.** `WALLET_PRIVATE_KEY` is optional. Without it, `adapter.hasWallet()` returns false and live execution is a no-op. Paper trading is the default and is the only path verified end-to-end.
 - **Direct-execution guard.** `engine/index.ts` exits unless invoked through the CLI (`prism dev` / `bun cli/index.ts dev`) or `PRISM_ALLOW_DIRECT=true` is set.
 - **Install telemetry.** Anonymous install pings are sent at install, setup, dev-start and register. They use a random local UUID stored in `~/.config/prism/install-id` and include no PII. Set `PRISM_API_URL` to a non-existent host to block pings.
-- **Feedback.** `prism feedback` can file GitHub issues if `GITHUB_TOKEN` is set; otherwise feedback is stored locally. Opt out with `PRISM_FEEDBACK_OPT_OUT=true`.
+- **Feedback.** `prism feedback` submits authenticated records to Prism Cloud D1 and keeps a local SQLite record for deduplication/outage recovery. Opt out with `PRISM_FEEDBACK_OPT_OUT=true`.
 - **Auto-update integrity.** The updater verifies SHA-256 checksums before applying a release. GPG signatures are generated but **not yet verified client-side**.
 - **Secret sanitization.** `engine/error-reporter.ts` strips sensitive values from telemetry.
 
@@ -269,33 +270,33 @@ The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copi
 
 `.env.example` is a partial reference. `engine/config-service.ts` is the canonical source of defaults and validation.
 
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `HELIUS_API_KEY` | — | Required for Solana RPC. In test mode defaults to a dummy value. |
-| `SOLANA_RPC_URL` | Helius URL if key present | RPC endpoint. Falls back to public Solana RPC if absent. |
-| `WALLET_PRIVATE_KEY` | — | Optional; required only for live trading. |
-| `PAPER_TRADING` | `true` | Simulated positions by default. |
-| `SCAN_INTERVAL_MS` | `600000` | Time between scan cycles (10 min). |
-| `WATCHLIST_POOLS` | — | Comma-separated Meteora DLMM pool addresses. |
-| `ENABLE_POOL_DISCOVERY` | `true` (postinstall default) / `false` (code fallback) | Discover pools when watchlist is empty. |
-| `MIN_POOL_TVL_USD` | `50000` | Skip pools below this TVL. |
-| `VOLUME_AUTH_THRESHOLD` | `0.70` | Minimum volume authenticity score. |
-| `CONFIDENCE_THRESHOLD` | `0.65` | Minimum confidence to act. |
-| `STOP_LOSS_PCT` | `0.15` | Drawdown that blocks HOLD/REBALANCE. |
-| `TRAILING_STOP_PCT` | `0.10` | Drawdown from peak that triggers EXIT. |
-| `MAX_OPEN_POSITIONS` | `3` | Concurrent positions cap. |
-| `MAX_PER_POOL_ALLOCATION_PCT` | `0.4` | Max portfolio share for one pool. |
-| `SQLITE_DB_PATH` | `~/.local/share/prism/prism.db` (bundled) or `./prism.db` (source) | SQLite database path. |
-| `ENABLE_SNAPSHOT_CAPTURE` | `false` | Dump full snapshots every cycle (paper only). |
-| `EMBEDDINGS_BACKEND` | `fallback` | `fallback` = deterministic hash vectors; `onnx` = Xenova/MiniLM (downloads ~80MB). |
-| `AGENTIC_MODE` | `false` | Enable agent runtime overlay. |
-| `AGENT_MCP_ENABLED` | `false` | Expose stdio MCP server. |
-| `AGENT_HTTP_PORT` | `0` | Local HTTP status port (`0` = disabled). |
-| `AUTO_UPDATE` | `true` | Check for releases periodically. |
-| `UPDATE_CHANNEL` | `stable` | `stable`, `beta` or `dev`. |
-| `UPDATE_R2_PUBLIC_URL` | `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev` | Release CDN. `.env.example` contains a stale `r2.prism-agent.com` value; the code fallback is the source of truth. |
-| `GITHUB_TOKEN` | — | Optional PAT for filing feedback issues. |
-| `PRISM_FEEDBACK_OPT_OUT` | `false` | Disable automatic feedback. |
+| Variable                      | Default                                                            | Meaning                                                                                                            |
+| ----------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `HELIUS_API_KEY`              | —                                                                  | Required for Solana RPC. In test mode defaults to a dummy value.                                                   |
+| `SOLANA_RPC_URL`              | Helius URL if key present                                          | RPC endpoint. Falls back to public Solana RPC if absent.                                                           |
+| `WALLET_PRIVATE_KEY`          | —                                                                  | Optional; required only for live trading.                                                                          |
+| `PAPER_TRADING`               | `true`                                                             | Simulated positions by default.                                                                                    |
+| `SCAN_INTERVAL_MS`            | `600000`                                                           | Time between scan cycles (10 min).                                                                                 |
+| `WATCHLIST_POOLS`             | —                                                                  | Comma-separated Meteora DLMM pool addresses.                                                                       |
+| `ENABLE_POOL_DISCOVERY`       | `true` (postinstall default) / `false` (code fallback)             | Discover pools when watchlist is empty.                                                                            |
+| `MIN_POOL_TVL_USD`            | `50000`                                                            | Skip pools below this TVL.                                                                                         |
+| `VOLUME_AUTH_THRESHOLD`       | `0.70`                                                             | Minimum volume authenticity score.                                                                                 |
+| `CONFIDENCE_THRESHOLD`        | `0.65`                                                             | Minimum confidence to act.                                                                                         |
+| `STOP_LOSS_PCT`               | `0.15`                                                             | Drawdown that blocks HOLD/REBALANCE.                                                                               |
+| `TRAILING_STOP_PCT`           | `0.10`                                                             | Drawdown from peak that triggers EXIT.                                                                             |
+| `MAX_OPEN_POSITIONS`          | `3`                                                                | Concurrent positions cap.                                                                                          |
+| `MAX_PER_POOL_ALLOCATION_PCT` | `0.4`                                                              | Max portfolio share for one pool.                                                                                  |
+| `SQLITE_DB_PATH`              | `~/.local/share/prism/prism.db` (bundled) or `./prism.db` (source) | SQLite database path.                                                                                              |
+| `ENABLE_SNAPSHOT_CAPTURE`     | `false`                                                            | Dump full snapshots every cycle (paper only).                                                                      |
+| `EMBEDDINGS_BACKEND`          | `fallback`                                                         | `fallback` = deterministic hash vectors; `onnx` = Xenova/MiniLM (downloads ~80MB).                                 |
+| `AGENTIC_MODE`                | `false`                                                            | Enable agent runtime overlay.                                                                                      |
+| `AGENT_MCP_ENABLED`           | `false`                                                            | Expose stdio MCP server.                                                                                           |
+| `AGENT_HTTP_PORT`             | `0`                                                                | Local HTTP status port (`0` = disabled).                                                                           |
+| `AUTO_UPDATE`                 | `true`                                                             | Check for releases periodically.                                                                                   |
+| `UPDATE_CHANNEL`              | `stable`                                                           | `stable`, `beta` or `dev`.                                                                                         |
+| `UPDATE_R2_PUBLIC_URL`        | `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev`              | Release CDN. `.env.example` contains a stale `r2.prism-agent.com` value; the code fallback is the source of truth. |
+| `PRISM_CONFIG_DIR`            | `~/.config/prism`                                                  | Override the shared credentials and config directory.                                                              |
+| `PRISM_FEEDBACK_OPT_OUT`      | `false`                                                            | Disable automatic feedback.                                                                                        |
 
 In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaults to `test-helius-key` and `SOLANA_RPC_URL` defaults to `https://example.com`.
 

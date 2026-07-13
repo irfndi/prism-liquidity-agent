@@ -1,8 +1,8 @@
 import fs from "fs";
 import path from "path";
-import os from "os";
 import { getOrCreateInstallId } from "./install-id.js";
 import { getCurrentVersion } from "../engine/version.js";
+import { getPrismConfigDir } from "../engine/paths.js";
 
 const DEFAULT_API_URL = "https://prism-api.irfndi.workers.dev";
 
@@ -10,7 +10,7 @@ export function getApiBaseUrl(): string {
   return process.env.PRISM_API_URL ?? DEFAULT_API_URL;
 }
 
-export const CREDENTIALS_FILE = path.join(os.homedir(), ".config", "prism", "credentials.json");
+export const CREDENTIALS_FILE = path.join(getPrismConfigDir(), "credentials.json");
 
 export interface ApiResponse<T> {
   ok: boolean;
@@ -114,7 +114,11 @@ export async function requireRegistered(validate = false): Promise<PrismCredenti
     throw new Error("Prism account required. Run 'prism register' first.");
   }
   if (validate) {
-    const result = await prismApiPost("/v1/login", {}, { apiKey: credentials.apiKey });
+    const result = await prismApiPost(
+      "/v1/login",
+      {},
+      { apiKey: credentials.apiKey, signal: AbortSignal.timeout(5000) },
+    );
     if (!result.ok) {
       throw new Error(
         `Stored Prism credentials are invalid or unavailable. Run 'prism login <key>'.${
