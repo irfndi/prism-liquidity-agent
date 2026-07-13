@@ -232,7 +232,7 @@ if [ -z "$SKIP_SETUP" ]; then
 fi
 
 # Anonymous install telemetry (opt-out via PRISM_FEEDBACK_OPT_OUT).
-INSTALL_ID_FILE="$HOME/.config/prism/install-id"
+INSTALL_ID_FILE="$CONFIG_DIR/install-id"
 if [ ! -s "$INSTALL_ID_FILE" ]; then
   INSTALL_ID="$(bun -e 'console.log(crypto.randomUUID())' 2>/dev/null || echo "")"
   if [ -z "$INSTALL_ID" ]; then

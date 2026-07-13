@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { pingInstall, prismApiPost, writeCredentials } from "./api.js";
+import { pingInstall, prismApiPost, writeCredentials, CREDENTIALS_FILE } from "./api.js";
 
 interface RegisterResult {
   user_id: string;
@@ -32,7 +32,7 @@ export const registerCommand = new Command("register")
     console.log("✓ Registration successful");
     console.log(`  User ID: ${userId}`);
     console.log(`  API Key: ${apiKey.slice(0, 12)}...`);
-    console.log(`  Saved to: ${process.env.HOME}/.config/prism/credentials.json`);
+    console.log(`  Saved to: ${CREDENTIALS_FILE}`);
     console.log("");
     console.log("Next: run 'prism setup' to configure your trading agent");
   });

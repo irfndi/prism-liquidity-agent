@@ -4,7 +4,7 @@ import { DbService, RevenueConfigService, type DbApi, type RevenueConfig } from 
 import { createLogger } from "./logger.js";
 import fs from "fs";
 import path from "path";
-import { getPrismConfigDir } from "./paths.js";
+import { getPrismUserConfigDir } from "./paths.js";
 
 const log = createLogger("revenue-config-service");
 
@@ -12,7 +12,7 @@ const API_BASE_URL = "https://prism-api.irfndi.workers.dev";
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 2000;
-const CREDENTIALS_FILE = path.join(getPrismConfigDir(), "credentials.json");
+const CREDENTIALS_FILE = path.join(getPrismUserConfigDir(), "credentials.json");
 const METADATA_KEY = "revenue_config";
 
 const DEFAULT_CONFIG: RevenueConfig = {

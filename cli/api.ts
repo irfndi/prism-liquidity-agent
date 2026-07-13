@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { getOrCreateInstallId } from "./install-id.js";
 import { getCurrentVersion } from "../engine/version.js";
-import { getPrismConfigDir } from "../engine/paths.js";
+import { getPrismUserConfigDir } from "../engine/paths.js";
 
 const DEFAULT_API_URL = "https://prism-api.irfndi.workers.dev";
 
@@ -10,7 +10,7 @@ export function getApiBaseUrl(): string {
   return process.env.PRISM_API_URL ?? DEFAULT_API_URL;
 }
 
-export const CREDENTIALS_FILE = path.join(getPrismConfigDir(), "credentials.json");
+export const CREDENTIALS_FILE = path.join(getPrismUserConfigDir(), "credentials.json");
 
 export interface ApiResponse<T> {
   ok: boolean;

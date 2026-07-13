@@ -15,7 +15,7 @@ import {
 } from "./services.js";
 import { getCurrentVersion } from "./version.js";
 import { detectInstallMethod } from "./install-method.js";
-import { getPrismConfigDir } from "./paths.js";
+import { getPrismUserConfigDir } from "./paths.js";
 
 const logger = createLogger("feedback");
 
@@ -142,7 +142,7 @@ function readPrismApiKey(): Effect.Effect<string | null, never> {
   return Effect.try({
     try: () => {
       const credentialsFile =
-        process.env.PRISM_CREDENTIALS_FILE ?? join(getPrismConfigDir(), "credentials.json");
+        process.env.PRISM_CREDENTIALS_FILE ?? join(getPrismUserConfigDir(), "credentials.json");
       if (!existsSync(credentialsFile)) return null;
       const value = JSON.parse(readFileSync(credentialsFile, "utf-8")) as {
         apiKey?: unknown;

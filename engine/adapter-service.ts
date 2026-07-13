@@ -20,7 +20,7 @@ import { ConfigService } from "./config-service.js";
 import { AdapterError } from "./errors.js";
 import { DiscoverPoolsError } from "./errors.js";
 import { createLogger } from "./logger.js";
-import { getPrismConfigDir } from "./paths.js";
+import { getPrismUserConfigDir } from "./paths.js";
 import type { BinArray, BinData, PoolState, Position } from "./types.js";
 import {
   CircuitBreaker,
@@ -180,7 +180,7 @@ function describe(v: unknown): string {
 
 // ─── Install ID helper (engine-safe mirror of cli/install-id.ts) ───────────
 
-const INSTALL_ID_FILE = path.join(os.homedir(), ".config", "prism", "install-id");
+const INSTALL_ID_FILE = path.join(getPrismUserConfigDir(), "install-id");
 let cachedInstallId: string | null = null;
 
 function getOrCreateInstallId(): Effect.Effect<string, never> {
@@ -1428,7 +1428,7 @@ export const AdapterLive = Layer.effect(
           const installId = yield* getOrCreateInstallId();
           const apiKey = yield* Effect.try({
             try: () => {
-              const credsPath = path.join(getPrismConfigDir(), "credentials.json");
+              const credsPath = path.join(getPrismUserConfigDir(), "credentials.json");
               const creds = JSON.parse(fs.readFileSync(credsPath, "utf-8")) as {
                 apiKey?: unknown;
               };

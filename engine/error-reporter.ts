@@ -14,7 +14,7 @@
 import { existsSync, readFileSync } from "fs";
 import { Effect } from "effect";
 import { join } from "path";
-import { getPrismConfigDir } from "./paths.js";
+import { getPrismUserConfigDir } from "./paths.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -70,7 +70,7 @@ const MAX_PENDING_BUFFER = 1000;
 function readPrismApiKey(): Effect.Effect<string | null, never> {
   return Effect.try({
     try: () => {
-      const credentialsFile = join(getPrismConfigDir(), "credentials.json");
+      const credentialsFile = join(getPrismUserConfigDir(), "credentials.json");
       if (!existsSync(credentialsFile)) return null;
       const value = JSON.parse(readFileSync(credentialsFile, "utf-8")) as {
         apiKey?: unknown;

@@ -2,9 +2,9 @@ import { Command } from "commander";
 import fs from "fs";
 import path from "path";
 import { prismApiGet } from "./api.js";
-import { getPrismConfigDir } from "../engine/paths.js";
+import { getPrismUserConfigDir } from "../engine/paths.js";
 
-const CREDENTIALS_FILE = path.join(getPrismConfigDir(), "credentials.json");
+const CREDENTIALS_FILE = path.join(getPrismUserConfigDir(), "credentials.json");
 
 // Tier display info
 const TIER_INFO: Record<

@@ -4,6 +4,7 @@ import os from "os";
 import path from "path";
 import {
   getPrismConfigDir,
+  getPrismUserConfigDir,
   getPrismDataDir,
   getPrismEnvPath,
   getPrismDbPath,
@@ -47,6 +48,7 @@ describe("paths", () => {
 
     const realProjectRoot = fs.realpathSync(projectRoot);
     expect(getPrismConfigDir()).toBe(realProjectRoot);
+    expect(getPrismUserConfigDir()).toBe(process.env.PRISM_CONFIG_DIR);
     expect(getPrismDataDir()).toBe(realProjectRoot);
     expect(getPrismEnvPath()).toBe(path.join(realProjectRoot, ".env"));
     expect(getPrismDbPath()).toBe(path.join(realProjectRoot, "prism.db"));

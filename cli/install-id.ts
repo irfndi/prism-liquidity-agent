@@ -1,9 +1,9 @@
 import fs from "fs";
 import path from "path";
-import os from "os";
 import { randomUUID } from "crypto";
+import { getPrismUserConfigDir } from "../engine/paths.js";
 
-const INSTALL_ID_FILE = path.join(os.homedir(), ".config", "prism", "install-id");
+const INSTALL_ID_FILE = path.join(getPrismUserConfigDir(), "install-id");
 
 let cachedId: string | null = null;
 
