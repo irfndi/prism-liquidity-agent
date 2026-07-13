@@ -1,14 +1,22 @@
 import { Effect } from "effect";
 import semver from "semver";
+import path from "path";
+
+export function getVersionAgnosticInstallDir(installDir: string): string {
+  const normalized = path.normalize(installDir);
+  const name = path.basename(normalized);
+  const match = /^(prism(?:-dlmm|-liquidity-agent)?)-v\d+\.\d+\.\d+(?:[-+].+)?$/.exec(name);
+  const prefix = match?.[1];
+  return prefix ? path.join(path.dirname(normalized), prefix) : normalized;
+}
 
 function tryNetwork<T>(promise: () => Promise<T>, description: string): Effect.Effect<T, Error> {
   return Effect.tryPromise({
     try: promise,
     catch: (error) =>
-      new Error(
-        `${description}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      ),
+      new Error(`${description}: ${error instanceof Error ? error.message : String(error)}`, {
+        cause: error,
+      }),
   });
 }
 

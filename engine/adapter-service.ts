@@ -33,10 +33,11 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { randomUUID } from "crypto";
+import { getWalletSystemLamportsRequired } from "./live-entry-budget.js";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const GAS_RESERVE_LAMPORTS = 20_000_000n; // 0.02 SOL reserved for transaction fees
+const GAS_RESERVE_LAMPORTS = 20_000_000n; // 0.02 SOL reserved for fees and non-System-program costs
 const RPC_RETRY_OPTIONS = {
   maxRetries: 2,
   baseDelayMs: 1_000,
@@ -1030,74 +1031,57 @@ export const AdapterLive = Layer.effect(
             Effect.map((m) => m.decimals),
           );
 
-          let totalXAmount = new BN(Math.floor((halfUsd / priceX) * Math.pow(10, tokenXDecimals)));
-          let totalYAmount = new BN(Math.floor((halfUsd / priceY) * Math.pow(10, tokenYDecimals)));
+          const totalXAmount = new BN(
+            Math.floor((halfUsd / priceX) * Math.pow(10, tokenXDecimals)),
+          );
+          const totalYAmount = new BN(
+            Math.floor((halfUsd / priceY) * Math.pow(10, tokenYDecimals)),
+          );
           const requestedXAmount = BigInt(totalXAmount.toString());
           const requestedYAmount = BigInt(totalYAmount.toString());
 
-          // Check balances
-          const balanceX = yield* getTokenBalance(pool.tokenX);
-          const balanceY = yield* getTokenBalance(pool.tokenY);
-          let nativeSolBalance = 0n;
-          if (pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT) {
-            nativeSolBalance = BigInt(yield* rpcCall((conn) => conn.getBalance(wallet.publicKey)));
-          }
-
-          const maxX =
-            pool.tokenX === SOL_MINT
-              ? nativeSolBalance > GAS_RESERVE_LAMPORTS
-                ? nativeSolBalance - GAS_RESERVE_LAMPORTS
-                : 0n
-              : balanceX;
-          if (BigInt(totalXAmount.toString()) > maxX) {
-            totalXAmount = new BN(maxX.toString());
-          }
-
-          const maxY =
-            pool.tokenY === SOL_MINT
-              ? nativeSolBalance > GAS_RESERVE_LAMPORTS
-                ? nativeSolBalance - GAS_RESERVE_LAMPORTS
-                : 0n
-              : balanceY;
-          if (BigInt(totalYAmount.toString()) > maxY) {
-            totalYAmount = new BN(maxY.toString());
-          }
-
-          if (
-            (pool.tokenX === SOL_MINT && maxX === 0n) ||
-            (pool.tokenY === SOL_MINT && maxY === 0n)
-          ) {
-            const shortages: string[] = [];
-            if (pool.tokenX === SOL_MINT && maxX === 0n) {
-              shortages.push(
-                `${pool.tokenX} required ${formatTokenAmount(requestedXAmount, tokenXDecimals)}, available ${formatTokenAmount(maxX, tokenXDecimals)} after gas reserve`,
-              );
-            }
-            if (pool.tokenY === SOL_MINT && maxY === 0n) {
-              shortages.push(
-                `${pool.tokenY} required ${formatTokenAmount(requestedYAmount, tokenYDecimals)}, available ${formatTokenAmount(maxY, tokenYDecimals)} after gas reserve`,
-              );
-            }
+          if (requestedXAmount === 0n || requestedYAmount === 0n) {
             return yield* Effect.fail(
               new AdapterError({
-                message: `Insufficient native SOL balance after reserving gas: ${shortages.join("; ")}`,
+                message: "Cannot enter a position with a zero-sized token leg",
                 poolAddress,
               }),
             );
           }
 
-          if (totalXAmount.eq(new BN(0)) || totalYAmount.eq(new BN(0))) {
-            const shortages: string[] = [];
-            if (totalXAmount.eq(new BN(0))) {
-              shortages.push(
-                `${pool.tokenX} required ${formatTokenAmount(requestedXAmount, tokenXDecimals)}, available ${formatTokenAmount(maxX, tokenXDecimals)}`,
-              );
-            }
-            if (totalYAmount.eq(new BN(0))) {
-              shortages.push(
-                `${pool.tokenY} required ${formatTokenAmount(requestedYAmount, tokenYDecimals)}, available ${formatTokenAmount(maxY, tokenYDecimals)}`,
-              );
-            }
+          // Check balances
+          const balanceX = yield* getTokenBalance(pool.tokenX);
+          const balanceY = yield* getTokenBalance(pool.tokenY);
+          const nativeSolBalance =
+            pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT
+              ? BigInt(yield* rpcCall((conn) => conn.getBalance(wallet.publicKey)))
+              : undefined;
+
+          const maxX =
+            pool.tokenX === SOL_MINT
+              ? nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
+                ? nativeSolBalance - GAS_RESERVE_LAMPORTS
+                : 0n
+              : balanceX;
+
+          const maxY =
+            pool.tokenY === SOL_MINT
+              ? nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
+                ? nativeSolBalance - GAS_RESERVE_LAMPORTS
+                : 0n
+              : balanceY;
+          const shortages: string[] = [];
+          if (requestedXAmount > maxX) {
+            shortages.push(
+              `${pool.tokenX} required ${formatTokenAmount(requestedXAmount, tokenXDecimals)}, available ${formatTokenAmount(maxX, tokenXDecimals)}${pool.tokenX === SOL_MINT ? " after gas reserve" : ""}`,
+            );
+          }
+          if (requestedYAmount > maxY) {
+            shortages.push(
+              `${pool.tokenY} required ${formatTokenAmount(requestedYAmount, tokenYDecimals)}, available ${formatTokenAmount(maxY, tokenYDecimals)}${pool.tokenY === SOL_MINT ? " after gas reserve" : ""}`,
+            );
+          }
+          if (shortages.length > 0) {
             return yield* Effect.fail(
               new AdapterError({
                 message: `Insufficient token balance: ${shortages.join("; ")}. Wallet must hold both pool tokens before live entry.`,
@@ -1123,6 +1107,22 @@ export const AdapterLive = Layer.effect(
               slippage: 50,
             }),
           );
+
+          const transactionLamports = getWalletSystemLamportsRequired(
+            tx.instructions,
+            wallet.publicKey,
+          );
+          const requiredLamports = transactionLamports + GAS_RESERVE_LAMPORTS;
+          const actualSolBalance =
+            nativeSolBalance ?? BigInt(yield* rpcCall((conn) => conn.getBalance(wallet.publicKey)));
+          if (actualSolBalance < requiredLamports) {
+            return yield* Effect.fail(
+              new AdapterError({
+                message: `Insufficient SOL for live entry transaction: required ${formatTokenAmount(requiredLamports, 9)} (direct System Program debits plus ${formatTokenAmount(GAS_RESERVE_LAMPORTS, 9)} reserve for fees, ATA rent and other costs), available ${formatTokenAmount(actualSolBalance, 9)}.`,
+                poolAddress,
+              }),
+            );
+          }
 
           tx.feePayer = wallet.publicKey;
           const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());

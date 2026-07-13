@@ -58,7 +58,7 @@ There are also optional peripheral subprojects:
 
 | File                                                  | Purpose                                                                                                                                       |
 | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `package.json`                                        | Root manifest, scripts, dependencies. Current version `0.0.30`.                                                                               |
+| `package.json`                                        | Root manifest, scripts, dependencies. Current version `0.0.31`.                                                                               |
 | `tsconfig.json`                                       | Strict TypeScript config for `engine/`, `ops/`, `bench/`, `cli/`, `types/`.                                                                   |
 | `vitest.config.ts`                                    | Engine test config; coverage thresholds and exclusions.                                                                                       |
 | `tsdown.config.ts`                                    | Build config for the engine bundle (`engine/index.ts` → `dist/index.mjs`).                                                                    |
@@ -309,6 +309,7 @@ In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaul
 - **Bundled blacklists are empty.** `engine/data/deployer-blacklist.json` and `engine/data/token-blacklist.json` ship as `[]`. Override with `DEPLOYER_BLACKLIST_PATH` / `TOKEN_BLACKLIST_PATH`.
 - **Deployer blacklist is half-wired.** `blacklist.checkPool()` accepts deployer addresses, but deployers are not currently fetched from on-chain metadata.
 - **One ENTER per live cycle.** In live mode, `ENTER` is silently skipped if any position is already open.
+- **Live entry balance policy.** Live entries fail closed when either requested token amount exceeds the wallet balance; they are not silently downsized.
 - **sqlite-vec extension.** Source installs rely on `scripts/generate-vec-embed.ts` to create `engine/sqlite-vec-embedded.ts`; bundled installs provide the native extension via `PRISM_VEC0_PATH`.
 - **Backtest is a simplified simulation.** It does not replicate the full decision loop (no risk gates, memory, dynamic ENTER/EXIT sizing, trailing stop). Use it as a regression baseline, not a performance forecast.
 - **`.env.example` is stale in places.** For example, its `UPDATE_R2_PUBLIC_URL` default does not match the code fallback. Always verify against `engine/config-service.ts`.

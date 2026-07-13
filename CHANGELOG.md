@@ -2,6 +2,14 @@
 
 All notable changes to Prism are documented here.
 
+## [0.0.31] — 2026-07-13
+
+### Fixed
+
+- Live DLMM entries now reject insufficient token balances before building a transaction.
+- SOL entries now account for wallet-funded position, bin-array, ATA and wrapped SOL instructions before submission.
+- `prism update` migrates legacy versioned install directories to stable paths and rewrites generated wrappers.
+
 ## [0.0.30] — 2026-07-13
 
 ### Changed
