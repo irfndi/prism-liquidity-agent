@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { detectInstallMethod, isSourceInstall } from "../engine/install-method.js";
+import { getVersionAgnosticInstallDir } from "../engine/update-utils.js";
 
 describe("install-method", () => {
   let tmpDir = "";
@@ -36,5 +37,12 @@ describe("install-method", () => {
     fs.mkdirSync(path.join(tmpDir, "dist", "cli"), { recursive: true });
     fs.writeFileSync(path.join(tmpDir, "dist", "cli", "index.mjs"), "");
     expect(isSourceInstall(tmpDir)).toBe(false);
+  });
+
+  it("removes release versions from legacy bundle install paths", () => {
+    expect(getVersionAgnosticInstallDir("/home/user/prism-dlmm-v0.0.30")).toBe(
+      "/home/user/prism-dlmm",
+    );
+    expect(getVersionAgnosticInstallDir("/home/user/.prism")).toBe("/home/user/.prism");
   });
 });

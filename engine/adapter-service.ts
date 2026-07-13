@@ -33,6 +33,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { randomUUID } from "crypto";
+import { getWalletSystemLamportsRequired } from "./live-entry-budget.js";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -1030,8 +1031,12 @@ export const AdapterLive = Layer.effect(
             Effect.map((m) => m.decimals),
           );
 
-          let totalXAmount = new BN(Math.floor((halfUsd / priceX) * Math.pow(10, tokenXDecimals)));
-          let totalYAmount = new BN(Math.floor((halfUsd / priceY) * Math.pow(10, tokenYDecimals)));
+          const totalXAmount = new BN(
+            Math.floor((halfUsd / priceX) * Math.pow(10, tokenXDecimals)),
+          );
+          const totalYAmount = new BN(
+            Math.floor((halfUsd / priceY) * Math.pow(10, tokenYDecimals)),
+          );
           const requestedXAmount = BigInt(totalXAmount.toString());
           const requestedYAmount = BigInt(totalYAmount.toString());
 
@@ -1049,9 +1054,6 @@ export const AdapterLive = Layer.effect(
                 ? nativeSolBalance - GAS_RESERVE_LAMPORTS
                 : 0n
               : balanceX;
-          if (BigInt(totalXAmount.toString()) > maxX) {
-            totalXAmount = new BN(maxX.toString());
-          }
 
           const maxY =
             pool.tokenY === SOL_MINT
@@ -1059,45 +1061,18 @@ export const AdapterLive = Layer.effect(
                 ? nativeSolBalance - GAS_RESERVE_LAMPORTS
                 : 0n
               : balanceY;
-          if (BigInt(totalYAmount.toString()) > maxY) {
-            totalYAmount = new BN(maxY.toString());
-          }
-
-          if (
-            (pool.tokenX === SOL_MINT && maxX === 0n) ||
-            (pool.tokenY === SOL_MINT && maxY === 0n)
-          ) {
-            const shortages: string[] = [];
-            if (pool.tokenX === SOL_MINT && maxX === 0n) {
-              shortages.push(
-                `${pool.tokenX} required ${formatTokenAmount(requestedXAmount, tokenXDecimals)}, available ${formatTokenAmount(maxX, tokenXDecimals)} after gas reserve`,
-              );
-            }
-            if (pool.tokenY === SOL_MINT && maxY === 0n) {
-              shortages.push(
-                `${pool.tokenY} required ${formatTokenAmount(requestedYAmount, tokenYDecimals)}, available ${formatTokenAmount(maxY, tokenYDecimals)} after gas reserve`,
-              );
-            }
-            return yield* Effect.fail(
-              new AdapterError({
-                message: `Insufficient native SOL balance after reserving gas: ${shortages.join("; ")}`,
-                poolAddress,
-              }),
+          const shortages: string[] = [];
+          if (requestedXAmount > maxX) {
+            shortages.push(
+              `${pool.tokenX} required ${formatTokenAmount(requestedXAmount, tokenXDecimals)}, available ${formatTokenAmount(maxX, tokenXDecimals)}${pool.tokenX === SOL_MINT ? " after gas reserve" : ""}`,
             );
           }
-
-          if (totalXAmount.eq(new BN(0)) || totalYAmount.eq(new BN(0))) {
-            const shortages: string[] = [];
-            if (totalXAmount.eq(new BN(0))) {
-              shortages.push(
-                `${pool.tokenX} required ${formatTokenAmount(requestedXAmount, tokenXDecimals)}, available ${formatTokenAmount(maxX, tokenXDecimals)}`,
-              );
-            }
-            if (totalYAmount.eq(new BN(0))) {
-              shortages.push(
-                `${pool.tokenY} required ${formatTokenAmount(requestedYAmount, tokenYDecimals)}, available ${formatTokenAmount(maxY, tokenYDecimals)}`,
-              );
-            }
+          if (requestedYAmount > maxY) {
+            shortages.push(
+              `${pool.tokenY} required ${formatTokenAmount(requestedYAmount, tokenYDecimals)}, available ${formatTokenAmount(maxY, tokenYDecimals)}${pool.tokenY === SOL_MINT ? " after gas reserve" : ""}`,
+            );
+          }
+          if (shortages.length > 0) {
             return yield* Effect.fail(
               new AdapterError({
                 message: `Insufficient token balance: ${shortages.join("; ")}. Wallet must hold both pool tokens before live entry.`,
@@ -1123,6 +1098,22 @@ export const AdapterLive = Layer.effect(
               slippage: 50,
             }),
           );
+
+          if (pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT) {
+            const transactionLamports = getWalletSystemLamportsRequired(
+              tx.instructions,
+              wallet.publicKey,
+            );
+            const requiredLamports = transactionLamports + GAS_RESERVE_LAMPORTS;
+            if (nativeSolBalance < requiredLamports) {
+              return yield* Effect.fail(
+                new AdapterError({
+                  message: `Insufficient SOL for live entry transaction: required ${formatTokenAmount(requiredLamports, 9)}, available ${formatTokenAmount(nativeSolBalance, 9)}. This includes position, bin-array, ATA and wrapped SOL funding plus gas reserve.`,
+                  poolAddress,
+                }),
+              );
+            }
+          }
 
           tx.feePayer = wallet.publicKey;
           const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
