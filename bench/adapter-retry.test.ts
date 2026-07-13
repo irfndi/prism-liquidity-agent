@@ -94,6 +94,29 @@ describe("retryWithBackoff", () => {
     );
     expect(fn).toHaveBeenCalledTimes(1);
   });
+
+  it("honors Retry-After headers when rate limited", async () => {
+    let call = 0;
+    const startedAt = Date.now();
+    const fn = vi.fn(async () => {
+      call++;
+      if (call === 1) {
+        throw {
+          code: 429,
+          headers: { get: () => "0.02" },
+          message: "too many requests",
+        };
+      }
+      return "ok";
+    });
+
+    await Effect.runPromise(
+      retryWithBackoff(fn, { baseDelayMs: 1, rateLimitBaseDelayMs: 1, maxRetries: 1 }),
+    );
+
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(15);
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
 });
 
 // ── CircuitBreaker ────────────────────────────────────────────────

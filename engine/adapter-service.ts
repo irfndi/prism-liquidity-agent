@@ -44,6 +44,7 @@ const RPC_RETRY_OPTIONS = {
   maxDelayMs: 30_000,
   rateLimitBaseDelayMs: 5_000,
 } as const;
+const RPC_MIN_INTERVAL_MS = 50;
 
 function formatTokenAmount(amount: bigint, decimals: number): string {
   return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
@@ -314,15 +315,36 @@ export const AdapterLive = Layer.effect(
     const fallbackRpcCircuitBreaker = fallbackConnection
       ? new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 30_000 })
       : null;
+    const nextRpcStartAt = new Map<Connection, number>();
+    let nextHeliusRequestAt = 0;
+
+    function paceRpc(conn: Connection): Effect.Effect<void> {
+      const now = Date.now();
+      const nextStartAt = nextRpcStartAt.get(conn) ?? now;
+      const waitMs = Math.max(0, nextStartAt - now);
+      nextRpcStartAt.set(conn, Math.max(now, nextStartAt) + RPC_MIN_INTERVAL_MS);
+      return Effect.sleep(waitMs);
+    }
+
+    function paceHeliusRequest(): Effect.Effect<void> {
+      const now = Date.now();
+      const waitMs = Math.max(0, nextHeliusRequestAt - now);
+      nextHeliusRequestAt = Math.max(now, nextHeliusRequestAt) + RPC_MIN_INTERVAL_MS;
+      return Effect.sleep(waitMs);
+    }
 
     function rpcCall<T>(
       fn: (conn: Connection) => Promise<T>,
       primaryConn: Connection = connection,
     ): Effect.Effect<T, unknown> {
       const run = (conn: Connection, breaker: CircuitBreaker): Effect.Effect<T, unknown> =>
-        breaker.execute(
-          retryWithBackoff(() => fn(conn), RPC_RETRY_OPTIONS),
-          isRpcNetworkError,
+        paceRpc(conn).pipe(
+          Effect.zipRight(
+            breaker.execute(
+              retryWithBackoff(() => fn(conn), RPC_RETRY_OPTIONS),
+              isRpcNetworkError,
+            ),
+          ),
         );
 
       return run(primaryConn, primaryRpcCircuitBreaker).pipe(
@@ -426,6 +448,7 @@ export const AdapterLive = Layer.effect(
           return yield* Effect.fail(
             Object.assign(new Error(`Helius getAsset returned HTTP ${res.status}`), {
               code: res.status,
+              headers: res.headers,
             }),
           );
         }
@@ -440,7 +463,9 @@ export const AdapterLive = Layer.effect(
         return json;
       });
       return Effect.cachedInvalidateWithTTL(
-        retryEffectWithBackoff(assetRequest, RPC_RETRY_OPTIONS),
+        paceHeliusRequest().pipe(
+          Effect.zipRight(retryEffectWithBackoff(assetRequest, RPC_RETRY_OPTIONS)),
+        ),
         HELIUS_ASSET_CACHE_TTL_MS,
       );
     });
@@ -740,11 +765,15 @@ export const AdapterLive = Layer.effect(
     }
 
     const WALLET_BALANCE_CACHE_TTL_MS = 30_000;
+    const tokenBalanceCache = new Map<string, { value: bigint; expiresAt: number }>();
+    let nativeSolBalanceCache: { value: bigint; expiresAt: number } | undefined;
 
     function readTokenBalance(mintAddress: string): Effect.Effect<bigint, unknown> {
       return Effect.gen(function* () {
         const activeWallet = wallet;
         if (!activeWallet) return 0n;
+        const cached = tokenBalanceCache.get(mintAddress);
+        if (cached && cached.expiresAt > Date.now()) return cached.value;
         const mint = new PublicKey(mintAddress);
         const accounts = yield* rpcCall((conn) =>
           conn.getParsedTokenAccountsByOwner(activeWallet.publicKey, { mint }),
@@ -762,7 +791,26 @@ export const AdapterLive = Layer.effect(
           const amount = tokenAmount["amount"];
           if (typeof amount === "string") total += BigInt(amount);
         }
+        tokenBalanceCache.set(mintAddress, {
+          value: total,
+          expiresAt: Date.now() + WALLET_BALANCE_CACHE_TTL_MS,
+        });
         return total;
+      });
+    }
+
+    function readNativeSolBalance(): Effect.Effect<bigint, unknown> {
+      return Effect.gen(function* () {
+        if (!wallet) return 0n;
+        if (nativeSolBalanceCache && nativeSolBalanceCache.expiresAt > Date.now()) {
+          return nativeSolBalanceCache.value;
+        }
+        const value = BigInt(yield* rpcCall((conn) => conn.getBalance(wallet.publicKey)));
+        nativeSolBalanceCache = {
+          value,
+          expiresAt: Date.now() + WALLET_BALANCE_CACHE_TTL_MS,
+        };
+        return value;
       });
     }
 
@@ -782,6 +830,11 @@ export const AdapterLive = Layer.effect(
       readWalletBalanceUsd(),
       WALLET_BALANCE_CACHE_TTL_MS,
     );
+
+    const invalidateBalanceCaches = Effect.sync(() => {
+      tokenBalanceCache.clear();
+      nativeSolBalanceCache = undefined;
+    }).pipe(Effect.zipRight(invalidateWalletBalance));
 
     // ─── Pool stats ────────────────────────────────────────────────────────
 
@@ -846,8 +899,7 @@ export const AdapterLive = Layer.effect(
       getNativeSolBalance: () =>
         Effect.gen(function* () {
           if (!wallet) return 0;
-          const lamports = yield* rpcCall((conn) => conn.getBalance(wallet.publicKey));
-          return lamports;
+          return Number(yield* readNativeSolBalance());
         }),
 
       getPoolState: (poolAddress) =>
@@ -1054,7 +1106,7 @@ export const AdapterLive = Layer.effect(
           const balanceY = yield* getTokenBalance(pool.tokenY);
           const nativeSolBalance =
             pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT
-              ? BigInt(yield* rpcCall((conn) => conn.getBalance(wallet.publicKey)))
+              ? yield* readNativeSolBalance()
               : undefined;
 
           const maxX =
@@ -1113,8 +1165,7 @@ export const AdapterLive = Layer.effect(
             wallet.publicKey,
           );
           const requiredLamports = transactionLamports + GAS_RESERVE_LAMPORTS;
-          const actualSolBalance =
-            nativeSolBalance ?? BigInt(yield* rpcCall((conn) => conn.getBalance(wallet.publicKey)));
+          const actualSolBalance = nativeSolBalance ?? (yield* readNativeSolBalance());
           if (actualSolBalance < requiredLamports) {
             return yield* Effect.fail(
               new AdapterError({
@@ -1137,7 +1188,7 @@ export const AdapterLive = Layer.effect(
           );
 
           yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
-          yield* invalidateWalletBalance;
+          yield* invalidateBalanceCaches;
 
           return {
             positionPubKey: positionKeypair.publicKey.toBase58(),
@@ -1197,7 +1248,7 @@ export const AdapterLive = Layer.effect(
             );
             yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
           }
-          yield* invalidateWalletBalance;
+          yield* invalidateBalanceCaches;
 
           return { txSignature: "batch-confirmed" };
         }).pipe(
@@ -1396,7 +1447,7 @@ export const AdapterLive = Layer.effect(
           );
 
           yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
-          yield* invalidateWalletBalance;
+          yield* invalidateBalanceCaches;
 
           return {
             txSignature: signature,
@@ -1547,8 +1598,8 @@ export const AdapterLive = Layer.effect(
           const activeWallet = wallet;
           if (!activeWallet) return;
 
-          const lamports = yield* rpcCall((conn) => conn.getBalance(activeWallet.publicKey));
-          const solBalance = lamports / 1e9;
+          const lamports = yield* readNativeSolBalance();
+          const solBalance = Number(lamports) / 1e9;
 
           if (solBalance >= minSolThreshold) return;
 
@@ -1622,7 +1673,7 @@ export const AdapterLive = Layer.effect(
             );
 
             yield* rpcCall((conn) => conn.confirmTransaction(sig, "confirmed"));
-            yield* invalidateWalletBalance;
+            yield* invalidateBalanceCaches;
             logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
           });
 

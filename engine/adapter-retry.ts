@@ -15,6 +15,44 @@ function hasMessage(err: unknown): err is { readonly message: string } {
   return isObject(err) && "message" in err && typeof err.message === "string";
 }
 
+function retryAfterMs(err: unknown): number | undefined {
+  if (!isObject(err)) return undefined;
+  const headers = err["headers"];
+  const response = err["response"];
+  const responseHeaders = isObject(response) ? response["headers"] : undefined;
+  const getHeader = (value: unknown): string | null => {
+    if (isObject(value) && typeof value["get"] === "function") {
+      const result = (value["get"] as (name: string) => unknown)("retry-after");
+      return typeof result === "string" ? result : null;
+    }
+    return null;
+  };
+  const header = getHeader(headers) ?? getHeader(responseHeaders);
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+  return Math.min(seconds * 1000, 120_000);
+}
+
+const retryLogState = new Map<string, { lastLoggedAt: number; suppressed: number }>();
+const RETRY_LOG_INTERVAL_MS = 10_000;
+
+function logRetry(err: unknown, message: string): void {
+  const now = Date.now();
+  const key = String(err);
+  const previous = retryLogState.get(key);
+  if (previous && now - previous.lastLoggedAt < RETRY_LOG_INTERVAL_MS) {
+    previous.suppressed++;
+    return;
+  }
+  const suppressed = previous?.suppressed ?? 0;
+  retryLogState.set(key, { lastLoggedAt: now, suppressed: 0 });
+  logger.warn(message, {
+    error: String(err),
+    ...(suppressed > 0 ? { suppressedRetries: suppressed } : {}),
+  });
+}
+
 export function isRetriableError(err: unknown): boolean {
   if (hasCode(err) && (err.code === 429 || err.code === -32005)) return true;
   if (hasMessage(err)) {
@@ -140,11 +178,11 @@ export function retryEffectWithBackoff<T>(
         const effectiveBase = isRateLimitError(err) ? rateLimitBaseDelayMs : baseDelayMs;
         const exponentialDelay = Math.min(maxDelayMs, effectiveBase * 2 ** attemptNumber);
         const jitter = Math.random() * exponentialDelay * 0.5;
-        const delay = Math.floor(exponentialDelay + jitter);
+        const delay = Math.max(Math.floor(exponentialDelay + jitter), retryAfterMs(err) ?? 0);
         return Effect.sync(() =>
-          logger.warn(
+          logRetry(
+            err,
             `Retriable RPC error (attempt ${attemptNumber + 1}/${maxRetries}), retrying in ${delay}ms`,
-            { error: String(err) },
           ),
         ).pipe(
           Effect.zipRight(Effect.sleep(delay)),

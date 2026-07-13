@@ -70,6 +70,11 @@ import type { AgentRuntimeAlert, AgentRuntimeCheckin } from "./agent-transport.j
 import { randomUUID } from "crypto";
 import { AgentLive, AgentNoOp } from "./agent-service.js";
 import { createLogger } from "./logger.js";
+import {
+  isInsufficientTokenBalanceError,
+  nextEntryFailureBackoff,
+  type EntryFailureBackoff,
+} from "./entry-backoff.js";
 
 const logger = createLogger("program");
 
@@ -328,6 +333,7 @@ export const program = Effect.gen(function* () {
   for (const pos of allPositions) {
     trackedPositions.set(pos.poolAddress, pos);
   }
+  const entryFailureBackoff = new Map<string, EntryFailureBackoff>();
 
   // Agent check-in state
   const programStartTime = Date.now();
@@ -645,7 +651,9 @@ export const program = Effect.gen(function* () {
         cycleId: randomUUID(),
         startedAt: Date.now(),
         poolsScanned: 0,
-        poolsActioned: 0,
+        poolsDecided: 0,
+        poolsExecuted: 0,
+        poolsFailed: 0,
         decisions: [],
         totalGasCostSol: 0,
         paperTrading: config.paperTrading,
@@ -665,8 +673,9 @@ export const program = Effect.gen(function* () {
       }
 
       for (const poolAddress of poolsToScan) {
-        const decision = yield* evaluatePool(poolAddress, cycle.cycleId).pipe(
+        const decision = yield* evaluatePool(poolAddress, cycle).pipe(
           Effect.catchAll((err) => {
+            cycle.poolsFailed++;
             console.error("Error processing pool", { poolAddress, err: String(err) });
             return Effect.succeed(null);
           }),
@@ -674,7 +683,7 @@ export const program = Effect.gen(function* () {
 
         if (decision) {
           cycle.decisions.push(decision);
-          cycle.poolsActioned++;
+          cycle.poolsDecided++;
         }
         cycle.poolsScanned++;
       }
@@ -684,7 +693,9 @@ export const program = Effect.gen(function* () {
       console.info("Scan cycle complete", {
         cycleId: cycle.cycleId,
         scanned: cycle.poolsScanned,
-        actioned: cycle.poolsActioned,
+        decided: cycle.poolsDecided,
+        executed: cycle.poolsExecuted,
+        failed: cycle.poolsFailed,
         durationSec: (durationMs / 1000).toFixed(1),
       });
 
@@ -823,9 +834,10 @@ export const program = Effect.gen(function* () {
 
   const evaluatePool = (
     poolAddress: string,
-    cycleId: string,
+    cycle: AgentCycle,
   ): Effect.Effect<AgentDecision | null, unknown> =>
     Effect.gen(function* () {
+      const cycleId = cycle.cycleId;
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, pool.activeBinId);
@@ -1320,6 +1332,13 @@ export const program = Effect.gen(function* () {
               logger.info("Skipping ENTER for unmanaged pool", { pool: poolAddress });
               return null;
             }
+            const entryBackoff = entryFailureBackoff.get(poolAddress);
+            if (entryBackoff) {
+              if (entryBackoff.nextAttemptAt > Date.now()) {
+                return null;
+              }
+              entryFailureBackoff.delete(poolAddress);
+            }
 
             // F7: pool cooldown check — skip ENTER if this pool is on cooldown
             const cooldown = yield* db
@@ -1605,6 +1624,25 @@ export const program = Effect.gen(function* () {
         );
         executed = liveResult.executed;
         executionError = liveResult.error;
+      }
+
+      if (decision.action !== "HOLD") {
+        if (executed) {
+          cycle.poolsExecuted++;
+        } else {
+          cycle.poolsFailed++;
+        }
+      }
+      if (decision.action === "ENTER" && isInsufficientTokenBalanceError(executionError)) {
+        const backoff = nextEntryFailureBackoff(entryFailureBackoff.get(poolAddress));
+        entryFailureBackoff.set(poolAddress, backoff);
+        logger.warn("Entry suppressed after insufficient token balance", {
+          pool: poolAddress,
+          retryAfterMs: backoff.nextAttemptAt - Date.now(),
+          failures: backoff.failures,
+        });
+      } else if (decision.action === "ENTER" && executed) {
+        entryFailureBackoff.delete(poolAddress);
       }
 
       // Audit after execution

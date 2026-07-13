@@ -138,7 +138,9 @@ export interface AgentCycle {
   startedAt: number;
   completedAt?: number;
   poolsScanned: number;
-  poolsActioned: number;
+  poolsDecided: number;
+  poolsExecuted: number;
+  poolsFailed: number;
   decisions: AgentDecision[];
   totalGasCostSol: number;
   paperTrading: boolean;
