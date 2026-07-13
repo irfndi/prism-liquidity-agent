@@ -1,10 +1,10 @@
 import { Command } from "commander";
 import fs from "fs";
 import path from "path";
-import os from "os";
 import { prismApiGet } from "./api.js";
+import { getPrismUserConfigDir } from "../engine/paths.js";
 
-const CREDENTIALS_FILE = path.join(os.homedir(), ".config", "prism", "credentials.json");
+const CREDENTIALS_FILE = path.join(getPrismUserConfigDir(), "credentials.json");
 
 // Tier display info
 const TIER_INFO: Record<

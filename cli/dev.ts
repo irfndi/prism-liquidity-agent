@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { pingInstall, readCredentials } from "./api.js";
+import { pingInstall, requireRegistered, type PrismCredentials } from "./api.js";
 import { acquireLock, releaseLock, LOCKFILE_PATH } from "./lockfile.js";
 import { runEngine } from "../engine/run-engine.js";
 
@@ -15,17 +15,19 @@ export const devCommand = new Command("dev")
     false,
   )
   .action(async (options: DevCommandOptions) => {
-    const creds = readCredentials();
-
-    if (!creds) {
-      console.warn(
-        "Warning: No Prism account found. Run 'prism register' to enable cloud features.",
-      );
-      console.warn("Continuing in local-only mode (paper trading works without registration).");
-      console.warn("");
+    let creds: PrismCredentials;
+    try {
+      creds = await requireRegistered(true);
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
     }
 
-    await pingInstall("dev_start", creds ? { userId: creds.userId } : {});
+    if (!(await pingInstall("dev_start", { userId: creds.userId }))) {
+      console.error("Error: Prism telemetry is unavailable; refusing to start the agent.");
+      console.error("Run 'prism doctor' to diagnose the account and API connection.");
+      process.exit(1);
+    }
 
     const lock = acquireLock();
     if (!lock.acquired) {

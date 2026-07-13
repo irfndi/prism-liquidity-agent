@@ -2,6 +2,7 @@ import { Command } from "commander";
 import {
   createWriteStream,
   cpSync,
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -147,9 +148,7 @@ async function fetchAndValidateChecksum(url: string): Promise<string> {
   }
   const [expectedHash] = checksumText.split(/\s+/);
   if (!expectedHash || !/^[a-fA-F0-9]{64}$/.test(expectedHash)) {
-    throw new UpdateAbort(
-      `SHA-256 checksum file is malformed: ${checksumText.slice(0, 32)}`,
-    );
+    throw new UpdateAbort(`SHA-256 checksum file is malformed: ${checksumText.slice(0, 32)}`);
   }
   return expectedHash;
 }
@@ -245,11 +244,10 @@ function resolveInstallRoot(): string {
       logger.debug(`Detected source install via wrapper: ${candidate}`);
       return candidate;
     }
-  } catch {
-  }
+  } catch {}
 
   try {
-    const main = typeof Bun !== "undefined" ? Bun.main : process.argv[1] ?? "";
+    const main = typeof Bun !== "undefined" ? Bun.main : (process.argv[1] ?? "");
     if (main) {
       const mainReal = realpathSync(main);
       const mainCandidate = dirname(dirname(mainReal));
@@ -258,8 +256,7 @@ function resolveInstallRoot(): string {
         return mainCandidate;
       }
     }
-  } catch {
-  }
+  } catch {}
 
   const installDir = resolveInstallDir();
   logger.debug(`Falling back to bundle install dir: ${installDir}`);
@@ -284,10 +281,9 @@ function rewriteWrapperSymlink(wrapperBin: string, sourceDir: string): void {
     renameSync(tempLink, wrapperBin);
   } catch (error) {
     const target = join(sourceDir, "cli", "index.ts");
-    logger.warn(
-      `Failed to rewrite source wrapper symlink at "${wrapperBin}" to "${target}"`,
-      { error: error instanceof Error ? error.message : String(error) },
-    );
+    logger.warn(`Failed to rewrite source wrapper symlink at "${wrapperBin}" to "${target}"`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
     if (tempLink) {
       try {
         rmSync(tempLink, { force: true });
@@ -308,10 +304,9 @@ function rewriteBundleWrapperSymlink(wrapperBin: string, installDir: string): vo
     renameSync(tempLink, wrapperBin);
   } catch (error) {
     const target = join(installDir, "dist", "cli", "index.mjs");
-    logger.warn(
-      `Failed to rewrite bundle wrapper symlink at "${wrapperBin}" to "${target}"`,
-      { error: error instanceof Error ? error.message : String(error) },
-    );
+    logger.warn(`Failed to rewrite bundle wrapper symlink at "${wrapperBin}" to "${target}"`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
     if (tempLink) {
       try {
         rmSync(tempLink, { force: true });
@@ -337,9 +332,7 @@ function findSourceRoot(extractedDir: string): string {
       return dir;
     }
   }
-  throw new UpdateAbort(
-    "Extracted source tarball does not contain a valid Prism source tree",
-  );
+  throw new UpdateAbort("Extracted source tarball does not contain a valid Prism source tree");
 }
 
 function preserveUserData(sourceDir: string, destDir: string): void {
@@ -350,6 +343,27 @@ function preserveUserData(sourceDir: string, destDir: string): void {
     if (existsSync(src)) {
       cpSync(src, dest, { recursive: true });
     }
+  }
+}
+
+function migrateBundleStateToUserDirs(installDir: string): void {
+  const configDir = process.env.PRISM_CONFIG_DIR ?? join(homedir(), ".config", "prism");
+  const dataDir = process.env.PRISM_DATA_DIR ?? join(homedir(), ".local", "share", "prism");
+
+  const legacyEnv = join(installDir, ".env");
+  const configEnv = join(configDir, ".env");
+  if (existsSync(legacyEnv) && !existsSync(configEnv)) {
+    mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    cpSync(legacyEnv, configEnv);
+    chmodSync(configEnv, 0o600);
+  }
+
+  for (const item of ["prism.db", "prism.db-wal", "prism.db-shm", "logs"]) {
+    const legacyPath = join(installDir, item);
+    const dataPath = join(dataDir, item);
+    if (!existsSync(legacyPath) || existsSync(dataPath)) continue;
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    cpSync(legacyPath, dataPath, { recursive: true });
   }
 }
 
@@ -439,6 +453,7 @@ async function updateFromBundle(
   const bundleRoot = findBundleRoot(extractedDir);
 
   const installDir = resolveInstallDir();
+  migrateBundleStateToUserDirs(installDir);
   preserveUserData(installDir, bundleRoot);
 
   console.log("Installing bundle...");
@@ -480,7 +495,13 @@ export const updateCommand = new Command("update")
     let workDir: string | null = null;
     try {
       const repo = "irfndi/prism-liquidity-agent";
-      const channel = options.channel as "stable" | "beta" | "dev";
+      const channelValue = String(options.channel);
+      if (channelValue !== "stable" && channelValue !== "beta" && channelValue !== "dev") {
+        throw new UpdateAbort(
+          `Invalid release channel '${channelValue}'. Use stable, beta, or dev.`,
+        );
+      }
+      const channel = channelValue;
       const r2Url = options.r2Url as string;
 
       const release = await Effect.runPromise(fetchLatestRelease(repo, channel, r2Url));

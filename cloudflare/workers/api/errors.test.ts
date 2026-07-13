@@ -3,11 +3,12 @@ import { env, createExecutionContext } from "cloudflare:test";
 import worker, { type Env } from "./index";
 
 const testEnv = env as unknown as Env;
+let apiKey = "";
 
 function buildRequest(method: string, path: string, body?: unknown, token?: string): Request {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
+  if (token ?? apiKey) {
+    headers["Authorization"] = `Bearer ${token ?? apiKey}`;
   }
   const init: RequestInit = { method, headers };
   if (body !== undefined) {
@@ -19,8 +20,26 @@ function buildRequest(method: string, path: string, body?: unknown, token?: stri
 describe("Error Reporting API", () => {
   beforeAll(async () => {
     await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        telegram_id TEXT UNIQUE,
+        tier TEXT NOT NULL DEFAULT 'free',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+    ).run();
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS api_keys (
+        key_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_used_at DATETIME
+      )`,
+    ).run();
+    await env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS error_logs (
         id TEXT PRIMARY KEY,
+        user_id TEXT,
         agent_id TEXT,
         error_type TEXT NOT NULL,
         message TEXT NOT NULL,
@@ -32,9 +51,22 @@ describe("Error Reporting API", () => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
     ).run();
+    await env.DB.prepare("ALTER TABLE error_logs ADD COLUMN user_id TEXT")
+      .run()
+      .catch(() => {});
     await env.DB.prepare(
       `CREATE INDEX IF NOT EXISTS idx_error_logs_agent_created ON error_logs(agent_id, created_at)`,
     ).run();
+    await env.DB.prepare("DELETE FROM api_keys").run();
+    await env.DB.prepare("DELETE FROM users").run();
+    await env.CACHE.delete("rate_limit:register:unknown");
+    const response = await worker.fetch(
+      buildRequest("POST", "/v1/register", {}, ""),
+      testEnv,
+      createExecutionContext(),
+    );
+    const body = (await response.json()) as { api_key: string };
+    apiKey = body.api_key;
   });
 
   describe("POST /v1/errors/report", () => {
@@ -203,8 +235,8 @@ describe("Error Reporting API", () => {
     beforeAll(async () => {
       // Seed some error data for stats
       const stmt = env.DB.prepare(
-        `INSERT INTO error_logs (id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO error_logs (user_id, id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const now = new Date();
       const seeds = [
@@ -236,6 +268,7 @@ describe("Error Reporting API", () => {
       for (const s of seeds) {
         await stmt
           .bind(
+            "stats-user",
             s.id,
             "stats-agent",
             s.errorType,

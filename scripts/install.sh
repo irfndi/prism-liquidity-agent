@@ -10,6 +10,8 @@ SHELL_NAME="${SHELL_NAME:-sh}"
 REPO="${PRISM_REPO:-irfndi/prism-liquidity-agent}"
 BIN_DIR="${PRISM_BIN_DIR:-$HOME/.local/bin}"
 INSTALL_DIR="${PRISM_INSTALL_DIR:-$HOME/.prism}"
+CONFIG_DIR="${PRISM_CONFIG_DIR:-$HOME/.config/prism}"
+DATA_DIR="${PRISM_DATA_DIR:-$HOME/.local/share/prism}"
 R2_BASE_URL="${PRISM_R2_URL:-https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev}"
 VERSION="${PRISM_VERSION:-}"
 CHANNEL="${PRISM_CHANNEL:-stable}"
@@ -143,9 +145,39 @@ log_done "Checksum verified"
 
 log_step "Installing Prism to ${INSTALL_DIR}"
 mkdir -p "$BIN_DIR" "$INSTALL_DIR"
+PRESERVE_DIR="${TMP_DIR}/preserve"
+mkdir -p "$PRESERVE_DIR"
+for _state_file in .env prism.db; do
+  if [ -e "${INSTALL_DIR}/${_state_file}" ]; then
+    cp -p "${INSTALL_DIR}/${_state_file}" "${PRESERVE_DIR}/${_state_file}"
+  fi
+done
+if [ -d "${INSTALL_DIR}/logs" ]; then
+  cp -R "${INSTALL_DIR}/logs" "${PRESERVE_DIR}/logs"
+fi
 rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 tar -xzf "${TMP_DIR}/${TARBALL_NAME}" -C "$INSTALL_DIR"
+for _state_file in .env prism.db; do
+  if [ -e "${PRESERVE_DIR}/${_state_file}" ]; then
+    cp -p "${PRESERVE_DIR}/${_state_file}" "${INSTALL_DIR}/${_state_file}"
+  fi
+done
+if [ -d "${PRESERVE_DIR}/logs" ]; then
+  rm -rf "${INSTALL_DIR}/logs"
+  cp -R "${PRESERVE_DIR}/logs" "${INSTALL_DIR}/"
+fi
+
+mkdir -p "$CONFIG_DIR" "$DATA_DIR"
+if [ ! -e "${CONFIG_DIR}/.env" ] && [ -e "${INSTALL_DIR}/.env" ]; then
+  cp -p "${INSTALL_DIR}/.env" "${CONFIG_DIR}/.env"
+fi
+if [ ! -e "${DATA_DIR}/prism.db" ] && [ -e "${INSTALL_DIR}/prism.db" ]; then
+  cp -p "${INSTALL_DIR}/prism.db" "${DATA_DIR}/prism.db"
+fi
+if [ ! -d "${DATA_DIR}/logs" ] && [ -d "${INSTALL_DIR}/logs" ]; then
+  cp -R "${INSTALL_DIR}/logs" "${DATA_DIR}/logs"
+fi
 
 if ! ensure_bun; then
   exit 1
@@ -162,7 +194,7 @@ exec bun "$INSTALL_DIR/dist/cli/index.mjs" "\$@"
 EOF
 chmod +x "$WRAPPER"
 
-mkdir -p "$HOME/.config/prism" "$HOME/.local/share/prism"
+mkdir -p "$CONFIG_DIR" "$DATA_DIR"
 
 PATH_HAS_BIN_DIR=0
 IFS=':' read -r -a _path_entries <<<"${PATH:-}"
@@ -187,12 +219,20 @@ if [ "$PATH_HAS_BIN_DIR" -eq 0 ]; then
 fi
 
 if [ -z "$SKIP_SETUP" ]; then
-  log_step "Running Prism setup..."
-  "$WRAPPER" setup
+  CREDENTIALS_FILE="$CONFIG_DIR/credentials.json"
+  CONFIG_ENV_FILE="$CONFIG_DIR/.env"
+  if [ -s "$CONFIG_ENV_FILE" ] || [ -s "${INSTALL_DIR}/.env" ]; then
+    log_step "Existing Prism environment preserved; setup not requested."
+  elif [ -s "$CREDENTIALS_FILE" ]; then
+    log_step "Running Prism setup..."
+    "$WRAPPER" setup
+  else
+    log_step "Setup deferred until registration. Run 'prism register' then 'prism setup'."
+  fi
 fi
 
 # Anonymous install telemetry (opt-out via PRISM_FEEDBACK_OPT_OUT).
-INSTALL_ID_FILE="$HOME/.config/prism/install-id"
+INSTALL_ID_FILE="$CONFIG_DIR/install-id"
 if [ ! -s "$INSTALL_ID_FILE" ]; then
   INSTALL_ID="$(bun -e 'console.log(crypto.randomUUID())' 2>/dev/null || echo "")"
   if [ -z "$INSTALL_ID" ]; then

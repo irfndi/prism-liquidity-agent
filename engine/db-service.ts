@@ -285,26 +285,31 @@ export const DbLive = (dbPath?: string) =>
         insertMemory: (entry) =>
           hasVecMemoryTable(db)
             ? Effect.catchAll(
-                Effect.tryPromise(async () => {
+                Effect.gen(function* () {
                   const id = randomUUID();
                   const now = Date.now();
                   const expiresAt = now + ttlMs(entry.category);
-                  const embedding = await getEmbedding(entry.content);
-                  runOne(
-                    db,
-                    `INSERT INTO vec_memory (embedding, id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    JSON.stringify(embedding),
-                    id,
-                    entry.category,
-                    entry.content,
-                    entry.poolAddress ?? null,
-                    entry.outcome ?? null,
-                    entry.pnlUsd ?? null,
-                    entry.confidence ?? null,
-                    now,
-                    expiresAt,
-                  );
+                  const embedding = yield* getEmbedding(entry.content);
+                  yield* Effect.try({
+                    try: () => {
+                      runOne(
+                        db,
+                        `INSERT INTO vec_memory (embedding, id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        JSON.stringify(embedding),
+                        id,
+                        entry.category,
+                        entry.content,
+                        entry.poolAddress ?? null,
+                        entry.outcome ?? null,
+                        entry.pnlUsd ?? null,
+                        entry.confidence ?? null,
+                        now,
+                        expiresAt,
+                      );
+                    },
+                    catch: (error) => error,
+                  });
                 }),
                 (e) => (isVecMemoryMissingError(e) ? Effect.void : Effect.fail(e)),
               )
@@ -313,9 +318,9 @@ export const DbLive = (dbPath?: string) =>
         queryMemory: (queryText, topK, poolAddress) =>
           hasVecMemoryTable(db)
             ? Effect.catchAll(
-                Effect.tryPromise(async () => {
+                Effect.gen(function* () {
                   const now = Date.now();
-                  const embedding = await getEmbedding(queryText);
+                  const embedding = yield* getEmbedding(queryText);
                   const sql = poolAddress
                     ? `SELECT
                     id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
@@ -332,7 +337,10 @@ export const DbLive = (dbPath?: string) =>
                   const params = poolAddress
                     ? [JSON.stringify(embedding), topK * 2, now, poolAddress]
                     : [JSON.stringify(embedding), topK * 2, now];
-                  const rows = queryAll<Record<string, unknown>>(db, sql, ...params);
+                  const rows = yield* Effect.try({
+                    try: () => queryAll<Record<string, unknown>>(db, sql, ...params),
+                    catch: (error) => error,
+                  });
 
                   const RECENCY_HALFLIFE_MS = 30 * 24 * 60 * 60 * 1000;
                   const ranked = rows

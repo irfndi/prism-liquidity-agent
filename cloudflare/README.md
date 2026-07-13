@@ -113,10 +113,6 @@ echo "YOUR_TELEGRAM_BOT_TOKEN" | wrangler secret put TELEGRAM_BOT_TOKEN
 # Optional: webhook secret for additional security
 echo "RANDOM_SECRET" | wrangler secret put TELEGRAM_WEBHOOK_SECRET
 
-# Optional: GitHub token for issue filing via /v1/issue
-echo "ghp_xxxxxxxx" | wrangler secret put GITHUB_TOKEN
-echo "owner/repo" | wrangler secret put GITHUB_REPO
-
 # Optional: fee collection wallet (Solana address)
 echo "YOUR_SOLANA_ADDRESS" | wrangler secret put FEE_WALLET_ADDRESS
 ```
@@ -154,7 +150,12 @@ curl "https://api.telegram.org/botYOUR_BOT_TOKEN/getWebhookInfo"
 | `/v1/link-telegram/confirm` | POST   | None   | Confirm Telegram link with code       |
 | `/v1/register-telegram`     | POST   | None   | Register via Telegram (for bot)       |
 | `/v1/agent-status`          | POST   | None   | Get agent status (for Telegram bot)   |
-| `/v1/issue`                 | POST   | Bearer | File GitHub issue                     |
+| `/v1/issue`                 | POST   | Bearer | Store an issue in D1                  |
+| `/v1/feedback`              | POST   | Bearer | Store deduplicated agent feedback     |
+| `/v1/errors/report`         | POST   | Bearer | Store one authenticated error report  |
+| `/v1/errors/batch`          | POST   | Bearer | Store authenticated error reports     |
+| `/v1/installs/ping`         | POST   | Mixed  | Anonymous install; auth for lifecycle|
+| `/v1/audit`                 | GET    | Admin  | Query deduplicated audit summaries   |
 
 ## Telegram Bot Commands
 
@@ -171,7 +172,7 @@ Send a 6-character code to link your Telegram to an existing account.
 
 ## Bindings
 
-- **DB** (D1): `prism-db` — users, api_keys, telegram_link_codes, wallets, subscriptions, audit_log
+- **DB** (D1): `prism-db` — accounts, feedback, errors, installs, audit summaries, and trading metadata
 - **CACHE** (KV): `prism-cache` — rate limits, session cache
 - **BACKUPS** (R2): `prism-backups` — database backups
 - **MEMORY** (Vectorize): `prism-memory` — embeddings (384d, cosine)
@@ -372,6 +373,6 @@ To deploy a staging environment:
 
 ## Support
 
-- GitHub Issues: https://github.com/irfndi/prism-liquidity-agent/issues
+- Feedback and issues: `prism feedback "..."` or `prism issue "..."` (stored in D1)
 - Telegram Bot: @prism_agent_bot
 - Docs: https://github.com/irfndi/prism-liquidity-agent/tree/main/docs

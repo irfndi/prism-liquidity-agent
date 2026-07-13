@@ -5,15 +5,15 @@ import type { AdapterApi } from "../engine/services.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
-  return Effect.runSync((Effect.provide as any)(effect, layer));
+function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): Promise<T> {
+  return Effect.runPromise((Effect.provide as any)(effect, layer));
 }
 
 const FEE_WALLET_API_URL = "https://prism-api.irfndi.workers.dev";
 
 type FeeCollectionEvent = {
   poolAddress: string;
-  positionPubkey: string;
+  positionPubkey?: string;
   feeX: number;
   feeY: number;
   platformFeeX: number;
@@ -49,18 +49,23 @@ function makeTestAdapterLayer() {
     discoverPools: () => Effect.succeed([]),
 
     reportFeeCollection(event: FeeCollectionEvent) {
-      void (async () => {
-        try {
-          const res = await fetch(`${FEE_WALLET_API_URL}/v1/revenue/log`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...event, installId: "test-install-id" }),
-          });
-          if (!res.ok) console.warn("Revenue report failed:", res.status);
-        } catch (err) {
-          console.warn("Revenue report failed:", String(err));
-        }
-      })();
+      return Effect.tryPromise(() =>
+        fetch(`${FEE_WALLET_API_URL}/v1/revenue/log`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...event, installId: "test-install-id" }),
+        }),
+      ).pipe(
+        Effect.tap((res) =>
+          res.ok
+            ? Effect.void
+            : Effect.sync(() => console.warn("Revenue report failed:", res.status)),
+        ),
+        Effect.catchAll((err) =>
+          Effect.sync(() => console.warn("Revenue report failed:", String(err))),
+        ),
+        Effect.asVoid,
+      );
     },
 
     swapUSDCForSOL: () => Effect.void,
@@ -100,10 +105,10 @@ describe("reportFeeCollection", () => {
 
     const layer = makeTestAdapterLayer();
 
-    run(
+    await run(
       Effect.gen(function* () {
         const adapter = yield* AdapterService;
-        adapter.reportFeeCollection(sampleEvent);
+        yield* adapter.reportFeeCollection(sampleEvent);
       }),
       layer,
     );
@@ -136,15 +141,15 @@ describe("reportFeeCollection", () => {
     const layer = makeTestAdapterLayer();
 
     // Should not throw
-    expect(() => {
+    await expect(
       run(
         Effect.gen(function* () {
           const adapter = yield* AdapterService;
-          adapter.reportFeeCollection(sampleEvent);
+          yield* adapter.reportFeeCollection(sampleEvent);
         }),
         layer,
-      );
-    }).not.toThrow();
+      ),
+    ).resolves.toBeUndefined();
 
     // Flush microtasks so the async fetch completes
     await vi.advanceTimersByTimeAsync(0);

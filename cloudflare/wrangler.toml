@@ -47,7 +47,6 @@ head_sampling_rate = 1
 # Secrets (set via wrangler secret put)
 # wrangler secret put FEE_WALLET_ADDRESS
 # wrangler secret put TELEGRAM_BOT_TOKEN
-# wrangler secret put GITHUB_TOKEN
 # wrangler secret put ADMIN_API_KEY
 
 # Staging environment

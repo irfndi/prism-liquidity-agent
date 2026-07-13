@@ -42,52 +42,55 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
             const screened: ScreenedPool[] = [];
 
             for (const pool of pools) {
-              try {
-                if (pool.tvlUsd < screenerConfig.minTvlUsd) continue;
+              const candidate = yield* Effect.try({
+                try: () => {
+                  if (pool.tvlUsd < screenerConfig.minTvlUsd) return null;
 
-                const poolState = {
-                  address: pool.address,
-                  tokenX: pool.tokenX,
-                  tokenY: pool.tokenY,
-                  tokenXSymbol: pool.tokenX.slice(0, 4),
-                  tokenYSymbol: pool.tokenY.slice(0, 4),
-                  tvlUsd: pool.tvlUsd,
-                  volume24hUsd: pool.volume24hUsd,
-                  fees24hUsd: pool.fees24hUsd,
-                  apr: pool.apr,
-                  activeBinId: 0,
-                  binStep: pool.binStep,
-                  currentPrice: 0,
-                  timestamp: Date.now(),
-                };
+                  const poolState = {
+                    address: pool.address,
+                    tokenX: pool.tokenX,
+                    tokenY: pool.tokenY,
+                    tokenXSymbol: pool.tokenX.slice(0, 4),
+                    tokenYSymbol: pool.tokenY.slice(0, 4),
+                    tvlUsd: pool.tvlUsd,
+                    volume24hUsd: pool.volume24hUsd,
+                    fees24hUsd: pool.fees24hUsd,
+                    apr: pool.apr,
+                    activeBinId: 0,
+                    binStep: pool.binStep,
+                    currentPrice: 0,
+                    timestamp: Date.now(),
+                  };
 
-                const auth = strategy.checkVolumeAuthenticity(poolState);
-                if (auth.score < screenerConfig.volumeAuthThreshold) continue;
+                  const auth = strategy.checkVolumeAuthenticity(poolState);
+                  if (auth.score < screenerConfig.volumeAuthThreshold) return null;
 
-                // Annualized fee-to-TVL heuristic for screening (not the same as
-                // StrategyService.computeFeeIlRatio which uses bin-drift IL)
-                const discoveryFeeToTvlRatio =
-                  pool.fees24hUsd > 0 && pool.tvlUsd > 0
-                    ? (pool.fees24hUsd * 365) / pool.tvlUsd
-                    : 0;
+                  // Annualized fee-to-TVL heuristic for screening (not the same as
+                  // StrategyService.computeFeeIlRatio which uses bin-drift IL)
+                  const discoveryFeeToTvlRatio =
+                    pool.fees24hUsd > 0 && pool.tvlUsd > 0
+                      ? (pool.fees24hUsd * 365) / pool.tvlUsd
+                      : 0;
 
-                if (discoveryFeeToTvlRatio < screenerConfig.minFeeRatio) continue;
+                  if (discoveryFeeToTvlRatio < screenerConfig.minFeeRatio) return null;
 
-                screened.push({
-                  address: pool.address,
-                  tvlUsd: pool.tvlUsd,
-                  volume24hUsd: pool.volume24hUsd,
-                  fees24hUsd: pool.fees24hUsd,
-                  apr: pool.apr,
-                  feeIlRatio: discoveryFeeToTvlRatio,
-                  volumeAuth: auth.score,
-                  binUtilization: 0,
-                  tokenX: pool.tokenX,
-                  tokenY: pool.tokenY,
-                });
-              } catch {
-                continue;
-              }
+                  return {
+                    address: pool.address,
+                    tvlUsd: pool.tvlUsd,
+                    volume24hUsd: pool.volume24hUsd,
+                    fees24hUsd: pool.fees24hUsd,
+                    apr: pool.apr,
+                    feeIlRatio: discoveryFeeToTvlRatio,
+                    volumeAuth: auth.score,
+                    binUtilization: 0,
+                    tokenX: pool.tokenX,
+                    tokenY: pool.tokenY,
+                  };
+                },
+                catch: (error) => error,
+              }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+
+              if (candidate) screened.push(candidate);
             }
 
             return screened.sort((a, b) => b.feeIlRatio - a.feeIlRatio);

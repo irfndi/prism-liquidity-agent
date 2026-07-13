@@ -22,19 +22,35 @@ prism login sk-prism-xxxxxxxx
 
 ### `prism setup`
 
-Interactive wizard to configure the trading agent.
+Interactive wizard to configure the trading agent. Run `prism register` first;
+setup validates the stored account and writes a timestamped `.env` backup.
 
 ```bash
 # Interactive mode
 prism setup
 
 # Non-interactive (for agents/CI)
-prism setup --non-interactive --helius-key=your-key --wallet-key=optional
+prism setup --non-interactive --helius-key=your-key --rpc-fallback-url=https://second-rpc.example.com
+```
+
+### `prism doctor`
+
+Validate runtime, registration, local paths, RPC providers, wallet mode, and error
+telemetry. `--fix` creates missing directories and repairs permissions without
+changing provider keys or wallet data.
+
+```bash
+prism doctor
+prism doctor --fix
+prism doctor --json
 ```
 
 **Options:**
-- `--helius-key <key>` — Helius API key (required)
-- `--wallet-key <key>` — Solana wallet private key (optional)
+- `--helius-key <key>` — Helius API key (optional when `--rpc-url` is provided)
+- `--rpc-url <url>` — primary Solana RPC URL
+- `--rpc-fallback-url <url>` — optional fallback Solana RPC URL
+- `--jupiter-api-key <key>` — optional Jupiter Price API v3 key
+- `--wallet-key-file <path>` — Solana wallet keypair file (optional)
 - `--watchlist <pools>` — Comma-separated pool addresses (optional)
 - `--paper-trading` — Enable paper trading (default: true)
 
@@ -123,10 +139,18 @@ Key env vars (set via `prism setup` or `.env`):
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `HELIUS_API_KEY` | **YES** | — | Helius RPC API key |
+| `HELIUS_API_KEY` | NO | empty | Helius DAS/RPC API key |
+| `SOLANA_RPC_URL` | YES | Helius or public fallback | Primary Solana RPC URL |
+| `SOLANA_RPC_FALLBACK_URL` | NO | empty | Separate RPC endpoint used after primary rate-limit/network failures |
+| `JUPITER_API_KEY` | NO | empty | Jupiter Price API v3 key |
+| `COINGECKO_API_KEY` | NO | empty | CoinGecko Pro API key |
 | `WALLET_PRIVATE_KEY` | NO | empty | Solana wallet (live trading only) |
 | `WATCHLIST_POOLS` | NO | empty | Comma-separated pool addresses |
 | `PAPER_TRADING` | NO | `true` | Paper vs live trading |
 | `SQLITE_DB_PATH` | NO | `./prism.db` | SQLite database file |
+
+`prism setup`, `prism dev`, `prism feedback`, and `prism issue` require a valid
+registered account. Feedback and issues are stored in the Prism Cloud D1 store;
+local storage is only an outage fallback.
 
 See [`config-service.ts`](../engine/config-service.ts) for the full list.

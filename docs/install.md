@@ -4,7 +4,7 @@
 
 ## Prism Architecture
 
-Prism has 3 layers. Only the CLI is required. The API and Telegram are optional add-ons.
+Prism has 3 layers. The CLI is the operating boundary, and the API account is required before an agent can configure or run so telemetry, errors, and feedback have an owner. Telegram is optional.
 
 1. **CLI (Local)** — The trading agent runs on your machine. All strategy, memory,
    risk management, and position execution lives here. Commands: `prism dev`,
@@ -14,7 +14,7 @@ Prism has 3 layers. Only the CLI is required. The API and Telegram are optional 
 2. **API (Cloud)** — A Cloudflare Worker that handles user accounts, API keys,
    and subscription tiers. Commands that need it: `prism register`, `prism whoami`,
    `prism login`, `prism link-telegram`, `prism subscription`.
-   **OPTIONAL.** Skip if you only need local trading.
+   **REQUIRED for setup and agent operation.** `prism register` stores the account key locally.
 
 3. **Telegram (Chat)** — A Telegram bot (`@prism_agent_bot`) for monitoring and
    control from your phone. Requires the API layer for auth.
@@ -24,28 +24,27 @@ Prism has 3 layers. Only the CLI is required. The API and Telegram are optional 
 
 Pick the option that matches your use case:
 
-**Option A: Minimal (CLI only)** — Local-only trading, no cloud account.
+**Option A: Standard (CLI + API)** — The supported agent and user flow.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
-prism setup --non-interactive --helius-key=$HELIUS_KEY   # wizard, no API call
+prism register
+prism setup --non-interactive --rpc-url="$SOLANA_RPC_URL"
+prism doctor
 prism dev                                                  # start paper trading
 ```
 
-**Option B: Standard (CLI + API)** — Most users. Adds cloud account, subscription
-management, and multi-device support.
+**Option B: Full (CLI + API + Telegram)** — Adds subscription management, multi-device
+support, and Telegram monitoring.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 prism register                                              # get API key from cloud
-prism setup --non-interactive --helius-key=$HELIUS_KEY
+prism setup --non-interactive --rpc-url="$SOLANA_RPC_URL"
 prism dev
 ```
-
-**Option C: Full (CLI + API + Telegram)** — Power users who want Telegram alerts
-and phone-based monitoring.
 
 ```bash
 # Same as Standard, then:
@@ -73,9 +72,9 @@ prism link-telegram   # generates 6-char code
 ## Prerequisites
 
 - **Bun 1.4.0+** — [Install Bun](https://bun.sh/docs/installation) (the one-liner installer can do this for you)
-- **Git** — for cloning the repository
+- **Git** — only for contributor source installs
 - **Solana wallet** (optional) — only needed for live trading; paper trading works without one
-- **Helius API key** (REQUIRED) — [Get one free at Helius](https://helius.xyz/)
+- **Private Solana RPC URL** — required for reliable live trading; Helius is optional
 
 ## One-liner Install (Recommended)
 
@@ -91,18 +90,18 @@ What the installer does:
 4. Verifies the bundle's SHA-256 checksum
 5. Extracts it to `~/.prism` (override with `PRISM_INSTALL_DIR`)
 6. Writes a `prism` wrapper at `~/.local/bin/prism` that sets `PRISM_INSTALL_DIR` and `PRISM_VEC0_PATH`, then runs the bundle with Bun
-7. Runs `prism setup` to write the initial `.env`
+7. Preserves existing `.env`, `prism.db`, and logs; setup is deferred until registration
 
 Then:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"   # if not already on PATH
 
-# For cloud features (optional):
-prism register                          # get an API key from the Cloudflare API
+prism register                          # required before setup/dev
 
-# Required:
-prism setup --non-interactive --helius-key=your-helius-key
+# Required for reliable live trading:
+prism setup --non-interactive --rpc-url=https://your-paid-rpc.example.com
+prism doctor
 prism dev                               # start paper trading
 ```
 
@@ -110,24 +109,27 @@ prism dev                               # start paper trading
 
 Choose your path based on the architecture above. The recommended path is the one-liner installer; the manual source path is for contributors.
 
-**CLI only (no cloud account):**
+**Registered CLI agent:**
 
 ```bash
 # One-liner installer (recommended)
 curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
-prism setup     # interactive .env wizard (local, no API call)
+prism register
+prism setup     # interactive RPC/.env wizard
+prism doctor
 prism dev       # start paper trading
 ```
 
-**With cloud account (for whoami, Telegram, subscriptions):**
+**With cloud account (same required flow):**
 
 ```bash
 # One-liner installer (recommended)
 curl -fsSL https://raw.githubusercontent.com/irfndi/prism-liquidity-agent/main/scripts/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 prism register  # get API key from Cloudflare API
-prism setup     # configure Helius key + watchlist
+prism setup     # configure RPC providers + watchlist
+prism doctor    # validate registration, providers, and local state
 prism dev       # start paper trading
 ```
 
@@ -163,7 +165,7 @@ bun install  # postinstall writes a default .env next to package.json
 If the postinstall hook is disabled (`bun install --ignore-scripts`), run
 `bun run setup:env` manually to write the default `.env`.
 
-### 2. Register (Get API Key) — OPTIONAL
+### 2. Register (Get API Key) — REQUIRED
 
 ```bash
 prism register
@@ -172,35 +174,44 @@ prism register
 Creates your identity with Prism's Cloudflare Worker and returns an API key. Store it
 securely in `~/.config/prism/credentials.json`.
 
-**Skip this step if you only need local trading.** The CLI works without an API key.
-You lose access to `prism whoami`, `prism link-telegram`, `prism subscription`,
-and `prism issue` — but all trading commands (`prism dev`, `prism setup`,
-`prism wallet`, `prism backtest`, `prism update`) work fine.
+Setup, dev, feedback, issue, error reporting, and registered telemetry require the
+stored account key. Telegram remains optional.
 
-### 3. Configure (Helius Key Required)
+### 3. Configure RPC providers
 
 ```bash
 prism setup
 ```
 
+`prism setup` preserves the existing environment by writing a timestamped backup and
+never asks an already configured install to repeat setup during upgrade.
+
 Interactive wizard that asks for:
 
-| Prompt             | Required | Default                    |
-| ------------------ | -------- | -------------------------- |
-| Helius API key     | **YES**  | —                          |
-| Wallet private key | NO       | empty (paper trading)      |
-| Watchlist pools    | NO       | empty (use pool discovery) |
+| Prompt             | Required | Default                     |
+| ------------------ | -------- | --------------------------- |
+| Helius API key     | NO       | empty when using custom RPC |
+| Primary RPC URL    | NO       | derived from Helius key     |
+| Fallback RPC URL   | NO       | empty                       |
+| Wallet private key | NO       | empty (paper trading)       |
+| Watchlist pools    | NO       | empty (use pool discovery)  |
 
 Everything else is **preconfigured** with sensible defaults:
 
 - `PAPER_TRADING=true`
-- `SOLANA_RPC_URL` auto-derived from your Helius key
+- `SOLANA_RPC_URL` defaults to Helius when a key is present; set it to a paid RPC URL for live trading
+- `SOLANA_RPC_FALLBACK_URL` optionally points to a separate provider
+- `JUPITER_API_KEY` optionally raises Jupiter Price API limits
 - All strategy params (min TVL, fee/IL ratio, etc.) from `config-service.ts`
 
 #### Agent-driven setup (non-interactive)
 
 ```bash
-prism setup --non-interactive --helius-key=your-helius-key
+prism setup --non-interactive --rpc-url=https://your-paid-rpc.example.com \
+  --rpc-fallback-url=https://your-second-rpc.example.com
+
+# Or use a non-Helius primary provider:
+prism setup --non-interactive --rpc-url=https://your-paid-rpc.example.com
 ```
 
 ### 4. Start Trading
@@ -212,6 +223,9 @@ prism dev
 # Live trading (requires wallet private key in .env)
 PAPER_TRADING=false prism dev
 ```
+
+Use `prism doctor` before starting, or `prism doctor --fix` to create missing local
+directories and repair their permissions without changing secrets.
 
 ## What's Preconfigured
 

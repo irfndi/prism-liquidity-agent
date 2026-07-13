@@ -3,9 +3,13 @@ import { env, createExecutionContext } from "cloudflare:test";
 import worker, { type Env } from "./index";
 
 const testEnv = env as unknown as Env;
+let apiKey = "";
+let userId = "";
 
-function buildRequest(method: string, path: string, body?: unknown): Request {
-  const init: RequestInit = { method, headers: { "Content-Type": "application/json" } };
+function buildRequest(method: string, path: string, body?: unknown, token?: string): Request {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token ?? apiKey) headers.Authorization = `Bearer ${token ?? apiKey}`;
+  const init: RequestInit = { method, headers };
   if (body !== undefined) {
     init.body = JSON.stringify(body);
   }
@@ -14,6 +18,23 @@ function buildRequest(method: string, path: string, body?: unknown): Request {
 
 describe("Install Telemetry API", () => {
   beforeAll(async () => {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        telegram_id TEXT UNIQUE,
+        tier TEXT NOT NULL DEFAULT 'free',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+    ).run();
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS api_keys (
+        key_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_used_at DATETIME
+      )`,
+    ).run();
     await env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS installs (
         id TEXT PRIMARY KEY,
@@ -26,6 +47,17 @@ describe("Install Telemetry API", () => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
     ).run();
+    await env.DB.prepare("DELETE FROM api_keys").run();
+    await env.DB.prepare("DELETE FROM users").run();
+    await env.CACHE.delete("rate_limit:register:unknown");
+    const response = await worker.fetch(
+      buildRequest("POST", "/v1/register", {}, ""),
+      testEnv,
+      createExecutionContext(),
+    );
+    const body = (await response.json()) as { api_key: string; user_id: string };
+    apiKey = body.api_key;
+    userId = body.user_id;
   });
 
   describe("POST /v1/installs/ping", () => {
@@ -69,15 +101,13 @@ describe("Install Telemetry API", () => {
       });
       await worker.fetch(request, testEnv, ctx);
 
-      const rows = await env.DB.prepare(
-        "SELECT user_id FROM installs WHERE install_id = ?",
-      )
+      const rows = await env.DB.prepare("SELECT user_id FROM installs WHERE install_id = ?")
         .bind("user-id-test-install-aaaa")
         .all();
       const results = rows.results ?? [];
       expect(results).toHaveLength(1);
       const row = results[0] as Record<string, unknown>;
-      expect(row.user_id).toBe("user-xyz-456");
+      expect(row.user_id).toBe(userId);
     });
 
     it("accepts all four valid events", async () => {
@@ -144,7 +174,9 @@ describe("Install Telemetry API", () => {
 
       const rows = await env.DB.prepare(
         "SELECT install_id, event, version, channel, platform FROM installs WHERE install_id = ?",
-      ).bind("persist-test-install-id-aaaaaaaa").all();
+      )
+        .bind("persist-test-install-id-aaaaaaaa")
+        .all();
       const results = rows.results ?? [];
       expect(results).toHaveLength(1);
       const row = results[0] as Record<string, unknown>;

@@ -50,11 +50,7 @@ function resolveProjectRoot(): string {
   if (entryFile === "index.ts" && entryDirName === "cli") {
     return parentDir;
   }
-  if (
-    entryFile === "index.mjs" &&
-    entryDirName === "cli" &&
-    path.basename(parentDir) === "dist"
-  ) {
+  if (entryFile === "index.mjs" && entryDirName === "cli" && path.basename(parentDir) === "dist") {
     return path.dirname(parentDir);
   }
 
@@ -90,6 +86,10 @@ export function getPrismConfigDir(): string {
   if (isRunningFromSource() && hasProjectEnv()) {
     return resolveProjectRoot();
   }
+  return getDefaultConfigDir();
+}
+
+export function getPrismUserConfigDir(): string {
   return getDefaultConfigDir();
 }
 

@@ -130,7 +130,7 @@ export interface AdapterApi {
   readonly discoverPools: () => Effect.Effect<ReadonlyArray<DiscoveredPool>, DiscoverPoolsError>;
   readonly reportFeeCollection: (event: {
     poolAddress: string;
-    positionPubkey: string;
+    positionPubkey?: string;
     feeX: number;
     feeY: number;
     platformFeeX: number;
@@ -140,7 +140,7 @@ export interface AdapterApi {
     tier: string;
     txSignature: string;
     feeTransferTxSignature?: string;
-  }) => void;
+  }) => Effect.Effect<void, never>;
   readonly swapUSDCForSOL: (
     minSolThreshold?: number,
     swapAmountUSDC?: number,
@@ -665,12 +665,10 @@ export interface AgentFeedback {
 }
 
 export type FeedbackResult =
-  | { kind: "created"; issueNumber: number; issueUrl: string }
-  | { kind: "duplicate"; issueNumber: number; issueUrl: string }
   | { kind: "rate_limited"; reason: string }
   | { kind: "opt_out" }
   | { kind: "local_only"; localId: string }
-  | { kind: "cloud"; id: string }
+  | { kind: "cloud"; id: string; duplicate?: boolean }
   | { kind: "error"; error: string };
 
 export interface FeedbackEntry {

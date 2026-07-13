@@ -15,6 +15,7 @@ import {
 } from "./services.js";
 import { getCurrentVersion } from "./version.js";
 import { detectInstallMethod } from "./install-method.js";
+import { getPrismUserConfigDir } from "./paths.js";
 
 const logger = createLogger("feedback");
 
@@ -25,8 +26,6 @@ const FEEDBACK_LIMITS = {
   duplicateCooldownMs: 24 * 60 * 60 * 1000,
 } as const;
 
-const SIMILARITY_THRESHOLD = 0.7;
-const MAX_KEYWORDS = 5;
 const DEFAULT_CLOUD_FEEDBACK_URL = "https://prism-api.irfndi.workers.dev/v1/feedback";
 
 interface CloudFeedbackPayload {
@@ -45,118 +44,56 @@ interface CloudFeedbackPayload {
 function submitCloudFeedback(
   apiUrl: string,
   payload: CloudFeedbackPayload,
-): Effect.Effect<{ readonly id: string } | null, never> {
+  apiKey: string,
+): Effect.Effect<
+  { readonly id: string; readonly duplicate: boolean } | { readonly authFailure: true } | null,
+  never
+> {
   return Effect.gen(function* () {
     const res = yield* Effect.tryPromise(() =>
       fetch(apiUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(10_000),
       }),
     );
+    if (res.status === 401 || res.status === 403) return { authFailure: true as const };
     if (!res.ok) return null;
     const json = (yield* Effect.tryPromise(() => res.json())) as Record<string, unknown>;
     if (typeof json.id !== "string") return null;
-    return { id: json.id };
+    return { id: json.id, duplicate: json.duplicate === true };
   }).pipe(Effect.catchAll(() => Effect.succeed(null)));
 }
-const STOP_WORDS = new Set([
-  "the",
-  "a",
-  "an",
-  "is",
-  "are",
-  "was",
-  "were",
-  "be",
-  "been",
-  "being",
-  "to",
-  "of",
-  "in",
-  "for",
-  "on",
-  "with",
-  "at",
-  "by",
-  "from",
-  "as",
-  "and",
-  "or",
-  "but",
-  "if",
-  "then",
-  "else",
-  "when",
-  "where",
-  "while",
-  "i",
-  "you",
-  "we",
-  "they",
-  "he",
-  "she",
-  "it",
-  "this",
-  "that",
-  "these",
-  "those",
-  "my",
-  "your",
-  "our",
-  "their",
-  "his",
-  "her",
-  "its",
-  "me",
-  "him",
-  "us",
-  "them",
-]);
 
 function hashFeedback(summary: string, details: string | undefined, category: string): string {
   const normalized = `${category}:${summary.trim().toLowerCase()}:${(details ?? "").trim().toLowerCase()}`;
   return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
 
-function extractKeywords(text: string): string[] {
-  return Array.from(
-    new Set(
-      text
-        .toLowerCase()
-        .replace(/[^a-z0-9\s-]/g, " ")
-        .split(/\s+/)
-        .filter((w) => w.length >= 4 && !STOP_WORDS.has(w) && !/^\d+$/.test(w)),
-    ),
-  ).slice(0, MAX_KEYWORDS);
-}
-
-function jaccardSimilarity(a: ReadonlyArray<string>, b: ReadonlyArray<string>): number {
-  if (a.length === 0 && b.length === 0) return 1;
-  const setA = new Set(a);
-  const setB = new Set(b);
-  const intersection = [...setA].filter((x) => setB.has(x)).length;
-  const union = new Set([...a, ...b]).size;
-  return union === 0 ? 0 : intersection / union;
-}
-
 const OPT_OUT_FILE = join(homedir(), ".config", "prism", "feedback-opt-out");
 
-function readOptOut(): boolean {
-  try {
-    if (existsSync(OPT_OUT_FILE)) {
-      return readFileSync(OPT_OUT_FILE, "utf-8").trim() === "true";
-    }
-  } catch {}
-  return false;
+function readOptOut(): Effect.Effect<boolean, never> {
+  return Effect.try({
+    try: () => existsSync(OPT_OUT_FILE) && readFileSync(OPT_OUT_FILE, "utf-8").trim() === "true",
+    catch: (cause) => cause,
+  }).pipe(Effect.catchAll(() => Effect.succeed(false)));
 }
 
-function writeOptOut(value: boolean): void {
-  try {
-    mkdirSync(join(homedir(), ".config", "prism"), { recursive: true });
-    writeFileSync(OPT_OUT_FILE, value ? "true" : "false");
-  } catch {}
+function writeOptOut(value: boolean): Effect.Effect<void, never> {
+  return Effect.try({
+    try: () => {
+      mkdirSync(join(homedir(), ".config", "prism"), { recursive: true });
+      writeFileSync(OPT_OUT_FILE, value ? "true" : "false");
+    },
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catchAll(() => Effect.void),
+    Effect.asVoid,
+  );
 }
 
 function buildContext(): FeedbackContext {
@@ -178,159 +115,42 @@ function buildContext(): FeedbackContext {
   return ctx;
 }
 
-function detectAgentId(): string {
+function detectAgentId(): Effect.Effect<string, never> {
   const walletPath = join(homedir(), ".config", "prism", "agent-id");
-  if (existsSync(walletPath)) {
-    return readFileSync(walletPath, "utf-8").trim();
-  }
-  const fingerprint = `${process.platform}-${process.arch}-${homedir()}-${process.cwd()}`;
-  const id = createHash("sha256").update(fingerprint).digest("hex").slice(0, 8);
-  try {
-    const dir = join(homedir(), ".config", "prism");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(walletPath, id, { mode: 0o600 });
-  } catch {
-    // best-effort
-  }
-  return id;
-}
+  return Effect.gen(function* () {
+    const existing = yield* Effect.try({
+      try: () => (existsSync(walletPath) ? readFileSync(walletPath, "utf-8").trim() : null),
+      catch: (cause) => cause,
+    }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+    if (existing) return existing;
 
-interface GitHubIssue {
-  readonly number: number;
-  readonly title: string;
-  readonly body: string;
-  readonly html_url: string;
-  readonly state: string;
-}
-
-interface GitHubSearchResponse {
-  readonly items: ReadonlyArray<GitHubIssue>;
-}
-
-interface GitHubCreateResponse {
-  readonly number: number;
-  readonly html_url: string;
-}
-
-const ghHeaders = (token: string) => ({
-  Authorization: `Bearer ${token}`,
-  Accept: "application/vnd.github+json",
-  "User-Agent": "prism-feedback",
-});
-
-function searchGitHubIssues(
-  token: string,
-  repo: string,
-  keywords: ReadonlyArray<string>,
-): Effect.Effect<ReadonlyArray<GitHubIssue>, unknown> {
-  if (keywords.length === 0) return Effect.succeed([]);
-  const query = encodeURIComponent(
-    `repo:${repo} label:agent-feedback is:open ${keywords.join(" ")}`,
-  );
-  return Effect.tryPromise({
-    try: () =>
-      fetch(`https://api.github.com/search/issues?q=${query}&per_page=50`, {
-        headers: ghHeaders(token),
-      }).then(async (res) => {
-        if (!res.ok) {
-          logger.warn(`GitHub search returned ${res.status}; treating as no duplicates`);
-          return [] as ReadonlyArray<GitHubIssue>;
-        }
-        const data = (await res.json()) as GitHubSearchResponse;
-        return data.items;
-      }),
-    catch: (err: unknown) => err,
+    const fingerprint = `${process.platform}-${process.arch}-${homedir()}-${process.cwd()}`;
+    const id = createHash("sha256").update(fingerprint).digest("hex").slice(0, 8);
+    yield* Effect.try({
+      try: () => {
+        const dir = join(homedir(), ".config", "prism");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(walletPath, id, { mode: 0o600 });
+      },
+      catch: (cause) => cause,
+    }).pipe(Effect.catchAll(() => Effect.void));
+    return id;
   });
 }
 
-function createGitHubIssue(
-  token: string,
-  repo: string,
-  title: string,
-  body: string,
-): Effect.Effect<GitHubCreateResponse, unknown> {
-  return Effect.tryPromise({
-    try: () =>
-      fetch(`https://api.github.com/repos/${repo}/issues`, {
-        method: "POST",
-        headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-        body: JSON.stringify({ title, body, labels: ["agent-feedback"] }),
-      }).then(async (res) => {
-        if (!res.ok) {
-          const errBody = await res.text();
-          throw new Error(`GitHub create issue failed: ${res.status} ${errBody.slice(0, 200)}`);
-        }
-        return (await res.json()) as GitHubCreateResponse;
-      }),
-    catch: (err: unknown) => err,
-  });
-}
-
-function commentOnGitHubIssue(
-  token: string,
-  repo: string,
-  issueNumber: number,
-  body: string,
-): Effect.Effect<void, unknown> {
-  return Effect.tryPromise({
-    try: () =>
-      fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}/comments`, {
-        method: "POST",
-        headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-        body: JSON.stringify({ body }),
-      }).then(async (res) => {
-        if (!res.ok) throw new Error(`GitHub comment failed: ${res.status}`);
-      }),
-    catch: (err: unknown) => err,
-  });
-}
-
-function formatNewIssueBody(
-  feedback: AgentFeedback,
-  context: FeedbackContext,
-  agentId: string,
-): string {
-  const lines: string[] = [
-    "## Agent Feedback",
-    "",
-    `**Category:** ${feedback.category}`,
-    `**Severity:** ${feedback.severity}`,
-    `**Agent ID:** ${agentId}`,
-    `**Version:** ${context.prismVersion}`,
-    `**Platform:** ${context.platform}`,
-    `**Install method:** ${context.installMethod}`,
-    `**Runtime:** ${context.runtime}`,
-    "",
-    "### Summary",
-    feedback.summary,
-  ];
-  if (feedback.details) {
-    lines.push("", "### Details", feedback.details);
-  }
-  if (feedback.relatedFiles && feedback.relatedFiles.length > 0) {
-    lines.push("", "### Related files", ...feedback.relatedFiles.map((f) => `- \`${f}\``));
-  }
-  lines.push(
-    "",
-    "---",
-    "*This issue was automatically created by a Prism agent. If you're a human, please add the `confirmed` label if this is valid.*",
-  );
-  return lines.join("\n");
-}
-
-function formatCommentBody(
-  feedback: AgentFeedback,
-  context: FeedbackContext,
-  agentId: string,
-): string {
-  const parts: string[] = [
-    `+1 from agent on ${context.platform} (${context.runtime}).`,
-    "",
-    feedback.summary,
-  ];
-  if (feedback.details) parts.push("", feedback.details);
-  parts.push("", `Agent ID: ${agentId}`);
-  return parts.join("\n");
+function readPrismApiKey(): Effect.Effect<string | null, never> {
+  return Effect.try({
+    try: () => {
+      const credentialsFile =
+        process.env.PRISM_CREDENTIALS_FILE ?? join(getPrismUserConfigDir(), "credentials.json");
+      if (!existsSync(credentialsFile)) return null;
+      const value = JSON.parse(readFileSync(credentialsFile, "utf-8")) as {
+        apiKey?: unknown;
+      };
+      return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
+    },
+    catch: (cause) => cause,
+  }).pipe(Effect.catchAll(() => Effect.succeed(null)));
 }
 
 function toFeedbackEntry(row: {
@@ -368,8 +188,8 @@ export const FeedbackLive = Layer.effect(
   Effect.gen(function* () {
     const config = yield* ConfigService;
     const db = yield* DbService;
-    const agentId = detectAgentId();
-    const state = { optOut: config.feedbackOptOut || readOptOut() };
+    const agentId = yield* detectAgentId();
+    const state = { optOut: config.feedbackOptOut || (yield* readOptOut()) };
 
     const submit = (rawFeedback: AgentFeedback): Effect.Effect<FeedbackResult, never> =>
       Effect.gen(function* () {
@@ -382,24 +202,20 @@ export const FeedbackLive = Layer.effect(
           context,
         };
         const hash = hashFeedback(feedback.summary, feedback.details, feedback.category);
+        const apiKey = yield* readPrismApiKey();
+        if (!apiKey) {
+          return {
+            kind: "error" as const,
+            error: "Prism account required. Run 'prism register' first.",
+          } satisfies FeedbackResult;
+        }
 
         const localRow = yield* db.getFeedbackByHash(hash, agentId);
         const local = localRow ? toFeedbackEntry(localRow) : null;
         if (local) {
           const ageMs = Date.now() - local.reportedAt;
           if (ageMs < FEEDBACK_LIMITS.duplicateCooldownMs) {
-            logger.info(
-              `Skipping duplicate feedback (cooldown ${Math.round(ageMs / 1000)}s): ` +
-                `${feedback.summary} → issue #${local.githubIssueNumber}`,
-            );
-
-            if (local.githubIssueNumber !== null) {
-              return {
-                kind: "duplicate" as const,
-                issueNumber: local.githubIssueNumber,
-                issueUrl: local.githubIssueUrl ?? "",
-              };
-            }
+            logger.info(`Skipping duplicate feedback (cooldown ${Math.round(ageMs / 1000)}s)`);
             return {
               kind: "local_only" as const,
               localId: local.id,
@@ -435,13 +251,14 @@ export const FeedbackLive = Layer.effect(
           }
         }
 
-        if (!config.githubToken) {
-          const cloudUrl = process.env.PRISM_API_URL
-            ? `${process.env.PRISM_API_URL}/v1/feedback`
-            : DEFAULT_CLOUD_FEEDBACK_URL;
-          const reportedAt = Date.now();
-          const cloudId = randomUUID();
-          const cloudResult = yield* submitCloudFeedback(cloudUrl, {
+        const cloudUrl = process.env.PRISM_API_URL
+          ? `${process.env.PRISM_API_URL}/v1/feedback`
+          : DEFAULT_CLOUD_FEEDBACK_URL;
+        const reportedAt = Date.now();
+        const cloudId = randomUUID();
+        const cloudResult = yield* submitCloudFeedback(
+          cloudUrl,
+          {
             id: cloudId,
             agentId,
             category: feedback.category,
@@ -452,31 +269,20 @@ export const FeedbackLive = Layer.effect(
             context,
             hash,
             reportedAt,
-          });
+          },
+          apiKey,
+        );
 
-          if (cloudResult) {
-            const entry: FeedbackEntry = {
-              id: cloudResult.id,
-              agentId,
-              category: feedback.category,
-              severity: feedback.severity,
-              summary: feedback.summary,
-              details: feedback.details ?? null,
-              relatedFiles: feedback.relatedFiles ?? [],
-              contextJson: JSON.stringify(context),
-              githubIssueNumber: null,
-              githubIssueUrl: null,
-              reportedAt,
-              hash,
-            };
-            yield* db.saveFeedback(entry);
-            logger.info(`Submitted feedback to Prism cloud: ${feedback.summary}`);
-            return { kind: "cloud" as const, id: cloudResult.id };
-          }
+        if (cloudResult && "authFailure" in cloudResult) {
+          return {
+            kind: "error" as const,
+            error: "Prism cloud rejected the stored credentials. Run 'prism login' again.",
+          } satisfies FeedbackResult;
+        }
 
-          const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        if (cloudResult) {
           const entry: FeedbackEntry = {
-            id: localId,
+            id: cloudResult.id,
             agentId,
             category: feedback.category,
             severity: feedback.severity,
@@ -486,121 +292,32 @@ export const FeedbackLive = Layer.effect(
             contextJson: JSON.stringify(context),
             githubIssueNumber: null,
             githubIssueUrl: null,
-            reportedAt: Date.now(),
+            reportedAt,
             hash,
           };
           yield* db.saveFeedback(entry);
-          logger.warn(
-            "GITHUB_TOKEN unset and cloud feedback unavailable — feedback stored locally only. " +
-              "Set GITHUB_TOKEN to enable GitHub Issues filing.",
-          );
-          return { kind: "local_only" as const, localId };
+          logger.info(`Submitted feedback to Prism cloud: ${feedback.summary}`);
+          return { kind: "cloud" as const, id: cloudResult.id, duplicate: cloudResult.duplicate };
         }
 
-        const recentHour = yield* db.getRecentFeedbackForAgent(
-          agentId,
-          Date.now() - 60 * 60 * 1000,
-        );
-        if (recentHour.length >= FEEDBACK_LIMITS.perHour) {
-          return {
-            kind: "rate_limited" as const,
-            reason: `Exceeded ${FEEDBACK_LIMITS.perHour} feedback items per hour`,
-          };
-        }
-        const recentDay = yield* db.getRecentFeedbackForAgent(
-          agentId,
-          Date.now() - 24 * 60 * 60 * 1000,
-        );
-        if (recentDay.length >= FEEDBACK_LIMITS.perDay) {
-          return {
-            kind: "rate_limited" as const,
-            reason: `Exceeded ${FEEDBACK_LIMITS.perDay} feedback items per day`,
-          };
-        }
-        const lastRow = yield* db.getLastFeedbackForAgent(agentId);
-        const last = lastRow ? toFeedbackEntry(lastRow) : null;
-        if (last && Date.now() - last.reportedAt < FEEDBACK_LIMITS.minIntervalMs) {
-          const wait = Math.round(
-            (FEEDBACK_LIMITS.minIntervalMs - (Date.now() - last.reportedAt)) / 1000,
-          );
-          return {
-            kind: "rate_limited" as const,
-            reason: `Minimum interval between feedback is ${FEEDBACK_LIMITS.minIntervalMs / 1000}s (wait ${wait}s)`,
-          };
-        }
-
-        const keywords = extractKeywords(`${feedback.summary} ${feedback.details ?? ""}`);
-        const issues = yield* searchGitHubIssues(config.githubToken, config.githubRepo, keywords);
-
-        const feedbackKw = keywords;
-        let existing: { number: number; html_url: string } | null = null;
-        for (const issue of issues) {
-          const issueKw = extractKeywords(`${issue.title} ${issue.body}`);
-          if (jaccardSimilarity(feedbackKw, issueKw) >= SIMILARITY_THRESHOLD) {
-            existing = { number: issue.number, html_url: issue.html_url };
-            break;
-          }
-        }
-
-        if (existing) {
-          yield* commentOnGitHubIssue(
-            config.githubToken,
-            config.githubRepo,
-            existing.number,
-            formatCommentBody(feedback, context, agentId),
-          );
-          const entry: FeedbackEntry = {
-            id: `gh-comment-${existing.number}-${Date.now()}`,
-            agentId,
-            category: feedback.category,
-            severity: feedback.severity,
-            summary: feedback.summary,
-            details: feedback.details ?? null,
-            relatedFiles: feedback.relatedFiles ?? [],
-            contextJson: JSON.stringify(feedback.context),
-            githubIssueNumber: existing.number,
-            githubIssueUrl: existing.html_url,
-            reportedAt: Date.now(),
-            hash,
-          };
-          yield* db.saveFeedback(entry);
-          logger.info(`Added +1 to existing issue #${existing.number} for: ${feedback.summary}`);
-          return {
-            kind: "duplicate" as const,
-            issueNumber: existing.number,
-            issueUrl: existing.html_url,
-          };
-        }
-
-        const issueTitle =
-          feedback.summary.length > 256 ? feedback.summary.slice(0, 253) + "..." : feedback.summary;
-        const created = yield* createGitHubIssue(
-          config.githubToken,
-          config.githubRepo,
-          issueTitle,
-          formatNewIssueBody(feedback, context, agentId),
-        );
+        const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const entry: FeedbackEntry = {
-          id: `gh-created-${created.number}-${Date.now()}`,
+          id: localId,
           agentId,
           category: feedback.category,
           severity: feedback.severity,
           summary: feedback.summary,
           details: feedback.details ?? null,
           relatedFiles: feedback.relatedFiles ?? [],
-          contextJson: JSON.stringify(feedback.context),
-          githubIssueNumber: created.number,
-          githubIssueUrl: created.html_url,
-          reportedAt: Date.now(),
+          contextJson: JSON.stringify(context),
+          githubIssueNumber: null,
+          githubIssueUrl: null,
+          reportedAt,
           hash,
         };
         yield* db.saveFeedback(entry);
-        logger.info(`Filed new issue #${created.number} for: ${feedback.summary}`);
-        return {
-          kind: "created" as const,
-          issueNumber: created.number,
-          issueUrl: created.html_url,
-        };
+        logger.warn(`Cloud feedback unavailable; feedback stored locally: ${feedback.summary}`);
+        return { kind: "local_only" as const, localId };
       }).pipe(
         Effect.catchAll((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
@@ -622,9 +339,9 @@ export const FeedbackLive = Layer.effect(
           Effect.succeed(row ? toFeedbackEntry(row) : null),
         ),
       setOptOut: (value: boolean) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           state.optOut = value;
-          writeOptOut(value);
+          yield* writeOptOut(value);
         }),
       getOptOut: () => Effect.sync(() => state.optOut),
     };
