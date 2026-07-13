@@ -231,7 +231,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const screenerDeps = Layer.merge(adapter, StrategyLive);
   const screener = Layer.provide(
     ScreenerLive({
-      minTvlUsd: cfg?.discoveryMinTvlUsd ?? 100_000,
+      minTvlUsd: cfg?.discoveryMinTvlUsd ?? 1_000_000,
       minFeeRatio: cfg?.discoveryMinFeeRatio ?? 1.5,
       volumeAuthThreshold: cfg?.volumeAuthThreshold ?? 0.7,
       minBinUtilization: cfg?.minBinUtilization ?? 0.3,
@@ -498,12 +498,6 @@ export const program = Effect.gen(function* () {
 
   let poolsToScan = [...config.watchlistPools];
 
-  for (const poolAddress of trackedPositions.keys()) {
-    if (!poolsToScan.includes(poolAddress)) {
-      poolsToScan.push(poolAddress);
-    }
-  }
-
   if (!shouldDiscoverPools(config) && config.enablePoolDiscovery) {
     console.warn("Live pool discovery is disabled; configure WATCHLIST_POOLS for approved pools.");
   }
@@ -538,7 +532,18 @@ export const program = Effect.gen(function* () {
     }
   }
 
-  yield* reconcilePositions(adapter, db, memory, trackedPositions, poolsToScan);
+  const approvedPoolAddresses = [...poolsToScan];
+  const refreshPoolsToScan = () => {
+    poolsToScan = [...approvedPoolAddresses];
+    for (const poolAddress of trackedPositions.keys()) {
+      if (!poolsToScan.includes(poolAddress)) {
+        poolsToScan.push(poolAddress);
+      }
+    }
+  };
+
+  yield* reconcilePositions(adapter, db, memory, trackedPositions, approvedPoolAddresses);
+  refreshPoolsToScan();
 
   // Start agent-facing servers (MCP and HTTP fallback)
   yield* mcpServer.start().pipe(Effect.catchAll(() => Effect.void));
@@ -2109,7 +2114,8 @@ export const program = Effect.gen(function* () {
   let shuttingDown = false;
   const runScheduledCycle = Effect.gen(function* () {
     if (shuttingDown) return;
-    yield* reconcilePositions(adapter, db, memory, trackedPositions, poolsToScan);
+    yield* reconcilePositions(adapter, db, memory, trackedPositions, approvedPoolAddresses);
+    refreshPoolsToScan();
     yield* claimAllFees();
     yield* checkForAutoUpdate(config, db);
     yield* runScanCycle();
