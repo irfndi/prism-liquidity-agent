@@ -1053,6 +1053,13 @@ export const program = Effect.gen(function* () {
         ? yield* adapter.getWalletBalanceUsd().pipe(
             Effect.catchAll((err) => {
               if (config.paperTrading) return Effect.succeed(config.paperPortfolioUsd);
+              if (decision?.action === "EXIT") {
+                console.error("Live wallet balance unavailable; continuing EXIT", {
+                  pool: poolAddress,
+                  error: String(err),
+                });
+                return Effect.succeed(lastWalletBalanceUsd);
+              }
               console.error("Live wallet balance unavailable; skipping pool", {
                 pool: poolAddress,
                 error: String(err),
