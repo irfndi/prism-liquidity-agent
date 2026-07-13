@@ -32,6 +32,7 @@ import { ReferralLive } from "./referral-service.js";
 import { AgentStateMutable } from "./state-service.js";
 import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
+import { shouldDiscoverPools } from "./pool-policy.js";
 
 import { checkForAutoUpdate } from "./update-check.js";
 import type { PositionRecord } from "./db-service.js";
@@ -497,7 +498,11 @@ export const program = Effect.gen(function* () {
 
   let poolsToScan = [...config.watchlistPools];
 
-  if (config.enablePoolDiscovery) {
+  if (config.enablePoolDiscovery && !config.paperTrading) {
+    console.warn("Live pool discovery is disabled; configure WATCHLIST_POOLS for approved pools.");
+  }
+
+  if (shouldDiscoverPools(config)) {
     const screened = yield* screener.screenPools().pipe(
       Effect.catchAll((err) => {
         if (
