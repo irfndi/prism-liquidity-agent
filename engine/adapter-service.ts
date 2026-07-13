@@ -37,7 +37,7 @@ import { getWalletSystemLamportsRequired } from "./live-entry-budget.js";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const GAS_RESERVE_LAMPORTS = 20_000_000n; // 0.02 SOL reserved for transaction fees
+const GAS_RESERVE_LAMPORTS = 20_000_000n; // 0.02 SOL reserved for fees and non-System-program costs
 const RPC_RETRY_OPTIONS = {
   maxRetries: 2,
   baseDelayMs: 1_000,
@@ -1040,24 +1040,33 @@ export const AdapterLive = Layer.effect(
           const requestedXAmount = BigInt(totalXAmount.toString());
           const requestedYAmount = BigInt(totalYAmount.toString());
 
+          if (requestedXAmount === 0n || requestedYAmount === 0n) {
+            return yield* Effect.fail(
+              new AdapterError({
+                message: "Cannot enter a position with a zero-sized token leg",
+                poolAddress,
+              }),
+            );
+          }
+
           // Check balances
           const balanceX = yield* getTokenBalance(pool.tokenX);
           const balanceY = yield* getTokenBalance(pool.tokenY);
-          let nativeSolBalance = 0n;
-          if (pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT) {
-            nativeSolBalance = BigInt(yield* rpcCall((conn) => conn.getBalance(wallet.publicKey)));
-          }
+          const nativeSolBalance =
+            pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT
+              ? BigInt(yield* rpcCall((conn) => conn.getBalance(wallet.publicKey)))
+              : undefined;
 
           const maxX =
             pool.tokenX === SOL_MINT
-              ? nativeSolBalance > GAS_RESERVE_LAMPORTS
+              ? nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
                 ? nativeSolBalance - GAS_RESERVE_LAMPORTS
                 : 0n
               : balanceX;
 
           const maxY =
             pool.tokenY === SOL_MINT
-              ? nativeSolBalance > GAS_RESERVE_LAMPORTS
+              ? nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
                 ? nativeSolBalance - GAS_RESERVE_LAMPORTS
                 : 0n
               : balanceY;
@@ -1099,20 +1108,20 @@ export const AdapterLive = Layer.effect(
             }),
           );
 
-          if (pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT) {
-            const transactionLamports = getWalletSystemLamportsRequired(
-              tx.instructions,
-              wallet.publicKey,
+          const transactionLamports = getWalletSystemLamportsRequired(
+            tx.instructions,
+            wallet.publicKey,
+          );
+          const requiredLamports = transactionLamports + GAS_RESERVE_LAMPORTS;
+          const actualSolBalance =
+            nativeSolBalance ?? BigInt(yield* rpcCall((conn) => conn.getBalance(wallet.publicKey)));
+          if (actualSolBalance < requiredLamports) {
+            return yield* Effect.fail(
+              new AdapterError({
+                message: `Insufficient SOL for live entry transaction: required ${formatTokenAmount(requiredLamports, 9)} (direct System Program debits plus ${formatTokenAmount(GAS_RESERVE_LAMPORTS, 9)} reserve for fees, ATA rent and other costs), available ${formatTokenAmount(actualSolBalance, 9)}.`,
+                poolAddress,
+              }),
             );
-            const requiredLamports = transactionLamports + GAS_RESERVE_LAMPORTS;
-            if (nativeSolBalance < requiredLamports) {
-              return yield* Effect.fail(
-                new AdapterError({
-                  message: `Insufficient SOL for live entry transaction: required ${formatTokenAmount(requiredLamports, 9)}, available ${formatTokenAmount(nativeSolBalance, 9)}. This includes position, bin-array, ATA and wrapped SOL funding plus gas reserve.`,
-                  poolAddress,
-                }),
-              );
-            }
           }
 
           tx.feePayer = wallet.publicKey;

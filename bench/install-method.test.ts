@@ -43,6 +43,9 @@ describe("install-method", () => {
     expect(getVersionAgnosticInstallDir("/home/user/prism-dlmm-v0.0.30")).toBe(
       "/home/user/prism-dlmm",
     );
+    expect(getVersionAgnosticInstallDir("/home/user/prism-dlmm-v0.0.30-beta.1")).toBe(
+      "/home/user/prism-dlmm",
+    );
     expect(getVersionAgnosticInstallDir("/home/user/.prism")).toBe("/home/user/.prism");
   });
 });

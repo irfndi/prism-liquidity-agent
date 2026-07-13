@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Keypair, SystemProgram, Transaction } from "@solana/web3.js";
+import { Keypair, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { getWalletSystemLamportsRequired } from "../engine/live-entry-budget.js";
 
 describe("getWalletSystemLamportsRequired", () => {
@@ -47,5 +47,44 @@ describe("getWalletSystemLamportsRequired", () => {
 
     // Then unrelated instructions do not reduce the wallet's available balance
     expect(required).toBe(0n);
+  });
+
+  it("counts seeded account creation", () => {
+    // Given a seeded account funded by the wallet
+    const wallet = Keypair.generate().publicKey;
+    const account = Keypair.generate().publicKey;
+    const transaction = new Transaction().add(
+      SystemProgram.createAccountWithSeed({
+        fromPubkey: wallet,
+        newAccountPubkey: account,
+        basePubkey: wallet,
+        seed: "prism",
+        lamports: 3_000_000,
+        space: 0,
+        programId: SystemProgram.programId,
+      }),
+    );
+
+    // When the transaction budget is calculated
+    const required = getWalletSystemLamportsRequired(transaction.instructions, wallet);
+
+    // Then the seeded account funding is included
+    expect(required).toBe(3_000_000n);
+  });
+
+  it("fails closed when a System Program instruction cannot be decoded", () => {
+    // Given malformed System Program instruction data
+    const wallet = Keypair.generate().publicKey;
+    const instruction = new TransactionInstruction({
+      keys: [],
+      programId: SystemProgram.programId,
+      data: Buffer.alloc(0),
+    });
+
+    // When the transaction budget is calculated
+    // Then malformed funding data is rejected instead of being undercounted
+    expect(() => getWalletSystemLamportsRequired([instruction], wallet)).toThrow(
+      "Unable to decode System Program instruction",
+    );
   });
 });
