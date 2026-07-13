@@ -15,24 +15,35 @@ function hasMessage(err: unknown): err is { readonly message: string } {
   return isObject(err) && "message" in err && typeof err.message === "string";
 }
 
-function retryAfterMs(err: unknown): number | undefined {
+const RETRY_AFTER_MAX_MS = 300_000;
+
+export function retryAfterMs(err: unknown): number | undefined {
   if (!isObject(err)) return undefined;
   const headers = err["headers"];
   const response = err["response"];
   const responseHeaders = isObject(response) ? response["headers"] : undefined;
   const getHeader = (value: unknown): string | null => {
-    if (isObject(value) && typeof value["get"] === "function") {
+    if (!isObject(value)) return null;
+    if (typeof value["get"] === "function") {
       const result = (value["get"] as (name: string) => unknown)("retry-after");
-      return typeof result === "string" ? result : null;
+      if (typeof result === "string") return result;
     }
+    const direct = value["retry-after"] ?? value["Retry-After"];
+    if (typeof direct === "string") return direct;
+    if (typeof direct === "number") return String(direct);
     return null;
   };
   const header = getHeader(headers) ?? getHeader(responseHeaders);
   if (!header) return undefined;
   const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, RETRY_AFTER_MAX_MS);
+  }
   const retryAt = Date.parse(header);
-  return Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : undefined;
+  if (Number.isFinite(retryAt)) {
+    return Math.min(Math.max(0, retryAt - Date.now()), RETRY_AFTER_MAX_MS);
+  }
+  return undefined;
 }
 
 const retryLogState = new Map<string, { lastLoggedAt: number; suppressed: number }>();

@@ -654,7 +654,6 @@ export const program = Effect.gen(function* () {
         poolsDecided: 0,
         poolsExecuted: 0,
         poolsFailed: 0,
-        poolsActioned: 0,
         decisions: [],
         totalGasCostSol: 0,
         paperTrading: config.paperTrading,
@@ -685,7 +684,6 @@ export const program = Effect.gen(function* () {
         if (decision) {
           cycle.decisions.push(decision);
           cycle.poolsDecided++;
-          cycle.poolsActioned++;
         }
         cycle.poolsScanned++;
       }
@@ -1339,7 +1337,6 @@ export const program = Effect.gen(function* () {
               if (entryBackoff.nextAttemptAt > Date.now()) {
                 const retryAfterMs = entryBackoff.nextAttemptAt - Date.now();
                 cycle.poolsDecided++;
-                cycle.poolsActioned++;
                 yield* audit
                   .recordDecision({
                     timestamp: Date.now(),

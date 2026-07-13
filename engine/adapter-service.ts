@@ -355,7 +355,10 @@ export const AdapterLive = Layer.effect(
         paceRpc(conn).pipe(
           Effect.zipRight(
             breaker.execute(
-              withRpcTimeout(retryWithBackoff(() => fn(conn), RPC_RETRY_OPTIONS)),
+              retryEffectWithBackoff(
+                withRpcTimeout(Effect.tryPromise(() => fn(conn))),
+                RPC_RETRY_OPTIONS,
+              ),
               isRpcNetworkError,
             ),
           ),
@@ -478,7 +481,7 @@ export const AdapterLive = Layer.effect(
       });
       return Effect.cachedInvalidateWithTTL(
         paceHeliusRequest().pipe(
-          Effect.zipRight(retryEffectWithBackoff(assetRequest, RPC_RETRY_OPTIONS)),
+          Effect.zipRight(retryEffectWithBackoff(withRpcTimeout(assetRequest), RPC_RETRY_OPTIONS)),
         ),
         HELIUS_ASSET_CACHE_TTL_MS,
       );
@@ -813,10 +816,12 @@ export const AdapterLive = Layer.effect(
       });
     }
 
-    function readNativeSolBalance(): Effect.Effect<bigint, unknown> {
+    function readNativeSolBalance(opts?: {
+      readonly force?: boolean;
+    }): Effect.Effect<bigint, unknown> {
       return Effect.gen(function* () {
         if (!wallet) return 0n;
-        if (nativeSolBalanceCache && nativeSolBalanceCache.expiresAt > Date.now()) {
+        if (!opts?.force && nativeSolBalanceCache && nativeSolBalanceCache.expiresAt > Date.now()) {
           return nativeSolBalanceCache.value;
         }
         const value = BigInt(yield* rpcCall((conn) => conn.getBalance(wallet.publicKey)));
@@ -830,9 +835,8 @@ export const AdapterLive = Layer.effect(
 
     function readWalletBalanceUsd(): Effect.Effect<number, unknown> {
       return Effect.gen(function* () {
-        const activeWallet = wallet;
-        if (!activeWallet) return 0;
-        const lamports = yield* rpcCall((conn) => conn.getBalance(activeWallet.publicKey));
+        if (!wallet) return 0;
+        const lamports = Number(yield* readNativeSolBalance());
         const prices = yield* fetchTokenPrices([SOL_MINT]);
         const solPrice = prices[SOL_MINT] ?? fallbackPrices[SOL_MINT] ?? 0;
         const usdcRaw = yield* readTokenBalance(USDC_MINT);
@@ -1179,7 +1183,7 @@ export const AdapterLive = Layer.effect(
             wallet.publicKey,
           );
           const requiredLamports = transactionLamports + GAS_RESERVE_LAMPORTS;
-          const actualSolBalance = nativeSolBalance ?? (yield* readNativeSolBalance());
+          const actualSolBalance = yield* readNativeSolBalance({ force: true });
           if (actualSolBalance < requiredLamports) {
             return yield* Effect.fail(
               new AdapterError({
