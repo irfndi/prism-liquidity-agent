@@ -1528,11 +1528,7 @@ export const AdapterLive = Layer.effect(
             });
           }
           return valid
-            .filter(
-              (p) =>
-                p.tvl >= config.discoveryMinTvlUsd &&
-                (p.launchpad === null || p.launchpad === undefined),
-            )
+            .filter((p) => p.tvl >= config.discoveryMinTvlUsd && !p.launchpad)
             .map((p) => ({
               address: p.address,
               tvlUsd: p.tvl,

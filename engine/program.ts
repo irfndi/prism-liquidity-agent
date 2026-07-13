@@ -498,7 +498,13 @@ export const program = Effect.gen(function* () {
 
   let poolsToScan = [...config.watchlistPools];
 
-  if (config.enablePoolDiscovery && !config.paperTrading) {
+  for (const poolAddress of trackedPositions.keys()) {
+    if (!poolsToScan.includes(poolAddress)) {
+      poolsToScan.push(poolAddress);
+    }
+  }
+
+  if (!shouldDiscoverPools(config) && config.enablePoolDiscovery) {
     console.warn("Live pool discovery is disabled; configure WATCHLIST_POOLS for approved pools.");
   }
 

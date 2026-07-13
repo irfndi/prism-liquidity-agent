@@ -106,7 +106,7 @@ async function main() {
     "# SQLite",
     "SQLITE_DB_PATH=./prism.db",
     "",
-    "# Pools to watch (empty = use ENABLE_POOL_DISCOVERY to find pools)",
+    "# Pools to watch (required for live trading; discovery is paper-only and opt-in)",
     `WATCHLIST_POOLS=${answers.watchlistPools as string}`,
     "ENABLE_POOL_DISCOVERY=false",
     "DISCOVERY_MIN_TVL_USD=1000000",
