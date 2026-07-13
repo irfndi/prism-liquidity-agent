@@ -15,7 +15,7 @@ describe("entry failure backoff", () => {
 
   it("increases the retry delay and caps it", () => {
     const first = nextEntryFailureBackoff(undefined, 1_000);
-    const second = nextEntryFailureBackoff(first, 1_000);
+    const second = nextEntryFailureBackoff({ ...first, nextAttemptAt: 0 }, 1_000);
     let capped = second;
     for (let i = 0; i < 10; i++) {
       capped = nextEntryFailureBackoff(capped, 1_000);

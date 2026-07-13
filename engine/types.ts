@@ -141,6 +141,7 @@ export interface AgentCycle {
   poolsDecided: number;
   poolsExecuted: number;
   poolsFailed: number;
+  poolsActioned: number;
   decisions: AgentDecision[];
   totalGasCostSol: number;
   paperTrading: boolean;

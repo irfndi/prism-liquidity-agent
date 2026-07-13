@@ -42,6 +42,12 @@ describe("isRetriableError", () => {
   });
 });
 
+describe("isRpcNetworkError", () => {
+  it("classifies adapter RPC timeouts as network failures", () => {
+    expect(isRpcNetworkError(new Error("RPC request timeout after 15s"))).toBe(true);
+  });
+});
+
 // ── retryWithBackoff ──────────────────────────────────────────────
 
 describe("retryWithBackoff", () => {

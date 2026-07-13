@@ -39,12 +39,13 @@ const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const GAS_RESERVE_LAMPORTS = 20_000_000n; // 0.02 SOL reserved for fees and non-System-program costs
 const RPC_RETRY_OPTIONS = {
-  maxRetries: 2,
+  maxRetries: 1,
   baseDelayMs: 1_000,
   maxDelayMs: 30_000,
   rateLimitBaseDelayMs: 5_000,
 } as const;
 const RPC_MIN_INTERVAL_MS = 50;
+const RPC_REQUEST_TIMEOUT_MS = 15_000;
 
 function formatTokenAmount(amount: bigint, decimals: number): string {
   return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
@@ -319,18 +320,31 @@ export const AdapterLive = Layer.effect(
     let nextHeliusRequestAt = 0;
 
     function paceRpc(conn: Connection): Effect.Effect<void> {
-      const now = Date.now();
-      const nextStartAt = nextRpcStartAt.get(conn) ?? now;
-      const waitMs = Math.max(0, nextStartAt - now);
-      nextRpcStartAt.set(conn, Math.max(now, nextStartAt) + RPC_MIN_INTERVAL_MS);
-      return Effect.sleep(waitMs);
+      return Effect.sync(() => {
+        const now = Date.now();
+        const nextStartAt = nextRpcStartAt.get(conn) ?? now;
+        const waitMs = Math.max(0, nextStartAt - now);
+        nextRpcStartAt.set(conn, Math.max(now, nextStartAt) + RPC_MIN_INTERVAL_MS);
+        return waitMs;
+      }).pipe(Effect.flatMap(Effect.sleep));
     }
 
     function paceHeliusRequest(): Effect.Effect<void> {
-      const now = Date.now();
-      const waitMs = Math.max(0, nextHeliusRequestAt - now);
-      nextHeliusRequestAt = Math.max(now, nextHeliusRequestAt) + RPC_MIN_INTERVAL_MS;
-      return Effect.sleep(waitMs);
+      return Effect.sync(() => {
+        const now = Date.now();
+        const waitMs = Math.max(0, nextHeliusRequestAt - now);
+        nextHeliusRequestAt = Math.max(now, nextHeliusRequestAt) + RPC_MIN_INTERVAL_MS;
+        return waitMs;
+      }).pipe(Effect.flatMap(Effect.sleep));
+    }
+
+    function withRpcTimeout<T>(effect: Effect.Effect<T, unknown>): Effect.Effect<T, unknown> {
+      return effect.pipe(
+        Effect.timeoutFail({
+          duration: RPC_REQUEST_TIMEOUT_MS,
+          onTimeout: () => new Error("RPC request timeout after 15s"),
+        }),
+      );
     }
 
     function rpcCall<T>(
@@ -341,7 +355,7 @@ export const AdapterLive = Layer.effect(
         paceRpc(conn).pipe(
           Effect.zipRight(
             breaker.execute(
-              retryWithBackoff(() => fn(conn), RPC_RETRY_OPTIONS),
+              withRpcTimeout(retryWithBackoff(() => fn(conn), RPC_RETRY_OPTIONS)),
               isRpcNetworkError,
             ),
           ),
@@ -1187,8 +1201,8 @@ export const AdapterLive = Layer.effect(
             }),
           );
 
-          yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
           yield* invalidateBalanceCaches;
+          yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
 
           return {
             positionPubKey: positionKeypair.publicKey.toBase58(),

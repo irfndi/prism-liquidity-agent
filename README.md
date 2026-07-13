@@ -180,6 +180,8 @@ Live entries that fail because the wallet lacks a pool token are backed off
 exponentially for that pool, starting at 30 minutes and capped at 6 hours.
 RPC requests are paced, wallet balances are cached briefly within the adapter,
 and scan logs report decided, executed, and failed pools separately.
+`failed` counts processing or execution failures; risk and backoff gates are
+rejected decisions recorded in the audit trail, not execution failures.
 
 ## Agent runtime overlay
 

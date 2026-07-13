@@ -30,25 +30,37 @@ function retryAfterMs(err: unknown): number | undefined {
   const header = getHeader(headers) ?? getHeader(responseHeaders);
   if (!header) return undefined;
   const seconds = Number(header);
-  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-  return Math.min(seconds * 1000, 120_000);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const retryAt = Date.parse(header);
+  return Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : undefined;
 }
 
 const retryLogState = new Map<string, { lastLoggedAt: number; suppressed: number }>();
 const RETRY_LOG_INTERVAL_MS = 10_000;
+const RETRY_LOG_MAX_ENTRIES = 512;
+
+function safeErrorMessage(err: unknown): string {
+  return String(err)
+    .replace(/([?&](?:api[-_]?key|token|authorization)=)[^&\s]+/gi, "$1***")
+    .replace(/(Bearer\s+)[^\s]+/gi, "$1***");
+}
 
 function logRetry(err: unknown, message: string): void {
   const now = Date.now();
-  const key = String(err);
+  const key = safeErrorMessage(err);
   const previous = retryLogState.get(key);
   if (previous && now - previous.lastLoggedAt < RETRY_LOG_INTERVAL_MS) {
     previous.suppressed++;
     return;
   }
   const suppressed = previous?.suppressed ?? 0;
+  if (!previous && retryLogState.size >= RETRY_LOG_MAX_ENTRIES) {
+    const oldest = retryLogState.keys().next().value;
+    if (oldest !== undefined) retryLogState.delete(oldest);
+  }
   retryLogState.set(key, { lastLoggedAt: now, suppressed: 0 });
   logger.warn(message, {
-    error: String(err),
+    error: key,
     ...(suppressed > 0 ? { suppressedRetries: suppressed } : {}),
   });
 }
@@ -60,6 +72,7 @@ export function isRetriableError(err: unknown): boolean {
     if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests")) {
       return true;
     }
+    if (msg.includes("rpc request timeout")) return true;
   }
   return false;
 }
@@ -112,6 +125,7 @@ export function isRpcNetworkError(err: unknown): boolean {
     if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests")) {
       return true;
     }
+    if (msg.includes("rpc request timeout")) return true;
     if (/HTTP\s+5\d{2}/.test(err.message)) return true;
   }
 

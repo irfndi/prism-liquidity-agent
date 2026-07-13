@@ -654,6 +654,7 @@ export const program = Effect.gen(function* () {
         poolsDecided: 0,
         poolsExecuted: 0,
         poolsFailed: 0,
+        poolsActioned: 0,
         decisions: [],
         totalGasCostSol: 0,
         paperTrading: config.paperTrading,
@@ -684,6 +685,7 @@ export const program = Effect.gen(function* () {
         if (decision) {
           cycle.decisions.push(decision);
           cycle.poolsDecided++;
+          cycle.poolsActioned++;
         }
         cycle.poolsScanned++;
       }
@@ -1335,9 +1337,35 @@ export const program = Effect.gen(function* () {
             const entryBackoff = entryFailureBackoff.get(poolAddress);
             if (entryBackoff) {
               if (entryBackoff.nextAttemptAt > Date.now()) {
+                const retryAfterMs = entryBackoff.nextAttemptAt - Date.now();
+                cycle.poolsDecided++;
+                cycle.poolsActioned++;
+                yield* audit
+                  .recordDecision({
+                    timestamp: Date.now(),
+                    cycleId,
+                    poolAddress,
+                    action: "ENTER",
+                    confidence: 0,
+                    reasoning: `[entry-backoff] insufficient token balance; retry in ${Math.ceil(retryAfterMs / 60_000)} minutes`,
+                    metrics,
+                    riskResult: {
+                      approved: false,
+                      reason: "Entry suppressed after insufficient token balance",
+                    },
+                    executed: false,
+                    paperTrading: config.paperTrading,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+                yield* memory
+                  .upsert({
+                    category: "warning",
+                    content: `Entry suppressed for ${poolAddress} after insufficient token balance; retry in ${Math.ceil(retryAfterMs / 60_000)} minutes.`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
                 return null;
               }
-              entryFailureBackoff.delete(poolAddress);
             }
 
             // F7: pool cooldown check — skip ENTER if this pool is on cooldown
