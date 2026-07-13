@@ -455,9 +455,9 @@ export const AdapterLive = Layer.effect(
     // Known mint decimals (avoids network roundtrips for common SPL tokens).
     // If a mint is missing here and the RPC doesn't expose decimals via the
     // standard SPL Token program (or via Helius DAS getAsset), getTokenMeta
-    // falls back to 6 — the historical default. For non-Helius RPCs we use
-    // the SPL Token program (parsed account info), which returns decimals
-    // for any valid SPL mint, instead of the Helius-specific getAsset RPC.
+    // fails with Effect.fail, so callers must handle the error. For
+    // non-Helius RPCs we use the SPL Token program (parsed account info),
+    // which returns decimals for any valid SPL mint.
     const KNOWN_MINT_DECIMALS: Record<string, { symbol: string; decimals: number }> = {
       [SOL_MINT]: { symbol: "SOL", decimals: 9 },
       [USDC_MINT]: { symbol: "USDC", decimals: 6 },
@@ -1566,7 +1566,10 @@ export const AdapterLive = Layer.effect(
             const quoteResponse = yield* Effect.tryPromise(() =>
               fetch(
                 `https://api.jup.ag/swap/v1/quote?inputMint=${USDC_MINT}&outputMint=${SOL_MINT}&amount=${Math.round(swapAmountUSDC * 1e6)}&slippageBps=50&asLegacyTransaction=true`,
-                { headers: jupiterApiKey ? headers : undefined },
+                {
+                  headers: jupiterApiKey ? headers : undefined,
+                  signal: AbortSignal.timeout(10_000),
+                },
               ),
             );
 
@@ -1589,6 +1592,7 @@ export const AdapterLive = Layer.effect(
                   wrapAndUnwrapSol: true,
                   asLegacyTransaction: true,
                 }),
+                signal: AbortSignal.timeout(10_000),
               }),
             );
 

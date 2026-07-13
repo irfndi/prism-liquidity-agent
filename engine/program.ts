@@ -1852,25 +1852,33 @@ export const program = Effect.gen(function* () {
               (claimResult.operatorFeeY ?? 0) > 0
             ) {
               yield* Effect.fork(
-                adapter.reportFeeCollection({
-                  poolAddress: decision.poolAddress,
-                  ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
-                  feeX: claimResult.feeX,
-                  feeY: claimResult.feeY,
-                  platformFeeX: claimResult.platformFeeX,
-                  platformFeeY: claimResult.platformFeeY,
-                  tier,
-                  txSignature: claimResult.txSignature,
-                  ...(claimResult.feeTransferTxSignature != null && {
-                    feeTransferTxSignature: claimResult.feeTransferTxSignature,
-                  }),
-                  ...(claimResult.operatorFeeX != null && {
-                    operatorFeeX: claimResult.operatorFeeX,
-                  }),
-                  ...(claimResult.operatorFeeY != null && {
-                    operatorFeeY: claimResult.operatorFeeY,
-                  }),
-                }),
+                adapter
+                  .reportFeeCollection({
+                    poolAddress: decision.poolAddress,
+                    ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
+                    feeX: claimResult.feeX,
+                    feeY: claimResult.feeY,
+                    platformFeeX: claimResult.platformFeeX,
+                    platformFeeY: claimResult.platformFeeY,
+                    tier,
+                    txSignature: claimResult.txSignature,
+                    ...(claimResult.feeTransferTxSignature != null && {
+                      feeTransferTxSignature: claimResult.feeTransferTxSignature,
+                    }),
+                    ...(claimResult.operatorFeeX != null && {
+                      operatorFeeX: claimResult.operatorFeeX,
+                    }),
+                    ...(claimResult.operatorFeeY != null && {
+                      operatorFeeY: claimResult.operatorFeeY,
+                    }),
+                  })
+                  .pipe(
+                    Effect.catchAllCause((cause) =>
+                      Effect.sync(() =>
+                        console.error("reportFeeCollection failed", { cause: String(cause) }),
+                      ),
+                    ),
+                  ),
               ).pipe(Effect.asVoid);
             }
           }
@@ -1988,25 +1996,33 @@ export const program = Effect.gen(function* () {
             (result.operatorFeeY ?? 0) > 0
           ) {
             yield* Effect.fork(
-              adapter.reportFeeCollection({
-                poolAddress,
-                ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
-                feeX: result.feeX,
-                feeY: result.feeY,
-                platformFeeX: result.platformFeeX,
-                platformFeeY: result.platformFeeY,
-                tier,
-                txSignature: result.txSignature,
-                ...(result.feeTransferTxSignature != null && {
-                  feeTransferTxSignature: result.feeTransferTxSignature,
-                }),
-                ...(result.operatorFeeX != null && {
-                  operatorFeeX: result.operatorFeeX,
-                }),
-                ...(result.operatorFeeY != null && {
-                  operatorFeeY: result.operatorFeeY,
-                }),
-              }),
+              adapter
+                .reportFeeCollection({
+                  poolAddress,
+                  ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
+                  feeX: result.feeX,
+                  feeY: result.feeY,
+                  platformFeeX: result.platformFeeX,
+                  platformFeeY: result.platformFeeY,
+                  tier,
+                  txSignature: result.txSignature,
+                  ...(result.feeTransferTxSignature != null && {
+                    feeTransferTxSignature: result.feeTransferTxSignature,
+                  }),
+                  ...(result.operatorFeeX != null && {
+                    operatorFeeX: result.operatorFeeX,
+                  }),
+                  ...(result.operatorFeeY != null && {
+                    operatorFeeY: result.operatorFeeY,
+                  }),
+                })
+                .pipe(
+                  Effect.catchAllCause((cause) =>
+                    Effect.sync(() =>
+                      console.error("reportFeeCollection failed", { cause: String(cause) }),
+                    ),
+                  ),
+                ),
             ).pipe(Effect.asVoid);
           }
 
