@@ -69,6 +69,9 @@ import type {
 import type { AgentRuntimeAlert, AgentRuntimeCheckin } from "./agent-transport.js";
 import { randomUUID } from "crypto";
 import { AgentLive, AgentNoOp } from "./agent-service.js";
+import { createLogger } from "./logger.js";
+
+const logger = createLogger("program");
 
 // ─── Position value estimation (rough heuristic) ───────────────
 
@@ -80,6 +83,11 @@ export function estimatePositionValue(pos: PositionRecord, pool: PoolState): num
   const ilFactor = 1 - driftPct * 0.5;
   return pos.depositedUsd * ilFactor;
 }
+
+type PositionReconcileResult = {
+  succeeded: boolean;
+  unresolvedPoolAddresses: ReadonlySet<string>;
+};
 
 function toRiskPosition(pos: PositionRecord): Position {
   return {
@@ -103,14 +111,14 @@ export function reconcilePositions(
   memory: MemoryApi,
   trackedPositions: Map<string, PositionRecord>,
   poolsToScan: ReadonlyArray<string>,
-): Effect.Effect<boolean> {
+): Effect.Effect<PositionReconcileResult> {
   return Effect.gen(function* () {
     if (!adapter.hasWallet()) {
-      return true;
+      return { succeeded: true, unresolvedPoolAddresses: new Set<string>() };
     }
     const walletAddress = adapter.getWalletAddress();
     if (!walletAddress) {
-      return true;
+      return { succeeded: true, unresolvedPoolAddresses: new Set<string>() };
     }
 
     const onChainPositions = yield* adapter.getAllWalletPositions(walletAddress).pipe(
@@ -123,11 +131,15 @@ export function reconcilePositions(
     );
 
     if (onChainPositions === null) {
-      return false;
+      return {
+        succeeded: false,
+        unresolvedPoolAddresses: new Set(poolsToScan),
+      };
     }
 
     const onChainPoolSet = new Set(onChainPositions.map((p) => p.poolAddress));
     const watchedPoolSet = new Set(poolsToScan);
+    const unresolvedPoolAddresses = new Set<string>();
 
     for (const [poolAddress, pos] of trackedPositions) {
       if (pos.positionPubKey && !onChainPoolSet.has(poolAddress)) {
@@ -160,6 +172,7 @@ export function reconcilePositions(
               pool: onChainPos.poolAddress,
               err: String(err),
             });
+            unresolvedPoolAddresses.add(onChainPos.poolAddress);
             return Effect.succeed(null);
           }),
         );
@@ -198,7 +211,7 @@ export function reconcilePositions(
       }
     }
 
-    return true;
+    return { succeeded: true, unresolvedPoolAddresses };
   });
 }
 
@@ -494,6 +507,13 @@ export const program = Effect.gen(function* () {
         }
       }
     }
+
+    for (const [poolAddress, pos] of trackedPositions) {
+      if (!pos.positionPubKey) {
+        trackedPositions.delete(poolAddress);
+        yield* db.deletePosition(poolAddress).pipe(Effect.catchAll(() => Effect.void));
+      }
+    }
   }
 
   // ─── Pool discovery ────────────────────────────────────────────────────────
@@ -501,7 +521,9 @@ export const program = Effect.gen(function* () {
   let poolsToScan = [...config.watchlistPools];
 
   if (!shouldDiscoverPools(config) && config.enablePoolDiscovery) {
-    console.warn("Live pool discovery is disabled; configure WATCHLIST_POOLS for approved pools.");
+    logger.warn("Live pool discovery is disabled; configure WATCHLIST_POOLS for approved pools.", {
+      paperTrading: config.paperTrading,
+    });
   }
 
   if (shouldDiscoverPools(config)) {
@@ -535,9 +557,11 @@ export const program = Effect.gen(function* () {
   }
 
   const approvedPoolAddresses = [...poolsToScan];
-  const refreshPoolsToScan = (includeTrackedPositions: boolean) => {
+  let unresolvedPoolAddresses = new Set<string>();
+  const refreshPoolsToScan = (reconcileResult: PositionReconcileResult) => {
+    unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
     poolsToScan = [...approvedPoolAddresses];
-    if (!includeTrackedPositions) {
+    if (!reconcileResult.succeeded) {
       return;
     }
     for (const poolAddress of trackedPositions.keys()) {
@@ -547,14 +571,14 @@ export const program = Effect.gen(function* () {
     }
   };
 
-  const initialReconcileSucceeded = yield* reconcilePositions(
+  const initialReconcileResult = yield* reconcilePositions(
     adapter,
     db,
     memory,
     trackedPositions,
     approvedPoolAddresses,
   );
-  refreshPoolsToScan(initialReconcileSucceeded);
+  refreshPoolsToScan(initialReconcileResult);
 
   // Start agent-facing servers (MCP and HTTP fallback)
   yield* mcpServer.start().pipe(Effect.catchAll(() => Effect.void));
@@ -1288,6 +1312,15 @@ export const program = Effect.gen(function* () {
               };
             }
           } else {
+            if (unresolvedPoolAddresses.has(poolAddress)) {
+              logger.warn("Skipping ENTER for unresolved pool", { pool: poolAddress });
+              return null;
+            }
+            if (!approvedPoolAddresses.includes(poolAddress)) {
+              logger.info("Skipping ENTER for unmanaged pool", { pool: poolAddress });
+              return null;
+            }
+
             // F7: pool cooldown check — skip ENTER if this pool is on cooldown
             const cooldown = yield* db
               .getPoolCooldown(poolAddress)
@@ -2125,14 +2158,14 @@ export const program = Effect.gen(function* () {
   let shuttingDown = false;
   const runScheduledCycle = Effect.gen(function* () {
     if (shuttingDown) return;
-    const reconcileSucceeded = yield* reconcilePositions(
+    const reconcileResult = yield* reconcilePositions(
       adapter,
       db,
       memory,
       trackedPositions,
       approvedPoolAddresses,
     );
-    refreshPoolsToScan(reconcileSucceeded);
+    refreshPoolsToScan(reconcileResult);
     yield* claimAllFees();
     yield* checkForAutoUpdate(config, db);
     yield* runScanCycle();
