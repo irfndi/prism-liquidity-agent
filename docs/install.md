@@ -194,7 +194,7 @@ Interactive wizard that asks for:
 | Primary RPC URL    | NO       | derived from Helius key     |
 | Fallback RPC URL   | NO       | empty                       |
 | Wallet private key | NO       | empty (paper trading)       |
-| Watchlist pools    | NO       | empty (use pool discovery)  |
+| Watchlist pools    | NO       | empty (discovery is opt-in) |
 
 Everything else is **preconfigured** with sensible defaults:
 
@@ -238,6 +238,8 @@ not set through `.env`.
 - `PAPER_TRADING=true` — start with simulated trades
 - `SCAN_INTERVAL_MS=600000` — scan every 10 minutes
 - `MIN_POOL_TVL_USD=50000` — skip low-TVL pools
+- `ENABLE_POOL_DISCOVERY=false` — keep automatic discovery off until pools are approved
+- `DISCOVERY_MIN_TVL_USD=1000000` — minimum TVL for opt-in discovery
 - `MIN_FEE_IL_RATIO=1.2` — minimum fee/IL ratio to hold
 - `VOLUME_AUTH_THRESHOLD=0.70` — skip wash-traded pools
 - `CONFIDENCE_THRESHOLD=0.65` — minimum confidence to act

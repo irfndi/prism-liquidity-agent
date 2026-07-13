@@ -84,8 +84,12 @@ describe("reconcilePositions — integration", () => {
         yield* db.savePosition(makePosition("pool1", "pubkey1"));
         yield* db.savePosition(makePosition("pool2", "pubkey2"));
 
-        yield* reconcilePositions(adapter, db, memory, trackedPositions, ["pool1", "pool2"]);
+        const reconciled = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+          "pool1",
+          "pool2",
+        ]);
 
+        expect(reconciled.succeeded).toBe(true);
         expect(trackedPositions.has("pool1")).toBe(false);
         expect(trackedPositions.has("pool2")).toBe(false);
 
@@ -111,8 +115,11 @@ describe("reconcilePositions — integration", () => {
 
         yield* db.savePosition(makePosition("pool1", "pubkey1"));
 
-        yield* reconcilePositions(adapter, db, memory, trackedPositions, ["pool1"]);
+        const reconciled = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+          "pool1",
+        ]);
 
+        expect(reconciled.succeeded).toBe(false);
         expect(trackedPositions.has("pool1")).toBe(true);
 
         const all = yield* db.getAllPositions();
@@ -201,6 +208,39 @@ describe("reconcilePositions — integration", () => {
 
         const all = yield* db.getAllPositions();
         expect(all).toHaveLength(0);
+      }),
+      dbLayer,
+    );
+  });
+
+  it("marks approved external positions unresolved when pool state cannot be fetched", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () =>
+            Effect.succeed([
+              {
+                poolAddress: "unresolved-pool",
+                positionPubKey: "external-pubkey",
+                lowerBinId: 4980,
+                upperBinId: 5020,
+              },
+            ]),
+          getPoolState: () => Effect.fail("pool unavailable"),
+        });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+
+        const result = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+          "unresolved-pool",
+        ]);
+
+        expect(result.succeeded).toBe(true);
+        expect(result.unresolvedPoolAddresses.has("unresolved-pool")).toBe(true);
+        expect(trackedPositions.has("unresolved-pool")).toBe(false);
       }),
       dbLayer,
     );

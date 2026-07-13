@@ -164,6 +164,8 @@ Key `.env` variables:
 | Variable                  | Default      | Description                              |
 | ------------------------- | ------------ | ---------------------------------------- |
 | `WATCHLIST_POOLS`         | --           | Comma-separated pool addresses           |
+| `ENABLE_POOL_DISCOVERY`   | `false`      | Opt-in automatic discovery; live mode should use approved watchlist pools |
+| `DISCOVERY_MIN_TVL_USD`    | `1000000`    | Minimum TVL for automatic discovery     |
 | `PAPER_TRADING`           | `true`       | Disable to execute on-chain              |
 | `MIN_POOL_TVL_USD`        | `50000`      | Skip pools below this TVL                |
 | `MIN_FEE_IL_RATIO`        | `1.2`        | Minimum fee/IL ratio to hold             |

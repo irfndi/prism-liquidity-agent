@@ -278,8 +278,9 @@ The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copi
 | `PAPER_TRADING`               | `true`                                                             | Simulated positions by default.                                                                                    |
 | `SCAN_INTERVAL_MS`            | `600000`                                                           | Time between scan cycles (10 min).                                                                                 |
 | `WATCHLIST_POOLS`             | —                                                                  | Comma-separated Meteora DLMM pool addresses.                                                                       |
-| `ENABLE_POOL_DISCOVERY`       | `true` (postinstall default) / `false` (code fallback)             | Discover pools when watchlist is empty.                                                                            |
-| `MIN_POOL_TVL_USD`            | `50000`                                                            | Skip pools below this TVL.                                                                                         |
+| `ENABLE_POOL_DISCOVERY`       | `false`                                                            | Opt-in discovery; live mode should use explicit approved watchlist pools.                                         |
+| `MIN_POOL_TVL_USD`            | `50000`                                                            | Skip watched pools below this TVL.                                                                                  |
+| `DISCOVERY_MIN_TVL_USD`       | `1000000`                                                          | Minimum TVL for opt-in automatic discovery.                                                                         |
 | `VOLUME_AUTH_THRESHOLD`       | `0.70`                                                             | Minimum volume authenticity score.                                                                                 |
 | `CONFIDENCE_THRESHOLD`        | `0.65`                                                             | Minimum confidence to act.                                                                                         |
 | `STOP_LOSS_PCT`               | `0.15`                                                             | Drawdown that blocks HOLD/REBALANCE.                                                                               |
@@ -307,6 +308,7 @@ In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaul
 - **Coverage thresholds apply only to included files.** Several large engine modules are excluded from coverage.
 - **Embeddings default to fallback.** The ONNX backend downloads ~80MB on first use and can crash with BigInt serialization errors in Node; the engine automatically falls back.
 - **Bundled blacklists are empty.** `engine/data/deployer-blacklist.json` and `engine/data/token-blacklist.json` ship as `[]`. Override with `DEPLOYER_BLACKLIST_PATH` / `TOKEN_BLACKLIST_PATH`.
+- **Live discovery is opt-in.** Keep `ENABLE_POOL_DISCOVERY=false` and configure `WATCHLIST_POOLS` with approved pools. Automatic discovery also excludes Meteora launchpad pools.
 - **Deployer blacklist is half-wired.** `blacklist.checkPool()` accepts deployer addresses, but deployers are not currently fetched from on-chain metadata.
 - **One ENTER per live cycle.** In live mode, `ENTER` is silently skipped if any position is already open.
 - **Live entry balance policy.** Live entries fail closed when either requested token amount exceeds the wallet balance; they are not silently downsized.
