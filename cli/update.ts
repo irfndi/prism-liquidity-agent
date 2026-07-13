@@ -2,6 +2,7 @@ import { Command } from "commander";
 import {
   createWriteStream,
   cpSync,
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -354,6 +355,7 @@ function migrateBundleStateToUserDirs(installDir: string): void {
   if (existsSync(legacyEnv) && !existsSync(configEnv)) {
     mkdirSync(configDir, { recursive: true, mode: 0o700 });
     cpSync(legacyEnv, configEnv);
+    chmodSync(configEnv, 0o600);
   }
 
   for (const item of ["prism.db", "prism.db-wal", "prism.db-shm", "logs"]) {

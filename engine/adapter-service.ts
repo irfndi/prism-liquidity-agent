@@ -20,6 +20,7 @@ import { ConfigService } from "./config-service.js";
 import { AdapterError } from "./errors.js";
 import { DiscoverPoolsError } from "./errors.js";
 import { createLogger } from "./logger.js";
+import { getPrismConfigDir } from "./paths.js";
 import type { BinArray, BinData, PoolState, Position } from "./types.js";
 import {
   CircuitBreaker,
@@ -510,9 +511,6 @@ export const AdapterLive = Layer.effect(
           return meta;
         }
 
-        // Last-resort fallback for non-SPL mints (e.g., Token-2022 with
-        // exotic extensions). Surface the failure so callers can decide
-        // rather than silently mis-sizing positions.
         return yield* Effect.fail(
           new Error(`Cannot resolve decimals for mint ${mint} via Helius or standard RPC`),
         );
@@ -564,22 +562,27 @@ export const AdapterLive = Layer.effect(
       if (missing.length === 0 || !config.heliusApiKey) return Effect.succeed({});
       return Effect.gen(function* () {
         const result: Record<string, number> = {};
-        for (const mint of missing) {
-          const asset = yield* fetchHeliusAsset(mint).pipe(
-            Effect.catchAll((err) => {
-              logger.debug("Helius asset price unavailable", {
-                mint,
-                error: String(err),
-              });
-              return Effect.succeed(null);
-            }),
-          );
-          const price = asset ? readHeliusPrice(asset) : undefined;
-          if (price !== undefined) {
-            result[mint] = price;
-            setCachedPrice(mint, price);
-          }
-        }
+        yield* Effect.forEach(
+          missing,
+          (mint) =>
+            fetchHeliusAsset(mint).pipe(
+              Effect.catchAll((err) => {
+                logger.debug("Helius asset price unavailable", {
+                  mint,
+                  error: String(err),
+                });
+                return Effect.succeed(null);
+              }),
+              Effect.map((asset) => {
+                const price = asset ? readHeliusPrice(asset) : undefined;
+                if (price !== undefined) {
+                  result[mint] = price;
+                  setCachedPrice(mint, price);
+                }
+              }),
+            ),
+          { concurrency: 5 },
+        );
         return result;
       });
     }
@@ -795,17 +798,12 @@ export const AdapterLive = Layer.effect(
         const tokenXMint = lbPair.tokenXMint.toBase58();
         const tokenYMint = lbPair.tokenYMint.toBase58();
 
-        const [mintXInfo, mintYInfo] = yield* Effect.all([
-          rpcCall((conn) => conn.getParsedAccountInfo(lbPair.tokenXMint)),
-          rpcCall((conn) => conn.getParsedAccountInfo(lbPair.tokenYMint)),
+        const [tokenXMeta, tokenYMeta] = yield* Effect.all([
+          getTokenMeta(tokenXMint),
+          getTokenMeta(tokenYMint),
         ]);
-
-        const tokenXDecimals =
-          (mintXInfo.value?.data as { parsed?: { info?: { decimals?: number } } })?.parsed?.info
-            ?.decimals ?? 9;
-        const tokenYDecimals =
-          (mintYInfo.value?.data as { parsed?: { info?: { decimals?: number } } })?.parsed?.info
-            ?.decimals ?? 6;
+        const tokenXDecimals = tokenXMeta.decimals;
+        const tokenYDecimals = tokenYMeta.decimals;
 
         const [balX, balY] = yield* Effect.all([
           rpcCall((conn) => conn.getTokenAccountBalance(lbPair.reserveX)),
@@ -1430,7 +1428,7 @@ export const AdapterLive = Layer.effect(
           const installId = yield* getOrCreateInstallId();
           const apiKey = yield* Effect.try({
             try: () => {
-              const credsPath = path.join(os.homedir(), ".config", "prism", "credentials.json");
+              const credsPath = path.join(getPrismConfigDir(), "credentials.json");
               const creds = JSON.parse(fs.readFileSync(credsPath, "utf-8")) as {
                 apiKey?: unknown;
               };
