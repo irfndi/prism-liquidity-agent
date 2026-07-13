@@ -103,14 +103,14 @@ export function reconcilePositions(
   memory: MemoryApi,
   trackedPositions: Map<string, PositionRecord>,
   poolsToScan: ReadonlyArray<string>,
-): Effect.Effect<void> {
+): Effect.Effect<boolean> {
   return Effect.gen(function* () {
     if (!adapter.hasWallet()) {
-      return;
+      return true;
     }
     const walletAddress = adapter.getWalletAddress();
     if (!walletAddress) {
-      return;
+      return true;
     }
 
     const onChainPositions = yield* adapter.getAllWalletPositions(walletAddress).pipe(
@@ -123,7 +123,7 @@ export function reconcilePositions(
     );
 
     if (onChainPositions === null) {
-      return;
+      return false;
     }
 
     const onChainPoolSet = new Set(onChainPositions.map((p) => p.poolAddress));
@@ -197,6 +197,8 @@ export function reconcilePositions(
         }
       }
     }
+
+    return true;
   });
 }
 
@@ -533,8 +535,11 @@ export const program = Effect.gen(function* () {
   }
 
   const approvedPoolAddresses = [...poolsToScan];
-  const refreshPoolsToScan = () => {
+  const refreshPoolsToScan = (includeTrackedPositions: boolean) => {
     poolsToScan = [...approvedPoolAddresses];
+    if (!includeTrackedPositions) {
+      return;
+    }
     for (const poolAddress of trackedPositions.keys()) {
       if (!poolsToScan.includes(poolAddress)) {
         poolsToScan.push(poolAddress);
@@ -542,8 +547,14 @@ export const program = Effect.gen(function* () {
     }
   };
 
-  yield* reconcilePositions(adapter, db, memory, trackedPositions, approvedPoolAddresses);
-  refreshPoolsToScan();
+  const initialReconcileSucceeded = yield* reconcilePositions(
+    adapter,
+    db,
+    memory,
+    trackedPositions,
+    approvedPoolAddresses,
+  );
+  refreshPoolsToScan(initialReconcileSucceeded);
 
   // Start agent-facing servers (MCP and HTTP fallback)
   yield* mcpServer.start().pipe(Effect.catchAll(() => Effect.void));
@@ -2114,8 +2125,14 @@ export const program = Effect.gen(function* () {
   let shuttingDown = false;
   const runScheduledCycle = Effect.gen(function* () {
     if (shuttingDown) return;
-    yield* reconcilePositions(adapter, db, memory, trackedPositions, approvedPoolAddresses);
-    refreshPoolsToScan();
+    const reconcileSucceeded = yield* reconcilePositions(
+      adapter,
+      db,
+      memory,
+      trackedPositions,
+      approvedPoolAddresses,
+    );
+    refreshPoolsToScan(reconcileSucceeded);
     yield* claimAllFees();
     yield* checkForAutoUpdate(config, db);
     yield* runScanCycle();

@@ -84,8 +84,12 @@ describe("reconcilePositions — integration", () => {
         yield* db.savePosition(makePosition("pool1", "pubkey1"));
         yield* db.savePosition(makePosition("pool2", "pubkey2"));
 
-        yield* reconcilePositions(adapter, db, memory, trackedPositions, ["pool1", "pool2"]);
+        const reconciled = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+          "pool1",
+          "pool2",
+        ]);
 
+        expect(reconciled).toBe(true);
         expect(trackedPositions.has("pool1")).toBe(false);
         expect(trackedPositions.has("pool2")).toBe(false);
 
@@ -111,8 +115,11 @@ describe("reconcilePositions — integration", () => {
 
         yield* db.savePosition(makePosition("pool1", "pubkey1"));
 
-        yield* reconcilePositions(adapter, db, memory, trackedPositions, ["pool1"]);
+        const reconciled = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+          "pool1",
+        ]);
 
+        expect(reconciled).toBe(false);
         expect(trackedPositions.has("pool1")).toBe(true);
 
         const all = yield* db.getAllPositions();
