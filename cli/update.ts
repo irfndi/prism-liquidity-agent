@@ -540,11 +540,13 @@ async function updateFromBundle(
   const backupDir = atomicReplaceInstall(installDir, bundleRoot);
 
   const wrapperBin = resolveWrapperBin();
+  let failedOperation = "wrapper rewrite";
   try {
     rewriteBundleWrapper(wrapperBin, installDir);
+    failedOperation = "smoke test";
     smokeTest(wrapperBin, skipSmokeTest);
   } catch (smokeErr) {
-    console.error("Smoke test failed — rolling back");
+    console.error(`${failedOperation} failed — rolling back`);
     if (existsSync(installDir)) {
       rmSync(installDir, { recursive: true, force: true });
     }
@@ -572,7 +574,7 @@ async function updateFromBundle(
       });
     }
     throw new UpdateAbort(
-      `Smoke test failed — rolled back to previous version. ` +
+      `${failedOperation} failed — rolled back to previous version. ` +
         `Error: ${smokeErr instanceof Error ? smokeErr.message : String(smokeErr)}`,
     );
   }
