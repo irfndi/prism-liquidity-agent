@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { Effect } from "effect";
+import type { ActionType } from "../engine/types.js";
 import {
   parseProposalResponse,
   parseHttpQueueProposal,
   ProposalParseError,
 } from "../engine/proposal-schema.js";
+
+const ORIGINAL_ACTION: ActionType = "HOLD";
 
 function runSyncOrFail<A, E>(effect: Effect.Effect<A, E>): A {
   return Effect.runSync(effect);
@@ -23,9 +26,10 @@ describe("parseProposalResponse", () => {
     const raw = `Here is my decision:
     {"action":"ENTER","poolAddress":"Pool111111111111111111111111111111111111111","confidence":0.85,"positionSizeUsd":1000,"reasoning":"strong fee/IL ratio"}`;
 
-    const proposal = runSyncOrFail(parseProposalResponse(raw));
+    const proposal = runSyncOrFail(parseProposalResponse(raw, ORIGINAL_ACTION));
 
     expect(proposal.action).toBe("ENTER");
+    expect(proposal.originalAction).toBe("HOLD");
     expect(proposal.poolAddress).toBe("Pool111111111111111111111111111111111111111");
     expect(proposal.confidence).toBe(0.85);
     expect(proposal.positionSizeUsd).toBe(1000);
@@ -42,7 +46,7 @@ describe("parseProposalResponse", () => {
       confidence: 0.5,
     });
 
-    const proposal = runSyncOrFail(parseProposalResponse(raw));
+    const proposal = runSyncOrFail(parseProposalResponse(raw, ORIGINAL_ACTION));
 
     expect(proposal.action).toBe("HOLD");
     expect(proposal.positionSizeUsd).toBeUndefined();
@@ -57,7 +61,7 @@ describe("parseProposalResponse", () => {
       confidence: 0.85,
     });
 
-    expectError(parseProposalResponse(raw));
+    expectError(parseProposalResponse(raw, ORIGINAL_ACTION));
   });
 
   it("rejects an empty pool address", () => {
@@ -67,7 +71,7 @@ describe("parseProposalResponse", () => {
       confidence: 0.85,
     });
 
-    expectError(parseProposalResponse(raw));
+    expectError(parseProposalResponse(raw, ORIGINAL_ACTION));
   });
 
   it("rejects confidence outside [0,1]", () => {
@@ -77,7 +81,7 @@ describe("parseProposalResponse", () => {
       confidence: 1.5,
     });
 
-    expectError(parseProposalResponse(raw));
+    expectError(parseProposalResponse(raw, ORIGINAL_ACTION));
   });
 
   it("rejects a negative position size", () => {
@@ -88,7 +92,7 @@ describe("parseProposalResponse", () => {
       positionSizeUsd: -100,
     });
 
-    expectError(parseProposalResponse(raw));
+    expectError(parseProposalResponse(raw, ORIGINAL_ACTION));
   });
 
   it("rejects invalid rebalance range", () => {
@@ -99,11 +103,11 @@ describe("parseProposalResponse", () => {
       rebalanceParams: { lowerBinId: 10, upperBinId: 5 },
     });
 
-    expectError(parseProposalResponse(raw));
+    expectError(parseProposalResponse(raw, ORIGINAL_ACTION));
   });
 
   it("rejects a response with no JSON object", () => {
-    expectError(parseProposalResponse("no json here"));
+    expectError(parseProposalResponse("no json here", ORIGINAL_ACTION));
   });
 });
 
@@ -119,6 +123,22 @@ describe("parseHttpQueueProposal", () => {
 
     expect(proposal.proposalId).toBe("queue-id-123");
     expect(proposal.source).toBe("http-queue");
+    expect(proposal.action).toBe("EXIT");
+    expect(proposal.originalAction).toBe("EXIT");
+  });
+
+  it("preserves an explicit original action", () => {
+    const raw = JSON.stringify({
+      action: "EXIT",
+      poolAddress: "Pool333333333333333333333333333333333333333",
+      confidence: 0.9,
+    });
+
+    const proposal = runSyncOrFail(
+      parseHttpQueueProposal(raw, "queue-id-123", "http-queue", "HOLD"),
+    );
+
+    expect(proposal.originalAction).toBe("HOLD");
     expect(proposal.action).toBe("EXIT");
   });
 });

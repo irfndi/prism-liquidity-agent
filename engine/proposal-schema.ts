@@ -1,6 +1,6 @@
 import { Data, Effect, ParseResult, Schema } from "effect";
 import { randomUUID } from "crypto";
-import type { AgentProposal } from "./types.js";
+import type { ActionType, AgentProposal } from "./types.js";
 
 export class ProposalParseError extends Data.TaggedError("ProposalParseError")<{
   readonly message: string;
@@ -106,11 +106,13 @@ function buildProposal(
   decoded: DecodedProposalJson,
   proposalId: string,
   source: "sync-prompt" | "http-queue",
+  originalAction: ActionType,
 ): AgentProposal {
   const now = Date.now();
   return {
     proposalId,
     source,
+    originalAction,
     action: decoded.action,
     poolAddress: decoded.poolAddress,
     confidence: decoded.confidence,
@@ -133,9 +135,10 @@ function buildProposal(
 
 export function parseProposalResponse(
   raw: string,
+  originalAction: ActionType,
 ): Effect.Effect<AgentProposal, ProposalParseError> {
   return decodeProposalJson(raw).pipe(
-    Effect.map((decoded) => buildProposal(decoded, randomUUID(), "sync-prompt")),
+    Effect.map((decoded) => buildProposal(decoded, randomUUID(), "sync-prompt", originalAction)),
   );
 }
 
@@ -143,8 +146,9 @@ export function parseHttpQueueProposal(
   raw: string,
   proposalId: string,
   source: "sync-prompt" | "http-queue" = "http-queue",
+  originalAction?: ActionType,
 ): Effect.Effect<AgentProposal, ProposalParseError> {
   return decodeProposalJson(raw).pipe(
-    Effect.map((decoded) => buildProposal(decoded, proposalId, source)),
+    Effect.map((decoded) => buildProposal(decoded, proposalId, source, originalAction ?? decoded.action)),
   );
 }

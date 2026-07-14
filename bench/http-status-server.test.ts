@@ -379,4 +379,37 @@ describe("HttpStatusServer", () => {
       await Effect.runPromise(server.stop());
     }
   });
+
+  it("rejects batches that exceed the configured limit", async () => {
+    const port = 18_792;
+    const enqueued: AgentProposal[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "secret-token",
+        agentProposalMaxBatchSize: 2,
+      }),
+      mockAgentState(baseSnapshot(), enqueued),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const proposals = [
+        { action: "HOLD", poolAddress: "PoolA", confidence: 0.8 },
+        { action: "HOLD", poolAddress: "PoolB", confidence: 0.8 },
+        { action: "HOLD", poolAddress: "PoolC", confidence: 0.8 },
+      ];
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify(proposals),
+      });
+      expect(response.status).toBe(413);
+      expect(enqueued).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
 });

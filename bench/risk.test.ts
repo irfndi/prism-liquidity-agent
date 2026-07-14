@@ -209,14 +209,14 @@ describe("RiskEngine", () => {
     });
 
     it("rejects promoting a non-ENTER action to ENTER", () => {
-      const proposal = makeProposal({ action: "ENTER", originalAction: "HOLD" });
+      const proposal = makeProposal({ action: "ENTER", originalAction: "HOLD", positionSizeUsd: 1_000 });
       const result = evaluateAgentProposal(proposal, makeContext(), appConfig);
       expect(result.valid).toBe(false);
       expect(result.reason).toContain("promote");
     });
 
     it("rejects promoting REBALANCE to ENTER", () => {
-      const proposal = makeProposal({ action: "ENTER", originalAction: "REBALANCE" });
+      const proposal = makeProposal({ action: "ENTER", originalAction: "REBALANCE", positionSizeUsd: 1_000 });
       const result = evaluateAgentProposal(proposal, makeContext(), appConfig);
       expect(result.valid).toBe(false);
       expect(result.reason).toContain("promote");

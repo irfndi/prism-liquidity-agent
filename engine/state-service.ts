@@ -49,7 +49,7 @@ export interface PrismStateSnapshot {
   readonly pendingProposals: ReadonlyArray<AgentProposal>;
 }
 
-const initialSnapshot: PrismStateSnapshot = {
+export const initialSnapshot: PrismStateSnapshot = {
   programStartTime: Date.now(),
   scanCount: 0,
   lastCycleAt: null,

@@ -208,12 +208,22 @@ describe("evaluateAgentProposal", () => {
 
   it("cannot promote a non-ENTER action to ENTER", () => {
     const result = evaluateAgentProposal(
-      makeProposal({ action: "ENTER", poolAddress: "pool1", originalAction: "HOLD" }),
+      makeProposal({ action: "ENTER", poolAddress: "pool1", positionSizeUsd: 1_000, originalAction: "HOLD" }),
       makeContext(),
       makeConfig(),
     );
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/Cannot promote/);
+  });
+
+  it("rejects ENTER without positionSizeUsd", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "ENTER", poolAddress: "pool1" }),
+      makeContext({ openPositions: [] }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/positionSizeUsd/);
   });
 
   it("approves ENTER when the pool is not already held", () => {

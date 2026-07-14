@@ -30,7 +30,7 @@ import { DbLive } from "./db-service.js";
 import { RevenueLive } from "./revenue-service.js";
 import { RevenueConfigServiceLive } from "./revenue-config-service.js";
 import { ReferralLive } from "./referral-service.js";
-import { AgentStateMutable } from "./state-service.js";
+import { AgentStateMutable, initialSnapshot } from "./state-service.js";
 import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
@@ -999,6 +999,7 @@ export const program = Effect.gen(function* () {
 
   const refreshAgentState = (): Effect.Effect<void, never> =>
     Effect.gen(function* () {
+      const snapshot = yield* agentState.getSnapshot().pipe(Effect.catchAll(() => Effect.succeed(initialSnapshot)));
       const positions = Array.from(trackedPositions.values()).map((p) => ({
         poolAddress: p.poolAddress,
         tokenXSymbol: p.tokenXSymbol,
@@ -1024,9 +1025,20 @@ export const program = Effect.gen(function* () {
       const recentDecisions = yield* audit
         .getRecentDecisions(20)
         .pipe(Effect.catchAll(() => Effect.succeed([])));
+
+      const now = Date.now();
+      let badProposalBackoffUntil: number | null = null;
+      for (const backoff of proposalBackoff.values()) {
+        if (isProposalBackoffActive(backoff, now)) {
+          if (badProposalBackoffUntil === null || backoff.nextProposalAt > badProposalBackoffUntil) {
+            badProposalBackoffUntil = backoff.nextProposalAt;
+          }
+        }
+      }
+
       yield* agentState.updateSnapshot({
         scanCount,
-        lastCycleAt: Date.now(),
+        lastCycleAt: now,
         portfolio: {
           totalValueUsd: lastWalletBalanceUsd + positionsValueUsd,
           unrealizedPnlUsd,
@@ -1045,6 +1057,19 @@ export const program = Effect.gen(function* () {
           reasoning: d.reasoning,
           executed: d.executed,
         })),
+        agentPolicy: {
+          mode: config.agentProposalMode,
+          proposalsQueued: snapshot.pendingProposals.length,
+          lastProposalAt: snapshot.agentPolicy.lastProposalAt,
+          badProposalBackoffUntil,
+          circuitBreakerOpen: proposalCircuitBreaker.isOpen(now),
+          hardCaps: {
+            maxPositionSizePct: config.agentProposalMaxPositionSizePct,
+            maxRebalanceRangeBins: config.maxRebalanceRangeBins,
+            minProposalConfidence: config.agentProposalMinConfidence,
+            proposalStaleMs: config.agentProposalStaleMs,
+          },
+        },
       });
     });
 
@@ -1984,8 +2009,12 @@ export const program = Effect.gen(function* () {
             if (isProposalBackoffActive(poolBackoff, now)) {
               console.info(`[agent-proposal] ${poolAddress} skipped — backoff active`);
             } else {
+              const proposalToEvaluate = {
+                ...agentProposal,
+                originalAction: decision.action,
+              };
               const validation = evaluateAgentProposal(
-                agentProposal,
+                proposalToEvaluate,
                 {
                   openPositions,
                   portfolioValueUsd,
@@ -2002,6 +2031,12 @@ export const program = Effect.gen(function* () {
                 decision = validation.adjustedDecision;
                 proposalBackoff.delete(poolAddress);
                 proposalCircuitBreaker.recordSuccess();
+
+                if (proposalSource === "queue" && agentProposal.proposalId) {
+                  yield* agentState
+                    .dequeueProposals([agentProposal.proposalId])
+                    .pipe(Effect.catchAll(() => Effect.void));
+                }
               } else {
                 console.warn(`[agent-proposal] ${proposalSource} rejected: ${validation.reason}`);
                 proposalBackoff.set(

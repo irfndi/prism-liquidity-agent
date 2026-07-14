@@ -72,6 +72,13 @@ export class HttpStatusServer {
     }
 
     const items = Array.isArray(parsedBody) ? parsedBody : [parsedBody];
+    const maxBatchSize = this.config.agentProposalMaxBatchSize;
+    if (items.length > maxBatchSize) {
+      return new Response(
+        `Batch size ${items.length} exceeds limit ${maxBatchSize}`,
+        { status: 413 },
+      );
+    }
     const proposals: AgentProposal[] = [];
     for (const [index, item] of items.entries()) {
       if (item === null || typeof item !== "object") {

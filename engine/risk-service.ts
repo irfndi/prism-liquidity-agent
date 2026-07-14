@@ -134,6 +134,10 @@ export function evaluateAgentProposal(
   //    agent proposal limit and the existing per-pool allocation cap.
   let adjustedPositionSizeUsd = proposal.positionSizeUsd;
 
+  if (proposal.action === "ENTER" && proposal.positionSizeUsd === undefined) {
+    return { valid: false, reason: "ENTER proposals must include positionSizeUsd" };
+  }
+
   if (proposal.positionSizeUsd !== undefined) {
     if (proposal.positionSizeUsd < 0) {
       return { valid: false, reason: "positionSizeUsd cannot be negative" };

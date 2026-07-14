@@ -427,7 +427,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           return transport.sendPrompt(prompt, context).pipe(
             Effect.flatMap((response: AgentRuntimeResponse) => {
               lastPromptAt = Date.now();
-              return parseProposalResponse(response.raw).pipe(
+              return parseProposalResponse(response.raw, decision.action).pipe(
                 Effect.map((proposal) => {
                   logger.info("Agent proposal", {
                     pool: decision.poolAddress,
