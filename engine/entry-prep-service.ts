@@ -297,6 +297,41 @@ export const EntryPrepLive = Layer.effect(
             })),
           });
 
+          // Preflight every swap quote before submitting any transaction. This
+          // prevents partial preparation where one leg is swapped successfully
+          // and then a quote failure on the other leg leaves the wallet altered.
+          yield* Effect.all(
+            deficits.map((deficit) => {
+              const usdcInputAtomic = computeUsdcInputAtomic(
+                deficit.amount,
+                deficit.decimals,
+                deficit.price,
+              );
+              if (usdcInputAtomic <= 0n) {
+                return Effect.fail(
+                  makePrepError(
+                    "SWAP_QUOTE_FAILED",
+                    `Computed USDC input too small for ${deficit.mint}`,
+                    poolAddress,
+                  ),
+                );
+              }
+              return adapter
+                .quoteSwapUSDCForToken(deficit.mint, usdcInputAtomic)
+                .pipe(
+                  Effect.mapError((err) =>
+                    makePrepError(
+                      "SWAP_QUOTE_FAILED",
+                      `Failed to quote swap USDC -> ${deficit.mint}: ${String(err)}`,
+                      poolAddress,
+                      err,
+                    ),
+                  ),
+                );
+            }),
+            { concurrency: "unbounded" },
+          );
+
           for (const deficit of deficits) {
             const usdcInputAtomic = computeUsdcInputAtomic(
               deficit.amount,

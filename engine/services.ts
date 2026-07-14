@@ -151,6 +151,10 @@ export interface AdapterApi {
     mints: ReadonlyArray<string>,
   ) => Effect.Effect<Record<string, number>, unknown>;
   readonly getTokenDecimals: (mintAddress: string) => Effect.Effect<number, unknown>;
+  readonly quoteSwapUSDCForToken: (
+    outputMint: string,
+    amountAtomic: bigint,
+  ) => Effect.Effect<Record<string, unknown>, unknown>;
   readonly swapUSDCForToken: (
     outputMint: string,
     amountAtomic: bigint,

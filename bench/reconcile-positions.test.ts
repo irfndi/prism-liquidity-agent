@@ -19,6 +19,7 @@ function makeMockAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
     getTokenBalance: () => Effect.succeed(0n),
     getTokenPrices: () => Effect.succeed({}),
     getTokenDecimals: () => Effect.succeed(6),
+    quoteSwapUSDCForToken: () => Effect.fail("not implemented"),
     swapUSDCForToken: () => Effect.fail("not implemented"),
     getPoolState: () => Effect.fail("not implemented"),
     getBinArray: () => Effect.fail("not implemented"),

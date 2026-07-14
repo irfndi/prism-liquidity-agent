@@ -861,17 +861,17 @@ export const AdapterLive = Layer.effect(
       nativeSolBalanceCache = undefined;
     }).pipe(Effect.zipRight(invalidateWalletBalance));
 
-    function swapUSDCForToken(
+    function quoteSwapUSDCForToken(
       outputMint: string,
       amountAtomic: bigint,
-    ): Effect.Effect<string, unknown> {
+    ): Effect.Effect<Record<string, unknown>, unknown> {
       return Effect.gen(function* () {
         const activeWallet = wallet;
         if (!activeWallet) {
           return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
         }
         if (amountAtomic <= 0n) {
-          return "";
+          return { routePlan: [] };
         }
 
         const jupiterApiKey = process.env.JUPITER_API_KEY ?? "";
@@ -907,6 +907,29 @@ export const AdapterLive = Layer.effect(
             }),
           );
         }
+
+        return quoteData as Record<string, unknown>;
+      });
+    }
+
+    function swapUSDCForToken(
+      outputMint: string,
+      amountAtomic: bigint,
+    ): Effect.Effect<string, unknown> {
+      return Effect.gen(function* () {
+        const activeWallet = wallet;
+        if (!activeWallet) {
+          return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
+        }
+        if (amountAtomic <= 0n) {
+          return "";
+        }
+
+        const jupiterApiKey = process.env.JUPITER_API_KEY ?? "";
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (jupiterApiKey) headers["x-api-key"] = jupiterApiKey;
+
+        const quoteData = yield* quoteSwapUSDCForToken(outputMint, amountAtomic);
 
         const swapResponse = yield* Effect.tryPromise(() =>
           fetch("https://api.jup.ag/swap/v1/swap", {
@@ -1716,6 +1739,18 @@ export const AdapterLive = Layer.effect(
             }))
             .slice(0, 50);
         }),
+
+      quoteSwapUSDCForToken: (outputMint: string, amountAtomic: bigint) =>
+        quoteSwapUSDCForToken(outputMint, amountAtomic).pipe(
+          Effect.catchAll((err) =>
+            Effect.fail(
+              new AdapterError({
+                message: `quoteSwapUSDCForToken failed: ${String(err)}`,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
 
       swapUSDCForToken: (outputMint: string, amountAtomic: bigint) =>
         swapUSDCForToken(outputMint, amountAtomic).pipe(

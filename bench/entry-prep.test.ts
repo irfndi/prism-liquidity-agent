@@ -63,6 +63,7 @@ function makeAdapter(mock: Partial<AdapterApi> = {}): AdapterApi {
     getTokenBalance: (mint: string) => Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
     getTokenPrices: () => Effect.succeed({ [TOKEN_X]: 150, [TOKEN_Y]: 1 }),
     getTokenDecimals: () => Effect.succeed(9),
+    quoteSwapUSDCForToken: () => Effect.succeed({ routePlan: [{ swapInfo: {} }] }),
     swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
     ...mock,
   };
@@ -217,9 +218,9 @@ describe("EntryPrepService", () => {
         getTokenBalance: (mint: string) =>
           Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
         getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
-        swapUSDCForToken: () =>
+        quoteSwapUSDCForToken: () =>
           Effect.fail(
-            new Error("swapUSDCForToken failed: Jupiter quote failed: 502", {
+            new Error("quoteSwapUSDCForToken failed: Jupiter quote failed: 502", {
               cause: new SwapQuoteError({ message: "Jupiter quote failed: 502" }),
             }),
           ),
@@ -235,6 +236,43 @@ describe("EntryPrepService", () => {
         }).pipe(Effect.provide(layer)),
       ),
     ).rejects.toThrow(/SWAP_QUOTE_FAILED/);
+  });
+
+  it("preflights all quotes before executing any swap", async () => {
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    const quoteSpy = vi.fn((mint: string) => {
+      if (mint === TOKEN_Y) {
+        return Effect.fail(
+          new Error("quoteSwapUSDCForToken failed: Jupiter quote returned no usable route", {
+            cause: new SwapQuoteError({ message: "Jupiter quote returned no usable route" }),
+          }),
+        );
+      }
+      return Effect.succeed({ routePlan: [{ swapInfo: {} }] });
+    });
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(0n),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        quoteSwapUSDCForToken: quoteSpy,
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/SWAP_QUOTE_FAILED/);
+
+    expect(quoteSpy).toHaveBeenCalledTimes(2);
+    expect(swapSpy).not.toHaveBeenCalled();
   });
 
   it("fails with BALANCE_READ_FAILED when a balance read fails", async () => {
