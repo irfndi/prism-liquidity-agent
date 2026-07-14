@@ -97,6 +97,10 @@ import {
 
 const logger = createLogger("program");
 
+export function isProposalStale(proposal: AgentProposal, staleMs: number, now: number): boolean {
+  return now > proposal.proposedAt + staleMs || now > proposal.expiresAt;
+}
+
 // ─── Position value estimation (rough heuristic) ───────────────
 
 export function estimatePositionValue(pos: PositionRecord, pool: PoolState): number {
@@ -1266,9 +1270,6 @@ export const program = Effect.gen(function* () {
     cooldownMs: config.agentProposalCircuitBreakerCooldownMs,
   });
 
-  const isProposalStale = (proposal: AgentProposal, staleMs: number): boolean =>
-    Date.now() > proposal.proposedAt + staleMs;
-
   const findPendingProposal = (
     proposals: ReadonlyArray<AgentProposal>,
     poolAddress: string,
@@ -1277,7 +1278,7 @@ export const program = Effect.gen(function* () {
   ): AgentProposal | undefined =>
     proposals.find((p) => {
       if (p.poolAddress !== poolAddress) return false;
-      if (isProposalStale(p, staleMs)) return false;
+      if (isProposalStale(p, staleMs, Date.now())) return false;
       if (mode === "supervised") return p.status === "approved";
       return p.status === "pending" || p.status === "approved";
     });

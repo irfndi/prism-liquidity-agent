@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { Effect } from "effect";
-import { buildLayer, estimatePositionValue, executeLive } from "../engine/program.js";
+import { buildLayer, estimatePositionValue, executeLive, isProposalStale } from "../engine/program.js";
 import { ConfigService } from "../engine/config-service.js";
 import { EntryPrepError } from "../engine/errors.js";
 import {
@@ -362,5 +362,40 @@ describe("estimatePositionValue", () => {
     const pos = makePos(4995, 5005, 1000);
     const pool = makePool(5005);
     expect(estimatePositionValue(pos, pool)).toBe(500);
+  });
+});
+
+describe("isProposalStale", () => {
+  function makeProposal(proposedAt: number, expiresAt: number) {
+    return {
+      proposalId: "p-1",
+      source: "http-queue" as const,
+      originalAction: "HOLD" as const,
+      action: "HOLD" as const,
+      poolAddress: "pool1",
+      confidence: 0.8,
+      reasoning: "test",
+      proposedAt,
+      expiresAt,
+      status: "pending" as const,
+    };
+  }
+
+  it("returns false when both staleMs and expiresAt are in the future", () => {
+    const now = 1000;
+    const proposal = makeProposal(0, 2000);
+    expect(isProposalStale(proposal, 5000, now)).toBe(false);
+  });
+
+  it("returns true when past the configured staleMs", () => {
+    const now = 6000;
+    const proposal = makeProposal(0, 2000);
+    expect(isProposalStale(proposal, 5000, now)).toBe(true);
+  });
+
+  it("returns true when past the explicit expiresAt even if within staleMs", () => {
+    const now = 1500;
+    const proposal = makeProposal(0, 1000);
+    expect(isProposalStale(proposal, 10_000, now)).toBe(true);
   });
 });
