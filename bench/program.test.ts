@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { Effect } from "effect";
-import { buildLayer, estimatePositionValue } from "../engine/program.js";
+import { describe, it, expect, vi } from "vitest";
+import { Effect, Layer } from "effect";
+import { buildLayer, estimatePositionValue, executeLive } from "../engine/program.js";
 import { ConfigService } from "../engine/config-service.js";
 import {
   AdapterService,
@@ -12,7 +12,12 @@ import {
   ScreenerService,
   DbService,
   EntryPrepService,
+  type AdapterApi,
+  type StrategyApi,
+  type DbApi,
+  type RevenueConfigApi,
 } from "../engine/services.js";
+import type { AgentDecision } from "../engine/types.js";
 
 function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
   return Effect.runSync((Effect.provide as any)(effect, layer));
@@ -38,6 +43,197 @@ describe("Program integration", () => {
       layer,
     );
     expect(result).toBe("ok");
+  });
+});
+
+describe("executeLive", () => {
+  function makeAdapter(): AdapterApi {
+    return {
+      hasWallet: () => true,
+      getWalletAddress: () => "mock-wallet",
+      getWalletBalanceUsd: () => Effect.succeed(10_000),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+      getPoolState: () =>
+        Effect.succeed({
+          address: "TestPool111111111111111111111111111111111111",
+          tokenX: "So11111111111111111111111111111111111111112",
+          tokenY: "FakeToken1111111111111111111111111111111111",
+          tokenXSymbol: "SOL",
+          tokenYSymbol: "FAKE",
+          tvlUsd: 100_000,
+          volume24hUsd: 30_000,
+          fees24hUsd: 300,
+          apr: 60,
+          activeBinId: 5000,
+          binStep: 10,
+          currentPrice: 150,
+          timestamp: Date.now(),
+        }),
+      getBinArray: () =>
+        Effect.succeed({
+          lowerBinId: 4980,
+          upperBinId: 5020,
+          activeBinId: 5000,
+          bins: [],
+        }),
+      getPositions: () => Effect.succeed([]),
+      getAllWalletPositions: () => Effect.succeed([]),
+      simulateRebalance: () =>
+        Effect.succeed({ estimatedIlUsd: 0, estimatedFeesUsd: 0, netBenefitUsd: 0 }),
+      enterPosition: () => Effect.succeed({ positionPubKey: "mock-pos", txSignature: "mock-tx" }),
+      exitPosition: () => Effect.succeed({ txSignature: "mock-tx" }),
+      rebalancePosition: () =>
+        Effect.succeed({ newPositionPubKey: "mock-pos", txSignatures: ["mock-tx"] }),
+      claimFees: () =>
+        Effect.succeed({
+          txSignature: "mock-tx",
+          feeX: 0,
+          feeY: 0,
+          platformFeeX: 0,
+          platformFeeY: 0,
+          netFeeX: 0,
+          netFeeY: 0,
+        }),
+      discoverPools: () => Effect.succeed([]),
+      reportFeeCollection: () => Effect.void,
+      swapUSDCForSOL: () => Effect.void,
+      getTokenBalance: () => Effect.succeed(0n),
+      getTokenPrices: () => Effect.succeed({}),
+      getTokenDecimals: () => Effect.succeed(9),
+      swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
+    };
+  }
+
+  function makeStrategy(): StrategyApi {
+    return {
+      computeMetrics: () =>
+        ({
+          pool: {
+            address: "TestPool111111111111111111111111111111111111",
+            tokenX: "So11111111111111111111111111111111111111112",
+            tokenY: "FakeToken1111111111111111111111111111111111",
+            tokenXSymbol: "SOL",
+            tokenYSymbol: "FAKE",
+            tvlUsd: 100_000,
+            volume24hUsd: 30_000,
+            fees24hUsd: 300,
+            apr: 60,
+            activeBinId: 5000,
+            binStep: 10,
+            currentPrice: 150,
+            timestamp: Date.now(),
+          },
+          binArray: {
+            lowerBinId: 4980,
+            upperBinId: 5020,
+            activeBinId: 5000,
+            bins: [],
+          },
+          feeIlRatio: 2,
+          volumeAuthenticity: 0.9,
+          binUtilization: 0.5,
+          tvlVelocity: 0,
+        }) as import("../engine/types.js").PoolMetrics,
+      checkVolumeAuthenticity: () => ({ score: 0.9, flags: [] }),
+      computeBinUtilization: () => 0.5,
+      computeFeeIlRatio: () => 2,
+      recommendBinRange: () => ({ lowerBinId: 4980, upperBinId: 5020 }),
+      passesPreFilter: () => true,
+    };
+  }
+
+  function makeDb(): DbApi {
+    return {
+      db: {},
+      savePosition: () => Effect.void,
+      getPosition: () => Effect.succeed(null),
+      getAllPositions: () => Effect.succeed([]),
+      getPaperExitedPositions: () => Effect.succeed([]),
+      deletePosition: () => Effect.void,
+      markPaperExited: () => Effect.void,
+      updatePositionValue: () => Effect.void,
+      saveAudit: () => Effect.void,
+      getRecentAudit: () => Effect.succeed([]),
+      cacheBlacklist: () => Effect.void,
+      isBlacklisted: () => Effect.succeed(false),
+      insertMemory: () => Effect.void,
+      queryMemory: () => Effect.succeed([]),
+      pruneMemory: () => Effect.succeed(0),
+      saveSnapshot: () => Effect.void,
+      getSnapshots: () => Effect.succeed([]),
+      getSnapshotPools: () => Effect.succeed([]),
+      getSnapshotCount: () => Effect.succeed(0),
+      pruneSnapshots: () => Effect.succeed(0),
+      saveFeedback: () => Effect.void,
+      getFeedbackByHash: () => Effect.succeed(null),
+      getRecentFeedbackForAgent: () => Effect.succeed([]),
+      getLastFeedbackForAgent: () => Effect.succeed(null),
+      listFeedbackForAgent: () => Effect.succeed([]),
+      getMetadata: () => Effect.succeed(null),
+      setMetadata: () => Effect.void,
+      setMetadataBatch: () => Effect.void,
+      saveFeeClaim: () => Effect.void,
+      getUnreportedFeeClaims: () => Effect.succeed([]),
+      markFeeClaimReported: () => Effect.void,
+      saveSignalSnapshot: () => Effect.succeed(0),
+      getSignalSnapshots: () => Effect.succeed([]),
+      recordSignalOutcome: () => Effect.void,
+      getRecentOutcomes: () => Effect.succeed([]),
+      getEvolvedThresholds: () => Effect.succeed(null),
+      saveEvolvedThresholds: () => Effect.void,
+      getClosedPositionOutcomes: () => Effect.succeed([]),
+      getSignalWeights: () => Effect.succeed(null),
+      saveSignalWeights: () => Effect.void,
+      getPoolCooldown: () => Effect.succeed(null),
+      setPoolCooldown: () => Effect.void,
+      clearPoolCooldown: () => Effect.void,
+    };
+  }
+
+  function makeRevenueConfigSvc(): RevenueConfigApi {
+    const config = {
+      tier: "free",
+      platformFeeRate: 0,
+      revenueShareEnabled: false,
+      revenueShareOperatorPct: 0,
+      feeWalletAddress: "",
+    };
+    return {
+      getConfig: () => Effect.succeed(config),
+      refreshConfig: () => Effect.succeed(config),
+    };
+  }
+
+  it("calls prepareEntryTokens on a live ENTER when autoSwapEntry is true", () => {
+    const poolAddress = "TestPool111111111111111111111111111111111111";
+    const positionSizeUsd = 1234;
+
+    const prepareSpy = vi.fn().mockReturnValue(Effect.void);
+
+    const result = Effect.runSync(
+      executeLive(
+        {
+          adapter: makeAdapter(),
+          strategy: makeStrategy(),
+          db: makeDb(),
+          revenueConfigSvc: makeRevenueConfigSvc(),
+          trackedPositions: new Map(),
+        },
+        {
+          action: "ENTER",
+          poolAddress,
+          confidence: 0.8,
+          reasoning: "test",
+          positionSizeUsd,
+        } as AgentDecision,
+        { activeBinId: 5000, binStep: 10, tokenXSymbol: "SOL", tokenYSymbol: "USDC" },
+      ).pipe(Effect.provide(Layer.succeed(EntryPrepService, { prepareEntryTokens: prepareSpy }))),
+    );
+
+    expect(result.executed).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
+    expect(prepareSpy).toHaveBeenCalledWith(poolAddress, positionSizeUsd);
   });
 });
 
