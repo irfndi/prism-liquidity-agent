@@ -850,6 +850,36 @@ describe("EntryPrepService", () => {
     expect(swapSpy).not.toHaveBeenCalled();
   });
 
+  it("fails with SWAP_QUOTE_FAILED when quote amount is non-numeric", async () => {
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        quoteSwapUSDCForToken: () =>
+          Effect.succeed({
+            routePlan: [{ swapInfo: {} }],
+            outAmount: "not-a-number",
+          }),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/SWAP_QUOTE_FAILED/);
+
+    expect(swapSpy).not.toHaveBeenCalled();
+  });
+
   it("fails when native SOL drops below the live entry gate after swaps", async () => {
     const OTHER_TOKEN = "OtherToken1111111111111111111111111111111";
     const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));

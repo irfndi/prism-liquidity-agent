@@ -82,21 +82,33 @@ function isSwapQuoteError(err: unknown): boolean {
   return (cause as { _tag?: string })._tag === "SwapQuoteError";
 }
 
+function parseAtomicAmount(value: unknown): bigint | null {
+  if (typeof value === "string") {
+    // Jupiter returns atomic amounts as integer strings. Reject empty or
+    // non-integer strings so malformed quotes cannot throw during BigInt conversion.
+    if (!/^-?\d+$/.test(value)) return null;
+    try {
+      return BigInt(value);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return BigInt(Math.floor(value));
+  }
+  return null;
+}
+
 function quoteOutAmount(quoteData: Record<string, unknown>): bigint {
-  const raw = quoteData.outAmount;
-  if (typeof raw === "string") return BigInt(raw);
-  if (typeof raw === "number") return BigInt(Math.floor(raw));
-  return 0n;
+  return parseAtomicAmount(quoteData.outAmount) ?? 0n;
 }
 
 function quoteGuaranteedOutAmount(quoteData: Record<string, unknown>): bigint {
   // Jupiter's `otherAmountThreshold` is the minimum output guaranteed at the
   // quoted slippage; prefer it over the optimistic `outAmount` so a swap is
   // only submitted when it can actually cover the deficit after slippage.
-  const threshold = quoteData.otherAmountThreshold;
-  if (typeof threshold === "string" && threshold.length > 0) return BigInt(threshold);
-  if (typeof threshold === "number" && Number.isFinite(threshold))
-    return BigInt(Math.floor(threshold));
+  const threshold = parseAtomicAmount(quoteData.otherAmountThreshold);
+  if (threshold !== null) return threshold;
   return quoteOutAmount(quoteData);
 }
 
