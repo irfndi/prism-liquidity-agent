@@ -32,6 +32,7 @@ import { ReferralLive } from "./referral-service.js";
 import { AgentStateMutable } from "./state-service.js";
 import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
+import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
 
 import { checkForAutoUpdate } from "./update-check.js";
@@ -53,6 +54,7 @@ import {
   AgentStateService,
   McpServerService,
   HttpStatusServerService,
+  EntryPrepService,
   type AdapterApi,
   type DbApi,
   type MemoryApi,
@@ -238,7 +240,8 @@ type AllServices =
   | AgentService
   | AgentStateService
   | McpServerService
-  | HttpStatusServerService;
+  | HttpStatusServerService
+  | EntryPrepService;
 
 export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, never> {
   const dbLayer = DbLive(cfg?.sqliteDbPath);
@@ -272,6 +275,9 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const revenueConfigDeps = Layer.merge(dbLayer, configLayer);
   const revenueConfig = Layer.provide(RevenueConfigServiceLive, revenueConfigDeps);
 
+  const entryPrepDeps = Layer.merge(adapter, configLayer);
+  const entryPrep = Layer.provide(EntryPrepLive, entryPrepDeps);
+
   const merged = Layer.merge(adapter, StrategyLive);
   const merged2 = Layer.merge(merged, dbLayer);
   const merged3 = Layer.merge(merged2, memory);
@@ -283,6 +289,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged9 = Layer.merge(merged8, RevenueLive);
   const merged10 = Layer.merge(merged9, ReferralLive);
   const merged11 = Layer.merge(merged10, revenueConfig);
+  const merged11a = Layer.merge(merged11, entryPrep);
 
   const agentLayer = cfg?.agentiveMode ? AgentLive(cfg) : Layer.succeed(AgentService, AgentNoOp);
 
@@ -300,7 +307,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
           stop: () => Effect.void,
         });
 
-  const merged12 = Layer.merge(merged11, agentLayer);
+  const merged12 = Layer.merge(merged11a, agentLayer);
   const merged13 = Layer.merge(merged12, agentStateLayer);
   const merged14 = Layer.merge(merged13, mcpLayer);
   const merged15 = Layer.merge(merged14, httpLayer);
@@ -645,7 +652,7 @@ export const program = Effect.gen(function* () {
 
   // ─── Scan cycle ────────────────────────────────────────────────────────────
 
-  const runScanCycle = (): Effect.Effect<void> =>
+  const runScanCycle = (): Effect.Effect<void, never, EntryPrepService> =>
     Effect.gen(function* () {
       const cycle: AgentCycle = {
         cycleId: randomUUID(),
@@ -835,7 +842,7 @@ export const program = Effect.gen(function* () {
   const evaluatePool = (
     poolAddress: string,
     cycle: AgentCycle,
-  ): Effect.Effect<AgentDecision | null, unknown> =>
+  ): Effect.Effect<AgentDecision | null, unknown, EntryPrepService> =>
     Effect.gen(function* () {
       const cycleId = cycle.cycleId;
       const pool = yield* adapter.getPoolState(poolAddress);
@@ -1713,7 +1720,7 @@ export const program = Effect.gen(function* () {
     pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
     signalTimestamp?: number,
     signalSnapshotId?: number,
-  ): Effect.Effect<{ executed: boolean; error: string | undefined }> =>
+  ): Effect.Effect<{ executed: boolean; error: string | undefined }, never, EntryPrepService> =>
     Effect.gen(function* () {
       if (decision.action === "ENTER" && decision.positionSizeUsd) {
         const existing = trackedPositions.get(decision.poolAddress);
@@ -1795,7 +1802,7 @@ export const program = Effect.gen(function* () {
     pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
     signalTimestamp?: number,
     signalSnapshotId?: number,
-  ): Effect.Effect<{ executed: boolean; error: string | undefined }> =>
+  ): Effect.Effect<{ executed: boolean; error: string | undefined }, never, EntryPrepService> =>
     Effect.gen(function* () {
       if (!adapter.hasWallet()) {
         console.error("Live trading enabled but no wallet configured");
@@ -1826,6 +1833,25 @@ export const program = Effect.gen(function* () {
         if (solBalance < 0.03) {
           console.warn("Insufficient SOL for gas — skipping ENTER");
           return { executed: false, error: "Insufficient SOL for gas — skipping ENTER" };
+        }
+      }
+
+      if (decision.action === "ENTER" && decision.positionSizeUsd) {
+        const entryPrep = yield* EntryPrepService;
+        const prepResult = yield* entryPrep
+          .prepareEntryTokens(decision.poolAddress, decision.positionSizeUsd)
+          .pipe(
+            Effect.matchEffect({
+              onSuccess: () => Effect.succeed({ error: undefined as string | undefined }),
+              onFailure: (err) =>
+                Effect.succeed({
+                  error: `Entry token preparation failed: ${err instanceof Error ? err.message : String(err)}`,
+                }),
+            }),
+          );
+        if (prepResult.error) {
+          console.warn(prepResult.error, { pool: decision.poolAddress });
+          return { executed: false, error: prepResult.error };
         }
       }
 

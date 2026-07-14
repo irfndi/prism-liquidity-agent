@@ -11,6 +11,7 @@ import {
   AuditService,
   ScreenerService,
   DbService,
+  EntryPrepService,
 } from "../engine/services.js";
 
 function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
@@ -31,6 +32,7 @@ describe("Program integration", () => {
         yield* AuditService;
         yield* ScreenerService;
         yield* DbService;
+        yield* EntryPrepService;
         return "ok";
       }),
       layer,
