@@ -7,7 +7,13 @@ export interface EntryFailureBackoff {
 }
 
 export function isInsufficientTokenBalanceError(error: string | undefined): boolean {
-  return error?.toLowerCase().includes("insufficient token balance") ?? false;
+  if (!error) return false;
+  const normalized = error.toLowerCase();
+  return (
+    normalized.includes("insufficient token balance") ||
+    normalized.includes("insufficient_usdc_balance") ||
+    normalized.includes("insufficient_balance_after_swap")
+  );
 }
 
 export function nextEntryFailureBackoff(
