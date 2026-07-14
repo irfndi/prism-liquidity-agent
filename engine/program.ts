@@ -1003,7 +1003,9 @@ export const program = Effect.gen(function* () {
 
   const refreshAgentState = (): Effect.Effect<void, never> =>
     Effect.gen(function* () {
-      const snapshot = yield* agentState.getSnapshot().pipe(Effect.catchAll(() => Effect.succeed(initialSnapshot)));
+      const snapshot = yield* agentState
+        .getSnapshot()
+        .pipe(Effect.catchAll(() => Effect.succeed(initialSnapshot)));
       const positions = Array.from(trackedPositions.values()).map((p) => ({
         poolAddress: p.poolAddress,
         tokenXSymbol: p.tokenXSymbol,
@@ -1034,7 +1036,10 @@ export const program = Effect.gen(function* () {
       let badProposalBackoffUntil: number | null = null;
       for (const backoff of proposalBackoff.values()) {
         if (isProposalBackoffActive(backoff, now)) {
-          if (badProposalBackoffUntil === null || backoff.nextProposalAt > badProposalBackoffUntil) {
+          if (
+            badProposalBackoffUntil === null ||
+            backoff.nextProposalAt > badProposalBackoffUntil
+          ) {
             badProposalBackoffUntil = backoff.nextProposalAt;
           }
         }
@@ -1539,48 +1544,71 @@ export const program = Effect.gen(function* () {
         consecutiveOorExits: number;
       } | null = null;
 
+      const computeCooldownForExit = (
+        exitDecision: AgentDecision,
+        position: PositionRecord | undefined,
+      ): Effect.Effect<
+        {
+          poolAddress: string;
+          cooldownUntil: number;
+          reason: string;
+          consecutiveOorExits: number;
+        } | null,
+        unknown
+      > =>
+        Effect.gen(function* () {
+          if (exitDecision.action !== "EXIT") return null;
+
+          const existingCooldown = yield* db
+            .getPoolCooldown(poolAddress)
+            .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          const existingOorCount = existingCooldown?.consecutiveOorExits ?? 0;
+          const isOorExit =
+            exitDecision.reasoning.includes("volatility") ||
+            (position &&
+              position.oorCycleCount >= config.oorGracePeriodCycles &&
+              position.oorCycleCount > 0);
+          const isLowYieldExit =
+            exitDecision.reasoning.includes("Fee/IL ratio") ||
+            exitDecision.reasoning.includes("Volume authenticity");
+
+          if (isOorExit) {
+            const newOorCount = existingOorCount + 1;
+            const cooldownDuration =
+              newOorCount >= config.maxOorCooldownExits
+                ? config.repeatOorCooldownMs
+                : config.oorCooldownMs;
+            const cooldownUntil = Date.now() + cooldownDuration;
+            const hours = (cooldownDuration / 3_600_000).toFixed(1);
+            console.info(
+              `[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — OOR exit #${newOorCount}`,
+            );
+            return {
+              poolAddress,
+              cooldownUntil,
+              reason: `OOR exit (#${newOorCount})`,
+              consecutiveOorExits: newOorCount,
+            };
+          } else if (isLowYieldExit) {
+            const cooldownDuration = config.oorCooldownMs;
+            const cooldownUntil = Date.now() + cooldownDuration;
+            const hours = (cooldownDuration / 3_600_000).toFixed(1);
+            console.info(
+              `[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — low yield exit`,
+            );
+            return {
+              poolAddress,
+              cooldownUntil,
+              reason: `Low yield exit`,
+              consecutiveOorExits: 0,
+            };
+          }
+          return null;
+        });
+
       // F7: update pool cooldown after EXIT decisions
       if (decision && decision.action === "EXIT") {
-        const existingCooldown = yield* db
-          .getPoolCooldown(poolAddress)
-          .pipe(Effect.catchAll(() => Effect.succeed(null)));
-        const existingOorCount = existingCooldown?.consecutiveOorExits ?? 0;
-        const isOorExit =
-          decision.reasoning.includes("volatility") ||
-          (pos && pos.oorCycleCount >= config.oorGracePeriodCycles && pos.oorCycleCount > 0);
-        const isLowYieldExit =
-          decision.reasoning.includes("Fee/IL ratio") ||
-          decision.reasoning.includes("Volume authenticity");
-
-        if (isOorExit) {
-          const newOorCount = existingOorCount + 1;
-          const cooldownDuration =
-            newOorCount >= config.maxOorCooldownExits
-              ? config.repeatOorCooldownMs
-              : config.oorCooldownMs;
-          const cooldownUntil = Date.now() + cooldownDuration;
-          pendingCooldown = {
-            poolAddress,
-            cooldownUntil,
-            reason: `OOR exit (#${newOorCount})`,
-            consecutiveOorExits: newOorCount,
-          };
-          const hours = (cooldownDuration / 3_600_000).toFixed(1);
-          console.info(
-            `[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — OOR exit #${newOorCount}`,
-          );
-        } else if (isLowYieldExit) {
-          const cooldownDuration = config.oorCooldownMs;
-          const cooldownUntil = Date.now() + cooldownDuration;
-          pendingCooldown = {
-            poolAddress,
-            cooldownUntil,
-            reason: `Low yield exit`,
-            consecutiveOorExits: 0,
-          };
-          const hours = (cooldownDuration / 3_600_000).toFixed(1);
-          console.info(`[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — low yield exit`);
-        }
+        pendingCooldown = yield* computeCooldownForExit(decision, pos);
       }
 
       // Single persist point: trailing-exit above may update highestValueUsd/currentValueUsd.
@@ -1999,58 +2027,58 @@ export const program = Effect.gen(function* () {
           if (!poolCircuitBreaker.canTry(now)) {
             logger.info("Agent proposal circuit breaker open — skipping", { pool: poolAddress });
           } else {
-            let syncFetchFailed = false;
+            const poolBackoff = proposalBackoff.get(poolAddress);
+            if (isProposalBackoffActive(poolBackoff, now)) {
+              logger.info("Agent proposal skipped — backoff active", { pool: poolAddress });
+            } else {
+              let syncFetchFailed = false;
 
-            const snapshot = yield* agentState.getSnapshot();
-            const queuedProposal = findPendingProposal(
-              snapshot.pendingProposals,
-              poolAddress,
-              proposalMode,
-              config.agentProposalStaleMs,
-              now,
-            );
-            if (queuedProposal) {
-              agentProposal = queuedProposal;
-              proposalSource = "queue";
-            }
-
-            if (!agentProposal && proposalMode !== "supervised") {
-              const syncProposal = yield* agent
-                .enhanceDecision(decision, {
-                  decision,
-                  pool,
-                  metrics,
-                  warnings,
-                  recentDecisions: yield* audit
-                    .getRecentDecisions(10)
-                    .pipe(Effect.catchAll(() => Effect.succeed([]))),
-                })
-                .pipe(
-                  Effect.catchAll((err) => {
-                    syncFetchFailed = true;
-                    logger.warn("Agent proposal fetch failed", {
-                      pool: poolAddress,
-                      error: String(err),
-                    });
-                    return Effect.succeed(null);
-                  }),
-                );
-              if (syncProposal && isAgentProposal(syncProposal)) {
-                agentProposal = syncProposal;
-                proposalSource = "sync";
-              } else if (syncProposal === null) {
-                syncFetchFailed = true;
+              const snapshot = yield* agentState.getSnapshot();
+              const queuedProposal = findPendingProposal(
+                snapshot.pendingProposals,
+                poolAddress,
+                proposalMode,
+                config.agentProposalStaleMs,
+                now,
+              );
+              if (queuedProposal) {
+                agentProposal = queuedProposal;
+                proposalSource = "queue";
               }
-            }
 
-            if (agentProposal) {
-              const poolBackoff = proposalBackoff.get(poolAddress);
-              if (isProposalBackoffActive(poolBackoff, now)) {
-                logger.info("Agent proposal skipped — backoff active", { pool: poolAddress });
-              } else {
+              if (!agentProposal && proposalMode !== "supervised") {
+                const syncProposal = yield* agent
+                  .enhanceDecision(decision, {
+                    decision,
+                    pool,
+                    metrics,
+                    warnings,
+                    recentDecisions: yield* audit
+                      .getRecentDecisions(10)
+                      .pipe(Effect.catchAll(() => Effect.succeed([]))),
+                  })
+                  .pipe(
+                    Effect.catchAll((err) => {
+                      syncFetchFailed = true;
+                      logger.warn("Agent proposal fetch failed", {
+                        pool: poolAddress,
+                        error: String(err),
+                      });
+                      return Effect.succeed(null);
+                    }),
+                  );
+                if (syncProposal && isAgentProposal(syncProposal)) {
+                  agentProposal = syncProposal;
+                  proposalSource = "sync";
+                } else if (syncProposal === null) {
+                  syncFetchFailed = true;
+                }
+              }
+
+              if (agentProposal) {
                 const proposalToEvaluate = {
                   ...agentProposal,
-                  originalAction: decision.action,
+                  originalAction: agentProposal.originalAction ?? decision.action,
                 };
                 const validation = evaluateAgentProposal(
                   proposalToEvaluate,
@@ -2090,9 +2118,14 @@ export const program = Effect.gen(function* () {
                       from: decision.action,
                       to: validation.adjustedDecision.action,
                     });
+                    const originalAction = decision.action;
                     decision = validation.adjustedDecision;
                     proposalBackoff.delete(poolAddress);
                     poolCircuitBreaker.recordSuccess();
+
+                    if (decision.action === "EXIT" && originalAction !== "EXIT") {
+                      pendingCooldown = yield* computeCooldownForExit(decision, pos);
+                    }
 
                     if (
                       decision.action === "HOLD" &&
@@ -2120,6 +2153,7 @@ export const program = Effect.gen(function* () {
                       maxMs: config.agentProposalBackoffMaxMs,
                     }),
                   );
+                  poolCircuitBreaker.recordFailure(now);
                   yield* memory
                     .upsert({
                       category: "warning",
@@ -2137,24 +2171,26 @@ export const program = Effect.gen(function* () {
                     .setAgentPolicy({ lastProposalAt: now })
                     .pipe(Effect.catchAll(() => Effect.void));
                 }
-              }
-            } else if (syncFetchFailed) {
-              logger.warn("Agent proposal fetch failed — recording backoff", { pool: poolAddress });
-              proposalBackoff.set(
-                poolAddress,
-                nextProposalBackoff(proposalBackoff.get(poolAddress), now, {
-                  baseMs: config.agentProposalBackoffBaseMs,
-                  maxMs: config.agentProposalBackoffMaxMs,
-                }),
-              );
-              poolCircuitBreaker.recordFailure(now);
-              yield* memory
-                .upsert({
-                  category: "warning",
-                  content: `Agent proposal fetch failed for ${poolAddress}`,
+              } else if (syncFetchFailed) {
+                logger.warn("Agent proposal fetch failed — recording backoff", {
+                  pool: poolAddress,
+                });
+                proposalBackoff.set(
                   poolAddress,
-                })
-                .pipe(Effect.catchAll(() => Effect.void));
+                  nextProposalBackoff(proposalBackoff.get(poolAddress), now, {
+                    baseMs: config.agentProposalBackoffBaseMs,
+                    maxMs: config.agentProposalBackoffMaxMs,
+                  }),
+                );
+                poolCircuitBreaker.recordFailure(now);
+                yield* memory
+                  .upsert({
+                    category: "warning",
+                    content: `Agent proposal fetch failed for ${poolAddress}`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              }
             }
           }
         }

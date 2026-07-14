@@ -125,7 +125,9 @@ export function AgentStateMutable(): {
   const prunePendingProposals = (now: number): ReadonlyArray<AgentProposal> => {
     return snapshot.pendingProposals.filter(
       (proposal) =>
-        proposal.expiresAt >= now && proposal.status !== "rejected" && proposal.status !== "executed",
+        proposal.expiresAt >= now &&
+        proposal.status !== "rejected" &&
+        proposal.status !== "executed",
     );
   };
 

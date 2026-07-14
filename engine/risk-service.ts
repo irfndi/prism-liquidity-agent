@@ -116,7 +116,35 @@ export function evaluateAgentProposal(
     return { valid: false, reason: `Invalid action: ${proposal.action}` };
   }
 
-  // 2. Confidence must be finite and within [minConfidence, 1].
+  // 2. Proposal must target the pool currently being evaluated.
+  if (proposal.poolAddress !== ctx.poolAddress) {
+    return {
+      valid: false,
+      reason: `Proposal poolAddress ${proposal.poolAddress} does not match evaluated pool ${ctx.poolAddress}`,
+    };
+  }
+
+  // 3. Safety EXIT cannot be downgraded to a less-defensive action.
+  if (proposal.originalAction === "EXIT" && proposal.action !== "EXIT") {
+    return {
+      valid: false,
+      reason: "Cannot downgrade a safety EXIT to a non-EXIT action",
+    };
+  }
+
+  // 4. Non-ENTER actions may not be promoted to ENTER.
+  if (
+    proposal.originalAction !== undefined &&
+    proposal.originalAction !== "ENTER" &&
+    proposal.action === "ENTER"
+  ) {
+    return {
+      valid: false,
+      reason: `Cannot promote ${proposal.originalAction} to ENTER`,
+    };
+  }
+
+  // 5. Confidence must be finite and within [minConfidence, 1].
   if (
     !Number.isFinite(proposal.confidence) ||
     proposal.confidence < config.agentProposalMinConfidence ||
@@ -130,7 +158,7 @@ export function evaluateAgentProposal(
     };
   }
 
-  // 3. Position size must be non-negative and capped to the stricter of the
+  // 7. Position size must be non-negative and capped to the stricter of the
   //    agent proposal limit and the existing per-pool allocation cap.
   let adjustedPositionSizeUsd = proposal.positionSizeUsd;
 
@@ -186,9 +214,15 @@ export function evaluateAgentProposal(
     }
   }
 
-  // 4. REBALANCE parameters must form a valid, bounded bin range.
+  // 8. REBALANCE parameters must form a valid, bounded bin range with integer IDs.
   if (proposal.rebalanceParams !== undefined) {
     const { newLowerBinId, newUpperBinId } = proposal.rebalanceParams;
+    if (!Number.isInteger(newLowerBinId) || !Number.isInteger(newUpperBinId)) {
+      return {
+        valid: false,
+        reason: "Rebalance bin IDs must be integers",
+      };
+    }
     if (newUpperBinId <= newLowerBinId) {
       return {
         valid: false,
@@ -202,34 +236,6 @@ export function evaluateAgentProposal(
         reason: `Rebalance range ${rangeWidth} bins exceeds max ${config.maxRebalanceRangeBins}`,
       };
     }
-  }
-
-  // 5. Safety EXIT cannot be downgraded to a less-defensive action.
-  if (proposal.originalAction === "EXIT" && proposal.action !== "EXIT") {
-    return {
-      valid: false,
-      reason: "Cannot downgrade a safety EXIT to a non-EXIT action",
-    };
-  }
-
-  // 6. Non-ENTER actions may not be promoted to ENTER.
-  if (
-    proposal.originalAction !== undefined &&
-    proposal.originalAction !== "ENTER" &&
-    proposal.action === "ENTER"
-  ) {
-    return {
-      valid: false,
-      reason: `Cannot promote ${proposal.originalAction} to ENTER`,
-    };
-  }
-
-  // 7. Proposal must target the pool currently being evaluated.
-  if (proposal.poolAddress !== ctx.poolAddress) {
-    return {
-      valid: false,
-      reason: `Proposal poolAddress ${proposal.poolAddress} does not match evaluated pool ${ctx.poolAddress}`,
-    };
   }
 
   const adjustedDecision: AgentDecision = {

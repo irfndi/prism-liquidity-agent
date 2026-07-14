@@ -363,8 +363,12 @@ describe("HttpStatusServer", () => {
         body: JSON.stringify(proposals),
       });
       expect(response.status).toBe(202);
-      const body = await response.json();
-      expect(body).toEqual({ accepted: 2 });
+      const body = (await response.json()) as {
+        accepted: number;
+        proposalIds: ReadonlyArray<string>;
+      };
+      expect(body.accepted).toBe(2);
+      expect(body.proposalIds).toHaveLength(2);
       expect(enqueued).toHaveLength(2);
       expect(enqueued[0]!.action).toBe("ENTER");
       expect(enqueued[0]!.poolAddress).toBe("PoolA");

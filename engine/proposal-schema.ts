@@ -12,8 +12,8 @@ const PROPOSAL_TTL_MS = 5 * 60 * 1000;
 const ActionTypeSchema = Schema.Literal("HOLD", "REBALANCE", "EXIT", "ENTER");
 
 const RebalanceParamsSchema = Schema.Struct({
-  lowerBinId: Schema.Number,
-  upperBinId: Schema.Number,
+  lowerBinId: Schema.Int,
+  upperBinId: Schema.Int,
 }).pipe(
   Schema.filter((params) => {
     if (params.lowerBinId >= params.upperBinId) {
@@ -107,6 +107,7 @@ function buildProposal(
   proposalId: string,
   source: "sync-prompt" | "http-queue",
   originalAction: ActionType,
+  staleMs: number,
 ): AgentProposal {
   const now = Date.now();
   return {
@@ -118,7 +119,7 @@ function buildProposal(
     confidence: decoded.confidence,
     reasoning: decoded.reasoning ?? "",
     proposedAt: now,
-    expiresAt: now + PROPOSAL_TTL_MS,
+    expiresAt: now + staleMs,
     status: "pending",
     ...(decoded.positionSizeUsd !== undefined && {
       positionSizeUsd: decoded.positionSizeUsd,
@@ -136,9 +137,12 @@ function buildProposal(
 export function parseProposalResponse(
   raw: string,
   originalAction: ActionType,
+  staleMs: number = PROPOSAL_TTL_MS,
 ): Effect.Effect<AgentProposal, ProposalParseError> {
   return decodeProposalJson(raw).pipe(
-    Effect.map((decoded) => buildProposal(decoded, randomUUID(), "sync-prompt", originalAction)),
+    Effect.map((decoded) =>
+      buildProposal(decoded, randomUUID(), "sync-prompt", originalAction, staleMs),
+    ),
   );
 }
 
@@ -147,8 +151,11 @@ export function parseHttpQueueProposal(
   proposalId: string,
   source: "sync-prompt" | "http-queue" = "http-queue",
   originalAction?: ActionType,
+  staleMs: number = PROPOSAL_TTL_MS,
 ): Effect.Effect<AgentProposal, ProposalParseError> {
   return decodeProposalJson(raw).pipe(
-    Effect.map((decoded) => buildProposal(decoded, proposalId, source, originalAction ?? decoded.action)),
+    Effect.map((decoded) =>
+      buildProposal(decoded, proposalId, source, originalAction ?? decoded.action, staleMs),
+    ),
   );
 }

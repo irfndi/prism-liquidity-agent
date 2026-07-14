@@ -74,10 +74,9 @@ export class HttpStatusServer {
     const items = Array.isArray(parsedBody) ? parsedBody : [parsedBody];
     const maxBatchSize = this.config.agentProposalMaxBatchSize;
     if (items.length > maxBatchSize) {
-      return new Response(
-        `Batch size ${items.length} exceeds limit ${maxBatchSize}`,
-        { status: 413 },
-      );
+      return new Response(`Batch size ${items.length} exceeds limit ${maxBatchSize}`, {
+        status: 413,
+      });
     }
     const proposals: AgentProposal[] = [];
     for (const [index, item] of items.entries()) {
@@ -87,7 +86,13 @@ export class HttpStatusServer {
       const raw = JSON.stringify(item);
       try {
         const proposal = await Effect.runPromise(
-          parseHttpQueueProposal(raw, crypto.randomUUID(), "http-queue"),
+          parseHttpQueueProposal(
+            raw,
+            crypto.randomUUID(),
+            "http-queue",
+            undefined,
+            this.config.agentProposalStaleMs,
+          ),
         );
         proposals.push(proposal);
       } catch (e) {
@@ -102,7 +107,13 @@ export class HttpStatusServer {
       await Effect.runPromise(this.state.enqueueProposal(proposal));
     }
 
-    return Response.json({ accepted: proposals.length }, { status: 202 });
+    return Response.json(
+      {
+        accepted: proposals.length,
+        proposalIds: proposals.map((p) => p.proposalId),
+      },
+      { status: 202 },
+    );
   }
 
   private async handleApprove(request: Request): Promise<Response> {

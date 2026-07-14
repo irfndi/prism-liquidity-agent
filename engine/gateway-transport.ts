@@ -207,11 +207,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
 
       const id = `prompt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const text = yield* this.sendAndWait(
-        id,
-        { type: "prompt", payload: prompt, id },
-        timeoutMs,
-      );
+      const text = yield* this.sendAndWait(id, { type: "prompt", payload: prompt, id }, timeoutMs);
 
       const latencyMs = Date.now() - startedAt;
       this.emit({ type: "response_received", transport: this.name, latencyMs });
