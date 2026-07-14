@@ -1,6 +1,6 @@
 ---
 name: prism-openclaw
-version: "0.0.22"
+version: "0.0.31"
 description: >
   Operate Prism, an autonomous Solana DLMM liquidity agent for Meteora pools,
   through the OpenClaw Gateway. Use when the user asks about "prism", "DLMM",

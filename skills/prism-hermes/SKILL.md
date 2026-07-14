@@ -1,6 +1,6 @@
 ---
 name: prism-hermes
-version: "0.0.22"
+version: "0.0.31"
 description: >
   Operate Prism, an autonomous Solana DLMM liquidity agent for Meteora pools,
   through Hermes ACP. Use when the user asks about "prism", "DLMM", "liquidity
