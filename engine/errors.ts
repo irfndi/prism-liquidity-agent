@@ -42,3 +42,15 @@ export class DiscoverPoolsError extends Data.TaggedError("DiscoverPoolsError")<{
   readonly status?: number;
   readonly cause?: unknown;
 }> {}
+
+export class EntryPrepError extends Data.TaggedError("EntryPrepError")<{
+  readonly code:
+    | "PRICE_UNAVAILABLE"
+    | "SWAP_QUOTE_FAILED"
+    | "SWAP_TRANSACTION_FAILED"
+    | "INSUFFICIENT_BALANCE_AFTER_SWAP"
+    | "NO_WALLET";
+  readonly message: string;
+  readonly poolAddress?: string;
+  readonly cause?: unknown;
+}> {}

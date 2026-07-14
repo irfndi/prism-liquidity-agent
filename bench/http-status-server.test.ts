@@ -89,6 +89,7 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     signalWeightFloor: 0.3,
     signalWeightCeiling: 2.5,
     weightedEntryScoreThreshold: 1.8,
+    autoSwapEntry: false,
     ...overrides,
   };
 }
