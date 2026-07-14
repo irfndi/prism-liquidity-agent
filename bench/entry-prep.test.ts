@@ -5,9 +5,8 @@ import { EntryPrepLive, computeUsdcInputAtomic } from "../engine/entry-prep-serv
 import { AdapterService, type AdapterApi } from "../engine/services.js";
 import { ConfigService } from "../engine/config-service.js";
 import { defaultAppConfig } from "./helpers.js";
+import { SOL_MINT, USDC_MINT } from "../engine/constants.js";
 
-const SOL_MINT = "So11111111111111111111111111111111111111112";
-const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const TOKEN_X = SOL_MINT;
 const TOKEN_Y = "FakeToken1111111111111111111111111111111111";
 const POOL_ADDRESS = "TestPool111111111111111111111111111111111111";
@@ -56,7 +55,7 @@ function makeAdapter(mock: Partial<AdapterApi> = {}): AdapterApi {
     discoverPools: () => Effect.succeed([]),
     reportFeeCollection: () => Effect.void,
     swapUSDCForSOL: () => Effect.void,
-    getTokenBalance: () => Effect.succeed(0n),
+    getTokenBalance: (mint: string) => Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
     getTokenPrices: () => Effect.succeed({ [TOKEN_X]: 150, [TOKEN_Y]: 1 }),
     getTokenDecimals: () => Effect.succeed(9),
     swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
@@ -133,7 +132,8 @@ describe("EntryPrepService", () => {
     const layer = buildLayer(
       {
         getNativeSolBalance: () => Effect.succeed(solBalance),
-        getTokenBalance: (mint: string) => Effect.succeed(tokenBalances[mint] ?? 0n),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : (tokenBalances[mint] ?? 0n)),
         getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
         swapUSDCForToken: swapSpy,
       },
@@ -165,7 +165,8 @@ describe("EntryPrepService", () => {
     const layer = buildLayer(
       {
         getNativeSolBalance: () => Effect.succeed(solBalance),
-        getTokenBalance: (mint: string) => Effect.succeed(tokenBalances[mint] ?? 0n),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : (tokenBalances[mint] ?? 0n)),
         getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
         swapUSDCForToken: swapSpy,
       },
@@ -186,7 +187,8 @@ describe("EntryPrepService", () => {
     const layer = buildLayer(
       {
         getNativeSolBalance: () => Effect.succeed(0n),
-        getTokenBalance: () => Effect.succeed(0n),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
         getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
         swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
       },
@@ -207,8 +209,11 @@ describe("EntryPrepService", () => {
     const layer = buildLayer(
       {
         getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
-        getTokenBalance: (mint: string) =>
-          mint === TOKEN_Y ? Effect.fail(new Error("RPC down")) : Effect.succeed(0n),
+        getTokenBalance: (mint: string) => {
+          if (mint === TOKEN_Y) return Effect.fail(new Error("RPC down"));
+          if (mint === USDC_MINT) return Effect.succeed(10_000_000_000n);
+          return Effect.succeed(0n);
+        },
         getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
         swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
       },
@@ -223,6 +228,46 @@ describe("EntryPrepService", () => {
         }).pipe(Effect.provide(layer)),
       ),
     ).rejects.toThrow(/BALANCE_READ_FAILED/);
+  });
+
+  it("fails with PRICE_UNAVAILABLE when token prices are missing", async () => {
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: () => Effect.succeed(0n),
+        getTokenPrices: () => Effect.succeed({}),
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/PRICE_UNAVAILABLE/);
+  });
+
+  it("fails with INSUFFICIENT_USDC_BALANCE when wallet cannot cover swaps", async () => {
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: (mint: string) => Effect.succeed(mint === USDC_MINT ? 100n : 0n),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/INSUFFICIENT_USDC_BALANCE/);
   });
 
   it("computes USDC input without precision loss for large amounts", () => {

@@ -81,12 +81,21 @@ async function expectSwapFailure(
   if (result._tag !== "Left") {
     expect.fail("expected swap to fail, but it succeeded");
   }
-  const err = result.left as {
-    readonly message: string;
-    readonly cause: { readonly message: string };
-  };
-  expect(err.message).toContain("swapUSDCForToken failed:");
-  expect(err.cause.message).toBe(expectedCauseMessage);
+  const err = result.left;
+  if (typeof err !== "object" || err === null || !("message" in err)) {
+    expect.fail("expected error object with message");
+  }
+  const cause = (err as { cause?: unknown }).cause;
+  if (
+    typeof cause !== "object" ||
+    cause === null ||
+    !("message" in cause) ||
+    typeof (cause as { message?: unknown }).message !== "string"
+  ) {
+    expect.fail("expected error cause with message");
+  }
+  expect((err as { message: string }).message).toContain("swapUSDCForToken failed:");
+  expect((cause as { message: string }).message).toBe(expectedCauseMessage);
 }
 
 describe("AdapterService.swapUSDCForToken", () => {
@@ -109,12 +118,19 @@ describe("AdapterService.swapUSDCForToken", () => {
       .serialize({ requireAllSignatures: false, verifySignatures: false })
       .toString("base64");
 
-    const restore = mockFetch((async (url: string | URL | Request) => {
+    const captured: {
+      quoteUrl: string;
+      swapBody: Record<string, unknown>;
+    } = { quoteUrl: "", swapBody: {} };
+
+    const restore = mockFetch((async (url: string | URL | Request, init?: RequestInit) => {
       const u = url.toString();
       if (u.includes("/swap/v1/quote")) {
+        captured.quoteUrl = u;
         return new Response(JSON.stringify({ routePlan: [] }), { status: 200 });
       }
       if (u.includes("/swap/v1/swap")) {
+        captured.swapBody = JSON.parse((init?.body as string | undefined) ?? "{}");
         return new Response(JSON.stringify({ swapTransaction: validSwapTx }), { status: 200 });
       }
       return new Response("unexpected", { status: 500 });
@@ -128,6 +144,10 @@ describe("AdapterService.swapUSDCForToken", () => {
     try {
       const sig = await runSwap(buildLayer(), SOL_MINT, 1_000_000n);
       expect(sig).toBe("mock-sig");
+      expect(captured.quoteUrl).toContain("slippageBps=50");
+      expect(captured.quoteUrl).toContain("asLegacyTransaction=true");
+      expect(captured.swapBody.wrapAndUnwrapSol).toBe(true);
+      expect(captured.swapBody.asLegacyTransaction).toBe(true);
     } finally {
       restore();
     }

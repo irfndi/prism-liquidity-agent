@@ -4,11 +4,10 @@ import { ConfigService } from "./config-service.js";
 import { EntryPrepError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import { BN } from "@coral-xyz/anchor";
+import { SOL_MINT, USDC_MINT, GAS_RESERVE_LAMPORTS } from "./constants.js";
 
 const logger = createLogger("entry-prep-service");
-const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_DECIMALS = 6;
-const GAS_RESERVE_LAMPORTS = 20_000_000n;
 
 function formatAtomic(amount: bigint, decimals: number): string {
   return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
@@ -194,8 +193,26 @@ export const EntryPrepLive = Layer.effect(
             return;
           }
 
+          const usdcBalance = yield* readTokenBalance(USDC_MINT);
+          const totalUsdcInputAtomic = deficits.reduce(
+            (sum, deficit) =>
+              sum + computeUsdcInputAtomic(deficit.amount, deficit.decimals, deficit.price),
+            0n,
+          );
+
+          if (usdcBalance < totalUsdcInputAtomic) {
+            return yield* Effect.fail(
+              makePrepError(
+                "INSUFFICIENT_USDC_BALANCE",
+                `Wallet USDC balance ${formatAtomic(usdcBalance, USDC_DECIMALS)} is less than required ${formatAtomic(totalUsdcInputAtomic, USDC_DECIMALS)} for auto-swap entry`,
+                poolAddress,
+              ),
+            );
+          }
+
           logger.info("Auto-swapping USDC for missing pool tokens", {
             poolAddress,
+            totalUsdcInput: formatAtomic(totalUsdcInputAtomic, USDC_DECIMALS),
             deficits: deficits.map((d) => ({
               mint: d.mint,
               amount: formatAtomic(d.amount, d.decimals),

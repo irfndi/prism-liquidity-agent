@@ -34,10 +34,8 @@ import path from "path";
 import os from "os";
 import { randomUUID } from "crypto";
 import { getWalletSystemLamportsRequired } from "./live-entry-budget.js";
+import { SOL_MINT, USDC_MINT, GAS_RESERVE_LAMPORTS } from "./constants.js";
 
-const SOL_MINT = "So11111111111111111111111111111111111111112";
-const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const GAS_RESERVE_LAMPORTS = 20_000_000n; // 0.02 SOL reserved for fees and non-System-program costs
 const RPC_RETRY_OPTIONS = {
   maxRetries: 1,
   baseDelayMs: 1_000,
@@ -1222,8 +1220,8 @@ export const AdapterLive = Layer.effect(
           }
 
           // Check balances
-          const balanceX = yield* getTokenBalance(pool.tokenX);
-          const balanceY = yield* getTokenBalance(pool.tokenY);
+          const balanceX = yield* readTokenBalance(pool.tokenX);
+          const balanceY = yield* readTokenBalance(pool.tokenY);
           const nativeSolBalance =
             pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT
               ? yield* readNativeSolBalance()
@@ -1742,9 +1740,11 @@ export const AdapterLive = Layer.effect(
           });
 
           yield* swapUSDCForToken(SOL_MINT, BigInt(Math.round(swapAmountUSDC * 1e6))).pipe(
-            Effect.tap((sig) =>
-              logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC }),
-            ),
+            Effect.tap((sig) => {
+              if (sig) {
+                logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
+              }
+            }),
             Effect.catchAll((err) =>
               Effect.sync(() => logger.warn("USDC → SOL swap failed (non-fatal):", String(err))),
             ),
@@ -1753,9 +1753,5 @@ export const AdapterLive = Layer.effect(
     };
 
     return api;
-
-    function getTokenBalance(mintAddress: string): Effect.Effect<bigint, unknown> {
-      return readTokenBalance(mintAddress);
-    }
   }),
 );

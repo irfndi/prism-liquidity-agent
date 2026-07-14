@@ -204,7 +204,7 @@ describe("executeLive", () => {
     };
   }
 
-  it("calls prepareEntryTokens on a live ENTER when autoSwapEntry is true", () => {
+  it("calls prepareEntryTokens on a live ENTER decision", () => {
     const poolAddress = "TestPool111111111111111111111111111111111111";
     const positionSizeUsd = 1234;
 
