@@ -107,6 +107,39 @@ export interface AgentDecision {
   positionSizeUsd?: number;
 }
 
+// ─── Agent Proposals ───────────────────────────────────────────────────────────
+
+export type AgentProposalMode = "veto" | "suggest" | "supervised" | "full";
+
+export interface AgentProposal extends AgentDecision {
+  readonly proposalId: string;
+  readonly proposedAt: number;
+  readonly expiresAt: number;
+  readonly source: "sync-prompt" | "http-queue";
+  readonly originalAction?: ActionType;
+  readonly status: "pending" | "approved" | "rejected" | "executed";
+}
+
+export interface AgentPolicySnapshot {
+  readonly mode: AgentProposalMode;
+  readonly proposalsQueued: number;
+  readonly lastProposalAt: number | null;
+  readonly badProposalBackoffUntil: number | null;
+  readonly circuitBreakerOpen: boolean;
+  readonly hardCaps: {
+    readonly maxPositionSizePct: number;
+    readonly maxRebalanceRangeBins: number;
+    readonly minProposalConfidence: number;
+    readonly proposalStaleMs: number;
+  };
+}
+
+export interface ProposalValidationResult {
+  readonly valid: boolean;
+  readonly reason?: string;
+  readonly adjustedDecision?: AgentDecision;
+}
+
 // ─── Risk ─────────────────────────────────────────────────────────────────────
 
 export interface RiskResult {

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Effect, Layer } from "effect";
 import { McpServer } from "../engine/mcp-server.js";
-import { AgentStateService } from "../engine/services.js";
+import { AgentStateService, type AgentStateApi } from "../engine/services.js";
 import { AgentStateMutable } from "../engine/state-service.js";
 import type { AppConfig } from "../engine/config-service.js";
 
@@ -79,6 +79,17 @@ function baseConfig(): AppConfig {
     agentHermesApiUrl: "",
     agentHttpPort: 18_790,
     agentMcpEnabled: true,
+    agentProposalMode: "veto",
+    agentProposalToken: "",
+    agentProposalTimeoutMs: 15_000,
+    agentProposalMaxBatchSize: 10,
+    agentProposalStaleMs: 300_000,
+    agentProposalBackoffBaseMs: 60_000,
+    agentProposalBackoffMaxMs: 3_600_000,
+    agentProposalMaxPositionSizePct: 0.4,
+    agentProposalMinConfidence: 0.65,
+    agentProposalCircuitBreakerThreshold: 5,
+    agentProposalCircuitBreakerCooldownMs: 300_000,
     oorCooldownMs: 4 * 60 * 60 * 1000,
     repeatOorCooldownMs: 12 * 60 * 60 * 1000,
     maxOorCooldownExits: 3,
@@ -98,6 +109,19 @@ function baseConfig(): AppConfig {
 function mockState() {
   return {
     layer: AgentStateMutable().layer,
+  };
+}
+
+function mockAgentState(overrides: Partial<AgentStateApi> = {}): AgentStateApi {
+  return {
+    getSnapshot: () => Effect.succeed({} as never),
+    updateSnapshot: () => Effect.void,
+    setAgentPolicy: () => Effect.void,
+    enqueueProposal: () => Effect.void,
+    dequeueProposals: () => Effect.void,
+    approveProposal: () => Effect.void,
+    rejectProposal: () => Effect.void,
+    ...overrides,
   };
 }
 
@@ -146,10 +170,7 @@ function sendRequest(
 describe("McpServer", () => {
   it("responds to initialize", async () => {
     const { layer } = mockState();
-    const server = new McpServer(baseConfig(), {
-      getSnapshot: () => Effect.succeed({} as never),
-      updateSnapshot: () => Effect.void,
-    });
+    const server = new McpServer(baseConfig(), mockAgentState());
 
     const response = await Effect.runPromise(
       Effect.provide(
@@ -166,10 +187,7 @@ describe("McpServer", () => {
   });
 
   it("lists tools", async () => {
-    const server = new McpServer(baseConfig(), {
-      getSnapshot: () => Effect.succeed({} as never),
-      updateSnapshot: () => Effect.void,
-    });
+    const server = new McpServer(baseConfig(), mockAgentState());
 
     const response = await sendRequest(server, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     expect(response.result).toHaveProperty("tools");
@@ -180,30 +198,33 @@ describe("McpServer", () => {
         "prism_positions",
         "prism_decisions",
         "prism_config",
+        "prism_agent_policy",
       ]),
     );
   });
 
   it("returns status via prism_status tool", async () => {
-    const server = new McpServer(baseConfig(), {
-      getSnapshot: () =>
-        Effect.succeed({
-          programStartTime: Date.now() - 1000,
-          scanCount: 5,
-          lastCycleAt: Date.now(),
-          portfolio: {
-            totalValueUsd: 11_000,
-            unrealizedPnlUsd: 1000,
-            realizedPnlUsd: 0,
-            openPositions: 2,
-            maxPositions: 3,
-            walletBalanceUsd: 10_000,
-          },
-          positions: [],
-          recentDecisions: [],
-        } as never),
-      updateSnapshot: () => Effect.void,
-    });
+    const server = new McpServer(
+      baseConfig(),
+      mockAgentState({
+        getSnapshot: () =>
+          Effect.succeed({
+            programStartTime: Date.now() - 1000,
+            scanCount: 5,
+            lastCycleAt: Date.now(),
+            portfolio: {
+              totalValueUsd: 11_000,
+              unrealizedPnlUsd: 1000,
+              realizedPnlUsd: 0,
+              openPositions: 2,
+              maxPositions: 3,
+              walletBalanceUsd: 10_000,
+            },
+            positions: [],
+            recentDecisions: [],
+          } as never),
+      }),
+    );
 
     const response = await sendRequest(server, {
       jsonrpc: "2.0",
@@ -221,32 +242,34 @@ describe("McpServer", () => {
   });
 
   it("returns positions via prism_positions tool", async () => {
-    const server = new McpServer(baseConfig(), {
-      getSnapshot: () =>
-        Effect.succeed({
-          programStartTime: Date.now(),
-          scanCount: 0,
-          lastCycleAt: null,
-          portfolio: {} as never,
-          positions: [
-            {
-              poolAddress: "Pool111111111111111111111111111111111111111",
-              tokenXSymbol: "TKNA",
-              tokenYSymbol: "TKNB",
-              depositedUsd: 1000,
-              currentValueUsd: 1100,
-              activeBinId: 100,
-              lowerBinId: 90,
-              upperBinId: 110,
-              lastAction: "ENTER",
-              lastActionAt: Date.now(),
-              hoursHeld: 1,
-            },
-          ],
-          recentDecisions: [],
-        } as never),
-      updateSnapshot: () => Effect.void,
-    });
+    const server = new McpServer(
+      baseConfig(),
+      mockAgentState({
+        getSnapshot: () =>
+          Effect.succeed({
+            programStartTime: Date.now(),
+            scanCount: 0,
+            lastCycleAt: null,
+            portfolio: {} as never,
+            positions: [
+              {
+                poolAddress: "Pool111111111111111111111111111111111111111",
+                tokenXSymbol: "TKNA",
+                tokenYSymbol: "TKNB",
+                depositedUsd: 1000,
+                currentValueUsd: 1100,
+                activeBinId: 100,
+                lowerBinId: 90,
+                upperBinId: 110,
+                lastAction: "ENTER",
+                lastActionAt: Date.now(),
+                hoursHeld: 1,
+              },
+            ],
+            recentDecisions: [],
+          } as never),
+      }),
+    );
 
     const response = await sendRequest(server, {
       jsonrpc: "2.0",
@@ -263,10 +286,7 @@ describe("McpServer", () => {
   });
 
   it("returns sanitized config via prism_config tool", async () => {
-    const server = new McpServer(baseConfig(), {
-      getSnapshot: () => Effect.succeed({} as never),
-      updateSnapshot: () => Effect.void,
-    });
+    const server = new McpServer(baseConfig(), mockAgentState());
 
     const response = await sendRequest(server, {
       jsonrpc: "2.0",

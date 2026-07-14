@@ -2,6 +2,9 @@ import { describe, it, expect } from "vitest";
 import { Effect } from "effect";
 import { HttpStatusServer } from "../engine/http-status-server.js";
 import type { AppConfig } from "../engine/config-service.js";
+import type { AgentStateApi } from "../engine/services.js";
+import type { AgentProposal } from "../engine/types.js";
+import type { PrismStateSnapshot } from "../engine/state-service.js";
 
 function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -77,6 +80,17 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     agentHermesApiUrl: "",
     agentHttpPort: 0,
     agentMcpEnabled: true,
+    agentProposalMode: "veto",
+    agentProposalToken: "",
+    agentProposalTimeoutMs: 15_000,
+    agentProposalMaxBatchSize: 10,
+    agentProposalStaleMs: 300_000,
+    agentProposalBackoffBaseMs: 60_000,
+    agentProposalBackoffMaxMs: 3_600_000,
+    agentProposalMaxPositionSizePct: 0.4,
+    agentProposalMinConfidence: 0.65,
+    agentProposalCircuitBreakerThreshold: 5,
+    agentProposalCircuitBreakerCooldownMs: 300_000,
     oorCooldownMs: 4 * 60 * 60 * 1000,
     repeatOorCooldownMs: 12 * 60 * 60 * 1000,
     maxOorCooldownExits: 3,
@@ -98,6 +112,62 @@ function mockState(snapshot: Record<string, unknown> = {}) {
   return {
     getSnapshot: () => Effect.succeed(snapshot as never),
     updateSnapshot: () => Effect.void,
+    setAgentPolicy: () => Effect.void,
+    enqueueProposal: () => Effect.void,
+    dequeueProposals: () => Effect.void,
+    approveProposal: () => Effect.void,
+    rejectProposal: () => Effect.void,
+  };
+}
+
+function baseSnapshot(overrides: Partial<PrismStateSnapshot> = {}): PrismStateSnapshot {
+  return {
+    programStartTime: Date.now(),
+    scanCount: 0,
+    lastCycleAt: null,
+    portfolio: {
+      totalValueUsd: 0,
+      unrealizedPnlUsd: 0,
+      realizedPnlUsd: 0,
+      openPositions: 0,
+      maxPositions: 0,
+      walletBalanceUsd: 0,
+    },
+    positions: [],
+    recentDecisions: [],
+    agentPolicy: {
+      mode: "veto",
+      proposalsQueued: 0,
+      lastProposalAt: null,
+      badProposalBackoffUntil: null,
+      circuitBreakerOpen: false,
+      hardCaps: {
+        maxPositionSizePct: 0.4,
+        maxRebalanceRangeBins: 50,
+        minProposalConfidence: 0.65,
+        proposalStaleMs: 300_000,
+      },
+    },
+    pendingProposals: [],
+    ...overrides,
+  };
+}
+
+function mockAgentState(
+  snapshot: PrismStateSnapshot,
+  enqueued: AgentProposal[] = [],
+): AgentStateApi {
+  return {
+    getSnapshot: () => Effect.succeed(snapshot),
+    updateSnapshot: () => Effect.void,
+    setAgentPolicy: () => Effect.void,
+    enqueueProposal: (proposal: AgentProposal) =>
+      Effect.sync(() => {
+        enqueued.push(proposal);
+      }),
+    dequeueProposals: () => Effect.void,
+    approveProposal: () => Effect.void,
+    rejectProposal: () => Effect.void,
   };
 }
 
@@ -219,6 +289,92 @@ describe("HttpStatusServer", () => {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/unknown`);
       expect(response.status).toBe(404);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("serves agent policy endpoint", async () => {
+    const port = 18_795;
+    const policy = { ...baseSnapshot().agentPolicy, mode: "suggest" as const };
+    const server = new HttpStatusServer(
+      baseConfig({ agentHttpPort: port }),
+      mockAgentState(baseSnapshot({ agentPolicy: policy })),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/agent-policy`);
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toEqual(policy);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("rejects propose with bad token", async () => {
+    const port = 18_794;
+    const enqueued: AgentProposal[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
+      mockAgentState(baseSnapshot(), enqueued),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer wrong-token",
+        },
+        body: JSON.stringify({ action: "HOLD", poolAddress: "PoolA", confidence: 0.8 }),
+      });
+      expect(response.status).toBe(401);
+      expect(enqueued).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("accepts and enqueues valid proposals", async () => {
+    const port = 18_793;
+    const enqueued: AgentProposal[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
+      mockAgentState(baseSnapshot(), enqueued),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const proposals = [
+        { action: "ENTER", poolAddress: "PoolA", confidence: 0.8, positionSizeUsd: 1000 },
+        {
+          action: "REBALANCE",
+          poolAddress: "PoolB",
+          confidence: 0.75,
+          rebalanceParams: { lowerBinId: 10, upperBinId: 20 },
+        },
+      ];
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify(proposals),
+      });
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      expect(body).toEqual({ accepted: 2 });
+      expect(enqueued).toHaveLength(2);
+      expect(enqueued[0]!.action).toBe("ENTER");
+      expect(enqueued[0]!.poolAddress).toBe("PoolA");
+      expect(enqueued[0]!.status).toBe("pending");
+      expect(enqueued[1]!.action).toBe("REBALANCE");
+      expect(enqueued[1]!.rebalanceParams).toEqual({
+        newLowerBinId: 10,
+        newUpperBinId: 20,
+        slippageBps: 0,
+      });
     } finally {
       await Effect.runPromise(server.stop());
     }

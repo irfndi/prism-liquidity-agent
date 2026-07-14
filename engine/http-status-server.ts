@@ -1,12 +1,16 @@
 import { Effect, Layer } from "effect";
+import crypto from "node:crypto";
 import { createLogger } from "./logger.js";
 import type { AgentStateApi } from "./services.js";
 import { AgentStateService, HttpStatusServerService } from "./services.js";
 import type { AppConfig } from "./config-service.js";
+import type { PrismStateSnapshot } from "./state-service.js";
+import type { AgentProposal } from "./types.js";
+import { parseHttpQueueProposal, ProposalParseError } from "./proposal-schema.js";
 
 const logger = createLogger("HttpStatusServer");
 
-function sanitizeConfig(cfg: AppConfig): Record<string, unknown> {
+function sanitizeConfig(cfg: AppConfig, snapshot: PrismStateSnapshot): Record<string, unknown> {
   return {
     paperTrading: cfg.paperTrading,
     scanIntervalMs: cfg.scanIntervalMs,
@@ -25,6 +29,8 @@ function sanitizeConfig(cfg: AppConfig): Record<string, unknown> {
     agentRuntime: cfg.agentRuntime,
     agentHttpPort: cfg.agentHttpPort,
     agentMcpEnabled: cfg.agentMcpEnabled,
+    agentPolicy: snapshot.agentPolicy,
+    agentProposalToken: cfg.agentProposalToken ? "configured" : "",
   };
 }
 
@@ -35,6 +41,62 @@ export class HttpStatusServer {
     private readonly config: AppConfig,
     private readonly state: AgentStateApi,
   ) {}
+
+  private async handlePropose(request: Request): Promise<Response> {
+    const authHeader = request.headers.get("Authorization") ?? "";
+    const providedToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length)
+      : "";
+    const expectedToken = this.config.agentProposalToken;
+    if (expectedToken.length === 0) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    const expectedBuf = Buffer.from(expectedToken);
+    const actualBuf = Buffer.from(providedToken);
+    if (
+      actualBuf.length !== expectedBuf.length ||
+      !crypto.timingSafeEqual(actualBuf, expectedBuf)
+    ) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    let parsedBody: unknown;
+    try {
+      parsedBody = await request.json();
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        return new Response("Invalid JSON body", { status: 400 });
+      }
+      throw e;
+    }
+
+    const items = Array.isArray(parsedBody) ? parsedBody : [parsedBody];
+    const proposals: AgentProposal[] = [];
+    for (const [index, item] of items.entries()) {
+      if (item === null || typeof item !== "object") {
+        return new Response("Invalid proposal body", { status: 400 });
+      }
+      const raw = JSON.stringify(item);
+      try {
+        const proposal = await Effect.runPromise(
+          parseHttpQueueProposal(raw, crypto.randomUUID(), "http-queue"),
+        );
+        proposals.push(proposal);
+      } catch (e) {
+        if (e instanceof ProposalParseError) {
+          return new Response(`Invalid proposal at index ${index}: ${e.message}`, { status: 400 });
+        }
+        throw e;
+      }
+    }
+
+    for (const proposal of proposals) {
+      await Effect.runPromise(this.state.enqueueProposal(proposal));
+    }
+
+    return Response.json({ accepted: proposals.length }, { status: 202 });
+  }
 
   start(): Effect.Effect<void, unknown> {
     return Effect.gen(this, function* () {
@@ -89,7 +151,15 @@ export class HttpStatusServer {
           }
 
           if (url.pathname === "/config") {
-            return Response.json(sanitizeConfig(this.config));
+            return Response.json(sanitizeConfig(this.config, snapshot));
+          }
+
+          if (url.pathname === "/agent-policy") {
+            return Response.json(snapshot.agentPolicy);
+          }
+
+          if (url.pathname === "/propose") {
+            return this.handlePropose(request);
           }
 
           return new Response("Not found", { status: 404 });

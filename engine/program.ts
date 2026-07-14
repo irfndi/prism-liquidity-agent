@@ -5,6 +5,7 @@ import { StrategyLive } from "./strategy-service.js";
 import { MemoryLive } from "./memory-service.js";
 import {
   RiskLive,
+  evaluateAgentProposal,
   evaluateGasGate,
   evaluateCompoundGate,
   evaluatePerPoolAllocation,
@@ -70,6 +71,8 @@ import {
 } from "./services.js";
 import type {
   AgentDecision,
+  AgentProposal,
+  AgentProposalMode,
   AgentCycle,
   PoolMetrics,
   PoolState,
@@ -85,6 +88,12 @@ import {
   nextEntryFailureBackoff,
   type EntryFailureBackoff,
 } from "./entry-backoff.js";
+import {
+  nextProposalBackoff,
+  isProposalBackoffActive,
+  ProposalCircuitBreaker,
+  type ProposalBackoff,
+} from "./proposal-backoff.js";
 
 const logger = createLogger("program");
 
@@ -1226,6 +1235,31 @@ export const program = Effect.gen(function* () {
       yield* agent.sendAlert(alert).pipe(Effect.catchAll(() => Effect.void));
     });
 
+  const proposalBackoff = new Map<string, ProposalBackoff>();
+  const proposalCircuitBreaker = new ProposalCircuitBreaker({
+    failureThreshold: config.agentProposalCircuitBreakerThreshold,
+    cooldownMs: config.agentProposalCircuitBreakerCooldownMs,
+  });
+
+  const isProposalStale = (proposal: AgentProposal, staleMs: number): boolean =>
+    Date.now() > proposal.expiresAt + staleMs;
+
+  const findPendingProposal = (
+    proposals: ReadonlyArray<AgentProposal>,
+    poolAddress: string,
+    mode: AgentProposalMode,
+    staleMs: number,
+  ): AgentProposal | undefined =>
+    proposals.find((p) => {
+      if (p.poolAddress !== poolAddress) return false;
+      if (isProposalStale(p, staleMs)) return false;
+      if (mode === "supervised") return p.status === "approved";
+      return p.status === "pending" || p.status === "approved";
+    });
+
+  const isAgentProposal = (value: AgentDecision | null): value is AgentProposal =>
+    value !== null && "proposalId" in value && "source" in value && "status" in value;
+
   // ─── Per-pool evaluation ───────────────────────────────────────────────────
 
   const evaluatePool = (
@@ -1884,40 +1918,121 @@ export const program = Effect.gen(function* () {
         };
       }
 
-      // Agentic-mode overlay (optional agent runtime review)
-      if (config.agentiveMode) {
-        const enhanced = yield* agent
-          .enhanceDecision(decision, {
-            decision,
-            pool,
-            metrics,
-            warnings,
-            recentDecisions: yield* audit
-              .getRecentDecisions(10)
-              .pipe(Effect.catchAll(() => Effect.succeed([]))),
-          })
-          .pipe(Effect.catchAll(() => Effect.succeed(null)));
-        if (enhanced) {
-          console.info(
-            `[agentic] ${decision.action} → ${enhanced.action} ` +
-              `(confidence ${decision.confidence.toFixed(2)} → ${enhanced.confidence.toFixed(2)})`,
+      const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
+      const portfolioValueUsd = walletBalanceUsd;
+      const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
+
+      if (config.agentiveMode && proposalCircuitBreaker.canTry(Date.now())) {
+        const proposalMode = config.agentProposalMode;
+
+        if (proposalMode === "veto") {
+          const enhanced = yield* agent
+            .enhanceDecision(decision, {
+              decision,
+              pool,
+              metrics,
+              warnings,
+              recentDecisions: yield* audit
+                .getRecentDecisions(10)
+                .pipe(Effect.catchAll(() => Effect.succeed([]))),
+            })
+            .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          if (enhanced) {
+            console.info(
+              `[agentic] ${decision.action} → ${enhanced.action} ` +
+                `(confidence ${decision.confidence.toFixed(2)} → ${enhanced.confidence.toFixed(2)})`,
+            );
+            decision = enhanced;
+          }
+        } else {
+          let agentProposal: AgentProposal | null = null;
+          let proposalSource: "queue" | "sync" | undefined;
+
+          const snapshot = yield* agentState.getSnapshot();
+          const queuedProposal = findPendingProposal(
+            snapshot.pendingProposals,
+            poolAddress,
+            proposalMode,
+            config.agentProposalStaleMs,
           );
-          decision = enhanced;
+          if (queuedProposal) {
+            agentProposal = queuedProposal;
+            proposalSource = "queue";
+          }
+
+          if (!agentProposal) {
+            const syncProposal = yield* agent
+              .enhanceDecision(decision, {
+                decision,
+                pool,
+                metrics,
+                warnings,
+                recentDecisions: yield* audit
+                  .getRecentDecisions(10)
+                  .pipe(Effect.catchAll(() => Effect.succeed([]))),
+              })
+              .pipe(Effect.catchAll(() => Effect.succeed(null)));
+            if (syncProposal && isAgentProposal(syncProposal)) {
+              agentProposal = syncProposal;
+              proposalSource = "sync";
+            }
+          }
+
+          if (agentProposal) {
+            const now = Date.now();
+            const poolBackoff = proposalBackoff.get(poolAddress);
+            if (isProposalBackoffActive(poolBackoff, now)) {
+              console.info(`[agent-proposal] ${poolAddress} skipped — backoff active`);
+            } else {
+              const validation = evaluateAgentProposal(
+                agentProposal,
+                {
+                  openPositions,
+                  portfolioValueUsd,
+                  recentPnlUsd,
+                  poolAddress,
+                },
+                config,
+              );
+              if (validation.valid && validation.adjustedDecision) {
+                console.info(
+                  `[agent-proposal] ${proposalSource} ${decision.action} → ${validation.adjustedDecision.action} ` +
+                    `(confidence ${decision.confidence.toFixed(2)} → ${validation.adjustedDecision.confidence.toFixed(2)})`,
+                );
+                decision = validation.adjustedDecision;
+                proposalBackoff.delete(poolAddress);
+                proposalCircuitBreaker.recordSuccess();
+              } else {
+                console.warn(`[agent-proposal] ${proposalSource} rejected: ${validation.reason}`);
+                proposalBackoff.set(
+                  poolAddress,
+                  nextProposalBackoff(poolBackoff, now, {
+                    baseMs: config.agentProposalBackoffBaseMs,
+                    maxMs: config.agentProposalBackoffMaxMs,
+                  }),
+                );
+                proposalCircuitBreaker.recordFailure(now);
+                yield* memory
+                  .upsert({
+                    category: "warning",
+                    content: `Agent proposal rejected for ${poolAddress}: ${validation.reason}`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              }
+            }
+          }
         }
       }
 
       if (!decision) return null;
 
       // Risk evaluation
-      const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
-
-      const portfolioValueUsd = walletBalanceUsd;
-      const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
-
       const riskResult = risk.evaluate(decision, {
         openPositions,
         portfolioValueUsd,
         recentPnlUsd,
+        poolAddress,
       });
 
       // Apply risk-adjusted position size cap

@@ -59,6 +59,12 @@ const tools: ReadonlyArray<McpTool> = [
     description: "Get sanitized configuration (no secrets) for the running agent.",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "prism_agent_policy",
+    description:
+      "Get the current agent policy snapshot (proposal mode, hard caps, circuit breaker).",
+    inputSchema: { type: "object", properties: {} },
+  },
 ];
 
 function sanitizeConfig(cfg: AppConfig): Record<string, unknown> {
@@ -173,6 +179,16 @@ export class McpServer {
             {
               type: "text",
               text: JSON.stringify(sanitizeConfig(this.config)),
+            },
+          ],
+        };
+      }
+      case "prism_agent_policy": {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(snapshot.agentPolicy),
             },
           ],
         };

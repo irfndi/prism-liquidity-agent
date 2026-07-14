@@ -1,6 +1,12 @@
 import { Context, Layer } from "effect";
 import { RiskService, type RiskApi, type RiskContext, type RiskResult } from "./services.js";
-import type { AgentDecision } from "./types.js";
+import type { AppConfig } from "./config-service.js";
+import type {
+  ActionType,
+  AgentDecision,
+  AgentProposal,
+  ProposalValidationResult,
+} from "./types.js";
 
 export interface RiskConfig {
   readonly confidenceThreshold: number;
@@ -96,6 +102,136 @@ export function evaluateRisk(
   }
 
   return { approved: true, reason: "All risk checks passed" };
+}
+
+const VALID_ACTIONS: ReadonlyArray<ActionType> = ["HOLD", "REBALANCE", "EXIT", "ENTER"];
+
+export function evaluateAgentProposal(
+  proposal: AgentProposal,
+  ctx: RiskContext,
+  config: AppConfig,
+): ProposalValidationResult {
+  // 1. Action must be a known decision action.
+  if (!VALID_ACTIONS.includes(proposal.action)) {
+    return { valid: false, reason: `Invalid action: ${proposal.action}` };
+  }
+
+  // 2. Confidence must be finite and within [minConfidence, 1].
+  if (
+    !Number.isFinite(proposal.confidence) ||
+    proposal.confidence < config.agentProposalMinConfidence ||
+    proposal.confidence > 1
+  ) {
+    return {
+      valid: false,
+      reason:
+        `Confidence ${proposal.confidence} must be finite and between ` +
+        `${config.agentProposalMinConfidence} and 1`,
+    };
+  }
+
+  // 3. Position size must be non-negative and capped to the stricter of the
+  //    agent proposal limit and the existing per-pool allocation cap.
+  let adjustedPositionSizeUsd = proposal.positionSizeUsd;
+
+  if (proposal.positionSizeUsd !== undefined) {
+    if (proposal.positionSizeUsd < 0) {
+      return { valid: false, reason: "positionSizeUsd cannot be negative" };
+    }
+
+    const agentMaxSizeUsd = ctx.portfolioValueUsd * config.agentProposalMaxPositionSizePct;
+    const perPoolCapUsd = ctx.portfolioValueUsd * config.maxPerPoolAllocationPct;
+    let cappedSizeUsd = Math.min(proposal.positionSizeUsd, agentMaxSizeUsd, perPoolCapUsd);
+
+    if (proposal.action === "ENTER") {
+      const duplicate = ctx.openPositions.find((p) => p.poolAddress === proposal.poolAddress);
+      if (duplicate) {
+        return {
+          valid: false,
+          reason: `Already holding position in pool ${proposal.poolAddress} — use REBALANCE instead`,
+        };
+      }
+
+      const allocationResult = evaluatePerPoolAllocation({
+        proposedDepositUsd: cappedSizeUsd,
+        portfolioValueUsd: ctx.portfolioValueUsd,
+        openPositions: ctx.openPositions,
+        maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+        maxOpenPositions: config.maxOpenPositions,
+      });
+
+      if (!allocationResult.approved) {
+        return { valid: false, reason: allocationResult.reason };
+      }
+
+      cappedSizeUsd = allocationResult.adjustedDepositUsd;
+    }
+
+    if (cappedSizeUsd !== proposal.positionSizeUsd) {
+      adjustedPositionSizeUsd = cappedSizeUsd;
+    }
+  }
+
+  // 4. REBALANCE parameters must form a valid, bounded bin range.
+  if (proposal.rebalanceParams !== undefined) {
+    const { newLowerBinId, newUpperBinId } = proposal.rebalanceParams;
+    if (newUpperBinId <= newLowerBinId) {
+      return {
+        valid: false,
+        reason: "Invalid rebalance range: upperBinId must be > lowerBinId",
+      };
+    }
+    const rangeWidth = newUpperBinId - newLowerBinId;
+    if (rangeWidth > config.maxRebalanceRangeBins) {
+      return {
+        valid: false,
+        reason: `Rebalance range ${rangeWidth} bins exceeds max ${config.maxRebalanceRangeBins}`,
+      };
+    }
+  }
+
+  // 5. Safety EXIT cannot be downgraded to a less-defensive action.
+  if (proposal.originalAction === "EXIT" && proposal.action !== "EXIT") {
+    return {
+      valid: false,
+      reason: "Cannot downgrade a safety EXIT to a non-EXIT action",
+    };
+  }
+
+  // 6. Non-ENTER actions may not be promoted to ENTER.
+  if (
+    proposal.originalAction !== undefined &&
+    proposal.originalAction !== "ENTER" &&
+    proposal.action === "ENTER"
+  ) {
+    return {
+      valid: false,
+      reason: `Cannot promote ${proposal.originalAction} to ENTER`,
+    };
+  }
+
+  // 7. Proposal must target the pool currently being evaluated.
+  if (proposal.poolAddress !== ctx.poolAddress) {
+    return {
+      valid: false,
+      reason: `Proposal poolAddress ${proposal.poolAddress} does not match evaluated pool ${ctx.poolAddress}`,
+    };
+  }
+
+  const adjustedDecision: AgentDecision = {
+    action: proposal.action,
+    poolAddress: proposal.poolAddress,
+    confidence: proposal.confidence,
+    reasoning: proposal.reasoning,
+    ...(adjustedPositionSizeUsd !== undefined && { positionSizeUsd: adjustedPositionSizeUsd }),
+    ...(proposal.rebalanceParams !== undefined && { rebalanceParams: proposal.rebalanceParams }),
+  };
+
+  return {
+    valid: true,
+    reason: "Agent proposal validated",
+    adjustedDecision,
+  };
 }
 
 export const RiskLive = (riskConfig: RiskConfig) =>

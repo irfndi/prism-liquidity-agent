@@ -2,6 +2,8 @@ import { Context, Effect } from "effect";
 import type { AppConfig } from "./config-service.js";
 import type {
   AgentDecision,
+  AgentPolicySnapshot,
+  AgentProposal,
   AgentCycle,
   BacktestResult,
   BinArray,
@@ -240,6 +242,7 @@ export interface RiskContext {
   readonly openPositions: ReadonlyArray<Position>;
   readonly portfolioValueUsd: number;
   readonly recentPnlUsd: number;
+  readonly poolAddress: string;
 }
 
 export interface RiskResult {
@@ -787,6 +790,7 @@ export interface AgentApi {
     decision: AgentDecision,
     context: AgentRuntimeContext,
   ) => Effect.Effect<AgentDecision | null, unknown>;
+  readonly getPolicy: () => Effect.Effect<AgentPolicySnapshot, unknown>;
   readonly sendCheckin: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, unknown>;
   readonly sendAlert: (alert: AgentRuntimeAlert) => Effect.Effect<void, unknown>;
   readonly getStatus: () => Effect.Effect<
@@ -808,6 +812,11 @@ export class AgentService extends Context.Tag("AgentService")<AgentService, Agen
 export interface AgentStateApi {
   readonly getSnapshot: () => Effect.Effect<PrismStateSnapshot, never>;
   readonly updateSnapshot: (patch: Partial<PrismStateSnapshot>) => Effect.Effect<void, never>;
+  readonly setAgentPolicy: (patch: Partial<AgentPolicySnapshot>) => Effect.Effect<void, never>;
+  readonly enqueueProposal: (proposal: AgentProposal) => Effect.Effect<void, never>;
+  readonly dequeueProposals: (proposalIds: ReadonlyArray<string>) => Effect.Effect<void, never>;
+  readonly approveProposal: (proposalId: string) => Effect.Effect<void, never>;
+  readonly rejectProposal: (proposalId: string) => Effect.Effect<void, never>;
 }
 
 export class AgentStateService extends Context.Tag("AgentStateService")<

@@ -13,11 +13,14 @@ import {
   ScreenerService,
   DbService,
   EntryPrepService,
+  AgentService,
+  AgentStateService,
   type AdapterApi,
   type StrategyApi,
   type DbApi,
   type RevenueConfigApi,
 } from "../engine/services.js";
+
 import type { AgentDecision } from "../engine/types.js";
 
 function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
@@ -39,7 +42,10 @@ describe("Program integration", () => {
         yield* ScreenerService;
         yield* DbService;
         yield* EntryPrepService;
+        yield* AgentService;
+        yield* AgentStateService;
         return "ok";
+
       }),
       layer,
     );
