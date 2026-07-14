@@ -124,10 +124,10 @@ describe("parseHttpQueueProposal", () => {
     expect(proposal.proposalId).toBe("queue-id-123");
     expect(proposal.source).toBe("http-queue");
     expect(proposal.action).toBe("EXIT");
-    expect(proposal.originalAction).toBe("EXIT");
+    expect(proposal.originalAction).toBeUndefined();
   });
 
-  it("preserves an explicit original action", () => {
+  it("respects a custom stale TTL", () => {
     const raw = JSON.stringify({
       action: "EXIT",
       poolAddress: "Pool333333333333333333333333333333333333333",
@@ -135,11 +135,10 @@ describe("parseHttpQueueProposal", () => {
     });
 
     const proposal = runSyncOrFail(
-      parseHttpQueueProposal(raw, "queue-id-123", "http-queue", "HOLD"),
+      parseHttpQueueProposal(raw, "queue-id-123", "http-queue", 30_000),
     );
 
-    expect(proposal.originalAction).toBe("HOLD");
-    expect(proposal.action).toBe("EXIT");
+    expect(proposal.expiresAt - proposal.proposedAt).toBe(30_000);
   });
 });
 

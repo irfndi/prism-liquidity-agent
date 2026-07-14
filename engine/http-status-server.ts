@@ -90,7 +90,6 @@ export class HttpStatusServer {
             raw,
             crypto.randomUUID(),
             "http-queue",
-            undefined,
             this.config.agentProposalStaleMs,
           ),
         );

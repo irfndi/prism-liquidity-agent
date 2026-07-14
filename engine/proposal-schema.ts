@@ -106,14 +106,13 @@ function buildProposal(
   decoded: DecodedProposalJson,
   proposalId: string,
   source: "sync-prompt" | "http-queue",
-  originalAction: ActionType,
+  originalAction: ActionType | undefined,
   staleMs: number,
 ): AgentProposal {
   const now = Date.now();
   return {
     proposalId,
     source,
-    originalAction,
     action: decoded.action,
     poolAddress: decoded.poolAddress,
     confidence: decoded.confidence,
@@ -121,6 +120,7 @@ function buildProposal(
     proposedAt: now,
     expiresAt: now + staleMs,
     status: "pending",
+    ...(originalAction !== undefined && { originalAction }),
     ...(decoded.positionSizeUsd !== undefined && {
       positionSizeUsd: decoded.positionSizeUsd,
     }),
@@ -150,12 +150,9 @@ export function parseHttpQueueProposal(
   raw: string,
   proposalId: string,
   source: "sync-prompt" | "http-queue" = "http-queue",
-  originalAction?: ActionType,
   staleMs: number = PROPOSAL_TTL_MS,
 ): Effect.Effect<AgentProposal, ProposalParseError> {
   return decodeProposalJson(raw).pipe(
-    Effect.map((decoded) =>
-      buildProposal(decoded, proposalId, source, originalAction ?? decoded.action, staleMs),
-    ),
+    Effect.map((decoded) => buildProposal(decoded, proposalId, source, undefined, staleMs)),
   );
 }
