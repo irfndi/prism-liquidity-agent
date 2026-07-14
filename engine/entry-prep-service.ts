@@ -36,15 +36,12 @@ function numberToScaledBigInt(value: number): bigint {
   return BigInt(`${sign}${whole}${frac.padEnd(FIXED_POINT_SCALE, "0")}`);
 }
 
-function validateDecimals(decimals: number, context: string): void {
-  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 255) {
-    throw new RangeError(`Invalid token decimals for ${context}: ${decimals}`);
-  }
+function isValidDecimals(decimals: number): boolean {
+  return Number.isInteger(decimals) && decimals >= 0 && decimals <= 255;
 }
 
 export function computeRequiredAtomic(halfUsd: number, price: number, decimals: number): bigint {
-  if (halfUsd <= 0 || price <= 0) return 0n;
-  validateDecimals(decimals, "computeRequiredAtomic");
+  if (halfUsd <= 0 || price <= 0 || !isValidDecimals(decimals)) return 0n;
   const usdScaled = numberToScaledBigInt(halfUsd);
   const priceScaled = numberToScaledBigInt(price);
   if (priceScaled === 0n) return 0n;
@@ -52,7 +49,7 @@ export function computeRequiredAtomic(halfUsd: number, price: number, decimals: 
 }
 
 export function computeUsdcInputAtomic(amount: bigint, decimals: number, price: number): bigint {
-  validateDecimals(decimals, "computeUsdcInputAtomic");
+  if (!isValidDecimals(decimals)) return 0n;
   // Scale the floating price to a fixed-point integer without converting `amount` to Number.
   const priceScaled = numberToScaledBigInt(price);
   if (priceScaled === 0n) return 0n;
@@ -181,7 +178,7 @@ export const EntryPrepLive = Layer.effect(
             [pool.tokenX, tokenXDecimals],
             [pool.tokenY, tokenYDecimals],
           ] as const) {
-            if (!Number.isInteger(decimals) || decimals < 0 || decimals > 255) {
+            if (!isValidDecimals(decimals)) {
               return yield* Effect.fail(
                 makePrepError(
                   "PRICE_UNAVAILABLE",

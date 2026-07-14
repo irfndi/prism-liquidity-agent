@@ -873,6 +873,9 @@ export const AdapterLive = Layer.effect(
       const inAmount = quoteData.inAmount;
       const expectedAmount = amountAtomic.toString();
       if (inAmount !== expectedAmount && String(inAmount) !== expectedAmount) return false;
+      // A prefetched quote without a usable route should be rejected early so the
+      // caller gets a clear quote failure instead of a swap-build failure.
+      if (!Array.isArray(quoteData.routePlan) || quoteData.routePlan.length === 0) return false;
       return true;
     }
 
