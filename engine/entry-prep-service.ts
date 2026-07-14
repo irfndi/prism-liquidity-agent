@@ -147,9 +147,21 @@ export const EntryPrepLive = Layer.effect(
                 ),
               );
 
-          const nativeSolLamports = yield* adapter
-            .getNativeSolBalance()
-            .pipe(Effect.catchAll(() => Effect.succeed(0n)));
+          const readNativeSolBalance = () =>
+            adapter
+              .getNativeSolBalance()
+              .pipe(
+                Effect.mapError((err) =>
+                  makePrepError(
+                    "BALANCE_READ_FAILED",
+                    `Failed to read native SOL balance: ${String(err)}`,
+                    poolAddress,
+                    err,
+                  ),
+                ),
+              );
+
+          const nativeSolLamports = yield* readNativeSolBalance();
 
           const balanceX =
             pool.tokenX === SOL_MINT ? nativeSolLamports : yield* readTokenBalance(pool.tokenX);
@@ -172,6 +184,15 @@ export const EntryPrepLive = Layer.effect(
             price: number;
           }> = [];
           if (requiredX > availableX) {
+            if (pool.tokenX === USDC_MINT) {
+              return yield* Effect.fail(
+                makePrepError(
+                  "INSUFFICIENT_USDC_BALANCE",
+                  `Wallet USDC balance ${formatAtomic(availableX, USDC_DECIMALS)} is less than required ${formatAtomic(requiredX, USDC_DECIMALS)} for pool token X`,
+                  poolAddress,
+                ),
+              );
+            }
             deficits.push({
               mint: pool.tokenX,
               amount: requiredX - availableX,
@@ -180,6 +201,15 @@ export const EntryPrepLive = Layer.effect(
             });
           }
           if (requiredY > availableY) {
+            if (pool.tokenY === USDC_MINT) {
+              return yield* Effect.fail(
+                makePrepError(
+                  "INSUFFICIENT_USDC_BALANCE",
+                  `Wallet USDC balance ${formatAtomic(availableY, USDC_DECIMALS)} is less than required ${formatAtomic(requiredY, USDC_DECIMALS)} for pool token Y`,
+                  poolAddress,
+                ),
+              );
+            }
             deficits.push({
               mint: pool.tokenY,
               amount: requiredY - availableY,
@@ -257,9 +287,7 @@ export const EntryPrepLive = Layer.effect(
             });
           }
 
-          const nativeSolAfter = yield* adapter
-            .getNativeSolBalance()
-            .pipe(Effect.catchAll(() => Effect.succeed(0n)));
+          const nativeSolAfter = yield* readNativeSolBalance();
           const balanceXAfter =
             pool.tokenX === SOL_MINT ? nativeSolAfter : yield* readTokenBalance(pool.tokenX);
           const balanceYAfter =

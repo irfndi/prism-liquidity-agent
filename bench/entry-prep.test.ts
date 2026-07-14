@@ -270,6 +270,72 @@ describe("EntryPrepService", () => {
     ).rejects.toThrow(/INSUFFICIENT_USDC_BALANCE/);
   });
 
+  it("propagates getNativeSolBalance failure as BALANCE_READ_FAILED without swapping", async () => {
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.fail(new Error("RPC down")),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/BALANCE_READ_FAILED/);
+
+    expect(swapSpy).not.toHaveBeenCalled();
+  });
+
+  it("fails with INSUFFICIENT_USDC_BALANCE when a pool leg is USDC and wallet lacks it", async () => {
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    const layer = buildLayer(
+      {
+        getPoolState: () =>
+          Effect.succeed({
+            address: POOL_ADDRESS,
+            tokenX: TOKEN_X,
+            tokenY: USDC_MINT,
+            tokenXSymbol: "SOL",
+            tokenYSymbol: "USDC",
+            tvlUsd: 100_000,
+            volume24hUsd: 30_000,
+            fees24hUsd: 300,
+            apr: 60,
+            activeBinId: 5000,
+            binStep: 10,
+            currentPrice: 1,
+            timestamp: Date.now(),
+          }),
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: (mint: string) => Effect.succeed(mint === USDC_MINT ? 100n : 0n),
+        getTokenPrices: () => Effect.succeed({ [TOKEN_X]: 150, [USDC_MINT]: 1 }),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/INSUFFICIENT_USDC_BALANCE/);
+
+    expect(swapSpy).not.toHaveBeenCalled();
+  });
+
   it("computes USDC input without precision loss for large amounts", () => {
     // 1 unit of a 9-decimal token at $1 with a 1% buffer -> 1.01 USDC atomic.
     expect(computeUsdcInputAtomic(1_000_000_000n, 9, 1)).toBe(1_010_000n);
