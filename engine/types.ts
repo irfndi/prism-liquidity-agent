@@ -117,6 +117,7 @@ export interface AgentProposal extends AgentDecision {
   readonly expiresAt: number;
   readonly source: "sync-prompt" | "http-queue";
   readonly originalAction?: ActionType;
+  readonly originalConfidence?: number;
   readonly status: "pending" | "approved" | "rejected" | "executed";
 }
 

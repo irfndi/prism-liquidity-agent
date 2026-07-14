@@ -104,16 +104,19 @@ export function AgentStateMutable(): {
   let snapshot: PrismStateSnapshot = initialSnapshot;
 
   const update = (patch: Partial<PrismStateSnapshot>): void => {
+    const nextPendingProposals = patch.pendingProposals ?? snapshot.pendingProposals;
     const next: PrismStateSnapshot = {
       ...snapshot,
       ...patch,
       portfolio: patch.portfolio
         ? { ...snapshot.portfolio, ...patch.portfolio }
         : snapshot.portfolio,
-      agentPolicy: patch.agentPolicy
-        ? { ...snapshot.agentPolicy, ...patch.agentPolicy }
-        : snapshot.agentPolicy,
-      pendingProposals: patch.pendingProposals ?? snapshot.pendingProposals,
+      agentPolicy: {
+        ...snapshot.agentPolicy,
+        ...patch.agentPolicy,
+        proposalsQueued: nextPendingProposals.length,
+      },
+      pendingProposals: nextPendingProposals,
     };
     snapshot = next;
   };

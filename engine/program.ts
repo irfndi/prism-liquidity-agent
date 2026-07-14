@@ -2079,6 +2079,7 @@ export const program = Effect.gen(function* () {
                 const proposalToEvaluate = {
                   ...agentProposal,
                   originalAction: agentProposal.originalAction ?? decision.action,
+                  originalConfidence: agentProposal.originalConfidence ?? decision.confidence,
                 };
                 const validation = evaluateAgentProposal(
                   proposalToEvaluate,

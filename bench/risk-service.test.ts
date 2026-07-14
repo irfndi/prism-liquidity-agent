@@ -162,6 +162,23 @@ describe("evaluateAgentProposal", () => {
     expect(result.reason).toMatch(/Confidence/);
   });
 
+  it("allows proposals that preserve the original low-confidence decision", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "HOLD",
+        poolAddress: "pool1",
+        confidence: 0.5,
+        originalAction: "HOLD",
+        originalConfidence: 0.5,
+      }),
+      makeContext(),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.adjustedDecision?.action).toBe("HOLD");
+    expect(result.adjustedDecision?.confidence).toBe(0.5);
+  });
+
   it("caps position size to agent and per-pool limits", () => {
     const result = evaluateAgentProposal(
       makeProposal({ action: "ENTER", poolAddress: "pool1", positionSizeUsd: 10_000 }),

@@ -144,11 +144,19 @@ export function evaluateAgentProposal(
     };
   }
 
-  // 5. Confidence must be finite and within [minConfidence, 1].
+  // 5. Confidence must be finite and within [minConfidence, 1], unless the proposal
+  //    preserves the original low-confidence decision unchanged.
+  const preservesOriginalDecision =
+    proposal.originalAction !== undefined &&
+    proposal.originalConfidence !== undefined &&
+    proposal.action === proposal.originalAction &&
+    proposal.confidence === proposal.originalConfidence;
+
   if (
-    !Number.isFinite(proposal.confidence) ||
-    proposal.confidence < config.agentProposalMinConfidence ||
-    proposal.confidence > 1
+    !preservesOriginalDecision &&
+    (!Number.isFinite(proposal.confidence) ||
+      proposal.confidence < config.agentProposalMinConfidence ||
+      proposal.confidence > 1)
   ) {
     return {
       valid: false,
