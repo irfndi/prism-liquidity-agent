@@ -2063,24 +2063,46 @@ export const program = Effect.gen(function* () {
                   config,
                 );
                 if (validation.valid && validation.adjustedDecision) {
-                  logger.info("Agent proposal applied", {
-                    source: proposalSource,
-                    pool: poolAddress,
-                    from: decision.action,
-                    to: validation.adjustedDecision.action,
-                  });
-                  decision = validation.adjustedDecision;
-                  proposalBackoff.delete(poolAddress);
-                  poolCircuitBreaker.recordSuccess();
-
-                  if (
-                    decision.action === "HOLD" &&
-                    proposalSource === "queue" &&
-                    agentProposal.proposalId
-                  ) {
-                    yield* agentState
-                      .dequeueProposals([agentProposal.proposalId])
+                  if (proposalMode === "suggest") {
+                    logger.info("Agent proposal suggested (advisory)", {
+                      source: proposalSource,
+                      pool: poolAddress,
+                      from: decision.action,
+                      suggested: validation.adjustedDecision.action,
+                    });
+                    yield* memory
+                      .upsert({
+                        category: "pattern",
+                        content: `Advisory suggestion for ${poolAddress}: ${validation.adjustedDecision.action} (confidence ${validation.adjustedDecision.confidence.toFixed(2)})`,
+                        poolAddress,
+                      })
                       .pipe(Effect.catchAll(() => Effect.void));
+
+                    if (proposalSource === "queue" && agentProposal.proposalId) {
+                      yield* agentState
+                        .dequeueProposals([agentProposal.proposalId])
+                        .pipe(Effect.catchAll(() => Effect.void));
+                    }
+                  } else {
+                    logger.info("Agent proposal applied", {
+                      source: proposalSource,
+                      pool: poolAddress,
+                      from: decision.action,
+                      to: validation.adjustedDecision.action,
+                    });
+                    decision = validation.adjustedDecision;
+                    proposalBackoff.delete(poolAddress);
+                    poolCircuitBreaker.recordSuccess();
+
+                    if (
+                      decision.action === "HOLD" &&
+                      proposalSource === "queue" &&
+                      agentProposal.proposalId
+                    ) {
+                      yield* agentState
+                        .dequeueProposals([agentProposal.proposalId])
+                        .pipe(Effect.catchAll(() => Effect.void));
+                    }
                   }
                   yield* agentState
                     .setAgentPolicy({ lastProposalAt: now })
