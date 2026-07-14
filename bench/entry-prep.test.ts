@@ -9,7 +9,7 @@ import {
 import { AdapterService, type AdapterApi } from "../engine/services.js";
 import { ConfigService } from "../engine/config-service.js";
 import { defaultAppConfig } from "./helpers.js";
-import { SOL_MINT, USDC_MINT } from "../engine/constants.js";
+import { SOL_MINT, USDC_MINT, SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS } from "../engine/constants.js";
 import { SwapQuoteError } from "../engine/errors.js";
 
 const TOKEN_X = SOL_MINT;
@@ -166,6 +166,41 @@ describe("EntryPrepService", () => {
         solBalance = 10_000_000_000n;
       } else {
         tokenBalances[mint] = 10_000_000_000n;
+      }
+      return Effect.succeed("mock-swap-tx");
+    });
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(solBalance),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : (tokenBalances[mint] ?? 0n)),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const prep = yield* EntryPrepService;
+        return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(swapSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("succeeds when swapped SOL exactly covers the buffered requirement", async () => {
+    let solBalance = 0n;
+    const tokenBalances: Record<string, bigint> = { [TOKEN_Y]: 0n };
+    const swapSpy = vi.fn((mint: string) => {
+      if (mint === SOL_MINT) {
+        // Exact buffered requirement for $500 of SOL at $150 plus the 50M
+        // transaction buffer; prior code double-subtracted GAS_RESERVE_LAMPORTS
+        // and rejected this valid case.
+        solBalance = computeRequiredAtomic(500, 150, 9) + SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS;
+      } else {
+        tokenBalances[mint] = computeRequiredAtomic(500, 1, 6);
       }
       return Effect.succeed("mock-swap-tx");
     });

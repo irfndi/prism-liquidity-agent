@@ -414,24 +414,14 @@ export const EntryPrepLive = Layer.effect(
           const balanceYAfter =
             pool.tokenY === SOL_MINT ? nativeSolAfter : yield* readTokenBalance(pool.tokenY);
 
-          const availableXAfter =
-            pool.tokenX === SOL_MINT
-              ? balanceXAfter > GAS_RESERVE_LAMPORTS
-                ? balanceXAfter - GAS_RESERVE_LAMPORTS
-                : 0n
-              : balanceXAfter;
-          const availableYAfter =
-            pool.tokenY === SOL_MINT
-              ? balanceYAfter > GAS_RESERVE_LAMPORTS
-                ? balanceYAfter - GAS_RESERVE_LAMPORTS
-                : 0n
-              : balanceYAfter;
-
-          if (availableXAfter < requiredX || availableYAfter < requiredY) {
+          // For SOL legs, requiredX/Y already include SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS,
+          // so compare the raw post-swap balance against the buffered requirement.
+          // Re-subtracting GAS_RESERVE_LAMPORTS here would double-count the reserve.
+          if (balanceXAfter < requiredX || balanceYAfter < requiredY) {
             return yield* Effect.fail(
               makePrepError(
                 "INSUFFICIENT_BALANCE_AFTER_SWAP",
-                `Balances still insufficient after swap: X=${formatAtomic(availableXAfter, tokenXDecimals)}/${formatAtomic(requiredX, tokenXDecimals)}, Y=${formatAtomic(availableYAfter, tokenYDecimals)}/${formatAtomic(requiredY, tokenYDecimals)}`,
+                `Balances still insufficient after swap: X=${formatAtomic(balanceXAfter, tokenXDecimals)}/${formatAtomic(requiredX, tokenXDecimals)}, Y=${formatAtomic(balanceYAfter, tokenYDecimals)}/${formatAtomic(requiredY, tokenYDecimals)}`,
                 poolAddress,
               ),
             );
