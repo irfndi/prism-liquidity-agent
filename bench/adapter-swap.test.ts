@@ -19,7 +19,9 @@ const SOL_MINT = "So11111111111111111111111111111111111111112";
 const walletKeypair = Keypair.generate();
 const walletPrivateKey = bs58.encode(walletKeypair.secretKey);
 
-function buildLayer(): Layer.Layer<AdapterService, never, never> {
+function makeAdapterLayer(
+  overrides: Parameters<typeof defaultAppConfig>[0] = {},
+): Layer.Layer<AdapterService, never, never> {
   const configLayer = Layer.succeed(
     ConfigService,
     defaultAppConfig({
@@ -29,6 +31,7 @@ function buildLayer(): Layer.Layer<AdapterService, never, never> {
       sqliteDbPath: ":memory:",
       autoUpdate: false,
       updateCheckIntervalMs: 216_000_000,
+      ...overrides,
     }),
   );
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
@@ -37,6 +40,53 @@ function buildLayer(): Layer.Layer<AdapterService, never, never> {
     never,
     never
   >;
+}
+
+function buildLayer(): Layer.Layer<AdapterService, never, never> {
+  return makeAdapterLayer();
+}
+
+function buildLayerNoWallet(): Layer.Layer<AdapterService, never, never> {
+  return makeAdapterLayer({ walletPrivateKey: "" });
+}
+
+function swapEffect(
+  layer: Layer.Layer<AdapterService, never, never>,
+  outputMint: string,
+  amountAtomic: bigint,
+): Effect.Effect<string, unknown, never> {
+  return Effect.gen(function* () {
+    const adapter = yield* AdapterService;
+    return yield* adapter.swapUSDCForToken(outputMint, amountAtomic);
+  }).pipe(Effect.provide(layer));
+}
+
+async function runSwap(
+  layer: Layer.Layer<AdapterService, never, never>,
+  outputMint: string,
+  amountAtomic: bigint,
+): Promise<string> {
+  return Effect.runPromise(swapEffect(layer, outputMint, amountAtomic));
+}
+
+async function expectSwapFailure(
+  layer: Layer.Layer<AdapterService, never, never>,
+  outputMint: string,
+  amountAtomic: bigint,
+  expectedCauseMessage: string,
+): Promise<void> {
+  const result = await Effect.runPromise(
+    swapEffect(layer, outputMint, amountAtomic).pipe(Effect.either),
+  );
+  if (result._tag !== "Left") {
+    expect.fail("expected swap to fail, but it succeeded");
+  }
+  const err = result.left as {
+    readonly message: string;
+    readonly cause: { readonly message: string };
+  };
+  expect(err.message).toContain("swapUSDCForToken failed:");
+  expect(err.cause.message).toBe(expectedCauseMessage);
 }
 
 describe("AdapterService.swapUSDCForToken", () => {
@@ -76,13 +126,94 @@ describe("AdapterService.swapUSDCForToken", () => {
     );
 
     try {
-      const sig = await Effect.runPromise(
-        Effect.gen(function* () {
-          const adapter = yield* AdapterService;
-          return yield* adapter.swapUSDCForToken(SOL_MINT, 1_000_000n);
-        }).pipe(Effect.provide(buildLayer())),
-      );
+      const sig = await runSwap(buildLayer(), SOL_MINT, 1_000_000n);
       expect(sig).toBe("mock-sig");
+    } finally {
+      restore();
+    }
+  });
+
+  it("fails when no wallet is configured", async () => {
+    const restore = mockFetch(
+      (async () => new Response("unexpected", { status: 500 })) as unknown as typeof fetch,
+    );
+
+    try {
+      await expectSwapFailure(buildLayerNoWallet(), SOL_MINT, 1_000_000n, "No wallet configured");
+    } finally {
+      restore();
+    }
+  });
+
+  it("returns an empty string for non-positive amounts without calling Jupiter", async () => {
+    const fetchImpl = vi.fn(
+      (async () => new Response("unexpected", { status: 500 })) as unknown as typeof fetch,
+    );
+    const restore = mockFetch(fetchImpl);
+
+    try {
+      const sig = await runSwap(buildLayer(), SOL_MINT, 0n);
+      expect(sig).toBe("");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("fails when Jupiter quote request returns non-OK", async () => {
+    const restore = mockFetch((async (url: string | URL | Request) => {
+      const u = url.toString();
+      if (u.includes("/swap/v1/quote")) {
+        return new Response("quote error", { status: 502 });
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch);
+
+    try {
+      await expectSwapFailure(buildLayer(), SOL_MINT, 1_000_000n, "Jupiter quote failed: 502");
+    } finally {
+      restore();
+    }
+  });
+
+  it("fails when Jupiter swap build request returns non-OK", async () => {
+    const restore = mockFetch((async (url: string | URL | Request) => {
+      const u = url.toString();
+      if (u.includes("/swap/v1/quote")) {
+        return new Response(JSON.stringify({ routePlan: [] }), { status: 200 });
+      }
+      if (u.includes("/swap/v1/swap")) {
+        return new Response("swap error", { status: 503 });
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch);
+
+    try {
+      await expectSwapFailure(buildLayer(), SOL_MINT, 1_000_000n, "Jupiter swap build failed: 503");
+    } finally {
+      restore();
+    }
+  });
+
+  it("fails when swap response is missing swapTransaction", async () => {
+    const restore = mockFetch((async (url: string | URL | Request) => {
+      const u = url.toString();
+      if (u.includes("/swap/v1/quote")) {
+        return new Response(JSON.stringify({ routePlan: [] }), { status: 200 });
+      }
+      if (u.includes("/swap/v1/swap")) {
+        return new Response(JSON.stringify({ transaction: "ignored" }), { status: 200 });
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch);
+
+    try {
+      await expectSwapFailure(
+        buildLayer(),
+        SOL_MINT,
+        1_000_000n,
+        "Jupiter swap: no transaction returned",
+      );
     } finally {
       restore();
     }
