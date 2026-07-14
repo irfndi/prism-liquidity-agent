@@ -58,7 +58,7 @@ There are also optional peripheral subprojects:
 
 | File                                                  | Purpose                                                                                                                                       |
 | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `package.json`                                        | Root manifest, scripts, dependencies. Current version `0.0.31`.                                                                               |
+| `package.json`                                        | Root manifest, scripts, dependencies. Current version `0.0.32`.                                                                               |
 | `tsconfig.json`                                       | Strict TypeScript config for `engine/`, `ops/`, `bench/`, `cli/`, `types/`.                                                                   |
 | `vitest.config.ts`                                    | Engine test config; coverage thresholds and exclusions.                                                                                       |
 | `tsdown.config.ts`                                    | Build config for the engine bundle (`engine/index.ts` → `dist/index.mjs`).                                                                    |

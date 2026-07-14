@@ -2,6 +2,16 @@
 
 All notable changes to Prism are documented here.
 
+## [0.0.32] — 2026-07-14
+
+### Fixed
+
+- Per-pool exponential backoff for deterministic insufficient-token live ENTER failures (30 min – 6 h).
+- Cache native SOL and SPL token balances for 30 s, invalidate after transactions, and pace Solana/Helius requests.
+- Honor `Retry-After` headers, cap retry delays at 5 minutes, and deduplicate repeated retry warnings.
+- Apply RPC timeout per retry attempt so long provider cooldowns are respected.
+- Report scan `decided`, `executed`, and `failed` counts separately.
+
 ## [0.0.31] — 2026-07-13
 
 ### Fixed
