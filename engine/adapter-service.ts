@@ -356,7 +356,12 @@ export const AdapterLive = Layer.effect(
           Effect.zipRight(
             breaker.execute(
               retryEffectWithBackoff(
-                withRpcTimeout(Effect.tryPromise(() => fn(conn))),
+                withRpcTimeout(
+                  Effect.tryPromise({
+                    try: () => fn(conn),
+                    catch: (cause) => cause,
+                  }),
+                ),
                 RPC_RETRY_OPTIONS,
               ),
               isRpcNetworkError,
@@ -448,19 +453,21 @@ export const AdapterLive = Layer.effect(
     const fetchHeliusAssetCached = yield* Effect.cachedFunction((mint: string) => {
       const url = `https://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
       const assetRequest = Effect.gen(function* () {
-        const res = yield* Effect.tryPromise(() =>
-          fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              jsonrpc: "2.0",
-              id: "get-asset",
-              method: "getAsset",
-              params: { id: mint },
+        const res = yield* Effect.tryPromise({
+          try: () =>
+            fetch(url, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: "get-asset",
+                method: "getAsset",
+                params: { id: mint },
+              }),
+              signal: AbortSignal.timeout(10_000),
             }),
-            signal: AbortSignal.timeout(10_000),
-          }),
-        );
+          catch: (cause) => cause,
+        });
         if (!res.ok) {
           return yield* Effect.fail(
             Object.assign(new Error(`Helius getAsset returned HTTP ${res.status}`), {
