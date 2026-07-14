@@ -72,7 +72,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
   }
 
   sendPrompt(
-    _prompt: string,
+    prompt: string,
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
@@ -82,6 +82,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
 
       const payload = {
         type: "prism_prompt",
+        prompt,
         decision: ctx.decision,
         pool: ctx.pool,
         metrics: ctx.metrics,

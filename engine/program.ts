@@ -2127,11 +2127,7 @@ export const program = Effect.gen(function* () {
                       pendingCooldown = yield* computeCooldownForExit(decision, pos);
                     }
 
-                    if (
-                      decision.action === "HOLD" &&
-                      proposalSource === "queue" &&
-                      agentProposal.proposalId
-                    ) {
+                    if (proposalSource === "queue" && agentProposal.proposalId) {
                       yield* agentState
                         .dequeueProposals([agentProposal.proposalId])
                         .pipe(Effect.catchAll(() => Effect.void));
