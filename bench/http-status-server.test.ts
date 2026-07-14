@@ -412,4 +412,66 @@ describe("HttpStatusServer", () => {
       await Effect.runPromise(server.stop());
     }
   });
+
+  it("approves queued proposals via /approve", async () => {
+    const port = 18_791;
+    const approvedIds: string[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
+      {
+        ...mockAgentState(baseSnapshot()),
+        approveProposal: (proposalId: string) =>
+          Effect.sync(() => {
+            approvedIds.push(proposalId);
+          }),
+      },
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/approve`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({ proposalIds: ["id-1", "id-2"] }),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toEqual({ approved: 2 });
+      expect(approvedIds).toEqual(["id-1", "id-2"]);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("rejects /approve with bad token", async () => {
+    const port = 18_790;
+    const approvedIds: string[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
+      {
+        ...mockAgentState(baseSnapshot()),
+        approveProposal: (proposalId: string) =>
+          Effect.sync(() => {
+            approvedIds.push(proposalId);
+          }),
+      },
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/approve`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer wrong-token",
+        },
+        body: JSON.stringify({ proposalIds: ["id-1"] }),
+      });
+      expect(response.status).toBe(401);
+      expect(approvedIds).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
 });

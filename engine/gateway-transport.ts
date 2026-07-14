@@ -198,6 +198,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
   sendPrompt(
     prompt: string,
     ctx: AgentRuntimeContext,
+    timeoutMs?: number,
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
     return Effect.gen(this, function* () {
       const startedAt = Date.now();
@@ -206,7 +207,11 @@ export class GatewayTransport implements AgentRuntimeTransport {
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
 
       const id = `prompt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const text = yield* this.sendAndWait(id, { type: "prompt", payload: prompt, id });
+      const text = yield* this.sendAndWait(
+        id,
+        { type: "prompt", payload: prompt, id },
+        timeoutMs,
+      );
 
       const latencyMs = Date.now() - startedAt;
       this.emit({ type: "response_received", transport: this.name, latencyMs });
@@ -227,17 +232,22 @@ export class GatewayTransport implements AgentRuntimeTransport {
     });
   }
 
-  private sendAndWait(id: string, message: GatewayMessage): Effect.Effect<string, unknown> {
+  private sendAndWait(
+    id: string,
+    message: GatewayMessage,
+    timeoutMs?: number,
+  ): Effect.Effect<string, unknown> {
     return Effect.async((resume) => {
       if (this.ws?.readyState !== WebSocket.OPEN) {
         resume(Effect.fail(new Error("Gateway not connected")));
         return;
       }
 
+      const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
       const timer = setTimeout(() => {
         this.pending.delete(id);
         resume(Effect.fail(new Error(`Gateway prompt timeout: ${message.type}`)));
-      }, this.options.timeoutMs);
+      }, effectiveTimeout);
 
       this.pending.set(id, {
         resolve: (text) => {

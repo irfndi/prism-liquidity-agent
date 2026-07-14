@@ -73,6 +73,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
   sendPrompt(
     prompt: string,
     ctx: AgentRuntimeContext,
+    _timeoutMs?: number,
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
     return Effect.gen(this, function* () {
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });

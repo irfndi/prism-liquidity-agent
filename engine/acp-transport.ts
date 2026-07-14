@@ -172,6 +172,7 @@ export class AcpTransport implements AgentRuntimeTransport {
   sendPrompt(
     prompt: string,
     ctx: AgentRuntimeContext,
+    timeoutMs?: number,
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
     return Effect.gen(this, function* () {
       const startedAt = Date.now();
@@ -179,12 +180,17 @@ export class AcpTransport implements AgentRuntimeTransport {
 
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
 
-      yield* this.request("agent/session/prompt", {
-        sessionId: this.sessionId,
-        prompt: [{ type: "text", text: prompt }],
-      });
+      const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
+      yield* this.request(
+        "agent/session/prompt",
+        {
+          sessionId: this.sessionId,
+          prompt: [{ type: "text", text: prompt }],
+        },
+        effectiveTimeout,
+      );
 
-      const text = yield* this.collectSessionText(ctx.decision.poolAddress);
+      const text = yield* this.collectSessionText(ctx.decision.poolAddress, effectiveTimeout);
       const latencyMs = Date.now() - startedAt;
       this.emit({ type: "response_received", transport: this.name, latencyMs });
 
@@ -266,7 +272,10 @@ export class AcpTransport implements AgentRuntimeTransport {
     }
   }
 
-  private collectSessionText(poolAddress: string): Effect.Effect<string, unknown> {
+  private collectSessionText(
+    poolAddress: string,
+    timeoutMs?: number,
+  ): Effect.Effect<string, unknown> {
     return Effect.async((resume) => {
       this.sessionText = "";
       this.sessionTextResolve = (text: string) => {
@@ -274,10 +283,11 @@ export class AcpTransport implements AgentRuntimeTransport {
         resume(Effect.succeed(text));
       };
 
+      const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
       const timer = setTimeout(() => {
         this.sessionTextResolve = undefined;
         resume(Effect.fail(new Error(`ACP prompt timeout for ${poolAddress}`)));
-      }, this.options.timeoutMs);
+      }, effectiveTimeout);
 
       return Effect.sync(() => {
         clearTimeout(timer);
@@ -289,6 +299,7 @@ export class AcpTransport implements AgentRuntimeTransport {
   private request(
     method: string,
     params: Record<string, unknown>,
+    timeoutMs?: number,
   ): Effect.Effect<unknown, unknown> {
     return Effect.async((resume) => {
       if (!this.process?.stdin) {
@@ -300,10 +311,11 @@ export class AcpTransport implements AgentRuntimeTransport {
       const id = this.requestId;
       const req: AcpRequest = { jsonrpc: "2.0", id, method, params };
 
+      const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
       const timer = setTimeout(() => {
         this.pending.delete(id);
         resume(Effect.fail(new Error(`ACP request timeout: ${method}`)));
-      }, this.options.timeoutMs);
+      }, effectiveTimeout);
 
       this.pending.set(id, {
         resolve: (value) => {

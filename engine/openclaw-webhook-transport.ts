@@ -74,6 +74,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
   sendPrompt(
     _prompt: string,
     ctx: AgentRuntimeContext,
+    _timeoutMs?: number,
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
     return Effect.gen(this, function* () {
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });

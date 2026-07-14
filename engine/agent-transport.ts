@@ -120,6 +120,7 @@ export interface AgentRuntimeTransport {
   readonly sendPrompt: (
     prompt: string,
     ctx: AgentRuntimeContext,
+    timeoutMs?: number,
   ) => Effect.Effect<AgentRuntimeResponse, unknown>;
   readonly sendCheckin?: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, unknown>;
   readonly sendAlert?: (alert: AgentRuntimeAlert) => Effect.Effect<void, unknown>;

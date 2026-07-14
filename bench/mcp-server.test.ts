@@ -199,6 +199,7 @@ describe("McpServer", () => {
         "prism_decisions",
         "prism_config",
         "prism_agent_policy",
+        "prism_approve_proposals",
       ]),
     );
   });
@@ -301,5 +302,34 @@ describe("McpServer", () => {
     expect(cfg.paperTrading).toBe(true);
     expect(cfg).not.toHaveProperty("walletPrivateKey");
     expect(cfg).not.toHaveProperty("heliusApiKey");
+  });
+
+  it("approves proposals via prism_approve_proposals tool", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(
+      baseConfig(),
+      mockAgentState({
+        approveProposal: (proposalId: string) =>
+          Effect.sync(() => {
+            approvedIds.push(proposalId);
+          }),
+      }),
+    );
+
+    const response = await sendRequest(server, {
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: {
+        name: "prism_approve_proposals",
+        arguments: { proposalIds: ["id-1", "id-2"] },
+      },
+    });
+
+    expect(response.error).toBeUndefined();
+    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    const result = JSON.parse(content[0]!.text);
+    expect(result.approved).toBe(2);
+    expect(approvedIds).toEqual(["id-1", "id-2"]);
   });
 });

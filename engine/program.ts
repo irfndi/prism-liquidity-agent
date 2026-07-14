@@ -1985,7 +1985,7 @@ export const program = Effect.gen(function* () {
             proposalSource = "queue";
           }
 
-          if (!agentProposal) {
+          if (!agentProposal && proposalMode !== "supervised") {
             const syncProposal = yield* agent
               .enhanceDecision(decision, {
                 decision,

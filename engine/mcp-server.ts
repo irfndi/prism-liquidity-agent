@@ -65,6 +65,22 @@ const tools: ReadonlyArray<McpTool> = [
       "Get the current agent policy snapshot (proposal mode, hard caps, circuit breaker).",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "prism_approve_proposals",
+    description:
+      "Approve one or more pending agent proposals so they can execute in supervised mode.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        proposalIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Proposal IDs to approve",
+        },
+      },
+      required: ["proposalIds"],
+    },
+  },
 ];
 
 function sanitizeConfig(cfg: AppConfig): Record<string, unknown> {
@@ -189,6 +205,25 @@ export class McpServer {
             {
               type: "text",
               text: JSON.stringify(snapshot.agentPolicy),
+            },
+          ],
+        };
+      }
+      case "prism_approve_proposals": {
+        const proposalIds = Array.isArray(arguments_.proposalIds)
+          ? arguments_.proposalIds.filter((id): id is string => typeof id === "string")
+          : [];
+        if (proposalIds.length === 0) {
+          throw new Error("proposalIds must be a non-empty array of strings");
+        }
+        for (const proposalId of proposalIds) {
+          await Effect.runPromise(this.state.approveProposal(proposalId));
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ approved: proposalIds.length }),
             },
           ],
         };

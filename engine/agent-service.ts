@@ -424,7 +424,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           }
 
           const prompt = buildProposalPrompt(decision, context);
-          return transport.sendPrompt(prompt, context).pipe(
+          return transport.sendPrompt(prompt, context, config.agentProposalTimeoutMs).pipe(
             Effect.flatMap((response: AgentRuntimeResponse) => {
               lastPromptAt = Date.now();
               return parseProposalResponse(response.raw, decision.action).pipe(

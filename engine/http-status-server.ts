@@ -105,6 +105,55 @@ export class HttpStatusServer {
     return Response.json({ accepted: proposals.length }, { status: 202 });
   }
 
+  private async handleApprove(request: Request): Promise<Response> {
+    const authHeader = request.headers.get("Authorization") ?? "";
+    const providedToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length)
+      : "";
+    const expectedToken = this.config.agentProposalToken;
+    if (expectedToken.length === 0) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    const expectedBuf = Buffer.from(expectedToken);
+    const actualBuf = Buffer.from(providedToken);
+    if (
+      actualBuf.length !== expectedBuf.length ||
+      !crypto.timingSafeEqual(actualBuf, expectedBuf)
+    ) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    let parsedBody: unknown;
+    try {
+      parsedBody = await request.json();
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        return new Response("Invalid JSON body", { status: 400 });
+      }
+      throw e;
+    }
+
+    if (
+      parsedBody === null ||
+      typeof parsedBody !== "object" ||
+      !Array.isArray((parsedBody as Record<string, unknown>).proposalIds)
+    ) {
+      return new Response("Missing proposalIds array", { status: 400 });
+    }
+
+    const proposalIds = (parsedBody as { proposalIds: unknown }).proposalIds;
+    if (!Array.isArray(proposalIds) || proposalIds.some((id) => typeof id !== "string")) {
+      return new Response("proposalIds must be an array of strings", { status: 400 });
+    }
+
+    for (const proposalId of proposalIds) {
+      await Effect.runPromise(this.state.approveProposal(proposalId as string));
+    }
+
+    return Response.json({ approved: proposalIds.length }, { status: 200 });
+  }
+
   start(): Effect.Effect<void, unknown> {
     return Effect.gen(this, function* () {
       if (this.server) return;
@@ -167,6 +216,10 @@ export class HttpStatusServer {
 
           if (url.pathname === "/propose") {
             return this.handlePropose(request);
+          }
+
+          if (url.pathname === "/approve") {
+            return this.handleApprove(request);
           }
 
           return new Response("Not found", { status: 404 });
