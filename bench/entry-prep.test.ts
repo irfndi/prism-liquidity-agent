@@ -363,6 +363,13 @@ describe("EntryPrepService", () => {
     expect(computeRequiredAtomic(500, 150, 9)).toBe(3_333_333_333n);
   });
 
+  it("returns zero for prices that round to zero at fixed-point scale", () => {
+    // Sub-1e-12 prices round to 0n with FIXED_POINT_SCALE = 12, so the
+    // required atomic amount cannot be computed safely.
+    expect(computeRequiredAtomic(50, 1e-13, 9)).toBe(0n);
+    expect(computeRequiredAtomic(50, 1e-15, 6)).toBe(0n);
+  });
+
   it("fails without swapping when USDC pool leg leaves insufficient USDC for swaps", async () => {
     const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
     const layer = buildLayer(
@@ -400,6 +407,28 @@ describe("EntryPrepService", () => {
         }).pipe(Effect.provide(layer)),
       ),
     ).rejects.toThrow(/INSUFFICIENT_USDC_BALANCE/);
+
+    expect(swapSpy).not.toHaveBeenCalled();
+  });
+
+  it("fails with PRICE_UNAVAILABLE when token price rounds to zero", async () => {
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    const layer = buildLayer(
+      {
+        getTokenPrices: () => Effect.succeed({ [TOKEN_X]: 150, [TOKEN_Y]: 1e-13 }),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/PRICE_UNAVAILABLE/);
 
     expect(swapSpy).not.toHaveBeenCalled();
   });

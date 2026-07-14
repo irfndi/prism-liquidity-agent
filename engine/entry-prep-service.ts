@@ -29,6 +29,7 @@ export function computeRequiredAtomic(halfUsd: number, price: number, decimals: 
   if (halfUsd <= 0 || price <= 0) return 0n;
   const usdScaled = numberToScaledBigInt(halfUsd);
   const priceScaled = numberToScaledBigInt(price);
+  if (priceScaled === 0n) return 0n;
   return (usdScaled * 10n ** BigInt(decimals)) / priceScaled;
 }
 
@@ -151,6 +152,16 @@ export const EntryPrepLive = Layer.effect(
           const requiredY =
             computeRequiredAtomic(halfUsd, priceY, tokenYDecimals) +
             (pool.tokenY === SOL_MINT ? SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS : 0n);
+
+          if (requiredX === 0n || requiredY === 0n) {
+            return yield* Effect.fail(
+              makePrepError(
+                "PRICE_UNAVAILABLE",
+                `Token price too small or position size too small to produce a non-zero requirement for pool tokens: ${pool.tokenX}=${priceX}, ${pool.tokenY}=${priceY}`,
+                poolAddress,
+              ),
+            );
+          }
 
           const readTokenBalance = (mint: string) =>
             adapter

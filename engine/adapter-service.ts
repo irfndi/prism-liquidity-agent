@@ -35,6 +35,7 @@ import os from "os";
 import { randomUUID } from "crypto";
 import { getWalletSystemLamportsRequired } from "./live-entry-budget.js";
 import { SOL_MINT, USDC_MINT, GAS_RESERVE_LAMPORTS } from "./constants.js";
+import { computeRequiredAtomic } from "./entry-prep-service.js";
 
 const RPC_RETRY_OPTIONS = {
   maxRetries: 1,
@@ -1209,14 +1210,10 @@ export const AdapterLive = Layer.effect(
             Effect.map((m) => m.decimals),
           );
 
-          const totalXAmount = new BN(
-            Math.floor((halfUsd / priceX) * Math.pow(10, tokenXDecimals)),
-          );
-          const totalYAmount = new BN(
-            Math.floor((halfUsd / priceY) * Math.pow(10, tokenYDecimals)),
-          );
-          const requestedXAmount = BigInt(totalXAmount.toString());
-          const requestedYAmount = BigInt(totalYAmount.toString());
+          const requestedXAmount = computeRequiredAtomic(halfUsd, priceX, tokenXDecimals);
+          const requestedYAmount = computeRequiredAtomic(halfUsd, priceY, tokenYDecimals);
+          const totalXAmount = new BN(requestedXAmount.toString());
+          const totalYAmount = new BN(requestedYAmount.toString());
 
           if (requestedXAmount === 0n || requestedYAmount === 0n) {
             return yield* Effect.fail(
