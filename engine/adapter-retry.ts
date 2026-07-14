@@ -15,6 +15,67 @@ function hasMessage(err: unknown): err is { readonly message: string } {
   return isObject(err) && "message" in err && typeof err.message === "string";
 }
 
+const RETRY_AFTER_MAX_MS = 300_000;
+
+export function retryAfterMs(err: unknown): number | undefined {
+  if (!isObject(err)) return undefined;
+  const headers = err["headers"];
+  const response = err["response"];
+  const responseHeaders = isObject(response) ? response["headers"] : undefined;
+  const getHeader = (value: unknown): string | null => {
+    if (!isObject(value)) return null;
+    if (typeof value["get"] === "function") {
+      const result = (value["get"] as (name: string) => unknown)("retry-after");
+      if (typeof result === "string") return result;
+    }
+    const direct = value["retry-after"] ?? value["Retry-After"];
+    if (typeof direct === "string") return direct;
+    if (typeof direct === "number") return String(direct);
+    return null;
+  };
+  const header = getHeader(headers) ?? getHeader(responseHeaders);
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, RETRY_AFTER_MAX_MS);
+  }
+  const retryAt = Date.parse(header);
+  if (Number.isFinite(retryAt)) {
+    return Math.min(Math.max(0, retryAt - Date.now()), RETRY_AFTER_MAX_MS);
+  }
+  return undefined;
+}
+
+const retryLogState = new Map<string, { lastLoggedAt: number; suppressed: number }>();
+const RETRY_LOG_INTERVAL_MS = 10_000;
+const RETRY_LOG_MAX_ENTRIES = 512;
+
+function safeErrorMessage(err: unknown): string {
+  return String(err)
+    .replace(/([?&](?:api[-_]?key|token|authorization)=)[^&\s]+/gi, "$1***")
+    .replace(/(Bearer\s+)[^\s]+/gi, "$1***");
+}
+
+function logRetry(err: unknown, message: string): void {
+  const now = Date.now();
+  const key = safeErrorMessage(err);
+  const previous = retryLogState.get(key);
+  if (previous && now - previous.lastLoggedAt < RETRY_LOG_INTERVAL_MS) {
+    previous.suppressed++;
+    return;
+  }
+  const suppressed = previous?.suppressed ?? 0;
+  if (!previous && retryLogState.size >= RETRY_LOG_MAX_ENTRIES) {
+    const oldest = retryLogState.keys().next().value;
+    if (oldest !== undefined) retryLogState.delete(oldest);
+  }
+  retryLogState.set(key, { lastLoggedAt: now, suppressed: 0 });
+  logger.warn(message, {
+    error: key,
+    ...(suppressed > 0 ? { suppressedRetries: suppressed } : {}),
+  });
+}
+
 export function isRetriableError(err: unknown): boolean {
   if (hasCode(err) && (err.code === 429 || err.code === -32005)) return true;
   if (hasMessage(err)) {
@@ -22,6 +83,7 @@ export function isRetriableError(err: unknown): boolean {
     if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests")) {
       return true;
     }
+    if (msg.includes("rpc request timeout")) return true;
   }
   return false;
 }
@@ -74,6 +136,7 @@ export function isRpcNetworkError(err: unknown): boolean {
     if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests")) {
       return true;
     }
+    if (msg.includes("rpc request timeout")) return true;
     if (/HTTP\s+5\d{2}/.test(err.message)) return true;
   }
 
@@ -140,11 +203,11 @@ export function retryEffectWithBackoff<T>(
         const effectiveBase = isRateLimitError(err) ? rateLimitBaseDelayMs : baseDelayMs;
         const exponentialDelay = Math.min(maxDelayMs, effectiveBase * 2 ** attemptNumber);
         const jitter = Math.random() * exponentialDelay * 0.5;
-        const delay = Math.floor(exponentialDelay + jitter);
+        const delay = Math.max(Math.floor(exponentialDelay + jitter), retryAfterMs(err) ?? 0);
         return Effect.sync(() =>
-          logger.warn(
+          logRetry(
+            err,
             `Retriable RPC error (attempt ${attemptNumber + 1}/${maxRetries}), retrying in ${delay}ms`,
-            { error: String(err) },
           ),
         ).pipe(
           Effect.zipRight(Effect.sleep(delay)),

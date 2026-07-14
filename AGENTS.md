@@ -311,7 +311,10 @@ In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaul
 - **Live discovery is opt-in.** Keep `ENABLE_POOL_DISCOVERY=false` and configure `WATCHLIST_POOLS` with approved pools. Automatic discovery also excludes Meteora launchpad pools.
 - **Deployer blacklist is half-wired.** `blacklist.checkPool()` accepts deployer addresses, but deployers are not currently fetched from on-chain metadata.
 - **One ENTER per live cycle.** In live mode, `ENTER` is silently skipped if any position is already open.
-- **Live entry balance policy.** Live entries fail closed when either requested token amount exceeds the wallet balance; they are not silently downsized.
+- **Live entry balance policy.** Live entries fail closed when requested token amount exceeds the wallet balance; they are not silently downsized.
+- **Live entry retry policy.** Deterministic insufficient-token failures are exponentially backed off per pool (30 minutes to 6 hours) to avoid repeating doomed entries and amplifying RPC load.
+- **Scan metrics.** Cycle logs report `decided`, `executed`, and `failed` pools separately; `decided` is not a success count.
+- **Scan failure semantics.** `failed` counts processing or execution failures; risk and backoff gates are rejected decisions recorded in the audit trail, not execution failures.
 - **sqlite-vec extension.** Source installs rely on `scripts/generate-vec-embed.ts` to create `engine/sqlite-vec-embedded.ts`; bundled installs provide the native extension via `PRISM_VEC0_PATH`.
 - **Backtest is a simplified simulation.** It does not replicate the full decision loop (no risk gates, memory, dynamic ENTER/EXIT sizing, trailing stop). Use it as a regression baseline, not a performance forecast.
 - **`.env.example` is stale in places.** For example, its `UPDATE_R2_PUBLIC_URL` default does not match the code fallback. Always verify against `engine/config-service.ts`.

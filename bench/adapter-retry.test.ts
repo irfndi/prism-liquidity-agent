@@ -4,6 +4,7 @@ import {
   isRetriableError,
   isRpcNetworkError,
   retryWithBackoff,
+  retryAfterMs,
   CircuitBreaker,
   CircuitBreakerOpenError,
 } from "../engine/adapter-retry.js";
@@ -39,6 +40,57 @@ describe("isRetriableError", () => {
     expect(isRetriableError(null)).toBe(false);
     expect(isRetriableError(undefined)).toBe(false);
     expect(isRetriableError("string error")).toBe(false);
+  });
+});
+
+describe("isRpcNetworkError", () => {
+  it("classifies adapter RPC timeouts as network failures", () => {
+    expect(isRpcNetworkError(new Error("RPC request timeout after 15s"))).toBe(true);
+  });
+});
+
+// ── retryAfterMs ──────────────────────────────────────────────────
+
+describe("retryAfterMs", () => {
+  it("parses Retry-After seconds from Headers-like object", () => {
+    expect(retryAfterMs({ headers: { get: () => "2" } })).toBe(2000);
+  });
+
+  it("parses Retry-After seconds from plain object header", () => {
+    expect(retryAfterMs({ headers: { "retry-after": "3" } })).toBe(3000);
+    expect(retryAfterMs({ headers: { "Retry-After": "4" } })).toBe(4000);
+  });
+
+  it("parses Retry-After seconds from nested response.headers", () => {
+    expect(retryAfterMs({ response: { headers: { get: () => "5" } } })).toBe(5000);
+    expect(retryAfterMs({ response: { headers: { "retry-after": "6" } } })).toBe(6000);
+  });
+
+  it("parses HTTP-date Retry-After header", () => {
+    const retryAt = Date.now() + 5000;
+    const date = new Date(retryAt).toUTCString();
+    const result = retryAfterMs({ headers: { get: () => date } });
+    expect(result).toBeGreaterThanOrEqual(4000);
+    expect(result).toBeLessThanOrEqual(5500);
+  });
+
+  it("caps Retry-After at 5 minutes", () => {
+    expect(retryAfterMs({ headers: { get: () => "600" } })).toBe(300_000);
+  });
+
+  it("caps HTTP-date Retry-After at 5 minutes", () => {
+    const farFuture = new Date(Date.now() + 600_000).toUTCString();
+    expect(retryAfterMs({ headers: { get: () => farFuture } })).toBe(300_000);
+  });
+
+  it("returns undefined when no Retry-After header is present", () => {
+    expect(retryAfterMs({ headers: { get: () => null } })).toBeUndefined();
+    expect(retryAfterMs({})).toBeUndefined();
+    expect(retryAfterMs("not an object")).toBeUndefined();
+  });
+
+  it("ignores invalid Retry-After values", () => {
+    expect(retryAfterMs({ headers: { get: () => "not-a-number" } })).toBeUndefined();
   });
 });
 
@@ -93,6 +145,52 @@ describe("retryWithBackoff", () => {
       "bad input",
     );
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors Retry-After headers when rate limited", async () => {
+    let call = 0;
+    const startedAt = Date.now();
+    const fn = vi.fn(async () => {
+      call++;
+      if (call === 1) {
+        throw {
+          code: 429,
+          headers: { get: () => "0.02" },
+          message: "too many requests",
+        };
+      }
+      return "ok";
+    });
+
+    await Effect.runPromise(
+      retryWithBackoff(fn, { baseDelayMs: 1, rateLimitBaseDelayMs: 1, maxRetries: 1 }),
+    );
+
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(15);
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it("honors Retry-After from plain object headers", async () => {
+    let call = 0;
+    const startedAt = Date.now();
+    const fn = vi.fn(async () => {
+      call++;
+      if (call === 1) {
+        throw {
+          code: 429,
+          headers: { "retry-after": "0.02" },
+          message: "too many requests",
+        };
+      }
+      return "ok";
+    });
+
+    await Effect.runPromise(
+      retryWithBackoff(fn, { baseDelayMs: 1, rateLimitBaseDelayMs: 1, maxRetries: 1 }),
+    );
+
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(15);
+    expect(fn).toHaveBeenCalledTimes(2);
   });
 });
 
