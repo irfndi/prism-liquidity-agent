@@ -145,6 +145,15 @@ export interface AdapterApi {
     minSolThreshold?: number,
     swapAmountUSDC?: number,
   ) => Effect.Effect<void, never>;
+  readonly getTokenBalance: (mintAddress: string) => Effect.Effect<bigint, unknown>;
+  readonly getTokenPrices: (
+    mints: ReadonlyArray<string>,
+  ) => Effect.Effect<Record<string, number>, unknown>;
+  readonly getTokenDecimals: (mintAddress: string) => Effect.Effect<number, unknown>;
+  readonly swapUSDCForToken: (
+    outputMint: string,
+    amountAtomic: bigint,
+  ) => Effect.Effect<string, unknown>;
 }
 
 export class AdapterService extends Context.Tag("AdapterService")<AdapterService, AdapterApi>() {}

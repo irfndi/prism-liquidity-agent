@@ -861,6 +861,94 @@ export const AdapterLive = Layer.effect(
       nativeSolBalanceCache = undefined;
     }).pipe(Effect.zipRight(invalidateWalletBalance));
 
+    function swapUSDCForToken(
+      outputMint: string,
+      amountAtomic: bigint,
+    ): Effect.Effect<string, unknown> {
+      return Effect.gen(function* () {
+        const activeWallet = wallet;
+        if (!activeWallet) {
+          return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
+        }
+        if (amountAtomic <= 0n) {
+          return "";
+        }
+
+        const jupiterApiKey = process.env.JUPITER_API_KEY ?? "";
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (jupiterApiKey) headers["x-api-key"] = jupiterApiKey;
+
+        const quoteResponse = yield* Effect.tryPromise(() =>
+          fetch(
+            `https://api.jup.ag/swap/v1/quote?inputMint=${USDC_MINT}&outputMint=${outputMint}&amount=${amountAtomic.toString()}&slippageBps=50&asLegacyTransaction=true`,
+            {
+              headers: jupiterApiKey ? headers : undefined,
+              signal: AbortSignal.timeout(10_000),
+            },
+          ),
+        );
+
+        if (!quoteResponse.ok) {
+          return yield* Effect.fail(
+            new AdapterError({
+              message: `Jupiter quote failed: ${quoteResponse.status}`,
+            }),
+          );
+        }
+
+        const quoteData = (yield* Effect.tryPromise(() => quoteResponse.json())) as {
+          routePlan?: unknown;
+        };
+
+        const swapResponse = yield* Effect.tryPromise(() =>
+          fetch("https://api.jup.ag/swap/v1/swap", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              quoteResponse: quoteData,
+              userPublicKey: activeWallet.publicKey.toBase58(),
+              wrapAndUnwrapSol: true,
+              asLegacyTransaction: true,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          }),
+        );
+
+        if (!swapResponse.ok) {
+          return yield* Effect.fail(
+            new AdapterError({
+              message: `Jupiter swap build failed: ${swapResponse.status}`,
+            }),
+          );
+        }
+
+        const swapData = (yield* Effect.tryPromise(() => swapResponse.json())) as {
+          swapTransaction?: string;
+        };
+
+        if (!swapData.swapTransaction) {
+          return yield* Effect.fail(
+            new AdapterError({ message: "Jupiter swap: no transaction returned" }),
+          );
+        }
+
+        const swapTxBuf = Buffer.from(swapData.swapTransaction, "base64");
+        const swapTx = Transaction.from(swapTxBuf);
+        swapTx.sign(activeWallet);
+
+        const sig = yield* rpcCall((conn) =>
+          conn.sendRawTransaction(swapTx.serialize(), {
+            skipPreflight: false,
+            preflightCommitment: "confirmed",
+          }),
+        );
+
+        yield* rpcCall((conn) => conn.confirmTransaction(sig, "confirmed"));
+        yield* invalidateBalanceCaches;
+        return sig;
+      });
+    }
+
     // ─── Pool stats ────────────────────────────────────────────────────────
 
     function fetchPoolStats(
@@ -926,6 +1014,13 @@ export const AdapterLive = Layer.effect(
           if (!wallet) return 0;
           return Number(yield* readNativeSolBalance());
         }),
+
+      getTokenBalance: (mintAddress: string) => readTokenBalance(mintAddress),
+
+      getTokenPrices: (mints: ReadonlyArray<string>) => fetchTokenPrices(mints),
+
+      getTokenDecimals: (mintAddress: string) =>
+        getTokenMeta(mintAddress).pipe(Effect.map((m) => m.decimals)),
 
       getPoolState: (poolAddress) =>
         Effect.gen(function* () {
@@ -1618,6 +1713,18 @@ export const AdapterLive = Layer.effect(
             .slice(0, 50);
         }),
 
+      swapUSDCForToken: (outputMint: string, amountAtomic: bigint) =>
+        swapUSDCForToken(outputMint, amountAtomic).pipe(
+          Effect.catchAll((err) =>
+            Effect.fail(
+              new AdapterError({
+                message: `swapUSDCForToken failed: ${String(err)}`,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
+
       swapUSDCForSOL: (minSolThreshold = 0.05, swapAmountUSDC = 1.0) =>
         Effect.gen(function* () {
           const activeWallet = wallet;
@@ -1634,75 +1741,10 @@ export const AdapterLive = Layer.effect(
             swapAmountUSDC,
           });
 
-          const swap = Effect.gen(function* () {
-            const jupiterApiKey = process.env.JUPITER_API_KEY ?? "";
-            const headers: Record<string, string> = { "Content-Type": "application/json" };
-            if (jupiterApiKey) headers["x-api-key"] = jupiterApiKey;
-
-            const quoteResponse = yield* Effect.tryPromise(() =>
-              fetch(
-                `https://api.jup.ag/swap/v1/quote?inputMint=${USDC_MINT}&outputMint=${SOL_MINT}&amount=${Math.round(swapAmountUSDC * 1e6)}&slippageBps=50&asLegacyTransaction=true`,
-                {
-                  headers: jupiterApiKey ? headers : undefined,
-                  signal: AbortSignal.timeout(10_000),
-                },
-              ),
-            );
-
-            if (!quoteResponse.ok) {
-              logger.warn("Jupiter quote failed:", quoteResponse.status);
-              return;
-            }
-
-            const quoteData = (yield* Effect.tryPromise(() => quoteResponse.json())) as {
-              routePlan?: unknown;
-            };
-
-            const swapResponse = yield* Effect.tryPromise(() =>
-              fetch("https://api.jup.ag/swap/v1/swap", {
-                method: "POST",
-                headers,
-                body: JSON.stringify({
-                  quoteResponse: quoteData,
-                  userPublicKey: activeWallet.publicKey.toBase58(),
-                  wrapAndUnwrapSol: true,
-                  asLegacyTransaction: true,
-                }),
-                signal: AbortSignal.timeout(10_000),
-              }),
-            );
-
-            if (!swapResponse.ok) {
-              logger.warn("Jupiter swap build failed:", swapResponse.status);
-              return;
-            }
-
-            const swapData = (yield* Effect.tryPromise(() => swapResponse.json())) as {
-              swapTransaction?: string;
-            };
-
-            if (!swapData.swapTransaction) {
-              logger.warn("Jupiter swap: no transaction returned");
-              return;
-            }
-
-            const swapTxBuf = Buffer.from(swapData.swapTransaction, "base64");
-            const swapTx = Transaction.from(swapTxBuf);
-            swapTx.sign(activeWallet);
-
-            const sig = yield* rpcCall((conn) =>
-              conn.sendRawTransaction(swapTx.serialize(), {
-                skipPreflight: false,
-                preflightCommitment: "confirmed",
-              }),
-            );
-
-            yield* rpcCall((conn) => conn.confirmTransaction(sig, "confirmed"));
-            yield* invalidateBalanceCaches;
-            logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
-          });
-
-          yield* swap.pipe(
+          yield* swapUSDCForToken(SOL_MINT, BigInt(Math.round(swapAmountUSDC * 1e6))).pipe(
+            Effect.tap((sig) =>
+              logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC }),
+            ),
             Effect.catchAll((err) =>
               Effect.sync(() => logger.warn("USDC → SOL swap failed (non-fatal):", String(err))),
             ),
