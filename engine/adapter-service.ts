@@ -861,6 +861,21 @@ export const AdapterLive = Layer.effect(
       nativeSolBalanceCache = undefined;
     }).pipe(Effect.zipRight(invalidateWalletBalance));
 
+    function quoteMatchesRequest(
+      quoteData: Record<string, unknown>,
+      outputMint: string,
+      amountAtomic: bigint,
+    ): boolean {
+      const inputMint = quoteData.inputMint;
+      if (inputMint !== USDC_MINT) return false;
+      const quoteOutputMint = quoteData.outputMint;
+      if (quoteOutputMint !== outputMint) return false;
+      const inAmount = quoteData.inAmount;
+      const expectedAmount = amountAtomic.toString();
+      if (inAmount !== expectedAmount && String(inAmount) !== expectedAmount) return false;
+      return true;
+    }
+
     function quoteSwapUSDCForToken(
       outputMint: string,
       amountAtomic: bigint,
@@ -871,7 +886,11 @@ export const AdapterLive = Layer.effect(
           return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
         }
         if (amountAtomic <= 0n) {
-          return { routePlan: [] };
+          return yield* Effect.fail(
+            new SwapQuoteError({
+              message: `Cannot quote swap for non-positive amount: ${amountAtomic.toString()}`,
+            }),
+          );
         }
 
         const jupiterApiKey = process.env.JUPITER_API_KEY ?? "";
@@ -923,7 +942,11 @@ export const AdapterLive = Layer.effect(
           return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
         }
         if (amountAtomic <= 0n) {
-          return "";
+          return yield* Effect.fail(
+            new AdapterError({
+              message: `Cannot swap USDC for non-positive amount: ${amountAtomic.toString()}`,
+            }),
+          );
         }
 
         const jupiterApiKey = process.env.JUPITER_API_KEY ?? "";
@@ -932,6 +955,14 @@ export const AdapterLive = Layer.effect(
 
         const quoteData =
           prefetchedQuote ?? (yield* quoteSwapUSDCForToken(outputMint, amountAtomic));
+
+        if (prefetchedQuote && !quoteMatchesRequest(quoteData, outputMint, amountAtomic)) {
+          return yield* Effect.fail(
+            new AdapterError({
+              message: `Prefetched Jupiter quote does not match request: outputMint=${outputMint}, amount=${amountAtomic.toString()}`,
+            }),
+          );
+        }
 
         const swapResponse = yield* Effect.tryPromise(() =>
           fetch("https://api.jup.ag/swap/v1/swap", {

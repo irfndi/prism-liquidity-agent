@@ -19,6 +19,7 @@ describe("entry failure backoff", () => {
         "Entry token preparation failed: [INSUFFICIENT_BALANCE_AFTER_SWAP] Balances still insufficient after swap",
       ),
     ).toBe(true);
+    expect(isInsufficientTokenBalanceError("Insufficient SOL for gas — skipping ENTER")).toBe(true);
     expect(isInsufficientTokenBalanceError("RPC 429 Too Many Requests")).toBe(false);
     expect(isInsufficientTokenBalanceError(undefined)).toBe(false);
   });

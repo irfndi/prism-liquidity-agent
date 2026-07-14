@@ -10,6 +10,7 @@ import {
   SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS,
   GAS_TOP_UP_USDC,
   SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
+  MIN_SOL_FOR_GAS_LAMPORTS,
 } from "./constants.js";
 
 const logger = createLogger("entry-prep-service");
@@ -17,7 +18,15 @@ const USDC_DECIMALS = 6;
 const FIXED_POINT_SCALE = 12;
 
 function formatAtomic(amount: bigint, decimals: number): string {
-  return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
+  if (decimals <= 0) return amount.toString();
+  const sign = amount < 0n ? "-" : "";
+  const absAmount = amount < 0n ? -amount : amount;
+  const divisor = 10n ** BigInt(decimals);
+  const whole = (absAmount / divisor).toString();
+  const frac = (absAmount % divisor).toString().padStart(decimals, "0");
+  const precision = Math.min(decimals, 6);
+  const trimmed = frac.slice(0, precision).replace(/0+$/, "");
+  return trimmed ? `${sign}${whole}.${trimmed}` : `${sign}${whole}`;
 }
 
 function numberToScaledBigInt(value: number): bigint {
@@ -27,8 +36,15 @@ function numberToScaledBigInt(value: number): bigint {
   return BigInt(`${sign}${whole}${frac.padEnd(FIXED_POINT_SCALE, "0")}`);
 }
 
+function validateDecimals(decimals: number, context: string): void {
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 255) {
+    throw new RangeError(`Invalid token decimals for ${context}: ${decimals}`);
+  }
+}
+
 export function computeRequiredAtomic(halfUsd: number, price: number, decimals: number): bigint {
   if (halfUsd <= 0 || price <= 0) return 0n;
+  validateDecimals(decimals, "computeRequiredAtomic");
   const usdScaled = numberToScaledBigInt(halfUsd);
   const priceScaled = numberToScaledBigInt(price);
   if (priceScaled === 0n) return 0n;
@@ -36,8 +52,10 @@ export function computeRequiredAtomic(halfUsd: number, price: number, decimals: 
 }
 
 export function computeUsdcInputAtomic(amount: bigint, decimals: number, price: number): bigint {
+  validateDecimals(decimals, "computeUsdcInputAtomic");
   // Scale the floating price to a fixed-point integer without converting `amount` to Number.
-  const priceScaled = BigInt(price.toFixed(FIXED_POINT_SCALE).replace(".", ""));
+  const priceScaled = numberToScaledBigInt(price);
+  if (priceScaled === 0n) return 0n;
   const numerator = amount * priceScaled * 10n ** BigInt(USDC_DECIMALS) * 101n; // 1% buffer as 101/100
   const denominator = 10n ** BigInt(decimals) * 100n * 10n ** BigInt(FIXED_POINT_SCALE);
   const quotient = numerator / denominator;
@@ -158,6 +176,21 @@ export const EntryPrepLive = Layer.effect(
             ],
             { concurrency: "unbounded" },
           );
+
+          for (const [mint, decimals] of [
+            [pool.tokenX, tokenXDecimals],
+            [pool.tokenY, tokenYDecimals],
+          ] as const) {
+            if (!Number.isInteger(decimals) || decimals < 0 || decimals > 255) {
+              return yield* Effect.fail(
+                makePrepError(
+                  "PRICE_UNAVAILABLE",
+                  `Invalid decimals for ${mint}: ${decimals}`,
+                  poolAddress,
+                ),
+              );
+            }
+          }
 
           const priceX = prices[pool.tokenX] ?? 0;
           const priceY = prices[pool.tokenY] ?? 0;
@@ -439,12 +472,13 @@ export const EntryPrepLive = Layer.effect(
           }
 
           // Swaps consumed native SOL fees; ensure the wallet still has enough
-          // gas for the final enterPosition transaction.
-          if (swapped && nativeSolAfter <= GAS_RESERVE_LAMPORTS) {
+          // gas for the final enterPosition transaction. Use the same threshold
+          // as the live entry gate so the two checks stay aligned.
+          if (swapped && nativeSolAfter < MIN_SOL_FOR_GAS_LAMPORTS) {
             return yield* Effect.fail(
               makePrepError(
                 "INSUFFICIENT_BALANCE_AFTER_SWAP",
-                `Native SOL balance ${formatAtomic(nativeSolAfter, 9)} is below gas reserve ${formatAtomic(GAS_RESERVE_LAMPORTS, 9)} after swap`,
+                `Native SOL balance ${formatAtomic(nativeSolAfter, 9)} is below minimum ${formatAtomic(MIN_SOL_FOR_GAS_LAMPORTS, 9)} required for gas after swap`,
                 poolAddress,
               ),
             );

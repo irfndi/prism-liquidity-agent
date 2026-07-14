@@ -12,7 +12,8 @@ export function isInsufficientTokenBalanceError(error: string | undefined): bool
   return (
     normalized.includes("insufficient token balance") ||
     normalized.includes("insufficient_usdc_balance") ||
-    normalized.includes("insufficient_balance_after_swap")
+    normalized.includes("insufficient_balance_after_swap") ||
+    normalized.includes("insufficient sol for gas")
   );
 }
 

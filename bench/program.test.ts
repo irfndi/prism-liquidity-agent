@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { buildLayer, estimatePositionValue, executeLive } from "../engine/program.js";
 import { ConfigService } from "../engine/config-service.js";
 import { EntryPrepError } from "../engine/errors.js";
@@ -221,6 +221,7 @@ describe("executeLive", () => {
           db: makeDb(),
           revenueConfigSvc: makeRevenueConfigSvc(),
           trackedPositions: new Map(),
+          entryPrep: { prepareEntryTokens: prepareSpy },
         },
         {
           action: "ENTER",
@@ -230,7 +231,7 @@ describe("executeLive", () => {
           positionSizeUsd,
         } as AgentDecision,
         { activeBinId: 5000, binStep: 10, tokenXSymbol: "SOL", tokenYSymbol: "USDC" },
-      ).pipe(Effect.provide(Layer.succeed(EntryPrepService, { prepareEntryTokens: prepareSpy }))),
+      ),
     );
 
     expect(result.executed).toBe(true);
@@ -259,6 +260,16 @@ describe("executeLive", () => {
           db: makeDb(),
           revenueConfigSvc: makeRevenueConfigSvc(),
           trackedPositions: new Map(),
+          entryPrep: {
+            prepareEntryTokens: () =>
+              Effect.fail(
+                new EntryPrepError({
+                  code: "INSUFFICIENT_USDC_BALANCE",
+                  message: "Not enough USDC",
+                  poolAddress,
+                }),
+              ),
+          },
         },
         {
           action: "ENTER",
@@ -268,19 +279,6 @@ describe("executeLive", () => {
           positionSizeUsd,
         } as AgentDecision,
         { activeBinId: 5000, binStep: 10, tokenXSymbol: "SOL", tokenYSymbol: "USDC" },
-      ).pipe(
-        Effect.provide(
-          Layer.succeed(EntryPrepService, {
-            prepareEntryTokens: () =>
-              Effect.fail(
-                new EntryPrepError({
-                  code: "INSUFFICIENT_USDC_BALANCE",
-                  message: "Not enough USDC",
-                  poolAddress,
-                }),
-              ),
-          }),
-        ),
       ),
     );
 

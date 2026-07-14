@@ -54,10 +54,22 @@ function swapEffect(
   layer: Layer.Layer<AdapterService, never, never>,
   outputMint: string,
   amountAtomic: bigint,
+  prefetchedQuote?: Record<string, unknown>,
 ): Effect.Effect<string, unknown, never> {
   return Effect.gen(function* () {
     const adapter = yield* AdapterService;
-    return yield* adapter.swapUSDCForToken(outputMint, amountAtomic);
+    return yield* adapter.swapUSDCForToken(outputMint, amountAtomic, prefetchedQuote);
+  }).pipe(Effect.provide(layer));
+}
+
+function quoteEffect(
+  layer: Layer.Layer<AdapterService, never, never>,
+  outputMint: string,
+  amountAtomic: bigint,
+): Effect.Effect<Record<string, unknown>, unknown, never> {
+  return Effect.gen(function* () {
+    const adapter = yield* AdapterService;
+    return yield* adapter.quoteSwapUSDCForToken(outputMint, amountAtomic);
   }).pipe(Effect.provide(layer));
 }
 
@@ -74,9 +86,10 @@ async function expectSwapFailure(
   outputMint: string,
   amountAtomic: bigint,
   expectedCauseMessage: string,
+  prefetchedQuote?: Record<string, unknown>,
 ): Promise<void> {
   const result = await Effect.runPromise(
-    swapEffect(layer, outputMint, amountAtomic).pipe(Effect.either),
+    swapEffect(layer, outputMint, amountAtomic, prefetchedQuote).pipe(Effect.either),
   );
   if (result._tag !== "Left") {
     expect.fail("expected swap to fail, but it succeeded");
@@ -165,15 +178,19 @@ describe("AdapterService.swapUSDCForToken", () => {
     }
   });
 
-  it("returns an empty string for non-positive amounts without calling Jupiter", async () => {
+  it("fails for non-positive amounts without calling Jupiter", async () => {
     const fetchImpl = vi.fn(
       (async () => new Response("unexpected", { status: 500 })) as unknown as typeof fetch,
     );
     const restore = mockFetch(fetchImpl);
 
     try {
-      const sig = await runSwap(buildLayer(), SOL_MINT, 0n);
-      expect(sig).toBe("");
+      await expectSwapFailure(
+        buildLayer(),
+        SOL_MINT,
+        0n,
+        "Cannot swap USDC for non-positive amount: 0",
+      );
       expect(fetchImpl).not.toHaveBeenCalled();
     } finally {
       restore();
@@ -258,6 +275,69 @@ describe("AdapterService.swapUSDCForToken", () => {
       );
       expect(fetchImpl).toHaveBeenCalledTimes(1);
       expect(fetchImpl.mock.calls[0]?.[0]?.toString()).toContain("/swap/v1/quote");
+    } finally {
+      restore();
+    }
+  });
+
+  it("fails quote for non-positive amounts", async () => {
+    const result = await Effect.runPromise(
+      quoteEffect(buildLayer(), SOL_MINT, 0n).pipe(Effect.either),
+    );
+    expect(result._tag).toBe("Left");
+    if (result._tag !== "Left") return;
+    const err = result.left;
+    expect(typeof err === "object" && err !== null && "message" in err).toBe(true);
+    expect((err as { message: string }).message).toContain(
+      "quoteSwapUSDCForToken failed: SwapQuoteError: Cannot quote swap for non-positive amount: 0",
+    );
+  });
+
+  it("fails when prefetched quote outputMint does not match", async () => {
+    const fetchImpl = vi.fn(
+      (async () => new Response("unexpected", { status: 500 })) as unknown as typeof fetch,
+    );
+    const restore = mockFetch(fetchImpl);
+
+    try {
+      await expectSwapFailure(
+        buildLayer(),
+        SOL_MINT,
+        1_000_000n,
+        "Prefetched Jupiter quote does not match request: outputMint=So11111111111111111111111111111111111111112, amount=1000000",
+        {
+          inputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          outputMint: "OtherMint1111111111111111111111111111111111",
+          inAmount: "1000000",
+          routePlan: [{ swapInfo: {} }],
+        },
+      );
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("fails when prefetched quote amount does not match", async () => {
+    const fetchImpl = vi.fn(
+      (async () => new Response("unexpected", { status: 500 })) as unknown as typeof fetch,
+    );
+    const restore = mockFetch(fetchImpl);
+
+    try {
+      await expectSwapFailure(
+        buildLayer(),
+        SOL_MINT,
+        1_000_000n,
+        "Prefetched Jupiter quote does not match request: outputMint=So11111111111111111111111111111111111111112, amount=1000000",
+        {
+          inputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          outputMint: SOL_MINT,
+          inAmount: "2000000",
+          routePlan: [{ swapInfo: {} }],
+        },
+      );
+      expect(fetchImpl).not.toHaveBeenCalled();
     } finally {
       restore();
     }

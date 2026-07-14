@@ -850,7 +850,7 @@ describe("EntryPrepService", () => {
     expect(swapSpy).not.toHaveBeenCalled();
   });
 
-  it("fails when native SOL drops below the gas reserve after swaps", async () => {
+  it("fails when native SOL drops below the live entry gate after swaps", async () => {
     const OTHER_TOKEN = "OtherToken1111111111111111111111111111111";
     const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
     const layer = buildLayer(

@@ -15,6 +15,12 @@ export const SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS = 50_000_000n;
 // passed to `adapter.swapUSDCForSOL` in `program.ts`.
 export const GAS_TOP_UP_USDC = 2;
 
-// Native SOL threshold below which `swapUSDCForSOL` performs a gas top-up
-// (0.05 SOL). Must stay in sync with the minSolThreshold passed from `program.ts`.
-export const SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS = 50_000_000n;
+// Minimum native SOL the live entry gate requires before it will submit an
+// ENTER transaction (0.03 SOL). This is also the threshold used for the gas
+// top-up and the post-swap SOL recheck so all three gates stay aligned.
+export const MIN_SOL_FOR_GAS_LAMPORTS = 30_000_000n;
+
+// Native SOL threshold below which `swapUSDCForSOL` performs a gas top-up.
+// Kept in sync with the live entry gate to avoid reserving a top-up that the
+// gate would reject anyway.
+export const SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS = MIN_SOL_FOR_GAS_LAMPORTS;

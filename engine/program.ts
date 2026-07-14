@@ -38,7 +38,11 @@ import { shouldDiscoverPools } from "./pool-policy.js";
 import { checkForAutoUpdate } from "./update-check.js";
 import type { PositionRecord } from "./db-service.js";
 import { DiscoverPoolsError } from "./errors.js";
-import { GAS_TOP_UP_USDC, SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS } from "./constants.js";
+import {
+  GAS_TOP_UP_USDC,
+  SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
+  MIN_SOL_FOR_GAS_LAMPORTS,
+} from "./constants.js";
 import {
   AdapterService,
   StrategyService,
@@ -62,6 +66,7 @@ import {
   type ScreenedPool,
   type StrategyApi,
   type RevenueConfigApi,
+  type EntryPrepApi,
 } from "./services.js";
 import type {
   AgentDecision,
@@ -402,6 +407,11 @@ export function executePaper(
 
 // ─── Live execution ──────────────────────────────────────────────────────────
 
+/**
+ * Execute a live decision. `entryPrep` is only used for ENTER actions; callers
+ * must still provide it because the function signature does not conditionally
+ * expose the dependency.
+ */
 export function executeLive(
   deps: {
     adapter: AdapterApi;
@@ -409,14 +419,15 @@ export function executeLive(
     db: DbApi;
     revenueConfigSvc: RevenueConfigApi;
     trackedPositions: Map<string, PositionRecord>;
+    entryPrep: EntryPrepApi;
   },
   decision: AgentDecision,
   pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
   signalTimestamp?: number,
   signalSnapshotId?: number,
-): Effect.Effect<{ executed: boolean; error: string | undefined }, never, EntryPrepService> {
+): Effect.Effect<{ executed: boolean; error: string | undefined }, never, never> {
   return Effect.gen(function* () {
-    const { adapter, strategy, db, revenueConfigSvc, trackedPositions } = deps;
+    const { adapter, strategy, db, revenueConfigSvc, trackedPositions, entryPrep } = deps;
 
     if (!adapter.hasWallet()) {
       console.error("Live trading enabled but no wallet configured");
@@ -445,15 +456,14 @@ export function executeLive(
       if (nativeBalance.value === null) {
         return { executed: false, error: nativeBalance.error };
       }
-      const solBalance = Number(nativeBalance.value) / 1e9;
-      if (solBalance < 0.03) {
+      const solBalance = nativeBalance.value;
+      if (solBalance < MIN_SOL_FOR_GAS_LAMPORTS) {
         console.warn("Insufficient SOL for gas — skipping ENTER");
         return { executed: false, error: "Insufficient SOL for gas — skipping ENTER" };
       }
     }
 
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
-      const entryPrep = yield* EntryPrepService;
       const prepResult = yield* entryPrep
         .prepareEntryTokens(decision.poolAddress, decision.positionSizeUsd)
         .pipe(
@@ -2020,12 +2030,14 @@ export const program = Effect.gen(function* () {
         existingPosition?.positionPubKey &&
         config.paperModeExitLive;
 
+      const entryPrep = yield* EntryPrepService;
+
       if (paperExitShouldGoLive) {
         console.warn(
           `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${poolAddress}`,
         );
         const liveResult = yield* executeLive(
-          { adapter, strategy, db, revenueConfigSvc, trackedPositions },
+          { adapter, strategy, db, revenueConfigSvc, trackedPositions, entryPrep },
           decision,
           pool,
           signalTimestamp,
@@ -2049,7 +2061,7 @@ export const program = Effect.gen(function* () {
         executionError = paperResult.error;
       } else {
         const liveResult = yield* executeLive(
-          { adapter, strategy, db, revenueConfigSvc, trackedPositions },
+          { adapter, strategy, db, revenueConfigSvc, trackedPositions, entryPrep },
           decision,
           pool,
           signalTimestamp,
