@@ -10,6 +10,7 @@ import { AdapterService, type AdapterApi } from "../engine/services.js";
 import { ConfigService } from "../engine/config-service.js";
 import { defaultAppConfig } from "./helpers.js";
 import { SOL_MINT, USDC_MINT } from "../engine/constants.js";
+import { SwapQuoteError } from "../engine/errors.js";
 
 const TOKEN_X = SOL_MINT;
 const TOKEN_Y = "FakeToken1111111111111111111111111111111111";
@@ -207,6 +208,33 @@ describe("EntryPrepService", () => {
         }).pipe(Effect.provide(layer)),
       ),
     ).rejects.toThrow(/INSUFFICIENT_BALANCE_AFTER_SWAP/);
+  });
+
+  it("fails with SWAP_QUOTE_FAILED when Jupiter quote fails", async () => {
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        swapUSDCForToken: () =>
+          Effect.fail(
+            new Error("swapUSDCForToken failed: Jupiter quote failed: 502", {
+              cause: new SwapQuoteError({ message: "Jupiter quote failed: 502" }),
+            }),
+          ),
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/SWAP_QUOTE_FAILED/);
   });
 
   it("fails with BALANCE_READ_FAILED when a balance read fails", async () => {

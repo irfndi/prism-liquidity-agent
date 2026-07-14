@@ -11,6 +11,11 @@ export class AdapterError extends Data.TaggedError("AdapterError")<{
   readonly cause?: unknown;
 }> {}
 
+export class SwapQuoteError extends Data.TaggedError("SwapQuoteError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
 export class MemoryError extends Data.TaggedError("MemoryError")<{
   readonly message: string;
   readonly cause?: unknown;

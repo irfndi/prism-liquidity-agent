@@ -1,7 +1,7 @@
 import { Effect, Layer } from "effect";
 import { AdapterService, EntryPrepService, type EntryPrepApi } from "./services.js";
 import { ConfigService } from "./config-service.js";
-import { EntryPrepError } from "./errors.js";
+import { EntryPrepError, SwapQuoteError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import {
   SOL_MINT,
@@ -56,6 +56,14 @@ function makePrepError(
     poolAddress,
     cause,
   });
+}
+
+function isSwapQuoteError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  if ((err as { _tag?: string })._tag === "SwapQuoteError") return true;
+  const cause = (err as { cause?: unknown }).cause;
+  if (typeof cause !== "object" || cause === null) return false;
+  return (cause as { _tag?: string })._tag === "SwapQuoteError";
 }
 
 export const EntryPrepLive = Layer.effect(
@@ -306,18 +314,24 @@ export const EntryPrepLive = Layer.effect(
               );
             }
 
-            const txSig = yield* adapter
-              .swapUSDCForToken(deficit.mint, usdcInputAtomic)
-              .pipe(
-                Effect.mapError((err) =>
-                  makePrepError(
-                    "SWAP_TRANSACTION_FAILED",
-                    `Failed to swap USDC -> ${deficit.mint}: ${String(err)}`,
+            const txSig = yield* adapter.swapUSDCForToken(deficit.mint, usdcInputAtomic).pipe(
+              Effect.mapError((err) => {
+                if (isSwapQuoteError(err)) {
+                  return makePrepError(
+                    "SWAP_QUOTE_FAILED",
+                    `Failed to quote swap USDC -> ${deficit.mint}: ${String(err)}`,
                     poolAddress,
                     err,
-                  ),
-                ),
-              );
+                  );
+                }
+                return makePrepError(
+                  "SWAP_TRANSACTION_FAILED",
+                  `Failed to swap USDC -> ${deficit.mint}: ${String(err)}`,
+                  poolAddress,
+                  err,
+                );
+              }),
+            );
 
             logger.info("Swapped USDC for pool token", {
               poolAddress,

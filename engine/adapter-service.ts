@@ -19,6 +19,7 @@ import { AdapterService, type AdapterApi } from "./services.js";
 import { ConfigService } from "./config-service.js";
 import { AdapterError } from "./errors.js";
 import { DiscoverPoolsError } from "./errors.js";
+import { SwapQuoteError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import { getPrismUserConfigDir } from "./paths.js";
 import type { BinArray, BinData, PoolState, Position } from "./types.js";
@@ -889,7 +890,7 @@ export const AdapterLive = Layer.effect(
 
         if (!quoteResponse.ok) {
           return yield* Effect.fail(
-            new AdapterError({
+            new SwapQuoteError({
               message: `Jupiter quote failed: ${quoteResponse.status}`,
             }),
           );
@@ -901,7 +902,7 @@ export const AdapterLive = Layer.effect(
 
         if (!Array.isArray(quoteData.routePlan) || quoteData.routePlan.length === 0) {
           return yield* Effect.fail(
-            new AdapterError({
+            new SwapQuoteError({
               message: "Jupiter quote returned no usable route",
             }),
           );
