@@ -128,11 +128,11 @@ export const EntryPrepLive = Layer.effect(
 
           const priceX = prices[pool.tokenX] ?? 0;
           const priceY = prices[pool.tokenY] ?? 0;
-          if (!priceX || !priceY) {
+          if (!Number.isFinite(priceX) || priceX <= 0 || !Number.isFinite(priceY) || priceY <= 0) {
             return yield* Effect.fail(
               makePrepError(
                 "PRICE_UNAVAILABLE",
-                `Missing price for pool tokens: ${pool.tokenX}=${priceX}, ${pool.tokenY}=${priceY}`,
+                `Invalid or missing price for pool tokens: ${pool.tokenX}=${priceX}, ${pool.tokenY}=${priceY}`,
                 poolAddress,
               ),
             );
@@ -179,12 +179,16 @@ export const EntryPrepLive = Layer.effect(
             pool.tokenY === SOL_MINT ? nativeSolLamports : yield* readTokenBalance(pool.tokenY);
 
           const availableX =
-            pool.tokenX === SOL_MINT && balanceX > GAS_RESERVE_LAMPORTS
-              ? balanceX - GAS_RESERVE_LAMPORTS
+            pool.tokenX === SOL_MINT
+              ? balanceX > GAS_RESERVE_LAMPORTS
+                ? balanceX - GAS_RESERVE_LAMPORTS
+                : 0n
               : balanceX;
           const availableY =
-            pool.tokenY === SOL_MINT && balanceY > GAS_RESERVE_LAMPORTS
-              ? balanceY - GAS_RESERVE_LAMPORTS
+            pool.tokenY === SOL_MINT
+              ? balanceY > GAS_RESERVE_LAMPORTS
+                ? balanceY - GAS_RESERVE_LAMPORTS
+                : 0n
               : balanceY;
 
           const deficits: Array<{
@@ -309,12 +313,16 @@ export const EntryPrepLive = Layer.effect(
             pool.tokenY === SOL_MINT ? nativeSolAfter : yield* readTokenBalance(pool.tokenY);
 
           const availableXAfter =
-            pool.tokenX === SOL_MINT && balanceXAfter > GAS_RESERVE_LAMPORTS
-              ? balanceXAfter - GAS_RESERVE_LAMPORTS
+            pool.tokenX === SOL_MINT
+              ? balanceXAfter > GAS_RESERVE_LAMPORTS
+                ? balanceXAfter - GAS_RESERVE_LAMPORTS
+                : 0n
               : balanceXAfter;
           const availableYAfter =
-            pool.tokenY === SOL_MINT && balanceYAfter > GAS_RESERVE_LAMPORTS
-              ? balanceYAfter - GAS_RESERVE_LAMPORTS
+            pool.tokenY === SOL_MINT
+              ? balanceYAfter > GAS_RESERVE_LAMPORTS
+                ? balanceYAfter - GAS_RESERVE_LAMPORTS
+                : 0n
               : balanceYAfter;
 
           if (availableXAfter < requiredX || availableYAfter < requiredY) {

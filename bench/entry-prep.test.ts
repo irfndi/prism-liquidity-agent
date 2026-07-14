@@ -403,4 +403,55 @@ describe("EntryPrepService", () => {
 
     expect(swapSpy).not.toHaveBeenCalled();
   });
+
+  it("fails with PRICE_UNAVAILABLE for infinite or negative token prices", async () => {
+    const layer = buildLayer(
+      {
+        getTokenPrices: () =>
+          Effect.succeed({ [TOKEN_X]: Number.POSITIVE_INFINITY, [TOKEN_Y]: -1 }),
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/PRICE_UNAVAILABLE/);
+  });
+
+  it("treats SOL below gas reserve as unavailable and swaps for it", async () => {
+    let solBalance = 1_000_000n;
+    const tokenBalances: Record<string, bigint> = { [TOKEN_Y]: 10_000_000_000n };
+    const swapSpy = vi.fn((mint: string) => {
+      if (mint === SOL_MINT) {
+        solBalance = 10_000_000_000n;
+      } else {
+        tokenBalances[mint] = 10_000_000_000n;
+      }
+      return Effect.succeed("mock-swap-tx");
+    });
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(solBalance),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : (tokenBalances[mint] ?? 0n)),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const prep = yield* EntryPrepService;
+        return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(swapSpy).toHaveBeenCalledWith(SOL_MINT, expect.any(BigInt));
+  });
 });
