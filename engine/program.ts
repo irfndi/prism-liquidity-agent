@@ -1312,6 +1312,8 @@ export const program = Effect.gen(function* () {
   ): Effect.Effect<AgentDecision | null, unknown, EntryPrepService> =>
     Effect.gen(function* () {
       const cycleId = cycle.cycleId;
+      let agentProposal: AgentProposal | null = null;
+      let proposalSource: "queue" | "sync" | undefined;
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, pool.activeBinId);
@@ -1997,8 +1999,6 @@ export const program = Effect.gen(function* () {
           if (!poolCircuitBreaker.canTry(now)) {
             logger.info("Agent proposal circuit breaker open — skipping", { pool: poolAddress });
           } else {
-            let agentProposal: AgentProposal | null = null;
-            let proposalSource: "queue" | "sync" | undefined;
             let syncFetchFailed = false;
 
             const snapshot = yield* agentState.getSnapshot();
@@ -2073,7 +2073,11 @@ export const program = Effect.gen(function* () {
                   proposalBackoff.delete(poolAddress);
                   poolCircuitBreaker.recordSuccess();
 
-                  if (proposalSource === "queue" && agentProposal.proposalId) {
+                  if (
+                    decision.action === "HOLD" &&
+                    proposalSource === "queue" &&
+                    agentProposal.proposalId
+                  ) {
                     yield* agentState
                       .dequeueProposals([agentProposal.proposalId])
                       .pipe(Effect.catchAll(() => Effect.void));
@@ -2104,7 +2108,7 @@ export const program = Effect.gen(function* () {
 
                   if (proposalSource === "queue" && agentProposal.proposalId) {
                     yield* agentState
-                      .dequeueProposals([agentProposal.proposalId])
+                      .rejectProposal(agentProposal.proposalId)
                       .pipe(Effect.catchAll(() => Effect.void));
                   }
                   yield* agentState
@@ -2312,6 +2316,12 @@ export const program = Effect.gen(function* () {
         });
       } else if (decision.action === "ENTER" && executed) {
         entryFailureBackoff.delete(poolAddress);
+      }
+
+      if (executed && proposalSource === "queue" && agentProposal?.proposalId) {
+        yield* agentState
+          .dequeueProposals([agentProposal.proposalId])
+          .pipe(Effect.catchAll(() => Effect.void));
       }
 
       // Audit after execution

@@ -122,6 +122,20 @@ export function AgentStateMutable(): {
     update({ agentPolicy: { ...snapshot.agentPolicy, ...patch } });
   };
 
+  const prunePendingProposals = (now: number): ReadonlyArray<AgentProposal> => {
+    return snapshot.pendingProposals.filter(
+      (proposal) =>
+        proposal.expiresAt >= now && proposal.status !== "rejected" && proposal.status !== "executed",
+    );
+  };
+
+  const prune = (now: number): void => {
+    const pruned = prunePendingProposals(now);
+    if (pruned.length !== snapshot.pendingProposals.length) {
+      update({ pendingProposals: pruned });
+    }
+  };
+
   const setPendingProposals = (proposals: ReadonlyArray<AgentProposal>): void => {
     update({ pendingProposals: [...proposals] });
   };
@@ -151,10 +165,15 @@ export function AgentStateMutable(): {
   const rejectProposal = (id: string): void => updateProposalStatus(id, "rejected");
 
   const layer = Layer.succeed(AgentStateService, {
-    getSnapshot: () => Effect.succeed(snapshot),
+    getSnapshot: () =>
+      Effect.sync(() => {
+        prune(Date.now());
+        return snapshot;
+      }),
     updateSnapshot: (patch) =>
       Effect.sync(() => {
         update(patch);
+        prune(Date.now());
         logger.debug("Agent state updated");
       }),
     setAgentPolicy: (patch) =>
@@ -164,18 +183,22 @@ export function AgentStateMutable(): {
     enqueueProposal: (proposal) =>
       Effect.sync(() => {
         enqueueProposal(proposal);
+        prune(Date.now());
       }),
     dequeueProposals: (proposalIds) =>
       Effect.sync(() => {
         dequeueProposals(proposalIds);
+        prune(Date.now());
       }),
     approveProposal: (proposalId) =>
       Effect.sync(() => {
         approveProposal(proposalId);
+        prune(Date.now());
       }),
     rejectProposal: (proposalId) =>
       Effect.sync(() => {
         rejectProposal(proposalId);
+        prune(Date.now());
       }),
   });
 
