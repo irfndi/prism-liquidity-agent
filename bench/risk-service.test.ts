@@ -172,6 +172,16 @@ describe("evaluateAgentProposal", () => {
     expect(result.adjustedDecision?.positionSizeUsd).toBeLessThan(10_000);
   });
 
+  it("rejects REBALANCE without rebalanceParams", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "REBALANCE", poolAddress: "pool1" }),
+      makeContext(),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/rebalanceParams/);
+  });
+
   it("rejects REBALANCE with an inverted range", () => {
     const result = evaluateAgentProposal(
       makeProposal({
@@ -224,6 +234,16 @@ describe("evaluateAgentProposal", () => {
     );
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/positionSizeUsd/);
+  });
+
+  it("rejects ENTER with zero positionSizeUsd", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "ENTER", poolAddress: "pool1", positionSizeUsd: 0 }),
+      makeContext({ openPositions: [] }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/positive/);
   });
 
   it("approves ENTER when the pool is not already held", () => {

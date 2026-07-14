@@ -1267,7 +1267,7 @@ export const program = Effect.gen(function* () {
   });
 
   const isProposalStale = (proposal: AgentProposal, staleMs: number): boolean =>
-    Date.now() > proposal.expiresAt + staleMs;
+    Date.now() > proposal.proposedAt + staleMs;
 
   const findPendingProposal = (
     proposals: ReadonlyArray<AgentProposal>,

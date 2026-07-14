@@ -138,6 +138,16 @@ export function evaluateAgentProposal(
     return { valid: false, reason: "ENTER proposals must include positionSizeUsd" };
   }
 
+  if (proposal.action === "ENTER") {
+    if (proposal.positionSizeUsd !== undefined && proposal.positionSizeUsd <= 0) {
+      return { valid: false, reason: "positionSizeUsd must be positive for ENTER" };
+    }
+  }
+
+  if (proposal.action === "REBALANCE" && proposal.rebalanceParams === undefined) {
+    return { valid: false, reason: "REBALANCE proposals must include rebalanceParams" };
+  }
+
   if (proposal.positionSizeUsd !== undefined) {
     if (proposal.positionSizeUsd < 0) {
       return { valid: false, reason: "positionSizeUsd cannot be negative" };
