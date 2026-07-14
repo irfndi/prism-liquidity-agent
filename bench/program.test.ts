@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { Effect, Layer } from "effect";
 import { buildLayer, estimatePositionValue, executeLive } from "../engine/program.js";
 import { ConfigService } from "../engine/config-service.js";
+import { EntryPrepError } from "../engine/errors.js";
 import {
   AdapterService,
   StrategyService,
@@ -236,6 +237,56 @@ describe("executeLive", () => {
     expect(result.error).toBeUndefined();
     expect(prepareSpy).toHaveBeenCalledTimes(1);
     expect(prepareSpy).toHaveBeenCalledWith(poolAddress, positionSizeUsd);
+  });
+
+  it("skips enterPosition when prepareEntryTokens fails", () => {
+    const poolAddress = "TestPool111111111111111111111111111111111111";
+    const positionSizeUsd = 1234;
+
+    const enterPositionSpy = vi.fn(() =>
+      Effect.succeed({ positionPubKey: "mock-pos", txSignature: "mock-tx" }),
+    );
+    const adapter: AdapterApi = {
+      ...makeAdapter(),
+      enterPosition: enterPositionSpy,
+    };
+
+    const result = Effect.runSync(
+      executeLive(
+        {
+          adapter,
+          strategy: makeStrategy(),
+          db: makeDb(),
+          revenueConfigSvc: makeRevenueConfigSvc(),
+          trackedPositions: new Map(),
+        },
+        {
+          action: "ENTER",
+          poolAddress,
+          confidence: 0.8,
+          reasoning: "test",
+          positionSizeUsd,
+        } as AgentDecision,
+        { activeBinId: 5000, binStep: 10, tokenXSymbol: "SOL", tokenYSymbol: "USDC" },
+      ).pipe(
+        Effect.provide(
+          Layer.succeed(EntryPrepService, {
+            prepareEntryTokens: () =>
+              Effect.fail(
+                new EntryPrepError({
+                  code: "INSUFFICIENT_USDC_BALANCE",
+                  message: "Not enough USDC",
+                  poolAddress,
+                }),
+              ),
+          }),
+        ),
+      ),
+    );
+
+    expect(result.executed).toBe(false);
+    expect(result.error).toContain("Entry token preparation failed");
+    expect(enterPositionSpy).not.toHaveBeenCalled();
   });
 });
 

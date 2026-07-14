@@ -239,6 +239,30 @@ describe("EntryPrepService", () => {
     ).rejects.toThrow(/SWAP_QUOTE_FAILED/);
   });
 
+  it("fails with SWAP_TRANSACTION_FAILED for non-quote swap failures", async () => {
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        quoteSwapUSDCForToken: () =>
+          Effect.succeed({ routePlan: [{ swapInfo: {} }], outAmount: "10000000000000" }),
+        swapUSDCForToken: () => Effect.fail(new Error("RPC timeout")),
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/SWAP_TRANSACTION_FAILED/);
+  });
+
   it("preflights all quotes before executing any swap", async () => {
     const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
     const quoteSpy = vi.fn((mint: string) => {

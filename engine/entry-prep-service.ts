@@ -34,11 +34,10 @@ export function computeRequiredAtomic(halfUsd: number, price: number, decimals: 
 }
 
 export function computeUsdcInputAtomic(amount: bigint, decimals: number, price: number): bigint {
-  const priceScale = 12;
   // Scale the floating price to a fixed-point integer without converting `amount` to Number.
-  const priceScaled = BigInt(price.toFixed(priceScale).replace(".", ""));
+  const priceScaled = BigInt(price.toFixed(FIXED_POINT_SCALE).replace(".", ""));
   const numerator = amount * priceScaled * 10n ** BigInt(USDC_DECIMALS) * 101n; // 1% buffer as 101/100
-  const denominator = 10n ** BigInt(decimals) * 100n * 10n ** BigInt(priceScale);
+  const denominator = 10n ** BigInt(decimals) * 100n * 10n ** BigInt(FIXED_POINT_SCALE);
   const quotient = numerator / denominator;
   const remainder = numerator % denominator;
   return remainder === 0n ? quotient : quotient + 1n;
