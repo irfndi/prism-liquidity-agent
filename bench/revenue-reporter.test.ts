@@ -36,7 +36,7 @@ function makeTestAdapterLayer() {
     hasWallet: () => false,
     getWalletAddress: () => null,
     getWalletBalanceUsd: () => Effect.succeed(0),
-    getNativeSolBalance: () => Effect.succeed(0),
+    getNativeSolBalance: () => Effect.succeed(0n),
     getTokenBalance: () => Effect.succeed(0n),
     getTokenPrices: () => Effect.succeed({}),
     getTokenDecimals: () => Effect.succeed(6),

@@ -1822,7 +1822,7 @@ export const program = Effect.gen(function* () {
         if (nativeBalance.value === null) {
           return { executed: false, error: nativeBalance.error };
         }
-        const solBalance = nativeBalance.value / 1e9;
+        const solBalance = Number(nativeBalance.value) / 1e9;
         if (solBalance < 0.03) {
           console.warn("Insufficient SOL for gas — skipping ENTER");
           return { executed: false, error: "Insufficient SOL for gas — skipping ENTER" };

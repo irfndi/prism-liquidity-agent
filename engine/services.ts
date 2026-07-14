@@ -33,6 +33,7 @@ import type {
   AuditError,
   BlacklistError,
   DiscoverPoolsError,
+  EntryPrepError,
   MemoryError,
   RiskError,
   ScreenerError,
@@ -55,7 +56,7 @@ export interface AdapterApi {
   readonly hasWallet: () => boolean;
   readonly getWalletAddress: () => string | null;
   readonly getWalletBalanceUsd: () => Effect.Effect<number, unknown>;
-  readonly getNativeSolBalance: () => Effect.Effect<number, unknown>;
+  readonly getNativeSolBalance: () => Effect.Effect<bigint, unknown>;
   readonly getPoolState: (poolAddress: string) => Effect.Effect<PoolState, unknown>;
   readonly getBinArray: (poolAddress: string) => Effect.Effect<BinArray, unknown>;
   readonly getPositions: (
@@ -157,6 +158,20 @@ export interface AdapterApi {
 }
 
 export class AdapterService extends Context.Tag("AdapterService")<AdapterService, AdapterApi>() {}
+
+// ─── Entry Prep Service ───────────────────────────────────────────────────────
+
+export interface EntryPrepApi {
+  readonly prepareEntryTokens: (
+    poolAddress: string,
+    positionSizeUsd: number,
+  ) => Effect.Effect<void, EntryPrepError>;
+}
+
+export class EntryPrepService extends Context.Tag("EntryPrepService")<
+  EntryPrepService,
+  EntryPrepApi
+>() {}
 
 // ─── Strategy Service ────────────────────────────────────────────────────────
 

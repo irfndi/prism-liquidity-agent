@@ -1011,8 +1011,8 @@ export const AdapterLive = Layer.effect(
 
       getNativeSolBalance: () =>
         Effect.gen(function* () {
-          if (!wallet) return 0;
-          return Number(yield* readNativeSolBalance());
+          if (!wallet) return 0n;
+          return yield* readNativeSolBalance();
         }),
 
       getTokenBalance: (mintAddress: string) => readTokenBalance(mintAddress),
