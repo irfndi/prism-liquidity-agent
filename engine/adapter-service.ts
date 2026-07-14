@@ -898,6 +898,14 @@ export const AdapterLive = Layer.effect(
           routePlan?: unknown;
         };
 
+        if (!Array.isArray(quoteData.routePlan) || quoteData.routePlan.length === 0) {
+          return yield* Effect.fail(
+            new AdapterError({
+              message: "Jupiter quote returned no usable route",
+            }),
+          );
+        }
+
         const swapResponse = yield* Effect.tryPromise(() =>
           fetch("https://api.jup.ag/swap/v1/swap", {
             method: "POST",

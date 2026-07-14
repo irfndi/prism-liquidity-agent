@@ -127,7 +127,7 @@ describe("AdapterService.swapUSDCForToken", () => {
       const u = url.toString();
       if (u.includes("/swap/v1/quote")) {
         captured.quoteUrl = u;
-        return new Response(JSON.stringify({ routePlan: [] }), { status: 200 });
+        return new Response(JSON.stringify({ routePlan: [{ swapInfo: {} }] }), { status: 200 });
       }
       if (u.includes("/swap/v1/swap")) {
         captured.swapBody = JSON.parse((init?.body as string | undefined) ?? "{}");
@@ -200,7 +200,7 @@ describe("AdapterService.swapUSDCForToken", () => {
     const restore = mockFetch((async (url: string | URL | Request) => {
       const u = url.toString();
       if (u.includes("/swap/v1/quote")) {
-        return new Response(JSON.stringify({ routePlan: [] }), { status: 200 });
+        return new Response(JSON.stringify({ routePlan: [{ swapInfo: {} }] }), { status: 200 });
       }
       if (u.includes("/swap/v1/swap")) {
         return new Response("swap error", { status: 503 });
@@ -219,7 +219,7 @@ describe("AdapterService.swapUSDCForToken", () => {
     const restore = mockFetch((async (url: string | URL | Request) => {
       const u = url.toString();
       if (u.includes("/swap/v1/quote")) {
-        return new Response(JSON.stringify({ routePlan: [] }), { status: 200 });
+        return new Response(JSON.stringify({ routePlan: [{ swapInfo: {} }] }), { status: 200 });
       }
       if (u.includes("/swap/v1/swap")) {
         return new Response(JSON.stringify({ transaction: "ignored" }), { status: 200 });
@@ -234,6 +234,30 @@ describe("AdapterService.swapUSDCForToken", () => {
         1_000_000n,
         "Jupiter swap: no transaction returned",
       );
+    } finally {
+      restore();
+    }
+  });
+
+  it("fails when Jupiter quote returns an empty route without building a swap", async () => {
+    const fetchImpl = vi.fn((async (url: string | URL | Request) => {
+      const u = url.toString();
+      if (u.includes("/swap/v1/quote")) {
+        return new Response(JSON.stringify({ routePlan: [] }), { status: 200 });
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch);
+    const restore = mockFetch(fetchImpl);
+
+    try {
+      await expectSwapFailure(
+        buildLayer(),
+        SOL_MINT,
+        1_000_000n,
+        "Jupiter quote returned no usable route",
+      );
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(fetchImpl.mock.calls[0]?.[0]?.toString()).toContain("/swap/v1/quote");
     } finally {
       restore();
     }
