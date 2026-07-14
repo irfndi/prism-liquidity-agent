@@ -15,11 +15,8 @@ const RebalanceParamsSchema = Schema.Struct({
   lowerBinId: Schema.Int,
   upperBinId: Schema.Int,
 }).pipe(
-  Schema.filter((params) => {
-    if (params.lowerBinId >= params.upperBinId) {
-      return "lowerBinId must be less than upperBinId";
-    }
-    return true;
+  Schema.filter((params) => params.lowerBinId < params.upperBinId, {
+    message: () => "lowerBinId must be less than upperBinId",
   }),
 );
 

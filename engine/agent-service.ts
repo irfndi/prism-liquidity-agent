@@ -57,9 +57,11 @@ export const AgentNoOp: AgentApi = {
   disconnect: () => Effect.void,
 };
 
-function buildPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
-  const { pool, metrics, warnings, recentDecisions } = ctx;
-
+function formatRuntimeContext(ctx: AgentRuntimeContext): {
+  warningsBlock: string;
+  decisionsBlock: string;
+} {
+  const { warnings, recentDecisions } = ctx;
   const warningsBlock =
     warnings.length > 0
       ? warnings.map((w) => `  - [${w.category}] ${w.content}`).join("\n")
@@ -75,6 +77,13 @@ function buildPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string 
           )
           .join("\n")
       : "  (none)";
+
+  return { warningsBlock, decisionsBlock };
+}
+
+function buildPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
+  const { pool, metrics } = ctx;
+  const { warningsBlock, decisionsBlock } = formatRuntimeContext(ctx);
 
   return `You are a liquidity pool risk overlay. Review the deterministic agent's decision and optionally override it.
 
@@ -113,23 +122,8 @@ Respond with JSON only:
 }
 
 function buildProposalPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
-  const { pool, metrics, warnings, recentDecisions } = ctx;
-
-  const warningsBlock =
-    warnings.length > 0
-      ? warnings.map((w) => `  - [${w.category}] ${w.content}`).join("\n")
-      : "  (none)";
-
-  const decisionsBlock =
-    recentDecisions.length > 0
-      ? recentDecisions
-          .slice(0, 10)
-          .map(
-            (d) =>
-              `  - ${d.action} (confidence: ${d.confidence.toFixed(2)}) @ ${new Date(d.timestamp).toISOString()}: ${d.reasoning}`,
-          )
-          .join("\n")
-      : "  (none)";
+  const { pool, metrics } = ctx;
+  const { warningsBlock, decisionsBlock } = formatRuntimeContext(ctx);
 
   return `You are a liquidity pool strategy advisor. Review the deterministic agent's decision and propose the best action for this pool.
 

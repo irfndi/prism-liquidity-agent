@@ -78,41 +78,46 @@ export class HttpStatusServer {
         status: 413,
       });
     }
-    const proposals: AgentProposal[] = [];
-    for (const [index, item] of items.entries()) {
-      if (item === null || typeof item !== "object") {
-        return new Response("Invalid proposal body", { status: 400 });
-      }
-      const raw = JSON.stringify(item);
-      try {
-        const proposal = await Effect.runPromise(
-          parseHttpQueueProposal(
-            raw,
-            crypto.randomUUID(),
-            "http-queue",
-            this.config.agentProposalStaleMs,
+
+    const effect = Effect.gen(this, function* () {
+      const proposals: AgentProposal[] = [];
+      for (const [index, item] of items.entries()) {
+        if (item === null || typeof item !== "object") {
+          return new Response("Invalid proposal body", { status: 400 });
+        }
+        const raw = JSON.stringify(item);
+        const proposal = yield* parseHttpQueueProposal(
+          raw,
+          crypto.randomUUID(),
+          "http-queue",
+          this.config.agentProposalStaleMs,
+        ).pipe(
+          Effect.mapError(
+            (err) =>
+              new ProposalParseError({
+                message: `Invalid proposal at index ${index}: ${err.message}`,
+              }),
           ),
         );
         proposals.push(proposal);
-      } catch (e) {
-        if (e instanceof ProposalParseError) {
-          return new Response(`Invalid proposal at index ${index}: ${e.message}`, { status: 400 });
-        }
-        throw e;
       }
-    }
-
-    for (const proposal of proposals) {
-      await Effect.runPromise(this.state.enqueueProposal(proposal));
-    }
-
-    return Response.json(
-      {
-        accepted: proposals.length,
-        proposalIds: proposals.map((p) => p.proposalId),
-      },
-      { status: 202 },
+      yield* Effect.forEach(proposals, (proposal) => this.state.enqueueProposal(proposal), {
+        discard: true,
+      });
+      return Response.json(
+        {
+          accepted: proposals.length,
+          proposalIds: proposals.map((p) => p.proposalId),
+        },
+        { status: 202 },
+      );
+    }).pipe(
+      Effect.catchTag("ProposalParseError", (err) =>
+        Effect.succeed(new Response(err.message, { status: 400 })),
+      ),
     );
+
+    return await Effect.runPromise(effect);
   }
 
   private async handleApprove(request: Request): Promise<Response> {

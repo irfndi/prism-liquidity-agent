@@ -150,7 +150,7 @@ export function evaluateAgentProposal(
     proposal.originalAction !== undefined &&
     proposal.originalConfidence !== undefined &&
     proposal.action === proposal.originalAction &&
-    proposal.confidence === proposal.originalConfidence;
+    Math.abs(proposal.confidence - proposal.originalConfidence) < 1e-9;
 
   if (
     !preservesOriginalDecision &&

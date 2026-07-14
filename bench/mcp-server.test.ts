@@ -304,6 +304,59 @@ describe("McpServer", () => {
     expect(cfg).not.toHaveProperty("heliusApiKey");
   });
 
+  it("returns agent policy via prism_agent_policy tool", async () => {
+    const server = new McpServer(
+      baseConfig(),
+      mockAgentState({
+        getSnapshot: () =>
+          Effect.succeed({
+            programStartTime: Date.now(),
+            scanCount: 0,
+            lastCycleAt: null,
+            portfolio: {
+              totalValueUsd: 0,
+              unrealizedPnlUsd: 0,
+              realizedPnlUsd: 0,
+              openPositions: 0,
+              maxPositions: 0,
+              walletBalanceUsd: 0,
+            },
+            positions: [],
+            recentDecisions: [],
+            agentPolicy: {
+              mode: "suggest",
+              proposalsQueued: 3,
+              lastProposalAt: Date.now(),
+              badProposalBackoffUntil: null,
+              circuitBreakerOpen: true,
+              hardCaps: {
+                maxPositionSizePct: 0.4,
+                maxRebalanceRangeBins: 50,
+                minProposalConfidence: 0.65,
+                proposalStaleMs: 300_000,
+              },
+            },
+            pendingProposals: [],
+          } as never),
+      }),
+    );
+
+    const response = await sendRequest(server, {
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: { name: "prism_agent_policy", arguments: {} },
+    });
+
+    expect(response.error).toBeUndefined();
+    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    expect(content).toHaveLength(1);
+    const policy = JSON.parse(content[0]!.text);
+    expect(policy.mode).toBe("suggest");
+    expect(policy.proposalsQueued).toBe(3);
+    expect(policy.circuitBreakerOpen).toBe(true);
+  });
+
   it("approves proposals via prism_approve_proposals tool", async () => {
     const approvedIds: string[] = [];
     const server = new McpServer(
@@ -371,7 +424,7 @@ describe("McpServer", () => {
 
     const response = await sendRequest(server, {
       jsonrpc: "2.0",
-      id: 6,
+      id: 7,
       method: "tools/call",
       params: {
         name: "prism_approve_proposals",
