@@ -3,7 +3,12 @@ import { AdapterService, EntryPrepService, type EntryPrepApi } from "./services.
 import { ConfigService } from "./config-service.js";
 import { EntryPrepError } from "./errors.js";
 import { createLogger } from "./logger.js";
-import { SOL_MINT, USDC_MINT, GAS_RESERVE_LAMPORTS } from "./constants.js";
+import {
+  SOL_MINT,
+  USDC_MINT,
+  GAS_RESERVE_LAMPORTS,
+  SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS,
+} from "./constants.js";
 
 const logger = createLogger("entry-prep-service");
 const USDC_DECIMALS = 6;
@@ -140,8 +145,12 @@ export const EntryPrepLive = Layer.effect(
 
           const halfUsd = positionSizeUsd / 2;
 
-          const requiredX = computeRequiredAtomic(halfUsd, priceX, tokenXDecimals);
-          const requiredY = computeRequiredAtomic(halfUsd, priceY, tokenYDecimals);
+          const requiredX =
+            computeRequiredAtomic(halfUsd, priceX, tokenXDecimals) +
+            (pool.tokenX === SOL_MINT ? SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS : 0n);
+          const requiredY =
+            computeRequiredAtomic(halfUsd, priceY, tokenYDecimals) +
+            (pool.tokenY === SOL_MINT ? SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS : 0n);
 
           const readTokenBalance = (mint: string) =>
             adapter

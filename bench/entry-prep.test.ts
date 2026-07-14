@@ -495,4 +495,30 @@ describe("EntryPrepService", () => {
 
     expect(swapSpy).not.toHaveBeenCalled();
   });
+
+  it("reserves SOL transaction debits when computing the SOL deficit", async () => {
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(0n),
+        getTokenBalance: (mint: string) => Effect.succeed(mint === USDC_MINT ? 1_013_000_000n : 0n),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    // 1013 USDC is enough for the unbuffered SOL+FAKE swaps (~1010 USDC) but
+    // not enough once the SOL transaction buffer is included (~1017 USDC).
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/INSUFFICIENT_USDC_BALANCE/);
+
+    expect(swapSpy).not.toHaveBeenCalled();
+  });
 });
