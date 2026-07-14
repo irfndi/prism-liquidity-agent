@@ -150,7 +150,7 @@ export function evaluateAgentProposal(
     proposal.originalAction !== undefined &&
     proposal.originalConfidence !== undefined &&
     proposal.action === proposal.originalAction &&
-    Math.abs(proposal.confidence - proposal.originalConfidence) < 1e-9;
+    Math.abs(proposal.confidence - proposal.originalConfidence) < 0.005;
 
   if (
     !preservesOriginalDecision &&
@@ -180,11 +180,10 @@ export function evaluateAgentProposal(
     }
   }
 
-  if (proposal.action === "REBALANCE" && proposal.rebalanceParams === undefined) {
-    return { valid: false, reason: "REBALANCE proposals must include rebalanceParams" };
-  }
-
   if (proposal.action === "REBALANCE") {
+    if (proposal.rebalanceParams === undefined) {
+      return { valid: false, reason: "REBALANCE proposals must include rebalanceParams" };
+    }
     const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
     if (!hasPosition) {
       return {

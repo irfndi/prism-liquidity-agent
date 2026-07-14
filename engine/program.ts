@@ -1537,13 +1537,6 @@ export const program = Effect.gen(function* () {
         }
       }
 
-      let pendingCooldown: {
-        poolAddress: string;
-        cooldownUntil: number;
-        reason: string;
-        consecutiveOorExits: number;
-      } | null = null;
-
       const computeCooldownForExit = (
         exitDecision: AgentDecision,
         position: PositionRecord | undefined,
@@ -1606,11 +1599,6 @@ export const program = Effect.gen(function* () {
           return null;
         });
 
-      // F7: update pool cooldown after EXIT decisions
-      if (decision && decision.action === "EXIT") {
-        pendingCooldown = yield* computeCooldownForExit(decision, pos);
-      }
-
       // Single persist point: trailing-exit above may update highestValueUsd/currentValueUsd.
       if (pos && hasPosition) {
         yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
@@ -1636,10 +1624,6 @@ export const program = Effect.gen(function* () {
           )
         : config.paperPortfolioUsd;
       lastWalletBalanceUsd = walletBalanceUsd;
-
-      if (pendingCooldown) {
-        yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catchAll(() => Effect.void));
-      }
 
       // REBALANCE check
       if (!decision) {
@@ -1998,38 +1982,66 @@ export const program = Effect.gen(function* () {
 
       if (config.agentiveMode) {
         const proposalMode = config.agentProposalMode;
+        const poolCircuitBreaker = getPoolCircuitBreaker(poolAddress);
+        const now = Date.now();
 
-        if (proposalMode === "veto") {
-          const enhanced = yield* agent
-            .enhanceDecision(decision, {
-              decision,
-              pool,
-              metrics,
-              warnings,
-              recentDecisions: yield* audit
-                .getRecentDecisions(10)
-                .pipe(Effect.catchAll(() => Effect.succeed([]))),
-            })
-            .pipe(Effect.catchAll(() => Effect.succeed(null)));
-          if (enhanced) {
-            logger.info("Agent override", {
-              pool: poolAddress,
-              from: decision.action,
-              to: enhanced.action,
-              fromConfidence: decision.confidence.toFixed(2),
-              toConfidence: enhanced.confidence.toFixed(2),
-            });
-            decision = enhanced;
-          }
+        if (!poolCircuitBreaker.canTry(now)) {
+          logger.info("Agent proposal circuit breaker open — skipping", { pool: poolAddress });
         } else {
-          const poolCircuitBreaker = getPoolCircuitBreaker(poolAddress);
-          const now = Date.now();
-          if (!poolCircuitBreaker.canTry(now)) {
-            logger.info("Agent proposal circuit breaker open — skipping", { pool: poolAddress });
+          const poolBackoff = proposalBackoff.get(poolAddress);
+          if (isProposalBackoffActive(poolBackoff, now)) {
+            logger.info("Agent proposal skipped — backoff active", { pool: poolAddress });
           } else {
-            const poolBackoff = proposalBackoff.get(poolAddress);
-            if (isProposalBackoffActive(poolBackoff, now)) {
-              logger.info("Agent proposal skipped — backoff active", { pool: poolAddress });
+            if (proposalMode === "veto") {
+              let vetoFetchFailed = false;
+              const enhanced = yield* agent
+                .enhanceDecision(decision, {
+                  decision,
+                  pool,
+                  metrics,
+                  warnings,
+                  recentDecisions: yield* audit
+                    .getRecentDecisions(10)
+                    .pipe(Effect.catchAll(() => Effect.succeed([]))),
+                })
+                .pipe(
+                  Effect.catchAll((err) => {
+                    vetoFetchFailed = true;
+                    logger.warn("Agent veto fetch failed", {
+                      pool: poolAddress,
+                      error: String(err),
+                    });
+                    return Effect.succeed(null);
+                  }),
+                );
+              if (enhanced) {
+                logger.info("Agent override", {
+                  pool: poolAddress,
+                  from: decision.action,
+                  to: enhanced.action,
+                  fromConfidence: decision.confidence.toFixed(2),
+                  toConfidence: enhanced.confidence.toFixed(2),
+                });
+                decision = enhanced;
+                proposalBackoff.delete(poolAddress);
+                poolCircuitBreaker.recordSuccess();
+              } else if (vetoFetchFailed) {
+                proposalBackoff.set(
+                  poolAddress,
+                  nextProposalBackoff(poolBackoff, now, {
+                    baseMs: config.agentProposalBackoffBaseMs,
+                    maxMs: config.agentProposalBackoffMaxMs,
+                  }),
+                );
+                poolCircuitBreaker.recordFailure(now);
+                yield* memory
+                  .upsert({
+                    category: "warning",
+                    content: `Agent veto fetch failed for ${poolAddress}`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              }
             } else {
               let syncFetchFailed = false;
 
@@ -2123,10 +2135,6 @@ export const program = Effect.gen(function* () {
                     decision = validation.adjustedDecision;
                     proposalBackoff.delete(poolAddress);
                     poolCircuitBreaker.recordSuccess();
-
-                    if (decision.action === "EXIT" && originalAction !== "EXIT") {
-                      pendingCooldown = yield* computeCooldownForExit(decision, pos);
-                    }
 
                     if (proposalSource === "queue" && agentProposal.proposalId) {
                       yield* agentState
@@ -2242,6 +2250,13 @@ export const program = Effect.gen(function* () {
           })
           .pipe(Effect.catchAll(() => Effect.void));
         return decision;
+      }
+
+      if (decision.action === "EXIT") {
+        const pendingCooldown = yield* computeCooldownForExit(decision, pos);
+        if (pendingCooldown) {
+          yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catchAll(() => Effect.void));
+        }
       }
 
       const signalTimestamp = Date.now();
