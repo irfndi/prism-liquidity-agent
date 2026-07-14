@@ -454,4 +454,45 @@ describe("EntryPrepService", () => {
 
     expect(swapSpy).toHaveBeenCalledWith(SOL_MINT, expect.any(BigInt));
   });
+
+  it("does not read native SOL balance for pools without a SOL leg", async () => {
+    const OTHER_TOKEN = "OtherToken1111111111111111111111111111111";
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    const layer = buildLayer(
+      {
+        getPoolState: () =>
+          Effect.succeed({
+            address: POOL_ADDRESS,
+            tokenX: TOKEN_Y,
+            tokenY: OTHER_TOKEN,
+            tokenXSymbol: "FAKE",
+            tokenYSymbol: "OTHER",
+            tvlUsd: 100_000,
+            volume24hUsd: 30_000,
+            fees24hUsd: 300,
+            apr: 60,
+            activeBinId: 5000,
+            binStep: 10,
+            currentPrice: 1,
+            timestamp: Date.now(),
+          }),
+        getNativeSolBalance: () => Effect.fail(new Error("RPC down")),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === TOKEN_Y || mint === OTHER_TOKEN ? 10_000_000_000n : 0n),
+        getTokenPrices: () => Effect.succeed({ [TOKEN_Y]: 1, [OTHER_TOKEN]: 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const prep = yield* EntryPrepService;
+        return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(swapSpy).not.toHaveBeenCalled();
+  });
 });

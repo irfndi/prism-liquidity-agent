@@ -171,7 +171,8 @@ export const EntryPrepLive = Layer.effect(
                 ),
               );
 
-          const nativeSolLamports = yield* readNativeSolBalance();
+          const poolNeedsSol = pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT;
+          const nativeSolLamports = poolNeedsSol ? yield* readNativeSolBalance() : 0n;
 
           const balanceX =
             pool.tokenX === SOL_MINT ? nativeSolLamports : yield* readTokenBalance(pool.tokenX);
@@ -306,7 +307,7 @@ export const EntryPrepLive = Layer.effect(
             });
           }
 
-          const nativeSolAfter = yield* readNativeSolBalance();
+          const nativeSolAfter = poolNeedsSol ? yield* readNativeSolBalance() : 0n;
           const balanceXAfter =
             pool.tokenX === SOL_MINT ? nativeSolAfter : yield* readTokenBalance(pool.tokenX);
           const balanceYAfter =
