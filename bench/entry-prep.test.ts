@@ -701,4 +701,78 @@ describe("EntryPrepService", () => {
 
     expect(swapSpy).not.toHaveBeenCalled();
   });
+
+  it("fails with SWAP_QUOTE_FAILED when guaranteed output is below the deficit", async () => {
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        quoteSwapUSDCForToken: () =>
+          Effect.succeed({
+            routePlan: [{ swapInfo: {} }],
+            outAmount: "10000000000000",
+            otherAmountThreshold: "1000",
+          }),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/SWAP_QUOTE_FAILED/);
+
+    expect(swapSpy).not.toHaveBeenCalled();
+  });
+
+  it("fails when native SOL drops below the gas reserve after swaps", async () => {
+    const OTHER_TOKEN = "OtherToken1111111111111111111111111111111";
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    const layer = buildLayer(
+      {
+        getPoolState: () =>
+          Effect.succeed({
+            address: POOL_ADDRESS,
+            tokenX: TOKEN_Y,
+            tokenY: OTHER_TOKEN,
+            tokenXSymbol: "FAKE",
+            tokenYSymbol: "OTHER",
+            tvlUsd: 100_000,
+            volume24hUsd: 30_000,
+            fees24hUsd: 300,
+            apr: 60,
+            activeBinId: 5000,
+            binStep: 10,
+            currentPrice: 1,
+            timestamp: Date.now(),
+          }),
+        getNativeSolBalance: () => Effect.succeed(0n),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
+        getTokenPrices: () => Effect.succeed({ [TOKEN_Y]: 1, [OTHER_TOKEN]: 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/INSUFFICIENT_BALANCE_AFTER_SWAP/);
+
+    expect(swapSpy).toHaveBeenCalledTimes(2);
+  });
 });

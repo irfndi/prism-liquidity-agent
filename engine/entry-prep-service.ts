@@ -73,6 +73,17 @@ function quoteOutAmount(quoteData: Record<string, unknown>): bigint {
   return 0n;
 }
 
+function quoteGuaranteedOutAmount(quoteData: Record<string, unknown>): bigint {
+  // Jupiter's `otherAmountThreshold` is the minimum output guaranteed at the
+  // quoted slippage; prefer it over the optimistic `outAmount` so a swap is
+  // only submitted when it can actually cover the deficit after slippage.
+  const threshold = quoteData.otherAmountThreshold;
+  if (typeof threshold === "string" && threshold.length > 0) return BigInt(threshold);
+  if (typeof threshold === "number" && Number.isFinite(threshold))
+    return BigInt(Math.floor(threshold));
+  return quoteOutAmount(quoteData);
+}
+
 export const EntryPrepLive = Layer.effect(
   EntryPrepService,
   Effect.gen(function* () {
@@ -334,7 +345,7 @@ export const EntryPrepLive = Layer.effect(
                   ),
                 ),
                 Effect.flatMap((quoteData) => {
-                  const outAmount = quoteOutAmount(quoteData);
+                  const outAmount = quoteGuaranteedOutAmount(quoteData);
                   if (outAmount < deficit.amount) {
                     return Effect.fail(
                       makePrepError(
@@ -351,6 +362,7 @@ export const EntryPrepLive = Layer.effect(
             { concurrency: "unbounded" },
           );
 
+          let swapped = false;
           for (const deficit of deficits) {
             const usdcInputAtomic = computeUsdcInputAtomic(
               deficit.amount,
@@ -387,6 +399,7 @@ export const EntryPrepLive = Layer.effect(
               }),
             );
 
+            swapped = true;
             logger.info("Swapped USDC for pool token", {
               poolAddress,
               mint: deficit.mint,
@@ -395,7 +408,7 @@ export const EntryPrepLive = Layer.effect(
             });
           }
 
-          const nativeSolAfter = poolNeedsSol ? yield* readNativeSolBalance() : 0n;
+          const nativeSolAfter = swapped ? yield* readNativeSolBalance() : 0n;
           const balanceXAfter =
             pool.tokenX === SOL_MINT ? nativeSolAfter : yield* readTokenBalance(pool.tokenX);
           const balanceYAfter =
@@ -419,6 +432,18 @@ export const EntryPrepLive = Layer.effect(
               makePrepError(
                 "INSUFFICIENT_BALANCE_AFTER_SWAP",
                 `Balances still insufficient after swap: X=${formatAtomic(availableXAfter, tokenXDecimals)}/${formatAtomic(requiredX, tokenXDecimals)}, Y=${formatAtomic(availableYAfter, tokenYDecimals)}/${formatAtomic(requiredY, tokenYDecimals)}`,
+                poolAddress,
+              ),
+            );
+          }
+
+          // Swaps consumed native SOL fees; ensure the wallet still has enough
+          // gas for the final enterPosition transaction.
+          if (swapped && nativeSolAfter <= GAS_RESERVE_LAMPORTS) {
+            return yield* Effect.fail(
+              makePrepError(
+                "INSUFFICIENT_BALANCE_AFTER_SWAP",
+                `Native SOL balance ${formatAtomic(nativeSolAfter, 9)} is below gas reserve ${formatAtomic(GAS_RESERVE_LAMPORTS, 9)} after swap`,
                 poolAddress,
               ),
             );
