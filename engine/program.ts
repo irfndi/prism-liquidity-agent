@@ -2135,12 +2135,6 @@ export const program = Effect.gen(function* () {
                     decision = validation.adjustedDecision;
                     proposalBackoff.delete(poolAddress);
                     poolCircuitBreaker.recordSuccess();
-
-                    if (proposalSource === "queue" && agentProposal.proposalId) {
-                      yield* agentState
-                        .dequeueProposals([agentProposal.proposalId])
-                        .pipe(Effect.catchAll(() => Effect.void));
-                    }
                   }
                   yield* agentState
                     .setAgentPolicy({ lastProposalAt: now })
