@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
 import { EntryPrepService } from "../engine/services.js";
-import { EntryPrepLive } from "../engine/entry-prep-service.js";
+import { EntryPrepLive, computeUsdcInputAtomic } from "../engine/entry-prep-service.js";
 import { AdapterService, type AdapterApi } from "../engine/services.js";
 import { ConfigService } from "../engine/config-service.js";
 import { defaultAppConfig } from "./helpers.js";
@@ -201,5 +201,40 @@ describe("EntryPrepService", () => {
         }).pipe(Effect.provide(layer)),
       ),
     ).rejects.toThrow(/INSUFFICIENT_BALANCE_AFTER_SWAP/);
+  });
+
+  it("fails with BALANCE_READ_FAILED when a balance read fails", async () => {
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: (mint: string) =>
+          mint === TOKEN_Y ? Effect.fail(new Error("RPC down")) : Effect.succeed(0n),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/BALANCE_READ_FAILED/);
+  });
+
+  it("computes USDC input without precision loss for large amounts", () => {
+    // 1 unit of a 9-decimal token at $1 with a 1% buffer -> 1.01 USDC atomic.
+    expect(computeUsdcInputAtomic(1_000_000_000n, 9, 1)).toBe(1_010_000n);
+
+    // Large amount that exceeds Number.MAX_SAFE_INTEGER; no precision loss.
+    expect(computeUsdcInputAtomic(1_000_000_000_000_000_000_000n, 9, 1)).toBe(
+      1_010_000_000_000_000_000n,
+    );
+
+    // Fractional case that requires ceiling.
+    expect(computeUsdcInputAtomic(1n, 6, 1.234_567_89)).toBe(2n);
   });
 });

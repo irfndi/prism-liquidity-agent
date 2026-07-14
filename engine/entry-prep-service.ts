@@ -7,13 +7,22 @@ import { BN } from "@coral-xyz/anchor";
 
 const logger = createLogger("entry-prep-service");
 const SOL_MINT = "So11111111111111111111111111111111111111112";
-const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const USDC_DECIMALS = 6;
 const GAS_RESERVE_LAMPORTS = 20_000_000n;
-const SWAP_INPUT_BUFFER_PCT = 1.01; // 1% buffer to cover fees/slippage
 
 function formatAtomic(amount: bigint, decimals: number): string {
   return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
+}
+
+export function computeUsdcInputAtomic(amount: bigint, decimals: number, price: number): bigint {
+  const priceScale = 12;
+  // Scale the floating price to a fixed-point integer without converting `amount` to Number.
+  const priceScaled = BigInt(price.toFixed(priceScale).replace(".", ""));
+  const numerator = amount * priceScaled * 10n ** BigInt(USDC_DECIMALS) * 101n; // 1% buffer as 101/100
+  const denominator = 10n ** BigInt(decimals) * 100n * 10n ** BigInt(priceScale);
+  const quotient = numerator / denominator;
+  const remainder = numerator % denominator;
+  return remainder === 0n ? quotient : quotient + 1n;
 }
 
 function makePrepError(
@@ -131,7 +140,7 @@ export const EntryPrepLive = Layer.effect(
               .pipe(
                 Effect.mapError((err) =>
                   makePrepError(
-                    "INSUFFICIENT_BALANCE_AFTER_SWAP",
+                    "BALANCE_READ_FAILED",
                     `Failed to read balance for ${mint}: ${String(err)}`,
                     poolAddress,
                     err,
@@ -194,12 +203,10 @@ export const EntryPrepLive = Layer.effect(
           });
 
           for (const deficit of deficits) {
-            const usdcInputAtomic = BigInt(
-              Math.ceil(
-                ((Number(deficit.amount) * deficit.price * 10 ** USDC_DECIMALS) /
-                  10 ** deficit.decimals) *
-                  SWAP_INPUT_BUFFER_PCT,
-              ),
+            const usdcInputAtomic = computeUsdcInputAtomic(
+              deficit.amount,
+              deficit.decimals,
+              deficit.price,
             );
 
             if (usdcInputAtomic <= 0n) {

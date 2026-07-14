@@ -49,6 +49,7 @@ export class EntryPrepError extends Data.TaggedError("EntryPrepError")<{
     | "SWAP_QUOTE_FAILED"
     | "SWAP_TRANSACTION_FAILED"
     | "INSUFFICIENT_BALANCE_AFTER_SWAP"
+    | "BALANCE_READ_FAILED"
     | "NO_WALLET";
   readonly message: string;
   readonly poolAddress?: string;
