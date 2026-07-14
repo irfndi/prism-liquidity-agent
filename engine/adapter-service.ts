@@ -915,6 +915,7 @@ export const AdapterLive = Layer.effect(
     function swapUSDCForToken(
       outputMint: string,
       amountAtomic: bigint,
+      prefetchedQuote?: Record<string, unknown>,
     ): Effect.Effect<string, unknown> {
       return Effect.gen(function* () {
         const activeWallet = wallet;
@@ -929,7 +930,8 @@ export const AdapterLive = Layer.effect(
         const headers: Record<string, string> = { "Content-Type": "application/json" };
         if (jupiterApiKey) headers["x-api-key"] = jupiterApiKey;
 
-        const quoteData = yield* quoteSwapUSDCForToken(outputMint, amountAtomic);
+        const quoteData =
+          prefetchedQuote ?? (yield* quoteSwapUSDCForToken(outputMint, amountAtomic));
 
         const swapResponse = yield* Effect.tryPromise(() =>
           fetch("https://api.jup.ag/swap/v1/swap", {
@@ -1752,8 +1754,12 @@ export const AdapterLive = Layer.effect(
           ),
         ),
 
-      swapUSDCForToken: (outputMint: string, amountAtomic: bigint) =>
-        swapUSDCForToken(outputMint, amountAtomic).pipe(
+      swapUSDCForToken: (
+        outputMint: string,
+        amountAtomic: bigint,
+        quoteData?: Record<string, unknown>,
+      ) =>
+        swapUSDCForToken(outputMint, amountAtomic, quoteData).pipe(
           Effect.catchAll((err) =>
             Effect.fail(
               new AdapterError({

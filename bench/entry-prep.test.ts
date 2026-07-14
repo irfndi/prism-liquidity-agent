@@ -155,7 +155,42 @@ describe("EntryPrepService", () => {
     );
 
     expect(swapSpy).toHaveBeenCalledTimes(1);
-    expect(swapSpy).toHaveBeenCalledWith(TOKEN_Y, expect.any(BigInt));
+    expect(swapSpy).toHaveBeenCalledWith(TOKEN_Y, expect.any(BigInt), expect.anything());
+  });
+
+  it("reuses the preflighted quote when executing swaps", async () => {
+    let solBalance = 10_000_000_000n;
+    const tokenBalances: Record<string, bigint> = { [TOKEN_Y]: 0n };
+    const quote = { routePlan: [{ swapInfo: {} }], outAmount: "10000000000000" };
+    const swapSpy = vi.fn((mint: string, _amount: bigint, quoteData?: Record<string, unknown>) => {
+      if (mint === SOL_MINT) {
+        solBalance = 10_000_000_000n;
+      } else {
+        tokenBalances[mint] = 10_000_000_000n;
+      }
+      expect(quoteData).toBe(quote);
+      return Effect.succeed("mock-swap-tx");
+    });
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(solBalance),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : (tokenBalances[mint] ?? 0n)),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        quoteSwapUSDCForToken: () => Effect.succeed(quote),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const prep = yield* EntryPrepService;
+        return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(swapSpy).toHaveBeenCalledTimes(1);
   });
 
   it("swaps USDC for both missing legs", async () => {
@@ -278,6 +313,53 @@ describe("EntryPrepService", () => {
 
     expect(quoteSpy).not.toHaveBeenCalled();
     expect(swapSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not reserve gas top-up when native SOL is already above the threshold", async () => {
+    const OTHER_TOKEN = "OtherToken1111111111111111111111111111111";
+    const tokenBalances: Record<string, bigint> = {};
+    const swapSpy = vi.fn((mint: string) => {
+      tokenBalances[mint] = 1_000_000_000n;
+      return Effect.succeed("mock-swap-tx");
+    });
+    // Non-SOL pool with exactly enough USDC for the two token swaps and no
+    // gas top-up, because native SOL already exceeds the 0.05 SOL threshold.
+    const layer = buildLayer(
+      {
+        getPoolState: () =>
+          Effect.succeed({
+            address: POOL_ADDRESS,
+            tokenX: TOKEN_Y,
+            tokenY: OTHER_TOKEN,
+            tokenXSymbol: "FAKE",
+            tokenYSymbol: "OTHER",
+            tvlUsd: 100_000,
+            volume24hUsd: 30_000,
+            fees24hUsd: 300,
+            apr: 60,
+            activeBinId: 5000,
+            binStep: 10,
+            currentPrice: 1,
+            timestamp: Date.now(),
+          }),
+        getNativeSolBalance: () => Effect.succeed(100_000_000n),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 1_010_000_000n : (tokenBalances[mint] ?? 0n)),
+        getTokenPrices: () => Effect.succeed({ [TOKEN_Y]: 1, [OTHER_TOKEN]: 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const prep = yield* EntryPrepService;
+        return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(swapSpy).toHaveBeenCalledTimes(2);
   });
 
   it("fails with SWAP_QUOTE_FAILED when Jupiter quote fails", async () => {
@@ -640,10 +722,10 @@ describe("EntryPrepService", () => {
       }).pipe(Effect.provide(layer)),
     );
 
-    expect(swapSpy).toHaveBeenCalledWith(SOL_MINT, expect.any(BigInt));
+    expect(swapSpy).toHaveBeenCalledWith(SOL_MINT, expect.any(BigInt), expect.anything());
   });
 
-  it("does not read native SOL balance for pools without a SOL leg", async () => {
+  it("reads native SOL for the gas top-up decision even when the pool has no SOL leg", async () => {
     const OTHER_TOKEN = "OtherToken1111111111111111111111111111111";
     const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
     const layer = buildLayer(
@@ -664,7 +746,7 @@ describe("EntryPrepService", () => {
             currentPrice: 1,
             timestamp: Date.now(),
           }),
-        getNativeSolBalance: () => Effect.fail(new Error("RPC down")),
+        getNativeSolBalance: () => Effect.succeed(100_000_000n),
         getTokenBalance: (mint: string) =>
           Effect.succeed(mint === TOKEN_Y || mint === OTHER_TOKEN ? 10_000_000_000n : 0n),
         getTokenPrices: () => Effect.succeed({ [TOKEN_Y]: 1, [OTHER_TOKEN]: 1 }),

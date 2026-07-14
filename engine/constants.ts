@@ -14,3 +14,7 @@ export const SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS = 50_000_000n;
 // native balance is below the threshold. Must be kept in sync with the value
 // passed to `adapter.swapUSDCForSOL` in `program.ts`.
 export const GAS_TOP_UP_USDC = 2;
+
+// Native SOL threshold below which `swapUSDCForSOL` performs a gas top-up
+// (0.05 SOL). Must stay in sync with the minSolThreshold passed from `program.ts`.
+export const SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS = 50_000_000n;

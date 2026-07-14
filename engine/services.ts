@@ -158,6 +158,7 @@ export interface AdapterApi {
   readonly swapUSDCForToken: (
     outputMint: string,
     amountAtomic: bigint,
+    quoteData?: Record<string, unknown>,
   ) => Effect.Effect<string, unknown>;
 }
 

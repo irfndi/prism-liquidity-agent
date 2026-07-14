@@ -9,6 +9,7 @@ import {
   GAS_RESERVE_LAMPORTS,
   SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS,
   GAS_TOP_UP_USDC,
+  SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
 } from "./constants.js";
 
 const logger = createLogger("entry-prep-service");
@@ -218,7 +219,7 @@ export const EntryPrepLive = Layer.effect(
               );
 
           const poolNeedsSol = pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT;
-          const nativeSolLamports = poolNeedsSol ? yield* readNativeSolBalance() : 0n;
+          const nativeSolLamports = yield* readNativeSolBalance();
 
           const balanceX =
             pool.tokenX === SOL_MINT ? nativeSolLamports : yield* readTokenBalance(pool.tokenX);
@@ -294,14 +295,18 @@ export const EntryPrepLive = Layer.effect(
           const requiredUsdcPoolLeg =
             (pool.tokenX === USDC_MINT ? requiredX : 0n) +
             (pool.tokenY === USDC_MINT ? requiredY : 0n);
-          const gasTopUpAtomic = BigInt(GAS_TOP_UP_USDC) * 10n ** BigInt(USDC_DECIMALS);
+          const needsGasTopUp = nativeSolLamports < SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS;
+          const gasTopUpAtomic = needsGasTopUp
+            ? BigInt(GAS_TOP_UP_USDC) * 10n ** BigInt(USDC_DECIMALS)
+            : 0n;
           const totalUsdcRequired = totalUsdcInputAtomic + requiredUsdcPoolLeg + gasTopUpAtomic;
 
           if (usdcBalance < totalUsdcRequired) {
+            const gasNote = needsGasTopUp ? " + gas top-up" : "";
             return yield* Effect.fail(
               makePrepError(
                 "INSUFFICIENT_USDC_BALANCE",
-                `Wallet USDC balance ${formatAtomic(usdcBalance, USDC_DECIMALS)} is less than required ${formatAtomic(totalUsdcRequired, USDC_DECIMALS)} for auto-swap entry (swaps + USDC pool leg + gas top-up)`,
+                `Wallet USDC balance ${formatAtomic(usdcBalance, USDC_DECIMALS)} is less than required ${formatAtomic(totalUsdcRequired, USDC_DECIMALS)} for auto-swap entry (swaps + USDC pool leg${gasNote})`,
                 poolAddress,
               ),
             );
@@ -319,7 +324,7 @@ export const EntryPrepLive = Layer.effect(
           // Preflight every swap quote before submitting any transaction. This
           // prevents partial preparation where one leg is swapped successfully
           // and then a quote failure on the other leg leaves the wallet altered.
-          yield* Effect.all(
+          const quoteResults = yield* Effect.all(
             deficits.map((deficit) => {
               const usdcInputAtomic = computeUsdcInputAtomic(
                 deficit.amount,
@@ -355,11 +360,14 @@ export const EntryPrepLive = Layer.effect(
                       ),
                     );
                   }
-                  return Effect.succeed(quoteData);
+                  return Effect.succeed({ deficit, quoteData });
                 }),
               );
             }),
             { concurrency: "unbounded" },
+          );
+          const preflightedQuotes = new Map(
+            quoteResults.map(({ deficit, quoteData }) => [deficit.mint, quoteData]),
           );
 
           let swapped = false;
@@ -380,24 +388,27 @@ export const EntryPrepLive = Layer.effect(
               );
             }
 
-            const txSig = yield* adapter.swapUSDCForToken(deficit.mint, usdcInputAtomic).pipe(
-              Effect.mapError((err) => {
-                if (isSwapQuoteError(err)) {
+            const quoteData = preflightedQuotes.get(deficit.mint);
+            const txSig = yield* adapter
+              .swapUSDCForToken(deficit.mint, usdcInputAtomic, quoteData)
+              .pipe(
+                Effect.mapError((err) => {
+                  if (isSwapQuoteError(err)) {
+                    return makePrepError(
+                      "SWAP_QUOTE_FAILED",
+                      `Failed to quote swap USDC -> ${deficit.mint}: ${String(err)}`,
+                      poolAddress,
+                      err,
+                    );
+                  }
                   return makePrepError(
-                    "SWAP_QUOTE_FAILED",
-                    `Failed to quote swap USDC -> ${deficit.mint}: ${String(err)}`,
+                    "SWAP_TRANSACTION_FAILED",
+                    `Failed to swap USDC -> ${deficit.mint}: ${String(err)}`,
                     poolAddress,
                     err,
                   );
-                }
-                return makePrepError(
-                  "SWAP_TRANSACTION_FAILED",
-                  `Failed to swap USDC -> ${deficit.mint}: ${String(err)}`,
-                  poolAddress,
-                  err,
-                );
-              }),
-            );
+                }),
+              );
 
             swapped = true;
             logger.info("Swapped USDC for pool token", {
