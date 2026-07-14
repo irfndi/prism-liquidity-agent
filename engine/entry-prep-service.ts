@@ -84,16 +84,17 @@ function isSwapQuoteError(err: unknown): boolean {
 
 function parseAtomicAmount(value: unknown): bigint | null {
   if (typeof value === "string") {
-    // Jupiter returns atomic amounts as integer strings. Reject empty or
-    // non-integer strings so malformed quotes cannot throw during BigInt conversion.
-    if (!/^-?\d+$/.test(value)) return null;
+    // Jupiter returns atomic amounts as non-negative integer strings. Reject
+    // empty, non-integer, or negative strings so malformed quotes cannot throw
+    // during BigInt conversion.
+    if (!/^\d+$/.test(value)) return null;
     try {
       return BigInt(value);
     } catch {
       return null;
     }
   }
-  if (typeof value === "number" && Number.isFinite(value)) {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
     return BigInt(Math.floor(value));
   }
   return null;
