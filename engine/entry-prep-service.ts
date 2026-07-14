@@ -66,6 +66,13 @@ function isSwapQuoteError(err: unknown): boolean {
   return (cause as { _tag?: string })._tag === "SwapQuoteError";
 }
 
+function quoteOutAmount(quoteData: Record<string, unknown>): bigint {
+  const raw = quoteData.outAmount;
+  if (typeof raw === "string") return BigInt(raw);
+  if (typeof raw === "number") return BigInt(Math.floor(raw));
+  return 0n;
+}
+
 export const EntryPrepLive = Layer.effect(
   EntryPrepService,
   Effect.gen(function* () {
@@ -316,18 +323,29 @@ export const EntryPrepLive = Layer.effect(
                   ),
                 );
               }
-              return adapter
-                .quoteSwapUSDCForToken(deficit.mint, usdcInputAtomic)
-                .pipe(
-                  Effect.mapError((err) =>
-                    makePrepError(
-                      "SWAP_QUOTE_FAILED",
-                      `Failed to quote swap USDC -> ${deficit.mint}: ${String(err)}`,
-                      poolAddress,
-                      err,
-                    ),
+              return adapter.quoteSwapUSDCForToken(deficit.mint, usdcInputAtomic).pipe(
+                Effect.mapError((err) =>
+                  makePrepError(
+                    "SWAP_QUOTE_FAILED",
+                    `Failed to quote swap USDC -> ${deficit.mint}: ${String(err)}`,
+                    poolAddress,
+                    err,
                   ),
-                );
+                ),
+                Effect.flatMap((quoteData) => {
+                  const outAmount = quoteOutAmount(quoteData);
+                  if (outAmount < deficit.amount) {
+                    return Effect.fail(
+                      makePrepError(
+                        "SWAP_QUOTE_FAILED",
+                        `Quoted output for ${deficit.mint} (${formatAtomic(outAmount, deficit.decimals)}) is less than required deficit (${formatAtomic(deficit.amount, deficit.decimals)})`,
+                        poolAddress,
+                      ),
+                    );
+                  }
+                  return Effect.succeed(quoteData);
+                }),
+              );
             }),
             { concurrency: "unbounded" },
           );

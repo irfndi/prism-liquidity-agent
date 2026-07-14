@@ -63,7 +63,8 @@ function makeAdapter(mock: Partial<AdapterApi> = {}): AdapterApi {
     getTokenBalance: (mint: string) => Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
     getTokenPrices: () => Effect.succeed({ [TOKEN_X]: 150, [TOKEN_Y]: 1 }),
     getTokenDecimals: () => Effect.succeed(9),
-    quoteSwapUSDCForToken: () => Effect.succeed({ routePlan: [{ swapInfo: {} }] }),
+    quoteSwapUSDCForToken: () =>
+      Effect.succeed({ routePlan: [{ swapInfo: {} }], outAmount: "10000000000000" }),
     swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
     ...mock,
   };
@@ -248,7 +249,7 @@ describe("EntryPrepService", () => {
           }),
         );
       }
-      return Effect.succeed({ routePlan: [{ swapInfo: {} }] });
+      return Effect.succeed({ routePlan: [{ swapInfo: {} }], outAmount: "10000000000000" });
     });
     const layer = buildLayer(
       {
@@ -613,6 +614,33 @@ describe("EntryPrepService", () => {
         }).pipe(Effect.provide(layer)),
       ),
     ).rejects.toThrow(/INSUFFICIENT_USDC_BALANCE/);
+
+    expect(swapSpy).not.toHaveBeenCalled();
+  });
+
+  it("fails with SWAP_QUOTE_FAILED when quoted output cannot cover the deficit", async () => {
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: (mint: string) =>
+          Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        quoteSwapUSDCForToken: () =>
+          Effect.succeed({ routePlan: [{ swapInfo: {} }], outAmount: "1000" }),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/SWAP_QUOTE_FAILED/);
 
     expect(swapSpy).not.toHaveBeenCalled();
   });

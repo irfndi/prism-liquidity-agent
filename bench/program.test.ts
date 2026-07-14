@@ -100,7 +100,8 @@ describe("executeLive", () => {
       getTokenBalance: () => Effect.succeed(0n),
       getTokenPrices: () => Effect.succeed({}),
       getTokenDecimals: () => Effect.succeed(9),
-      quoteSwapUSDCForToken: () => Effect.succeed({ routePlan: [{ swapInfo: {} }] }),
+      quoteSwapUSDCForToken: () =>
+        Effect.succeed({ routePlan: [{ swapInfo: {} }], outAmount: "10000000000000" }),
       swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
     };
   }
