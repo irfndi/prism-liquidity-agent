@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
 import { EntryPrepService } from "../engine/services.js";
-import { EntryPrepLive, computeUsdcInputAtomic } from "../engine/entry-prep-service.js";
+import {
+  EntryPrepLive,
+  computeRequiredAtomic,
+  computeUsdcInputAtomic,
+} from "../engine/entry-prep-service.js";
 import { AdapterService, type AdapterApi } from "../engine/services.js";
 import { ConfigService } from "../engine/config-service.js";
 import { defaultAppConfig } from "./helpers.js";
@@ -347,5 +351,56 @@ describe("EntryPrepService", () => {
 
     // Fractional case that requires ceiling.
     expect(computeUsdcInputAtomic(1n, 6, 1.234_567_89)).toBe(2n);
+  });
+
+  it("computes required token amounts without unsafe Number conversion", () => {
+    // $0.000001 token with 9 decimals and a $100 position (halfUsd = 50).
+    // The old Number path overflowed / was rejected by BN for this case.
+    expect(computeRequiredAtomic(50, 0.000_001, 9)).toBe(50_000_000_000_000_000n);
+
+    // Spot-check against the original formula for a normal-priced token.
+    // $500 of SOL at $150 with 9 decimals -> floor(500/150 * 10^9) = 3_333_333_333.
+    expect(computeRequiredAtomic(500, 150, 9)).toBe(3_333_333_333n);
+  });
+
+  it("fails without swapping when USDC pool leg leaves insufficient USDC for swaps", async () => {
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    const layer = buildLayer(
+      {
+        getPoolState: () =>
+          Effect.succeed({
+            address: POOL_ADDRESS,
+            tokenX: TOKEN_Y,
+            tokenY: USDC_MINT,
+            tokenXSymbol: "FAKE",
+            tokenYSymbol: "USDC",
+            tvlUsd: 100_000,
+            volume24hUsd: 30_000,
+            fees24hUsd: 300,
+            apr: 60,
+            activeBinId: 5000,
+            binStep: 10,
+            currentPrice: 1,
+            timestamp: Date.now(),
+          }),
+        getNativeSolBalance: () => Effect.succeed(0n),
+        getTokenBalance: (mint: string) => Effect.succeed(mint === USDC_MINT ? 600_000_000n : 0n),
+        getTokenPrices: () => Effect.succeed({ [TOKEN_Y]: 1, [USDC_MINT]: 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/INSUFFICIENT_USDC_BALANCE/);
+
+    expect(swapSpy).not.toHaveBeenCalled();
   });
 });

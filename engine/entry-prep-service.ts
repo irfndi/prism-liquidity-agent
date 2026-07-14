@@ -3,14 +3,28 @@ import { AdapterService, EntryPrepService, type EntryPrepApi } from "./services.
 import { ConfigService } from "./config-service.js";
 import { EntryPrepError } from "./errors.js";
 import { createLogger } from "./logger.js";
-import { BN } from "@coral-xyz/anchor";
 import { SOL_MINT, USDC_MINT, GAS_RESERVE_LAMPORTS } from "./constants.js";
 
 const logger = createLogger("entry-prep-service");
 const USDC_DECIMALS = 6;
+const FIXED_POINT_SCALE = 12;
 
 function formatAtomic(amount: bigint, decimals: number): string {
   return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
+}
+
+function numberToScaledBigInt(value: number): bigint {
+  const sign = value < 0 ? "-" : "";
+  const absValue = Math.abs(value);
+  const [whole, frac = ""] = absValue.toFixed(FIXED_POINT_SCALE).split(".");
+  return BigInt(`${sign}${whole}${frac.padEnd(FIXED_POINT_SCALE, "0")}`);
+}
+
+export function computeRequiredAtomic(halfUsd: number, price: number, decimals: number): bigint {
+  if (halfUsd <= 0 || price <= 0) return 0n;
+  const usdScaled = numberToScaledBigInt(halfUsd);
+  const priceScaled = numberToScaledBigInt(price);
+  return (usdScaled * 10n ** BigInt(decimals)) / priceScaled;
 }
 
 export function computeUsdcInputAtomic(amount: bigint, decimals: number, price: number): bigint {
@@ -126,12 +140,8 @@ export const EntryPrepLive = Layer.effect(
 
           const halfUsd = positionSizeUsd / 2;
 
-          const requiredX = BigInt(
-            new BN(Math.floor((halfUsd / priceX) * 10 ** tokenXDecimals)).toString(),
-          );
-          const requiredY = BigInt(
-            new BN(Math.floor((halfUsd / priceY) * 10 ** tokenYDecimals)).toString(),
-          );
+          const requiredX = computeRequiredAtomic(halfUsd, priceX, tokenXDecimals);
+          const requiredY = computeRequiredAtomic(halfUsd, priceY, tokenYDecimals);
 
           const readTokenBalance = (mint: string) =>
             adapter
@@ -230,11 +240,16 @@ export const EntryPrepLive = Layer.effect(
             0n,
           );
 
-          if (usdcBalance < totalUsdcInputAtomic) {
+          const requiredUsdcPoolLeg =
+            (pool.tokenX === USDC_MINT ? requiredX : 0n) +
+            (pool.tokenY === USDC_MINT ? requiredY : 0n);
+          const totalUsdcRequired = totalUsdcInputAtomic + requiredUsdcPoolLeg;
+
+          if (usdcBalance < totalUsdcRequired) {
             return yield* Effect.fail(
               makePrepError(
                 "INSUFFICIENT_USDC_BALANCE",
-                `Wallet USDC balance ${formatAtomic(usdcBalance, USDC_DECIMALS)} is less than required ${formatAtomic(totalUsdcInputAtomic, USDC_DECIMALS)} for auto-swap entry`,
+                `Wallet USDC balance ${formatAtomic(usdcBalance, USDC_DECIMALS)} is less than required ${formatAtomic(totalUsdcRequired, USDC_DECIMALS)} for auto-swap entry (swaps + USDC pool leg)`,
                 poolAddress,
               ),
             );
