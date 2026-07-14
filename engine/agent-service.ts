@@ -406,14 +406,6 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
                 }
                 return override;
               }),
-              Effect.catchAll((err) => {
-                errorCount += 1;
-                logger.warn("Agent prompt failed", {
-                  pool: decision.poolAddress,
-                  error: String(err),
-                });
-                return Effect.succeed(null);
-              }),
             );
           }
 
