@@ -147,11 +147,19 @@ export class HttpStatusServer {
       return new Response("proposalIds must be an array of strings", { status: 400 });
     }
 
-    for (const proposalId of proposalIds) {
-      await Effect.runPromise(this.state.approveProposal(proposalId as string));
+    const snapshot = await Effect.runPromise(this.state.getSnapshot());
+    const pendingIds = new Set(snapshot.pendingProposals.map((p) => p.proposalId));
+    const ids = proposalIds as string[];
+    const missing = ids.filter((id) => !pendingIds.has(id));
+    if (missing.length > 0) {
+      return Response.json({ error: "Proposal IDs not found", missing }, { status: 404 });
     }
 
-    return Response.json({ approved: proposalIds.length }, { status: 200 });
+    for (const proposalId of ids) {
+      await Effect.runPromise(this.state.approveProposal(proposalId));
+    }
+
+    return Response.json({ approved: ids.length }, { status: 200 });
   }
 
   start(): Effect.Effect<void, unknown> {

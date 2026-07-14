@@ -419,7 +419,34 @@ describe("HttpStatusServer", () => {
     const server = new HttpStatusServer(
       baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
       {
-        ...mockAgentState(baseSnapshot()),
+        ...mockAgentState(
+          baseSnapshot({
+            pendingProposals: [
+              {
+                proposalId: "id-1",
+                action: "HOLD",
+                poolAddress: "PoolA",
+                confidence: 0.8,
+                reasoning: "test",
+                proposedAt: Date.now(),
+                expiresAt: Date.now() + 300_000,
+                source: "http-queue",
+                status: "pending",
+              },
+              {
+                proposalId: "id-2",
+                action: "HOLD",
+                poolAddress: "PoolB",
+                confidence: 0.8,
+                reasoning: "test",
+                proposedAt: Date.now(),
+                expiresAt: Date.now() + 300_000,
+                source: "http-queue",
+                status: "pending",
+              },
+            ],
+          }),
+        ),
         approveProposal: (proposalId: string) =>
           Effect.sync(() => {
             approvedIds.push(proposalId);

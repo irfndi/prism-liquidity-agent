@@ -71,6 +71,7 @@ export class ProposalCircuitBreaker {
   }
 
   getState(): { readonly failures: number; readonly open: boolean } {
-    return { failures: this.failures, open: this.openedAt !== null };
+    const open = this.isOpen(Date.now());
+    return { failures: this.failures, open };
   }
 }

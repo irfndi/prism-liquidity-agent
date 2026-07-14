@@ -309,6 +309,59 @@ describe("McpServer", () => {
     const server = new McpServer(
       baseConfig(),
       mockAgentState({
+        getSnapshot: () =>
+          Effect.succeed({
+            programStartTime: Date.now(),
+            scanCount: 0,
+            lastCycleAt: null,
+            portfolio: {
+              totalValueUsd: 0,
+              unrealizedPnlUsd: 0,
+              realizedPnlUsd: 0,
+              openPositions: 0,
+              maxPositions: 0,
+              walletBalanceUsd: 0,
+            },
+            positions: [],
+            recentDecisions: [],
+            agentPolicy: {
+              mode: "veto",
+              proposalsQueued: 2,
+              lastProposalAt: Date.now(),
+              badProposalBackoffUntil: null,
+              circuitBreakerOpen: false,
+              hardCaps: {
+                maxPositionSizePct: 0.4,
+                maxRebalanceRangeBins: 50,
+                minProposalConfidence: 0.65,
+                proposalStaleMs: 300_000,
+              },
+            },
+            pendingProposals: [
+              {
+                proposalId: "id-1",
+                action: "HOLD",
+                poolAddress: "PoolA",
+                confidence: 0.8,
+                reasoning: "test",
+                proposedAt: Date.now(),
+                expiresAt: Date.now() + 300_000,
+                source: "sync-prompt",
+                status: "pending",
+              },
+              {
+                proposalId: "id-2",
+                action: "HOLD",
+                poolAddress: "PoolB",
+                confidence: 0.8,
+                reasoning: "test",
+                proposedAt: Date.now(),
+                expiresAt: Date.now() + 300_000,
+                source: "sync-prompt",
+                status: "pending",
+              },
+            ],
+          } as never),
         approveProposal: (proposalId: string) =>
           Effect.sync(() => {
             approvedIds.push(proposalId);

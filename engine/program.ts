@@ -1066,7 +1066,9 @@ export const program = Effect.gen(function* () {
           proposalsQueued: snapshot.pendingProposals.length,
           lastProposalAt: snapshot.agentPolicy.lastProposalAt,
           badProposalBackoffUntil,
-          circuitBreakerOpen: proposalCircuitBreaker.isOpen(now),
+          circuitBreakerOpen: Array.from(proposalCircuitBreakers.values()).some((breaker) =>
+            breaker.isOpen(now),
+          ),
           hardCaps: {
             maxPositionSizePct: config.agentProposalMaxPositionSizePct,
             maxRebalanceRangeBins: config.maxRebalanceRangeBins,
@@ -1265,23 +1267,39 @@ export const program = Effect.gen(function* () {
     });
 
   const proposalBackoff = new Map<string, ProposalBackoff>();
-  const proposalCircuitBreaker = new ProposalCircuitBreaker({
-    failureThreshold: config.agentProposalCircuitBreakerThreshold,
-    cooldownMs: config.agentProposalCircuitBreakerCooldownMs,
-  });
+  const proposalCircuitBreakers = new Map<string, ProposalCircuitBreaker>();
+  const getPoolCircuitBreaker = (poolAddress: string): ProposalCircuitBreaker => {
+    let breaker = proposalCircuitBreakers.get(poolAddress);
+    if (!breaker) {
+      breaker = new ProposalCircuitBreaker({
+        failureThreshold: config.agentProposalCircuitBreakerThreshold,
+        cooldownMs: config.agentProposalCircuitBreakerCooldownMs,
+      });
+      proposalCircuitBreakers.set(poolAddress, breaker);
+    }
+    return breaker;
+  };
 
   const findPendingProposal = (
     proposals: ReadonlyArray<AgentProposal>,
     poolAddress: string,
     mode: AgentProposalMode,
     staleMs: number,
-  ): AgentProposal | undefined =>
-    proposals.find((p) => {
-      if (p.poolAddress !== poolAddress) return false;
-      if (isProposalStale(p, staleMs, Date.now())) return false;
-      if (mode === "supervised") return p.status === "approved";
-      return p.status === "pending" || p.status === "approved";
-    });
+    now: number,
+  ): AgentProposal | undefined => {
+    for (let i = proposals.length - 1; i >= 0; i--) {
+      const p = proposals[i];
+      if (!p) continue;
+      if (p.poolAddress !== poolAddress) continue;
+      if (isProposalStale(p, staleMs, now)) continue;
+      if (mode === "supervised") {
+        if (p.status === "approved") return p;
+      } else {
+        if (p.status === "pending" || p.status === "approved") return p;
+      }
+    }
+    return undefined;
+  };
 
   const isAgentProposal = (value: AgentDecision | null): value is AgentProposal =>
     value !== null && "proposalId" in value && "source" in value && "status" in value;
@@ -1948,7 +1966,7 @@ export const program = Effect.gen(function* () {
       const portfolioValueUsd = walletBalanceUsd;
       const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
 
-      if (config.agentiveMode && proposalCircuitBreaker.canTry(Date.now())) {
+      if (config.agentiveMode) {
         const proposalMode = config.agentProposalMode;
 
         if (proposalMode === "veto") {
@@ -1964,98 +1982,153 @@ export const program = Effect.gen(function* () {
             })
             .pipe(Effect.catchAll(() => Effect.succeed(null)));
           if (enhanced) {
-            console.info(
-              `[agentic] ${decision.action} → ${enhanced.action} ` +
-                `(confidence ${decision.confidence.toFixed(2)} → ${enhanced.confidence.toFixed(2)})`,
-            );
+            logger.info("Agent override", {
+              pool: poolAddress,
+              from: decision.action,
+              to: enhanced.action,
+              fromConfidence: decision.confidence.toFixed(2),
+              toConfidence: enhanced.confidence.toFixed(2),
+            });
             decision = enhanced;
           }
         } else {
-          let agentProposal: AgentProposal | null = null;
-          let proposalSource: "queue" | "sync" | undefined;
+          const poolCircuitBreaker = getPoolCircuitBreaker(poolAddress);
+          const now = Date.now();
+          if (!poolCircuitBreaker.canTry(now)) {
+            logger.info("Agent proposal circuit breaker open — skipping", { pool: poolAddress });
+          } else {
+            let agentProposal: AgentProposal | null = null;
+            let proposalSource: "queue" | "sync" | undefined;
+            let syncFetchFailed = false;
 
-          const snapshot = yield* agentState.getSnapshot();
-          const queuedProposal = findPendingProposal(
-            snapshot.pendingProposals,
-            poolAddress,
-            proposalMode,
-            config.agentProposalStaleMs,
-          );
-          if (queuedProposal) {
-            agentProposal = queuedProposal;
-            proposalSource = "queue";
-          }
-
-          if (!agentProposal && proposalMode !== "supervised") {
-            const syncProposal = yield* agent
-              .enhanceDecision(decision, {
-                decision,
-                pool,
-                metrics,
-                warnings,
-                recentDecisions: yield* audit
-                  .getRecentDecisions(10)
-                  .pipe(Effect.catchAll(() => Effect.succeed([]))),
-              })
-              .pipe(Effect.catchAll(() => Effect.succeed(null)));
-            if (syncProposal && isAgentProposal(syncProposal)) {
-              agentProposal = syncProposal;
-              proposalSource = "sync";
+            const snapshot = yield* agentState.getSnapshot();
+            const queuedProposal = findPendingProposal(
+              snapshot.pendingProposals,
+              poolAddress,
+              proposalMode,
+              config.agentProposalStaleMs,
+              now,
+            );
+            if (queuedProposal) {
+              agentProposal = queuedProposal;
+              proposalSource = "queue";
             }
-          }
 
-          if (agentProposal) {
-            const now = Date.now();
-            const poolBackoff = proposalBackoff.get(poolAddress);
-            if (isProposalBackoffActive(poolBackoff, now)) {
-              console.info(`[agent-proposal] ${poolAddress} skipped — backoff active`);
-            } else {
-              const proposalToEvaluate = {
-                ...agentProposal,
-                originalAction: decision.action,
-              };
-              const validation = evaluateAgentProposal(
-                proposalToEvaluate,
-                {
-                  openPositions,
-                  portfolioValueUsd,
-                  recentPnlUsd,
-                  poolAddress,
-                },
-                config,
-              );
-              if (validation.valid && validation.adjustedDecision) {
-                console.info(
-                  `[agent-proposal] ${proposalSource} ${decision.action} → ${validation.adjustedDecision.action} ` +
-                    `(confidence ${decision.confidence.toFixed(2)} → ${validation.adjustedDecision.confidence.toFixed(2)})`,
-                );
-                decision = validation.adjustedDecision;
-                proposalBackoff.delete(poolAddress);
-                proposalCircuitBreaker.recordSuccess();
-
-                if (proposalSource === "queue" && agentProposal.proposalId) {
-                  yield* agentState
-                    .dequeueProposals([agentProposal.proposalId])
-                    .pipe(Effect.catchAll(() => Effect.void));
-                }
-              } else {
-                console.warn(`[agent-proposal] ${proposalSource} rejected: ${validation.reason}`);
-                proposalBackoff.set(
-                  poolAddress,
-                  nextProposalBackoff(poolBackoff, now, {
-                    baseMs: config.agentProposalBackoffBaseMs,
-                    maxMs: config.agentProposalBackoffMaxMs,
+            if (!agentProposal && proposalMode !== "supervised") {
+              const syncProposal = yield* agent
+                .enhanceDecision(decision, {
+                  decision,
+                  pool,
+                  metrics,
+                  warnings,
+                  recentDecisions: yield* audit
+                    .getRecentDecisions(10)
+                    .pipe(Effect.catchAll(() => Effect.succeed([]))),
+                })
+                .pipe(
+                  Effect.catchAll((err) => {
+                    syncFetchFailed = true;
+                    logger.warn("Agent proposal fetch failed", {
+                      pool: poolAddress,
+                      error: String(err),
+                    });
+                    return Effect.succeed(null);
                   }),
                 );
-                proposalCircuitBreaker.recordFailure(now);
-                yield* memory
-                  .upsert({
-                    category: "warning",
-                    content: `Agent proposal rejected for ${poolAddress}: ${validation.reason}`,
-                    poolAddress,
-                  })
-                  .pipe(Effect.catchAll(() => Effect.void));
+              if (syncProposal && isAgentProposal(syncProposal)) {
+                agentProposal = syncProposal;
+                proposalSource = "sync";
+              } else if (syncProposal === null) {
+                syncFetchFailed = true;
               }
+            }
+
+            if (agentProposal) {
+              const poolBackoff = proposalBackoff.get(poolAddress);
+              if (isProposalBackoffActive(poolBackoff, now)) {
+                logger.info("Agent proposal skipped — backoff active", { pool: poolAddress });
+              } else {
+                const proposalToEvaluate = {
+                  ...agentProposal,
+                  originalAction: decision.action,
+                };
+                const validation = evaluateAgentProposal(
+                  proposalToEvaluate,
+                  {
+                    openPositions,
+                    portfolioValueUsd,
+                    recentPnlUsd,
+                    poolAddress,
+                  },
+                  config,
+                );
+                if (validation.valid && validation.adjustedDecision) {
+                  logger.info("Agent proposal applied", {
+                    source: proposalSource,
+                    pool: poolAddress,
+                    from: decision.action,
+                    to: validation.adjustedDecision.action,
+                  });
+                  decision = validation.adjustedDecision;
+                  proposalBackoff.delete(poolAddress);
+                  poolCircuitBreaker.recordSuccess();
+
+                  if (proposalSource === "queue" && agentProposal.proposalId) {
+                    yield* agentState
+                      .dequeueProposals([agentProposal.proposalId])
+                      .pipe(Effect.catchAll(() => Effect.void));
+                  }
+                  yield* agentState
+                    .setAgentPolicy({ lastProposalAt: now })
+                    .pipe(Effect.catchAll(() => Effect.void));
+                } else {
+                  logger.warn("Agent proposal rejected", {
+                    source: proposalSource,
+                    pool: poolAddress,
+                    reason: validation.reason,
+                  });
+                  proposalBackoff.set(
+                    poolAddress,
+                    nextProposalBackoff(poolBackoff, now, {
+                      baseMs: config.agentProposalBackoffBaseMs,
+                      maxMs: config.agentProposalBackoffMaxMs,
+                    }),
+                  );
+                  yield* memory
+                    .upsert({
+                      category: "warning",
+                      content: `Agent proposal rejected for ${poolAddress}: ${validation.reason}`,
+                      poolAddress,
+                    })
+                    .pipe(Effect.catchAll(() => Effect.void));
+
+                  if (proposalSource === "queue" && agentProposal.proposalId) {
+                    yield* agentState
+                      .dequeueProposals([agentProposal.proposalId])
+                      .pipe(Effect.catchAll(() => Effect.void));
+                  }
+                  yield* agentState
+                    .setAgentPolicy({ lastProposalAt: now })
+                    .pipe(Effect.catchAll(() => Effect.void));
+                }
+              }
+            } else if (syncFetchFailed) {
+              logger.warn("Agent proposal fetch failed — recording backoff", { pool: poolAddress });
+              proposalBackoff.set(
+                poolAddress,
+                nextProposalBackoff(proposalBackoff.get(poolAddress), now, {
+                  baseMs: config.agentProposalBackoffBaseMs,
+                  maxMs: config.agentProposalBackoffMaxMs,
+                }),
+              );
+              poolCircuitBreaker.recordFailure(now);
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Agent proposal fetch failed for ${poolAddress}`,
+                  poolAddress,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
             }
           }
         }

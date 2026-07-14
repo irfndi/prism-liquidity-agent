@@ -216,6 +216,12 @@ export class McpServer {
         if (proposalIds.length === 0) {
           throw new Error("proposalIds must be a non-empty array of strings");
         }
+        const snapshot = await Effect.runPromise(this.state.getSnapshot());
+        const pendingIds = new Set(snapshot.pendingProposals.map((p) => p.proposalId));
+        const missing = proposalIds.filter((id) => !pendingIds.has(id));
+        if (missing.length > 0) {
+          throw new Error(`Proposal IDs not found: ${missing.join(", ")}`);
+        }
         for (const proposalId of proposalIds) {
           await Effect.runPromise(this.state.approveProposal(proposalId));
         }
