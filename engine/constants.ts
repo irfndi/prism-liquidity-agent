@@ -9,3 +9,8 @@ export const GAS_RESERVE_LAMPORTS = 20_000_000n;
 // is acquired when auto-swapping USDC into the SOL leg so enterPosition's
 // transaction-balance check does not fail after the swap.
 export const SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS = 50_000_000n;
+
+// Amount of USDC the live-entry gas top-up swaps for SOL when the wallet's
+// native balance is below the threshold. Must be kept in sync with the value
+// passed to `adapter.swapUSDCForSOL` in `program.ts`.
+export const GAS_TOP_UP_USDC = 2;

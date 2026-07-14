@@ -212,6 +212,39 @@ describe("EntryPrepService", () => {
     ).rejects.toThrow(/INSUFFICIENT_BALANCE_AFTER_SWAP/);
   });
 
+  it("reserves the SOL gas top-up in the USDC budget", async () => {
+    const quoteSpy = vi
+      .fn()
+      .mockReturnValue(
+        Effect.succeed({ routePlan: [{ swapInfo: {} }], outAmount: "10000000000000" }),
+      );
+    const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
+    // Wallet has exactly enough USDC for the two token swaps, but not the
+    // additional 2 USDC gas top-up that executeLive performs before entry.
+    const layer = buildLayer(
+      {
+        getNativeSolBalance: () => Effect.succeed(0n),
+        getTokenBalance: (mint: string) => Effect.succeed(mint === USDC_MINT ? 1_017_575_000n : 0n),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === TOKEN_X ? 9 : 6),
+        quoteSwapUSDCForToken: quoteSpy,
+        swapUSDCForToken: swapSpy,
+      },
+      true,
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/INSUFFICIENT_USDC_BALANCE/);
+
+    expect(quoteSpy).not.toHaveBeenCalled();
+    expect(swapSpy).not.toHaveBeenCalled();
+  });
+
   it("fails with SWAP_QUOTE_FAILED when Jupiter quote fails", async () => {
     const layer = buildLayer(
       {

@@ -8,6 +8,7 @@ import {
   USDC_MINT,
   GAS_RESERVE_LAMPORTS,
   SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS,
+  GAS_TOP_UP_USDC,
 } from "./constants.js";
 
 const logger = createLogger("entry-prep-service");
@@ -282,13 +283,14 @@ export const EntryPrepLive = Layer.effect(
           const requiredUsdcPoolLeg =
             (pool.tokenX === USDC_MINT ? requiredX : 0n) +
             (pool.tokenY === USDC_MINT ? requiredY : 0n);
-          const totalUsdcRequired = totalUsdcInputAtomic + requiredUsdcPoolLeg;
+          const gasTopUpAtomic = BigInt(GAS_TOP_UP_USDC) * 10n ** BigInt(USDC_DECIMALS);
+          const totalUsdcRequired = totalUsdcInputAtomic + requiredUsdcPoolLeg + gasTopUpAtomic;
 
           if (usdcBalance < totalUsdcRequired) {
             return yield* Effect.fail(
               makePrepError(
                 "INSUFFICIENT_USDC_BALANCE",
-                `Wallet USDC balance ${formatAtomic(usdcBalance, USDC_DECIMALS)} is less than required ${formatAtomic(totalUsdcRequired, USDC_DECIMALS)} for auto-swap entry (swaps + USDC pool leg)`,
+                `Wallet USDC balance ${formatAtomic(usdcBalance, USDC_DECIMALS)} is less than required ${formatAtomic(totalUsdcRequired, USDC_DECIMALS)} for auto-swap entry (swaps + USDC pool leg + gas top-up)`,
                 poolAddress,
               ),
             );

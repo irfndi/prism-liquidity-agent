@@ -38,6 +38,7 @@ import { shouldDiscoverPools } from "./pool-policy.js";
 import { checkForAutoUpdate } from "./update-check.js";
 import type { PositionRecord } from "./db-service.js";
 import { DiscoverPoolsError } from "./errors.js";
+import { GAS_TOP_UP_USDC } from "./constants.js";
 import {
   AdapterService,
   StrategyService,
@@ -428,7 +429,7 @@ export function executeLive(
     // live mode honors maxOpenPositions.
 
     if (decision.action === "ENTER") {
-      yield* adapter.swapUSDCForSOL(0.05, 2.0).pipe(Effect.catchAll(() => Effect.void));
+      yield* adapter.swapUSDCForSOL(0.05, GAS_TOP_UP_USDC).pipe(Effect.catchAll(() => Effect.void));
 
       const nativeBalance = yield* adapter.getNativeSolBalance().pipe(
         Effect.map((lamports) => ({ value: lamports, error: undefined as string | undefined })),
