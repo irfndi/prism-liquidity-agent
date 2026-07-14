@@ -184,6 +184,16 @@ export function evaluateAgentProposal(
     return { valid: false, reason: "REBALANCE proposals must include rebalanceParams" };
   }
 
+  if (proposal.action === "REBALANCE") {
+    const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
+    if (!hasPosition) {
+      return {
+        valid: false,
+        reason: `Cannot REBALANCE pool ${proposal.poolAddress} — no open position`,
+      };
+    }
+  }
+
   if (proposal.positionSizeUsd !== undefined) {
     if (proposal.positionSizeUsd < 0) {
       return { valid: false, reason: "positionSizeUsd cannot be negative" };

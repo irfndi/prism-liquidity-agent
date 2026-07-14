@@ -206,11 +206,41 @@ describe("evaluateAgentProposal", () => {
         poolAddress: "pool1",
         rebalanceParams: { newLowerBinId: 100, newUpperBinId: 50, slippageBps: 0 },
       }),
-      makeContext(),
+      makeContext({
+        openPositions: [
+          {
+            id: "pos-1",
+            poolAddress: "pool1",
+            poolName: "SOL/USDC",
+            lowerBinId: 4980,
+            upperBinId: 5020,
+            liquidityShares: 0n,
+            depositedUsd: 1_000,
+            currentValueUsd: 1_000,
+            unrealizedPnlUsd: 0,
+            feesEarnedUsd: 0,
+            openedAt: Date.now(),
+          },
+        ],
+      }),
       makeConfig(),
     );
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/Invalid rebalance range/);
+  });
+
+  it("rejects REBALANCE when no position is open for the pool", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "REBALANCE",
+        poolAddress: "pool1",
+        rebalanceParams: { newLowerBinId: 100, newUpperBinId: 110, slippageBps: 0 },
+      }),
+      makeContext({ openPositions: [] }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/no open position/);
   });
 
   it("rejects a proposal targeting a different pool", () => {

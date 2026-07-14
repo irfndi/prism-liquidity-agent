@@ -326,31 +326,88 @@ describe("RiskEngine", () => {
     });
 
     it("rejects an inverted rebalance range", () => {
+      const positions: ReadonlyArray<Position> = [
+        {
+          id: "pos-1",
+          poolAddress: "TestPool111111111111111111111111111111111111",
+          poolName: "Test",
+          lowerBinId: 4990,
+          upperBinId: 5010,
+          liquidityShares: 1000n,
+          depositedUsd: 1000,
+          currentValueUsd: 1000,
+          unrealizedPnlUsd: 0,
+          feesEarnedUsd: 0,
+          openedAt: Date.now(),
+        },
+      ];
       const proposal = makeProposal({
         action: "REBALANCE",
         rebalanceParams: { newLowerBinId: 5010, newUpperBinId: 4990, slippageBps: 50 },
       });
-      const result = evaluateAgentProposal(proposal, makeContext(), appConfig);
+      const result = evaluateAgentProposal(
+        proposal,
+        makeContext({ openPositions: positions }),
+        appConfig,
+      );
       expect(result.valid).toBe(false);
       expect(result.reason).toContain("Invalid rebalance range");
     });
 
     it("rejects an overly wide rebalance range", () => {
+      const positions: ReadonlyArray<Position> = [
+        {
+          id: "pos-1",
+          poolAddress: "TestPool111111111111111111111111111111111111",
+          poolName: "Test",
+          lowerBinId: 4990,
+          upperBinId: 5010,
+          liquidityShares: 1000n,
+          depositedUsd: 1000,
+          currentValueUsd: 1000,
+          unrealizedPnlUsd: 0,
+          feesEarnedUsd: 0,
+          openedAt: Date.now(),
+        },
+      ];
       const proposal = makeProposal({
         action: "REBALANCE",
         rebalanceParams: { newLowerBinId: 4900, newUpperBinId: 5050, slippageBps: 50 },
       });
-      const result = evaluateAgentProposal(proposal, makeContext(), appConfig);
+      const result = evaluateAgentProposal(
+        proposal,
+        makeContext({ openPositions: positions }),
+        appConfig,
+      );
       expect(result.valid).toBe(false);
       expect(result.reason).toContain("exceeds max");
     });
 
     it("approves a valid rebalance range", () => {
+      const positions: ReadonlyArray<Position> = [
+        {
+          id: "pos-1",
+          poolAddress: "TestPool111111111111111111111111111111111111",
+          poolName: "Test",
+          lowerBinId: 4990,
+          upperBinId: 5010,
+          liquidityShares: 1000n,
+          depositedUsd: 1000,
+          currentValueUsd: 1000,
+          unrealizedPnlUsd: 0,
+          feesEarnedUsd: 0,
+          openedAt: Date.now(),
+        },
+      ];
       const proposal = makeProposal({
         action: "REBALANCE",
         rebalanceParams: { newLowerBinId: 4985, newUpperBinId: 5015, slippageBps: 50 },
       });
-      const result = evaluateAgentProposal(proposal, makeContext(), appConfig);
+      const result = evaluateAgentProposal(
+        proposal,
+        makeContext({ openPositions: positions }),
+        appConfig,
+      );
       expect(result.valid).toBe(true);
       expect(result.adjustedDecision?.rebalanceParams).toBeDefined();
     });
