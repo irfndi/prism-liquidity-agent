@@ -175,8 +175,12 @@ export function evaluateAgentProposal(
   }
 
   if (proposal.action === "ENTER") {
-    if (proposal.positionSizeUsd !== undefined && proposal.positionSizeUsd <= 0) {
-      return { valid: false, reason: "positionSizeUsd must be positive for ENTER" };
+    if (
+      proposal.positionSizeUsd === undefined ||
+      !Number.isFinite(proposal.positionSizeUsd) ||
+      proposal.positionSizeUsd <= 0
+    ) {
+      return { valid: false, reason: "positionSizeUsd must be a positive finite number for ENTER" };
     }
   }
 
@@ -194,8 +198,8 @@ export function evaluateAgentProposal(
   }
 
   if (proposal.positionSizeUsd !== undefined) {
-    if (proposal.positionSizeUsd < 0) {
-      return { valid: false, reason: "positionSizeUsd cannot be negative" };
+    if (!Number.isFinite(proposal.positionSizeUsd) || proposal.positionSizeUsd < 0) {
+      return { valid: false, reason: "positionSizeUsd must be a finite non-negative number" };
     }
 
     const agentMaxSizeUsd = ctx.portfolioValueUsd * config.agentProposalMaxPositionSizePct;

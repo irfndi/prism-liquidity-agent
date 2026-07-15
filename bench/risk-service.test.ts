@@ -299,6 +299,16 @@ describe("evaluateAgentProposal", () => {
     expect(result.reason).toMatch(/positive/);
   });
 
+  it("rejects ENTER with NaN positionSizeUsd", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "ENTER", poolAddress: "pool1", positionSizeUsd: NaN }),
+      makeContext({ openPositions: [] }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/positionSizeUsd/);
+  });
+
   it("approves ENTER when the pool is not already held", () => {
     const result = evaluateAgentProposal(
       makeProposal({ action: "ENTER", poolAddress: "pool1", positionSizeUsd: 1_000 }),
