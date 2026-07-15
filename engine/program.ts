@@ -78,6 +78,7 @@ import type {
   PoolState,
   Position,
   SignalWeights,
+  ActionType,
 } from "./types.js";
 import type { AgentRuntimeAlert, AgentRuntimeCheckin } from "./agent-transport.js";
 import { randomUUID } from "crypto";
@@ -99,6 +100,21 @@ const logger = createLogger("program");
 
 export function isProposalStale(proposal: AgentProposal, staleMs: number, now: number): boolean {
   return now > proposal.proposedAt + staleMs || now > proposal.expiresAt;
+}
+
+export function shouldDequeueQueuedProposal(
+  proposalSource: "queue" | "sync" | undefined,
+  proposalApplied: boolean,
+  agentProposal: AgentProposal | null,
+  executed: boolean,
+  action: ActionType,
+): boolean {
+  return (
+    proposalSource === "queue" &&
+    proposalApplied &&
+    agentProposal?.proposalId !== undefined &&
+    (executed || action === "HOLD")
+  );
 }
 
 // ─── Position value estimation (rough heuristic) ───────────────
@@ -1319,6 +1335,7 @@ export const program = Effect.gen(function* () {
       const cycleId = cycle.cycleId;
       let agentProposal: AgentProposal | null = null;
       let proposalSource: "queue" | "sync" | undefined;
+      let proposalApplied = false;
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, pool.activeBinId);
@@ -2140,6 +2157,7 @@ export const program = Effect.gen(function* () {
                     });
                     const originalAction = decision.action;
                     decision = validation.adjustedDecision;
+                    proposalApplied = true;
                     proposalBackoff.delete(poolAddress);
                     poolCircuitBreaker.recordSuccess();
                   }
@@ -2389,7 +2407,16 @@ export const program = Effect.gen(function* () {
         entryFailureBackoff.delete(poolAddress);
       }
 
-      if (executed && proposalSource === "queue" && agentProposal?.proposalId) {
+      if (
+        shouldDequeueQueuedProposal(
+          proposalSource,
+          proposalApplied,
+          agentProposal,
+          executed,
+          decision.action,
+        ) &&
+        agentProposal
+      ) {
         yield* agentState
           .dequeueProposals([agentProposal.proposalId])
           .pipe(Effect.catchAll(() => Effect.void));

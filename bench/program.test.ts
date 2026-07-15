@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { Effect } from "effect";
-import { buildLayer, estimatePositionValue, executeLive, isProposalStale } from "../engine/program.js";
+import { buildLayer, estimatePositionValue, executeLive, isProposalStale, shouldDequeueQueuedProposal } from "../engine/program.js";
 import { ConfigService } from "../engine/config-service.js";
 import { EntryPrepError } from "../engine/errors.js";
 import {
@@ -397,5 +397,42 @@ describe("isProposalStale", () => {
     const now = 1500;
     const proposal = makeProposal(0, 1000);
     expect(isProposalStale(proposal, 10_000, now)).toBe(true);
+  });
+});
+
+describe("shouldDequeueQueuedProposal", () => {
+  function makeProposal(): import("../engine/types.js").AgentProposal {
+    return {
+      proposalId: "p-1",
+      source: "http-queue" as const,
+      originalAction: "HOLD" as const,
+      action: "HOLD" as const,
+      poolAddress: "pool1",
+      confidence: 0.8,
+      reasoning: "test",
+      proposedAt: 0,
+      expiresAt: 10_000,
+      status: "pending" as const,
+    };
+  }
+
+  it("dequeues a queued proposal when it was applied and execution succeeded", () => {
+    expect(shouldDequeueQueuedProposal("queue", true, makeProposal(), true, "ENTER")).toBe(true);
+  });
+
+  it("dequeues a queued HOLD proposal even though HOLD is not executed", () => {
+    expect(shouldDequeueQueuedProposal("queue", true, makeProposal(), false, "HOLD")).toBe(true);
+  });
+
+  it("does not dequeue a queued proposal that was rejected", () => {
+    expect(shouldDequeueQueuedProposal("queue", false, makeProposal(), false, "HOLD")).toBe(false);
+  });
+
+  it("does not dequeue a sync proposal", () => {
+    expect(shouldDequeueQueuedProposal("sync", true, makeProposal(), true, "HOLD")).toBe(false);
+  });
+
+  it("does not dequeue when execution fails for a non-HOLD action", () => {
+    expect(shouldDequeueQueuedProposal("queue", true, makeProposal(), false, "ENTER")).toBe(false);
   });
 });
