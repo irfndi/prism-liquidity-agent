@@ -49,6 +49,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     tokenBlacklistPath: "",
     sqliteDbPath: ":memory:",
     enableSnapshotCapture: false,
+    autoSwapEntry: false,
     autoUpdate: true,
     updateCheckIntervalMs: 86_400_000,
     updateChannel: "stable",
