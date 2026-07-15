@@ -278,13 +278,15 @@ export class AcpTransport implements AgentRuntimeTransport {
   ): Effect.Effect<string, unknown> {
     return Effect.async((resume) => {
       this.sessionText = "";
+      let timer: ReturnType<typeof setTimeout>;
       this.sessionTextResolve = (text: string) => {
         this.sessionTextResolve = undefined;
+        clearTimeout(timer);
         resume(Effect.succeed(text));
       };
 
       const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         this.sessionTextResolve = undefined;
         resume(Effect.fail(new Error(`ACP prompt timeout for ${poolAddress}`)));
       }, effectiveTimeout);

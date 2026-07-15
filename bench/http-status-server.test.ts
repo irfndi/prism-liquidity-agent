@@ -82,6 +82,7 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     agentMcpEnabled: true,
     agentProposalMode: "veto",
     agentProposalToken: "",
+    agentApprovalToken: "",
     agentProposalTimeoutMs: 15_000,
     agentProposalMaxBatchSize: 10,
     agentProposalStaleMs: 300_000,
@@ -529,6 +530,67 @@ describe("HttpStatusServer", () => {
         body: JSON.stringify({ proposalIds: ["id-1", "id-2", "id-3"] }),
       });
       expect(response.status).toBe(413);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("requires a separate approval token for /approve when configured", async () => {
+    const port = 18_788;
+    const approvedIds: string[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "proposal-token",
+        agentApprovalToken: "approval-token",
+      }),
+      {
+        ...mockAgentState(
+          baseSnapshot({
+            pendingProposals: [
+              {
+                proposalId: "id-1",
+                action: "HOLD",
+                poolAddress: "PoolA",
+                confidence: 0.8,
+                reasoning: "test",
+                proposedAt: Date.now(),
+                expiresAt: Date.now() + 300_000,
+                source: "http-queue",
+                status: "pending",
+              },
+            ],
+          }),
+        ),
+        approveProposal: (proposalId: string) =>
+          Effect.sync(() => {
+            approvedIds.push(proposalId);
+          }),
+      },
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const proposalTokenResponse = await fetch(`http://127.0.0.1:${port}/approve`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer proposal-token",
+        },
+        body: JSON.stringify({ proposalIds: ["id-1"] }),
+      });
+      expect(proposalTokenResponse.status).toBe(401);
+      expect(approvedIds).toHaveLength(0);
+
+      const approvalTokenResponse = await fetch(`http://127.0.0.1:${port}/approve`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer approval-token",
+        },
+        body: JSON.stringify({ proposalIds: ["id-1"] }),
+      });
+      expect(approvalTokenResponse.status).toBe(200);
+      expect(approvedIds).toEqual(["id-1"]);
     } finally {
       await Effect.runPromise(server.stop());
     }

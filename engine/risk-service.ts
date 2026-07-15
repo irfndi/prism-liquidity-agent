@@ -197,6 +197,16 @@ export function evaluateAgentProposal(
     }
   }
 
+  if (proposal.action === "EXIT") {
+    const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
+    if (!hasPosition) {
+      return {
+        valid: false,
+        reason: `Cannot EXIT pool ${proposal.poolAddress} — no open position`,
+      };
+    }
+  }
+
   if (proposal.positionSizeUsd !== undefined) {
     if (!Number.isFinite(proposal.positionSizeUsd) || proposal.positionSizeUsd < 0) {
       return { valid: false, reason: "positionSizeUsd must be a finite non-negative number" };

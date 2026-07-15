@@ -93,6 +93,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     agentMcpEnabled: true,
     agentProposalMode: "veto",
     agentProposalToken: "",
+    agentApprovalToken: "",
     agentProposalTimeoutMs: 15_000,
     agentProposalMaxBatchSize: 10,
     agentProposalStaleMs: 300_000,

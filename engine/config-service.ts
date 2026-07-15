@@ -139,6 +139,8 @@ export interface AppConfig {
   readonly agentProposalMode: AgentProposalMode;
   /** Auth token for agent proposal endpoints. Empty = disabled. Default "". */
   readonly agentProposalToken: string;
+  /** Separate auth token for the /approve endpoint. If empty, falls back to agentProposalToken. Default "". */
+  readonly agentApprovalToken: string;
   /** Timeout for agent proposal responses. Default 15000 ms. */
   readonly agentProposalTimeoutMs: number;
   /** Max proposals to queue in one batch. Default 10. */
@@ -361,6 +363,9 @@ const loadConfig = Effect.gen(function* () {
   const agentProposalToken = yield* Config.string("AGENT_PROPOSAL_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
+  const agentApprovalToken = yield* Config.string("AGENT_APPROVAL_TOKEN").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
   const agentProposalTimeoutMs = yield* validatedNumber(
     "AGENT_PROPOSAL_TIMEOUT_MS",
     1_000,
@@ -386,17 +391,12 @@ const loadConfig = Effect.gen(function* () {
     3_600_000,
   );
   const agentProposalBackoffMaxMs = Math.max(
-    yield* validatedNumber(
-      "AGENT_PROPOSAL_BACKOFF_MAX_MS",
-      60_000,
-      3_600_000,
-      3_600_000,
-    ),
+    yield* validatedNumber("AGENT_PROPOSAL_BACKOFF_MAX_MS", 60_000, 3_600_000, 3_600_000),
     agentProposalBackoffBaseMs,
   );
   const agentProposalMaxPositionSizePct = yield* validatedNumber(
     "AGENT_PROPOSAL_MAX_POSITION_SIZE_PCT",
-    0.1,
+    0,
     0.4,
     1.0,
   );
@@ -604,6 +604,7 @@ const loadConfig = Effect.gen(function* () {
     agentMcpEnabled,
     agentProposalMode,
     agentProposalToken,
+    agentApprovalToken,
     agentProposalTimeoutMs,
     agentProposalMaxBatchSize,
     agentProposalStaleMs,

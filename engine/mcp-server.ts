@@ -66,6 +66,16 @@ const tools: ReadonlyArray<McpTool> = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "prism_pending_proposals",
+    description: "List pending agent proposals that are awaiting approval in supervised mode.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pool: { type: "string", description: "Optional pool address to filter by" },
+      },
+    },
+  },
+  {
     name: "prism_approve_proposals",
     description:
       "Approve one or more pending agent proposals so they can execute in supervised mode.",
@@ -205,6 +215,20 @@ export class McpServer {
             {
               type: "text",
               text: JSON.stringify(snapshot.agentPolicy),
+            },
+          ],
+        };
+      }
+      case "prism_pending_proposals": {
+        const pool = arguments_.pool as string | undefined;
+        const proposals = pool
+          ? snapshot.pendingProposals.filter((p) => p.poolAddress === pool)
+          : snapshot.pendingProposals;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ proposals }),
             },
           ],
         };

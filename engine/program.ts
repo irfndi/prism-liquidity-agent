@@ -1999,69 +1999,59 @@ export const program = Effect.gen(function* () {
 
       if (config.agentiveMode) {
         const proposalMode = config.agentProposalMode;
-        const poolCircuitBreaker = getPoolCircuitBreaker(poolAddress);
         const now = Date.now();
 
-        if (!poolCircuitBreaker.canTry(now)) {
-          logger.info("Agent proposal circuit breaker open — skipping", { pool: poolAddress });
-        } else {
-          const poolBackoff = proposalBackoff.get(poolAddress);
-          if (isProposalBackoffActive(poolBackoff, now)) {
-            logger.info("Agent proposal skipped — backoff active", { pool: poolAddress });
-          } else {
-            if (proposalMode === "veto") {
-              let vetoFetchFailed = false;
-              const enhanced = yield* agent
-                .enhanceDecision(decision, {
-                  decision,
-                  pool,
-                  metrics,
-                  warnings,
-                  recentDecisions: yield* audit
-                    .getRecentDecisions(10)
-                    .pipe(Effect.catchAll(() => Effect.succeed([]))),
-                })
-                .pipe(
-                  Effect.catchAll((err) => {
-                    vetoFetchFailed = true;
-                    logger.warn("Agent veto fetch failed", {
-                      pool: poolAddress,
-                      error: String(err),
-                    });
-                    return Effect.succeed(null);
-                  }),
-                );
-              if (enhanced) {
-                logger.info("Agent override", {
+        if (proposalMode === "veto") {
+          // Veto is a safety overlay: it runs independently of the proposal
+          // backoff/circuit-breaker path so a transient failure cannot silence it.
+          let vetoFetchFailed = false;
+          const enhanced = yield* agent
+            .enhanceDecision(decision, {
+              decision,
+              pool,
+              metrics,
+              warnings,
+              recentDecisions: yield* audit
+                .getRecentDecisions(10)
+                .pipe(Effect.catchAll(() => Effect.succeed([]))),
+            })
+            .pipe(
+              Effect.catchAll((err) => {
+                vetoFetchFailed = true;
+                logger.warn("Agent veto fetch failed", {
                   pool: poolAddress,
-                  from: decision.action,
-                  to: enhanced.action,
-                  fromConfidence: decision.confidence.toFixed(2),
-                  toConfidence: enhanced.confidence.toFixed(2),
+                  error: String(err),
                 });
-                decision = enhanced;
-                proposalBackoff.delete(poolAddress);
-                poolCircuitBreaker.recordSuccess();
-              } else if (vetoFetchFailed) {
-                proposalBackoff.set(
-                  poolAddress,
-                  nextProposalBackoff(poolBackoff, now, {
-                    baseMs: config.agentProposalBackoffBaseMs,
-                    maxMs: config.agentProposalBackoffMaxMs,
-                  }),
-                );
-                poolCircuitBreaker.recordFailure(now);
-                yield* memory
-                  .upsert({
-                    category: "warning",
-                    content: `Agent veto fetch failed for ${poolAddress}`,
-                    poolAddress,
-                  })
-                  .pipe(Effect.catchAll(() => Effect.void));
-              } else {
-                proposalBackoff.delete(poolAddress);
-                poolCircuitBreaker.recordSuccess();
-              }
+                return Effect.succeed(null);
+              }),
+            );
+          if (enhanced) {
+            logger.info("Agent override", {
+              pool: poolAddress,
+              from: decision.action,
+              to: enhanced.action,
+              fromConfidence: decision.confidence.toFixed(2),
+              toConfidence: enhanced.confidence.toFixed(2),
+            });
+            decision = enhanced;
+          } else if (vetoFetchFailed) {
+            yield* memory
+              .upsert({
+                category: "warning",
+                content: `Agent veto fetch failed for ${poolAddress}`,
+                poolAddress,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
+        } else {
+          const poolCircuitBreaker = getPoolCircuitBreaker(poolAddress);
+
+          if (!poolCircuitBreaker.canTry(now)) {
+            logger.info("Agent proposal circuit breaker open — skipping", { pool: poolAddress });
+          } else {
+            const poolBackoff = proposalBackoff.get(poolAddress);
+            if (isProposalBackoffActive(poolBackoff, now)) {
+              logger.info("Agent proposal skipped — backoff active", { pool: poolAddress });
             } else {
               let syncFetchFailed = false;
 
@@ -2113,7 +2103,7 @@ export const program = Effect.gen(function* () {
                   ...(agentProposal.originalAction === undefined
                     ? { originalAction: decision.action }
                     : {}),
-                  ...(proposalSource === "sync" && agentProposal.originalConfidence === undefined
+                  ...(agentProposal.originalConfidence === undefined
                     ? { originalConfidence: decision.confidence }
                     : {}),
                 };
@@ -2143,6 +2133,9 @@ export const program = Effect.gen(function* () {
                       })
                       .pipe(Effect.catchAll(() => Effect.void));
 
+                    proposalBackoff.delete(poolAddress);
+                    poolCircuitBreaker.recordSuccess();
+
                     if (proposalSource === "queue" && agentProposal.proposalId) {
                       yield* agentState
                         .dequeueProposals([agentProposal.proposalId])
@@ -2156,10 +2149,24 @@ export const program = Effect.gen(function* () {
                       to: validation.adjustedDecision.action,
                     });
                     const originalAction = decision.action;
+                    const deterministicReasoning = decision.reasoning;
                     decision = validation.adjustedDecision;
+                    if (
+                      originalAction === "EXIT" &&
+                      decision.action === "EXIT" &&
+                      deterministicReasoning.length > 0
+                    ) {
+                      decision = { ...decision, reasoning: deterministicReasoning };
+                    }
                     proposalApplied = true;
                     proposalBackoff.delete(poolAddress);
                     poolCircuitBreaker.recordSuccess();
+
+                    if (proposalSource === "queue" && agentProposal.proposalId) {
+                      yield* agentState
+                        .dequeueProposals([agentProposal.proposalId])
+                        .pipe(Effect.catchAll(() => Effect.void));
+                    }
                   }
                   yield* agentState
                     .setAgentPolicy({ lastProposalAt: now })

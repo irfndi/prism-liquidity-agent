@@ -1,6 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
 import { Effect } from "effect";
-import { buildLayer, estimatePositionValue, executeLive, isProposalStale, shouldDequeueQueuedProposal } from "../engine/program.js";
+import {
+  buildLayer,
+  estimatePositionValue,
+  executeLive,
+  isProposalStale,
+  shouldDequeueQueuedProposal,
+} from "../engine/program.js";
 import { ConfigService } from "../engine/config-service.js";
 import { EntryPrepError } from "../engine/errors.js";
 import {
@@ -45,7 +51,6 @@ describe("Program integration", () => {
         yield* AgentService;
         yield* AgentStateService;
         return "ok";
-
       }),
       layer,
     );

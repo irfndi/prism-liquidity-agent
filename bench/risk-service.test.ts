@@ -99,6 +99,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     agentMcpEnabled: false,
     agentProposalMode: "veto",
     agentProposalToken: "",
+    agentApprovalToken: "",
     agentProposalTimeoutMs: 15_000,
     agentProposalMaxBatchSize: 10,
     agentProposalStaleMs: 300_000,
@@ -237,6 +238,16 @@ describe("evaluateAgentProposal", () => {
         poolAddress: "pool1",
         rebalanceParams: { newLowerBinId: 100, newUpperBinId: 110, slippageBps: 0 },
       }),
+      makeContext({ openPositions: [] }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/no open position/);
+  });
+
+  it("rejects EXIT when no position is open for the pool", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "EXIT", poolAddress: "pool1" }),
       makeContext({ openPositions: [] }),
       makeConfig(),
     );

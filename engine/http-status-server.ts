@@ -123,7 +123,10 @@ export class HttpStatusServer {
     const providedToken = authHeader.startsWith("Bearer ")
       ? authHeader.slice("Bearer ".length)
       : "";
-    const expectedToken = this.config.agentProposalToken;
+    const expectedToken =
+      this.config.agentApprovalToken.length > 0
+        ? this.config.agentApprovalToken
+        : this.config.agentProposalToken;
     if (expectedToken.length === 0) {
       return new Response("Unauthorized", { status: 401 });
     }

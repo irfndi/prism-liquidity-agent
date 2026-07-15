@@ -81,6 +81,7 @@ function baseConfig(): AppConfig {
     agentMcpEnabled: true,
     agentProposalMode: "veto",
     agentProposalToken: "",
+    agentApprovalToken: "",
     agentProposalTimeoutMs: 15_000,
     agentProposalMaxBatchSize: 10,
     agentProposalStaleMs: 300_000,
@@ -199,6 +200,7 @@ describe("McpServer", () => {
         "prism_decisions",
         "prism_config",
         "prism_agent_policy",
+        "prism_pending_proposals",
         "prism_approve_proposals",
       ]),
     );
@@ -357,6 +359,90 @@ describe("McpServer", () => {
     expect(policy.circuitBreakerOpen).toBe(true);
   });
 
+  it("returns pending proposals via prism_pending_proposals tool", async () => {
+    const server = new McpServer(
+      baseConfig(),
+      mockAgentState({
+        getSnapshot: () =>
+          Effect.succeed({
+            programStartTime: Date.now(),
+            scanCount: 0,
+            lastCycleAt: null,
+            portfolio: {} as never,
+            positions: [],
+            recentDecisions: [],
+            agentPolicy: {
+              mode: "supervised",
+              proposalsQueued: 2,
+              lastProposalAt: Date.now(),
+              badProposalBackoffUntil: null,
+              circuitBreakerOpen: false,
+              hardCaps: {
+                maxPositionSizePct: 0.4,
+                maxRebalanceRangeBins: 50,
+                minProposalConfidence: 0.65,
+                proposalStaleMs: 300_000,
+              },
+            },
+            pendingProposals: [
+              {
+                proposalId: "id-1",
+                action: "HOLD",
+                poolAddress: "PoolA",
+                confidence: 0.8,
+                reasoning: "test",
+                proposedAt: Date.now(),
+                expiresAt: Date.now() + 300_000,
+                source: "http-queue",
+                status: "pending",
+              },
+              {
+                proposalId: "id-2",
+                action: "EXIT",
+                poolAddress: "PoolB",
+                confidence: 0.9,
+                reasoning: "test",
+                proposedAt: Date.now(),
+                expiresAt: Date.now() + 300_000,
+                source: "http-queue",
+                status: "pending",
+              },
+            ],
+          } as never),
+      }),
+    );
+
+    const response = await sendRequest(server, {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: { name: "prism_pending_proposals", arguments: {} },
+    });
+
+    expect(response.error).toBeUndefined();
+    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    expect(content).toHaveLength(1);
+    const result = JSON.parse(content[0]!.text);
+    expect(result.proposals).toHaveLength(2);
+    expect(result.proposals.map((p: { proposalId: string }) => p.proposalId)).toEqual([
+      "id-1",
+      "id-2",
+    ]);
+
+    const filtered = await sendRequest(server, {
+      jsonrpc: "2.0",
+      id: 8,
+      method: "tools/call",
+      params: { name: "prism_pending_proposals", arguments: { pool: "PoolB" } },
+    });
+    expect(filtered.error).toBeUndefined();
+    const filteredContent = (filtered.result as { content: ReadonlyArray<{ text: string }> })
+      .content;
+    const filteredResult = JSON.parse(filteredContent[0]!.text);
+    expect(filteredResult.proposals).toHaveLength(1);
+    expect(filteredResult.proposals[0].proposalId).toBe("id-2");
+  });
+
   it("approves proposals via prism_approve_proposals tool", async () => {
     const approvedIds: string[] = [];
     const server = new McpServer(
@@ -424,7 +510,7 @@ describe("McpServer", () => {
 
     const response = await sendRequest(server, {
       jsonrpc: "2.0",
-      id: 7,
+      id: 9,
       method: "tools/call",
       params: {
         name: "prism_approve_proposals",

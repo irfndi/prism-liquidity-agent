@@ -203,7 +203,22 @@ describe("RiskEngine", () => {
 
     it("allows an EXIT proposal after a safety EXIT", () => {
       const proposal = makeProposal({ action: "EXIT", originalAction: "EXIT", confidence: 0.9 });
-      const result = evaluateAgentProposal(proposal, makeContext(), appConfig);
+      const result = evaluateAgentProposal(
+        proposal,
+        makeContext({
+          openPositions: [
+            {
+              poolAddress: "TestPool111111111111111111111111111111111111",
+              depositedUsd: 1_000,
+              currentValueUsd: 1_000,
+              unrealizedPnlUsd: 0,
+              feesEarnedUsd: 0,
+              openedAt: Date.now(),
+            } as unknown as Position,
+          ],
+        }),
+        appConfig,
+      );
       expect(result.valid).toBe(true);
       expect(result.adjustedDecision?.action).toBe("EXIT");
     });
