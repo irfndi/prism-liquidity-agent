@@ -29,8 +29,6 @@ function sanitizeConfig(cfg: AppConfig, snapshot: PrismStateSnapshot): Record<st
     agentRuntime: cfg.agentRuntime,
     agentHttpPort: cfg.agentHttpPort,
     agentMcpEnabled: cfg.agentMcpEnabled,
-    agentPolicy: snapshot.agentPolicy,
-    agentProposalToken: cfg.agentProposalToken ? "configured" : "",
   };
 }
 
@@ -160,6 +158,13 @@ export class HttpStatusServer {
     const proposalIds = (parsedBody as { proposalIds: unknown }).proposalIds;
     if (!Array.isArray(proposalIds) || proposalIds.some((id) => typeof id !== "string")) {
       return new Response("proposalIds must be an array of strings", { status: 400 });
+    }
+
+    const maxBatchSize = this.config.agentProposalMaxBatchSize;
+    if (proposalIds.length > maxBatchSize) {
+      return new Response(`Batch size ${proposalIds.length} exceeds limit ${maxBatchSize}`, {
+        status: 413,
+      });
     }
 
     const snapshot = await Effect.runPromise(this.state.getSnapshot());

@@ -277,6 +277,8 @@ describe("HttpStatusServer", () => {
       expect(body.paperTrading).toBe(true);
       expect(body).not.toHaveProperty("walletPrivateKey");
       expect(body).not.toHaveProperty("heliusApiKey");
+      expect(body).not.toHaveProperty("agentPolicy");
+      expect(body).not.toHaveProperty("agentProposalToken");
     } finally {
       await Effect.runPromise(server.stop());
     }
@@ -501,6 +503,32 @@ describe("HttpStatusServer", () => {
       });
       expect(response.status).toBe(401);
       expect(approvedIds).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("rejects /approve batches that exceed the configured limit", async () => {
+    const port = 18_789;
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "secret-token",
+        agentProposalMaxBatchSize: 2,
+      }),
+      mockAgentState(baseSnapshot()),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/approve`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({ proposalIds: ["id-1", "id-2", "id-3"] }),
+      });
+      expect(response.status).toBe(413);
     } finally {
       await Effect.runPromise(server.stop());
     }
