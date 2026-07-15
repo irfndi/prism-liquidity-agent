@@ -2093,7 +2093,7 @@ export const program = Effect.gen(function* () {
               if (agentProposal) {
                 const proposalToEvaluate = {
                   ...agentProposal,
-                  ...(proposalSource === "sync" && agentProposal.originalAction === undefined
+                  ...(agentProposal.originalAction === undefined
                     ? { originalAction: decision.action }
                     : {}),
                   ...(proposalSource === "sync" && agentProposal.originalConfidence === undefined
