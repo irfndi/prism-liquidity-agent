@@ -2041,6 +2041,9 @@ export const program = Effect.gen(function* () {
                     poolAddress,
                   })
                   .pipe(Effect.catchAll(() => Effect.void));
+              } else {
+                proposalBackoff.delete(poolAddress);
+                poolCircuitBreaker.recordSuccess();
               }
             } else {
               let syncFetchFailed = false;
