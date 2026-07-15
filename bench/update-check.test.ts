@@ -105,6 +105,7 @@ function buildLayer(
     signalWeightFloor: 0.3,
     signalWeightCeiling: 2.5,
     weightedEntryScoreThreshold: 1.8,
+    autoSwapEntry: false,
   });
   return Layer.merge(mockConfig, DbLive(":memory:"));
 }

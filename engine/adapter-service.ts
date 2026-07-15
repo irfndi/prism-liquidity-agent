@@ -19,6 +19,7 @@ import { AdapterService, type AdapterApi } from "./services.js";
 import { ConfigService } from "./config-service.js";
 import { AdapterError } from "./errors.js";
 import { DiscoverPoolsError } from "./errors.js";
+import { SwapQuoteError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import { getPrismUserConfigDir } from "./paths.js";
 import type { BinArray, BinData, PoolState, Position } from "./types.js";
@@ -34,10 +35,9 @@ import path from "path";
 import os from "os";
 import { randomUUID } from "crypto";
 import { getWalletSystemLamportsRequired } from "./live-entry-budget.js";
+import { SOL_MINT, USDC_MINT, GAS_RESERVE_LAMPORTS } from "./constants.js";
+import { computeRequiredAtomic } from "./entry-prep-service.js";
 
-const SOL_MINT = "So11111111111111111111111111111111111111112";
-const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const GAS_RESERVE_LAMPORTS = 20_000_000n; // 0.02 SOL reserved for fees and non-System-program costs
 const RPC_RETRY_OPTIONS = {
   maxRetries: 1,
   baseDelayMs: 1_000,
@@ -861,6 +861,161 @@ export const AdapterLive = Layer.effect(
       nativeSolBalanceCache = undefined;
     }).pipe(Effect.zipRight(invalidateWalletBalance));
 
+    function quoteMatchesRequest(
+      quoteData: Record<string, unknown>,
+      outputMint: string,
+      amountAtomic: bigint,
+    ): boolean {
+      const inputMint = quoteData.inputMint;
+      if (inputMint !== USDC_MINT) return false;
+      const quoteOutputMint = quoteData.outputMint;
+      if (quoteOutputMint !== outputMint) return false;
+      const inAmount = quoteData.inAmount;
+      const expectedAmount = amountAtomic.toString();
+      if (inAmount !== expectedAmount && String(inAmount) !== expectedAmount) return false;
+      // A prefetched quote without a usable route should be rejected early so the
+      // caller gets a clear quote failure instead of a swap-build failure.
+      if (!Array.isArray(quoteData.routePlan) || quoteData.routePlan.length === 0) return false;
+      return true;
+    }
+
+    function quoteSwapUSDCForToken(
+      outputMint: string,
+      amountAtomic: bigint,
+    ): Effect.Effect<Record<string, unknown>, unknown> {
+      return Effect.gen(function* () {
+        const activeWallet = wallet;
+        if (!activeWallet) {
+          return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
+        }
+        if (amountAtomic <= 0n) {
+          return yield* Effect.fail(
+            new SwapQuoteError({
+              message: `Cannot quote swap for non-positive amount: ${amountAtomic.toString()}`,
+            }),
+          );
+        }
+
+        const jupiterApiKey = process.env.JUPITER_API_KEY ?? "";
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (jupiterApiKey) headers["x-api-key"] = jupiterApiKey;
+
+        const quoteResponse = yield* Effect.tryPromise(() =>
+          fetch(
+            `https://api.jup.ag/swap/v1/quote?inputMint=${USDC_MINT}&outputMint=${outputMint}&amount=${amountAtomic.toString()}&slippageBps=50&asLegacyTransaction=true`,
+            {
+              headers: jupiterApiKey ? headers : undefined,
+              signal: AbortSignal.timeout(10_000),
+            },
+          ),
+        );
+
+        if (!quoteResponse.ok) {
+          return yield* Effect.fail(
+            new SwapQuoteError({
+              message: `Jupiter quote failed: ${quoteResponse.status}`,
+            }),
+          );
+        }
+
+        const quoteData = (yield* Effect.tryPromise(() => quoteResponse.json())) as {
+          routePlan?: unknown;
+        };
+
+        if (!Array.isArray(quoteData.routePlan) || quoteData.routePlan.length === 0) {
+          return yield* Effect.fail(
+            new SwapQuoteError({
+              message: "Jupiter quote returned no usable route",
+            }),
+          );
+        }
+
+        return quoteData as Record<string, unknown>;
+      });
+    }
+
+    function swapUSDCForToken(
+      outputMint: string,
+      amountAtomic: bigint,
+      prefetchedQuote?: Record<string, unknown>,
+    ): Effect.Effect<string, unknown> {
+      return Effect.gen(function* () {
+        const activeWallet = wallet;
+        if (!activeWallet) {
+          return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
+        }
+        if (amountAtomic <= 0n) {
+          return yield* Effect.fail(
+            new AdapterError({
+              message: `Cannot swap USDC for non-positive amount: ${amountAtomic.toString()}`,
+            }),
+          );
+        }
+
+        const jupiterApiKey = process.env.JUPITER_API_KEY ?? "";
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (jupiterApiKey) headers["x-api-key"] = jupiterApiKey;
+
+        const quoteData =
+          prefetchedQuote ?? (yield* quoteSwapUSDCForToken(outputMint, amountAtomic));
+
+        if (prefetchedQuote && !quoteMatchesRequest(quoteData, outputMint, amountAtomic)) {
+          return yield* Effect.fail(
+            new AdapterError({
+              message: `Prefetched Jupiter quote does not match request: outputMint=${outputMint}, amount=${amountAtomic.toString()}`,
+            }),
+          );
+        }
+
+        const swapResponse = yield* Effect.tryPromise(() =>
+          fetch("https://api.jup.ag/swap/v1/swap", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              quoteResponse: quoteData,
+              userPublicKey: activeWallet.publicKey.toBase58(),
+              wrapAndUnwrapSol: true,
+              asLegacyTransaction: true,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          }),
+        );
+
+        if (!swapResponse.ok) {
+          return yield* Effect.fail(
+            new AdapterError({
+              message: `Jupiter swap build failed: ${swapResponse.status}`,
+            }),
+          );
+        }
+
+        const swapData = (yield* Effect.tryPromise(() => swapResponse.json())) as {
+          swapTransaction?: string;
+        };
+
+        if (!swapData.swapTransaction) {
+          return yield* Effect.fail(
+            new AdapterError({ message: "Jupiter swap: no transaction returned" }),
+          );
+        }
+
+        const swapTxBuf = Buffer.from(swapData.swapTransaction, "base64");
+        const swapTx = Transaction.from(swapTxBuf);
+        swapTx.sign(activeWallet);
+
+        const sig = yield* rpcCall((conn) =>
+          conn.sendRawTransaction(swapTx.serialize(), {
+            skipPreflight: false,
+            preflightCommitment: "confirmed",
+          }),
+        );
+
+        yield* rpcCall((conn) => conn.confirmTransaction(sig, "confirmed"));
+        yield* invalidateBalanceCaches;
+        return sig;
+      });
+    }
+
     // ─── Pool stats ────────────────────────────────────────────────────────
 
     function fetchPoolStats(
@@ -923,9 +1078,16 @@ export const AdapterLive = Layer.effect(
 
       getNativeSolBalance: () =>
         Effect.gen(function* () {
-          if (!wallet) return 0;
-          return Number(yield* readNativeSolBalance());
+          if (!wallet) return 0n;
+          return yield* readNativeSolBalance();
         }),
+
+      getTokenBalance: (mintAddress: string) => readTokenBalance(mintAddress),
+
+      getTokenPrices: (mints: ReadonlyArray<string>) => fetchTokenPrices(mints),
+
+      getTokenDecimals: (mintAddress: string) =>
+        getTokenMeta(mintAddress).pipe(Effect.map((m) => m.decimals)),
 
       getPoolState: (poolAddress) =>
         Effect.gen(function* () {
@@ -1108,14 +1270,10 @@ export const AdapterLive = Layer.effect(
             Effect.map((m) => m.decimals),
           );
 
-          const totalXAmount = new BN(
-            Math.floor((halfUsd / priceX) * Math.pow(10, tokenXDecimals)),
-          );
-          const totalYAmount = new BN(
-            Math.floor((halfUsd / priceY) * Math.pow(10, tokenYDecimals)),
-          );
-          const requestedXAmount = BigInt(totalXAmount.toString());
-          const requestedYAmount = BigInt(totalYAmount.toString());
+          const requestedXAmount = computeRequiredAtomic(halfUsd, priceX, tokenXDecimals);
+          const requestedYAmount = computeRequiredAtomic(halfUsd, priceY, tokenYDecimals);
+          const totalXAmount = new BN(requestedXAmount.toString());
+          const totalYAmount = new BN(requestedYAmount.toString());
 
           if (requestedXAmount === 0n || requestedYAmount === 0n) {
             return yield* Effect.fail(
@@ -1127,8 +1285,8 @@ export const AdapterLive = Layer.effect(
           }
 
           // Check balances
-          const balanceX = yield* getTokenBalance(pool.tokenX);
-          const balanceY = yield* getTokenBalance(pool.tokenY);
+          const balanceX = yield* readTokenBalance(pool.tokenX);
+          const balanceY = yield* readTokenBalance(pool.tokenY);
           const nativeSolBalance =
             pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT
               ? yield* readNativeSolBalance()
@@ -1618,6 +1776,34 @@ export const AdapterLive = Layer.effect(
             .slice(0, 50);
         }),
 
+      quoteSwapUSDCForToken: (outputMint: string, amountAtomic: bigint) =>
+        quoteSwapUSDCForToken(outputMint, amountAtomic).pipe(
+          Effect.catchAll((err) =>
+            Effect.fail(
+              new AdapterError({
+                message: `quoteSwapUSDCForToken failed: ${String(err)}`,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
+
+      swapUSDCForToken: (
+        outputMint: string,
+        amountAtomic: bigint,
+        quoteData?: Record<string, unknown>,
+      ) =>
+        swapUSDCForToken(outputMint, amountAtomic, quoteData).pipe(
+          Effect.catchAll((err) =>
+            Effect.fail(
+              new AdapterError({
+                message: `swapUSDCForToken failed: ${String(err)}`,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
+
       swapUSDCForSOL: (minSolThreshold = 0.05, swapAmountUSDC = 1.0) =>
         Effect.gen(function* () {
           const activeWallet = wallet;
@@ -1634,75 +1820,12 @@ export const AdapterLive = Layer.effect(
             swapAmountUSDC,
           });
 
-          const swap = Effect.gen(function* () {
-            const jupiterApiKey = process.env.JUPITER_API_KEY ?? "";
-            const headers: Record<string, string> = { "Content-Type": "application/json" };
-            if (jupiterApiKey) headers["x-api-key"] = jupiterApiKey;
-
-            const quoteResponse = yield* Effect.tryPromise(() =>
-              fetch(
-                `https://api.jup.ag/swap/v1/quote?inputMint=${USDC_MINT}&outputMint=${SOL_MINT}&amount=${Math.round(swapAmountUSDC * 1e6)}&slippageBps=50&asLegacyTransaction=true`,
-                {
-                  headers: jupiterApiKey ? headers : undefined,
-                  signal: AbortSignal.timeout(10_000),
-                },
-              ),
-            );
-
-            if (!quoteResponse.ok) {
-              logger.warn("Jupiter quote failed:", quoteResponse.status);
-              return;
-            }
-
-            const quoteData = (yield* Effect.tryPromise(() => quoteResponse.json())) as {
-              routePlan?: unknown;
-            };
-
-            const swapResponse = yield* Effect.tryPromise(() =>
-              fetch("https://api.jup.ag/swap/v1/swap", {
-                method: "POST",
-                headers,
-                body: JSON.stringify({
-                  quoteResponse: quoteData,
-                  userPublicKey: activeWallet.publicKey.toBase58(),
-                  wrapAndUnwrapSol: true,
-                  asLegacyTransaction: true,
-                }),
-                signal: AbortSignal.timeout(10_000),
-              }),
-            );
-
-            if (!swapResponse.ok) {
-              logger.warn("Jupiter swap build failed:", swapResponse.status);
-              return;
-            }
-
-            const swapData = (yield* Effect.tryPromise(() => swapResponse.json())) as {
-              swapTransaction?: string;
-            };
-
-            if (!swapData.swapTransaction) {
-              logger.warn("Jupiter swap: no transaction returned");
-              return;
-            }
-
-            const swapTxBuf = Buffer.from(swapData.swapTransaction, "base64");
-            const swapTx = Transaction.from(swapTxBuf);
-            swapTx.sign(activeWallet);
-
-            const sig = yield* rpcCall((conn) =>
-              conn.sendRawTransaction(swapTx.serialize(), {
-                skipPreflight: false,
-                preflightCommitment: "confirmed",
-              }),
-            );
-
-            yield* rpcCall((conn) => conn.confirmTransaction(sig, "confirmed"));
-            yield* invalidateBalanceCaches;
-            logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
-          });
-
-          yield* swap.pipe(
+          yield* swapUSDCForToken(SOL_MINT, BigInt(Math.round(swapAmountUSDC * 1e6))).pipe(
+            Effect.tap((sig) => {
+              if (sig) {
+                logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
+              }
+            }),
             Effect.catchAll((err) =>
               Effect.sync(() => logger.warn("USDC → SOL swap failed (non-fatal):", String(err))),
             ),
@@ -1711,9 +1834,5 @@ export const AdapterLive = Layer.effect(
     };
 
     return api;
-
-    function getTokenBalance(mintAddress: string): Effect.Effect<bigint, unknown> {
-      return readTokenBalance(mintAddress);
-    }
   }),
 );

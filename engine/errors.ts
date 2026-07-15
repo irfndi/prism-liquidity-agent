@@ -11,6 +11,11 @@ export class AdapterError extends Data.TaggedError("AdapterError")<{
   readonly cause?: unknown;
 }> {}
 
+export class SwapQuoteError extends Data.TaggedError("SwapQuoteError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
 export class MemoryError extends Data.TaggedError("MemoryError")<{
   readonly message: string;
   readonly cause?: unknown;
@@ -40,5 +45,19 @@ export class DiscoverPoolsError extends Data.TaggedError("DiscoverPoolsError")<{
   readonly message: string;
   readonly url: string;
   readonly status?: number;
+  readonly cause?: unknown;
+}> {}
+
+export class EntryPrepError extends Data.TaggedError("EntryPrepError")<{
+  readonly code:
+    | "PRICE_UNAVAILABLE"
+    | "SWAP_QUOTE_FAILED"
+    | "SWAP_TRANSACTION_FAILED"
+    | "INSUFFICIENT_BALANCE_AFTER_SWAP"
+    | "INSUFFICIENT_USDC_BALANCE"
+    | "BALANCE_READ_FAILED"
+    | "NO_WALLET";
+  readonly message: string;
+  readonly poolAddress?: string;
   readonly cause?: unknown;
 }> {}

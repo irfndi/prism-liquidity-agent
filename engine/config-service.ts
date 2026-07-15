@@ -148,6 +148,8 @@ export interface AppConfig {
   readonly signalWeightFloor: number;
   readonly signalWeightCeiling: number;
   readonly weightedEntryScoreThreshold: number;
+  // Auto-swap USDC into missing pool tokens before live ENTER
+  readonly autoSwapEntry: boolean;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -347,6 +349,9 @@ const loadConfig = Effect.gen(function* () {
     0.1,
     1.8,
   );
+  const autoSwapEntry = yield* Config.boolean("AUTO_SWAP_ENTRY").pipe(
+    Effect.orElseSucceed(() => false),
+  );
 
   // New feature configs
   const stopLossPct = yield* validatedNumber("STOP_LOSS_PCT", 0, 0.15);
@@ -511,6 +516,7 @@ const loadConfig = Effect.gen(function* () {
     signalWeightFloor,
     signalWeightCeiling,
     weightedEntryScoreThreshold,
+    autoSwapEntry,
   };
 
   return cfg;
