@@ -385,11 +385,14 @@ const loadConfig = Effect.gen(function* () {
     60_000,
     3_600_000,
   );
-  const agentProposalBackoffMaxMs = yield* validatedNumber(
-    "AGENT_PROPOSAL_BACKOFF_MAX_MS",
-    60_000,
-    3_600_000,
-    3_600_000,
+  const agentProposalBackoffMaxMs = Math.max(
+    yield* validatedNumber(
+      "AGENT_PROPOSAL_BACKOFF_MAX_MS",
+      60_000,
+      3_600_000,
+      3_600_000,
+    ),
+    agentProposalBackoffBaseMs,
   );
   const agentProposalMaxPositionSizePct = yield* validatedNumber(
     "AGENT_PROPOSAL_MAX_POSITION_SIZE_PCT",
