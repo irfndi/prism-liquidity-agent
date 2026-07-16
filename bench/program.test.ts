@@ -653,7 +653,7 @@ describe("shouldPenalizeAppliedProposalDenial", () => {
     ).toBe(true);
   });
 
-  it("is true for a gate-crossing nudge that caused the denial", () => {
+  it("is true for a confidence-only nudge that caused the denial", () => {
     expect(
       shouldPenalizeAppliedProposalDenial({
         appliedAgentProposal: true,
@@ -664,12 +664,23 @@ describe("shouldPenalizeAppliedProposalDenial", () => {
     ).toBe(true);
   });
 
-  it("is false for a gate-crossing nudge when the deterministic decision was already denied", () => {
+  it("is false for a confidence-only nudge when the deterministic decision was already denied", () => {
     expect(
       shouldPenalizeAppliedProposalDenial({
         appliedAgentProposal: true,
         preApplyDecision: base({ confidence: 0.652 }),
         appliedDecision: base({ confidence: 0.648 }),
+        isPreApplyRiskApproved: () => false,
+      }),
+    ).toBe(false);
+  });
+
+  it("is false for a >=0.005 same-action nudge when the deterministic decision was already denied", () => {
+    expect(
+      shouldPenalizeAppliedProposalDenial({
+        appliedAgentProposal: true,
+        preApplyDecision: base({ action: "ENTER", confidence: 0.66 }),
+        appliedDecision: base({ action: "ENTER", confidence: 0.65 }),
         isPreApplyRiskApproved: () => false,
       }),
     ).toBe(false);
@@ -701,7 +712,7 @@ describe("recordAppliedProposalRiskDenial", () => {
 
     await Effect.runPromise(
       recordAppliedProposalRiskDenial(agentState, {
-        appliedAgentProposal: true,
+        penalizeAdvisor: true,
         appliedQueuedProposalId: "p-risk-1",
         proposalBackoff,
         recordCircuitFailure: (now) => {
@@ -734,7 +745,7 @@ describe("recordAppliedProposalRiskDenial", () => {
 
     await Effect.runPromise(
       recordAppliedProposalRiskDenial(agentState, {
-        appliedAgentProposal: true,
+        penalizeAdvisor: true,
         appliedQueuedProposalId: undefined,
         proposalBackoff,
         recordCircuitFailure: (now) => {
@@ -753,7 +764,7 @@ describe("recordAppliedProposalRiskDenial", () => {
     expect(backoff!.failures).toBe(1);
   });
 
-  it("is a no-op when no agent proposal was applied", async () => {
+  it("is a no-op when penalization is not warranted", async () => {
     const rejected: string[] = [];
     const circuitFailures: number[] = [];
     const proposalBackoff = new Map<string, ProposalBackoff>();
@@ -766,7 +777,7 @@ describe("recordAppliedProposalRiskDenial", () => {
 
     await Effect.runPromise(
       recordAppliedProposalRiskDenial(agentState, {
-        appliedAgentProposal: false,
+        penalizeAdvisor: false,
         appliedQueuedProposalId: undefined,
         proposalBackoff,
         recordCircuitFailure: (now) => {
@@ -796,7 +807,7 @@ describe("recordAppliedProposalRiskDenial", () => {
 
     await Effect.runPromise(
       recordAppliedProposalRiskDenial(agentState, {
-        appliedAgentProposal: false,
+        penalizeAdvisor: false,
         appliedQueuedProposalId: "p-noop",
         proposalBackoff,
         recordCircuitFailure: (now) => {
@@ -813,13 +824,13 @@ describe("recordAppliedProposalRiskDenial", () => {
     expect(proposalBackoff.size).toBe(0);
   });
 
-  it("escalates backoff across repeated apply→risk-deny cycles without intermediate success", async () => {
+  it("escalates backoff across repeated penalized cycles without intermediate success", async () => {
     const proposalBackoff = new Map<string, ProposalBackoff>();
     const agentState = {
       rejectProposal: () => Effect.void,
     };
     const args = {
-      appliedAgentProposal: true as const,
+      penalizeAdvisor: true as const,
       appliedQueuedProposalId: undefined as string | undefined,
       proposalBackoff,
       recordCircuitFailure: () => {},

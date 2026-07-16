@@ -79,6 +79,7 @@ import type {
   PoolMetrics,
   PoolState,
   Position,
+  RebalanceParams,
   SignalWeights,
   ActionType,
 } from "./types.js";
@@ -176,6 +177,21 @@ export function decisionChangesExecutableBehavior(
 }
 
 /**
+ * True when two rebalance param values are functionally equivalent.
+ * Slippage is intentionally excluded (proposals hardcode 0, deterministic
+ * decisions use 50, execution never reads it) — keep in sync with
+ * rebalanceParamsEqual in risk-service.ts.
+ */
+const rebalanceParamsEquivalent = (
+  a: RebalanceParams | undefined,
+  b: RebalanceParams | undefined,
+): boolean => {
+  if (a === undefined && b === undefined) return true;
+  if (a === undefined || b === undefined) return false;
+  return a.newLowerBinId === b.newLowerBinId && a.newUpperBinId === b.newUpperBinId;
+};
+
+/**
  * Counterpart to recordAppliedProposalRiskDenial for the approval side: any
  * validated proposal that survives risk evaluation is a usable advisor
  * response, so clear per-pool backoff and reset the circuit breaker —
@@ -194,10 +210,11 @@ export const recordAppliedProposalRiskApproval = (args: {
 
 /**
  * Whether a risk denial after an applied proposal should arm proposal backoff
- * / circuit failure. A pure sub-epsilon gate crossing (a behavior change only
- * because it crosses confidenceThreshold) is penalized only when the nudge
- * actually caused the denial — denials the deterministic decision would have
- * received identically (stop-loss, drawdown pause) are not the advisor's fault.
+ * / circuit failure. If the proposal changed executable behavior (action,
+ * position size, bin range), the advisor is penalized. If it only changed
+ * confidence, re-evaluate the pre-apply deterministic decision: penalize only
+ * when the deterministic decision would have been approved, i.e. the nudge
+ * caused the denial.
  */
 export const shouldPenalizeAppliedProposalDenial = (args: {
   readonly appliedAgentProposal: boolean;
@@ -208,24 +225,28 @@ export const shouldPenalizeAppliedProposalDenial = (args: {
   if (!args.appliedAgentProposal || args.preApplyDecision === undefined) {
     return args.appliedAgentProposal;
   }
-  const gateCrossingOnly = !decisionChangesExecutableBehavior(
-    args.preApplyDecision,
-    args.appliedDecision,
-  );
-  return !gateCrossingOnly || args.isPreApplyRiskApproved();
+  const executableParamsUnchanged =
+    args.preApplyDecision.action === args.appliedDecision.action &&
+    (args.preApplyDecision.positionSizeUsd ?? undefined) ===
+      (args.appliedDecision.positionSizeUsd ?? undefined) &&
+    rebalanceParamsEquivalent(
+      args.preApplyDecision.rebalanceParams,
+      args.appliedDecision.rebalanceParams,
+    );
+  return !executableParamsUnchanged || args.isPreApplyRiskApproved();
 };
 
 /**
- * Sticky risk denials after an applied agent proposal that changed executable
- * behavior should arm proposal backoff and trip the circuit breaker so the
- * same doomed advisor response is not re-requested every scan. Queued
- * proposals are rejected either way so they are not re-selected until TTL
- * prune. Transient execution failures still retry via finalizeAppliedProposal.
+ * Records sticky risk denials after an applied agent proposal when the advisor
+ * should be penalized (`penalizeAdvisor`). Backoff / circuit failure is only
+ * armed when penalization is warranted; queued proposals are always rejected
+ * so they are not re-selected until TTL prune. Transient execution failures
+ * still retry via finalizeAppliedProposal.
  */
 export const recordAppliedProposalRiskDenial = (
   agentState: Pick<AgentStateApi, "rejectProposal">,
   args: {
-    readonly appliedAgentProposal: boolean;
+    readonly penalizeAdvisor: boolean;
     readonly appliedQueuedProposalId: string | undefined;
     readonly proposalBackoff: Map<string, ProposalBackoff>;
     readonly recordCircuitFailure: ((now: number) => void) | undefined;
@@ -234,10 +255,10 @@ export const recordAppliedProposalRiskDenial = (
     readonly backoff: { readonly baseMs: number; readonly maxMs: number };
   },
 ): Effect.Effect<void> => {
-  if (!args.appliedAgentProposal && args.appliedQueuedProposalId === undefined) {
+  if (!args.penalizeAdvisor && args.appliedQueuedProposalId === undefined) {
     return Effect.void;
   }
-  if (args.appliedAgentProposal) {
+  if (args.penalizeAdvisor) {
     args.proposalBackoff.set(
       args.poolAddress,
       nextProposalBackoff(args.proposalBackoff.get(args.poolAddress), args.now, args.backoff),
@@ -2559,7 +2580,7 @@ export const program = Effect.gen(function* () {
             preApplyDecision !== undefined && risk.evaluate(preApplyDecision, riskCtx).approved,
         });
         yield* recordAppliedProposalRiskDenial(agentState, {
-          appliedAgentProposal: penalizeAppliedProposal,
+          penalizeAdvisor: penalizeAppliedProposal,
           appliedQueuedProposalId,
           proposalBackoff,
           recordCircuitFailure: penalizeAppliedProposal

@@ -351,6 +351,7 @@ describe("HttpStatusServer", () => {
         agentApprovalToken: "approval-token",
         agentiveMode: true,
         agentProposalMode: "supervised",
+        watchlistPools: ["PoolA", "PoolB"],
       }),
       mockAgentState(baseSnapshot(), enqueued),
     );
@@ -390,6 +391,88 @@ describe("HttpStatusServer", () => {
         newUpperBinId: 20,
         slippageBps: 0,
       });
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("rejects /propose for pools outside the configured watchlist", async () => {
+    const port = 18_795;
+    const enqueued: AgentProposal[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "secret-token",
+        agentApprovalToken: "approval-token",
+        agentiveMode: true,
+        agentProposalMode: "supervised",
+        watchlistPools: ["PoolA"],
+      }),
+      mockAgentState(baseSnapshot(), enqueued),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({ action: "ENTER", poolAddress: "PoolB", confidence: 0.8 }),
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as {
+        accepted: number;
+        error: string;
+        unscannable: Array<{ poolAddress: string }>;
+      };
+      expect(body.error).toBe("unscannable_pool");
+      expect(body.accepted).toBe(0);
+      expect(body.unscannable).toEqual([expect.objectContaining({ poolAddress: "PoolB" })]);
+      expect(enqueued).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("lists unscannable pools in a mixed /propose batch while accepting watchlisted pools", async () => {
+    const port = 18_796;
+    const enqueued: AgentProposal[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "secret-token",
+        agentApprovalToken: "approval-token",
+        agentiveMode: true,
+        agentProposalMode: "supervised",
+        watchlistPools: ["PoolA"],
+      }),
+      mockAgentState(baseSnapshot(), enqueued),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify([
+          { action: "ENTER", poolAddress: "PoolA", confidence: 0.8 },
+          { action: "ENTER", poolAddress: "PoolB", confidence: 0.8 },
+        ]),
+      });
+      expect(response.status).toBe(202);
+      const body = (await response.json()) as {
+        accepted: number;
+        proposalIds: string[];
+        unscannable: Array<{ poolAddress: string }>;
+      };
+      expect(body.accepted).toBe(1);
+      expect(body.proposalIds).toHaveLength(1);
+      expect(body.unscannable).toEqual([expect.objectContaining({ poolAddress: "PoolB" })]);
+      expect(enqueued).toHaveLength(1);
+      expect(enqueued[0]!.poolAddress).toBe("PoolA");
     } finally {
       await Effect.runPromise(server.stop());
     }
@@ -739,6 +822,7 @@ describe("HttpStatusServer", () => {
         agentProposalToken: "secret-token",
         agentProposalMode: "full",
         agentProposalMaxQueueSize: 1,
+        watchlistPools: ["PoolA"],
       }),
       {
         ...mockAgentState(baseSnapshot()),
@@ -782,6 +866,7 @@ describe("HttpStatusServer", () => {
         agentiveMode: true,
         agentProposalToken: "secret-token",
         agentProposalMode: "full",
+        watchlistPools: ["PoolA"],
       }),
       mockAgentState(baseSnapshot(), enqueued),
     );
@@ -822,6 +907,7 @@ describe("HttpStatusServer", () => {
         agentProposalToken: "secret-token",
         agentProposalMode: "supervised",
         agentApprovalToken: "approval-token",
+        watchlistPools: ["PoolA"],
       }),
       {
         ...mockAgentState(baseSnapshot()),
@@ -868,6 +954,7 @@ describe("HttpStatusServer", () => {
         agentProposalToken: "secret-token",
         agentProposalMode: "supervised",
         agentApprovalToken: "approval-token",
+        watchlistPools: ["PoolA", "PoolB"],
       }),
       {
         ...mockAgentState(baseSnapshot(), enqueued),
