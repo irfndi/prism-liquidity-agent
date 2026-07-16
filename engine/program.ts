@@ -140,11 +140,35 @@ export const finalizeAppliedProposal = (
     : Effect.void;
 
 /**
- * Sticky risk denials after an applied agent proposal (sync or queue) should
- * arm proposal backoff and trip the circuit breaker so the same doomed advisor
- * response is not re-requested every scan. Queued proposals are also rejected
- * so they are not re-selected until TTL prune. Transient execution failures
- * still retry via finalizeAppliedProposal.
+ * True when an applied proposal changes executable behavior vs the deterministic
+ * decision. Pure echoes (preserve-original no-ops) should not arm proposal
+ * backoff when risk later rejects the unchanged decision.
+ */
+export function decisionChangesExecutableBehavior(
+  before: AgentDecision,
+  after: AgentDecision,
+): boolean {
+  if (before.action !== after.action) return true;
+  if (Math.abs(before.confidence - after.confidence) >= 0.005) return true;
+  if ((before.positionSizeUsd ?? undefined) !== (after.positionSizeUsd ?? undefined)) {
+    return true;
+  }
+  const beforeParams = before.rebalanceParams;
+  const afterParams = after.rebalanceParams;
+  if (beforeParams === undefined && afterParams === undefined) return false;
+  if (beforeParams === undefined || afterParams === undefined) return true;
+  return (
+    beforeParams.newLowerBinId !== afterParams.newLowerBinId ||
+    beforeParams.newUpperBinId !== afterParams.newUpperBinId
+  );
+}
+
+/**
+ * Sticky risk denials after an applied agent proposal that changed executable
+ * behavior should arm proposal backoff and trip the circuit breaker so the
+ * same doomed advisor response is not re-requested every scan. Queued
+ * proposals are rejected either way so they are not re-selected until TTL
+ * prune. Transient execution failures still retry via finalizeAppliedProposal.
  */
 export const recordAppliedProposalRiskDenial = (
   agentState: Pick<AgentStateApi, "rejectProposal">,
@@ -158,14 +182,16 @@ export const recordAppliedProposalRiskDenial = (
     readonly backoff: { readonly baseMs: number; readonly maxMs: number };
   },
 ): Effect.Effect<void> => {
-  if (!args.appliedAgentProposal) {
+  if (!args.appliedAgentProposal && args.appliedQueuedProposalId === undefined) {
     return Effect.void;
   }
-  args.proposalBackoff.set(
-    args.poolAddress,
-    nextProposalBackoff(args.proposalBackoff.get(args.poolAddress), args.now, args.backoff),
-  );
-  args.recordCircuitFailure?.(args.now);
+  if (args.appliedAgentProposal) {
+    args.proposalBackoff.set(
+      args.poolAddress,
+      nextProposalBackoff(args.proposalBackoff.get(args.poolAddress), args.now, args.backoff),
+    );
+    args.recordCircuitFailure?.(args.now);
+  }
   if (args.appliedQueuedProposalId === undefined) {
     return Effect.void;
   }
@@ -2295,6 +2321,7 @@ export const program = Effect.gen(function* () {
                   from: decision.action,
                   to: validation.adjustedDecision.action,
                 });
+                const preApplyDecision = decision;
                 const originalAction = decision.action;
                 const deterministicReasoning = decision.reasoning;
                 decision = validation.adjustedDecision;
@@ -2305,15 +2332,20 @@ export const program = Effect.gen(function* () {
                 ) {
                   decision = { ...decision, reasoning: deterministicReasoning };
                 }
-                // Defer backoff clear / circuit success until the applied
-                // decision survives risk.evaluate — otherwise apply→risk-deny
-                // loops reset counters every scan and never escalate.
-                appliedAgentProposal = true;
+                // Only count real executable changes toward risk-deny backoff /
+                // circuit failure. Pure preserve-original echoes that later
+                // fail the confidence gate must not silence the advisor.
+                // Defer backoff clear / circuit success until risk.evaluate
+                // approves — otherwise apply→risk-deny loops reset counters.
+                if (decisionChangesExecutableBehavior(preApplyDecision, decision)) {
+                  appliedAgentProposal = true;
+                }
 
                 // Queued proposals are retained until execution succeeds (or
                 // the applied decision is a non-executing HOLD) so a
                 // transient failure can be retried on the next cycle.
                 // Deterministic risk denials reject/drop the proposal earlier.
+                // No-op echoes still set the id so the queue entry is consumed.
                 if (proposalSource === "queue" && agentProposal.proposalId) {
                   appliedQueuedProposalId = agentProposal.proposalId;
                 }

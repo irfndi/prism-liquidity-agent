@@ -7,10 +7,12 @@ import {
   finalizeAppliedProposal,
   hasSyncProposalTransport,
   isProposalStale,
+  decisionChangesExecutableBehavior,
   recordAppliedProposalRiskDenial,
   shouldHoldForSupervisedApproval,
 } from "../engine/program.js";
 import type { ProposalBackoff } from "../engine/proposal-backoff.js";
+import type { AgentDecision } from "../engine/types.js";
 import { ConfigService } from "../engine/config-service.js";
 import { EntryPrepError } from "../engine/errors.js";
 import {
@@ -30,8 +32,6 @@ import {
   type DbApi,
   type RevenueConfigApi,
 } from "../engine/services.js";
-
-import type { AgentDecision } from "../engine/types.js";
 
 function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
   return Effect.runSync((Effect.provide as any)(effect, layer));
@@ -489,6 +489,27 @@ describe("hasSyncProposalTransport", () => {
   });
 });
 
+describe("decisionChangesExecutableBehavior", () => {
+  const base = (overrides: Partial<AgentDecision> = {}): AgentDecision => ({
+    action: "HOLD",
+    poolAddress: "pool-a",
+    confidence: 0.5,
+    reasoning: "deterministic",
+    ...overrides,
+  });
+
+  it("is false for pure preserve-original echoes", () => {
+    expect(decisionChangesExecutableBehavior(base(), base({ reasoning: "advisor" }))).toBe(false);
+  });
+
+  it("is true when action or confidence changes", () => {
+    expect(
+      decisionChangesExecutableBehavior(base(), base({ action: "EXIT", confidence: 0.5 })),
+    ).toBe(true);
+    expect(decisionChangesExecutableBehavior(base(), base({ confidence: 0.9 }))).toBe(true);
+  });
+});
+
 describe("recordAppliedProposalRiskDenial", () => {
   it("rejects a queued applied proposal, arms backoff, and records circuit failure", async () => {
     const rejected: string[] = [];
@@ -581,6 +602,36 @@ describe("recordAppliedProposalRiskDenial", () => {
     );
 
     expect(rejected).toEqual([]);
+    expect(circuitFailures).toEqual([]);
+    expect(proposalBackoff.size).toBe(0);
+  });
+
+  it("rejects a queued no-op echo without arming backoff", async () => {
+    const rejected: string[] = [];
+    const circuitFailures: number[] = [];
+    const proposalBackoff = new Map<string, ProposalBackoff>();
+    const agentState = {
+      rejectProposal: (id: string) =>
+        Effect.sync(() => {
+          rejected.push(id);
+        }),
+    };
+
+    await Effect.runPromise(
+      recordAppliedProposalRiskDenial(agentState, {
+        appliedAgentProposal: false,
+        appliedQueuedProposalId: "p-noop",
+        proposalBackoff,
+        recordCircuitFailure: (now) => {
+          circuitFailures.push(now);
+        },
+        poolAddress: "pool-a",
+        now: 1_000_000,
+        backoff: { baseMs: 60_000, maxMs: 3_600_000 },
+      }),
+    );
+
+    expect(rejected).toEqual(["p-noop"]);
     expect(circuitFailures).toEqual([]);
     expect(proposalBackoff.size).toBe(0);
   });

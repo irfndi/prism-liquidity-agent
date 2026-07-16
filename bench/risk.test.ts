@@ -19,6 +19,7 @@ function makeContext(
     portfolioValueUsd: number;
     recentPnlUsd: number;
     poolAddress: string;
+    activeBinId: number;
   }> = {},
 ) {
   return {
@@ -151,6 +152,27 @@ describe("RiskEngine", () => {
         rebalanceParams: { newLowerBinId: 4985, newUpperBinId: 5015, slippageBps: 50 },
       });
       const result = evaluateRisk(riskConfig, decision, makeContext());
+      expect(result.approved).toBe(true);
+    });
+
+    it("rejects a range that does not contain the active bin", () => {
+      const decision = makeDecision({
+        action: "REBALANCE",
+        confidence: 0.8,
+        rebalanceParams: { newLowerBinId: 1, newUpperBinId: 10, slippageBps: 50 },
+      });
+      const result = evaluateRisk(riskConfig, decision, makeContext({ activeBinId: 10_000 }));
+      expect(result.approved).toBe(false);
+      expect(result.reason).toMatch(/does not contain active bin/);
+    });
+
+    it("approves a range that contains the active bin", () => {
+      const decision = makeDecision({
+        action: "REBALANCE",
+        confidence: 0.8,
+        rebalanceParams: { newLowerBinId: 9_990, newUpperBinId: 10_010, slippageBps: 50 },
+      });
+      const result = evaluateRisk(riskConfig, decision, makeContext({ activeBinId: 10_000 }));
       expect(result.approved).toBe(true);
     });
   });
