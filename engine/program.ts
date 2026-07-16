@@ -142,14 +142,23 @@ export const finalizeAppliedProposal = (
 /**
  * True when an applied proposal changes executable behavior vs the deterministic
  * decision. Pure echoes (preserve-original no-ops) should not arm proposal
- * backoff when risk later rejects the unchanged decision.
+ * backoff when risk later rejects the unchanged decision. When
+ * confidenceThreshold is provided, a confidence nudge inside the epsilon that
+ * crosses the gate still counts — it flips the risk outcome.
  */
 export function decisionChangesExecutableBehavior(
   before: AgentDecision,
   after: AgentDecision,
+  confidenceThreshold?: number,
 ): boolean {
   if (before.action !== after.action) return true;
   if (Math.abs(before.confidence - after.confidence) >= 0.005) return true;
+  if (
+    confidenceThreshold !== undefined &&
+    before.confidence >= confidenceThreshold !== after.confidence >= confidenceThreshold
+  ) {
+    return true;
+  }
   if ((before.positionSizeUsd ?? undefined) !== (after.positionSizeUsd ?? undefined)) {
     return true;
   }
@@ -157,6 +166,9 @@ export function decisionChangesExecutableBehavior(
   const afterParams = after.rebalanceParams;
   if (beforeParams === undefined && afterParams === undefined) return false;
   if (beforeParams === undefined || afterParams === undefined) return true;
+  // Slippage is intentionally excluded, mirroring rebalanceParamsEqual in
+  // risk-service.ts: proposals hardcode slippageBps 0 while deterministic
+  // decisions use 50, and execution never reads it.
   return (
     beforeParams.newLowerBinId !== afterParams.newLowerBinId ||
     beforeParams.newUpperBinId !== afterParams.newUpperBinId
@@ -1439,6 +1451,8 @@ export const program = Effect.gen(function* () {
       let appliedQueuedProposalId: string | undefined;
       /** True when a full/supervised proposal replaced the deterministic decision. */
       let appliedAgentProposal = false;
+      /** True when any proposal (echo or behavior-changing) was validated and applied. */
+      let proposalValidated = false;
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, pool.activeBinId);
@@ -2337,7 +2351,14 @@ export const program = Effect.gen(function* () {
                 // fail the confidence gate must not silence the advisor.
                 // Defer backoff clear / circuit success until risk.evaluate
                 // approves — otherwise apply→risk-deny loops reset counters.
-                if (decisionChangesExecutableBehavior(preApplyDecision, decision)) {
+                proposalValidated = true;
+                if (
+                  decisionChangesExecutableBehavior(
+                    preApplyDecision,
+                    decision,
+                    config.confidenceThreshold,
+                  )
+                ) {
                   appliedAgentProposal = true;
                 }
 
@@ -2502,8 +2523,9 @@ export const program = Effect.gen(function* () {
         return decision;
       }
 
-      // Applied proposal survived risk: clear per-pool backoff and reset breaker.
-      if (appliedAgentProposal) {
+      // Any validated proposal that survives risk is a usable advisor response:
+      // clear per-pool backoff and reset the breaker, including no-op echoes.
+      if (proposalValidated) {
         proposalBackoff.delete(poolAddress);
         getPoolCircuitBreaker(poolAddress).recordSuccess();
       }

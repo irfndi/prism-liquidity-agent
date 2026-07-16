@@ -508,6 +508,69 @@ describe("decisionChangesExecutableBehavior", () => {
     ).toBe(true);
     expect(decisionChangesExecutableBehavior(base(), base({ confidence: 0.9 }))).toBe(true);
   });
+
+  it("is true when positionSizeUsd appears, disappears, or changes", () => {
+    expect(decisionChangesExecutableBehavior(base(), base({ positionSizeUsd: 1_000 }))).toBe(true);
+    expect(decisionChangesExecutableBehavior(base({ positionSizeUsd: 1_000 }), base())).toBe(true);
+    expect(
+      decisionChangesExecutableBehavior(
+        base({ positionSizeUsd: 1_000 }),
+        base({ positionSizeUsd: 2_000 }),
+      ),
+    ).toBe(true);
+    expect(
+      decisionChangesExecutableBehavior(
+        base({ positionSizeUsd: 1_000 }),
+        base({ positionSizeUsd: 1_000 }),
+      ),
+    ).toBe(false);
+  });
+
+  it("is true when rebalanceParams appear, disappear, or change bin ids", () => {
+    const params = { newLowerBinId: 100, newUpperBinId: 110, slippageBps: 0 };
+    expect(decisionChangesExecutableBehavior(base(), base({ rebalanceParams: params }))).toBe(true);
+    expect(decisionChangesExecutableBehavior(base({ rebalanceParams: params }), base())).toBe(true);
+    expect(
+      decisionChangesExecutableBehavior(
+        base({ rebalanceParams: params }),
+        base({ rebalanceParams: { ...params, newUpperBinId: 120 } }),
+      ),
+    ).toBe(true);
+  });
+
+  it("ignores slippage-only differences, mirroring rebalanceParamsEqual", () => {
+    expect(
+      decisionChangesExecutableBehavior(
+        base({
+          rebalanceParams: { newLowerBinId: 100, newUpperBinId: 110, slippageBps: 50 },
+        }),
+        base({
+          rebalanceParams: { newLowerBinId: 100, newUpperBinId: 110, slippageBps: 0 },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("treats a confidence nudge across the gate threshold as a behavior change", () => {
+    expect(
+      decisionChangesExecutableBehavior(
+        base({ confidence: 0.652 }),
+        base({ confidence: 0.648 }),
+        0.65,
+      ),
+    ).toBe(true);
+    expect(
+      decisionChangesExecutableBehavior(
+        base({ confidence: 0.66 }),
+        base({ confidence: 0.656 }),
+        0.65,
+      ),
+    ).toBe(false);
+    // Without a threshold, the same epsilon nudge stays a no-op echo.
+    expect(
+      decisionChangesExecutableBehavior(base({ confidence: 0.652 }), base({ confidence: 0.648 })),
+    ).toBe(false);
+  });
 });
 
 describe("recordAppliedProposalRiskDenial", () => {
