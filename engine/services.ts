@@ -244,6 +244,8 @@ export interface RiskContext {
   readonly recentPnlUsd: number;
   readonly poolAddress: string;
   readonly originalDecision?: AgentDecision;
+  /** Current pool active bin; used to reject REBALANCE ranges that miss the market. */
+  readonly activeBinId?: number;
 }
 
 export interface RiskResult {

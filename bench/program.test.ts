@@ -584,4 +584,32 @@ describe("recordAppliedProposalRiskDenial", () => {
     expect(circuitFailures).toEqual([]);
     expect(proposalBackoff.size).toBe(0);
   });
+
+  it("escalates backoff across repeated apply→risk-deny cycles without intermediate success", async () => {
+    const proposalBackoff = new Map<string, ProposalBackoff>();
+    const agentState = {
+      rejectProposal: () => Effect.void,
+    };
+    const args = {
+      appliedAgentProposal: true as const,
+      appliedQueuedProposalId: undefined as string | undefined,
+      proposalBackoff,
+      recordCircuitFailure: () => {},
+      poolAddress: "pool-a",
+      backoff: { baseMs: 60_000, maxMs: 3_600_000 },
+    };
+
+    await Effect.runPromise(
+      recordAppliedProposalRiskDenial(agentState, { ...args, now: 1_000_000 }),
+    );
+    const first = proposalBackoff.get("pool-a");
+    expect(first?.failures).toBe(1);
+
+    await Effect.runPromise(
+      recordAppliedProposalRiskDenial(agentState, { ...args, now: 2_000_000 }),
+    );
+    const second = proposalBackoff.get("pool-a");
+    expect(second?.failures).toBe(2);
+    expect(second!.nextProposalAt).toBeGreaterThan(first!.nextProposalAt);
+  });
 });

@@ -101,6 +101,18 @@ export function evaluateRisk(
         reason: `Rebalance range ${rangeWidth} bins exceeds max ${riskConfig.maxRebalanceRangeBins}`,
       };
     }
+    if (
+      ctx.activeBinId !== undefined &&
+      Number.isFinite(ctx.activeBinId) &&
+      (ctx.activeBinId < newLowerBinId || ctx.activeBinId > newUpperBinId)
+    ) {
+      return {
+        approved: false,
+        reason:
+          `Rebalance range [${newLowerBinId}, ${newUpperBinId}] does not contain ` +
+          `active bin ${ctx.activeBinId}`,
+      };
+    }
   }
 
   return { approved: true, reason: "All risk checks passed" };
@@ -266,7 +278,9 @@ export function evaluateAgentProposal(
     }
   }
 
-  // 8. REBALANCE parameters must form a valid, bounded bin range with integer IDs.
+  // 8. REBALANCE parameters must form a valid, bounded bin range with integer IDs
+  //    that contains the pool's current active bin when known — otherwise the
+  //    advisor can move liquidity completely out of range.
   if (proposal.rebalanceParams !== undefined) {
     const { newLowerBinId, newUpperBinId } = proposal.rebalanceParams;
     if (!Number.isInteger(newLowerBinId) || !Number.isInteger(newUpperBinId)) {
@@ -286,6 +300,18 @@ export function evaluateAgentProposal(
       return {
         valid: false,
         reason: `Rebalance range ${rangeWidth} bins exceeds max ${config.maxRebalanceRangeBins}`,
+      };
+    }
+    if (
+      ctx.activeBinId !== undefined &&
+      Number.isFinite(ctx.activeBinId) &&
+      (ctx.activeBinId < newLowerBinId || ctx.activeBinId > newUpperBinId)
+    ) {
+      return {
+        valid: false,
+        reason:
+          `Rebalance range [${newLowerBinId}, ${newUpperBinId}] does not contain ` +
+          `active bin ${ctx.activeBinId}`,
       };
     }
   }

@@ -2216,6 +2216,7 @@ export const program = Effect.gen(function* () {
                 recentPnlUsd,
                 poolAddress,
                 originalDecision: decision,
+                activeBinId: pool.activeBinId,
               },
               config,
             );
@@ -2304,8 +2305,9 @@ export const program = Effect.gen(function* () {
                 ) {
                   decision = { ...decision, reasoning: deterministicReasoning };
                 }
-                proposalBackoff.delete(poolAddress);
-                poolCircuitBreaker.recordSuccess();
+                // Defer backoff clear / circuit success until the applied
+                // decision survives risk.evaluate — otherwise apply→risk-deny
+                // loops reset counters every scan and never escalate.
                 appliedAgentProposal = true;
 
                 // Queued proposals are retained until execution succeeds (or
@@ -2404,6 +2406,7 @@ export const program = Effect.gen(function* () {
         portfolioValueUsd,
         recentPnlUsd,
         poolAddress,
+        activeBinId: pool.activeBinId,
       });
 
       // Apply risk-adjusted position size cap
@@ -2465,6 +2468,12 @@ export const program = Effect.gen(function* () {
           },
         });
         return decision;
+      }
+
+      // Applied proposal survived risk: clear per-pool backoff and reset breaker.
+      if (appliedAgentProposal) {
+        proposalBackoff.delete(poolAddress);
+        getPoolCircuitBreaker(poolAddress).recordSuccess();
       }
 
       if (decision.action === "EXIT") {

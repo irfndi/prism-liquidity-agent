@@ -471,6 +471,67 @@ describe("evaluateAgentProposal", () => {
     expect(result.reason).toMatch(/no open position/);
   });
 
+  it("rejects REBALANCE ranges that do not contain the active bin", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "REBALANCE",
+        poolAddress: "pool1",
+        rebalanceParams: { newLowerBinId: 1, newUpperBinId: 10, slippageBps: 0 },
+      }),
+      makeContext({
+        activeBinId: 10_000,
+        openPositions: [
+          {
+            id: "pos-1",
+            poolAddress: "pool1",
+            poolName: "SOL/USDC",
+            lowerBinId: 9_980,
+            upperBinId: 10_020,
+            liquidityShares: 0n,
+            depositedUsd: 1_000,
+            currentValueUsd: 1_000,
+            unrealizedPnlUsd: 0,
+            feesEarnedUsd: 0,
+            openedAt: Date.now(),
+          },
+        ],
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/does not contain active bin/);
+  });
+
+  it("approves REBALANCE when the active bin is inside the proposed range", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "REBALANCE",
+        poolAddress: "pool1",
+        rebalanceParams: { newLowerBinId: 9_990, newUpperBinId: 10_010, slippageBps: 0 },
+      }),
+      makeContext({
+        activeBinId: 10_000,
+        openPositions: [
+          {
+            id: "pos-1",
+            poolAddress: "pool1",
+            poolName: "SOL/USDC",
+            lowerBinId: 9_980,
+            upperBinId: 10_020,
+            liquidityShares: 0n,
+            depositedUsd: 1_000,
+            currentValueUsd: 1_000,
+            unrealizedPnlUsd: 0,
+            feesEarnedUsd: 0,
+            openedAt: Date.now(),
+          },
+        ],
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+  });
+
   it("rejects EXIT when no position is open for the pool", () => {
     const result = evaluateAgentProposal(
       makeProposal({ action: "EXIT", poolAddress: "pool1" }),
