@@ -176,6 +176,46 @@ export function decisionChangesExecutableBehavior(
 }
 
 /**
+ * Counterpart to recordAppliedProposalRiskDenial for the approval side: any
+ * validated proposal that survives risk evaluation is a usable advisor
+ * response, so clear per-pool backoff and reset the circuit breaker —
+ * including no-op echoes.
+ */
+export const recordAppliedProposalRiskApproval = (args: {
+  readonly proposalValidated: boolean;
+  readonly proposalBackoff: Map<string, ProposalBackoff>;
+  readonly recordCircuitSuccess: () => void;
+  readonly poolAddress: string;
+}): void => {
+  if (!args.proposalValidated) return;
+  args.proposalBackoff.delete(args.poolAddress);
+  args.recordCircuitSuccess();
+};
+
+/**
+ * Whether a risk denial after an applied proposal should arm proposal backoff
+ * / circuit failure. A pure sub-epsilon gate crossing (a behavior change only
+ * because it crosses confidenceThreshold) is penalized only when the nudge
+ * actually caused the denial — denials the deterministic decision would have
+ * received identically (stop-loss, drawdown pause) are not the advisor's fault.
+ */
+export const shouldPenalizeAppliedProposalDenial = (args: {
+  readonly appliedAgentProposal: boolean;
+  readonly preApplyDecision: AgentDecision | undefined;
+  readonly appliedDecision: AgentDecision;
+  readonly isPreApplyRiskApproved: () => boolean;
+}): boolean => {
+  if (!args.appliedAgentProposal || args.preApplyDecision === undefined) {
+    return args.appliedAgentProposal;
+  }
+  const gateCrossingOnly = !decisionChangesExecutableBehavior(
+    args.preApplyDecision,
+    args.appliedDecision,
+  );
+  return !gateCrossingOnly || args.isPreApplyRiskApproved();
+};
+
+/**
  * Sticky risk denials after an applied agent proposal that changed executable
  * behavior should arm proposal backoff and trip the circuit breaker so the
  * same doomed advisor response is not re-requested every scan. Queued
@@ -1453,6 +1493,8 @@ export const program = Effect.gen(function* () {
       let appliedAgentProposal = false;
       /** True when any proposal (echo or behavior-changing) was validated and applied. */
       let proposalValidated = false;
+      /** The deterministic decision before an applied proposal replaced it. */
+      let preApplyDecision: AgentDecision | undefined;
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, pool.activeBinId);
@@ -2335,7 +2377,7 @@ export const program = Effect.gen(function* () {
                   from: decision.action,
                   to: validation.adjustedDecision.action,
                 });
-                const preApplyDecision = decision;
+                preApplyDecision = decision;
                 const originalAction = decision.action;
                 const deterministicReasoning = decision.reasoning;
                 decision = validation.adjustedDecision;
@@ -2454,13 +2496,14 @@ export const program = Effect.gen(function* () {
       }
 
       // Risk evaluation
-      const riskResult = risk.evaluate(decision, {
+      const riskCtx = {
         openPositions,
         portfolioValueUsd,
         recentPnlUsd,
         poolAddress,
         activeBinId: pool.activeBinId,
-      });
+      };
+      const riskResult = risk.evaluate(decision, riskCtx);
 
       // Apply risk-adjusted position size cap
       if (riskResult.adjustedSizeUsd && decision.action === "ENTER") {
@@ -2505,12 +2548,21 @@ export const program = Effect.gen(function* () {
         // Arm backoff / circuit breaker for applied sync or queue proposals so
         // the same doomed advisor response is not re-requested every scan.
         // Queued proposals are rejected; transient execution failures still
-        // retry via finalize.
-        yield* recordAppliedProposalRiskDenial(agentState, {
+        // retry via finalize. A pure gate-crossing nudge is penalized only when
+        // it caused the denial — denials the deterministic decision would have
+        // received identically are not the advisor's fault.
+        const penalizeAppliedProposal = shouldPenalizeAppliedProposalDenial({
           appliedAgentProposal,
+          preApplyDecision,
+          appliedDecision: decision,
+          isPreApplyRiskApproved: () =>
+            preApplyDecision !== undefined && risk.evaluate(preApplyDecision, riskCtx).approved,
+        });
+        yield* recordAppliedProposalRiskDenial(agentState, {
+          appliedAgentProposal: penalizeAppliedProposal,
           appliedQueuedProposalId,
           proposalBackoff,
-          recordCircuitFailure: appliedAgentProposal
+          recordCircuitFailure: penalizeAppliedProposal
             ? (t) => getPoolCircuitBreaker(poolAddress).recordFailure(t)
             : undefined,
           poolAddress,
@@ -2525,10 +2577,12 @@ export const program = Effect.gen(function* () {
 
       // Any validated proposal that survives risk is a usable advisor response:
       // clear per-pool backoff and reset the breaker, including no-op echoes.
-      if (proposalValidated) {
-        proposalBackoff.delete(poolAddress);
-        getPoolCircuitBreaker(poolAddress).recordSuccess();
-      }
+      recordAppliedProposalRiskApproval({
+        proposalValidated,
+        proposalBackoff,
+        recordCircuitSuccess: () => getPoolCircuitBreaker(poolAddress).recordSuccess(),
+        poolAddress,
+      });
 
       if (decision.action === "EXIT") {
         const pendingCooldown = yield* computeCooldownForExit(decision, pos);

@@ -8,8 +8,10 @@ import {
   hasSyncProposalTransport,
   isProposalStale,
   decisionChangesExecutableBehavior,
+  recordAppliedProposalRiskApproval,
   recordAppliedProposalRiskDenial,
   shouldHoldForSupervisedApproval,
+  shouldPenalizeAppliedProposalDenial,
 } from "../engine/program.js";
 import type { ProposalBackoff } from "../engine/proposal-backoff.js";
 import type { AgentDecision } from "../engine/types.js";
@@ -561,6 +563,13 @@ describe("decisionChangesExecutableBehavior", () => {
     ).toBe(true);
     expect(
       decisionChangesExecutableBehavior(
+        base({ confidence: 0.648 }),
+        base({ confidence: 0.652 }),
+        0.65,
+      ),
+    ).toBe(true);
+    expect(
+      decisionChangesExecutableBehavior(
         base({ confidence: 0.66 }),
         base({ confidence: 0.656 }),
         0.65,
@@ -570,6 +579,111 @@ describe("decisionChangesExecutableBehavior", () => {
     expect(
       decisionChangesExecutableBehavior(base({ confidence: 0.652 }), base({ confidence: 0.648 })),
     ).toBe(false);
+  });
+});
+
+describe("recordAppliedProposalRiskApproval", () => {
+  it("clears backoff and records circuit success for a validated proposal", () => {
+    const proposalBackoff = new Map<string, ProposalBackoff>([
+      ["pool-a", { failures: 2, nextProposalAt: 1_000_000 }],
+    ]);
+    let successes = 0;
+    recordAppliedProposalRiskApproval({
+      proposalValidated: true,
+      proposalBackoff,
+      recordCircuitSuccess: () => {
+        successes++;
+      },
+      poolAddress: "pool-a",
+    });
+    expect(proposalBackoff.has("pool-a")).toBe(false);
+    expect(successes).toBe(1);
+  });
+
+  it("does nothing when no proposal was validated", () => {
+    const proposalBackoff = new Map<string, ProposalBackoff>([
+      ["pool-a", { failures: 2, nextProposalAt: 1_000_000 }],
+    ]);
+    let successes = 0;
+    recordAppliedProposalRiskApproval({
+      proposalValidated: false,
+      proposalBackoff,
+      recordCircuitSuccess: () => {
+        successes++;
+      },
+      poolAddress: "pool-a",
+    });
+    expect(proposalBackoff.has("pool-a")).toBe(true);
+    expect(successes).toBe(0);
+  });
+});
+
+describe("shouldPenalizeAppliedProposalDenial", () => {
+  const base = (overrides: Partial<AgentDecision> = {}): AgentDecision => ({
+    action: "HOLD",
+    poolAddress: "pool-a",
+    confidence: 0.5,
+    reasoning: "deterministic",
+    ...overrides,
+  });
+
+  it("is false when no behavior-changing proposal was applied", () => {
+    expect(
+      shouldPenalizeAppliedProposalDenial({
+        appliedAgentProposal: false,
+        preApplyDecision: undefined,
+        appliedDecision: base(),
+        isPreApplyRiskApproved: () => {
+          throw new Error("must not be consulted");
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("is true for a real behavior change without consulting pre-apply risk", () => {
+    expect(
+      shouldPenalizeAppliedProposalDenial({
+        appliedAgentProposal: true,
+        preApplyDecision: base(),
+        appliedDecision: base({ action: "EXIT" }),
+        isPreApplyRiskApproved: () => {
+          throw new Error("must not be consulted");
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("is true for a gate-crossing nudge that caused the denial", () => {
+    expect(
+      shouldPenalizeAppliedProposalDenial({
+        appliedAgentProposal: true,
+        preApplyDecision: base({ confidence: 0.652 }),
+        appliedDecision: base({ confidence: 0.648 }),
+        isPreApplyRiskApproved: () => true,
+      }),
+    ).toBe(true);
+  });
+
+  it("is false for a gate-crossing nudge when the deterministic decision was already denied", () => {
+    expect(
+      shouldPenalizeAppliedProposalDenial({
+        appliedAgentProposal: true,
+        preApplyDecision: base({ confidence: 0.652 }),
+        appliedDecision: base({ confidence: 0.648 }),
+        isPreApplyRiskApproved: () => false,
+      }),
+    ).toBe(false);
+  });
+
+  it("is true when the pre-apply decision is unavailable", () => {
+    expect(
+      shouldPenalizeAppliedProposalDenial({
+        appliedAgentProposal: true,
+        preApplyDecision: undefined,
+        appliedDecision: base({ confidence: 0.648 }),
+        isPreApplyRiskApproved: () => false,
+      }),
+    ).toBe(true);
   });
 });
 
