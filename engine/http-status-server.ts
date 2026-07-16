@@ -105,13 +105,34 @@ export class HttpStatusServer {
         );
         proposals.push(proposal);
       }
-      yield* Effect.forEach(proposals, (proposal) => this.state.enqueueProposal(proposal), {
-        discard: true,
-      });
+
+      const acceptedIds: string[] = [];
+      for (const proposal of proposals) {
+        const result = yield* this.state.enqueueProposal(proposal);
+        if (result.status === "rejected") {
+          if (acceptedIds.length === 0) {
+            return new Response(
+              `Proposal queue full (max ${this.config.agentProposalMaxQueueSize})`,
+              { status: 503 },
+            );
+          }
+          return Response.json(
+            {
+              accepted: acceptedIds.length,
+              proposalIds: acceptedIds,
+              error: "queue_full",
+              message: `Proposal queue full after accepting ${acceptedIds.length} of ${proposals.length}`,
+            },
+            { status: 503 },
+          );
+        }
+        acceptedIds.push(proposal.proposalId);
+      }
+
       return Response.json(
         {
-          accepted: proposals.length,
-          proposalIds: proposals.map((p) => p.proposalId),
+          accepted: acceptedIds.length,
+          proposalIds: acceptedIds,
         },
         { status: 202 },
       );
@@ -129,10 +150,10 @@ export class HttpStatusServer {
     const providedToken = authHeader.startsWith("Bearer ")
       ? authHeader.slice("Bearer ".length)
       : "";
-    const expectedToken =
-      this.config.agentApprovalToken.length > 0
-        ? this.config.agentApprovalToken
-        : this.config.agentProposalToken;
+    // Fail-closed: approve requires an explicit approval token. Do not fall
+    // back to the proposal enqueue credential — that would collapse the
+    // supervised human boundary if a single token leaks.
+    const expectedToken = this.config.agentApprovalToken;
     if (expectedToken.length === 0) {
       return new Response("Unauthorized", { status: 401 });
     }

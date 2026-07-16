@@ -810,11 +810,19 @@ export class AgentService extends Context.Tag("AgentService")<AgentService, Agen
 
 // ─── Agent State Service (shared mutable state for MCP/HTTP servers) ─────────
 
+/** Result of attempting to enqueue an agent proposal into the in-memory queue. */
+export type EnqueueProposalResult =
+  | { readonly status: "enqueued" }
+  | { readonly status: "replaced"; readonly replacedIds: ReadonlyArray<string> }
+  | { readonly status: "rejected"; readonly reason: "queue_full" };
+
 export interface AgentStateApi {
   readonly getSnapshot: () => Effect.Effect<PrismStateSnapshot, never>;
   readonly updateSnapshot: (patch: Partial<PrismStateSnapshot>) => Effect.Effect<void, never>;
   readonly setAgentPolicy: (patch: Partial<AgentPolicySnapshot>) => Effect.Effect<void, never>;
-  readonly enqueueProposal: (proposal: AgentProposal) => Effect.Effect<void, never>;
+  readonly enqueueProposal: (
+    proposal: AgentProposal,
+  ) => Effect.Effect<EnqueueProposalResult, never>;
   readonly dequeueProposals: (proposalIds: ReadonlyArray<string>) => Effect.Effect<void, never>;
   readonly approveProposal: (proposalId: string) => Effect.Effect<void, never>;
   readonly rejectProposal: (proposalId: string) => Effect.Effect<void, never>;

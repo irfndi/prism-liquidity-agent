@@ -1,6 +1,6 @@
 import { Effect, Layer } from "effect";
 import { createLogger } from "./logger.js";
-import { AgentStateService } from "./services.js";
+import { AgentStateService, type EnqueueProposalResult } from "./services.js";
 import type { AgentPolicySnapshot, AgentProposal } from "./types.js";
 
 const logger = createLogger("AgentStateService");
@@ -84,23 +84,29 @@ export function AgentStateLive(): Layer.Layer<AgentStateService, never, never> {
     getSnapshot: () => Effect.succeed(initialSnapshot),
     updateSnapshot: () => Effect.void,
     setAgentPolicy: () => Effect.void,
-    enqueueProposal: () => Effect.void,
+    enqueueProposal: () => Effect.succeed({ status: "enqueued" as const }),
     dequeueProposals: () => Effect.void,
     approveProposal: () => Effect.void,
     rejectProposal: () => Effect.void,
   });
 }
 
-export function AgentStateMutable(): {
+export interface AgentStateMutableOptions {
+  /** Maximum number of non-expired pending/approved proposals retained. Default 50. */
+  readonly maxPendingProposals?: number;
+}
+
+export function AgentStateMutable(options: AgentStateMutableOptions = {}): {
   readonly layer: Layer.Layer<AgentStateService, never, never>;
   readonly update: (patch: Partial<PrismStateSnapshot>) => void;
   readonly setAgentPolicy: (patch: Partial<AgentPolicySnapshot>) => void;
   readonly setPendingProposals: (proposals: ReadonlyArray<AgentProposal>) => void;
-  readonly enqueueProposal: (proposal: AgentProposal) => void;
+  readonly enqueueProposal: (proposal: AgentProposal) => EnqueueProposalResult;
   readonly dequeueProposals: (ids: ReadonlyArray<string>) => void;
   readonly approveProposal: (id: string) => void;
   readonly rejectProposal: (id: string) => void;
 } {
+  const maxPendingProposals = options.maxPendingProposals ?? 50;
   let snapshot: PrismStateSnapshot = initialSnapshot;
 
   const update = (patch: Partial<PrismStateSnapshot>): void => {
@@ -145,8 +151,28 @@ export function AgentStateMutable(): {
     update({ pendingProposals: [...proposals] });
   };
 
-  const enqueueProposal = (proposal: AgentProposal): void => {
-    update({ pendingProposals: [...snapshot.pendingProposals, proposal] });
+  const enqueueProposal = (proposal: AgentProposal): EnqueueProposalResult => {
+    const now = Date.now();
+    prune(now);
+
+    // Prefer a single latest proposal per pool: drop older pending/approved
+    // entries for the same pool so re-proposals do not accumulate.
+    const samePoolIds = snapshot.pendingProposals
+      .filter((p) => p.poolAddress === proposal.poolAddress)
+      .map((p) => p.proposalId);
+    const withoutSamePool = snapshot.pendingProposals.filter(
+      (p) => p.poolAddress !== proposal.poolAddress,
+    );
+
+    if (withoutSamePool.length >= maxPendingProposals) {
+      return { status: "rejected", reason: "queue_full" };
+    }
+
+    update({ pendingProposals: [...withoutSamePool, proposal] });
+    if (samePoolIds.length > 0) {
+      return { status: "replaced", replacedIds: samePoolIds };
+    }
+    return { status: "enqueued" };
   };
 
   const dequeueProposals = (proposalIds: ReadonlyArray<string>): void => {
@@ -187,8 +213,9 @@ export function AgentStateMutable(): {
       }),
     enqueueProposal: (proposal) =>
       Effect.sync(() => {
-        enqueueProposal(proposal);
+        const result = enqueueProposal(proposal);
         prune(Date.now());
+        return result;
       }),
     dequeueProposals: (proposalIds) =>
       Effect.sync(() => {

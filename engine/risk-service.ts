@@ -8,6 +8,7 @@ import type {
   ProposalValidationResult,
   RebalanceParams,
 } from "./types.js";
+import { shouldHoldForRecovery } from "./strategy-service.js";
 
 export interface RiskConfig {
   readonly confidenceThreshold: number;
@@ -140,6 +141,10 @@ export function evaluateAgentProposal(
   }
 
   // 4. Non-ENTER actions may not be promoted to ENTER.
+  // HOLD→REBALANCE and HOLD→EXIT are intentionally allowed when a position
+  // exists (checked below). Callers in `full`/`supervised` must still re-run
+  // capital-protection gates (min interval, gas, recovery) before applying
+  // agent-originated REBALANCE — see evaluateAgentRebalanceCapitalGates.
   if (
     proposal.originalAction !== undefined &&
     proposal.originalAction !== "ENTER" &&
@@ -310,6 +315,66 @@ export const RiskLive = (riskConfig: RiskConfig) =>
       },
     } satisfies RiskApi),
   );
+
+// ─── Agent-originated REBALANCE capital-protection gates ─────────────────────
+
+export interface AgentRebalanceCapitalGateInput {
+  readonly now: number;
+  readonly lastRebalanceAt: number;
+  readonly minRebalanceIntervalMs: number;
+  /** When true (OOR grace expired), min-interval may be bypassed. */
+  readonly oorGraceExpired: boolean;
+  readonly rebalanceGasCostSol: number;
+  readonly solPriceUsd: number;
+  readonly positionDailyFeesUsd: number;
+  readonly minDaysOfFeesPaidAhead: number;
+  readonly recoveryProbability: number;
+  readonly oorRecoveryHoldThreshold: number;
+}
+
+/**
+ * Re-apply the deterministic REBALANCE capital-protection gates to an
+ * agent-originated REBALANCE so advisors cannot bypass min-interval, gas, or
+ * OOR recovery holds that protect the deterministic path.
+ */
+export function evaluateAgentRebalanceCapitalGates(input: AgentRebalanceCapitalGateInput): {
+  readonly approved: boolean;
+  readonly reason: string;
+} {
+  const timeSinceRebal = input.now - input.lastRebalanceAt;
+  if (timeSinceRebal < input.minRebalanceIntervalMs && !input.oorGraceExpired) {
+    return {
+      approved: false,
+      reason:
+        `Agent REBALANCE blocked by min-interval: ${timeSinceRebal}ms < ` +
+        `${input.minRebalanceIntervalMs}ms`,
+    };
+  }
+
+  const gasGate = evaluateGasGate({
+    rebalanceGasCostSol: input.rebalanceGasCostSol,
+    solPriceUsd: input.solPriceUsd,
+    positionDailyFeesUsd: input.positionDailyFeesUsd,
+    minDaysOfFeesPaidAhead: input.minDaysOfFeesPaidAhead,
+  });
+  if (!gasGate.approved) {
+    return {
+      approved: false,
+      reason: `Agent REBALANCE blocked by gas-gate: ${gasGate.reason}`,
+    };
+  }
+
+  if (shouldHoldForRecovery(input.recoveryProbability, input.oorRecoveryHoldThreshold)) {
+    return {
+      approved: false,
+      reason:
+        `Agent REBALANCE blocked by recovery-gate: probability ` +
+        `${input.recoveryProbability.toFixed(2)} >= ${input.oorRecoveryHoldThreshold}`,
+    };
+  }
+
+  return { approved: true, reason: "Agent REBALANCE capital gates passed" };
+}
 
 // ─── F1: Gas-aware rebalancing gate ──────────────────────────────────────────
 

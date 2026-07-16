@@ -89,6 +89,7 @@ function buildLayer() {
     agentApprovalToken: "",
     agentProposalTimeoutMs: 15_000,
     agentProposalMaxBatchSize: 10,
+    agentProposalMaxQueueSize: 50,
     agentProposalStaleMs: 300_000,
     agentProposalBackoffBaseMs: 60_000,
     agentProposalBackoffMaxMs: 3_600_000,

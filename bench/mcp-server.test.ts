@@ -84,6 +84,7 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     agentApprovalToken: "",
     agentProposalTimeoutMs: 15_000,
     agentProposalMaxBatchSize: 10,
+    agentProposalMaxQueueSize: 50,
     agentProposalStaleMs: 300_000,
     agentProposalBackoffBaseMs: 60_000,
     agentProposalBackoffMaxMs: 3_600_000,
@@ -119,7 +120,7 @@ function mockAgentState(overrides: Partial<AgentStateApi> = {}): AgentStateApi {
     getSnapshot: () => Effect.succeed({} as never),
     updateSnapshot: () => Effect.void,
     setAgentPolicy: () => Effect.void,
-    enqueueProposal: () => Effect.void,
+    enqueueProposal: () => Effect.succeed({ status: "enqueued" as const }),
     dequeueProposals: () => Effect.void,
     approveProposal: () => Effect.void,
     rejectProposal: () => Effect.void,
@@ -526,7 +527,7 @@ describe("McpServer", () => {
     expect(approvedIds).toEqual([]);
   });
 
-  it("falls back to the proposal token when no approval token is configured", async () => {
+  it("does not fall back to the proposal token when no approval token is configured", async () => {
     const approvedIds: string[] = [];
     const server = new McpServer(
       baseConfig({ agentProposalToken: "secret-proposal" }),
@@ -538,8 +539,9 @@ describe("McpServer", () => {
       token: "secret-proposal",
     });
 
-    expect(response.error).toBeUndefined();
-    expect(approvedIds).toEqual(["id-1"]);
+    const error = response.error as { message: string } | undefined;
+    expect(error?.message).toMatch(/Unauthorized/);
+    expect(approvedIds).toEqual([]);
   });
 
   it("rejects the proposal token when a separate approval token is configured", async () => {
@@ -556,6 +558,23 @@ describe("McpServer", () => {
 
     const error = response.error as { message: string } | undefined;
     expect(error?.message).toMatch(/Unauthorized/);
+    expect(approvedIds).toEqual([]);
+  });
+
+  it("rejects prism_approve_proposals batches that exceed the configured limit", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(
+      baseConfig({ agentApprovalToken: "secret-approval", agentProposalMaxBatchSize: 2 }),
+      approveTestState(approvedIds),
+    );
+
+    const response = await callApprove(server, 14, {
+      proposalIds: ["id-1", "id-2", "id-3"],
+      token: "secret-approval",
+    });
+
+    const error = response.error as { message: string } | undefined;
+    expect(error?.message).toMatch(/Batch size 3 exceeds limit 2/);
     expect(approvedIds).toEqual([]);
   });
 });

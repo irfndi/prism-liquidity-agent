@@ -184,10 +184,19 @@ Do not import service implementations directly in program logic. `Layer.provide`
 
 When `AGENTIC_MODE=true`, the engine can talk to a local agent harness (Hermes via ACP, OpenClaw via Gateway WebSocket). It exposes:
 
-- **MCP server** over stdio — tools `prism_status`, `prism_positions`, `prism_decisions`, `prism_config`. Enable with `AGENT_MCP_ENABLED=true`.
-- **HTTP fallback** on `127.0.0.1:AGENT_HTTP_PORT` — endpoints `/health`, `/status`, `/positions`, `/decisions`, `/config`.
+- **MCP server** over stdio — tools `prism_status`, `prism_positions`, `prism_decisions`, `prism_config`, plus proposal tools when enabled. Enable with `AGENT_MCP_ENABLED=true`.
+- **HTTP fallback** on `127.0.0.1:AGENT_HTTP_PORT` — endpoints `/health`, `/status`, `/positions`, `/decisions`, `/config`, and (when proposal mode allows) `/propose` + `/approve`.
 
-The overlay can only **reduce confidence** or change an action to `HOLD`. No remote LLM API keys are used.
+**Proposal modes** (`AGENT_PROPOSAL_MODE`, default `veto`):
+
+| Mode | Applied to execution? | Authority |
+| --- | --- | --- |
+| `veto` | Yes (overlay only) | May **reduce confidence** or force `HOLD` only. Legacy safety overlay. |
+| `suggest` | No | Advisory log only; never changes the decision. |
+| `supervised` | Only human-approved queue | `ENTER`/`REBALANCE` require an approved queued proposal (`AGENT_APPROVAL_TOKEN`). Deterministic `EXIT` stays free. No sync-advisor apply. |
+| `full` | Yes, after validation | May change action except non-`ENTER`→`ENTER` and safety-`EXIT` downgrades. `HOLD`→`REBALANCE` still must pass min-interval / gas / recovery gates. |
+
+Defaults stay fail-closed (`AGENTIC_MODE=false`, mode `veto`, empty tokens). `/approve` requires a distinct `AGENT_APPROVAL_TOKEN` (no fallback to the proposal enqueue token). No remote LLM API keys are used.
 
 ## Code style and conventions
 
@@ -293,6 +302,10 @@ The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copi
 | `AGENTIC_MODE`                | `false`                                                            | Enable agent runtime overlay.                                                                                      |
 | `AGENT_MCP_ENABLED`           | `false`                                                            | Expose stdio MCP server.                                                                                           |
 | `AGENT_HTTP_PORT`             | `0`                                                                | Local HTTP status port (`0` = disabled).                                                                           |
+| `AGENT_PROPOSAL_MODE`         | `veto`                                                             | `veto` \| `suggest` \| `supervised` \| `full` (see Agent runtime overlay).                                         |
+| `AGENT_PROPOSAL_TOKEN`        | `""`                                                               | Bearer token for `/propose` enqueue. Empty disables enqueue.                                                       |
+| `AGENT_APPROVAL_TOKEN`        | `""`                                                               | Bearer token for `/approve` / MCP approve. Required for supervised; no fallback to proposal token.                 |
+| `AGENT_PROPOSAL_MAX_QUEUE_SIZE` | `50`                                                             | Max pending proposals in the in-memory queue.                                                                      |
 | `AUTO_UPDATE`                 | `true`                                                             | Check for releases periodically.                                                                                   |
 | `UPDATE_CHANNEL`              | `stable`                                                           | `stable`, `beta` or `dev`.                                                                                         |
 | `UPDATE_R2_PUBLIC_URL`        | `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev`              | Release CDN. `.env.example` contains a stale `r2.prism-agent.com` value; the code fallback is the source of truth. |

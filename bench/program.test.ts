@@ -5,6 +5,7 @@ import {
   estimatePositionValue,
   executeLive,
   finalizeAppliedProposal,
+  hasSyncProposalTransport,
   isProposalStale,
   shouldHoldForSupervisedApproval,
 } from "../engine/program.js";
@@ -468,5 +469,20 @@ describe("finalizeAppliedProposal", () => {
     const { agentState, dequeued } = makeAgentState();
     await Effect.runPromise(finalizeAppliedProposal(agentState, undefined, true, "ENTER"));
     expect(dequeued).toEqual([]);
+  });
+});
+
+describe("hasSyncProposalTransport", () => {
+  it("is false for AgentNoOp / disconnected runtimes", () => {
+    expect(hasSyncProposalTransport({ transport: null })).toBe(false);
+  });
+
+  it("is false for alert-only transports", () => {
+    expect(hasSyncProposalTransport({ transport: "alert-only" })).toBe(false);
+  });
+
+  it("is true when a real advisor transport is present", () => {
+    expect(hasSyncProposalTransport({ transport: "acp" })).toBe(true);
+    expect(hasSyncProposalTransport({ transport: "gateway" })).toBe(true);
   });
 });

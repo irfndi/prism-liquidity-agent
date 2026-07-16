@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { Effect } from "effect";
-import { evaluateAgentProposal } from "../engine/risk-service.js";
+import {
+  evaluateAgentProposal,
+  evaluateAgentRebalanceCapitalGates,
+} from "../engine/risk-service.js";
 import { buildProposalPrompt } from "../engine/agent-service.js";
 import { parseProposalResponse } from "../engine/proposal-schema.js";
 import type { RiskContext } from "../engine/services.js";
@@ -106,6 +109,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     agentApprovalToken: "",
     agentProposalTimeoutMs: 15_000,
     agentProposalMaxBatchSize: 10,
+    agentProposalMaxQueueSize: 50,
     agentProposalStaleMs: 300_000,
     agentProposalBackoffBaseMs: 60_000,
     agentProposalBackoffMaxMs: 3_600_000,
@@ -705,5 +709,62 @@ describe("proposal template echo end-to-end", () => {
     );
     expect(result.valid).toBe(true);
     expect(result.adjustedDecision?.rebalanceParams?.newUpperBinId).toBe(520);
+  });
+});
+
+describe("evaluateAgentRebalanceCapitalGates", () => {
+  const baseInput = {
+    now: 10_000_000,
+    lastRebalanceAt: 0,
+    minRebalanceIntervalMs: 3_600_000,
+    oorGraceExpired: false,
+    rebalanceGasCostSol: 0.01,
+    solPriceUsd: 100,
+    positionDailyFeesUsd: 50,
+    minDaysOfFeesPaidAhead: 1,
+    recoveryProbability: 0.2,
+    oorRecoveryHoldThreshold: 0.7,
+  };
+
+  it("blocks rebalance inside the min-interval window", () => {
+    const result = evaluateAgentRebalanceCapitalGates({
+      ...baseInput,
+      lastRebalanceAt: baseInput.now - 60_000,
+    });
+    expect(result.approved).toBe(false);
+    expect(result.reason).toMatch(/min-interval/);
+  });
+
+  it("allows rebalance when OOR grace expires even inside min-interval", () => {
+    const result = evaluateAgentRebalanceCapitalGates({
+      ...baseInput,
+      lastRebalanceAt: baseInput.now - 60_000,
+      oorGraceExpired: true,
+    });
+    expect(result.approved).toBe(true);
+  });
+
+  it("blocks rebalance when gas gate fails", () => {
+    const result = evaluateAgentRebalanceCapitalGates({
+      ...baseInput,
+      positionDailyFeesUsd: 0,
+    });
+    expect(result.approved).toBe(false);
+    expect(result.reason).toMatch(/gas-gate/);
+  });
+
+  it("blocks rebalance when recovery probability is high", () => {
+    const result = evaluateAgentRebalanceCapitalGates({
+      ...baseInput,
+      recoveryProbability: 0.9,
+      oorRecoveryHoldThreshold: 0.7,
+    });
+    expect(result.approved).toBe(false);
+    expect(result.reason).toMatch(/recovery-gate/);
+  });
+
+  it("approves when all capital gates pass", () => {
+    const result = evaluateAgentRebalanceCapitalGates(baseInput);
+    expect(result.approved).toBe(true);
   });
 });

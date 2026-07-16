@@ -135,16 +135,34 @@ export interface AppConfig {
   /** Enable the MCP server for agent runtime tool discovery. Default false (enable only when stdout is isolated). */
   readonly agentMcpEnabled: boolean;
   // ─── Agent Proposals ───────────────────────────────────────────────────────
-  /** Agent proposal mode. Default "veto". */
+  /**
+   * Agent proposal mode. Default "veto".
+   *
+   * Authority matrix:
+   * - `veto` — legacy overlay only: may reduce confidence or force HOLD; never promotes action.
+   * - `suggest` — proposals are advisory logs only; never applied to execution.
+   * - `supervised` — ENTER/REBALANCE require a human-approved queued proposal
+   *   (`AGENT_APPROVAL_TOKEN`); deterministic EXIT remains free. No sync advisor apply.
+   * - `full` — validated proposals may change action (except non-ENTER→ENTER and
+   *   EXIT downgrades). HOLD→REBALANCE still passes min-interval/gas/recovery gates;
+   *   HOLD→EXIT is allowed when a position exists. Defaults keep this off
+   *   (`agentiveMode=false`, mode=`veto`).
+   */
   readonly agentProposalMode: AgentProposalMode;
-  /** Auth token for agent proposal endpoints. Empty = disabled. Default "". */
+  /** Auth token for agent proposal enqueue (`/propose`). Empty = disabled. Default "". */
   readonly agentProposalToken: string;
-  /** Separate auth token for the /approve endpoint. If empty, falls back to agentProposalToken. Default "". */
+  /**
+   * Auth token for `/approve` and MCP `prism_approve_proposals`. Required for
+   * supervised approvals; does not fall back to `agentProposalToken` (fail-closed).
+   * Default "".
+   */
   readonly agentApprovalToken: string;
   /** Timeout for agent proposal responses. Default 15000 ms. */
   readonly agentProposalTimeoutMs: number;
   /** Max proposals to queue in one batch. Default 10. */
   readonly agentProposalMaxBatchSize: number;
+  /** Max pending proposals retained in the in-memory queue. Default 50. */
+  readonly agentProposalMaxQueueSize: number;
   /** How long a proposal is valid before considered stale. Default 300000 ms. */
   readonly agentProposalStaleMs: number;
   /** Base backoff duration for bad proposals. Default 60000 ms. */
@@ -378,6 +396,12 @@ const loadConfig = Effect.gen(function* () {
     10,
     100,
   );
+  const agentProposalMaxQueueSize = yield* validatedNumber(
+    "AGENT_PROPOSAL_MAX_QUEUE_SIZE",
+    1,
+    50,
+    1000,
+  );
   const agentProposalStaleMs = yield* validatedNumber(
     "AGENT_PROPOSAL_STALE_MS",
     10_000,
@@ -607,6 +631,7 @@ const loadConfig = Effect.gen(function* () {
     agentApprovalToken,
     agentProposalTimeoutMs,
     agentProposalMaxBatchSize,
+    agentProposalMaxQueueSize,
     agentProposalStaleMs,
     agentProposalBackoffBaseMs,
     agentProposalBackoffMaxMs,

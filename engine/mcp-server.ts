@@ -90,7 +90,8 @@ const tools: ReadonlyArray<McpTool> = [
         },
         token: {
           type: "string",
-          description: "Approval token (AGENT_APPROVAL_TOKEN, or AGENT_PROPOSAL_TOKEN if unset)",
+          description:
+            "Approval token (AGENT_APPROVAL_TOKEN; required, no proposal-token fallback)",
         },
       },
       required: ["proposalIds", "token"],
@@ -241,11 +242,9 @@ export class McpServer {
       case "prism_approve_proposals": {
         // Approvals are the human boundary of supervised mode: require the
         // same credential as the HTTP /approve endpoint so an MCP-capable
-        // advisor cannot approve its own proposals.
-        const expectedToken =
-          this.config.agentApprovalToken.length > 0
-            ? this.config.agentApprovalToken
-            : this.config.agentProposalToken;
+        // advisor cannot approve its own proposals. Fail-closed: no fallback
+        // to the proposal enqueue token.
+        const expectedToken = this.config.agentApprovalToken;
         const providedToken = typeof arguments_.token === "string" ? arguments_.token : "";
         const expectedBuf = Buffer.from(expectedToken);
         const actualBuf = Buffer.from(providedToken);
@@ -261,6 +260,10 @@ export class McpServer {
           : [];
         if (proposalIds.length === 0) {
           throw new Error("proposalIds must be a non-empty array of strings");
+        }
+        const maxBatchSize = this.config.agentProposalMaxBatchSize;
+        if (proposalIds.length > maxBatchSize) {
+          throw new Error(`Batch size ${proposalIds.length} exceeds limit ${maxBatchSize}`);
         }
         const snapshot = await Effect.runPromise(this.state.getSnapshot());
         const pendingIds = new Set(snapshot.pendingProposals.map((p) => p.proposalId));

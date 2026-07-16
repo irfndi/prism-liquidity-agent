@@ -85,6 +85,7 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     agentApprovalToken: "",
     agentProposalTimeoutMs: 15_000,
     agentProposalMaxBatchSize: 10,
+    agentProposalMaxQueueSize: 50,
     agentProposalStaleMs: 300_000,
     agentProposalBackoffBaseMs: 60_000,
     agentProposalBackoffMaxMs: 3_600_000,
@@ -114,7 +115,7 @@ function mockState(snapshot: Record<string, unknown> = {}) {
     getSnapshot: () => Effect.succeed(snapshot as never),
     updateSnapshot: () => Effect.void,
     setAgentPolicy: () => Effect.void,
-    enqueueProposal: () => Effect.void,
+    enqueueProposal: () => Effect.succeed({ status: "enqueued" as const }),
     dequeueProposals: () => Effect.void,
     approveProposal: () => Effect.void,
     rejectProposal: () => Effect.void,
@@ -165,6 +166,7 @@ function mockAgentState(
     enqueueProposal: (proposal: AgentProposal) =>
       Effect.sync(() => {
         enqueued.push(proposal);
+        return { status: "enqueued" as const };
       }),
     dequeueProposals: () => Effect.void,
     approveProposal: () => Effect.void,
@@ -484,7 +486,11 @@ describe("HttpStatusServer", () => {
     const port = 18_791;
     const approvedIds: string[] = [];
     const server = new HttpStatusServer(
-      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "proposal-token",
+        agentApprovalToken: "secret-token",
+      }),
       {
         ...mockAgentState(
           baseSnapshot({
@@ -543,7 +549,11 @@ describe("HttpStatusServer", () => {
     const port = 18_790;
     const approvedIds: string[] = [];
     const server = new HttpStatusServer(
-      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "proposal-token",
+        agentApprovalToken: "secret-token",
+      }),
       {
         ...mockAgentState(baseSnapshot()),
         approveProposal: (proposalId: string) =>
@@ -569,12 +579,42 @@ describe("HttpStatusServer", () => {
     }
   });
 
+  it("rejects /approve when only the proposal token is configured", async () => {
+    const port = 18_787;
+    const approvedIds: string[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
+      {
+        ...mockAgentState(baseSnapshot()),
+        approveProposal: (proposalId: string) =>
+          Effect.sync(() => {
+            approvedIds.push(proposalId);
+          }),
+      },
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/approve`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({ proposalIds: ["id-1"] }),
+      });
+      expect(response.status).toBe(401);
+      expect(approvedIds).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
   it("rejects /approve batches that exceed the configured limit", async () => {
     const port = 18_789;
     const server = new HttpStatusServer(
       baseConfig({
         agentHttpPort: port,
-        agentProposalToken: "secret-token",
+        agentApprovalToken: "secret-token",
         agentProposalMaxBatchSize: 2,
       }),
       mockAgentState(baseSnapshot()),
@@ -651,6 +691,41 @@ describe("HttpStatusServer", () => {
       });
       expect(approvalTokenResponse.status).toBe(200);
       expect(approvedIds).toEqual(["id-1"]);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("rejects /propose when the in-memory queue is full", async () => {
+    const port = 18_786;
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentiveMode: true,
+        agentProposalToken: "secret-token",
+        agentProposalMode: "full",
+        agentProposalMaxQueueSize: 1,
+      }),
+      {
+        ...mockAgentState(baseSnapshot()),
+        enqueueProposal: () => Effect.succeed({ status: "rejected", reason: "queue_full" }),
+      },
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({
+          action: "HOLD",
+          poolAddress: "PoolA",
+          confidence: 0.8,
+        }),
+      });
+      expect(response.status).toBe(503);
     } finally {
       await Effect.runPromise(server.stop());
     }
