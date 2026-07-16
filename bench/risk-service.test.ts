@@ -206,6 +206,46 @@ describe("evaluateAgentProposal", () => {
     expect(result.adjustedDecision?.positionSizeUsd).toBe(1_000);
   });
 
+  it("waives the confidence floor for a matching REBALANCE echo despite differing slippage", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "REBALANCE",
+        poolAddress: "pool1",
+        confidence: 0.5,
+        originalAction: "REBALANCE",
+        originalConfidence: 0.5,
+        rebalanceParams: { newLowerBinId: 100, newUpperBinId: 110, slippageBps: 0 },
+      }),
+      makeContext({
+        openPositions: [
+          {
+            id: "pos-1",
+            poolAddress: "pool1",
+            poolName: "SOL/USDC",
+            lowerBinId: 90,
+            upperBinId: 120,
+            liquidityShares: 0n,
+            depositedUsd: 1_000,
+            currentValueUsd: 1_000,
+            unrealizedPnlUsd: 0,
+            feesEarnedUsd: 0,
+            openedAt: Date.now(),
+          },
+        ],
+        originalDecision: {
+          action: "REBALANCE",
+          poolAddress: "pool1",
+          confidence: 0.5,
+          reasoning: "deterministic",
+          rebalanceParams: { newLowerBinId: 100, newUpperBinId: 110, slippageBps: 50 },
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.adjustedDecision?.rebalanceParams?.newUpperBinId).toBe(110);
+  });
+
   it("applies the confidence floor when the proposal changes the position size", () => {
     const result = evaluateAgentProposal(
       makeProposal({

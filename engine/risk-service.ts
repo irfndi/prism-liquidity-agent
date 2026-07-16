@@ -107,10 +107,11 @@ export function evaluateRisk(
 
 const VALID_ACTIONS: ReadonlyArray<ActionType> = ["HOLD", "REBALANCE", "EXIT", "ENTER"];
 
+// Slippage is intentionally excluded: the proposal schema does not accept it
+// (buildProposal hardcodes 0 while deterministic decisions use 50), and it is
+// never read during execution — only the bin range alters execution.
 const rebalanceParamsEqual = (a: RebalanceParams, b: RebalanceParams): boolean =>
-  a.newLowerBinId === b.newLowerBinId &&
-  a.newUpperBinId === b.newUpperBinId &&
-  a.slippageBps === b.slippageBps;
+  a.newLowerBinId === b.newLowerBinId && a.newUpperBinId === b.newUpperBinId;
 
 export function evaluateAgentProposal(
   proposal: AgentProposal,
