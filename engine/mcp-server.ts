@@ -1,4 +1,5 @@
 import { Effect, Layer } from "effect";
+import crypto from "node:crypto";
 import { createLogger } from "./logger.js";
 import type { AgentStateApi } from "./services.js";
 import { AgentStateService, McpServerService } from "./services.js";
@@ -78,7 +79,7 @@ const tools: ReadonlyArray<McpTool> = [
   {
     name: "prism_approve_proposals",
     description:
-      "Approve one or more pending agent proposals so they can execute in supervised mode.",
+      "Approve one or more pending agent proposals so they can execute in supervised mode. Requires the approval token configured for the engine.",
     inputSchema: {
       type: "object",
       properties: {
@@ -87,8 +88,12 @@ const tools: ReadonlyArray<McpTool> = [
           items: { type: "string" },
           description: "Proposal IDs to approve",
         },
+        token: {
+          type: "string",
+          description: "Approval token (AGENT_APPROVAL_TOKEN, or AGENT_PROPOSAL_TOKEN if unset)",
+        },
       },
-      required: ["proposalIds"],
+      required: ["proposalIds", "token"],
     },
   },
 ];
@@ -234,6 +239,23 @@ export class McpServer {
         };
       }
       case "prism_approve_proposals": {
+        // Approvals are the human boundary of supervised mode: require the
+        // same credential as the HTTP /approve endpoint so an MCP-capable
+        // advisor cannot approve its own proposals.
+        const expectedToken =
+          this.config.agentApprovalToken.length > 0
+            ? this.config.agentApprovalToken
+            : this.config.agentProposalToken;
+        const providedToken = typeof arguments_.token === "string" ? arguments_.token : "";
+        const expectedBuf = Buffer.from(expectedToken);
+        const actualBuf = Buffer.from(providedToken);
+        if (
+          expectedToken.length === 0 ||
+          actualBuf.length !== expectedBuf.length ||
+          !crypto.timingSafeEqual(actualBuf, expectedBuf)
+        ) {
+          throw new Error("Unauthorized: invalid approval token");
+        }
         const proposalIds = Array.isArray(arguments_.proposalIds)
           ? arguments_.proposalIds.filter((id): id is string => typeof id === "string")
           : [];

@@ -5,7 +5,7 @@ import { AgentStateService, type AgentStateApi } from "../engine/services.js";
 import { AgentStateMutable } from "../engine/state-service.js";
 import type { AppConfig } from "../engine/config-service.js";
 
-function baseConfig(): AppConfig {
+function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     walletPrivateKey: "",
     heliusApiKey: "",
@@ -104,6 +104,7 @@ function baseConfig(): AppConfig {
     signalWeightCeiling: 2.5,
     weightedEntryScoreThreshold: 1.8,
     autoSwapEntry: false,
+    ...overrides,
   };
 }
 
@@ -443,79 +444,48 @@ describe("McpServer", () => {
     expect(filteredResult.proposals[0].proposalId).toBe("id-2");
   });
 
+  const approveTestState = (approvedIds: string[]): AgentStateApi => {
+    const pending = (id: string) => ({
+      proposalId: id,
+      action: "HOLD" as const,
+      poolAddress: "PoolA",
+      confidence: 0.8,
+      reasoning: "test",
+      proposedAt: Date.now(),
+      expiresAt: Date.now() + 300_000,
+      source: "sync-prompt" as const,
+      status: "pending" as const,
+    });
+    return mockAgentState({
+      getSnapshot: () =>
+        Effect.succeed({
+          pendingProposals: [pending("id-1"), pending("id-2")],
+        } as never),
+      approveProposal: (proposalId: string) =>
+        Effect.sync(() => {
+          approvedIds.push(proposalId);
+        }),
+    });
+  };
+
+  const callApprove = (server: McpServer, id: number, args: Record<string, unknown>) =>
+    sendRequest(server, {
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name: "prism_approve_proposals", arguments: args },
+    });
+
   it("approves proposals via prism_approve_proposals tool", async () => {
     const approvedIds: string[] = [];
     const server = new McpServer(
-      baseConfig(),
-      mockAgentState({
-        getSnapshot: () =>
-          Effect.succeed({
-            programStartTime: Date.now(),
-            scanCount: 0,
-            lastCycleAt: null,
-            portfolio: {
-              totalValueUsd: 0,
-              unrealizedPnlUsd: 0,
-              realizedPnlUsd: 0,
-              openPositions: 0,
-              maxPositions: 0,
-              walletBalanceUsd: 0,
-            },
-            positions: [],
-            recentDecisions: [],
-            agentPolicy: {
-              mode: "veto",
-              proposalsQueued: 2,
-              lastProposalAt: Date.now(),
-              badProposalBackoffUntil: null,
-              circuitBreakerOpen: false,
-              hardCaps: {
-                maxPositionSizePct: 0.4,
-                maxRebalanceRangeBins: 50,
-                minProposalConfidence: 0.65,
-                proposalStaleMs: 300_000,
-              },
-            },
-            pendingProposals: [
-              {
-                proposalId: "id-1",
-                action: "HOLD",
-                poolAddress: "PoolA",
-                confidence: 0.8,
-                reasoning: "test",
-                proposedAt: Date.now(),
-                expiresAt: Date.now() + 300_000,
-                source: "sync-prompt",
-                status: "pending",
-              },
-              {
-                proposalId: "id-2",
-                action: "HOLD",
-                poolAddress: "PoolB",
-                confidence: 0.8,
-                reasoning: "test",
-                proposedAt: Date.now(),
-                expiresAt: Date.now() + 300_000,
-                source: "sync-prompt",
-                status: "pending",
-              },
-            ],
-          } as never),
-        approveProposal: (proposalId: string) =>
-          Effect.sync(() => {
-            approvedIds.push(proposalId);
-          }),
-      }),
+      baseConfig({ agentApprovalToken: "secret-approval" }),
+      approveTestState(approvedIds),
     );
 
-    const response = await sendRequest(server, {
-      jsonrpc: "2.0",
-      id: 9,
-      method: "tools/call",
-      params: {
-        name: "prism_approve_proposals",
-        arguments: { proposalIds: ["id-1", "id-2"] },
-      },
+    const response = await callApprove(server, 9, {
+      proposalIds: ["id-1", "id-2"],
+      token: "secret-approval",
     });
 
     expect(response.error).toBeUndefined();
@@ -523,5 +493,52 @@ describe("McpServer", () => {
     const result = JSON.parse(content[0]!.text);
     expect(result.approved).toBe(2);
     expect(approvedIds).toEqual(["id-1", "id-2"]);
+  });
+
+  it("rejects prism_approve_proposals with an invalid approval token", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(
+      baseConfig({ agentApprovalToken: "secret-approval" }),
+      approveTestState(approvedIds),
+    );
+
+    const response = await callApprove(server, 10, {
+      proposalIds: ["id-1"],
+      token: "wrong-token",
+    });
+
+    const error = response.error as { message: string } | undefined;
+    expect(error?.message).toMatch(/Unauthorized/);
+    expect(approvedIds).toEqual([]);
+  });
+
+  it("rejects prism_approve_proposals when no approval token is configured", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(baseConfig(), approveTestState(approvedIds));
+
+    const response = await callApprove(server, 11, {
+      proposalIds: ["id-1"],
+      token: "anything",
+    });
+
+    const error = response.error as { message: string } | undefined;
+    expect(error?.message).toMatch(/Unauthorized/);
+    expect(approvedIds).toEqual([]);
+  });
+
+  it("falls back to the proposal token when no approval token is configured", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(
+      baseConfig({ agentProposalToken: "secret-proposal" }),
+      approveTestState(approvedIds),
+    );
+
+    const response = await callApprove(server, 12, {
+      proposalIds: ["id-1"],
+      token: "secret-proposal",
+    });
+
+    expect(response.error).toBeUndefined();
+    expect(approvedIds).toEqual(["id-1"]);
   });
 });

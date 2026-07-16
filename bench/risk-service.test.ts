@@ -649,4 +649,41 @@ describe("proposal template echo end-to-end", () => {
     expect(result.valid).toBe(true);
     expect(result.adjustedDecision?.positionSizeUsd).toBe(2_500);
   });
+
+  it("a faithful template echo of a low-confidence REBALANCE round-trips the bin range and passes the waiver", () => {
+    const decision: AgentDecision = {
+      action: "REBALANCE",
+      poolAddress: "pool1",
+      confidence: 0.5,
+      reasoning: "deterministic",
+      rebalanceParams: { newLowerBinId: 500, newUpperBinId: 520, slippageBps: 50 },
+    };
+    const proposal = echoTemplate(decision);
+    expect(proposal.rebalanceParams?.newLowerBinId).toBe(500);
+    expect(proposal.rebalanceParams?.newUpperBinId).toBe(520);
+    const result = evaluateAgentProposal(
+      proposal,
+      makeContext({
+        openPositions: [
+          {
+            id: "pos-1",
+            poolAddress: "pool1",
+            poolName: "SOL/USDC",
+            lowerBinId: 490,
+            upperBinId: 530,
+            liquidityShares: 0n,
+            depositedUsd: 1_000,
+            currentValueUsd: 1_000,
+            unrealizedPnlUsd: 0,
+            feesEarnedUsd: 0,
+            openedAt: Date.now(),
+          },
+        ],
+        originalDecision: decision,
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.adjustedDecision?.rebalanceParams?.newUpperBinId).toBe(520);
+  });
 });
