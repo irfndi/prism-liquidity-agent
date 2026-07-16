@@ -65,6 +65,23 @@ export class HttpStatusServer {
       });
     }
 
+    // Supervised mode can only consume human-approved proposals. Without an
+    // approval token nothing can ever leave pending, so reject enqueue early
+    // rather than accepting IDs that will only expire.
+    if (
+      this.config.agentProposalMode === "supervised" &&
+      this.config.agentApprovalToken.length === 0
+    ) {
+      return Response.json(
+        {
+          error: "approval_token_required",
+          message:
+            "AGENT_PROPOSAL_MODE=supervised requires AGENT_APPROVAL_TOKEN so proposals can be approved",
+        },
+        { status: 409 },
+      );
+    }
+
     let parsedBody: unknown;
     try {
       parsedBody = await request.json();
@@ -117,32 +134,64 @@ export class HttpStatusServer {
 
       const acceptedIds: string[] = [];
       const replacedIds: string[] = [];
+      const skipped: Array<{
+        readonly poolAddress: string;
+        readonly proposalId: string;
+        readonly reason: "approved_exists";
+      }> = [];
       for (const proposal of deduped) {
         const result = yield* this.state.enqueueProposal(proposal);
         if (result.status === "rejected") {
-          const status = result.reason === "queue_full" ? 503 : 409;
-          const message =
-            result.reason === "queue_full"
-              ? `Proposal queue full (max ${this.config.agentProposalMaxQueueSize})` +
-                (acceptedIds.length > 0
-                  ? ` after accepting ${acceptedIds.length} of ${deduped.length}`
-                  : "")
-              : "An approved proposal already exists for this pool; wait for it to execute or reject it before re-proposing";
-          return Response.json(
-            {
-              accepted: acceptedIds.length,
-              proposalIds: acceptedIds,
-              ...(replacedIds.length > 0 && { replacedIds }),
-              error: result.reason,
-              message,
-            },
-            { status },
-          );
+          // Queue full is global — fail closed for the rest of the batch.
+          if (result.reason === "queue_full") {
+            return Response.json(
+              {
+                accepted: acceptedIds.length,
+                proposalIds: acceptedIds,
+                ...(replacedIds.length > 0 && { replacedIds }),
+                ...(skipped.length > 0 && { skipped }),
+                error: "queue_full",
+                message:
+                  `Proposal queue full (max ${this.config.agentProposalMaxQueueSize})` +
+                  (acceptedIds.length > 0
+                    ? ` after accepting ${acceptedIds.length} of ${deduped.length}`
+                    : ""),
+              },
+              { status: 503 },
+            );
+          }
+          // approved_exists is pool-specific: skip this item and continue so
+          // healthy pools in the same batch still enqueue.
+          if (result.reason === "approved_exists") {
+            skipped.push({
+              poolAddress: proposal.poolAddress,
+              proposalId: proposal.proposalId,
+              reason: "approved_exists",
+            });
+            continue;
+          }
         }
         if (result.status === "replaced") {
           replacedIds.push(...result.replacedIds);
         }
-        acceptedIds.push(proposal.proposalId);
+        if (result.status === "enqueued" || result.status === "replaced") {
+          acceptedIds.push(proposal.proposalId);
+        }
+      }
+
+      if (acceptedIds.length === 0 && skipped.length > 0) {
+        return Response.json(
+          {
+            accepted: 0,
+            proposalIds: [],
+            skipped,
+            error: "approved_exists",
+            poolAddresses: skipped.map((s) => s.poolAddress),
+            message:
+              "An approved proposal already exists for the requested pool(s); wait for it to execute or expire before re-proposing",
+          },
+          { status: 409 },
+        );
       }
 
       return Response.json(
@@ -150,6 +199,7 @@ export class HttpStatusServer {
           accepted: acceptedIds.length,
           proposalIds: acceptedIds,
           ...(replacedIds.length > 0 && { replacedIds }),
+          ...(skipped.length > 0 && { skipped }),
         },
         { status: 202 },
       );
@@ -308,7 +358,8 @@ export class HttpStatusServer {
   stop(): Effect.Effect<void, unknown> {
     return Effect.sync(() => {
       if (this.server) {
-        this.server.stop();
+        // closeActiveConnections avoids TIME_WAIT races when tests rebind ports.
+        this.server.stop(true);
         this.server = null;
         logger.info("HTTP status server stopped");
       }

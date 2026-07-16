@@ -348,6 +348,7 @@ describe("HttpStatusServer", () => {
       baseConfig({
         agentHttpPort: port,
         agentProposalToken: "secret-token",
+        agentApprovalToken: "approval-token",
         agentiveMode: true,
         agentProposalMode: "supervised",
       }),
@@ -401,6 +402,7 @@ describe("HttpStatusServer", () => {
       baseConfig({
         agentHttpPort: port,
         agentProposalToken: "secret-token",
+        agentApprovalToken: "approval-token",
         agentiveMode: true,
         agentProposalMode: "supervised",
         agentProposalMaxBatchSize: 2,
@@ -430,7 +432,7 @@ describe("HttpStatusServer", () => {
   });
 
   it("rejects /propose when proposals are not consumed in the current mode", async () => {
-    const port = 18_787;
+    const port = 18_783;
     const enqueued: AgentProposal[] = [];
     const server = new HttpStatusServer(
       baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
@@ -454,7 +456,7 @@ describe("HttpStatusServer", () => {
   });
 
   it("rejects /propose when agentic mode is on but proposal mode is veto", async () => {
-    const port = 18_786;
+    const port = 18_782;
     const enqueued: AgentProposal[] = [];
     const server = new HttpStatusServer(
       baseConfig({
@@ -476,6 +478,38 @@ describe("HttpStatusServer", () => {
         body: JSON.stringify({ action: "HOLD", poolAddress: "PoolA", confidence: 0.8 }),
       });
       expect(response.status).toBe(409);
+      expect(enqueued).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("rejects /propose in supervised mode when no approval token is configured", async () => {
+    const port = 18_781;
+    const enqueued: AgentProposal[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "secret-token",
+        agentiveMode: true,
+        agentProposalMode: "supervised",
+        agentApprovalToken: "",
+      }),
+      mockAgentState(baseSnapshot(), enqueued),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({ action: "HOLD", poolAddress: "PoolA", confidence: 0.8 }),
+      });
+      expect(response.status).toBe(409);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("approval_token_required");
       expect(enqueued).toHaveLength(0);
     } finally {
       await Effect.runPromise(server.stop());
@@ -580,7 +614,7 @@ describe("HttpStatusServer", () => {
   });
 
   it("rejects /approve when only the proposal token is configured", async () => {
-    const port = 18_787;
+    const port = 18_780;
     const approvedIds: string[] = [];
     const server = new HttpStatusServer(
       baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
@@ -697,7 +731,7 @@ describe("HttpStatusServer", () => {
   });
 
   it("rejects /propose when the in-memory queue is full", async () => {
-    const port = 18_786;
+    const port = 18_779;
     const server = new HttpStatusServer(
       baseConfig({
         agentHttpPort: port,
@@ -780,13 +814,14 @@ describe("HttpStatusServer", () => {
   });
 
   it("rejects /propose with JSON 409 when an approved proposal exists for the pool", async () => {
-    const port = 18_784;
+    const port = 18_778;
     const server = new HttpStatusServer(
       baseConfig({
         agentHttpPort: port,
         agentiveMode: true,
         agentProposalToken: "secret-token",
         agentProposalMode: "supervised",
+        agentApprovalToken: "approval-token",
       }),
       {
         ...mockAgentState(baseSnapshot()),
@@ -808,9 +843,70 @@ describe("HttpStatusServer", () => {
         }),
       });
       expect(response.status).toBe(409);
-      const body = (await response.json()) as { error: string; accepted: number };
+      const body = (await response.json()) as {
+        error: string;
+        accepted: number;
+        poolAddresses: string[];
+        message: string;
+      };
       expect(body.error).toBe("approved_exists");
       expect(body.accepted).toBe(0);
+      expect(body.poolAddresses).toEqual(["PoolA"]);
+      expect(body.message).toMatch(/execute or expire/);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("skips approved_exists pools and still accepts healthy pools in the same batch", async () => {
+    const port = 18_777;
+    const enqueued: AgentProposal[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentiveMode: true,
+        agentProposalToken: "secret-token",
+        agentProposalMode: "supervised",
+        agentApprovalToken: "approval-token",
+      }),
+      {
+        ...mockAgentState(baseSnapshot(), enqueued),
+        enqueueProposal: (proposal: AgentProposal) =>
+          Effect.sync(() => {
+            if (proposal.poolAddress === "PoolA") {
+              return { status: "rejected" as const, reason: "approved_exists" as const };
+            }
+            enqueued.push(proposal);
+            return { status: "enqueued" as const };
+          }),
+      },
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify([
+          { action: "HOLD", poolAddress: "PoolA", confidence: 0.8 },
+          { action: "HOLD", poolAddress: "PoolB", confidence: 0.8 },
+        ]),
+      });
+      expect(response.status).toBe(202);
+      const body = (await response.json()) as {
+        accepted: number;
+        proposalIds: string[];
+        skipped: Array<{ poolAddress: string; reason: string }>;
+      };
+      expect(body.accepted).toBe(1);
+      expect(body.proposalIds).toHaveLength(1);
+      expect(body.skipped).toEqual([
+        expect.objectContaining({ poolAddress: "PoolA", reason: "approved_exists" }),
+      ]);
+      expect(enqueued).toHaveLength(1);
+      expect(enqueued[0]!.poolAddress).toBe("PoolB");
     } finally {
       await Effect.runPromise(server.stop());
     }
