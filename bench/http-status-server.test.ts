@@ -451,6 +451,35 @@ describe("HttpStatusServer", () => {
     }
   });
 
+  it("rejects /propose when agentic mode is on but proposal mode is veto", async () => {
+    const port = 18_786;
+    const enqueued: AgentProposal[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "secret-token",
+        agentiveMode: true,
+        agentProposalMode: "veto",
+      }),
+      mockAgentState(baseSnapshot(), enqueued),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({ action: "HOLD", poolAddress: "PoolA", confidence: 0.8 }),
+      });
+      expect(response.status).toBe(409);
+      expect(enqueued).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
   it("approves queued proposals via /approve", async () => {
     const port = 18_791;
     const approvedIds: string[] = [];

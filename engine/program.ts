@@ -78,6 +78,7 @@ import type {
   PoolState,
   Position,
   SignalWeights,
+  ActionType,
 } from "./types.js";
 import type { AgentRuntimeAlert, AgentRuntimeCheckin } from "./agent-transport.js";
 import { randomUUID } from "crypto";
@@ -99,6 +100,15 @@ const logger = createLogger("program");
 
 export function isProposalStale(proposal: AgentProposal, staleMs: number, now: number): boolean {
   return now > proposal.proposedAt + staleMs || now > proposal.expiresAt;
+}
+
+export function shouldHoldForSupervisedApproval(
+  agentiveMode: boolean,
+  mode: AgentProposalMode,
+  approvedProposalApplied: boolean,
+  action: ActionType,
+): boolean {
+  return agentiveMode && mode === "supervised" && !approvedProposalApplied && action !== "HOLD";
 }
 
 // ─── Position value estimation (rough heuristic) ───────────────
@@ -1320,6 +1330,7 @@ export const program = Effect.gen(function* () {
       const cycleId = cycle.cycleId;
       let agentProposal: AgentProposal | null = null;
       let proposalSource: "queue" | "sync" | undefined;
+      let appliedQueuedProposalId: string | undefined;
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, pool.activeBinId);
@@ -2149,10 +2160,11 @@ export const program = Effect.gen(function* () {
                     proposalBackoff.delete(poolAddress);
                     poolCircuitBreaker.recordSuccess();
 
+                    // Queued proposals are retained until execution succeeds (or
+                    // the applied decision is a non-executing HOLD) so a
+                    // transient failure can be retried on the next cycle.
                     if (proposalSource === "queue" && agentProposal.proposalId) {
-                      yield* agentState
-                        .dequeueProposals([agentProposal.proposalId])
-                        .pipe(Effect.catchAll(() => Effect.void));
+                      appliedQueuedProposalId = agentProposal.proposalId;
                     }
                   }
                   yield* agentState
@@ -2215,6 +2227,27 @@ export const program = Effect.gen(function* () {
       }
 
       if (!decision) return null;
+
+      // Supervised mode gates execution on human approval: without an applied
+      // approved proposal, any non-HOLD decision is held until one is available.
+      if (
+        shouldHoldForSupervisedApproval(
+          config.agentiveMode,
+          config.agentProposalMode,
+          appliedQueuedProposalId !== undefined,
+          decision.action,
+        )
+      ) {
+        logger.info("Supervised mode: holding decision pending approved proposal", {
+          pool: poolAddress,
+          action: decision.action,
+        });
+        decision = {
+          ...decision,
+          action: "HOLD",
+          reasoning: `Supervised mode: awaiting approved proposal (held ${decision.action}: ${decision.reasoning})`,
+        };
+      }
 
       // Risk evaluation
       const riskResult = risk.evaluate(decision, {
@@ -2399,6 +2432,15 @@ export const program = Effect.gen(function* () {
         });
       } else if (decision.action === "ENTER" && executed) {
         entryFailureBackoff.delete(poolAddress);
+      }
+
+      // Consume the applied queued proposal only once the outcome is final:
+      // after successful execution, or when the applied decision is HOLD.
+      // Risk-rejected and failed executions retain the proposal for retry.
+      if (appliedQueuedProposalId && (executed || decision.action === "HOLD")) {
+        yield* agentState
+          .dequeueProposals([appliedQueuedProposalId])
+          .pipe(Effect.catchAll(() => Effect.void));
       }
 
       // Audit after execution

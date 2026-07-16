@@ -5,6 +5,7 @@ import {
   estimatePositionValue,
   executeLive,
   isProposalStale,
+  shouldHoldForSupervisedApproval,
 } from "../engine/program.js";
 import { ConfigService } from "../engine/config-service.js";
 import { EntryPrepError } from "../engine/errors.js";
@@ -401,5 +402,30 @@ describe("isProposalStale", () => {
     const now = 1500;
     const proposal = makeProposal(0, 1000);
     expect(isProposalStale(proposal, 10_000, now)).toBe(true);
+  });
+});
+
+describe("shouldHoldForSupervisedApproval", () => {
+  it("holds a non-HOLD decision in supervised mode without an approved proposal", () => {
+    expect(shouldHoldForSupervisedApproval(true, "supervised", false, "ENTER")).toBe(true);
+    expect(shouldHoldForSupervisedApproval(true, "supervised", false, "EXIT")).toBe(true);
+    expect(shouldHoldForSupervisedApproval(true, "supervised", false, "REBALANCE")).toBe(true);
+  });
+
+  it("does not hold HOLD decisions", () => {
+    expect(shouldHoldForSupervisedApproval(true, "supervised", false, "HOLD")).toBe(false);
+  });
+
+  it("does not hold when an approved queued proposal was applied", () => {
+    expect(shouldHoldForSupervisedApproval(true, "supervised", true, "ENTER")).toBe(false);
+  });
+
+  it("does not hold in full or suggest modes", () => {
+    expect(shouldHoldForSupervisedApproval(true, "full", false, "ENTER")).toBe(false);
+    expect(shouldHoldForSupervisedApproval(true, "suggest", false, "ENTER")).toBe(false);
+  });
+
+  it("does not hold when the agent overlay is disabled", () => {
+    expect(shouldHoldForSupervisedApproval(false, "supervised", false, "ENTER")).toBe(false);
   });
 });
