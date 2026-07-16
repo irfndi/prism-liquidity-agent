@@ -541,4 +541,21 @@ describe("McpServer", () => {
     expect(response.error).toBeUndefined();
     expect(approvedIds).toEqual(["id-1"]);
   });
+
+  it("rejects the proposal token when a separate approval token is configured", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(
+      baseConfig({ agentApprovalToken: "secret-approval", agentProposalToken: "secret-proposal" }),
+      approveTestState(approvedIds),
+    );
+
+    const response = await callApprove(server, 13, {
+      proposalIds: ["id-1"],
+      token: "secret-proposal",
+    });
+
+    const error = response.error as { message: string } | undefined;
+    expect(error?.message).toMatch(/Unauthorized/);
+    expect(approvedIds).toEqual([]);
+  });
 });

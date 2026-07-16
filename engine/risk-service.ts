@@ -213,7 +213,9 @@ export function evaluateAgentProposal(
 
   if (proposal.action === "EXIT") {
     const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
-    if (!hasPosition) {
+    // An echoed deterministic EXIT on an unheld pool is a no-op, not a bad
+    // proposal — only reject advisor-initiated exits with no position.
+    if (!hasPosition && proposal.originalAction !== "EXIT") {
       return {
         valid: false,
         reason: `Cannot EXIT pool ${proposal.poolAddress} — no open position`,

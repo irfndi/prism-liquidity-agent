@@ -477,6 +477,26 @@ describe("evaluateAgentProposal", () => {
     expect(result.reason).toMatch(/no open position/);
   });
 
+  it("rejects an advisor-initiated EXIT on an unheld pool", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "EXIT", poolAddress: "pool1", originalAction: "HOLD" }),
+      makeContext({ openPositions: [] }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/no open position/);
+  });
+
+  it("allows an echoed deterministic EXIT on an unheld pool as a no-op", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "EXIT", poolAddress: "pool1", originalAction: "EXIT" }),
+      makeContext({ openPositions: [] }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.adjustedDecision?.action).toBe("EXIT");
+  });
+
   it("rejects a proposal targeting a different pool", () => {
     const result = evaluateAgentProposal(
       makeProposal({ action: "HOLD", poolAddress: "other-pool" }),
