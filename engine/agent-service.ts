@@ -121,16 +121,27 @@ Respond with JSON only:
 `;
 }
 
-function buildProposalPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
+export function buildProposalPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
   const { pool, metrics } = ctx;
   const { warningsBlock, decisionsBlock } = formatRuntimeContext(ctx);
+  const currentParamsBlock = [
+    decision.positionSizeUsd !== undefined
+      ? `Position Size: $${decision.positionSizeUsd.toFixed(0)}`
+      : null,
+    decision.rebalanceParams !== undefined
+      ? `Bin Range: ${decision.rebalanceParams.newLowerBinId} to ${decision.rebalanceParams.newUpperBinId}`
+      : null,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
 
   return `You are a liquidity pool strategy advisor. Review the deterministic agent's decision and propose the best action for this pool.
 
 RULES (strict — you must follow them):
 - You may propose any of: HOLD, REBALANCE, EXIT, ENTER.
 - The engine will validate your proposal against safety gates; only safe proposals execute.
-- You may attach a position size for ENTER (USD) and bin range for REBALANCE.
+- ENTER proposals require positionSizeUsd (USD); REBALANCE proposals require rebalanceParams.
+- When echoing the engine's action, reuse the current executable values shown below — do not invent new ones.
 - Do not propose actions for pools outside the current context.
 - If the engine's decision is already optimal, return the same action and confidence.
 
@@ -138,7 +149,7 @@ DECISION TO REVIEW:
 Action: ${decision.action}
 Confidence: ${decision.confidence.toFixed(2)}
 Reasoning: ${decision.reasoning}
-Pool: ${pool.tokenXSymbol}/${pool.tokenYSymbol} (${pool.address})
+${currentParamsBlock === "" ? "" : `${currentParamsBlock}\n`}Pool: ${pool.tokenXSymbol}/${pool.tokenYSymbol} (${pool.address})
 TVL: $${pool.tvlUsd.toFixed(0)}
 24h Volume: $${pool.volume24hUsd.toFixed(0)}
 24h Fees: $${pool.fees24hUsd.toFixed(0)}
@@ -157,7 +168,7 @@ RECENT DECISIONS:
 ${decisionsBlock}
 
 Respond with JSON only:
-{"action": "HOLD|REBALANCE|EXIT|ENTER", "poolAddress": "${pool.address}", "confidence": 0.0-1.0, "positionSizeUsd": 100, "rebalanceParams": {"lowerBinId": 100, "upperBinId": 110}, "reasoning": "..."}
+{"action": "HOLD|REBALANCE|EXIT|ENTER", "poolAddress": "${pool.address}", "confidence": 0.0-1.0, "positionSizeUsd": ${decision.positionSizeUsd ?? 100}, "rebalanceParams": {"lowerBinId": ${decision.rebalanceParams?.newLowerBinId ?? 100}, "upperBinId": ${decision.rebalanceParams?.newUpperBinId ?? 110}}, "reasoning": "..."}
 `;
 }
 

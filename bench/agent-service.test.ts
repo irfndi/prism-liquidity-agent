@@ -1,11 +1,16 @@
 import { describe, it, expect } from "vitest";
 import { Effect } from "effect";
-import { parseResponse, validateOverride, AgentNoOp } from "../engine/agent-service.js";
+import {
+  parseResponse,
+  validateOverride,
+  AgentNoOp,
+  buildProposalPrompt,
+} from "../engine/agent-service.js";
 import { AcpTransport } from "../engine/acp-transport.js";
 import { GatewayTransport } from "../engine/gateway-transport.js";
 import type { AgentDecision } from "../engine/types.js";
 import type { AppConfig } from "../engine/config-service.js";
-import type { AgentRuntimeDetection } from "../engine/agent-transport.js";
+import type { AgentRuntimeContext, AgentRuntimeDetection } from "../engine/agent-transport.js";
 
 function makeDecision(overrides: Partial<AgentDecision> = {}): AgentDecision {
   return {
@@ -215,6 +220,60 @@ describe("AgentNoOp", () => {
     const status = await Effect.runPromise(AgentNoOp.getStatus());
     expect(status.connected).toBe(false);
     expect(status.transport).toBeNull();
+  });
+});
+
+describe("buildProposalPrompt", () => {
+  const makeCtx = (decision: AgentDecision): AgentRuntimeContext =>
+    ({
+      decision,
+      pool: {
+        address: decision.poolAddress,
+        tokenXSymbol: "SOL",
+        tokenYSymbol: "USDC",
+        tvlUsd: 100_000,
+        volume24hUsd: 50_000,
+        fees24hUsd: 500,
+        apr: 12,
+      },
+      metrics: {
+        feeIlRatio: 1.5,
+        volumeAuthenticity: 0.9,
+        binUtilization: 0.5,
+        tvlVelocity: 0.01,
+      },
+      warnings: [],
+      recentDecisions: [],
+    }) as unknown as AgentRuntimeContext;
+
+  it("embeds the current ENTER size in the decision block and response template", () => {
+    const prompt = buildProposalPrompt(
+      makeDecision({ action: "ENTER", positionSizeUsd: 2_500 }),
+      makeCtx(makeDecision({ action: "ENTER", positionSizeUsd: 2_500 })),
+    );
+    expect(prompt).toContain("Position Size: $2500");
+    expect(prompt).toContain('"positionSizeUsd": 2500');
+    expect(prompt).not.toContain('"positionSizeUsd": 100');
+  });
+
+  it("embeds the current REBALANCE bin range in the decision block and response template", () => {
+    const decision = makeDecision({
+      action: "REBALANCE",
+      rebalanceParams: { newLowerBinId: 500, newUpperBinId: 520, slippageBps: 50 },
+    });
+    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    expect(prompt).toContain("Bin Range: 500 to 520");
+    expect(prompt).toContain('"lowerBinId": 500, "upperBinId": 520');
+    expect(prompt).not.toContain('"lowerBinId": 100, "upperBinId": 110');
+  });
+
+  it("falls back to placeholder values when the decision has no executable params", () => {
+    const decision = makeDecision({ action: "HOLD" });
+    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    expect(prompt).not.toContain("Position Size:");
+    expect(prompt).not.toContain("Bin Range:");
+    expect(prompt).toContain('"positionSizeUsd": 100');
+    expect(prompt).toContain('"lowerBinId": 100, "upperBinId": 110');
   });
 });
 

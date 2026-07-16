@@ -220,6 +220,53 @@ describe("evaluateAgentProposal", () => {
     expect(result.reason).toMatch(/Confidence/);
   });
 
+  it("rejects a proposal whose claimed originalAction conflicts with the trusted original", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "HOLD",
+        poolAddress: "pool1",
+        confidence: 0.5,
+        originalAction: "HOLD",
+        originalConfidence: 0.5,
+      }),
+      makeContext({
+        originalDecision: {
+          action: "ENTER",
+          poolAddress: "pool1",
+          confidence: 0.9,
+          reasoning: "deterministic",
+          positionSizeUsd: 1_000,
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/Confidence/);
+  });
+
+  it("rejects a proposal whose claimed originalConfidence conflicts with the trusted original", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "HOLD",
+        poolAddress: "pool1",
+        confidence: 0.5,
+        originalAction: "HOLD",
+        originalConfidence: 0.5,
+      }),
+      makeContext({
+        originalDecision: {
+          action: "HOLD",
+          poolAddress: "pool1",
+          confidence: 0.9,
+          reasoning: "deterministic",
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/Confidence/);
+  });
+
   it("waives the confidence floor when executable params match the original decision", () => {
     const result = evaluateAgentProposal(
       makeProposal({
