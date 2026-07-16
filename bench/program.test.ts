@@ -7,7 +7,7 @@ import {
   finalizeAppliedProposal,
   hasSyncProposalTransport,
   isProposalStale,
-  rejectQueuedProposalOnRiskDenial,
+  recordAppliedProposalRiskDenial,
   shouldHoldForSupervisedApproval,
 } from "../engine/program.js";
 import type { ProposalBackoff } from "../engine/proposal-backoff.js";
@@ -489,9 +489,10 @@ describe("hasSyncProposalTransport", () => {
   });
 });
 
-describe("rejectQueuedProposalOnRiskDenial", () => {
-  it("rejects the applied proposal and arms backoff", async () => {
+describe("recordAppliedProposalRiskDenial", () => {
+  it("rejects a queued applied proposal, arms backoff, and records circuit failure", async () => {
     const rejected: string[] = [];
+    const circuitFailures: number[] = [];
     const proposalBackoff = new Map<string, ProposalBackoff>();
     const agentState = {
       rejectProposal: (id: string) =>
@@ -501,25 +502,30 @@ describe("rejectQueuedProposalOnRiskDenial", () => {
     };
 
     await Effect.runPromise(
-      rejectQueuedProposalOnRiskDenial(
-        agentState,
-        "p-risk-1",
+      recordAppliedProposalRiskDenial(agentState, {
+        appliedAgentProposal: true,
+        appliedQueuedProposalId: "p-risk-1",
         proposalBackoff,
-        "pool-a",
-        1_000_000,
-        { baseMs: 60_000, maxMs: 3_600_000 },
-      ),
+        recordCircuitFailure: (now) => {
+          circuitFailures.push(now);
+        },
+        poolAddress: "pool-a",
+        now: 1_000_000,
+        backoff: { baseMs: 60_000, maxMs: 3_600_000 },
+      }),
     );
 
     expect(rejected).toEqual(["p-risk-1"]);
+    expect(circuitFailures).toEqual([1_000_000]);
     const backoff = proposalBackoff.get("pool-a");
     expect(backoff).toBeDefined();
     expect(backoff!.failures).toBe(1);
     expect(backoff!.nextProposalAt).toBeGreaterThan(1_000_000);
   });
 
-  it("is a no-op when no queued proposal was applied", async () => {
+  it("arms backoff and circuit failure for sync proposals without a queue id", async () => {
     const rejected: string[] = [];
+    const circuitFailures: number[] = [];
     const proposalBackoff = new Map<string, ProposalBackoff>();
     const agentState = {
       rejectProposal: (id: string) =>
@@ -529,17 +535,53 @@ describe("rejectQueuedProposalOnRiskDenial", () => {
     };
 
     await Effect.runPromise(
-      rejectQueuedProposalOnRiskDenial(
-        agentState,
-        undefined,
+      recordAppliedProposalRiskDenial(agentState, {
+        appliedAgentProposal: true,
+        appliedQueuedProposalId: undefined,
         proposalBackoff,
-        "pool-a",
-        1_000_000,
-        { baseMs: 60_000, maxMs: 3_600_000 },
-      ),
+        recordCircuitFailure: (now) => {
+          circuitFailures.push(now);
+        },
+        poolAddress: "pool-a",
+        now: 1_000_000,
+        backoff: { baseMs: 60_000, maxMs: 3_600_000 },
+      }),
     );
 
     expect(rejected).toEqual([]);
+    expect(circuitFailures).toEqual([1_000_000]);
+    const backoff = proposalBackoff.get("pool-a");
+    expect(backoff).toBeDefined();
+    expect(backoff!.failures).toBe(1);
+  });
+
+  it("is a no-op when no agent proposal was applied", async () => {
+    const rejected: string[] = [];
+    const circuitFailures: number[] = [];
+    const proposalBackoff = new Map<string, ProposalBackoff>();
+    const agentState = {
+      rejectProposal: (id: string) =>
+        Effect.sync(() => {
+          rejected.push(id);
+        }),
+    };
+
+    await Effect.runPromise(
+      recordAppliedProposalRiskDenial(agentState, {
+        appliedAgentProposal: false,
+        appliedQueuedProposalId: undefined,
+        proposalBackoff,
+        recordCircuitFailure: (now) => {
+          circuitFailures.push(now);
+        },
+        poolAddress: "pool-a",
+        now: 1_000_000,
+        backoff: { baseMs: 60_000, maxMs: 3_600_000 },
+      }),
+    );
+
+    expect(rejected).toEqual([]);
+    expect(circuitFailures).toEqual([]);
     expect(proposalBackoff.size).toBe(0);
   });
 });

@@ -140,27 +140,37 @@ export const finalizeAppliedProposal = (
     : Effect.void;
 
 /**
- * Sticky risk denials should drop the applied queued proposal (and arm
- * proposal backoff) so the same doomed proposal is not re-selected every scan.
- * Transient execution failures still retry via finalizeAppliedProposal.
+ * Sticky risk denials after an applied agent proposal (sync or queue) should
+ * arm proposal backoff and trip the circuit breaker so the same doomed advisor
+ * response is not re-requested every scan. Queued proposals are also rejected
+ * so they are not re-selected until TTL prune. Transient execution failures
+ * still retry via finalizeAppliedProposal.
  */
-export const rejectQueuedProposalOnRiskDenial = (
+export const recordAppliedProposalRiskDenial = (
   agentState: Pick<AgentStateApi, "rejectProposal">,
-  appliedQueuedProposalId: string | undefined,
-  proposalBackoff: Map<string, ProposalBackoff>,
-  poolAddress: string,
-  now: number,
-  opts: { readonly baseMs: number; readonly maxMs: number },
+  args: {
+    readonly appliedAgentProposal: boolean;
+    readonly appliedQueuedProposalId: string | undefined;
+    readonly proposalBackoff: Map<string, ProposalBackoff>;
+    readonly recordCircuitFailure: ((now: number) => void) | undefined;
+    readonly poolAddress: string;
+    readonly now: number;
+    readonly backoff: { readonly baseMs: number; readonly maxMs: number };
+  },
 ): Effect.Effect<void> => {
-  if (appliedQueuedProposalId === undefined) {
+  if (!args.appliedAgentProposal) {
     return Effect.void;
   }
-  proposalBackoff.set(
-    poolAddress,
-    nextProposalBackoff(proposalBackoff.get(poolAddress), now, opts),
+  args.proposalBackoff.set(
+    args.poolAddress,
+    nextProposalBackoff(args.proposalBackoff.get(args.poolAddress), args.now, args.backoff),
   );
+  args.recordCircuitFailure?.(args.now);
+  if (args.appliedQueuedProposalId === undefined) {
+    return Effect.void;
+  }
   return agentState
-    .rejectProposal(appliedQueuedProposalId)
+    .rejectProposal(args.appliedQueuedProposalId)
     .pipe(Effect.catchAll(() => Effect.void));
 };
 
@@ -1401,6 +1411,8 @@ export const program = Effect.gen(function* () {
       let agentProposal: AgentProposal | null = null;
       let proposalSource: "queue" | "sync" | undefined;
       let appliedQueuedProposalId: string | undefined;
+      /** True when a full/supervised proposal replaced the deterministic decision. */
+      let appliedAgentProposal = false;
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, pool.activeBinId);
@@ -2294,6 +2306,7 @@ export const program = Effect.gen(function* () {
                 }
                 proposalBackoff.delete(poolAddress);
                 poolCircuitBreaker.recordSuccess();
+                appliedAgentProposal = true;
 
                 // Queued proposals are retained until execution succeeds (or
                 // the applied decision is a non-executing HOLD) so a
@@ -2433,19 +2446,24 @@ export const program = Effect.gen(function* () {
           .pipe(Effect.catchAll(() => Effect.void));
 
         // Deterministic risk denials are sticky (drawdown pause, stop-loss, etc.).
-        // Drop the applied queued proposal so it is not re-selected every scan
-        // until TTL; transient execution failures still retry via finalize.
-        yield* rejectQueuedProposalOnRiskDenial(
-          agentState,
+        // Arm backoff / circuit breaker for applied sync or queue proposals so
+        // the same doomed advisor response is not re-requested every scan.
+        // Queued proposals are rejected; transient execution failures still
+        // retry via finalize.
+        yield* recordAppliedProposalRiskDenial(agentState, {
+          appliedAgentProposal,
           appliedQueuedProposalId,
           proposalBackoff,
+          recordCircuitFailure: appliedAgentProposal
+            ? (t) => getPoolCircuitBreaker(poolAddress).recordFailure(t)
+            : undefined,
           poolAddress,
-          Date.now(),
-          {
+          now: Date.now(),
+          backoff: {
             baseMs: config.agentProposalBackoffBaseMs,
             maxMs: config.agentProposalBackoffMaxMs,
           },
-        );
+        });
         return decision;
       }
 
