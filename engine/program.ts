@@ -68,6 +68,7 @@ import {
   type StrategyApi,
   type RevenueConfigApi,
   type EntryPrepApi,
+  type AgentStateApi,
 } from "./services.js";
 import type {
   AgentDecision,
@@ -108,8 +109,33 @@ export function shouldHoldForSupervisedApproval(
   approvedProposalApplied: boolean,
   action: ActionType,
 ): boolean {
-  return agentiveMode && mode === "supervised" && !approvedProposalApplied && action !== "HOLD";
+  // ENTER and REBALANCE deploy or reshape capital, so supervised mode requires
+  // an approved proposal for them. HOLD is a no-op, and deterministic EXITs are
+  // operator-configured safety actions (stop-loss / trailing stop) that the
+  // engine keeps final authority over — gating them would delay loss-cutting
+  // exits while the operator is offline.
+  return (
+    agentiveMode &&
+    mode === "supervised" &&
+    !approvedProposalApplied &&
+    (action === "ENTER" || action === "REBALANCE")
+  );
 }
+
+// Consume an applied queued proposal only once its outcome is final: after
+// successful execution, or when the applied decision is a non-executing HOLD.
+// Failed executions retain the proposal so it can be retried on a later cycle.
+export const finalizeAppliedProposal = (
+  agentState: Pick<AgentStateApi, "dequeueProposals">,
+  appliedQueuedProposalId: string | undefined,
+  executed: boolean,
+  action: ActionType,
+): Effect.Effect<void> =>
+  appliedQueuedProposalId !== undefined && (executed || action === "HOLD")
+    ? agentState
+        .dequeueProposals([appliedQueuedProposalId])
+        .pipe(Effect.catchAll(() => Effect.void))
+    : Effect.void;
 
 // ─── Position value estimation (rough heuristic) ───────────────
 
@@ -2113,6 +2139,7 @@ export const program = Effect.gen(function* () {
                     portfolioValueUsd,
                     recentPnlUsd,
                     poolAddress,
+                    originalDecision: decision,
                   },
                   config,
                 );
@@ -2229,7 +2256,9 @@ export const program = Effect.gen(function* () {
       if (!decision) return null;
 
       // Supervised mode gates execution on human approval: without an applied
-      // approved proposal, any non-HOLD decision is held until one is available.
+      // approved proposal, ENTER/REBALANCE decisions are held until one is
+      // available. Deterministic EXITs are exempt — they are safety actions
+      // the engine keeps final authority over.
       if (
         shouldHoldForSupervisedApproval(
           config.agentiveMode,
@@ -2434,14 +2463,14 @@ export const program = Effect.gen(function* () {
         entryFailureBackoff.delete(poolAddress);
       }
 
-      // Consume the applied queued proposal only once the outcome is final:
-      // after successful execution, or when the applied decision is HOLD.
-      // Risk-rejected and failed executions retain the proposal for retry.
-      if (appliedQueuedProposalId && (executed || decision.action === "HOLD")) {
-        yield* agentState
-          .dequeueProposals([appliedQueuedProposalId])
-          .pipe(Effect.catchAll(() => Effect.void));
-      }
+      // Risk-rejected and paper-validation-blocked paths return before this
+      // point, so those proposals are retained for retry as well.
+      yield* finalizeAppliedProposal(
+        agentState,
+        appliedQueuedProposalId,
+        executed,
+        decision.action,
+      );
 
       // Audit after execution
       yield* audit

@@ -6,6 +6,7 @@ import type {
   AgentDecision,
   AgentProposal,
   ProposalValidationResult,
+  RebalanceParams,
 } from "./types.js";
 
 export interface RiskConfig {
@@ -106,6 +107,11 @@ export function evaluateRisk(
 
 const VALID_ACTIONS: ReadonlyArray<ActionType> = ["HOLD", "REBALANCE", "EXIT", "ENTER"];
 
+const rebalanceParamsEqual = (a: RebalanceParams, b: RebalanceParams): boolean =>
+  a.newLowerBinId === b.newLowerBinId &&
+  a.newUpperBinId === b.newUpperBinId &&
+  a.slippageBps === b.slippageBps;
+
 export function evaluateAgentProposal(
   proposal: AgentProposal,
   ctx: RiskContext,
@@ -145,12 +151,22 @@ export function evaluateAgentProposal(
   }
 
   // 5. Confidence must be finite and within [minConfidence, 1], unless the proposal
-  //    preserves the original low-confidence decision unchanged.
+  //    preserves the original low-confidence decision unchanged — same action,
+  //    same confidence, and same executable parameters.
+  const paramsPreserveOriginal =
+    (proposal.positionSizeUsd === undefined ||
+      (ctx.originalDecision?.positionSizeUsd !== undefined &&
+        proposal.positionSizeUsd === ctx.originalDecision.positionSizeUsd)) &&
+    (proposal.rebalanceParams === undefined ||
+      (ctx.originalDecision?.rebalanceParams !== undefined &&
+        rebalanceParamsEqual(proposal.rebalanceParams, ctx.originalDecision.rebalanceParams)));
+
   const preservesOriginalDecision =
     proposal.originalAction !== undefined &&
     proposal.originalConfidence !== undefined &&
     proposal.action === proposal.originalAction &&
-    Math.abs(proposal.confidence - proposal.originalConfidence) < 0.005;
+    Math.abs(proposal.confidence - proposal.originalConfidence) < 0.005 &&
+    paramsPreserveOriginal;
 
   if (
     !preservesOriginalDecision &&

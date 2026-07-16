@@ -4,6 +4,7 @@ import {
   buildLayer,
   estimatePositionValue,
   executeLive,
+  finalizeAppliedProposal,
   isProposalStale,
   shouldHoldForSupervisedApproval,
 } from "../engine/program.js";
@@ -406,10 +407,13 @@ describe("isProposalStale", () => {
 });
 
 describe("shouldHoldForSupervisedApproval", () => {
-  it("holds a non-HOLD decision in supervised mode without an approved proposal", () => {
+  it("holds ENTER and REBALANCE in supervised mode without an approved proposal", () => {
     expect(shouldHoldForSupervisedApproval(true, "supervised", false, "ENTER")).toBe(true);
-    expect(shouldHoldForSupervisedApproval(true, "supervised", false, "EXIT")).toBe(true);
     expect(shouldHoldForSupervisedApproval(true, "supervised", false, "REBALANCE")).toBe(true);
+  });
+
+  it("does not hold deterministic EXITs — the engine keeps final safety authority", () => {
+    expect(shouldHoldForSupervisedApproval(true, "supervised", false, "EXIT")).toBe(false);
   });
 
   it("does not hold HOLD decisions", () => {
@@ -427,5 +431,42 @@ describe("shouldHoldForSupervisedApproval", () => {
 
   it("does not hold when the agent overlay is disabled", () => {
     expect(shouldHoldForSupervisedApproval(false, "supervised", false, "ENTER")).toBe(false);
+  });
+});
+
+describe("finalizeAppliedProposal", () => {
+  const makeAgentState = () => {
+    const dequeued: string[][] = [];
+    const agentState = {
+      dequeueProposals: (ids: ReadonlyArray<string>) => {
+        dequeued.push([...ids]);
+        return Effect.void;
+      },
+    };
+    return { agentState, dequeued };
+  };
+
+  it("dequeues the applied proposal after successful execution", async () => {
+    const { agentState, dequeued } = makeAgentState();
+    await Effect.runPromise(finalizeAppliedProposal(agentState, "p-1", true, "ENTER"));
+    expect(dequeued).toEqual([["p-1"]]);
+  });
+
+  it("dequeues an applied HOLD proposal even though nothing executed", async () => {
+    const { agentState, dequeued } = makeAgentState();
+    await Effect.runPromise(finalizeAppliedProposal(agentState, "p-1", false, "HOLD"));
+    expect(dequeued).toEqual([["p-1"]]);
+  });
+
+  it("retains the proposal when execution failed", async () => {
+    const { agentState, dequeued } = makeAgentState();
+    await Effect.runPromise(finalizeAppliedProposal(agentState, "p-1", false, "ENTER"));
+    expect(dequeued).toEqual([]);
+  });
+
+  it("does nothing when no queued proposal was applied", async () => {
+    const { agentState, dequeued } = makeAgentState();
+    await Effect.runPromise(finalizeAppliedProposal(agentState, undefined, true, "ENTER"));
+    expect(dequeued).toEqual([]);
   });
 });

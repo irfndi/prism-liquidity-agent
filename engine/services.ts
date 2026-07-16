@@ -243,6 +243,7 @@ export interface RiskContext {
   readonly portfolioValueUsd: number;
   readonly recentPnlUsd: number;
   readonly poolAddress: string;
+  readonly originalDecision?: AgentDecision;
 }
 
 export interface RiskResult {

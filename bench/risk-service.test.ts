@@ -181,6 +181,98 @@ describe("evaluateAgentProposal", () => {
     expect(result.adjustedDecision?.confidence).toBe(0.5);
   });
 
+  it("waives the confidence floor when executable params match the original decision", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "ENTER",
+        poolAddress: "pool1",
+        confidence: 0.5,
+        originalAction: "ENTER",
+        originalConfidence: 0.5,
+        positionSizeUsd: 1_000,
+      }),
+      makeContext({
+        originalDecision: {
+          action: "ENTER",
+          poolAddress: "pool1",
+          confidence: 0.5,
+          reasoning: "deterministic",
+          positionSizeUsd: 1_000,
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.adjustedDecision?.positionSizeUsd).toBe(1_000);
+  });
+
+  it("applies the confidence floor when the proposal changes the position size", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "ENTER",
+        poolAddress: "pool1",
+        confidence: 0.5,
+        originalAction: "ENTER",
+        originalConfidence: 0.5,
+        positionSizeUsd: 2_000,
+      }),
+      makeContext({
+        originalDecision: {
+          action: "ENTER",
+          poolAddress: "pool1",
+          confidence: 0.5,
+          reasoning: "deterministic",
+          positionSizeUsd: 1_000,
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/Confidence/);
+  });
+
+  it("applies the confidence floor when the proposal changes rebalance params", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "REBALANCE",
+        poolAddress: "pool1",
+        confidence: 0.5,
+        originalAction: "REBALANCE",
+        originalConfidence: 0.5,
+        rebalanceParams: { newLowerBinId: 100, newUpperBinId: 110, slippageBps: 0 },
+      }),
+      makeContext({
+        originalDecision: {
+          action: "REBALANCE",
+          poolAddress: "pool1",
+          confidence: 0.5,
+          reasoning: "deterministic",
+          rebalanceParams: { newLowerBinId: 100, newUpperBinId: 120, slippageBps: 0 },
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/Confidence/);
+  });
+
+  it("applies the confidence floor when no original decision is available for comparison", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "ENTER",
+        poolAddress: "pool1",
+        confidence: 0.5,
+        originalAction: "ENTER",
+        originalConfidence: 0.5,
+        positionSizeUsd: 1_000,
+      }),
+      makeContext(),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/Confidence/);
+  });
+
   it("caps position size to agent and per-pool limits", () => {
     const result = evaluateAgentProposal(
       makeProposal({ action: "ENTER", poolAddress: "pool1", positionSizeUsd: 10_000 }),
