@@ -78,7 +78,6 @@ import type {
   PoolState,
   Position,
   SignalWeights,
-  ActionType,
 } from "./types.js";
 import type { AgentRuntimeAlert, AgentRuntimeCheckin } from "./agent-transport.js";
 import { randomUUID } from "crypto";
@@ -100,21 +99,6 @@ const logger = createLogger("program");
 
 export function isProposalStale(proposal: AgentProposal, staleMs: number, now: number): boolean {
   return now > proposal.proposedAt + staleMs || now > proposal.expiresAt;
-}
-
-export function shouldDequeueQueuedProposal(
-  proposalSource: "queue" | "sync" | undefined,
-  proposalApplied: boolean,
-  agentProposal: AgentProposal | null,
-  executed: boolean,
-  action: ActionType,
-): boolean {
-  return (
-    proposalSource === "queue" &&
-    proposalApplied &&
-    agentProposal?.proposalId !== undefined &&
-    (executed || action === "HOLD")
-  );
 }
 
 // ─── Position value estimation (rough heuristic) ───────────────
@@ -1289,6 +1273,7 @@ export const program = Effect.gen(function* () {
 
   const proposalBackoff = new Map<string, ProposalBackoff>();
   const proposalCircuitBreakers = new Map<string, ProposalCircuitBreaker>();
+  const vetoWarningThrottle = new Map<string, number>();
   const getPoolCircuitBreaker = (poolAddress: string): ProposalCircuitBreaker => {
     let breaker = proposalCircuitBreakers.get(poolAddress);
     if (!breaker) {
@@ -1335,7 +1320,6 @@ export const program = Effect.gen(function* () {
       const cycleId = cycle.cycleId;
       let agentProposal: AgentProposal | null = null;
       let proposalSource: "queue" | "sync" | undefined;
-      let proposalApplied = false;
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, pool.activeBinId);
@@ -2035,13 +2019,17 @@ export const program = Effect.gen(function* () {
             });
             decision = enhanced;
           } else if (vetoFetchFailed) {
-            yield* memory
-              .upsert({
-                category: "warning",
-                content: `Agent veto fetch failed for ${poolAddress}`,
-                poolAddress,
-              })
-              .pipe(Effect.catchAll(() => Effect.void));
+            const lastWarn = vetoWarningThrottle.get(poolAddress) ?? 0;
+            if (now - lastWarn > config.agentProposalStaleMs) {
+              vetoWarningThrottle.set(poolAddress, now);
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Agent veto fetch failed for ${poolAddress}`,
+                  poolAddress,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+            }
           }
         } else {
           const poolCircuitBreaker = getPoolCircuitBreaker(poolAddress);
@@ -2158,7 +2146,6 @@ export const program = Effect.gen(function* () {
                     ) {
                       decision = { ...decision, reasoning: deterministicReasoning };
                     }
-                    proposalApplied = true;
                     proposalBackoff.delete(poolAddress);
                     poolCircuitBreaker.recordSuccess();
 
@@ -2412,21 +2399,6 @@ export const program = Effect.gen(function* () {
         });
       } else if (decision.action === "ENTER" && executed) {
         entryFailureBackoff.delete(poolAddress);
-      }
-
-      if (
-        shouldDequeueQueuedProposal(
-          proposalSource,
-          proposalApplied,
-          agentProposal,
-          executed,
-          decision.action,
-        ) &&
-        agentProposal
-      ) {
-        yield* agentState
-          .dequeueProposals([agentProposal.proposalId])
-          .pipe(Effect.catchAll(() => Effect.void));
       }
 
       // Audit after execution

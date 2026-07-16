@@ -59,6 +59,12 @@ export class HttpStatusServer {
       return new Response("Unauthorized", { status: 401 });
     }
 
+    if (!this.config.agentiveMode || this.config.agentProposalMode === "veto") {
+      return new Response("Agent proposals are not consumed in the current mode", {
+        status: 409,
+      });
+    }
+
     let parsedBody: unknown;
     try {
       parsedBody = await request.json();

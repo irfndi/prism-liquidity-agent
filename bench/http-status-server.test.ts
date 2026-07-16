@@ -343,7 +343,12 @@ describe("HttpStatusServer", () => {
     const port = 18_793;
     const enqueued: AgentProposal[] = [];
     const server = new HttpStatusServer(
-      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "secret-token",
+        agentiveMode: true,
+        agentProposalMode: "supervised",
+      }),
       mockAgentState(baseSnapshot(), enqueued),
     );
     await Effect.runPromise(server.start());
@@ -394,6 +399,8 @@ describe("HttpStatusServer", () => {
       baseConfig({
         agentHttpPort: port,
         agentProposalToken: "secret-token",
+        agentiveMode: true,
+        agentProposalMode: "supervised",
         agentProposalMaxBatchSize: 2,
       }),
       mockAgentState(baseSnapshot(), enqueued),
@@ -414,6 +421,30 @@ describe("HttpStatusServer", () => {
         body: JSON.stringify(proposals),
       });
       expect(response.status).toBe(413);
+      expect(enqueued).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("rejects /propose when proposals are not consumed in the current mode", async () => {
+    const port = 18_787;
+    const enqueued: AgentProposal[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
+      mockAgentState(baseSnapshot(), enqueued),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({ action: "HOLD", poolAddress: "PoolA", confidence: 0.8 }),
+      });
+      expect(response.status).toBe(409);
       expect(enqueued).toHaveLength(0);
     } finally {
       await Effect.runPromise(server.stop());
