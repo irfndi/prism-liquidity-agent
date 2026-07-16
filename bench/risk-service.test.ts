@@ -173,12 +173,51 @@ describe("evaluateAgentProposal", () => {
         originalAction: "HOLD",
         originalConfidence: 0.5,
       }),
-      makeContext(),
+      makeContext({
+        originalDecision: {
+          action: "HOLD",
+          poolAddress: "pool1",
+          confidence: 0.5,
+          reasoning: "deterministic",
+        },
+      }),
       makeConfig(),
     );
     expect(result.valid).toBe(true);
     expect(result.adjustedDecision?.action).toBe("HOLD");
     expect(result.adjustedDecision?.confidence).toBe(0.5);
+  });
+
+  it("applies the confidence floor to a HOLD echo without a trusted original decision", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "HOLD",
+        poolAddress: "pool1",
+        confidence: 0.5,
+        originalAction: "HOLD",
+        originalConfidence: 0.5,
+      }),
+      makeContext(),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/Confidence/);
+  });
+
+  it("applies the confidence floor to an EXIT echo without a trusted original decision", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "EXIT",
+        poolAddress: "pool1",
+        confidence: 0.5,
+        originalAction: "EXIT",
+        originalConfidence: 0.5,
+      }),
+      makeContext(),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/Confidence/);
   });
 
   it("waives the confidence floor when executable params match the original decision", () => {

@@ -152,22 +152,19 @@ export function evaluateAgentProposal(
   }
 
   // 5. Confidence must be finite and within [minConfidence, 1], unless the proposal
-  //    preserves the original low-confidence decision unchanged — same action,
-  //    same confidence, and same executable parameters.
-  const paramsPreserveOriginal =
-    (proposal.positionSizeUsd === undefined ||
-      (ctx.originalDecision?.positionSizeUsd !== undefined &&
-        proposal.positionSizeUsd === ctx.originalDecision.positionSizeUsd)) &&
-    (proposal.rebalanceParams === undefined ||
-      (ctx.originalDecision?.rebalanceParams !== undefined &&
-        rebalanceParamsEqual(proposal.rebalanceParams, ctx.originalDecision.rebalanceParams)));
-
+  //    preserves the original low-confidence decision unchanged — verified against
+  //    the trusted original decision (same action, same confidence, same
+  //    executable parameters). Without one, the waiver does not apply.
+  const original = ctx.originalDecision;
   const preservesOriginalDecision =
-    proposal.originalAction !== undefined &&
-    proposal.originalConfidence !== undefined &&
-    proposal.action === proposal.originalAction &&
-    Math.abs(proposal.confidence - proposal.originalConfidence) < 0.005 &&
-    paramsPreserveOriginal;
+    original !== undefined &&
+    proposal.action === original.action &&
+    Math.abs(proposal.confidence - original.confidence) < 0.005 &&
+    (proposal.positionSizeUsd === undefined ||
+      proposal.positionSizeUsd === original.positionSizeUsd) &&
+    (proposal.rebalanceParams === undefined ||
+      (original.rebalanceParams !== undefined &&
+        rebalanceParamsEqual(proposal.rebalanceParams, original.rebalanceParams)));
 
   if (
     !preservesOriginalDecision &&
