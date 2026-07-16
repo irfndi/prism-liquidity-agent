@@ -142,33 +142,49 @@ export class HttpStatusServer {
       for (const proposal of deduped) {
         const result = yield* this.state.enqueueProposal(proposal);
         if (result.status === "rejected") {
-          // Queue full is global — fail closed for the rest of the batch.
-          if (result.reason === "queue_full") {
-            return Response.json(
-              {
-                accepted: acceptedIds.length,
-                proposalIds: acceptedIds,
-                ...(replacedIds.length > 0 && { replacedIds }),
-                ...(skipped.length > 0 && { skipped }),
-                error: "queue_full",
-                message:
-                  `Proposal queue full (max ${this.config.agentProposalMaxQueueSize})` +
-                  (acceptedIds.length > 0
-                    ? ` after accepting ${acceptedIds.length} of ${deduped.length}`
-                    : ""),
-              },
-              { status: 503 },
-            );
-          }
-          // approved_exists is pool-specific: skip this item and continue so
-          // healthy pools in the same batch still enqueue.
-          if (result.reason === "approved_exists") {
-            skipped.push({
-              poolAddress: proposal.poolAddress,
-              proposalId: proposal.proposalId,
-              reason: "approved_exists",
-            });
-            continue;
+          // Exhaustive on EnqueueProposalResult["reason"] so new reasons fail
+          // closed (and TypeScript errors) instead of being silently dropped.
+          switch (result.reason) {
+            case "queue_full":
+              // Global — fail closed for the rest of the batch.
+              return Response.json(
+                {
+                  accepted: acceptedIds.length,
+                  proposalIds: acceptedIds,
+                  ...(replacedIds.length > 0 && { replacedIds }),
+                  ...(skipped.length > 0 && { skipped }),
+                  error: "queue_full",
+                  message:
+                    `Proposal queue full (max ${this.config.agentProposalMaxQueueSize})` +
+                    (acceptedIds.length > 0
+                      ? ` after accepting ${acceptedIds.length} of ${deduped.length}`
+                      : ""),
+                },
+                { status: 503 },
+              );
+            case "approved_exists":
+              // Pool-specific: skip this item and continue so healthy pools
+              // in the same batch still enqueue.
+              skipped.push({
+                poolAddress: proposal.poolAddress,
+                proposalId: proposal.proposalId,
+                reason: "approved_exists",
+              });
+              continue;
+            default: {
+              const unexpected: never = result.reason;
+              return Response.json(
+                {
+                  accepted: acceptedIds.length,
+                  proposalIds: acceptedIds,
+                  ...(replacedIds.length > 0 && { replacedIds }),
+                  ...(skipped.length > 0 && { skipped }),
+                  error: "enqueue_rejected",
+                  message: `Unhandled enqueue rejection: ${String(unexpected)}`,
+                },
+                { status: 500 },
+              );
+            }
           }
         }
         if (result.status === "replaced") {
