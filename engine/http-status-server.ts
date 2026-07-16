@@ -132,7 +132,11 @@ export class HttpStatusServer {
       }
       const deduped = proposals.filter((p, i) => lastIndexByPool.get(p.poolAddress) === i);
 
-      const watchlistSet = new Set(this.config.watchlistPools);
+      const snapshot = yield* this.state.getSnapshot();
+      const scannableSet = new Set([
+        ...this.config.watchlistPools,
+        ...snapshot.positions.map((p) => p.poolAddress),
+      ]);
       const acceptedIds: string[] = [];
       const replacedIds: string[] = [];
       const skipped: Array<{
@@ -142,7 +146,7 @@ export class HttpStatusServer {
       }> = [];
       const unscannable: Array<{ readonly poolAddress: string; readonly proposalId: string }> = [];
       for (const proposal of deduped) {
-        if (!watchlistSet.has(proposal.poolAddress)) {
+        if (!scannableSet.has(proposal.poolAddress)) {
           unscannable.push({ poolAddress: proposal.poolAddress, proposalId: proposal.proposalId });
           continue;
         }
@@ -209,7 +213,7 @@ export class HttpStatusServer {
             unscannable,
             error: "unscannable_pool",
             message:
-              "Proposals target pool(s) not in the configured watchlist; add them to WATCHLIST_POOLS or wait for discovery",
+              "Proposals target pool(s) not in the watchlist or held positions; add them to WATCHLIST_POOLS or hold a position in the pool",
           },
           { status: 400 },
         );
@@ -221,6 +225,7 @@ export class HttpStatusServer {
             accepted: 0,
             proposalIds: [],
             skipped,
+            ...(unscannable.length > 0 && { unscannable }),
             error: "approved_exists",
             poolAddresses: skipped.map((s) => s.poolAddress),
             message:

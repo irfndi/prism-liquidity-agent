@@ -396,7 +396,7 @@ describe("HttpStatusServer", () => {
     }
   });
 
-  it("rejects /propose for pools outside the configured watchlist", async () => {
+  it("rejects /propose for pools outside the scanned set", async () => {
     const port = 18_795;
     const enqueued: AgentProposal[] = [];
     const server = new HttpStatusServer(
@@ -430,6 +430,111 @@ describe("HttpStatusServer", () => {
       expect(body.accepted).toBe(0);
       expect(body.unscannable).toEqual([expect.objectContaining({ poolAddress: "PoolB" })]);
       expect(enqueued).toHaveLength(0);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("accepts /propose for held positions outside the watchlist", async () => {
+    const port = 18_786;
+    const enqueued: AgentProposal[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "secret-token",
+        agentApprovalToken: "approval-token",
+        agentiveMode: true,
+        agentProposalMode: "supervised",
+        watchlistPools: ["PoolA"],
+      }),
+      mockAgentState(
+        baseSnapshot({
+          positions: [
+            {
+              poolAddress: "HeldPool",
+              tokenXSymbol: "X",
+              tokenYSymbol: "Y",
+              depositedUsd: 1000,
+              currentValueUsd: 1000,
+              activeBinId: 100,
+              lowerBinId: 90,
+              upperBinId: 110,
+              lastAction: "ENTER",
+              lastActionAt: Date.now(),
+              hoursHeld: 1,
+            },
+          ],
+        }),
+        enqueued,
+      ),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({ action: "REBALANCE", poolAddress: "HeldPool", confidence: 0.8 }),
+      });
+      expect(response.status).toBe(202);
+      const body = (await response.json()) as { accepted: number; proposalIds: string[] };
+      expect(body.accepted).toBe(1);
+      expect(body.proposalIds).toHaveLength(1);
+      expect(enqueued).toHaveLength(1);
+      expect(enqueued[0]!.poolAddress).toBe("HeldPool");
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("reports unscannable pools alongside skipped pools when nothing is accepted", async () => {
+    const port = 18_784;
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "secret-token",
+        agentApprovalToken: "approval-token",
+        agentiveMode: true,
+        agentProposalMode: "supervised",
+        watchlistPools: ["PoolA"],
+      }),
+      {
+        ...mockAgentState(baseSnapshot()),
+        enqueueProposal: (proposal: AgentProposal) =>
+          Effect.sync(() => {
+            if (proposal.poolAddress === "PoolA") {
+              return { status: "rejected" as const, reason: "approved_exists" as const };
+            }
+            return { status: "enqueued" as const };
+          }),
+      },
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify([
+          { action: "HOLD", poolAddress: "PoolA", confidence: 0.8 },
+          { action: "HOLD", poolAddress: "PoolB", confidence: 0.8 },
+        ]),
+      });
+      expect(response.status).toBe(409);
+      const body = (await response.json()) as {
+        accepted: number;
+        error: string;
+        skipped: Array<{ poolAddress: string }>;
+        unscannable: Array<{ poolAddress: string }>;
+      };
+      expect(body.accepted).toBe(0);
+      expect(body.error).toBe("approved_exists");
+      expect(body.skipped).toEqual([expect.objectContaining({ poolAddress: "PoolA" })]);
+      expect(body.unscannable).toEqual([expect.objectContaining({ poolAddress: "PoolB" })]);
     } finally {
       await Effect.runPromise(server.stop());
     }
