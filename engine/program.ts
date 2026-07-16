@@ -31,7 +31,7 @@ import { DbLive } from "./db-service.js";
 import { RevenueLive } from "./revenue-service.js";
 import { RevenueConfigServiceLive } from "./revenue-config-service.js";
 import { ReferralLive } from "./referral-service.js";
-import { AgentStateMutable, initialSnapshot } from "./state-service.js";
+import { AgentStateMutable, initialSnapshot, type PositionSnapshot } from "./state-service.js";
 import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
@@ -921,6 +921,24 @@ export const program = Effect.gen(function* () {
   for (const pos of allPositions) {
     trackedPositions.set(pos.poolAddress, pos);
   }
+  const buildPositionSnapshots = (positions: Iterable<PositionRecord>): Array<PositionSnapshot> =>
+    Array.from(positions).map((p) => ({
+      poolAddress: p.poolAddress,
+      tokenXSymbol: p.tokenXSymbol,
+      tokenYSymbol: p.tokenYSymbol,
+      depositedUsd: p.depositedUsd,
+      currentValueUsd: p.currentValueUsd,
+      activeBinId: p.activeBinId,
+      lowerBinId: p.lowerBinId,
+      upperBinId: p.upperBinId,
+      lastAction: (p.lastRebalanceAt > p.timestamp ? "REBALANCE" : "ENTER") as
+        | "ENTER"
+        | "EXIT"
+        | "REBALANCE"
+        | "HOLD",
+      lastActionAt: p.lastRebalanceAt > p.timestamp ? p.lastRebalanceAt : p.timestamp,
+      hoursHeld: (Date.now() - p.timestamp) / 3_600_000,
+    }));
   const entryFailureBackoff = new Map<string, EntryFailureBackoff>();
 
   // Agent check-in state
@@ -1174,6 +1192,13 @@ export const program = Effect.gen(function* () {
   );
   refreshPoolsToScan(initialReconcileResult);
 
+  // Seed the agent state snapshot with current positions before exposing the
+  // HTTP/MCP interfaces, so /propose can accept proposals for held pools
+  // immediately after startup (not just after the first scan cycle).
+  yield* agentState
+    .updateSnapshot({ positions: buildPositionSnapshots(trackedPositions.values()) })
+    .pipe(Effect.catchAll(() => Effect.void));
+
   // Start agent-facing servers (MCP and HTTP fallback)
   yield* mcpServer.start().pipe(Effect.catchAll(() => Effect.void));
   yield* httpStatusServer.start().pipe(Effect.catchAll(() => Effect.void));
@@ -1195,23 +1220,7 @@ export const program = Effect.gen(function* () {
       const snapshot = yield* agentState
         .getSnapshot()
         .pipe(Effect.catchAll(() => Effect.succeed(initialSnapshot)));
-      const positions = Array.from(trackedPositions.values()).map((p) => ({
-        poolAddress: p.poolAddress,
-        tokenXSymbol: p.tokenXSymbol,
-        tokenYSymbol: p.tokenYSymbol,
-        depositedUsd: p.depositedUsd,
-        currentValueUsd: p.currentValueUsd,
-        activeBinId: p.activeBinId,
-        lowerBinId: p.lowerBinId,
-        upperBinId: p.upperBinId,
-        lastAction: (p.lastRebalanceAt > p.timestamp ? "REBALANCE" : "ENTER") as
-          | "ENTER"
-          | "EXIT"
-          | "REBALANCE"
-          | "HOLD",
-        lastActionAt: p.lastRebalanceAt > p.timestamp ? p.lastRebalanceAt : p.timestamp,
-        hoursHeld: (Date.now() - p.timestamp) / 3_600_000,
-      }));
+      const positions = buildPositionSnapshots(trackedPositions.values());
       const positionsValueUsd = positions.reduce((sum, p) => sum + p.currentValueUsd, 0);
       const unrealizedPnlUsd = positions.reduce(
         (sum, p) => sum + (p.currentValueUsd - p.depositedUsd),
