@@ -109,6 +109,52 @@ describe("parseProposalResponse", () => {
   it("rejects a response with no JSON object", () => {
     expectError(parseProposalResponse("no json here", ORIGINAL_ACTION));
   });
+
+  it("strips executable params that do not match the proposed action", () => {
+    const raw = JSON.stringify({
+      action: "HOLD",
+      poolAddress: "Pool111111111111111111111111111111111111111",
+      confidence: 0.85,
+      positionSizeUsd: 100,
+      rebalanceParams: { lowerBinId: 100, upperBinId: 110 },
+    });
+
+    const proposal = runSyncOrFail(parseProposalResponse(raw, ORIGINAL_ACTION));
+
+    expect(proposal.positionSizeUsd).toBeUndefined();
+    expect(proposal.rebalanceParams).toBeUndefined();
+  });
+
+  it("keeps positionSizeUsd but drops rebalanceParams for ENTER", () => {
+    const raw = JSON.stringify({
+      action: "ENTER",
+      poolAddress: "Pool111111111111111111111111111111111111111",
+      confidence: 0.85,
+      positionSizeUsd: 1000,
+      rebalanceParams: { lowerBinId: 100, upperBinId: 110 },
+    });
+
+    const proposal = runSyncOrFail(parseProposalResponse(raw, ORIGINAL_ACTION));
+
+    expect(proposal.positionSizeUsd).toBe(1000);
+    expect(proposal.rebalanceParams).toBeUndefined();
+  });
+
+  it("keeps rebalanceParams but drops positionSizeUsd for REBALANCE", () => {
+    const raw = JSON.stringify({
+      action: "REBALANCE",
+      poolAddress: "Pool111111111111111111111111111111111111111",
+      confidence: 0.85,
+      positionSizeUsd: 1000,
+      rebalanceParams: { lowerBinId: 100, upperBinId: 110 },
+    });
+
+    const proposal = runSyncOrFail(parseProposalResponse(raw, ORIGINAL_ACTION));
+
+    expect(proposal.positionSizeUsd).toBeUndefined();
+    expect(proposal.rebalanceParams?.newLowerBinId).toBe(100);
+    expect(proposal.rebalanceParams?.newUpperBinId).toBe(110);
+  });
 });
 
 describe("parseHttpQueueProposal", () => {

@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { Effect } from "effect";
 import { evaluateAgentProposal } from "../engine/risk-service.js";
+import { buildProposalPrompt } from "../engine/agent-service.js";
+import { parseProposalResponse } from "../engine/proposal-schema.js";
 import type { RiskContext } from "../engine/services.js";
 import type { AppConfig } from "../engine/config-service.js";
-import type { AgentProposal } from "../engine/types.js";
+import type { AgentDecision, AgentProposal } from "../engine/types.js";
+import type { AgentRuntimeContext } from "../engine/agent-transport.js";
 
 function makeProposal(
   overrides: Partial<AgentProposal> & { action: AgentProposal["action"]; poolAddress: string },
@@ -572,5 +576,77 @@ describe("evaluateAgentProposal", () => {
     );
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/Already holding/);
+  });
+});
+
+describe("proposal template echo end-to-end", () => {
+  const makePromptCtx = (decision: AgentDecision): AgentRuntimeContext =>
+    ({
+      decision,
+      pool: {
+        address: decision.poolAddress,
+        tokenXSymbol: "SOL",
+        tokenYSymbol: "USDC",
+        tvlUsd: 100_000,
+        volume24hUsd: 50_000,
+        fees24hUsd: 500,
+        apr: 12,
+      },
+      metrics: {
+        feeIlRatio: 1.5,
+        volumeAuthenticity: 0.9,
+        binUtilization: 0.5,
+        tvlVelocity: 0.01,
+      },
+      warnings: [],
+      recentDecisions: [],
+    }) as unknown as AgentRuntimeContext;
+
+  // Simulate a faithful advisor: take the prompt's response template and
+  // substitute only the action and confidence it is proposing.
+  const echoTemplate = (decision: AgentDecision): AgentProposal => {
+    const prompt = buildProposalPrompt(decision, makePromptCtx(decision));
+    const template = prompt.slice(prompt.indexOf('{"action"'), prompt.lastIndexOf("}") + 1);
+    const json = template
+      .replace('"HOLD|REBALANCE|EXIT|ENTER"', `"${decision.action}"`)
+      .replace("0.0-1.0", String(decision.confidence));
+    return Effect.runSync(parseProposalResponse(json, decision.action));
+  };
+
+  it("a faithful template echo of a low-confidence HOLD passes the waiver", () => {
+    const decision: AgentDecision = {
+      action: "HOLD",
+      poolAddress: "pool1",
+      confidence: 0.5,
+      reasoning: "deterministic",
+    };
+    const proposal = echoTemplate(decision);
+    expect(proposal.positionSizeUsd).toBeUndefined();
+    expect(proposal.rebalanceParams).toBeUndefined();
+    const result = evaluateAgentProposal(
+      proposal,
+      makeContext({ originalDecision: decision }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it("a faithful template echo of a low-confidence ENTER preserves the size and passes the waiver", () => {
+    const decision: AgentDecision = {
+      action: "ENTER",
+      poolAddress: "pool1",
+      confidence: 0.5,
+      reasoning: "deterministic",
+      positionSizeUsd: 2_500,
+    };
+    const proposal = echoTemplate(decision);
+    expect(proposal.positionSizeUsd).toBe(2_500);
+    const result = evaluateAgentProposal(
+      proposal,
+      makeContext({ originalDecision: decision }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.adjustedDecision?.positionSizeUsd).toBe(2_500);
   });
 });

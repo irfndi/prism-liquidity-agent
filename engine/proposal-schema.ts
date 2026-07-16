@@ -118,16 +118,21 @@ function buildProposal(
     expiresAt: now + staleMs,
     status: "pending",
     ...(originalAction !== undefined && { originalAction }),
-    ...(decoded.positionSizeUsd !== undefined && {
-      positionSizeUsd: decoded.positionSizeUsd,
-    }),
-    ...(decoded.rebalanceParams !== undefined && {
-      rebalanceParams: {
-        newLowerBinId: decoded.rebalanceParams.lowerBinId,
-        newUpperBinId: decoded.rebalanceParams.upperBinId,
-        slippageBps: 0,
-      },
-    }),
+    // Executable params apply only to their own action; strip anything else so
+    // a template echo cannot attach irrelevant params that would then fail
+    // validation or the confidence-floor waiver.
+    ...(decoded.action === "ENTER" &&
+      decoded.positionSizeUsd !== undefined && {
+        positionSizeUsd: decoded.positionSizeUsd,
+      }),
+    ...(decoded.action === "REBALANCE" &&
+      decoded.rebalanceParams !== undefined && {
+        rebalanceParams: {
+          newLowerBinId: decoded.rebalanceParams.lowerBinId,
+          newUpperBinId: decoded.rebalanceParams.upperBinId,
+          slippageBps: 0,
+        },
+      }),
   };
 }
 
