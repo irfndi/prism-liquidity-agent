@@ -814,7 +814,10 @@ export class AgentService extends Context.Tag("AgentService")<AgentService, Agen
 export type EnqueueProposalResult =
   | { readonly status: "enqueued" }
   | { readonly status: "replaced"; readonly replacedIds: ReadonlyArray<string> }
-  | { readonly status: "rejected"; readonly reason: "queue_full" };
+  | {
+      readonly status: "rejected";
+      readonly reason: "queue_full" | "approved_exists";
+    };
 
 export interface AgentStateApi {
   readonly getSnapshot: () => Effect.Effect<PrismStateSnapshot, never>;

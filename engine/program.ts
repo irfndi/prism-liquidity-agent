@@ -139,6 +139,31 @@ export const finalizeAppliedProposal = (
         .pipe(Effect.catchAll(() => Effect.void))
     : Effect.void;
 
+/**
+ * Sticky risk denials should drop the applied queued proposal (and arm
+ * proposal backoff) so the same doomed proposal is not re-selected every scan.
+ * Transient execution failures still retry via finalizeAppliedProposal.
+ */
+export const rejectQueuedProposalOnRiskDenial = (
+  agentState: Pick<AgentStateApi, "rejectProposal">,
+  appliedQueuedProposalId: string | undefined,
+  proposalBackoff: Map<string, ProposalBackoff>,
+  poolAddress: string,
+  now: number,
+  opts: { readonly baseMs: number; readonly maxMs: number },
+): Effect.Effect<void> => {
+  if (appliedQueuedProposalId === undefined) {
+    return Effect.void;
+  }
+  proposalBackoff.set(
+    poolAddress,
+    nextProposalBackoff(proposalBackoff.get(poolAddress), now, opts),
+  );
+  return agentState
+    .rejectProposal(appliedQueuedProposalId)
+    .pipe(Effect.catchAll(() => Effect.void));
+};
+
 /** True when the agent runtime can actually send a sync proposal prompt. */
 export function hasSyncProposalTransport(status: { readonly transport: string | null }): boolean {
   return status.transport !== null && status.transport !== "alert-only";
@@ -2410,18 +2435,17 @@ export const program = Effect.gen(function* () {
         // Deterministic risk denials are sticky (drawdown pause, stop-loss, etc.).
         // Drop the applied queued proposal so it is not re-selected every scan
         // until TTL; transient execution failures still retry via finalize.
-        if (appliedQueuedProposalId !== undefined) {
-          yield* agentState
-            .rejectProposal(appliedQueuedProposalId)
-            .pipe(Effect.catchAll(() => Effect.void));
-          proposalBackoff.set(
-            poolAddress,
-            nextProposalBackoff(proposalBackoff.get(poolAddress), Date.now(), {
-              baseMs: config.agentProposalBackoffBaseMs,
-              maxMs: config.agentProposalBackoffMaxMs,
-            }),
-          );
-        }
+        yield* rejectQueuedProposalOnRiskDenial(
+          agentState,
+          appliedQueuedProposalId,
+          proposalBackoff,
+          poolAddress,
+          Date.now(),
+          {
+            baseMs: config.agentProposalBackoffBaseMs,
+            maxMs: config.agentProposalBackoffMaxMs,
+          },
+        );
         return decision;
       }
 

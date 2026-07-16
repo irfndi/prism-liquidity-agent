@@ -88,4 +88,16 @@ describe("AgentStateMutable", () => {
     const snapshot = await getSnapshot(layer);
     expect(snapshot.pendingProposals.map((p) => p.proposalId)).toEqual(["p-2"]);
   });
+
+  it("refuses to replace a human-approved proposal for the same pool", async () => {
+    const { layer, enqueueProposal, approveProposal } = AgentStateMutable();
+    enqueueProposal(makeProposal("p-1", "pool1"));
+    approveProposal("p-1");
+    const result = enqueueProposal(makeProposal("p-2", "pool1"));
+    expect(result).toEqual({ status: "rejected", reason: "approved_exists" });
+    const snapshot = await getSnapshot(layer);
+    expect(snapshot.pendingProposals).toHaveLength(1);
+    expect(snapshot.pendingProposals[0]?.proposalId).toBe("p-1");
+    expect(snapshot.pendingProposals[0]?.status).toBe("approved");
+  });
 });

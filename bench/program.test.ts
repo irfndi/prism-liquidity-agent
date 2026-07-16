@@ -7,8 +7,10 @@ import {
   finalizeAppliedProposal,
   hasSyncProposalTransport,
   isProposalStale,
+  rejectQueuedProposalOnRiskDenial,
   shouldHoldForSupervisedApproval,
 } from "../engine/program.js";
+import type { ProposalBackoff } from "../engine/proposal-backoff.js";
 import { ConfigService } from "../engine/config-service.js";
 import { EntryPrepError } from "../engine/errors.js";
 import {
@@ -484,5 +486,60 @@ describe("hasSyncProposalTransport", () => {
   it("is true when a real advisor transport is present", () => {
     expect(hasSyncProposalTransport({ transport: "acp" })).toBe(true);
     expect(hasSyncProposalTransport({ transport: "gateway" })).toBe(true);
+  });
+});
+
+describe("rejectQueuedProposalOnRiskDenial", () => {
+  it("rejects the applied proposal and arms backoff", async () => {
+    const rejected: string[] = [];
+    const proposalBackoff = new Map<string, ProposalBackoff>();
+    const agentState = {
+      rejectProposal: (id: string) =>
+        Effect.sync(() => {
+          rejected.push(id);
+        }),
+    };
+
+    await Effect.runPromise(
+      rejectQueuedProposalOnRiskDenial(
+        agentState,
+        "p-risk-1",
+        proposalBackoff,
+        "pool-a",
+        1_000_000,
+        { baseMs: 60_000, maxMs: 3_600_000 },
+      ),
+    );
+
+    expect(rejected).toEqual(["p-risk-1"]);
+    const backoff = proposalBackoff.get("pool-a");
+    expect(backoff).toBeDefined();
+    expect(backoff!.failures).toBe(1);
+    expect(backoff!.nextProposalAt).toBeGreaterThan(1_000_000);
+  });
+
+  it("is a no-op when no queued proposal was applied", async () => {
+    const rejected: string[] = [];
+    const proposalBackoff = new Map<string, ProposalBackoff>();
+    const agentState = {
+      rejectProposal: (id: string) =>
+        Effect.sync(() => {
+          rejected.push(id);
+        }),
+    };
+
+    await Effect.runPromise(
+      rejectQueuedProposalOnRiskDenial(
+        agentState,
+        undefined,
+        proposalBackoff,
+        "pool-a",
+        1_000_000,
+        { baseMs: 60_000, maxMs: 3_600_000 },
+      ),
+    );
+
+    expect(rejected).toEqual([]);
+    expect(proposalBackoff.size).toBe(0);
   });
 });

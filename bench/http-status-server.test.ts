@@ -726,6 +726,91 @@ describe("HttpStatusServer", () => {
         }),
       });
       expect(response.status).toBe(503);
+      const body = (await response.json()) as {
+        accepted: number;
+        proposalIds: string[];
+        error: string;
+      };
+      expect(body.error).toBe("queue_full");
+      expect(body.accepted).toBe(0);
+      expect(body.proposalIds).toEqual([]);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("dedupes same-pool items in a batch last-wins and only returns live IDs", async () => {
+    const port = 18_785;
+    const enqueued: AgentProposal[] = [];
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentiveMode: true,
+        agentProposalToken: "secret-token",
+        agentProposalMode: "full",
+      }),
+      mockAgentState(baseSnapshot(), enqueued),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify([
+          { action: "HOLD", poolAddress: "PoolA", confidence: 0.7 },
+          { action: "EXIT", poolAddress: "PoolA", confidence: 0.9 },
+        ]),
+      });
+      expect(response.status).toBe(202);
+      const body = (await response.json()) as {
+        accepted: number;
+        proposalIds: string[];
+      };
+      expect(body.accepted).toBe(1);
+      expect(body.proposalIds).toHaveLength(1);
+      expect(enqueued).toHaveLength(1);
+      expect(enqueued[0]!.action).toBe("EXIT");
+      expect(enqueued[0]!.proposalId).toBe(body.proposalIds[0]);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("rejects /propose with JSON 409 when an approved proposal exists for the pool", async () => {
+    const port = 18_784;
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentiveMode: true,
+        agentProposalToken: "secret-token",
+        agentProposalMode: "supervised",
+      }),
+      {
+        ...mockAgentState(baseSnapshot()),
+        enqueueProposal: () => Effect.succeed({ status: "rejected", reason: "approved_exists" }),
+      },
+    );
+    await Effect.runPromise(server.start());
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({
+          action: "HOLD",
+          poolAddress: "PoolA",
+          confidence: 0.8,
+        }),
+      });
+      expect(response.status).toBe(409);
+      const body = (await response.json()) as { error: string; accepted: number };
+      expect(body.error).toBe("approved_exists");
+      expect(body.accepted).toBe(0);
     } finally {
       await Effect.runPromise(server.stop());
     }

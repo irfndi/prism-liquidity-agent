@@ -106,25 +106,41 @@ export class HttpStatusServer {
         proposals.push(proposal);
       }
 
+      // Last-wins per pool within a single batch so we never advertise IDs that
+      // were immediately superseded by a later item in the same request.
+      const lastIndexByPool = new Map<string, number>();
+      for (let i = 0; i < proposals.length; i++) {
+        const pool = proposals[i]?.poolAddress;
+        if (pool !== undefined) lastIndexByPool.set(pool, i);
+      }
+      const deduped = proposals.filter((p, i) => lastIndexByPool.get(p.poolAddress) === i);
+
       const acceptedIds: string[] = [];
-      for (const proposal of proposals) {
+      const replacedIds: string[] = [];
+      for (const proposal of deduped) {
         const result = yield* this.state.enqueueProposal(proposal);
         if (result.status === "rejected") {
-          if (acceptedIds.length === 0) {
-            return new Response(
-              `Proposal queue full (max ${this.config.agentProposalMaxQueueSize})`,
-              { status: 503 },
-            );
-          }
+          const status = result.reason === "queue_full" ? 503 : 409;
+          const message =
+            result.reason === "queue_full"
+              ? `Proposal queue full (max ${this.config.agentProposalMaxQueueSize})` +
+                (acceptedIds.length > 0
+                  ? ` after accepting ${acceptedIds.length} of ${deduped.length}`
+                  : "")
+              : "An approved proposal already exists for this pool; wait for it to execute or reject it before re-proposing";
           return Response.json(
             {
               accepted: acceptedIds.length,
               proposalIds: acceptedIds,
-              error: "queue_full",
-              message: `Proposal queue full after accepting ${acceptedIds.length} of ${proposals.length}`,
+              ...(replacedIds.length > 0 && { replacedIds }),
+              error: result.reason,
+              message,
             },
-            { status: 503 },
+            { status },
           );
+        }
+        if (result.status === "replaced") {
+          replacedIds.push(...result.replacedIds);
         }
         acceptedIds.push(proposal.proposalId);
       }
@@ -133,6 +149,7 @@ export class HttpStatusServer {
         {
           accepted: acceptedIds.length,
           proposalIds: acceptedIds,
+          ...(replacedIds.length > 0 && { replacedIds }),
         },
         { status: 202 },
       );

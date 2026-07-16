@@ -155,22 +155,33 @@ export function AgentStateMutable(options: AgentStateMutableOptions = {}): {
     const now = Date.now();
     prune(now);
 
-    // Prefer a single latest proposal per pool: drop older pending/approved
-    // entries for the same pool so re-proposals do not accumulate.
-    const samePoolIds = snapshot.pendingProposals
-      .filter((p) => p.poolAddress === proposal.poolAddress)
-      .map((p) => p.proposalId);
-    const withoutSamePool = snapshot.pendingProposals.filter(
-      (p) => p.poolAddress !== proposal.poolAddress,
+    const samePool = snapshot.pendingProposals.filter(
+      (p) => p.poolAddress === proposal.poolAddress,
     );
 
-    if (withoutSamePool.length >= maxPendingProposals) {
+    // Human-approved proposals are the supervised-mode boundary: a proposer
+    // holding only AGENT_PROPOSAL_TOKEN must not silently cancel them by
+    // re-proposing for the same pool.
+    if (samePool.some((p) => p.status === "approved")) {
+      return { status: "rejected", reason: "approved_exists" };
+    }
+
+    // Prefer a single latest pending proposal per pool: drop older pending
+    // entries for the same pool so re-proposals do not accumulate.
+    const pendingSamePoolIds = samePool
+      .filter((p) => p.status === "pending")
+      .map((p) => p.proposalId);
+    const remaining = snapshot.pendingProposals.filter(
+      (p) => !(p.poolAddress === proposal.poolAddress && p.status === "pending"),
+    );
+
+    if (remaining.length >= maxPendingProposals) {
       return { status: "rejected", reason: "queue_full" };
     }
 
-    update({ pendingProposals: [...withoutSamePool, proposal] });
-    if (samePoolIds.length > 0) {
-      return { status: "replaced", replacedIds: samePoolIds };
+    update({ pendingProposals: [...remaining, proposal] });
+    if (pendingSamePoolIds.length > 0) {
+      return { status: "replaced", replacedIds: pendingSamePoolIds };
     }
     return { status: "enqueued" };
   };
