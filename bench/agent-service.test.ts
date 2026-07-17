@@ -293,11 +293,12 @@ describe("buildProposalPrompt", () => {
     expect(prompt).not.toContain('"action": "HOLD|REBALANCE|EXIT"');
   });
 
-  it("allows all actions for a deterministic ENTER decision", () => {
+  it("allows only executable actions for a deterministic ENTER decision", () => {
     const decision = makeDecision({ action: "ENTER", positionSizeUsd: 1_000 });
     const prompt = buildProposalPrompt(decision, makeCtx(decision));
-    expect(prompt).toContain("You may propose only: HOLD, REBALANCE, EXIT, ENTER.");
-    expect(prompt).toContain('"action": "HOLD|REBALANCE|EXIT|ENTER"');
+    expect(prompt).toContain("You may propose only: HOLD, ENTER.");
+    expect(prompt).toContain('"action": "HOLD|ENTER"');
+    expect(prompt).not.toContain('"action": "HOLD|REBALANCE|EXIT|ENTER"');
   });
 });
 

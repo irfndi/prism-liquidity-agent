@@ -136,12 +136,13 @@ export function buildProposalPrompt(decision: AgentDecision, ctx: AgentRuntimeCo
     .join("\n");
 
   // Mirror the validator's action limits so compliant advisors are not
-  // penalized for impossible promotions or downgrades.
+  // penalized for impossible promotions or downgrades. For ENTER the pool has
+  // no open position, so REBALANCE/EXIT are not executable either.
   const allowedActions =
     decision.action === "EXIT"
       ? ["EXIT"]
       : decision.action === "ENTER"
-        ? ["HOLD", "REBALANCE", "EXIT", "ENTER"]
+        ? ["HOLD", "ENTER"]
         : ["HOLD", "REBALANCE", "EXIT"];
   const allowedActionsText = allowedActions.join(", ");
 
