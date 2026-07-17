@@ -1115,6 +1115,10 @@ export const AdapterLive = Layer.effect(
             binStep: lbPair.binStep,
             currentPrice: Number(activeBin.price),
             timestamp: Date.now(),
+            // tvl comes from on-chain reserves × price, but volume/fees are
+            // modeled — see fetchPoolStats. The Meteora Data API overlay in
+            // program.ts upgrades this to "datapi" when available.
+            statsSource: "heuristic" as const,
           };
         }).pipe(
           Effect.catchAll((err) =>
@@ -1137,21 +1141,50 @@ export const AdapterLive = Layer.effect(
           const upperBinId = activeBin.binId + halfRange;
           const binStep = Number(dlmm.lbPair.binStep);
 
-          const bins: BinData[] = [];
-          const basePrice = Number(activeBin.price);
-          for (let i = lowerBinId; i <= upperBinId; i++) {
-            const price = basePrice * Math.pow(1 + binStep / 10000, i - activeBin.binId);
-            bins.push({
-              binId: i,
-              price,
-              reserveX: 0n,
-              reserveY: 0n,
-              // Synthetic bins lack real reserves; 1n is required so
-              // computeBinUtilization counts them as active. Without this,
-              // passesPreFilter rejects every pool (bin util == 0).
-              liquiditySupply: 1n,
-            });
+          // Real per-bin reserves from the on-chain bin arrays. The SDK fills
+          // uninitialized bins with zero-amount placeholders, which is the
+          // truthful "empty bin" representation.
+          const realBins = yield* Effect.tryPromise(() =>
+            dlmm.getBinsAroundActiveBin(halfRange, halfRange),
+          ).pipe(
+            Effect.catchAll((err) => {
+              logger.warn(
+                "Real bin reserves unavailable — bin-derived metrics will be marked unknown",
+                { pool: poolAddress, error: String(err) },
+              );
+              return Effect.succeed(null);
+            }),
+          );
+
+          if (realBins === null) {
+            // Explicit unknown state: metrics skip the auth/utilization gates
+            // with a warning instead of consuming fabricated 1.0 values.
+            return {
+              lowerBinId,
+              upperBinId,
+              bins: [],
+              activeBinId: activeBin.binId,
+              binStep,
+              reservesKnown: false,
+            };
           }
+
+          const basePrice = Number(activeBin.price);
+          const bins: BinData[] = realBins.bins
+            .filter((b) => b.binId >= lowerBinId && b.binId <= upperBinId)
+            .map((b) => {
+              const parsedPrice = Number(b.price);
+              return {
+                binId: b.binId,
+                price:
+                  Number.isFinite(parsedPrice) && parsedPrice > 0
+                    ? parsedPrice
+                    : basePrice * Math.pow(1 + binStep / 10000, b.binId - activeBin.binId),
+                reserveX: BigInt(b.xAmount.toString()),
+                reserveY: BigInt(b.yAmount.toString()),
+                liquiditySupply: BigInt(b.supply.toString()),
+              };
+            });
 
           return {
             lowerBinId,
@@ -1159,6 +1192,7 @@ export const AdapterLive = Layer.effect(
             bins,
             activeBinId: activeBin.binId,
             binStep,
+            reservesKnown: true,
           };
         }),
 

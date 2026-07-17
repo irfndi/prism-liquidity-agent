@@ -14,6 +14,13 @@ export interface BinArray {
   bins: BinData[];
   activeBinId: number;
   binStep?: number;
+  /**
+   * False when per-bin reserves were NOT fetched from on-chain bin arrays
+   * (e.g. the SDK call failed). Metrics must treat bin-derived signals as
+   * "unknown" rather than fabricating them. Undefined is treated as known
+   * for backward compatibility with stored snapshots and test fixtures.
+   */
+  reservesKnown?: boolean | undefined;
 }
 
 export interface PoolState {
@@ -30,6 +37,12 @@ export interface PoolState {
   binStep: number;
   currentPrice: number;
   timestamp: number;
+  /**
+   * Where tvl/volume/fees came from. "datapi" = real Meteora Data API values;
+   * "heuristic" = on-chain reserves × price with modeled turnover (fabricated
+   * volume/fees). Volume-authenticity is only meaningful for "datapi" stats.
+   */
+  statsSource?: "datapi" | "heuristic" | undefined;
 }
 
 export interface PoolSnapshot {
@@ -52,8 +65,18 @@ export interface PoolMetrics {
   binArray: BinArray;
   tvlVelocity: number; // % change in TVL over last N intervals
   feeIlRatio: number;
-  volumeAuthenticity: number; // 0–1 score
-  binUtilization: number; // active bins / total bins
+  volumeAuthenticity: number; // 0–1 score (0 when unknown)
+  binUtilization: number; // active bins / total bins (0 when unknown)
+  /** False when volume/fees are heuristic estimates — auth gates must skip. */
+  readonly volumeAuthenticityKnown: boolean;
+  /** False when real per-bin reserves were unavailable — util gates must skip. */
+  readonly binUtilizationKnown: boolean;
+}
+
+/** Recent price reference used to estimate impermanent loss from drift. */
+export interface PriceDriftContext {
+  readonly previousPrice?: number | undefined;
+  readonly previousTimestamp?: number | undefined;
 }
 
 // ─── Signal Staging ──────────────────────────────────────────────────────────

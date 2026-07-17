@@ -1,12 +1,119 @@
 import { Context, Layer } from "effect";
 import { StrategyService, type StrategyApi } from "./services.js";
-import type { BinArray, PoolMetrics, PoolState, SignalWeights } from "./types.js";
+import type {
+  BinArray,
+  PoolMetrics,
+  PoolState,
+  PriceDriftContext,
+  SignalWeights,
+} from "./types.js";
+
+/**
+ * Upper bound for the fee/IL ratio. Also the value reported when observed
+ * price drift is zero (no IL measured → fees dominate by construction).
+ * Replaces the old hardcoded `999` sentinel which made every fee/IL gate
+ * vacuous. Kept in sync with the weightedEntryScore cap below.
+ */
+export const MAX_FEE_IL_RATIO = 20;
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Reference half-width (bins) for the concentration multiplier: the half-range
+ * the adapter fetches around the active bin. Liquidity squeezed into a
+ * narrower effective width experiences amplified IL per unit of price drift.
+ */
+const CONCENTRATION_REFERENCE_HALF_WIDTH = 20;
+const MAX_CONCENTRATION_MULTIPLIER = 10;
+
+/** Assumed daily drift per unit of bin step when no price history exists yet. */
+const BIN_STEP_DRIFT_PROXY_PER_DAY = 10;
+
+/** IL fraction of a full-range LP position after price moves by ratio r. */
+function impermanentLossFraction(priceRatio: number): number {
+  return Math.abs((2 * Math.sqrt(priceRatio)) / (1 + priceRatio) - 1);
+}
+
+/**
+ * Liquidity-weighted mean distance (in bins) of stocked bins from the active
+ * bin, expressed as an IL amplification factor vs the reference half-width.
+ * Returns 1 when bin reserves are unknown or no bin holds liquidity.
+ */
+function computeConcentrationMultiplier(binArray: BinArray): number {
+  if (binArray.reservesKnown === false) return 1;
+
+  let weightSum = 0;
+  let distanceSum = 0;
+  for (const b of binArray.bins) {
+    const weight = Number(b.liquiditySupply);
+    if (!Number.isFinite(weight) || weight <= 0) continue;
+    weightSum += weight;
+    distanceSum += weight * Math.abs(b.binId - binArray.activeBinId);
+  }
+  if (weightSum <= 0) return 1;
+
+  const effectiveHalfWidth = Math.max(distanceSum / weightSum, 1);
+  return Math.min(
+    Math.max(CONCENTRATION_REFERENCE_HALF_WIDTH / effectiveHalfWidth, 1),
+    MAX_CONCENTRATION_MULTIPLIER,
+  );
+}
+
+/**
+ * Estimated daily impermanent loss in USD for liquidity in this pool.
+ *
+ * Primary model (price history available): take the per-cycle endpoint drift
+ * r = price/prevPrice, convert to the full-range IL fraction, scale to a day
+ * by the number of elapsed-cycle equivalents, and amplify by the liquidity
+ * concentration multiplier. This is a conservative upper-bound ranking
+ * signal: it assumes every cycle drifts like the last one and ignores
+ * intra-cycle mean reversion.
+ *
+ * Fallback (first cycle after startup — no previous snapshot): assume a daily
+ * drift of BIN_STEP_DRIFT_PROXY_PER_DAY × binStep, so the estimate still
+ * varies across pools with different volatility profiles instead of
+ * collapsing to the old `/365`-amortized ~0 that produced the 999 sentinel.
+ */
+export function estimateDailyIlUsd(
+  pool: PoolState,
+  binArray: BinArray,
+  priceDrift?: PriceDriftContext,
+): number {
+  const concentration = computeConcentrationMultiplier(binArray);
+
+  const previousPrice = priceDrift?.previousPrice;
+  const previousTimestamp = priceDrift?.previousTimestamp;
+  const hasDrift =
+    previousPrice !== undefined &&
+    previousPrice > 0 &&
+    previousTimestamp !== undefined &&
+    pool.timestamp > previousTimestamp &&
+    pool.currentPrice > 0;
+
+  if (hasDrift) {
+    const ratio = Math.min(Math.max(pool.currentPrice / previousPrice, 0.5), 2);
+    const elapsedMs = pool.timestamp - previousTimestamp;
+    const cyclesPerDay = MS_PER_DAY / elapsedMs;
+    const ilDailyFraction = impermanentLossFraction(ratio) * cyclesPerDay * concentration;
+    return pool.tvlUsd * ilDailyFraction;
+  }
+
+  const binStepBps = binArray.binStep ?? pool.binStep ?? 10;
+  const assumedDailyDrift = (binStepBps / 10_000) * BIN_STEP_DRIFT_PROXY_PER_DAY;
+  const ilDailyFraction = impermanentLossFraction(1 + assumedDailyDrift) * concentration;
+  return pool.tvlUsd * ilDailyFraction;
+}
 
 export const DLMMStrategy: StrategyApi = {
-  computeMetrics(pool: PoolState, binArray: BinArray, previousTvlUsd: number): PoolMetrics {
+  computeMetrics(
+    pool: PoolState,
+    binArray: BinArray,
+    previousTvlUsd: number,
+    priceDrift?: PriceDriftContext,
+  ): PoolMetrics {
     const tvlVelocity = previousTvlUsd > 0 ? (pool.tvlUsd - previousTvlUsd) / previousTvlUsd : 0;
 
-    const feeIlRatio = DLMMStrategy.computeFeeIlRatio(pool, binArray);
+    const feeIlRatio = DLMMStrategy.computeFeeIlRatio(pool, binArray, priceDrift);
     const volumeAuthenticity = DLMMStrategy.checkVolumeAuthenticity(pool);
     const binUtilization = DLMMStrategy.computeBinUtilization(binArray);
 
@@ -17,26 +124,19 @@ export const DLMMStrategy: StrategyApi = {
       feeIlRatio,
       volumeAuthenticity: volumeAuthenticity.score,
       binUtilization,
+      // Volume authenticity is only meaningful on real (Data API) stats;
+      // heuristic volume/fees would just re-validate their own assumptions.
+      volumeAuthenticityKnown: pool.statsSource === "datapi",
+      binUtilizationKnown: binArray.reservesKnown !== false,
     };
   },
 
-  computeFeeIlRatio(pool: PoolState, binArray: BinArray): number {
+  computeFeeIlRatio(pool: PoolState, binArray: BinArray, priceDrift?: PriceDriftContext): number {
     if (pool.tvlUsd === 0) return 0;
 
-    const activeBin = binArray.bins.find((b) => b.binId === binArray.activeBinId);
-    if (!activeBin) return 0;
-
-    const rangeCenter = (binArray.lowerBinId + binArray.upperBinId) / 2;
-    const binsDrifted = Math.abs(binArray.activeBinId - rangeCenter);
-    const binStep = binArray.binStep ?? 10;
-
-    const priceRatio = Math.pow(1 + binStep / 10_000, binsDrifted);
-    const ilFraction = (2 * Math.sqrt(priceRatio)) / (1 + priceRatio) - 1;
-    const estimatedIlUsd = pool.tvlUsd * Math.abs(ilFraction);
-    const estimatedIlDaily = estimatedIlUsd / 365;
-
-    if (estimatedIlDaily === 0) return pool.fees24hUsd > 0 ? 999 : 0;
-    return pool.fees24hUsd / estimatedIlDaily;
+    const estimatedIlDailyUsd = estimateDailyIlUsd(pool, binArray, priceDrift);
+    if (estimatedIlDailyUsd <= 0) return pool.fees24hUsd > 0 ? MAX_FEE_IL_RATIO : 0;
+    return Math.min(pool.fees24hUsd / estimatedIlDailyUsd, MAX_FEE_IL_RATIO);
   },
 
   checkVolumeAuthenticity(pool: PoolState): {
@@ -77,6 +177,10 @@ export const DLMMStrategy: StrategyApi = {
   },
 
   computeBinUtilization(binArray: BinArray): number {
+    // Unknown reserves must report 0 (and binUtilizationKnown=false upstream)
+    // — never fabricate 1.0 from synthetic bins.
+    if (binArray.reservesKnown === false) return 0;
+
     const total = binArray.bins.length;
     if (total === 0) return 0;
 
@@ -105,12 +209,16 @@ export const DLMMStrategy: StrategyApi = {
     minTvlUsd: number,
     minAuthScore: number,
     minBinUtilization: number,
+    authKnown = true,
+    binUtilizationKnown = true,
   ): boolean {
     return (
       pool.tvlUsd > 0 &&
       pool.tvlUsd >= minTvlUsd &&
-      authScore >= minAuthScore &&
-      binUtilization >= minBinUtilization
+      // Unknown metrics skip their gate (a warning is logged by the caller);
+      // they must neither auto-pass nor auto-fail the pre-filter.
+      (!authKnown || authScore >= minAuthScore) &&
+      (!binUtilizationKnown || binUtilization >= minBinUtilization)
     );
   },
 };
@@ -384,13 +492,14 @@ function clampWeight(value: number, floor: number, ceiling: number): number {
   return Math.max(floor, Math.min(ceiling, value));
 }
 
-const MAX_FEE_IL_RATIO = 20;
-
 export function weightedEntryScore(metrics: PoolMetrics, weights: SignalWeights): number {
   const cappedFeeIlRatio = Math.min(metrics.feeIlRatio, MAX_FEE_IL_RATIO);
   const feeContrib = cappedFeeIlRatio * weights.feeIlRatio;
-  const authContrib = metrics.volumeAuthenticity * weights.volumeAuthenticity;
-  const binContrib = metrics.binUtilization * weights.binUtilization;
+  // Unknown metrics contribute 0 (fail-closed) rather than a fabricated 1.0.
+  const authContrib =
+    (metrics.volumeAuthenticityKnown ? metrics.volumeAuthenticity : 0) * weights.volumeAuthenticity;
+  const binContrib =
+    (metrics.binUtilizationKnown ? metrics.binUtilization : 0) * weights.binUtilization;
   const tvlContrib = Math.min(metrics.pool.tvlUsd / 1_000_000, 1) * weights.tvlUsd;
   const velContrib = (1 / (1 + Math.abs(metrics.tvlVelocity))) * weights.tvlVelocity * 0.1;
 

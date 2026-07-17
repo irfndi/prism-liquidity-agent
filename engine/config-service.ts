@@ -53,6 +53,7 @@ export interface AppConfig {
   // env var; falls back to the official DLMM Data API (dlmm.datapi.meteora.ag)
   // if the env var is unset or empty.
   readonly meteoraPoolsUrl: string;
+  readonly meteoraDatapiBaseUrl: string;
 
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
   /** Estimated SOL cost of a single rebalance tx (entry + close). */
@@ -543,6 +544,9 @@ const loadConfig = Effect.gen(function* () {
   const meteoraPoolsUrl =
     meteoraPoolsUrlRaw ||
     "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc";
+  const meteoraDatapiBaseUrl = yield* Config.string("METEORA_DATA_API_URL").pipe(
+    Effect.orElseSucceed(() => "https://dlmm.datapi.meteora.ag"),
+  );
 
   const watchlistPools = watchlistPoolsRaw
     .split(",")
@@ -591,6 +595,7 @@ const loadConfig = Effect.gen(function* () {
     feedbackOptOut,
     paperModeExitLive,
     meteoraPoolsUrl,
+    meteoraDatapiBaseUrl,
 
     rebalanceGasCostSol,
     solPriceUsd,

@@ -42,6 +42,8 @@ function makeContext(): AgentRuntimeContext {
     feeIlRatio: 1.5,
     volumeAuthenticity: 0.9,
     binUtilization: 0.5,
+    volumeAuthenticityKnown: true,
+    binUtilizationKnown: true,
   };
 
   const warnings: MemoryEntry[] = [];

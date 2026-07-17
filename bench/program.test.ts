@@ -154,6 +154,8 @@ describe("executeLive", () => {
           volumeAuthenticity: 0.9,
           binUtilization: 0.5,
           tvlVelocity: 0,
+          volumeAuthenticityKnown: true,
+          binUtilizationKnown: true,
         }) as import("../engine/types.js").PoolMetrics,
       checkVolumeAuthenticity: () => ({ score: 0.9, flags: [] }),
       computeBinUtilization: () => 0.5,

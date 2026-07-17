@@ -14,6 +14,7 @@ import type {
   PoolSnapshot,
   PoolState,
   Position,
+  PriceDriftContext,
   SignalSnapshot,
   SignalWeights,
 } from "./types.js";
@@ -187,13 +188,18 @@ export interface StrategyApi {
     pool: PoolState,
     binArray: BinArray,
     previousTvlUsd: number,
+    priceDrift?: PriceDriftContext,
   ) => PoolMetrics;
   readonly checkVolumeAuthenticity: (pool: PoolState) => {
     score: number;
     flags: ReadonlyArray<string>;
   };
   readonly computeBinUtilization: (binArray: BinArray) => number;
-  readonly computeFeeIlRatio: (pool: PoolState, binArray: BinArray) => number;
+  readonly computeFeeIlRatio: (
+    pool: PoolState,
+    binArray: BinArray,
+    priceDrift?: PriceDriftContext,
+  ) => number;
   readonly recommendBinRange: (
     activeBinId: number,
     binStep: number,
@@ -205,12 +211,51 @@ export interface StrategyApi {
     minTvlUsd: number,
     minAuthScore: number,
     minBinUtilization: number,
+    authKnown?: boolean,
+    binUtilizationKnown?: boolean,
   ) => boolean;
 }
 
 export class StrategyService extends Context.Tag("StrategyService")<
   StrategyService,
   StrategyApi
+>() {}
+
+// ─── Meteora Data API Service ────────────────────────────────────────────────
+
+/** Real pool statistics from the Meteora Data API (dlmm.datapi.meteora.ag). */
+export interface MeteoraPoolStats {
+  readonly address: string;
+  readonly name: string;
+  readonly tvlUsd: number;
+  readonly volume24hUsd: number;
+  readonly fees24hUsd: number;
+  readonly apr: number;
+  readonly apy: number;
+  readonly currentPrice: number;
+  readonly feeTvlRatio24h: number | null;
+  readonly feeTvlRatio12h: number | null;
+  readonly feeTvlRatio1h: number | null;
+  readonly dynamicFeePct: number | null;
+  readonly baseFeePct: number | null;
+  readonly hasFarm: boolean | null;
+  readonly isBlacklisted: boolean | null;
+  readonly tokenXFreezeAuthorityDisabled: boolean | null;
+  readonly tokenYFreezeAuthorityDisabled: boolean | null;
+}
+
+export interface MeteoraDatapiApi {
+  /**
+   * Fetch real stats for one pool. Never fails: on any network/HTTP/schema
+   * error it logs a warning and returns null so callers fall back to
+   * heuristic metrics without crashing the scan cycle.
+   */
+  readonly getPoolData: (poolAddress: string) => Effect.Effect<MeteoraPoolStats | null, never>;
+}
+
+export class MeteoraDatapiService extends Context.Tag("MeteoraDatapiService")<
+  MeteoraDatapiService,
+  MeteoraDatapiApi
 >() {}
 
 // ─── Memory Service ──────────────────────────────────────────────────────────

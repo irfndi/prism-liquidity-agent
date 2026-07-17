@@ -37,6 +37,8 @@ function makeMetrics(overrides: Partial<PoolMetrics> = {}): PoolMetrics {
     feeIlRatio: overrides.feeIlRatio ?? 1.5,
     volumeAuthenticity: overrides.volumeAuthenticity ?? 0.85,
     binUtilization: overrides.binUtilization ?? 0.6,
+    volumeAuthenticityKnown: overrides.volumeAuthenticityKnown ?? true,
+    binUtilizationKnown: overrides.binUtilizationKnown ?? true,
   };
 }
 
