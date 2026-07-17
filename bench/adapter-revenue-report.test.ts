@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
+import fs from "fs";
 import { AdapterService } from "../engine/services.js";
 import { AdapterLive } from "../engine/adapter-service.js";
 import { ConfigService } from "../engine/config-service.js";
@@ -35,17 +36,40 @@ const FEE_EVENT = {
   txSignature: "sig-123",
 };
 
-describe("AdapterService.reportFeeCollection opt-out", () => {
-  const originalFetch = globalThis.fetch;
+// reportFeeCollection reads ~/.config/prism/{install-id,credentials.json} from
+// the real home directory — stub those reads so tests never touch the
+// environment. Paths that don't match fall through to the real fs.
+function stubPrismConfigDir(): void {
+  const realReadFileSync = fs.readFileSync;
+  const realExistsSync = fs.existsSync;
+  vi.spyOn(fs, "readFileSync").mockImplementation(((
+    path: fs.PathOrFileDescriptor,
+    options?: unknown,
+  ) => {
+    if (typeof path === "string" && path.includes("install-id")) {
+      return "ci-test-install-id-1234";
+    }
+    if (typeof path === "string" && path.includes("credentials.json")) {
+      return JSON.stringify({ apiKey: "ci-test-api-key", userId: "ci-test-user" });
+    }
+    return realReadFileSync(path, options as never);
+  }) as typeof fs.readFileSync);
+  vi.spyOn(fs, "existsSync").mockImplementation((path: fs.PathLike) => {
+    if (typeof path === "string" && path.includes("install-id")) return true;
+    return realExistsSync(path);
+  });
+}
 
+describe("AdapterService.reportFeeCollection opt-out", () => {
   afterEach(() => {
-    globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
   });
 
   it("does not POST revenue telemetry when feedbackOptOut is set", async () => {
-    const fetchMock = vi.fn();
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    stubPrismConfigDir();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(() => Promise.resolve(new Response("{}", { status: 200 })));
     const layer = buildAdapterLayer({ feedbackOptOut: true });
 
     await Effect.runPromise(
@@ -58,12 +82,14 @@ describe("AdapterService.reportFeeCollection opt-out", () => {
       ),
     );
 
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("POSTs revenue telemetry when feedbackOptOut is not set", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    stubPrismConfigDir();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(() => Promise.resolve(new Response("{}", { status: 200 })));
     const layer = buildAdapterLayer({ feedbackOptOut: false });
 
     await Effect.runPromise(
@@ -76,7 +102,7 @@ describe("AdapterService.reportFeeCollection opt-out", () => {
       ),
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/v1/revenue/log");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain("/v1/revenue/log");
   });
 });
