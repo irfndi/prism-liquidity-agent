@@ -719,9 +719,7 @@ describe("proposal template echo end-to-end", () => {
   const echoTemplate = (decision: AgentDecision): AgentProposal => {
     const prompt = buildProposalPrompt(decision, makePromptCtx(decision));
     const template = prompt.slice(prompt.indexOf('{"action"'), prompt.lastIndexOf("}") + 1);
-    const json = template
-      .replace(/"action": "[^"]+"/, `"action": "${decision.action}"`)
-      .replace("0.0-1.0", String(decision.confidence));
+    const json = template.replace(/"action": "[^"]+"/, `"action": "${decision.action}"`);
     return Effect.runSync(parseProposalResponse(json, decision.action));
   };
 

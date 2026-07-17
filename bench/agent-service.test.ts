@@ -283,8 +283,8 @@ describe("buildProposalPrompt", () => {
     const ctx = { ...makeCtx(decision), hasOpenPosition: true };
     const prompt = buildProposalPrompt(decision, ctx);
     expect(prompt).toContain("You may propose only: HOLD, REBALANCE, EXIT.");
-    expect(prompt).toContain('"action": "HOLD|REBALANCE|EXIT"');
-    expect(prompt).not.toContain('"action": "HOLD|REBALANCE|EXIT|ENTER"');
+    expect(prompt).toContain("allowed actions: HOLD, REBALANCE, EXIT");
+    expect(prompt).toContain('"action": "HOLD"');
   });
 
   it("limits allowed actions for a deterministic HOLD decision without an open position", () => {
@@ -292,24 +292,27 @@ describe("buildProposalPrompt", () => {
     const ctx = { ...makeCtx(decision), hasOpenPosition: false };
     const prompt = buildProposalPrompt(decision, ctx);
     expect(prompt).toContain("You may propose only: HOLD.");
+    expect(prompt).toContain("allowed actions: HOLD");
     expect(prompt).toContain('"action": "HOLD"');
-    expect(prompt).not.toContain('"action": "HOLD|REBALANCE|EXIT"');
+    expect(prompt).not.toContain("allowed actions: HOLD, REBALANCE, EXIT");
   });
 
   it("limits allowed actions for a deterministic EXIT decision", () => {
     const decision = makeDecision({ action: "EXIT" });
     const prompt = buildProposalPrompt(decision, makeCtx(decision));
     expect(prompt).toContain("You may propose only: EXIT.");
+    expect(prompt).toContain("allowed actions: EXIT");
     expect(prompt).toContain('"action": "EXIT"');
-    expect(prompt).not.toContain('"action": "HOLD|REBALANCE|EXIT"');
+    expect(prompt).not.toContain("allowed actions: HOLD, REBALANCE, EXIT");
   });
 
   it("allows only executable actions for a deterministic ENTER decision", () => {
     const decision = makeDecision({ action: "ENTER", positionSizeUsd: 1_000 });
     const prompt = buildProposalPrompt(decision, makeCtx(decision));
     expect(prompt).toContain("You may propose only: HOLD, ENTER.");
-    expect(prompt).toContain('"action": "HOLD|ENTER"');
-    expect(prompt).not.toContain('"action": "HOLD|REBALANCE|EXIT|ENTER"');
+    expect(prompt).toContain("allowed actions: HOLD, ENTER");
+    expect(prompt).toContain('"action": "ENTER"');
+    expect(prompt).not.toContain("allowed actions: HOLD, REBALANCE, EXIT, ENTER");
   });
 });
 

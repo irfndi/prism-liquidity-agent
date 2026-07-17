@@ -181,8 +181,8 @@ ${warningsBlock}
 RECENT DECISIONS:
 ${decisionsBlock}
 
-Respond with JSON only:
-{"action": "${allowedActions.join("|")}", "poolAddress": "${pool.address}", "confidence": 0.0-1.0, "positionSizeUsd": ${decision.positionSizeUsd ?? 100}, "rebalanceParams": {"lowerBinId": ${decision.rebalanceParams?.newLowerBinId ?? 100}, "upperBinId": ${decision.rebalanceParams?.newUpperBinId ?? 110}}, "reasoning": "..."}
+Respond with JSON only (replace the example action and confidence with your proposal; allowed actions: ${allowedActionsText}, confidence must be a number between 0.0 and 1.0):
+{"action": "${decision.action}", "poolAddress": "${pool.address}", "confidence": ${decision.confidence}, "positionSizeUsd": ${decision.positionSizeUsd ?? 100}, "rebalanceParams": {"lowerBinId": ${decision.rebalanceParams?.newLowerBinId ?? 100}, "upperBinId": ${decision.rebalanceParams?.newUpperBinId ?? 110}}, "reasoning": "..."}
 `;
 }
 
