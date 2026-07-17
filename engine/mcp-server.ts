@@ -1,4 +1,5 @@
 import { Effect, Layer } from "effect";
+import crypto from "node:crypto";
 import { createLogger } from "./logger.js";
 import type { AgentStateApi } from "./services.js";
 import { AgentStateService, McpServerService } from "./services.js";
@@ -58,6 +59,43 @@ const tools: ReadonlyArray<McpTool> = [
     name: "prism_config",
     description: "Get sanitized configuration (no secrets) for the running agent.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "prism_agent_policy",
+    description:
+      "Get the current agent policy snapshot (proposal mode, hard caps, circuit breaker).",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "prism_pending_proposals",
+    description: "List pending agent proposals that are awaiting approval in supervised mode.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pool: { type: "string", description: "Optional pool address to filter by" },
+      },
+    },
+  },
+  {
+    name: "prism_approve_proposals",
+    description:
+      "Approve one or more pending agent proposals so they can execute in supervised mode. Requires the approval token configured for the engine.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        proposalIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Proposal IDs to approve",
+        },
+        token: {
+          type: "string",
+          description:
+            "Approval token (AGENT_APPROVAL_TOKEN; required, no proposal-token fallback)",
+        },
+      },
+      required: ["proposalIds", "token"],
+    },
   },
 ];
 
@@ -173,6 +211,74 @@ export class McpServer {
             {
               type: "text",
               text: JSON.stringify(sanitizeConfig(this.config)),
+            },
+          ],
+        };
+      }
+      case "prism_agent_policy": {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(snapshot.agentPolicy),
+            },
+          ],
+        };
+      }
+      case "prism_pending_proposals": {
+        const pool = arguments_.pool as string | undefined;
+        const proposals = pool
+          ? snapshot.pendingProposals.filter((p) => p.poolAddress === pool)
+          : snapshot.pendingProposals;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ proposals }),
+            },
+          ],
+        };
+      }
+      case "prism_approve_proposals": {
+        // Approvals are the human boundary of supervised mode: require the
+        // same credential as the HTTP /approve endpoint so an MCP-capable
+        // advisor cannot approve its own proposals. Fail-closed: no fallback
+        // to the proposal enqueue token.
+        const expectedToken = this.config.agentApprovalToken;
+        const providedToken = typeof arguments_.token === "string" ? arguments_.token : "";
+        const expectedBuf = Buffer.from(expectedToken);
+        const actualBuf = Buffer.from(providedToken);
+        if (
+          expectedToken.length === 0 ||
+          actualBuf.length !== expectedBuf.length ||
+          !crypto.timingSafeEqual(actualBuf, expectedBuf)
+        ) {
+          throw new Error("Unauthorized: invalid approval token");
+        }
+        const proposalIds = Array.isArray(arguments_.proposalIds)
+          ? arguments_.proposalIds.filter((id): id is string => typeof id === "string")
+          : [];
+        if (proposalIds.length === 0) {
+          throw new Error("proposalIds must be a non-empty array of strings");
+        }
+        const maxBatchSize = this.config.agentProposalMaxBatchSize;
+        if (proposalIds.length > maxBatchSize) {
+          throw new Error(`Batch size ${proposalIds.length} exceeds limit ${maxBatchSize}`);
+        }
+        const snapshot = await Effect.runPromise(this.state.getSnapshot());
+        const pendingIds = new Set(snapshot.pendingProposals.map((p) => p.proposalId));
+        const missing = proposalIds.filter((id) => !pendingIds.has(id));
+        if (missing.length > 0) {
+          throw new Error(`Proposal IDs not found: ${missing.join(", ")}`);
+        }
+        for (const proposalId of proposalIds) {
+          await Effect.runPromise(this.state.approveProposal(proposalId));
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ approved: proposalIds.length }),
             },
           ],
         };

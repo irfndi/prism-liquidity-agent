@@ -7,6 +7,7 @@ import { createLogger } from "./logger.js";
 import { detectAgents } from "./agent-detection.js";
 import { AcpTransport } from "./acp-transport.js";
 import { GatewayTransport } from "./gateway-transport.js";
+import { parseProposalResponse } from "./proposal-schema.js";
 import type {
   AgentRuntimeContext,
   AgentRuntimeDetection,
@@ -30,6 +31,20 @@ interface ParsedAgentResponse {
 
 export const AgentNoOp: AgentApi = {
   enhanceDecision: () => Effect.succeed(null),
+  getPolicy: () =>
+    Effect.succeed({
+      mode: "veto" as const,
+      proposalsQueued: 0,
+      lastProposalAt: null,
+      badProposalBackoffUntil: null,
+      circuitBreakerOpen: false,
+      hardCaps: {
+        maxPositionSizePct: 0.4,
+        maxRebalanceRangeBins: 50,
+        minProposalConfidence: 0.65,
+        proposalStaleMs: 300_000,
+      },
+    }),
   sendCheckin: () => Effect.void,
   sendAlert: () => Effect.void,
   getStatus: () =>
@@ -42,9 +57,11 @@ export const AgentNoOp: AgentApi = {
   disconnect: () => Effect.void,
 };
 
-function buildPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
-  const { pool, metrics, warnings, recentDecisions } = ctx;
-
+function formatRuntimeContext(ctx: AgentRuntimeContext): {
+  warningsBlock: string;
+  decisionsBlock: string;
+} {
+  const { warnings, recentDecisions } = ctx;
   const warningsBlock =
     warnings.length > 0
       ? warnings.map((w) => `  - [${w.category}] ${w.content}`).join("\n")
@@ -60,6 +77,13 @@ function buildPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string 
           )
           .join("\n")
       : "  (none)";
+
+  return { warningsBlock, decisionsBlock };
+}
+
+function buildPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
+  const { pool, metrics } = ctx;
+  const { warningsBlock, decisionsBlock } = formatRuntimeContext(ctx);
 
   return `You are a liquidity pool risk overlay. Review the deterministic agent's decision and optionally override it.
 
@@ -94,6 +118,71 @@ ${decisionsBlock}
 
 Respond with JSON only:
 {"action": "HOLD|REBALANCE|EXIT|ENTER", "confidence": 0.0-1.0, "reasoning": "..."}
+`;
+}
+
+export function buildProposalPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
+  const { pool, metrics } = ctx;
+  const { warningsBlock, decisionsBlock } = formatRuntimeContext(ctx);
+  const currentParamsBlock = [
+    decision.positionSizeUsd !== undefined
+      ? `Position Size: $${decision.positionSizeUsd.toFixed(0)}`
+      : null,
+    decision.rebalanceParams !== undefined
+      ? `Bin Range: ${decision.rebalanceParams.newLowerBinId} to ${decision.rebalanceParams.newUpperBinId}`
+      : null,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+
+  // Mirror the validator's action limits so compliant advisors are not
+  // penalized for impossible promotions or downgrades. For ENTER the pool has
+  // no open position, so REBALANCE/EXIT are not executable either. For an
+  // unheld default HOLD, only HOLD is executable.
+  const allowedActions =
+    decision.action === "EXIT"
+      ? ["EXIT"]
+      : decision.action === "ENTER"
+        ? ["HOLD", "ENTER"]
+        : ctx.hasOpenPosition
+          ? ["HOLD", "REBALANCE", "EXIT"]
+          : ["HOLD"];
+  const allowedActionsText = allowedActions.join(", ");
+
+  return `You are a liquidity pool strategy advisor. Review the deterministic agent's decision and propose the best action for this pool.
+
+RULES (strict — you must follow them):
+- You may propose only: ${allowedActionsText}.
+- The engine will validate your proposal against safety gates; only safe proposals execute.
+- ENTER proposals require positionSizeUsd (USD); REBALANCE proposals require rebalanceParams.
+- When echoing the engine's action, reuse the current executable values shown below — do not invent new ones.
+- Do not propose actions for pools outside the current context.
+- If the engine's decision is already optimal, return the same action and confidence.
+
+DECISION TO REVIEW:
+Action: ${decision.action}
+Confidence: ${decision.confidence.toFixed(2)}
+Reasoning: ${decision.reasoning}
+${currentParamsBlock === "" ? "" : `${currentParamsBlock}\n`}Pool: ${pool.tokenXSymbol}/${pool.tokenYSymbol} (${pool.address})
+TVL: $${pool.tvlUsd.toFixed(0)}
+24h Volume: $${pool.volume24hUsd.toFixed(0)}
+24h Fees: $${pool.fees24hUsd.toFixed(0)}
+APR: ${pool.apr.toFixed(2)}%
+
+METRICS:
+- Fee/IL Ratio: ${metrics.feeIlRatio.toFixed(2)}
+- Volume Authenticity: ${metrics.volumeAuthenticity.toFixed(2)}
+- Bin Utilization: ${metrics.binUtilization.toFixed(2)}
+- TVL Velocity: ${(metrics.tvlVelocity * 100).toFixed(1)}%
+
+MEMORY WARNINGS:
+${warningsBlock}
+
+RECENT DECISIONS:
+${decisionsBlock}
+
+Respond with JSON only (replace the example action and confidence with your proposal; allowed actions: ${allowedActionsText}, confidence must be a number between 0.0 and 1.0):
+{"action": "${decision.action}", "poolAddress": "${pool.address}", "confidence": ${decision.confidence}, "positionSizeUsd": ${decision.positionSizeUsd ?? 100}, "rebalanceParams": {"lowerBinId": ${decision.rebalanceParams?.newLowerBinId ?? 100}, "upperBinId": ${decision.rebalanceParams?.newUpperBinId ?? 110}}, "reasoning": "..."}
 `;
 }
 
@@ -323,26 +412,51 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           if (!transport) {
             return Effect.succeed(null);
           }
-          const prompt = buildPrompt(decision, context);
-          return transport.sendPrompt(prompt, context).pipe(
-            Effect.map((response: AgentRuntimeResponse) => {
+          const proposalMode = config.agentProposalMode;
+          if (proposalMode === "veto") {
+            const prompt = buildPrompt(decision, context);
+            return transport.sendPrompt(prompt, context).pipe(
+              Effect.map((response: AgentRuntimeResponse) => {
+                lastPromptAt = Date.now();
+                const parsed = parseResponse(response.raw);
+                const override = validateOverride(decision, parsed);
+                if (override) {
+                  logger.info("Agent override", {
+                    pool: decision.poolAddress,
+                    originalAction: decision.action,
+                    newAction: override.action,
+                    originalConfidence: decision.confidence.toFixed(2),
+                    newConfidence: override.confidence.toFixed(2),
+                  });
+                }
+                return override;
+              }),
+            );
+          }
+
+          const prompt = buildProposalPrompt(decision, context);
+          return transport.sendPrompt(prompt, context, config.agentProposalTimeoutMs).pipe(
+            Effect.flatMap((response: AgentRuntimeResponse) => {
               lastPromptAt = Date.now();
-              const parsed = parseResponse(response.raw);
-              const override = validateOverride(decision, parsed);
-              if (override) {
-                logger.info("Agent override", {
-                  pool: decision.poolAddress,
-                  originalAction: decision.action,
-                  newAction: override.action,
-                  originalConfidence: decision.confidence.toFixed(2),
-                  newConfidence: override.confidence.toFixed(2),
-                });
-              }
-              return override;
+              return parseProposalResponse(
+                response.raw,
+                decision.action,
+                config.agentProposalStaleMs,
+              ).pipe(
+                Effect.map((proposal) => {
+                  logger.info("Agent proposal", {
+                    pool: decision.poolAddress,
+                    originalAction: decision.action,
+                    proposedAction: proposal.action,
+                    confidence: proposal.confidence.toFixed(2),
+                  });
+                  return proposal;
+                }),
+              );
             }),
             Effect.catchAll((err) => {
               errorCount += 1;
-              logger.warn("Agent prompt failed", {
+              logger.warn("Agent proposal failed", {
                 pool: decision.poolAddress,
                 error: String(err),
               });
@@ -350,6 +464,21 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             }),
           );
         },
+
+        getPolicy: () =>
+          Effect.succeed({
+            mode: config.agentProposalMode,
+            proposalsQueued: 0,
+            lastProposalAt: lastPromptAt,
+            badProposalBackoffUntil: null,
+            circuitBreakerOpen: false,
+            hardCaps: {
+              maxPositionSizePct: config.agentProposalMaxPositionSizePct,
+              maxRebalanceRangeBins: config.maxRebalanceRangeBins,
+              minProposalConfidence: config.agentProposalMinConfidence,
+              proposalStaleMs: config.agentProposalStaleMs,
+            },
+          }),
 
         sendCheckin: (checkin: AgentRuntimeCheckin) => {
           if (!transport?.sendCheckin) {

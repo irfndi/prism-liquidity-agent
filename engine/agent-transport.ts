@@ -15,6 +15,8 @@ export interface AgentRuntimeContext {
   readonly metrics: PoolMetrics;
   readonly warnings: ReadonlyArray<MemoryEntry>;
   readonly recentDecisions: ReadonlyArray<DecisionRecord>;
+  /** Whether the pool currently has an open position; used to restrict proposal actions. */
+  readonly hasOpenPosition: boolean;
 }
 
 export interface AgentRuntimeResponse {
@@ -120,6 +122,7 @@ export interface AgentRuntimeTransport {
   readonly sendPrompt: (
     prompt: string,
     ctx: AgentRuntimeContext,
+    timeoutMs?: number,
   ) => Effect.Effect<AgentRuntimeResponse, unknown>;
   readonly sendCheckin?: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, unknown>;
   readonly sendAlert?: (alert: AgentRuntimeAlert) => Effect.Effect<void, unknown>;

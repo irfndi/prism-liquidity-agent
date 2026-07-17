@@ -73,6 +73,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
   sendPrompt(
     prompt: string,
     ctx: AgentRuntimeContext,
+    timeoutMs?: number,
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
     return Effect.gen(this, function* () {
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
@@ -87,7 +88,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
         },
       };
 
-      const text = yield* this.post(payload);
+      const text = yield* this.post(payload, timeoutMs);
       const latencyMs = Date.now() - startedAt;
       this.emit({ type: "response_received", transport: this.name, latencyMs });
 
@@ -125,10 +126,11 @@ export class HermesApiTransport implements AgentRuntimeTransport {
     return headers;
   }
 
-  private post(body: unknown): Effect.Effect<string, unknown> {
+  private post(body: unknown, timeoutMs?: number): Effect.Effect<string, unknown> {
     return Effect.tryPromise(async () => {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
+      const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
+      const timer = setTimeout(() => controller.abort(), effectiveTimeout);
       try {
         const response = await fetch(this.options.url, {
           method: "POST",

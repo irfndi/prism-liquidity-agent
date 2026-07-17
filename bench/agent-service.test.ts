@@ -1,11 +1,16 @@
 import { describe, it, expect } from "vitest";
 import { Effect } from "effect";
-import { parseResponse, validateOverride, AgentNoOp } from "../engine/agent-service.js";
+import {
+  parseResponse,
+  validateOverride,
+  AgentNoOp,
+  buildProposalPrompt,
+} from "../engine/agent-service.js";
 import { AcpTransport } from "../engine/acp-transport.js";
 import { GatewayTransport } from "../engine/gateway-transport.js";
 import type { AgentDecision } from "../engine/types.js";
 import type { AppConfig } from "../engine/config-service.js";
-import type { AgentRuntimeDetection } from "../engine/agent-transport.js";
+import type { AgentRuntimeContext, AgentRuntimeDetection } from "../engine/agent-transport.js";
 
 function makeDecision(overrides: Partial<AgentDecision> = {}): AgentDecision {
   return {
@@ -91,6 +96,19 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     agentHermesApiUrl: "",
     agentHttpPort: 18_790,
     agentMcpEnabled: true,
+    agentProposalMode: "veto",
+    agentProposalToken: "",
+    agentApprovalToken: "",
+    agentProposalTimeoutMs: 15_000,
+    agentProposalMaxBatchSize: 10,
+    agentProposalMaxQueueSize: 50,
+    agentProposalStaleMs: 300_000,
+    agentProposalBackoffBaseMs: 60_000,
+    agentProposalBackoffMaxMs: 3_600_000,
+    agentProposalMaxPositionSizePct: 0.4,
+    agentProposalMinConfidence: 0.65,
+    agentProposalCircuitBreakerThreshold: 5,
+    agentProposalCircuitBreakerCooldownMs: 300_000,
     oorCooldownMs: 4 * 60 * 60 * 1000,
     repeatOorCooldownMs: 12 * 60 * 60 * 1000,
     maxOorCooldownExits: 3,
@@ -203,6 +221,98 @@ describe("AgentNoOp", () => {
     const status = await Effect.runPromise(AgentNoOp.getStatus());
     expect(status.connected).toBe(false);
     expect(status.transport).toBeNull();
+  });
+});
+
+describe("buildProposalPrompt", () => {
+  const makeCtx = (decision: AgentDecision): AgentRuntimeContext =>
+    ({
+      decision,
+      pool: {
+        address: decision.poolAddress,
+        tokenXSymbol: "SOL",
+        tokenYSymbol: "USDC",
+        tvlUsd: 100_000,
+        volume24hUsd: 50_000,
+        fees24hUsd: 500,
+        apr: 12,
+      },
+      metrics: {
+        feeIlRatio: 1.5,
+        volumeAuthenticity: 0.9,
+        binUtilization: 0.5,
+        tvlVelocity: 0.01,
+      },
+      warnings: [],
+      recentDecisions: [],
+      hasOpenPosition: decision.action === "REBALANCE" || decision.action === "EXIT",
+    }) as unknown as AgentRuntimeContext;
+
+  it("embeds the current ENTER size in the decision block and response template", () => {
+    const prompt = buildProposalPrompt(
+      makeDecision({ action: "ENTER", positionSizeUsd: 2_500 }),
+      makeCtx(makeDecision({ action: "ENTER", positionSizeUsd: 2_500 })),
+    );
+    expect(prompt).toContain("Position Size: $2500");
+    expect(prompt).toContain('"positionSizeUsd": 2500');
+    expect(prompt).not.toContain('"positionSizeUsd": 100');
+  });
+
+  it("embeds the current REBALANCE bin range in the decision block and response template", () => {
+    const decision = makeDecision({
+      action: "REBALANCE",
+      rebalanceParams: { newLowerBinId: 500, newUpperBinId: 520, slippageBps: 50 },
+    });
+    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    expect(prompt).toContain("Bin Range: 500 to 520");
+    expect(prompt).toContain('"lowerBinId": 500, "upperBinId": 520');
+    expect(prompt).not.toContain('"lowerBinId": 100, "upperBinId": 110');
+  });
+
+  it("falls back to placeholder values when the decision has no executable params", () => {
+    const decision = makeDecision({ action: "HOLD" });
+    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    expect(prompt).not.toContain("Position Size:");
+    expect(prompt).not.toContain("Bin Range:");
+    expect(prompt).toContain('"positionSizeUsd": 100');
+    expect(prompt).toContain('"lowerBinId": 100, "upperBinId": 110');
+  });
+
+  it("limits allowed actions for a deterministic HOLD decision with an open position", () => {
+    const decision = makeDecision({ action: "HOLD" });
+    const ctx = { ...makeCtx(decision), hasOpenPosition: true };
+    const prompt = buildProposalPrompt(decision, ctx);
+    expect(prompt).toContain("You may propose only: HOLD, REBALANCE, EXIT.");
+    expect(prompt).toContain("allowed actions: HOLD, REBALANCE, EXIT");
+    expect(prompt).toContain('"action": "HOLD"');
+  });
+
+  it("limits allowed actions for a deterministic HOLD decision without an open position", () => {
+    const decision = makeDecision({ action: "HOLD" });
+    const ctx = { ...makeCtx(decision), hasOpenPosition: false };
+    const prompt = buildProposalPrompt(decision, ctx);
+    expect(prompt).toContain("You may propose only: HOLD.");
+    expect(prompt).toContain("allowed actions: HOLD");
+    expect(prompt).toContain('"action": "HOLD"');
+    expect(prompt).not.toContain("allowed actions: HOLD, REBALANCE, EXIT");
+  });
+
+  it("limits allowed actions for a deterministic EXIT decision", () => {
+    const decision = makeDecision({ action: "EXIT" });
+    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    expect(prompt).toContain("You may propose only: EXIT.");
+    expect(prompt).toContain("allowed actions: EXIT");
+    expect(prompt).toContain('"action": "EXIT"');
+    expect(prompt).not.toContain("allowed actions: HOLD, REBALANCE, EXIT");
+  });
+
+  it("allows only executable actions for a deterministic ENTER decision", () => {
+    const decision = makeDecision({ action: "ENTER", positionSizeUsd: 1_000 });
+    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    expect(prompt).toContain("You may propose only: HOLD, ENTER.");
+    expect(prompt).toContain("allowed actions: HOLD, ENTER");
+    expect(prompt).toContain('"action": "ENTER"');
+    expect(prompt).not.toContain("allowed actions: HOLD, REBALANCE, EXIT, ENTER");
   });
 });
 

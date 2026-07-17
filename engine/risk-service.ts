@@ -1,6 +1,14 @@
 import { Context, Layer } from "effect";
 import { RiskService, type RiskApi, type RiskContext, type RiskResult } from "./services.js";
-import type { AgentDecision } from "./types.js";
+import type { AppConfig } from "./config-service.js";
+import type {
+  ActionType,
+  AgentDecision,
+  AgentProposal,
+  ProposalValidationResult,
+  RebalanceParams,
+} from "./types.js";
+import { shouldHoldForRecovery } from "./strategy-service.js";
 
 export interface RiskConfig {
   readonly confidenceThreshold: number;
@@ -93,9 +101,238 @@ export function evaluateRisk(
         reason: `Rebalance range ${rangeWidth} bins exceeds max ${riskConfig.maxRebalanceRangeBins}`,
       };
     }
+    if (
+      ctx.activeBinId !== undefined &&
+      Number.isFinite(ctx.activeBinId) &&
+      (ctx.activeBinId < newLowerBinId || ctx.activeBinId > newUpperBinId)
+    ) {
+      return {
+        approved: false,
+        reason:
+          `Rebalance range [${newLowerBinId}, ${newUpperBinId}] does not contain ` +
+          `active bin ${ctx.activeBinId}`,
+      };
+    }
   }
 
   return { approved: true, reason: "All risk checks passed" };
+}
+
+const VALID_ACTIONS: ReadonlyArray<ActionType> = ["HOLD", "REBALANCE", "EXIT", "ENTER"];
+
+// Slippage is intentionally excluded: the proposal schema does not accept it
+// (buildProposal hardcodes 0 while deterministic decisions use 50), and it is
+// never read during execution — only the bin range alters execution.
+const rebalanceParamsEqual = (a: RebalanceParams, b: RebalanceParams): boolean =>
+  a.newLowerBinId === b.newLowerBinId && a.newUpperBinId === b.newUpperBinId;
+
+export function evaluateAgentProposal(
+  proposal: AgentProposal,
+  ctx: RiskContext,
+  config: AppConfig,
+): ProposalValidationResult {
+  // 1. Action must be a known decision action.
+  if (!VALID_ACTIONS.includes(proposal.action)) {
+    return { valid: false, reason: `Invalid action: ${proposal.action}` };
+  }
+
+  // 2. Proposal must target the pool currently being evaluated.
+  if (proposal.poolAddress !== ctx.poolAddress) {
+    return {
+      valid: false,
+      reason: `Proposal poolAddress ${proposal.poolAddress} does not match evaluated pool ${ctx.poolAddress}`,
+    };
+  }
+
+  // 3. Safety EXIT cannot be downgraded to a less-defensive action.
+  if (proposal.originalAction === "EXIT" && proposal.action !== "EXIT") {
+    return {
+      valid: false,
+      reason: "Cannot downgrade a safety EXIT to a non-EXIT action",
+    };
+  }
+
+  // 4. Non-ENTER actions may not be promoted to ENTER.
+  // HOLD→REBALANCE and HOLD→EXIT are intentionally allowed when a position
+  // exists (checked below). Callers in `full`/`supervised` must still re-run
+  // capital-protection gates (min interval, gas, recovery) before applying
+  // agent-originated REBALANCE — see evaluateAgentRebalanceCapitalGates.
+  if (
+    proposal.originalAction !== undefined &&
+    proposal.originalAction !== "ENTER" &&
+    proposal.action === "ENTER"
+  ) {
+    return {
+      valid: false,
+      reason: `Cannot promote ${proposal.originalAction} to ENTER`,
+    };
+  }
+
+  // 5. Confidence must be finite and within [minConfidence, 1], unless the proposal
+  //    preserves the original low-confidence decision unchanged — verified against
+  //    the trusted original decision (same action, same confidence, same
+  //    executable parameters). Without one, the waiver does not apply.
+  const original = ctx.originalDecision;
+  const preservesOriginalDecision =
+    original !== undefined &&
+    proposal.action === original.action &&
+    Math.abs(proposal.confidence - original.confidence) < 0.005 &&
+    (proposal.positionSizeUsd === undefined ||
+      proposal.positionSizeUsd === original.positionSizeUsd) &&
+    (proposal.rebalanceParams === undefined ||
+      (original.rebalanceParams !== undefined &&
+        rebalanceParamsEqual(proposal.rebalanceParams, original.rebalanceParams)));
+
+  if (
+    !preservesOriginalDecision &&
+    (!Number.isFinite(proposal.confidence) ||
+      proposal.confidence < config.agentProposalMinConfidence ||
+      proposal.confidence > 1)
+  ) {
+    return {
+      valid: false,
+      reason:
+        `Confidence ${proposal.confidence} must be finite and between ` +
+        `${config.agentProposalMinConfidence} and 1`,
+    };
+  }
+
+  // 7. Position size must be non-negative and capped to the stricter of the
+  //    agent proposal limit and the existing per-pool allocation cap.
+  let adjustedPositionSizeUsd = proposal.positionSizeUsd;
+
+  if (proposal.action === "ENTER" && proposal.positionSizeUsd === undefined) {
+    return { valid: false, reason: "ENTER proposals must include positionSizeUsd" };
+  }
+
+  if (proposal.action === "ENTER") {
+    if (
+      proposal.positionSizeUsd === undefined ||
+      !Number.isFinite(proposal.positionSizeUsd) ||
+      proposal.positionSizeUsd <= 0
+    ) {
+      return { valid: false, reason: "positionSizeUsd must be a positive finite number for ENTER" };
+    }
+  }
+
+  if (proposal.action === "REBALANCE") {
+    if (proposal.rebalanceParams === undefined) {
+      return { valid: false, reason: "REBALANCE proposals must include rebalanceParams" };
+    }
+    const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
+    if (!hasPosition) {
+      return {
+        valid: false,
+        reason: `Cannot REBALANCE pool ${proposal.poolAddress} — no open position`,
+      };
+    }
+  }
+
+  if (proposal.action === "EXIT") {
+    const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
+    // An echoed deterministic EXIT on an unheld pool is a no-op, not a bad
+    // proposal — only reject advisor-initiated exits with no position.
+    if (!hasPosition && proposal.originalAction !== "EXIT") {
+      return {
+        valid: false,
+        reason: `Cannot EXIT pool ${proposal.poolAddress} — no open position`,
+      };
+    }
+  }
+
+  if (proposal.positionSizeUsd !== undefined) {
+    if (!Number.isFinite(proposal.positionSizeUsd) || proposal.positionSizeUsd < 0) {
+      return { valid: false, reason: "positionSizeUsd must be a finite non-negative number" };
+    }
+
+    const agentMaxSizeUsd = ctx.portfolioValueUsd * config.agentProposalMaxPositionSizePct;
+    const perPoolCapUsd = ctx.portfolioValueUsd * config.maxPerPoolAllocationPct;
+    let cappedSizeUsd = Math.min(proposal.positionSizeUsd, agentMaxSizeUsd, perPoolCapUsd);
+
+    if (proposal.action === "ENTER") {
+      const duplicate = ctx.openPositions.find((p) => p.poolAddress === proposal.poolAddress);
+      if (duplicate) {
+        return {
+          valid: false,
+          reason: `Already holding position in pool ${proposal.poolAddress} — use REBALANCE instead`,
+        };
+      }
+
+      const allocationResult = evaluatePerPoolAllocation({
+        proposedDepositUsd: cappedSizeUsd,
+        portfolioValueUsd: ctx.portfolioValueUsd,
+        openPositions: ctx.openPositions,
+        maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+        maxOpenPositions: config.maxOpenPositions,
+      });
+
+      if (!allocationResult.approved) {
+        return { valid: false, reason: allocationResult.reason };
+      }
+
+      cappedSizeUsd = allocationResult.adjustedDepositUsd;
+    }
+
+    if (cappedSizeUsd !== proposal.positionSizeUsd) {
+      adjustedPositionSizeUsd = cappedSizeUsd;
+    }
+  }
+
+  // 8. REBALANCE parameters must form a valid, bounded bin range with integer IDs
+  //    that contains the pool's current active bin when known — otherwise the
+  //    advisor can move liquidity completely out of range.
+  if (proposal.rebalanceParams !== undefined) {
+    const { newLowerBinId, newUpperBinId } = proposal.rebalanceParams;
+    if (!Number.isInteger(newLowerBinId) || !Number.isInteger(newUpperBinId)) {
+      return {
+        valid: false,
+        reason: "Rebalance bin IDs must be integers",
+      };
+    }
+    if (newUpperBinId <= newLowerBinId) {
+      return {
+        valid: false,
+        reason: "Invalid rebalance range: upperBinId must be > lowerBinId",
+      };
+    }
+    const rangeWidth = newUpperBinId - newLowerBinId;
+    if (rangeWidth > config.maxRebalanceRangeBins) {
+      return {
+        valid: false,
+        reason: `Rebalance range ${rangeWidth} bins exceeds max ${config.maxRebalanceRangeBins}`,
+      };
+    }
+    if (
+      ctx.activeBinId !== undefined &&
+      Number.isFinite(ctx.activeBinId) &&
+      (ctx.activeBinId < newLowerBinId || ctx.activeBinId > newUpperBinId)
+    ) {
+      return {
+        valid: false,
+        reason:
+          `Rebalance range [${newLowerBinId}, ${newUpperBinId}] does not contain ` +
+          `active bin ${ctx.activeBinId}`,
+      };
+    }
+  }
+
+  const adjustedDecision: AgentDecision = {
+    action: proposal.action,
+    poolAddress: proposal.poolAddress,
+    // A preserve-original waiver keeps the trusted original confidence so a
+    // rounded prompt echo cannot promote a sub-threshold decision into an
+    // execution-approved one.
+    confidence: preservesOriginalDecision ? original.confidence : proposal.confidence,
+    reasoning: proposal.reasoning,
+    ...(adjustedPositionSizeUsd !== undefined && { positionSizeUsd: adjustedPositionSizeUsd }),
+    ...(proposal.rebalanceParams !== undefined && { rebalanceParams: proposal.rebalanceParams }),
+  };
+
+  return {
+    valid: true,
+    reason: "Agent proposal validated",
+    adjustedDecision,
+  };
 }
 
 export const RiskLive = (riskConfig: RiskConfig) =>
@@ -107,6 +344,66 @@ export const RiskLive = (riskConfig: RiskConfig) =>
       },
     } satisfies RiskApi),
   );
+
+// ─── Agent-originated REBALANCE capital-protection gates ─────────────────────
+
+export interface AgentRebalanceCapitalGateInput {
+  readonly now: number;
+  readonly lastRebalanceAt: number;
+  readonly minRebalanceIntervalMs: number;
+  /** When true (OOR grace expired), min-interval may be bypassed. */
+  readonly oorGraceExpired: boolean;
+  readonly rebalanceGasCostSol: number;
+  readonly solPriceUsd: number;
+  readonly positionDailyFeesUsd: number;
+  readonly minDaysOfFeesPaidAhead: number;
+  readonly recoveryProbability: number;
+  readonly oorRecoveryHoldThreshold: number;
+}
+
+/**
+ * Re-apply the deterministic REBALANCE capital-protection gates to an
+ * agent-originated REBALANCE so advisors cannot bypass min-interval, gas, or
+ * OOR recovery holds that protect the deterministic path.
+ */
+export function evaluateAgentRebalanceCapitalGates(input: AgentRebalanceCapitalGateInput): {
+  readonly approved: boolean;
+  readonly reason: string;
+} {
+  const timeSinceRebal = input.now - input.lastRebalanceAt;
+  if (timeSinceRebal < input.minRebalanceIntervalMs && !input.oorGraceExpired) {
+    return {
+      approved: false,
+      reason:
+        `Agent REBALANCE blocked by min-interval: ${timeSinceRebal}ms < ` +
+        `${input.minRebalanceIntervalMs}ms`,
+    };
+  }
+
+  const gasGate = evaluateGasGate({
+    rebalanceGasCostSol: input.rebalanceGasCostSol,
+    solPriceUsd: input.solPriceUsd,
+    positionDailyFeesUsd: input.positionDailyFeesUsd,
+    minDaysOfFeesPaidAhead: input.minDaysOfFeesPaidAhead,
+  });
+  if (!gasGate.approved) {
+    return {
+      approved: false,
+      reason: `Agent REBALANCE blocked by gas-gate: ${gasGate.reason}`,
+    };
+  }
+
+  if (shouldHoldForRecovery(input.recoveryProbability, input.oorRecoveryHoldThreshold)) {
+    return {
+      approved: false,
+      reason:
+        `Agent REBALANCE blocked by recovery-gate: probability ` +
+        `${input.recoveryProbability.toFixed(2)} >= ${input.oorRecoveryHoldThreshold}`,
+    };
+  }
+
+  return { approved: true, reason: "Agent REBALANCE capital gates passed" };
+}
 
 // ─── F1: Gas-aware rebalancing gate ──────────────────────────────────────────
 

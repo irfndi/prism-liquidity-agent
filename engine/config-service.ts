@@ -1,6 +1,7 @@
 import { Config, Context, Effect, Layer, Option, pipe } from "effect";
 import { ConfigError } from "./errors.js";
 import { getPrismDbPath } from "./paths.js";
+import type { AgentProposalMode } from "./types.js";
 
 export interface AppConfig {
   readonly walletPrivateKey: string;
@@ -133,6 +134,49 @@ export interface AppConfig {
   readonly agentHttpPort: number;
   /** Enable the MCP server for agent runtime tool discovery. Default false (enable only when stdout is isolated). */
   readonly agentMcpEnabled: boolean;
+  // ─── Agent Proposals ───────────────────────────────────────────────────────
+  /**
+   * Agent proposal mode. Default "veto".
+   *
+   * Authority matrix:
+   * - `veto` — legacy overlay only: may reduce confidence or force HOLD; never promotes action.
+   * - `suggest` — proposals are advisory logs only; never applied to execution.
+   * - `supervised` — ENTER/REBALANCE require a human-approved queued proposal
+   *   (`AGENT_APPROVAL_TOKEN`); deterministic EXIT remains free. No sync advisor apply.
+   * - `full` — validated proposals may change action (except non-ENTER→ENTER and
+   *   EXIT downgrades). HOLD→REBALANCE still passes min-interval/gas/recovery gates;
+   *   HOLD→EXIT is allowed when a position exists. Defaults keep this off
+   *   (`agentiveMode=false`, mode=`veto`).
+   */
+  readonly agentProposalMode: AgentProposalMode;
+  /** Auth token for agent proposal enqueue (`/propose`). Empty = disabled. Default "". */
+  readonly agentProposalToken: string;
+  /**
+   * Auth token for `/approve` and MCP `prism_approve_proposals`. Required for
+   * supervised approvals; does not fall back to `agentProposalToken` (fail-closed).
+   * Default "".
+   */
+  readonly agentApprovalToken: string;
+  /** Timeout for agent proposal responses. Default 15000 ms. */
+  readonly agentProposalTimeoutMs: number;
+  /** Max proposals to queue in one batch. Default 10. */
+  readonly agentProposalMaxBatchSize: number;
+  /** Max pending proposals retained in the in-memory queue. Default 50. */
+  readonly agentProposalMaxQueueSize: number;
+  /** How long a proposal is valid before considered stale. Default 300000 ms. */
+  readonly agentProposalStaleMs: number;
+  /** Base backoff duration for bad proposals. Default 60000 ms. */
+  readonly agentProposalBackoffBaseMs: number;
+  /** Max backoff duration for bad proposals. Default 3600000 ms. */
+  readonly agentProposalBackoffMaxMs: number;
+  /** Max position size as percentage of portfolio. Default 0.4. */
+  readonly agentProposalMaxPositionSizePct: number;
+  /** Minimum confidence for an agent proposal. Default 0.65. */
+  readonly agentProposalMinConfidence: number;
+  /** Bad proposals before circuit breaker opens. Default 5. */
+  readonly agentProposalCircuitBreakerThreshold: number;
+  /** Cooldown before circuit breaker can close. Default 300000 ms. */
+  readonly agentProposalCircuitBreakerCooldownMs: number;
 
   // ─── Threshold evolution ─────────────────────────────────────────────
   /** How many closed positions between evolution rounds. Default 5. */
@@ -324,6 +368,81 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => false),
   );
 
+  // ─── Agent Proposals ───────────────────────────────────────────────────────
+  const agentProposalModeRaw = yield* Config.string("AGENT_PROPOSAL_MODE").pipe(
+    Effect.orElseSucceed(() => "veto"),
+  );
+  const validAgentProposalModes = ["veto", "suggest", "supervised", "full"] as const;
+  const agentProposalMode = validAgentProposalModes.includes(
+    agentProposalModeRaw as (typeof validAgentProposalModes)[number],
+  )
+    ? (agentProposalModeRaw as (typeof validAgentProposalModes)[number])
+    : "veto";
+  const agentProposalToken = yield* Config.string("AGENT_PROPOSAL_TOKEN").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const agentApprovalToken = yield* Config.string("AGENT_APPROVAL_TOKEN").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const agentProposalTimeoutMs = yield* validatedNumber(
+    "AGENT_PROPOSAL_TIMEOUT_MS",
+    1_000,
+    15_000,
+    60_000,
+  );
+  const agentProposalMaxBatchSize = yield* validatedNumber(
+    "AGENT_PROPOSAL_MAX_BATCH_SIZE",
+    1,
+    10,
+    100,
+  );
+  const agentProposalMaxQueueSize = yield* validatedNumber(
+    "AGENT_PROPOSAL_MAX_QUEUE_SIZE",
+    1,
+    50,
+    1000,
+  );
+  const agentProposalStaleMs = yield* validatedNumber(
+    "AGENT_PROPOSAL_STALE_MS",
+    10_000,
+    300_000,
+    1_800_000,
+  );
+  const agentProposalBackoffBaseMs = yield* validatedNumber(
+    "AGENT_PROPOSAL_BACKOFF_BASE_MS",
+    1_000,
+    60_000,
+    3_600_000,
+  );
+  const agentProposalBackoffMaxMs = Math.max(
+    yield* validatedNumber("AGENT_PROPOSAL_BACKOFF_MAX_MS", 60_000, 3_600_000, 3_600_000),
+    agentProposalBackoffBaseMs,
+  );
+  const agentProposalMaxPositionSizePct = yield* validatedNumber(
+    "AGENT_PROPOSAL_MAX_POSITION_SIZE_PCT",
+    0,
+    0.4,
+    1.0,
+  );
+  const agentProposalMinConfidence = yield* validatedNumber(
+    "AGENT_PROPOSAL_MIN_CONFIDENCE",
+    0,
+    0.65,
+    1.0,
+  );
+  const agentProposalCircuitBreakerThreshold = yield* validatedNumber(
+    "AGENT_PROPOSAL_CIRCUIT_BREAKER_THRESHOLD",
+    1,
+    5,
+    20,
+  );
+  const agentProposalCircuitBreakerCooldownMs = yield* validatedNumber(
+    "AGENT_PROPOSAL_CIRCUIT_BREAKER_COOLDOWN_MS",
+    60_000,
+    300_000,
+    1_800_000,
+  );
+
   // ─── Threshold evolution ─────────────────────────────────────────────
   const evolutionInterval = yield* validatedNumber("EVOLUTION_INTERVAL", 1, 5, 100);
   const evolutionMaxChangePct = yield* validatedNumber("EVOLUTION_MAX_CHANGE_PCT", 0.01, 0.2, 1.0);
@@ -507,6 +626,19 @@ const loadConfig = Effect.gen(function* () {
     agentHermesApiUrl,
     agentHttpPort,
     agentMcpEnabled,
+    agentProposalMode,
+    agentProposalToken,
+    agentApprovalToken,
+    agentProposalTimeoutMs,
+    agentProposalMaxBatchSize,
+    agentProposalMaxQueueSize,
+    agentProposalStaleMs,
+    agentProposalBackoffBaseMs,
+    agentProposalBackoffMaxMs,
+    agentProposalMaxPositionSizePct,
+    agentProposalMinConfidence,
+    agentProposalCircuitBreakerThreshold,
+    agentProposalCircuitBreakerCooldownMs,
     evolutionInterval,
     evolutionMaxChangePct,
     signalWeightWindowDays,

@@ -5,6 +5,8 @@ import { StrategyLive } from "./strategy-service.js";
 import { MemoryLive } from "./memory-service.js";
 import {
   RiskLive,
+  evaluateAgentProposal,
+  evaluateAgentRebalanceCapitalGates,
   evaluateGasGate,
   evaluateCompoundGate,
   evaluatePerPoolAllocation,
@@ -29,7 +31,7 @@ import { DbLive } from "./db-service.js";
 import { RevenueLive } from "./revenue-service.js";
 import { RevenueConfigServiceLive } from "./revenue-config-service.js";
 import { ReferralLive } from "./referral-service.js";
-import { AgentStateMutable } from "./state-service.js";
+import { AgentStateMutable, initialSnapshot, type PositionSnapshot } from "./state-service.js";
 import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
@@ -67,14 +69,19 @@ import {
   type StrategyApi,
   type RevenueConfigApi,
   type EntryPrepApi,
+  type AgentStateApi,
 } from "./services.js";
 import type {
   AgentDecision,
+  AgentProposal,
+  AgentProposalMode,
   AgentCycle,
   PoolMetrics,
   PoolState,
   Position,
+  RebalanceParams,
   SignalWeights,
+  ActionType,
 } from "./types.js";
 import type { AgentRuntimeAlert, AgentRuntimeCheckin } from "./agent-transport.js";
 import { randomUUID } from "crypto";
@@ -85,8 +92,191 @@ import {
   nextEntryFailureBackoff,
   type EntryFailureBackoff,
 } from "./entry-backoff.js";
+import {
+  nextProposalBackoff,
+  isProposalBackoffActive,
+  ProposalCircuitBreaker,
+  type ProposalBackoff,
+} from "./proposal-backoff.js";
 
 const logger = createLogger("program");
+
+export function isProposalStale(proposal: AgentProposal, staleMs: number, now: number): boolean {
+  return now > proposal.proposedAt + staleMs || now > proposal.expiresAt;
+}
+
+export function shouldHoldForSupervisedApproval(
+  agentiveMode: boolean,
+  mode: AgentProposalMode,
+  approvedProposalApplied: boolean,
+  action: ActionType,
+): boolean {
+  // ENTER and REBALANCE deploy or reshape capital, so supervised mode requires
+  // an approved proposal for them. HOLD is a no-op, and deterministic EXITs are
+  // operator-configured safety actions (stop-loss / trailing stop) that the
+  // engine keeps final authority over — gating them would delay loss-cutting
+  // exits while the operator is offline.
+  return (
+    agentiveMode &&
+    mode === "supervised" &&
+    !approvedProposalApplied &&
+    (action === "ENTER" || action === "REBALANCE")
+  );
+}
+
+// Consume an applied queued proposal only once its outcome is final: after
+// successful execution, or when the applied decision is a non-executing HOLD.
+// Failed executions retain the proposal so it can be retried on a later cycle.
+// Risk-engine denials are handled separately (reject + drop) before this runs.
+export const finalizeAppliedProposal = (
+  agentState: Pick<AgentStateApi, "dequeueProposals">,
+  appliedQueuedProposalId: string | undefined,
+  executed: boolean,
+  action: ActionType,
+): Effect.Effect<void> =>
+  appliedQueuedProposalId !== undefined && (executed || action === "HOLD")
+    ? agentState
+        .dequeueProposals([appliedQueuedProposalId])
+        .pipe(Effect.catchAll(() => Effect.void))
+    : Effect.void;
+
+/**
+ * True when an applied proposal changes executable behavior vs the deterministic
+ * decision. Pure echoes (preserve-original no-ops) should not arm proposal
+ * backoff when risk later rejects the unchanged decision. When
+ * confidenceThreshold is provided, a confidence nudge inside the epsilon that
+ * crosses the gate still counts — it flips the risk outcome.
+ */
+export function decisionChangesExecutableBehavior(
+  before: AgentDecision,
+  after: AgentDecision,
+  confidenceThreshold?: number,
+): boolean {
+  if (before.action !== after.action) return true;
+  if (Math.abs(before.confidence - after.confidence) >= 0.005) return true;
+  if (
+    confidenceThreshold !== undefined &&
+    before.confidence >= confidenceThreshold !== after.confidence >= confidenceThreshold
+  ) {
+    return true;
+  }
+  if ((before.positionSizeUsd ?? undefined) !== (after.positionSizeUsd ?? undefined)) {
+    return true;
+  }
+  const beforeParams = before.rebalanceParams;
+  const afterParams = after.rebalanceParams;
+  if (beforeParams === undefined && afterParams === undefined) return false;
+  if (beforeParams === undefined || afterParams === undefined) return true;
+  // Slippage is intentionally excluded, mirroring rebalanceParamsEqual in
+  // risk-service.ts: proposals hardcode slippageBps 0 while deterministic
+  // decisions use 50, and execution never reads it.
+  return (
+    beforeParams.newLowerBinId !== afterParams.newLowerBinId ||
+    beforeParams.newUpperBinId !== afterParams.newUpperBinId
+  );
+}
+
+/**
+ * True when two rebalance param values are functionally equivalent.
+ * Slippage is intentionally excluded (proposals hardcode 0, deterministic
+ * decisions use 50, execution never reads it) — keep in sync with
+ * rebalanceParamsEqual in risk-service.ts.
+ */
+const rebalanceParamsEquivalent = (
+  a: RebalanceParams | undefined,
+  b: RebalanceParams | undefined,
+): boolean => {
+  if (a === undefined && b === undefined) return true;
+  if (a === undefined || b === undefined) return false;
+  return a.newLowerBinId === b.newLowerBinId && a.newUpperBinId === b.newUpperBinId;
+};
+
+/**
+ * Counterpart to recordAppliedProposalRiskDenial for the approval side: any
+ * validated proposal that survives risk evaluation is a usable advisor
+ * response, so clear per-pool backoff and reset the circuit breaker —
+ * including no-op echoes.
+ */
+export const recordAppliedProposalRiskApproval = (args: {
+  readonly proposalValidated: boolean;
+  readonly proposalBackoff: Map<string, ProposalBackoff>;
+  readonly recordCircuitSuccess: () => void;
+  readonly poolAddress: string;
+}): void => {
+  if (!args.proposalValidated) return;
+  args.proposalBackoff.delete(args.poolAddress);
+  args.recordCircuitSuccess();
+};
+
+/**
+ * Whether a risk denial after an applied proposal should arm proposal backoff
+ * / circuit failure. If the proposal changed executable behavior (action,
+ * position size, bin range), the advisor is penalized. If it only changed
+ * confidence, re-evaluate the pre-apply deterministic decision: penalize only
+ * when the deterministic decision would have been approved, i.e. the nudge
+ * caused the denial.
+ */
+export const shouldPenalizeAppliedProposalDenial = (args: {
+  readonly appliedAgentProposal: boolean;
+  readonly preApplyDecision: AgentDecision | undefined;
+  readonly appliedDecision: AgentDecision;
+  readonly isPreApplyRiskApproved: () => boolean;
+}): boolean => {
+  if (!args.appliedAgentProposal || args.preApplyDecision === undefined) {
+    return args.appliedAgentProposal;
+  }
+  const executableParamsUnchanged =
+    args.preApplyDecision.action === args.appliedDecision.action &&
+    (args.preApplyDecision.positionSizeUsd ?? undefined) ===
+      (args.appliedDecision.positionSizeUsd ?? undefined) &&
+    rebalanceParamsEquivalent(
+      args.preApplyDecision.rebalanceParams,
+      args.appliedDecision.rebalanceParams,
+    );
+  return !executableParamsUnchanged || args.isPreApplyRiskApproved();
+};
+
+/**
+ * Records sticky risk denials after an applied agent proposal when the advisor
+ * should be penalized (`penalizeAdvisor`). Backoff / circuit failure is only
+ * armed when penalization is warranted; queued proposals are always rejected
+ * so they are not re-selected until TTL prune. Transient execution failures
+ * still retry via finalizeAppliedProposal.
+ */
+export const recordAppliedProposalRiskDenial = (
+  agentState: Pick<AgentStateApi, "rejectProposal">,
+  args: {
+    readonly penalizeAdvisor: boolean;
+    readonly appliedQueuedProposalId: string | undefined;
+    readonly proposalBackoff: Map<string, ProposalBackoff>;
+    readonly recordCircuitFailure: ((now: number) => void) | undefined;
+    readonly poolAddress: string;
+    readonly now: number;
+    readonly backoff: { readonly baseMs: number; readonly maxMs: number };
+  },
+): Effect.Effect<void> => {
+  if (!args.penalizeAdvisor && args.appliedQueuedProposalId === undefined) {
+    return Effect.void;
+  }
+  if (args.penalizeAdvisor) {
+    args.proposalBackoff.set(
+      args.poolAddress,
+      nextProposalBackoff(args.proposalBackoff.get(args.poolAddress), args.now, args.backoff),
+    );
+    args.recordCircuitFailure?.(args.now);
+  }
+  if (args.appliedQueuedProposalId === undefined) {
+    return Effect.void;
+  }
+  return agentState
+    .rejectProposal(args.appliedQueuedProposalId)
+    .pipe(Effect.catchAll(() => Effect.void));
+};
+
+/** True when the agent runtime can actually send a sync proposal prompt. */
+export function hasSyncProposalTransport(status: { readonly transport: string | null }): boolean {
+  return status.transport !== null && status.transport !== "alert-only";
+}
 
 // ─── Position value estimation (rough heuristic) ───────────────
 
@@ -301,7 +491,9 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
 
   const agentLayer = cfg?.agentiveMode ? AgentLive(cfg) : Layer.succeed(AgentService, AgentNoOp);
 
-  const agentStateLayer = AgentStateMutable().layer;
+  const agentStateLayer = AgentStateMutable({
+    maxPendingProposals: cfg?.agentProposalMaxQueueSize ?? 50,
+  }).layer;
 
   const mcpLayer = cfg?.agentMcpEnabled
     ? Layer.provide(McpServerLive(cfg), agentStateLayer)
@@ -706,6 +898,27 @@ export function executeLive(
 
 // ─── Main program ────────────────────────────────────────────────────────────
 
+export const buildPositionSnapshots = (
+  positions: Iterable<PositionRecord>,
+): Array<PositionSnapshot> =>
+  Array.from(positions).map((p) => ({
+    poolAddress: p.poolAddress,
+    tokenXSymbol: p.tokenXSymbol,
+    tokenYSymbol: p.tokenYSymbol,
+    depositedUsd: p.depositedUsd,
+    currentValueUsd: p.currentValueUsd,
+    activeBinId: p.activeBinId,
+    lowerBinId: p.lowerBinId,
+    upperBinId: p.upperBinId,
+    lastAction: (p.lastRebalanceAt > p.timestamp ? "REBALANCE" : "ENTER") as
+      | "ENTER"
+      | "EXIT"
+      | "REBALANCE"
+      | "HOLD",
+    lastActionAt: p.lastRebalanceAt > p.timestamp ? p.lastRebalanceAt : p.timestamp,
+    hoursHeld: (Date.now() - p.timestamp) / 3_600_000,
+  }));
+
 export const program = Effect.gen(function* () {
   const config = yield* ConfigService;
   const adapter = yield* AdapterService;
@@ -982,31 +1195,35 @@ export const program = Effect.gen(function* () {
   );
   refreshPoolsToScan(initialReconcileResult);
 
+  // Seed the agent state snapshot with current positions before exposing the
+  // HTTP/MCP interfaces, so /propose can accept proposals for held pools
+  // immediately after startup (not just after the first scan cycle).
+  yield* agentState
+    .updateSnapshot({ positions: buildPositionSnapshots(trackedPositions.values()) })
+    .pipe(Effect.catchAll(() => Effect.void));
+
   // Start agent-facing servers (MCP and HTTP fallback)
   yield* mcpServer.start().pipe(Effect.catchAll(() => Effect.void));
   yield* httpStatusServer.start().pipe(Effect.catchAll(() => Effect.void));
+
+  if (
+    config.agentiveMode &&
+    config.agentProposalMode === "supervised" &&
+    config.agentApprovalToken.length === 0
+  ) {
+    logger.warn(
+      "Supervised proposal mode is enabled without AGENT_APPROVAL_TOKEN — /approve and MCP prism_approve_proposals will reject all approvals (fail-closed)",
+    );
+  }
 
   // ─── Agent state snapshot ──────────────────────────────────────────────────
 
   const refreshAgentState = (): Effect.Effect<void, never> =>
     Effect.gen(function* () {
-      const positions = Array.from(trackedPositions.values()).map((p) => ({
-        poolAddress: p.poolAddress,
-        tokenXSymbol: p.tokenXSymbol,
-        tokenYSymbol: p.tokenYSymbol,
-        depositedUsd: p.depositedUsd,
-        currentValueUsd: p.currentValueUsd,
-        activeBinId: p.activeBinId,
-        lowerBinId: p.lowerBinId,
-        upperBinId: p.upperBinId,
-        lastAction: (p.lastRebalanceAt > p.timestamp ? "REBALANCE" : "ENTER") as
-          | "ENTER"
-          | "EXIT"
-          | "REBALANCE"
-          | "HOLD",
-        lastActionAt: p.lastRebalanceAt > p.timestamp ? p.lastRebalanceAt : p.timestamp,
-        hoursHeld: (Date.now() - p.timestamp) / 3_600_000,
-      }));
+      const snapshot = yield* agentState
+        .getSnapshot()
+        .pipe(Effect.catchAll(() => Effect.succeed(initialSnapshot)));
+      const positions = buildPositionSnapshots(trackedPositions.values());
       const positionsValueUsd = positions.reduce((sum, p) => sum + p.currentValueUsd, 0);
       const unrealizedPnlUsd = positions.reduce(
         (sum, p) => sum + (p.currentValueUsd - p.depositedUsd),
@@ -1015,9 +1232,23 @@ export const program = Effect.gen(function* () {
       const recentDecisions = yield* audit
         .getRecentDecisions(20)
         .pipe(Effect.catchAll(() => Effect.succeed([])));
+
+      const now = Date.now();
+      let badProposalBackoffUntil: number | null = null;
+      for (const backoff of proposalBackoff.values()) {
+        if (isProposalBackoffActive(backoff, now)) {
+          if (
+            badProposalBackoffUntil === null ||
+            backoff.nextProposalAt > badProposalBackoffUntil
+          ) {
+            badProposalBackoffUntil = backoff.nextProposalAt;
+          }
+        }
+      }
+
       yield* agentState.updateSnapshot({
         scanCount,
-        lastCycleAt: Date.now(),
+        lastCycleAt: now,
         portfolio: {
           totalValueUsd: lastWalletBalanceUsd + positionsValueUsd,
           unrealizedPnlUsd,
@@ -1036,6 +1267,21 @@ export const program = Effect.gen(function* () {
           reasoning: d.reasoning,
           executed: d.executed,
         })),
+        agentPolicy: {
+          mode: config.agentProposalMode,
+          proposalsQueued: snapshot.pendingProposals.length,
+          lastProposalAt: snapshot.agentPolicy.lastProposalAt,
+          badProposalBackoffUntil,
+          circuitBreakerOpen: Array.from(proposalCircuitBreakers.values()).some((breaker) =>
+            breaker.isOpen(now),
+          ),
+          hardCaps: {
+            maxPositionSizePct: config.agentProposalMaxPositionSizePct,
+            maxRebalanceRangeBins: config.maxRebalanceRangeBins,
+            minProposalConfidence: config.agentProposalMinConfidence,
+            proposalStaleMs: config.agentProposalStaleMs,
+          },
+        },
       });
     });
 
@@ -1226,6 +1472,45 @@ export const program = Effect.gen(function* () {
       yield* agent.sendAlert(alert).pipe(Effect.catchAll(() => Effect.void));
     });
 
+  const proposalBackoff = new Map<string, ProposalBackoff>();
+  const proposalCircuitBreakers = new Map<string, ProposalCircuitBreaker>();
+  const vetoWarningThrottle = new Map<string, number>();
+  const getPoolCircuitBreaker = (poolAddress: string): ProposalCircuitBreaker => {
+    let breaker = proposalCircuitBreakers.get(poolAddress);
+    if (!breaker) {
+      breaker = new ProposalCircuitBreaker({
+        failureThreshold: config.agentProposalCircuitBreakerThreshold,
+        cooldownMs: config.agentProposalCircuitBreakerCooldownMs,
+      });
+      proposalCircuitBreakers.set(poolAddress, breaker);
+    }
+    return breaker;
+  };
+
+  const findPendingProposal = (
+    proposals: ReadonlyArray<AgentProposal>,
+    poolAddress: string,
+    mode: AgentProposalMode,
+    staleMs: number,
+    now: number,
+  ): AgentProposal | undefined => {
+    for (let i = proposals.length - 1; i >= 0; i--) {
+      const p = proposals[i];
+      if (!p) continue;
+      if (p.poolAddress !== poolAddress) continue;
+      if (isProposalStale(p, staleMs, now)) continue;
+      if (mode === "supervised") {
+        if (p.status === "approved") return p;
+      } else {
+        if (p.status === "pending" || p.status === "approved") return p;
+      }
+    }
+    return undefined;
+  };
+
+  const isAgentProposal = (value: AgentDecision | null): value is AgentProposal =>
+    value !== null && "proposalId" in value && "source" in value && "status" in value;
+
   // ─── Per-pool evaluation ───────────────────────────────────────────────────
 
   const evaluatePool = (
@@ -1234,6 +1519,15 @@ export const program = Effect.gen(function* () {
   ): Effect.Effect<AgentDecision | null, unknown, EntryPrepService> =>
     Effect.gen(function* () {
       const cycleId = cycle.cycleId;
+      let agentProposal: AgentProposal | null = null;
+      let proposalSource: "queue" | "sync" | undefined;
+      let appliedQueuedProposalId: string | undefined;
+      /** True when a full/supervised proposal replaced the deterministic decision. */
+      let appliedAgentProposal = false;
+      /** True when any proposal (echo or behavior-changing) was validated and applied. */
+      let proposalValidated = false;
+      /** The deterministic decision before an applied proposal replaced it. */
+      let preApplyDecision: AgentDecision | undefined;
       const pool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, pool.activeBinId);
@@ -1452,56 +1746,67 @@ export const program = Effect.gen(function* () {
         }
       }
 
-      let pendingCooldown: {
-        poolAddress: string;
-        cooldownUntil: number;
-        reason: string;
-        consecutiveOorExits: number;
-      } | null = null;
+      const computeCooldownForExit = (
+        exitDecision: AgentDecision,
+        position: PositionRecord | undefined,
+      ): Effect.Effect<
+        {
+          poolAddress: string;
+          cooldownUntil: number;
+          reason: string;
+          consecutiveOorExits: number;
+        } | null,
+        unknown
+      > =>
+        Effect.gen(function* () {
+          if (exitDecision.action !== "EXIT") return null;
 
-      // F7: update pool cooldown after EXIT decisions
-      if (decision && decision.action === "EXIT") {
-        const existingCooldown = yield* db
-          .getPoolCooldown(poolAddress)
-          .pipe(Effect.catchAll(() => Effect.succeed(null)));
-        const existingOorCount = existingCooldown?.consecutiveOorExits ?? 0;
-        const isOorExit =
-          decision.reasoning.includes("volatility") ||
-          (pos && pos.oorCycleCount >= config.oorGracePeriodCycles && pos.oorCycleCount > 0);
-        const isLowYieldExit =
-          decision.reasoning.includes("Fee/IL ratio") ||
-          decision.reasoning.includes("Volume authenticity");
+          const existingCooldown = yield* db
+            .getPoolCooldown(poolAddress)
+            .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          const existingOorCount = existingCooldown?.consecutiveOorExits ?? 0;
+          const isOorExit =
+            exitDecision.reasoning.includes("volatility") ||
+            (position &&
+              position.oorCycleCount >= config.oorGracePeriodCycles &&
+              position.oorCycleCount > 0);
+          const isLowYieldExit =
+            exitDecision.reasoning.includes("Fee/IL ratio") ||
+            exitDecision.reasoning.includes("Volume authenticity");
 
-        if (isOorExit) {
-          const newOorCount = existingOorCount + 1;
-          const cooldownDuration =
-            newOorCount >= config.maxOorCooldownExits
-              ? config.repeatOorCooldownMs
-              : config.oorCooldownMs;
-          const cooldownUntil = Date.now() + cooldownDuration;
-          pendingCooldown = {
-            poolAddress,
-            cooldownUntil,
-            reason: `OOR exit (#${newOorCount})`,
-            consecutiveOorExits: newOorCount,
-          };
-          const hours = (cooldownDuration / 3_600_000).toFixed(1);
-          console.info(
-            `[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — OOR exit #${newOorCount}`,
-          );
-        } else if (isLowYieldExit) {
-          const cooldownDuration = config.oorCooldownMs;
-          const cooldownUntil = Date.now() + cooldownDuration;
-          pendingCooldown = {
-            poolAddress,
-            cooldownUntil,
-            reason: `Low yield exit`,
-            consecutiveOorExits: 0,
-          };
-          const hours = (cooldownDuration / 3_600_000).toFixed(1);
-          console.info(`[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — low yield exit`);
-        }
-      }
+          if (isOorExit) {
+            const newOorCount = existingOorCount + 1;
+            const cooldownDuration =
+              newOorCount >= config.maxOorCooldownExits
+                ? config.repeatOorCooldownMs
+                : config.oorCooldownMs;
+            const cooldownUntil = Date.now() + cooldownDuration;
+            const hours = (cooldownDuration / 3_600_000).toFixed(1);
+            console.info(
+              `[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — OOR exit #${newOorCount}`,
+            );
+            return {
+              poolAddress,
+              cooldownUntil,
+              reason: `OOR exit (#${newOorCount})`,
+              consecutiveOorExits: newOorCount,
+            };
+          } else if (isLowYieldExit) {
+            const cooldownDuration = config.oorCooldownMs;
+            const cooldownUntil = Date.now() + cooldownDuration;
+            const hours = (cooldownDuration / 3_600_000).toFixed(1);
+            console.info(
+              `[cooldown] Pool ${poolAddress} on cooldown for ${hours}h — low yield exit`,
+            );
+            return {
+              poolAddress,
+              cooldownUntil,
+              reason: `Low yield exit`,
+              consecutiveOorExits: 0,
+            };
+          }
+          return null;
+        });
 
       // Single persist point: trailing-exit above may update highestValueUsd/currentValueUsd.
       if (pos && hasPosition) {
@@ -1528,10 +1833,6 @@ export const program = Effect.gen(function* () {
           )
         : config.paperPortfolioUsd;
       lastWalletBalanceUsd = walletBalanceUsd;
-
-      if (pendingCooldown) {
-        yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catchAll(() => Effect.void));
-      }
 
       // REBALANCE check
       if (!decision) {
@@ -1884,41 +2185,360 @@ export const program = Effect.gen(function* () {
         };
       }
 
-      // Agentic-mode overlay (optional agent runtime review)
+      const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
+      const portfolioValueUsd = walletBalanceUsd;
+      const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
+
       if (config.agentiveMode) {
-        const enhanced = yield* agent
-          .enhanceDecision(decision, {
-            decision,
-            pool,
-            metrics,
-            warnings,
-            recentDecisions: yield* audit
-              .getRecentDecisions(10)
-              .pipe(Effect.catchAll(() => Effect.succeed([]))),
-          })
-          .pipe(Effect.catchAll(() => Effect.succeed(null)));
-        if (enhanced) {
-          console.info(
-            `[agentic] ${decision.action} → ${enhanced.action} ` +
-              `(confidence ${decision.confidence.toFixed(2)} → ${enhanced.confidence.toFixed(2)})`,
+        const proposalMode = config.agentProposalMode;
+        const now = Date.now();
+
+        if (proposalMode === "veto") {
+          // Veto is a safety overlay: it runs independently of the proposal
+          // backoff/circuit-breaker path so a transient failure cannot silence it.
+          let vetoFetchFailed = false;
+          const enhanced = yield* agent
+            .enhanceDecision(decision, {
+              decision,
+              pool,
+              metrics,
+              warnings,
+              recentDecisions: yield* audit
+                .getRecentDecisions(10)
+                .pipe(Effect.catchAll(() => Effect.succeed([]))),
+              hasOpenPosition: trackedPositions.has(poolAddress),
+            })
+            .pipe(
+              Effect.catchAll((err) => {
+                vetoFetchFailed = true;
+                logger.warn("Agent veto fetch failed", {
+                  pool: poolAddress,
+                  error: String(err),
+                });
+                return Effect.succeed(null);
+              }),
+            );
+          if (enhanced) {
+            logger.info("Agent override", {
+              pool: poolAddress,
+              from: decision.action,
+              to: enhanced.action,
+              fromConfidence: decision.confidence.toFixed(2),
+              toConfidence: enhanced.confidence.toFixed(2),
+            });
+            decision = enhanced;
+          } else if (vetoFetchFailed) {
+            const lastWarn = vetoWarningThrottle.get(poolAddress) ?? 0;
+            if (now - lastWarn > config.agentProposalStaleMs) {
+              vetoWarningThrottle.set(poolAddress, now);
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Agent veto fetch failed for ${poolAddress}`,
+                  poolAddress,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+            }
+          }
+        } else {
+          // suggest | supervised | full
+          // HTTP queue consumption is independent of sync advisor backoff /
+          // circuit-breaker state so AgentNoOp and failed local runtimes cannot
+          // suppress already-enqueued /propose proposals.
+          const poolCircuitBreaker = getPoolCircuitBreaker(poolAddress);
+          let syncFetchFailed = false;
+
+          const snapshot = yield* agentState.getSnapshot();
+          const queuedProposal = findPendingProposal(
+            snapshot.pendingProposals,
+            poolAddress,
+            proposalMode,
+            config.agentProposalStaleMs,
+            now,
           );
-          decision = enhanced;
+          if (queuedProposal) {
+            agentProposal = queuedProposal;
+            proposalSource = "queue";
+          }
+
+          if (!agentProposal && proposalMode !== "supervised") {
+            const agentStatus = yield* agent.getStatus().pipe(
+              Effect.catchAll(() =>
+                Effect.succeed({
+                  connected: false,
+                  transport: null,
+                  lastPromptAt: null,
+                  errorCount: 0,
+                }),
+              ),
+            );
+            if (!hasSyncProposalTransport(agentStatus)) {
+              // No local runtime / AgentNoOp: skip sync without recording failure.
+            } else if (!poolCircuitBreaker.canTry(now)) {
+              logger.info("Agent proposal circuit breaker open — skipping sync", {
+                pool: poolAddress,
+              });
+            } else if (isProposalBackoffActive(proposalBackoff.get(poolAddress), now)) {
+              logger.info("Agent proposal sync skipped — backoff active", {
+                pool: poolAddress,
+              });
+            } else {
+              const syncProposal = yield* agent
+                .enhanceDecision(decision, {
+                  decision,
+                  pool,
+                  metrics,
+                  warnings,
+                  recentDecisions: yield* audit
+                    .getRecentDecisions(10)
+                    .pipe(Effect.catchAll(() => Effect.succeed([]))),
+                  hasOpenPosition: trackedPositions.has(poolAddress),
+                })
+                .pipe(
+                  Effect.catchAll((err) => {
+                    syncFetchFailed = true;
+                    logger.warn("Agent proposal fetch failed", {
+                      pool: poolAddress,
+                      error: String(err),
+                    });
+                    return Effect.succeed(null);
+                  }),
+                );
+              if (syncProposal && isAgentProposal(syncProposal)) {
+                agentProposal = syncProposal;
+                proposalSource = "sync";
+              } else if (syncProposal === null) {
+                // Real transport attempt returned null (parse/timeout/etc.).
+                syncFetchFailed = true;
+              }
+            }
+          }
+
+          if (agentProposal) {
+            const poolBackoff = proposalBackoff.get(poolAddress);
+            const proposalToEvaluate = {
+              ...agentProposal,
+              ...(agentProposal.originalAction === undefined
+                ? { originalAction: decision.action }
+                : {}),
+              ...(agentProposal.originalConfidence === undefined
+                ? { originalConfidence: decision.confidence }
+                : {}),
+            };
+            let validation = evaluateAgentProposal(
+              proposalToEvaluate,
+              {
+                openPositions,
+                portfolioValueUsd,
+                recentPnlUsd,
+                poolAddress,
+                originalDecision: decision,
+                activeBinId: pool.activeBinId,
+              },
+              config,
+            );
+
+            // Re-run deterministic capital-protection gates for agent REBALANCE
+            // so advisors cannot skip min-interval / gas / recovery policy.
+            if (
+              validation.valid &&
+              validation.adjustedDecision?.action === "REBALANCE" &&
+              pos &&
+              hasPosition
+            ) {
+              const currentLowerBinId = pos.lowerBinId;
+              const currentUpperBinId = pos.upperBinId;
+              const positionCenter = (currentLowerBinId + currentUpperBinId) / 2;
+              const oorGraceExpired = pos.oorCycleCount >= config.oorGracePeriodCycles;
+              const recoveryLookback = Math.max(2, config.oorRecoveryLookbackCycles);
+              const recoveryBins =
+                recentBins.length > recoveryLookback
+                  ? recentBins.slice(recentBins.length - recoveryLookback)
+                  : recentBins;
+              const recoveryProb = estimateRecoveryProbability(
+                recoveryBins,
+                Math.abs(pool.activeBinId - positionCenter),
+              );
+              const positionSharePct =
+                pool.tvlUsd > 0 && pos.currentValueUsd > 0
+                  ? Math.min(pos.currentValueUsd / pool.tvlUsd, 1)
+                  : 0;
+              const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
+              const capitalGate = evaluateAgentRebalanceCapitalGates({
+                now,
+                lastRebalanceAt: pos.lastRebalanceAt ?? 0,
+                minRebalanceIntervalMs: config.minRebalanceIntervalMs,
+                oorGraceExpired,
+                rebalanceGasCostSol: config.rebalanceGasCostSol,
+                solPriceUsd: config.solPriceUsd,
+                positionDailyFeesUsd,
+                minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
+                recoveryProbability: recoveryProb,
+                oorRecoveryHoldThreshold: config.oorRecoveryHoldThreshold,
+              });
+              if (!capitalGate.approved) {
+                validation = { valid: false, reason: capitalGate.reason };
+              }
+            }
+
+            if (validation.valid && validation.adjustedDecision) {
+              if (proposalMode === "suggest") {
+                logger.info("Agent proposal suggested (advisory)", {
+                  source: proposalSource,
+                  pool: poolAddress,
+                  from: decision.action,
+                  suggested: validation.adjustedDecision.action,
+                });
+                yield* memory
+                  .upsert({
+                    category: "pattern",
+                    content: `Advisory suggestion for ${poolAddress}: ${validation.adjustedDecision.action} (confidence ${validation.adjustedDecision.confidence.toFixed(2)})`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+
+                proposalBackoff.delete(poolAddress);
+                poolCircuitBreaker.recordSuccess();
+
+                if (proposalSource === "queue" && agentProposal.proposalId) {
+                  yield* agentState
+                    .dequeueProposals([agentProposal.proposalId])
+                    .pipe(Effect.catchAll(() => Effect.void));
+                }
+              } else {
+                logger.info("Agent proposal applied", {
+                  source: proposalSource,
+                  pool: poolAddress,
+                  from: decision.action,
+                  to: validation.adjustedDecision.action,
+                });
+                preApplyDecision = decision;
+                const originalAction = decision.action;
+                const deterministicReasoning = decision.reasoning;
+                decision = validation.adjustedDecision;
+                if (
+                  originalAction === "EXIT" &&
+                  decision.action === "EXIT" &&
+                  deterministicReasoning.length > 0
+                ) {
+                  decision = { ...decision, reasoning: deterministicReasoning };
+                }
+                // Only count real executable changes toward risk-deny backoff /
+                // circuit failure. Pure preserve-original echoes that later
+                // fail the confidence gate must not silence the advisor.
+                // Defer backoff clear / circuit success until risk.evaluate
+                // approves — otherwise apply→risk-deny loops reset counters.
+                proposalValidated = true;
+                if (
+                  decisionChangesExecutableBehavior(
+                    preApplyDecision,
+                    decision,
+                    config.confidenceThreshold,
+                  )
+                ) {
+                  appliedAgentProposal = true;
+                }
+
+                // Queued proposals are retained until execution succeeds (or
+                // the applied decision is a non-executing HOLD) so a
+                // transient failure can be retried on the next cycle.
+                // Deterministic risk denials reject/drop the proposal earlier.
+                // No-op echoes still set the id so the queue entry is consumed.
+                if (proposalSource === "queue" && agentProposal.proposalId) {
+                  appliedQueuedProposalId = agentProposal.proposalId;
+                }
+              }
+              yield* agentState
+                .setAgentPolicy({ lastProposalAt: now })
+                .pipe(Effect.catchAll(() => Effect.void));
+            } else {
+              logger.warn("Agent proposal rejected", {
+                source: proposalSource,
+                pool: poolAddress,
+                reason: validation.reason,
+              });
+              proposalBackoff.set(
+                poolAddress,
+                nextProposalBackoff(poolBackoff, now, {
+                  baseMs: config.agentProposalBackoffBaseMs,
+                  maxMs: config.agentProposalBackoffMaxMs,
+                }),
+              );
+              poolCircuitBreaker.recordFailure(now);
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Agent proposal rejected for ${poolAddress}: ${validation.reason}`,
+                  poolAddress,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+
+              if (proposalSource === "queue" && agentProposal.proposalId) {
+                yield* agentState
+                  .rejectProposal(agentProposal.proposalId)
+                  .pipe(Effect.catchAll(() => Effect.void));
+              }
+              yield* agentState
+                .setAgentPolicy({ lastProposalAt: now })
+                .pipe(Effect.catchAll(() => Effect.void));
+            }
+          } else if (syncFetchFailed) {
+            logger.warn("Agent proposal fetch failed — recording backoff", {
+              pool: poolAddress,
+            });
+            proposalBackoff.set(
+              poolAddress,
+              nextProposalBackoff(proposalBackoff.get(poolAddress), now, {
+                baseMs: config.agentProposalBackoffBaseMs,
+                maxMs: config.agentProposalBackoffMaxMs,
+              }),
+            );
+            poolCircuitBreaker.recordFailure(now);
+            yield* memory
+              .upsert({
+                category: "warning",
+                content: `Agent proposal fetch failed for ${poolAddress}`,
+                poolAddress,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
         }
       }
 
       if (!decision) return null;
 
+      // Supervised mode gates execution on human approval: without an applied
+      // approved proposal, ENTER/REBALANCE decisions are held until one is
+      // available. Deterministic EXITs are exempt — they are safety actions
+      // the engine keeps final authority over.
+      if (
+        shouldHoldForSupervisedApproval(
+          config.agentiveMode,
+          config.agentProposalMode,
+          appliedQueuedProposalId !== undefined,
+          decision.action,
+        )
+      ) {
+        logger.info("Supervised mode: holding decision pending approved proposal", {
+          pool: poolAddress,
+          action: decision.action,
+        });
+        decision = {
+          ...decision,
+          action: "HOLD",
+          reasoning: `Supervised mode: awaiting approved proposal (held ${decision.action}: ${decision.reasoning})`,
+        };
+      }
+
       // Risk evaluation
-      const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
-
-      const portfolioValueUsd = walletBalanceUsd;
-      const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
-
-      const riskResult = risk.evaluate(decision, {
+      const riskCtx = {
         openPositions,
         portfolioValueUsd,
         recentPnlUsd,
-      });
+        poolAddress,
+        activeBinId: pool.activeBinId,
+      };
+      const riskResult = risk.evaluate(decision, riskCtx);
 
       // Apply risk-adjusted position size cap
       if (riskResult.adjustedSizeUsd && decision.action === "ENTER") {
@@ -1958,7 +2578,52 @@ export const program = Effect.gen(function* () {
             poolAddress,
           })
           .pipe(Effect.catchAll(() => Effect.void));
+
+        // Deterministic risk denials are sticky (drawdown pause, stop-loss, etc.).
+        // Arm backoff / circuit breaker for applied sync or queue proposals so
+        // the same doomed advisor response is not re-requested every scan.
+        // Queued proposals are rejected; transient execution failures still
+        // retry via finalize. A pure gate-crossing nudge is penalized only when
+        // it caused the denial — denials the deterministic decision would have
+        // received identically are not the advisor's fault.
+        const penalizeAppliedProposal = shouldPenalizeAppliedProposalDenial({
+          appliedAgentProposal,
+          preApplyDecision,
+          appliedDecision: decision,
+          isPreApplyRiskApproved: () =>
+            preApplyDecision !== undefined && risk.evaluate(preApplyDecision, riskCtx).approved,
+        });
+        yield* recordAppliedProposalRiskDenial(agentState, {
+          penalizeAdvisor: penalizeAppliedProposal,
+          appliedQueuedProposalId,
+          proposalBackoff,
+          recordCircuitFailure: penalizeAppliedProposal
+            ? (t) => getPoolCircuitBreaker(poolAddress).recordFailure(t)
+            : undefined,
+          poolAddress,
+          now: Date.now(),
+          backoff: {
+            baseMs: config.agentProposalBackoffBaseMs,
+            maxMs: config.agentProposalBackoffMaxMs,
+          },
+        });
         return decision;
+      }
+
+      // Any validated proposal that survives risk is a usable advisor response:
+      // clear per-pool backoff and reset the breaker, including no-op echoes.
+      recordAppliedProposalRiskApproval({
+        proposalValidated,
+        proposalBackoff,
+        recordCircuitSuccess: () => getPoolCircuitBreaker(poolAddress).recordSuccess(),
+        poolAddress,
+      });
+
+      if (decision.action === "EXIT") {
+        const pendingCooldown = yield* computeCooldownForExit(decision, pos);
+        if (pendingCooldown) {
+          yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catchAll(() => Effect.void));
+        }
       }
 
       const signalTimestamp = Date.now();
@@ -2089,6 +2754,15 @@ export const program = Effect.gen(function* () {
       } else if (decision.action === "ENTER" && executed) {
         entryFailureBackoff.delete(poolAddress);
       }
+
+      // Risk-rejected paths reject/drop the proposal before this point.
+      // Paper-validation-blocked and failed executions retain for retry.
+      yield* finalizeAppliedProposal(
+        agentState,
+        appliedQueuedProposalId,
+        executed,
+        decision.action,
+      );
 
       // Audit after execution
       yield* audit

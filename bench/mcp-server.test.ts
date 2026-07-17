@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { Effect, Layer } from "effect";
 import { McpServer } from "../engine/mcp-server.js";
-import { AgentStateService } from "../engine/services.js";
+import { AgentStateService, type AgentStateApi } from "../engine/services.js";
 import { AgentStateMutable } from "../engine/state-service.js";
 import type { AppConfig } from "../engine/config-service.js";
 
-function baseConfig(): AppConfig {
+function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     walletPrivateKey: "",
     heliusApiKey: "",
@@ -79,6 +79,19 @@ function baseConfig(): AppConfig {
     agentHermesApiUrl: "",
     agentHttpPort: 18_790,
     agentMcpEnabled: true,
+    agentProposalMode: "veto",
+    agentProposalToken: "",
+    agentApprovalToken: "",
+    agentProposalTimeoutMs: 15_000,
+    agentProposalMaxBatchSize: 10,
+    agentProposalMaxQueueSize: 50,
+    agentProposalStaleMs: 300_000,
+    agentProposalBackoffBaseMs: 60_000,
+    agentProposalBackoffMaxMs: 3_600_000,
+    agentProposalMaxPositionSizePct: 0.4,
+    agentProposalMinConfidence: 0.65,
+    agentProposalCircuitBreakerThreshold: 5,
+    agentProposalCircuitBreakerCooldownMs: 300_000,
     oorCooldownMs: 4 * 60 * 60 * 1000,
     repeatOorCooldownMs: 12 * 60 * 60 * 1000,
     maxOorCooldownExits: 3,
@@ -92,12 +105,26 @@ function baseConfig(): AppConfig {
     signalWeightCeiling: 2.5,
     weightedEntryScoreThreshold: 1.8,
     autoSwapEntry: false,
+    ...overrides,
   };
 }
 
 function mockState() {
   return {
     layer: AgentStateMutable().layer,
+  };
+}
+
+function mockAgentState(overrides: Partial<AgentStateApi> = {}): AgentStateApi {
+  return {
+    getSnapshot: () => Effect.succeed({} as never),
+    updateSnapshot: () => Effect.void,
+    setAgentPolicy: () => Effect.void,
+    enqueueProposal: () => Effect.succeed({ status: "enqueued" as const }),
+    dequeueProposals: () => Effect.void,
+    approveProposal: () => Effect.void,
+    rejectProposal: () => Effect.void,
+    ...overrides,
   };
 }
 
@@ -146,10 +173,7 @@ function sendRequest(
 describe("McpServer", () => {
   it("responds to initialize", async () => {
     const { layer } = mockState();
-    const server = new McpServer(baseConfig(), {
-      getSnapshot: () => Effect.succeed({} as never),
-      updateSnapshot: () => Effect.void,
-    });
+    const server = new McpServer(baseConfig(), mockAgentState());
 
     const response = await Effect.runPromise(
       Effect.provide(
@@ -166,10 +190,7 @@ describe("McpServer", () => {
   });
 
   it("lists tools", async () => {
-    const server = new McpServer(baseConfig(), {
-      getSnapshot: () => Effect.succeed({} as never),
-      updateSnapshot: () => Effect.void,
-    });
+    const server = new McpServer(baseConfig(), mockAgentState());
 
     const response = await sendRequest(server, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     expect(response.result).toHaveProperty("tools");
@@ -180,30 +201,35 @@ describe("McpServer", () => {
         "prism_positions",
         "prism_decisions",
         "prism_config",
+        "prism_agent_policy",
+        "prism_pending_proposals",
+        "prism_approve_proposals",
       ]),
     );
   });
 
   it("returns status via prism_status tool", async () => {
-    const server = new McpServer(baseConfig(), {
-      getSnapshot: () =>
-        Effect.succeed({
-          programStartTime: Date.now() - 1000,
-          scanCount: 5,
-          lastCycleAt: Date.now(),
-          portfolio: {
-            totalValueUsd: 11_000,
-            unrealizedPnlUsd: 1000,
-            realizedPnlUsd: 0,
-            openPositions: 2,
-            maxPositions: 3,
-            walletBalanceUsd: 10_000,
-          },
-          positions: [],
-          recentDecisions: [],
-        } as never),
-      updateSnapshot: () => Effect.void,
-    });
+    const server = new McpServer(
+      baseConfig(),
+      mockAgentState({
+        getSnapshot: () =>
+          Effect.succeed({
+            programStartTime: Date.now() - 1000,
+            scanCount: 5,
+            lastCycleAt: Date.now(),
+            portfolio: {
+              totalValueUsd: 11_000,
+              unrealizedPnlUsd: 1000,
+              realizedPnlUsd: 0,
+              openPositions: 2,
+              maxPositions: 3,
+              walletBalanceUsd: 10_000,
+            },
+            positions: [],
+            recentDecisions: [],
+          } as never),
+      }),
+    );
 
     const response = await sendRequest(server, {
       jsonrpc: "2.0",
@@ -221,32 +247,34 @@ describe("McpServer", () => {
   });
 
   it("returns positions via prism_positions tool", async () => {
-    const server = new McpServer(baseConfig(), {
-      getSnapshot: () =>
-        Effect.succeed({
-          programStartTime: Date.now(),
-          scanCount: 0,
-          lastCycleAt: null,
-          portfolio: {} as never,
-          positions: [
-            {
-              poolAddress: "Pool111111111111111111111111111111111111111",
-              tokenXSymbol: "TKNA",
-              tokenYSymbol: "TKNB",
-              depositedUsd: 1000,
-              currentValueUsd: 1100,
-              activeBinId: 100,
-              lowerBinId: 90,
-              upperBinId: 110,
-              lastAction: "ENTER",
-              lastActionAt: Date.now(),
-              hoursHeld: 1,
-            },
-          ],
-          recentDecisions: [],
-        } as never),
-      updateSnapshot: () => Effect.void,
-    });
+    const server = new McpServer(
+      baseConfig(),
+      mockAgentState({
+        getSnapshot: () =>
+          Effect.succeed({
+            programStartTime: Date.now(),
+            scanCount: 0,
+            lastCycleAt: null,
+            portfolio: {} as never,
+            positions: [
+              {
+                poolAddress: "Pool111111111111111111111111111111111111111",
+                tokenXSymbol: "TKNA",
+                tokenYSymbol: "TKNB",
+                depositedUsd: 1000,
+                currentValueUsd: 1100,
+                activeBinId: 100,
+                lowerBinId: 90,
+                upperBinId: 110,
+                lastAction: "ENTER",
+                lastActionAt: Date.now(),
+                hoursHeld: 1,
+              },
+            ],
+            recentDecisions: [],
+          } as never),
+      }),
+    );
 
     const response = await sendRequest(server, {
       jsonrpc: "2.0",
@@ -263,10 +291,7 @@ describe("McpServer", () => {
   });
 
   it("returns sanitized config via prism_config tool", async () => {
-    const server = new McpServer(baseConfig(), {
-      getSnapshot: () => Effect.succeed({} as never),
-      updateSnapshot: () => Effect.void,
-    });
+    const server = new McpServer(baseConfig(), mockAgentState());
 
     const response = await sendRequest(server, {
       jsonrpc: "2.0",
@@ -281,5 +306,275 @@ describe("McpServer", () => {
     expect(cfg.paperTrading).toBe(true);
     expect(cfg).not.toHaveProperty("walletPrivateKey");
     expect(cfg).not.toHaveProperty("heliusApiKey");
+  });
+
+  it("returns agent policy via prism_agent_policy tool", async () => {
+    const server = new McpServer(
+      baseConfig(),
+      mockAgentState({
+        getSnapshot: () =>
+          Effect.succeed({
+            programStartTime: Date.now(),
+            scanCount: 0,
+            lastCycleAt: null,
+            portfolio: {
+              totalValueUsd: 0,
+              unrealizedPnlUsd: 0,
+              realizedPnlUsd: 0,
+              openPositions: 0,
+              maxPositions: 0,
+              walletBalanceUsd: 0,
+            },
+            positions: [],
+            recentDecisions: [],
+            agentPolicy: {
+              mode: "suggest",
+              proposalsQueued: 3,
+              lastProposalAt: Date.now(),
+              badProposalBackoffUntil: null,
+              circuitBreakerOpen: true,
+              hardCaps: {
+                maxPositionSizePct: 0.4,
+                maxRebalanceRangeBins: 50,
+                minProposalConfidence: 0.65,
+                proposalStaleMs: 300_000,
+              },
+            },
+            pendingProposals: [],
+          } as never),
+      }),
+    );
+
+    const response = await sendRequest(server, {
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: { name: "prism_agent_policy", arguments: {} },
+    });
+
+    expect(response.error).toBeUndefined();
+    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    expect(content).toHaveLength(1);
+    const policy = JSON.parse(content[0]!.text);
+    expect(policy.mode).toBe("suggest");
+    expect(policy.proposalsQueued).toBe(3);
+    expect(policy.circuitBreakerOpen).toBe(true);
+  });
+
+  it("returns pending proposals via prism_pending_proposals tool", async () => {
+    const server = new McpServer(
+      baseConfig(),
+      mockAgentState({
+        getSnapshot: () =>
+          Effect.succeed({
+            programStartTime: Date.now(),
+            scanCount: 0,
+            lastCycleAt: null,
+            portfolio: {} as never,
+            positions: [],
+            recentDecisions: [],
+            agentPolicy: {
+              mode: "supervised",
+              proposalsQueued: 2,
+              lastProposalAt: Date.now(),
+              badProposalBackoffUntil: null,
+              circuitBreakerOpen: false,
+              hardCaps: {
+                maxPositionSizePct: 0.4,
+                maxRebalanceRangeBins: 50,
+                minProposalConfidence: 0.65,
+                proposalStaleMs: 300_000,
+              },
+            },
+            pendingProposals: [
+              {
+                proposalId: "id-1",
+                action: "HOLD",
+                poolAddress: "PoolA",
+                confidence: 0.8,
+                reasoning: "test",
+                proposedAt: Date.now(),
+                expiresAt: Date.now() + 300_000,
+                source: "http-queue",
+                status: "pending",
+              },
+              {
+                proposalId: "id-2",
+                action: "EXIT",
+                poolAddress: "PoolB",
+                confidence: 0.9,
+                reasoning: "test",
+                proposedAt: Date.now(),
+                expiresAt: Date.now() + 300_000,
+                source: "http-queue",
+                status: "pending",
+              },
+            ],
+          } as never),
+      }),
+    );
+
+    const response = await sendRequest(server, {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: { name: "prism_pending_proposals", arguments: {} },
+    });
+
+    expect(response.error).toBeUndefined();
+    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    expect(content).toHaveLength(1);
+    const result = JSON.parse(content[0]!.text);
+    expect(result.proposals).toHaveLength(2);
+    expect(result.proposals.map((p: { proposalId: string }) => p.proposalId)).toEqual([
+      "id-1",
+      "id-2",
+    ]);
+
+    const filtered = await sendRequest(server, {
+      jsonrpc: "2.0",
+      id: 8,
+      method: "tools/call",
+      params: { name: "prism_pending_proposals", arguments: { pool: "PoolB" } },
+    });
+    expect(filtered.error).toBeUndefined();
+    const filteredContent = (filtered.result as { content: ReadonlyArray<{ text: string }> })
+      .content;
+    const filteredResult = JSON.parse(filteredContent[0]!.text);
+    expect(filteredResult.proposals).toHaveLength(1);
+    expect(filteredResult.proposals[0].proposalId).toBe("id-2");
+  });
+
+  const approveTestState = (approvedIds: string[]): AgentStateApi => {
+    const pending = (id: string) => ({
+      proposalId: id,
+      action: "HOLD" as const,
+      poolAddress: "PoolA",
+      confidence: 0.8,
+      reasoning: "test",
+      proposedAt: Date.now(),
+      expiresAt: Date.now() + 300_000,
+      source: "sync-prompt" as const,
+      status: "pending" as const,
+    });
+    return mockAgentState({
+      getSnapshot: () =>
+        Effect.succeed({
+          pendingProposals: [pending("id-1"), pending("id-2")],
+        } as never),
+      approveProposal: (proposalId: string) =>
+        Effect.sync(() => {
+          approvedIds.push(proposalId);
+        }),
+    });
+  };
+
+  const callApprove = (server: McpServer, id: number, args: Record<string, unknown>) =>
+    sendRequest(server, {
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name: "prism_approve_proposals", arguments: args },
+    });
+
+  it("approves proposals via prism_approve_proposals tool", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(
+      baseConfig({ agentApprovalToken: "secret-approval" }),
+      approveTestState(approvedIds),
+    );
+
+    const response = await callApprove(server, 9, {
+      proposalIds: ["id-1", "id-2"],
+      token: "secret-approval",
+    });
+
+    expect(response.error).toBeUndefined();
+    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    const result = JSON.parse(content[0]!.text);
+    expect(result.approved).toBe(2);
+    expect(approvedIds).toEqual(["id-1", "id-2"]);
+  });
+
+  it("rejects prism_approve_proposals with an invalid approval token", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(
+      baseConfig({ agentApprovalToken: "secret-approval" }),
+      approveTestState(approvedIds),
+    );
+
+    const response = await callApprove(server, 10, {
+      proposalIds: ["id-1"],
+      token: "wrong-token",
+    });
+
+    const error = response.error as { message: string } | undefined;
+    expect(error?.message).toMatch(/Unauthorized/);
+    expect(approvedIds).toEqual([]);
+  });
+
+  it("rejects prism_approve_proposals when no approval token is configured", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(baseConfig(), approveTestState(approvedIds));
+
+    const response = await callApprove(server, 11, {
+      proposalIds: ["id-1"],
+      token: "anything",
+    });
+
+    const error = response.error as { message: string } | undefined;
+    expect(error?.message).toMatch(/Unauthorized/);
+    expect(approvedIds).toEqual([]);
+  });
+
+  it("does not fall back to the proposal token when no approval token is configured", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(
+      baseConfig({ agentProposalToken: "secret-proposal" }),
+      approveTestState(approvedIds),
+    );
+
+    const response = await callApprove(server, 12, {
+      proposalIds: ["id-1"],
+      token: "secret-proposal",
+    });
+
+    const error = response.error as { message: string } | undefined;
+    expect(error?.message).toMatch(/Unauthorized/);
+    expect(approvedIds).toEqual([]);
+  });
+
+  it("rejects the proposal token when a separate approval token is configured", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(
+      baseConfig({ agentApprovalToken: "secret-approval", agentProposalToken: "secret-proposal" }),
+      approveTestState(approvedIds),
+    );
+
+    const response = await callApprove(server, 13, {
+      proposalIds: ["id-1"],
+      token: "secret-proposal",
+    });
+
+    const error = response.error as { message: string } | undefined;
+    expect(error?.message).toMatch(/Unauthorized/);
+    expect(approvedIds).toEqual([]);
+  });
+
+  it("rejects prism_approve_proposals batches that exceed the configured limit", async () => {
+    const approvedIds: string[] = [];
+    const server = new McpServer(
+      baseConfig({ agentApprovalToken: "secret-approval", agentProposalMaxBatchSize: 2 }),
+      approveTestState(approvedIds),
+    );
+
+    const response = await callApprove(server, 14, {
+      proposalIds: ["id-1", "id-2", "id-3"],
+      token: "secret-approval",
+    });
+
+    const error = response.error as { message: string } | undefined;
+    expect(error?.message).toMatch(/Batch size 3 exceeds limit 2/);
+    expect(approvedIds).toEqual([]);
   });
 });
