@@ -898,6 +898,27 @@ export function executeLive(
 
 // ─── Main program ────────────────────────────────────────────────────────────
 
+export const buildPositionSnapshots = (
+  positions: Iterable<PositionRecord>,
+): Array<PositionSnapshot> =>
+  Array.from(positions).map((p) => ({
+    poolAddress: p.poolAddress,
+    tokenXSymbol: p.tokenXSymbol,
+    tokenYSymbol: p.tokenYSymbol,
+    depositedUsd: p.depositedUsd,
+    currentValueUsd: p.currentValueUsd,
+    activeBinId: p.activeBinId,
+    lowerBinId: p.lowerBinId,
+    upperBinId: p.upperBinId,
+    lastAction: (p.lastRebalanceAt > p.timestamp ? "REBALANCE" : "ENTER") as
+      | "ENTER"
+      | "EXIT"
+      | "REBALANCE"
+      | "HOLD",
+    lastActionAt: p.lastRebalanceAt > p.timestamp ? p.lastRebalanceAt : p.timestamp,
+    hoursHeld: (Date.now() - p.timestamp) / 3_600_000,
+  }));
+
 export const program = Effect.gen(function* () {
   const config = yield* ConfigService;
   const adapter = yield* AdapterService;
@@ -921,24 +942,6 @@ export const program = Effect.gen(function* () {
   for (const pos of allPositions) {
     trackedPositions.set(pos.poolAddress, pos);
   }
-  const buildPositionSnapshots = (positions: Iterable<PositionRecord>): Array<PositionSnapshot> =>
-    Array.from(positions).map((p) => ({
-      poolAddress: p.poolAddress,
-      tokenXSymbol: p.tokenXSymbol,
-      tokenYSymbol: p.tokenYSymbol,
-      depositedUsd: p.depositedUsd,
-      currentValueUsd: p.currentValueUsd,
-      activeBinId: p.activeBinId,
-      lowerBinId: p.lowerBinId,
-      upperBinId: p.upperBinId,
-      lastAction: (p.lastRebalanceAt > p.timestamp ? "REBALANCE" : "ENTER") as
-        | "ENTER"
-        | "EXIT"
-        | "REBALANCE"
-        | "HOLD",
-      lastActionAt: p.lastRebalanceAt > p.timestamp ? p.lastRebalanceAt : p.timestamp,
-      hoursHeld: (Date.now() - p.timestamp) / 3_600_000,
-    }));
   const entryFailureBackoff = new Map<string, EntryFailureBackoff>();
 
   // Agent check-in state

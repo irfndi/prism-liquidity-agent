@@ -489,6 +489,86 @@ describe("HttpStatusServer", () => {
     }
   });
 
+  it("reads positions from live snapshot updates for the /propose scannable set", async () => {
+    const port = 18_776;
+    const enqueued: AgentProposal[] = [];
+    let snapshot = baseSnapshot({ positions: [] });
+    const mutableState: AgentStateApi = {
+      getSnapshot: () => Effect.succeed(snapshot),
+      updateSnapshot: (patch) =>
+        Effect.sync(() => {
+          snapshot = { ...snapshot, ...patch };
+        }),
+      setAgentPolicy: () => Effect.void,
+      enqueueProposal: (proposal) =>
+        Effect.sync(() => {
+          enqueued.push(proposal);
+          return { status: "enqueued" as const };
+        }),
+      dequeueProposals: () => Effect.void,
+      approveProposal: () => Effect.void,
+      rejectProposal: () => Effect.void,
+    };
+    const server = new HttpStatusServer(
+      baseConfig({
+        agentHttpPort: port,
+        agentProposalToken: "secret-token",
+        agentApprovalToken: "approval-token",
+        agentiveMode: true,
+        agentProposalMode: "supervised",
+        watchlistPools: ["PoolA"],
+      }),
+      mutableState,
+    );
+    await Effect.runPromise(server.start());
+    try {
+      // Before the startup seeding runs, a held-pool proposal is unscannable.
+      const before = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({ action: "REBALANCE", poolAddress: "HeldPool", confidence: 0.8 }),
+      });
+      expect(before.status).toBe(400);
+
+      // Simulate program.ts seeding the snapshot before exposing the interface.
+      snapshot = {
+        ...snapshot,
+        positions: [
+          {
+            poolAddress: "HeldPool",
+            tokenXSymbol: "X",
+            tokenYSymbol: "Y",
+            depositedUsd: 1000,
+            currentValueUsd: 1000,
+            activeBinId: 100,
+            lowerBinId: 90,
+            upperBinId: 110,
+            lastAction: "ENTER",
+            lastActionAt: Date.now(),
+            hoursHeld: 1,
+          },
+        ],
+      };
+
+      const after = await fetch(`http://127.0.0.1:${port}/propose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        body: JSON.stringify({ action: "REBALANCE", poolAddress: "HeldPool", confidence: 0.8 }),
+      });
+      expect(after.status).toBe(202);
+      expect(enqueued).toHaveLength(1);
+      expect(enqueued[0]!.poolAddress).toBe("HeldPool");
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
   it("reports unscannable pools alongside skipped pools when nothing is accepted", async () => {
     const port = 18_784;
     const server = new HttpStatusServer(

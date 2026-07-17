@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { Effect } from "effect";
 import {
   buildLayer,
+  buildPositionSnapshots,
   estimatePositionValue,
   executeLive,
   finalizeAppliedProposal,
@@ -850,5 +851,93 @@ describe("recordAppliedProposalRiskDenial", () => {
     const second = proposalBackoff.get("pool-a");
     expect(second?.failures).toBe(2);
     expect(second!.nextProposalAt).toBeGreaterThan(first!.nextProposalAt);
+  });
+});
+
+describe("buildPositionSnapshots", () => {
+  it("maps tracked positions to agent state snapshots", () => {
+    const now = 1_000_000;
+    const positions = [
+      {
+        poolAddress: "pool-a",
+        tokenXSymbol: "SOL",
+        tokenYSymbol: "USDC",
+        depositedUsd: 1000,
+        currentValueUsd: 1100,
+        activeBinId: 100,
+        lowerBinId: 90,
+        upperBinId: 110,
+        timestamp: now - 3_600_000,
+        outOfRangeSince: null,
+        oorCycleCount: 0,
+        lastFeeClaimAt: 0,
+        trailingStopThreshold: null,
+        highestValueUsd: null,
+        lastRebalanceAt: now - 3_600_000,
+        positionPubKey: null,
+        paperExitedAt: null,
+        entrySignalTimestamp: null,
+        entrySignalSnapshotId: null,
+      },
+      {
+        poolAddress: "pool-b",
+        tokenXSymbol: "BONK",
+        tokenYSymbol: "SOL",
+        depositedUsd: 500,
+        currentValueUsd: 450,
+        activeBinId: 200,
+        lowerBinId: 180,
+        upperBinId: 220,
+        timestamp: now - 7_200_000,
+        outOfRangeSince: null,
+        oorCycleCount: 0,
+        lastFeeClaimAt: 0,
+        trailingStopThreshold: null,
+        highestValueUsd: null,
+        lastRebalanceAt: now - 1_800_000,
+        positionPubKey: "pubkey",
+        paperExitedAt: null,
+        entrySignalTimestamp: null,
+        entrySignalSnapshotId: null,
+      },
+    ];
+
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const snapshots = buildPositionSnapshots(positions);
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots[0]).toMatchObject({
+        poolAddress: "pool-a",
+        tokenXSymbol: "SOL",
+        tokenYSymbol: "USDC",
+        depositedUsd: 1000,
+        currentValueUsd: 1100,
+        activeBinId: 100,
+        lowerBinId: 90,
+        upperBinId: 110,
+        lastAction: "ENTER",
+        lastActionAt: now - 3_600_000,
+      });
+      expect(snapshots[0]!.hoursHeld).toBeCloseTo(1);
+      expect(snapshots[1]).toMatchObject({
+        poolAddress: "pool-b",
+        tokenXSymbol: "BONK",
+        tokenYSymbol: "SOL",
+        depositedUsd: 500,
+        currentValueUsd: 450,
+        activeBinId: 200,
+        lowerBinId: 180,
+        upperBinId: 220,
+        lastAction: "REBALANCE",
+        lastActionAt: now - 1_800_000,
+      });
+      expect(snapshots[1]!.hoursHeld).toBeCloseTo(2);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("returns an empty array when no positions are tracked", () => {
+    expect(buildPositionSnapshots([])).toEqual([]);
   });
 });
