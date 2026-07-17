@@ -166,9 +166,9 @@ Do not import service implementations directly in program logic. `Layer.provide`
 
 ### Decision loop (per cycle, per pool)
 
-1. `adapter.getPoolState` + `adapter.getBinArray` fetch on-chain data.
+1. `adapter.getPoolState` + `adapter.getBinArray` fetch on-chain data (real per-bin reserves via `dlmm.getBinsAroundActiveBin`). `meteoraDatapi.getPoolData` then overlays real TVL/volume/fees from the Meteora Data API (`statsSource: "datapi"`); on API failure it logs a warning and the adapter's heuristic stats are used (`statsSource: "heuristic"`).
 2. `blacklist.checkPool` early-rejects disallowed pools (errors swallowed).
-3. `strategy.computeMetrics` produces pure metrics (fee/IL, volume authenticity, bin utilization, TVL velocity).
+3. `strategy.computeMetrics` produces pure metrics (fee/IL, volume authenticity, bin utilization, TVL velocity vs the previous `pool_snapshots` row). Metrics whose inputs are unavailable are reported as explicit "unknown" (`volumeAuthenticityKnown` / `binUtilizationKnown` on `PoolMetrics`); unknown metrics skip their pre-filter/EXIT gates with a warning and block ENTER (fail-closed), never fabricate 1.0.
 4. Pre-filter skips pools below `MIN_POOL_TVL_USD`, `VOLUME_AUTH_THRESHOLD` or `MIN_BIN_UTILIZATION`.
 5. `memory.getRelevantContext` recalls recent warnings/patterns (errors swallowed).
 6. Decision rules evaluate, in order: `EXIT` → `REBALANCE` → `HOLD` → `ENTER`.
@@ -297,7 +297,8 @@ The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copi
 | `MAX_OPEN_POSITIONS`          | `3`                                                                | Concurrent positions cap.                                                                                          |
 | `MAX_PER_POOL_ALLOCATION_PCT` | `0.4`                                                              | Max portfolio share for one pool.                                                                                  |
 | `SQLITE_DB_PATH`              | `~/.local/share/prism/prism.db` (bundled) or `./prism.db` (source) | SQLite database path.                                                                                              |
-| `ENABLE_SNAPSHOT_CAPTURE`     | `false`                                                            | Dump full snapshots every cycle (paper only).                                                                      |
+| `ENABLE_SNAPSHOT_CAPTURE`     | `false`                                                            | Store full bin-array detail in per-cycle snapshots (paper only). Lightweight per-cycle snapshot rows are always persisted — TVL velocity and IL drift need the history. |
+| `METEORA_DATA_API_URL`        | `https://dlmm.datapi.meteora.ag`                                   | Base URL for the Meteora Data API used to enrich pool TVL/volume/fees. On failure the engine falls back to heuristic stats with a warning.                              |
 | `EMBEDDINGS_BACKEND`          | `fallback`                                                         | `fallback` = deterministic hash vectors; `onnx` = Xenova/MiniLM (downloads ~80MB).                                 |
 | `AGENTIC_MODE`                | `false`                                                            | Enable agent runtime overlay.                                                                                      |
 | `AGENT_MCP_ENABLED`           | `false`                                                            | Expose stdio MCP server.                                                                                           |
