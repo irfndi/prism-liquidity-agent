@@ -15,6 +15,8 @@ export interface AgentRuntimeContext {
   readonly metrics: PoolMetrics;
   readonly warnings: ReadonlyArray<MemoryEntry>;
   readonly recentDecisions: ReadonlyArray<DecisionRecord>;
+  /** Whether the pool currently has an open position; used to restrict proposal actions. */
+  readonly hasOpenPosition?: boolean;
 }
 
 export interface AgentRuntimeResponse {

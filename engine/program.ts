@@ -2206,6 +2206,7 @@ export const program = Effect.gen(function* () {
               recentDecisions: yield* audit
                 .getRecentDecisions(10)
                 .pipe(Effect.catchAll(() => Effect.succeed([]))),
+              hasOpenPosition: trackedPositions.has(poolAddress),
             })
             .pipe(
               Effect.catchAll((err) => {
@@ -2291,6 +2292,7 @@ export const program = Effect.gen(function* () {
                   recentDecisions: yield* audit
                     .getRecentDecisions(10)
                     .pipe(Effect.catchAll(() => Effect.succeed([]))),
+                  hasOpenPosition: trackedPositions.has(poolAddress),
                 })
                 .pipe(
                   Effect.catchAll((err) => {

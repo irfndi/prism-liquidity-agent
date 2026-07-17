@@ -277,12 +277,22 @@ describe("buildProposalPrompt", () => {
     expect(prompt).toContain('"lowerBinId": 100, "upperBinId": 110');
   });
 
-  it("limits allowed actions for a deterministic HOLD decision", () => {
+  it("limits allowed actions for a deterministic HOLD decision with an open position", () => {
     const decision = makeDecision({ action: "HOLD" });
-    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    const ctx = { ...makeCtx(decision), hasOpenPosition: true };
+    const prompt = buildProposalPrompt(decision, ctx);
     expect(prompt).toContain("You may propose only: HOLD, REBALANCE, EXIT.");
     expect(prompt).toContain('"action": "HOLD|REBALANCE|EXIT"');
     expect(prompt).not.toContain('"action": "HOLD|REBALANCE|EXIT|ENTER"');
+  });
+
+  it("limits allowed actions for a deterministic HOLD decision without an open position", () => {
+    const decision = makeDecision({ action: "HOLD" });
+    const ctx = { ...makeCtx(decision), hasOpenPosition: false };
+    const prompt = buildProposalPrompt(decision, ctx);
+    expect(prompt).toContain("You may propose only: HOLD.");
+    expect(prompt).toContain('"action": "HOLD"');
+    expect(prompt).not.toContain('"action": "HOLD|REBALANCE|EXIT"');
   });
 
   it("limits allowed actions for a deterministic EXIT decision", () => {

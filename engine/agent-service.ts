@@ -137,13 +137,16 @@ export function buildProposalPrompt(decision: AgentDecision, ctx: AgentRuntimeCo
 
   // Mirror the validator's action limits so compliant advisors are not
   // penalized for impossible promotions or downgrades. For ENTER the pool has
-  // no open position, so REBALANCE/EXIT are not executable either.
+  // no open position, so REBALANCE/EXIT are not executable either. For an
+  // unheld default HOLD, only HOLD is executable.
   const allowedActions =
     decision.action === "EXIT"
       ? ["EXIT"]
       : decision.action === "ENTER"
         ? ["HOLD", "ENTER"]
-        : ["HOLD", "REBALANCE", "EXIT"];
+        : ctx.hasOpenPosition
+          ? ["HOLD", "REBALANCE", "EXIT"]
+          : ["HOLD"];
   const allowedActionsText = allowedActions.join(", ");
 
   return `You are a liquidity pool strategy advisor. Review the deterministic agent's decision and propose the best action for this pool.
