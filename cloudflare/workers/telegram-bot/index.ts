@@ -8,6 +8,22 @@ interface Env {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
   API_BASE_URL: string;
+  // Shared secret presented as X-Bot-Api-Secret on bot->API calls. The API
+  // rejects telegram_id-keyed endpoints without it (fail closed).
+  BOT_API_SECRET?: string;
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i++) {
+    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 // Services
@@ -108,12 +124,16 @@ function callPrismApi(
   baseUrl: string,
   path: string,
   body: Record<string, unknown>,
+  botApiSecret?: string,
 ): Effect.Effect<{ ok: boolean; data?: unknown; error?: string }, never> {
   return Effect.gen(function* () {
     const response = yield* Effect.tryPromise(() =>
       fetch(`${baseUrl}${path}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(botApiSecret ? { "X-Bot-Api-Secret": botApiSecret } : {}),
+        },
         body: JSON.stringify(body),
       }),
     );
@@ -148,7 +168,7 @@ function handleStart(
   return sendMessage(
     botToken,
     chatId,
-    `Welcome to Prism, ${firstName}!\n\n` +
+    `Welcome to Prism, ${escapeHtml(firstName)}!\n\n` +
       `To get started, register with:\n` +
       `<code>prism register</code>\n\n` +
       `Or link your existing account with /link`,
@@ -174,12 +194,18 @@ function handleRegister(
   chatId: number,
   telegramId: string,
   firstName: string,
+  botApiSecret?: string,
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
-    const result = yield* callPrismApi(apiBaseUrl, "/v1/register-telegram", {
-      telegram_id: telegramId,
-      first_name: firstName,
-    });
+    const result = yield* callPrismApi(
+      apiBaseUrl,
+      "/v1/register-telegram",
+      {
+        telegram_id: telegramId,
+        first_name: firstName,
+      },
+      botApiSecret,
+    );
 
     if (result.ok && result.data) {
       const data = result.data as { api_key: string; user_id: string };
@@ -223,11 +249,17 @@ function handleWhoami(
   botToken: string,
   chatId: number,
   telegramId: string,
+  botApiSecret?: string,
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
-    const result = yield* callPrismApi(apiBaseUrl, "/v1/whoami-telegram", {
-      telegram_id: telegramId,
-    });
+    const result = yield* callPrismApi(
+      apiBaseUrl,
+      "/v1/whoami-telegram",
+      {
+        telegram_id: telegramId,
+      },
+      botApiSecret,
+    );
 
     if (result.ok && result.data) {
       const data = result.data as { user_id: string; tier: string };
@@ -247,11 +279,17 @@ function handleStatus(
   botToken: string,
   chatId: number,
   telegramId: string,
+  botApiSecret?: string,
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
-    const result = yield* callPrismApi(apiBaseUrl, "/v1/agent-status", {
-      telegram_id: telegramId,
-    });
+    const result = yield* callPrismApi(
+      apiBaseUrl,
+      "/v1/agent-status",
+      {
+        telegram_id: telegramId,
+      },
+      botApiSecret,
+    );
 
     if (result.ok && result.data) {
       const data = result.data as { status: string; positions: number; pnl: number };
@@ -269,6 +307,10 @@ function handleStatus(
   });
 }
 
+// Commands that return credentials or account data are private-chat only —
+// in groups the reply (and any API key) would be visible to every member.
+const PRIVATE_ONLY_COMMANDS = new Set(["/register", "/whoami", "/status", "/link"]);
+
 // Process incoming Telegram update
 function processUpdate(
   db: D1Database,
@@ -279,6 +321,7 @@ function processUpdate(
 
   const message = update.message;
   const chatId = message.chat.id;
+  const isPrivateChat = message.chat.type === "private";
   const text = message.text ?? "";
   const telegramId = String(message.from.id);
   const firstName = message.from.first_name;
@@ -288,6 +331,16 @@ function processUpdate(
     if (text.startsWith("/")) {
       const rawCommand = text.split(" ")[0] ?? "";
       const command = rawCommand.split("@")[0]?.toLowerCase() ?? "";
+
+      if (!isPrivateChat && PRIVATE_ONLY_COMMANDS.has(command)) {
+        yield* sendMessage(
+          env.TELEGRAM_BOT_TOKEN,
+          chatId,
+          `For your security, ${command} is only available in a private chat with this bot. ` +
+            `Please open a direct message and try again.`,
+        );
+        return;
+      }
 
       switch (command) {
         case "/start":
@@ -300,6 +353,7 @@ function processUpdate(
             chatId,
             telegramId,
             firstName,
+            env.BOT_API_SECRET,
           );
           break;
         case "/link":
@@ -309,21 +363,48 @@ function processUpdate(
           yield* handleHelp(env.TELEGRAM_BOT_TOKEN, chatId);
           break;
         case "/whoami":
-          yield* handleWhoami(env.API_BASE_URL, env.TELEGRAM_BOT_TOKEN, chatId, telegramId);
+          yield* handleWhoami(
+            env.API_BASE_URL,
+            env.TELEGRAM_BOT_TOKEN,
+            chatId,
+            telegramId,
+            env.BOT_API_SECRET,
+          );
           break;
         case "/status":
-          yield* handleStatus(env.API_BASE_URL, env.TELEGRAM_BOT_TOKEN, chatId, telegramId);
+          yield* handleStatus(
+            env.API_BASE_URL,
+            env.TELEGRAM_BOT_TOKEN,
+            chatId,
+            telegramId,
+            env.BOT_API_SECRET,
+          );
           break;
         default:
           yield* sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, "Unknown command. Try /help");
       }
-    } else if (/^LINK-[A-Z0-9]{6}$/i.test(text.trim()) || /^[A-Z0-9]{6}$/i.test(text.trim())) {
+    } else if (/^LINK-[A-Z0-9]{6,16}$/i.test(text.trim()) || /^[A-Z0-9]{6,16}$/i.test(text.trim())) {
+      if (!isPrivateChat) {
+        // A link code is a credential: confirming in a group would let any
+        // member hijack the link first.
+        yield* sendMessage(
+          env.TELEGRAM_BOT_TOKEN,
+          chatId,
+          `Link codes must be sent in a private chat with this bot for your security.`,
+        );
+        return;
+      }
       const rawCode = text.trim().toUpperCase();
       const code = rawCode.startsWith("LINK-") ? rawCode : `LINK-${rawCode}`;
-      const result = yield* callPrismApi(env.API_BASE_URL, "/v1/link-telegram/confirm", {
-        code,
-        telegram_id: telegramId,
-      });
+      const result = yield* callPrismApi(
+        env.API_BASE_URL,
+        "/v1/link-telegram/confirm",
+        {
+          code,
+          telegram_id: telegramId,
+        },
+        env.BOT_API_SECRET,
+      );
 
       if (result.ok) {
         yield* sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, "Account linked successfully!");
@@ -350,12 +431,11 @@ app.get("/health", async (c) => {
 });
 
 app.post("/webhook", async (c) => {
-  // Optional: verify webhook secret
-  if (c.env.TELEGRAM_WEBHOOK_SECRET) {
-    const headerSecret = c.req.header("X-Telegram-Bot-Api-Secret-Token");
-    if (headerSecret !== c.env.TELEGRAM_WEBHOOK_SECRET) {
-      return c.json({ error: "Unauthorized" }, 401);
-    }
+  // Fail closed: an unset TELEGRAM_WEBHOOK_SECRET rejects every webhook POST.
+  const webhookSecret = c.env.TELEGRAM_WEBHOOK_SECRET;
+  const headerSecret = c.req.header("X-Telegram-Bot-Api-Secret-Token");
+  if (!webhookSecret || !headerSecret || !constantTimeEqual(headerSecret, webhookSecret)) {
+    return c.json({ error: "Unauthorized" }, 401);
   }
 
   return await Effect.runPromise(

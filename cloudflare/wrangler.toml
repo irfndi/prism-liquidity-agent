@@ -48,6 +48,7 @@ head_sampling_rate = 1
 # wrangler secret put FEE_WALLET_ADDRESS
 # wrangler secret put TELEGRAM_BOT_TOKEN
 # wrangler secret put ADMIN_API_KEY
+# wrangler secret put BOT_API_SECRET   # shared with the telegram-bot worker (X-Bot-Api-Secret)
 
 # Staging environment
 [env.staging]

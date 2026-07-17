@@ -1,0 +1,17 @@
+# Local development secrets for `wrangler dev`. Copy to `.dev.vars` and fill in.
+# NEVER commit real values — production secrets go through `wrangler secret put`.
+
+# Telegram bot token from @BotFather (both workers)
+TELEGRAM_BOT_TOKEN=
+
+# REQUIRED for the telegram-bot worker: Telegram setWebhook secret_token.
+# Webhook POSTs are rejected when this is unset (fail closed).
+TELEGRAM_WEBHOOK_SECRET=
+
+# Shared secret between telegram-bot and API workers (X-Bot-Api-Secret header).
+# Must be identical in both workers' .dev.vars / production secrets.
+BOT_API_SECRET=
+
+# API worker only
+FEE_WALLET_ADDRESS=
+ADMIN_API_KEY=

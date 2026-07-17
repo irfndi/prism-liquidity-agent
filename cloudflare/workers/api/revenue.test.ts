@@ -151,6 +151,32 @@ describe("Revenue Tracking API", () => {
       expect(response.status).toBe(401);
     });
 
+    it("rejects negative or non-finite numeric fields", async () => {
+      const base = {
+        poolAddress: "5JvD1TW5nqSz6gJtHfVnZKq3fZmBnL5xY7u9dR2wT4k",
+        platformFeeX: 1.0,
+        platformFeeY: 2.0,
+      };
+      const invalidPayloads: Array<Record<string, unknown>> = [
+        { ...base, platformFeeX: -1 },
+        { ...base, platformFeeY: -0.001 },
+        { ...base, feeX: -5 },
+        { ...base, feeY: -5 },
+        { ...base, operatorFeeX: -1 },
+        { ...base, operatorFeeY: -1 },
+        { ...base, platformFeeX: "1.0" },
+        { ...base, feeX: "lots" },
+      ];
+      for (const payload of invalidPayloads) {
+        const ctx = createExecutionContext();
+        const request = buildRequest("POST", "/v1/revenue/log", payload, {
+          Authorization: `Bearer ${apiKey}`,
+        });
+        const response = await worker.fetch(request, testEnv, ctx);
+        expect(response.status).toBe(400);
+      }
+    });
+
     it("returns 400 on missing required fields", async () => {
       const ctx = createExecutionContext();
       const request1 = buildRequest(

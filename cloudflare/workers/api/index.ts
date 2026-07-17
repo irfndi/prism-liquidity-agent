@@ -10,6 +10,9 @@ export interface Env {
   FEE_WALLET_ADDRESS: string;
   TELEGRAM_BOT_TOKEN: string;
   ADMIN_API_KEY?: string;
+  // Shared secret the Telegram bot worker presents as X-Bot-Api-Secret for
+  // telegram_id-keyed endpoints. Unset means those endpoints fail closed.
+  BOT_API_SECRET?: string;
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
@@ -19,6 +22,13 @@ function constantTimeEqual(a: string, b: string): boolean {
     mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
   }
   return mismatch === 0;
+}
+
+// Telegram-bot shared-secret check. Fails closed: an unset server secret
+// rejects everything, and comparison is constant-time.
+function isBotAuthorized(env: Env, headerSecret: string | undefined): boolean {
+  if (!env.BOT_API_SECRET || !headerSecret) return false;
+  return constantTimeEqual(headerSecret, env.BOT_API_SECRET);
 }
 
 const MAX_ERROR_MESSAGE_LENGTH = 4096;
@@ -53,6 +63,16 @@ const generateId = () => {
   const randomBytes = new Uint8Array(8);
   crypto.getRandomValues(randomBytes);
   return `${Date.now()}-${Array.from(randomBytes)
+    .map((b) => b.toString(36).padStart(2, "0"))
+    .join("")}`;
+};
+
+// API keys are bearer credentials: 20 CSPRNG bytes (~160 bits), no timestamp
+// component, so they cannot be predicted from registration time.
+const generateApiKey = () => {
+  const randomBytes = new Uint8Array(20);
+  crypto.getRandomValues(randomBytes);
+  return `sk-prism-${Array.from(randomBytes)
     .map((b) => b.toString(36).padStart(2, "0"))
     .join("")}`;
 };
@@ -181,7 +201,7 @@ const TIERS: Record<string, { platformFeeRate: number }> = {
 const registerHandler = (db: D1Database) =>
   Effect.gen(function* () {
     const userId = generateId();
-    const apiKey = `sk-prism-${generateId()}`;
+    const apiKey = generateApiKey();
     const keyHash = yield* hashKey(apiKey);
 
     yield* Effect.tryPromise(() =>
@@ -270,26 +290,39 @@ const whoamiHandler = (db: D1Database, userId: string) =>
     return result;
   });
 
-// Link Telegram start handler
+// Link Telegram start handler. Codes carry 64 bits of CSPRNG entropy and a
+// unixepoch expiry; requesting a new code burns the user's outstanding ones.
 const linkTelegramStartHandler = (db: D1Database, userId: string) =>
   Effect.gen(function* () {
-    const randomBytes = new Uint8Array(4);
+    const randomBytes = new Uint8Array(8);
     crypto.getRandomValues(randomBytes);
     const code = `LINK-${Array.from(randomBytes)
-      .map((b) => b.toString(36).padStart(2, "0"))
+      .map((b) => b.toString(16).padStart(2, "0"))
       .join("")
-      .toUpperCase()
-      .slice(0, 6)}`;
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
+      .toUpperCase()}`;
+    const expiresAtEpoch = Math.floor(Date.now() / 1000) + 10 * 60; // 10 minutes
+
+    yield* Effect.tryPromise(() =>
+      db
+        .prepare(
+          `UPDATE telegram_link_codes
+           SET used_at = CURRENT_TIMESTAMP
+           WHERE user_id = ? AND used_at IS NULL`,
+        )
+        .bind(userId)
+        .run(),
+    );
 
     yield* Effect.tryPromise(() =>
       db
         .prepare("INSERT INTO telegram_link_codes (code, user_id, expires_at) VALUES (?, ?, ?)")
-        .bind(code, userId, expiresAt)
+        .bind(code, userId, expiresAtEpoch)
         .run(),
     );
 
-    return { code, expiresAt };
+    // expiresAt stays an ISO string in the API response — the CLI parses it
+    // with new Date() to display the remaining time.
+    return { code, expiresAt: new Date(expiresAtEpoch * 1000).toISOString() };
   });
 
 // Health check
@@ -314,7 +347,7 @@ const registerTelegramHandler = (db: D1Database, telegramId: string, firstName: 
     }
 
     const userId = generateId();
-    const apiKey = `sk-prism-${generateId()}`;
+    const apiKey = generateApiKey();
     const keyHash = yield* hashKey(apiKey);
 
     yield* Effect.tryPromise(() =>
@@ -392,6 +425,11 @@ app.post("/v1/register", async (c) => {
     yield* Effect.tryPromise(() => CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }));
 
     if (body.telegram_id) {
+      // Binding a telegram_id to a fresh account is a bot-only flow — without
+      // the shared secret anyone could squat arbitrary Telegram identities.
+      if (!isBotAuthorized(c.env, c.req.header("X-Bot-Api-Secret"))) {
+        return c.json({ error: "Unauthorized" }, 401);
+      }
       if (!/^\d+$/.test(body.telegram_id)) {
         return c.json({ error: "Invalid telegram_id format. Must be numeric." }, 400);
       }
@@ -473,8 +511,12 @@ app.post("/v1/link-telegram/start", async (c) => {
   );
 });
 
+const LINK_CONFIRM_RATE_LIMIT_PER_HOUR = 10;
+const LINK_CODE_MAX_ATTEMPTS = 5;
+
 app.post("/v1/link-telegram/confirm", async (c) => {
-  const { DB } = c.env;
+  const { DB, CACHE } = c.env;
+  const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
   const body = await Effect.runPromise(readJsonBody<{ code: string; telegram_id: string }>(c.req));
 
   if (!body.code || !body.telegram_id) {
@@ -485,42 +527,61 @@ app.post("/v1/link-telegram/confirm", async (c) => {
     return c.json({ error: "Invalid telegram_id format. Must be numeric." }, 400);
   }
 
+  // Brute-force defense: every attempt counts against the per-IP budget,
+  // not just successful ones, so guessing codes is capped at 10/hour.
+  const rateKey = `rate_limit:link_confirm:${clientIp}`;
+  const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
+  const rateCount = rateData ? parseInt(rateData, 10) : 0;
+  if (rateCount >= LINK_CONFIRM_RATE_LIMIT_PER_HOUR) {
+    return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
+  }
+  await Effect.runPromise(cachePut(CACHE, rateKey, String(rateCount + 1), { expirationTtl: 3600 }));
+
   const linking = Effect.gen(function* () {
+    const codeRow = yield* Effect.tryPromise(() =>
+      DB.prepare(
+        `SELECT user_id, expires_at, used_at, attempts
+         FROM telegram_link_codes
+         WHERE code = ?`,
+      )
+        .bind(body.code)
+        .first(),
+    );
+
+    if (!codeRow) return c.json({ error: "Invalid code" }, 400);
+
+    // 5-strike burn: a code that absorbs too many confirm attempts is dead.
+    const attempts = typeof codeRow.attempts === "number" ? codeRow.attempts : 0;
+    if (attempts >= LINK_CODE_MAX_ATTEMPTS) {
+      return c.json({ error: "Too many attempts for this code" }, 429);
+    }
+    yield* Effect.tryPromise(() =>
+      DB.prepare("UPDATE telegram_link_codes SET attempts = attempts + 1 WHERE code = ?")
+        .bind(body.code)
+        .run(),
+    );
+
+    if (codeRow.used_at) return c.json({ error: "Code already used" }, 400);
+    const expiresAt = typeof codeRow.expires_at === "number" ? codeRow.expires_at : 0;
+    if (expiresAt <= Math.floor(Date.now() / 1000)) {
+      return c.json({ error: "Code expired" }, 400);
+    }
+
     const updateResult = yield* Effect.tryPromise(() =>
       DB.prepare(
         `UPDATE telegram_link_codes
          SET used_at = CURRENT_TIMESTAMP
-         WHERE code = ?
-           AND used_at IS NULL
-           AND expires_at > CURRENT_TIMESTAMP`,
+         WHERE code = ? AND used_at IS NULL`,
       )
         .bind(body.code)
         .run(),
     );
 
     if (!updateResult.success || updateResult.meta.changes === 0) {
-      const codeResult = yield* Effect.tryPromise(() =>
-        DB.prepare(
-          `SELECT used_at, expires_at
-           FROM telegram_link_codes
-           WHERE code = ?`,
-        )
-          .bind(body.code)
-          .first(),
-      );
-
-      if (!codeResult) return c.json({ error: "Invalid code" }, 400);
-      if (codeResult.used_at) return c.json({ error: "Code already used" }, 400);
-      if (new Date(codeResult.expires_at as string) < new Date()) {
-        return c.json({ error: "Code expired" }, 400);
-      }
-      return c.json({ error: "Linking failed" }, 500);
+      return c.json({ error: "Code already used" }, 400);
     }
 
-    const codeResult = yield* Effect.tryPromise(() =>
-      DB.prepare(`SELECT user_id FROM telegram_link_codes WHERE code = ?`).bind(body.code).first(),
-    );
-    const userId = typeof codeResult?.user_id === "string" ? codeResult.user_id : null;
+    const userId = typeof codeRow.user_id === "string" ? codeRow.user_id : null;
     if (!userId) return c.json({ error: "Linking failed" }, 500);
 
     yield* Effect.tryPromise(() =>
@@ -540,6 +601,9 @@ app.post("/v1/link-telegram/confirm", async (c) => {
 
 app.post("/v1/whoami-telegram", async (c) => {
   const { DB } = c.env;
+  if (!isBotAuthorized(c.env, c.req.header("X-Bot-Api-Secret"))) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
   const body = await Effect.runPromise(readJsonBody<{ telegram_id?: string }>(c.req));
 
   if (!body.telegram_id) {
@@ -573,6 +637,9 @@ app.post("/v1/whoami-telegram", async (c) => {
 
 app.post("/v1/register-telegram", async (c) => {
   const { DB, CACHE } = c.env;
+  if (!isBotAuthorized(c.env, c.req.header("X-Bot-Api-Secret"))) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
   const clientIp = c.req.header("CF-Connecting-IP") || "unknown";
   const body = await Effect.runPromise(
     readJsonBody<{ telegram_id?: string; first_name?: string }>(c.req),
@@ -623,6 +690,9 @@ app.post("/v1/register-telegram", async (c) => {
 
 app.post("/v1/agent-status", async (c) => {
   const { DB } = c.env;
+  if (!isBotAuthorized(c.env, c.req.header("X-Bot-Api-Secret"))) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
   const body = await Effect.runPromise(readJsonBody<{ telegram_id?: string }>(c.req));
 
   if (!body.telegram_id) {
@@ -1626,19 +1696,30 @@ app.post("/v1/revenue/log", async (c) => {
     }>(c.req),
   );
 
-  if (
-    typeof body.poolAddress !== "string" ||
-    body.poolAddress.length === 0 ||
-    typeof body.platformFeeX !== "number" ||
-    typeof body.platformFeeY !== "number"
-  ) {
-    return c.json(
-      {
-        error:
-          "Missing required fields: poolAddress (string), platformFeeX (number), platformFeeY (number)",
-      },
-      400,
-    );
+  if (typeof body.poolAddress !== "string" || body.poolAddress.length === 0) {
+    return c.json({ error: "Missing required field: poolAddress (string)" }, 400);
+  }
+
+  // Every numeric field must be a finite, non-negative number. Negative or
+  // non-finite fees would corrupt revenue accounting.
+  const numericFields: Array<readonly [string, number | undefined, boolean]> = [
+    ["platformFeeX", body.platformFeeX, true],
+    ["platformFeeY", body.platformFeeY, true],
+    ["feeX", body.feeX, false],
+    ["feeY", body.feeY, false],
+    ["operatorFeeX", body.operatorFeeX, false],
+    ["operatorFeeY", body.operatorFeeY, false],
+  ];
+  for (const [name, value, required] of numericFields) {
+    if (value === undefined) {
+      if (required) {
+        return c.json({ error: `Missing required field: ${name} (number)` }, 400);
+      }
+      continue;
+    }
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      return c.json({ error: `Invalid ${name}: must be a finite, non-negative number` }, 400);
+    }
   }
 
   if (CACHE) {
