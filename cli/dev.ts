@@ -7,6 +7,15 @@ interface DevCommandOptions {
   exitLive: boolean;
 }
 
+// Telemetry must never block agent startup — degrade to a warning when the
+// API is unreachable so offline work keeps running.
+export async function reportDevStartTelemetry(userId: string): Promise<void> {
+  if (!(await pingInstall("dev_start", { userId }))) {
+    console.warn("⚠️  Prism telemetry is unavailable; continuing without telemetry.");
+    console.warn("Run 'prism doctor' to diagnose the account and API connection.");
+  }
+}
+
 export const devCommand = new Command("dev")
   .description("Start the trading agent")
   .option(
@@ -23,11 +32,7 @@ export const devCommand = new Command("dev")
       process.exit(1);
     }
 
-    if (!(await pingInstall("dev_start", { userId: creds.userId }))) {
-      console.error("Error: Prism telemetry is unavailable; refusing to start the agent.");
-      console.error("Run 'prism doctor' to diagnose the account and API connection.");
-      process.exit(1);
-    }
+    await reportDevStartTelemetry(creds.userId);
 
     const lock = acquireLock();
     if (!lock.acquired) {

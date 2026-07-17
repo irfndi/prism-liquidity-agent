@@ -6,6 +6,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -634,8 +635,7 @@ export const updateCommand = new Command("update")
         return;
       }
 
-      workDir = join(tmpdir(), `prism-update-${Date.now()}`);
-      mkdirSync(workDir, { recursive: true });
+      workDir = mkdtempSync(join(tmpdir(), "prism-update-"));
 
       const installRoot = resolveInstallRoot();
       const fromSource = isSourceInstall(installRoot);

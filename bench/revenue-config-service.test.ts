@@ -203,6 +203,41 @@ describe("RevenueConfigService — refreshConfig", () => {
   });
 });
 
+// ─── fetch timeout ───────────────────────────────────────────────────────────
+
+describe("RevenueConfigService — fetch timeout", () => {
+  it("passes an AbortSignal timeout to the config API fetch", async () => {
+    const config = {
+      tier: "pro",
+      platformFeeRate: 0.05,
+      revenueShareEnabled: true,
+      revenueShareOperatorPct: 0.2,
+      feeWalletAddress: "TimeoutWallet11111111111111111111111111111",
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(config),
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    mockCredentialsFile();
+    const layer = buildLayer();
+
+    await Effect.runPromise(
+      Effect.provide(
+        Effect.gen(function* () {
+          const svc = yield* RevenueConfigService;
+          return yield* svc.getConfig();
+        }),
+        layer,
+      ),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = fetchMock.mock.calls[0]?.[1] as { signal?: AbortSignal } | undefined;
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
 // ─── In-memory cache within TTL ─────────────────────────────────────────────
 
 describe("RevenueConfigService — in-memory cache within TTL", () => {

@@ -136,7 +136,7 @@ Common agent commands:
 | `prism feedback "..."`                                          | Store structured feedback in Prism Cloud D1                      |
 | `prism issue "..."`                                             | Store an issue in Prism Cloud D1                                  |
 | `prism whoami`                                                   | Show current user / API key info (requires `register`)            |
-| `prism link-telegram`                                            | Issue a 6-char code to link `@prism_agent_bot` (optional)         |
+| `prism link-telegram`                                            | Issue a `LINK-<16 hex>` code to link `@prism_agent_bot` (optional)  |
 | `prism update`                                                   | Self-update from R2/GitHub releases (with smoke tests + rollback) |
 | `prism wallet {generate,import,show}`                            | Non-custodial local keypair (required for live trading)           |
 
