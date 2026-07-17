@@ -245,6 +245,7 @@ describe("buildProposalPrompt", () => {
       },
       warnings: [],
       recentDecisions: [],
+      hasOpenPosition: decision.action === "REBALANCE" || decision.action === "EXIT",
     }) as unknown as AgentRuntimeContext;
 
   it("embeds the current ENTER size in the decision block and response template", () => {

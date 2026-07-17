@@ -319,7 +319,10 @@ export function evaluateAgentProposal(
   const adjustedDecision: AgentDecision = {
     action: proposal.action,
     poolAddress: proposal.poolAddress,
-    confidence: proposal.confidence,
+    // A preserve-original waiver keeps the trusted original confidence so a
+    // rounded prompt echo cannot promote a sub-threshold decision into an
+    // execution-approved one.
+    confidence: preservesOriginalDecision ? original.confidence : proposal.confidence,
     reasoning: proposal.reasoning,
     ...(adjustedPositionSizeUsd !== undefined && { positionSizeUsd: adjustedPositionSizeUsd }),
     ...(proposal.rebalanceParams !== undefined && { rebalanceParams: proposal.rebalanceParams }),

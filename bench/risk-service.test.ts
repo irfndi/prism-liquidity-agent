@@ -196,6 +196,32 @@ describe("evaluateAgentProposal", () => {
     expect(result.adjustedDecision?.confidence).toBe(0.5);
   });
 
+  it("keeps the original confidence for a preserve-original waiver echo", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "ENTER",
+        poolAddress: "pool1",
+        confidence: 0.65,
+        originalAction: "ENTER",
+        originalConfidence: 0.646,
+        positionSizeUsd: 1_000,
+      }),
+      makeContext({
+        originalDecision: {
+          action: "ENTER",
+          poolAddress: "pool1",
+          confidence: 0.646,
+          reasoning: "deterministic",
+          positionSizeUsd: 1_000,
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.adjustedDecision?.action).toBe("ENTER");
+    expect(result.adjustedDecision?.confidence).toBe(0.646);
+  });
+
   it("applies the confidence floor to a HOLD echo without a trusted original decision", () => {
     const result = evaluateAgentProposal(
       makeProposal({
@@ -685,6 +711,7 @@ describe("proposal template echo end-to-end", () => {
       },
       warnings: [],
       recentDecisions: [],
+      hasOpenPosition: decision.action === "REBALANCE" || decision.action === "EXIT",
     }) as unknown as AgentRuntimeContext;
 
   // Simulate a faithful advisor: take the prompt's response template and

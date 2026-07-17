@@ -47,7 +47,7 @@ function makeContext(): AgentRuntimeContext {
   const warnings: MemoryEntry[] = [];
   const recentDecisions: DecisionRecord[] = [];
 
-  return { decision, pool, metrics, warnings, recentDecisions };
+  return { decision, pool, metrics, warnings, recentDecisions, hasOpenPosition: false };
 }
 
 describe("OpenClawWebhookTransport", () => {
