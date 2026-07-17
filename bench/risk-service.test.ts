@@ -693,7 +693,7 @@ describe("proposal template echo end-to-end", () => {
     const prompt = buildProposalPrompt(decision, makePromptCtx(decision));
     const template = prompt.slice(prompt.indexOf('{"action"'), prompt.lastIndexOf("}") + 1);
     const json = template
-      .replace('"HOLD|REBALANCE|EXIT|ENTER"', `"${decision.action}"`)
+      .replace(/"action": "[^"]+"/, `"action": "${decision.action}"`)
       .replace("0.0-1.0", String(decision.confidence));
     return Effect.runSync(parseProposalResponse(json, decision.action));
   };

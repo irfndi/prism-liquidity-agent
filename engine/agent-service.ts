@@ -135,10 +135,20 @@ export function buildProposalPrompt(decision: AgentDecision, ctx: AgentRuntimeCo
     .filter((line): line is string => line !== null)
     .join("\n");
 
+  // Mirror the validator's action limits so compliant advisors are not
+  // penalized for impossible promotions or downgrades.
+  const allowedActions =
+    decision.action === "EXIT"
+      ? ["EXIT"]
+      : decision.action === "ENTER"
+        ? ["HOLD", "REBALANCE", "EXIT", "ENTER"]
+        : ["HOLD", "REBALANCE", "EXIT"];
+  const allowedActionsText = allowedActions.join(", ");
+
   return `You are a liquidity pool strategy advisor. Review the deterministic agent's decision and propose the best action for this pool.
 
 RULES (strict — you must follow them):
-- You may propose any of: HOLD, REBALANCE, EXIT, ENTER.
+- You may propose only: ${allowedActionsText}.
 - The engine will validate your proposal against safety gates; only safe proposals execute.
 - ENTER proposals require positionSizeUsd (USD); REBALANCE proposals require rebalanceParams.
 - When echoing the engine's action, reuse the current executable values shown below — do not invent new ones.
@@ -168,7 +178,7 @@ RECENT DECISIONS:
 ${decisionsBlock}
 
 Respond with JSON only:
-{"action": "HOLD|REBALANCE|EXIT|ENTER", "poolAddress": "${pool.address}", "confidence": 0.0-1.0, "positionSizeUsd": ${decision.positionSizeUsd ?? 100}, "rebalanceParams": {"lowerBinId": ${decision.rebalanceParams?.newLowerBinId ?? 100}, "upperBinId": ${decision.rebalanceParams?.newUpperBinId ?? 110}}, "reasoning": "..."}
+{"action": "${allowedActions.join("|")}", "poolAddress": "${pool.address}", "confidence": 0.0-1.0, "positionSizeUsd": ${decision.positionSizeUsd ?? 100}, "rebalanceParams": {"lowerBinId": ${decision.rebalanceParams?.newLowerBinId ?? 100}, "upperBinId": ${decision.rebalanceParams?.newUpperBinId ?? 110}}, "reasoning": "..."}
 `;
 }
 

@@ -276,6 +276,29 @@ describe("buildProposalPrompt", () => {
     expect(prompt).toContain('"positionSizeUsd": 100');
     expect(prompt).toContain('"lowerBinId": 100, "upperBinId": 110');
   });
+
+  it("limits allowed actions for a deterministic HOLD decision", () => {
+    const decision = makeDecision({ action: "HOLD" });
+    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    expect(prompt).toContain("You may propose only: HOLD, REBALANCE, EXIT.");
+    expect(prompt).toContain('"action": "HOLD|REBALANCE|EXIT"');
+    expect(prompt).not.toContain('"action": "HOLD|REBALANCE|EXIT|ENTER"');
+  });
+
+  it("limits allowed actions for a deterministic EXIT decision", () => {
+    const decision = makeDecision({ action: "EXIT" });
+    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    expect(prompt).toContain("You may propose only: EXIT.");
+    expect(prompt).toContain('"action": "EXIT"');
+    expect(prompt).not.toContain('"action": "HOLD|REBALANCE|EXIT"');
+  });
+
+  it("allows all actions for a deterministic ENTER decision", () => {
+    const decision = makeDecision({ action: "ENTER", positionSizeUsd: 1_000 });
+    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    expect(prompt).toContain("You may propose only: HOLD, REBALANCE, EXIT, ENTER.");
+    expect(prompt).toContain('"action": "HOLD|REBALANCE|EXIT|ENTER"');
+  });
 });
 
 describe("transport factories", () => {
