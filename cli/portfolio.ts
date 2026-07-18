@@ -1,8 +1,9 @@
 import { Command } from "commander";
 import { Effect, Layer } from "effect";
 import { DbLive } from "../engine/db-service.js";
-import { DbService } from "../engine/services.js";
+import { DbService, type DbApi } from "../engine/services.js";
 import type { PositionRecord } from "../engine/db-service.js";
+import { computePositionAnalytics } from "../engine/pnl.js";
 import { createLogger } from "../engine/logger.js";
 import { getPrismDbPath } from "../engine/paths.js";
 
@@ -17,13 +18,15 @@ export interface PortfolioSummary {
   totalCurrentValueUsd: number;
   totalUnrealizedPnlUsd: number;
   totalUnrealizedPnlPct: number;
+  totalFeesClaimedUsd: number;
   positionCount: number;
 }
 
 export function computeSummary(positions: ReadonlyArray<PositionRecord>): PortfolioSummary {
   const totalDepositedUsd = positions.reduce((sum, p) => sum + p.depositedUsd, 0);
   const totalCurrentValueUsd = positions.reduce((sum, p) => sum + p.currentValueUsd, 0);
-  const totalUnrealizedPnlUsd = totalCurrentValueUsd - totalDepositedUsd;
+  const totalFeesClaimedUsd = positions.reduce((sum, p) => sum + p.cumulativeFeesClaimedUsd, 0);
+  const totalUnrealizedPnlUsd = totalCurrentValueUsd + totalFeesClaimedUsd - totalDepositedUsd;
   const totalUnrealizedPnlPct =
     totalDepositedUsd > 0 ? (totalUnrealizedPnlUsd / totalDepositedUsd) * 100 : 0;
 
@@ -32,6 +35,7 @@ export function computeSummary(positions: ReadonlyArray<PositionRecord>): Portfo
     totalCurrentValueUsd,
     totalUnrealizedPnlUsd,
     totalUnrealizedPnlPct,
+    totalFeesClaimedUsd,
     positionCount: positions.length,
   };
 }
@@ -64,21 +68,46 @@ function colorize(text: string, colorCode: string): string {
   return `${colorCode}${text}\x1b[0m`;
 }
 
-function formatPosition(pos: PositionRecord): string {
-  const { pnlUsd, pnlPct } = computePnl(pos.depositedUsd, pos.currentValueUsd);
-  const pnlText = `${formatCurrency(pnlUsd)} (${formatPct(pnlPct)})`;
-  const coloredPnl = colorize(pnlText, pnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m");
+export function formatPosition(pos: PositionRecord, currentPriceUsd: number | null): string {
+  const analytics = computePositionAnalytics(
+    {
+      depositedUsd: pos.depositedUsd,
+      currentValueUsd: pos.currentValueUsd,
+      cumulativeFeesClaimedUsd: pos.cumulativeFeesClaimedUsd,
+      entryPriceUsd: pos.entryPriceUsd,
+      entryAmountXUsd: pos.entryAmountXUsd,
+      entryAmountYUsd: pos.entryAmountYUsd,
+      openedAtMs: pos.timestamp,
+      outOfRangeSinceMs: pos.outOfRangeSince,
+    },
+    currentPriceUsd,
+    Date.now(),
+  );
+  const pnlText = `${formatCurrency(analytics.unrealizedPnlUsd)} (${formatPct(analytics.unrealizedPnlPct)})`;
+  const coloredPnl = colorize(pnlText, analytics.unrealizedPnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m");
 
   const poolName = `${pos.tokenXSymbol}/${pos.tokenYSymbol}`;
   const range = `[${pos.lowerBinId}–${pos.upperBinId}]`;
   const age = formatAge(pos.timestamp);
+  const ilText =
+    analytics.ilVsHodlUsd != null
+      ? colorize(
+          `${analytics.ilVsHodlUsd >= 0 ? "+" : ""}${formatCurrency(analytics.ilVsHodlUsd)}`,
+          analytics.ilVsHodlUsd >= 0 ? "\x1b[32m" : "\x1b[31m",
+        )
+      : "n/a";
+  const inRangeText =
+    analytics.timeInRangePct != null ? `${analytics.timeInRangePct.toFixed(1)}%` : "n/a";
 
   return [
     `  ${poolName} ${range}`,
-    `    Pool:     ${pos.poolAddress}`,
+    `    Pool:       ${pos.poolAddress}`,
     `    Deposited:  ${formatCurrency(pos.depositedUsd)}`,
     `    Current:    ${formatCurrency(pos.currentValueUsd)}`,
     `    P&L:        ${coloredPnl}`,
+    `    Fees:       ${formatCurrency(analytics.feesClaimedUsd)}`,
+    `    IL vs HODL: ${ilText}`,
+    `    In range:   ${inRangeText}`,
     `    Active bin: ${pos.activeBinId}`,
     `    Age:        ${age}`,
     pos.outOfRangeSince != null ? `    ⚠ Out of range since ${formatAge(pos.outOfRangeSince)}` : "",
@@ -112,14 +141,18 @@ function formatSummary(summary: PortfolioSummary): string {
   return [
     "Portfolio Summary",
     "=================",
-    `  Positions:     ${summary.positionCount}`,
+    `  Positions:        ${summary.positionCount}`,
     `  Total Deposited:  ${formatCurrency(summary.totalDepositedUsd)}`,
     `  Total Current:    ${formatCurrency(summary.totalCurrentValueUsd)}`,
+    `  Fees Claimed:     ${formatCurrency(summary.totalFeesClaimedUsd)}`,
     `  Unrealized P&L:   ${coloredPnl}`,
   ].join("\n");
 }
 
-function formatPositionsList(positions: ReadonlyArray<PositionRecord>): string {
+function formatPositionsList(
+  positions: ReadonlyArray<PositionRecord>,
+  prices: ReadonlyMap<string, number>,
+): string {
   if (positions.length === 0) {
     return "No active positions.\n";
   }
@@ -129,11 +162,18 @@ function formatPositionsList(positions: ReadonlyArray<PositionRecord>): string {
   lines.push("=".repeat(40));
 
   for (const pos of positions) {
-    lines.push(formatPosition(pos));
+    lines.push(formatPosition(pos, prices.get(pos.poolAddress) ?? null));
     lines.push("");
   }
 
   return lines.join("\n");
+}
+
+function realizedPnlFor(pos: PositionRecord): { pnlUsd: number; pnlPct: number } {
+  const pnlUsd =
+    pos.realizedPnlUsd ?? pos.currentValueUsd + pos.cumulativeFeesClaimedUsd - pos.depositedUsd;
+  const pnlPct = pos.depositedUsd > 0 ? (pnlUsd / pos.depositedUsd) * 100 : 0;
+  return { pnlUsd, pnlPct };
 }
 
 function formatHistoryList(positions: ReadonlyArray<PositionRecord>): string {
@@ -146,18 +186,18 @@ function formatHistoryList(positions: ReadonlyArray<PositionRecord>): string {
   lines.push("=".repeat(40));
 
   for (const pos of positions) {
-    const { pnlUsd, pnlPct } = computePnl(pos.depositedUsd, pos.currentValueUsd);
+    const { pnlUsd, pnlPct } = realizedPnlFor(pos);
     const pnlText = `${formatCurrency(pnlUsd)} (${formatPct(pnlPct)})`;
     const coloredPnl = colorize(pnlText, pnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m");
+    const exitedAt = pos.closedAt ?? pos.paperExitedAt;
 
     lines.push(`  ${pos.tokenXSymbol}/${pos.tokenYSymbol}`);
-    lines.push(`    Pool:      ${pos.poolAddress}`);
+    lines.push(`    Pool:       ${pos.poolAddress}`);
     lines.push(`    Deposited:  ${formatCurrency(pos.depositedUsd)}`);
     lines.push(`    Exit Value: ${formatCurrency(pos.currentValueUsd)}`);
+    lines.push(`    Fees:       ${formatCurrency(pos.cumulativeFeesClaimedUsd)}`);
     lines.push(`    Realized P&L: ${coloredPnl}`);
-    lines.push(
-      `    Exited:     ${pos.paperExitedAt != null ? new Date(pos.paperExitedAt).toISOString() : "N/A"}`,
-    );
+    lines.push(`    Exited:     ${exitedAt != null ? new Date(exitedAt).toISOString() : "N/A"}`);
     lines.push("");
   }
 
@@ -173,6 +213,12 @@ export interface PortfolioJsonOutput {
     currentValueUsd: number;
     unrealizedPnlUsd: number;
     unrealizedPnlPct: number;
+    entryPriceUsd: number | null;
+    feesClaimedUsd: number;
+    hodlValueUsd: number | null;
+    ilVsHodlUsd: number | null;
+    timeInRangePct: number | null;
+    feeAprPct: number | null;
     activeBinId: number;
     lowerBinId: number;
     upperBinId: number;
@@ -183,18 +229,40 @@ export interface PortfolioJsonOutput {
   summary: PortfolioSummary;
 }
 
-export function toJsonOutput(positions: ReadonlyArray<PositionRecord>): PortfolioJsonOutput {
+export function toJsonOutput(
+  positions: ReadonlyArray<PositionRecord>,
+  prices: ReadonlyMap<string, number> = new Map(),
+): PortfolioJsonOutput {
   return {
     positions: positions.map((pos) => {
-      const { pnlUsd, pnlPct } = computePnl(pos.depositedUsd, pos.currentValueUsd);
+      const analytics = computePositionAnalytics(
+        {
+          depositedUsd: pos.depositedUsd,
+          currentValueUsd: pos.currentValueUsd,
+          cumulativeFeesClaimedUsd: pos.cumulativeFeesClaimedUsd,
+          entryPriceUsd: pos.entryPriceUsd,
+          entryAmountXUsd: pos.entryAmountXUsd,
+          entryAmountYUsd: pos.entryAmountYUsd,
+          openedAtMs: pos.timestamp,
+          outOfRangeSinceMs: pos.outOfRangeSince,
+        },
+        prices.get(pos.poolAddress) ?? null,
+        Date.now(),
+      );
       return {
         poolAddress: pos.poolAddress,
         poolName: `${pos.tokenXSymbol}/${pos.tokenYSymbol}`,
         positionPubKey: pos.positionPubKey,
         depositedUsd: pos.depositedUsd,
         currentValueUsd: pos.currentValueUsd,
-        unrealizedPnlUsd: pnlUsd,
-        unrealizedPnlPct: pnlPct,
+        unrealizedPnlUsd: analytics.unrealizedPnlUsd,
+        unrealizedPnlPct: analytics.unrealizedPnlPct,
+        entryPriceUsd: pos.entryPriceUsd,
+        feesClaimedUsd: analytics.feesClaimedUsd,
+        hodlValueUsd: analytics.hodlValueUsd,
+        ilVsHodlUsd: analytics.ilVsHodlUsd,
+        timeInRangePct: analytics.timeInRangePct,
+        feeAprPct: analytics.feeAprPct,
         activeBinId: pos.activeBinId,
         lowerBinId: pos.lowerBinId,
         upperBinId: pos.upperBinId,
@@ -213,8 +281,10 @@ export interface HistoryJsonOutput {
     poolName: string;
     depositedUsd: number;
     exitValueUsd: number;
+    feesClaimedUsd: number;
     realizedPnlUsd: number;
     realizedPnlPct: number;
+    closedAt: number | null;
     paperExitedAt: number | null;
   }>;
   summary: PortfolioSummary;
@@ -223,14 +293,16 @@ export interface HistoryJsonOutput {
 export function toHistoryJsonOutput(positions: ReadonlyArray<PositionRecord>): HistoryJsonOutput {
   return {
     positions: positions.map((pos) => {
-      const { pnlUsd, pnlPct } = computePnl(pos.depositedUsd, pos.currentValueUsd);
+      const { pnlUsd, pnlPct } = realizedPnlFor(pos);
       return {
         poolAddress: pos.poolAddress,
         poolName: `${pos.tokenXSymbol}/${pos.tokenYSymbol}`,
         depositedUsd: pos.depositedUsd,
         exitValueUsd: pos.currentValueUsd,
+        feesClaimedUsd: pos.cumulativeFeesClaimedUsd,
         realizedPnlUsd: pnlUsd,
         realizedPnlPct: pnlPct,
+        closedAt: pos.closedAt,
         paperExitedAt: pos.paperExitedAt,
       };
     }),
@@ -275,13 +347,14 @@ portfolioCommand.action(async function (this: Command, opts: { json?: boolean })
       Effect.gen(function* () {
         const db = yield* DbService;
         const positions = yield* db.getAllPositions();
+        const prices = yield* latestPrices(db, positions);
 
         if (isJson) {
-          console.log(JSON.stringify(toJsonOutput(positions), null, 2));
+          console.log(JSON.stringify(toJsonOutput(positions, prices), null, 2));
           return;
         }
 
-        console.log(formatPositionsList(positions));
+        console.log(formatPositionsList(positions, prices));
         console.log(formatSummary(computeSummary(positions)));
       }).pipe(Effect.provide(program)),
     );
@@ -330,7 +403,7 @@ portfolioCommand
       await Effect.runPromise(
         Effect.gen(function* () {
           const db = yield* DbService;
-          const positions = yield* db.getPaperExitedPositions();
+          const positions = yield* db.getClosedPositions();
 
           if (isJson) {
             console.log(JSON.stringify(toHistoryJsonOutput(positions), null, 2));
@@ -342,3 +415,19 @@ portfolioCommand
       );
     });
   });
+
+function latestPrices(
+  db: DbApi,
+  positions: ReadonlyArray<PositionRecord>,
+): Effect.Effect<ReadonlyMap<string, number>, never, never> {
+  return Effect.gen(function* () {
+    const prices = new Map<string, number>();
+    for (const pos of positions) {
+      const price = yield* db
+        .getLatestSnapshotPrice(pos.poolAddress)
+        .pipe(Effect.catchAll(() => Effect.succeed(null)));
+      if (price != null) prices.set(pos.poolAddress, price);
+    }
+    return prices;
+  });
+}

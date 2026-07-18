@@ -74,6 +74,13 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
           const summary = computeSummary(positions);
 
           const activePositions = positions.filter((p) => p.paperExitedAt === null);
+          const prices = new Map<string, number>();
+          for (const pos of activePositions) {
+            const price = yield* db
+              .getLatestSnapshotPrice(pos.poolAddress)
+              .pipe(Effect.catchAll(() => Effect.succeed(null)));
+            if (price != null) prices.set(pos.poolAddress, price);
+          }
           const hasDb = positions.length > 0 || recentAudit.length > 0;
           const lastActivityAt = recentAudit[0]?.timestamp ?? 0;
           const lock = readLockfile();
@@ -97,7 +104,7 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
                 checkinOnEvents: config.agentCheckinOnEvents,
               },
               portfolio: summary,
-              positions: toJsonOutput(activePositions).positions,
+              positions: toJsonOutput(activePositions, prices).positions,
               recentDecisions: recentAudit.slice(0, 10).map((d) => ({
                 timestamp: new Date(d.timestamp).toISOString(),
                 action: d.action,
@@ -135,6 +142,7 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
               `Positions: ${activePositions.length} active`,
               `Deposited: $${summary.totalDepositedUsd.toFixed(2)}`,
               `Current:   $${summary.totalCurrentValueUsd.toFixed(2)}`,
+              `Fees:      $${summary.totalFeesClaimedUsd.toFixed(2)}`,
               `Unrealized: ${pnlEmoji} $${summary.totalUnrealizedPnlUsd.toFixed(2)} (${summary.totalUnrealizedPnlPct.toFixed(2)}%)`,
               "",
               "*Open positions*",
@@ -163,6 +171,7 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
               `  Positions:   ${activePositions.length} active`,
               `  Deposited:   $${summary.totalDepositedUsd.toFixed(2)}`,
               `  Current:     $${summary.totalCurrentValueUsd.toFixed(2)}`,
+              `  Fees:        $${summary.totalFeesClaimedUsd.toFixed(2)}`,
               `  Unrealized:  ${pnlText}`,
               `  ${agentStatus}`,
               "",

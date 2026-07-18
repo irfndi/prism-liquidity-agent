@@ -39,6 +39,7 @@ import { shouldDiscoverPools } from "./pool-policy.js";
 
 import { checkForAutoUpdate } from "./update-check.js";
 import type { PositionRecord } from "./db-service.js";
+import { applyCompoundToCostBasis, computeRealizedPnlUsd } from "./pnl.js";
 import { BlacklistError, DiscoverPoolsError } from "./errors.js";
 import {
   GAS_TOP_UP_USDC,
@@ -418,6 +419,12 @@ export function reconcilePositions(
             paperExitedAt: null,
             entrySignalTimestamp: null,
             entrySignalSnapshotId: null,
+            entryPriceUsd: null,
+            entryAmountXUsd: null,
+            entryAmountYUsd: null,
+            cumulativeFeesClaimedUsd: 0,
+            closedAt: null,
+            realizedPnlUsd: null,
           };
           trackedPositions.set(onChainPos.poolAddress, pos);
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
@@ -548,7 +555,13 @@ export function executePaper(
     trackedPositions: Map<string, PositionRecord>;
   },
   decision: AgentDecision,
-  pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
+  pool: {
+    activeBinId: number;
+    binStep: number;
+    tokenXSymbol: string;
+    tokenYSymbol: string;
+    currentPrice: number;
+  },
   signalTimestamp?: number,
   signalSnapshotId?: number,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never> {
@@ -578,9 +591,28 @@ export function executePaper(
         paperExitedAt: liveExited ? existing!.paperExitedAt : null,
         entrySignalTimestamp: signalTimestamp ?? null,
         entrySignalSnapshotId: signalSnapshotId ?? null,
+        entryPriceUsd: pool.currentPrice,
+        entryAmountXUsd: decision.positionSizeUsd / 2,
+        entryAmountYUsd: decision.positionSizeUsd / 2,
+        cumulativeFeesClaimedUsd: 0,
+        closedAt: null,
+        realizedPnlUsd: null,
       };
       trackedPositions.set(decision.poolAddress, pos);
       yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+      yield* db
+        .savePositionEvent({
+          id: randomUUID(),
+          poolAddress: decision.poolAddress,
+          positionPubKey: pos.positionPubKey,
+          event: "ENTER",
+          valueUsd: decision.positionSizeUsd,
+          feesUsd: null,
+          price: pool.currentPrice,
+          metadata: { lowerBinId: pos.lowerBinId, upperBinId: pos.upperBinId },
+          createdAt: Date.now(),
+        })
+        .pipe(Effect.catchAll(() => Effect.void));
     } else if (decision.action === "EXIT") {
       const pos = trackedPositions.get(decision.poolAddress);
       if (pos?.positionPubKey) {
@@ -601,6 +633,29 @@ export function executePaper(
           .recordSignalOutcome(pos.entrySignalSnapshotId, pnlUsd)
           .pipe(Effect.catchAll(() => Effect.void));
       }
+      if (pos) {
+        const realizedPnlUsd = computeRealizedPnlUsd(
+          pos.currentValueUsd,
+          pos.cumulativeFeesClaimedUsd,
+          pos.depositedUsd,
+        );
+        yield* db
+          .savePositionEvent({
+            id: randomUUID(),
+            poolAddress: decision.poolAddress,
+            positionPubKey: pos.positionPubKey,
+            event: "EXIT",
+            valueUsd: pos.currentValueUsd,
+            feesUsd: pos.cumulativeFeesClaimedUsd,
+            price: pool.currentPrice,
+            metadata: { realizedPnlUsd },
+            createdAt: Date.now(),
+          })
+          .pipe(Effect.catchAll(() => Effect.void));
+        yield* db
+          .closePosition(decision.poolAddress, realizedPnlUsd)
+          .pipe(Effect.catchAll(() => Effect.void));
+      }
       yield* db.markPaperExited(decision.poolAddress).pipe(Effect.catchAll(() => Effect.void));
       trackedPositions.delete(decision.poolAddress);
     } else if (
@@ -617,6 +672,22 @@ export function executePaper(
       };
       trackedPositions.set(decision.poolAddress, updated);
       yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
+      yield* db
+        .savePositionEvent({
+          id: randomUUID(),
+          poolAddress: decision.poolAddress,
+          positionPubKey: updated.positionPubKey,
+          event: "REBALANCE",
+          valueUsd: updated.currentValueUsd,
+          feesUsd: null,
+          price: pool.currentPrice,
+          metadata: {
+            newLowerBinId: decision.rebalanceParams.newLowerBinId,
+            newUpperBinId: decision.rebalanceParams.newUpperBinId,
+          },
+          createdAt: Date.now(),
+        })
+        .pipe(Effect.catchAll(() => Effect.void));
     }
     return { executed: true, error: undefined };
   });
@@ -637,14 +708,22 @@ export function executeLive(
     revenueConfigSvc: RevenueConfigApi;
     trackedPositions: Map<string, PositionRecord>;
     entryPrep: EntryPrepApi;
+    solPriceUsd: number;
   },
   decision: AgentDecision,
-  pool: { activeBinId: number; binStep: number; tokenXSymbol: string; tokenYSymbol: string },
+  pool: {
+    activeBinId: number;
+    binStep: number;
+    tokenXSymbol: string;
+    tokenYSymbol: string;
+    currentPrice: number;
+  },
   signalTimestamp?: number,
   signalSnapshotId?: number,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never, never> {
   return Effect.gen(function* () {
-    const { adapter, strategy, db, revenueConfigSvc, trackedPositions, entryPrep } = deps;
+    const { adapter, strategy, db, revenueConfigSvc, trackedPositions, entryPrep, solPriceUsd } =
+      deps;
 
     if (!adapter.hasWallet()) {
       console.error("Live trading enabled but no wallet configured");
@@ -747,9 +826,32 @@ export function executeLive(
           paperExitedAt: null,
           entrySignalTimestamp: signalTimestamp ?? null,
           entrySignalSnapshotId: signalSnapshotId ?? null,
+          entryPriceUsd: pool.currentPrice,
+          entryAmountXUsd: decision.positionSizeUsd / 2,
+          entryAmountYUsd: decision.positionSizeUsd / 2,
+          cumulativeFeesClaimedUsd: 0,
+          closedAt: null,
+          realizedPnlUsd: null,
         };
         trackedPositions.set(decision.poolAddress, pos);
         yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+        yield* db
+          .savePositionEvent({
+            id: randomUUID(),
+            poolAddress: decision.poolAddress,
+            positionPubKey: pos.positionPubKey,
+            event: "ENTER",
+            valueUsd: decision.positionSizeUsd,
+            feesUsd: null,
+            price: pool.currentPrice,
+            metadata: {
+              lowerBinId: pos.lowerBinId,
+              upperBinId: pos.upperBinId,
+              txSignature: enterResult.result.txSignature,
+            },
+            createdAt: Date.now(),
+          })
+          .pipe(Effect.catchAll(() => Effect.void));
         return { executed: true, error: undefined };
       }
       return { executed: false, error: enterResult.error };
@@ -790,8 +892,30 @@ export function executeLive(
             .recordSignalOutcome(pos.entrySignalSnapshotId, pnlUsd)
             .pipe(Effect.catchAll(() => Effect.void));
         }
+        if (pos) {
+          const realizedPnlUsd = computeRealizedPnlUsd(
+            pos.currentValueUsd,
+            pos.cumulativeFeesClaimedUsd,
+            pos.depositedUsd,
+          );
+          yield* db
+            .savePositionEvent({
+              id: randomUUID(),
+              poolAddress: decision.poolAddress,
+              positionPubKey: pos.positionPubKey,
+              event: "EXIT",
+              valueUsd: pos.currentValueUsd,
+              feesUsd: pos.cumulativeFeesClaimedUsd,
+              price: pool.currentPrice,
+              metadata: { realizedPnlUsd },
+              createdAt: Date.now(),
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          yield* db
+            .closePosition(decision.poolAddress, realizedPnlUsd)
+            .pipe(Effect.catchAll(() => Effect.void));
+        }
         trackedPositions.delete(decision.poolAddress);
-        yield* db.deletePosition(decision.poolAddress).pipe(Effect.catchAll(() => Effect.void));
         return { executed: true, error: undefined };
       }
       return { executed: false, error: exitError };
@@ -833,6 +957,28 @@ export function executeLive(
               txSignature: claimResult.txSignature,
               feeTransferTxSignature: claimResult.feeTransferTxSignature ?? null,
               reportedToApi: false,
+              createdAt: Date.now(),
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+
+          const claimedFeesUsd = convertClaimFeesToUsd({
+            netFeeXRaw: claimResult.netFeeX,
+            netFeeYRaw: claimResult.netFeeY,
+            tokenXSymbol: pos.tokenXSymbol,
+            tokenYSymbol: pos.tokenYSymbol,
+            solPriceUsd,
+          });
+          pos.cumulativeFeesClaimedUsd += claimedFeesUsd;
+          yield* db
+            .savePositionEvent({
+              id: randomUUID(),
+              poolAddress: decision.poolAddress,
+              positionPubKey: pos.positionPubKey,
+              event: "CLAIM",
+              valueUsd: null,
+              feesUsd: claimedFeesUsd,
+              price: pool.currentPrice,
+              metadata: { txSignature: claimResult.txSignature },
               createdAt: Date.now(),
             })
             .pipe(Effect.catchAll(() => Effect.void));
@@ -911,6 +1057,22 @@ export function executeLive(
           };
           trackedPositions.set(decision.poolAddress, updated);
           yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
+          yield* db
+            .savePositionEvent({
+              id: randomUUID(),
+              poolAddress: decision.poolAddress,
+              positionPubKey: updated.positionPubKey,
+              event: "REBALANCE",
+              valueUsd: updated.currentValueUsd,
+              feesUsd: null,
+              price: pool.currentPrice,
+              metadata: {
+                newLowerBinId: decision.rebalanceParams.newLowerBinId,
+                newUpperBinId: decision.rebalanceParams.newUpperBinId,
+              },
+              createdAt: Date.now(),
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
           return { executed: true, error: undefined };
         }
         return { executed: false, error: rebalanceResult.error };
@@ -2939,7 +3101,15 @@ export const program = Effect.gen(function* () {
           `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${poolAddress}`,
         );
         const liveResult = yield* executeLive(
-          { adapter, strategy, db, revenueConfigSvc, trackedPositions, entryPrep },
+          {
+            adapter,
+            strategy,
+            db,
+            revenueConfigSvc,
+            trackedPositions,
+            entryPrep,
+            solPriceUsd: config.solPriceUsd,
+          },
           decision,
           pool,
           signalTimestamp,
@@ -2963,7 +3133,15 @@ export const program = Effect.gen(function* () {
         executionError = paperResult.error;
       } else {
         const liveResult = yield* executeLive(
-          { adapter, strategy, db, revenueConfigSvc, trackedPositions, entryPrep },
+          {
+            adapter,
+            strategy,
+            db,
+            revenueConfigSvc,
+            trackedPositions,
+            entryPrep,
+            solPriceUsd: config.solPriceUsd,
+          },
           decision,
           pool,
           signalTimestamp,
@@ -3087,6 +3265,14 @@ export const program = Effect.gen(function* () {
             continue;
           }
 
+          const netFeesUsd = convertClaimFeesToUsd({
+            netFeeXRaw: result.netFeeX,
+            netFeeYRaw: result.netFeeY,
+            tokenXSymbol: pos.tokenXSymbol,
+            tokenYSymbol: pos.tokenYSymbol,
+            solPriceUsd: config.solPriceUsd,
+          });
+
           yield* db
             .saveFeeClaim({
               id: randomUUID(),
@@ -3145,31 +3331,30 @@ export const program = Effect.gen(function* () {
           }
 
           pos.lastFeeClaimAt = Date.now();
+          pos.cumulativeFeesClaimedUsd += netFeesUsd;
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
 
-          yield* alertSvc.recordFeeClaim(
-            poolAddress,
-            convertClaimFeesToUsd({
-              netFeeXRaw: result.netFeeX,
-              netFeeYRaw: result.netFeeY,
-              tokenXSymbol: pos.tokenXSymbol,
-              tokenYSymbol: pos.tokenYSymbol,
-              solPriceUsd: config.solPriceUsd,
-            }),
-          );
+          yield* db
+            .savePositionEvent({
+              id: randomUUID(),
+              poolAddress,
+              positionPubKey: pos.positionPubKey,
+              event: "CLAIM",
+              valueUsd: null,
+              feesUsd: netFeesUsd,
+              price: null,
+              metadata: { txSignature: result.txSignature },
+              createdAt: Date.now(),
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+
+          yield* alertSvc.recordFeeClaim(poolAddress, netFeesUsd);
 
           // F3: fee compounding — if AUTO_COMPOUND_FEES is on and the net fees
           // cleared the cost threshold, redeposit them into the same range.
           // This closes + reopens the position around the same bins so the
           // claimed fees become new liquidity instead of sitting in the wallet.
           if (config.autoCompoundFees && config.paperTrading === false) {
-            const netFeesUsd = convertClaimFeesToUsd({
-              netFeeXRaw: result.netFeeX,
-              netFeeYRaw: result.netFeeY,
-              tokenXSymbol: pos.tokenXSymbol,
-              tokenYSymbol: pos.tokenYSymbol,
-              solPriceUsd: config.solPriceUsd,
-            });
             const rebalanceGasCostUsd = config.rebalanceGasCostSol * config.solPriceUsd;
             const compoundGate = evaluateCompoundGate({
               netFeesUsd,
@@ -3201,8 +3386,32 @@ export const program = Effect.gen(function* () {
               if (compoundResult) {
                 pos.positionPubKey = compoundResult.newPositionPubKey;
                 pos.lastRebalanceAt = Date.now();
-                pos.depositedUsd += netFeesUsd;
+                // Compounded fees become new cost basis; currentValue/highest
+                // adjust in lockstep so PnL and the trailing stop stay honest
+                // (see applyCompoundToCostBasis in engine/pnl.ts).
+                const compounded = applyCompoundToCostBasis({
+                  depositedUsd: pos.depositedUsd,
+                  currentValueUsd: pos.currentValueUsd,
+                  highestValueUsd: pos.highestValueUsd,
+                  compoundedFeesUsd: netFeesUsd,
+                });
+                pos.depositedUsd = compounded.depositedUsd;
+                pos.currentValueUsd = compounded.currentValueUsd;
+                pos.highestValueUsd = compounded.highestValueUsd;
                 yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+                yield* db
+                  .savePositionEvent({
+                    id: randomUUID(),
+                    poolAddress,
+                    positionPubKey: pos.positionPubKey,
+                    event: "COMPOUND",
+                    valueUsd: netFeesUsd,
+                    feesUsd: null,
+                    price: null,
+                    metadata: { savingsUsd: compoundGate.savingsUsd },
+                    createdAt: Date.now(),
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
                 yield* memory
                   .upsert({
                     category: "pattern",

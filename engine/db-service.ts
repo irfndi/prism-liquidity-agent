@@ -37,6 +37,26 @@ export interface PositionRecord {
   paperExitedAt: number | null;
   entrySignalTimestamp: number | null;
   entrySignalSnapshotId: number | null;
+  entryPriceUsd: number | null;
+  entryAmountXUsd: number | null;
+  entryAmountYUsd: number | null;
+  cumulativeFeesClaimedUsd: number;
+  closedAt: number | null;
+  realizedPnlUsd: number | null;
+}
+
+export type PositionEventType = "ENTER" | "EXIT" | "REBALANCE" | "CLAIM" | "COMPOUND";
+
+export interface PositionEventRecord {
+  id: string;
+  poolAddress: string;
+  positionPubKey: string | null;
+  event: PositionEventType;
+  valueUsd: number | null;
+  feesUsd: number | null;
+  price: number | null;
+  metadata: string | null;
+  createdAt: number;
 }
 
 export interface AuditRecord {
@@ -116,8 +136,10 @@ export const DbLive = (dbPath?: string) =>
               timestamp, out_of_range_since, oor_cycle_count, last_fee_claim_at,
               trailing_stop_threshold, highest_value_usd, last_rebalance_at, paper_exited_at,
               entry_signal_timestamp,
-              entry_signal_snapshot_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              entry_signal_snapshot_id,
+              entry_price_usd, entry_amount_x_usd, entry_amount_y_usd,
+              cumulative_fees_claimed_usd, closed_at, realized_pnl_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pool_address) DO UPDATE SET
               position_pubkey = COALESCE(excluded.position_pubkey, positions.position_pubkey),
               deposited_usd = excluded.deposited_usd,
@@ -136,7 +158,13 @@ export const DbLive = (dbPath?: string) =>
               last_rebalance_at = excluded.last_rebalance_at,
               paper_exited_at = excluded.paper_exited_at,
               entry_signal_timestamp = excluded.entry_signal_timestamp,
-              entry_signal_snapshot_id = excluded.entry_signal_snapshot_id`,
+              entry_signal_snapshot_id = excluded.entry_signal_snapshot_id,
+              entry_price_usd = COALESCE(excluded.entry_price_usd, positions.entry_price_usd),
+              entry_amount_x_usd = COALESCE(excluded.entry_amount_x_usd, positions.entry_amount_x_usd),
+              entry_amount_y_usd = COALESCE(excluded.entry_amount_y_usd, positions.entry_amount_y_usd),
+              cumulative_fees_claimed_usd = excluded.cumulative_fees_claimed_usd,
+              closed_at = excluded.closed_at,
+              realized_pnl_usd = excluded.realized_pnl_usd`,
               pos.poolAddress,
               pos.positionPubKey,
               pos.depositedUsd,
@@ -156,6 +184,12 @@ export const DbLive = (dbPath?: string) =>
               pos.paperExitedAt,
               pos.entrySignalTimestamp,
               pos.entrySignalSnapshotId,
+              pos.entryPriceUsd,
+              pos.entryAmountXUsd,
+              pos.entryAmountYUsd,
+              pos.cumulativeFeesClaimedUsd,
+              pos.closedAt,
+              pos.realizedPnlUsd,
             );
           }),
 
@@ -173,7 +207,7 @@ export const DbLive = (dbPath?: string) =>
           Effect.sync(() => {
             const rows = queryAll<Record<string, unknown>>(
               db,
-              "SELECT * FROM positions WHERE paper_exited_at IS NULL",
+              "SELECT * FROM positions WHERE paper_exited_at IS NULL AND closed_at IS NULL",
             );
             return rows.map(rowToPosition);
           }),
@@ -183,6 +217,17 @@ export const DbLive = (dbPath?: string) =>
             const rows = queryAll<Record<string, unknown>>(
               db,
               "SELECT * FROM positions WHERE paper_exited_at IS NOT NULL ORDER BY paper_exited_at DESC",
+            );
+            return rows.map(rowToPosition);
+          }),
+
+        getClosedPositions: () =>
+          Effect.sync(() => {
+            const rows = queryAll<Record<string, unknown>>(
+              db,
+              `SELECT * FROM positions
+               WHERE closed_at IS NOT NULL OR paper_exited_at IS NOT NULL
+               ORDER BY COALESCE(closed_at, paper_exited_at) DESC`,
             );
             return rows.map(rowToPosition);
           }),
@@ -200,6 +245,62 @@ export const DbLive = (dbPath?: string) =>
               Date.now(),
               poolAddress,
             );
+          }),
+
+        closePosition: (poolAddress, realizedPnlUsd) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              "UPDATE positions SET closed_at = ?, realized_pnl_usd = ? WHERE pool_address = ?",
+              Date.now(),
+              realizedPnlUsd,
+              poolAddress,
+            );
+          }),
+
+        savePositionEvent: (event) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              `INSERT INTO position_events (
+                id, pool_address, position_pubkey, event,
+                value_usd, fees_usd, price, metadata, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              event.id,
+              event.poolAddress,
+              event.positionPubKey,
+              event.event,
+              event.valueUsd,
+              event.feesUsd,
+              event.price,
+              event.metadata != null ? serializeJson(event.metadata) : null,
+              event.createdAt,
+            );
+          }),
+
+        getPositionEvents: (poolAddress, limit) =>
+          Effect.sync(() => {
+            const rows = queryAll<Record<string, unknown>>(
+              db,
+              `SELECT * FROM position_events
+               WHERE pool_address = ?
+               ORDER BY created_at ASC, rowid ASC
+               ${limit != null ? "LIMIT ?" : ""}`,
+              ...(limit != null ? [poolAddress, limit] : [poolAddress]),
+            );
+            return rows.map(rowToPositionEvent);
+          }),
+
+        getLatestSnapshotPrice: (poolAddress) =>
+          Effect.sync(() => {
+            const row = queryOne<{ current_price: number }>(
+              db,
+              `SELECT current_price FROM pool_snapshots
+               WHERE pool_address = ?
+               ORDER BY timestamp DESC LIMIT 1`,
+              poolAddress,
+            );
+            return row ? Number(row.current_price) : null;
           }),
 
         updatePositionValue: (poolAddress, currentValueUsd, highestValueUsd) =>
@@ -907,6 +1008,26 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
       row.entry_signal_timestamp != null ? Number(row.entry_signal_timestamp) : null,
     entrySignalSnapshotId:
       row.entry_signal_snapshot_id != null ? Number(row.entry_signal_snapshot_id) : null,
+    entryPriceUsd: row.entry_price_usd != null ? Number(row.entry_price_usd) : null,
+    entryAmountXUsd: row.entry_amount_x_usd != null ? Number(row.entry_amount_x_usd) : null,
+    entryAmountYUsd: row.entry_amount_y_usd != null ? Number(row.entry_amount_y_usd) : null,
+    cumulativeFeesClaimedUsd: Number(row.cumulative_fees_claimed_usd ?? 0),
+    closedAt: row.closed_at != null ? Number(row.closed_at) : null,
+    realizedPnlUsd: row.realized_pnl_usd != null ? Number(row.realized_pnl_usd) : null,
+  };
+}
+
+function rowToPositionEvent(row: Record<string, unknown>): PositionEventRecord {
+  return {
+    id: String(row.id),
+    poolAddress: String(row.pool_address),
+    positionPubKey: row.position_pubkey ? String(row.position_pubkey) : null,
+    event: String(row.event) as PositionEventType,
+    valueUsd: row.value_usd != null ? Number(row.value_usd) : null,
+    feesUsd: row.fees_usd != null ? Number(row.fees_usd) : null,
+    price: row.price != null ? Number(row.price) : null,
+    metadata: row.metadata != null ? String(row.metadata) : null,
+    createdAt: Number(row.created_at ?? 0),
   };
 }
 
