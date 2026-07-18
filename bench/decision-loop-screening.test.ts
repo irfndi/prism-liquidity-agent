@@ -77,7 +77,19 @@ function makeAdapter(hooks: {
         netBenefitUsd: 0,
         source: "pool-heuristic" as const,
       }),
-    enterPosition: () => Effect.succeed({ positionPubKey: "mock-pos", txSignature: "mock-tx" }),
+    enterPosition: (
+      _poolAddress: string,
+      _lowerBinId: number,
+      _upperBinId: number,
+      positionSizeUsd: number,
+    ) =>
+      Effect.succeed({
+        positionPubKey: "mock-pos",
+        txSignature: "mock-tx",
+        depositMode: "two-sided" as const,
+        amountXUsd: positionSizeUsd / 2,
+        amountYUsd: positionSizeUsd / 2,
+      }),
     exitPosition: () => Effect.succeed({ txSignature: "mock-tx" }),
     rebalancePosition: () =>
       Effect.succeed({ positionPubKey: "mock-pos", txSignatures: ["mock-tx"] }),

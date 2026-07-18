@@ -5,6 +5,7 @@ import {
   buildPositionSnapshots,
   estimatePositionValue,
   executeLive,
+  executePaper,
   finalizeAppliedProposal,
   hasSyncProposalTransport,
   isProposalStale,
@@ -104,7 +105,19 @@ describe("executeLive", () => {
           netBenefitUsd: 0,
           source: "pool-heuristic" as const,
         }),
-      enterPosition: () => Effect.succeed({ positionPubKey: "mock-pos", txSignature: "mock-tx" }),
+      enterPosition: (
+        _poolAddress: string,
+        _lowerBinId: number,
+        _upperBinId: number,
+        positionSizeUsd: number,
+      ) =>
+        Effect.succeed({
+          positionPubKey: "mock-pos",
+          txSignature: "mock-tx",
+          depositMode: "two-sided" as const,
+          amountXUsd: positionSizeUsd / 2,
+          amountYUsd: positionSizeUsd / 2,
+        }),
       exitPosition: () => Effect.succeed({ txSignature: "mock-tx" }),
       rebalancePosition: () =>
         Effect.succeed({ positionPubKey: "mock-pos", txSignatures: ["mock-tx"] }),
@@ -254,6 +267,7 @@ describe("executeLive", () => {
           trackedPositions: new Map(),
           entryPrep: { prepareEntryTokens: prepareSpy },
           solPriceUsd: 150,
+          entryStrategyShape: "spot",
         },
         {
           action: "ENTER",
@@ -283,7 +297,13 @@ describe("executeLive", () => {
     const positionSizeUsd = 1234;
 
     const enterPositionSpy = vi.fn(() =>
-      Effect.succeed({ positionPubKey: "mock-pos", txSignature: "mock-tx" }),
+      Effect.succeed({
+        positionPubKey: "mock-pos",
+        txSignature: "mock-tx",
+        depositMode: "two-sided" as const,
+        amountXUsd: positionSizeUsd / 2,
+        amountYUsd: positionSizeUsd / 2,
+      }),
     );
     const adapter: AdapterApi = {
       ...makeAdapter(),
@@ -309,6 +329,7 @@ describe("executeLive", () => {
               ),
           },
           solPriceUsd: 150,
+          entryStrategyShape: "spot",
         },
         {
           action: "ENTER",
@@ -330,6 +351,178 @@ describe("executeLive", () => {
     expect(result.executed).toBe(false);
     expect(result.error).toContain("Entry token preparation failed");
     expect(enterPositionSpy).not.toHaveBeenCalled();
+  });
+
+  it("passes the resolved entry strategy shape to the adapter", () => {
+    const poolAddress = "TestPool111111111111111111111111111111111111";
+    const positionSizeUsd = 1234;
+
+    const enterPositionSpy = vi.fn(
+      (
+        _pool: string,
+        _lower: number,
+        _upper: number,
+        sizeUsd: number,
+        _options?: { strategyShape?: "spot" | "curve" | "bidask" },
+      ) =>
+        Effect.succeed({
+          positionPubKey: "mock-pos",
+          txSignature: "mock-tx",
+          depositMode: "two-sided" as const,
+          amountXUsd: sizeUsd / 2,
+          amountYUsd: sizeUsd / 2,
+        }),
+    );
+
+    const result = Effect.runSync(
+      executeLive(
+        {
+          adapter: { ...makeAdapter(), enterPosition: enterPositionSpy },
+          strategy: makeStrategy(),
+          db: makeDb(),
+          revenueConfigSvc: makeRevenueConfigSvc(),
+          trackedPositions: new Map(),
+          entryPrep: { prepareEntryTokens: () => Effect.void },
+          solPriceUsd: 150,
+          entryStrategyShape: "curve",
+        },
+        {
+          action: "ENTER",
+          poolAddress,
+          confidence: 0.8,
+          reasoning: "test",
+          positionSizeUsd,
+        } as AgentDecision,
+        {
+          activeBinId: 5000,
+          binStep: 10,
+          tokenXSymbol: "SOL",
+          tokenYSymbol: "USDC",
+          currentPrice: 150,
+        },
+      ),
+    );
+
+    expect(result.executed).toBe(true);
+    expect(enterPositionSpy).toHaveBeenCalledTimes(1);
+    expect(enterPositionSpy.mock.calls[0]![4]).toEqual({ strategyShape: "curve" });
+  });
+
+  it("records single-sided entry legs and metadata from the adapter result", () => {
+    const poolAddress = "TestPool111111111111111111111111111111111111";
+    const positionSizeUsd = 1234;
+
+    const savePositionEventSpy = vi.fn().mockReturnValue(Effect.void);
+    const db: DbApi = { ...makeDb(), savePositionEvent: savePositionEventSpy };
+    const trackedPositions = new Map();
+
+    const result = Effect.runSync(
+      executeLive(
+        {
+          adapter: {
+            ...makeAdapter(),
+            enterPosition: () =>
+              Effect.succeed({
+                positionPubKey: "mock-pos",
+                txSignature: "mock-tx",
+                depositMode: "single-sided-x" as const,
+                amountXUsd: positionSizeUsd,
+                amountYUsd: 0,
+              }),
+          },
+          strategy: makeStrategy(),
+          db,
+          revenueConfigSvc: makeRevenueConfigSvc(),
+          trackedPositions,
+          entryPrep: { prepareEntryTokens: () => Effect.void },
+          solPriceUsd: 150,
+          entryStrategyShape: "spot",
+        },
+        {
+          action: "ENTER",
+          poolAddress,
+          confidence: 0.8,
+          reasoning: "test",
+          positionSizeUsd,
+        } as AgentDecision,
+        {
+          activeBinId: 5000,
+          binStep: 10,
+          tokenXSymbol: "SOL",
+          tokenYSymbol: "USDC",
+          currentPrice: 150,
+        },
+      ),
+    );
+
+    expect(result.executed).toBe(true);
+    const pos = trackedPositions.get(poolAddress) as
+      | { entryAmountXUsd: number | null; entryAmountYUsd: number | null }
+      | undefined;
+    // Single-sided entry: the full size sits in the held leg; the other is 0.
+    expect(pos?.entryAmountXUsd).toBe(positionSizeUsd);
+    expect(pos?.entryAmountYUsd).toBe(0);
+
+    const enterEvent = savePositionEventSpy.mock.calls
+      .map((c) => c[0] as { event: string; metadata?: Record<string, unknown> })
+      .find((e) => e.event === "ENTER");
+    expect(enterEvent?.metadata?.["depositMode"]).toBe("single-sided-x");
+    expect(enterEvent?.metadata?.["strategyShape"]).toBe("spot");
+  });
+});
+
+describe("executePaper paper/live parity", () => {
+  it("paper ENTER derives the range from strategy.recommendBinRange like live", () => {
+    const poolAddress = "TestPool111111111111111111111111111111111111";
+    const recommendBinRangeSpy = vi.fn((activeBinId: number, _binStep: number) => ({
+      lowerBinId: activeBinId - 34,
+      upperBinId: activeBinId + 34,
+    }));
+    const strategy: StrategyApi = {
+      computeMetrics: () => {
+        throw new Error("not used");
+      },
+      checkVolumeAuthenticity: () => ({ score: 1, flags: [] }),
+      computeBinUtilization: () => 1,
+      computeFeeIlRatio: () => 1,
+      recommendBinRange: recommendBinRangeSpy,
+      passesPreFilter: () => true,
+    };
+    // Only savePosition/savePositionEvent are touched by a paper ENTER.
+    const db = {
+      savePosition: () => Effect.void,
+      savePositionEvent: () => Effect.void,
+    } as unknown as DbApi;
+    const trackedPositions = new Map();
+
+    const result = Effect.runSync(
+      executePaper(
+        { db, trackedPositions, strategy, entryStrategyShape: "spot" },
+        {
+          action: "ENTER",
+          poolAddress,
+          confidence: 0.8,
+          reasoning: "test",
+          positionSizeUsd: 1000,
+        } as AgentDecision,
+        {
+          activeBinId: 5000,
+          binStep: 10,
+          tokenXSymbol: "SOL",
+          tokenYSymbol: "USDC",
+          currentPrice: 150,
+        },
+      ),
+    );
+
+    expect(result.executed).toBe(true);
+    expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10);
+    const pos = trackedPositions.get(poolAddress) as
+      | { lowerBinId: number; upperBinId: number }
+      | undefined;
+    // Parity: the paper range is exactly what live would use — not a hardcoded ±20.
+    expect(pos?.lowerBinId).toBe(5000 - 34);
+    expect(pos?.upperBinId).toBe(5000 + 34);
   });
 });
 

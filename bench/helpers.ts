@@ -189,6 +189,7 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     signalWeightCeiling: 2.5,
     weightedEntryScoreThreshold: 1.8,
     autoSwapEntry: false,
+    entryStrategyType: "spot",
     snapshotRetentionDays: 14,
     alertsEnabled: true,
     alertCooldownMinutes: 120,

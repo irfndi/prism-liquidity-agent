@@ -7,6 +7,8 @@ import type {
   AgentCycle,
   BacktestResult,
   BinArray,
+  EntryDepositMode,
+  EntryStrategyShape,
   MemoryCategory,
   MemoryEntry,
   PoolCooldown,
@@ -98,12 +100,33 @@ export interface AdapterApi {
     },
     unknown
   >;
+  /**
+   * Open a live position and deposit liquidity by strategy. The deposit
+   * distribution comes from `options.strategyShape` (resolved per pool by the
+   * decision loop) falling back to the configured `ENTRY_STRATEGY_TYPE`
+   * (`auto` falls back to `spot` here — the adapter has no volatility
+   * context). When the wallet can fund only one of the pool's tokens, the
+   * adapter takes the SDK single-sided deposit path
+   * (`StrategyParameters.singleSidedX`, full position size in the held leg)
+   * instead of failing; `depositMode`/`amountXUsd`/`amountYUsd` report what
+   * was actually deposited so entry accounting stays exact.
+   */
   readonly enterPosition: (
     poolAddress: string,
     lowerBinId: number,
     upperBinId: number,
     positionSizeUsd: number,
-  ) => Effect.Effect<{ positionPubKey: string; txSignature: string }, unknown>;
+    options?: { strategyShape?: EntryStrategyShape },
+  ) => Effect.Effect<
+    {
+      positionPubKey: string;
+      txSignature: string;
+      depositMode: EntryDepositMode;
+      amountXUsd: number;
+      amountYUsd: number;
+    },
+    unknown
+  >;
   readonly exitPosition: (
     poolAddress: string,
     positionPubKey: string,

@@ -1,7 +1,7 @@
 import { Config, Context, Effect, Layer, Option, pipe } from "effect";
 import { ConfigError } from "./errors.js";
 import { getPrismDbPath } from "./paths.js";
-import type { AgentProposalMode } from "./types.js";
+import type { AgentProposalMode, EntryStrategyType } from "./types.js";
 
 export interface AppConfig {
   readonly walletPrivateKey: string;
@@ -197,6 +197,12 @@ export interface AppConfig {
   readonly weightedEntryScoreThreshold: number;
   // Auto-swap USDC into missing pool tokens before live ENTER
   readonly autoSwapEntry: boolean;
+  /**
+   * DLMM deposit distribution for position creation (ENTRY_STRATEGY_TYPE).
+   * `spot` (default) | `curve` | `bidask` | `auto` (`auto` resolves per pool
+   * from recent volatility/trend metrics in the decision loop).
+   */
+  readonly entryStrategyType: EntryStrategyType;
 
   // ─── Proactive Telegram alerts (Wave 5) ───────────────────────────────────
   /** Master switch for proactive Telegram alerts. Default true; delivery only
@@ -483,6 +489,15 @@ const loadConfig = Effect.gen(function* () {
   const autoSwapEntry = yield* Config.boolean("AUTO_SWAP_ENTRY").pipe(
     Effect.orElseSucceed(() => false),
   );
+  const entryStrategyTypeRaw = yield* Config.string("ENTRY_STRATEGY_TYPE").pipe(
+    Effect.orElseSucceed(() => "spot"),
+  );
+  const validEntryStrategyTypes = ["spot", "curve", "bidask", "auto"] as const;
+  const entryStrategyType: EntryStrategyType = validEntryStrategyTypes.includes(
+    entryStrategyTypeRaw as (typeof validEntryStrategyTypes)[number],
+  )
+    ? (entryStrategyTypeRaw as (typeof validEntryStrategyTypes)[number])
+    : "spot";
 
   // ─── Proactive Telegram alerts (Wave 5) ───────────────────────────────────
   const alertsEnabled = yield* Config.boolean("ALERTS_ENABLED").pipe(
@@ -674,6 +689,7 @@ const loadConfig = Effect.gen(function* () {
     signalWeightCeiling,
     weightedEntryScoreThreshold,
     autoSwapEntry,
+    entryStrategyType,
     alertsEnabled,
     alertCooldownMinutes,
     alertFeeMilestoneUsd,
