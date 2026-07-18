@@ -108,6 +108,7 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     weightedEntryScoreThreshold: 1.8,
     autoSwapEntry: false,
     entryStrategyType: "spot",
+    farmRewardsEnabled: true,
     snapshotRetentionDays: 14,
     alertsEnabled: true,
     alertCooldownMinutes: 120,

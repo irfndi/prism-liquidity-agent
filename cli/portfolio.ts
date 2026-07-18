@@ -19,6 +19,7 @@ export interface PortfolioSummary {
   totalUnrealizedPnlUsd: number;
   totalUnrealizedPnlPct: number;
   totalFeesClaimedUsd: number;
+  totalRewardsClaimedUsd: number;
   positionCount: number;
 }
 
@@ -26,7 +27,12 @@ export function computeSummary(positions: ReadonlyArray<PositionRecord>): Portfo
   const totalDepositedUsd = positions.reduce((sum, p) => sum + p.depositedUsd, 0);
   const totalCurrentValueUsd = positions.reduce((sum, p) => sum + p.currentValueUsd, 0);
   const totalFeesClaimedUsd = positions.reduce((sum, p) => sum + p.cumulativeFeesClaimedUsd, 0);
-  const totalUnrealizedPnlUsd = totalCurrentValueUsd + totalFeesClaimedUsd - totalDepositedUsd;
+  const totalRewardsClaimedUsd = positions.reduce(
+    (sum, p) => sum + p.cumulativeRewardsClaimedUsd,
+    0,
+  );
+  const totalUnrealizedPnlUsd =
+    totalCurrentValueUsd + totalFeesClaimedUsd + totalRewardsClaimedUsd - totalDepositedUsd;
   const totalUnrealizedPnlPct =
     totalDepositedUsd > 0 ? (totalUnrealizedPnlUsd / totalDepositedUsd) * 100 : 0;
 
@@ -36,6 +42,7 @@ export function computeSummary(positions: ReadonlyArray<PositionRecord>): Portfo
     totalUnrealizedPnlUsd,
     totalUnrealizedPnlPct,
     totalFeesClaimedUsd,
+    totalRewardsClaimedUsd,
     positionCount: positions.length,
   };
 }
@@ -74,6 +81,7 @@ export function formatPosition(pos: PositionRecord, currentPriceUsd: number | nu
       depositedUsd: pos.depositedUsd,
       currentValueUsd: pos.currentValueUsd,
       cumulativeFeesClaimedUsd: pos.cumulativeFeesClaimedUsd,
+      cumulativeRewardsClaimedUsd: pos.cumulativeRewardsClaimedUsd,
       entryPriceUsd: pos.entryPriceUsd,
       entryAmountXUsd: pos.entryAmountXUsd,
       entryAmountYUsd: pos.entryAmountYUsd,
@@ -106,6 +114,9 @@ export function formatPosition(pos: PositionRecord, currentPriceUsd: number | nu
     `    Current:    ${formatCurrency(pos.currentValueUsd)}`,
     `    P&L:        ${coloredPnl}`,
     `    Fees:       ${formatCurrency(analytics.feesClaimedUsd)}`,
+    analytics.rewardsClaimedUsd > 0
+      ? `    Rewards:    ${formatCurrency(analytics.rewardsClaimedUsd)}`
+      : "",
     `    IL vs HODL: ${ilText}`,
     `    In range:   ${inRangeText}`,
     `    Active bin: ${pos.activeBinId}`,
@@ -145,6 +156,9 @@ function formatSummary(summary: PortfolioSummary): string {
     `  Total Deposited:  ${formatCurrency(summary.totalDepositedUsd)}`,
     `  Total Current:    ${formatCurrency(summary.totalCurrentValueUsd)}`,
     `  Fees Claimed:     ${formatCurrency(summary.totalFeesClaimedUsd)}`,
+    ...(summary.totalRewardsClaimedUsd > 0
+      ? [`  Rewards Claimed:  ${formatCurrency(summary.totalRewardsClaimedUsd)}`]
+      : []),
     `  Unrealized P&L:   ${coloredPnl}`,
   ].join("\n");
 }
@@ -171,7 +185,11 @@ function formatPositionsList(
 
 function realizedPnlFor(pos: PositionRecord): { pnlUsd: number; pnlPct: number } {
   const pnlUsd =
-    pos.realizedPnlUsd ?? pos.currentValueUsd + pos.cumulativeFeesClaimedUsd - pos.depositedUsd;
+    pos.realizedPnlUsd ??
+    pos.currentValueUsd +
+      pos.cumulativeFeesClaimedUsd +
+      pos.cumulativeRewardsClaimedUsd -
+      pos.depositedUsd;
   const pnlPct = pos.depositedUsd > 0 ? (pnlUsd / pos.depositedUsd) * 100 : 0;
   return { pnlUsd, pnlPct };
 }
@@ -196,6 +214,9 @@ function formatHistoryList(positions: ReadonlyArray<PositionRecord>): string {
     lines.push(`    Deposited:  ${formatCurrency(pos.depositedUsd)}`);
     lines.push(`    Exit Value: ${formatCurrency(pos.currentValueUsd)}`);
     lines.push(`    Fees:       ${formatCurrency(pos.cumulativeFeesClaimedUsd)}`);
+    if (pos.cumulativeRewardsClaimedUsd > 0) {
+      lines.push(`    Rewards:    ${formatCurrency(pos.cumulativeRewardsClaimedUsd)}`);
+    }
     lines.push(`    Realized P&L: ${coloredPnl}`);
     lines.push(`    Exited:     ${exitedAt != null ? new Date(exitedAt).toISOString() : "N/A"}`);
     lines.push("");
@@ -215,6 +236,7 @@ export interface PortfolioJsonOutput {
     unrealizedPnlPct: number;
     entryPriceUsd: number | null;
     feesClaimedUsd: number;
+    rewardsClaimedUsd: number;
     hodlValueUsd: number | null;
     ilVsHodlUsd: number | null;
     timeInRangePct: number | null;
@@ -240,6 +262,7 @@ export function toJsonOutput(
           depositedUsd: pos.depositedUsd,
           currentValueUsd: pos.currentValueUsd,
           cumulativeFeesClaimedUsd: pos.cumulativeFeesClaimedUsd,
+          cumulativeRewardsClaimedUsd: pos.cumulativeRewardsClaimedUsd,
           entryPriceUsd: pos.entryPriceUsd,
           entryAmountXUsd: pos.entryAmountXUsd,
           entryAmountYUsd: pos.entryAmountYUsd,
@@ -259,6 +282,7 @@ export function toJsonOutput(
         unrealizedPnlPct: analytics.unrealizedPnlPct,
         entryPriceUsd: pos.entryPriceUsd,
         feesClaimedUsd: analytics.feesClaimedUsd,
+        rewardsClaimedUsd: analytics.rewardsClaimedUsd,
         hodlValueUsd: analytics.hodlValueUsd,
         ilVsHodlUsd: analytics.ilVsHodlUsd,
         timeInRangePct: analytics.timeInRangePct,
@@ -282,6 +306,7 @@ export interface HistoryJsonOutput {
     depositedUsd: number;
     exitValueUsd: number;
     feesClaimedUsd: number;
+    rewardsClaimedUsd: number;
     realizedPnlUsd: number;
     realizedPnlPct: number;
     closedAt: number | null;
@@ -300,6 +325,7 @@ export function toHistoryJsonOutput(positions: ReadonlyArray<PositionRecord>): H
         depositedUsd: pos.depositedUsd,
         exitValueUsd: pos.currentValueUsd,
         feesClaimedUsd: pos.cumulativeFeesClaimedUsd,
+        rewardsClaimedUsd: pos.cumulativeRewardsClaimedUsd,
         realizedPnlUsd: pnlUsd,
         realizedPnlPct: pnlPct,
         closedAt: pos.closedAt,

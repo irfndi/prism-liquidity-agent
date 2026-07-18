@@ -33,6 +33,7 @@ import type {
   PrismStateSnapshot,
 } from "./state-service.js";
 import type { EvolvableThresholds, OutcomeRecord } from "./strategy-service.js";
+import type { ClaimedReward } from "./rewards.js";
 import type {
   AdapterError,
   AuditError,
@@ -175,6 +176,30 @@ export interface AdapterApi {
     },
     unknown
   >;
+  /**
+   * Claim LM farm rewards for a position via the SDK's claimAllLMRewards
+   * (LM-only — never the combined fee+reward claim, which would move swap
+   * fees outside the engine's own fee accounting). Rides the same periodic
+   * cadence as claimFees. Skip semantics (not errors): the pool's function
+   * type is LimitOrder with nothing pending, or the position has no pending
+   * rewards — claiming when nothing is claimable is a no-op by construction,
+   * which is what keeps repeated cycles idempotent. Amounts are the position's
+   * pending rewardOne/rewardTwo read immediately before the claim; a reward
+   * whose mint price is unavailable is recorded with amountUsd null and never
+   * blocks the claim.
+   */
+  readonly claimRewards: (
+    poolAddress: string,
+    positionPubKey: string,
+  ) => Effect.Effect<
+    {
+      skipped: boolean;
+      skipReason: string | null;
+      txSignatures: ReadonlyArray<string>;
+      rewards: ReadonlyArray<ClaimedReward>;
+    },
+    unknown
+  >;
   readonly discoverPools: () => Effect.Effect<ReadonlyArray<DiscoveredPool>, DiscoverPoolsError>;
   readonly reportFeeCollection: (event: {
     poolAddress: string;
@@ -293,6 +318,14 @@ export interface MeteoraPoolStats {
   readonly dynamicFeePct: number | null;
   readonly baseFeePct: number | null;
   readonly hasFarm: boolean | null;
+  /**
+   * Farm reward APR from the Data API (`farm_apr`), annualized percent — the
+   * same convention as the engine's enriched `PoolState.apr`. Null when the
+   * API omits it (schema drift) or the pool has no farm.
+   */
+  readonly farmApr: number | null;
+  /** Farm reward APY from the Data API (`farm_apy`), annualized percent. */
+  readonly farmApy: number | null;
   readonly isBlacklisted: boolean | null;
   readonly tokenXFreezeAuthorityDisabled: boolean | null;
   readonly tokenYFreezeAuthorityDisabled: boolean | null;
@@ -456,6 +489,7 @@ export interface DbApi {
     entryAmountXUsd: number | null;
     entryAmountYUsd: number | null;
     cumulativeFeesClaimedUsd: number;
+    cumulativeRewardsClaimedUsd: number;
     closedAt: number | null;
     realizedPnlUsd: number | null;
   }) => Effect.Effect<void, unknown>;
@@ -484,6 +518,7 @@ export interface DbApi {
       entryAmountXUsd: number | null;
       entryAmountYUsd: number | null;
       cumulativeFeesClaimedUsd: number;
+      cumulativeRewardsClaimedUsd: number;
       closedAt: number | null;
       realizedPnlUsd: number | null;
     } | null,
@@ -514,6 +549,7 @@ export interface DbApi {
       entryAmountXUsd: number | null;
       entryAmountYUsd: number | null;
       cumulativeFeesClaimedUsd: number;
+      cumulativeRewardsClaimedUsd: number;
       closedAt: number | null;
       realizedPnlUsd: number | null;
     }>,
@@ -544,6 +580,7 @@ export interface DbApi {
       entryAmountXUsd: number | null;
       entryAmountYUsd: number | null;
       cumulativeFeesClaimedUsd: number;
+      cumulativeRewardsClaimedUsd: number;
       closedAt: number | null;
       realizedPnlUsd: number | null;
     }>,
@@ -580,6 +617,7 @@ export interface DbApi {
       entryAmountXUsd: number | null;
       entryAmountYUsd: number | null;
       cumulativeFeesClaimedUsd: number;
+      cumulativeRewardsClaimedUsd: number;
       closedAt: number | null;
       realizedPnlUsd: number | null;
     }>,

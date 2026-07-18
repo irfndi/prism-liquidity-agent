@@ -66,6 +66,8 @@ export function parseMeteoraPoolStats(raw: unknown): MeteoraPoolStats | null {
     dynamicFeePct: readNumber(raw, "dynamic_fee_pct"),
     baseFeePct: readNumber(poolConfig, "base_fee_pct"),
     hasFarm: readBoolean(raw, "has_farm"),
+    farmApr: readNumber(raw, "farm_apr"),
+    farmApy: readNumber(raw, "farm_apy"),
     isBlacklisted: readBoolean(raw, "is_blacklisted"),
     tokenXFreezeAuthorityDisabled: readBoolean(tokenX, "freeze_authority_disabled"),
     tokenYFreezeAuthorityDisabled: readBoolean(tokenY, "freeze_authority_disabled"),
@@ -91,6 +93,11 @@ export function enrichPoolWithDatapi(pool: PoolState, stats: MeteoraPoolStats): 
     volume24hUsd: stats.volume24hUsd,
     fees24hUsd: stats.fees24hUsd,
     apr: aprAnnualizedPct,
+    hasFarm: stats.hasFarm,
+    // farm_apr is already annualized percent (unlike the API's daily `apr`),
+    // so it lands on the pool state without rescaling. A farm pool with an
+    // unknown APR keeps null here — computeMetrics reports 0 for it.
+    farmAprPct: stats.hasFarm === true ? stats.farmApr : null,
     statsSource: "datapi",
   };
 }

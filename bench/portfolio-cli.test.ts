@@ -44,6 +44,7 @@ function makePosition(overrides: Partial<PositionRecord> = {}): PositionRecord {
     entryAmountXUsd: overrides.entryAmountXUsd ?? null,
     entryAmountYUsd: overrides.entryAmountYUsd ?? null,
     cumulativeFeesClaimedUsd: overrides.cumulativeFeesClaimedUsd ?? 0,
+    cumulativeRewardsClaimedUsd: overrides.cumulativeRewardsClaimedUsd ?? 0,
     closedAt: overrides.closedAt ?? null,
     realizedPnlUsd: overrides.realizedPnlUsd ?? null,
   };
@@ -120,6 +121,24 @@ describe("computeSummary", () => {
     const positions = [makePosition({ depositedUsd: 0, currentValueUsd: 100 })];
     const summary = computeSummary(positions);
     expect(summary.totalUnrealizedPnlPct).toBe(0);
+  });
+
+  it("(v) includes claimed rewards in totals (additive to P&L, separate from fees)", () => {
+    const positions = [
+      makePosition({
+        poolAddress: "pool1",
+        depositedUsd: 1000,
+        currentValueUsd: 1200,
+        cumulativeFeesClaimedUsd: 25,
+        cumulativeRewardsClaimedUsd: 40,
+      }),
+      makePosition({ poolAddress: "pool2", depositedUsd: 2000, currentValueUsd: 1900 }),
+    ];
+    const summary = computeSummary(positions);
+    expect(summary.totalFeesClaimedUsd).toBe(25);
+    expect(summary.totalRewardsClaimedUsd).toBe(40);
+    // 3100 current + 25 fees + 40 rewards − 3000 deposited
+    expect(summary.totalUnrealizedPnlUsd).toBe(165);
   });
 });
 
@@ -400,5 +419,55 @@ describe("portfolio — DB integration", () => {
     expect(summary.totalCurrentValueUsd).toBe(3000);
     expect(summary.totalUnrealizedPnlUsd).toBe(0);
     expect(summary.positionCount).toBe(2);
+  });
+});
+
+describe("reward reporting (Wave 8)", () => {
+  it("(v) formatPosition shows a Rewards line only when rewards were claimed", () => {
+    const withRewards = formatPosition(makePosition({ cumulativeRewardsClaimedUsd: 42.5 }), null);
+    expect(withRewards).toContain("Rewards:");
+    expect(withRewards).toContain("$42.50");
+
+    const without = formatPosition(makePosition(), null);
+    expect(without).not.toContain("Rewards:");
+  });
+
+  it("(v) toJsonOutput exposes rewardsClaimedUsd per position and in the summary", () => {
+    const json = toJsonOutput([
+      makePosition({ poolAddress: "pool1", cumulativeRewardsClaimedUsd: 40 }),
+      makePosition({ poolAddress: "pool2" }),
+    ]);
+    expect(json.positions[0]?.rewardsClaimedUsd).toBe(40);
+    expect(json.positions[1]?.rewardsClaimedUsd).toBe(0);
+    expect(json.summary.totalRewardsClaimedUsd).toBe(40);
+  });
+
+  it("(v) toHistoryJsonOutput surfaces rewards for exited positions", () => {
+    const json = toHistoryJsonOutput([
+      makePosition({
+        poolAddress: "pool1",
+        cumulativeFeesClaimedUsd: 25,
+        cumulativeRewardsClaimedUsd: 40,
+        closedAt: 1700000000000,
+        realizedPnlUsd: 165,
+      }),
+    ]);
+    expect(json.positions[0]?.rewardsClaimedUsd).toBe(40);
+    expect(json.positions[0]?.feesClaimedUsd).toBe(25);
+  });
+
+  it("(v) legacy fallback realized PnL includes rewards", () => {
+    const json = toHistoryJsonOutput([
+      makePosition({
+        poolAddress: "pool1",
+        depositedUsd: 1000,
+        currentValueUsd: 1100,
+        cumulativeFeesClaimedUsd: 25,
+        cumulativeRewardsClaimedUsd: 40,
+        paperExitedAt: 1700000000000,
+      }),
+    ]);
+    // 1100 + 25 + 40 − 1000 (no stored realizedPnlUsd → fallback)
+    expect(json.positions[0]?.realizedPnlUsd).toBe(165);
   });
 });

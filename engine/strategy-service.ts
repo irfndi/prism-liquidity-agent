@@ -129,6 +129,9 @@ export const DLMMStrategy: StrategyApi = {
       // heuristic volume/fees would just re-validate their own assumptions.
       volumeAuthenticityKnown: pool.statsSource === "datapi",
       binUtilizationKnown: binArray.reservesKnown !== false,
+      // Farm APR only flows from the Data API overlay: a pool with a farm but
+      // an unknown APR reports 0 (known farm, no rate), non-farm/unknown null.
+      farmAprPct: pool.hasFarm === true ? (pool.farmAprPct ?? 0) : null,
     };
   },
 
@@ -518,6 +521,16 @@ function clampWeight(value: number, floor: number, ceiling: number): number {
   return Math.max(floor, Math.min(ceiling, value));
 }
 
+/**
+ * Farm-APR score normalization: a farm streaming FARM_APR_SCORE_REFERENCE_PCT
+ * (annualized) or more earns the full FARM_SCORE_WEIGHT contribution; smaller
+ * APRs scale linearly. The contribution is a fixed, bounded tie-breaker — it
+ * is deliberately NOT part of the Darwinian SignalWeights so weight evolution
+ * cannot inflate farm yield above fee/IL quality signals.
+ */
+export const FARM_APR_SCORE_REFERENCE_PCT = 100;
+export const FARM_SCORE_WEIGHT = 1;
+
 export function weightedEntryScore(metrics: PoolMetrics, weights: SignalWeights): number {
   const cappedFeeIlRatio = Math.min(metrics.feeIlRatio, MAX_FEE_IL_RATIO);
   const feeContrib = cappedFeeIlRatio * weights.feeIlRatio;
@@ -528,6 +541,9 @@ export function weightedEntryScore(metrics: PoolMetrics, weights: SignalWeights)
     (metrics.binUtilizationKnown ? metrics.binUtilization : 0) * weights.binUtilization;
   const tvlContrib = Math.min(metrics.pool.tvlUsd / 1_000_000, 1) * weights.tvlUsd;
   const velContrib = (1 / (1 + Math.abs(metrics.tvlVelocity))) * weights.tvlVelocity * 0.1;
+  const farmContrib =
+    Math.min(Math.max(metrics.farmAprPct ?? 0, 0) / FARM_APR_SCORE_REFERENCE_PCT, 1) *
+    FARM_SCORE_WEIGHT;
 
-  return feeContrib + authContrib + binContrib + tvlContrib + velContrib;
+  return feeContrib + authContrib + binContrib + tvlContrib + velContrib + farmContrib;
 }

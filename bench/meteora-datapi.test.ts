@@ -153,6 +153,8 @@ describe("enrichPoolWithDatapi", () => {
       dynamicFeePct: 0.05,
       baseFeePct: 0.2,
       hasFarm: true,
+      farmApr: 0,
+      farmApy: 0,
       isBlacklisted: false,
       tokenXFreezeAuthorityDisabled: true,
       tokenYFreezeAuthorityDisabled: false,

@@ -43,6 +43,16 @@ export interface PoolState {
    * volume/fees). Volume-authenticity is only meaningful for "datapi" stats.
    */
   statsSource?: "datapi" | "heuristic" | undefined;
+  /**
+   * Whether the pool has an LM farm, from the Data API's `has_farm`. Only set
+   * when statsSource is "datapi"; undefined otherwise (unknown).
+   */
+  hasFarm?: boolean | null | undefined;
+  /**
+   * Farm reward APR (annualized percent) from the Data API's `farm_apr`.
+   * Null/undefined when the pool has no farm or the APR is unknown.
+   */
+  farmAprPct?: number | null | undefined;
 }
 
 export interface PoolSnapshot {
@@ -71,6 +81,12 @@ export interface PoolMetrics {
   readonly volumeAuthenticityKnown: boolean;
   /** False when real per-bin reserves were unavailable — util gates must skip. */
   readonly binUtilizationKnown: boolean;
+  /**
+   * Farm reward APR (annualized percent) for scoring. Null when the pool has
+   * no farm or farm status is unknown (heuristic stats); a farm pool with an
+   * unknown APR reports 0 (known farm, no current reward rate).
+   */
+  readonly farmAprPct: number | null;
 }
 
 /** Recent price reference used to estimate impermanent loss from drift. */

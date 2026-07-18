@@ -41,6 +41,7 @@ export interface PositionRecord {
   entryAmountXUsd: number | null;
   entryAmountYUsd: number | null;
   cumulativeFeesClaimedUsd: number;
+  cumulativeRewardsClaimedUsd: number;
   closedAt: number | null;
   realizedPnlUsd: number | null;
 }
@@ -138,8 +139,9 @@ export const DbLive = (dbPath?: string) =>
               entry_signal_timestamp,
               entry_signal_snapshot_id,
               entry_price_usd, entry_amount_x_usd, entry_amount_y_usd,
-              cumulative_fees_claimed_usd, closed_at, realized_pnl_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              cumulative_fees_claimed_usd, cumulative_rewards_claimed_usd,
+              closed_at, realized_pnl_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pool_address) DO UPDATE SET
               position_pubkey = COALESCE(excluded.position_pubkey, positions.position_pubkey),
               deposited_usd = excluded.deposited_usd,
@@ -163,6 +165,7 @@ export const DbLive = (dbPath?: string) =>
               entry_amount_x_usd = COALESCE(excluded.entry_amount_x_usd, positions.entry_amount_x_usd),
               entry_amount_y_usd = COALESCE(excluded.entry_amount_y_usd, positions.entry_amount_y_usd),
               cumulative_fees_claimed_usd = excluded.cumulative_fees_claimed_usd,
+              cumulative_rewards_claimed_usd = excluded.cumulative_rewards_claimed_usd,
               closed_at = excluded.closed_at,
               realized_pnl_usd = excluded.realized_pnl_usd`,
               pos.poolAddress,
@@ -188,6 +191,7 @@ export const DbLive = (dbPath?: string) =>
               pos.entryAmountXUsd,
               pos.entryAmountYUsd,
               pos.cumulativeFeesClaimedUsd,
+              pos.cumulativeRewardsClaimedUsd,
               pos.closedAt,
               pos.realizedPnlUsd,
             );
@@ -1012,6 +1016,7 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     entryAmountXUsd: row.entry_amount_x_usd != null ? Number(row.entry_amount_x_usd) : null,
     entryAmountYUsd: row.entry_amount_y_usd != null ? Number(row.entry_amount_y_usd) : null,
     cumulativeFeesClaimedUsd: Number(row.cumulative_fees_claimed_usd ?? 0),
+    cumulativeRewardsClaimedUsd: Number(row.cumulative_rewards_claimed_usd ?? 0),
     closedAt: row.closed_at != null ? Number(row.closed_at) : null,
     realizedPnlUsd: row.realized_pnl_usd != null ? Number(row.realized_pnl_usd) : null,
   };

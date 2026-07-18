@@ -204,6 +204,10 @@ export interface AppConfig {
    */
   readonly entryStrategyType: EntryStrategyType;
 
+  /** Master switch for periodic LM farm reward claims (Wave 8). Default true;
+   *  scoring stays farm-aware regardless — this only gates on-chain claims. */
+  readonly farmRewardsEnabled: boolean;
+
   // ─── Proactive Telegram alerts (Wave 5) ───────────────────────────────────
   /** Master switch for proactive Telegram alerts. Default true; delivery only
    *  happens when the user registered and linked Telegram (server-side). */
@@ -503,6 +507,10 @@ const loadConfig = Effect.gen(function* () {
   const alertsEnabled = yield* Config.boolean("ALERTS_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
+  // ─── LM farm reward claims (Wave 8) ───────────────────────────────────────
+  const farmRewardsEnabled = yield* Config.boolean("FARM_REWARDS_ENABLED").pipe(
+    Effect.orElseSucceed(() => true),
+  );
   const alertCooldownMinutes = yield* validatedNumber("ALERT_COOLDOWN_MINUTES", 1, 120);
   const alertFeeMilestoneUsd = yield* validatedNumber("ALERT_FEE_MILESTONE_USD", 0.01, 10);
 
@@ -690,6 +698,7 @@ const loadConfig = Effect.gen(function* () {
     weightedEntryScoreThreshold,
     autoSwapEntry,
     entryStrategyType,
+    farmRewardsEnabled,
     alertsEnabled,
     alertCooldownMinutes,
     alertFeeMilestoneUsd,

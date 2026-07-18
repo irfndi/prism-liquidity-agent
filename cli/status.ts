@@ -143,6 +143,9 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
               `Deposited: $${summary.totalDepositedUsd.toFixed(2)}`,
               `Current:   $${summary.totalCurrentValueUsd.toFixed(2)}`,
               `Fees:      $${summary.totalFeesClaimedUsd.toFixed(2)}`,
+              ...(summary.totalRewardsClaimedUsd > 0
+                ? [`Rewards:   $${summary.totalRewardsClaimedUsd.toFixed(2)}`]
+                : []),
               `Unrealized: ${pnlEmoji} $${summary.totalUnrealizedPnlUsd.toFixed(2)} (${summary.totalUnrealizedPnlPct.toFixed(2)}%)`,
               "",
               "*Open positions*",
@@ -172,6 +175,9 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
               `  Deposited:   $${summary.totalDepositedUsd.toFixed(2)}`,
               `  Current:     $${summary.totalCurrentValueUsd.toFixed(2)}`,
               `  Fees:        $${summary.totalFeesClaimedUsd.toFixed(2)}`,
+              ...(summary.totalRewardsClaimedUsd > 0
+                ? [`  Rewards:     $${summary.totalRewardsClaimedUsd.toFixed(2)}`]
+                : []),
               `  Unrealized:  ${pnlText}`,
               `  ${agentStatus}`,
               "",
