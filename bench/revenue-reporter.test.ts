@@ -40,6 +40,7 @@ function makeTestAdapterLayer() {
     getTokenBalance: () => Effect.succeed(0n),
     getTokenPrices: () => Effect.succeed({}),
     getTokenDecimals: () => Effect.succeed(6),
+    getMintAuthorities: () => Effect.succeed({ mintAuthority: null, freezeAuthority: null }),
     quoteSwapUSDCForToken: () => Effect.fail("not implemented"),
     swapUSDCForToken: () => Effect.fail("not implemented"),
     getPoolState: () => Effect.fail("not implemented"),

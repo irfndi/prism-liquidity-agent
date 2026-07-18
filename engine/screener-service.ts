@@ -14,6 +14,15 @@ export interface ScreenerConfig {
   readonly minBinUtilization: number;
 }
 
+/**
+ * Bin utilization is not part of the Data API discovery payload, so the
+ * screener enriches at most this many surviving candidates with on-chain bin
+ * data and applies minBinUtilization only where reserves are known. Candidates
+ * beyond the cap (or whose bin fetch fails) pass through unfiltered — the
+ * per-pool scan loop re-applies the gate with full data before any ENTER.
+ */
+const MAX_BIN_UTILIZATION_CHECKS = 10;
+
 export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
   Layer.effect(
     ScreenerService,
@@ -93,7 +102,39 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
               if (candidate) screened.push(candidate);
             }
 
-            return screened.sort((a, b) => b.feeIlRatio - a.feeIlRatio);
+            const sorted = screened.sort((a, b) => b.feeIlRatio - a.feeIlRatio);
+
+            // minBinUtilization filter: only applied where on-chain bin data
+            // exists (see MAX_BIN_UTILIZATION_CHECKS). Fail-open otherwise.
+            const enriched: ScreenedPool[] = [];
+            for (const candidate of sorted.slice(0, MAX_BIN_UTILIZATION_CHECKS)) {
+              const binArray = yield* adapter.getBinArray(candidate.address).pipe(
+                Effect.catchAll((err) => {
+                  logger.warn("Bin data unavailable for candidate — skipping utilization gate", {
+                    pool: candidate.address,
+                    error: String(err),
+                  });
+                  return Effect.succeed(null);
+                }),
+              );
+              if (binArray === null || binArray.reservesKnown === false) {
+                enriched.push(candidate);
+                continue;
+              }
+              const utilization = strategy.computeBinUtilization(binArray);
+              if (utilization < screenerConfig.minBinUtilization) {
+                logger.info("Candidate filtered by bin utilization", {
+                  pool: candidate.address,
+                  utilization: utilization.toFixed(2),
+                  minBinUtilization: screenerConfig.minBinUtilization,
+                });
+                continue;
+              }
+              enriched.push({ ...candidate, binUtilization: utilization });
+            }
+            enriched.push(...sorted.slice(MAX_BIN_UTILIZATION_CHECKS));
+
+            return enriched;
           }),
       };
 

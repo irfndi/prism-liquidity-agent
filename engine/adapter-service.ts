@@ -435,6 +435,45 @@ export const AdapterLive = Layer.effect(
     const tokenMetaCache = new Map<string, TokenMeta>();
     const HELIUS_ASSET_CACHE_TTL_MS = 5 * 60 * 1000;
 
+    // Mint authorities are quasi-static (revocation is one-way), so a long TTL
+    // is safe and keeps the per-cycle safety screening to one RPC call per
+    // mint per hour.
+    const MINT_AUTHORITIES_CACHE_TTL_MS = 60 * 60 * 1000;
+    interface MintAuthoritiesEntry {
+      readonly mintAuthority: string | null;
+      readonly freezeAuthority: string | null;
+      readonly fetchedAt: number;
+    }
+    const mintAuthoritiesCache = new Map<string, MintAuthoritiesEntry>();
+
+    function getMintAuthorities(
+      mintAddress: string,
+    ): Effect.Effect<{ mintAuthority: string | null; freezeAuthority: string | null }, unknown> {
+      return Effect.gen(function* () {
+        const cached = mintAuthoritiesCache.get(mintAddress);
+        if (cached && Date.now() - cached.fetchedAt < MINT_AUTHORITIES_CACHE_TTL_MS) {
+          return { mintAuthority: cached.mintAuthority, freezeAuthority: cached.freezeAuthority };
+        }
+        const mintPubkey = new PublicKey(mintAddress);
+        const info = yield* rpcCall((conn) => conn.getParsedAccountInfo(mintPubkey));
+        const parsed = (
+          info.value?.data as {
+            parsed?: { info?: { mintAuthority?: unknown; freezeAuthority?: unknown } };
+          }
+        )?.parsed?.info;
+        const mintAuthority =
+          typeof parsed?.mintAuthority === "string" ? parsed.mintAuthority : null;
+        const freezeAuthority =
+          typeof parsed?.freezeAuthority === "string" ? parsed.freezeAuthority : null;
+        mintAuthoritiesCache.set(mintAddress, {
+          mintAuthority,
+          freezeAuthority,
+          fetchedAt: Date.now(),
+        });
+        return { mintAuthority, freezeAuthority };
+      });
+    }
+
     function readHeliusPrice(asset: HeliusAssetResponse): number | undefined {
       const priceInfo = asset.result?.token_info?.price_info;
       const price = priceInfo?.price_per_token;
@@ -1088,6 +1127,8 @@ export const AdapterLive = Layer.effect(
 
       getTokenDecimals: (mintAddress: string) =>
         getTokenMeta(mintAddress).pipe(Effect.map((m) => m.decimals)),
+
+      getMintAuthorities: (mintAddress: string) => getMintAuthorities(mintAddress),
 
       getPoolState: (poolAddress) =>
         Effect.gen(function* () {

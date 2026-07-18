@@ -222,14 +222,16 @@ This returns a short markdown summary with emojis and bullets, formatted for cha
 
 Decisions pass through checks in order before any on-chain action:
 
-1. Confidence below `CONFIDENCE_THRESHOLD` -> reject
-2. Max concurrent positions reached -> reject ENTER
+1. EXIT -> always approved (capital protection beats the confidence gate)
+2. Confidence below `CONFIDENCE_THRESHOLD` -> reject
+3. Max concurrent positions reached -> reject ENTER
    - **Duplicate pool guard** -> reject ENTER if same pool already held
-3. EXIT -> always approved (capital protection)
 4. Portfolio drawdown > 10% -> pause new entries
 5. Stop-loss triggered (`STOP_LOSS_PCT` exceeded) -> reject HOLD/REBALANCE
-6. Position size > 30% of portfolio -> cap and allow
+6. Position size > `MAX_PER_POOL_ALLOCATION_PCT` (default 40%) of portfolio -> cap and allow
 7. Rebalance range > `MAX_REBALANCE_RANGE_BINS` -> reject REBALANCE
+
+HOLD executes nothing, so it skips risk evaluation entirely. Deterministic EXIT conditions only fire for pools with a tracked position.
 
 ### Rebalance-specific gates (run inside the decision loop, not at execution)
 
