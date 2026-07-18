@@ -18,6 +18,7 @@ import {
   isHighVolatility,
   recommendBinRangeForVolatility,
   recommendStrategyShape,
+  resolveRangeHalfWidth,
   estimateRecoveryProbability,
   shouldHoldForRecovery,
   evolveThresholds,
@@ -617,6 +618,7 @@ export function executePaper(
     trackedPositions: Map<string, PositionRecord>;
     strategy: StrategyApi;
     entryStrategyShape: EntryStrategyShape;
+    entryRangeHalfWidth?: number;
   },
   decision: AgentDecision,
   pool: {
@@ -630,14 +632,18 @@ export function executePaper(
   signalSnapshotId?: number,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never> {
   return Effect.gen(function* () {
-    const { db, trackedPositions, strategy, entryStrategyShape } = deps;
+    const { db, trackedPositions, strategy, entryStrategyShape, entryRangeHalfWidth } = deps;
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
       const existing = trackedPositions.get(decision.poolAddress);
       const liveExited =
         existing && existing.paperExitedAt !== null && existing.positionPubKey !== null;
       // Paper/live parity: the simulated range comes from the same
       // recommendBinRange live entries use, so paper validates real behavior.
-      const recommended = strategy.recommendBinRange(pool.activeBinId, pool.binStep);
+      const recommended = strategy.recommendBinRange(
+        pool.activeBinId,
+        pool.binStep,
+        entryRangeHalfWidth,
+      );
       const pos: PositionRecord = {
         poolAddress: decision.poolAddress,
         positionPubKey: liveExited ? existing!.positionPubKey : null,
@@ -783,6 +789,7 @@ export function executeLive(
     entryPrep: EntryPrepApi;
     solPriceUsd: number;
     entryStrategyShape: EntryStrategyShape;
+    entryRangeHalfWidth?: number;
     reconcileRequestedPools?: Set<string>;
   },
   decision: AgentDecision,
@@ -806,6 +813,7 @@ export function executeLive(
       entryPrep,
       solPriceUsd,
       entryStrategyShape,
+      entryRangeHalfWidth,
     } = deps;
 
     if (!adapter.hasWallet()) {
@@ -861,7 +869,11 @@ export function executeLive(
     }
 
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
-      const recommended = strategy.recommendBinRange(pool.activeBinId, pool.binStep);
+      const recommended = strategy.recommendBinRange(
+        pool.activeBinId,
+        pool.binStep,
+        entryRangeHalfWidth,
+      );
       const enterResult = yield* adapter
         .enterPosition(
           decision.poolAddress,
@@ -2134,6 +2146,18 @@ export const program = Effect.gen(function* () {
           : recentBins;
       const volatilityStddev = computeBinVolatilityStddev(volatilityBins);
 
+      // Wave 9: resolve the entry/rebalance range half-width once per
+      // pool-cycle — static baseline (ENTRY_RANGE_HALF_WIDTH_BINS or the
+      // binStep tier), scaled by σ when VOLATILITY_ADAPTIVE_RANGES is on.
+      // σ=0 (cold start, <2 snapshots) yields the bounded baseline.
+      const rangeHalfWidth = resolveRangeHalfWidth({
+        binStep: pool.binStep,
+        configuredBaseHalfWidth: config.entryRangeHalfWidthBins,
+        adaptiveEnabled: config.volatilityAdaptiveRanges,
+        volatilityStddev,
+        maxFullRangeBins: config.maxRebalanceRangeBins,
+      });
+
       if (pos && hasPosition) {
         const estimatedValue = estimatePositionValue(pos, pool);
         pos.currentValueUsd = estimatedValue;
@@ -2389,14 +2413,19 @@ export const program = Effect.gen(function* () {
           (driftPct > 0.6 || oorGraceExpired) &&
           (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
         ) {
-          const recommended = highVol
-            ? recommendBinRangeForVolatility(
-                pool.activeBinId,
-                pool.binStep,
-                true,
-                config.volatilityWideHalfWidthBins,
-              )
-            : strategy.recommendBinRange(pool.activeBinId, pool.binStep);
+          // Wave 9: adaptive mode replaces the binary high-vol widening with
+          // the continuous σ-scaled width; disabled keeps the legacy behavior.
+          const recommended = config.volatilityAdaptiveRanges
+            ? strategy.recommendBinRange(pool.activeBinId, pool.binStep, rangeHalfWidth)
+            : highVol
+              ? recommendBinRangeForVolatility(
+                  pool.activeBinId,
+                  pool.binStep,
+                  true,
+                  config.volatilityWideHalfWidthBins,
+                  config.entryRangeHalfWidthBins > 0 ? config.entryRangeHalfWidthBins : undefined,
+                )
+              : strategy.recommendBinRange(pool.activeBinId, pool.binStep, rangeHalfWidth);
           // Simulation-first: live mode runs the SDK's atomic-rebalance
           // simulation against the real position; on any simulation/transport
           // failure the gate fails closed (no rebalance this cycle).
@@ -3262,6 +3291,13 @@ export const program = Effect.gen(function* () {
             recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0,
         });
       }
+      if (decision.action === "ENTER" && config.volatilityAdaptiveRanges) {
+        console.info(`[adaptive-range] ${poolAddress} halfWidth=${rangeHalfWidth}`, {
+          volatilityStddev,
+          binStep: pool.binStep,
+          configuredBaseHalfWidth: config.entryRangeHalfWidthBins,
+        });
+      }
 
       if (paperExitShouldGoLive) {
         console.warn(
@@ -3277,6 +3313,7 @@ export const program = Effect.gen(function* () {
             entryPrep,
             solPriceUsd: config.solPriceUsd,
             entryStrategyShape,
+            entryRangeHalfWidth: rangeHalfWidth,
             reconcileRequestedPools,
           },
           decision,
@@ -3292,7 +3329,13 @@ export const program = Effect.gen(function* () {
           pool: poolAddress,
         });
         const paperResult = yield* executePaper(
-          { db, trackedPositions, strategy, entryStrategyShape },
+          {
+            db,
+            trackedPositions,
+            strategy,
+            entryStrategyShape,
+            entryRangeHalfWidth: rangeHalfWidth,
+          },
           decision,
           pool,
           signalTimestamp,
@@ -3311,6 +3354,7 @@ export const program = Effect.gen(function* () {
             entryPrep,
             solPriceUsd: config.solPriceUsd,
             entryStrategyShape,
+            entryRangeHalfWidth: rangeHalfWidth,
             reconcileRequestedPools,
           },
           decision,
