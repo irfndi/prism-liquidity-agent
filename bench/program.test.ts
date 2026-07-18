@@ -175,6 +175,11 @@ describe("executeLive", () => {
       getPaperExitedPositions: () => Effect.succeed([]),
       deletePosition: () => Effect.void,
       markPaperExited: () => Effect.void,
+      closePosition: () => Effect.void,
+      getClosedPositions: () => Effect.succeed([]),
+      savePositionEvent: () => Effect.void,
+      getPositionEvents: () => Effect.succeed([]),
+      getLatestSnapshotPrice: () => Effect.succeed(null),
       updatePositionValue: () => Effect.void,
       saveAudit: () => Effect.void,
       getRecentAudit: () => Effect.succeed([]),
@@ -243,6 +248,7 @@ describe("executeLive", () => {
           revenueConfigSvc: makeRevenueConfigSvc(),
           trackedPositions: new Map(),
           entryPrep: { prepareEntryTokens: prepareSpy },
+          solPriceUsd: 150,
         },
         {
           action: "ENTER",
@@ -251,7 +257,13 @@ describe("executeLive", () => {
           reasoning: "test",
           positionSizeUsd,
         } as AgentDecision,
-        { activeBinId: 5000, binStep: 10, tokenXSymbol: "SOL", tokenYSymbol: "USDC" },
+        {
+          activeBinId: 5000,
+          binStep: 10,
+          tokenXSymbol: "SOL",
+          tokenYSymbol: "USDC",
+          currentPrice: 150,
+        },
       ),
     );
 
@@ -291,6 +303,7 @@ describe("executeLive", () => {
                 }),
               ),
           },
+          solPriceUsd: 150,
         },
         {
           action: "ENTER",
@@ -299,7 +312,13 @@ describe("executeLive", () => {
           reasoning: "test",
           positionSizeUsd,
         } as AgentDecision,
-        { activeBinId: 5000, binStep: 10, tokenXSymbol: "SOL", tokenYSymbol: "USDC" },
+        {
+          activeBinId: 5000,
+          binStep: 10,
+          tokenXSymbol: "SOL",
+          tokenYSymbol: "USDC",
+          currentPrice: 150,
+        },
       ),
     );
 
@@ -331,6 +350,12 @@ describe("estimatePositionValue", () => {
       paperExitedAt: null,
       entrySignalTimestamp: null,
       entrySignalSnapshotId: null,
+      entryPriceUsd: null,
+      entryAmountXUsd: null,
+      entryAmountYUsd: null,
+      cumulativeFeesClaimedUsd: 0,
+      closedAt: null,
+      realizedPnlUsd: null,
     };
   }
 
@@ -881,6 +906,12 @@ describe("buildPositionSnapshots", () => {
         paperExitedAt: null,
         entrySignalTimestamp: null,
         entrySignalSnapshotId: null,
+        entryPriceUsd: null,
+        entryAmountXUsd: null,
+        entryAmountYUsd: null,
+        cumulativeFeesClaimedUsd: 0,
+        closedAt: null,
+        realizedPnlUsd: null,
       },
       {
         poolAddress: "pool-b",
@@ -902,6 +933,12 @@ describe("buildPositionSnapshots", () => {
         paperExitedAt: null,
         entrySignalTimestamp: null,
         entrySignalSnapshotId: null,
+        entryPriceUsd: null,
+        entryAmountXUsd: null,
+        entryAmountYUsd: null,
+        cumulativeFeesClaimedUsd: 0,
+        closedAt: null,
+        realizedPnlUsd: null,
       },
     ];
 

@@ -41,6 +41,12 @@ function makePosition(
     paperExitedAt: overrides.paperExitedAt ?? null,
     entrySignalTimestamp: overrides.entrySignalTimestamp ?? null,
     entrySignalSnapshotId: overrides.entrySignalSnapshotId ?? null,
+    entryPriceUsd: null,
+    entryAmountXUsd: null,
+    entryAmountYUsd: null,
+    cumulativeFeesClaimedUsd: 0,
+    closedAt: null,
+    realizedPnlUsd: null,
   };
 }
 

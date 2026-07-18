@@ -33,6 +33,12 @@ function makePosition(
   paperExitedAt: number | null;
   entrySignalTimestamp: number | null;
   entrySignalSnapshotId: number | null;
+  entryPriceUsd: number | null;
+  entryAmountXUsd: number | null;
+  entryAmountYUsd: number | null;
+  cumulativeFeesClaimedUsd: number;
+  closedAt: number | null;
+  realizedPnlUsd: number | null;
 } {
   return {
     poolAddress,
@@ -54,6 +60,12 @@ function makePosition(
     paperExitedAt,
     entrySignalTimestamp: null,
     entrySignalSnapshotId: null,
+    entryPriceUsd: null,
+    entryAmountXUsd: null,
+    entryAmountYUsd: null,
+    cumulativeFeesClaimedUsd: 0,
+    closedAt: null,
+    realizedPnlUsd: null,
   };
 }
 

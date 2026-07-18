@@ -13,6 +13,7 @@ import {
   computeSummary,
   computePnl,
   formatAge,
+  formatPosition,
   toJsonOutput,
   toHistoryJsonOutput,
 } from "../cli/portfolio.js";
@@ -39,6 +40,12 @@ function makePosition(overrides: Partial<PositionRecord> = {}): PositionRecord {
     paperExitedAt: overrides.paperExitedAt ?? null,
     entrySignalTimestamp: overrides.entrySignalTimestamp ?? null,
     entrySignalSnapshotId: overrides.entrySignalSnapshotId ?? null,
+    entryPriceUsd: overrides.entryPriceUsd ?? null,
+    entryAmountXUsd: overrides.entryAmountXUsd ?? null,
+    entryAmountYUsd: overrides.entryAmountYUsd ?? null,
+    cumulativeFeesClaimedUsd: overrides.cumulativeFeesClaimedUsd ?? 0,
+    closedAt: overrides.closedAt ?? null,
+    realizedPnlUsd: overrides.realizedPnlUsd ?? null,
   };
 }
 
@@ -233,6 +240,99 @@ describe("toHistoryJsonOutput", () => {
     expect(json.positions).toHaveLength(0);
     expect(json.summary.positionCount).toBe(0);
     expect(json.summary.totalDepositedUsd).toBe(0);
+  });
+
+  it("prefers the stored realizedPnlUsd over the legacy fallback", () => {
+    const positions = [
+      makePosition({
+        poolAddress: "pool1",
+        depositedUsd: 1000,
+        currentValueUsd: 1100,
+        cumulativeFeesClaimedUsd: 25,
+        closedAt: 1700000000000,
+        realizedPnlUsd: 125,
+      }),
+    ];
+    const json = toHistoryJsonOutput(positions);
+    expect(json.positions[0]).toBeDefined();
+    if (json.positions[0]) {
+      expect(json.positions[0].realizedPnlUsd).toBe(125);
+      expect(json.positions[0].realizedPnlPct).toBeCloseTo(12.5, 5);
+      expect(json.positions[0].feesClaimedUsd).toBe(25);
+      expect(json.positions[0].closedAt).toBe(1700000000000);
+    }
+  });
+});
+
+describe("Wave 4 — PnL accounting fields", () => {
+  it("toJsonOutput surfaces entry price, fees, HODL benchmark, IL and time-in-range", () => {
+    const positions = [
+      makePosition({
+        poolAddress: "pool1",
+        depositedUsd: 1000,
+        currentValueUsd: 1100,
+        cumulativeFeesClaimedUsd: 25,
+        entryPriceUsd: 100,
+        entryAmountXUsd: 500,
+        entryAmountYUsd: 500,
+        timestamp: Date.now() - 24 * 60 * 60 * 1000,
+      }),
+    ];
+    const prices = new Map([["pool1", 110]]);
+    const json = toJsonOutput(positions, prices);
+
+    expect(json.positions[0]).toBeDefined();
+    const p = json.positions[0]!;
+    expect(p.entryPriceUsd).toBe(100);
+    expect(p.feesClaimedUsd).toBe(25);
+    // unrealized = 1100 + 25 − 1000 = 125
+    expect(p.unrealizedPnlUsd).toBeCloseTo(125, 6);
+    expect(p.unrealizedPnlPct).toBeCloseTo(12.5, 4);
+    // HODL = 500 × (110/100) + 500 = 1050 → IL vs HODL = 1100 − 1050 = 50
+    expect(p.hodlValueUsd).toBeCloseTo(1050, 6);
+    expect(p.ilVsHodlUsd).toBeCloseTo(50, 6);
+    expect(p.timeInRangePct).toBe(100);
+    expect(p.feeAprPct).toBeCloseTo(912.5, 1);
+    expect(json.summary.totalFeesClaimedUsd).toBe(25);
+    expect(json.summary.totalUnrealizedPnlUsd).toBeCloseTo(125, 6);
+  });
+
+  it("toJsonOutput degrades to null benchmarks for pre-migration rows", () => {
+    const positions = [
+      makePosition({ poolAddress: "pool1", depositedUsd: 1000, currentValueUsd: 1200 }),
+    ];
+    const json = toJsonOutput(positions, new Map([["pool1", 110]]));
+    const p = json.positions[0]!;
+    expect(p.entryPriceUsd).toBeNull();
+    expect(p.hodlValueUsd).toBeNull();
+    expect(p.ilVsHodlUsd).toBeNull();
+    // Legacy PnL model still works.
+    expect(p.unrealizedPnlUsd).toBeCloseTo(200, 6);
+  });
+
+  it("formatPosition renders fees, IL-vs-HODL and time-in-range lines", () => {
+    const pos = makePosition({
+      poolAddress: "pool1",
+      depositedUsd: 1000,
+      currentValueUsd: 1100,
+      cumulativeFeesClaimedUsd: 25,
+      entryPriceUsd: 100,
+      entryAmountXUsd: 500,
+      entryAmountYUsd: 500,
+      timestamp: Date.now() - 3_600_000,
+    });
+    const text = formatPosition(pos, 110);
+    expect(text).toContain("Fees:");
+    expect(text).toContain("$25.00");
+    expect(text).toContain("IL vs HODL:");
+    expect(text).toContain("In range:");
+    expect(text).toContain("100.0%");
+  });
+
+  it("formatPosition shows n/a for IL-vs-HODL when entry data is missing", () => {
+    const pos = makePosition({ poolAddress: "pool1" });
+    const text = formatPosition(pos, 110);
+    expect(text).toContain("IL vs HODL: n/a");
   });
 });
 
