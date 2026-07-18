@@ -541,6 +541,19 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       `);
     },
   },
+  {
+    version: 17,
+    name: "farm_rewards_accounting",
+    up(db) {
+      // LM farm reward claims tracked separately from swap fees so fee APR
+      // stays fee-pure; pre-existing rows default to 0.
+      if (!hasColumn(db, "positions", "cumulative_rewards_claimed_usd")) {
+        db.exec(
+          "ALTER TABLE positions ADD COLUMN cumulative_rewards_claimed_usd REAL NOT NULL DEFAULT 0",
+        );
+      }
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

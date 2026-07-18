@@ -58,6 +58,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     enableSnapshotCapture: false,
     autoSwapEntry: false,
     entryStrategyType: "spot",
+    farmRewardsEnabled: true,
     snapshotRetentionDays: 14,
     alertsEnabled: true,
     alertCooldownMinutes: 120,

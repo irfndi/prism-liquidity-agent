@@ -31,6 +31,13 @@ function makeMockAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
     exitPosition: () => Effect.fail("not implemented"),
     rebalancePosition: () => Effect.fail("not implemented"),
     claimFees: () => Effect.fail("not implemented"),
+    claimRewards: () =>
+      Effect.succeed({
+        skipped: true,
+        skipReason: "no pending rewards",
+        txSignatures: [],
+        rewards: [],
+      }),
     discoverPools: () => Effect.succeed([]),
     reportFeeCollection: () => Effect.void,
     swapUSDCForSOL: () => Effect.void,
@@ -73,6 +80,7 @@ function makePosition(poolAddress: string, positionPubKey: string | null): Posit
     entryAmountXUsd: null,
     entryAmountYUsd: null,
     cumulativeFeesClaimedUsd: 0,
+    cumulativeRewardsClaimedUsd: 0,
     closedAt: null,
     realizedPnlUsd: null,
   };

@@ -22,6 +22,12 @@ export interface PositionAnalyticsInput {
   readonly currentValueUsd: number;
   /** Total fees claimed over the position lifecycle, in USD. */
   readonly cumulativeFeesClaimedUsd: number;
+  /**
+   * Total LM farm rewards claimed over the lifecycle, in USD (only the
+   * USD-priced portion). Defaults to 0 — W4 math is unchanged for callers
+   * that predate reward tracking. Counted in total PnL but never in fee APR.
+   */
+  readonly cumulativeRewardsClaimedUsd?: number | undefined;
   /** Pool price at entry; null for pre-migration rows. */
   readonly entryPriceUsd: number | null;
   /** USD value of the token-X leg at entry; null for pre-migration rows. */
@@ -41,6 +47,8 @@ export interface PositionAnalytics {
   /** unrealizedPnlUsd / costBasis × 100 (0 when basis is 0). */
   readonly unrealizedPnlPct: number;
   readonly feesClaimedUsd: number;
+  /** LM farm rewards claimed (USD-priced portion); 0 for pre-W8 callers. */
+  readonly rewardsClaimedUsd: number;
   /** HODL benchmark value; null when entry data or current price is missing. */
   readonly hodlValueUsd: number | null;
   /** currentValue − hodlValue (negative = worse than holding); null as above. */
@@ -102,8 +110,9 @@ export function computePositionAnalytics(
   nowMs: number,
 ): PositionAnalytics {
   const ageMs = Math.max(0, nowMs - input.openedAtMs);
+  const rewardsUsd = input.cumulativeRewardsClaimedUsd ?? 0;
   const unrealizedPnlUsd =
-    input.currentValueUsd + input.cumulativeFeesClaimedUsd - input.depositedUsd;
+    input.currentValueUsd + input.cumulativeFeesClaimedUsd + rewardsUsd - input.depositedUsd;
   const unrealizedPnlPct =
     input.depositedUsd > 0 ? (unrealizedPnlUsd / input.depositedUsd) * 100 : 0;
 
@@ -124,6 +133,7 @@ export function computePositionAnalytics(
     unrealizedPnlUsd,
     unrealizedPnlPct,
     feesClaimedUsd: input.cumulativeFeesClaimedUsd,
+    rewardsClaimedUsd: rewardsUsd,
     hodlValueUsd,
     ilVsHodlUsd: hodlValueUsd != null ? input.currentValueUsd - hodlValueUsd : null,
     timeInRangePct: computeTimeInRangePct(ageMs, input.outOfRangeSinceMs, nowMs),
@@ -132,13 +142,14 @@ export function computePositionAnalytics(
   };
 }
 
-/** Realized PnL at close: final value + cumulative fees − cost basis. */
+/** Realized PnL at close: final value + cumulative fees + rewards − cost basis. */
 export function computeRealizedPnlUsd(
   finalValueUsd: number,
   cumulativeFeesClaimedUsd: number,
   costBasisUsd: number,
+  cumulativeRewardsClaimedUsd = 0,
 ): number {
-  return finalValueUsd + cumulativeFeesClaimedUsd - costBasisUsd;
+  return finalValueUsd + cumulativeFeesClaimedUsd + cumulativeRewardsClaimedUsd - costBasisUsd;
 }
 
 /**

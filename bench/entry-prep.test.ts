@@ -74,6 +74,13 @@ function makeAdapter(mock: Partial<AdapterApi> = {}): AdapterApi {
         netFeeX: 0,
         netFeeY: 0,
       }),
+    claimRewards: () =>
+      Effect.succeed({
+        skipped: true,
+        skipReason: "no pending rewards",
+        txSignatures: [],
+        rewards: [],
+      }),
     discoverPools: () => Effect.succeed([]),
     reportFeeCollection: () => Effect.void,
     swapUSDCForSOL: () => Effect.void,

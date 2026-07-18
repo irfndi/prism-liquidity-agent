@@ -43,6 +43,7 @@ function makeContext(): AgentRuntimeContext {
     volumeAuthenticity: 0.9,
     binUtilization: 0.5,
     volumeAuthenticityKnown: true,
+    farmAprPct: null,
     binUtilizationKnown: true,
   };
 

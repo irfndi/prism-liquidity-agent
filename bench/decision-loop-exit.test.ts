@@ -55,6 +55,8 @@ function makeDatapiStats(overrides: Partial<MeteoraPoolStats> = {}): MeteoraPool
     dynamicFeePct: null,
     baseFeePct: null,
     hasFarm: null,
+    farmApr: null,
+    farmApy: null,
     isBlacklisted: null,
     tokenXFreezeAuthorityDisabled: null,
     tokenYFreezeAuthorityDisabled: null,
@@ -110,6 +112,13 @@ function makeAdapter(
         platformFeeY: 0,
         netFeeX: 0,
         netFeeY: 0,
+      }),
+    claimRewards: () =>
+      Effect.succeed({
+        skipped: true,
+        skipReason: "no pending rewards",
+        txSignatures: [],
+        rewards: [],
       }),
     discoverPools: () => Effect.succeed([]),
     reportFeeCollection: () => Effect.void,

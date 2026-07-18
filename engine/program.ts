@@ -41,6 +41,7 @@ import { shouldDiscoverPools } from "./pool-policy.js";
 import { checkForAutoUpdate } from "./update-check.js";
 import type { PositionRecord } from "./db-service.js";
 import { applyCompoundToCostBasis, computeRealizedPnlUsd } from "./pnl.js";
+import { buildRewardClaimMetadata, summarizeRewardClaim } from "./rewards.js";
 import { BlacklistError, DiscoverPoolsError } from "./errors.js";
 import {
   GAS_TOP_UP_USDC,
@@ -483,6 +484,7 @@ export function reconcilePositions(
             entryAmountXUsd: null,
             entryAmountYUsd: null,
             cumulativeFeesClaimedUsd: 0,
+            cumulativeRewardsClaimedUsd: 0,
             closedAt: null,
             realizedPnlUsd: null,
           };
@@ -660,6 +662,7 @@ export function executePaper(
         entryAmountXUsd: decision.positionSizeUsd / 2,
         entryAmountYUsd: decision.positionSizeUsd / 2,
         cumulativeFeesClaimedUsd: 0,
+        cumulativeRewardsClaimedUsd: 0,
         closedAt: null,
         realizedPnlUsd: null,
       };
@@ -707,6 +710,7 @@ export function executePaper(
           pos.currentValueUsd,
           pos.cumulativeFeesClaimedUsd,
           pos.depositedUsd,
+          pos.cumulativeRewardsClaimedUsd,
         );
         yield* db
           .savePositionEvent({
@@ -912,6 +916,7 @@ export function executeLive(
           entryAmountXUsd: enterResult.result.amountXUsd,
           entryAmountYUsd: enterResult.result.amountYUsd,
           cumulativeFeesClaimedUsd: 0,
+          cumulativeRewardsClaimedUsd: 0,
           closedAt: null,
           realizedPnlUsd: null,
         };
@@ -981,6 +986,7 @@ export function executeLive(
             pos.currentValueUsd,
             pos.cumulativeFeesClaimedUsd,
             pos.depositedUsd,
+            pos.cumulativeRewardsClaimedUsd,
           );
           yield* db
             .savePositionEvent({
@@ -3401,6 +3407,54 @@ export const program = Effect.gen(function* () {
 
       for (const [poolAddress, pos] of trackedPositions) {
         if (pos.positionPubKey && Date.now() - pos.lastFeeClaimAt > config.feeClaimIntervalMs) {
+          // LM farm rewards ride the same periodic cadence as swap-fee
+          // claims. The adapter skips silently for LimitOrder pools and
+          // positions with no pending rewards, so this is a cheap no-op for
+          // non-farm positions. Rewards are tracked separately from fees:
+          // cumulativeFeesClaimedUsd stays fee-pure (fee APR), while the
+          // USD-valued portion accumulates in cumulativeRewardsClaimedUsd.
+          if (config.farmRewardsEnabled) {
+            const rewardResult = yield* adapter
+              .claimRewards(poolAddress, pos.positionPubKey)
+              .pipe(Effect.catchAll(() => Effect.succeed(null)));
+            if (rewardResult && !rewardResult.skipped && rewardResult.rewards.length > 0) {
+              const rewardSummary = summarizeRewardClaim(rewardResult.rewards);
+              console.info("Farm rewards claimed", {
+                pool: poolAddress,
+                rewards: rewardResult.rewards,
+                totalUsd: rewardSummary.totalUsd,
+                txSignatures: rewardResult.txSignatures,
+              });
+              pos.cumulativeRewardsClaimedUsd += rewardSummary.totalUsd;
+              yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+              yield* db
+                .savePositionEvent({
+                  id: randomUUID(),
+                  poolAddress,
+                  positionPubKey: pos.positionPubKey,
+                  event: "CLAIM",
+                  valueUsd: rewardSummary.totalUsd > 0 ? rewardSummary.totalUsd : null,
+                  feesUsd: null,
+                  price: null,
+                  metadata: buildRewardClaimMetadata({
+                    txSignatures: rewardResult.txSignatures,
+                    rewards: rewardResult.rewards,
+                  }),
+                  createdAt: Date.now(),
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+              if (rewardSummary.unpricedCount > 0) {
+                yield* memory
+                  .upsert({
+                    category: "warning",
+                    content: `Claimed ${rewardSummary.unpricedCount} farm reward(s) for ${poolAddress} without USD pricing — raw amounts recorded in position_events.`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              }
+            }
+          }
+
           const result = yield* adapter
             .claimFees(
               poolAddress,

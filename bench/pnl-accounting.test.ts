@@ -693,6 +693,13 @@ function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
         netFeeX: 0,
         netFeeY: 25_000_000,
       }),
+    claimRewards: () =>
+      Effect.succeed({
+        skipped: true,
+        skipReason: "no pending rewards",
+        txSignatures: [],
+        rewards: [],
+      }),
     discoverPools: () => Effect.succeed([]),
     reportFeeCollection: () => Effect.void,
     swapUSDCForSOL: () => Effect.void,

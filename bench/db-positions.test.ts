@@ -45,6 +45,7 @@ function makePosition(
     entryAmountXUsd: null,
     entryAmountYUsd: null,
     cumulativeFeesClaimedUsd: 0,
+    cumulativeRewardsClaimedUsd: 0,
     closedAt: null,
     realizedPnlUsd: null,
   };

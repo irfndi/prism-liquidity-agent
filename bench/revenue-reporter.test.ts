@@ -52,6 +52,7 @@ function makeTestAdapterLayer() {
     exitPosition: () => Effect.fail("not implemented"),
     rebalancePosition: () => Effect.fail("not implemented"),
     claimFees: () => Effect.fail("not implemented"),
+    claimRewards: () => Effect.fail("not implemented"),
     discoverPools: () => Effect.succeed([]),
 
     reportFeeCollection(event: FeeCollectionEvent) {

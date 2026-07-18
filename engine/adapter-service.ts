@@ -15,6 +15,7 @@ import {
 import DLMM, {
   buildLiquidityStrategyParameters,
   getLiquidityStrategyParameterBuilder,
+  ConcreteFunctionType,
   StrategyType,
   MAX_ACTIVE_BIN_SLIPPAGE,
   type PositionData,
@@ -53,6 +54,9 @@ import { randomUUID } from "crypto";
 import { getWalletSystemLamportsRequired } from "./live-entry-budget.js";
 import { SOL_MINT, USDC_MINT, GAS_RESERVE_LAMPORTS } from "./constants.js";
 import { computeRequiredAtomic } from "./entry-prep-service.js";
+import type { ClaimedReward } from "./rewards.js";
+
+const DEFAULT_PUBLIC_KEY = "11111111111111111111111111111111";
 
 const RPC_RETRY_OPTIONS = {
   maxRetries: 1,
@@ -2043,6 +2047,135 @@ export const AdapterLive = Layer.effect(
             Effect.fail(
               new AdapterError({
                 message: `Failed to claim fees: ${String(err)}`,
+                poolAddress,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
+
+      claimRewards: (poolAddress, positionPubKey) =>
+        Effect.gen(function* () {
+          if (!wallet) {
+            return yield* Effect.fail(
+              new AdapterError({
+                message: "No wallet configured",
+              }),
+            );
+          }
+
+          const positionPubkey = new PublicKey(positionPubKey);
+          const dlmm = yield* getDlmm(poolAddress);
+          const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
+
+          const pendingOne = Number(position.positionData.rewardOne.toString());
+          const pendingTwo = Number(position.positionData.rewardTwo.toString());
+          const hasPending =
+            (Number.isFinite(pendingOne) && pendingOne > 0) ||
+            (Number.isFinite(pendingTwo) && pendingTwo > 0);
+
+          // ConcreteFunctionType gate: post-0.12.0 pools are LimitOrder-xor-
+          // LiquidityMining. Legacy pools predate the field and read 0
+          // (LimitOrder) — pending reward amounts are objective proof that
+          // rewards streamed to this position, so they still claim (real
+          // yield is never abandoned on a legacy field default).
+          const concreteFunctionType = (dlmm.lbPair as { concreteFunctionType?: number })
+            .concreteFunctionType;
+          if (!hasPending) {
+            const reason =
+              concreteFunctionType === ConcreteFunctionType.LimitOrder
+                ? "pool is LimitOrder function type (no LM rewards)"
+                : "no pending rewards";
+            return { skipped: true, skipReason: reason, txSignatures: [], rewards: [] };
+          }
+
+          const claimTxs = yield* Effect.tryPromise(() =>
+            dlmm.claimAllLMRewards({ owner: wallet.publicKey, positions: [position] }),
+          );
+          if (!claimTxs || claimTxs.length === 0) {
+            return {
+              skipped: true,
+              skipReason: "no claimable rewards",
+              txSignatures: [],
+              rewards: [],
+            };
+          }
+
+          const txSignatures: string[] = [];
+          for (const tx of claimTxs) {
+            tx.sign(wallet);
+            const signature = yield* rpcCall((conn) =>
+              conn.sendRawTransaction(tx.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: "confirmed",
+              }),
+            );
+            yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
+            txSignatures.push(signature);
+          }
+          yield* invalidateBalanceCaches;
+
+          // Slot mapping per the DLMM layout: rewardOne ↔ rewardInfos[0],
+          // rewardTwo ↔ rewardInfos[1]. An all-1s mint means the slot is
+          // inactive — record the mint as "unknown" and skip USD valuation.
+          const rewardInfos = dlmm.lbPair.rewardInfos;
+          const slots = [
+            { mint: rewardInfos[0]?.mint, amountAtomic: pendingOne },
+            { mint: rewardInfos[1]?.mint, amountAtomic: pendingTwo },
+          ].filter((s) => Number.isFinite(s.amountAtomic) && s.amountAtomic > 0);
+
+          const mintOf = (mint: PublicKey | undefined): string => {
+            const base58 = mint?.toBase58();
+            return base58 != null && base58 !== DEFAULT_PUBLIC_KEY ? base58 : "unknown";
+          };
+          const pricedMints = slots.map((s) => mintOf(s.mint)).filter((m) => m !== "unknown");
+          const prices =
+            pricedMints.length > 0
+              ? yield* fetchTokenPrices(pricedMints).pipe(
+                  Effect.catchAll(() => Effect.succeed({} as Record<string, number>)),
+                )
+              : {};
+
+          const rewards: ClaimedReward[] = [];
+          for (const slot of slots) {
+            const mint = mintOf(slot.mint);
+            let amountUsd: number | null = null;
+            const price = mint !== "unknown" ? prices[mint] : undefined;
+            if (price != null && price > 0) {
+              const decimals = yield* getTokenMeta(mint).pipe(
+                Effect.map((m) => m.decimals),
+                Effect.catchAll(() => Effect.succeed(null)),
+              );
+              if (decimals != null) {
+                amountUsd = (slot.amountAtomic / Math.pow(10, decimals)) * price;
+              } else {
+                logger.warn("Reward mint decimals unavailable — recording raw amount only", {
+                  pool: poolAddress,
+                  mint,
+                });
+              }
+            } else if (mint !== "unknown") {
+              logger.warn("Reward mint price unavailable — recording raw amount only", {
+                pool: poolAddress,
+                mint,
+              });
+            }
+            rewards.push({ mint, amountAtomic: slot.amountAtomic, amountUsd });
+          }
+
+          logger.info("LM rewards claimed", {
+            pool: poolAddress,
+            position: positionPubKey,
+            rewards,
+            txSignatures,
+          });
+
+          return { skipped: false, skipReason: null, txSignatures, rewards };
+        }).pipe(
+          Effect.catchAll((err: unknown) =>
+            Effect.fail(
+              new AdapterError({
+                message: `Failed to claim rewards: ${String(err)}`,
                 poolAddress,
                 cause: err,
               }),

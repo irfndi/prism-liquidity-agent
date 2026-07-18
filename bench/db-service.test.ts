@@ -37,6 +37,7 @@ function makePosition(
   entryAmountXUsd: number | null;
   entryAmountYUsd: number | null;
   cumulativeFeesClaimedUsd: number;
+  cumulativeRewardsClaimedUsd: number;
   closedAt: number | null;
   realizedPnlUsd: number | null;
 } {
@@ -64,6 +65,7 @@ function makePosition(
     entryAmountXUsd: null,
     entryAmountYUsd: null,
     cumulativeFeesClaimedUsd: 0,
+    cumulativeRewardsClaimedUsd: 0,
     closedAt: null,
     realizedPnlUsd: null,
   };
