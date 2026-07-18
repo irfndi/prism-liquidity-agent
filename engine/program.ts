@@ -63,6 +63,7 @@ import {
   HttpStatusServerService,
   EntryPrepService,
   MeteoraDatapiService,
+  AlertService,
   type AdapterApi,
   type DbApi,
   type MemoryApi,
@@ -74,6 +75,7 @@ import {
   type AgentStateApi,
 } from "./services.js";
 import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
+import { AlertLive } from "./alert-service.js";
 import type {
   AgentDecision,
   AgentProposal,
@@ -454,7 +456,8 @@ type AllServices =
   | McpServerService
   | HttpStatusServerService
   | EntryPrepService
-  | MeteoraDatapiService;
+  | MeteoraDatapiService
+  | AlertService;
 
 export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, never> {
   const dbLayer = DbLive(cfg?.sqliteDbPath);
@@ -530,7 +533,11 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged14 = Layer.merge(merged13, mcpLayer);
   const merged15 = Layer.merge(merged14, httpLayer);
 
-  return merged15 as Layer.Layer<AllServices, never, never>;
+  const alertDeps = Layer.merge(dbLayer, configLayer);
+  const alertLayer = Layer.provide(AlertLive, alertDeps);
+  const merged16 = Layer.merge(merged15, alertLayer);
+
+  return merged16 as Layer.Layer<AllServices, never, never>;
 }
 
 // ─── Paper execution ─────────────────────────────────────────────────────────
@@ -954,6 +961,7 @@ export const program = Effect.gen(function* () {
   const mcpServer = yield* McpServerService;
   const httpStatusServer = yield* HttpStatusServerService;
   const meteoraDatapi = yield* MeteoraDatapiService;
+  const alertSvc = yield* AlertService;
 
   // Load persisted positions at startup
   const allPositions = yield* db.getAllPositions().pipe(Effect.catchAll(() => Effect.succeed([])));
@@ -1773,11 +1781,47 @@ export const program = Effect.gen(function* () {
         if (!inRange) {
           if (pos.outOfRangeSince === null) {
             pos.outOfRangeSince = Date.now();
+            yield* alertSvc.sendAlert({
+              type: "position_out_of_range",
+              severity: "critical",
+              message:
+                `Position out of range on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ` +
+                `active bin ${pool.activeBinId} is outside [${pos.lowerBinId}, ${pos.upperBinId}] — fees stopped accruing`,
+              poolAddress,
+              data: {
+                activeBinId: pool.activeBinId,
+                lowerBinId: pos.lowerBinId,
+                upperBinId: pos.upperBinId,
+              },
+            });
           }
           pos.oorCycleCount++;
         } else {
           pos.outOfRangeSince = null;
           pos.oorCycleCount = 0;
+          // Range-consumption warning: alert once per cooldown when the active
+          // bin has drifted ≥80% toward an edge of the position range.
+          const halfWidth = (pos.upperBinId - pos.lowerBinId) / 2;
+          if (halfWidth > 0) {
+            const rangeCenter = (pos.lowerBinId + pos.upperBinId) / 2;
+            const consumedPct = Math.abs(pool.activeBinId - rangeCenter) / halfWidth;
+            if (consumedPct >= 0.8) {
+              yield* alertSvc.sendAlert({
+                type: "range_warning",
+                severity: "warning",
+                message:
+                  `Range ${(consumedPct * 100).toFixed(0)}% consumed on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ` +
+                  `active bin ${pool.activeBinId} nearing edge of [${pos.lowerBinId}, ${pos.upperBinId}]`,
+                poolAddress,
+                data: {
+                  activeBinId: pool.activeBinId,
+                  lowerBinId: pos.lowerBinId,
+                  upperBinId: pos.upperBinId,
+                  consumedPct,
+                },
+              });
+            }
+          }
         }
       }
 
@@ -2743,6 +2787,13 @@ export const program = Effect.gen(function* () {
           `Risk gate rejected ${decision.action} on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${riskResult.reason}`,
           { pool, metrics, position: pos ?? undefined },
         );
+        yield* alertSvc.sendAlert({
+          type: "risk_rejection",
+          severity: "warning",
+          message: `Risk gate rejected ${decision.action} on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${riskResult.reason}`,
+          poolAddress,
+          data: { action: decision.action, reason: riskResult.reason },
+        });
         yield* audit
           .recordDecision({
             timestamp: Date.now(),
@@ -2929,6 +2980,15 @@ export const program = Effect.gen(function* () {
           cycle.poolsFailed++;
         }
       }
+      if (executed && decision.action === "EXIT") {
+        yield* alertSvc.sendAlert({
+          type: "exit_executed",
+          severity: "critical",
+          message: `EXIT executed on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${decision.reasoning}`,
+          poolAddress,
+          data: { reasoning: decision.reasoning, paperTrading: config.paperTrading },
+        });
+      }
       if (decision.action === "ENTER" && isInsufficientTokenBalanceError(executionError)) {
         const backoff = nextEntryFailureBackoff(entryFailureBackoff.get(poolAddress));
         entryFailureBackoff.set(poolAddress, backoff);
@@ -3086,6 +3146,17 @@ export const program = Effect.gen(function* () {
 
           pos.lastFeeClaimAt = Date.now();
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+
+          yield* alertSvc.recordFeeClaim(
+            poolAddress,
+            convertClaimFeesToUsd({
+              netFeeXRaw: result.netFeeX,
+              netFeeYRaw: result.netFeeY,
+              tokenXSymbol: pos.tokenXSymbol,
+              tokenYSymbol: pos.tokenYSymbol,
+              solPriceUsd: config.solPriceUsd,
+            }),
+          );
 
           // F3: fee compounding — if AUTO_COMPOUND_FEES is on and the net fees
           // cleared the cost threshold, redeposit them into the same range.

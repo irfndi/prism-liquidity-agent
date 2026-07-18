@@ -162,6 +162,8 @@ curl "https://api.telegram.org/botYOUR_BOT_TOKEN/getWebhookInfo"
 | `/v1/errors/report`         | POST   | Bearer      | Store one authenticated error report  |
 | `/v1/errors/batch`          | POST   | Bearer      | Store authenticated error reports     |
 | `/v1/installs/ping`         | POST   | Mixed       | Anonymous install; auth for lifecycle|
+| `/v1/alerts`                | POST   | Bearer      | Store an engine alert + push to Telegram |
+| `/v1/alerts/preferences`    | POST   | Bot secret  | Set `alerts_enabled` for a telegram_id |
 | `/v1/audit`                 | GET    | Admin       | Query deduplicated audit summaries   |
 
 ¹ `/v1/register` is open for normal CLI registration, but binding a `telegram_id`
@@ -169,6 +171,18 @@ in the same call requires the `X-Bot-Api-Secret` header.
 ² `/v1/link-telegram/confirm` is limited to 10 attempts/hour/IP, and each code is
 burned after 5 attempts. Link codes expire 10 minutes after issue (unixepoch
 comparison) and requesting a new code invalidates the user's outstanding ones.
+
+### Proactive alerts (engine → Telegram push)
+
+The engine emits alert events (`position_out_of_range`, `range_warning`,
+`exit_executed`, `risk_rejection`, `fee_milestone`) to `POST /v1/alerts` with
+its API key. The API worker stores every alert in the `alerts` D1 table
+(60/hour per user cap) and, when the user has a linked `telegram_id` and
+`alerts_enabled = 1`, forwards it to the bot worker's internal
+`POST /internal/deliver-alert` endpoint (authenticated with the same
+`BOT_API_SECRET` shared secret) which formats and pushes the Telegram message.
+Delivery is best-effort: undelivered alerts stay in D1 with `delivered_at`
+NULL. Users toggle delivery with `/alerts on|off` in the bot.
 
 ## Telegram Bot Commands
 
@@ -179,14 +193,17 @@ comparison) and requesting a new code invalidates the user's outstanding ones.
 | `/link`     | Instructions to link existing account      |
 | `/whoami`   | Show account info (user ID, tier)          |
 | `/status`   | Show agent status (positions, P&L)         |
+| `/alerts on\|off` | Toggle proactive alert delivery        |
 | `/help`     | List all commands                          |
 
 Send the `LINK-<16 hex>` code to link your Telegram to an existing account.
 
-**Private chats only:** `/register`, `/whoami`, `/status`, `/link` and link-code
-confirmation are refused in group chats — credentials must never be posted where
-other members can see them. User-controlled text (e.g. first names) is
-HTML-escaped before being interpolated into `parse_mode: HTML` replies.
+**Private chats only:** `/register`, `/whoami`, `/status`, `/link`, `/alerts`
+and link-code confirmation are refused in group chats — credentials and
+account-scoped preferences must never be posted where other members can see
+them. User-controlled text (e.g. first names) and engine-controlled alert
+content are HTML-escaped before being interpolated into `parse_mode: HTML`
+replies.
 
 ## Bindings
 
@@ -361,6 +378,7 @@ In `[vars]` section of `wrangler.toml`:
 | ---------------------- | ------------------------------------------------------- | ------------------------------ |
 | `ENVIRONMENT`          | `production`                                            | Environment name               |
 | `TELEGRAM_WEBHOOK_URL` | `https://prism-telegram-bot.irfndi.workers.dev/webhook` | Webhook URL                    |
+| `TELEGRAM_BOT_URL`     | `https://prism-telegram-bot.irfndi.workers.dev`         | Bot worker base URL (alert push) |
 | `API_BASE_URL`         | `https://prism-api.irfndi.workers.dev`                  | API URL (used by Telegram bot) |
 
 ## Staging Environment

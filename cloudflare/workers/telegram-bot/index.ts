@@ -238,6 +238,7 @@ function handleHelp(botToken: string, chatId: number): Effect.Effect<void, never
       `/link - Link existing account\n` +
       `/whoami - Show your account info\n` +
       `/status - Check agent status\n` +
+      `/alerts on|off - Toggle proactive alerts\n` +
       `/help - Show this help\n\n` +
       `For more info: https://github.com/irfndi/prism-liquidity-agent`,
   );
@@ -307,9 +308,55 @@ function handleStatus(
   });
 }
 
+// Handle `/alerts on|off` — toggles proactive alert delivery for the linked account.
+function handleAlerts(
+  apiBaseUrl: string,
+  botToken: string,
+  chatId: number,
+  telegramId: string,
+  args: string,
+  botApiSecret?: string,
+): Effect.Effect<void, never> {
+  return Effect.gen(function* () {
+    const arg = args.trim().toLowerCase();
+    if (arg !== "on" && arg !== "off") {
+      yield* sendMessage(
+        botToken,
+        chatId,
+        `Usage: <code>/alerts on</code> or <code>/alerts off</code>\n\n` +
+          `When enabled, Prism pushes position alerts (out-of-range, exits, risk rejections, fee milestones) to this chat.`,
+      );
+      return;
+    }
+    const enabled = arg === "on";
+    const result = yield* callPrismApi(
+      apiBaseUrl,
+      "/v1/alerts/preferences",
+      { telegram_id: telegramId, enabled },
+      botApiSecret,
+    );
+    if (result.ok) {
+      yield* sendMessage(
+        botToken,
+        chatId,
+        enabled
+          ? `Alerts enabled. Prism will notify you here about position events.`
+          : `Alerts disabled. Alerts are still logged but will not be pushed here.`,
+      );
+    } else {
+      yield* sendMessage(
+        botToken,
+        chatId,
+        `Could not update alert preferences: ${result.error ?? "unknown error"}. ` +
+          `Make sure your account is linked with /link.`,
+      );
+    }
+  });
+}
+
 // Commands that return credentials or account data are private-chat only —
 // in groups the reply (and any API key) would be visible to every member.
-const PRIVATE_ONLY_COMMANDS = new Set(["/register", "/whoami", "/status", "/link"]);
+const PRIVATE_ONLY_COMMANDS = new Set(["/register", "/whoami", "/status", "/link", "/alerts"]);
 
 // Process incoming Telegram update
 function processUpdate(
@@ -380,10 +427,23 @@ function processUpdate(
             env.BOT_API_SECRET,
           );
           break;
+        case "/alerts":
+          yield* handleAlerts(
+            env.API_BASE_URL,
+            env.TELEGRAM_BOT_TOKEN,
+            chatId,
+            telegramId,
+            text.slice(rawCommand.length),
+            env.BOT_API_SECRET,
+          );
+          break;
         default:
           yield* sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, "Unknown command. Try /help");
       }
-    } else if (/^LINK-[A-Z0-9]{6,16}$/i.test(text.trim()) || /^[A-Z0-9]{6,16}$/i.test(text.trim())) {
+    } else if (
+      /^LINK-[A-Z0-9]{6,16}$/i.test(text.trim()) ||
+      /^[A-Z0-9]{6,16}$/i.test(text.trim())
+    ) {
       if (!isPrivateChat) {
         // A link code is a credential: confirming in a group would let any
         // member hijack the link first.
@@ -449,6 +509,117 @@ app.post("/webhook", async (c) => {
       return c.json({ ok: true });
     }),
   );
+});
+
+// ── Internal alert delivery (API worker → bot → Telegram) ───────────────────
+// Authenticated with the same BOT_API_SECRET shared secret (fail closed), so
+// only the API worker can push. All engine/pool-controlled text is escaped
+// before going into a parse_mode: HTML message.
+
+const ALERT_SEVERITY_EMOJI: Record<string, string> = {
+  critical: "\u{1F6A8}",
+  warning: "⚠️",
+  info: "ℹ️",
+};
+
+const ALERT_TYPE_LABEL: Record<string, string> = {
+  position_out_of_range: "Position out of range",
+  range_warning: "Range warning",
+  exit_executed: "EXIT executed",
+  risk_rejection: "Risk gate rejection",
+  fee_milestone: "Fee milestone",
+};
+
+const ALERT_DELIVER_SEVERITIES = new Set(["info", "warning", "critical"]);
+const MAX_DELIVER_MESSAGE_LENGTH = 1000;
+
+interface DeliverAlertBody {
+  alert_id?: unknown;
+  telegram_id?: unknown;
+  type?: unknown;
+  severity?: unknown;
+  message?: unknown;
+  pool_address?: unknown;
+  data?: unknown;
+}
+
+function shortenAddress(address: string): string {
+  return address.length > 12 ? `${address.slice(0, 4)}…${address.slice(-4)}` : address;
+}
+
+function deliverTelegramMessage(
+  botToken: string,
+  chatId: number,
+  text: string,
+): Effect.Effect<boolean, never> {
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  return Effect.gen(function* () {
+    const response = yield* Effect.tryPromise(() =>
+      fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
+      }),
+    );
+    if (!response.ok) {
+      yield* Effect.tryPromise(() => response.text()).pipe(
+        Effect.flatMap((errorBody) =>
+          Effect.sync(() => console.error(`Alert delivery failed: ${response.status}`, errorBody)),
+        ),
+        Effect.catchAll(() => Effect.void),
+      );
+      return false;
+    }
+    return true;
+  }).pipe(
+    Effect.catchAll((error) =>
+      Effect.sync(() => console.error("Alert delivery failed", error)).pipe(Effect.as(false)),
+    ),
+  );
+}
+
+app.post("/internal/deliver-alert", async (c) => {
+  // Fail closed, mirroring the webhook secret check: unset secret rejects all.
+  const botSecret = c.env.BOT_API_SECRET;
+  const headerSecret = c.req.header("X-Bot-Api-Secret");
+  if (!botSecret || !headerSecret || !constantTimeEqual(headerSecret, botSecret)) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const body = await Effect.runPromise(readJsonBody<DeliverAlertBody>(c.req));
+
+  if (typeof body.telegram_id !== "string" || !/^\d+$/.test(body.telegram_id)) {
+    return c.json({ error: "telegram_id required (numeric string)" }, 400);
+  }
+  if (typeof body.severity !== "string" || !ALERT_DELIVER_SEVERITIES.has(body.severity)) {
+    return c.json({ error: "severity must be one of: info, warning, critical" }, 400);
+  }
+  if (typeof body.message !== "string" || body.message.length === 0) {
+    return c.json({ error: "message is required" }, 400);
+  }
+  if (body.message.length > MAX_DELIVER_MESSAGE_LENGTH) {
+    return c.json({ error: `message exceeds ${MAX_DELIVER_MESSAGE_LENGTH} characters` }, 400);
+  }
+  const poolAddress =
+    typeof body.pool_address === "string" && body.pool_address.length > 0
+      ? body.pool_address.slice(0, 64)
+      : null;
+  const typeLabel =
+    typeof body.type === "string" ? (ALERT_TYPE_LABEL[body.type] ?? "Alert") : "Alert";
+
+  const emoji = ALERT_SEVERITY_EMOJI[body.severity] ?? ALERT_SEVERITY_EMOJI.info;
+  const lines = [`${emoji} <b>${escapeHtml(typeLabel)}</b>`];
+  if (poolAddress) {
+    lines.push(`Pool: <code>${escapeHtml(shortenAddress(poolAddress))}</code>`);
+  }
+  lines.push(escapeHtml(body.message));
+
+  const delivered = await Effect.runPromise(
+    deliverTelegramMessage(c.env.TELEGRAM_BOT_TOKEN, Number(body.telegram_id), lines.join("\n")),
+  );
+  return delivered
+    ? c.json({ ok: true, delivered: true })
+    : c.json({ error: "Telegram delivery failed" }, 502);
 });
 
 export default {

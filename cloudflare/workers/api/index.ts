@@ -13,6 +13,9 @@ export interface Env {
   // Shared secret the Telegram bot worker presents as X-Bot-Api-Secret for
   // telegram_id-keyed endpoints. Unset means those endpoints fail closed.
   BOT_API_SECRET?: string;
+  // Base URL of the telegram-bot worker used to push alert deliveries
+  // (POST {TELEGRAM_BOT_URL}/internal/deliver-alert). Unset disables push.
+  TELEGRAM_BOT_URL?: string;
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
@@ -1277,6 +1280,202 @@ app.get("/v1/errors/stats", async (c) => {
   );
 
   return Effect.runPromise(stats);
+});
+
+// ── Proactive Telegram alerts (Wave 5) ──────────────────────────────────────
+// Engine POSTs alert events with its API key. Every alert is persisted first
+// (delivered_at NULL), then pushed to the telegram-bot worker, which is the
+// only component that can reach the Telegram API. Push is best-effort: the
+// row stays auditable even when delivery is skipped or fails.
+
+const VALID_ALERT_TYPES = new Set([
+  "position_out_of_range",
+  "range_warning",
+  "exit_executed",
+  "risk_rejection",
+  "fee_milestone",
+]);
+const VALID_ALERT_SEVERITIES = new Set(["info", "warning", "critical"]);
+const MAX_ALERT_MESSAGE_LENGTH = 1000;
+const MAX_ALERT_DATA_LENGTH = 4096;
+const ALERT_RATE_LIMIT_PER_HOUR = 60;
+const ALERT_FORWARD_TIMEOUT_MS = 5000;
+
+app.post("/v1/alerts", async (c) => {
+  const { DB, CACHE } = c.env;
+  const user = await Effect.runPromise(authenticateUser(DB, c.get("apiKey") as string | undefined));
+  if (!user) return c.json({ error: "API key required" }, 401);
+
+  const body = await Effect.runPromise(
+    readJsonBody<{
+      type?: string;
+      poolAddress?: string;
+      severity?: string;
+      message?: string;
+      data?: unknown;
+    }>(c.req),
+  );
+
+  if (!body.type || !VALID_ALERT_TYPES.has(body.type)) {
+    return c.json(
+      { error: `type must be one of: ${Array.from(VALID_ALERT_TYPES).join(", ")}` },
+      400,
+    );
+  }
+  if (!body.severity || !VALID_ALERT_SEVERITIES.has(body.severity)) {
+    return c.json({ error: "severity must be one of: info, warning, critical" }, 400);
+  }
+  if (!body.message || typeof body.message !== "string") {
+    return c.json({ error: "message is required" }, 400);
+  }
+  if (body.message.length > MAX_ALERT_MESSAGE_LENGTH) {
+    return c.json({ error: `message exceeds ${MAX_ALERT_MESSAGE_LENGTH} characters` }, 400);
+  }
+  if (
+    body.poolAddress !== undefined &&
+    (typeof body.poolAddress !== "string" || body.poolAddress.length > 64)
+  ) {
+    return c.json({ error: "poolAddress must be a string of at most 64 characters" }, 400);
+  }
+  let dataJson: string | null = null;
+  if (body.data !== undefined && body.data !== null) {
+    if (typeof body.data !== "object" || Array.isArray(body.data)) {
+      return c.json({ error: "data must be a JSON object" }, 400);
+    }
+    dataJson = JSON.stringify(body.data);
+    if (dataJson.length > MAX_ALERT_DATA_LENGTH) {
+      return c.json({ error: `data exceeds ${MAX_ALERT_DATA_LENGTH} characters` }, 400);
+    }
+  }
+
+  // Per-user (not per-IP) cap: an engine bug must not spam a user's Telegram.
+  if (CACHE) {
+    const rateKey = `rate_limit:alerts:${user.id}`;
+    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
+    const count = rateData ? parseInt(rateData, 10) : 0;
+    if (count >= ALERT_RATE_LIMIT_PER_HOUR) {
+      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
+    }
+    await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
+  }
+
+  const alertType = body.type;
+  const alertSeverity = body.severity;
+  const alertMessage = body.message;
+  const botUrl = c.env.TELEGRAM_BOT_URL;
+  const botSecret = c.env.BOT_API_SECRET;
+
+  const storeAndForward = Effect.gen(function* () {
+    const id = generateId();
+    yield* Effect.tryPromise(() =>
+      DB.prepare(
+        `INSERT INTO alerts (id, user_id, type, pool_address, severity, message, data)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          id,
+          user.id,
+          alertType,
+          body.poolAddress ?? null,
+          alertSeverity,
+          alertMessage,
+          dataJson,
+        )
+        .run(),
+    );
+
+    const userRow = yield* Effect.tryPromise(() =>
+      DB.prepare("SELECT telegram_id, alerts_enabled FROM users WHERE id = ?")
+        .bind(user.id)
+        .first(),
+    );
+    const telegramId =
+      userRow && typeof userRow.telegram_id === "string" && userRow.telegram_id.length > 0
+        ? userRow.telegram_id
+        : null;
+    const alertsEnabled = !userRow || userRow.alerts_enabled !== 0;
+
+    let delivered = false;
+    if (telegramId && alertsEnabled && botUrl && botSecret) {
+      const forward = yield* Effect.tryPromise(() =>
+        fetch(`${botUrl}/internal/deliver-alert`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Bot-Api-Secret": botSecret,
+          },
+          body: JSON.stringify({
+            alert_id: id,
+            telegram_id: telegramId,
+            type: alertType,
+            severity: alertSeverity,
+            message: alertMessage,
+            pool_address: body.poolAddress ?? null,
+            data: body.data ?? null,
+          }),
+          signal: AbortSignal.timeout(ALERT_FORWARD_TIMEOUT_MS),
+        }),
+      ).pipe(Effect.catchAll(() => Effect.succeed(null)));
+
+      if (forward?.ok) {
+        delivered = true;
+        yield* Effect.tryPromise(() =>
+          DB.prepare("UPDATE alerts SET delivered_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(id)
+            .run(),
+        ).pipe(Effect.catchAll(() => Effect.succeed(null)));
+      } else {
+        console.error(
+          "[Alerts] telegram-bot forward failed",
+          forward ? `status ${forward.status}` : "network error",
+        );
+      }
+    }
+
+    return c.json({ id, delivered });
+  });
+
+  return Effect.runPromise(
+    storeAndForward.pipe(
+      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to store alert" }, 500))),
+    ),
+  );
+});
+
+// Bot-authenticated preference toggle backing the `/alerts on|off` command.
+app.post("/v1/alerts/preferences", async (c) => {
+  const { DB } = c.env;
+  if (!isBotAuthorized(c.env, c.req.header("X-Bot-Api-Secret"))) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+  const body = await Effect.runPromise(
+    readJsonBody<{ telegram_id?: string; enabled?: unknown }>(c.req),
+  );
+
+  if (!body.telegram_id || !/^\d+$/.test(body.telegram_id)) {
+    return c.json({ error: "telegram_id required (numeric)" }, 400);
+  }
+  if (typeof body.enabled !== "boolean") {
+    return c.json({ error: "enabled must be a boolean" }, 400);
+  }
+  const enabled = body.enabled;
+  const telegramId = body.telegram_id;
+
+  return Effect.runPromise(
+    Effect.tryPromise(() =>
+      DB.prepare("UPDATE users SET alerts_enabled = ? WHERE telegram_id = ?")
+        .bind(enabled ? 1 : 0, telegramId)
+        .run(),
+    ).pipe(
+      Effect.match({
+        onFailure: () => c.json({ error: "Failed to update preferences" }, 500),
+        onSuccess: (result) =>
+          result.meta.changes === 0
+            ? c.json({ error: "User not found" }, 404)
+            : c.json({ success: true, alerts_enabled: enabled }),
+      }),
+    ),
+  );
 });
 
 // ── Fee Wallet ───────────────────────────────────────────────────────────────

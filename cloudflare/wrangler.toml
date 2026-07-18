@@ -28,6 +28,9 @@ index_name = "prism-memory"
 [vars]
 ENVIRONMENT = "production"
 TELEGRAM_WEBHOOK_URL = "https://prism-telegram-bot.irfndi.workers.dev/webhook"
+# Base URL of the telegram-bot worker — the API pushes alert deliveries to
+# {TELEGRAM_BOT_URL}/internal/deliver-alert (X-Bot-Api-Secret authenticated).
+TELEGRAM_BOT_URL = "https://prism-telegram-bot.irfndi.workers.dev"
 
 [observability]
 enabled = false
