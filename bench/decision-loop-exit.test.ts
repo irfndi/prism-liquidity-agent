@@ -150,7 +150,12 @@ function makeTestLayer(opts: {
     opts.memoryRecorded
       ? Layer.succeed(MemoryService, makeRecordingMemory(opts.memoryRecorded))
       : Layer.provide(MemoryLive, dbLayer),
-    RiskLive({ confidenceThreshold: 0.65, maxRebalanceRangeBins: 50, stopLossPct: 0.15 }),
+    RiskLive({
+      confidenceThreshold: 0.65,
+      maxRebalanceRangeBins: 50,
+      stopLossPct: 0.15,
+      maxPerPoolAllocationPct: 0.4,
+    }),
     Layer.succeed(BlacklistService, {
       isDeployerBlacklisted: () => false,
       isTokenBlacklisted: () => false,

@@ -33,6 +33,8 @@ export interface AppConfig {
   readonly tokenBlacklistPath: string;
   readonly sqliteDbPath: string;
   readonly enableSnapshotCapture: boolean;
+  /** Days of pool_snapshots history to keep; older rows are pruned daily. Default 14. */
+  readonly snapshotRetentionDays: number;
   // Auto-update settings
   readonly autoUpdate: boolean;
   readonly updateCheckIntervalMs: number;
@@ -499,6 +501,7 @@ const loadConfig = Effect.gen(function* () {
   const enableSnapshotCapture = yield* Config.boolean("ENABLE_SNAPSHOT_CAPTURE").pipe(
     Effect.orElseSucceed(() => false),
   );
+  const snapshotRetentionDays = yield* validatedNumber("SNAPSHOT_RETENTION_DAYS", 1, 14);
 
   // Auto-update config
   const autoUpdate = yield* Config.boolean("AUTO_UPDATE").pipe(Effect.orElseSucceed(() => true));
@@ -582,6 +585,7 @@ const loadConfig = Effect.gen(function* () {
     tokenBlacklistPath,
     sqliteDbPath,
     enableSnapshotCapture,
+    snapshotRetentionDays,
     autoUpdate,
     updateCheckIntervalMs,
     updateChannel,

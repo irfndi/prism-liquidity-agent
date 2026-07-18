@@ -14,6 +14,7 @@ export interface RiskConfig {
   readonly confidenceThreshold: number;
   readonly maxRebalanceRangeBins: number;
   readonly stopLossPct: number;
+  readonly maxPerPoolAllocationPct: number;
 }
 
 export function evaluateRisk(
@@ -21,7 +22,14 @@ export function evaluateRisk(
   decision: AgentDecision,
   ctx: RiskContext,
 ): RiskResult {
-  // 1. Confidence gate
+  // 1. EXIT always approved — capital protection must not be gated on
+  // confidence: a high CONFIDENCE_THRESHOLD would otherwise block
+  // capital-protection exits.
+  if (decision.action === "EXIT") {
+    return { approved: true, reason: "EXIT approved: capital protection" };
+  }
+
+  // 2. Confidence gate
   if (decision.confidence < riskConfig.confidenceThreshold) {
     return {
       approved: false,
@@ -29,9 +37,9 @@ export function evaluateRisk(
     };
   }
 
-  // 2. Concurrent positions cap is enforced upstream by evaluatePerPoolAllocation.
+  // 3. Concurrent positions cap is enforced upstream by evaluatePerPoolAllocation.
 
-  // 2a. Duplicate pool guard
+  // 3a. Duplicate pool guard
   if (decision.action === "ENTER" && decision.poolAddress) {
     const duplicate = ctx.openPositions.find((p) => p.poolAddress === decision.poolAddress);
     if (duplicate) {
@@ -40,11 +48,6 @@ export function evaluateRisk(
         reason: `Already holding position in pool ${decision.poolAddress} — use REBALANCE instead`,
       };
     }
-  }
-
-  // 3. EXIT always approved
-  if (decision.action === "EXIT") {
-    return { approved: true, reason: "EXIT approved: capital protection" };
   }
 
   // 4. Drawdown check
@@ -72,14 +75,16 @@ export function evaluateRisk(
     }
   }
 
-  // 6. Position size validation
+  // 6. Position size validation — the cap is the configured per-pool
+  // allocation (single source of truth: MAX_PER_POOL_ALLOCATION_PCT).
   if (decision.action === "ENTER" && decision.positionSizeUsd !== undefined) {
-    const maxSize = ctx.portfolioValueUsd * 0.3;
+    const capPct = riskConfig.maxPerPoolAllocationPct;
+    const maxSize = ctx.portfolioValueUsd * capPct;
     if (decision.positionSizeUsd > maxSize) {
       const adjustedSizeUsd = maxSize;
       return {
         approved: true,
-        reason: `Size capped to 30% of portfolio ($${adjustedSizeUsd.toFixed(0)})`,
+        reason: `Size capped to ${(capPct * 100).toFixed(0)}% of portfolio ($${adjustedSizeUsd.toFixed(0)})`,
         adjustedSizeUsd,
       };
     }

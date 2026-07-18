@@ -137,6 +137,7 @@ function buildLayer(
     signalWeightCeiling: 2.5,
     weightedEntryScoreThreshold: 1.8,
     autoSwapEntry: false,
+    snapshotRetentionDays: 14,
   });
   const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));
   return Layer.provide(FeedbackLive, baseLayer) as Layer.Layer<FeedbackService, never, never>;

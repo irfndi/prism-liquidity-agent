@@ -39,7 +39,7 @@ import { shouldDiscoverPools } from "./pool-policy.js";
 
 import { checkForAutoUpdate } from "./update-check.js";
 import type { PositionRecord } from "./db-service.js";
-import { DiscoverPoolsError } from "./errors.js";
+import { BlacklistError, DiscoverPoolsError } from "./errors.js";
 import {
   GAS_TOP_UP_USDC,
   SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
@@ -66,6 +66,7 @@ import {
   type AdapterApi,
   type DbApi,
   type MemoryApi,
+  type RiskResult,
   type ScreenedPool,
   type StrategyApi,
   type RevenueConfigApi,
@@ -110,6 +111,9 @@ const logger = createLogger("program");
  * indexed on (pool_address, timestamp) so this stays cheap.
  */
 const PREVIOUS_SNAPSHOT_WINDOW_MS = 26 * 60 * 60 * 1000;
+
+/** How often pool_snapshots pruning runs (rows older than the retention window are deleted). */
+const SNAPSHOT_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export function isProposalStale(proposal: AgentProposal, staleMs: number, now: number): boolean {
   return now > proposal.proposedAt + staleMs || now > proposal.expiresAt;
@@ -476,6 +480,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
     confidenceThreshold: cfg?.confidenceThreshold ?? 0.65,
     maxRebalanceRangeBins: cfg?.maxRebalanceRangeBins ?? 50,
     stopLossPct: cfg?.stopLossPct ?? 0.15,
+    maxPerPoolAllocationPct: cfg?.maxPerPoolAllocationPct ?? 0.4,
   });
   const blacklist = BlacklistLive({
     deployerBlacklistPath: cfg?.deployerBlacklistPath ?? "./engine/data/deployer-blacklist.json",
@@ -963,6 +968,7 @@ export const program = Effect.gen(function* () {
   let scanCount = 0;
   let lastAgentCheckinAt = 0;
   let lastWalletBalanceUsd = config.paperPortfolioUsd;
+  let lastSnapshotPruneAt = 0;
 
   // F2: per-pool recent active-bin history (in-memory ring buffer; resets on restart)
   const binHistoryCap = Math.max(
@@ -1358,6 +1364,23 @@ export const program = Effect.gen(function* () {
       // Prune expired memories after each cycle
       yield* memory.pruneExpired().pipe(Effect.catchAll(() => Effect.void));
 
+      // Prune pool_snapshots past the retention window (they grow every
+      // cycle). Runs at most once per day; the first cycle prunes immediately.
+      const nowForPrune = Date.now();
+      if (nowForPrune - lastSnapshotPruneAt > SNAPSHOT_PRUNE_INTERVAL_MS) {
+        lastSnapshotPruneAt = nowForPrune;
+        const cutoff = nowForPrune - config.snapshotRetentionDays * 86_400_000;
+        const pruned = yield* db
+          .pruneSnapshots(cutoff)
+          .pipe(Effect.catchAll(() => Effect.succeed(0)));
+        if (pruned > 0) {
+          console.info("[snapshot-retention] Pruned old pool snapshots", {
+            pruned,
+            retentionDays: config.snapshotRetentionDays,
+          });
+        }
+      }
+
       scanCount += 1;
       yield* maybeSendAgentCheckin("periodic").pipe(Effect.catchAll(() => Effect.void));
       yield* refreshAgentState();
@@ -1595,11 +1618,98 @@ export const program = Effect.gen(function* () {
           }),
         );
 
-      // Blacklist check (token mints only; deployer info not yet fetched)
-      // TODO: fetch token deployer/authority from on-chain metadata and pass to checkPool
-      yield* blacklist
-        .checkPool(poolAddress, pool.tokenX, pool.tokenY)
-        .pipe(Effect.catchAll(() => Effect.void));
+      // Safety screening (fail-closed on positive signals, fail-open on
+      // transport errors):
+      // 1. Meteora Data API flags: is_blacklisted, freeze_authority_disabled.
+      // 2. On-chain mint accounts: freeze authority enabled → reject; mint
+      //    authority doubles as the documented deployer fallback for the
+      //    deployer blacklist.
+      // 3. Token + deployer blacklist: a loaded blacklist hit rejects the
+      //    pool; only unexpected transport/IO errors are swallowed.
+      const rejectForSafety = (reason: string): Effect.Effect<null> =>
+        Effect.gen(function* () {
+          logger.warn("Pool rejected by safety screening", { pool: poolAddress, reason });
+          yield* audit
+            .recordDecision({
+              timestamp: Date.now(),
+              cycleId,
+              poolAddress,
+              action: "HOLD",
+              confidence: 0,
+              reasoning: `[safety] ${reason}`,
+              riskResult: { approved: false, reason: `[safety] ${reason}` },
+              executed: false,
+              paperTrading: config.paperTrading,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          yield* memory
+            .upsert({
+              category: "warning",
+              content: `Safety screening rejected ${poolAddress}: ${reason}`,
+              poolAddress,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          return null;
+        });
+
+      if (datapiStats?.isBlacklisted === true) {
+        return yield* rejectForSafety("Meteora Data API flags pool as blacklisted");
+      }
+
+      const fetchAuthorities = (mint: string) =>
+        adapter.getMintAuthorities(mint).pipe(
+          Effect.catchAll((err) => {
+            logger.warn(
+              "Mint authority fetch failed — skipping on-chain authority screening (fail-open)",
+              { pool: poolAddress, mint, err: String(err) },
+            );
+            return Effect.succeed(null);
+          }),
+        );
+      const [authX, authY] = yield* Effect.all([
+        fetchAuthorities(pool.tokenX),
+        fetchAuthorities(pool.tokenY),
+      ]);
+
+      const freezeEnabledX =
+        datapiStats?.tokenXFreezeAuthorityDisabled === false || authX?.freezeAuthority != null;
+      const freezeEnabledY =
+        datapiStats?.tokenYFreezeAuthorityDisabled === false || authY?.freezeAuthority != null;
+      if (freezeEnabledX || freezeEnabledY) {
+        const which = [
+          freezeEnabledX ? `token X (${pool.tokenXSymbol})` : null,
+          freezeEnabledY ? `token Y (${pool.tokenYSymbol})` : null,
+        ]
+          .filter((s) => s !== null)
+          .join(" and ");
+        return yield* rejectForSafety(`Freeze authority enabled on ${which}`);
+      }
+
+      const blacklistRejection = yield* blacklist
+        .checkPool(
+          poolAddress,
+          pool.tokenX,
+          pool.tokenY,
+          authX?.mintAuthority ?? undefined,
+          authY?.mintAuthority ?? undefined,
+        )
+        .pipe(
+          Effect.as(null as string | null),
+          Effect.catchIf(
+            (err): err is BlacklistError => err instanceof BlacklistError,
+            (err) => Effect.succeed(err.message),
+          ),
+          Effect.catchAll((err) => {
+            logger.warn("Blacklist check failed — proceeding (fail-open)", {
+              pool: poolAddress,
+              err: String(err),
+            });
+            return Effect.succeed(null);
+          }),
+        );
+      if (blacklistRejection !== null) {
+        return yield* rejectForSafety(blacklistRejection);
+      }
 
       const metrics = strategy.computeMetrics(
         pool,
@@ -1722,8 +1832,11 @@ export const program = Effect.gen(function* () {
         yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
       }
 
-      // EXIT conditions (capital protection)
-      if (tvlVelocity < -config.tvlDropExitPct) {
+      // EXIT conditions (capital protection). Gated on hasPosition: pools
+      // without a position take the ENTER/HOLD path only — a positionless
+      // "EXIT" would be a phantom record that also arms cooldowns and the
+      // threshold-evolution counter for capital we never deployed.
+      if (hasPosition && tvlVelocity < -config.tvlDropExitPct) {
         decision = {
           action: "EXIT",
           poolAddress,
@@ -1744,6 +1857,7 @@ export const program = Effect.gen(function* () {
           { pool, metrics, position: pos ?? undefined },
         );
       } else if (
+        hasPosition &&
         metrics.volumeAuthenticityKnown &&
         volumeAuth < evolvedThresholds.volumeAuthThreshold
       ) {
@@ -1759,7 +1873,7 @@ export const program = Effect.gen(function* () {
           `Volume authenticity ${volumeAuth.toFixed(2)} below threshold on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
           { pool, metrics, position: pos ?? undefined },
         );
-      } else if (feeIlRatio < 0.5) {
+      } else if (hasPosition && feeIlRatio < 0.5) {
         decision = {
           action: "EXIT",
           poolAddress,
@@ -1895,6 +2009,14 @@ export const program = Effect.gen(function* () {
           )
         : config.paperPortfolioUsd;
       lastWalletBalanceUsd = walletBalanceUsd;
+
+      // Portfolio value = wallet + open positions (mirrors refreshAgentState).
+      // Using the wallet alone shrinks the drawdown/allocation/size gates as
+      // positions grow, tightening risk limits exactly when capital is deployed.
+      const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
+      const portfolioValueUsd =
+        walletBalanceUsd + openPositions.reduce((sum, p) => sum + p.currentValueUsd, 0);
+      const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
 
       // REBALANCE check
       if (!decision) {
@@ -2191,13 +2313,11 @@ export const program = Effect.gen(function* () {
 
               // F5: per-pool allocation cap — split across maxOpenPositions pools
               // so a single SOL/USDC exposure doesn't dominate the portfolio.
-              // F5 fix: use the actual fetched wallet balance (live) or paper
-              // portfolio default (paper) as portfolioValueUsd. Previously this
-              // hardcoded config.paperPortfolioUsd which made live caps wrong.
+              // portfolioValueUsd includes open positions (see above).
               const allocation = evaluatePerPoolAllocation({
                 proposedDepositUsd: proposedSizeUsd,
-                portfolioValueUsd: walletBalanceUsd,
-                openPositions: Array.from(trackedPositions.values()).map(toRiskPosition),
+                portfolioValueUsd,
+                openPositions,
                 maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
                 maxOpenPositions: config.maxOpenPositions,
               });
@@ -2248,10 +2368,6 @@ export const program = Effect.gen(function* () {
           reasoning: `No strong signal. Fee/IL: ${feeIlRatio.toFixed(2)}`,
         };
       }
-
-      const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
-      const portfolioValueUsd = walletBalanceUsd;
-      const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
 
       if (config.agentiveMode) {
         const proposalMode = config.agentProposalMode;
@@ -2594,7 +2710,10 @@ export const program = Effect.gen(function* () {
         };
       }
 
-      // Risk evaluation
+      // Risk evaluation. HOLD executes nothing, so risk gates are skipped for
+      // it — every rejection used to write a 60-day warning memory, and those
+      // warnings then suppressed the good-HOLD branch (hasRecentWarning),
+      // feeding a self-sustaining spam loop that flooded vector memory.
       const riskCtx = {
         openPositions,
         portfolioValueUsd,
@@ -2602,7 +2721,10 @@ export const program = Effect.gen(function* () {
         poolAddress,
         activeBinId: pool.activeBinId,
       };
-      const riskResult = risk.evaluate(decision, riskCtx);
+      const riskResult: RiskResult =
+        decision.action === "HOLD"
+          ? { approved: true, reason: "HOLD — no execution; risk gates skipped" }
+          : risk.evaluate(decision, riskCtx);
 
       // Apply risk-adjusted position size cap
       if (riskResult.adjustedSizeUsd && decision.action === "ENTER") {

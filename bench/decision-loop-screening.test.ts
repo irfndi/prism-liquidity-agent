@@ -142,7 +142,12 @@ function makeTestLayer(opts: {
     Layer.succeed(AdapterService, opts.adapter),
     StrategyLive,
     Layer.provide(MemoryLive, dbLayer),
-    RiskLive({ confidenceThreshold: 0.65, maxRebalanceRangeBins: 50, stopLossPct: 0.15 }),
+    RiskLive({
+      confidenceThreshold: 0.65,
+      maxRebalanceRangeBins: 50,
+      stopLossPct: 0.15,
+      maxPerPoolAllocationPct: 0.4,
+    }),
     Layer.succeed(BlacklistService, opts.blacklist),
     Layer.provide(AuditLive, dbLayer),
     Layer.succeed(ScreenerService, { screenPools: () => Effect.succeed([]) }),
@@ -369,9 +374,10 @@ describe("safety screening + blacklist enforcement (Wave 2)", () => {
 
     const decisions = await runOneCycle(layer);
     const forPool = decisions.filter((d) => d.poolAddress === POOL);
-    expect(forPool.length, "pool should still be processed when metadata is unavailable").toBeGreaterThan(
-      0,
-    );
+    expect(
+      forPool.length,
+      "pool should still be processed when metadata is unavailable",
+    ).toBeGreaterThan(0);
     expect(
       forPool.every((d) => d.riskResult.approved),
       `expected no screening rejections, got: ${stringifySafe(forPool.map((d) => d.riskResult))}`,

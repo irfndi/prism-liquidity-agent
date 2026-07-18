@@ -69,6 +69,7 @@ describe("evaluatePool TVL-drop EXIT (integration)", () => {
       getTokenBalance: () => Effect.succeed(0n),
       getTokenPrices: () => Effect.succeed({}),
       getTokenDecimals: () => Effect.succeed(9),
+      getMintAuthorities: () => Effect.succeed({ mintAuthority: null, freezeAuthority: null }),
       quoteSwapUSDCForToken: () => Effect.succeed({}),
       swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
     };
@@ -94,7 +95,12 @@ describe("evaluatePool TVL-drop EXIT (integration)", () => {
       Layer.succeed(AdapterService, makeAdapter()),
       StrategyLive,
       Layer.provide(MemoryLive, dbLayer),
-      RiskLive({ confidenceThreshold: 0.65, maxRebalanceRangeBins: 50, stopLossPct: 0.15 }),
+      RiskLive({
+        confidenceThreshold: 0.65,
+        maxRebalanceRangeBins: 50,
+        stopLossPct: 0.15,
+        maxPerPoolAllocationPct: 0.4,
+      }),
       Layer.succeed(BlacklistService, {
         isDeployerBlacklisted: () => false,
         isTokenBlacklisted: () => false,

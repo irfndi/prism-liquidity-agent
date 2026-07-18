@@ -154,6 +154,16 @@ export interface AdapterApi {
     mints: ReadonlyArray<string>,
   ) => Effect.Effect<Record<string, number>, unknown>;
   readonly getTokenDecimals: (mintAddress: string) => Effect.Effect<number, unknown>;
+  /**
+   * On-chain mint/freeze authority for a token mint, from the parsed mint
+   * account. The mint authority doubles as the documented deployer fallback
+   * for the deployer blacklist; the freeze authority feeds the safety
+   * screening (freeze-authority-enabled tokens are rejected). Callers treat
+   * RPC failures as fail-open.
+   */
+  readonly getMintAuthorities: (
+    mintAddress: string,
+  ) => Effect.Effect<{ mintAuthority: string | null; freezeAuthority: string | null }, unknown>;
   readonly quoteSwapUSDCForToken: (
     outputMint: string,
     amountAtomic: bigint,

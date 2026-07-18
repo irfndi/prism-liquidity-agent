@@ -167,12 +167,12 @@ Do not import service implementations directly in program logic. `Layer.provide`
 ### Decision loop (per cycle, per pool)
 
 1. `adapter.getPoolState` + `adapter.getBinArray` fetch on-chain data (real per-bin reserves via `dlmm.getBinsAroundActiveBin`). `meteoraDatapi.getPoolData` then overlays real TVL/volume/fees from the Meteora Data API (`statsSource: "datapi"`); on API failure it logs a warning and the adapter's heuristic stats are used (`statsSource: "heuristic"`).
-2. `blacklist.checkPool` early-rejects disallowed pools (errors swallowed).
+2. Safety screening early-rejects the pool with a recorded rejected decision + audit + warning: (a) Data API `is_blacklisted=true` or `freeze_authority_disabled=false`; (b) on-chain freeze authority set on either mint (`adapter.getMintAuthorities`, mint authority doubles as the deployer fallback); (c) `blacklist.checkPool` hits the token or deployer blacklist. Positive signals fail closed; transport/IO errors (blacklist load, RPC metadata fetch, Data API down) fail open with a warning.
 3. `strategy.computeMetrics` produces pure metrics (fee/IL, volume authenticity, bin utilization, TVL velocity vs the previous `pool_snapshots` row). Metrics whose inputs are unavailable are reported as explicit "unknown" (`volumeAuthenticityKnown` / `binUtilizationKnown` on `PoolMetrics`); unknown metrics skip their pre-filter/EXIT gates with a warning and block ENTER (fail-closed), never fabricate 1.0.
 4. Pre-filter skips pools below `MIN_POOL_TVL_USD`, `VOLUME_AUTH_THRESHOLD` or `MIN_BIN_UTILIZATION`.
 5. `memory.getRelevantContext` recalls recent warnings/patterns (errors swallowed).
-6. Decision rules evaluate, in order: `EXIT` → `REBALANCE` → `HOLD` → `ENTER`.
-7. `risk.evaluate` gates execution.
+6. Decision rules evaluate, in order: `EXIT` → `REBALANCE` → `HOLD` → `ENTER`. Deterministic `EXIT` conditions (TVL drop, low fee/IL, volume authenticity, volatility gate, trailing stop) only fire for pools with a tracked position — positionless pools take the ENTER/HOLD path only.
+7. `risk.evaluate` gates execution: `EXIT` is always approved first (capital protection beats the confidence gate), then the confidence gate and remaining structural checks. `HOLD` skips risk evaluation entirely (it executes nothing; rejections used to spam warning memory and suppress the good-HOLD branch). Portfolio value for the drawdown/allocation/size gates is `walletBalanceUsd + Σ openPositions.currentValueUsd`.
 8. `audit.recordDecision` logs every decision (errors swallowed).
 9. Execution updates the in-memory `trackedPositions` Map and persists to SQLite via `db.savePosition` / `db.deletePosition`.
 
@@ -302,6 +302,7 @@ The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copi
 | `MAX_PER_POOL_ALLOCATION_PCT` | `0.4`                                                              | Max portfolio share for one pool.                                                                                  |
 | `SQLITE_DB_PATH`              | `~/.local/share/prism/prism.db` (bundled) or `./prism.db` (source) | SQLite database path.                                                                                              |
 | `ENABLE_SNAPSHOT_CAPTURE`     | `false`                                                            | Store full bin-array detail in per-cycle snapshots (paper only). Lightweight per-cycle snapshot rows are always persisted — TVL velocity and IL drift need the history. |
+| `SNAPSHOT_RETENTION_DAYS`     | `14`                                                               | Days of `pool_snapshots` history to keep; older rows are pruned once per day (first cycle prunes immediately). |
 | `METEORA_DATA_API_URL`        | `https://dlmm.datapi.meteora.ag`                                   | Base URL for the Meteora Data API used to enrich pool TVL/volume/fees. On failure the engine falls back to heuristic stats with a warning.                              |
 | `EMBEDDINGS_BACKEND`          | `fallback`                                                         | `fallback` = deterministic hash vectors; `onnx` = Xenova/MiniLM (downloads ~80MB).                                 |
 | `AGENTIC_MODE`                | `false`                                                            | Enable agent runtime overlay.                                                                                      |
@@ -327,7 +328,7 @@ In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaul
 - **Embeddings default to fallback.** The ONNX backend downloads ~80MB on first use and can crash with BigInt serialization errors in Node; the engine automatically falls back.
 - **Bundled blacklists are empty.** `engine/data/deployer-blacklist.json` and `engine/data/token-blacklist.json` ship as `[]`. Override with `DEPLOYER_BLACKLIST_PATH` / `TOKEN_BLACKLIST_PATH`.
 - **Live discovery is opt-in.** Keep `ENABLE_POOL_DISCOVERY=false` and configure `WATCHLIST_POOLS` with approved pools. Automatic discovery also excludes Meteora launchpad pools.
-- **Deployer blacklist is half-wired.** `blacklist.checkPool()` accepts deployer addresses, but deployers are not currently fetched from on-chain metadata.
+- **Deployer blacklist uses the mint-authority fallback.** Each cycle the engine fetches on-chain mint authorities (`adapter.getMintAuthorities`, 1h cache) and passes the mint authority to `blacklist.checkPool()` as the deployer fallback; Metaplex update-authority metadata is not fetched. Pools flagged by the Data API (`is_blacklisted`, `freeze_authority_disabled=false`) or with an on-chain freeze authority set are rejected before metric evaluation — note this screens out freeze-authority-enabled tokens (e.g. USDC) by design.
 - **One ENTER per live cycle.** In live mode, `ENTER` is silently skipped if any position is already open.
 - **Live entry balance policy.** Live entries fail closed when requested token amount exceeds the wallet balance; they are not silently downsized.
 - **Live entry retry policy.** Deterministic insufficient-token failures are exponentially backed off per pool (30 minutes to 6 hours) to avoid repeating doomed entries and amplifying RPC load.
@@ -335,6 +336,8 @@ In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaul
 - **Scan failure semantics.** `failed` counts processing or execution failures; risk and backoff gates are rejected decisions recorded in the audit trail, not execution failures.
 - **sqlite-vec extension.** Source installs rely on `scripts/generate-vec-embed.ts` to create `engine/sqlite-vec-embedded.ts`; bundled installs provide the native extension via `PRISM_VEC0_PATH`.
 - **Backtest is a simplified simulation.** It does not replicate the full decision loop (no risk gates, memory, dynamic ENTER/EXIT sizing, trailing stop). Use it as a regression baseline, not a performance forecast.
+- **Screener bin-utilization filter is bounded.** Discovery data comes from the Data API without per-bin data, so `minBinUtilization` is enforced only for the first 10 screened candidates via an on-chain `getBinArray` probe; the rest pass through and the per-pool scan loop re-applies the gate.
+- **Risk size cap follows `MAX_PER_POOL_ALLOCATION_PCT`.** The per-position cap in `risk-service.ts` is the configured allocation pct (default 40%), not a hardcoded constant.
 - **`.env.example` is stale in places.** For example, its `UPDATE_R2_PUBLIC_URL` default does not match the code fallback. Always verify against `engine/config-service.ts`.
 
 ## Where to look first

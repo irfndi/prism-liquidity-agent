@@ -57,6 +57,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     sqliteDbPath: ":memory:",
     enableSnapshotCapture: false,
     autoSwapEntry: false,
+    snapshotRetentionDays: 14,
     autoUpdate: true,
     updateCheckIntervalMs: 86_400_000,
     updateChannel: "stable",

@@ -116,11 +116,7 @@ describe("RiskEngine", () => {
     it("derives the cap from maxPerPoolAllocationPct (config, not hardcode)", () => {
       const config25 = { ...riskConfig, maxPerPoolAllocationPct: 0.25 };
       const decision = makeDecision({ action: "ENTER", confidence: 0.8, positionSizeUsd: 5000 });
-      const result = evaluateRisk(
-        config25,
-        decision,
-        makeContext({ portfolioValueUsd: 10_000 }),
-      );
+      const result = evaluateRisk(config25, decision, makeContext({ portfolioValueUsd: 10_000 }));
       expect(result.approved).toBe(true);
       expect(result.adjustedSizeUsd).toBe(2500);
       expect(result.reason).toContain("25%");

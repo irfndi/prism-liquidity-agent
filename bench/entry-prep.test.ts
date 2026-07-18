@@ -63,6 +63,7 @@ function makeAdapter(mock: Partial<AdapterApi> = {}): AdapterApi {
     getTokenBalance: (mint: string) => Effect.succeed(mint === USDC_MINT ? 10_000_000_000n : 0n),
     getTokenPrices: () => Effect.succeed({ [TOKEN_X]: 150, [TOKEN_Y]: 1 }),
     getTokenDecimals: () => Effect.succeed(9),
+    getMintAuthorities: () => Effect.succeed({ mintAuthority: null, freezeAuthority: null }),
     quoteSwapUSDCForToken: () =>
       Effect.succeed({ routePlan: [{ swapInfo: {} }], outAmount: "10000000000000" }),
     swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),

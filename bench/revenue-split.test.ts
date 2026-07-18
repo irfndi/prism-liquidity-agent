@@ -111,6 +111,7 @@ function buildLayer() {
     signalWeightCeiling: 2.5,
     weightedEntryScoreThreshold: 1.8,
     autoSwapEntry: false,
+    snapshotRetentionDays: 14,
   });
   const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));
   return Layer.merge(Layer.provide(AuditLive, DbLive(":memory:")), baseLayer);

@@ -106,6 +106,7 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     signalWeightCeiling: 2.5,
     weightedEntryScoreThreshold: 1.8,
     autoSwapEntry: false,
+    snapshotRetentionDays: 14,
     ...overrides,
   };
 }
