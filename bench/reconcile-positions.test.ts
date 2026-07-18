@@ -141,6 +141,86 @@ describe("reconcilePositions — integration", () => {
     );
   });
 
+  it("syncs a tracked position's range when the same on-chain position has drifted", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        // The on-chain position kept its pubkey but its range moved (e.g. an
+        // atomic rebalance whose confirmation errored after landing).
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () =>
+            Effect.succeed([
+              {
+                poolAddress: "pool1",
+                positionPubKey: "pubkey1",
+                lowerBinId: 4990,
+                upperBinId: 5030,
+              },
+            ]),
+        });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+        trackedPositions.set("pool1", makePosition("pool1", "pubkey1"));
+
+        yield* db.savePosition(makePosition("pool1", "pubkey1"));
+
+        const reconciled = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+          "pool1",
+        ]);
+
+        expect(reconciled.succeeded).toBe(true);
+        const tracked = trackedPositions.get("pool1")!;
+        expect(tracked.positionPubKey).toBe("pubkey1");
+        expect(tracked.lowerBinId).toBe(4990);
+        expect(tracked.upperBinId).toBe(5030);
+        // Identity + accounting fields are untouched by the range sync.
+        expect(tracked.depositedUsd).toBe(1000);
+
+        const all = yield* db.getAllPositions();
+        expect(all).toHaveLength(1);
+        expect(all[0]!.lowerBinId).toBe(4990);
+        expect(all[0]!.upperBinId).toBe(5030);
+      }),
+      dbLayer,
+    );
+  });
+
+  it("does not sync ranges across different position pubkeys", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () =>
+            Effect.succeed([
+              {
+                poolAddress: "pool1",
+                positionPubKey: "some-other-pubkey",
+                lowerBinId: 4990,
+                upperBinId: 5030,
+              },
+            ]),
+        });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+        trackedPositions.set("pool1", makePosition("pool1", "pubkey1"));
+
+        yield* db.savePosition(makePosition("pool1", "pubkey1"));
+
+        yield* reconcilePositions(adapter, db, memory, trackedPositions, ["pool1"]);
+
+        const tracked = trackedPositions.get("pool1")!;
+        expect(tracked.positionPubKey).toBe("pubkey1");
+        expect(tracked.lowerBinId).toBe(4980);
+        expect(tracked.upperBinId).toBe(5020);
+      }),
+      dbLayer,
+    );
+  });
+
   it("discovers external positions in watched pools", () => {
     const dbLayer = DbLive(":memory:");
 

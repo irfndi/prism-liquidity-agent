@@ -306,6 +306,36 @@ export function estimatePositionValue(pos: PositionRecord, pool: PoolState): num
   return pos.depositedUsd * ilFactor;
 }
 
+export interface RebalanceBenefitEstimate {
+  readonly estimatedFeesUsd: number;
+  readonly estimatedCostUsd: number;
+  readonly netBenefitUsd: number;
+  readonly source: "sdk-simulation" | "pool-heuristic";
+}
+
+/**
+ * Paper-mode rebalance benefit. There is no on-chain position to simulate in
+ * paper mode, so the gate uses a pool-level fee-share heuristic; it shapes
+ * simulated decisions only and never moves capital. Live mode instead runs
+ * the SDK's atomic-rebalance simulation (see adapter.simulateRebalance).
+ */
+export function estimatePaperRebalanceBenefit(args: {
+  fees24hUsd: number;
+  newLowerBinId: number;
+  newUpperBinId: number;
+}): RebalanceBenefitEstimate {
+  const rangeWidth = Math.max(args.newUpperBinId - args.newLowerBinId, 0);
+  const feeCaptureRatio = Math.min(rangeWidth / 100, 1.0);
+  const estimatedFeesUsd = args.fees24hUsd * feeCaptureRatio;
+  const estimatedCostUsd = 0.5; // nominal simulated tx cost — paper pays no real gas/rent
+  return {
+    estimatedFeesUsd,
+    estimatedCostUsd,
+    netBenefitUsd: estimatedFeesUsd - estimatedCostUsd,
+    source: "pool-heuristic",
+  };
+}
+
 type PositionReconcileResult = {
   succeeded: boolean;
   unresolvedPoolAddresses: ReadonlySet<string>;
@@ -381,10 +411,38 @@ export function reconcilePositions(
     }
 
     for (const onChainPos of onChainPositions) {
-      if (
-        !trackedPositions.has(onChainPos.poolAddress) &&
-        watchedPoolSet.has(onChainPos.poolAddress)
-      ) {
+      if (trackedPositions.has(onChainPos.poolAddress)) {
+        // A tracked position whose on-chain range moved under the same pubkey
+        // (e.g. an externally-executed rebalance, or an atomic rebalance whose
+        // confirmation errored after landing) — sync the record back to the
+        // real range instead of deciding on stale bins.
+        const tracked = trackedPositions.get(onChainPos.poolAddress)!;
+        if (
+          tracked.positionPubKey === onChainPos.positionPubKey &&
+          (tracked.lowerBinId !== onChainPos.lowerBinId ||
+            tracked.upperBinId !== onChainPos.upperBinId)
+        ) {
+          console.warn(
+            `Reconciling: position ${onChainPos.poolAddress} range drifted on-chain (${tracked.lowerBinId}-${tracked.upperBinId} → ${onChainPos.lowerBinId}-${onChainPos.upperBinId}) — syncing record`,
+          );
+          const updated: PositionRecord = {
+            ...tracked,
+            lowerBinId: onChainPos.lowerBinId,
+            upperBinId: onChainPos.upperBinId,
+          };
+          trackedPositions.set(onChainPos.poolAddress, updated);
+          yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
+          yield* memory
+            .upsert({
+              category: "warning",
+              content: `Position ${onChainPos.poolAddress} range synced to on-chain state (${onChainPos.lowerBinId}-${onChainPos.upperBinId}).`,
+              poolAddress: onChainPos.poolAddress,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+        }
+        continue;
+      }
+      if (watchedPoolSet.has(onChainPos.poolAddress)) {
         console.warn(
           `Reconciling: discovered external position in ${onChainPos.poolAddress} — adding to tracking`,
         );
@@ -709,6 +767,7 @@ export function executeLive(
     trackedPositions: Map<string, PositionRecord>;
     entryPrep: EntryPrepApi;
     solPriceUsd: number;
+    reconcileRequestedPools?: Set<string>;
   },
   decision: AgentDecision,
   pool: {
@@ -1030,15 +1089,16 @@ export function executeLive(
           )
           .pipe(
             Effect.tap((r) =>
-              console.info("Live position rebalanced", {
+              console.info("Live position rebalanced atomically", {
                 pool: decision.poolAddress,
-                newPosition: r.newPositionPubKey,
+                position: r.positionPubKey,
+                txSignatures: r.txSignatures.length,
               }),
             ),
             Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
             Effect.catchAll((err) => {
               const msg = (err as { message?: string }).message ?? String(err);
-              console.error("Live REBALANCE failed", {
+              console.error("Live atomic REBALANCE failed", {
                 pool: decision.poolAddress,
                 err: msg,
               });
@@ -1049,7 +1109,9 @@ export function executeLive(
         if (rebalanceResult.result) {
           const updated: PositionRecord = {
             ...pos,
-            positionPubKey: rebalanceResult.result.newPositionPubKey,
+            // Atomic rebalance preserves the position account: the pubkey,
+            // entry basis and cumulative fee accounting all survive.
+            positionPubKey: rebalanceResult.result.positionPubKey,
             lowerBinId: decision.rebalanceParams.newLowerBinId,
             upperBinId: decision.rebalanceParams.newUpperBinId,
             lastFeeClaimAt: Date.now(),
@@ -1069,12 +1131,22 @@ export function executeLive(
               metadata: {
                 newLowerBinId: decision.rebalanceParams.newLowerBinId,
                 newUpperBinId: decision.rebalanceParams.newUpperBinId,
+                txSignatures: rebalanceResult.result.txSignatures,
               },
               createdAt: Date.now(),
             })
             .pipe(Effect.catchAll(() => Effect.void));
           return { executed: true, error: undefined };
         }
+        // Atomic failure leaves the on-chain position untouched — unless the
+        // tx landed despite a confirmation error. Either way the next
+        // reconcile sweep re-reads the real range; in-memory/DB state is
+        // deliberately left exactly as-is (no half-updated records).
+        logger.warn("Atomic rebalance failed — flagging pool for reconcile", {
+          pool: decision.poolAddress,
+          error: rebalanceResult.error,
+        });
+        deps.reconcileRequestedPools?.add(decision.poolAddress);
         return { executed: false, error: rebalanceResult.error };
       }
       return { executed: false, error: "REBALANCE requires an existing live position" };
@@ -1363,6 +1435,9 @@ export const program = Effect.gen(function* () {
 
   const approvedPoolAddresses = [...poolsToScan];
   let unresolvedPoolAddresses = new Set<string>();
+  // Pools whose atomic rebalance failed mid-execution — re-read on-chain
+  // state at the next cycle's reconcile before deciding again.
+  const reconcileRequestedPools = new Set<string>();
   const refreshPoolsToScan = (reconcileResult: PositionReconcileResult) => {
     unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
     poolsToScan = [...approvedPoolAddresses];
@@ -2279,6 +2354,7 @@ export const program = Effect.gen(function* () {
           );
         } else if (
           hasPosition &&
+          pos &&
           (driftPct > 0.6 || oorGraceExpired) &&
           (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
         ) {
@@ -2290,73 +2366,75 @@ export const program = Effect.gen(function* () {
                 config.volatilityWideHalfWidthBins,
               )
             : strategy.recommendBinRange(pool.activeBinId, pool.binStep);
-          const sim = yield* adapter.simulateRebalance(
-            poolAddress,
-            recommended.lowerBinId,
-            recommended.upperBinId,
-          );
+          // Simulation-first: live mode runs the SDK's atomic-rebalance
+          // simulation against the real position; on any simulation/transport
+          // failure the gate fails closed (no rebalance this cycle).
+          const sim = config.paperTrading
+            ? estimatePaperRebalanceBenefit({
+                fees24hUsd: pool.fees24hUsd,
+                newLowerBinId: recommended.lowerBinId,
+                newUpperBinId: recommended.upperBinId,
+              })
+            : pos.positionPubKey
+              ? yield* adapter
+                  .simulateRebalance(
+                    poolAddress,
+                    pos.positionPubKey,
+                    recommended.lowerBinId,
+                    recommended.upperBinId,
+                  )
+                  .pipe(
+                    Effect.catchAll((err) =>
+                      Effect.sync(() => {
+                        logger.warn(
+                          "Rebalance simulation failed — holding position (fail-closed)",
+                          {
+                            pool: poolAddress,
+                            error: err instanceof Error ? err.message : String(err),
+                          },
+                        );
+                        return null;
+                      }),
+                    ),
+                  )
+              : null;
 
-          // F1: gas-aware gate — skip rebalance when gas cost > N days of position fees
-          // Use currentValueUsd (not depositedUsd) so the share reflects the
-          // position's present value, not its original deposit. If current
-          // value is unknown (reconciled positions), fall back to 0 which
-          // makes the gas gate reject — a conservative default.
-          const positionSharePct =
-            pool.tvlUsd > 0 && pos && pos.currentValueUsd > 0
-              ? Math.min(pos.currentValueUsd / pool.tvlUsd, 1)
-              : 0;
-          const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
-          const gasGate = evaluateGasGate({
-            rebalanceGasCostSol: config.rebalanceGasCostSol,
-            solPriceUsd: config.solPriceUsd,
-            positionDailyFeesUsd,
-            minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
-          });
-          if (!gasGate.approved) {
-            console.info(
-              `[gas-gate] Holding ${poolAddress} — ${gasGate.reason} (gas=$${gasGate.gasCostUsd.toFixed(2)}, threshold=$${gasGate.feesThresholdUsd.toFixed(2)})`,
-            );
+          if (sim === null) {
             yield* memory
               .upsert({
                 category: "warning",
-                content: `Gas-aware rebalance gate held ${poolAddress}: ${gasGate.reason}`,
+                content: `Rebalance simulation unavailable for ${poolAddress} — rebalance skipped this cycle`,
                 poolAddress,
-              })
-              .pipe(Effect.catchAll(() => Effect.void));
-            yield* audit
-              .recordDecision({
-                timestamp: Date.now(),
-                cycleId,
-                poolAddress,
-                action: "HOLD",
-                confidence: 0,
-                reasoning: `[gas-gate] ${gasGate.reason}`,
-                metrics,
-                riskResult: { approved: false, reason: `[gas-gate] ${gasGate.reason}` },
-                executed: false,
-                paperTrading: config.paperTrading,
               })
               .pipe(Effect.catchAll(() => Effect.void));
           } else {
-            // F4: OOR recovery probability — if the recent bin path is
-            // mean-reverting enough to plausibly recover, hold rather than
-            // rebalance. Otherwise rebalance as usual.
-            const recoveryProb = estimateRecoveryProbability(
-              recoveryBins,
-              Math.abs(pool.activeBinId - positionCenter),
+            console.info(
+              `[rebalance-sim] ${poolAddress} source=${sim.source} fees=$${sim.estimatedFeesUsd.toFixed(2)} cost=$${sim.estimatedCostUsd.toFixed(2)} net=$${sim.netBenefitUsd.toFixed(2)}`,
             );
-            const holdForRecovery = shouldHoldForRecovery(
-              recoveryProb,
-              config.oorRecoveryHoldThreshold,
-            );
-            if (holdForRecovery) {
+            // F1: gas-aware gate — skip rebalance when gas cost > N days of position fees
+            // Use currentValueUsd (not depositedUsd) so the share reflects the
+            // position's present value, not its original deposit. If current
+            // value is unknown (reconciled positions), fall back to 0 which
+            // makes the gas gate reject — a conservative default.
+            const positionSharePct =
+              pool.tvlUsd > 0 && pos && pos.currentValueUsd > 0
+                ? Math.min(pos.currentValueUsd / pool.tvlUsd, 1)
+                : 0;
+            const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
+            const gasGate = evaluateGasGate({
+              rebalanceGasCostSol: config.rebalanceGasCostSol,
+              solPriceUsd: config.solPriceUsd,
+              positionDailyFeesUsd,
+              minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
+            });
+            if (!gasGate.approved) {
               console.info(
-                `[recovery-gate] Holding ${poolAddress} — recovery prob ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold}`,
+                `[gas-gate] Holding ${poolAddress} — ${gasGate.reason} (gas=$${gasGate.gasCostUsd.toFixed(2)}, threshold=$${gasGate.feesThresholdUsd.toFixed(2)})`,
               );
               yield* memory
                 .upsert({
-                  category: "pattern",
-                  content: `OOR recovery prediction held ${poolAddress}: probability ${recoveryProb.toFixed(2)}`,
+                  category: "warning",
+                  content: `Gas-aware rebalance gate held ${poolAddress}: ${gasGate.reason}`,
                   poolAddress,
                 })
                 .pipe(Effect.catchAll(() => Effect.void));
@@ -2366,35 +2444,73 @@ export const program = Effect.gen(function* () {
                   cycleId,
                   poolAddress,
                   action: "HOLD",
-                  confidence: recoveryProb,
-                  reasoning: `[recovery-gate] probability ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold} — expecting mean-reversion`,
+                  confidence: 0,
+                  reasoning: `[gas-gate] ${gasGate.reason}`,
                   metrics,
-                  riskResult: {
-                    approved: false,
-                    reason: `[recovery-gate] probability ${recoveryProb.toFixed(2)} above hold threshold`,
-                  },
+                  riskResult: { approved: false, reason: `[gas-gate] ${gasGate.reason}` },
                   executed: false,
                   paperTrading: config.paperTrading,
                 })
                 .pipe(Effect.catchAll(() => Effect.void));
-            } else if (
-              sim.netBenefitUsd > config.minRebalanceNetBenefitUsd ||
-              recoveryProb <= config.oorRecoveryForceRebalanceThreshold
-            ) {
-              const forceRebalance = recoveryProb <= config.oorRecoveryForceRebalanceThreshold;
-              decision = {
-                action: "REBALANCE",
-                poolAddress,
-                confidence: Math.min(0.7 + feeIlRatio * 0.1, 0.9),
-                reasoning: forceRebalance
-                  ? `[recovery-gate] force-rebalance — probability ${recoveryProb.toFixed(2)} <= ${config.oorRecoveryForceRebalanceThreshold}. Drift ${(driftPct * 100).toFixed(0)}%`
-                  : `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${sim.netBenefitUsd.toFixed(2)}`,
-                rebalanceParams: {
-                  newLowerBinId: recommended.lowerBinId,
-                  newUpperBinId: recommended.upperBinId,
-                  slippageBps: 50,
-                },
-              };
+            } else {
+              // F4: OOR recovery probability — if the recent bin path is
+              // mean-reverting enough to plausibly recover, hold rather than
+              // rebalance. Otherwise rebalance as usual.
+              const recoveryProb = estimateRecoveryProbability(
+                recoveryBins,
+                Math.abs(pool.activeBinId - positionCenter),
+              );
+              const holdForRecovery = shouldHoldForRecovery(
+                recoveryProb,
+                config.oorRecoveryHoldThreshold,
+              );
+              if (holdForRecovery) {
+                console.info(
+                  `[recovery-gate] Holding ${poolAddress} — recovery prob ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold}`,
+                );
+                yield* memory
+                  .upsert({
+                    category: "pattern",
+                    content: `OOR recovery prediction held ${poolAddress}: probability ${recoveryProb.toFixed(2)}`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+                yield* audit
+                  .recordDecision({
+                    timestamp: Date.now(),
+                    cycleId,
+                    poolAddress,
+                    action: "HOLD",
+                    confidence: recoveryProb,
+                    reasoning: `[recovery-gate] probability ${recoveryProb.toFixed(2)} >= ${config.oorRecoveryHoldThreshold} — expecting mean-reversion`,
+                    metrics,
+                    riskResult: {
+                      approved: false,
+                      reason: `[recovery-gate] probability ${recoveryProb.toFixed(2)} above hold threshold`,
+                    },
+                    executed: false,
+                    paperTrading: config.paperTrading,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              } else if (
+                sim.netBenefitUsd > config.minRebalanceNetBenefitUsd ||
+                recoveryProb <= config.oorRecoveryForceRebalanceThreshold
+              ) {
+                const forceRebalance = recoveryProb <= config.oorRecoveryForceRebalanceThreshold;
+                decision = {
+                  action: "REBALANCE",
+                  poolAddress,
+                  confidence: Math.min(0.7 + feeIlRatio * 0.1, 0.9),
+                  reasoning: forceRebalance
+                    ? `[recovery-gate] force-rebalance — probability ${recoveryProb.toFixed(2)} <= ${config.oorRecoveryForceRebalanceThreshold}. Drift ${(driftPct * 100).toFixed(0)}%`
+                    : `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${sim.netBenefitUsd.toFixed(2)}`,
+                  rebalanceParams: {
+                    newLowerBinId: recommended.lowerBinId,
+                    newUpperBinId: recommended.upperBinId,
+                    slippageBps: 50,
+                  },
+                };
+              }
             }
           }
         }
@@ -3109,6 +3225,7 @@ export const program = Effect.gen(function* () {
             trackedPositions,
             entryPrep,
             solPriceUsd: config.solPriceUsd,
+            reconcileRequestedPools,
           },
           decision,
           pool,
@@ -3141,6 +3258,7 @@ export const program = Effect.gen(function* () {
             trackedPositions,
             entryPrep,
             solPriceUsd: config.solPriceUsd,
+            reconcileRequestedPools,
           },
           decision,
           pool,
@@ -3366,25 +3484,41 @@ export const program = Effect.gen(function* () {
               console.info(
                 `[compound] Redeeming fees back into ${poolAddress} — ${compoundGate.reason}`,
               );
-              const compoundResult = yield* adapter
-                .rebalancePosition(poolAddress, pos.positionPubKey, pos.lowerBinId, pos.upperBinId)
-                .pipe(
-                  Effect.tap((r) =>
-                    console.info("Compound rebalance succeeded", {
-                      pool: poolAddress,
-                      newPosition: r.newPositionPubKey,
-                    }),
-                  ),
-                  Effect.catchAll((err) => {
-                    console.warn("Compound rebalance failed", {
-                      pool: poolAddress,
-                      err: (err as { message?: string }).message ?? String(err),
-                    });
-                    return Effect.succeed(null);
-                  }),
-                );
+              // Atomic rebalance into the same range with the just-claimed
+              // net fees as top-up, so the claimed fees become new liquidity
+              // in the preserved position (no close+reopen).
+              const topUp = {
+                amountXAtomic: BigInt(Math.max(Math.trunc(result.netFeeX), 0)),
+                amountYAtomic: BigInt(Math.max(Math.trunc(result.netFeeY), 0)),
+              };
+              const compoundResult =
+                topUp.amountXAtomic === 0n && topUp.amountYAtomic === 0n
+                  ? null
+                  : yield* adapter
+                      .rebalancePosition(
+                        poolAddress,
+                        pos.positionPubKey,
+                        pos.lowerBinId,
+                        pos.upperBinId,
+                        topUp,
+                      )
+                      .pipe(
+                        Effect.tap((r) =>
+                          console.info("Compound rebalance succeeded", {
+                            pool: poolAddress,
+                            position: r.positionPubKey,
+                          }),
+                        ),
+                        Effect.catchAll((err) => {
+                          console.warn("Compound rebalance failed", {
+                            pool: poolAddress,
+                            err: (err as { message?: string }).message ?? String(err),
+                          });
+                          return Effect.succeed(null);
+                        }),
+                      );
               if (compoundResult) {
-                pos.positionPubKey = compoundResult.newPositionPubKey;
+                pos.positionPubKey = compoundResult.positionPubKey;
                 pos.lastRebalanceAt = Date.now();
                 // Compounded fees become new cost basis; currentValue/highest
                 // adjust in lockstep so PnL and the trailing stop stay honest
@@ -3436,6 +3570,11 @@ export const program = Effect.gen(function* () {
   let shuttingDown = false;
   const runScheduledCycle = Effect.gen(function* () {
     if (shuttingDown) return;
+    if (reconcileRequestedPools.size > 0) {
+      logger.warn("Reconciling pools flagged by failed atomic rebalances", {
+        pools: [...reconcileRequestedPools],
+      });
+    }
     const reconcileResult = yield* reconcilePositions(
       adapter,
       db,
@@ -3443,6 +3582,7 @@ export const program = Effect.gen(function* () {
       trackedPositions,
       approvedPoolAddresses,
     );
+    reconcileRequestedPools.clear();
     refreshPoolsToScan(reconcileResult);
     yield* claimAllFees();
     yield* checkForAutoUpdate(config, db);

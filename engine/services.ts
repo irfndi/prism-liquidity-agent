@@ -75,15 +75,26 @@ export interface AdapterApi {
     }>,
     unknown
   >;
+  /**
+   * Estimate the benefit of rebalancing `positionPubKey` into a new range.
+   * Live mode runs the Meteora SDK's atomic-rebalance simulation against the
+   * real on-chain position: `estimatedFeesUsd` is the position's real
+   * claimable fees and `estimatedCostUsd` is the quoted bin-array/bitmap
+   * rent for the target range. Paper mode has no on-chain position to
+   * simulate, so it reports a pool-level heuristic (`source:
+   * "pool-heuristic"`) that only shapes simulated decisions.
+   */
   readonly simulateRebalance: (
     poolAddress: string,
+    positionPubKey: string,
     newLowerBinId: number,
     newUpperBinId: number,
   ) => Effect.Effect<
     {
-      estimatedIlUsd: number;
       estimatedFeesUsd: number;
+      estimatedCostUsd: number;
       netBenefitUsd: number;
+      source: "sdk-simulation" | "pool-heuristic";
     },
     unknown
   >;
@@ -97,14 +108,24 @@ export interface AdapterApi {
     poolAddress: string,
     positionPubKey: string,
   ) => Effect.Effect<{ txSignature: string }, unknown>;
+  /**
+   * Atomically rebalance a position into a new range via the Meteora SDK's
+   * `rebalancePosition` instruction. The position account — and therefore its
+   * identity (`positionPubKey`), entry accounting and accrued-fee history — is
+   * preserved; there is no close+reopen exposure window. The reshaped size is
+   * the position's current on-chain liquidity plus the optional `topUp`
+   * amounts (used by auto-compound to redeposit just-claimed fees); it is
+   * never derived from paper-trading config.
+   */
   readonly rebalancePosition: (
     poolAddress: string,
     positionPubKey: string,
     newLowerBinId: number,
     newUpperBinId: number,
+    topUp?: { amountXAtomic: bigint; amountYAtomic: bigint },
   ) => Effect.Effect<
     {
-      newPositionPubKey: string;
+      positionPubKey: string;
       txSignatures: ReadonlyArray<string>;
     },
     unknown
