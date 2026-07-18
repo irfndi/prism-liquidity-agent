@@ -49,11 +49,16 @@ describe("evaluatePool TVL-drop EXIT (integration)", () => {
       getPositions: () => Effect.succeed([]),
       getAllWalletPositions: () => Effect.succeed([]),
       simulateRebalance: () =>
-        Effect.succeed({ estimatedIlUsd: 0, estimatedFeesUsd: 0, netBenefitUsd: 0 }),
+        Effect.succeed({
+          estimatedFeesUsd: 0,
+          estimatedCostUsd: 0,
+          netBenefitUsd: 0,
+          source: "pool-heuristic" as const,
+        }),
       enterPosition: () => Effect.succeed({ positionPubKey: "mock-pos", txSignature: "mock-tx" }),
       exitPosition: () => Effect.succeed({ txSignature: "mock-tx" }),
       rebalancePosition: () =>
-        Effect.succeed({ newPositionPubKey: "mock-pos", txSignatures: ["mock-tx"] }),
+        Effect.succeed({ positionPubKey: "mock-pos", txSignatures: ["mock-tx"] }),
       claimFees: () =>
         Effect.succeed({
           txSignature: "mock-tx",

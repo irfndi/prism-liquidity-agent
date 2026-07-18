@@ -12,7 +12,15 @@ import {
   createAssociatedTokenAccountInstruction,
   createTransferInstruction,
 } from "@solana/spl-token";
-import DLMM from "@meteora-ag/dlmm";
+import DLMM, {
+  buildLiquidityStrategyParameters,
+  getLiquidityStrategyParameterBuilder,
+  StrategyType,
+  MAX_ACTIVE_BIN_SLIPPAGE,
+  type PositionData,
+  type RebalanceWithDeposit,
+  type RebalanceWithWithdraw,
+} from "@meteora-ag/dlmm";
 import { BN } from "@coral-xyz/anchor";
 import { Context, Effect, Layer } from "effect";
 import { AdapterService, type AdapterApi } from "./services.js";
@@ -47,8 +55,88 @@ const RPC_RETRY_OPTIONS = {
 const RPC_MIN_INTERVAL_MS = 50;
 const RPC_REQUEST_TIMEOUT_MS = 15_000;
 
+// Atomic rebalance (SDK rebalancePosition): the position's full on-chain
+// liquidity is withdrawn and redeposited into the target range inside a single
+// instruction, so the position account — and its identity — is preserved.
+const REBALANCE_WITHDRAW_BPS = 10_000;
+// Bounds sim→exec drift on the SDK-quoted deposit/withdraw amounts (percent).
+const REBALANCE_SLIPPAGE_PERCENT = 10;
+// initializeBinArray instructions are small; a conservative chunk keeps the
+// init transaction well under the size limit.
+const MAX_INIT_BIN_ARRAY_IXS_PER_TX = 8;
+
+interface AtomicRebalancePlan {
+  readonly deposits: RebalanceWithDeposit[];
+  readonly withdraws: RebalanceWithWithdraw[];
+}
+
+/**
+ * Build the withdraw-everything + redeposit-into-target-range parameters for
+ * `simulateRebalancePosition`/`rebalancePosition`. Deposit amounts come from
+ * the position's real on-chain token amounts plus any explicit top-up
+ * (auto-compound redeposits just-claimed fees) — never from paper config.
+ */
+export function buildAtomicRebalancePlan(args: {
+  activeBinId: number;
+  binStep: number;
+  positionData: Pick<PositionData, "totalXAmount" | "totalYAmount" | "lowerBinId" | "upperBinId">;
+  newLowerBinId: number;
+  newUpperBinId: number;
+  topUp?: { amountXAtomic: bigint; amountYAtomic: bigint };
+}): AtomicRebalancePlan {
+  const activeId = new BN(args.activeBinId);
+  const minDeltaId = new BN(args.newLowerBinId - args.activeBinId);
+  const maxDeltaId = new BN(args.newUpperBinId - args.activeBinId);
+  const depositX = new BN(args.positionData.totalXAmount).add(
+    new BN((args.topUp?.amountXAtomic ?? 0n).toString()),
+  );
+  const depositY = new BN(args.positionData.totalYAmount).add(
+    new BN((args.topUp?.amountYAtomic ?? 0n).toString()),
+  );
+  const strategyParameters = buildLiquidityStrategyParameters(
+    depositX,
+    depositY,
+    minDeltaId,
+    maxDeltaId,
+    new BN(args.binStep),
+    false,
+    activeId,
+    getLiquidityStrategyParameterBuilder(StrategyType.Spot),
+  );
+  return {
+    deposits: [
+      {
+        minDeltaId,
+        maxDeltaId,
+        x0: strategyParameters.x0,
+        y0: strategyParameters.y0,
+        deltaX: strategyParameters.deltaX,
+        deltaY: strategyParameters.deltaY,
+        favorXInActiveBin: false,
+      },
+    ],
+    withdraws: [
+      {
+        minBinId: new BN(args.positionData.lowerBinId),
+        maxBinId: new BN(args.positionData.upperBinId),
+        bps: new BN(REBALANCE_WITHDRAW_BPS),
+      },
+    ],
+  };
+}
+
 function formatTokenAmount(amount: bigint, decimals: number): string {
   return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
+}
+
+// Effect.tryPromise wraps rejections in UnknownException; surface the original
+// message so gate logs and AdapterErrors stay readable.
+function underlyingErrorMessage(err: unknown): string {
+  if (err && typeof err === "object" && "cause" in err) {
+    const cause = (err as { cause: unknown }).cause;
+    if (cause instanceof Error) return cause.message;
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 const logger = createLogger("adapter-service");
@@ -1057,6 +1145,33 @@ export const AdapterLive = Layer.effect(
 
     // ─── Pool stats ────────────────────────────────────────────────────────
 
+    function sendInstructions(
+      instructions: ReadonlyArray<TransactionInstruction>,
+    ): Effect.Effect<string, unknown> {
+      return Effect.gen(function* () {
+        if (!wallet) {
+          return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
+        }
+        const tx = new Transaction();
+        tx.add(...instructions);
+        const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
+        tx.feePayer = wallet.publicKey;
+        tx.recentBlockhash = blockhash;
+        tx.sign(wallet);
+
+        const signature = yield* rpcCall((conn) =>
+          conn.sendRawTransaction(tx.serialize(), {
+            skipPreflight: false,
+            preflightCommitment: "confirmed",
+          }),
+        );
+        yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
+        return signature;
+      });
+    }
+
+    // ─── Pool stats ────────────────────────────────────────────────────────
+
     function fetchPoolStats(
       poolAddress: string,
     ): Effect.Effect<
@@ -1290,26 +1405,89 @@ export const AdapterLive = Layer.effect(
           return result;
         }),
 
-      simulateRebalance: (poolAddress, newLowerBinId, newUpperBinId) =>
+      simulateRebalance: (poolAddress, positionPubKey, newLowerBinId, newUpperBinId) =>
         Effect.gen(function* () {
-          const pool = yield* api.getPoolState(poolAddress);
+          if (!wallet) {
+            return yield* Effect.fail(
+              new AdapterError({
+                message: "No wallet configured — cannot simulate an on-chain rebalance",
+                poolAddress,
+              }),
+            );
+          }
 
-          const rangeWidth = Math.max(newUpperBinId - newLowerBinId, 0);
+          const dlmm = yield* getDlmm(poolAddress);
+          const positionPubkey = new PublicKey(positionPubKey);
+          // Fresh lbPair so the simulated deltas and the position read agree
+          // on the active bin.
+          yield* Effect.tryPromise(() => dlmm.refetchStates());
+          const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
+          const positionData = position.positionData;
 
-          // Fee estimate: proportional to pool's 24h fees, scaled by our range width
-          // A narrower range captures fewer fees but is more capital-efficient.
-          const feeCaptureRatio = Math.min(rangeWidth / 100, 1.0);
-          const estimatedFeesUsd = pool.fees24hUsd * feeCaptureRatio;
+          const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
+          const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
+          const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint]);
+          const decimalsX = dlmm.tokenX.mint.decimals;
+          const decimalsY = dlmm.tokenY.mint.decimals;
+          // The position's real claimable fees — the measurable benefit of the
+          // rebalance (they are harvested by the engine's own claim path).
+          const feeXUsd =
+            (Number(positionData.feeX.toString()) / 10 ** decimalsX) * (prices[tokenXMint] ?? 0);
+          const feeYUsd =
+            (Number(positionData.feeY.toString()) / 10 ** decimalsY) * (prices[tokenYMint] ?? 0);
+          const estimatedFeesUsd = feeXUsd + feeYUsd;
 
-          // IL estimate for rebalancing: small fixed cost (tx fees + temporary IL).
-          // The old heuristic (rangeWidth * 0.5) was wrong — rebalancing to center
-          // on the active bin eliminates OOR IL, it doesn't create new IL.
-          const estimatedIlUsd = 0.5;
+          const plan = buildAtomicRebalancePlan({
+            activeBinId: dlmm.lbPair.activeId,
+            binStep: dlmm.lbPair.binStep,
+            positionData,
+            newLowerBinId,
+            newUpperBinId,
+          });
+          const simulation = yield* Effect.tryPromise(() =>
+            dlmm.simulateRebalancePosition(
+              positionPubkey,
+              positionData,
+              false,
+              false,
+              plan.deposits,
+              plan.withdraws,
+            ),
+          );
 
-          const netBenefitUsd = estimatedFeesUsd - estimatedIlUsd;
+          // binArrayCost / bitmapExtensionCost are quoted in SOL (SDK rent
+          // constants) — the real, on-chain cost of the rebalance.
+          const rentCostSol = simulation.binArrayCost + simulation.bitmapExtensionCost;
+          const estimatedCostUsd = rentCostSol * config.solPriceUsd;
+          const netBenefitUsd = estimatedFeesUsd - estimatedCostUsd;
 
-          return { estimatedIlUsd, estimatedFeesUsd, netBenefitUsd };
-        }),
+          logger.info("rebalance simulation", {
+            pool: poolAddress,
+            position: positionPubKey,
+            feeXUsd,
+            feeYUsd,
+            rentCostSol,
+            newBinArrays: simulation.binArrayCount,
+            netBenefitUsd,
+          });
+
+          return {
+            estimatedFeesUsd,
+            estimatedCostUsd,
+            netBenefitUsd,
+            source: "sdk-simulation" as const,
+          };
+        }).pipe(
+          Effect.catchAll((err: unknown) =>
+            Effect.fail(
+              new AdapterError({
+                message: `Failed to simulate rebalance: ${underlyingErrorMessage(err)}`,
+                poolAddress,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
 
       enterPosition: (poolAddress, lowerBinId, upperBinId, positionSizeUsd) =>
         Effect.gen(function* () {
@@ -1521,25 +1699,84 @@ export const AdapterLive = Layer.effect(
           ),
         ),
 
-      rebalancePosition: (poolAddress, positionPubKey, newLowerBinId, newUpperBinId) =>
+      rebalancePosition: (poolAddress, positionPubKey, newLowerBinId, newUpperBinId, topUp) =>
         Effect.gen(function* () {
-          // NOTE: Sequential exit-then-enter, not atomic. If enter fails after
-          // exit succeeds, the position is lost without rollback. Retaining
-          // position state for recovery would require significant refactoring.
-          yield* api.exitPosition(poolAddress, positionPubKey);
-          const pool = yield* api.getPoolState(poolAddress);
-          const positionSizeUsd = Math.min(config.paperPortfolioUsd * 0.2, pool.tvlUsd * 0.01);
-          const enterResult = yield* api.enterPosition(
-            poolAddress,
+          if (!wallet) {
+            return yield* Effect.fail(
+              new AdapterError({
+                message: "No wallet configured",
+              }),
+            );
+          }
+
+          const dlmm = yield* getDlmm(poolAddress);
+          const positionPubkey = new PublicKey(positionPubKey);
+          yield* Effect.tryPromise(() => dlmm.refetchStates());
+          const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
+          const positionData = position.positionData;
+
+          const plan = buildAtomicRebalancePlan({
+            activeBinId: dlmm.lbPair.activeId,
+            binStep: dlmm.lbPair.binStep,
+            positionData,
             newLowerBinId,
             newUpperBinId,
-            positionSizeUsd,
+            ...(topUp ? { topUp } : {}),
+          });
+          // Simulation first: the response carries the quoted amounts and the
+          // bin-array/bitmap coverage the instruction builder needs.
+          const simulation = yield* Effect.tryPromise(() =>
+            dlmm.simulateRebalancePosition(
+              positionPubkey,
+              positionData,
+              false,
+              false,
+              plan.deposits,
+              plan.withdraws,
+            ),
           );
-          return {
-            newPositionPubKey: enterResult.positionPubKey,
-            txSignatures: ["batch-confirmed", enterResult.txSignature],
-          };
-        }),
+          const { initBinArrayInstructions, rebalancePositionInstruction } =
+            yield* Effect.tryPromise(() =>
+              dlmm.rebalancePosition(
+                simulation,
+                new BN(MAX_ACTIVE_BIN_SLIPPAGE),
+                wallet.publicKey,
+                REBALANCE_SLIPPAGE_PERCENT,
+              ),
+            );
+
+          const txSignatures: string[] = [];
+          // New bin arrays must exist on-chain before the rebalance
+          // instruction references them — send and confirm their init
+          // transactions first. A failure here leaves the position itself
+          // untouched (only rent for the new arrays is spent).
+          for (let i = 0; i < initBinArrayInstructions.length; i += MAX_INIT_BIN_ARRAY_IXS_PER_TX) {
+            const chunk = initBinArrayInstructions.slice(i, i + MAX_INIT_BIN_ARRAY_IXS_PER_TX);
+            txSignatures.push(yield* sendInstructions(chunk));
+          }
+          txSignatures.push(yield* sendInstructions(rebalancePositionInstruction));
+          yield* invalidateBalanceCaches;
+
+          logger.info("atomic rebalance executed", {
+            pool: poolAddress,
+            position: positionPubKey,
+            newLowerBinId,
+            newUpperBinId,
+            txSignatures,
+          });
+
+          return { positionPubKey, txSignatures };
+        }).pipe(
+          Effect.catchAll((err: unknown) =>
+            Effect.fail(
+              new AdapterError({
+                message: `Failed to atomically rebalance position: ${underlyingErrorMessage(err)}`,
+                poolAddress,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
 
       claimFees: (
         poolAddress,

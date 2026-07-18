@@ -612,11 +612,18 @@ function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
     getPositions: () => Effect.succeed([]),
     getAllWalletPositions: () => Effect.succeed([]),
     simulateRebalance: () =>
-      Effect.succeed({ estimatedIlUsd: 0, estimatedFeesUsd: 0, netBenefitUsd: 0 }),
+      Effect.succeed({
+        estimatedFeesUsd: 0,
+        estimatedCostUsd: 0,
+        netBenefitUsd: 0,
+        source: "pool-heuristic" as const,
+      }),
     enterPosition: () => Effect.succeed({ positionPubKey: "pos-1", txSignature: "tx-enter" }),
     exitPosition: () => Effect.succeed({ txSignature: "tx-exit" }),
+    // Atomic rebalance (Wave 6): the SDK rebalancePosition instruction
+    // preserves the position account, so the same pubkey comes back.
     rebalancePosition: () =>
-      Effect.succeed({ newPositionPubKey: "pos-2", txSignatures: ["tx-rebalance"] }),
+      Effect.succeed({ positionPubKey: "pos-1", txSignatures: ["tx-rebalance"] }),
     claimFees: () =>
       Effect.succeed({
         txSignature: "tx-claim",
@@ -727,6 +734,17 @@ describe("live lifecycle PnL accounting", () => {
           pool,
         );
         expect(rebalance.executed).toBe(true);
+
+        // Wave 6: the atomic rebalance preserves the position account — the
+        // same pubkey, the entry basis and accrued fees all survive.
+        const afterRebalance = trackedPositions.get("pool1")!;
+        expect(afterRebalance.positionPubKey).toBe("pos-1");
+        expect(afterRebalance.lowerBinId).toBe(4990);
+        expect(afterRebalance.upperBinId).toBe(5030);
+        expect(afterRebalance.entryPriceUsd).toBe(100);
+        expect(afterRebalance.entryAmountXUsd).toBeCloseTo(500, 8);
+        expect(afterRebalance.entryAmountYUsd).toBeCloseTo(500, 8);
+        expect(afterRebalance.cumulativeFeesClaimedUsd).toBeCloseTo(25, 8);
 
         // 3. Price moves 100 → 110; position marked to $1100.
         const pos = trackedPositions.get("pool1")!;
