@@ -175,27 +175,21 @@ function makeLoopLayer(opts: { adapter: AdapterApi; configOverrides?: Partial<Ap
 }
 
 describe("periodic reward claim cycle", () => {
-  it("(v) records one reward CLAIM event and cumulative total across many cycles; fees stay fee-pure", async () => {
-    // First cycle has pending rewards; after the claim the on-chain pending
-    // amounts are zero, so every subsequent cycle reports skipped.
-    let call = 0;
-    const claimRewards = vi.fn(() => {
-      call += 1;
-      return call === 1
-        ? Effect.succeed({
-            skipped: false,
-            skipReason: null,
-            txSignatures: ["tx-reward-1"],
-            rewards: [{ mint: REWARD_MINT, amountAtomic: 250_000_000, amountUsd: 100 }],
-          })
-        : Effect.succeed({
-            skipped: true,
-            skipReason: "no pending rewards",
-            txSignatures: [] as string[],
-            rewards: [],
-          });
+  it("(v) zero-fee farm position claims once, then the re-armed gate suppresses further claims within the interval", async () => {
+    const claimRewards = vi.fn(() =>
+      Effect.succeed({
+        skipped: false,
+        skipReason: null,
+        txSignatures: ["tx-reward-1"],
+        rewards: [{ mint: REWARD_MINT, amountAtomic: 250_000_000, amountUsd: 100 }],
+      }),
+    );
+    const layer = makeLoopLayer({
+      adapter: makeLoopAdapter(claimRewards),
+      // Interval far longer than the test window: after the first successful
+      // reward claim re-arms the gate, no later cycle may even ask the SDK.
+      configOverrides: { feeClaimIntervalMs: 10_000 },
     });
-    const layer = makeLoopLayer({ adapter: makeLoopAdapter(claimRewards) });
 
     const outcome = await Effect.runPromise(
       Effect.provide(
@@ -225,8 +219,9 @@ describe("periodic reward claim cycle", () => {
       events: ReadonlyArray<{ event: string; feesUsd: number | null; metadata: string | null }>;
     };
 
-    // The claim ran and was then skipped on later cycles (no double-claim).
-    expect(claimRewards.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // Exactly one claim across ~15 scheduled cycles: the first claim re-armed
+    // lastFeeClaimAt, so the shared gate stayed closed for the interval.
+    expect(claimRewards).toHaveBeenCalledTimes(1);
 
     const pos = positions.find((p) => "cumulativeRewardsClaimedUsd" in p)!;
     expect(pos.cumulativeRewardsClaimedUsd).toBeCloseTo(100, 8);
@@ -240,6 +235,55 @@ describe("periodic reward claim cycle", () => {
     expect(rewardEvents[0]!.feesUsd).toBeNull();
     expect(rewardEvents[0]!.metadata).toContain(REWARD_MINT);
     expect(rewardEvents[0]!.metadata).toContain("tx-reward-1");
+  });
+
+  it("(v) claims resume after feeClaimIntervalMs elapses", async () => {
+    const claimRewards = vi.fn(() =>
+      Effect.succeed({
+        skipped: false,
+        skipReason: null,
+        txSignatures: ["tx-reward-n"],
+        rewards: [{ mint: REWARD_MINT, amountAtomic: 10_000_000, amountUsd: 10 }],
+      }),
+    );
+    const layer = makeLoopLayer({
+      adapter: makeLoopAdapter(claimRewards),
+      // Short interval: cycles every 100ms re-claim roughly every 400ms.
+      configOverrides: { feeClaimIntervalMs: 400 },
+    });
+
+    const outcome = await Effect.runPromise(
+      Effect.provide(
+        Effect.gen(function* () {
+          const db = yield* DbService;
+          yield* db.savePosition(
+            makePosition({
+              poolAddress: FARM_POOL,
+              positionPubKey: FARM_POS,
+              lastFeeClaimAt: 0,
+            }),
+          );
+          yield* Effect.raceFirst(program, Effect.sleep(2_000));
+          const positions = yield* db.getAllPositions();
+          const events = yield* db.getPositionEvents(FARM_POOL);
+          return { positions, events };
+        }),
+        layer,
+      ) as Effect.Effect<never, unknown, never>,
+    );
+
+    const { positions, events } = outcome as unknown as {
+      positions: ReadonlyArray<{ cumulativeRewardsClaimedUsd: number }>;
+      events: ReadonlyArray<{ event: string; metadata: string | null }>;
+    };
+
+    // At least the first (t≈0) and a re-armed (t≈400ms+) claim landed.
+    expect(claimRewards.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // Each claim produced exactly one event and one cumulative increment.
+    const rewardEvents = events.filter((e) => e.metadata?.includes("lm_reward"));
+    expect(rewardEvents).toHaveLength(claimRewards.mock.calls.length);
+    const pos = positions.find((p) => "cumulativeRewardsClaimedUsd" in p)!;
+    expect(pos.cumulativeRewardsClaimedUsd).toBeCloseTo(10 * claimRewards.mock.calls.length, 8);
   });
 
   it("(v) FARM_REWARDS_ENABLED=false disables reward claims entirely", async () => {

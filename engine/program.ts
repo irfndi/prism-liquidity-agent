@@ -3426,6 +3426,13 @@ export const program = Effect.gen(function* () {
                 txSignatures: rewardResult.txSignatures,
               });
               pos.cumulativeRewardsClaimedUsd += rewardSummary.totalUsd;
+              // Re-arm the shared claim gate: lastFeeClaimAt means "last
+              // on-chain claim of either kind" — a successful reward claim is
+              // a real claim tx, so the position waits one full interval
+              // before the next claim pass even when swap fees are zero
+              // (their claim path never updates the timestamp on a zero
+              // result, which would otherwise re-fire every scan cycle).
+              pos.lastFeeClaimAt = Date.now();
               yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
               yield* db
                 .savePositionEvent({

@@ -69,7 +69,7 @@ export function makePosition(overrides: Partial<PositionRecord> = {}): PositionR
     timestamp: Date.now(),
     outOfRangeSince: null,
     oorCycleCount: 0,
-    lastFeeClaimAt: Date.now(),
+    lastFeeClaimAt: overrides.lastFeeClaimAt ?? Date.now(),
     trailingStopThreshold: overrides.trailingStopThreshold ?? null,
     highestValueUsd: overrides.highestValueUsd ?? null,
     lastRebalanceAt: overrides.lastRebalanceAt ?? 0,
