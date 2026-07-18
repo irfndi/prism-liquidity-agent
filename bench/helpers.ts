@@ -125,6 +125,7 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     paperModeExitLive: false,
     meteoraPoolsUrl:
       "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc",
+    meteoraDatapiBaseUrl: "https://dlmm.datapi.meteora.ag",
     rebalanceGasCostSol: 0.01,
     solPriceUsd: 150,
     gasAwareMinDaysOfFeesPaidAhead: 3,
@@ -201,9 +202,9 @@ export async function runAsync<T>(effect: Effect.Effect<T, unknown, never>): Pro
 
 // ─── Fetch mock ──────────────────────────────────────────────────────────────
 
-export function mockFetch(impl: typeof fetch): () => void {
+export function mockFetch(impl: unknown): () => void {
   const original = globalThis.fetch;
-  globalThis.fetch = vi.fn(impl) as unknown as typeof globalThis.fetch;
+  globalThis.fetch = vi.fn(impl as typeof fetch) as unknown as typeof globalThis.fetch;
   return () => {
     globalThis.fetch = original;
   };

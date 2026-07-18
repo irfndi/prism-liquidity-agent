@@ -65,6 +65,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     feedbackOptOut: false,
     paperModeExitLive: false,
     meteoraPoolsUrl: "",
+    meteoraDatapiBaseUrl: "",
     rebalanceGasCostSol: 0.01,
     solPriceUsd: 150,
     gasAwareMinDaysOfFeesPaidAhead: 3,

@@ -62,6 +62,7 @@ import {
   McpServerService,
   HttpStatusServerService,
   EntryPrepService,
+  MeteoraDatapiService,
   type AdapterApi,
   type DbApi,
   type MemoryApi,
@@ -71,12 +72,14 @@ import {
   type EntryPrepApi,
   type AgentStateApi,
 } from "./services.js";
+import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
 import type {
   AgentDecision,
   AgentProposal,
   AgentProposalMode,
   AgentCycle,
   PoolMetrics,
+  PoolSnapshot,
   PoolState,
   Position,
   RebalanceParams,
@@ -100,6 +103,13 @@ import {
 } from "./proposal-backoff.js";
 
 const logger = createLogger("program");
+
+/**
+ * How far back to look for a previous pool snapshot when computing TVL
+ * velocity / IL drift. Wide enough to survive a day of downtime; the query is
+ * indexed on (pool_address, timestamp) so this stays cheap.
+ */
+const PREVIOUS_SNAPSHOT_WINDOW_MS = 26 * 60 * 60 * 1000;
 
 export function isProposalStale(proposal: AgentProposal, staleMs: number, now: number): boolean {
   return now > proposal.proposedAt + staleMs || now > proposal.expiresAt;
@@ -439,7 +449,8 @@ type AllServices =
   | AgentStateService
   | McpServerService
   | HttpStatusServerService
-  | EntryPrepService;
+  | EntryPrepService
+  | MeteoraDatapiService;
 
 export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, never> {
   const dbLayer = DbLive(cfg?.sqliteDbPath);
@@ -448,6 +459,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const adapter = Layer.provide(AdapterLive, configLayer);
   const memory = Layer.provide(MemoryLive, dbLayer);
   const audit = Layer.provide(AuditLive, dbLayer);
+  const meteoraDatapi = Layer.provide(MeteoraDatapiLive, configLayer);
 
   const screenerDeps = Layer.merge(adapter, StrategyLive);
   const screener = Layer.provide(
@@ -488,6 +500,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged10 = Layer.merge(merged9, ReferralLive);
   const merged11 = Layer.merge(merged10, revenueConfig);
   const merged11a = Layer.merge(merged11, entryPrep);
+  const merged11b = Layer.merge(merged11a, meteoraDatapi);
 
   const agentLayer = cfg?.agentiveMode ? AgentLive(cfg) : Layer.succeed(AgentService, AgentNoOp);
 
@@ -507,7 +520,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
           stop: () => Effect.void,
         });
 
-  const merged12 = Layer.merge(merged11a, agentLayer);
+  const merged12 = Layer.merge(merged11b, agentLayer);
   const merged13 = Layer.merge(merged12, agentStateLayer);
   const merged14 = Layer.merge(merged13, mcpLayer);
   const merged15 = Layer.merge(merged14, httpLayer);
@@ -935,6 +948,7 @@ export const program = Effect.gen(function* () {
   const agentState = yield* AgentStateService;
   const mcpServer = yield* McpServerService;
   const httpStatusServer = yield* HttpStatusServerService;
+  const meteoraDatapi = yield* MeteoraDatapiService;
 
   // Load persisted positions at startup
   const allPositions = yield* db.getAllPositions().pipe(Effect.catchAll(() => Effect.succeed([])));
@@ -1528,33 +1542,58 @@ export const program = Effect.gen(function* () {
       let proposalValidated = false;
       /** The deterministic decision before an applied proposal replaced it. */
       let preApplyDecision: AgentDecision | undefined;
-      const pool = yield* adapter.getPoolState(poolAddress);
+      const rawPool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
-      pushBinHistory(poolAddress, pool.activeBinId);
+      pushBinHistory(poolAddress, rawPool.activeBinId);
 
-      if (config.enableSnapshotCapture && config.paperTrading) {
-        yield* db
-          .saveSnapshot({
-            poolAddress,
-            timestamp: pool.timestamp,
-            activeBinId: pool.activeBinId,
-            tvlUsd: pool.tvlUsd,
-            volume24hUsd: pool.volume24hUsd,
-            fees24hUsd: pool.fees24hUsd,
-            apr: pool.apr,
-            currentPrice: pool.currentPrice,
-            binStep: pool.binStep,
-            tokenXSymbol: pool.tokenXSymbol,
-            tokenYSymbol: pool.tokenYSymbol,
-            binArray: { ...binArray, binStep: pool.binStep },
-          })
-          .pipe(
-            Effect.catchAll((err) => {
-              console.warn("Snapshot save failed", { pool: poolAddress, err });
-              return Effect.void;
-            }),
-          );
-      }
+      // Real pool stats from the Meteora Data API; falls back to the
+      // adapter's heuristic stats (with a logged warning) when unavailable.
+      const datapiStats = yield* meteoraDatapi.getPoolData(poolAddress);
+      const pool = datapiStats === null ? rawPool : enrichPoolWithDatapi(rawPool, datapiStats);
+
+      // TVL velocity + IL price-drift need a previous reference point, so the
+      // previous snapshot must be read BEFORE persisting the current one.
+      const previousSnapshots = yield* db
+        .getSnapshots(poolAddress, pool.timestamp - PREVIOUS_SNAPSHOT_WINDOW_MS, pool.timestamp)
+        .pipe(Effect.catchAll(() => Effect.succeed([] as ReadonlyArray<PoolSnapshot>)));
+      const previousSnapshot =
+        previousSnapshots.length > 0 ? previousSnapshots[previousSnapshots.length - 1] : undefined;
+
+      // Persist a snapshot every cycle (both paper and live): TVL velocity and
+      // the TVL-drop EXIT are dead code without per-cycle history. The full
+      // bin-array detail is only stored under ENABLE_SNAPSHOT_CAPTURE (paper)
+      // as before; routine rows stay lightweight.
+      yield* db
+        .saveSnapshot({
+          poolAddress,
+          timestamp: pool.timestamp,
+          activeBinId: pool.activeBinId,
+          tvlUsd: pool.tvlUsd,
+          volume24hUsd: pool.volume24hUsd,
+          fees24hUsd: pool.fees24hUsd,
+          apr: pool.apr,
+          currentPrice: pool.currentPrice,
+          binStep: pool.binStep,
+          tokenXSymbol: pool.tokenXSymbol,
+          tokenYSymbol: pool.tokenYSymbol,
+          binArray:
+            config.enableSnapshotCapture && config.paperTrading
+              ? { ...binArray, binStep: pool.binStep }
+              : {
+                  lowerBinId: binArray.lowerBinId,
+                  upperBinId: binArray.upperBinId,
+                  bins: [],
+                  activeBinId: binArray.activeBinId,
+                  binStep: pool.binStep,
+                  reservesKnown: binArray.reservesKnown,
+                },
+        })
+        .pipe(
+          Effect.catchAll((err) => {
+            console.warn("Snapshot save failed", { pool: poolAddress, err });
+            return Effect.void;
+          }),
+        );
 
       // Blacklist check (token mints only; deployer info not yet fetched)
       // TODO: fetch token deployer/authority from on-chain metadata and pass to checkPool
@@ -1562,7 +1601,25 @@ export const program = Effect.gen(function* () {
         .checkPool(poolAddress, pool.tokenX, pool.tokenY)
         .pipe(Effect.catchAll(() => Effect.void));
 
-      const metrics = strategy.computeMetrics(pool, binArray, 0);
+      const metrics = strategy.computeMetrics(
+        pool,
+        binArray,
+        previousSnapshot?.tvlUsd ?? 0,
+        previousSnapshot
+          ? {
+              previousPrice: previousSnapshot.currentPrice,
+              previousTimestamp: previousSnapshot.timestamp,
+            }
+          : undefined,
+      );
+
+      if (!metrics.volumeAuthenticityKnown || !metrics.binUtilizationKnown) {
+        logger.warn("Metric data unavailable — skipping the affected gates for this pool", {
+          pool: poolAddress,
+          volumeAuthenticityKnown: metrics.volumeAuthenticityKnown,
+          binUtilizationKnown: metrics.binUtilizationKnown,
+        });
+      }
 
       // Pre-filter
       if (
@@ -1573,6 +1630,8 @@ export const program = Effect.gen(function* () {
           config.minPoolTvlUsd,
           evolvedThresholds.volumeAuthThreshold,
           evolvedThresholds.minBinUtilization,
+          metrics.volumeAuthenticityKnown,
+          metrics.binUtilizationKnown,
         )
       ) {
         console.debug("Pool failed pre-filter", { pool: poolAddress });
@@ -1684,7 +1743,10 @@ export const program = Effect.gen(function* () {
           `TVL dropped ${(Math.abs(tvlVelocity) * 100).toFixed(1)}% on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — capital protection EXIT triggered`,
           { pool, metrics, position: pos ?? undefined },
         );
-      } else if (volumeAuth < evolvedThresholds.volumeAuthThreshold) {
+      } else if (
+        metrics.volumeAuthenticityKnown &&
+        volumeAuth < evolvedThresholds.volumeAuthThreshold
+      ) {
         decision = {
           action: "EXIT",
           poolAddress,
@@ -2097,7 +2159,9 @@ export const program = Effect.gen(function* () {
 
             if (
               feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 &&
+              metrics.volumeAuthenticityKnown &&
               volumeAuth > 0.8 &&
+              metrics.binUtilizationKnown &&
               binUtilization > 0.4 &&
               pool.tvlUsd > config.minPoolTvlUsd * 2
             ) {

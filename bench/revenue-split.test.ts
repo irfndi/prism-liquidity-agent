@@ -53,6 +53,7 @@ function buildLayer() {
     paperModeExitLive: false,
     meteoraPoolsUrl:
       "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc",
+    meteoraDatapiBaseUrl: "https://dlmm.datapi.meteora.ag",
     rebalanceGasCostSol: 0.01,
     solPriceUsd: 150,
     gasAwareMinDaysOfFeesPaidAhead: 3,
