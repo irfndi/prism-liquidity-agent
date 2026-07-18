@@ -14,9 +14,9 @@ cloudflare/
 │   │   └── api.test.ts              # API tests (vitest-pool-workers)
 │   └── telegram-bot/                # Telegram webhook handler
 │       ├── index.ts                 # Bot commands: /start, /register, /link, /whoami, /status
-│       └── telegram-bot.test.ts     # Bot tests (16 tests, all passing)
+│       └── telegram-bot.test.ts     # Bot tests (vitest-pool-workers)
 ├── migrations/
-│   └── 0001_initial.sql             # D1 schema: users, api_keys, telegram_link_codes, wallets, subscriptions, audit_log
+│   └── NNNN_*.sql                   # D1 schema migrations (users, api_keys, telegram_link_codes, …)
 ├── wrangler.toml                    # API worker config
 ├── wrangler.telegram.toml           # Telegram bot worker config
 ├── wrangler.telegram.test.toml      # Telegram bot test config (no service bindings)
@@ -110,8 +110,14 @@ wrangler d1 migrations apply prism-db --local
 # Telegram bot token (get from @BotFather)
 echo "YOUR_TELEGRAM_BOT_TOKEN" | wrangler secret put TELEGRAM_BOT_TOKEN
 
-# Optional: webhook secret for additional security
+# REQUIRED: webhook secret — the bot worker rejects all webhook POSTs without it
 echo "RANDOM_SECRET" | wrangler secret put TELEGRAM_WEBHOOK_SECRET
+
+# REQUIRED: shared secret between the telegram bot and API workers.
+# The bot sends it as the X-Bot-Api-Secret header; the API rejects
+# telegram_id-keyed endpoints without it. Use the SAME value in both workers:
+echo "RANDOM_SHARED_SECRET" | wrangler secret put BOT_API_SECRET
+echo "RANDOM_SHARED_SECRET" | wrangler secret put BOT_API_SECRET --config wrangler.telegram.toml
 
 # Optional: fee collection wallet (Solana address)
 echo "YOUR_SOLANA_ADDRESS" | wrangler secret put FEE_WALLET_ADDRESS
@@ -130,8 +136,9 @@ wrangler deploy --config wrangler.telegram.toml
 ### 7. Setup Telegram webhook
 
 ```bash
-# Replace YOUR_BOT_TOKEN with the token from step 5
-curl "https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook?url=https://prism-telegram-bot.YOUR_SUBDOMAIN.workers.dev/webhook"
+# Replace YOUR_BOT_TOKEN with the token from step 5.
+# secret_token MUST match TELEGRAM_WEBHOOK_SECRET — the worker fails closed without it.
+curl "https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook?url=https://prism-telegram-bot.YOUR_SUBDOMAIN.workers.dev/webhook&secret_token=YOUR_WEBHOOK_SECRET"
 
 # Verify
 curl "https://api.telegram.org/botYOUR_BOT_TOKEN/getWebhookInfo"
@@ -139,23 +146,29 @@ curl "https://api.telegram.org/botYOUR_BOT_TOKEN/getWebhookInfo"
 
 ## API Endpoints
 
-| Endpoint                    | Method | Auth   | Description                           |
-| --------------------------- | ------ | ------ | ------------------------------------- |
-| `/health`                   | GET    | None   | Health check                          |
-| `/v1/register`              | POST   | None   | Register new user, returns API key    |
-| `/v1/login`                 | POST   | Bearer | Validate API key, returns user info   |
-| `/v1/whoami`                | GET    | Bearer | Get current user info                 |
-| `/v1/whoami-telegram`       | POST   | None   | Look up user by telegram_id (for bot) |
-| `/v1/link-telegram/start`   | POST   | Bearer | Generate `LINK-XXXXXX` code           |
-| `/v1/link-telegram/confirm` | POST   | None   | Confirm Telegram link with code       |
-| `/v1/register-telegram`     | POST   | None   | Register via Telegram (for bot)       |
-| `/v1/agent-status`          | POST   | None   | Get agent status (for Telegram bot)   |
-| `/v1/issue`                 | POST   | Bearer | Store an issue in D1                  |
-| `/v1/feedback`              | POST   | Bearer | Store deduplicated agent feedback     |
-| `/v1/errors/report`         | POST   | Bearer | Store one authenticated error report  |
-| `/v1/errors/batch`          | POST   | Bearer | Store authenticated error reports     |
-| `/v1/installs/ping`         | POST   | Mixed  | Anonymous install; auth for lifecycle|
-| `/v1/audit`                 | GET    | Admin  | Query deduplicated audit summaries   |
+| Endpoint                    | Method | Auth        | Description                           |
+| --------------------------- | ------ | ----------- | ------------------------------------- |
+| `/health`                   | GET    | None        | Health check                          |
+| `/v1/register`              | POST   | None¹       | Register new user, returns API key    |
+| `/v1/login`                 | POST   | Bearer      | Validate API key, returns user info   |
+| `/v1/whoami`                | GET    | Bearer      | Get current user info                 |
+| `/v1/whoami-telegram`       | POST   | Bot secret  | Look up user by telegram_id (for bot) |
+| `/v1/link-telegram/start`   | POST   | Bearer      | Generate `LINK-<16 hex>` code         |
+| `/v1/link-telegram/confirm` | POST   | Rate-limited² | Confirm Telegram link with code     |
+| `/v1/register-telegram`     | POST   | Bot secret  | Register via Telegram (for bot)       |
+| `/v1/agent-status`          | POST   | Bot secret  | Get agent status (for Telegram bot)   |
+| `/v1/issue`                 | POST   | Bearer      | Store an issue in D1                  |
+| `/v1/feedback`              | POST   | Bearer      | Store deduplicated agent feedback     |
+| `/v1/errors/report`         | POST   | Bearer      | Store one authenticated error report  |
+| `/v1/errors/batch`          | POST   | Bearer      | Store authenticated error reports     |
+| `/v1/installs/ping`         | POST   | Mixed       | Anonymous install; auth for lifecycle|
+| `/v1/audit`                 | GET    | Admin       | Query deduplicated audit summaries   |
+
+¹ `/v1/register` is open for normal CLI registration, but binding a `telegram_id`
+in the same call requires the `X-Bot-Api-Secret` header.
+² `/v1/link-telegram/confirm` is limited to 10 attempts/hour/IP, and each code is
+burned after 5 attempts. Link codes expire 10 minutes after issue (unixepoch
+comparison) and requesting a new code invalidates the user's outstanding ones.
 
 ## Telegram Bot Commands
 
@@ -168,7 +181,12 @@ curl "https://api.telegram.org/botYOUR_BOT_TOKEN/getWebhookInfo"
 | `/status`   | Show agent status (positions, P&L)         |
 | `/help`     | List all commands                          |
 
-Send a 6-character code to link your Telegram to an existing account.
+Send the `LINK-<16 hex>` code to link your Telegram to an existing account.
+
+**Private chats only:** `/register`, `/whoami`, `/status`, `/link` and link-code
+confirmation are refused in group chats — credentials must never be posted where
+other members can see them. User-controlled text (e.g. first names) is
+HTML-escaped before being interpolated into `parse_mode: HTML` replies.
 
 ## Bindings
 
@@ -205,16 +223,17 @@ bunx vitest run
 bunx vitest run workers/telegram-bot/telegram-bot.test.ts
 ```
 
-### Test coverage: 16 tests for Telegram bot
+### Test coverage: 30 tests for Telegram bot
 
 - Health check (1)
-- Webhook security (2)
-- Command handlers (4)
-- Link code handling (2)
+- Webhook security (4, incl. fail-closed when the secret is unset)
+- Command handlers (6, incl. HTML-escaping of user-controlled names)
+- Group chat restrictions (5)
+- Link code handling (6, incl. bot-secret header and 16-hex codes)
 - Registration flow (2)
 - Whoami command (2)
 - Status command (1)
-- Edge cases (2)
+- Edge cases (3)
 
 ## Development
 

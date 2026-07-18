@@ -1658,6 +1658,9 @@ export const AdapterLive = Layer.effect(
         ),
 
       reportFeeCollection(event) {
+        // Revenue telemetry honors the same opt-out flag as feedback —
+        // posting fee events must not bypass PRISM_FEEDBACK_OPT_OUT.
+        if (config.feedbackOptOut) return Effect.void;
         return Effect.gen(function* () {
           const installId = yield* getOrCreateInstallId();
           const apiKey = yield* Effect.try({

@@ -46,8 +46,10 @@ describe("Audit Logging API", () => {
       `CREATE TABLE IF NOT EXISTS telegram_link_codes (
         code TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
-        expires_at DATETIME NOT NULL,
-        used_at DATETIME
+        expires_at INTEGER NOT NULL,
+        used_at DATETIME,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
     ).run();
     await env.DB.prepare(
@@ -102,6 +104,7 @@ describe("Audit Logging API", () => {
     await env.DB.prepare("DELETE FROM api_keys").run();
     await env.DB.prepare("DELETE FROM users").run();
     await env.CACHE.delete("rate_limit:register:unknown");
+    await env.CACHE.delete("rate_limit:link_confirm:unknown");
 
     // Register a user to get an API key
     const ctx = createExecutionContext();
@@ -192,7 +195,7 @@ describe("Audit Logging API", () => {
     await env.DB.prepare(
       "INSERT INTO telegram_link_codes (code, user_id, expires_at) VALUES (?, ?, ?)",
     )
-      .bind("LINK-TEST", userId, new Date(Date.now() + 600000).toISOString())
+      .bind("LINK-TEST", userId, Math.floor(Date.now() / 1000) + 600)
       .run();
 
     const ctx = createExecutionContext();

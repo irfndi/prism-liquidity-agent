@@ -35,4 +35,5 @@ head_sampling_rate = 1
 
 # Secrets (set via wrangler secret put)
 # wrangler secret put TELEGRAM_BOT_TOKEN
-# wrangler secret put TELEGRAM_WEBHOOK_SECRET
+# wrangler secret put TELEGRAM_WEBHOOK_SECRET   # REQUIRED — webhooks fail closed without it
+# wrangler secret put BOT_API_SECRET            # must match the API worker's BOT_API_SECRET

@@ -68,6 +68,7 @@ function fetchConfigFromApi(apiKey: string): Effect.Effect<RevenueConfig, unknow
     const res = yield* Effect.tryPromise(() =>
       fetch(`${API_BASE_URL}/v1/config`, {
         headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(10_000),
       }),
     );
 

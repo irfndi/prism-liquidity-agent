@@ -274,6 +274,10 @@ The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copi
 - **Feedback.** `prism feedback` submits authenticated records to Prism Cloud D1 and keeps a local SQLite record for deduplication/outage recovery. Opt out with `PRISM_FEEDBACK_OPT_OUT=true`.
 - **Auto-update integrity.** The updater verifies SHA-256 checksums before applying a release. GPG signatures are generated but **not yet verified client-side**.
 - **Secret sanitization.** `engine/error-reporter.ts` strips sensitive values from telemetry.
+- **Telegram bot ↔ API shared secret.** `BOT_API_SECRET` (wrangler secret, set on BOTH workers with the same value) authenticates the bot to the API via the `X-Bot-Api-Secret` header. `/v1/register-telegram`, `/v1/whoami-telegram`, `/v1/agent-status` and the telegram-binding path of `/v1/register` fail closed (401) when it is missing or unset. Plain CLI `/v1/register` (no `telegram_id`) does not need it.
+- **Telegram webhook fails closed.** The bot worker rejects every webhook POST unless `TELEGRAM_WEBHOOK_SECRET` is set AND the `X-Telegram-Bot-Api-Secret-Token` header matches it (constant-time comparison). Set the same value in Telegram's `setWebhook?secret_token=...`.
+- **Telegram link codes.** Codes are `LINK-` + 16 hex chars (64-bit CSPRNG), expire after 10 minutes (`expires_at` is unixepoch INTEGER in D1), allow 5 confirm attempts before burning, are limited to 10 confirm attempts/hour/IP, and requesting a new code invalidates the user's outstanding codes.
+- **Group-chat refusals.** The bot only answers `/register`, `/whoami`, `/status`, `/link` and link-code confirmations in private chats, and HTML-escapes user-controlled text in `parse_mode: HTML` replies.
 
 ## Important environment variables
 
