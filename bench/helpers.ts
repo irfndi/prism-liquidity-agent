@@ -76,6 +76,12 @@ export function makePosition(overrides: Partial<PositionRecord> = {}): PositionR
     paperExitedAt: overrides.paperExitedAt ?? null,
     entrySignalTimestamp: overrides.entrySignalTimestamp ?? null,
     entrySignalSnapshotId: overrides.entrySignalSnapshotId ?? null,
+    entryPriceUsd: overrides.entryPriceUsd ?? null,
+    entryAmountXUsd: overrides.entryAmountXUsd ?? null,
+    entryAmountYUsd: overrides.entryAmountYUsd ?? null,
+    cumulativeFeesClaimedUsd: overrides.cumulativeFeesClaimedUsd ?? 0,
+    closedAt: overrides.closedAt ?? null,
+    realizedPnlUsd: overrides.realizedPnlUsd ?? null,
   };
 }
 

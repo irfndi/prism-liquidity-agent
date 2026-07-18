@@ -174,11 +174,19 @@ Do not import service implementations directly in program logic. `Layer.provide`
 6. Decision rules evaluate, in order: `EXIT` → `REBALANCE` → `HOLD` → `ENTER`. Deterministic `EXIT` conditions (TVL drop, low fee/IL, volume authenticity, volatility gate, trailing stop) only fire for pools with a tracked position — positionless pools take the ENTER/HOLD path only.
 7. `risk.evaluate` gates execution: `EXIT` is always approved first (capital protection beats the confidence gate), then the confidence gate and remaining structural checks. `HOLD` skips risk evaluation entirely (it executes nothing; rejections used to spam warning memory and suppress the good-HOLD branch). Portfolio value for the drawdown/allocation/size gates is `walletBalanceUsd + Σ openPositions.currentValueUsd`.
 8. `audit.recordDecision` logs every decision (errors swallowed).
-9. Execution updates the in-memory `trackedPositions` Map and persists to SQLite via `db.savePosition` / `db.deletePosition`.
+9. Execution updates the in-memory `trackedPositions` Map and persists to SQLite via `db.savePosition`. EXIT soft-closes the row via `db.closePosition` (sets `closed_at` + `realized_pnl_usd`, row kept for history); `db.deletePosition` is reserved for true cleanup (stale paper rows, externally-closed positions).
 
 ### Position persistence
 
-`trackedPositions` is only an in-memory cache. At startup `program.ts` loads all rows from `positions` into the Map, and every state change (ENTER, EXIT, REBALANCE, trailing-stop update, fee claim) is written back to SQLite.
+`trackedPositions` is only an in-memory cache. At startup `program.ts` loads all rows from `positions` into the Map, and every state change (ENTER, EXIT, REBALANCE, trailing-stop update, fee claim) is written back to SQLite. Active-position queries (`getAllPositions`) exclude rows with `paper_exited_at` or `closed_at` set; history queries (`getClosedPositions`) return them.
+
+### PnL accounting
+
+Each position row carries `entry_price_usd` (pool `currentPrice` at ENTER), `entry_amount_x_usd` / `entry_amount_y_usd` (USD value of each leg at entry — the documented 50/50 model, half the entry size per leg, since the adapter does not return actual on-chain deposit amounts), `cumulative_fees_claimed_usd`, `closed_at` and `realized_pnl_usd`. Every lifecycle transition also appends to the append-only `position_events` log (`ENTER` / `EXIT` / `REBALANCE` / `CLAIM` / `COMPOUND` with value, fees, price and metadata).
+
+`depositedUsd` is the cost basis. Auto-compounded fees become new cost basis when redeposited (they were already counted in `cumulative_fees_claimed_usd` when claimed, so total-PnL math stays continuous); `currentValueUsd` and `highestValueUsd` adjust in lockstep via `applyCompoundToCostBasis` in `engine/pnl.ts` so the trailing stop is not distorted. Pure analytics live in `engine/pnl.ts`: unrealized PnL = `currentValueUsd + cumulativeFeesClaimedUsd − depositedUsd`; HODL benchmark = `entryAmountXUsd × (currentPrice / entryPrice) + entryAmountYUsd`; fee APR = fees / cost basis annualized by position age; time-in-range is approximated as `1 − (current OOR stint / age)` (recovered past stints are not tracked and count as in-range time — a documented overestimate).
+
+Positions opened before migration v16 have NULL entry fields: analytics and the CLI degrade gracefully (no HODL benchmark / IL-vs-HODL — shown as `n/a` — and PnL falls back to the legacy `currentValueUsd − depositedUsd` model). The CLI surfaces all of this in `prism portfolio` (per-position + totals), `prism portfolio history` (realized PnL from `closed_at` rows) and `prism status`; the current price for the HODL benchmark comes from the latest `pool_snapshots` row.
 
 ### Agent runtime overlay
 

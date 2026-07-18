@@ -494,6 +494,53 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       }
     },
   },
+  {
+    version: 16,
+    name: "pnl_accounting",
+    up(db) {
+      // Per-position PnL accounting. Entry columns stay NULL for positions
+      // opened before this migration — analytics degrade gracefully on them.
+      if (!hasColumn(db, "positions", "entry_price_usd")) {
+        db.exec("ALTER TABLE positions ADD COLUMN entry_price_usd REAL");
+      }
+      if (!hasColumn(db, "positions", "entry_amount_x_usd")) {
+        db.exec("ALTER TABLE positions ADD COLUMN entry_amount_x_usd REAL");
+      }
+      if (!hasColumn(db, "positions", "entry_amount_y_usd")) {
+        db.exec("ALTER TABLE positions ADD COLUMN entry_amount_y_usd REAL");
+      }
+      if (!hasColumn(db, "positions", "cumulative_fees_claimed_usd")) {
+        db.exec(
+          "ALTER TABLE positions ADD COLUMN cumulative_fees_claimed_usd REAL NOT NULL DEFAULT 0",
+        );
+      }
+      if (!hasColumn(db, "positions", "closed_at")) {
+        db.exec("ALTER TABLE positions ADD COLUMN closed_at INTEGER");
+      }
+      if (!hasColumn(db, "positions", "realized_pnl_usd")) {
+        db.exec("ALTER TABLE positions ADD COLUMN realized_pnl_usd REAL");
+      }
+
+      // Append-only lifecycle event log (ENTER/EXIT/REBALANCE/CLAIM/COMPOUND).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS position_events (
+          id TEXT PRIMARY KEY,
+          pool_address TEXT NOT NULL,
+          position_pubkey TEXT,
+          event TEXT NOT NULL,
+          value_usd REAL,
+          fees_usd REAL,
+          price REAL,
+          metadata TEXT,
+          created_at INTEGER NOT NULL
+        );
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_position_events_pool_time
+          ON position_events(pool_address, created_at);
+      `);
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

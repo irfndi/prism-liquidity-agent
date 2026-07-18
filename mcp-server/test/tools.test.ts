@@ -151,7 +151,8 @@ const SCHEMA_SQL = `
     trailing_stop_threshold REAL,
     highest_value_usd REAL,
     last_rebalance_at INTEGER DEFAULT 0,
-    paper_exited_at INTEGER
+    paper_exited_at INTEGER,
+    closed_at INTEGER
   );
   CREATE TABLE audit (
     id TEXT PRIMARY KEY,
@@ -198,6 +199,18 @@ function seedPositions(dbPath: string): void {
   ).run(
     "PoolExited", 500, 500, "SOL", "USDC", 5000, 4980, 5020,
     Date.now(), null, 0, Date.now(), null, 500, 0, Date.now() - 3600_000,
+  );
+  // Soft-closed (Wave 4 live EXIT): closed_at set, paper_exited_at NULL.
+  db.prepare(
+    `INSERT INTO positions (pool_address, deposited_usd, current_value_usd,
+      token_x_symbol, token_y_symbol, active_bin_id, lower_bin_id, upper_bin_id,
+      timestamp, out_of_range_since, oor_cycle_count, last_fee_claim_at,
+      trailing_stop_threshold, highest_value_usd, last_rebalance_at, paper_exited_at,
+      closed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    "PoolClosed", 800, 900, "RAY", "USDC", 7000, 6980, 7020,
+    Date.now(), null, 0, Date.now(), null, 950, 0, null, Date.now() - 1800_000,
   );
   db.close();
 }
@@ -275,6 +288,60 @@ describe("DB-backed tools", () => {
     const parsed = JSON.parse(result.text);
     assert.equal(parsed.length, 1);
     assert.equal(parsed[0].pool, "PoolActive1");
+  });
+
+  it("prism_status and prism_positions exclude soft-closed (closed_at) positions", async () => {
+    const dbPath = setupTestDb(workDir);
+    seedPositions(dbPath);
+    seedAudit(dbPath);
+    process.env.SQLITE_DB_PATH = dbPath;
+
+    const status = JSON.parse((await runTool("prism_status", {})).text);
+    assert.equal(status.positionCount, 1);
+    assert.equal(status.totalDepositedUsd, 1000);
+
+    const positions = JSON.parse((await runTool("prism_positions", {})).text);
+    assert.equal(positions.length, 1);
+    assert.ok(!positions.some((p: { pool: string }) => p.pool === "PoolClosed"));
+  });
+
+  it("prism_status still works against a pre-v16 schema without closed_at", async () => {
+    const dbPath = join(workDir, "old.db");
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE positions (
+        pool_address TEXT PRIMARY KEY,
+        deposited_usd REAL,
+        current_value_usd REAL,
+        paper_exited_at INTEGER
+      );
+      CREATE TABLE audit (
+        id TEXT PRIMARY KEY,
+        timestamp INTEGER,
+        cycle_id TEXT,
+        pool_address TEXT,
+        action TEXT,
+        confidence REAL,
+        reasoning TEXT,
+        metrics_json TEXT,
+        risk_result_json TEXT,
+        executed INTEGER,
+        paper_trading INTEGER,
+        tx_signature TEXT,
+        error TEXT
+      );
+    `);
+    db.prepare(
+      "INSERT INTO positions (pool_address, deposited_usd, current_value_usd, paper_exited_at) VALUES (?, ?, ?, ?)",
+    ).run("PoolOld", 250, 260, null);
+    db.close();
+    process.env.SQLITE_DB_PATH = dbPath;
+
+    const result = await runTool("prism_status", {});
+    const parsed = JSON.parse(result.text);
+    assert.equal(result.ok, true);
+    assert.equal(parsed.positionCount, 1);
+    assert.equal(parsed.totalDepositedUsd, 250);
   });
 
   it("prism_positions includes range and out-of-range count", async () => {

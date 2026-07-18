@@ -408,6 +408,12 @@ export interface DbApi {
     paperExitedAt: number | null;
     entrySignalTimestamp: number | null;
     entrySignalSnapshotId: number | null;
+    entryPriceUsd: number | null;
+    entryAmountXUsd: number | null;
+    entryAmountYUsd: number | null;
+    cumulativeFeesClaimedUsd: number;
+    closedAt: number | null;
+    realizedPnlUsd: number | null;
   }) => Effect.Effect<void, unknown>;
   readonly getPosition: (poolAddress: string) => Effect.Effect<
     {
@@ -430,6 +436,12 @@ export interface DbApi {
       paperExitedAt: number | null;
       entrySignalTimestamp: number | null;
       entrySignalSnapshotId: number | null;
+      entryPriceUsd: number | null;
+      entryAmountXUsd: number | null;
+      entryAmountYUsd: number | null;
+      cumulativeFeesClaimedUsd: number;
+      closedAt: number | null;
+      realizedPnlUsd: number | null;
     } | null,
     unknown
   >;
@@ -454,6 +466,12 @@ export interface DbApi {
       paperExitedAt: number | null;
       entrySignalTimestamp: number | null;
       entrySignalSnapshotId: number | null;
+      entryPriceUsd: number | null;
+      entryAmountXUsd: number | null;
+      entryAmountYUsd: number | null;
+      cumulativeFeesClaimedUsd: number;
+      closedAt: number | null;
+      realizedPnlUsd: number | null;
     }>,
     unknown
   >;
@@ -478,11 +496,80 @@ export interface DbApi {
       paperExitedAt: number | null;
       entrySignalTimestamp: number | null;
       entrySignalSnapshotId: number | null;
+      entryPriceUsd: number | null;
+      entryAmountXUsd: number | null;
+      entryAmountYUsd: number | null;
+      cumulativeFeesClaimedUsd: number;
+      closedAt: number | null;
+      realizedPnlUsd: number | null;
     }>,
     unknown
   >;
   readonly deletePosition: (poolAddress: string) => Effect.Effect<void, unknown>;
   readonly markPaperExited: (poolAddress: string) => Effect.Effect<void, unknown>;
+  readonly closePosition: (
+    poolAddress: string,
+    realizedPnlUsd: number | null,
+  ) => Effect.Effect<void, unknown>;
+  readonly getClosedPositions: () => Effect.Effect<
+    ReadonlyArray<{
+      poolAddress: string;
+      positionPubKey: string | null;
+      depositedUsd: number;
+      currentValueUsd: number;
+      tokenXSymbol: string;
+      tokenYSymbol: string;
+      activeBinId: number;
+      lowerBinId: number;
+      upperBinId: number;
+      timestamp: number;
+      outOfRangeSince: number | null;
+      oorCycleCount: number;
+      lastFeeClaimAt: number;
+      trailingStopThreshold: number | null;
+      highestValueUsd: number | null;
+      lastRebalanceAt: number;
+      paperExitedAt: number | null;
+      entrySignalTimestamp: number | null;
+      entrySignalSnapshotId: number | null;
+      entryPriceUsd: number | null;
+      entryAmountXUsd: number | null;
+      entryAmountYUsd: number | null;
+      cumulativeFeesClaimedUsd: number;
+      closedAt: number | null;
+      realizedPnlUsd: number | null;
+    }>,
+    unknown
+  >;
+  readonly savePositionEvent: (event: {
+    id: string;
+    poolAddress: string;
+    positionPubKey: string | null;
+    event: "ENTER" | "EXIT" | "REBALANCE" | "CLAIM" | "COMPOUND";
+    valueUsd: number | null;
+    feesUsd: number | null;
+    price: number | null;
+    metadata?: Record<string, unknown> | null;
+    createdAt: number;
+  }) => Effect.Effect<void, unknown>;
+  readonly getPositionEvents: (
+    poolAddress: string,
+    limit?: number,
+  ) => Effect.Effect<
+    ReadonlyArray<{
+      id: string;
+      poolAddress: string;
+      positionPubKey: string | null;
+      event: "ENTER" | "EXIT" | "REBALANCE" | "CLAIM" | "COMPOUND";
+      valueUsd: number | null;
+      feesUsd: number | null;
+      price: number | null;
+      metadata: string | null;
+      createdAt: number;
+    }>,
+    unknown
+  >;
+  readonly getLatestSnapshotPrice: (poolAddress: string) => Effect.Effect<number | null, unknown>;
   readonly updatePositionValue: (
     poolAddress: string,
     currentValueUsd: number,

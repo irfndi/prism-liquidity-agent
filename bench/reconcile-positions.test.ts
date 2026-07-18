@@ -69,6 +69,12 @@ function makePosition(poolAddress: string, positionPubKey: string | null): Posit
     paperExitedAt: null,
     entrySignalTimestamp: null,
     entrySignalSnapshotId: null,
+    entryPriceUsd: null,
+    entryAmountXUsd: null,
+    entryAmountYUsd: null,
+    cumulativeFeesClaimedUsd: 0,
+    closedAt: null,
+    realizedPnlUsd: null,
   };
 }
 

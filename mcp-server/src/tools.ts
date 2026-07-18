@@ -26,6 +26,17 @@ function openDb(): InstanceType<typeof Database> | null {
   return new Database(dbPath, { readonly: true, fileMustExist: true });
 }
 
+// The engine soft-closes positions via closed_at (Wave 4); DBs written by
+// older engines lack the column, so detect it per connection instead of
+// failing the query with "no such column".
+function activePositionsWhere(db: InstanceType<typeof Database>): string {
+  const cols = db.prepare("PRAGMA table_info(positions)").all() as Array<{ name: string }>;
+  const hasClosedAt = cols.some((c) => c.name === "closed_at");
+  return hasClosedAt
+    ? "paper_exited_at IS NULL AND closed_at IS NULL"
+    : "paper_exited_at IS NULL";
+}
+
 function registerPrismStatus(server: McpServer): void {
   server.tool(
     "prism_status",
@@ -50,14 +61,15 @@ function registerPrismStatus(server: McpServer): void {
         };
       }
       try {
+        const activeWhere = activePositionsWhere(db);
         const positionCount = (
-          db.prepare("SELECT COUNT(*) as n FROM positions WHERE paper_exited_at IS NULL").get() as { n: number }
+          db.prepare("SELECT COUNT(*) as n FROM positions WHERE " + activeWhere).get() as { n: number }
         ).n;
         const totals = db
           .prepare(
             "SELECT COALESCE(SUM(deposited_usd), 0) as total_deposited, " +
               "COALESCE(SUM(current_value_usd), 0) as total_current " +
-              "FROM positions WHERE paper_exited_at IS NULL",
+              "FROM positions WHERE " + activeWhere,
           )
           .get() as { total_deposited: number; total_current: number };
         const lastAudit = db
@@ -121,7 +133,8 @@ function registerPrismStatus(server: McpServer): void {
 function registerPrismPositions(server: McpServer): void {
   server.tool(
     "prism_positions",
-    "List all active positions tracked by the Prism agent. Excludes paper-exited positions. " +
+    "List all active positions tracked by the Prism agent. Excludes exited (soft-closed " +
+      "or paper-exited) positions. " +
       "Returns an empty array if the SQLite database does not exist.",
     {},
     async () => {
@@ -142,7 +155,7 @@ function registerPrismPositions(server: McpServer): void {
             "SELECT pool_address, token_x_symbol, token_y_symbol, " +
               "deposited_usd, current_value_usd, lower_bin_id, upper_bin_id, " +
               "active_bin_id, oor_cycle_count, last_rebalance_at " +
-              "FROM positions WHERE paper_exited_at IS NULL " +
+              "FROM positions WHERE " + activePositionsWhere(db) + " " +
               "ORDER BY deposited_usd DESC",
           )
           .all() as Array<Record<string, unknown>>;
