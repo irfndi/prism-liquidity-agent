@@ -482,10 +482,12 @@ describe("executeLive", () => {
 describe("executePaper paper/live parity", () => {
   it("paper ENTER derives the range from strategy.recommendBinRange like live", () => {
     const poolAddress = "TestPool111111111111111111111111111111111111";
-    const recommendBinRangeSpy = vi.fn((activeBinId: number, _binStep: number) => ({
-      lowerBinId: activeBinId - 34,
-      upperBinId: activeBinId + 34,
-    }));
+    const recommendBinRangeSpy = vi.fn(
+      (activeBinId: number, _binStep: number, halfWidthOverride?: number) => ({
+        lowerBinId: activeBinId - (halfWidthOverride ?? 20),
+        upperBinId: activeBinId + (halfWidthOverride ?? 20),
+      }),
+    );
     const strategy: StrategyApi = {
       computeMetrics: () => {
         throw new Error("not used");
@@ -505,7 +507,7 @@ describe("executePaper paper/live parity", () => {
 
     const result = Effect.runSync(
       executePaper(
-        { db, trackedPositions, strategy, entryStrategyShape: "spot" },
+        { db, trackedPositions, strategy, entryStrategyShape: "spot", entryRangeHalfWidth: 34 },
         {
           action: "ENTER",
           poolAddress,
@@ -524,7 +526,7 @@ describe("executePaper paper/live parity", () => {
     );
 
     expect(result.executed).toBe(true);
-    expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10);
+    expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10, 34);
     const pos = trackedPositions.get(poolAddress) as
       | { lowerBinId: number; upperBinId: number }
       | undefined;
