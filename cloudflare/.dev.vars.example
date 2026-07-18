@@ -15,3 +15,9 @@ BOT_API_SECRET=
 # API worker only
 FEE_WALLET_ADDRESS=
 ADMIN_API_KEY=
+
+# API worker only, non-secret override for local dev: point at the locally
+# running telegram-bot worker so POST /v1/alerts can push deliveries to
+# {TELEGRAM_BOT_URL}/internal/deliver-alert. Production value lives in
+# wrangler.toml [vars].
+# TELEGRAM_BOT_URL=http://localhost:8788

@@ -198,6 +198,10 @@ When `AGENTIC_MODE=true`, the engine can talk to a local agent harness (Hermes v
 
 Defaults stay fail-closed (`AGENTIC_MODE=false`, mode `veto`, empty tokens). `/approve` requires a distinct `AGENT_APPROVAL_TOKEN` (no fallback to the proposal enqueue token). No remote LLM API keys are used.
 
+### Proactive Telegram alerts
+
+`engine/alert-service.ts` (`AlertService`) maps engine events to alert types (`position_out_of_range`, `range_warning`, `exit_executed`, `risk_rejection`, `fee_milestone`) and POSTs them to `POST /v1/alerts` with the registered API key. The API worker stores each alert in the `alerts` D1 table and forwards it to the bot worker (`POST /internal/deliver-alert`, `BOT_API_SECRET`-authenticated) which pushes the Telegram message. Per-rule cooldowns and the fee-milestone accumulator persist in the SQLite `metadata` table (keys `alert_cooldown:*`, `alert_fee_total_usd`, `alert_fee_next_milestone_usd`) so restarts do not reset throttling. The service **fails open**: delivery errors are logged and swallowed, never blocking a scan cycle. Alerts are a user-requested utility, not telemetry — `PRISM_FEEDBACK_OPT_OUT` does not affect them. Opt-outs: `ALERTS_ENABLED=false` engine-side, `/alerts off` per-user bot-side (users `alerts_enabled` flag).
+
 ## Code style and conventions
 
 - **No `any` types.** Use `unknown` and narrow. The repo intentionally contains one `as any` in `engine/adapter-service.ts` for parsed mint account data; do not add more.
@@ -317,6 +321,9 @@ The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copi
 | `UPDATE_R2_PUBLIC_URL`        | `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev`              | Release CDN. `.env.example` contains a stale `r2.prism-agent.com` value; the code fallback is the source of truth. |
 | `PRISM_CONFIG_DIR`            | `~/.config/prism`                                                  | Override the shared credentials and config directory.                                                              |
 | `PRISM_FEEDBACK_OPT_OUT`      | `false`                                                            | Disable automatic feedback.                                                                                        |
+| `ALERTS_ENABLED`              | `true`                                                             | Master switch for proactive Telegram alerts (engine-side). Delivery still requires registration + Telegram link.   |
+| `ALERT_COOLDOWN_MINUTES`      | `120`                                                              | Per-rule (alert type + pool) cooldown between pushed alerts. Persisted in SQLite metadata.                         |
+| `ALERT_FEE_MILESTONE_USD`     | `10`                                                               | USD step between cumulative-fee milestone alerts.                                                                  |
 
 In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaults to `test-helius-key` and `SOLANA_RPC_URL` defaults to `https://example.com`.
 

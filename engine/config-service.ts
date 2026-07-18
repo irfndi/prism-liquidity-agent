@@ -197,6 +197,15 @@ export interface AppConfig {
   readonly weightedEntryScoreThreshold: number;
   // Auto-swap USDC into missing pool tokens before live ENTER
   readonly autoSwapEntry: boolean;
+
+  // ─── Proactive Telegram alerts (Wave 5) ───────────────────────────────────
+  /** Master switch for proactive Telegram alerts. Default true; delivery only
+   *  happens when the user registered and linked Telegram (server-side). */
+  readonly alertsEnabled: boolean;
+  /** Per-rule (type+pool) cooldown between pushed alerts. Default 120. */
+  readonly alertCooldownMinutes: number;
+  /** USD step between cumulative-fee milestone alerts. Default 10. */
+  readonly alertFeeMilestoneUsd: number;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -475,6 +484,13 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => false),
   );
 
+  // ─── Proactive Telegram alerts (Wave 5) ───────────────────────────────────
+  const alertsEnabled = yield* Config.boolean("ALERTS_ENABLED").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const alertCooldownMinutes = yield* validatedNumber("ALERT_COOLDOWN_MINUTES", 1, 120);
+  const alertFeeMilestoneUsd = yield* validatedNumber("ALERT_FEE_MILESTONE_USD", 0.01, 10);
+
   // New feature configs
   const stopLossPct = yield* validatedNumber("STOP_LOSS_PCT", 0, 0.15);
   const trailingStopPct = yield* validatedNumber("TRAILING_STOP_PCT", 0, 0.1);
@@ -658,6 +674,9 @@ const loadConfig = Effect.gen(function* () {
     signalWeightCeiling,
     weightedEntryScoreThreshold,
     autoSwapEntry,
+    alertsEnabled,
+    alertCooldownMinutes,
+    alertFeeMilestoneUsd,
   };
 
   return cfg;

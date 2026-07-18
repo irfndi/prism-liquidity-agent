@@ -121,6 +121,9 @@ function buildLayer(
     weightedEntryScoreThreshold: 1.8,
     autoSwapEntry: false,
     snapshotRetentionDays: 14,
+    alertsEnabled: true,
+    alertCooldownMinutes: 120,
+    alertFeeMilestoneUsd: 10,
   });
   return Layer.merge(mockConfig, DbLive(":memory:"));
 }

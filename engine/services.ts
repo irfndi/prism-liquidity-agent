@@ -893,6 +893,41 @@ export class AgentStateService extends Context.Tag("AgentStateService")<
   AgentStateApi
 >() {}
 
+// ─── Alert Service (proactive Telegram push alerts) ─────────────────────────
+
+export type AlertType =
+  | "position_out_of_range"
+  | "range_warning"
+  | "exit_executed"
+  | "risk_rejection"
+  | "fee_milestone";
+
+export type AlertSeverity = "info" | "warning" | "critical";
+
+export interface EngineAlert {
+  readonly type: AlertType;
+  readonly severity: AlertSeverity;
+  readonly message: string;
+  readonly poolAddress?: string;
+  readonly data?: Record<string, unknown>;
+}
+
+export interface AlertApi {
+  /**
+   * Send an alert to the user's linked Telegram via Prism Cloud. Applies
+   * per-rule cooldowns (persisted in SQLite) and never fails: delivery errors
+   * are logged and swallowed so a scan cycle is never blocked on alerts.
+   */
+  readonly sendAlert: (alert: EngineAlert) => Effect.Effect<void, never>;
+  /**
+   * Accumulate claimed fees (USD) and emit a fee_milestone alert each time the
+   * running total crosses the next configured milestone. State is persisted.
+   */
+  readonly recordFeeClaim: (poolAddress: string, feeUsd: number) => Effect.Effect<void, never>;
+}
+
+export class AlertService extends Context.Tag("AlertService")<AlertService, AlertApi>() {}
+
 // ─── MCP Server Service ──────────────────────────────────────────────────────
 
 export interface McpServerApi {
