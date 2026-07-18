@@ -115,6 +115,28 @@ export interface Position {
 
 export type ActionType = "HOLD" | "REBALANCE" | "EXIT" | "ENTER";
 
+// ─── DLMM entry strategy shapes (Meteora StrategyType) ───────────────────────
+
+/**
+ * Concrete Meteora DLMM deposit distribution for position creation:
+ * - `spot` — uniform across the range (StrategyType.Spot).
+ * - `curve` — concentrated around the active bin (StrategyType.Curve); suits
+ *   calm, mean-reverting pools.
+ * - `bidask` — weighted toward the range edges (StrategyType.BidAsk); suits
+ *   trending / one-sided-leaning deployment.
+ */
+export type EntryStrategyShape = "spot" | "curve" | "bidask";
+
+/**
+ * ENTRY_STRATEGY_TYPE config value. `auto` resolves per pool from recent
+ * volatility/trend metrics in the decision loop (see recommendStrategyShape);
+ * anything else is used as-is. Default: `spot`.
+ */
+export type EntryStrategyType = EntryStrategyShape | "auto";
+
+/** How a live entry was funded, as executed by the adapter. */
+export type EntryDepositMode = "two-sided" | "single-sided-x" | "single-sided-y";
+
 export interface RebalanceParams {
   newLowerBinId: number;
   newUpperBinId: number;

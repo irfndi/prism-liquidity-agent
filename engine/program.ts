@@ -17,6 +17,7 @@ import {
   computeBinVolatilityStddev,
   isHighVolatility,
   recommendBinRangeForVolatility,
+  recommendStrategyShape,
   estimateRecoveryProbability,
   shouldHoldForRecovery,
   evolveThresholds,
@@ -82,6 +83,7 @@ import type {
   AgentProposal,
   AgentProposalMode,
   AgentCycle,
+  EntryStrategyShape,
   PoolMetrics,
   PoolSnapshot,
   PoolState,
@@ -611,6 +613,8 @@ export function executePaper(
   deps: {
     db: DbApi;
     trackedPositions: Map<string, PositionRecord>;
+    strategy: StrategyApi;
+    entryStrategyShape: EntryStrategyShape;
   },
   decision: AgentDecision,
   pool: {
@@ -624,11 +628,14 @@ export function executePaper(
   signalSnapshotId?: number,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never> {
   return Effect.gen(function* () {
-    const { db, trackedPositions } = deps;
+    const { db, trackedPositions, strategy, entryStrategyShape } = deps;
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
       const existing = trackedPositions.get(decision.poolAddress);
       const liveExited =
         existing && existing.paperExitedAt !== null && existing.positionPubKey !== null;
+      // Paper/live parity: the simulated range comes from the same
+      // recommendBinRange live entries use, so paper validates real behavior.
+      const recommended = strategy.recommendBinRange(pool.activeBinId, pool.binStep);
       const pos: PositionRecord = {
         poolAddress: decision.poolAddress,
         positionPubKey: liveExited ? existing!.positionPubKey : null,
@@ -637,8 +644,8 @@ export function executePaper(
         tokenXSymbol: pool.tokenXSymbol,
         tokenYSymbol: pool.tokenYSymbol,
         activeBinId: pool.activeBinId,
-        lowerBinId: pool.activeBinId - 20,
-        upperBinId: pool.activeBinId + 20,
+        lowerBinId: recommended.lowerBinId,
+        upperBinId: recommended.upperBinId,
         timestamp: Date.now(),
         outOfRangeSince: null,
         oorCycleCount: 0,
@@ -667,7 +674,11 @@ export function executePaper(
           valueUsd: decision.positionSizeUsd,
           feesUsd: null,
           price: pool.currentPrice,
-          metadata: { lowerBinId: pos.lowerBinId, upperBinId: pos.upperBinId },
+          metadata: {
+            lowerBinId: pos.lowerBinId,
+            upperBinId: pos.upperBinId,
+            strategyShape: entryStrategyShape,
+          },
           createdAt: Date.now(),
         })
         .pipe(Effect.catchAll(() => Effect.void));
@@ -767,6 +778,7 @@ export function executeLive(
     trackedPositions: Map<string, PositionRecord>;
     entryPrep: EntryPrepApi;
     solPriceUsd: number;
+    entryStrategyShape: EntryStrategyShape;
     reconcileRequestedPools?: Set<string>;
   },
   decision: AgentDecision,
@@ -781,8 +793,16 @@ export function executeLive(
   signalSnapshotId?: number,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never, never> {
   return Effect.gen(function* () {
-    const { adapter, strategy, db, revenueConfigSvc, trackedPositions, entryPrep, solPriceUsd } =
-      deps;
+    const {
+      adapter,
+      strategy,
+      db,
+      revenueConfigSvc,
+      trackedPositions,
+      entryPrep,
+      solPriceUsd,
+      entryStrategyShape,
+    } = deps;
 
     if (!adapter.hasWallet()) {
       console.error("Live trading enabled but no wallet configured");
@@ -844,6 +864,7 @@ export function executeLive(
           recommended.lowerBinId,
           recommended.upperBinId,
           decision.positionSizeUsd,
+          { strategyShape: entryStrategyShape },
         )
         .pipe(
           Effect.tap((r) =>
@@ -886,8 +907,10 @@ export function executeLive(
           entrySignalTimestamp: signalTimestamp ?? null,
           entrySignalSnapshotId: signalSnapshotId ?? null,
           entryPriceUsd: pool.currentPrice,
-          entryAmountXUsd: decision.positionSizeUsd / 2,
-          entryAmountYUsd: decision.positionSizeUsd / 2,
+          // Entry legs come from the adapter's executed deposit: 50/50 for a
+          // two-sided entry, full-size/0 for a single-sided one.
+          entryAmountXUsd: enterResult.result.amountXUsd,
+          entryAmountYUsd: enterResult.result.amountYUsd,
           cumulativeFeesClaimedUsd: 0,
           closedAt: null,
           realizedPnlUsd: null,
@@ -907,6 +930,8 @@ export function executeLive(
               lowerBinId: pos.lowerBinId,
               upperBinId: pos.upperBinId,
               txSignature: enterResult.result.txSignature,
+              depositMode: enterResult.result.depositMode,
+              strategyShape: entryStrategyShape,
             },
             createdAt: Date.now(),
           })
@@ -3212,6 +3237,26 @@ export const program = Effect.gen(function* () {
 
       const entryPrep = yield* EntryPrepService;
 
+      // Resolve the deposit distribution for entries: a concrete configured
+      // shape is used as-is; `auto` picks per pool from the recent volatility
+      // regime (see recommendStrategyShape). `spot` is the default.
+      const entryStrategyShape: EntryStrategyShape =
+        config.entryStrategyType === "auto"
+          ? recommendStrategyShape({
+              volatilityStddev,
+              highVolThreshold: config.volatilityExitStddev,
+              netDriftBins:
+                recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0,
+            })
+          : config.entryStrategyType;
+      if (decision.action === "ENTER" && config.entryStrategyType === "auto") {
+        console.info(`[strategy-shape] auto resolved ${entryStrategyShape} for ${poolAddress}`, {
+          volatilityStddev,
+          netDriftBins:
+            recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0,
+        });
+      }
+
       if (paperExitShouldGoLive) {
         console.warn(
           `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${poolAddress}`,
@@ -3225,6 +3270,7 @@ export const program = Effect.gen(function* () {
             trackedPositions,
             entryPrep,
             solPriceUsd: config.solPriceUsd,
+            entryStrategyShape,
             reconcileRequestedPools,
           },
           decision,
@@ -3240,7 +3286,7 @@ export const program = Effect.gen(function* () {
           pool: poolAddress,
         });
         const paperResult = yield* executePaper(
-          { db, trackedPositions },
+          { db, trackedPositions, strategy, entryStrategyShape },
           decision,
           pool,
           signalTimestamp,
@@ -3258,6 +3304,7 @@ export const program = Effect.gen(function* () {
             trackedPositions,
             entryPrep,
             solPriceUsd: config.solPriceUsd,
+            entryStrategyShape,
             reconcileRequestedPools,
           },
           decision,

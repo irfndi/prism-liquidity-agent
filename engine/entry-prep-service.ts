@@ -282,6 +282,38 @@ export const EntryPrepLive = Layer.effect(
                 : 0n
               : balanceY;
 
+          // Single-sided precedence (Wave 7): when exactly one leg cannot fund
+          // its half and the other leg alone covers a full-size single-sided
+          // deposit, skip the USDC auto-swap entirely — the adapter's
+          // enterPosition executes the native single-sided deposit instead
+          // (no swap slippage, works even when the missing leg is USDC
+          // itself). The auto-swap path below remains the fallback for every
+          // other deficit shape.
+          const xLegShort = requiredX > availableX;
+          const yLegShort = requiredY > availableY;
+          if (xLegShort !== yLegShort) {
+            const heldIsX = yLegShort;
+            const heldMint = heldIsX ? pool.tokenX : pool.tokenY;
+            const heldDecimals = heldIsX ? tokenXDecimals : tokenYDecimals;
+            const heldPrice = heldIsX ? priceX : priceY;
+            const heldAvailable = heldIsX ? availableX : availableY;
+            const fullSizeRequired =
+              computeRequiredAtomic(positionSizeUsd, heldPrice, heldDecimals) +
+              (heldMint === SOL_MINT ? SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS : 0n);
+            if (fullSizeRequired > 0n && heldAvailable >= fullSizeRequired) {
+              logger.info(
+                "Single-sided native deposit preferred over USDC auto-swap (held leg covers the full size)",
+                {
+                  poolAddress,
+                  heldMint,
+                  heldAvailable: formatAtomic(heldAvailable, heldDecimals),
+                  fullSizeRequired: formatAtomic(fullSizeRequired, heldDecimals),
+                },
+              );
+              return;
+            }
+          }
+
           const deficits: Array<{
             mint: string;
             amount: bigint;

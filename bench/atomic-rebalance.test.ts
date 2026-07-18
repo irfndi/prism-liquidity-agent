@@ -77,7 +77,19 @@ function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
     getPositions: () => Effect.succeed([]),
     getAllWalletPositions: () => Effect.succeed([]),
     simulateRebalance: () => Effect.fail(new Error("not used")),
-    enterPosition: () => Effect.succeed({ positionPubKey: "pos-1", txSignature: "tx-enter" }),
+    enterPosition: (
+      _poolAddress: string,
+      _lowerBinId: number,
+      _upperBinId: number,
+      positionSizeUsd: number,
+    ) =>
+      Effect.succeed({
+        positionPubKey: "pos-1",
+        txSignature: "tx-enter",
+        depositMode: "two-sided" as const,
+        amountXUsd: positionSizeUsd / 2,
+        amountYUsd: positionSizeUsd / 2,
+      }),
     exitPosition: () => Effect.succeed({ txSignature: "tx-exit" }),
     rebalancePosition: () =>
       Effect.succeed({ positionPubKey: "pos-1", txSignatures: ["tx-atomic-1"] }),
@@ -162,6 +174,7 @@ describe("executeLive REBALANCE (atomic)", () => {
       trackedPositions,
       entryPrep: liveEntryPrep,
       solPriceUsd: 150,
+      entryStrategyShape: "spot" as const,
     };
 
     const outcome = await runDb(
@@ -245,6 +258,7 @@ describe("executeLive REBALANCE (atomic)", () => {
       trackedPositions,
       entryPrep: liveEntryPrep,
       solPriceUsd: 150,
+      entryStrategyShape: "spot" as const,
       reconcileRequestedPools,
     };
 
@@ -344,7 +358,19 @@ function makeLoopAdapter(opts: {
       ),
     getAllWalletPositions: () => Effect.succeed(opts.onChainPositions),
     simulateRebalance: opts.simulateRebalance,
-    enterPosition: () => Effect.succeed({ positionPubKey: "pos-1", txSignature: "tx-enter" }),
+    enterPosition: (
+      _poolAddress: string,
+      _lowerBinId: number,
+      _upperBinId: number,
+      positionSizeUsd: number,
+    ) =>
+      Effect.succeed({
+        positionPubKey: "pos-1",
+        txSignature: "tx-enter",
+        depositMode: "two-sided" as const,
+        amountXUsd: positionSizeUsd / 2,
+        amountYUsd: positionSizeUsd / 2,
+      }),
     exitPosition: () => Effect.succeed({ txSignature: "tx-exit" }),
     rebalancePosition:
       opts.rebalancePosition ??

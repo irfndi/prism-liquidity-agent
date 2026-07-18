@@ -38,3 +38,32 @@ describe("ConfigService upper-bound clamping", () => {
     expect(cfg.maxPerPoolAllocationPct).toBe(0.5);
   });
 });
+
+describe("ConfigService ENTRY_STRATEGY_TYPE", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults to spot when unset", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.entryStrategyType).toBe("spot");
+  });
+
+  it.each(["spot", "curve", "bidask", "auto"] as const)("accepts %s", async (value) => {
+    vi.stubEnv("ENTRY_STRATEGY_TYPE", value);
+    const cfg = await loadConfig();
+    expect(cfg.entryStrategyType).toBe(value);
+  });
+
+  it("falls back to spot for invalid values", async () => {
+    vi.stubEnv("ENTRY_STRATEGY_TYPE", "spiral");
+    const cfg = await loadConfig();
+    expect(cfg.entryStrategyType).toBe("spot");
+  });
+
+  it("falls back to spot for case-mismatched values", async () => {
+    vi.stubEnv("ENTRY_STRATEGY_TYPE", "Curve");
+    const cfg = await loadConfig();
+    expect(cfg.entryStrategyType).toBe("spot");
+  });
+});

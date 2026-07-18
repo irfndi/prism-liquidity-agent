@@ -20,6 +20,7 @@ import DLMM, {
   type PositionData,
   type RebalanceWithDeposit,
   type RebalanceWithWithdraw,
+  type StrategyParameters,
 } from "@meteora-ag/dlmm";
 import { BN } from "@coral-xyz/anchor";
 import { Context, Effect, Layer } from "effect";
@@ -30,7 +31,14 @@ import { DiscoverPoolsError } from "./errors.js";
 import { SwapQuoteError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import { getPrismUserConfigDir } from "./paths.js";
-import type { BinArray, BinData, PoolState, Position } from "./types.js";
+import type {
+  BinArray,
+  BinData,
+  EntryDepositMode,
+  EntryStrategyShape,
+  PoolState,
+  Position,
+} from "./types.js";
 import {
   CircuitBreaker,
   isRpcNetworkError,
@@ -68,6 +76,18 @@ const MAX_INIT_BIN_ARRAY_IXS_PER_TX = 8;
 interface AtomicRebalancePlan {
   readonly deposits: RebalanceWithDeposit[];
   readonly withdraws: RebalanceWithWithdraw[];
+}
+
+/** Map the engine's entry strategy shape to the Meteora SDK StrategyType. */
+export function toSdkStrategyType(shape: EntryStrategyShape): StrategyType {
+  switch (shape) {
+    case "spot":
+      return StrategyType.Spot;
+    case "curve":
+      return StrategyType.Curve;
+    case "bidask":
+      return StrategyType.BidAsk;
+  }
 }
 
 /**
@@ -1489,7 +1509,7 @@ export const AdapterLive = Layer.effect(
           ),
         ),
 
-      enterPosition: (poolAddress, lowerBinId, upperBinId, positionSizeUsd) =>
+      enterPosition: (poolAddress, lowerBinId, upperBinId, positionSizeUsd, options) =>
         Effect.gen(function* () {
           if (!wallet) {
             return yield* Effect.fail(
@@ -1525,8 +1545,6 @@ export const AdapterLive = Layer.effect(
 
           const requestedXAmount = computeRequiredAtomic(halfUsd, priceX, tokenXDecimals);
           const requestedYAmount = computeRequiredAtomic(halfUsd, priceY, tokenYDecimals);
-          const totalXAmount = new BN(requestedXAmount.toString());
-          const totalYAmount = new BN(requestedYAmount.toString());
 
           if (requestedXAmount === 0n || requestedYAmount === 0n) {
             return yield* Effect.fail(
@@ -1558,32 +1576,92 @@ export const AdapterLive = Layer.effect(
                 ? nativeSolBalance - GAS_RESERVE_LAMPORTS
                 : 0n
               : balanceY;
-          const shortages: string[] = [];
-          if (requestedXAmount > maxX) {
-            shortages.push(
-              `${pool.tokenX} required ${formatTokenAmount(requestedXAmount, tokenXDecimals)}, available ${formatTokenAmount(maxX, tokenXDecimals)}${pool.tokenX === SOL_MINT ? " after gas reserve" : ""}`,
-            );
-          }
-          if (requestedYAmount > maxY) {
-            shortages.push(
-              `${pool.tokenY} required ${formatTokenAmount(requestedYAmount, tokenYDecimals)}, available ${formatTokenAmount(maxY, tokenYDecimals)}${pool.tokenY === SOL_MINT ? " after gas reserve" : ""}`,
-            );
-          }
-          if (shortages.length > 0) {
+
+          // Funding classification: two-sided when both legs cover their half
+          // of the position; otherwise the SDK single-sided deposit path with
+          // the held leg when it alone covers the full position size
+          // (StrategyParameters.singleSidedX). "Short" means the leg cannot
+          // fund its half — for a SOL leg that includes anything at or below
+          // the gas reserve.
+          const xShort = requestedXAmount > maxX;
+          const yShort = requestedYAmount > maxY;
+          const shortageX = `${pool.tokenX} required ${formatTokenAmount(requestedXAmount, tokenXDecimals)}, available ${formatTokenAmount(maxX, tokenXDecimals)}${pool.tokenX === SOL_MINT ? " after gas reserve" : ""}`;
+          const shortageY = `${pool.tokenY} required ${formatTokenAmount(requestedYAmount, tokenYDecimals)}, available ${formatTokenAmount(maxY, tokenYDecimals)}${pool.tokenY === SOL_MINT ? " after gas reserve" : ""}`;
+
+          let depositXAtomic = requestedXAmount;
+          let depositYAtomic = requestedYAmount;
+          let depositMode: EntryDepositMode = "two-sided";
+          let singleSidedX: boolean | undefined;
+          let amountXUsd = halfUsd;
+          let amountYUsd = halfUsd;
+
+          if (xShort && yShort) {
             return yield* Effect.fail(
               new AdapterError({
-                message: `Insufficient token balance: ${shortages.join("; ")}. Wallet must hold both pool tokens before live entry.`,
+                message: `Insufficient token balance: ${shortageX}; ${shortageY}. Neither pool token can fund the entry — fund one pool token up to the full position size for a single-sided deposit, or enable AUTO_SWAP_ENTRY with a USDC balance.`,
                 poolAddress,
               }),
             );
           }
 
-          const positionKeypair = new Keypair();
-          const strategy = {
+          if (xShort || yShort) {
+            const heldIsX = yShort;
+            const heldMint = heldIsX ? pool.tokenX : pool.tokenY;
+            const heldDecimals = heldIsX ? tokenXDecimals : tokenYDecimals;
+            const heldPrice = heldIsX ? priceX : priceY;
+            const heldAvailable = heldIsX ? maxX : maxY;
+            const missingShortage = heldIsX ? shortageY : shortageX;
+            // Single-sided deposits place the entire position in the held
+            // token — never silently downsized to the available half.
+            const fullSizeAtomic = computeRequiredAtomic(positionSizeUsd, heldPrice, heldDecimals);
+            if (fullSizeAtomic === 0n || fullSizeAtomic > heldAvailable) {
+              return yield* Effect.fail(
+                new AdapterError({
+                  message: `Single-sided entry impossible for ${heldMint}: available ${formatTokenAmount(heldAvailable, heldDecimals)} is below the full-size requirement ${formatTokenAmount(fullSizeAtomic, heldDecimals)} for a $${positionSizeUsd} single-sided deposit (${missingShortage}). Fund the held token up to the full position size or enable AUTO_SWAP_ENTRY.`,
+                  poolAddress,
+                }),
+              );
+            }
+            if (heldIsX) {
+              depositXAtomic = fullSizeAtomic;
+              depositYAtomic = 0n;
+              singleSidedX = true;
+              depositMode = "single-sided-x";
+              amountXUsd = positionSizeUsd;
+              amountYUsd = 0;
+            } else {
+              depositXAtomic = 0n;
+              depositYAtomic = fullSizeAtomic;
+              singleSidedX = false;
+              depositMode = "single-sided-y";
+              amountXUsd = 0;
+              amountYUsd = positionSizeUsd;
+            }
+            logger.info("Single-sided entry: depositing the full size in the held leg", {
+              pool: poolAddress,
+              heldMint,
+              depositMode,
+              amountUsd: positionSizeUsd,
+            });
+          }
+
+          const totalXAmount = new BN(depositXAtomic.toString());
+          const totalYAmount = new BN(depositYAtomic.toString());
+
+          // The decision loop resolves `auto` per pool and passes a concrete
+          // shape; a bare `auto` config reaches the adapter only from direct
+          // calls without volatility context, where spot is the safe default.
+          const strategyShape =
+            options?.strategyShape ??
+            (config.entryStrategyType === "auto" ? "spot" : config.entryStrategyType);
+          const strategy: StrategyParameters = {
             minBinId: lowerBinId,
             maxBinId: upperBinId,
-            strategyType: 0,
+            strategyType: toSdkStrategyType(strategyShape),
+            ...(singleSidedX !== undefined ? { singleSidedX } : {}),
           };
+
+          const positionKeypair = new Keypair();
 
           const tx = yield* Effect.tryPromise(() =>
             dlmm.initializePositionAndAddLiquidityByStrategy({
@@ -1629,6 +1707,9 @@ export const AdapterLive = Layer.effect(
           return {
             positionPubKey: positionKeypair.publicKey.toBase58(),
             txSignature: signature,
+            depositMode,
+            amountXUsd,
+            amountYUsd,
           };
         }).pipe(
           Effect.catchAll((err: unknown) =>

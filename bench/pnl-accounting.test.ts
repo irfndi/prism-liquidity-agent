@@ -39,6 +39,16 @@ describe("computeHodlValueUsd", () => {
     expect(computeHodlValueUsd(500, 500, 100, 90)).toBeCloseTo(950, 8);
   });
 
+  it("handles a zero Y leg (single-sided X entry)", () => {
+    // $1000 all in the X leg at price 100; price now 110 → $1100.
+    expect(computeHodlValueUsd(1000, 0, 100, 110)).toBeCloseTo(1100, 8);
+  });
+
+  it("handles a zero X leg (single-sided Y entry) as flat numeraire", () => {
+    // $1000 all in the Y leg: no price exposure, benchmark stays $1000.
+    expect(computeHodlValueUsd(0, 1000, 100, 110)).toBeCloseTo(1000, 8);
+  });
+
   it("is flat when the price has not moved", () => {
     expect(computeHodlValueUsd(500, 500, 100, 100)).toBeCloseTo(1000, 8);
   });
@@ -119,6 +129,28 @@ describe("computePositionAnalytics", () => {
     expect(a.timeInRangePct).toBe(100);
     expect(a.feeAprPct).toBeCloseTo((25 / 1000) * 365 * 100, 4);
     expect(a.ageMs).toBe(DAY_MS);
+  });
+
+  it("treats a zero entry leg as a valid single-sided position (not pre-migration)", () => {
+    // Single-sided X entry: full $1000 in the X leg, Y leg 0. The HODL
+    // benchmark must still be produced (0 is a real leg, NULL is not).
+    const a = computePositionAnalytics(
+      {
+        depositedUsd: 1000,
+        currentValueUsd: 1080,
+        cumulativeFeesClaimedUsd: 0,
+        entryPriceUsd: 100,
+        entryAmountXUsd: 1000,
+        entryAmountYUsd: 0,
+        openedAtMs: now - DAY_MS,
+        outOfRangeSinceMs: null,
+      },
+      110,
+      now,
+    );
+    expect(a.hodlValueUsd).toBeCloseTo(1100, 8);
+    expect(a.ilVsHodlUsd).toBeCloseTo(-20, 8);
+    expect(a.unrealizedPnlUsd).toBeCloseTo(80, 8);
   });
 
   it("degrades gracefully for pre-migration rows (NULL entry fields)", () => {
@@ -459,6 +491,21 @@ describe("DbService — position events + soft close", () => {
 
 // ─── Lifecycle: ENTER → CLAIM → price move → EXIT (paper path) ───────────────
 
+// Minimal strategy surface for paper entries: only recommendBinRange is used.
+const paperStrategy: StrategyApi = {
+  computeMetrics: () => {
+    throw new Error("not used");
+  },
+  checkVolumeAuthenticity: () => ({ score: 1, flags: [] }),
+  computeBinUtilization: () => 1,
+  computeFeeIlRatio: () => 1,
+  recommendBinRange: (activeBinId: number) => ({
+    lowerBinId: activeBinId - 20,
+    upperBinId: activeBinId + 20,
+  }),
+  passesPreFilter: () => true,
+};
+
 describe("paper lifecycle PnL accounting", () => {
   it("ENTER snapshots entry price/legs and writes an ENTER event", async () => {
     const layer = DbLive(":memory:");
@@ -475,7 +522,7 @@ describe("paper lifecycle PnL accounting", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         const result = yield* executePaper(
-          { db, trackedPositions },
+          { db, trackedPositions, strategy: paperStrategy, entryStrategyShape: "spot" },
           {
             action: "ENTER",
             poolAddress: "pool1",
@@ -520,7 +567,7 @@ describe("paper lifecycle PnL accounting", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* executePaper(
-          { db, trackedPositions },
+          { db, trackedPositions, strategy: paperStrategy, entryStrategyShape: "spot" },
           {
             action: "ENTER",
             poolAddress: "pool1",
@@ -551,7 +598,7 @@ describe("paper lifecycle PnL accounting", () => {
         yield* db.savePosition(pos);
 
         const exitResult = yield* executePaper(
-          { db, trackedPositions },
+          { db, trackedPositions, strategy: paperStrategy, entryStrategyShape: "spot" },
           { action: "EXIT", poolAddress: "pool1", confidence: 0.9, reasoning: "test exit" },
           { ...pool, currentPrice: 110 },
         );
@@ -618,7 +665,19 @@ function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
         netBenefitUsd: 0,
         source: "pool-heuristic" as const,
       }),
-    enterPosition: () => Effect.succeed({ positionPubKey: "pos-1", txSignature: "tx-enter" }),
+    enterPosition: (
+      _poolAddress: string,
+      _lowerBinId: number,
+      _upperBinId: number,
+      positionSizeUsd: number,
+    ) =>
+      Effect.succeed({
+        positionPubKey: "pos-1",
+        txSignature: "tx-enter",
+        depositMode: "two-sided" as const,
+        amountXUsd: positionSizeUsd / 2,
+        amountYUsd: positionSizeUsd / 2,
+      }),
     exitPosition: () => Effect.succeed({ txSignature: "tx-exit" }),
     // Atomic rebalance (Wave 6): the SDK rebalancePosition instruction
     // preserves the position account, so the same pubkey comes back.
@@ -705,6 +764,7 @@ describe("live lifecycle PnL accounting", () => {
           trackedPositions,
           entryPrep: liveEntryPrep,
           solPriceUsd: 150,
+          entryStrategyShape: "spot" as const,
         };
 
         // 1. ENTER $1000 at price 100.

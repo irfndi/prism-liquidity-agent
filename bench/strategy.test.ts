@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DLMMStrategy } from "../engine/strategy-service.js";
+import { DLMMStrategy, recommendStrategyShape } from "../engine/strategy-service.js";
 import type { PoolState, BinArray } from "../engine/types.js";
 
 function makePool(overrides: Partial<PoolState> = {}): PoolState {
@@ -165,6 +165,45 @@ describe("DLMMStrategy", () => {
       const range = DLMMStrategy.recommendBinRange(5000, 10);
       const center = (range.lowerBinId + range.upperBinId) / 2;
       expect(center).toBe(5000);
+    });
+  });
+
+  describe("recommendStrategyShape (ENTRY_STRATEGY_TYPE=auto regime pick)", () => {
+    it("picks curve for a calm, mean-reverting pool (low vol, no trend)", () => {
+      expect(
+        recommendStrategyShape({ volatilityStddev: 1, highVolThreshold: 5, netDriftBins: 0 }),
+      ).toBe("curve");
+    });
+
+    it("picks spot for a high-volatility pool without a dominant trend", () => {
+      expect(
+        recommendStrategyShape({ volatilityStddev: 6, highVolThreshold: 5, netDriftBins: 2 }),
+      ).toBe("spot");
+    });
+
+    it("picks bidask when the trend dominates the noise", () => {
+      expect(
+        recommendStrategyShape({ volatilityStddev: 1, highVolThreshold: 5, netDriftBins: 5 }),
+      ).toBe("bidask");
+    });
+
+    it("lets a dominant trend override the high-vol spot pick", () => {
+      // |drift| = 14 >= max(3, 2 × 6) → trend dominates even though vol is high.
+      expect(
+        recommendStrategyShape({ volatilityStddev: 6, highVolThreshold: 5, netDriftBins: -14 }),
+      ).toBe("bidask");
+    });
+
+    it("picks curve when no regime signal exists yet (fresh bin history)", () => {
+      expect(
+        recommendStrategyShape({ volatilityStddev: 0, highVolThreshold: 5, netDriftBins: 0 }),
+      ).toBe("curve");
+    });
+
+    it("requires at least 3 bins of drift for a trend even in dead-calm pools", () => {
+      expect(
+        recommendStrategyShape({ volatilityStddev: 0, highVolThreshold: 5, netDriftBins: 2 }),
+      ).toBe("curve");
     });
   });
 });

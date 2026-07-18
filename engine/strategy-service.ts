@@ -2,6 +2,7 @@ import { Context, Layer } from "effect";
 import { StrategyService, type StrategyApi } from "./services.js";
 import type {
   BinArray,
+  EntryStrategyShape,
   PoolMetrics,
   PoolState,
   PriceDriftContext,
@@ -263,6 +264,31 @@ export function recommendBinRangeForVolatility(
     upperBinId: activeBinId + halfWidth,
     halfWidth,
   };
+}
+
+// ─── Entry strategy shape regime pick (ENTRY_STRATEGY_TYPE=auto) ─────────────
+
+/**
+ * Pick a DLMM deposit distribution from recent pool regime signals. Only used
+ * when ENTRY_STRATEGY_TYPE=auto; any concrete configured shape bypasses this.
+ *
+ * Heuristic:
+ * - A dominant trend (|net drift| ≥ max(3 bins, 2σ) over the lookback window)
+ *   → `bidask`, whose edge-weighted distribution leans into directional moves.
+ * - High-volatility chop (σ ≥ highVolThreshold, no dominant trend) → `spot`,
+ *   the uniform, most rebalance-tolerant distribution.
+ * - Calm / mean-reverting (default, including no history yet) → `curve`,
+ *   concentrated around the active bin for maximum fee capture.
+ */
+export function recommendStrategyShape(args: {
+  readonly volatilityStddev: number;
+  readonly highVolThreshold: number;
+  readonly netDriftBins: number;
+}): EntryStrategyShape {
+  const trendDominates = Math.abs(args.netDriftBins) >= Math.max(3, 2 * args.volatilityStddev);
+  if (trendDominates) return "bidask";
+  if (isHighVolatility(args.volatilityStddev, args.highVolThreshold)) return "spot";
+  return "curve";
 }
 
 // ─── Adaptive threshold evolution ────────────────────────────────────────────
