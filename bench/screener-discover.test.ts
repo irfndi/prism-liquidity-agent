@@ -240,4 +240,57 @@ describe("ScreenerService.screenPools", () => {
       restore();
     }
   });
+
+  it("filters out candidates whose on-chain bin utilization is below minBinUtilization", async () => {
+    const POOL_A = "PoolHighUtil11111111111111111111111111111";
+    const POOL_B = "PoolLowUtil111111111111111111111111111111";
+    const discovered = [POOL_A, POOL_B].map((address) => ({
+      address,
+      tvlUsd: 2_000_000,
+      volume24hUsd: 1_000_000,
+      fees24hUsd: 10_000,
+      apr: 180,
+      binStep: 10,
+      tokenX: "TokenX111111111111111111111111111111111111",
+      tokenY: "TokenY111111111111111111111111111111111111",
+    }));
+    const makeBins = (activeCount: number) => ({
+      lowerBinId: 4990,
+      upperBinId: 4999,
+      activeBinId: 5000,
+      bins: Array.from({ length: 10 }, (_, i) => ({
+        binId: 4990 + i,
+        price: 150,
+        reserveX: i < activeCount ? BigInt(1_000_000) : 0n,
+        reserveY: i < activeCount ? BigInt(1_000_000) : 0n,
+        liquiditySupply: i < activeCount ? BigInt(1_000_000_000) : 0n,
+      })),
+    });
+    const adapterLayer = Layer.succeed(AdapterService, {
+      discoverPools: () => Effect.succeed(discovered),
+      getBinArray: (address: string) =>
+        Effect.succeed(address === POOL_A ? makeBins(10) : makeBins(1)),
+    } as never);
+    const configLayer = Layer.succeed(ConfigService, makeConfig());
+    const layer = Layer.provide(
+      ScreenerLive({
+        minTvlUsd: 100_000,
+        minFeeRatio: 1.5,
+        volumeAuthThreshold: 0.7,
+        minBinUtilization: 0.3,
+      }),
+      Layer.merge(configLayer, Layer.merge(adapterLayer, StrategyLive)),
+    );
+
+    const program = Effect.gen(function* () {
+      const screener = yield* ScreenerService;
+      return yield* screener.screenPools();
+    });
+    const screened = await Effect.runPromise(Effect.provide(program, layer));
+    const addresses = screened.map((p) => p.address);
+    expect(
+      addresses,
+      `low-utilization pool must be filtered out, got: ${JSON.stringify(addresses)}`,
+    ).toEqual([POOL_A]);
+  });
 });

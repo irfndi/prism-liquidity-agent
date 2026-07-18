@@ -51,6 +51,7 @@ describe("RiskEngine", () => {
     confidenceThreshold: 0.65,
     maxRebalanceRangeBins: 50,
     stopLossPct: 0.15,
+    maxPerPoolAllocationPct: 0.3,
   };
 
   describe("confidence gate", () => {
@@ -74,6 +75,21 @@ describe("RiskEngine", () => {
       const result = evaluateRisk(riskConfig, decision, makeContext({ recentPnlUsd: -5000 }));
       expect(result.approved).toBe(true);
     });
+
+    it("approves EXIT below the confidence threshold (capital protection beats confidence)", () => {
+      const strictConfig = { ...riskConfig, confidenceThreshold: 0.9 };
+      const decision = makeDecision({ action: "EXIT", confidence: 0.3 });
+      const result = evaluateRisk(strictConfig, decision, makeContext());
+      expect(result.approved).toBe(true);
+    });
+
+    it("rejects ENTER below the confidence threshold", () => {
+      const strictConfig = { ...riskConfig, confidenceThreshold: 0.9 };
+      const decision = makeDecision({ action: "ENTER", confidence: 0.3, positionSizeUsd: 100 });
+      const result = evaluateRisk(strictConfig, decision, makeContext());
+      expect(result.approved).toBe(false);
+      expect(result.reason).toContain("Confidence");
+    });
   });
 
   describe("drawdown gate", () => {
@@ -95,6 +111,19 @@ describe("RiskEngine", () => {
       const result = evaluateRisk(riskConfig, decision, makeContext({ portfolioValueUsd: 10_000 }));
       expect(result.approved).toBe(true);
       expect(result.adjustedSizeUsd).toBe(3000);
+    });
+
+    it("derives the cap from maxPerPoolAllocationPct (config, not hardcode)", () => {
+      const config25 = { ...riskConfig, maxPerPoolAllocationPct: 0.25 };
+      const decision = makeDecision({ action: "ENTER", confidence: 0.8, positionSizeUsd: 5000 });
+      const result = evaluateRisk(
+        config25,
+        decision,
+        makeContext({ portfolioValueUsd: 10_000 }),
+      );
+      expect(result.approved).toBe(true);
+      expect(result.adjustedSizeUsd).toBe(2500);
+      expect(result.reason).toContain("25%");
     });
   });
 
