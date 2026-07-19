@@ -3,6 +3,7 @@ import type { ActionType, AgentDecision, PoolMetrics, Position } from "../types.
 import type { RiskContext } from "../services.js";
 
 export interface ReplayPosition {
+  readonly positionPubKey: string;
   readonly poolAddress: string;
   readonly lowerBinId: number;
   readonly upperBinId: number;
@@ -16,6 +17,7 @@ export interface ReplayEvaluationInput {
   readonly activeBinId: number;
   readonly metrics: PoolMetrics;
   readonly position: ReplayPosition | undefined;
+  readonly openPositions: readonly ReplayPosition[];
   readonly portfolioValueUsd: number;
   readonly recentPnlUsd: number;
   readonly memoryWarningCount: number;
@@ -33,7 +35,7 @@ export interface ReplayEvaluation {
 }
 
 const toRiskPosition = (position: ReplayPosition): Position => ({
-  id: position.poolAddress,
+  id: position.positionPubKey,
   poolAddress: position.poolAddress,
   poolName: position.poolAddress,
   lowerBinId: position.lowerBinId,
@@ -69,7 +71,7 @@ export function evaluateReplayPool(input: ReplayEvaluationInput): ReplayEvaluati
           : "Replay position remains within trailing-stop limit",
     ...(action === "ENTER" && { positionSizeUsd: input.proposedSizeUsd }),
   };
-  const openPositions = position ? [toRiskPosition(position)] : [];
+  const openPositions = input.openPositions.map(toRiskPosition);
   const context: RiskContext = {
     openPositions,
     portfolioValueUsd: input.portfolioValueUsd,
