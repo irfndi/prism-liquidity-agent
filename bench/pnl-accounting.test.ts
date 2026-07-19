@@ -393,6 +393,7 @@ describe("DbService — position events + soft close", () => {
           id: "evt-1",
           poolAddress: "pool1",
           positionPubKey: null,
+          positionId: "paper-pool1",
           event: "ENTER",
           valueUsd: 1000,
           feesUsd: null,
@@ -404,6 +405,7 @@ describe("DbService — position events + soft close", () => {
           id: "evt-2",
           poolAddress: "pool1",
           positionPubKey: null,
+          positionId: "paper-pool1",
           event: "CLAIM",
           valueUsd: null,
           feesUsd: 25,
@@ -429,10 +431,10 @@ describe("DbService — position events + soft close", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.savePosition(makePosition({ poolAddress: "pool1", currentValueUsd: 1100 }));
-        yield* db.closePosition("pool1", 125);
+        yield* db.closePosition("paper-pool1", 125);
         const active = yield* db.getAllPositions();
         const closed = yield* db.getClosedPositions();
-        const raw = yield* db.getPosition("pool1");
+        const raw = yield* db.getPosition("paper-pool1");
         return { active, closed, raw };
       }),
       layer,
@@ -532,7 +534,8 @@ describe("paper lifecycle PnL accounting", () => {
           },
           pool,
         );
-        const pos = yield* db.getPosition("pool1");
+        const tracked = [...trackedPositions.values()][0]!;
+        const pos = yield* db.getPosition(tracked.positionId);
         const events = yield* db.getPositionEvents("pool1");
         return { result, pos, events };
       }),
@@ -579,13 +582,14 @@ describe("paper lifecycle PnL accounting", () => {
         );
 
         // CLAIM $25 of fees (mirrors the engine's claim accounting).
-        const pos = trackedPositions.get("pool1")!;
+        const pos = [...trackedPositions.values()][0]!;
         pos.cumulativeFeesClaimedUsd += 25;
         yield* db.savePosition(pos);
         yield* db.savePositionEvent({
           id: "evt-claim",
           poolAddress: "pool1",
           positionPubKey: null,
+          positionId: pos.positionId,
           event: "CLAIM",
           valueUsd: null,
           feesUsd: 25,
@@ -804,7 +808,7 @@ describe("live lifecycle PnL accounting", () => {
 
         // Wave 6: the atomic rebalance preserves the position account — the
         // same pubkey, the entry basis and accrued fees all survive.
-        const afterRebalance = trackedPositions.get("pool1")!;
+        const afterRebalance = trackedPositions.get("pos-1")!;
         expect(afterRebalance.positionPubKey).toBe("pos-1");
         expect(afterRebalance.lowerBinId).toBe(4990);
         expect(afterRebalance.upperBinId).toBe(5030);
@@ -814,7 +818,7 @@ describe("live lifecycle PnL accounting", () => {
         expect(afterRebalance.cumulativeFeesClaimedUsd).toBeCloseTo(25, 8);
 
         // 3. Price moves 100 → 110; position marked to $1100.
-        const pos = trackedPositions.get("pool1")!;
+        const pos = trackedPositions.get("pos-1")!;
         pos.currentValueUsd = 1100;
         yield* db.savePosition(pos);
 
@@ -829,7 +833,7 @@ describe("live lifecycle PnL accounting", () => {
         const closed = yield* db.getClosedPositions();
         const active = yield* db.getAllPositions();
         const events = yield* db.getPositionEvents("pool1");
-        return { closed, active, events, tracked: trackedPositions.get("pool1") };
+        return { closed, active, events, tracked: trackedPositions.get("pos-1") };
       }),
       layer,
     );

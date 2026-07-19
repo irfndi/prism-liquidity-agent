@@ -27,6 +27,8 @@ describe("evaluatePerPoolAllocation (F5 multi-pool allocation)", () => {
       openPositions: [],
       maxPerPoolAllocationPct: 0.4,
       maxOpenPositions: 3,
+      maxPositionsPerPool: 2,
+      poolAddress: "Pool1",
     });
     expect(result.approved).toBe(true);
     expect(result.adjustedDepositUsd).toBe(1000);
@@ -40,6 +42,8 @@ describe("evaluatePerPoolAllocation (F5 multi-pool allocation)", () => {
       openPositions: [],
       maxPerPoolAllocationPct: 0.4,
       maxOpenPositions: 3,
+      maxPositionsPerPool: 2,
+      poolAddress: "Pool1",
     });
     expect(result.approved).toBe(true);
     expect(result.adjustedDepositUsd).toBe(4000);
@@ -53,6 +57,8 @@ describe("evaluatePerPoolAllocation (F5 multi-pool allocation)", () => {
       openPositions: positions,
       maxPerPoolAllocationPct: 0.4,
       maxOpenPositions: 3,
+      maxPositionsPerPool: 2,
+      poolAddress: "Pool1",
     });
     expect(result.approved).toBe(false);
     expect(result.reason.toLowerCase()).toContain("max");
@@ -66,6 +72,8 @@ describe("evaluatePerPoolAllocation (F5 multi-pool allocation)", () => {
       openPositions: [],
       maxPerPoolAllocationPct: 0.4,
       maxOpenPositions: 3,
+      maxPositionsPerPool: 2,
+      poolAddress: "Pool1",
     });
     expect(result.approved).toBe(false);
     expect(result.adjustedDepositUsd).toBe(0);
@@ -80,6 +88,8 @@ describe("evaluatePerPoolAllocation (F5 multi-pool allocation)", () => {
       openPositions: positions,
       maxPerPoolAllocationPct: 0.4,
       maxOpenPositions: 3,
+      maxPositionsPerPool: 2,
+      poolAddress: "Pool1",
     });
     expect(result.approved).toBe(true);
     expect(result.adjustedDepositUsd).toBe(500);

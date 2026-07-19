@@ -347,7 +347,7 @@ type PositionReconcileResult = {
 
 function toRiskPosition(pos: PositionRecord): Position {
   return {
-    id: pos.poolAddress,
+    id: pos.positionId,
     poolAddress: pos.poolAddress,
     poolName: `${pos.tokenXSymbol}/${pos.tokenYSymbol}`,
     lowerBinId: pos.lowerBinId,
@@ -359,6 +359,35 @@ function toRiskPosition(pos: PositionRecord): Position {
     feesEarnedUsd: 0,
     openedAt: pos.timestamp,
   };
+}
+
+/** All tracked positions on a pool — a pool may hold several (tight+wide pairs). */
+export function positionsForPool(
+  trackedPositions: Map<string, PositionRecord>,
+  poolAddress: string,
+): PositionRecord[] {
+  const out: PositionRecord[] = [];
+  for (const pos of trackedPositions.values()) {
+    if (pos.poolAddress === poolAddress) out.push(pos);
+  }
+  return out;
+}
+
+/**
+ * The position a decision acts on. Explicit positionId wins; an untargeted
+ * decision resolves to the pool's position only when exactly one exists —
+ * with several, ambiguity fails closed (undefined) rather than hitting the
+ * wrong row.
+ */
+function resolveTargetPosition(
+  trackedPositions: Map<string, PositionRecord>,
+  decision: AgentDecision,
+): PositionRecord | undefined {
+  if (decision.positionId !== undefined) {
+    return trackedPositions.get(decision.positionId);
+  }
+  const poolPositions = positionsForPool(trackedPositions, decision.poolAddress);
+  return poolPositions.length === 1 ? poolPositions[0] : undefined;
 }
 
 export function reconcilePositions(
@@ -393,53 +422,54 @@ export function reconcilePositions(
       };
     }
 
-    const onChainPoolSet = new Set(onChainPositions.map((p) => p.poolAddress));
+    // Match by position identity, not pool: a pool can hold several positions
+    // (tight+wide pairs), so per-pool matching would conflate siblings.
+    const onChainByPubkey = new Map(onChainPositions.map((p) => [p.positionPubKey, p]));
     const watchedPoolSet = new Set(poolsToScan);
     const unresolvedPoolAddresses = new Set<string>();
 
-    for (const [poolAddress, pos] of trackedPositions) {
-      if (pos.positionPubKey && !onChainPoolSet.has(poolAddress)) {
+    for (const [positionId, pos] of trackedPositions) {
+      if (pos.positionPubKey && !onChainByPubkey.has(pos.positionPubKey)) {
         console.warn(
-          `Reconciling: position ${poolAddress} no longer on-chain — removing from tracking`,
+          `Reconciling: position ${positionId} on ${pos.poolAddress} no longer on-chain — removing from tracking`,
         );
-        trackedPositions.delete(poolAddress);
-        yield* db.deletePosition(poolAddress).pipe(Effect.catchAll(() => Effect.void));
+        trackedPositions.delete(positionId);
+        yield* db.deletePosition(positionId).pipe(Effect.catchAll(() => Effect.void));
         yield* memory
           .upsert({
             category: "warning",
-            content: `Position ${poolAddress} was closed externally (e.g. via Solscan/Meteora UI). Removed from tracking.`,
-            poolAddress,
+            content: `Position ${positionId} on ${pos.poolAddress} was closed externally (e.g. via Solscan/Meteora UI). Removed from tracking.`,
+            poolAddress: pos.poolAddress,
           })
           .pipe(Effect.catchAll(() => Effect.void));
       }
     }
 
     for (const onChainPos of onChainPositions) {
-      if (trackedPositions.has(onChainPos.poolAddress)) {
+      const tracked = trackedPositions.get(onChainPos.positionPubKey);
+      if (tracked) {
         // A tracked position whose on-chain range moved under the same pubkey
         // (e.g. an externally-executed rebalance, or an atomic rebalance whose
         // confirmation errored after landing) — sync the record back to the
         // real range instead of deciding on stale bins.
-        const tracked = trackedPositions.get(onChainPos.poolAddress)!;
         if (
-          tracked.positionPubKey === onChainPos.positionPubKey &&
-          (tracked.lowerBinId !== onChainPos.lowerBinId ||
-            tracked.upperBinId !== onChainPos.upperBinId)
+          tracked.lowerBinId !== onChainPos.lowerBinId ||
+          tracked.upperBinId !== onChainPos.upperBinId
         ) {
           console.warn(
-            `Reconciling: position ${onChainPos.poolAddress} range drifted on-chain (${tracked.lowerBinId}-${tracked.upperBinId} → ${onChainPos.lowerBinId}-${onChainPos.upperBinId}) — syncing record`,
+            `Reconciling: position ${onChainPos.positionPubKey} on ${onChainPos.poolAddress} range drifted on-chain (${tracked.lowerBinId}-${tracked.upperBinId} → ${onChainPos.lowerBinId}-${onChainPos.upperBinId}) — syncing record`,
           );
           const updated: PositionRecord = {
             ...tracked,
             lowerBinId: onChainPos.lowerBinId,
             upperBinId: onChainPos.upperBinId,
           };
-          trackedPositions.set(onChainPos.poolAddress, updated);
+          trackedPositions.set(onChainPos.positionPubKey, updated);
           yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
           yield* memory
             .upsert({
               category: "warning",
-              content: `Position ${onChainPos.poolAddress} range synced to on-chain state (${onChainPos.lowerBinId}-${onChainPos.upperBinId}).`,
+              content: `Position ${onChainPos.positionPubKey} on ${onChainPos.poolAddress} range synced to on-chain state (${onChainPos.lowerBinId}-${onChainPos.upperBinId}).`,
               poolAddress: onChainPos.poolAddress,
             })
             .pipe(Effect.catchAll(() => Effect.void));
@@ -448,7 +478,7 @@ export function reconcilePositions(
       }
       if (watchedPoolSet.has(onChainPos.poolAddress)) {
         console.warn(
-          `Reconciling: discovered external position in ${onChainPos.poolAddress} — adding to tracking`,
+          `Reconciling: discovered external position ${onChainPos.positionPubKey} in ${onChainPos.poolAddress} — adding to tracking`,
         );
         const pool = yield* adapter.getPoolState(onChainPos.poolAddress).pipe(
           Effect.catchAll((err) => {
@@ -462,6 +492,7 @@ export function reconcilePositions(
         );
         if (pool) {
           const pos: PositionRecord = {
+            positionId: onChainPos.positionPubKey,
             poolAddress: onChainPos.poolAddress,
             positionPubKey: onChainPos.positionPubKey,
             depositedUsd: 0,
@@ -489,12 +520,12 @@ export function reconcilePositions(
             closedAt: null,
             realizedPnlUsd: null,
           };
-          trackedPositions.set(onChainPos.poolAddress, pos);
+          trackedPositions.set(onChainPos.positionPubKey, pos);
           yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
           yield* memory
             .upsert({
               category: "warning",
-              content: `External position detected in ${onChainPos.poolAddress} and added to tracking.`,
+              content: `External position ${onChainPos.positionPubKey} detected in ${onChainPos.poolAddress} and added to tracking.`,
               poolAddress: onChainPos.poolAddress,
             })
             .pipe(Effect.catchAll(() => Effect.void));
@@ -554,6 +585,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
     maxRebalanceRangeBins: cfg?.maxRebalanceRangeBins ?? 50,
     stopLossPct: cfg?.stopLossPct ?? 0.15,
     maxPerPoolAllocationPct: cfg?.maxPerPoolAllocationPct ?? 0.4,
+    maxPositionsPerPool: cfg?.maxPositionsPerPool ?? 2,
   });
   const blacklist = BlacklistLive({
     deployerBlacklistPath: cfg?.deployerBlacklistPath ?? "./engine/data/deployer-blacklist.json",
@@ -634,9 +666,11 @@ export function executePaper(
   return Effect.gen(function* () {
     const { db, trackedPositions, strategy, entryStrategyShape, entryRangeHalfWidth } = deps;
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
-      const existing = trackedPositions.get(decision.poolAddress);
-      const liveExited =
-        existing && existing.paperExitedAt !== null && existing.positionPubKey !== null;
+      // Legacy parity: re-entering a pool whose live position was paper-exited
+      // keeps the live identity so the rows merge instead of duplicating.
+      const liveExited = positionsForPool(trackedPositions, decision.poolAddress).find(
+        (p) => p.paperExitedAt !== null && p.positionPubKey !== null,
+      );
       // Paper/live parity: the simulated range comes from the same
       // recommendBinRange live entries use, so paper validates real behavior.
       const recommended = strategy.recommendBinRange(
@@ -644,9 +678,13 @@ export function executePaper(
         pool.binStep,
         entryRangeHalfWidth,
       );
+      const positionId = liveExited
+        ? liveExited.positionPubKey!
+        : `paper-${decision.poolAddress}-${randomUUID()}`;
       const pos: PositionRecord = {
+        positionId,
         poolAddress: decision.poolAddress,
-        positionPubKey: liveExited ? existing!.positionPubKey : null,
+        positionPubKey: liveExited ? liveExited.positionPubKey : null,
         depositedUsd: decision.positionSizeUsd,
         currentValueUsd: decision.positionSizeUsd,
         tokenXSymbol: pool.tokenXSymbol,
@@ -661,7 +699,7 @@ export function executePaper(
         trailingStopThreshold: null,
         highestValueUsd: null,
         lastRebalanceAt: 0,
-        paperExitedAt: liveExited ? existing!.paperExitedAt : null,
+        paperExitedAt: liveExited ? liveExited.paperExitedAt : null,
         entrySignalTimestamp: signalTimestamp ?? null,
         entrySignalSnapshotId: signalSnapshotId ?? null,
         entryPriceUsd: pool.currentPrice,
@@ -672,13 +710,14 @@ export function executePaper(
         closedAt: null,
         realizedPnlUsd: null,
       };
-      trackedPositions.set(decision.poolAddress, pos);
+      trackedPositions.set(pos.positionId, pos);
       yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
       yield* db
         .savePositionEvent({
           id: randomUUID(),
           poolAddress: decision.poolAddress,
           positionPubKey: pos.positionPubKey,
+          positionId: pos.positionId,
           event: "ENTER",
           valueUsd: decision.positionSizeUsd,
           feesUsd: null,
@@ -692,17 +731,17 @@ export function executePaper(
         })
         .pipe(Effect.catchAll(() => Effect.void));
     } else if (decision.action === "EXIT") {
-      const pos = trackedPositions.get(decision.poolAddress);
+      const pos = resolveTargetPosition(trackedPositions, decision);
       if (pos?.positionPubKey) {
         // Live position — paper trading must not "exit" it without an on-chain tx.
         // Skip and warn so the user can switch to live mode to actually close it.
         console.warn(
-          `[PAPER] Skipping EXIT for ${decision.poolAddress} — this is a live position ` +
+          `[PAPER] Skipping EXIT for ${pos.positionId} on ${decision.poolAddress} — this is a live position ` +
             `(pubKey: ${pos.positionPubKey}). Switch to live mode to close it on-chain.`,
         );
         return {
           executed: false,
-          error: `Skipping EXIT for live position in paper mode: ${decision.poolAddress}`,
+          error: `Skipping EXIT for live position in paper mode: ${pos.positionId}`,
         };
       }
       if (pos?.entrySignalSnapshotId != null) {
@@ -723,6 +762,7 @@ export function executePaper(
             id: randomUUID(),
             poolAddress: decision.poolAddress,
             positionPubKey: pos.positionPubKey,
+            positionId: pos.positionId,
             event: "EXIT",
             valueUsd: pos.currentValueUsd,
             feesUsd: pos.cumulativeFeesClaimedUsd,
@@ -732,41 +772,40 @@ export function executePaper(
           })
           .pipe(Effect.catchAll(() => Effect.void));
         yield* db
-          .closePosition(decision.poolAddress, realizedPnlUsd)
+          .closePosition(pos.positionId, realizedPnlUsd)
+          .pipe(Effect.catchAll(() => Effect.void));
+        yield* db.markPaperExited(pos.positionId).pipe(Effect.catchAll(() => Effect.void));
+        trackedPositions.delete(pos.positionId);
+      }
+    } else if (decision.action === "REBALANCE" && decision.rebalanceParams) {
+      const current = resolveTargetPosition(trackedPositions, decision);
+      if (current) {
+        const updated: PositionRecord = {
+          ...current,
+          lowerBinId: decision.rebalanceParams.newLowerBinId,
+          upperBinId: decision.rebalanceParams.newUpperBinId,
+          lastRebalanceAt: Date.now(),
+        };
+        trackedPositions.set(updated.positionId, updated);
+        yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
+        yield* db
+          .savePositionEvent({
+            id: randomUUID(),
+            poolAddress: decision.poolAddress,
+            positionPubKey: updated.positionPubKey,
+            positionId: updated.positionId,
+            event: "REBALANCE",
+            valueUsd: updated.currentValueUsd,
+            feesUsd: null,
+            price: pool.currentPrice,
+            metadata: {
+              newLowerBinId: decision.rebalanceParams.newLowerBinId,
+              newUpperBinId: decision.rebalanceParams.newUpperBinId,
+            },
+            createdAt: Date.now(),
+          })
           .pipe(Effect.catchAll(() => Effect.void));
       }
-      yield* db.markPaperExited(decision.poolAddress).pipe(Effect.catchAll(() => Effect.void));
-      trackedPositions.delete(decision.poolAddress);
-    } else if (
-      decision.action === "REBALANCE" &&
-      decision.rebalanceParams &&
-      trackedPositions.has(decision.poolAddress)
-    ) {
-      const current = trackedPositions.get(decision.poolAddress)!;
-      const updated: PositionRecord = {
-        ...current,
-        lowerBinId: decision.rebalanceParams.newLowerBinId,
-        upperBinId: decision.rebalanceParams.newUpperBinId,
-        lastRebalanceAt: Date.now(),
-      };
-      trackedPositions.set(decision.poolAddress, updated);
-      yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
-      yield* db
-        .savePositionEvent({
-          id: randomUUID(),
-          poolAddress: decision.poolAddress,
-          positionPubKey: updated.positionPubKey,
-          event: "REBALANCE",
-          valueUsd: updated.currentValueUsd,
-          feesUsd: null,
-          price: pool.currentPrice,
-          metadata: {
-            newLowerBinId: decision.rebalanceParams.newLowerBinId,
-            newUpperBinId: decision.rebalanceParams.newUpperBinId,
-          },
-          createdAt: Date.now(),
-        })
-        .pipe(Effect.catchAll(() => Effect.void));
     }
     return { executed: true, error: undefined };
   });
@@ -903,6 +942,7 @@ export function executeLive(
 
       if (enterResult.result) {
         const pos: PositionRecord = {
+          positionId: enterResult.result.positionPubKey,
           poolAddress: decision.poolAddress,
           positionPubKey: enterResult.result.positionPubKey,
           depositedUsd: decision.positionSizeUsd,
@@ -932,13 +972,14 @@ export function executeLive(
           closedAt: null,
           realizedPnlUsd: null,
         };
-        trackedPositions.set(decision.poolAddress, pos);
+        trackedPositions.set(pos.positionId, pos);
         yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
         yield* db
           .savePositionEvent({
             id: randomUUID(),
             poolAddress: decision.poolAddress,
             positionPubKey: pos.positionPubKey,
+            positionId: pos.positionId,
             event: "ENTER",
             valueUsd: decision.positionSizeUsd,
             feesUsd: null,
@@ -959,7 +1000,7 @@ export function executeLive(
     } else if (decision.action === "ENTER") {
       return { executed: false, error: "ENTER decision missing position size" };
     } else if (decision.action === "EXIT") {
-      const pos = trackedPositions.get(decision.poolAddress);
+      const pos = resolveTargetPosition(trackedPositions, decision);
       let exited = false;
       let exitError: string | undefined = undefined;
       if (pos?.positionPubKey) {
@@ -969,6 +1010,7 @@ export function executeLive(
             Effect.tap(() =>
               console.info("Live position exited", {
                 pool: decision.poolAddress,
+                position: pos.positionPubKey,
               }),
             ),
             Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
@@ -1005,6 +1047,7 @@ export function executeLive(
               id: randomUUID(),
               poolAddress: decision.poolAddress,
               positionPubKey: pos.positionPubKey,
+              positionId: pos.positionId,
               event: "EXIT",
               valueUsd: pos.currentValueUsd,
               feesUsd: pos.cumulativeFeesClaimedUsd,
@@ -1014,15 +1057,15 @@ export function executeLive(
             })
             .pipe(Effect.catchAll(() => Effect.void));
           yield* db
-            .closePosition(decision.poolAddress, realizedPnlUsd)
+            .closePosition(pos.positionId, realizedPnlUsd)
             .pipe(Effect.catchAll(() => Effect.void));
+          trackedPositions.delete(pos.positionId);
         }
-        trackedPositions.delete(decision.poolAddress);
         return { executed: true, error: undefined };
       }
       return { executed: false, error: exitError };
     } else if (decision.action === "REBALANCE" && decision.rebalanceParams) {
-      const pos = trackedPositions.get(decision.poolAddress);
+      const pos = resolveTargetPosition(trackedPositions, decision);
       if (pos?.positionPubKey) {
         const revenueConfigResult = yield* revenueConfigSvc.getConfig();
         const platformFeeRate = revenueConfigResult.platformFeeRate;
@@ -1076,6 +1119,7 @@ export function executeLive(
               id: randomUUID(),
               poolAddress: decision.poolAddress,
               positionPubKey: pos.positionPubKey,
+              positionId: pos.positionId,
               event: "CLAIM",
               valueUsd: null,
               feesUsd: claimedFeesUsd,
@@ -1154,19 +1198,28 @@ export function executeLive(
             ...pos,
             // Atomic rebalance preserves the position account: the pubkey,
             // entry basis and cumulative fee accounting all survive.
+            positionId: rebalanceResult.result.positionPubKey,
             positionPubKey: rebalanceResult.result.positionPubKey,
             lowerBinId: decision.rebalanceParams.newLowerBinId,
             upperBinId: decision.rebalanceParams.newUpperBinId,
             lastFeeClaimAt: Date.now(),
             lastRebalanceAt: Date.now(),
           };
-          trackedPositions.set(decision.poolAddress, updated);
+          if (updated.positionId !== pos.positionId) {
+            // Defensive re-key: the SDK preserves the account, but if the
+            // pubkey ever changed, the identity and its row must move with it
+            // — otherwise the stale row would linger as a phantom position.
+            trackedPositions.delete(pos.positionId);
+            yield* db.deletePosition(pos.positionId).pipe(Effect.catchAll(() => Effect.void));
+          }
+          trackedPositions.set(updated.positionId, updated);
           yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
           yield* db
             .savePositionEvent({
               id: randomUUID(),
               poolAddress: decision.poolAddress,
               positionPubKey: updated.positionPubKey,
+              positionId: updated.positionId,
               event: "REBALANCE",
               valueUsd: updated.currentValueUsd,
               feesUsd: null,
@@ -1205,6 +1258,7 @@ export const buildPositionSnapshots = (
 ): Array<PositionSnapshot> =>
   Array.from(positions).map((p) => ({
     poolAddress: p.poolAddress,
+    positionId: p.positionId,
     tokenXSymbol: p.tokenXSymbol,
     tokenYSymbol: p.tokenYSymbol,
     depositedUsd: p.depositedUsd,
@@ -1240,11 +1294,12 @@ export const program = Effect.gen(function* () {
   const meteoraDatapi = yield* MeteoraDatapiService;
   const alertSvc = yield* AlertService;
 
-  // Load persisted positions at startup
+  // Load persisted positions at startup (keyed by position identity — a pool
+  // may hold several positions).
   const allPositions = yield* db.getAllPositions().pipe(Effect.catchAll(() => Effect.succeed([])));
   const trackedPositions = new Map<string, PositionRecord>();
   for (const pos of allPositions) {
-    trackedPositions.set(pos.poolAddress, pos);
+    trackedPositions.set(pos.positionId, pos);
   }
   const entryFailureBackoff = new Map<string, EntryFailureBackoff>();
 
@@ -1416,22 +1471,22 @@ export const program = Effect.gen(function* () {
           `while the on-chain position is still open.`,
       );
       for (const pos of paperExited) {
-        console.warn(`  Paper-exited: ${pos.poolAddress}`);
+        console.warn(`  Paper-exited: ${pos.poolAddress} (${pos.positionId})`);
         if (pos.positionPubKey) {
-          trackedPositions.set(pos.poolAddress, pos);
+          trackedPositions.set(pos.positionId, pos);
         }
       }
       for (const pos of paperExited) {
         if (!pos.positionPubKey) {
-          yield* db.deletePosition(pos.poolAddress).pipe(Effect.catchAll(() => Effect.void));
+          yield* db.deletePosition(pos.positionId).pipe(Effect.catchAll(() => Effect.void));
         }
       }
     }
 
-    for (const [poolAddress, pos] of trackedPositions) {
+    for (const [positionId, pos] of trackedPositions) {
       if (!pos.positionPubKey) {
-        trackedPositions.delete(poolAddress);
-        yield* db.deletePosition(poolAddress).pipe(Effect.catchAll(() => Effect.void));
+        trackedPositions.delete(positionId);
+        yield* db.deletePosition(positionId).pipe(Effect.catchAll(() => Effect.void));
       }
     }
   }
@@ -1487,9 +1542,11 @@ export const program = Effect.gen(function* () {
     if (!reconcileResult.succeeded) {
       return;
     }
-    for (const poolAddress of trackedPositions.keys()) {
-      if (!poolsToScan.includes(poolAddress)) {
-        poolsToScan.push(poolAddress);
+    // Held pools stay scanned even if they left the watchlist — positions are
+    // managed to exit. Iterate values: several positions can share a pool.
+    for (const pos of trackedPositions.values()) {
+      if (!poolsToScan.includes(pos.poolAddress)) {
+        poolsToScan.push(pos.poolAddress);
       }
     }
   };
@@ -1623,7 +1680,8 @@ export const program = Effect.gen(function* () {
       }
 
       for (const poolAddress of poolsToScan) {
-        const decision = yield* evaluatePool(poolAddress, cycle).pipe(
+        // A pool yields one decision per held position plus at most one ENTER.
+        const decisions = yield* evaluatePool(poolAddress, cycle).pipe(
           Effect.catchAll((err) => {
             cycle.poolsFailed++;
             console.error("Error processing pool", { poolAddress, err: String(err) });
@@ -1631,8 +1689,8 @@ export const program = Effect.gen(function* () {
           }),
         );
 
-        if (decision) {
-          cycle.decisions.push(decision);
+        if (decisions && decisions.length > 0) {
+          cycle.decisions.push(...decisions);
           cycle.poolsDecided++;
         }
         cycle.poolsScanned++;
@@ -1841,18 +1899,9 @@ export const program = Effect.gen(function* () {
   const evaluatePool = (
     poolAddress: string,
     cycle: AgentCycle,
-  ): Effect.Effect<AgentDecision | null, unknown, EntryPrepService> =>
+  ): Effect.Effect<ReadonlyArray<AgentDecision>, unknown, EntryPrepService> =>
     Effect.gen(function* () {
       const cycleId = cycle.cycleId;
-      let agentProposal: AgentProposal | null = null;
-      let proposalSource: "queue" | "sync" | undefined;
-      let appliedQueuedProposalId: string | undefined;
-      /** True when a full/supervised proposal replaced the deterministic decision. */
-      let appliedAgentProposal = false;
-      /** True when any proposal (echo or behavior-changing) was validated and applied. */
-      let proposalValidated = false;
-      /** The deterministic decision before an applied proposal replaced it. */
-      let preApplyDecision: AgentDecision | undefined;
       const rawPool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, rawPool.activeBinId);
@@ -1914,7 +1963,7 @@ export const program = Effect.gen(function* () {
       //    deployer blacklist.
       // 3. Token + deployer blacklist: a loaded blacklist hit rejects the
       //    pool; only unexpected transport/IO errors are swallowed.
-      const rejectForSafety = (reason: string): Effect.Effect<null> =>
+      const rejectForSafety = (reason: string): Effect.Effect<ReadonlyArray<AgentDecision>> =>
         Effect.gen(function* () {
           logger.warn("Pool rejected by safety screening", { pool: poolAddress, reason });
           yield* audit
@@ -1937,7 +1986,7 @@ export const program = Effect.gen(function* () {
               poolAddress,
             })
             .pipe(Effect.catchAll(() => Effect.void));
-          return null;
+          return [];
         });
 
       if (datapiStats?.isBlacklisted === true) {
@@ -2033,7 +2082,7 @@ export const program = Effect.gen(function* () {
         )
       ) {
         console.debug("Pool failed pre-filter", { pool: poolAddress });
-        return null;
+        return [];
       }
 
       // Check memory for warnings
@@ -2050,13 +2099,17 @@ export const program = Effect.gen(function* () {
       const tvlVelocity = metrics.tvlVelocity;
       const binUtilization = metrics.binUtilization;
 
-      let decision: AgentDecision | null = null;
+      // ── Per-position tracking ───────────────────────────────────────────
+      // A pool may hold several positions (tight+wide pairs). Every position
+      // gets independent OOR tracking, value estimation, and its own
+      // EXIT/REBALANCE/HOLD decision; the pool gets at most one ENTER.
+      let poolPositions = positionsForPool(trackedPositions, poolAddress).sort(
+        (a, b) => a.timestamp - b.timestamp || a.positionId.localeCompare(b.positionId),
+      );
 
       // OOR tracking must run before EXIT conditions so that out-of-range
       // cycle counts accumulate even when fee/IL triggers an EXIT.
-      const pos = trackedPositions.get(poolAddress);
-      let hasPosition = !!pos;
-      if (pos) {
+      for (const pos of poolPositions) {
         const inRange = pool.activeBinId >= pos.lowerBinId && pool.activeBinId <= pos.upperBinId;
         if (!inRange) {
           if (pos.outOfRangeSince === null) {
@@ -2065,9 +2118,10 @@ export const program = Effect.gen(function* () {
               type: "position_out_of_range",
               severity: "critical",
               message:
-                `Position out of range on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ` +
+                `Position ${pos.positionId} out of range on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ` +
                 `active bin ${pool.activeBinId} is outside [${pos.lowerBinId}, ${pos.upperBinId}] — fees stopped accruing`,
               poolAddress,
+              positionId: pos.positionId,
               data: {
                 activeBinId: pool.activeBinId,
                 lowerBinId: pos.lowerBinId,
@@ -2093,6 +2147,7 @@ export const program = Effect.gen(function* () {
                   `Range ${(consumedPct * 100).toFixed(0)}% consumed on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ` +
                   `active bin ${pool.activeBinId} nearing edge of [${pos.lowerBinId}, ${pos.upperBinId}]`,
                 poolAddress,
+                positionId: pos.positionId,
                 data: {
                   activeBinId: pool.activeBinId,
                   lowerBinId: pos.lowerBinId,
@@ -2105,7 +2160,10 @@ export const program = Effect.gen(function* () {
         }
       }
 
-      if (pos && pos.positionPubKey && adapter.hasWallet()) {
+      // Per-cycle external-close reconcile: one position fetch per pool,
+      // matched per position pubkey so a sibling's external close only
+      // removes its own record.
+      if (adapter.hasWallet() && poolPositions.some((p) => p.positionPubKey !== null)) {
         const walletAddress = adapter.getWalletAddress();
         if (walletAddress) {
           const onChainPositions = yield* adapter.getPositions(poolAddress, walletAddress).pipe(
@@ -2118,22 +2176,29 @@ export const program = Effect.gen(function* () {
             }),
           );
           if (onChainPositions !== null) {
-            const stillOnChain = onChainPositions.some((p) => p.id === pos.positionPubKey);
-            if (!stillOnChain) {
-              console.warn(
-                `Per-cycle reconcile: position ${poolAddress} no longer on-chain — removing from tracking`,
-              );
-              trackedPositions.delete(poolAddress);
-              yield* db.deletePosition(poolAddress).pipe(Effect.catchAll(() => Effect.void));
-              yield* memory
-                .upsert({
-                  category: "warning",
-                  content: `Position ${poolAddress} was closed externally during this cycle. Removed from tracking.`,
-                  poolAddress,
-                })
-                .pipe(Effect.catchAll(() => Effect.void));
-              hasPosition = false;
+            const survivors: PositionRecord[] = [];
+            for (const pos of poolPositions) {
+              if (
+                pos.positionPubKey &&
+                !onChainPositions.some((p) => p.id === pos.positionPubKey)
+              ) {
+                console.warn(
+                  `Per-cycle reconcile: position ${pos.positionId} on ${poolAddress} no longer on-chain — removing from tracking`,
+                );
+                trackedPositions.delete(pos.positionId);
+                yield* db.deletePosition(pos.positionId).pipe(Effect.catchAll(() => Effect.void));
+                yield* memory
+                  .upsert({
+                    category: "warning",
+                    content: `Position ${pos.positionId} on ${poolAddress} was closed externally during this cycle. Removed from tracking.`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              } else {
+                survivors.push(pos);
+              }
             }
+            poolPositions = survivors;
           }
         }
       }
@@ -2158,7 +2223,9 @@ export const program = Effect.gen(function* () {
         maxFullRangeBins: config.maxRebalanceRangeBins,
       });
 
-      if (pos && hasPosition) {
+      // Value estimation per position (feeds the trailing stop and the
+      // REBALANCE gas gate); OOR counters above are persisted by the same save.
+      for (const pos of poolPositions) {
         const estimatedValue = estimatePositionValue(pos, pool);
         pos.currentValueUsd = estimatedValue;
         const highest = pos.highestValueUsd ?? pos.depositedUsd;
@@ -2168,65 +2235,73 @@ export const program = Effect.gen(function* () {
         yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
       }
 
-      // EXIT conditions (capital protection). Gated on hasPosition: pools
-      // without a position take the ENTER/HOLD path only — a positionless
-      // "EXIT" would be a phantom record that also arms cooldowns and the
-      // threshold-evolution counter for capital we never deployed.
-      if (hasPosition && tvlVelocity < -config.tvlDropExitPct) {
-        decision = {
-          action: "EXIT",
-          poolAddress,
-          confidence: 0.85,
-          reasoning: `TVL dropped ${(Math.abs(tvlVelocity) * 100).toFixed(1)}% — capital protection exit`,
-        };
-        yield* memory
-          .upsert({
-            category: "warning",
-            content: `Pool ${poolAddress} TVL dropped sharply. Exit triggered.`,
-            poolAddress,
-          })
-          .pipe(Effect.catchAll(() => Effect.void));
-        yield* sendAgentAlert(
-          "critical",
-          "tvl_drop",
-          `TVL dropped ${(Math.abs(tvlVelocity) * 100).toFixed(1)}% on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — capital protection EXIT triggered`,
-          { pool, metrics, position: pos ?? undefined },
-        );
-      } else if (
-        hasPosition &&
-        metrics.volumeAuthenticityKnown &&
-        volumeAuth < evolvedThresholds.volumeAuthThreshold
-      ) {
-        decision = {
-          action: "EXIT",
-          poolAddress,
-          confidence: 0.8,
-          reasoning: `Volume authenticity ${volumeAuth.toFixed(2)} below threshold`,
-        };
-        yield* sendAgentAlert(
-          "warning",
-          "risk_rejected",
-          `Volume authenticity ${volumeAuth.toFixed(2)} below threshold on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
-          { pool, metrics, position: pos ?? undefined },
-        );
-      } else if (hasPosition && feeIlRatio < 0.5) {
-        decision = {
-          action: "EXIT",
-          poolAddress,
-          confidence: 0.75,
-          reasoning: `Fee/IL ratio ${feeIlRatio.toFixed(2)} below 0.5`,
-        };
-        yield* sendAgentAlert(
-          "warning",
-          "risk_rejected",
-          `Fee/IL ratio ${feeIlRatio.toFixed(2)} below 0.5 on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
-          { pool, metrics, position: pos ?? undefined },
-        );
-      }
+      // ── Phase 1: EXIT evaluation per position ───────────────────────────
+      // Pool-level degradation (TVL drop, fake volume, low fee/IL) exits
+      // every position on the pool; the trailing stop is per position.
+      const rawDecisions: AgentDecision[] = [];
+      let poolExitFired = false;
 
-      // Trailing exit (profit protection)
-      if (!decision) {
-        if (pos && hasPosition) {
+      for (const pos of poolPositions) {
+        let decision: AgentDecision | null = null;
+
+        if (tvlVelocity < -config.tvlDropExitPct) {
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            positionId: pos.positionId,
+            confidence: 0.85,
+            reasoning: `TVL dropped ${(Math.abs(tvlVelocity) * 100).toFixed(1)}% — capital protection exit`,
+          };
+          if (!poolExitFired) {
+            yield* memory
+              .upsert({
+                category: "warning",
+                content: `Pool ${poolAddress} TVL dropped sharply. Exit triggered.`,
+                poolAddress,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
+          yield* sendAgentAlert(
+            "critical",
+            "tvl_drop",
+            `TVL dropped ${(Math.abs(tvlVelocity) * 100).toFixed(1)}% on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — capital protection EXIT triggered`,
+            { pool, metrics, position: pos },
+          );
+        } else if (
+          metrics.volumeAuthenticityKnown &&
+          volumeAuth < evolvedThresholds.volumeAuthThreshold
+        ) {
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            positionId: pos.positionId,
+            confidence: 0.8,
+            reasoning: `Volume authenticity ${volumeAuth.toFixed(2)} below threshold`,
+          };
+          yield* sendAgentAlert(
+            "warning",
+            "risk_rejected",
+            `Volume authenticity ${volumeAuth.toFixed(2)} below threshold on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
+            { pool, metrics, position: pos },
+          );
+        } else if (feeIlRatio < 0.5) {
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            positionId: pos.positionId,
+            confidence: 0.75,
+            reasoning: `Fee/IL ratio ${feeIlRatio.toFixed(2)} below 0.5`,
+          };
+          yield* sendAgentAlert(
+            "warning",
+            "risk_rejected",
+            `Fee/IL ratio ${feeIlRatio.toFixed(2)} below 0.5 on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
+            { pool, metrics, position: pos },
+          );
+        }
+
+        // Trailing exit (profit protection)
+        if (!decision) {
           const estimatedValue = pos.currentValueUsd;
           const highest = pos.highestValueUsd ?? pos.depositedUsd;
           const drawdown = highest > 0 ? (highest - estimatedValue) / highest : 0;
@@ -2234,6 +2309,7 @@ export const program = Effect.gen(function* () {
             decision = {
               action: "EXIT",
               poolAddress,
+              positionId: pos.positionId,
               confidence: 0.8,
               reasoning: `Trailing stop: value dropped ${(drawdown * 100).toFixed(1)}% from peak $${highest.toFixed(2)}`,
             };
@@ -2255,6 +2331,11 @@ export const program = Effect.gen(function* () {
               );
             }
           }
+        }
+
+        if (decision) {
+          rawDecisions.push(decision);
+          if (decision.action === "EXIT") poolExitFired = true;
         }
       }
 
@@ -2320,16 +2401,13 @@ export const program = Effect.gen(function* () {
           return null;
         });
 
-      // Single persist point: trailing-exit above may update highestValueUsd/currentValueUsd.
-      if (pos && hasPosition) {
-        yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
-      }
-
+      // Single persist point happened per position above (OOR + value updates).
+      const exitPending = rawDecisions.some((d) => d.action === "EXIT");
       const walletBalanceUsd = adapter.hasWallet()
         ? yield* adapter.getWalletBalanceUsd().pipe(
             Effect.catchAll((err) => {
               if (config.paperTrading) return Effect.succeed(config.paperPortfolioUsd);
-              if (decision?.action === "EXIT") {
+              if (exitPending) {
                 console.error("Live wallet balance unavailable; continuing EXIT", {
                   pool: poolAddress,
                   error: String(err),
@@ -2354,62 +2432,62 @@ export const program = Effect.gen(function* () {
         walletBalanceUsd + openPositions.reduce((sum, p) => sum + p.currentValueUsd, 0);
       const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
 
-      // REBALANCE check
-      if (!decision) {
-        const currentLowerBinId = pos?.lowerBinId ?? pool.activeBinId - 20;
-        const currentUpperBinId = pos?.upperBinId ?? pool.activeBinId + 20;
-        const positionCenter = (currentLowerBinId + currentUpperBinId) / 2;
-        const positionHalfWidth = (currentUpperBinId - currentLowerBinId) / 2;
+      // ── Phase 2: REBALANCE / HOLD per surviving position ────────────────
+      const decidedPositionIds = new Set(
+        rawDecisions.map((d) => d.positionId).filter((id): id is string => id !== undefined),
+      );
+      const recoveryLookback = Math.max(2, config.oorRecoveryLookbackCycles);
+      // F4: slice the history to the configured recovery lookback window.
+      // The full ring buffer is sized to hold at least
+      // max(volatilityLookbackSnapshots, oorRecoveryLookbackCycles); volatility
+      // uses the full buffer while recovery slices to its own window.
+      const recoveryBins =
+        recentBins.length > recoveryLookback
+          ? recentBins.slice(recentBins.length - recoveryLookback)
+          : recentBins;
+      const highVol = isHighVolatility(volatilityStddev, config.volatilityExitStddev);
+
+      for (const pos of poolPositions) {
+        if (decidedPositionIds.has(pos.positionId)) continue;
+        let decision: AgentDecision | null = null;
+
+        const positionCenter = (pos.lowerBinId + pos.upperBinId) / 2;
+        const positionHalfWidth = (pos.upperBinId - pos.lowerBinId) / 2;
         const driftPct = Math.abs(pool.activeBinId - positionCenter) / (positionHalfWidth || 1);
-        const lastRebal = pos?.lastRebalanceAt ?? 0;
-        const timeSinceRebal = Date.now() - lastRebal;
-
-        const oorGraceExpired =
-          hasPosition && pos && pos.oorCycleCount >= config.oorGracePeriodCycles;
-
-        const highVol = isHighVolatility(volatilityStddev, config.volatilityExitStddev);
-
-        // F4: slice the history to the configured recovery lookback window.
-        // The full ring buffer is sized to hold at least
-        // max(volatilityLookbackSnapshots, oorRecoveryLookbackCycles); volatility
-        // uses the full buffer while recovery slices to its own window.
-        const recoveryLookback = Math.max(2, config.oorRecoveryLookbackCycles);
-        const recoveryBins =
-          recentBins.length > recoveryLookback
-            ? recentBins.slice(recentBins.length - recoveryLookback)
-            : recentBins;
+        const timeSinceRebal = Date.now() - pos.lastRebalanceAt;
+        const oorGraceExpired = pos.oorCycleCount >= config.oorGracePeriodCycles;
 
         if (
-          hasPosition &&
           highVol &&
           driftPct > 0.6 &&
           (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
         ) {
           console.info(
-            `[vol-gate] EXITING ${poolAddress} — high volatility (stddev=${volatilityStddev.toFixed(2)}, threshold=${config.volatilityExitStddev}). Drift=${(driftPct * 100).toFixed(0)}%`,
+            `[vol-gate] EXITING ${poolAddress} (${pos.positionId}) — high volatility (stddev=${volatilityStddev.toFixed(2)}, threshold=${config.volatilityExitStddev}). Drift=${(driftPct * 100).toFixed(0)}%`,
           );
           decision = {
             action: "EXIT",
             poolAddress,
+            positionId: pos.positionId,
             confidence: 0.8,
             reasoning: `High volatility (σ=${volatilityStddev.toFixed(2)}) + ${(driftPct * 100).toFixed(0)}% drift — exit to wallet rather than rebalancing into new range`,
           };
-          yield* memory
-            .upsert({
-              category: "warning",
-              content: `Volatility-gate EXIT for ${poolAddress}: stddev=${volatilityStddev.toFixed(2)} over ${volatilityBins.length} snapshots`,
-              poolAddress,
-            })
-            .pipe(Effect.catchAll(() => Effect.void));
+          if (!poolExitFired) {
+            yield* memory
+              .upsert({
+                category: "warning",
+                content: `Volatility-gate EXIT for ${poolAddress}: stddev=${volatilityStddev.toFixed(2)} over ${volatilityBins.length} snapshots`,
+                poolAddress,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
           yield* sendAgentAlert(
             "warning",
             "high_volatility",
             `High volatility exit on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: σ=${volatilityStddev.toFixed(2)}, drift=${(driftPct * 100).toFixed(0)}%`,
-            { pool, metrics, position: pos ?? undefined },
+            { pool, metrics, position: pos },
           );
         } else if (
-          hasPosition &&
-          pos &&
           (driftPct > 0.6 || oorGraceExpired) &&
           (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
         ) {
@@ -2477,7 +2555,7 @@ export const program = Effect.gen(function* () {
             // value is unknown (reconciled positions), fall back to 0 which
             // makes the gas gate reject — a conservative default.
             const positionSharePct =
-              pool.tvlUsd > 0 && pos && pos.currentValueUsd > 0
+              pool.tvlUsd > 0 && pos.currentValueUsd > 0
                 ? Math.min(pos.currentValueUsd / pool.tvlUsd, 1)
                 : 0;
             const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
@@ -2560,6 +2638,7 @@ export const program = Effect.gen(function* () {
                 decision = {
                   action: "REBALANCE",
                   poolAddress,
+                  positionId: pos.positionId,
                   confidence: Math.min(0.7 + feeIlRatio * 0.1, 0.9),
                   reasoning: forceRebalance
                     ? `[recovery-gate] force-rebalance — probability ${recoveryProb.toFixed(2)} <= ${config.oorRecoveryForceRebalanceThreshold}. Drift ${(driftPct * 100).toFixed(0)}%`
@@ -2575,60 +2654,70 @@ export const program = Effect.gen(function* () {
           }
         }
 
-        // HOLD or ENTER
-        if (!decision) {
-          if (hasPosition) {
-            if (feeIlRatio > evolvedThresholds.minFeeIlRatio && !hasRecentWarning) {
-              decision = {
-                action: "HOLD",
-                poolAddress,
-                confidence: Math.min(0.6 + feeIlRatio * 0.05, 0.9),
-                reasoning: `Fee/IL ${feeIlRatio.toFixed(2)} above threshold. Holding.`,
-              };
-            }
-          } else {
-            if (unresolvedPoolAddresses.has(poolAddress)) {
-              logger.warn("Skipping ENTER for unresolved pool", { pool: poolAddress });
-              return null;
-            }
-            if (!approvedPoolAddresses.includes(poolAddress)) {
-              logger.info("Skipping ENTER for unmanaged pool", { pool: poolAddress });
-              return null;
-            }
-            const entryBackoff = entryFailureBackoff.get(poolAddress);
-            if (entryBackoff) {
-              if (entryBackoff.nextAttemptAt > Date.now()) {
-                const retryAfterMs = entryBackoff.nextAttemptAt - Date.now();
-                cycle.poolsDecided++;
-                yield* audit
-                  .recordDecision({
-                    timestamp: Date.now(),
-                    cycleId,
-                    poolAddress,
-                    action: "ENTER",
-                    confidence: 0,
-                    reasoning: `[entry-backoff] insufficient token balance; retry in ${Math.ceil(retryAfterMs / 60_000)} minutes`,
-                    metrics,
-                    riskResult: {
-                      approved: false,
-                      reason: "Entry suppressed after insufficient token balance",
-                    },
-                    executed: false,
-                    paperTrading: config.paperTrading,
-                  })
-                  .pipe(Effect.catchAll(() => Effect.void));
-                yield* memory
-                  .upsert({
-                    category: "warning",
-                    content: `Entry suppressed for ${poolAddress} after insufficient token balance; retry in ${Math.ceil(retryAfterMs / 60_000)} minutes.`,
-                    poolAddress,
-                  })
-                  .pipe(Effect.catchAll(() => Effect.void));
-                return null;
-              }
-            }
+        // HOLD — a held position with a healthy fee/IL and no recent warnings
+        // stays put; anything else falls through to the pool's default HOLD.
+        if (!decision && feeIlRatio > evolvedThresholds.minFeeIlRatio && !hasRecentWarning) {
+          decision = {
+            action: "HOLD",
+            poolAddress,
+            positionId: pos.positionId,
+            confidence: Math.min(0.6 + feeIlRatio * 0.05, 0.9),
+            reasoning: `Fee/IL ${feeIlRatio.toFixed(2)} above threshold. Holding.`,
+          };
+        }
 
-            // F7: pool cooldown check — skip ENTER if this pool is on cooldown
+        if (decision) {
+          rawDecisions.push(decision);
+          if (decision.action === "EXIT") poolExitFired = true;
+        }
+      }
+
+      // ── ENTER slot: one per pool per cycle, under the per-pool cap ──────
+      // A pool already exiting this cycle never re-enters in the same cycle;
+      // the count cap (MAX_POSITIONS_PER_POOL) bounds stacked positions while
+      // the allocation gate bounds their aggregate exposure.
+      let enterGateRejected = false;
+      if (!poolExitFired && poolPositions.length < config.maxPositionsPerPool) {
+        if (unresolvedPoolAddresses.has(poolAddress)) {
+          logger.warn("Skipping ENTER for unresolved pool", { pool: poolAddress });
+          enterGateRejected = true;
+        } else if (!approvedPoolAddresses.includes(poolAddress)) {
+          logger.info("Skipping ENTER for unmanaged pool", { pool: poolAddress });
+          enterGateRejected = true;
+        } else {
+          const entryBackoff = entryFailureBackoff.get(poolAddress);
+          if (entryBackoff && entryBackoff.nextAttemptAt > Date.now()) {
+            const retryAfterMs = entryBackoff.nextAttemptAt - Date.now();
+            cycle.poolsDecided++;
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "ENTER",
+                confidence: 0,
+                reasoning: `[entry-backoff] insufficient token balance; retry in ${Math.ceil(retryAfterMs / 60_000)} minutes`,
+                metrics,
+                riskResult: {
+                  approved: false,
+                  reason: "Entry suppressed after insufficient token balance",
+                },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+            yield* memory
+              .upsert({
+                category: "warning",
+                content: `Entry suppressed for ${poolAddress} after insufficient token balance; retry in ${Math.ceil(retryAfterMs / 60_000)} minutes.`,
+                poolAddress,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+            enterGateRejected = true;
+          }
+
+          // F7: pool cooldown check — skip ENTER if this pool is on cooldown
+          if (!enterGateRejected) {
             const cooldown = yield* db
               .getPoolCooldown(poolAddress)
               .pipe(Effect.catchAll(() => Effect.succeed(null)));
@@ -2658,50 +2747,53 @@ export const program = Effect.gen(function* () {
                   paperTrading: config.paperTrading,
                 })
                 .pipe(Effect.catchAll(() => Effect.void));
-              return null;
+              enterGateRejected = true;
             }
+          }
 
-            if (
-              feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 &&
-              metrics.volumeAuthenticityKnown &&
-              volumeAuth > 0.8 &&
-              metrics.binUtilizationKnown &&
-              binUtilization > 0.4 &&
-              pool.tvlUsd > config.minPoolTvlUsd * 2
-            ) {
-              const entryScore = weightedEntryScore(metrics, signalWeights);
-              if (entryScore <= config.weightedEntryScoreThreshold) {
-                yield* audit
-                  .recordDecision({
-                    timestamp: Date.now(),
-                    cycleId,
-                    poolAddress,
-                    action: "ENTER",
-                    confidence: 0,
-                    reasoning: `[weighted-score] score ${entryScore.toFixed(3)} <= threshold ${config.weightedEntryScoreThreshold}`,
-                    metrics,
-                    riskResult: {
-                      approved: false,
-                      reason: `[weighted-score] ${entryScore.toFixed(3)} <= ${config.weightedEntryScoreThreshold}`,
-                    },
-                    executed: false,
-                    paperTrading: config.paperTrading,
-                  })
-                  .pipe(Effect.catchAll(() => Effect.void));
-                return null;
-              }
+          if (
+            !enterGateRejected &&
+            feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 &&
+            metrics.volumeAuthenticityKnown &&
+            volumeAuth > 0.8 &&
+            metrics.binUtilizationKnown &&
+            binUtilization > 0.4 &&
+            pool.tvlUsd > config.minPoolTvlUsd * 2
+          ) {
+            const entryScore = weightedEntryScore(metrics, signalWeights);
+            if (entryScore <= config.weightedEntryScoreThreshold) {
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: 0,
+                  reasoning: `[weighted-score] score ${entryScore.toFixed(3)} <= threshold ${config.weightedEntryScoreThreshold}`,
+                  metrics,
+                  riskResult: {
+                    approved: false,
+                    reason: `[weighted-score] ${entryScore.toFixed(3)} <= ${config.weightedEntryScoreThreshold}`,
+                  },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+              enterGateRejected = true;
+            } else {
               const maxPositionSize = Math.min(walletBalanceUsd * 0.5, pool.tvlUsd * 0.005, 500);
               const proposedSizeUsd = Math.max(maxPositionSize, 10);
 
-              // F5: per-pool allocation cap — split across maxOpenPositions pools
-              // so a single SOL/USDC exposure doesn't dominate the portfolio.
-              // portfolioValueUsd includes open positions (see above).
+              // F5: per-pool allocation cap — aggregate across the pool's
+              // positions so stacked exposure can't dominate the portfolio.
               const allocation = evaluatePerPoolAllocation({
                 proposedDepositUsd: proposedSizeUsd,
                 portfolioValueUsd,
                 openPositions,
                 maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
                 maxOpenPositions: config.maxOpenPositions,
+                poolAddress,
+                maxPositionsPerPool: config.maxPositionsPerPool,
               });
               if (!allocation.approved) {
                 console.info(`[alloc-gate] Skipping ENTER ${poolAddress} — ${allocation.reason}`);
@@ -2726,550 +2818,40 @@ export const program = Effect.gen(function* () {
                     paperTrading: config.paperTrading,
                   })
                   .pipe(Effect.catchAll(() => Effect.void));
-                return null;
+                enterGateRejected = true;
+              } else {
+                const positionSizeUsd = allocation.adjustedDepositUsd;
+                rawDecisions.push({
+                  action: "ENTER",
+                  poolAddress,
+                  confidence: Math.min(0.5 + feeIlRatio * 0.05, 0.85),
+                  reasoning: `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL $${pool.tvlUsd.toFixed(0)}`,
+                  positionSizeUsd,
+                });
               }
-              const positionSizeUsd = allocation.adjustedDepositUsd;
-
-              decision = {
-                action: "ENTER",
-                poolAddress,
-                confidence: Math.min(0.5 + feeIlRatio * 0.05, 0.85),
-                reasoning: `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL $${pool.tvlUsd.toFixed(0)}`,
-                positionSizeUsd,
-              };
             }
           }
         }
       }
 
-      if (!decision) {
-        decision = {
+      if (rawDecisions.length === 0 && !enterGateRejected) {
+        rawDecisions.push({
           action: "HOLD",
           poolAddress,
           confidence: 0.5,
           reasoning: `No strong signal. Fee/IL: ${feeIlRatio.toFixed(2)}`,
-        };
-      }
-
-      if (config.agentiveMode) {
-        const proposalMode = config.agentProposalMode;
-        const now = Date.now();
-
-        if (proposalMode === "veto") {
-          // Veto is a safety overlay: it runs independently of the proposal
-          // backoff/circuit-breaker path so a transient failure cannot silence it.
-          let vetoFetchFailed = false;
-          const enhanced = yield* agent
-            .enhanceDecision(decision, {
-              decision,
-              pool,
-              metrics,
-              warnings,
-              recentDecisions: yield* audit
-                .getRecentDecisions(10)
-                .pipe(Effect.catchAll(() => Effect.succeed([]))),
-              hasOpenPosition: trackedPositions.has(poolAddress),
-            })
-            .pipe(
-              Effect.catchAll((err) => {
-                vetoFetchFailed = true;
-                logger.warn("Agent veto fetch failed", {
-                  pool: poolAddress,
-                  error: String(err),
-                });
-                return Effect.succeed(null);
-              }),
-            );
-          if (enhanced) {
-            logger.info("Agent override", {
-              pool: poolAddress,
-              from: decision.action,
-              to: enhanced.action,
-              fromConfidence: decision.confidence.toFixed(2),
-              toConfidence: enhanced.confidence.toFixed(2),
-            });
-            decision = enhanced;
-          } else if (vetoFetchFailed) {
-            const lastWarn = vetoWarningThrottle.get(poolAddress) ?? 0;
-            if (now - lastWarn > config.agentProposalStaleMs) {
-              vetoWarningThrottle.set(poolAddress, now);
-              yield* memory
-                .upsert({
-                  category: "warning",
-                  content: `Agent veto fetch failed for ${poolAddress}`,
-                  poolAddress,
-                })
-                .pipe(Effect.catchAll(() => Effect.void));
-            }
-          }
-        } else {
-          // suggest | supervised | full
-          // HTTP queue consumption is independent of sync advisor backoff /
-          // circuit-breaker state so AgentNoOp and failed local runtimes cannot
-          // suppress already-enqueued /propose proposals.
-          const poolCircuitBreaker = getPoolCircuitBreaker(poolAddress);
-          let syncFetchFailed = false;
-
-          const snapshot = yield* agentState.getSnapshot();
-          const queuedProposal = findPendingProposal(
-            snapshot.pendingProposals,
-            poolAddress,
-            proposalMode,
-            config.agentProposalStaleMs,
-            now,
-          );
-          if (queuedProposal) {
-            agentProposal = queuedProposal;
-            proposalSource = "queue";
-          }
-
-          if (!agentProposal && proposalMode !== "supervised") {
-            const agentStatus = yield* agent.getStatus().pipe(
-              Effect.catchAll(() =>
-                Effect.succeed({
-                  connected: false,
-                  transport: null,
-                  lastPromptAt: null,
-                  errorCount: 0,
-                }),
-              ),
-            );
-            if (!hasSyncProposalTransport(agentStatus)) {
-              // No local runtime / AgentNoOp: skip sync without recording failure.
-            } else if (!poolCircuitBreaker.canTry(now)) {
-              logger.info("Agent proposal circuit breaker open — skipping sync", {
-                pool: poolAddress,
-              });
-            } else if (isProposalBackoffActive(proposalBackoff.get(poolAddress), now)) {
-              logger.info("Agent proposal sync skipped — backoff active", {
-                pool: poolAddress,
-              });
-            } else {
-              const syncProposal = yield* agent
-                .enhanceDecision(decision, {
-                  decision,
-                  pool,
-                  metrics,
-                  warnings,
-                  recentDecisions: yield* audit
-                    .getRecentDecisions(10)
-                    .pipe(Effect.catchAll(() => Effect.succeed([]))),
-                  hasOpenPosition: trackedPositions.has(poolAddress),
-                })
-                .pipe(
-                  Effect.catchAll((err) => {
-                    syncFetchFailed = true;
-                    logger.warn("Agent proposal fetch failed", {
-                      pool: poolAddress,
-                      error: String(err),
-                    });
-                    return Effect.succeed(null);
-                  }),
-                );
-              if (syncProposal && isAgentProposal(syncProposal)) {
-                agentProposal = syncProposal;
-                proposalSource = "sync";
-              } else if (syncProposal === null) {
-                // Real transport attempt returned null (parse/timeout/etc.).
-                syncFetchFailed = true;
-              }
-            }
-          }
-
-          if (agentProposal) {
-            const poolBackoff = proposalBackoff.get(poolAddress);
-            const proposalToEvaluate = {
-              ...agentProposal,
-              ...(agentProposal.originalAction === undefined
-                ? { originalAction: decision.action }
-                : {}),
-              ...(agentProposal.originalConfidence === undefined
-                ? { originalConfidence: decision.confidence }
-                : {}),
-            };
-            let validation = evaluateAgentProposal(
-              proposalToEvaluate,
-              {
-                openPositions,
-                portfolioValueUsd,
-                recentPnlUsd,
-                poolAddress,
-                originalDecision: decision,
-                activeBinId: pool.activeBinId,
-              },
-              config,
-            );
-
-            // Re-run deterministic capital-protection gates for agent REBALANCE
-            // so advisors cannot skip min-interval / gas / recovery policy.
-            if (
-              validation.valid &&
-              validation.adjustedDecision?.action === "REBALANCE" &&
-              pos &&
-              hasPosition
-            ) {
-              const currentLowerBinId = pos.lowerBinId;
-              const currentUpperBinId = pos.upperBinId;
-              const positionCenter = (currentLowerBinId + currentUpperBinId) / 2;
-              const oorGraceExpired = pos.oorCycleCount >= config.oorGracePeriodCycles;
-              const recoveryLookback = Math.max(2, config.oorRecoveryLookbackCycles);
-              const recoveryBins =
-                recentBins.length > recoveryLookback
-                  ? recentBins.slice(recentBins.length - recoveryLookback)
-                  : recentBins;
-              const recoveryProb = estimateRecoveryProbability(
-                recoveryBins,
-                Math.abs(pool.activeBinId - positionCenter),
-              );
-              const positionSharePct =
-                pool.tvlUsd > 0 && pos.currentValueUsd > 0
-                  ? Math.min(pos.currentValueUsd / pool.tvlUsd, 1)
-                  : 0;
-              const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
-              const capitalGate = evaluateAgentRebalanceCapitalGates({
-                now,
-                lastRebalanceAt: pos.lastRebalanceAt ?? 0,
-                minRebalanceIntervalMs: config.minRebalanceIntervalMs,
-                oorGraceExpired,
-                rebalanceGasCostSol: config.rebalanceGasCostSol,
-                solPriceUsd: config.solPriceUsd,
-                positionDailyFeesUsd,
-                minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
-                recoveryProbability: recoveryProb,
-                oorRecoveryHoldThreshold: config.oorRecoveryHoldThreshold,
-              });
-              if (!capitalGate.approved) {
-                validation = { valid: false, reason: capitalGate.reason };
-              }
-            }
-
-            if (validation.valid && validation.adjustedDecision) {
-              if (proposalMode === "suggest") {
-                logger.info("Agent proposal suggested (advisory)", {
-                  source: proposalSource,
-                  pool: poolAddress,
-                  from: decision.action,
-                  suggested: validation.adjustedDecision.action,
-                });
-                yield* memory
-                  .upsert({
-                    category: "pattern",
-                    content: `Advisory suggestion for ${poolAddress}: ${validation.adjustedDecision.action} (confidence ${validation.adjustedDecision.confidence.toFixed(2)})`,
-                    poolAddress,
-                  })
-                  .pipe(Effect.catchAll(() => Effect.void));
-
-                proposalBackoff.delete(poolAddress);
-                poolCircuitBreaker.recordSuccess();
-
-                if (proposalSource === "queue" && agentProposal.proposalId) {
-                  yield* agentState
-                    .dequeueProposals([agentProposal.proposalId])
-                    .pipe(Effect.catchAll(() => Effect.void));
-                }
-              } else {
-                logger.info("Agent proposal applied", {
-                  source: proposalSource,
-                  pool: poolAddress,
-                  from: decision.action,
-                  to: validation.adjustedDecision.action,
-                });
-                preApplyDecision = decision;
-                const originalAction = decision.action;
-                const deterministicReasoning = decision.reasoning;
-                decision = validation.adjustedDecision;
-                if (
-                  originalAction === "EXIT" &&
-                  decision.action === "EXIT" &&
-                  deterministicReasoning.length > 0
-                ) {
-                  decision = { ...decision, reasoning: deterministicReasoning };
-                }
-                // Only count real executable changes toward risk-deny backoff /
-                // circuit failure. Pure preserve-original echoes that later
-                // fail the confidence gate must not silence the advisor.
-                // Defer backoff clear / circuit success until risk.evaluate
-                // approves — otherwise apply→risk-deny loops reset counters.
-                proposalValidated = true;
-                if (
-                  decisionChangesExecutableBehavior(
-                    preApplyDecision,
-                    decision,
-                    config.confidenceThreshold,
-                  )
-                ) {
-                  appliedAgentProposal = true;
-                }
-
-                // Queued proposals are retained until execution succeeds (or
-                // the applied decision is a non-executing HOLD) so a
-                // transient failure can be retried on the next cycle.
-                // Deterministic risk denials reject/drop the proposal earlier.
-                // No-op echoes still set the id so the queue entry is consumed.
-                if (proposalSource === "queue" && agentProposal.proposalId) {
-                  appliedQueuedProposalId = agentProposal.proposalId;
-                }
-              }
-              yield* agentState
-                .setAgentPolicy({ lastProposalAt: now })
-                .pipe(Effect.catchAll(() => Effect.void));
-            } else {
-              logger.warn("Agent proposal rejected", {
-                source: proposalSource,
-                pool: poolAddress,
-                reason: validation.reason,
-              });
-              proposalBackoff.set(
-                poolAddress,
-                nextProposalBackoff(poolBackoff, now, {
-                  baseMs: config.agentProposalBackoffBaseMs,
-                  maxMs: config.agentProposalBackoffMaxMs,
-                }),
-              );
-              poolCircuitBreaker.recordFailure(now);
-              yield* memory
-                .upsert({
-                  category: "warning",
-                  content: `Agent proposal rejected for ${poolAddress}: ${validation.reason}`,
-                  poolAddress,
-                })
-                .pipe(Effect.catchAll(() => Effect.void));
-
-              if (proposalSource === "queue" && agentProposal.proposalId) {
-                yield* agentState
-                  .rejectProposal(agentProposal.proposalId)
-                  .pipe(Effect.catchAll(() => Effect.void));
-              }
-              yield* agentState
-                .setAgentPolicy({ lastProposalAt: now })
-                .pipe(Effect.catchAll(() => Effect.void));
-            }
-          } else if (syncFetchFailed) {
-            logger.warn("Agent proposal fetch failed — recording backoff", {
-              pool: poolAddress,
-            });
-            proposalBackoff.set(
-              poolAddress,
-              nextProposalBackoff(proposalBackoff.get(poolAddress), now, {
-                baseMs: config.agentProposalBackoffBaseMs,
-                maxMs: config.agentProposalBackoffMaxMs,
-              }),
-            );
-            poolCircuitBreaker.recordFailure(now);
-            yield* memory
-              .upsert({
-                category: "warning",
-                content: `Agent proposal fetch failed for ${poolAddress}`,
-                poolAddress,
-              })
-              .pipe(Effect.catchAll(() => Effect.void));
-          }
-        }
-      }
-
-      if (!decision) return null;
-
-      // Supervised mode gates execution on human approval: without an applied
-      // approved proposal, ENTER/REBALANCE decisions are held until one is
-      // available. Deterministic EXITs are exempt — they are safety actions
-      // the engine keeps final authority over.
-      if (
-        shouldHoldForSupervisedApproval(
-          config.agentiveMode,
-          config.agentProposalMode,
-          appliedQueuedProposalId !== undefined,
-          decision.action,
-        )
-      ) {
-        logger.info("Supervised mode: holding decision pending approved proposal", {
-          pool: poolAddress,
-          action: decision.action,
         });
-        decision = {
-          ...decision,
-          action: "HOLD",
-          reasoning: `Supervised mode: awaiting approved proposal (held ${decision.action}: ${decision.reasoning})`,
-        };
+      }
+      if (rawDecisions.length === 0) {
+        // An ENTER gate rejected with nothing else to do — mirror the legacy
+        // early-return (the rejection was already audited by the gate).
+        return [];
       }
 
-      // Risk evaluation. HOLD executes nothing, so risk gates are skipped for
-      // it — every rejection used to write a 60-day warning memory, and those
-      // warnings then suppressed the good-HOLD branch (hasRecentWarning),
-      // feeding a self-sustaining spam loop that flooded vector memory.
-      const riskCtx = {
-        openPositions,
-        portfolioValueUsd,
-        recentPnlUsd,
-        poolAddress,
-        activeBinId: pool.activeBinId,
-      };
-      const riskResult: RiskResult =
-        decision.action === "HOLD"
-          ? { approved: true, reason: "HOLD — no execution; risk gates skipped" }
-          : risk.evaluate(decision, riskCtx);
-
-      // Apply risk-adjusted position size cap
-      if (riskResult.adjustedSizeUsd && decision.action === "ENTER") {
-        decision.positionSizeUsd = riskResult.adjustedSizeUsd;
-        decision.reasoning += ` (size capped to $${riskResult.adjustedSizeUsd.toFixed(0)})`;
-      }
-
-      if (!riskResult.approved) {
-        console.warn("Risk engine rejected", {
-          reason: riskResult.reason,
-          pool: poolAddress,
-        });
-        yield* sendAgentAlert(
-          "warning",
-          "risk_rejected",
-          `Risk gate rejected ${decision.action} on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${riskResult.reason}`,
-          { pool, metrics, position: pos ?? undefined },
-        );
-        yield* alertSvc.sendAlert({
-          type: "risk_rejection",
-          severity: "warning",
-          message: `Risk gate rejected ${decision.action} on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${riskResult.reason}`,
-          poolAddress,
-          data: { action: decision.action, reason: riskResult.reason },
-        });
-        yield* audit
-          .recordDecision({
-            timestamp: Date.now(),
-            cycleId,
-            poolAddress,
-            action: decision.action,
-            confidence: decision.confidence,
-            reasoning: decision.reasoning,
-            metrics,
-            riskResult,
-            executed: false,
-            paperTrading: config.paperTrading,
-          })
-          .pipe(Effect.catchAll(() => Effect.void));
-        yield* memory
-          .upsert({
-            category: "warning",
-            content: `Decision rejected: ${riskResult.reason}. Action: ${decision.action}`,
-            poolAddress,
-          })
-          .pipe(Effect.catchAll(() => Effect.void));
-
-        // Deterministic risk denials are sticky (drawdown pause, stop-loss, etc.).
-        // Arm backoff / circuit breaker for applied sync or queue proposals so
-        // the same doomed advisor response is not re-requested every scan.
-        // Queued proposals are rejected; transient execution failures still
-        // retry via finalize. A pure gate-crossing nudge is penalized only when
-        // it caused the denial — denials the deterministic decision would have
-        // received identically are not the advisor's fault.
-        const penalizeAppliedProposal = shouldPenalizeAppliedProposalDenial({
-          appliedAgentProposal,
-          preApplyDecision,
-          appliedDecision: decision,
-          isPreApplyRiskApproved: () =>
-            preApplyDecision !== undefined && risk.evaluate(preApplyDecision, riskCtx).approved,
-        });
-        yield* recordAppliedProposalRiskDenial(agentState, {
-          penalizeAdvisor: penalizeAppliedProposal,
-          appliedQueuedProposalId,
-          proposalBackoff,
-          recordCircuitFailure: penalizeAppliedProposal
-            ? (t) => getPoolCircuitBreaker(poolAddress).recordFailure(t)
-            : undefined,
-          poolAddress,
-          now: Date.now(),
-          backoff: {
-            baseMs: config.agentProposalBackoffBaseMs,
-            maxMs: config.agentProposalBackoffMaxMs,
-          },
-        });
-        return decision;
-      }
-
-      // Any validated proposal that survives risk is a usable advisor response:
-      // clear per-pool backoff and reset the breaker, including no-op echoes.
-      recordAppliedProposalRiskApproval({
-        proposalValidated,
-        proposalBackoff,
-        recordCircuitSuccess: () => getPoolCircuitBreaker(poolAddress).recordSuccess(),
-        poolAddress,
-      });
-
-      if (decision.action === "EXIT") {
-        const pendingCooldown = yield* computeCooldownForExit(decision, pos);
-        if (pendingCooldown) {
-          yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catchAll(() => Effect.void));
-        }
-      }
-
-      const signalTimestamp = Date.now();
-      const signalSnapshotId = yield* db
-        .saveSignalSnapshot({
-          poolAddress,
-          timestamp: signalTimestamp,
-          feeIlRatio: metrics.feeIlRatio,
-          volumeAuthenticity: metrics.volumeAuthenticity,
-          binUtilization: metrics.binUtilization,
-          tvlUsd: pool.tvlUsd,
-          tvlVelocity: metrics.tvlVelocity,
-          volatilityStddev,
-          binStep: pool.binStep,
-          action: decision.action,
-          confidence: decision.confidence,
-        })
-        .pipe(Effect.catchAll(() => Effect.succeed(null)));
-
-      // Execute
-      let executed = false;
-      let executionError: string | undefined = undefined;
-
-      // F6: paper-trading validation gate — only blocks ENTER, runs only in live mode
-      if (!config.paperTrading && decision.action === "ENTER") {
-        const paperDays = yield* readPaperDays;
-        const validation = evaluatePaperValidation({
-          paperTrading: false,
-          paperDaysAccumulated: paperDays,
-          minDays: config.paperValidationMinDays,
-          enforce: config.paperValidationEnforce,
-        });
-        if (validation.warning) {
-          console.warn(`[paper-validation] ${validation.warning}`);
-        }
-        if (!validation.approved) {
-          console.warn(
-            `[paper-validation] Blocking live ENTER on ${poolAddress} — ${validation.reason}`,
-          );
-          yield* memory
-            .upsert({
-              category: "warning",
-              content: `Paper validation gate blocked live ENTER on ${poolAddress}: ${validation.reason}`,
-              poolAddress,
-            })
-            .pipe(Effect.catchAll(() => Effect.void));
-          yield* audit
-            .recordDecision({
-              timestamp: Date.now(),
-              cycleId,
-              poolAddress,
-              action: decision.action,
-              confidence: decision.confidence,
-              reasoning: `[paper-validation] ${validation.reason}`,
-              metrics,
-              riskResult: { approved: false, reason: validation.reason },
-              executed: false,
-              paperTrading: false,
-            })
-            .pipe(Effect.catchAll(() => Effect.void));
-          return decision;
-        }
-      }
-
-      const existingPosition = trackedPositions.get(poolAddress);
-      const paperExitShouldGoLive =
-        config.paperTrading &&
-        decision.action === "EXIT" &&
-        existingPosition?.positionPubKey &&
-        config.paperModeExitLive;
-
+      // ── Per-decision tail: overlay → supervised → risk → execution → audit.
+      // Decisions run sequentially so a queued proposal consumed by one
+      // decision is gone for the next, and so executions mutate tracking in
+      // a deterministic order (per-position decisions first, ENTER last).
       const entryPrep = yield* EntryPrepService;
 
       // Resolve the deposit distribution for entries: a concrete configured
@@ -3284,159 +2866,702 @@ export const program = Effect.gen(function* () {
                 recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0,
             })
           : config.entryStrategyType;
-      if (decision.action === "ENTER" && config.entryStrategyType === "auto") {
-        console.info(`[strategy-shape] auto resolved ${entryStrategyShape} for ${poolAddress}`, {
-          volatilityStddev,
-          netDriftBins:
-            recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0,
-        });
-      }
-      if (decision.action === "ENTER" && config.volatilityAdaptiveRanges) {
-        console.info(`[adaptive-range] ${poolAddress} halfWidth=${rangeHalfWidth}`, {
-          volatilityStddev,
-          binStep: pool.binStep,
-          configuredBaseHalfWidth: config.entryRangeHalfWidthBins,
-        });
-      }
 
-      if (paperExitShouldGoLive) {
-        console.warn(
-          `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${poolAddress}`,
-        );
-        const liveResult = yield* executeLive(
-          {
-            adapter,
-            strategy,
-            db,
-            revenueConfigSvc,
-            trackedPositions,
-            entryPrep,
-            solPriceUsd: config.solPriceUsd,
-            entryStrategyShape,
-            entryRangeHalfWidth: rangeHalfWidth,
-            reconcileRequestedPools,
-          },
-          decision,
-          pool,
-          signalTimestamp,
-          signalSnapshotId ?? undefined,
-        );
-        executed = liveResult.executed;
-        executionError = liveResult.error;
-      } else if (config.paperTrading) {
-        console.info("[PAPER] Would execute", {
-          action: decision.action,
-          pool: poolAddress,
-        });
-        const paperResult = yield* executePaper(
-          {
-            db,
-            trackedPositions,
-            strategy,
-            entryStrategyShape,
-            entryRangeHalfWidth: rangeHalfWidth,
-          },
-          decision,
-          pool,
-          signalTimestamp,
-          signalSnapshotId ?? undefined,
-        );
-        executed = paperResult.executed;
-        executionError = paperResult.error;
-      } else {
-        const liveResult = yield* executeLive(
-          {
-            adapter,
-            strategy,
-            db,
-            revenueConfigSvc,
-            trackedPositions,
-            entryPrep,
-            solPriceUsd: config.solPriceUsd,
-            entryStrategyShape,
-            entryRangeHalfWidth: rangeHalfWidth,
-            reconcileRequestedPools,
-          },
-          decision,
-          pool,
-          signalTimestamp,
-          signalSnapshotId ?? undefined,
-        );
-        executed = liveResult.executed;
-        executionError = liveResult.error;
-      }
+      const finalDecisions: AgentDecision[] = [];
 
-      if (decision.action !== "HOLD") {
-        if (executed) {
-          cycle.poolsExecuted++;
-        } else {
-          cycle.poolsFailed++;
+      for (const rawDecision of rawDecisions) {
+        let decision = rawDecision;
+        // The position this decision targets (EXIT/REBALANCE/HOLD). ENTER and
+        // the default positionless HOLD have none. Re-resolved against the
+        // live map so executions always act on current state.
+        const pos =
+          decision.positionId !== undefined ? trackedPositions.get(decision.positionId) : undefined;
+        const hasOpenPosition = positionsForPool(trackedPositions, poolAddress).length > 0;
+        let agentProposal: AgentProposal | null = null;
+        let proposalSource: "queue" | "sync" | undefined;
+        let appliedQueuedProposalId: string | undefined;
+        /** True when a full/supervised proposal replaced the deterministic decision. */
+        let appliedAgentProposal = false;
+        /** True when any proposal (echo or behavior-changing) was validated and applied. */
+        let proposalValidated = false;
+        /** The deterministic decision before an applied proposal replaced it. */
+        let preApplyDecision: AgentDecision | undefined;
+
+        if (config.agentiveMode) {
+          const proposalMode = config.agentProposalMode;
+          const now = Date.now();
+
+          if (proposalMode === "veto") {
+            // Veto is a safety overlay: it runs independently of the proposal
+            // backoff/circuit-breaker path so a transient failure cannot silence it.
+            let vetoFetchFailed = false;
+            const enhanced = yield* agent
+              .enhanceDecision(decision, {
+                decision,
+                pool,
+                metrics,
+                warnings,
+                recentDecisions: yield* audit
+                  .getRecentDecisions(10)
+                  .pipe(Effect.catchAll(() => Effect.succeed([]))),
+                hasOpenPosition,
+              })
+              .pipe(
+                Effect.catchAll((err) => {
+                  vetoFetchFailed = true;
+                  logger.warn("Agent veto fetch failed", {
+                    pool: poolAddress,
+                    error: String(err),
+                  });
+                  return Effect.succeed(null);
+                }),
+              );
+            if (enhanced) {
+              logger.info("Agent override", {
+                pool: poolAddress,
+                from: decision.action,
+                to: enhanced.action,
+                fromConfidence: decision.confidence.toFixed(2),
+                toConfidence: enhanced.confidence.toFixed(2),
+              });
+              decision = enhanced;
+            } else if (vetoFetchFailed) {
+              const lastWarn = vetoWarningThrottle.get(poolAddress) ?? 0;
+              if (now - lastWarn > config.agentProposalStaleMs) {
+                vetoWarningThrottle.set(poolAddress, now);
+                yield* memory
+                  .upsert({
+                    category: "warning",
+                    content: `Agent veto fetch failed for ${poolAddress}`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              }
+            }
+          } else {
+            // suggest | supervised | full
+            // HTTP queue consumption is independent of sync advisor backoff /
+            // circuit-breaker state so AgentNoOp and failed local runtimes cannot
+            // suppress already-enqueued /propose proposals.
+            const poolCircuitBreaker = getPoolCircuitBreaker(poolAddress);
+            let syncFetchFailed = false;
+
+            const snapshot = yield* agentState.getSnapshot();
+            const queuedProposal = findPendingProposal(
+              snapshot.pendingProposals,
+              poolAddress,
+              proposalMode,
+              config.agentProposalStaleMs,
+              now,
+            );
+            if (queuedProposal) {
+              agentProposal = queuedProposal;
+              proposalSource = "queue";
+            }
+
+            if (!agentProposal && proposalMode !== "supervised") {
+              const agentStatus = yield* agent.getStatus().pipe(
+                Effect.catchAll(() =>
+                  Effect.succeed({
+                    connected: false,
+                    transport: null,
+                    lastPromptAt: null,
+                    errorCount: 0,
+                  }),
+                ),
+              );
+              if (!hasSyncProposalTransport(agentStatus)) {
+                // No local runtime / AgentNoOp: skip sync without recording failure.
+              } else if (!poolCircuitBreaker.canTry(now)) {
+                logger.info("Agent proposal circuit breaker open — skipping sync", {
+                  pool: poolAddress,
+                });
+              } else if (isProposalBackoffActive(proposalBackoff.get(poolAddress), now)) {
+                logger.info("Agent proposal sync skipped — backoff active", {
+                  pool: poolAddress,
+                });
+              } else {
+                const syncProposal = yield* agent
+                  .enhanceDecision(decision, {
+                    decision,
+                    pool,
+                    metrics,
+                    warnings,
+                    recentDecisions: yield* audit
+                      .getRecentDecisions(10)
+                      .pipe(Effect.catchAll(() => Effect.succeed([]))),
+                    hasOpenPosition,
+                  })
+                  .pipe(
+                    Effect.catchAll((err) => {
+                      syncFetchFailed = true;
+                      logger.warn("Agent proposal fetch failed", {
+                        pool: poolAddress,
+                        error: String(err),
+                      });
+                      return Effect.succeed(null);
+                    }),
+                  );
+                if (syncProposal && isAgentProposal(syncProposal)) {
+                  agentProposal = syncProposal;
+                  proposalSource = "sync";
+                } else if (syncProposal === null) {
+                  // Real transport attempt returned null (parse/timeout/etc.).
+                  syncFetchFailed = true;
+                }
+              }
+            }
+
+            if (agentProposal) {
+              const poolBackoff = proposalBackoff.get(poolAddress);
+              const proposalToEvaluate = {
+                ...agentProposal,
+                ...(agentProposal.originalAction === undefined
+                  ? { originalAction: decision.action }
+                  : {}),
+                ...(agentProposal.originalConfidence === undefined
+                  ? { originalConfidence: decision.confidence }
+                  : {}),
+              };
+              let validation = evaluateAgentProposal(
+                proposalToEvaluate,
+                {
+                  openPositions,
+                  portfolioValueUsd,
+                  recentPnlUsd,
+                  poolAddress,
+                  originalDecision: decision,
+                  activeBinId: pool.activeBinId,
+                },
+                config,
+              );
+
+              // Re-run deterministic capital-protection gates for agent REBALANCE
+              // so advisors cannot skip min-interval / gas / recovery policy.
+              // The gated position is the adjusted decision's target (inherited
+              // from the deterministic decision by proposal validation).
+              const gatePosId = validation.adjustedDecision?.positionId ?? decision.positionId;
+              const gatePos = gatePosId !== undefined ? trackedPositions.get(gatePosId) : undefined;
+              if (
+                validation.valid &&
+                validation.adjustedDecision?.action === "REBALANCE" &&
+                gatePos !== undefined
+              ) {
+                const currentLowerBinId = gatePos.lowerBinId;
+                const currentUpperBinId = gatePos.upperBinId;
+                const positionCenter = (currentLowerBinId + currentUpperBinId) / 2;
+                const oorGraceExpired = gatePos.oorCycleCount >= config.oorGracePeriodCycles;
+                const recoveryProb = estimateRecoveryProbability(
+                  recoveryBins,
+                  Math.abs(pool.activeBinId - positionCenter),
+                );
+                const positionSharePct =
+                  pool.tvlUsd > 0 && gatePos.currentValueUsd > 0
+                    ? Math.min(gatePos.currentValueUsd / pool.tvlUsd, 1)
+                    : 0;
+                const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
+                const capitalGate = evaluateAgentRebalanceCapitalGates({
+                  now,
+                  lastRebalanceAt: gatePos.lastRebalanceAt ?? 0,
+                  minRebalanceIntervalMs: config.minRebalanceIntervalMs,
+                  oorGraceExpired,
+                  rebalanceGasCostSol: config.rebalanceGasCostSol,
+                  solPriceUsd: config.solPriceUsd,
+                  positionDailyFeesUsd,
+                  minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
+                  recoveryProbability: recoveryProb,
+                  oorRecoveryHoldThreshold: config.oorRecoveryHoldThreshold,
+                });
+                if (!capitalGate.approved) {
+                  validation = { valid: false, reason: capitalGate.reason };
+                }
+              }
+
+              if (validation.valid && validation.adjustedDecision) {
+                if (proposalMode === "suggest") {
+                  logger.info("Agent proposal suggested (advisory)", {
+                    source: proposalSource,
+                    pool: poolAddress,
+                    from: decision.action,
+                    suggested: validation.adjustedDecision.action,
+                  });
+                  yield* memory
+                    .upsert({
+                      category: "pattern",
+                      content: `Advisory suggestion for ${poolAddress}: ${validation.adjustedDecision.action} (confidence ${validation.adjustedDecision.confidence.toFixed(2)})`,
+                      poolAddress,
+                    })
+                    .pipe(Effect.catchAll(() => Effect.void));
+
+                  proposalBackoff.delete(poolAddress);
+                  poolCircuitBreaker.recordSuccess();
+
+                  if (proposalSource === "queue" && agentProposal.proposalId) {
+                    yield* agentState
+                      .dequeueProposals([agentProposal.proposalId])
+                      .pipe(Effect.catchAll(() => Effect.void));
+                  }
+                } else {
+                  logger.info("Agent proposal applied", {
+                    source: proposalSource,
+                    pool: poolAddress,
+                    from: decision.action,
+                    to: validation.adjustedDecision.action,
+                  });
+                  preApplyDecision = decision;
+                  const originalAction = decision.action;
+                  const deterministicReasoning = decision.reasoning;
+                  decision = validation.adjustedDecision;
+                  if (
+                    originalAction === "EXIT" &&
+                    decision.action === "EXIT" &&
+                    deterministicReasoning.length > 0
+                  ) {
+                    decision = { ...decision, reasoning: deterministicReasoning };
+                  }
+                  // Only count real executable changes toward risk-deny backoff /
+                  // circuit failure. Pure preserve-original echoes that later
+                  // fail the confidence gate must not silence the advisor.
+                  // Defer backoff clear / circuit success until risk.evaluate
+                  // approves — otherwise apply→risk-deny loops reset counters.
+                  proposalValidated = true;
+                  if (
+                    decisionChangesExecutableBehavior(
+                      preApplyDecision,
+                      decision,
+                      config.confidenceThreshold,
+                    )
+                  ) {
+                    appliedAgentProposal = true;
+                  }
+
+                  // Queued proposals are retained until execution succeeds (or
+                  // the applied decision is a non-executing HOLD) so a
+                  // transient failure can be retried on the next cycle.
+                  // Deterministic risk denials reject/drop the proposal earlier.
+                  // No-op echoes still set the id so the queue entry is consumed.
+                  if (proposalSource === "queue" && agentProposal.proposalId) {
+                    appliedQueuedProposalId = agentProposal.proposalId;
+                  }
+                }
+                yield* agentState
+                  .setAgentPolicy({ lastProposalAt: now })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              } else {
+                logger.warn("Agent proposal rejected", {
+                  source: proposalSource,
+                  pool: poolAddress,
+                  reason: validation.reason,
+                });
+                proposalBackoff.set(
+                  poolAddress,
+                  nextProposalBackoff(poolBackoff, now, {
+                    baseMs: config.agentProposalBackoffBaseMs,
+                    maxMs: config.agentProposalBackoffMaxMs,
+                  }),
+                );
+                poolCircuitBreaker.recordFailure(now);
+                yield* memory
+                  .upsert({
+                    category: "warning",
+                    content: `Agent proposal rejected for ${poolAddress}: ${validation.reason}`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+
+                if (proposalSource === "queue" && agentProposal.proposalId) {
+                  yield* agentState
+                    .rejectProposal(agentProposal.proposalId)
+                    .pipe(Effect.catchAll(() => Effect.void));
+                }
+                yield* agentState
+                  .setAgentPolicy({ lastProposalAt: now })
+                  .pipe(Effect.catchAll(() => Effect.void));
+              }
+            } else if (syncFetchFailed) {
+              logger.warn("Agent proposal fetch failed — recording backoff", {
+                pool: poolAddress,
+              });
+              proposalBackoff.set(
+                poolAddress,
+                nextProposalBackoff(proposalBackoff.get(poolAddress), now, {
+                  baseMs: config.agentProposalBackoffBaseMs,
+                  maxMs: config.agentProposalBackoffMaxMs,
+                }),
+              );
+              poolCircuitBreaker.recordFailure(now);
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Agent proposal fetch failed for ${poolAddress}`,
+                  poolAddress,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+            }
+          }
         }
-      }
-      if (executed && decision.action === "EXIT") {
-        yield* alertSvc.sendAlert({
-          type: "exit_executed",
-          severity: "critical",
-          message: `EXIT executed on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${decision.reasoning}`,
-          poolAddress,
-          data: { reasoning: decision.reasoning, paperTrading: config.paperTrading },
-        });
-      }
-      if (decision.action === "ENTER" && isInsufficientTokenBalanceError(executionError)) {
-        const backoff = nextEntryFailureBackoff(entryFailureBackoff.get(poolAddress));
-        entryFailureBackoff.set(poolAddress, backoff);
-        logger.warn("Entry suppressed after insufficient token balance", {
-          pool: poolAddress,
-          retryAfterMs: backoff.nextAttemptAt - Date.now(),
-          failures: backoff.failures,
-        });
-      } else if (decision.action === "ENTER" && executed) {
-        entryFailureBackoff.delete(poolAddress);
-      }
 
-      // Risk-rejected paths reject/drop the proposal before this point.
-      // Paper-validation-blocked and failed executions retain for retry.
-      yield* finalizeAppliedProposal(
-        agentState,
-        appliedQueuedProposalId,
-        executed,
-        decision.action,
-      );
+        // Supervised mode gates execution on human approval: without an applied
+        // approved proposal, ENTER/REBALANCE decisions are held until one is
+        // available. Deterministic EXITs are exempt — they are safety actions
+        // the engine keeps final authority over.
+        if (
+          shouldHoldForSupervisedApproval(
+            config.agentiveMode,
+            config.agentProposalMode,
+            appliedQueuedProposalId !== undefined,
+            decision.action,
+          )
+        ) {
+          logger.info("Supervised mode: holding decision pending approved proposal", {
+            pool: poolAddress,
+            action: decision.action,
+          });
+          decision = {
+            ...decision,
+            action: "HOLD",
+            reasoning: `Supervised mode: awaiting approved proposal (held ${decision.action}: ${decision.reasoning})`,
+          };
+        }
 
-      // Audit after execution
-      yield* audit
-        .recordDecision({
-          timestamp: Date.now(),
-          cycleId,
+        // Risk evaluation. HOLD executes nothing, so risk gates are skipped for
+        // it — every rejection used to write a 60-day warning memory, and those
+        // warnings then suppressed the good-HOLD branch (hasRecentWarning),
+        // feeding a self-sustaining spam loop that flooded vector memory.
+        const riskCtx = {
+          openPositions,
+          portfolioValueUsd,
+          recentPnlUsd,
           poolAddress,
-          action: decision.action,
-          confidence: decision.confidence,
-          reasoning: decision.reasoning,
-          metrics,
-          riskResult,
+          activeBinId: pool.activeBinId,
+          positionId: decision.positionId,
+        };
+        const riskResult: RiskResult =
+          decision.action === "HOLD"
+            ? { approved: true, reason: "HOLD — no execution; risk gates skipped" }
+            : risk.evaluate(decision, riskCtx);
+
+        // Apply risk-adjusted position size cap
+        if (riskResult.adjustedSizeUsd && decision.action === "ENTER") {
+          decision.positionSizeUsd = riskResult.adjustedSizeUsd;
+          decision.reasoning += ` (size capped to $${riskResult.adjustedSizeUsd.toFixed(0)})`;
+        }
+
+        if (!riskResult.approved) {
+          console.warn("Risk engine rejected", {
+            reason: riskResult.reason,
+            pool: poolAddress,
+          });
+          yield* sendAgentAlert(
+            "warning",
+            "risk_rejected",
+            `Risk gate rejected ${decision.action} on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${riskResult.reason}`,
+            { pool, metrics, position: pos },
+          );
+          yield* alertSvc.sendAlert({
+            type: "risk_rejection",
+            severity: "warning",
+            message: `Risk gate rejected ${decision.action} on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${riskResult.reason}`,
+            poolAddress,
+            ...(pos !== undefined ? { positionId: pos.positionId } : {}),
+            data: { action: decision.action, reason: riskResult.reason },
+          });
+          yield* audit
+            .recordDecision({
+              timestamp: Date.now(),
+              cycleId,
+              poolAddress,
+              action: decision.action,
+              confidence: decision.confidence,
+              reasoning: decision.reasoning,
+              metrics,
+              riskResult,
+              executed: false,
+              paperTrading: config.paperTrading,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          yield* memory
+            .upsert({
+              category: "warning",
+              content: `Decision rejected: ${riskResult.reason}. Action: ${decision.action}`,
+              poolAddress,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+
+          // Deterministic risk denials are sticky (drawdown pause, stop-loss, etc.).
+          // Arm backoff / circuit breaker for applied sync or queue proposals so
+          // the same doomed advisor response is not re-requested every scan.
+          // Queued proposals are rejected; transient execution failures still
+          // retry via finalize. A pure gate-crossing nudge is penalized only when
+          // it caused the denial — denials the deterministic decision would have
+          // received identically are not the advisor's fault.
+          const penalizeAppliedProposal = shouldPenalizeAppliedProposalDenial({
+            appliedAgentProposal,
+            preApplyDecision,
+            appliedDecision: decision,
+            isPreApplyRiskApproved: () =>
+              preApplyDecision !== undefined && risk.evaluate(preApplyDecision, riskCtx).approved,
+          });
+          yield* recordAppliedProposalRiskDenial(agentState, {
+            penalizeAdvisor: penalizeAppliedProposal,
+            appliedQueuedProposalId,
+            proposalBackoff,
+            recordCircuitFailure: penalizeAppliedProposal
+              ? (t) => getPoolCircuitBreaker(poolAddress).recordFailure(t)
+              : undefined,
+            poolAddress,
+            now: Date.now(),
+            backoff: {
+              baseMs: config.agentProposalBackoffBaseMs,
+              maxMs: config.agentProposalBackoffMaxMs,
+            },
+          });
+          finalDecisions.push(decision);
+          continue;
+        }
+
+        // Any validated proposal that survives risk is a usable advisor response:
+        // clear per-pool backoff and reset the breaker, including no-op echoes.
+        recordAppliedProposalRiskApproval({
+          proposalValidated,
+          proposalBackoff,
+          recordCircuitSuccess: () => getPoolCircuitBreaker(poolAddress).recordSuccess(),
+          poolAddress,
+        });
+
+        if (decision.action === "EXIT") {
+          const pendingCooldown = yield* computeCooldownForExit(decision, pos);
+          if (pendingCooldown) {
+            yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catchAll(() => Effect.void));
+          }
+        }
+
+        const signalTimestamp = Date.now();
+        const signalSnapshotId = yield* db
+          .saveSignalSnapshot({
+            poolAddress,
+            timestamp: signalTimestamp,
+            feeIlRatio: metrics.feeIlRatio,
+            volumeAuthenticity: metrics.volumeAuthenticity,
+            binUtilization: metrics.binUtilization,
+            tvlUsd: pool.tvlUsd,
+            tvlVelocity: metrics.tvlVelocity,
+            volatilityStddev,
+            binStep: pool.binStep,
+            action: decision.action,
+            confidence: decision.confidence,
+          })
+          .pipe(Effect.catchAll(() => Effect.succeed(null)));
+
+        // Execute
+        let executed = false;
+        let executionError: string | undefined = undefined;
+
+        // F6: paper-trading validation gate — only blocks ENTER, runs only in live mode
+        if (!config.paperTrading && decision.action === "ENTER") {
+          const paperDays = yield* readPaperDays;
+          const validation = evaluatePaperValidation({
+            paperTrading: false,
+            paperDaysAccumulated: paperDays,
+            minDays: config.paperValidationMinDays,
+            enforce: config.paperValidationEnforce,
+          });
+          if (validation.warning) {
+            console.warn(`[paper-validation] ${validation.warning}`);
+          }
+          if (!validation.approved) {
+            console.warn(
+              `[paper-validation] Blocking live ENTER on ${poolAddress} — ${validation.reason}`,
+            );
+            yield* memory
+              .upsert({
+                category: "warning",
+                content: `Paper validation gate blocked live ENTER on ${poolAddress}: ${validation.reason}`,
+                poolAddress,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: decision.action,
+                confidence: decision.confidence,
+                reasoning: `[paper-validation] ${validation.reason}`,
+                metrics,
+                riskResult: { approved: false, reason: validation.reason },
+                executed: false,
+                paperTrading: false,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+            finalDecisions.push(decision);
+            continue;
+          }
+        }
+
+        const paperExitShouldGoLive =
+          config.paperTrading &&
+          decision.action === "EXIT" &&
+          pos?.positionPubKey &&
+          config.paperModeExitLive;
+
+        if (decision.action === "ENTER" && config.entryStrategyType === "auto") {
+          console.info(`[strategy-shape] auto resolved ${entryStrategyShape} for ${poolAddress}`, {
+            volatilityStddev,
+            netDriftBins:
+              recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0,
+          });
+        }
+        if (decision.action === "ENTER" && config.volatilityAdaptiveRanges) {
+          console.info(`[adaptive-range] ${poolAddress} halfWidth=${rangeHalfWidth}`, {
+            volatilityStddev,
+            binStep: pool.binStep,
+            configuredBaseHalfWidth: config.entryRangeHalfWidthBins,
+          });
+        }
+
+        if (paperExitShouldGoLive) {
+          console.warn(
+            `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${poolAddress}`,
+          );
+          const liveResult = yield* executeLive(
+            {
+              adapter,
+              strategy,
+              db,
+              revenueConfigSvc,
+              trackedPositions,
+              entryPrep,
+              solPriceUsd: config.solPriceUsd,
+              entryStrategyShape,
+              entryRangeHalfWidth: rangeHalfWidth,
+              reconcileRequestedPools,
+            },
+            decision,
+            pool,
+            signalTimestamp,
+            signalSnapshotId ?? undefined,
+          );
+          executed = liveResult.executed;
+          executionError = liveResult.error;
+        } else if (config.paperTrading) {
+          console.info("[PAPER] Would execute", {
+            action: decision.action,
+            pool: poolAddress,
+          });
+          const paperResult = yield* executePaper(
+            {
+              db,
+              trackedPositions,
+              strategy,
+              entryStrategyShape,
+              entryRangeHalfWidth: rangeHalfWidth,
+            },
+            decision,
+            pool,
+            signalTimestamp,
+            signalSnapshotId ?? undefined,
+          );
+          executed = paperResult.executed;
+          executionError = paperResult.error;
+        } else {
+          const liveResult = yield* executeLive(
+            {
+              adapter,
+              strategy,
+              db,
+              revenueConfigSvc,
+              trackedPositions,
+              entryPrep,
+              solPriceUsd: config.solPriceUsd,
+              entryStrategyShape,
+              entryRangeHalfWidth: rangeHalfWidth,
+              reconcileRequestedPools,
+            },
+            decision,
+            pool,
+            signalTimestamp,
+            signalSnapshotId ?? undefined,
+          );
+          executed = liveResult.executed;
+          executionError = liveResult.error;
+        }
+
+        if (decision.action !== "HOLD") {
+          if (executed) {
+            cycle.poolsExecuted++;
+          } else {
+            cycle.poolsFailed++;
+          }
+        }
+        if (executed && decision.action === "EXIT") {
+          yield* alertSvc.sendAlert({
+            type: "exit_executed",
+            severity: "critical",
+            message: `EXIT executed on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${decision.reasoning}`,
+            poolAddress,
+            ...(pos !== undefined ? { positionId: pos.positionId } : {}),
+            data: { reasoning: decision.reasoning, paperTrading: config.paperTrading },
+          });
+        }
+        if (decision.action === "ENTER" && isInsufficientTokenBalanceError(executionError)) {
+          const backoff = nextEntryFailureBackoff(entryFailureBackoff.get(poolAddress));
+          entryFailureBackoff.set(poolAddress, backoff);
+          logger.warn("Entry suppressed after insufficient token balance", {
+            pool: poolAddress,
+            retryAfterMs: backoff.nextAttemptAt - Date.now(),
+            failures: backoff.failures,
+          });
+        } else if (decision.action === "ENTER" && executed) {
+          entryFailureBackoff.delete(poolAddress);
+        }
+
+        // Risk-rejected paths reject/drop the proposal before this point.
+        // Paper-validation-blocked and failed executions retain for retry.
+        yield* finalizeAppliedProposal(
+          agentState,
+          appliedQueuedProposalId,
           executed,
-          error: executionError,
-          paperTrading: config.paperTrading,
-        })
-        .pipe(Effect.catchAll(() => Effect.void));
+          decision.action,
+        );
 
-      // Threshold evolution: increment counter on EXIT, try evolve at interval
-      if (decision.action === "EXIT" && executed) {
-        yield* incrementEvolutionCount.pipe(Effect.catchAll(() => Effect.void));
-        yield* tryEvolveThresholds.pipe(Effect.catchAll(() => Effect.void));
+        // Audit after execution
+        yield* audit
+          .recordDecision({
+            timestamp: Date.now(),
+            cycleId,
+            poolAddress,
+            action: decision.action,
+            confidence: decision.confidence,
+            reasoning: decision.reasoning,
+            metrics,
+            riskResult,
+            executed,
+            error: executionError,
+            paperTrading: config.paperTrading,
+          })
+          .pipe(Effect.catchAll(() => Effect.void));
+
+        // Threshold evolution: increment counter on EXIT, try evolve at interval
+        if (decision.action === "EXIT" && executed) {
+          yield* incrementEvolutionCount.pipe(Effect.catchAll(() => Effect.void));
+          yield* tryEvolveThresholds.pipe(Effect.catchAll(() => Effect.void));
+        }
+
+        if (
+          executed &&
+          (decision.action === "ENTER" ||
+            decision.action === "EXIT" ||
+            decision.action === "REBALANCE")
+        ) {
+          const trigger = decision.action.toLowerCase() as AgentRuntimeCheckin["trigger"];
+          yield* maybeSendAgentCheckin(trigger).pipe(Effect.catchAll(() => Effect.void));
+        }
+
+        finalDecisions.push(decision);
       }
 
-      if (
-        executed &&
-        (decision.action === "ENTER" ||
-          decision.action === "EXIT" ||
-          decision.action === "REBALANCE")
-      ) {
-        const trigger = decision.action.toLowerCase() as AgentRuntimeCheckin["trigger"];
-        yield* maybeSendAgentCheckin(trigger).pipe(Effect.catchAll(() => Effect.void));
-      }
-
-      return decision;
+      return finalDecisions;
     });
 
   // ─── Periodic fee claiming ─────────────────────────────────────────────────
@@ -3449,7 +3574,8 @@ export const program = Effect.gen(function* () {
       const revenueShareOperatorPct = revenueConfigResult.revenueShareOperatorPct;
       const tier = revenueConfigResult.tier;
 
-      for (const [poolAddress, pos] of trackedPositions) {
+      for (const pos of trackedPositions.values()) {
+        const poolAddress = pos.poolAddress;
         if (pos.positionPubKey && Date.now() - pos.lastFeeClaimAt > config.feeClaimIntervalMs) {
           // LM farm rewards ride the same periodic cadence as swap-fee
           // claims. The adapter skips silently for LimitOrder pools and
@@ -3483,6 +3609,7 @@ export const program = Effect.gen(function* () {
                   id: randomUUID(),
                   poolAddress,
                   positionPubKey: pos.positionPubKey,
+                  positionId: pos.positionId,
                   event: "CLAIM",
                   valueUsd: rewardSummary.totalUsd > 0 ? rewardSummary.totalUsd : null,
                   feesUsd: null,
@@ -3609,6 +3736,7 @@ export const program = Effect.gen(function* () {
               id: randomUUID(),
               poolAddress,
               positionPubKey: pos.positionPubKey,
+              positionId: pos.positionId,
               event: "CLAIM",
               valueUsd: null,
               feesUsd: netFeesUsd,
@@ -3670,6 +3798,14 @@ export const program = Effect.gen(function* () {
                         }),
                       );
               if (compoundResult) {
+                if (compoundResult.positionPubKey !== pos.positionId) {
+                  // Defensive re-key (same contract as the atomic rebalance
+                  // path): the identity and its row move with the pubkey.
+                  trackedPositions.delete(pos.positionId);
+                  yield* db.deletePosition(pos.positionId).pipe(Effect.catchAll(() => Effect.void));
+                  pos.positionId = compoundResult.positionPubKey;
+                  trackedPositions.set(pos.positionId, pos);
+                }
                 pos.positionPubKey = compoundResult.positionPubKey;
                 pos.lastRebalanceAt = Date.now();
                 // Compounded fees become new cost basis; currentValue/highest
@@ -3690,6 +3826,7 @@ export const program = Effect.gen(function* () {
                     id: randomUUID(),
                     poolAddress,
                     positionPubKey: pos.positionPubKey,
+                    positionId: pos.positionId,
                     event: "COMPOUND",
                     valueUsd: netFeesUsd,
                     feesUsd: null,

@@ -554,6 +554,87 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       }
     },
   },
+  {
+    version: 18,
+    name: "multi_position_per_pool",
+    up(db) {
+      // Re-key positions by position identity so a pool can hold multiple
+      // positions (tight+wide range pairs). Live positions key on their
+      // on-chain pubkey; legacy paper rows (no pubkey) get a stable synthetic
+      // id — unique because pool_address was the old primary key.
+      if (!hasColumn(db, "positions", "position_id")) {
+        db.exec(`
+          CREATE TABLE positions_new (
+            position_id TEXT PRIMARY KEY,
+            pool_address TEXT NOT NULL,
+            position_pubkey TEXT,
+            deposited_usd REAL,
+            current_value_usd REAL,
+            token_x_symbol TEXT,
+            token_y_symbol TEXT,
+            active_bin_id INTEGER,
+            lower_bin_id INTEGER,
+            upper_bin_id INTEGER,
+            timestamp INTEGER,
+            out_of_range_since INTEGER,
+            oor_cycle_count INTEGER DEFAULT 0,
+            last_fee_claim_at INTEGER DEFAULT 0,
+            trailing_stop_threshold REAL,
+            highest_value_usd REAL,
+            last_rebalance_at INTEGER DEFAULT 0,
+            paper_exited_at INTEGER,
+            entry_signal_timestamp INTEGER,
+            entry_signal_snapshot_id INTEGER,
+            entry_price_usd REAL,
+            entry_amount_x_usd REAL,
+            entry_amount_y_usd REAL,
+            cumulative_fees_claimed_usd REAL NOT NULL DEFAULT 0,
+            cumulative_rewards_claimed_usd REAL NOT NULL DEFAULT 0,
+            closed_at INTEGER,
+            realized_pnl_usd REAL
+          );
+        `);
+        db.exec(`
+          INSERT INTO positions_new (
+            position_id, pool_address, position_pubkey, deposited_usd, current_value_usd,
+            token_x_symbol, token_y_symbol, active_bin_id, lower_bin_id, upper_bin_id,
+            timestamp, out_of_range_since, oor_cycle_count, last_fee_claim_at,
+            trailing_stop_threshold, highest_value_usd, last_rebalance_at, paper_exited_at,
+            entry_signal_timestamp, entry_signal_snapshot_id,
+            entry_price_usd, entry_amount_x_usd, entry_amount_y_usd,
+            cumulative_fees_claimed_usd, cumulative_rewards_claimed_usd, closed_at,
+            realized_pnl_usd
+          )
+          SELECT
+            COALESCE(position_pubkey, 'paper-' || pool_address), pool_address, position_pubkey,
+            deposited_usd, current_value_usd, token_x_symbol, token_y_symbol,
+            active_bin_id, lower_bin_id, upper_bin_id, timestamp, out_of_range_since,
+            oor_cycle_count, last_fee_claim_at, trailing_stop_threshold, highest_value_usd,
+            last_rebalance_at, paper_exited_at, entry_signal_timestamp, entry_signal_snapshot_id,
+            entry_price_usd, entry_amount_x_usd, entry_amount_y_usd,
+            cumulative_fees_claimed_usd, cumulative_rewards_claimed_usd, closed_at,
+            realized_pnl_usd
+          FROM positions;
+        `);
+        db.exec("DROP TABLE positions");
+        db.exec("ALTER TABLE positions_new RENAME TO positions");
+        db.exec("CREATE INDEX IF NOT EXISTS idx_positions_pool ON positions(pool_address)");
+      }
+
+      // Lifecycle events get the same identity column so paper positions
+      // (NULL pubkey) stay attributable per position. Legacy rows backfill
+      // from position_pubkey; pre-v18 paper events keep NULL (unknown).
+      if (!hasColumn(db, "position_events", "position_id")) {
+        db.exec("ALTER TABLE position_events ADD COLUMN position_id TEXT");
+        db.exec(
+          "UPDATE position_events SET position_id = position_pubkey WHERE position_pubkey IS NOT NULL",
+        );
+        db.exec(
+          "CREATE INDEX IF NOT EXISTS idx_position_events_position ON position_events(position_id)",
+        );
+      }
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

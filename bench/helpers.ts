@@ -56,9 +56,12 @@ export function makeDecision(overrides: Partial<AgentDecision> = {}): AgentDecis
 // ─── Position (DB record) ────────────────────────────────────────────────────
 
 export function makePosition(overrides: Partial<PositionRecord> = {}): PositionRecord {
+  const poolAddress = overrides.poolAddress ?? "Pool111111111111111111111111111111111111111";
+  const positionPubKey = overrides.positionPubKey ?? null;
   return {
-    poolAddress: overrides.poolAddress ?? "Pool111111111111111111111111111111111111111",
-    positionPubKey: overrides.positionPubKey ?? null,
+    positionId: overrides.positionId ?? positionPubKey ?? `paper-${poolAddress}`,
+    poolAddress,
+    positionPubKey,
     depositedUsd: overrides.depositedUsd ?? 1000,
     currentValueUsd: overrides.currentValueUsd ?? 1000,
     tokenXSymbol: "SOL",
@@ -149,6 +152,7 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     oorRecoveryForceRebalanceThreshold: 0.2,
     maxPerPoolAllocationPct: 0.4,
     maxOpenPositions: 3,
+    maxPositionsPerPool: 2,
     paperValidationMinDays: 7,
     paperValidationEnforce: false,
     agentiveMode: false,

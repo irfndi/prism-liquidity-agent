@@ -15,6 +15,7 @@ export interface RiskConfig {
   readonly maxRebalanceRangeBins: number;
   readonly stopLossPct: number;
   readonly maxPerPoolAllocationPct: number;
+  readonly maxPositionsPerPool: number;
 }
 
 export function evaluateRisk(
@@ -39,13 +40,19 @@ export function evaluateRisk(
 
   // 3. Concurrent positions cap is enforced upstream by evaluatePerPoolAllocation.
 
-  // 3a. Duplicate pool guard
+  // 3a. Per-pool position cap (Wave 10): DLMM natively supports multiple
+  // positions per pool (tight+wide pairs), so the old duplicate-pool guard is
+  // now a count cap. Aggregate exposure stays bounded by gate 6 below.
   if (decision.action === "ENTER" && decision.poolAddress) {
-    const duplicate = ctx.openPositions.find((p) => p.poolAddress === decision.poolAddress);
-    if (duplicate) {
+    const poolPositionCount = ctx.openPositions.filter(
+      (p) => p.poolAddress === decision.poolAddress,
+    ).length;
+    if (poolPositionCount >= riskConfig.maxPositionsPerPool) {
       return {
         approved: false,
-        reason: `Already holding position in pool ${decision.poolAddress} — use REBALANCE instead`,
+        reason:
+          `Per-pool position cap reached (${poolPositionCount}/${riskConfig.maxPositionsPerPool}) ` +
+          `for pool ${decision.poolAddress}`,
       };
     }
   }
@@ -61,9 +68,13 @@ export function evaluateRisk(
     }
   }
 
-  // 5. Stop-loss check
+  // 5. Stop-loss check — targets the decision's own position when identified
+  // (a pool may hold several positions with independent PnL).
   if (decision.action === "HOLD" || decision.action === "REBALANCE") {
-    const pos = ctx.openPositions.find((p) => p.poolAddress === decision.poolAddress);
+    const pos =
+      ctx.positionId !== undefined
+        ? ctx.openPositions.find((p) => p.id === ctx.positionId)
+        : ctx.openPositions.find((p) => p.poolAddress === decision.poolAddress);
     if (pos && pos.depositedUsd > 0) {
       const lossPct = (pos.currentValueUsd - pos.depositedUsd) / pos.depositedUsd;
       if (lossPct < -riskConfig.stopLossPct) {
@@ -76,11 +87,23 @@ export function evaluateRisk(
   }
 
   // 6. Position size validation — the cap is the configured per-pool
-  // allocation (single source of truth: MAX_PER_POOL_ALLOCATION_PCT).
+  // allocation (single source of truth: MAX_PER_POOL_ALLOCATION_PCT) minus
+  // the pool's existing aggregate exposure across all its positions.
   if (decision.action === "ENTER" && decision.positionSizeUsd !== undefined) {
     const capPct = riskConfig.maxPerPoolAllocationPct;
-    const maxSize = ctx.portfolioValueUsd * capPct;
+    const existingPoolExposureUsd = ctx.openPositions
+      .filter((p) => p.poolAddress === decision.poolAddress)
+      .reduce((sum, p) => sum + p.currentValueUsd, 0);
+    const maxSize = Math.max(ctx.portfolioValueUsd * capPct - existingPoolExposureUsd, 0);
     if (decision.positionSizeUsd > maxSize) {
+      if (maxSize <= 0) {
+        return {
+          approved: false,
+          reason:
+            `Pool exposure $${existingPoolExposureUsd.toFixed(0)} already fills the ` +
+            `${(capPct * 100).toFixed(0)}% per-pool allocation cap`,
+        };
+      }
       const adjustedSizeUsd = maxSize;
       return {
         approved: true,
@@ -255,20 +278,14 @@ export function evaluateAgentProposal(
     let cappedSizeUsd = Math.min(proposal.positionSizeUsd, agentMaxSizeUsd, perPoolCapUsd);
 
     if (proposal.action === "ENTER") {
-      const duplicate = ctx.openPositions.find((p) => p.poolAddress === proposal.poolAddress);
-      if (duplicate) {
-        return {
-          valid: false,
-          reason: `Already holding position in pool ${proposal.poolAddress} — use REBALANCE instead`,
-        };
-      }
-
       const allocationResult = evaluatePerPoolAllocation({
         proposedDepositUsd: cappedSizeUsd,
         portfolioValueUsd: ctx.portfolioValueUsd,
         openPositions: ctx.openPositions,
         maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
         maxOpenPositions: config.maxOpenPositions,
+        poolAddress: proposal.poolAddress,
+        maxPositionsPerPool: config.maxPositionsPerPool,
       });
 
       if (!allocationResult.approved) {
@@ -321,6 +338,19 @@ export function evaluateAgentProposal(
     }
   }
 
+  // Position targeting (Wave 10): position-bound actions must land on a
+  // specific position row when a pool holds several. The advisor may name one
+  // explicitly; otherwise inherit the deterministic decision's target; a pool
+  // with exactly one open position resolves to it. Anything else stays
+  // untargeted and fails closed at execution.
+  let positionId = proposal.positionId ?? ctx.originalDecision?.positionId;
+  if (positionId === undefined && (proposal.action === "EXIT" || proposal.action === "REBALANCE")) {
+    const poolPositions = ctx.openPositions.filter((p) => p.poolAddress === proposal.poolAddress);
+    if (poolPositions.length === 1) {
+      positionId = poolPositions[0]!.id;
+    }
+  }
+
   const adjustedDecision: AgentDecision = {
     action: proposal.action,
     poolAddress: proposal.poolAddress,
@@ -331,6 +361,7 @@ export function evaluateAgentProposal(
     reasoning: proposal.reasoning,
     ...(adjustedPositionSizeUsd !== undefined && { positionSizeUsd: adjustedPositionSizeUsd }),
     ...(proposal.rebalanceParams !== undefined && { rebalanceParams: proposal.rebalanceParams }),
+    ...(positionId !== undefined && { positionId }),
   };
 
   return {
@@ -537,6 +568,10 @@ export interface PerPoolAllocationInput {
   readonly openPositions: ReadonlyArray<Position>;
   readonly maxPerPoolAllocationPct: number;
   readonly maxOpenPositions: number;
+  /** Pool the ENTER targets — per-pool count and exposure are measured against it. */
+  readonly poolAddress: string;
+  /** Max simultaneous positions allowed on the target pool. */
+  readonly maxPositionsPerPool: number;
 }
 
 export interface PerPoolAllocationResult {
@@ -546,11 +581,26 @@ export interface PerPoolAllocationResult {
 }
 
 /**
- * Decide whether a proposed ENTER fits the per-pool allocation cap and the
- * hard cap on simultaneously open positions. The deposit is capped to the
- * per-pool limit; ENTER is rejected only when the position cap is reached.
+ * Decide whether a proposed ENTER fits the per-pool position-count cap, the
+ * hard cap on simultaneously open positions, and the per-pool allocation cap.
+ * The allocation cap is measured against the pool's AGGREGATE exposure (the
+ * sum of all its positions' current values), so a second position on the
+ * same pool only gets the headroom its siblings leave. The deposit is
+ * capped to the remaining headroom; ENTER is rejected when a count cap is
+ * reached or the headroom rounds the deposit to zero.
  */
 export function evaluatePerPoolAllocation(input: PerPoolAllocationInput): PerPoolAllocationResult {
+  const poolPositions = input.openPositions.filter((p) => p.poolAddress === input.poolAddress);
+  if (poolPositions.length >= input.maxPositionsPerPool) {
+    return {
+      approved: false,
+      reason:
+        `Per-pool position cap reached (${poolPositions.length}/${input.maxPositionsPerPool}) ` +
+        `for pool ${input.poolAddress}`,
+      adjustedDepositUsd: 0,
+    };
+  }
+
   if (input.openPositions.length >= input.maxOpenPositions) {
     return {
       approved: false,
@@ -560,12 +610,16 @@ export function evaluatePerPoolAllocation(input: PerPoolAllocationInput): PerPoo
   }
 
   const perPoolCapUsd = Math.max(input.portfolioValueUsd * input.maxPerPoolAllocationPct, 0);
-  const adjusted = Math.min(input.proposedDepositUsd, perPoolCapUsd);
+  const existingPoolExposureUsd = poolPositions.reduce((sum, p) => sum + p.currentValueUsd, 0);
+  const headroomUsd = Math.max(perPoolCapUsd - existingPoolExposureUsd, 0);
+  const adjusted = Math.min(input.proposedDepositUsd, headroomUsd);
 
   if (adjusted <= 0) {
     return {
       approved: false,
-      reason: `Per-pool cap $${perPoolCapUsd.toFixed(2)} would zero out the proposed $${input.proposedDepositUsd.toFixed(2)} deposit`,
+      reason:
+        `Per-pool cap $${perPoolCapUsd.toFixed(2)} is already filled by the pool's existing ` +
+        `$${existingPoolExposureUsd.toFixed(2)} exposure — proposed $${input.proposedDepositUsd.toFixed(2)} deposit rounds to zero`,
       adjustedDepositUsd: 0,
     };
   }

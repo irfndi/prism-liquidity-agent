@@ -66,6 +66,7 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     oorRecoveryForceRebalanceThreshold: 0.2,
     maxPerPoolAllocationPct: 0.4,
     maxOpenPositions: 3,
+    maxPositionsPerPool: 2,
     paperValidationMinDays: 7,
     paperValidationEnforce: false,
     agentiveMode: false,
@@ -460,6 +461,7 @@ describe("HttpStatusServer", () => {
         baseSnapshot({
           positions: [
             {
+              positionId: "held-pos-1",
               poolAddress: "HeldPool",
               tokenXSymbol: "X",
               tokenYSymbol: "Y",
@@ -547,6 +549,7 @@ describe("HttpStatusServer", () => {
         ...snapshot,
         positions: [
           {
+            positionId: "held-pos-1",
             poolAddress: "HeldPool",
             tokenXSymbol: "X",
             tokenYSymbol: "Y",

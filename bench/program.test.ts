@@ -464,7 +464,8 @@ describe("executeLive", () => {
     );
 
     expect(result.executed).toBe(true);
-    const pos = trackedPositions.get(poolAddress) as
+    // Live positions are keyed by their on-chain pubkey.
+    const pos = trackedPositions.get("mock-pos") as
       | { entryAmountXUsd: number | null; entryAmountYUsd: number | null }
       | undefined;
     // Single-sided entry: the full size sits in the held leg; the other is 0.
@@ -527,7 +528,8 @@ describe("executePaper paper/live parity", () => {
 
     expect(result.executed).toBe(true);
     expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10, 34);
-    const pos = trackedPositions.get(poolAddress) as
+    // Paper positions are keyed by a generated synthetic id.
+    const pos = [...trackedPositions.values()][0] as
       | { lowerBinId: number; upperBinId: number }
       | undefined;
     // Parity: the paper range is exactly what live would use — not a hardcoded ±20.
@@ -539,6 +541,7 @@ describe("executePaper paper/live parity", () => {
 describe("estimatePositionValue", () => {
   function makePos(lowerBinId: number, upperBinId: number, depositedUsd: number) {
     return {
+      positionId: "paper-pool1",
       poolAddress: "pool1",
       positionPubKey: null,
       depositedUsd,
@@ -1096,6 +1099,7 @@ describe("buildPositionSnapshots", () => {
     const now = 1_000_000;
     const positions = [
       {
+        positionId: "paper-pool-a",
         poolAddress: "pool-a",
         tokenXSymbol: "SOL",
         tokenYSymbol: "USDC",
@@ -1124,6 +1128,7 @@ describe("buildPositionSnapshots", () => {
         realizedPnlUsd: null,
       },
       {
+        positionId: "pubkey",
         poolAddress: "pool-b",
         tokenXSymbol: "BONK",
         tokenYSymbol: "SOL",

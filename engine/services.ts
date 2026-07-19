@@ -379,6 +379,13 @@ export interface RiskContext {
   readonly originalDecision?: AgentDecision;
   /** Current pool active bin; used to reject REBALANCE ranges that miss the market. */
   readonly activeBinId?: number;
+  /**
+   * Identity of the position the decision targets (Position.id). When set,
+   * position-bound gates (stop-loss) match it instead of falling back to the
+   * first position on the pool — required when a pool holds multiple
+   * positions.
+   */
+  readonly positionId?: string | undefined;
 }
 
 export interface RiskResult {
@@ -466,7 +473,14 @@ export class ScreenerService extends Context.Tag("ScreenerService")<
 
 export interface DbApi {
   readonly db: unknown;
+  /**
+   * Positions are keyed by position identity, not pool address: the on-chain
+   * position pubkey for live positions, a stable synthetic `paper-…` id for
+   * paper positions. A pool may hold multiple positions; every per-position
+   * method below takes the position id.
+   */
   readonly savePosition: (pos: {
+    positionId: string;
     poolAddress: string;
     positionPubKey: string | null;
     depositedUsd: number;
@@ -494,8 +508,9 @@ export interface DbApi {
     closedAt: number | null;
     realizedPnlUsd: number | null;
   }) => Effect.Effect<void, unknown>;
-  readonly getPosition: (poolAddress: string) => Effect.Effect<
+  readonly getPosition: (positionId: string) => Effect.Effect<
     {
+      positionId: string;
       poolAddress: string;
       positionPubKey: string | null;
       depositedUsd: number;
@@ -527,6 +542,7 @@ export interface DbApi {
   >;
   readonly getAllPositions: () => Effect.Effect<
     ReadonlyArray<{
+      positionId: string;
       poolAddress: string;
       positionPubKey: string | null;
       depositedUsd: number;
@@ -558,6 +574,7 @@ export interface DbApi {
   >;
   readonly getPaperExitedPositions: () => Effect.Effect<
     ReadonlyArray<{
+      positionId: string;
       poolAddress: string;
       positionPubKey: string | null;
       depositedUsd: number;
@@ -587,14 +604,15 @@ export interface DbApi {
     }>,
     unknown
   >;
-  readonly deletePosition: (poolAddress: string) => Effect.Effect<void, unknown>;
-  readonly markPaperExited: (poolAddress: string) => Effect.Effect<void, unknown>;
+  readonly deletePosition: (positionId: string) => Effect.Effect<void, unknown>;
+  readonly markPaperExited: (positionId: string) => Effect.Effect<void, unknown>;
   readonly closePosition: (
-    poolAddress: string,
+    positionId: string,
     realizedPnlUsd: number | null,
   ) => Effect.Effect<void, unknown>;
   readonly getClosedPositions: () => Effect.Effect<
     ReadonlyArray<{
+      positionId: string;
       poolAddress: string;
       positionPubKey: string | null;
       depositedUsd: number;
@@ -628,6 +646,7 @@ export interface DbApi {
     id: string;
     poolAddress: string;
     positionPubKey: string | null;
+    positionId: string | null;
     event: "ENTER" | "EXIT" | "REBALANCE" | "CLAIM" | "COMPOUND";
     valueUsd: number | null;
     feesUsd: number | null;
@@ -643,6 +662,7 @@ export interface DbApi {
       id: string;
       poolAddress: string;
       positionPubKey: string | null;
+      positionId: string | null;
       event: "ENTER" | "EXIT" | "REBALANCE" | "CLAIM" | "COMPOUND";
       valueUsd: number | null;
       feesUsd: number | null;
@@ -654,7 +674,7 @@ export interface DbApi {
   >;
   readonly getLatestSnapshotPrice: (poolAddress: string) => Effect.Effect<number | null, unknown>;
   readonly updatePositionValue: (
-    poolAddress: string,
+    positionId: string,
     currentValueUsd: number,
     highestValueUsd?: number,
   ) => Effect.Effect<void, unknown>;
@@ -1079,6 +1099,12 @@ export interface EngineAlert {
   readonly severity: AlertSeverity;
   readonly message: string;
   readonly poolAddress?: string;
+  /**
+   * Position identity for position-originated alerts (OOR, range warning,
+   * per-position exits). Included in the cooldown key so two positions on
+   * the same pool throttle independently.
+   */
+  readonly positionId?: string;
   readonly data?: Record<string, unknown>;
 }
 

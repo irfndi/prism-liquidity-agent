@@ -123,6 +123,7 @@ function makeLoopLayer(opts: { adapter: AdapterApi; configOverrides?: Partial<Ap
       maxRebalanceRangeBins: 50,
       stopLossPct: 0.6,
       maxPerPoolAllocationPct: 0.4,
+      maxPositionsPerPool: 2,
     }),
     Layer.succeed(BlacklistService, {
       isDeployerBlacklisted: () => false,

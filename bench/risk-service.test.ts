@@ -8,7 +8,7 @@ import { buildProposalPrompt } from "../engine/agent-service.js";
 import { parseProposalResponse } from "../engine/proposal-schema.js";
 import type { RiskContext } from "../engine/services.js";
 import type { AppConfig } from "../engine/config-service.js";
-import type { AgentDecision, AgentProposal } from "../engine/types.js";
+import type { AgentDecision, AgentProposal, Position } from "../engine/types.js";
 import type { AgentRuntimeContext } from "../engine/agent-transport.js";
 
 function makeProposal(
@@ -93,6 +93,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     oorRecoveryForceRebalanceThreshold: 0.2,
     maxPerPoolAllocationPct: 0.4,
     maxOpenPositions: 3,
+    maxPositionsPerPool: 2,
     paperValidationMinDays: 0,
     paperValidationEnforce: false,
     oorCooldownMs: 3_600_000,
@@ -672,7 +673,7 @@ describe("evaluateAgentProposal", () => {
     expect(result.adjustedDecision?.action).toBe("ENTER");
   });
 
-  it("rejects ENTER when the same pool is already held", () => {
+  it("accepts ENTER on an already-held pool under the per-pool position cap (Wave 10)", () => {
     const result = evaluateAgentProposal(
       makeProposal({ action: "ENTER", poolAddress: "pool1", positionSizeUsd: 1_000 }),
       makeContext({
@@ -694,8 +695,33 @@ describe("evaluateAgentProposal", () => {
       }),
       makeConfig(),
     );
+    expect(result.valid).toBe(true);
+    expect(result.adjustedDecision?.action).toBe("ENTER");
+    // A new position has no target identity yet — it is assigned at execution.
+    expect(result.adjustedDecision?.positionId).toBeUndefined();
+  });
+
+  it("rejects ENTER when the pool is at the per-pool position cap", () => {
+    const makeHeld = (id: string): Position => ({
+      id,
+      poolAddress: "pool1",
+      poolName: "SOL/USDC",
+      lowerBinId: 4980,
+      upperBinId: 5020,
+      liquidityShares: 0n,
+      depositedUsd: 1_000,
+      currentValueUsd: 1_000,
+      unrealizedPnlUsd: 0,
+      feesEarnedUsd: 0,
+      openedAt: Date.now(),
+    });
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "ENTER", poolAddress: "pool1", positionSizeUsd: 1_000 }),
+      makeContext({ openPositions: [makeHeld("pos-1"), makeHeld("pos-2")] }),
+      makeConfig(),
+    );
     expect(result.valid).toBe(false);
-    expect(result.reason).toMatch(/Already holding/);
+    expect(result.reason).toMatch(/position cap/i);
   });
 });
 

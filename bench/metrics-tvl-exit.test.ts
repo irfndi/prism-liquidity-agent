@@ -125,6 +125,7 @@ describe("evaluatePool TVL-drop EXIT (integration)", () => {
         maxRebalanceRangeBins: 50,
         stopLossPct: 0.15,
         maxPerPoolAllocationPct: 0.4,
+        maxPositionsPerPool: 2,
       }),
       Layer.succeed(BlacklistService, {
         isDeployerBlacklisted: () => false,

@@ -9,6 +9,7 @@ function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
 
 function makePosition(
   overrides: Partial<{
+    positionId: string;
     poolAddress: string;
     positionPubKey: string | null;
     depositedUsd: number;
@@ -21,9 +22,12 @@ function makePosition(
     entrySignalSnapshotId: number | null;
   }> = {},
 ) {
+  const poolAddress = overrides.poolAddress ?? "Pool111111111111111111111111111111111111111";
+  const positionPubKey = overrides.positionPubKey ?? null;
   return {
-    poolAddress: overrides.poolAddress ?? "Pool111111111111111111111111111111111111111",
-    positionPubKey: overrides.positionPubKey ?? null,
+    positionId: overrides.positionId ?? positionPubKey ?? `paper-${poolAddress}`,
+    poolAddress,
+    positionPubKey,
     depositedUsd: overrides.depositedUsd ?? 1000,
     currentValueUsd: overrides.currentValueUsd ?? 1000,
     tokenXSymbol: "SOL",
@@ -64,7 +68,7 @@ describe("DbService — positions", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.savePosition(pos);
-        const retrieved = yield* db.getPosition(pos.poolAddress);
+        const retrieved = yield* db.getPosition(pos.positionId);
         expect(retrieved).not.toBeNull();
         expect(retrieved!.depositedUsd).toBe(1000);
         expect(retrieved!.tokenXSymbol).toBe("SOL");
@@ -73,7 +77,7 @@ describe("DbService — positions", () => {
     );
   });
 
-  it("upserts on duplicate pool address", () => {
+  it("upserts on duplicate position id", () => {
     const layer = makeLayer();
     const pos1 = makePosition({ depositedUsd: 1000 });
     const pos2 = makePosition({ depositedUsd: 2000 });
@@ -83,7 +87,7 @@ describe("DbService — positions", () => {
         const db = yield* DbService;
         yield* db.savePosition(pos1);
         yield* db.savePosition(pos2);
-        const retrieved = yield* db.getPosition(pos1.poolAddress);
+        const retrieved = yield* db.getPosition(pos1.positionId);
         expect(retrieved!.depositedUsd).toBe(2000);
       }),
       layer,
@@ -126,8 +130,8 @@ describe("DbService — positions", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.savePosition(pos);
-        yield* db.deletePosition(pos.poolAddress);
-        const retrieved = yield* db.getPosition(pos.poolAddress);
+        yield* db.deletePosition(pos.positionId);
+        const retrieved = yield* db.getPosition(pos.positionId);
         expect(retrieved).toBeNull();
       }),
       layer,
@@ -142,8 +146,8 @@ describe("DbService — positions", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.savePosition(pos);
-        yield* db.updatePositionValue(pos.poolAddress, 1200, 1300);
-        const retrieved = yield* db.getPosition(pos.poolAddress);
+        yield* db.updatePositionValue(pos.positionId, 1200, 1300);
+        const retrieved = yield* db.getPosition(pos.positionId);
         expect(retrieved!.currentValueUsd).toBe(1200);
         expect(retrieved!.highestValueUsd).toBe(1300);
       }),
@@ -159,8 +163,8 @@ describe("DbService — positions", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.savePosition(pos);
-        yield* db.updatePositionValue(pos.poolAddress, 900);
-        const retrieved = yield* db.getPosition(pos.poolAddress);
+        yield* db.updatePositionValue(pos.positionId, 900);
+        const retrieved = yield* db.getPosition(pos.positionId);
         expect(retrieved!.currentValueUsd).toBe(900);
         expect(retrieved!.highestValueUsd).toBeNull();
       }),
@@ -176,7 +180,7 @@ describe("DbService — positions", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.savePosition(pos);
-        const retrieved = yield* db.getPosition(pos.poolAddress);
+        const retrieved = yield* db.getPosition(pos.positionId);
         expect(retrieved!.highestValueUsd).toBe(1500);
         expect(retrieved!.trailingStopThreshold).toBe(0.1);
       }),
@@ -192,7 +196,7 @@ describe("DbService — positions", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.savePosition(pos);
-        const retrieved = yield* db.getPosition(pos.poolAddress);
+        const retrieved = yield* db.getPosition(pos.positionId);
         expect(retrieved!.lastRebalanceAt).toBe(12345678);
       }),
       layer,

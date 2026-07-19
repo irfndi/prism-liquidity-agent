@@ -1,4 +1,5 @@
 import { Context, Effect, Layer } from "effect";
+import { randomUUID } from "crypto";
 import { AuditService, type AuditApi, type DecisionRecord } from "./services.js";
 import { DbService } from "./services.js";
 import type { PoolMetrics } from "./types.js";
@@ -13,7 +14,10 @@ export const AuditLive = Layer.effect(
       recordDecision: (record) =>
         Effect.gen(function* () {
           yield* db.saveAudit({
-            id: `${record.cycleId}-${record.poolAddress}-${record.timestamp}`,
+            // Unique per decision: a pool now yields several decisions in one
+            // cycle (multiple positions), and two same-pool decisions in the
+            // same millisecond must not collide on the primary key.
+            id: `${record.cycleId}-${record.poolAddress}-${record.timestamp}-${randomUUID()}`,
             timestamp: record.timestamp,
             cycleId: record.cycleId,
             poolAddress: record.poolAddress,

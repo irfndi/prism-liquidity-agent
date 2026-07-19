@@ -18,6 +18,12 @@ import { bigintReplacer } from "./bigint-json.js";
 import { randomUUID } from "crypto";
 
 export interface PositionRecord {
+  /**
+   * Position identity and primary key: the on-chain position pubkey for live
+   * positions, a stable synthetic `paper-<pool>-<uuid>` id for paper
+   * positions (legacy migrated paper rows use `paper-<pool>`).
+   */
+  positionId: string;
   poolAddress: string;
   positionPubKey: string | null;
   depositedUsd: number;
@@ -52,6 +58,7 @@ export interface PositionEventRecord {
   id: string;
   poolAddress: string;
   positionPubKey: string | null;
+  positionId: string | null;
   event: PositionEventType;
   valueUsd: number | null;
   feesUsd: number | null;
@@ -132,7 +139,7 @@ export const DbLive = (dbPath?: string) =>
             runOne(
               db,
               `INSERT INTO positions (
-              pool_address, position_pubkey, deposited_usd, current_value_usd,
+              position_id, pool_address, position_pubkey, deposited_usd, current_value_usd,
               token_x_symbol, token_y_symbol, active_bin_id, lower_bin_id, upper_bin_id,
               timestamp, out_of_range_since, oor_cycle_count, last_fee_claim_at,
               trailing_stop_threshold, highest_value_usd, last_rebalance_at, paper_exited_at,
@@ -141,8 +148,9 @@ export const DbLive = (dbPath?: string) =>
               entry_price_usd, entry_amount_x_usd, entry_amount_y_usd,
               cumulative_fees_claimed_usd, cumulative_rewards_claimed_usd,
               closed_at, realized_pnl_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(pool_address) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(position_id) DO UPDATE SET
+              pool_address = excluded.pool_address,
               position_pubkey = COALESCE(excluded.position_pubkey, positions.position_pubkey),
               deposited_usd = excluded.deposited_usd,
               current_value_usd = excluded.current_value_usd,
@@ -168,6 +176,7 @@ export const DbLive = (dbPath?: string) =>
               cumulative_rewards_claimed_usd = excluded.cumulative_rewards_claimed_usd,
               closed_at = excluded.closed_at,
               realized_pnl_usd = excluded.realized_pnl_usd`,
+              pos.positionId,
               pos.poolAddress,
               pos.positionPubKey,
               pos.depositedUsd,
@@ -197,12 +206,12 @@ export const DbLive = (dbPath?: string) =>
             );
           }),
 
-        getPosition: (poolAddress) =>
+        getPosition: (positionId) =>
           Effect.sync(() => {
             const row = queryOne<Record<string, unknown>>(
               db,
-              "SELECT * FROM positions WHERE pool_address = ?",
-              poolAddress,
+              "SELECT * FROM positions WHERE position_id = ?",
+              positionId,
             );
             return row ? rowToPosition(row) : null;
           }),
@@ -236,29 +245,29 @@ export const DbLive = (dbPath?: string) =>
             return rows.map(rowToPosition);
           }),
 
-        deletePosition: (poolAddress) =>
+        deletePosition: (positionId) =>
           Effect.sync(() => {
-            runOne(db, "DELETE FROM positions WHERE pool_address = ?", poolAddress);
+            runOne(db, "DELETE FROM positions WHERE position_id = ?", positionId);
           }),
 
-        markPaperExited: (poolAddress) =>
+        markPaperExited: (positionId) =>
           Effect.sync(() => {
             runOne(
               db,
-              "UPDATE positions SET paper_exited_at = ? WHERE pool_address = ?",
+              "UPDATE positions SET paper_exited_at = ? WHERE position_id = ?",
               Date.now(),
-              poolAddress,
+              positionId,
             );
           }),
 
-        closePosition: (poolAddress, realizedPnlUsd) =>
+        closePosition: (positionId, realizedPnlUsd) =>
           Effect.sync(() => {
             runOne(
               db,
-              "UPDATE positions SET closed_at = ?, realized_pnl_usd = ? WHERE pool_address = ?",
+              "UPDATE positions SET closed_at = ?, realized_pnl_usd = ? WHERE position_id = ?",
               Date.now(),
               realizedPnlUsd,
-              poolAddress,
+              positionId,
             );
           }),
 
@@ -267,12 +276,13 @@ export const DbLive = (dbPath?: string) =>
             runOne(
               db,
               `INSERT INTO position_events (
-                id, pool_address, position_pubkey, event,
+                id, pool_address, position_pubkey, position_id, event,
                 value_usd, fees_usd, price, metadata, created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               event.id,
               event.poolAddress,
               event.positionPubKey,
+              event.positionId,
               event.event,
               event.valueUsd,
               event.feesUsd,
@@ -307,22 +317,22 @@ export const DbLive = (dbPath?: string) =>
             return row ? Number(row.current_price) : null;
           }),
 
-        updatePositionValue: (poolAddress, currentValueUsd, highestValueUsd) =>
+        updatePositionValue: (positionId, currentValueUsd, highestValueUsd) =>
           Effect.sync(() => {
             if (highestValueUsd !== undefined) {
               runOne(
                 db,
-                "UPDATE positions SET current_value_usd = ?, highest_value_usd = ? WHERE pool_address = ?",
+                "UPDATE positions SET current_value_usd = ?, highest_value_usd = ? WHERE position_id = ?",
                 currentValueUsd,
                 highestValueUsd,
-                poolAddress,
+                positionId,
               );
             } else {
               runOne(
                 db,
-                "UPDATE positions SET current_value_usd = ? WHERE pool_address = ?",
+                "UPDATE positions SET current_value_usd = ? WHERE position_id = ?",
                 currentValueUsd,
-                poolAddress,
+                positionId,
               );
             }
           }),
@@ -990,6 +1000,7 @@ export const DbLive = (dbPath?: string) =>
 
 function rowToPosition(row: Record<string, unknown>): PositionRecord {
   return {
+    positionId: String(row.position_id),
     poolAddress: String(row.pool_address),
     positionPubKey: row.position_pubkey ? String(row.position_pubkey) : null,
     depositedUsd: Number(row.deposited_usd ?? 0),
@@ -1027,6 +1038,7 @@ function rowToPositionEvent(row: Record<string, unknown>): PositionEventRecord {
     id: String(row.id),
     poolAddress: String(row.pool_address),
     positionPubKey: row.position_pubkey ? String(row.position_pubkey) : null,
+    positionId: row.position_id ? String(row.position_id) : null,
     event: String(row.event) as PositionEventType,
     valueUsd: row.value_usd != null ? Number(row.value_usd) : null,
     feesUsd: row.fees_usd != null ? Number(row.fees_usd) : null,

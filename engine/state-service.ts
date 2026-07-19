@@ -7,6 +7,8 @@ const logger = createLogger("AgentStateService");
 
 export interface PositionSnapshot {
   readonly poolAddress: string;
+  /** Position identity (live pubkey / paper synthetic id) — disambiguates multiple positions on one pool. */
+  readonly positionId: string;
   readonly tokenXSymbol: string;
   readonly tokenYSymbol: string;
   readonly depositedUsd: number;
