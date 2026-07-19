@@ -66,6 +66,7 @@ import {
   EntryPrepService,
   MeteoraDatapiService,
   AlertService,
+  CopySignalService,
   type AdapterApi,
   type DbApi,
   type MemoryApi,
@@ -78,6 +79,8 @@ import {
 } from "./services.js";
 import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
 import { AlertLive } from "./alert-service.js";
+import { detectDepegAndLiquidityDrain } from "./depeg-liquidity-detector.js";
+import { CopySignalLive, applyCopySignalBoost } from "./copy-trading-signals.js";
 import type {
   AgentDecision,
   AgentProposal,
@@ -554,7 +557,8 @@ type AllServices =
   | HttpStatusServerService
   | EntryPrepService
   | MeteoraDatapiService
-  | AlertService;
+  | AlertService
+  | CopySignalService;
 
 export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, never> {
   const dbLayer = DbLive(cfg?.sqliteDbPath);
@@ -632,8 +636,10 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const alertDeps = Layer.merge(dbLayer, configLayer);
   const alertLayer = Layer.provide(AlertLive, alertDeps);
   const merged16 = Layer.merge(merged15, alertLayer);
+  const copySignalLayer = Layer.provide(CopySignalLive, configLayer);
+  const merged17 = Layer.merge(merged16, copySignalLayer);
 
-  return merged16 as Layer.Layer<AllServices, never, never>;
+  return merged17 as Layer.Layer<AllServices, never, never>;
 }
 
 // ─── Paper execution ─────────────────────────────────────────────────────────
@@ -1286,6 +1292,7 @@ export const program = Effect.gen(function* () {
   const httpStatusServer = yield* HttpStatusServerService;
   const meteoraDatapi = yield* MeteoraDatapiService;
   const alertSvc = yield* AlertService;
+  const copySignalsOption = yield* Effect.serviceOption(CopySignalService);
 
   // Load persisted positions at startup (keyed by position identity — a pool
   // may hold several positions).
@@ -1911,6 +1918,7 @@ export const program = Effect.gen(function* () {
         .pipe(Effect.catchAll(() => Effect.succeed([] as ReadonlyArray<PoolSnapshot>)));
       const previousSnapshot =
         previousSnapshots.length > 0 ? previousSnapshots[previousSnapshots.length - 1] : undefined;
+      const w15Signals = detectDepegAndLiquidityDrain(pool, previousSnapshots, config);
 
       // Persist a snapshot every cycle (both paper and live): TVL velocity and
       // the TVL-drop EXIT are dead code without per-cycle history. The full
@@ -2234,10 +2242,38 @@ export const program = Effect.gen(function* () {
       const rawDecisions: AgentDecision[] = [];
       let poolExitFired = false;
 
+      if (w15Signals.depeg || w15Signals.liquidityDrain) {
+        const reasons = [
+          ...(w15Signals.depeg
+            ? [`stablecoin deviation ${(w15Signals.depeg.deviationUsd * 100).toFixed(2)}%`]
+            : []),
+          ...(w15Signals.liquidityDrain
+            ? [
+                `TVL ${(w15Signals.liquidityDrain.tvlPct * 100).toFixed(1)}%, volume ${(w15Signals.liquidityDrain.volumePct * 100).toFixed(1)}%`,
+              ]
+            : []),
+        ];
+        yield* alertSvc.sendAlert({
+          type: w15Signals.depeg ? "stablecoin_depeg" : "liquidity_drain",
+          severity: "critical",
+          message: `Fast EXIT signal on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${reasons.join("; ")}`,
+          poolAddress,
+          data: { ...w15Signals },
+        });
+      }
+
       for (const pos of poolPositions) {
         let decision: AgentDecision | null = null;
 
-        if (tvlVelocity < -config.tvlDropExitPct) {
+        if (w15Signals.depeg || w15Signals.liquidityDrain) {
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            positionId: pos.positionId,
+            confidence: 1,
+            reasoning: `W15 fast EXIT: ${w15Signals.depeg ? "stablecoin depeg" : "liquidity drain"}`,
+          };
+        } else if (tvlVelocity < -config.tvlDropExitPct) {
           decision = {
             action: "EXIT",
             poolAddress,
@@ -3215,6 +3251,25 @@ export const program = Effect.gen(function* () {
             action: "HOLD",
             reasoning: `Supervised mode: awaiting approved proposal (held ${decision.action}: ${decision.reasoning})`,
           };
+        }
+
+        const copySignalResult =
+          copySignalsOption._tag === "Some"
+            ? yield* copySignalsOption.value.getBoost(poolAddress, Date.now())
+            : { boost: 0, wallets: [], ignored: 0 };
+        if (copySignalResult.boost > 0 && decision.action !== "EXIT") {
+          decision = applyCopySignalBoost(
+            decision,
+            copySignalResult,
+            config.copySignalsMaxBoost ?? 0.05,
+          );
+          logger.info("Applied bounded copy-trading signal boost", {
+            pool: poolAddress,
+            boost: copySignalResult.boost,
+            wallets: copySignalResult.wallets.length,
+            ignored: copySignalResult.ignored,
+            paperTrading: config.paperTrading,
+          });
         }
 
         // Risk evaluation. HOLD executes nothing, so risk gates are skipped for

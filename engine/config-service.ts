@@ -62,6 +62,11 @@ export interface AppConfig {
   // if the env var is unset or empty.
   readonly meteoraPoolsUrl: string;
   readonly meteoraDatapiBaseUrl: string;
+  readonly stablecoinMints?: ReadonlySet<string>;
+  readonly depegAbsoluteUsd?: number;
+  readonly depegRelativePct?: number;
+  readonly liquidityDrainPct?: number;
+  readonly liquidityDrainLookbackSnapshots?: number;
 
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
   /** Estimated SOL cost of a single rebalance tx (entry + close). */
@@ -241,6 +246,11 @@ export interface AppConfig {
   readonly alertCooldownMinutes: number;
   /** USD step between cumulative-fee milestone alerts. Default 10. */
   readonly alertFeeMilestoneUsd: number;
+  readonly copySignalsEnabled?: boolean;
+  readonly copySignalsEndpoint?: string;
+  readonly copySignalWallets?: ReadonlyArray<string>;
+  readonly copySignalsStaleMs?: number;
+  readonly copySignalsMaxBoost?: number;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -309,6 +319,23 @@ const loadConfig = Effect.gen(function* () {
   const maxRebalanceRangeBins = yield* validatedNumber("MAX_REBALANCE_RANGE_BINS", 1, 50);
   const watchlistPoolsRaw = yield* Config.string("WATCHLIST_POOLS").pipe(
     Effect.orElseSucceed(() => ""),
+  );
+  const stablecoinMintsRaw = yield* Config.string("STABLECOIN_MINTS").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const stablecoinMints = new Set(
+    stablecoinMintsRaw
+      .split(",")
+      .map((mint) => mint.trim())
+      .filter(Boolean),
+  );
+  const depegAbsoluteUsd = yield* validatedNumber("DEPEG_ABSOLUTE_USD", 0.001, 0.02);
+  const depegRelativePct = yield* validatedNumber("DEPEG_RELATIVE_PCT", 0.001, 0.02);
+  const liquidityDrainPct = yield* validatedNumber("LIQUIDITY_DRAIN_PCT", 0.01, 0.9);
+  const liquidityDrainLookbackSnapshots = yield* validatedNumber(
+    "LIQUIDITY_DRAIN_LOOKBACK_SNAPSHOTS",
+    1,
+    12,
   );
 
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
@@ -582,6 +609,26 @@ const loadConfig = Effect.gen(function* () {
     0,
     3,
   );
+  const copySignalsEnabled = yield* Config.boolean("COPY_SIGNALS_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const copySignalsEndpoint = yield* Config.string("COPY_SIGNALS_ENDPOINT").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const copySignalWalletsRaw = yield* Config.string("COPY_SIGNAL_WALLETS").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const copySignalWallets = copySignalWalletsRaw
+    .split(",")
+    .map((wallet) => wallet.trim())
+    .filter(Boolean);
+  const copySignalsStaleMs = yield* validatedNumber(
+    "COPY_SIGNALS_STALE_MS",
+    60_000,
+    900_000,
+    86_400_000,
+  );
+  const copySignalsMaxBoost = yield* validatedNumber("COPY_SIGNALS_MAX_BOOST", 0, 0.05, 0.05);
   const alertCooldownMinutes = yield* validatedNumber("ALERT_COOLDOWN_MINUTES", 1, 120);
   const alertFeeMilestoneUsd = yield* validatedNumber("ALERT_FEE_MILESTONE_USD", 0.01, 10);
 
@@ -729,6 +776,11 @@ const loadConfig = Effect.gen(function* () {
     paperModeExitLive,
     meteoraPoolsUrl,
     meteoraDatapiBaseUrl,
+    stablecoinMints,
+    depegAbsoluteUsd,
+    depegRelativePct,
+    liquidityDrainPct,
+    liquidityDrainLookbackSnapshots,
 
     rebalanceGasCostSol,
     solPriceUsd,
@@ -800,6 +852,11 @@ const loadConfig = Effect.gen(function* () {
     alertsEnabled,
     alertCooldownMinutes,
     alertFeeMilestoneUsd,
+    copySignalsEnabled,
+    copySignalsEndpoint,
+    copySignalWallets,
+    copySignalsStaleMs,
+    copySignalsMaxBoost,
   };
 
   return cfg;
