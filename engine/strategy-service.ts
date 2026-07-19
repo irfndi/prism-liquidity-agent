@@ -198,8 +198,9 @@ export const DLMMStrategy: StrategyApi = {
   recommendBinRange(
     activeBinId: number,
     binStep: number,
+    halfWidthOverride?: number,
   ): { lowerBinId: number; upperBinId: number } {
-    const halfWidth = binStep <= 10 ? 25 : binStep <= 25 ? 20 : 15;
+    const halfWidth = halfWidthOverride ?? baselineHalfWidthForBinStep(binStep);
     return {
       lowerBinId: activeBinId - halfWidth,
       upperBinId: activeBinId + halfWidth,
@@ -253,20 +254,85 @@ export function isHighVolatility(stddev: number, threshold: number): boolean {
  * currently in a high-volatility regime. High-vol gets a much wider range to
  * avoid constant rebalancing. The widened width comes from the caller-supplied
  * `wideHalfWidth` so users can tune it via VOLATILITY_WIDE_HALF_WIDTH_BINS.
+ * `baseHalfWidthOverride` (Wave 9) replaces the binStep-tier base when
+ * ENTRY_RANGE_HALF_WIDTH_BINS is set.
  */
 export function recommendBinRangeForVolatility(
   activeBinId: number,
   binStep: number,
   highVolatility: boolean,
   wideHalfWidth = 50,
+  baseHalfWidthOverride?: number,
 ): { lowerBinId: number; upperBinId: number; halfWidth: number } {
-  const baseHalfWidth = binStep <= 10 ? 25 : binStep <= 25 ? 20 : 15;
+  const baseHalfWidth = baseHalfWidthOverride ?? baselineHalfWidthForBinStep(binStep);
   const halfWidth = highVolatility ? Math.max(baseHalfWidth * 2, wideHalfWidth) : baseHalfWidth;
   return {
     lowerBinId: activeBinId - halfWidth,
     upperBinId: activeBinId + halfWidth,
     halfWidth,
   };
+}
+
+// ─── Wave 9: Volatility-adaptive range width ─────────────────────────────────
+
+/** σ of active-bin moves at which the baseline half-width is calibrated. */
+export const ADAPTIVE_RANGE_REFERENCE_STDDEV = 2;
+/** Calm-market floor: adaptation never tightens below half the baseline. */
+export const ADAPTIVE_RANGE_MIN_MULTIPLIER = 0.5;
+/** High-vol ceiling: adaptation never widens beyond 2× the baseline. */
+export const ADAPTIVE_RANGE_MAX_MULTIPLIER = 2;
+/** Sane floor — narrower ranges churn out-of-range within a cycle or two. */
+export const MIN_ADAPTIVE_HALF_WIDTH_BINS = 5;
+
+/**
+ * Static baseline range half-width (bins each side) by bin step. Coarser pools
+ * (larger binStep) get narrower ranges because each bin spans more price. This
+ * is the pre-Wave-9 hardcoded 25/20/15 tiering, now the default base that
+ * ENTRY_RANGE_HALF_WIDTH_BINS overrides and Wave 9 adaptation scales.
+ */
+export function baselineHalfWidthForBinStep(binStep: number): number {
+  return binStep <= 10 ? 25 : binStep <= 25 ? 20 : 15;
+}
+
+/**
+ * Resolve the range half-width (bins each side) for entries and rebalances.
+ *
+ * Base: `configuredBaseHalfWidth` (ENTRY_RANGE_HALF_WIDTH_BINS) when > 0, else
+ * the binStep tier. When `adaptiveEnabled` (VOLATILITY_ADAPTIVE_RANGES) and
+ * realized volatility has been measured, the base scales with
+ *
+ *   clamp(σ / ADAPTIVE_RANGE_REFERENCE_STDDEV, MIN_MULTIPLIER, MAX_MULTIPLIER)
+ *
+ * so high-vol regimes get wider ranges (fewer forced rebalances) and calm
+ * regimes get narrower ones (fee concentration). The result is always clamped
+ * to [MIN_ADAPTIVE_HALF_WIDTH_BINS, floor(maxFullRangeBins / 2)] so the full
+ * range never exceeds the MAX_REBALANCE_RANGE_BINS risk cap.
+ *
+ * Warmup: σ <= 0 means fewer than 2 bin snapshots (cold start) or a perfectly
+ * flat pool — both return the bounded baseline, never a fabricated jump.
+ */
+export function resolveRangeHalfWidth(args: {
+  readonly binStep: number;
+  readonly configuredBaseHalfWidth: number;
+  readonly adaptiveEnabled: boolean;
+  readonly volatilityStddev: number;
+  readonly maxFullRangeBins: number;
+}): number {
+  const base =
+    args.configuredBaseHalfWidth > 0
+      ? args.configuredBaseHalfWidth
+      : baselineHalfWidthForBinStep(args.binStep);
+  const halfCap = Math.max(MIN_ADAPTIVE_HALF_WIDTH_BINS, Math.floor(args.maxFullRangeBins / 2));
+  if (!args.adaptiveEnabled || args.volatilityStddev <= 0) {
+    return Math.min(halfCap, Math.max(MIN_ADAPTIVE_HALF_WIDTH_BINS, base));
+  }
+  const rawMultiplier = args.volatilityStddev / ADAPTIVE_RANGE_REFERENCE_STDDEV;
+  const multiplier = Math.min(
+    ADAPTIVE_RANGE_MAX_MULTIPLIER,
+    Math.max(ADAPTIVE_RANGE_MIN_MULTIPLIER, rawMultiplier),
+  );
+  const scaled = Math.round(base * multiplier);
+  return Math.min(halfCap, Math.max(MIN_ADAPTIVE_HALF_WIDTH_BINS, scaled));
 }
 
 // ─── Entry strategy shape regime pick (ENTRY_STRATEGY_TYPE=auto) ─────────────

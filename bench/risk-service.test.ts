@@ -83,6 +83,8 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     volatilityExitStddev: 5,
     volatilityLookbackSnapshots: 20,
     volatilityWideHalfWidthBins: 20,
+    entryRangeHalfWidthBins: 0,
+    volatilityAdaptiveRanges: false,
     autoCompoundFees: false,
     minCompoundFeesUsd: 1,
     compoundGasBufferUsd: 0.5,

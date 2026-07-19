@@ -73,6 +73,12 @@ export interface AppConfig {
   /** High-vol bin range width (bins each side). Wider = more breathing room. */
   readonly volatilityWideHalfWidthBins: number;
 
+  // ─── Wave 9: Volatility-adaptive range width ──────────────────────────────
+  /** Static baseline range half-width (bins each side). 0 = binStep-tiered default (25/20/15). */
+  readonly entryRangeHalfWidthBins: number;
+  /** Scale entry/rebalance range width by measured realized volatility. Default false (opt-in). */
+  readonly volatilityAdaptiveRanges: boolean;
+
   // ─── F3: Fee compounding / auto-reinvest ─────────────────────────────────────
   /** Master switch for auto-reinvest of accrued fees. */
   readonly autoCompoundFees: boolean;
@@ -295,6 +301,14 @@ const loadConfig = Effect.gen(function* () {
     "VOLATILITY_WIDE_HALF_WIDTH_BINS",
     5,
     50,
+  );
+
+  // ─── Wave 9: Volatility-adaptive range width ──────────────────────────────
+  // 0 = unset → binStep-tiered baseline (25/20/15); >0 = static base that
+  // adaptation scales. Bounded at use by the MAX_REBALANCE_RANGE_BINS cap.
+  const entryRangeHalfWidthBins = yield* validatedNumber("ENTRY_RANGE_HALF_WIDTH_BINS", 0, 0, 200);
+  const volatilityAdaptiveRanges = yield* Config.boolean("VOLATILITY_ADAPTIVE_RANGES").pipe(
+    Effect.orElseSucceed(() => false),
   );
 
   // ─── F3: Fee compounding / auto-reinvest ─────────────────────────────────────
@@ -646,6 +660,8 @@ const loadConfig = Effect.gen(function* () {
     volatilityExitStddev,
     volatilityLookbackSnapshots,
     volatilityWideHalfWidthBins,
+    entryRangeHalfWidthBins,
+    volatilityAdaptiveRanges,
     autoCompoundFees,
     minCompoundFeesUsd,
     compoundGasBufferUsd,

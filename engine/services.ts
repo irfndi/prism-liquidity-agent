@@ -282,6 +282,7 @@ export interface StrategyApi {
   readonly recommendBinRange: (
     activeBinId: number,
     binStep: number,
+    halfWidthOverride?: number,
   ) => { lowerBinId: number; upperBinId: number };
   readonly passesPreFilter: (
     pool: PoolState,

@@ -56,6 +56,8 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     volatilityExitStddev: 5,
     volatilityLookbackSnapshots: 12,
     volatilityWideHalfWidthBins: 50,
+    entryRangeHalfWidthBins: 0,
+    volatilityAdaptiveRanges: false,
     autoCompoundFees: false,
     minCompoundFeesUsd: 0.5,
     compoundGasBufferUsd: 0.05,
