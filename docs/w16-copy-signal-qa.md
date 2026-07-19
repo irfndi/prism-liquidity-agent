@@ -15,3 +15,10 @@ Observed output:
 ```
 
 This exercises boundary ingestion and the capped decision effect. The production path applies the same transform before the existing risk evaluation; paper mode still uses the existing paper executor and wallet signals never authorize transactions.
+
+Additional checks:
+
+- A disabled configuration or empty signal set returns zero boost and leaves the decision unchanged.
+- The pure transform preserves `EXIT` exactly and clamps boosts to `0.05`.
+- Malformed, stale, unauthorized, and duplicate observations are filtered before scoring; fetch timeout/HTTP/parse failures return zero boost.
+- The temporary QA script was removed after execution; no listener, database, or network mock remains.
