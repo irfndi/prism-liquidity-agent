@@ -39,7 +39,7 @@ function parseSeverity(raw: string | undefined, fallback: FeedbackSeverity): Fee
   return value as FeedbackSeverity;
 }
 
-function buildProgram(): Layer.Layer<FeedbackService | ConfigService, never, never> {
+function buildProgram(): Layer.Layer<FeedbackService | ConfigService, unknown, never> {
   return Layer.merge(
     Layer.provide(
       FeedbackLive,
