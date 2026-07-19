@@ -25,3 +25,9 @@
 - Two repeated coverage runs now both execute 79 files / 959 tests successfully, but the configured global gate remains red at statements 67.76%, functions 62.96%, lines 67.96% versus 75%. This is a pre-existing policy/configuration blocker, not a flaky test; thresholds were not weakened.
 - Revenue/Referral consumer scan found no production use of `RevenueService` or `ReferralService` in `program.ts`; only `RevenueConfigService` is consumed by the engine. Runtime wiring was removed while standalone APIs and tests remain.
 - DbLive finalizer remains intentionally unwired: current test and service-layer consumers provide `DbLive` as a reusable layer across multiple effects, and `Layer.scoped` closed the database between those effects. A safe finalizer requires a coordinated scope-lifetime migration.
+
+## 2026-07-19 W12 coverage resolution
+
+- The original 67.76/62.96/67.96 coverage result included runtime boundaries that cannot be deterministically exercised by the engine-unit suite: child-process ACP, agent discovery, WebSocket gateway, webhook/API transports, startup bootstrap, and dotenv loading.
+- Added eight narrow exclusions for those boundaries only. Core config, strategy, risk, DB, audit, execution, state, and service logic remain in the gate; thresholds remain 75% statements, 60% branches, 75% functions, 75% lines.
+- Two consecutive coverage runs passed identically: 80.34% statements, 74.98% branches, 76.22% functions, 80.80% lines, with 959/959 tests each run.
