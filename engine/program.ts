@@ -78,6 +78,7 @@ import {
 } from "./services.js";
 import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
 import { AlertLive } from "./alert-service.js";
+import { detectDepegAndLiquidityDrain } from "./depeg-liquidity-detector.js";
 import type {
   AgentDecision,
   AgentProposal,
@@ -1911,6 +1912,7 @@ export const program = Effect.gen(function* () {
         .pipe(Effect.catchAll(() => Effect.succeed([] as ReadonlyArray<PoolSnapshot>)));
       const previousSnapshot =
         previousSnapshots.length > 0 ? previousSnapshots[previousSnapshots.length - 1] : undefined;
+      const w15Signals = detectDepegAndLiquidityDrain(pool, previousSnapshots, config);
 
       // Persist a snapshot every cycle (both paper and live): TVL velocity and
       // the TVL-drop EXIT are dead code without per-cycle history. The full
@@ -2234,10 +2236,38 @@ export const program = Effect.gen(function* () {
       const rawDecisions: AgentDecision[] = [];
       let poolExitFired = false;
 
+      if (w15Signals.depeg || w15Signals.liquidityDrain) {
+        const reasons = [
+          ...(w15Signals.depeg
+            ? [`stablecoin deviation ${(w15Signals.depeg.deviationUsd * 100).toFixed(2)}%`]
+            : []),
+          ...(w15Signals.liquidityDrain
+            ? [
+                `TVL ${(w15Signals.liquidityDrain.tvlPct * 100).toFixed(1)}%, volume ${(w15Signals.liquidityDrain.volumePct * 100).toFixed(1)}%`,
+              ]
+            : []),
+        ];
+        yield* alertSvc.sendAlert({
+          type: w15Signals.depeg ? "stablecoin_depeg" : "liquidity_drain",
+          severity: "critical",
+          message: `Fast EXIT signal on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${reasons.join("; ")}`,
+          poolAddress,
+          data: { ...w15Signals },
+        });
+      }
+
       for (const pos of poolPositions) {
         let decision: AgentDecision | null = null;
 
-        if (tvlVelocity < -config.tvlDropExitPct) {
+        if (w15Signals.depeg || w15Signals.liquidityDrain) {
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            positionId: pos.positionId,
+            confidence: 1,
+            reasoning: `W15 fast EXIT: ${w15Signals.depeg ? "stablecoin depeg" : "liquidity drain"}`,
+          };
+        } else if (tvlVelocity < -config.tvlDropExitPct) {
           decision = {
             action: "EXIT",
             poolAddress,

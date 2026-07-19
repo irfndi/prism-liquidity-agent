@@ -62,6 +62,11 @@ export interface AppConfig {
   // if the env var is unset or empty.
   readonly meteoraPoolsUrl: string;
   readonly meteoraDatapiBaseUrl: string;
+  readonly stablecoinMints?: ReadonlySet<string>;
+  readonly depegAbsoluteUsd?: number;
+  readonly depegRelativePct?: number;
+  readonly liquidityDrainPct?: number;
+  readonly liquidityDrainLookbackSnapshots?: number;
 
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
   /** Estimated SOL cost of a single rebalance tx (entry + close). */
@@ -305,6 +310,23 @@ const loadConfig = Effect.gen(function* () {
   const maxRebalanceRangeBins = yield* validatedNumber("MAX_REBALANCE_RANGE_BINS", 1, 50);
   const watchlistPoolsRaw = yield* Config.string("WATCHLIST_POOLS").pipe(
     Effect.orElseSucceed(() => ""),
+  );
+  const stablecoinMintsRaw = yield* Config.string("STABLECOIN_MINTS").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const stablecoinMints = new Set(
+    stablecoinMintsRaw
+      .split(",")
+      .map((mint) => mint.trim())
+      .filter(Boolean),
+  );
+  const depegAbsoluteUsd = yield* validatedNumber("DEPEG_ABSOLUTE_USD", 0.001, 0.02);
+  const depegRelativePct = yield* validatedNumber("DEPEG_RELATIVE_PCT", 0.001, 0.02);
+  const liquidityDrainPct = yield* validatedNumber("LIQUIDITY_DRAIN_PCT", 0.01, 0.9);
+  const liquidityDrainLookbackSnapshots = yield* validatedNumber(
+    "LIQUIDITY_DRAIN_LOOKBACK_SNAPSHOTS",
+    1,
+    12,
   );
 
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
@@ -712,6 +734,11 @@ const loadConfig = Effect.gen(function* () {
     paperModeExitLive,
     meteoraPoolsUrl,
     meteoraDatapiBaseUrl,
+    stablecoinMints,
+    depegAbsoluteUsd,
+    depegRelativePct,
+    liquidityDrainPct,
+    liquidityDrainLookbackSnapshots,
 
     rebalanceGasCostSol,
     solPriceUsd,

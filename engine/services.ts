@@ -1104,7 +1104,9 @@ export type AlertType =
   | "range_warning"
   | "exit_executed"
   | "risk_rejection"
-  | "fee_milestone";
+  | "fee_milestone"
+  | "stablecoin_depeg"
+  | "liquidity_drain";
 
 export type AlertSeverity = "info" | "warning" | "critical";
 

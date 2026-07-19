@@ -31,3 +31,16 @@
 - The original 67.76/62.96/67.96 coverage result included runtime boundaries that cannot be deterministically exercised by the engine-unit suite: child-process ACP, agent discovery, WebSocket gateway, webhook/API transports, startup bootstrap, and dotenv loading.
 - Added eight narrow exclusions for those boundaries only. Core config, strategy, risk, DB, audit, execution, state, and service logic remain in the gate; thresholds remain 75% statements, 60% branches, 75% functions, 75% lines.
 - Two consecutive coverage runs passed identically: 80.34% statements, 74.98% branches, 76.22% functions, 80.80% lines, with 959/959 tests each run.
+## 2026-07-19 W15 depeg/liquidity alerts
+
+- W15 is isolated in `feat/depeg-liquidity-alerts`, based on integrated W13 commit `7b7d818`; W14 remains separately blocked by the SDK lifecycle limitation.
+- Stablecoin detection is mint-allowlist-only (`STABLECOIN_MINTS`); missing allowlist, prices, or snapshot history produce no signal. TVL and volume must both cross the configured drain threshold.
+- Fast EXIT is inserted before ordinary per-position EXIT gates, so it remains position-scoped and reaches the existing EXIT risk override, audit, paper/live execution, and AlertService cooldown path.
+- Manual detector QA: `bun -e ...` produced both `stablecoin deviation 3.00%` and `TVL -60.0%, volume -60.0%` signals from synthetic history; see `/tmp/w15-manual-qa.txt`.
+
+## 2026-07-19 W15 full-gate verification
+
+- The branch already included corrected W13 commit `7b7d818`; no W14 ancestry or code was introduced.
+- Current TypeScript 7 types require the known W13 CLI `buildProgram()` return annotations to expose `unknown` layer errors rather than `never`; this is a type-only correction in `cli/feedback.ts` and `cli/status.ts` with no CLI behavior change.
+- Full gates passed: lint, build, 968 tests, format check, changed-file oxlint, and 14 targeted detector/AlertService tests.
+- Repository manual QA is recorded in `docs/w15-manual-qa.md`; temporary runtime/DB/port cleanup was verified.
