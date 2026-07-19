@@ -76,12 +76,13 @@ describe("pnl — rewards are additive to total PnL but not to fee APR", () => {
   });
 
   it("(v) fee APR stays fee-pure (rewards excluded)", () => {
+    const now = Date.now();
     const withRewards = computePositionAnalytics(
       { ...base, cumulativeRewardsClaimedUsd: 400 },
       null,
-      Date.now(),
+      now,
     );
-    const without = computePositionAnalytics(base, null, Date.now());
+    const without = computePositionAnalytics(base, null, now);
     expect(withRewards.feeAprPct).toBeCloseTo(without.feeAprPct ?? 0, 8);
   });
 

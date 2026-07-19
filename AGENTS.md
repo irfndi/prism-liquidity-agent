@@ -369,6 +369,9 @@ In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaul
 
 ## Common gotchas
 
+- `WATCHLIST_POOLS` is parsed as comma-separated Solana public keys during configuration loading; invalid entries fail closed with the variable name and offending values. Numeric settings clamp to their configured bounds and emit a structured warning; non-finite values use the documented fallback.
+- `RevenueService` and `ReferralService` remain standalone library services with direct unit coverage, but are no longer wired into the production engine layer because the scan program has no consumers. `RevenueConfigService` remains wired for fee-share configuration.
+
 - **`bun run dev` is guarded.** Use `prism dev` or `bun cli/index.ts dev`. Set `PRISM_ALLOW_DIRECT=true` only if you deliberately need direct execution.
 - **`LOG_LEVEL` does not silence output.** `engine/logger.ts` always emits and writes to `logs/audit-trail.jsonl` regardless of level.
 - **Coverage thresholds apply only to included files.** Several large engine modules are excluded from coverage.

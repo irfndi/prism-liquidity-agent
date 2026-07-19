@@ -2,6 +2,10 @@ import { Config, Context, Effect, Layer, Option, pipe } from "effect";
 import { ConfigError } from "./errors.js";
 import { getPrismDbPath } from "./paths.js";
 import type { AgentProposalMode, EntryStrategyType } from "./types.js";
+import { PublicKey } from "@solana/web3.js";
+import { createLogger } from "./logger.js";
+
+const logger = createLogger("ConfigService");
 
 export interface AppConfig {
   readonly walletPrivateKey: string;
@@ -237,8 +241,19 @@ export class ConfigService extends Context.Tag("ConfigService")<ConfigService, A
 function validatedNumber(name: string, min: number, fallback: number, max?: number) {
   return Config.number(name).pipe(
     Effect.map((n) => {
-      if (!Number.isFinite(n) || n < min) return fallback;
-      return max !== undefined && n > max ? max : n;
+      if (!Number.isFinite(n)) {
+        logger.warn("Invalid numeric configuration; using fallback", { name, value: n, fallback });
+        return fallback;
+      }
+      if (n < min) {
+        logger.warn("Numeric configuration below minimum; clamping", { name, value: n, min });
+        return min;
+      }
+      if (max !== undefined && n > max) {
+        logger.warn("Numeric configuration above maximum; clamping", { name, value: n, max });
+        return max;
+      }
+      return n;
     }),
     Effect.orElseSucceed(() => fallback),
   );
@@ -617,6 +632,25 @@ const loadConfig = Effect.gen(function* () {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  const invalidPools = watchlistPools.filter((pool) => {
+    try {
+      new PublicKey(pool);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (invalidPools.length > 0) {
+    return yield* Effect.die(
+      new ConfigError({
+        message: `WATCHLIST_POOLS contains invalid Solana public keys: ${invalidPools.join(", ")}`,
+        issues: invalidPools.map((pool) => ({
+          path: "WATCHLIST_POOLS",
+          message: `Invalid public key: ${pool}`,
+        })),
+      }),
+    );
+  }
 
   const cfg: AppConfig = {
     walletPrivateKey,

@@ -113,6 +113,11 @@ describe("calculatePlatformFee", () => {
     expect(result.netFeeY).toBe(0);
   });
 
+  it("zero-guards invalid token prices", () => {
+    const result = calculatePlatformFee("pro", 100, 200, { x: 0, y: 1 });
+    expect(result).toEqual({ platformFeeUsd: 0, netFeeX: 100, netFeeY: 200 });
+  });
+
   it("never returns negative net fees", () => {
     // Edge case: if platform fee exceeds fee amount due to price rounding
     const result = calculatePlatformFee("fund", 1, 1, { x: 100, y: 100 });

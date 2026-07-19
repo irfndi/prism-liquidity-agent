@@ -4,6 +4,7 @@ import { createLogger } from "./logger.js";
 import type { AgentStateApi } from "./services.js";
 import { AgentStateService, McpServerService } from "./services.js";
 import type { AppConfig } from "./config-service.js";
+import { getCurrentVersion } from "./version.js";
 
 const logger = createLogger("McpServer");
 const MAX_STDIN_BUFFER_LENGTH = 65536;
@@ -143,7 +144,7 @@ export class McpServer {
       },
       serverInfo: {
         name: "prism-mcp",
-        version: "0.0.20",
+        version: getCurrentVersion(),
       },
     };
   }
