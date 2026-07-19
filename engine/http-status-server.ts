@@ -7,6 +7,7 @@ import type { AppConfig } from "./config-service.js";
 import type { PrismStateSnapshot } from "./state-service.js";
 import type { AgentProposal } from "./types.js";
 import { parseHttpQueueProposal, ProposalParseError } from "./proposal-schema.js";
+import { getCurrentVersion } from "./version.js";
 
 const logger = createLogger("HttpStatusServer");
 
@@ -338,7 +339,7 @@ export class HttpStatusServer {
             return Response.json({
               ok: true,
               uptimeMs: Date.now() - snapshot.programStartTime,
-              version: "0.0.20",
+              version: getCurrentVersion(),
             });
           }
 

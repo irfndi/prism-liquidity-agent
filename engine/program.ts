@@ -30,9 +30,7 @@ import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
 import { ScreenerLive } from "./screener-service.js";
 import { DbLive } from "./db-service.js";
-import { RevenueLive } from "./revenue-service.js";
 import { RevenueConfigServiceLive } from "./revenue-config-service.js";
-import { ReferralLive } from "./referral-service.js";
 import { AgentStateMutable, initialSnapshot, type PositionSnapshot } from "./state-service.js";
 import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
@@ -549,9 +547,7 @@ type AllServices =
   | AuditService
   | ScreenerService
   | DbService
-  | RevenueService
   | RevenueConfigService
-  | ReferralService
   | AgentService
   | AgentStateService
   | McpServerService
@@ -606,9 +602,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged6 = Layer.merge(merged5, audit);
   const merged7 = Layer.merge(merged6, screener);
   const merged8 = Layer.merge(merged7, configLayer);
-  const merged9 = Layer.merge(merged8, RevenueLive);
-  const merged10 = Layer.merge(merged9, ReferralLive);
-  const merged11 = Layer.merge(merged10, revenueConfig);
+  const merged11 = Layer.merge(merged8, revenueConfig);
   const merged11a = Layer.merge(merged11, entryPrep);
   const merged11b = Layer.merge(merged11a, meteoraDatapi);
 
@@ -1286,7 +1280,6 @@ export const program = Effect.gen(function* () {
   const screener = yield* ScreenerService;
   const db = yield* DbService;
   const revenueConfigSvc = yield* RevenueConfigService;
-  const referral = yield* ReferralService;
   const agent = yield* AgentService;
   const agentState = yield* AgentStateService;
   const mcpServer = yield* McpServerService;
@@ -1320,7 +1313,7 @@ export const program = Effect.gen(function* () {
   const pushBinHistory = (poolAddress: string, activeBinId: number): void => {
     const arr = binHistory.get(poolAddress) ?? [];
     arr.push(activeBinId);
-    if (arr.length > binHistoryCap) arr.shift();
+    while (arr.length > binHistoryCap) arr.shift();
     binHistory.set(poolAddress, arr);
   };
 

@@ -97,6 +97,23 @@ describe("AuditService", () => {
     expect(recent).toHaveLength(2);
   });
 
+  it("keeps same-cycle same-millisecond decisions unique", () => {
+    testId++;
+    const layer = makeLayer();
+    const api = run(
+      Effect.gen(function* () {
+        return yield* AuditService;
+      }),
+      layer,
+    );
+    const record = makeRecord({ timestamp: 1234 });
+
+    run(api.recordDecision(record), layer);
+    run(api.recordDecision(record), layer);
+
+    expect(run(api.getRecentDecisions(10), layer)).toHaveLength(2);
+  });
+
   it("returns empty array when no records", () => {
     testId++;
     const layer = makeLayer();

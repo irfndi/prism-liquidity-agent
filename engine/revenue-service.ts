@@ -62,6 +62,14 @@ export function calculatePlatformFee(
   if (!tierConfig) {
     return { platformFeeUsd: 0, netFeeX: feeXAmount, netFeeY: feeYAmount };
   }
+  if (
+    !Number.isFinite(tokenPrices.x) ||
+    !Number.isFinite(tokenPrices.y) ||
+    tokenPrices.x <= 0 ||
+    tokenPrices.y <= 0
+  ) {
+    return { platformFeeUsd: 0, netFeeX: feeXAmount, netFeeY: feeYAmount };
+  }
   const totalFeeUsd = feeXAmount * tokenPrices.x + feeYAmount * tokenPrices.y;
   const platformFeeUsd = totalFeeUsd * tierConfig.platformFeeRate;
 
