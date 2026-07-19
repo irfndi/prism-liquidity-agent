@@ -1,0 +1,9 @@
+W11 manual QA artifact, 2026-07-19
+
+Command:
+PRISM_ALLOW_DIRECT=true bun ops/backtest.ts --days 0.01 --pools Pool111111111111111111111111111111111111111
+
+Observed:
+- CLI started the synthetic backtest and printed the limitations banner.
+- Results table contained all four configurations.
+- Best config summary was emitted with net PnL, win rate, and rebalance count.

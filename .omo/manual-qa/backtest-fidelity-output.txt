@@ -1,0 +1,32 @@
+2026-07-19T05:33:27.717Z [33m[WARN ][0m [35m[Backtest][0m ═══════════════════════════════════════════════════════════════ 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m   BACKTEST LIMITATIONS — read before interpreting results 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m ═══════════════════════════════════════════════════════════════ 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m   • TVL is CONSTANT per pool (current snapshot, not historical). 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m     Position share, APR, and volume-auth checks use stale TVL. 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m   • Replay uses the shared risk kernel for ENTER sizing, confidence, 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m     allocation, and trailing-stop EXIT decisions. 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m     Live-only effects remain unavailable: memory retrieval/persistence, 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m     agent proposals, gas/recovery gates, and on-chain execution. 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m   • Each pool runs independently with $10K. Total PnL is the 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m     sum of 6 independent portfolios ($60K deployed, not $10K). 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m   • Synthetic bins (all liquiditySupply=1n) make binUtil=1.0 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m     always, so the binUtil pre-filter is a no-op. 
+2026-07-19T05:33:27.719Z [33m[WARN ][0m [35m[Backtest][0m   • NO TOKEN PRICE DEPRECIATION: the backtest models no 
+2026-07-19T05:33:27.720Z [33m[WARN ][0m [35m[Backtest][0m     mechanism for the underlying token value to decrease. 
+2026-07-19T05:33:27.720Z [33m[WARN ][0m [35m[Backtest][0m     Portfolio value only changes through fee accrual (+), 
+2026-07-19T05:33:27.720Z [33m[WARN ][0m [35m[Backtest][0m     rebalancing IL (-), and force-exit penalties (-). A pool 
+2026-07-19T05:33:27.720Z [33m[WARN ][0m [35m[Backtest][0m     for a token that dropped 90% would still show positive 
+2026-07-19T05:33:27.720Z [33m[WARN ][0m [35m[Backtest][0m     returns. The reported PnL is a meaningful overestimate. 
+2026-07-19T05:33:27.720Z [33m[WARN ][0m [35m[Backtest][0m ═══════════════════════════════════════════════════════════════ 
+2026-07-19T05:33:27.720Z [36m[INFO ][0m [35m[Backtest][0m 
+=== Pool: Pool111111111111111111111111111111111111111 (source=synthetic, days=0.01) ===
+ 
+2026-07-19T05:33:27.722Z [36m[INFO ][0m [35m[Backtest][0m Results table: [{"Config":"C1-conservative","Net PnL":"$0","Fees":"$0","IL":"$0","Rebal":0,"Win %":"0%","Sharpe":"162.11"},{"Config":"C2-balanced","Net PnL":"$0","Fees":"$0","IL":"$0","Rebal":0,"Win %":"0%","Sharpe":"162.11"},{"Config":"C3-aggressive","Net PnL":"$0","Fees":"$0","IL":"$0","Rebal":0,"Win %":"0%","Sharpe":"162.11"},{"Config":"C4-wide-patient","Net PnL":"$0","Fees":"$0","IL":"$0","Rebal":0,"Win %":"0%","Sharpe":"162.11"}] 
+2026-07-19T05:33:27.722Z [36m[INFO ][0m [35m[Backtest][0m Best config {
+  pool: "Pool111111111111111111111111111111111111111",
+  config: "C1-conservative",
+  netPnlUsd: "0.20",
+  winRate: "0.0%",
+  rebalances: 0,
+}
+2026-07-19T05:33:27.723Z [36m[INFO ][0m [35m[Backtest][0m   Best: C1-conservative (net=$0) 
