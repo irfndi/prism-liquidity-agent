@@ -37,6 +37,17 @@ describe("ConfigService upper-bound clamping", () => {
     expect(cfg.solPriceUsd).toBe(200);
     expect(cfg.maxPerPoolAllocationPct).toBe(0.5);
   });
+
+  it("clamps values below the minimum instead of accepting an unsafe range", async () => {
+    vi.stubEnv("PAPER_PORTFOLIO_USD", "-1");
+    const cfg = await loadConfig();
+    expect(cfg.paperPortfolioUsd).toBe(1);
+  });
+
+  it("rejects invalid watchlist public keys with an actionable config error", async () => {
+    vi.stubEnv("WATCHLIST_POOLS", "not-a-public-key");
+    await expect(loadConfig()).rejects.toThrow("WATCHLIST_POOLS");
+  });
 });
 
 describe("ConfigService ENTRY_STRATEGY_TYPE", () => {
