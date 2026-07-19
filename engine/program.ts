@@ -3741,6 +3741,46 @@ export const program = Effect.gen(function* () {
 
           yield* alertSvc.recordFeeClaim(poolAddress, netFeesUsd);
 
+          const feeDestination = config.feeDestination ?? "compound";
+          if (feeDestination !== "compound") {
+            const liveConversion = adapter.convertClaimedFees
+              ? adapter
+                  .convertClaimedFees(poolAddress, feeDestination, result.netFeeX, result.netFeeY)
+                  .pipe(Effect.catchAll(() => Effect.succeed(null)))
+              : Effect.succeed(null);
+            const conversion = config.paperTrading
+              ? Effect.succeed({
+                  destination: feeDestination,
+                  outputAtomic: 0n,
+                  outputUsd: null,
+                  txSignatures: [] as ReadonlyArray<string>,
+                })
+              : liveConversion;
+            const converted = yield* conversion;
+            if (converted) {
+              yield* db
+                .savePositionEvent({
+                  id: randomUUID(),
+                  poolAddress,
+                  positionPubKey: pos.positionPubKey,
+                  positionId: pos.positionId,
+                  event: "CLAIM",
+                  valueUsd: converted.outputUsd,
+                  feesUsd: null,
+                  price: null,
+                  metadata: {
+                    kind: "fee_accumulation",
+                    destination: converted.destination,
+                    outputAtomic: converted.outputAtomic.toString(),
+                    txSignatures: converted.txSignatures,
+                  },
+                  createdAt: Date.now(),
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+            }
+            continue;
+          }
+
           // F3: fee compounding — if AUTO_COMPOUND_FEES is on and the net fees
           // cleared the cost threshold, redeposit them into the same range.
           // This closes + reopens the position around the same bins so the

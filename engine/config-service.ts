@@ -7,6 +7,8 @@ import { createLogger } from "./logger.js";
 
 const logger = createLogger("ConfigService");
 
+export type FeeDestination = "compound" | "accumulate-quote" | "accumulate-sol";
+
 export interface AppConfig {
   readonly walletPrivateKey: string;
   readonly heliusApiKey: string;
@@ -90,6 +92,7 @@ export interface AppConfig {
   readonly minCompoundFeesUsd: number;
   /** Buffer (USD) added to the gas cost when evaluating compound worth-it. */
   readonly compoundGasBufferUsd: number;
+  readonly feeDestination?: FeeDestination;
 
   // ─── F4: OOR recovery prediction ─────────────────────────────────────────────
   /** # cycles of bin history used to estimate mean-reversion. */
@@ -340,6 +343,19 @@ const loadConfig = Effect.gen(function* () {
   );
   const minCompoundFeesUsd = yield* validatedNumber("MIN_COMPOUND_FEES_USD", 0, 0.5);
   const compoundGasBufferUsd = yield* validatedNumber("COMPOUND_GAS_BUFFER_USD", 0, 0.05);
+  const feeDestination: FeeDestination = yield* Config.string("FEE_DESTINATION").pipe(
+    Config.withDefault("compound"),
+    Effect.flatMap((value) =>
+      value === "compound" || value === "accumulate-quote" || value === "accumulate-sol"
+        ? Effect.succeed(value)
+        : Effect.fail(
+            new ConfigError({
+              message: `FEE_DESTINATION must be compound, accumulate-quote, or accumulate-sol; got ${value}`,
+            }),
+          ),
+    ),
+    Effect.map((value) => value as FeeDestination),
+  );
 
   // ─── F4: OOR recovery prediction ─────────────────────────────────────────────
   const oorRecoveryLookbackCycles = yield* validatedNumber("OOR_RECOVERY_LOOKBACK_CYCLES", 3, 10);
@@ -708,6 +724,7 @@ const loadConfig = Effect.gen(function* () {
     autoCompoundFees,
     minCompoundFeesUsd,
     compoundGasBufferUsd,
+    feeDestination,
     oorRecoveryLookbackCycles,
     oorRecoveryHoldThreshold,
     oorRecoveryForceRebalanceThreshold,

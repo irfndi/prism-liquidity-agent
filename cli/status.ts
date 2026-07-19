@@ -38,7 +38,7 @@ export interface StatusJsonOutput {
   }>;
 }
 
-function buildProgram(): Layer.Layer<DbService | AuditService | ConfigService, never, never> {
+function buildProgram() {
   const dbPath = process.env.SQLITE_DB_PATH ?? getPrismDbPath();
   const dbLayer = DbLive(dbPath);
   const auditLayer = Layer.provide(AuditLive, dbLayer);
