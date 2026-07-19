@@ -18,6 +18,7 @@ import { DLMMStrategy } from "../engine/strategy-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 import type { BacktestResult, BinArray, PoolSnapshot, PoolState } from "../engine/types.js";
+import { evaluateReplayPool } from "../engine/cycle/evaluate-pool.js";
 
 const log = createLogger("Backtest");
 
@@ -170,7 +171,7 @@ interface BacktestConfig {
   maxRebalances: number;
 }
 
-function runBacktestFromTicks(
+export function runBacktestFromTicks(
   ticks: ReadonlyArray<HistoryTick>,
   cfg: BacktestConfig,
 ): BacktestResult {
@@ -204,7 +205,9 @@ function runBacktestFromTicks(
   let previousTvl = ticks[0]!.pool.tvlUsd;
   let currentLowerBinId = ticks[0]!.pool.activeBinId - cfg.halfWidth;
   let currentUpperBinId = ticks[0]!.pool.activeBinId + cfg.halfWidth;
-  let hasPosition = true;
+  let hasPosition = false;
+  let positionSizeUsd = 0;
+  let positionPeakUsd = 0;
   let lastRebalanceTick = -cfg.minHoldTicks;
 
   const strategyReturns: number[] = [0];
@@ -234,9 +237,54 @@ function runBacktestFromTicks(
 
     const inRange =
       tick.pool.activeBinId >= currentLowerBinId && tick.pool.activeBinId <= currentUpperBinId;
-    const feesThisTick = inRange ? feesForTick(tick) : 0;
+    const feesThisTick = hasPosition && inRange ? feesForTick(tick) : 0;
     totalFees += feesThisTick;
     portfolioValue += feesThisTick;
+
+    const replayPosition = hasPosition
+      ? {
+          poolAddress: tick.pool.address,
+          lowerBinId: currentLowerBinId,
+          upperBinId: currentUpperBinId,
+          depositedUsd: positionSizeUsd,
+          currentValueUsd: inRange ? positionSizeUsd : positionSizeUsd * 0.8,
+          highestValueUsd: positionPeakUsd,
+        }
+      : undefined;
+    const replay = evaluateReplayPool({
+      poolAddress: tick.pool.address,
+      activeBinId: tick.pool.activeBinId,
+      metrics,
+      position: replayPosition,
+      portfolioValueUsd: portfolioValue,
+      recentPnlUsd: portfolioValue - initialValue,
+      memoryWarningCount: 0,
+      confidenceThreshold: 0.65,
+      trailingStopPct: 0.1,
+      risk: {
+        confidenceThreshold: 0.65,
+        maxRebalanceRangeBins: cfg.halfWidth * 2,
+        stopLossPct: 0.15,
+        maxPerPoolAllocationPct: 0.4,
+      },
+      proposedSizeUsd: Math.min(portfolioValue * 0.2, 2_000),
+    });
+    if (!replay.riskApproved) {
+      previousTvl = tick.pool.tvlUsd;
+      strategyReturns.push(0);
+      continue;
+    }
+    if (replay.decision.action === "ENTER") {
+      hasPosition = true;
+      positionSizeUsd = replay.adjustedSizeUsd;
+      positionPeakUsd = positionSizeUsd;
+    } else if (replay.decision.action === "EXIT") {
+      hasPosition = false;
+      positionSizeUsd = 0;
+      positionPeakUsd = 0;
+    } else if (hasPosition) {
+      positionPeakUsd = Math.max(positionPeakUsd, replayPosition?.currentValueUsd ?? 0);
+    }
 
     const positionCenter = (currentLowerBinId + currentUpperBinId) / 2;
     const positionHalfWidth = (currentUpperBinId - currentLowerBinId) / 2 || 1;
@@ -339,9 +387,10 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
   log.warn("═══════════════════════════════════════════════════════════════");
   log.warn("  • TVL is CONSTANT per pool (current snapshot, not historical).");
   log.warn("    Position share, APR, and volume-auth checks use stale TVL.");
-  log.warn("  • This is a simplified rebalancing simulation, NOT the live");
-  log.warn("    agent. Missing: EXIT on fee/IL, trailing stop, ENTER logic,");
-  log.warn("    risk gates, memory, position sizing, dynamic bin ranges.");
+  log.warn("  • Replay uses the shared risk kernel for ENTER sizing, confidence,");
+  log.warn("    allocation, and trailing-stop EXIT decisions.");
+  log.warn("    Live-only effects remain unavailable: memory retrieval/persistence,");
+  log.warn("    agent proposals, gas/recovery gates, and on-chain execution.");
   log.warn("  • Each pool runs independently with $10K. Total PnL is the");
   log.warn("    sum of 6 independent portfolios ($60K deployed, not $10K).");
   log.warn("  • Synthetic bins (all liquiditySupply=1n) make binUtil=1.0");
