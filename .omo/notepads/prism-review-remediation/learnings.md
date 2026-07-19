@@ -9,3 +9,4 @@
 - W10 PR #104 remains open on `feat/multi-position`; W11 was rebased onto that branch and PR #105 is now a stacked dependency instead of silently targeting W9 `main`.
 - W10 `RiskConfig.maxPositionsPerPool` is required by the production risk service. Replay now passes that field and represents open positions with `positionPubKey` identity plus aggregate position input.
 - The parity regression uses the same recorded snapshot-shaped position/range/value state for replay and production `evaluateRisk`, covering a trailing-stop EXIT; a second case proves the W10 per-pool cap rejects ENTER.
+- Probe results: `git status` is clean after the stacked push; `main..HEAD` visibly includes the three W10 commits; CLI output labels stale-TVL/price limitations and live-only gaps instead of claiming full fidelity. No long-running process or generated state remained to probe for interruption cleanup.
