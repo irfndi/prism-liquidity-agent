@@ -3253,6 +3253,25 @@ export const program = Effect.gen(function* () {
           };
         }
 
+        const copySignalResult =
+          copySignalsOption._tag === "Some"
+            ? yield* copySignalsOption.value.getBoost(poolAddress, Date.now())
+            : { boost: 0, wallets: [], ignored: 0 };
+        if (copySignalResult.boost > 0 && decision.action !== "EXIT") {
+          decision = applyCopySignalBoost(
+            decision,
+            copySignalResult,
+            config.copySignalsMaxBoost ?? 0.05,
+          );
+          logger.info("Applied bounded copy-trading signal boost", {
+            pool: poolAddress,
+            boost: copySignalResult.boost,
+            wallets: copySignalResult.wallets.length,
+            ignored: copySignalResult.ignored,
+            paperTrading: config.paperTrading,
+          });
+        }
+
         // Risk evaluation. HOLD executes nothing, so risk gates are skipped for
         // it — every rejection used to write a 60-day warning memory, and those
         // warnings then suppressed the good-HOLD branch (hasRecentWarning),
