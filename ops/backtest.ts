@@ -169,6 +169,7 @@ interface BacktestConfig {
   minHoldTicks: number;
   minNetBenefitUsd: number;
   maxRebalances: number;
+  maxPositionsPerPool: number;
 }
 
 export function runBacktestFromTicks(
@@ -244,6 +245,7 @@ export function runBacktestFromTicks(
     const replayPosition = hasPosition
       ? {
           poolAddress: tick.pool.address,
+          positionPubKey: `replay-${tick.pool.address}`,
           lowerBinId: currentLowerBinId,
           upperBinId: currentUpperBinId,
           depositedUsd: positionSizeUsd,
@@ -256,6 +258,7 @@ export function runBacktestFromTicks(
       activeBinId: tick.pool.activeBinId,
       metrics,
       position: replayPosition,
+      openPositions: replayPosition ? [replayPosition] : [],
       portfolioValueUsd: portfolioValue,
       recentPnlUsd: portfolioValue - initialValue,
       memoryWarningCount: 0,
@@ -266,6 +269,7 @@ export function runBacktestFromTicks(
         maxRebalanceRangeBins: cfg.halfWidth * 2,
         stopLossPct: 0.15,
         maxPerPoolAllocationPct: 0.4,
+        maxPositionsPerPool: cfg.maxPositionsPerPool,
       },
       proposedSizeUsd: Math.min(portfolioValue * 0.2, 2_000),
     });
@@ -412,6 +416,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
         minHoldTicks: 144,
         minNetBenefitUsd: 15,
         maxRebalances: 20,
+        maxPositionsPerPool: 2,
       },
     },
     {
@@ -422,6 +427,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
         minHoldTicks: 72,
         minNetBenefitUsd: 10,
         maxRebalances: 30,
+        maxPositionsPerPool: 2,
       },
     },
     {
@@ -432,6 +438,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
         minHoldTicks: 36,
         minNetBenefitUsd: 5,
         maxRebalances: 50,
+        maxPositionsPerPool: 2,
       },
     },
     {
@@ -442,6 +449,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
         minHoldTicks: 288,
         minNetBenefitUsd: 25,
         maxRebalances: 10,
+        maxPositionsPerPool: 2,
       },
     },
   ];
