@@ -136,6 +136,11 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     meteoraPoolsUrl:
       "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc",
     meteoraDatapiBaseUrl: "https://dlmm.datapi.meteora.ag",
+    stablecoinMints: new Set(),
+    depegAbsoluteUsd: 0.02,
+    depegRelativePct: 0.02,
+    liquidityDrainPct: 0.5,
+    liquidityDrainLookbackSnapshots: 2,
     rebalanceGasCostSol: 0.01,
     solPriceUsd: 150,
     gasAwareMinDaysOfFeesPaidAhead: 3,
