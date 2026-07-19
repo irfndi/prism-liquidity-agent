@@ -176,6 +176,20 @@ export interface AdapterApi {
     },
     unknown
   >;
+  readonly convertClaimedFees?: (
+    poolAddress: string,
+    destination: "accumulate-quote" | "accumulate-sol",
+    feeX: number,
+    feeY: number,
+  ) => Effect.Effect<
+    {
+      destination: "accumulate-quote" | "accumulate-sol";
+      outputAtomic: bigint;
+      outputUsd: number | null;
+      txSignatures: ReadonlyArray<string>;
+    },
+    unknown
+  >;
   /**
    * Claim LM farm rewards for a position via the SDK's claimAllLMRewards
    * (LM-only — never the combined fee+reward claim, which would move swap

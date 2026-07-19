@@ -1014,11 +1014,12 @@ export const AdapterLive = Layer.effect(
 
     function quoteMatchesRequest(
       quoteData: Record<string, unknown>,
+      inputMint: string,
       outputMint: string,
       amountAtomic: bigint,
     ): boolean {
-      const inputMint = quoteData.inputMint;
-      if (inputMint !== USDC_MINT) return false;
+      const quoteInputMint = quoteData.inputMint;
+      if (quoteInputMint !== inputMint) return false;
       const quoteOutputMint = quoteData.outputMint;
       if (quoteOutputMint !== outputMint) return false;
       const inAmount = quoteData.inAmount;
@@ -1085,6 +1086,44 @@ export const AdapterLive = Layer.effect(
       });
     }
 
+    function quoteSwapToken(
+      inputMint: string,
+      outputMint: string,
+      amountAtomic: bigint,
+    ): Effect.Effect<Record<string, unknown>, unknown> {
+      return Effect.gen(function* () {
+        if (!wallet)
+          return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
+        if (amountAtomic <= 0n)
+          return yield* Effect.fail(
+            new SwapQuoteError({ message: "Cannot quote non-positive fee amount" }),
+          );
+        const apiKey = process.env.JUPITER_API_KEY?.trim() ?? "";
+        const response = yield* Effect.tryPromise(() =>
+          fetch(
+            `https://api.jup.ag/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountAtomic.toString()}&slippageBps=50&asLegacyTransaction=true`,
+            {
+              headers: apiKey
+                ? { "Content-Type": "application/json", "x-api-key": apiKey }
+                : undefined,
+              signal: AbortSignal.timeout(10_000),
+            },
+          ),
+        );
+        if (!response.ok)
+          return yield* Effect.fail(
+            new SwapQuoteError({ message: `Jupiter quote failed: ${response.status}` }),
+          );
+        const quote = (yield* Effect.tryPromise(() => response.json())) as Record<string, unknown>;
+        if (!quoteMatchesRequest(quote, inputMint, outputMint, amountAtomic)) {
+          return yield* Effect.fail(
+            new SwapQuoteError({ message: "Jupiter quote returned no validated route" }),
+          );
+        }
+        return quote;
+      });
+    }
+
     function swapUSDCForToken(
       outputMint: string,
       amountAtomic: bigint,
@@ -1110,7 +1149,10 @@ export const AdapterLive = Layer.effect(
         const quoteData =
           prefetchedQuote ?? (yield* quoteSwapUSDCForToken(outputMint, amountAtomic));
 
-        if (prefetchedQuote && !quoteMatchesRequest(quoteData, outputMint, amountAtomic)) {
+        if (
+          prefetchedQuote &&
+          !quoteMatchesRequest(quoteData, USDC_MINT, outputMint, amountAtomic)
+        ) {
           return yield* Effect.fail(
             new AdapterError({
               message: `Prefetched Jupiter quote does not match request: outputMint=${outputMint}, amount=${amountAtomic.toString()}`,
@@ -1164,6 +1206,62 @@ export const AdapterLive = Layer.effect(
         yield* rpcCall((conn) => conn.confirmTransaction(sig, "confirmed"));
         yield* invalidateBalanceCaches;
         return sig;
+      });
+    }
+
+    function swapToken(
+      inputMint: string,
+      outputMint: string,
+      amountAtomic: bigint,
+      quoteData?: Record<string, unknown>,
+    ): Effect.Effect<string, unknown> {
+      return Effect.gen(function* () {
+        if (!wallet)
+          return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
+        const quote = quoteData ?? (yield* quoteSwapToken(inputMint, outputMint, amountAtomic));
+        if (!quoteMatchesRequest(quote, inputMint, outputMint, amountAtomic)) {
+          return yield* Effect.fail(
+            new AdapterError({ message: "Validated Jupiter quote does not match fee conversion" }),
+          );
+        }
+        const apiKey = process.env.JUPITER_API_KEY?.trim() ?? "";
+        const response = yield* Effect.tryPromise(() =>
+          fetch("https://api.jup.ag/swap/v1/swap", {
+            method: "POST",
+            headers: apiKey
+              ? { "Content-Type": "application/json", "x-api-key": apiKey }
+              : { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              quoteResponse: quote,
+              userPublicKey: wallet!.publicKey.toBase58(),
+              wrapAndUnwrapSol: true,
+              asLegacyTransaction: true,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          }),
+        );
+        if (!response.ok)
+          return yield* Effect.fail(
+            new AdapterError({ message: `Jupiter fee conversion failed: ${response.status}` }),
+          );
+        const data = (yield* Effect.tryPromise(() => response.json())) as {
+          swapTransaction?: string;
+        };
+        if (!data.swapTransaction)
+          return yield* Effect.fail(
+            new AdapterError({ message: "Jupiter fee conversion returned no transaction" }),
+          );
+        const transaction = Transaction.from(Buffer.from(data.swapTransaction, "base64"));
+        transaction.sign(wallet);
+        const signature = yield* rpcCall((conn) =>
+          conn.sendRawTransaction(transaction.serialize(), {
+            skipPreflight: false,
+            preflightCommitment: "confirmed",
+          }),
+        );
+        yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
+        yield* invalidateBalanceCaches;
+        return signature;
       });
     }
 
@@ -2053,6 +2151,59 @@ export const AdapterLive = Layer.effect(
             ),
           ),
         ),
+
+      convertClaimedFees: (poolAddress, destination, feeX, feeY) =>
+        Effect.gen(function* () {
+          if (!wallet)
+            return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
+          if (feeX <= 0 && feeY <= 0)
+            return yield* Effect.fail(
+              new AdapterError({ message: "Cannot convert zero claimed fees" }),
+            );
+          const dlmm = yield* getDlmm(poolAddress);
+          const inputMints = [dlmm.lbPair.tokenXMint.toBase58(), dlmm.lbPair.tokenYMint.toBase58()];
+          const targetMint = destination === "accumulate-sol" ? SOL_MINT : USDC_MINT;
+          const amounts = [feeX, feeY];
+          const signatures: string[] = [];
+          let outputAtomic = 0n;
+          for (let index = 0; index < inputMints.length; index += 1) {
+            const inputMint = inputMints[index];
+            const amount = amounts[index];
+            if (!inputMint || amount === undefined || amount <= 0) continue;
+            if (inputMint === targetMint) {
+              outputAtomic += BigInt(Math.trunc(amount));
+              continue;
+            }
+            const quote = yield* quoteSwapToken(inputMint, targetMint, BigInt(Math.trunc(amount)));
+            const quotedOutput = quote.outAmount;
+            if (
+              typeof quotedOutput !== "string" ||
+              !/^\d+$/.test(quotedOutput) ||
+              quotedOutput === "0"
+            ) {
+              return yield* Effect.fail(
+                new AdapterError({ message: "Jupiter fee conversion returned invalid output" }),
+              );
+            }
+            signatures.push(
+              yield* swapToken(inputMint, targetMint, BigInt(Math.trunc(amount)), quote),
+            );
+            outputAtomic += BigInt(quotedOutput);
+          }
+          if (outputAtomic === 0n)
+            return yield* Effect.fail(
+              new AdapterError({ message: "No supported fee token was converted" }),
+            );
+          const prices = yield* fetchTokenPrices([targetMint]);
+          const decimals = yield* getTokenMeta(targetMint).pipe(
+            Effect.map((meta) => meta.decimals),
+          );
+          const outputUsd =
+            prices[targetMint] === undefined
+              ? null
+              : (Number(outputAtomic) / 10 ** decimals) * prices[targetMint];
+          return { destination, outputAtomic, outputUsd, txSignatures: signatures };
+        }),
 
       claimRewards: (poolAddress, positionPubKey) =>
         Effect.gen(function* () {
