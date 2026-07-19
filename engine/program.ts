@@ -66,6 +66,7 @@ import {
   EntryPrepService,
   MeteoraDatapiService,
   AlertService,
+  CopySignalService,
   type AdapterApi,
   type DbApi,
   type MemoryApi,
@@ -79,6 +80,7 @@ import {
 import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
 import { AlertLive } from "./alert-service.js";
 import { detectDepegAndLiquidityDrain } from "./depeg-liquidity-detector.js";
+import { CopySignalLive, applyCopySignalBoost } from "./copy-trading-signals.js";
 import type {
   AgentDecision,
   AgentProposal,
@@ -555,7 +557,8 @@ type AllServices =
   | HttpStatusServerService
   | EntryPrepService
   | MeteoraDatapiService
-  | AlertService;
+  | AlertService
+  | CopySignalService;
 
 export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, never> {
   const dbLayer = DbLive(cfg?.sqliteDbPath);
@@ -633,8 +636,10 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const alertDeps = Layer.merge(dbLayer, configLayer);
   const alertLayer = Layer.provide(AlertLive, alertDeps);
   const merged16 = Layer.merge(merged15, alertLayer);
+  const copySignalLayer = Layer.provide(CopySignalLive, configLayer);
+  const merged17 = Layer.merge(merged16, copySignalLayer);
 
-  return merged16 as Layer.Layer<AllServices, never, never>;
+  return merged17 as Layer.Layer<AllServices, never, never>;
 }
 
 // ─── Paper execution ─────────────────────────────────────────────────────────
@@ -1287,6 +1292,7 @@ export const program = Effect.gen(function* () {
   const httpStatusServer = yield* HttpStatusServerService;
   const meteoraDatapi = yield* MeteoraDatapiService;
   const alertSvc = yield* AlertService;
+  const copySignalsOption = yield* Effect.serviceOption(CopySignalService);
 
   // Load persisted positions at startup (keyed by position identity — a pool
   // may hold several positions).
@@ -3245,6 +3251,25 @@ export const program = Effect.gen(function* () {
             action: "HOLD",
             reasoning: `Supervised mode: awaiting approved proposal (held ${decision.action}: ${decision.reasoning})`,
           };
+        }
+
+        const copySignalResult =
+          copySignalsOption._tag === "Some"
+            ? yield* copySignalsOption.value.getBoost(poolAddress, Date.now())
+            : { boost: 0, wallets: [], ignored: 0 };
+        if (copySignalResult.boost > 0 && decision.action !== "EXIT") {
+          decision = applyCopySignalBoost(
+            decision,
+            copySignalResult,
+            config.copySignalsMaxBoost ?? 0.05,
+          );
+          logger.info("Applied bounded copy-trading signal boost", {
+            pool: poolAddress,
+            boost: copySignalResult.boost,
+            wallets: copySignalResult.wallets.length,
+            ignored: copySignalResult.ignored,
+            paperTrading: config.paperTrading,
+          });
         }
 
         // Risk evaluation. HOLD executes nothing, so risk gates are skipped for

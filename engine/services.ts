@@ -44,6 +44,7 @@ import type {
   RiskError,
   ScreenerError,
 } from "./errors.js";
+import type { CopySignalApi } from "./copy-trading-signals.js";
 
 // ─── Adapter Service ─────────────────────────────────────────────────────────
 
@@ -1139,6 +1140,11 @@ export interface AlertApi {
 }
 
 export class AlertService extends Context.Tag("AlertService")<AlertService, AlertApi>() {}
+
+export class CopySignalService extends Context.Tag("CopySignalService")<
+  CopySignalService,
+  CopySignalApi
+>() {}
 
 // ─── MCP Server Service ──────────────────────────────────────────────────────
 
