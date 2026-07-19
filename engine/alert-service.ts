@@ -42,7 +42,10 @@ function readInstallId(): string | null {
 }
 
 function cooldownKey(alert: EngineAlert): string {
-  return `${COOLDOWN_KEY_PREFIX}${alert.type}:${alert.poolAddress ?? "global"}`;
+  const base = `${COOLDOWN_KEY_PREFIX}${alert.type}:${alert.poolAddress ?? "global"}`;
+  // Position-originated alerts throttle per position: two positions on the
+  // same pool (e.g. a tight+wide pair) must not suppress each other's OOR.
+  return alert.positionId !== undefined ? `${base}:${alert.positionId}` : base;
 }
 
 function parseNumber(raw: string | null): number | null {
@@ -70,6 +73,7 @@ function postAlert(
         severity: alert.severity,
         message: alert.message,
         ...(alert.poolAddress !== undefined ? { poolAddress: alert.poolAddress } : {}),
+        ...(alert.positionId !== undefined ? { positionId: alert.positionId } : {}),
         ...(alert.data !== undefined ? { data: alert.data } : {}),
       }),
       signal: AbortSignal.timeout(ALERT_POST_TIMEOUT_MS),

@@ -57,6 +57,7 @@ function makeMockMemory(): MemoryApi {
 
 function makePosition(poolAddress: string, positionPubKey: string | null): PositionRecord {
   return {
+    positionId: positionPubKey ?? `paper-${poolAddress}`,
     poolAddress,
     positionPubKey,
     depositedUsd: 1000,
@@ -98,8 +99,8 @@ describe("reconcilePositions — integration", () => {
         });
         const memory = makeMockMemory();
         const trackedPositions = new Map<string, PositionRecord>();
-        trackedPositions.set("pool1", makePosition("pool1", "pubkey1"));
-        trackedPositions.set("pool2", makePosition("pool2", "pubkey2"));
+        trackedPositions.set("pubkey1", makePosition("pool1", "pubkey1"));
+        trackedPositions.set("pubkey2", makePosition("pool2", "pubkey2"));
 
         yield* db.savePosition(makePosition("pool1", "pubkey1"));
         yield* db.savePosition(makePosition("pool2", "pubkey2"));
@@ -110,8 +111,8 @@ describe("reconcilePositions — integration", () => {
         ]);
 
         expect(reconciled.succeeded).toBe(true);
-        expect(trackedPositions.has("pool1")).toBe(false);
-        expect(trackedPositions.has("pool2")).toBe(false);
+        expect(trackedPositions.has("pubkey1")).toBe(false);
+        expect(trackedPositions.has("pubkey2")).toBe(false);
 
         const all = yield* db.getAllPositions();
         expect(all).toHaveLength(0);
@@ -131,7 +132,7 @@ describe("reconcilePositions — integration", () => {
         });
         const memory = makeMockMemory();
         const trackedPositions = new Map<string, PositionRecord>();
-        trackedPositions.set("pool1", makePosition("pool1", "pubkey1"));
+        trackedPositions.set("pubkey1", makePosition("pool1", "pubkey1"));
 
         yield* db.savePosition(makePosition("pool1", "pubkey1"));
 
@@ -140,7 +141,7 @@ describe("reconcilePositions — integration", () => {
         ]);
 
         expect(reconciled.succeeded).toBe(false);
-        expect(trackedPositions.has("pool1")).toBe(true);
+        expect(trackedPositions.has("pubkey1")).toBe(true);
 
         const all = yield* db.getAllPositions();
         expect(all).toHaveLength(1);
@@ -170,7 +171,7 @@ describe("reconcilePositions — integration", () => {
         });
         const memory = makeMockMemory();
         const trackedPositions = new Map<string, PositionRecord>();
-        trackedPositions.set("pool1", makePosition("pool1", "pubkey1"));
+        trackedPositions.set("pubkey1", makePosition("pool1", "pubkey1"));
 
         yield* db.savePosition(makePosition("pool1", "pubkey1"));
 
@@ -179,7 +180,7 @@ describe("reconcilePositions — integration", () => {
         ]);
 
         expect(reconciled.succeeded).toBe(true);
-        const tracked = trackedPositions.get("pool1")!;
+        const tracked = trackedPositions.get("pubkey1")!;
         expect(tracked.positionPubKey).toBe("pubkey1");
         expect(tracked.lowerBinId).toBe(4990);
         expect(tracked.upperBinId).toBe(5030);
@@ -195,12 +196,16 @@ describe("reconcilePositions — integration", () => {
     );
   });
 
-  it("does not sync ranges across different position pubkeys", () => {
+  it("removes a tracked position whose pubkey vanished and discovers its replacement", () => {
     const dbLayer = DbLive(":memory:");
 
     run(
       Effect.gen(function* () {
         const db = yield* DbService;
+        // pubkey1 is gone from the wallet while a different pubkey now exists
+        // on the same pool — per-pubkey matching treats the first as an
+        // external close and the second as a new discovery. Ranges are never
+        // copied across distinct pubkeys.
         const adapter = makeMockAdapter({
           getAllWalletPositions: () =>
             Effect.succeed([
@@ -211,19 +216,40 @@ describe("reconcilePositions — integration", () => {
                 upperBinId: 5030,
               },
             ]),
+          getPoolState: () =>
+            Effect.succeed({
+              address: "pool1",
+              tokenX: "SOL",
+              tokenY: "USDC",
+              tokenXSymbol: "SOL",
+              tokenYSymbol: "USDC",
+              tvlUsd: 100_000,
+              volume24hUsd: 30_000,
+              fees24hUsd: 300,
+              apr: 60,
+              activeBinId: 5000,
+              binStep: 10,
+              currentPrice: 150,
+              timestamp: Date.now(),
+            }),
         });
         const memory = makeMockMemory();
         const trackedPositions = new Map<string, PositionRecord>();
-        trackedPositions.set("pool1", makePosition("pool1", "pubkey1"));
+        trackedPositions.set("pubkey1", makePosition("pool1", "pubkey1"));
 
         yield* db.savePosition(makePosition("pool1", "pubkey1"));
 
         yield* reconcilePositions(adapter, db, memory, trackedPositions, ["pool1"]);
 
-        const tracked = trackedPositions.get("pool1")!;
-        expect(tracked.positionPubKey).toBe("pubkey1");
-        expect(tracked.lowerBinId).toBe(4980);
-        expect(tracked.upperBinId).toBe(5020);
+        expect(trackedPositions.has("pubkey1")).toBe(false);
+        const discovered = trackedPositions.get("some-other-pubkey")!;
+        expect(discovered.positionPubKey).toBe("some-other-pubkey");
+        expect(discovered.lowerBinId).toBe(4990);
+        expect(discovered.upperBinId).toBe(5030);
+        // The discovered position starts with clean accounting — nothing was
+        // carried over from the removed row.
+        expect(discovered.depositedUsd).toBe(0);
+        expect(discovered.cumulativeFeesClaimedUsd).toBe(0);
       }),
       dbLayer,
     );
@@ -267,7 +293,7 @@ describe("reconcilePositions — integration", () => {
 
         yield* reconcilePositions(adapter, db, memory, trackedPositions, ["external-pool"]);
 
-        expect(trackedPositions.has("external-pool")).toBe(true);
+        expect(trackedPositions.has("external-pubkey")).toBe(true);
 
         const all = yield* db.getAllPositions();
         expect(all).toHaveLength(1);
@@ -304,7 +330,7 @@ describe("reconcilePositions — integration", () => {
 
         yield* reconcilePositions(adapter, db, memory, trackedPositions, ["watched-pool"]);
 
-        expect(trackedPositions.has("unwatched-pool")).toBe(false);
+        expect(trackedPositions.has("external-pubkey")).toBe(false);
 
         const all = yield* db.getAllPositions();
         expect(all).toHaveLength(0);
@@ -340,7 +366,7 @@ describe("reconcilePositions — integration", () => {
 
         expect(result.succeeded).toBe(true);
         expect(result.unresolvedPoolAddresses.has("unresolved-pool")).toBe(true);
-        expect(trackedPositions.has("unresolved-pool")).toBe(false);
+        expect(trackedPositions.has("external-pubkey")).toBe(false);
       }),
       dbLayer,
     );

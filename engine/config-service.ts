@@ -100,6 +100,14 @@ export interface AppConfig {
   readonly maxPerPoolAllocationPct: number;
   /** Hard cap on number of simultaneously open positions. */
   readonly maxOpenPositions: number;
+  /**
+   * Max simultaneous positions on a single pool (Wave 10). DLMM natively
+   * supports many positions per pool (e.g. a tight+wide range pair); the
+   * pool's aggregate exposure across all its positions stays bounded by
+   * maxPerPoolAllocationPct. Default 2; set 1 for legacy single-position
+   * behavior.
+   */
+  readonly maxPositionsPerPool: number;
 
   // ─── F6: Paper-trading validation period ────────────────────────────────────
   /** Require N days of paper trading before allowing live ENTER. */
@@ -335,6 +343,7 @@ const loadConfig = Effect.gen(function* () {
     1.0,
   );
   const maxOpenPositions = yield* validatedNumber("MAX_OPEN_POSITIONS", 1, 3);
+  const maxPositionsPerPool = yield* validatedNumber("MAX_POSITIONS_PER_POOL", 1, 2);
 
   // ─── F6: Paper-trading validation period ────────────────────────────────────
   const paperValidationMinDays = yield* validatedNumber("PAPER_VALIDATION_MIN_DAYS", 0, 7);
@@ -670,6 +679,7 @@ const loadConfig = Effect.gen(function* () {
     oorRecoveryForceRebalanceThreshold,
     maxPerPoolAllocationPct,
     maxOpenPositions,
+    maxPositionsPerPool,
     paperValidationMinDays,
     paperValidationEnforce,
     oorCooldownMs,

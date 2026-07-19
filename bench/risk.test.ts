@@ -52,6 +52,7 @@ describe("RiskEngine", () => {
     maxRebalanceRangeBins: 50,
     stopLossPct: 0.15,
     maxPerPoolAllocationPct: 0.3,
+    maxPositionsPerPool: 2,
   };
 
   describe("confidence gate", () => {

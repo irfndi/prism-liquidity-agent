@@ -166,6 +166,15 @@ export interface AgentDecision {
   reasoning: string;
   rebalanceParams?: RebalanceParams;
   positionSizeUsd?: number;
+  /**
+   * Identity of the position this decision targets (live: the on-chain
+   * position pubkey; paper: the synthetic `paper-…` id). Undefined for
+   * pool-level decisions — ENTERs for a new position and the default
+   * positionless HOLD. EXIT/REBALANCE/HOLD decisions on a held position
+   * always carry it so execution and accounting hit the right row when a
+   * pool holds multiple positions.
+   */
+  positionId?: string | undefined;
 }
 
 // ─── Agent Proposals ───────────────────────────────────────────────────────────

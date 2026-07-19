@@ -110,6 +110,7 @@ export function formatPosition(pos: PositionRecord, currentPriceUsd: number | nu
   return [
     `  ${poolName} ${range}`,
     `    Pool:       ${pos.poolAddress}`,
+    `    Position:   ${pos.positionId}`,
     `    Deposited:  ${formatCurrency(pos.depositedUsd)}`,
     `    Current:    ${formatCurrency(pos.currentValueUsd)}`,
     `    P&L:        ${coloredPnl}`,
@@ -211,6 +212,7 @@ function formatHistoryList(positions: ReadonlyArray<PositionRecord>): string {
 
     lines.push(`  ${pos.tokenXSymbol}/${pos.tokenYSymbol}`);
     lines.push(`    Pool:       ${pos.poolAddress}`);
+    lines.push(`    Position:   ${pos.positionId}`);
     lines.push(`    Deposited:  ${formatCurrency(pos.depositedUsd)}`);
     lines.push(`    Exit Value: ${formatCurrency(pos.currentValueUsd)}`);
     lines.push(`    Fees:       ${formatCurrency(pos.cumulativeFeesClaimedUsd)}`);
@@ -229,6 +231,7 @@ export interface PortfolioJsonOutput {
   positions: Array<{
     poolAddress: string;
     poolName: string;
+    positionId: string;
     positionPubKey: string | null;
     depositedUsd: number;
     currentValueUsd: number;
@@ -275,6 +278,7 @@ export function toJsonOutput(
       return {
         poolAddress: pos.poolAddress,
         poolName: `${pos.tokenXSymbol}/${pos.tokenYSymbol}`,
+        positionId: pos.positionId,
         positionPubKey: pos.positionPubKey,
         depositedUsd: pos.depositedUsd,
         currentValueUsd: pos.currentValueUsd,
@@ -303,6 +307,7 @@ export interface HistoryJsonOutput {
   positions: Array<{
     poolAddress: string;
     poolName: string;
+    positionId: string;
     depositedUsd: number;
     exitValueUsd: number;
     feesClaimedUsd: number;
@@ -322,6 +327,7 @@ export function toHistoryJsonOutput(positions: ReadonlyArray<PositionRecord>): H
       return {
         poolAddress: pos.poolAddress,
         poolName: `${pos.tokenXSymbol}/${pos.tokenYSymbol}`,
+        positionId: pos.positionId,
         depositedUsd: pos.depositedUsd,
         exitValueUsd: pos.currentValueUsd,
         feesClaimedUsd: pos.cumulativeFeesClaimedUsd,

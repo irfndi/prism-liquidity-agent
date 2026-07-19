@@ -14,6 +14,7 @@ function makePosition(
   poolAddress: string,
   paperExitedAt: number | null = null,
 ): {
+  positionId: string;
   poolAddress: string;
   positionPubKey: string | null;
   depositedUsd: number;
@@ -42,6 +43,7 @@ function makePosition(
   realizedPnlUsd: number | null;
 } {
   return {
+    positionId: `paper-${poolAddress}`,
     poolAddress,
     positionPubKey: null,
     depositedUsd: 1000,
@@ -84,7 +86,7 @@ describe("DbService — paper-exit tracking", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.savePosition(pos);
-        return yield* db.getPosition("PoolA");
+        return yield* db.getPosition(pos.positionId);
       }),
       layer,
     );
@@ -102,8 +104,8 @@ describe("DbService — paper-exit tracking", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.savePosition(pos);
-        yield* db.markPaperExited("PoolB");
-        return yield* db.getPosition("PoolB");
+        yield* db.markPaperExited(pos.positionId);
+        return yield* db.getPosition(pos.positionId);
       }),
       layer,
     );
@@ -124,8 +126,8 @@ describe("DbService — paper-exit tracking", () => {
         yield* db.savePosition(makePosition("PoolActive2"));
         yield* db.savePosition(makePosition("PoolExited1"));
         yield* db.savePosition(makePosition("PoolExited2"));
-        yield* db.markPaperExited("PoolExited1");
-        yield* db.markPaperExited("PoolExited2");
+        yield* db.markPaperExited("paper-PoolExited1");
+        yield* db.markPaperExited("paper-PoolExited2");
         return yield* db.getAllPositions();
       }),
       layer,
@@ -164,8 +166,8 @@ describe("DbService — paper-exit tracking", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* db.savePosition(makePosition("PoolExited"));
-        yield* db.markPaperExited("PoolExited");
-        return yield* db.getPosition("PoolExited");
+        yield* db.markPaperExited("paper-PoolExited");
+        return yield* db.getPosition("paper-PoolExited");
       }),
       layer,
     );

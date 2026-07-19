@@ -182,6 +182,7 @@ function makeTestLayer(opts: {
       maxRebalanceRangeBins: 50,
       stopLossPct: 0.15,
       maxPerPoolAllocationPct: 0.4,
+      maxPositionsPerPool: 2,
     }),
     Layer.succeed(BlacklistService, {
       isDeployerBlacklisted: () => false,

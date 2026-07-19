@@ -216,7 +216,7 @@ describe("executeLive REBALANCE (atomic)", () => {
         expect(rebalance.executed).toBe(true);
 
         const events = yield* db.getPositionEvents("pool1");
-        return { tracked: trackedPositions.get("pool1"), events };
+        return { tracked: trackedPositions.get("pos-1"), events };
       }),
     );
 
@@ -299,7 +299,7 @@ describe("executeLive REBALANCE (atomic)", () => {
           livePool,
         );
         const events = yield* db.getPositionEvents("pool1");
-        return { rebalance, tracked: trackedPositions.get("pool1"), events };
+        return { rebalance, tracked: trackedPositions.get("pos-1"), events };
       }),
     );
 
@@ -437,6 +437,7 @@ function makeLoopLayer(opts: {
       // the rebalance gate being tested here.
       stopLossPct: 0.6,
       maxPerPoolAllocationPct: 0.4,
+      maxPositionsPerPool: 2,
     }),
     Layer.succeed(BlacklistService, {
       isDeployerBlacklisted: () => false,

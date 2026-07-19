@@ -20,6 +20,7 @@ function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
 
 function makeDbPosition(overrides: Record<string, unknown> = {}) {
   return {
+    positionId: "PosRewards11111111111111111111111111111111",
     poolAddress: "PoolRewards1111111111111111111111111111111",
     positionPubKey: "PosRewards11111111111111111111111111111111",
     depositedUsd: 1000,
@@ -137,7 +138,7 @@ describe("DbService — cumulativeRewardsClaimedUsd", () => {
         const db = yield* DbService;
         const pos = makeDbPosition({ cumulativeRewardsClaimedUsd: 42.5 });
         yield* db.savePosition(pos);
-        const retrieved = yield* db.getPosition(pos.poolAddress);
+        const retrieved = yield* db.getPosition(pos.positionId);
         expect(retrieved).not.toBeNull();
         expect(retrieved!.cumulativeRewardsClaimedUsd).toBeCloseTo(42.5, 8);
         // Fees remain fee-pure.
@@ -154,7 +155,7 @@ describe("DbService — cumulativeRewardsClaimedUsd", () => {
         const db = yield* DbService;
         const pos = makeDbPosition();
         yield* db.savePosition(pos);
-        const retrieved = yield* db.getPosition(pos.poolAddress);
+        const retrieved = yield* db.getPosition(pos.positionId);
         expect(retrieved!.cumulativeRewardsClaimedUsd).toBe(0);
       }),
       layer,
@@ -171,6 +172,7 @@ describe("DbService — cumulativeRewardsClaimedUsd", () => {
           id: "evt-reward-1",
           poolAddress: "PoolRewards1111111111111111111111111111111",
           positionPubKey: "PosRewards11111111111111111111111111111111",
+          positionId: "PosRewards11111111111111111111111111111111",
           event: "CLAIM",
           valueUsd: 100,
           feesUsd: null,
