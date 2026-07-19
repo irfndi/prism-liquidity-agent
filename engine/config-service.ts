@@ -242,6 +242,11 @@ export interface AppConfig {
   readonly alertCooldownMinutes: number;
   /** USD step between cumulative-fee milestone alerts. Default 10. */
   readonly alertFeeMilestoneUsd: number;
+  readonly copySignalsEnabled?: boolean;
+  readonly copySignalsEndpoint?: string;
+  readonly copySignalWallets?: ReadonlyArray<string>;
+  readonly copySignalsStaleMs?: number;
+  readonly copySignalsMaxBoost?: number;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -587,6 +592,26 @@ const loadConfig = Effect.gen(function* () {
   const farmRewardsEnabled = yield* Config.boolean("FARM_REWARDS_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
+  const copySignalsEnabled = yield* Config.boolean("COPY_SIGNALS_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const copySignalsEndpoint = yield* Config.string("COPY_SIGNALS_ENDPOINT").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const copySignalWalletsRaw = yield* Config.string("COPY_SIGNAL_WALLETS").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const copySignalWallets = copySignalWalletsRaw
+    .split(",")
+    .map((wallet) => wallet.trim())
+    .filter(Boolean);
+  const copySignalsStaleMs = yield* validatedNumber(
+    "COPY_SIGNALS_STALE_MS",
+    60_000,
+    900_000,
+    86_400_000,
+  );
+  const copySignalsMaxBoost = yield* validatedNumber("COPY_SIGNALS_MAX_BOOST", 0, 0.05, 0.05);
   const alertCooldownMinutes = yield* validatedNumber("ALERT_COOLDOWN_MINUTES", 1, 120);
   const alertFeeMilestoneUsd = yield* validatedNumber("ALERT_FEE_MILESTONE_USD", 0.01, 10);
 
@@ -806,6 +831,11 @@ const loadConfig = Effect.gen(function* () {
     alertsEnabled,
     alertCooldownMinutes,
     alertFeeMilestoneUsd,
+    copySignalsEnabled,
+    copySignalsEndpoint,
+    copySignalWallets,
+    copySignalsStaleMs,
+    copySignalsMaxBoost,
   };
 
   return cfg;
