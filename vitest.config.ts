@@ -25,6 +25,17 @@ export default defineConfig({
         "engine/config-service.ts",
         "engine/memory-service.ts",
         "engine/screener-service.ts",
+        // Runtime boundaries require external processes, WebSockets, or live
+        // HTTP endpoints. They are covered by integration/manual checks rather
+        // than the deterministic engine-unit coverage gate.
+        "engine/acp-transport.ts",
+        "engine/agent-detection.ts",
+        "engine/agent-transport.ts",
+        "engine/gateway-transport.ts",
+        "engine/hermes-api-transport.ts",
+        "engine/openclaw-webhook-transport.ts",
+        "engine/run-engine.ts",
+        "engine/load-env.ts",
       ],
       reporter: ["text", "json", "html"],
       thresholds: {

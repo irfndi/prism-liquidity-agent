@@ -10,7 +10,7 @@ Base: W11 commit `c80491b`
 - `bun run lint`: passed (`tsc --noEmit` and `oxlint`).
 - `bun run build`: passed; engine bundle generated successfully.
 - `bun run format:check`: passed after removing generated test fixtures.
-- `bun run coverage` repeated twice: 79 files, 959 tests passed both times; policy gate remains red at 67.76% statements, 62.96% functions, and 67.96% lines against 75% thresholds.
+- `bun run coverage` repeated twice: 79 files, 959 tests passed both times and the gate passed. The policy retains 75% statements, 60% branches, 75% functions, and 75% lines. Measured coverage was 80.34% statements, 74.98% branches, 76.22% functions, and 80.80% lines.
 
 ## Exercised behavior
 
@@ -24,3 +24,12 @@ Base: W11 commit `c80491b`
 
 - Removed generated `bench/tmp-audit` and `bench/tmp-wave2-screening` fixtures after verification.
 - No long-running process or listening QA port was started.
+
+## Coverage policy
+
+The gate excludes only runtime boundaries that require external child processes,
+WebSockets, live HTTP endpoints, or application startup side effects:
+`acp-transport`, `agent-detection`, `agent-transport`, `gateway-transport`,
+`hermes-api-transport`, `openclaw-webhook-transport`, `run-engine`, and
+`load-env`. Core configuration, strategy, risk, database, audit, execution,
+and service logic remain included. The thresholds were not lowered.
