@@ -165,10 +165,12 @@ function readStdin(): Promise<string> {
         output: process.stdout,
         terminal: false,
       });
-      rl.question("Paste keypair JSON and press Enter (input hidden): ", (answer) => {
+      rl.on("close", () => {
         try {
           Bun.spawnSync(["stty", "echo"], { stdin: "inherit", stdout: "inherit" });
         } catch { /* restore best-effort */ }
+      });
+      rl.question("Paste keypair JSON and press Enter (input hidden): ", (answer) => {
         rl.close();
         process.stdout.write("\n");
         resolve(answer.trim());
