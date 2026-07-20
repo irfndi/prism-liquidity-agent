@@ -48,7 +48,7 @@
     "chalk": "^5.6.2",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
-    "effect": "^3.21.4",
+    "effect": "^3.22.0",
     "semver": "^7.8.5",
     "sqlite-vec": "^0.1.9"
   },
@@ -58,8 +58,8 @@
     "@vitest/coverage-istanbul": "^4.1.10",
     "bun-types": "1.4.0-canary.20260519T150915",
     "oxfmt": "^0.59.0",
-    "oxlint": "^1.73.0",
-    "tsdown": "^0.22.4",
+    "oxlint": "^1.74.0",
+    "tsdown": "^0.22.12",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   },
