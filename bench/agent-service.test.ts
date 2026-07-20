@@ -98,6 +98,8 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     agentCheckinMaxPositions: 10,
     agentOpenclawWebhookUrl: "",
     agentHermesApiUrl: "",
+    agentOpenclawWebhookToken: "",
+    agentHermesApiToken: "",
     agentHttpPort: 18_790,
     agentMcpEnabled: true,
     agentProposalMode: "veto",

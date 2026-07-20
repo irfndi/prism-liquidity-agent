@@ -228,8 +228,12 @@ export interface AppConfig {
   readonly agentCheckinMaxPositions: number;
   /** OpenClaw webhook URL for one-way agent alerts. Empty = disabled. Default "". */
   readonly agentOpenclawWebhookUrl: string;
+  /** Bearer token for the OpenClaw webhook. Empty = no auth header. Default "". */
+  readonly agentOpenclawWebhookToken: string;
   /** Hermes HTTP API URL for one-way agent alerts. Empty = disabled. Default "". */
   readonly agentHermesApiUrl: string;
+  /** Bearer token (Hermes API_SERVER_KEY) for the Hermes HTTP API. Empty = no auth header. Default "". */
+  readonly agentHermesApiToken: string;
   /** Port for the local agent HTTP status API. 0 = disabled. Default 0 (disabled unless explicitly enabled). */
   readonly agentHttpPort: number;
   /** Enable the MCP server for agent runtime tool discovery. Default false (enable only when stdout is isolated). */
@@ -544,7 +548,13 @@ const loadConfig = Effect.gen(function* () {
   const agentOpenclawWebhookUrl = yield* Config.string("AGENT_OPENCLAW_WEBHOOK_URL").pipe(
     Effect.orElseSucceed(() => ""),
   );
+  const agentOpenclawWebhookToken = yield* Config.string("AGENT_OPENCLAW_WEBHOOK_TOKEN").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
   const agentHermesApiUrl = yield* Config.string("AGENT_HERMES_API_URL").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const agentHermesApiToken = yield* Config.string("AGENT_HERMES_API_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
   const agentHttpPort = yield* validatedNumber("AGENT_HTTP_PORT", 0, 0, 65_535);
@@ -894,7 +904,9 @@ const loadConfig = Effect.gen(function* () {
     agentCheckinIncludeHistory,
     agentCheckinMaxPositions,
     agentOpenclawWebhookUrl,
+    agentOpenclawWebhookToken,
     agentHermesApiUrl,
+    agentHermesApiToken,
     agentHttpPort,
     agentMcpEnabled,
     agentProposalMode,

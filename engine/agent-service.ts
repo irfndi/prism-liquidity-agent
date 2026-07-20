@@ -283,6 +283,7 @@ function createAlertTransports(config: AppConfig): ReadonlyArray<AgentRuntimeTra
     transports.push(
       new OpenClawWebhookTransport({
         url: config.agentOpenclawWebhookUrl,
+        token: config.agentOpenclawWebhookToken,
         timeoutMs: config.agentPromptTimeoutMs,
       }),
     );
@@ -292,7 +293,7 @@ function createAlertTransports(config: AppConfig): ReadonlyArray<AgentRuntimeTra
     transports.push(
       new HermesApiTransport({
         url: config.agentHermesApiUrl,
-        token: "",
+        token: config.agentHermesApiToken,
         timeoutMs: config.agentPromptTimeoutMs,
       }),
     );
