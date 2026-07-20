@@ -159,7 +159,9 @@ function readStdin(): Promise<string> {
     if (process.stdin.isTTY) {
       try {
         Bun.spawnSync(["stty", "-echo"], { stdin: "inherit", stdout: "inherit" });
-      } catch { /* non-POSIX shell */ }
+      } catch {
+        /* non-POSIX shell */
+      }
       const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
@@ -168,7 +170,9 @@ function readStdin(): Promise<string> {
       rl.on("close", () => {
         try {
           Bun.spawnSync(["stty", "echo"], { stdin: "inherit", stdout: "inherit" });
-        } catch { /* restore best-effort */ }
+        } catch {
+          /* restore best-effort */
+        }
       });
       rl.question("Paste keypair JSON and press Enter (input hidden): ", (answer) => {
         rl.close();
