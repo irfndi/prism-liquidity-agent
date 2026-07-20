@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-config-5ffcad1144-e918c_57f2116b79",
+  "featureId": "feat_config_5ffcad1144",
+  "title": "Symlink resolution loop has no iteration bound, risking infinite loop on circular symlinks",
+  "category": "maintainability",
+  "severity": "low",
+  "confidence": "medium",
+  "triage": "risk",
+  "evidence": [
+    {
+      "path": "scripts/prism.sh",
+      "startLine": 10,
+      "endLine": 14,
+      "symbol": null,
+      "quote": null
+    }
+  ],
+  "reasoning": "The while loop follows symlinks by repeatedly calling readlink and re-checking -L. Unlike OS-level pathname resolution (which returns ELOOP after ~40 levels), readlink itself does not detect cycles — it simply reads the next target. A circular symlink chain (A→B→A) would cause this loop to spin indefinitely. In practice this is extremely unlikely for a package bin script, but a simple iteration counter (e.g., max 20) would make the script robust against misconfigured environments without meaningful complexity.",
+  "reproduction": "ln -s prism.sh link_a && ln -s link_a prism_link && ./prism_link  # infinite loop (do not actually run)",
+  "recommendation": "Add an iteration counter that breaks with an error after a reasonable limit (e.g., 20): `local i=0; while [ -L \"$SOURCE\" ]; do (( i++ > 20 )) && echo 'Too many symlink levels' >&2 && exit 1; ...; done`",
+  "whyTestsDoNotAlreadyCoverThis": "No tests are included for this feature, and testing infinite-loop guards requires constructing circular symlinks in a test fixture, which is non-trivial.",
+  "suggestedRegressionTest": "Create a temporary directory with two symlinks pointing at each other, invoke the resolution logic (extracted into a testable function), and assert it exits with an error within a timeout rather than hanging.",
+  "minimumFixScope": "Add a counter variable and a guard clause inside the while loop (3 lines).",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-config-5ffcad1144_e918c7edcb",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T051243-181602",
+  "createdAt": "2026-07-20T05:13:45.674Z",
+  "updatedAt": "2026-07-20T05:13:45.674Z"
+}

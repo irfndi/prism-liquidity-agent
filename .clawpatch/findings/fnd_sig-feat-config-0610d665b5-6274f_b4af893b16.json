@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-config-0610d665b5-6274f_b4af893b16",
+  "featureId": "feat_config_0610d665b5",
+  "title": "publish_python_pkg skips build when dist/ directory exists but is empty or contains stale artifacts",
+  "category": "build-release",
+  "severity": "high",
+  "confidence": "high",
+  "triage": "risk",
+  "evidence": [
+    {
+      "path": "scripts/publish-skills.sh",
+      "startLine": 64,
+      "endLine": 74,
+      "symbol": "publish_python_pkg",
+      "quote": null
+    }
+  ],
+  "reasoning": "Line 64 checks `[ ! -d \"dist\" ]` to decide whether to run `python -m build`. This only tests directory existence, not whether it contains valid, up-to-date artifacts. Two failure modes result: (1) If `dist/` exists but is empty, the build is skipped and `python -m twine upload dist/*` receives the unexpanded literal glob `dist/*` (bash does not set nullglob here), causing a confusing twine error instead of a build-then-publish flow. (2) If `dist/` exists with stale artifacts from a prior build, the build is silently skipped and outdated packages are uploaded to PyPI, potentially publishing the wrong version. The npm counterpart (line 37) at least checks for a specific file (`dist/index.js`), making it slightly more robust, though it shares the staleness risk.",
+  "reproduction": "mkdir -p packages/langchain-prism/dist && ./scripts/publish-skills.sh  # build is skipped, twine upload fails or uploads stale files",
+  "recommendation": "Always rebuild before publishing, or at minimum check for the presence of actual artifact files (e.g., `dist/*.tar.gz` or `dist/*.whl`) rather than just the directory. A robust pattern: `if [ -z \"$(ls -A dist/*.whl dist/*.tar.gz 2>/dev/null)\" ]; then python -m build; fi`. For a publish script, unconditionally running the build step is safest.",
+  "whyTestsDoNotAlreadyCoverThis": "No tests are included for this feature, and shell publish scripts are rarely unit-tested. The failure requires a pre-existing dist/ directory, which a fresh CI checkout would not have, masking the issue in typical CI runs.",
+  "suggestedRegressionTest": "Add a shell test (e.g., bats or a simple bash test) that creates an empty `dist/` directory in a fixture package, runs `publish_python_pkg` in dry-run mode, and asserts that the build step is invoked. Repeat with a stale file in `dist/` to verify rebuild.",
+  "minimumFixScope": "Change line 64 from `[ ! -d \"dist\" ]` to a check for actual build artifacts, or unconditionally run `python -m build` before the twine upload.",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-config-0610d665b5_6274fa7d83",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T050927-d7f9e4",
+  "createdAt": "2026-07-20T05:10:46.996Z",
+  "updatedAt": "2026-07-20T05:10:46.996Z"
+}

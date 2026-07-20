@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "runId": "20260720T050927-d7f9e4",
+  "command": "review",
+  "args": [
+    "review",
+    "--provider",
+    "pi",
+    "--limit",
+    "5",
+    "--jobs",
+    "2"
+  ],
+  "rootPath": "/Users/irfandi/Coding/2026/prism-dlmm",
+  "headSha": "54a5dd6cbaafe242f2c64ba141e762214070ba23",
+  "startedAt": "2026-07-20T05:09:27.782Z",
+  "finishedAt": "2026-07-20T05:12:01.290Z",
+  "status": "completed",
+  "claimedFeatureIds": [
+    "feat_cli-command_4828cbbd69",
+    "feat_config_0610d665b5",
+    "feat_config_0c1c23856a",
+    "feat_config_3a72a27053",
+    "feat_config_57f59ddd1e"
+  ],
+  "findingIds": [
+    "fnd_sig-feat-cli-command-4828cbbd69-_f06b8dee81",
+    "fnd_sig-feat-config-0610d665b5-6274f_b4af893b16",
+    "fnd_sig-feat-config-0610d665b5-e3499_89fc54985b",
+    "fnd_sig-feat-config-0c1c23856a-1cf2d_abdcc44e81",
+    "fnd_sig-feat-config-3a72a27053-a2c7c_cc33a13d03",
+    "fnd_sig-feat-config-3a72a27053-49609_5d19d1f9f5",
+    "fnd_sig-feat-config-3a72a27053-9ae01_ff0edb24c6",
+    "fnd_sig-feat-config-3a72a27053-ff340_a701ef3cb5"
+  ],
+  "patchAttemptIds": [],
+  "errors": []
+}

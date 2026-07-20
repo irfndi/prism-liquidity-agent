@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-test-suite-84ae84a25a-b_e8133104a8",
+  "featureId": "feat_test-suite_84ae84a25a",
+  "title": "postinstall silently swallows setup failures that may leave test environment misconfigured",
+  "category": "maintainability",
+  "severity": "low",
+  "confidence": "low",
+  "triage": "risk",
+  "evidence": [
+    {
+      "path": "package.json",
+      "startLine": 31,
+      "endLine": 31,
+      "symbol": "postinstall",
+      "quote": null
+    }
+  ],
+  "reasoning": "The postinstall script uses `|| true`, meaning any failure (missing env vars, failed DB migration, config generation error) is silently ignored. If postinstall.js sets up state required by the test suite (e.g., .env files, sqlite databases, config), tests will fail with confusing errors unrelated to the actual code. The separate `setup:env` script (line 30) runs the same file without error suppression, suggesting the failure is non-fatal for install but the silent swallowing can mask real problems.",
+  "reproduction": "Temporarily break scripts/postinstall.js (e.g., exit 1), run `bun install`, observe success. Then run `bun run test` and observe potentially confusing failures if tests depend on postinstall output.",
+  "recommendation": "Replace `|| true` with a warning message: `bun run scripts/postinstall.js || echo 'Warning: postinstall failed; run bun run setup:env to retry'`. This preserves non-blocking install while alerting the developer.",
+  "whyTestsDoNotAlreadyCoverThis": "Tests run after install completes; they cannot detect that postinstall was silently skipped during a fresh environment setup.",
+  "suggestedRegressionTest": null,
+  "minimumFixScope": "Change the postinstall script string to log a warning instead of silently discarding the exit code.",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-test-suite-84ae84a25a_b7ed4320de",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T051243-181602",
+  "createdAt": "2026-07-20T05:17:11.079Z",
+  "updatedAt": "2026-07-20T05:17:11.079Z"
+}

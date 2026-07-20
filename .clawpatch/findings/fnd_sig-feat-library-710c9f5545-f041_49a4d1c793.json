@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-library-710c9f5545-f041_49a4d1c793",
+  "featureId": "feat_library_710c9f5545",
+  "title": "Tarball is read and hashed twice unnecessarily",
+  "category": "performance",
+  "severity": "low",
+  "confidence": "high",
+  "triage": "risk",
+  "evidence": [
+    {
+      "path": "scripts/build-bundle.ts",
+      "startLine": 70,
+      "endLine": 73,
+      "symbol": "sha256",
+      "quote": null
+    }
+  ],
+  "reasoning": "sha256(tarballPath) is called on line 70 to write the .sha256 checksum file, and again on line 73 to log the hash. Each call reads the entire tarball into memory via fs.readFileSync. For multi-hundred-MB platform bundles this doubles I/O and memory pressure during the build.",
+  "reproduction": null,
+  "recommendation": "Compute the hash once into a local variable (const digest = sha256(tarballPath)) and reuse it for both the file write and the log statement.",
+  "whyTestsDoNotAlreadyCoverThis": "No tests exist for this script. The issue is a redundant I/O operation, not a correctness bug, so it would not surface in functional tests.",
+  "suggestedRegressionTest": null,
+  "minimumFixScope": "Store the result of sha256(tarballPath) in a const and reference it on both lines 70 and 73.",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-library-710c9f5545_f04187379d",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T051243-181602",
+  "createdAt": "2026-07-20T05:15:18.626Z",
+  "updatedAt": "2026-07-20T05:15:18.626Z"
+}

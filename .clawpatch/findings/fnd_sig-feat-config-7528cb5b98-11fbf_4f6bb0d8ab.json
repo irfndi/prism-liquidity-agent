@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-config-7528cb5b98-11fbf_4f6bb0d8ab",
+  "featureId": "feat_config_7528cb5b98",
+  "title": "postinstall script silently swallows all errors with || true",
+  "category": "build-release",
+  "severity": "medium",
+  "confidence": "medium",
+  "triage": "risk",
+  "evidence": [
+    {
+      "path": "package.json",
+      "startLine": 31,
+      "endLine": 31,
+      "symbol": null,
+      "quote": null
+    },
+    {
+      "path": "package.json",
+      "startLine": 30,
+      "endLine": 30,
+      "symbol": null,
+      "quote": null
+    }
+  ],
+  "reasoning": "The postinstall script runs `bun run scripts/postinstall.js || true`, which suppresses any failure. The same script is exposed separately as `setup:env` (line 30) without the fallback, indicating it can fail and may perform essential environment/config setup. If postinstall.js provisions required .env values, config files, or native module setup, a silent failure during `bun install` will leave the project in a broken state with no visible error, causing confusing runtime failures that are hard to trace back to install time.",
+  "reproduction": "Run `bun install` in an environment where scripts/postinstall.js fails (e.g., missing permissions, missing template file). The install completes successfully with no error output, but subsequent `bun run start` or `bun run dev` fails due to missing configuration.",
+  "recommendation": "At minimum, log a warning on failure instead of fully silencing it: `\"postinstall\": \"bun run scripts/postinstall.js || echo '[warn] postinstall setup failed; run bun run setup:env to retry'\"`. Alternatively, let postinstall.js itself handle expected failures gracefully and exit 0 only for truly optional steps, while exiting non-zero (without || true) for required ones.",
+  "whyTestsDoNotAlreadyCoverThis": "No tests are listed for this feature, and postinstall behavior during package installation is not typically exercised by vitest unit tests.",
+  "suggestedRegressionTest": "Add a CI step that runs `bun install` from a clean checkout and asserts the resulting environment/config files exist and are valid, ensuring postinstall failures are caught.",
+  "minimumFixScope": "Replace `|| true` with a fallback that prints a warning message directing the user to `bun run setup:env`.",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-config-7528cb5b98_11fbf7120a",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T051243-181602",
+  "createdAt": "2026-07-20T05:13:31.859Z",
+  "updatedAt": "2026-07-20T05:13:31.859Z"
+}

@@ -29,11 +29,21 @@
     "process-exec",
     "filesystem"
   ],
-  "status": "pending",
+  "status": "reviewed",
   "lock": null,
   "findingIds": [],
   "patchAttemptIds": [],
-  "analysisHistory": [],
+  "analysisHistory": [
+    {
+      "runId": "20260720T050927-d7f9e4",
+      "kind": "review",
+      "summary": "0 finding(s); prompt=6450 bytes; approxTokens=1613; includedFiles=1; omittedFiles=0",
+      "provider": "pi",
+      "model": null,
+      "reasoningEffort": null,
+      "createdAt": "2026-07-20T05:11:49.866Z"
+    }
+  ],
   "createdAt": "2026-07-20T04:19:21.366Z",
-  "updatedAt": "2026-07-20T04:19:21.366Z"
+  "updatedAt": "2026-07-20T05:11:49.866Z"
 }

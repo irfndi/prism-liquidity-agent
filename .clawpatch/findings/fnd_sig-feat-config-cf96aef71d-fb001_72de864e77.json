@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-config-cf96aef71d-fb001_72de864e77",
+  "featureId": "feat_config_cf96aef71d",
+  "title": "Unbound SHELL variable causes immediate exit under set -u before fallback applies",
+  "category": "bug",
+  "severity": "medium",
+  "confidence": "high",
+  "triage": "confirmed-bug",
+  "evidence": [
+    {
+      "path": "scripts/install.sh",
+      "startLine": 7,
+      "endLine": 8,
+      "symbol": null,
+      "quote": null
+    }
+  ],
+  "reasoning": "Line 4 enables 'set -u'. Line 7 expands ${SHELL##*/}. In environments where SHELL is not set (minimal Docker containers, CI runners, cron jobs), bash raises 'SHELL: unbound variable' and exits immediately. The fallback on line 8 (SHELL_NAME=\"${SHELL_NAME:-sh}\") never executes because the script already terminated. SHELL_NAME is later used in the PATH hint (line 216), so a user in such an environment gets no installer output at all.",
+  "reproduction": "Run: env -u SHELL bash scripts/install.sh (or pipe via curl in a container without SHELL set). The script exits with 'SHELL: unbound variable' before any work is done.",
+  "recommendation": "Replace lines 7-8 with: SHELL_NAME=\"${SHELL:-sh}\"; SHELL_NAME=\"${SHELL_NAME##*/}\". This provides the default before the parameter expansion that would trigger set -u.",
+  "whyTestsDoNotAlreadyCoverThis": "No tests are included for this feature; reproducing requires unsetting the SHELL environment variable, which is uncommon on developer workstations.",
+  "suggestedRegressionTest": "Shell test: env -u SHELL bash -n scripts/install.sh (syntax/parse), plus a functional test running the script with SHELL unset in a stubbed environment, asserting it does not exit with 'unbound variable'.",
+  "minimumFixScope": "Change line 7 to SHELL_NAME=\"${SHELL:-sh}\" and line 8 to SHELL_NAME=\"${SHELL_NAME##*/}\".",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-config-cf96aef71d_fb001064f2",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T051243-181602",
+  "createdAt": "2026-07-20T05:15:19.230Z",
+  "updatedAt": "2026-07-20T05:15:19.230Z"
+}

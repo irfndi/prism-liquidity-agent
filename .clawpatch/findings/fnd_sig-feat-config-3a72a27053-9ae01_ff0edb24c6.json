@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-config-3a72a27053-9ae01_ff0edb24c6",
+  "featureId": "feat_config_3a72a27053",
+  "title": "bun-version: canary makes builds non-reproducible and vulnerable to upstream breakage",
+  "category": "build-release",
+  "severity": "medium",
+  "confidence": "medium",
+  "triage": "risk",
+  "evidence": [
+    {
+      "path": ".github/workflows/release.yml",
+      "startLine": 52,
+      "endLine": 52,
+      "symbol": null,
+      "quote": null
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "startLine": 92,
+      "endLine": 92,
+      "symbol": null,
+      "quote": null
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "startLine": 142,
+      "endLine": 142,
+      "symbol": null,
+      "quote": null
+    }
+  ],
+  "reasoning": "All three jobs (test, build-bundles, release) pin Bun to `canary`. Canary builds change daily and are not guaranteed stable. A breaking change in a canary release could simultaneously break testing, building, and releasing. Additionally, because the workflow runs multiple jobs that may start at different times, they could resolve to different canary versions, producing inconsistent artifacts across platforms.",
+  "reproduction": "Wait for a Bun canary release that introduces a breaking change (e.g., in bundler behavior) and push a release tag; all jobs fail or produce inconsistent output.",
+  "recommendation": "Pin to a specific stable Bun version (e.g., `bun-version: 1.2.15`) or use a lockfile-resolved version. If canary is intentional for testing, at minimum pin the release job to a stable version to ensure reproducible release artifacts.",
+  "whyTestsDoNotAlreadyCoverThis": "No tests exercise the CI workflow itself. Reproducibility issues only manifest when the upstream canary changes.",
+  "suggestedRegressionTest": null,
+  "minimumFixScope": "Replace `bun-version: canary` with a pinned stable version string in all three setup-bun steps, or at minimum in the build-bundles and release jobs.",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-config-3a72a27053_9ae01e6821",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T050927-d7f9e4",
+  "createdAt": "2026-07-20T05:12:01.276Z",
+  "updatedAt": "2026-07-20T05:12:01.276Z"
+}

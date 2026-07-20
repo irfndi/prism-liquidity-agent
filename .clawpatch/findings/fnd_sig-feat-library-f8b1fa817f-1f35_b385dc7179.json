@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-library-f8b1fa817f-1f35_b385dc7179",
+  "featureId": "feat_library_f8b1fa817f",
+  "title": "TOCTOU race on temp vec0 extension file in generated embed code",
+  "category": "concurrency",
+  "severity": "low",
+  "confidence": "medium",
+  "triage": "risk",
+  "evidence": [
+    {
+      "path": "scripts/generate-vec-embed.ts",
+      "startLine": 60,
+      "endLine": 63,
+      "symbol": "getEmbeddedVec0Path",
+      "quote": null
+    }
+  ],
+  "reasoning": "The generated `getEmbeddedVec0Path()` function (lines 52-65 of the template) checks `!fs.existsSync(tmpPath)` then writes the file. If two prism processes start concurrently (e.g., engine + CLI, or a restart racing with the previous instance), both can pass the existence check and write simultaneously. Since `writeFileSync` is not atomic for multi-MB native extensions, one process could `dlopen` a partially-written .so/.dylib, causing a crash or undefined behavior. The identical content means the race is benign in most cases, but a read-during-write on a large file can yield a corrupt load.",
+  "reproduction": "Start two `prism dev` processes simultaneously on a cold system where the temp vec0 file does not yet exist.",
+  "recommendation": "Write to a unique temporary file (e.g., `vec0.<pid>.<ext>`) then atomically rename it to the final path with `fs.renameSync`. Alternatively, use `fs.writeFileSync` with the `flag: 'wx'` (O_CREAT|O_EXCL) to ensure only one process creates the file, catching EEXIST on the loser.",
+  "whyTestsDoNotAlreadyCoverThis": "No tests cover the generated sqlite-vec-embedded module or its concurrent initialization. The vitest suite only exercises engine logic in bench/ tests under a single process.",
+  "suggestedRegressionTest": "Fork two child processes that both call getEmbeddedVec0Path() concurrently on a fresh temp directory and assert both return a valid path and the file is a complete, loadable extension.",
+  "minimumFixScope": "In the generated template in scripts/generate-vec-embed.ts, replace the existsSync+writeFileSync pattern with writeFileSync using flag 'wx' (catch EEXIST) or write-to-temp + rename.",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-library-f8b1fa817f_1f3543265d",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T051243-181602",
+  "createdAt": "2026-07-20T05:15:21.958Z",
+  "updatedAt": "2026-07-20T05:15:21.958Z"
+}

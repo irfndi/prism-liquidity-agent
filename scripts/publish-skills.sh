@@ -62,16 +62,16 @@ publish_python_pkg() {
   cd "$pkg_dir"
 
   if [ ! -d "dist" ]; then
-    log_warn "$pkg_name not built. Running python -m build..."
+    log_warn "$pkg_name not built. Running python3 -m build..."
     if [ "$DRY_RUN" != "--dry-run" ]; then
-      python -m build
+      python3 -m build
     fi
   fi
 
   if [ "$DRY_RUN" = "--dry-run" ]; then
-    log_info "$(dry_run_prefix)python -m twine upload dist/*"
+    log_info "$(dry_run_prefix)python3 -m twine upload dist/*"
   else
-    python -m twine upload dist/*
+      python3 -m twine upload dist/*
   fi
 
   log_info "$pkg_name published."
@@ -97,8 +97,8 @@ main() {
     exit 1
   fi
 
-  if ! command -v python &>/dev/null; then
-    log_error "python is required but not installed."
+  if ! command -v python3 &>/dev/null; then
+    log_error "python3 is required but not installed."
     exit 1
   fi
 

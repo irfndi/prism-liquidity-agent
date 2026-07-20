@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-config-cf96aef71d-dc789_bafbc5975a",
+  "featureId": "feat_config_cf96aef71d",
+  "title": "EXIT trap deletes preserved state files if install fails mid-swap",
+  "category": "data-loss",
+  "severity": "high",
+  "confidence": "high",
+  "triage": "confirmed-bug",
+  "evidence": [
+    {
+      "path": "scripts/install.sh",
+      "startLine": 125,
+      "endLine": 125,
+      "symbol": null,
+      "quote": null
+    },
+    {
+      "path": "scripts/install.sh",
+      "startLine": 148,
+      "endLine": 158,
+      "symbol": null,
+      "quote": null
+    }
+  ],
+  "reasoning": "PRESERVE_DIR is created inside TMP_DIR (line 148). The EXIT trap (line 125) unconditionally removes TMP_DIR. If the script fails between 'rm -rf $INSTALL_DIR' (line 158) and successful tar extraction (line 160)—e.g., disk full, tar corruption, or set -e triggered by mkdir failure—bash exits, the trap fires, and PRESERVE_DIR containing the user's .env and prism.db is permanently deleted alongside the already-removed INSTALL_DIR. The user loses both their running install and their backed-up state in one failure.",
+  "reproduction": "Fill the target filesystem to capacity after the checksum passes, then run the installer over an existing install that has a .env and prism.db. mkdir -p or tar -xzf fails, set -e exits, the EXIT trap removes TMP_DIR (including PRESERVE_DIR), and the original INSTALL_DIR was already deleted on line 158.",
+  "recommendation": "Place PRESERVE_DIR outside TMP_DIR (e.g., a sibling mktemp directory) and give it its own trap that restores files to INSTALL_DIR on failure, or restructure the swap to extract into a staging directory and only move the old INSTALL_DIR aside after the new extraction succeeds (rename-based atomic swap).",
+  "whyTestsDoNotAlreadyCoverThis": "No tests are included for this feature; the failure requires simulating a mid-install abort after INSTALL_DIR removal but before tar extraction completes.",
+  "suggestedRegressionTest": "Shell test: create a fake INSTALL_DIR with .env and prism.db, stub tar to exit 1, run install.sh, assert the .env and prism.db still exist on disk after the script exits non-zero.",
+  "minimumFixScope": "Move PRESERVE_DIR to a separate mktemp -d outside TMP_DIR; update the EXIT trap to restore preserved files into INSTALL_DIR if the script exits non-zero before restoration completes.",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-config-cf96aef71d_dc789d16e9",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T051243-181602",
+  "createdAt": "2026-07-20T05:15:19.230Z",
+  "updatedAt": "2026-07-20T05:15:19.230Z"
+}

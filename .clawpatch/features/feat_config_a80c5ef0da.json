@@ -32,11 +32,25 @@
     "filesystem",
     "network"
   ],
-  "status": "pending",
+  "status": "needs-fix",
   "lock": null,
-  "findingIds": [],
+  "findingIds": [
+    "fnd_sig-feat-config-a80c5ef0da-eae43_0bcd37512a",
+    "fnd_sig-feat-config-a80c5ef0da-54b68_49e5a52438",
+    "fnd_sig-feat-config-a80c5ef0da-09453_e837208bb6"
+  ],
   "patchAttemptIds": [],
-  "analysisHistory": [],
+  "analysisHistory": [
+    {
+      "runId": "20260720T051243-181602",
+      "kind": "review",
+      "summary": "3 finding(s); prompt=7131 bytes; approxTokens=1783; includedFiles=1; omittedFiles=0",
+      "provider": "pi",
+      "model": null,
+      "reasoningEffort": null,
+      "createdAt": "2026-07-20T05:13:49.248Z"
+    }
+  ],
   "createdAt": "2026-07-20T04:19:21.366Z",
-  "updatedAt": "2026-07-20T04:19:21.366Z"
+  "updatedAt": "2026-07-20T05:13:49.248Z"
 }
