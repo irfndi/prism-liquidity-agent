@@ -647,8 +647,9 @@ export const updateCommand = new Command("update")
       }
 
       console.log(`Update available: ${current} → ${latest}`);
-      if (release.channel === "canary" && release.commit) {
-        console.log(`Canary build: ${release.version} (commit ${release.commit.slice(0, 8)})`);
+      if (release.channel === "canary") {
+        const commitSuffix = release.commit ? ` (commit ${release.commit.slice(0, 8)})` : "";
+        console.log(`Canary build: ${release.version}${commitSuffix}`);
       }
       console.log(`Source: ${release.source === "r2" ? "Cloudflare R2" : "GitHub Releases"}`);
       if (release.bundleUrl) {
