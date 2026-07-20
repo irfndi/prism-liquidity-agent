@@ -4,6 +4,7 @@ import path from "path";
 import os from "os";
 import readline from "readline";
 import { Keypair } from "@solana/web3.js";
+import bs58 from "bs58";
 import { readCredentials, prismApiPost } from "./api.js";
 
 const WALLET_DIR = path.join(os.homedir(), ".config", "prism");
@@ -13,6 +14,42 @@ function ensureWalletDir() {
   if (!fs.existsSync(WALLET_DIR)) {
     fs.mkdirSync(WALLET_DIR, { recursive: true, mode: 0o700 });
   }
+}
+
+function isExistingFile(candidate: string): boolean {
+  try {
+    return fs.statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// Effective-wallet resolution mirroring the engine: WALLET_PRIVATE_KEY (base58, decoded
+// exactly like engine/adapter-service.ts) takes precedence over the local keystore.
+// Returns null when neither yields a usable key.
+function resolveEffectivePubkey(): { pubkey: string; source: "env" | "keystore" } | null {
+  const envKey = process.env.WALLET_PRIVATE_KEY?.trim();
+  if (envKey) {
+    try {
+      return {
+        pubkey: Keypair.fromSecretKey(bs58.decode(envKey)).publicKey.toBase58(),
+        source: "env",
+      };
+    } catch {
+      // Undecodable env key: fall through to the keystore.
+    }
+  }
+  if (fs.existsSync(WALLET_FILE)) {
+    try {
+      const walletData = JSON.parse(fs.readFileSync(WALLET_FILE, "utf-8")) as { pubkey?: string };
+      if (walletData.pubkey) {
+        return { pubkey: walletData.pubkey, source: "keystore" };
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 export const walletCommand = new Command("wallet")
@@ -55,28 +92,50 @@ export const walletCommand = new Command("wallet")
       }),
   )
   .addCommand(
-    new Command("show").description("Show wallet pubkey").action(() => {
-      if (!fs.existsSync(WALLET_FILE)) {
-        console.error("Error: No wallet found. Run 'prism wallet generate' first.");
-        process.exit(1);
-      }
-      let walletData: { pubkey: string };
-      try {
-        walletData = JSON.parse(fs.readFileSync(WALLET_FILE, "utf-8"));
-      } catch (err) {
-        console.error("Error: Failed to parse wallet file. It may be corrupted.");
-        process.exit(1);
-      }
-      console.log(walletData.pubkey);
-    }),
+    new Command("show")
+      .description("Show the effective wallet pubkey (WALLET_PRIVATE_KEY env, then local keystore)")
+      .action(() => {
+        const effective = resolveEffectivePubkey();
+        if (!effective) {
+          if (process.env.WALLET_PRIVATE_KEY?.trim()) {
+            console.error(
+              "Error: WALLET_PRIVATE_KEY is set but could not be decoded, and no keystore wallet exists.",
+            );
+          } else {
+            console.error(
+              "Error: No wallet found. Run 'prism wallet generate' first, or set WALLET_PRIVATE_KEY.",
+            );
+          }
+          process.exit(1);
+        }
+        console.log(effective.pubkey);
+        console.error(
+          effective.source === "env"
+            ? "(source: WALLET_PRIVATE_KEY environment variable)"
+            : `(source: keystore ${WALLET_FILE})`,
+        );
+      }),
   )
   .addCommand(
     new Command("import")
       .description("Import an existing keypair")
-      .argument("[keypair]", "Keypair as JSON array (not recommended — visible in shell history)")
+      .argument(
+        "[keypair]",
+        "Keypair as a JSON array, OR a path to a keypair JSON file (file paths are auto-detected)",
+      )
       .option("--force", "Overwrite existing wallet")
-      .option("--file <path>", "Read keypair JSON from file (secure)")
-      .option("--stdin", "Read keypair from stdin (secure, piped input)")
+      .option("--file <path>", "Read keypair JSON from file (recommended; secure)")
+      .option("--stdin", "Read keypair from stdin (recommended; secure, piped input)")
+      .addHelpText(
+        "after",
+        `
+Examples:
+  $ prism wallet import --file /path/to/keypair.json   # read from file (recommended)
+  $ prism wallet import /path/to/keypair.json          # file path auto-detected
+  $ cat keypair.json | prism wallet import --stdin      # read from stdin (recommended)
+  $ prism wallet import '[1,2,3,...]'                   # inline JSON (visible to ps/history; not recommended)
+`,
+      )
       .action(async (keypairStr, options) => {
         ensureWalletDir();
         if (fs.existsSync(WALLET_FILE) && !options.force) {
@@ -103,14 +162,28 @@ export const walletCommand = new Command("wallet")
             process.exit(1);
           }
         } else if (keypairStr) {
-          console.warn(
-            "⚠️  SECURITY WARNING: Providing a keypair as a CLI argument exposes it to `ps aux` and shell history. Use --file or --stdin instead.",
-          );
-          try {
-            secretKey = JSON.parse(keypairStr);
-          } catch (err) {
-            console.error("Error: Invalid keypair JSON format");
-            process.exit(1);
+          if (isExistingFile(keypairStr)) {
+            // A bare file path passed positionally, e.g. `prism wallet import ./kp.json`.
+            // A JSON array string is never an existing file, so this is unambiguous.
+            try {
+              const fileContent = fs.readFileSync(keypairStr, "utf-8");
+              secretKey = JSON.parse(fileContent);
+            } catch {
+              console.error(`Error: Failed to read or parse keypair file '${keypairStr}'`);
+              process.exit(1);
+            }
+          } else {
+            console.warn(
+              "⚠️  SECURITY WARNING: Providing a keypair as a CLI argument exposes it to `ps aux` and shell history. Use --file or --stdin instead.",
+            );
+            try {
+              secretKey = JSON.parse(keypairStr);
+            } catch {
+              console.error(
+                "Error: Invalid keypair JSON, and no such keypair file exists. Provide a valid JSON array or an existing file path.",
+              );
+              process.exit(1);
+            }
           }
         } else {
           console.error(
