@@ -114,7 +114,10 @@ function checkRpc(): DoctorCheck {
       "Public Solana RPC is configured; use a paid/private provider for live trading",
     );
   }
-  if (fallback && normalizeHeliusUrl(fallback, helius).url === normalizeHeliusUrl(primary, helius).url) {
+  if (
+    fallback &&
+    normalizeHeliusUrl(fallback, helius).url === normalizeHeliusUrl(primary, helius).url
+  ) {
     return check("rpc", "fail", "SOLANA_RPC_FALLBACK_URL duplicates SOLANA_RPC_URL");
   }
   if (!fallback && !paperTrading) {
@@ -127,7 +130,9 @@ function checkRpc(): DoctorCheck {
   );
 }
 
-async function probeRpcEndpoint(url: string): Promise<{ ok: boolean; status: number; error?: string }> {
+async function probeRpcEndpoint(
+  url: string,
+): Promise<{ ok: boolean; status: number; error?: string }> {
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -154,7 +159,11 @@ async function probeRpcEndpoint(url: string): Promise<{ ok: boolean; status: num
       };
     }
     if (json.error) {
-      return { ok: false, status: res.status, error: maskHeliusUrl(json.error.message ?? "RPC error") };
+      return {
+        ok: false,
+        status: res.status,
+        error: maskHeliusUrl(json.error.message ?? "RPC error"),
+      };
     }
     if (json.result !== "ok") {
       return {
@@ -188,11 +197,7 @@ async function checkRpcConnectivity(): Promise<DoctorCheck> {
   const normalizedPrimary = normalizeHeliusUrl(effectivePrimary, helius).url;
   const primaryResult = await probeRpcEndpoint(normalizedPrimary);
   if (!primaryResult.ok) {
-    return check(
-      "rpc-connectivity",
-      "fail",
-      `Primary RPC unreachable: ${primaryResult.error}`,
-    );
+    return check("rpc-connectivity", "fail", `Primary RPC unreachable: ${primaryResult.error}`);
   }
 
   if (fallback) {
@@ -220,11 +225,7 @@ async function checkHeliusApiKey(): Promise<DoctorCheck> {
   const url = `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`;
   const result = await probeRpcEndpoint(url);
   if (!result.ok) {
-    return check(
-      "helius-api-key",
-      "fail",
-      `HELIUS_API_KEY rejected by Helius: ${result.error}`,
-    );
+    return check("helius-api-key", "fail", `HELIUS_API_KEY rejected by Helius: ${result.error}`);
   }
 
   return check("helius-api-key", "pass", "Helius API key valid");
