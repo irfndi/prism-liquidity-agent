@@ -9,7 +9,7 @@ const logger = createLogger("ConfigService");
 
 export type FeeDestination = "compound" | "accumulate-quote" | "accumulate-sol";
 
-function maskHeliusUrl(u: string): string {
+export function maskHeliusUrl(u: string): string {
   return u.replace(/(api[-_]key=)[^&\s]*/g, "$1[REDACTED]");
 }
 

@@ -10,7 +10,7 @@ import {
   getPrismLogsDir,
 } from "../engine/paths.js";
 import { isSourceInstall } from "../engine/install-method.js";
-import { normalizeHeliusUrl } from "../engine/config-service.js";
+import { normalizeHeliusUrl, maskHeliusUrl } from "../engine/config-service.js";
 import { getApiBaseUrl, prismApiPost, readCredentials } from "./api.js";
 
 type DoctorStatus = "pass" | "warn" | "fail";
@@ -148,11 +148,13 @@ async function probeRpcEndpoint(url: string): Promise<{ ok: boolean; status: num
       return {
         ok: false,
         status: res.status,
-        error: `Invalid JSON response: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+        error: maskHeliusUrl(
+          `Invalid JSON response: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+        ),
       };
     }
     if (json.error) {
-      return { ok: false, status: res.status, error: json.error.message ?? "RPC error" };
+      return { ok: false, status: res.status, error: maskHeliusUrl(json.error.message ?? "RPC error") };
     }
     if (json.result === undefined && json.result !== null) {
       return {
@@ -166,7 +168,7 @@ async function probeRpcEndpoint(url: string): Promise<{ ok: boolean; status: num
     return {
       ok: false,
       status: 0,
-      error: err instanceof Error ? err.message : String(err),
+      error: maskHeliusUrl(err instanceof Error ? err.message : String(err)),
     };
   }
 }
@@ -270,8 +272,12 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
       : check("database", "warn", `${getPrismDbPath()} will be created on first run`),
   );
   checks.push(checkRpc());
-  checks.push(await checkRpcConnectivity());
-  checks.push(await checkHeliusApiKey());
+  const [rpcConnectivity, heliusApiKey] = await Promise.all([
+    checkRpcConnectivity(),
+    checkHeliusApiKey(),
+  ]);
+  checks.push(rpcConnectivity);
+  checks.push(heliusApiKey);
   checks.push(checkPriceProviders());
   checks.push(checkWallet());
   checks.push(await checkRegistration());
