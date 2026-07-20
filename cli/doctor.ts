@@ -11,6 +11,7 @@ import {
 } from "../engine/paths.js";
 import { isSourceInstall } from "../engine/install-method.js";
 import { normalizeHeliusUrl, maskHeliusUrl } from "../engine/config-service.js";
+import { loadKeystoreSecretKeyBase58 } from "../engine/wallet-keystore.js";
 import { getApiBaseUrl, prismApiPost, readCredentials } from "./api.js";
 
 type DoctorStatus = "pass" | "warn" | "fail";
@@ -235,9 +236,19 @@ function checkWallet(): DoctorCheck {
   if (process.env.PAPER_TRADING !== "false") {
     return check("wallet", "pass", "Paper trading is enabled; no private key required");
   }
-  return process.env.WALLET_PRIVATE_KEY?.trim()
-    ? check("wallet", "pass", "Live trading wallet key is configured")
-    : check("wallet", "fail", "Live trading requires WALLET_PRIVATE_KEY");
+  // Live trading signs with WALLET_PRIVATE_KEY, falling back to the local keystore the
+  // engine also loads (see engine/config-service.ts), so either makes it usable.
+  if (process.env.WALLET_PRIVATE_KEY?.trim()) {
+    return check("wallet", "pass", "Live trading wallet key is configured (WALLET_PRIVATE_KEY)");
+  }
+  if (loadKeystoreSecretKeyBase58() != null) {
+    return check("wallet", "pass", "Live trading wallet key is configured (local keystore)");
+  }
+  return check(
+    "wallet",
+    "fail",
+    "Live trading requires WALLET_PRIVATE_KEY or a generated wallet (prism wallet generate)",
+  );
 }
 
 function checkPriceProviders(): DoctorCheck {

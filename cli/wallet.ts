@@ -1,14 +1,15 @@
 import { Command } from "commander";
 import fs from "fs";
 import path from "path";
-import os from "os";
 import readline from "readline";
 import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
 import { readCredentials, prismApiPost } from "./api.js";
+import { getPrismUserConfigDir } from "../engine/paths.js";
+import { getWalletKeystorePath } from "../engine/wallet-keystore.js";
 
-const WALLET_DIR = path.join(os.homedir(), ".config", "prism");
-const WALLET_FILE = path.join(WALLET_DIR, "wallet.json");
+const WALLET_DIR = getPrismUserConfigDir();
+const WALLET_FILE = getWalletKeystorePath();
 
 function ensureWalletDir() {
   if (!fs.existsSync(WALLET_DIR)) {
@@ -34,13 +35,13 @@ function resolveImportPath(candidate: string): string {
   return callerCwd ? path.resolve(callerCwd, candidate) : candidate;
 }
 
-// Wallet resolution for `wallet show`: WALLET_PRIVATE_KEY (base58, decoded exactly like
-// engine/adapter-service.ts) takes precedence. If the env key is present but invalid,
-// returns an error rather than silently falling back — the engine resolves the wallet to
-// null on failure, so a silent fallback would report the wrong wallet. If no env key is
-// set, the locally-stored keystore is shown, but it is informational only: the engine
-// signs with WALLET_PRIVATE_KEY and does not read this keystore. Returns null when no key
-// is configured or stored anywhere.
+// Effective-wallet resolution, mirroring the engine (engine/config-service.ts):
+// WALLET_PRIVATE_KEY (base58, decoded exactly like engine/adapter-service.ts) takes
+// precedence, then the local keystore written by `prism wallet generate|import` — the
+// engine loads the same keystore as its fallback, so a generated/imported wallet IS the
+// engine's signing wallet. If the env key is present but invalid, returns an error rather
+// than silently falling back (the engine resolves the wallet to null on a bad env key).
+// Returns null when no key is configured or stored anywhere.
 function resolveEffectivePubkey(): {
   pubkey: string;
   source: "env" | "keystore";
@@ -116,7 +117,7 @@ export const walletCommand = new Command("wallet")
   .addCommand(
     new Command("show")
       .description(
-        "Show the wallet pubkey. The engine signs with WALLET_PRIVATE_KEY; the local keystore is shown for reference but is not used by the engine for signing.",
+        "Show the effective wallet pubkey (WALLET_PRIVATE_KEY env, then the local keystore). Both are usable by the engine for signing.",
       )
       .action(() => {
         const effective = resolveEffectivePubkey();
@@ -132,13 +133,9 @@ export const walletCommand = new Command("wallet")
         }
         console.log(effective.pubkey);
         if (effective.source === "env") {
-          console.error(
-            "(source: WALLET_PRIVATE_KEY environment variable — the engine's signing key)",
-          );
+          console.error("(source: WALLET_PRIVATE_KEY environment variable)");
         } else {
-          console.error(
-            `(source: keystore ${WALLET_FILE} — stored key; the engine signs with WALLET_PRIVATE_KEY, not this keystore)`,
-          );
+          console.error(`(source: keystore ${WALLET_FILE})`);
         }
       }),
   )

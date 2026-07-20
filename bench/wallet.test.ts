@@ -10,8 +10,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(__dirname, "..", "cli", "index.ts");
 
 function runWalletShow(env: Record<string, string>) {
+  // Resolve the keystore from the isolated HOME (getPrismUserConfigDir falls back to
+  // $HOME/.config/prism), not the developer's real config dir.
+  const childEnv: Record<string, string | undefined> = { ...process.env, ...env };
+  delete childEnv.PRISM_CONFIG_DIR;
   return Bun.spawnSync([process.execPath, CLI, "wallet", "show"], {
-    env: { ...process.env, ...env },
+    env: childEnv as Record<string, string>,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -77,20 +81,20 @@ describe("wallet show (effective wallet resolution)", () => {
       expect(result.exitCode).toBe(0);
       expect(stdout).toContain(envKeypair.publicKey.toBase58());
       expect(stdout).not.toContain(keystorePubkey);
-      // The env key is the engine's signing key.
-      expect(stderr).toContain("the engine's signing key");
+      expect(stderr).toContain("(source: WALLET_PRIVATE_KEY environment variable)");
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("shows the keystore pubkey for reference, labeled as not the engine's signing key, when no env key is set", () => {
+  it("shows the keystore pubkey as the effective wallet when no env key is set", () => {
     const { home, keystorePubkey } = makeIsolatedKeystore();
     try {
-      const { WALLET_PRIVATE_KEY: _walletKey, ...envBase } = process.env as Record<
-        string,
-        string | undefined
-      >;
+      const {
+        WALLET_PRIVATE_KEY: _walletKey,
+        PRISM_CONFIG_DIR: _configDir,
+        ...envBase
+      } = process.env as Record<string, string | undefined>;
       const env = { ...envBase, HOME: home } as Record<string, string>;
       const result = Bun.spawnSync([process.execPath, CLI, "wallet", "show"], {
         env,
@@ -102,9 +106,9 @@ describe("wallet show (effective wallet resolution)", () => {
 
       expect(result.exitCode).toBe(0);
       expect(stdout).toContain(keystorePubkey);
-      // The keystore is shown for reference but must NOT be reported as the engine's
-      // effective signing wallet (the engine signs with WALLET_PRIVATE_KEY only).
-      expect(stderr).toContain("the engine signs with WALLET_PRIVATE_KEY");
+      // The engine loads this keystore as its wallet fallback, so it IS the effective
+      // signing wallet when no WALLET_PRIVATE_KEY is set.
+      expect(stderr).toContain("(source: keystore");
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
