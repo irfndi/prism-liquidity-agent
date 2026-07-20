@@ -21,11 +21,13 @@ function makeContext(): AgentRuntimeContext {
 }
 
 describe("AcpTransport (ACP v1)", () => {
-  it("speaks canonical ACP: initialize / session/new / session/prompt + session/update streaming", async () => {
-    // The fixture agent only accepts canonical (non agent/-prefixed) method names and
-    // an integer protocolVersion, and streams the reply via session/update
-    // agent_message_chunk notifications before resolving with a stopReason. Success
-    // therefore proves the handshake, method names, streaming, and completion model.
+  it("handshakes, streams the reply, and answers the agent's client callback without hanging", async () => {
+    // The fixture agent only accepts canonical (non agent/-prefixed) methods + integer
+    // protocolVersion, and mid-prompt it issues a session/request_permission client
+    // callback, replying only after it receives our answer. Success therefore proves the
+    // handshake, method names, integer protocolVersion, session/update streaming, the
+    // stopReason completion model, AND that we respond to inbound requests (if we
+    // ignored the callback the reply never arrives and the prompt times out).
     const transport = new AcpTransport({
       command: process.execPath,
       args: [FAKE_AGENT],

@@ -253,8 +253,22 @@ export class AcpTransport implements AgentRuntimeTransport {
     }
   }
 
-  private handleMessage(msg: AcpResponse | AcpNotification): void {
-    if ("id" in msg && typeof msg.id === "number" && this.pending.has(msg.id)) {
+  private handleMessage(msg: AcpResponse | AcpNotification | AcpRequest): void {
+    // Inbound request from the agent (carries both a method and an id). Prism is a
+    // non-interactive ACP client and implements none of the client callbacks
+    // (session/request_permission, fs/*, terminal/*), but it must still reply, or the
+    // agent blocks indefinitely and the prompt times out.
+    if ("method" in msg && "id" in msg && msg.id != null) {
+      this.respondUnsupported(msg.id as number | string, msg.method as string);
+      return;
+    }
+
+    if (
+      "id" in msg &&
+      typeof msg.id === "number" &&
+      !("method" in msg) &&
+      this.pending.has(msg.id)
+    ) {
       const p = this.pending.get(msg.id)!;
       this.pending.delete(msg.id);
       clearTimeout(p.timer);
@@ -281,6 +295,25 @@ export class AcpTransport implements AgentRuntimeTransport {
       ) {
         this.sessionText += update.content.text;
       }
+    }
+  }
+
+  private respondUnsupported(id: number | string, method: string): void {
+    logger.debug("ACP client request not supported; replying so the agent does not hang", {
+      method,
+    });
+    this.write({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32601, message: `Method not supported by the Prism host: ${method}` },
+    });
+  }
+
+  private write(message: unknown): void {
+    try {
+      this.process?.stdin?.write(JSON.stringify(message) + "\n");
+    } catch (err) {
+      logger.warn("Failed to write ACP frame", { error: String(err) });
     }
   }
 
