@@ -175,6 +175,14 @@ Key `.env` variables:
 | `TRAILING_STOP_PCT`       | `0.10`       | Drawdown from peak that triggers EXIT    |
 | `SQLITE_DB_PATH`          | `./prism.db` | SQLite database file path                |
 | `ENABLE_SNAPSHOT_CAPTURE` | `false`      | Dump pool snapshots to DB (paper only)   |
+| `MAX_POSITIONS_PER_POOL`  | `2`          | Concurrent positions per pool (Wave 10)  |
+| `ENTRY_STRATEGY_TYPE`     | `spot`       | Deposit shape: spot\|curve\|bidask\|auto |
+| `VOLATILITY_ADAPTIVE_RANGES` | `false`   | Scale range width by realized volatility |
+| `FARM_REWARDS_ENABLED`    | `true`       | Claim LM farm rewards periodically       |
+| `FEE_DESTINATION`         | `compound`   | Fee routing: compound\|accumulate-quote\|accumulate-sol |
+| `ALERTS_ENABLED`          | `true`       | Proactive Telegram alert delivery        |
+| `COPY_SIGNALS_ENABLED`    | `false`      | Opt-in copy-trading signal boost         |
+| `STABLECOIN_MINTS`        | --           | Comma-separated stablecoin mints for depeg detection |
 
 Live entries that fail because the wallet lacks a pool token are backed off
 exponentially for that pool, starting at 30 minutes and capped at 6 hours.
