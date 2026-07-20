@@ -114,7 +114,7 @@ function checkRpc(): DoctorCheck {
       "Public Solana RPC is configured; use a paid/private provider for live trading",
     );
   }
-  if (fallback && fallback === primary) {
+  if (fallback && normalizeHeliusUrl(fallback, helius).url === normalizeHeliusUrl(primary, helius).url) {
     return check("rpc", "fail", "SOLANA_RPC_FALLBACK_URL duplicates SOLANA_RPC_URL");
   }
   if (!fallback && !paperTrading) {
@@ -156,7 +156,7 @@ async function probeRpcEndpoint(url: string): Promise<{ ok: boolean; status: num
     if (json.error) {
       return { ok: false, status: res.status, error: maskHeliusUrl(json.error.message ?? "RPC error") };
     }
-    if (json.result === undefined && json.result !== null) {
+    if (json.result === undefined || json.result === null) {
       return {
         ok: false,
         status: res.status,
