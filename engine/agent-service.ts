@@ -344,6 +344,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
       const detection = yield* detectAgents({
         agentAcpCommand: config.agentAcpCommand,
         agentGatewayUrl: config.agentGatewayUrl,
+        agentGatewayToken: config.agentGatewayToken,
       }).pipe(
         Effect.catchAll(() =>
           Effect.succeed({

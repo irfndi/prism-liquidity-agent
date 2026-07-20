@@ -72,16 +72,25 @@ export class GatewayTransport implements AgentRuntimeTransport {
       }, 3_000);
 
       try {
-        ws = new WebSocket(this.options.url);
+        // Bun's WebSocket takes an options object as the 2nd arg; pass the token
+        // on the upgrade so gateways that reject unauthenticated upgrades answer.
+        ws = this.options.token
+          ? new WebSocket(this.options.url, {
+              headers: { Authorization: `Bearer ${this.options.token}` },
+            })
+          : new WebSocket(this.options.url);
 
         ws.addEventListener("open", () => {
           clearTimeout(timer);
+          // Settle BEFORE closing: Bun dispatches the close listener synchronously
+          // during ws.close(), so settle(false) from the close handler would win
+          // if close() ran first (same race PR#116 fixed in agent-detection).
+          settle(true);
           try {
             ws?.close();
           } catch {
             // ignore close errors during probe success cleanup
           }
-          settle(true);
         });
         ws.addEventListener("error", () => {
           clearTimeout(timer);
