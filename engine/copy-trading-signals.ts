@@ -127,7 +127,7 @@ export const CopySignalLive = Layer.effect(
           const allowed = new Set(settings.wallets);
           const seen = new Set<string>();
           const valid = parseCopySignalPayload(raw).filter((signal) => {
-            const key = `${signal.wallet}:${signal.poolAddress}:${signal.action}:${signal.signature ?? signal.observedAt}`;
+            const key = `${signal.wallet}:${signal.poolAddress}:${signal.action}:${signal.signature ?? `${signal.wallet}:${signal.poolAddress}:${signal.observedAt}`}`;
             const accepted =
               signal.poolAddress === poolAddress &&
               allowed.has(signal.wallet) &&

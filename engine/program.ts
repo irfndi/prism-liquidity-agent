@@ -2254,7 +2254,7 @@ export const program = Effect.gen(function* () {
             : []),
         ];
         yield* alertSvc.sendAlert({
-          type: w15Signals.depeg ? "stablecoin_depeg" : "liquidity_drain",
+          type: w15Signals.liquidityDrain ? "liquidity_drain" : "stablecoin_depeg",
           severity: "critical",
           message: `Fast EXIT signal on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${reasons.join("; ")}`,
           poolAddress,
@@ -2271,7 +2271,12 @@ export const program = Effect.gen(function* () {
             poolAddress,
             positionId: pos.positionId,
             confidence: 1,
-            reasoning: `W15 fast EXIT: ${w15Signals.depeg ? "stablecoin depeg" : "liquidity drain"}`,
+            reasoning: `W15 fast EXIT: ${[
+              w15Signals.depeg ? "stablecoin depeg" : null,
+              w15Signals.liquidityDrain ? "liquidity drain" : null,
+            ]
+              .filter(Boolean)
+              .join(" + ")}`,
           };
         } else if (tvlVelocity < -config.tvlDropExitPct) {
           decision = {
@@ -3461,7 +3466,7 @@ export const program = Effect.gen(function* () {
           });
         }
         if (decision.action === "ENTER" && config.volatilityAdaptiveRanges) {
-          console.info(`[adaptive-range] ${poolAddress} halfWidth=${rangeHalfWidth}`, {
+          logger.info(`[adaptive-range] ${poolAddress} halfWidth=${rangeHalfWidth}`, {
             volatilityStddev,
             binStep: pool.binStep,
             configuredBaseHalfWidth: config.entryRangeHalfWidthBins,
@@ -3838,8 +3843,6 @@ export const program = Effect.gen(function* () {
 
           // F3: fee compounding — if AUTO_COMPOUND_FEES is on and the net fees
           // cleared the cost threshold, redeposit them into the same range.
-          // This closes + reopens the position around the same bins so the
-          // claimed fees become new liquidity instead of sitting in the wallet.
           if (config.autoCompoundFees && config.paperTrading === false) {
             const rebalanceGasCostUsd = config.rebalanceGasCostSol * config.solPriceUsd;
             const compoundGate = evaluateCompoundGate({

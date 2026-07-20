@@ -2260,7 +2260,7 @@ export const AdapterLive = Layer.effect(
         Effect.gen(function* () {
           if (!wallet)
             return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
-          if (feeX <= 0 && feeY <= 0)
+          if (!Number.isFinite(feeX) || !Number.isFinite(feeY) || (feeX <= 0 && feeY <= 0))
             return yield* Effect.fail(
               new AdapterError({ message: "Cannot convert zero claimed fees" }),
             );
@@ -2357,7 +2357,10 @@ export const AdapterLive = Layer.effect(
           }
 
           const txSignatures: string[] = [];
+          const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
           for (const tx of claimTxs) {
+            tx.feePayer = wallet.publicKey;
+            tx.recentBlockhash = blockhash;
             tx.sign(wallet);
             const signature = yield* rpcCall((conn) =>
               conn.sendRawTransaction(tx.serialize(), {

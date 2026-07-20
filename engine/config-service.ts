@@ -363,7 +363,9 @@ const loadConfig = Effect.gen(function* () {
   // ─── Wave 9: Volatility-adaptive range width ──────────────────────────────
   // 0 = unset → binStep-tiered baseline (25/20/15); >0 = static base that
   // adaptation scales. Bounded at use by the MAX_REBALANCE_RANGE_BINS cap.
-  const entryRangeHalfWidthBins = yield* validatedNumber("ENTRY_RANGE_HALF_WIDTH_BINS", 0, 0, 200);
+  const entryRangeHalfWidthBins = Math.floor(
+    yield* validatedNumber("ENTRY_RANGE_HALF_WIDTH_BINS", 0, 0, 200),
+  );
   const volatilityAdaptiveRanges = yield* Config.boolean("VOLATILITY_ADAPTIVE_RANGES").pipe(
     Effect.orElseSucceed(() => false),
   );
@@ -597,10 +599,10 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => true),
   );
   const limitOrdersEnabled = yield* Config.boolean("LIMIT_ORDERS_ENABLED").pipe(
-    Config.withDefault(false),
+    Effect.orElseSucceed(() => false),
   );
   const limitOrderModeRaw = yield* Config.string("LIMIT_ORDER_MODE").pipe(
-    Config.withDefault("take-profit"),
+    Effect.orElseSucceed(() => "take-profit"),
   );
   const limitOrderMode = limitOrderModeRaw === "dca" ? "dca" : "take-profit";
   const limitOrderTargetBinOffset = yield* validatedNumber("LIMIT_ORDER_TARGET_BIN_OFFSET", 1, 20);

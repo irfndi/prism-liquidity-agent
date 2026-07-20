@@ -27,7 +27,12 @@ export function detectDepegAndLiquidityDrain(
   const relativeThreshold = config.depegRelativePct ?? 0.02;
   const drainThreshold = config.liquidityDrainPct ?? 0.5;
   const depeg =
-    stablecoinMints
+    // Only stable/stable pairs expose a depeg: pool.currentPrice is the ratio
+    // between the two legs, so for a volatile/stable pair (e.g. SOL/USDC) the
+    // "stablecoin price" derived from it is the volatile asset's price, which
+    // would false-trigger a depeg on every cycle. Skip unless both legs are
+    // stablecoins. Liquidity-drain detection below is independent and unaffected.
+    (stablecoinMints.length === 2 ? stablecoinMints : [])
       .map((tokenMint) => {
         const stablecoinPrice =
           tokenMint === pool.tokenX ? pool.currentPrice : 1 / pool.currentPrice;
