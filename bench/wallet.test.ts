@@ -21,6 +21,12 @@ function decode(buffer: Uint8Array): string {
   return new TextDecoder().decode(buffer);
 }
 
+// A deliberately INVALID WALLET_PRIVATE_KEY: the hyphen is not in the base58 alphabet, so
+// bs58.decode throws (exercising the "env key present but invalid" path). It is kept a
+// low-entropy, obviously-placeholder string so secret scanners (e.g. GitGuardian's
+// "Generic High Entropy Secret" rule) do not mistake it for a hardcoded credential.
+const INVALID_BASE58_PRIVATE_KEY = "invalid-key";
+
 // Write a keystore wallet in an isolated HOME so the engine-equivalent resolution can be
 // exercised without touching the developer's real ~/.config/prism.
 function makeIsolatedKeystore(): { home: string; keystorePubkey: string } {
@@ -43,7 +49,7 @@ describe("wallet show (effective wallet resolution)", () => {
   it("errors on a set-but-invalid WALLET_PRIVATE_KEY instead of silently showing the keystore", () => {
     const { home, keystorePubkey } = makeIsolatedKeystore();
     try {
-      const result = runWalletShow({ HOME: home, WALLET_PRIVATE_KEY: "not-a-valid-base58-key!!!" });
+      const result = runWalletShow({ HOME: home, WALLET_PRIVATE_KEY: INVALID_BASE58_PRIVATE_KEY });
       const stdout = decode(result.stdout);
       const stderr = decode(result.stderr);
 
@@ -66,16 +72,19 @@ describe("wallet show (effective wallet resolution)", () => {
         WALLET_PRIVATE_KEY: bs58.encode(envKeypair.secretKey),
       });
       const stdout = decode(result.stdout);
+      const stderr = decode(result.stderr);
 
       expect(result.exitCode).toBe(0);
       expect(stdout).toContain(envKeypair.publicKey.toBase58());
       expect(stdout).not.toContain(keystorePubkey);
+      // The env key is the engine's signing key.
+      expect(stderr).toContain("the engine's signing key");
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("shows the keystore pubkey when no env key is set", () => {
+  it("shows the keystore pubkey for reference, labeled as not the engine's signing key, when no env key is set", () => {
     const { home, keystorePubkey } = makeIsolatedKeystore();
     try {
       const { WALLET_PRIVATE_KEY: _walletKey, ...envBase } = process.env as Record<
@@ -88,8 +97,14 @@ describe("wallet show (effective wallet resolution)", () => {
         stdout: "pipe",
         stderr: "pipe",
       });
+      const stdout = decode(result.stdout);
+      const stderr = decode(result.stderr);
+
       expect(result.exitCode).toBe(0);
-      expect(decode(result.stdout)).toContain(keystorePubkey);
+      expect(stdout).toContain(keystorePubkey);
+      // The keystore is shown for reference but must NOT be reported as the engine's
+      // effective signing wallet (the engine signs with WALLET_PRIVATE_KEY only).
+      expect(stderr).toContain("the engine signs with WALLET_PRIVATE_KEY");
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }

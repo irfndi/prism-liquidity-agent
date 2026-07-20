@@ -34,11 +34,13 @@ function resolveImportPath(candidate: string): string {
   return callerCwd ? path.resolve(callerCwd, candidate) : candidate;
 }
 
-// Effective-wallet resolution mirroring the engine: WALLET_PRIVATE_KEY (base58, decoded
-// exactly like engine/adapter-service.ts) takes precedence over the local keystore.
-// If the env key is present but invalid, returns an error instead of silently falling
-// back — the engine resolves the wallet to null in that case, so a silent fallback would
-// report the wrong effective wallet. Returns null when no key is configured anywhere.
+// Wallet resolution for `wallet show`: WALLET_PRIVATE_KEY (base58, decoded exactly like
+// engine/adapter-service.ts) takes precedence. If the env key is present but invalid,
+// returns an error rather than silently falling back — the engine resolves the wallet to
+// null on failure, so a silent fallback would report the wrong wallet. If no env key is
+// set, the locally-stored keystore is shown, but it is informational only: the engine
+// signs with WALLET_PRIVATE_KEY and does not read this keystore. Returns null when no key
+// is configured or stored anywhere.
 function resolveEffectivePubkey(): {
   pubkey: string;
   source: "env" | "keystore";
@@ -113,7 +115,9 @@ export const walletCommand = new Command("wallet")
   )
   .addCommand(
     new Command("show")
-      .description("Show the effective wallet pubkey (WALLET_PRIVATE_KEY env, then local keystore)")
+      .description(
+        "Show the wallet pubkey. The engine signs with WALLET_PRIVATE_KEY; the local keystore is shown for reference but is not used by the engine for signing.",
+      )
       .action(() => {
         const effective = resolveEffectivePubkey();
         if (effective?.error) {
@@ -127,11 +131,15 @@ export const walletCommand = new Command("wallet")
           process.exit(1);
         }
         console.log(effective.pubkey);
-        console.error(
-          effective.source === "env"
-            ? "(source: WALLET_PRIVATE_KEY environment variable)"
-            : `(source: keystore ${WALLET_FILE})`,
-        );
+        if (effective.source === "env") {
+          console.error(
+            "(source: WALLET_PRIVATE_KEY environment variable — the engine's signing key)",
+          );
+        } else {
+          console.error(
+            `(source: keystore ${WALLET_FILE} — stored key; the engine signs with WALLET_PRIVATE_KEY, not this keystore)`,
+          );
+        }
       }),
   )
   .addCommand(
