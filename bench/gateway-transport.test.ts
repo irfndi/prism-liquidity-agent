@@ -303,4 +303,61 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
       server.stop(true);
     }
   });
+
+  it("rejects cleanly with no unhandled rejection when the socket closes before chat.send is acked", async () => {
+    // Regression for the P1: if the chat.send acknowledgement never arrives (socket
+    // closed), both the ack request and the streamed-run promise reject. They must be
+    // handled together so Bun does not see an unhandled rejection and terminate the
+    // whole process instead of just failing this one call.
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, s) {
+        if (s.upgrade(req)) return;
+        return new Response("not found", { status: 404 });
+      },
+      websocket: {
+        open(ws) {
+          sendFrame(ws, challenge("nonce-drop"));
+        },
+        message(ws, data) {
+          const frame = JSON.parse(String(data)) as Frame;
+          if (frame.type === "req" && frame.method === "connect") {
+            sendFrame(ws, { type: "res", id: frame.id, ok: true, payload: HELLO_OK });
+          } else if (frame.type === "req" && frame.method === "chat.send") {
+            ws.close(1006, "dropped before ack");
+          }
+        },
+      },
+    });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      const transport = new GatewayTransport({
+        url: `ws://127.0.0.1:${server.port}`,
+        token: "test-token",
+        timeoutMs: 5000,
+      });
+      let error: unknown = null;
+      try {
+        await Effect.runPromise(transport.sendPrompt("review", makeContext()));
+      } catch (err) {
+        error = err;
+      }
+      // The prompt failed (socket dropped).
+      expect(error).not.toBeNull();
+      // Give the runtime a tick to surface any stray unhandled rejection before
+      // asserting there were none.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      server.stop(true);
+    }
+  });
 });

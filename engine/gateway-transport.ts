@@ -372,13 +372,21 @@ export class GatewayTransport implements AgentRuntimeTransport {
     try {
       // chat.send returns an ack res (status "started"); the reply streams back as
       // "chat" events keyed by runId (== our idempotencyKey), terminating on final.
-      await this.request(
-        "chat.send",
-        { sessionKey: this.sessionKey, message, idempotencyKey: id },
-        timeoutMs,
-        id,
-      );
-      return await runPromise;
+      // Await the ack and the streamed reply together so that if the socket closes (or
+      // either side times out) while we are waiting on only one of them, the other's
+      // rejection is still handled. Promise.all attaches a handler to both; otherwise an
+      // awaited-alone run promise could reject with no handler and Bun would treat it as
+      // an unhandled rejection, terminating the whole process rather than just the call.
+      const [, reply] = await Promise.all([
+        this.request(
+          "chat.send",
+          { sessionKey: this.sessionKey, message, idempotencyKey: id },
+          timeoutMs,
+          id,
+        ),
+        runPromise,
+      ]);
+      return reply;
     } finally {
       this.cleanupChatRun(id);
     }
