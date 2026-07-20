@@ -15,7 +15,9 @@ function maskHeliusUrl(u: string): string {
 
 function isHeliusHost(url: string): boolean {
   try {
-    const hostname = new URL(url).hostname;
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+    const hostname = parsed.hostname;
     return hostname === "helius-rpc.com" || hostname.endsWith(".helius-rpc.com");
   } catch {
     return false;

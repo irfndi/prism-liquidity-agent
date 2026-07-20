@@ -142,4 +142,22 @@ describe("normalizeHeliusUrl", () => {
     expect(url).toBe("not-a-url");
     expect(normalized).toBe(false);
   });
+
+  it("refuses to append credentials to http:// Helius URLs", () => {
+    const { url, normalized } = normalizeHeliusUrl(
+      "http://mainnet.helius-rpc.com/",
+      "my-secret-key",
+    );
+    expect(url).toBe("http://mainnet.helius-rpc.com/");
+    expect(normalized).toBe(false);
+  });
+
+  it("still normalizes api_key= to api-key= on http:// URLs without appending the key", () => {
+    const { url, normalized } = normalizeHeliusUrl(
+      "http://mainnet.helius-rpc.com/?api_key=existing",
+      "my-secret-key",
+    );
+    expect(url).toBe("http://mainnet.helius-rpc.com/?api_key=existing");
+    expect(normalized).toBe(false);
+  });
 });

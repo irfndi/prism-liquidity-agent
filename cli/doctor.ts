@@ -154,6 +154,13 @@ async function probeRpcEndpoint(url: string): Promise<{ ok: boolean; status: num
     if (json.error) {
       return { ok: false, status: res.status, error: json.error.message ?? "RPC error" };
     }
+    if (json.result === undefined && json.result !== null) {
+      return {
+        ok: false,
+        status: res.status,
+        error: "Response is not a valid JSON-RPC envelope (missing result field)",
+      };
+    }
     return { ok: true, status: res.status };
   } catch (err) {
     return {
