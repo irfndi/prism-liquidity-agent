@@ -4,12 +4,18 @@ Prism is designed to be operated by AI agent harnesses (OpenClaw, Hermes, acpx, 
 
 ## Supported Agent Platforms
 
-| Platform      | Status       | Integration         |
-| ------------- | ------------ | ------------------- |
-| OpenClaw      | ✅ Supported | Native CLI commands |
-| Hermes        | ✅ Supported | Native CLI commands |
-| acpx          | ✅ Supported | CLI wrapper         |
-| Custom agents | ✅ Supported | HTTP API + CLI      |
+Every harness operates Prism through the `prism` CLI plus the auto-discovered skill
+files. On top of that, harnesses that implement a supported runtime protocol can plug
+into Prism's opt-in *decision overlay* (`AGENTIC_MODE=true`) to review decisions and
+receive check-ins/alerts — see the
+[README agent runtime overlay](../README.md#agent-runtime-overlay) for the env vars.
+
+| Platform / runtime | Operating boundary | Decision overlay (`AGENTIC_MODE=true`) |
+| ------------------ | ------------------ | --------------------------------------- |
+| Hermes | CLI + `skills/prism-hermes/` | **ACP** (`AGENT_RUNTIME=hermes`, `hermes acp`) or **Hermes HTTP API** (`AGENT_HERMES_API_URL`) |
+| OpenClaw | CLI + `skills/prism-openclaw/` | **Gateway WebSocket** (`AGENT_RUNTIME=openclaw`, gateway protocol v4 / OpenClaw >= 2026.7.1, token required) or **webhook** (`AGENT_OPENCLAW_WEBHOOK_URL`) |
+| Any [ACP](https://agentclientprotocol.com) agent (Claude Code, Codex CLI, Gemini CLI, OpenCode, …) | CLI | **ACP** via `AGENT_ACP_COMMAND` / `AGENT_ACP_ARGS` |
+| acpx / custom | CLI wrapper / `skills/prism/` | any of the above, or the local **MCP server** / HTTP pull interfaces |
 
 ## Skills (auto-discovered by agent harnesses)
 
@@ -228,15 +234,22 @@ export SOLANA_RPC_FALLBACK_URL="https://your-second-rpc.example.com" # OPTIONAL
 export WALLET_PRIVATE_KEY="..."                    # OPTIONAL (for live trading only)
 ```
 
-Optional agent-runtime overlay (lets a local Hermes/OpenClaw harness review decisions):
+Optional agent-runtime overlay (lets a local Hermes/OpenClaw/ACP harness review decisions):
 
 ```bash
 export AGENTIC_MODE="true"
 export AGENT_RUNTIME="auto"                      # auto | hermes | openclaw | none
+# ACP runtime (any ACP agent: hermes, claude code, codex, gemini, opencode, ...)
 export AGENT_ACP_COMMAND="hermes"
 export AGENT_ACP_ARGS="acp"
+# OpenClaw gateway (requires OpenClaw >= 2026.7.1, gateway protocol v4)
 export AGENT_GATEWAY_URL="ws://127.0.0.1:18789"
-export AGENT_GATEWAY_TOKEN=""                    # optional Gateway auth token
+export AGENT_GATEWAY_TOKEN=""                    # shared gateway token (required for the gateway transport)
+# HTTP alert/check-in transports
+export AGENT_OPENCLAW_WEBHOOK_URL=""             # OpenClaw webhook (POSTs to /hooks/agent)
+export AGENT_OPENCLAW_WEBHOOK_TOKEN=""
+export AGENT_HERMES_API_URL=""                   # Hermes OpenAI-compatible API base URL
+export AGENT_HERMES_API_TOKEN=""                 # Hermes API_SERVER_KEY (Bearer)
 export AGENT_PROMPT_TIMEOUT_MS="15000"
 export AGENT_CHECKIN_INTERVAL_MS="3600000"
 export AGENT_CHECKIN_ON_EVENTS="true"
@@ -246,7 +259,10 @@ export AGENT_HTTP_PORT="0"                      # local HTTP status API; non-zer
 export AGENT_MCP_ENABLED="false"                # expose MCP tools to agent runtime; true enables
 ```
 
-The overlay can only reduce confidence or change an action to `HOLD`. No remote LLM API keys are used.
+The overlay can only reduce confidence or change an action to `HOLD`. No remote LLM
+API keys are used. The ACP runtime speaks canonical ACP v1; the OpenClaw gateway
+transport speaks gateway protocol v4 — on loopback a valid shared token lets Prism's
+`cli` client keep its scopes without device pairing.
 
 ## Agent Pull Interfaces (MCP + HTTP)
 
