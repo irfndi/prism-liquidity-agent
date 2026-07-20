@@ -34,6 +34,7 @@ import type {
 } from "./state-service.js";
 import type { EvolvableThresholds, OutcomeRecord } from "./strategy-service.js";
 import type { ClaimedReward } from "./rewards.js";
+import type { LimitOrderRequest } from "./limit-orders.js";
 import type {
   AdapterError,
   AuditError,
@@ -132,6 +133,15 @@ export interface AdapterApi {
   readonly exitPosition: (
     poolAddress: string,
     positionPubKey: string,
+  ) => Effect.Effect<{ txSignature: string }, unknown>;
+  readonly placeLimitOrder?: (
+    poolAddress: string,
+    request: LimitOrderRequest,
+  ) => Effect.Effect<{ orderPubKey: string; txSignature: string }, unknown>;
+  readonly cancelLimitOrder?: (
+    poolAddress: string,
+    orderPubKey: string,
+    binIds: ReadonlyArray<number>,
   ) => Effect.Effect<{ txSignature: string }, unknown>;
   /**
    * Atomically rebalance a position into a new range via the Meteora SDK's

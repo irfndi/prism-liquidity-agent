@@ -55,6 +55,7 @@ import { getWalletSystemLamportsRequired } from "./live-entry-budget.js";
 import { SOL_MINT, USDC_MINT, GAS_RESERVE_LAMPORTS } from "./constants.js";
 import { computeRequiredAtomic } from "./entry-prep-service.js";
 import type { ClaimedReward } from "./rewards.js";
+import { validateLimitOrderRequest, type LimitOrderRequest } from "./limit-orders.js";
 
 const DEFAULT_PUBLIC_KEY = "11111111111111111111111111111111";
 
@@ -1875,6 +1876,109 @@ export const AdapterLive = Layer.effect(
             Effect.fail(
               new AdapterError({
                 message: `Failed to exit position: ${String(err)}`,
+                poolAddress,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
+
+      placeLimitOrder: (poolAddress, request: LimitOrderRequest) =>
+        Effect.gen(function* () {
+          if (!wallet) {
+            return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
+          }
+          const dlmm = yield* getDlmm(poolAddress);
+          const concreteFunctionType = Number(
+            (dlmm.lbPair as { concreteFunctionType?: number }).concreteFunctionType ?? -1,
+          );
+          const validated = validateLimitOrderRequest(
+            request,
+            concreteFunctionType,
+            ConcreteFunctionType.LimitOrder,
+          );
+          const limitOrder = new Keypair();
+          const params = {
+            isAskSide: validated.isAskSide,
+            bins: [
+              { id: validated.targetBinId, amount: new BN(validated.amountAtomic.toString()) },
+            ],
+            ...(validated.maxActiveBinSlippage === undefined
+              ? {}
+              : {
+                  relativeBin: {
+                    activeId: dlmm.lbPair.activeId,
+                    maxActiveBinSlippage: validated.maxActiveBinSlippage,
+                  },
+                }),
+          };
+          const tx = yield* Effect.tryPromise(() =>
+            dlmm.placeLimitOrder({
+              owner: wallet.publicKey,
+              payer: wallet.publicKey,
+              sender: wallet.publicKey,
+              limitOrder: limitOrder.publicKey,
+              params,
+            }),
+          );
+          const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
+          tx.feePayer = wallet.publicKey;
+          tx.recentBlockhash = blockhash;
+          tx.sign(wallet, limitOrder);
+          const txSignature = yield* rpcCall((conn) =>
+            conn.sendRawTransaction(tx.serialize(), {
+              skipPreflight: false,
+              preflightCommitment: "confirmed",
+            }),
+          );
+          yield* rpcCall((conn) => conn.confirmTransaction(txSignature, "confirmed"));
+          return { orderPubKey: limitOrder.publicKey.toBase58(), txSignature };
+        }).pipe(
+          Effect.catchAll((err: unknown) =>
+            Effect.fail(
+              new AdapterError({
+                message: `Failed to place limit order: ${underlyingErrorMessage(err)}`,
+                poolAddress,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
+
+      cancelLimitOrder: (poolAddress, orderPubKey, binIds) =>
+        Effect.gen(function* () {
+          if (!wallet) {
+            return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
+          }
+          if (binIds.length === 0 || binIds.some((binId) => !Number.isSafeInteger(binId))) {
+            return yield* Effect.fail(new AdapterError({ message: "Invalid limit-order bin IDs" }));
+          }
+          const dlmm = yield* getDlmm(poolAddress);
+          const tx = yield* Effect.tryPromise(() =>
+            dlmm.cancelLimitOrder({
+              limitOrderPubkey: new PublicKey(orderPubKey),
+              owner: wallet.publicKey,
+              rentReceiver: wallet.publicKey,
+              binIds: [...binIds],
+            }),
+          );
+          const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
+          tx.feePayer = wallet.publicKey;
+          tx.recentBlockhash = blockhash;
+          tx.sign(wallet);
+          const txSignature = yield* rpcCall((conn) =>
+            conn.sendRawTransaction(tx.serialize(), {
+              skipPreflight: false,
+              preflightCommitment: "confirmed",
+            }),
+          );
+          yield* rpcCall((conn) => conn.confirmTransaction(txSignature, "confirmed"));
+          return { txSignature };
+        }).pipe(
+          Effect.catchAll((err: unknown) =>
+            Effect.fail(
+              new AdapterError({
+                message: `Failed to cancel limit order: ${underlyingErrorMessage(err)}`,
                 poolAddress,
                 cause: err,
               }),

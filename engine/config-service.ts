@@ -233,6 +233,10 @@ export interface AppConfig {
   /** Master switch for periodic LM farm reward claims (Wave 8). Default true;
    *  scoring stays farm-aware regardless — this only gates on-chain claims. */
   readonly farmRewardsEnabled: boolean;
+  readonly limitOrdersEnabled?: boolean;
+  readonly limitOrderMode?: "take-profit" | "dca";
+  readonly limitOrderTargetBinOffset?: number;
+  readonly limitOrderMaxActiveBinSlippage?: number;
 
   // ─── Proactive Telegram alerts (Wave 5) ───────────────────────────────────
   /** Master switch for proactive Telegram alerts. Default true; delivery only
@@ -592,6 +596,19 @@ const loadConfig = Effect.gen(function* () {
   const farmRewardsEnabled = yield* Config.boolean("FARM_REWARDS_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
+  const limitOrdersEnabled = yield* Config.boolean("LIMIT_ORDERS_ENABLED").pipe(
+    Config.withDefault(false),
+  );
+  const limitOrderModeRaw = yield* Config.string("LIMIT_ORDER_MODE").pipe(
+    Config.withDefault("take-profit"),
+  );
+  const limitOrderMode = limitOrderModeRaw === "dca" ? "dca" : "take-profit";
+  const limitOrderTargetBinOffset = yield* validatedNumber("LIMIT_ORDER_TARGET_BIN_OFFSET", 1, 20);
+  const limitOrderMaxActiveBinSlippage = yield* validatedNumber(
+    "LIMIT_ORDER_MAX_ACTIVE_BIN_SLIPPAGE",
+    0,
+    3,
+  );
   const copySignalsEnabled = yield* Config.boolean("COPY_SIGNALS_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
@@ -828,6 +845,10 @@ const loadConfig = Effect.gen(function* () {
     autoSwapEntry,
     entryStrategyType,
     farmRewardsEnabled,
+    limitOrdersEnabled,
+    limitOrderMode,
+    limitOrderTargetBinOffset,
+    limitOrderMaxActiveBinSlippage,
     alertsEnabled,
     alertCooldownMinutes,
     alertFeeMilestoneUsd,
