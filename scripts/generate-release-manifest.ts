@@ -2,8 +2,12 @@ import fs from "fs";
 import path from "path";
 
 const version = process.env.VERSION ?? "";
-const channel = (process.env.CHANNEL ?? "stable") as "stable" | "beta" | "dev";
-const r2Base = process.env.R2_BASE_URL ?? "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev";
+const channel = (process.env.CHANNEL ?? "stable") as "stable" | "beta" | "dev" | "canary";
+const r2Base = (
+  process.env.R2_BASE_URL ?? "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev"
+).replace(/\/+$/, "");
+const keyPrefix = (process.env.R2_KEY_PREFIX ?? `releases/v${version}`).replace(/^\/+|\/+$/g, "");
+const commit = process.env.COMMIT;
 const outFile = process.env.OUT_FILE ?? "manifest.json";
 const requireAllBundles = (process.env.REQUIRE_ALL_BUNDLES ?? "true") === "true";
 
@@ -12,7 +16,7 @@ if (!version) {
   process.exit(1);
 }
 
-if (!["stable", "beta", "dev"].includes(channel)) {
+if (!["stable", "beta", "dev", "canary"].includes(channel)) {
   console.error(`Invalid channel: ${channel}`);
   process.exit(1);
 }
@@ -35,7 +39,7 @@ for (const file of files) {
     console.warn(`Missing checksum for ${file}, skipping`);
     continue;
   }
-  const url = `${r2Base}/releases/v${version}/${file}`;
+  const url = `${r2Base}/${keyPrefix}/${file}`;
   bundles[platformKey] = { url, sha256_url: `${url}.sha256` };
 }
 
@@ -51,12 +55,13 @@ if (Object.keys(bundles).length === 0) {
   console.warn("No bundles found; manifest will have no per-platform bundles.");
 }
 
-const tarballUrl = `${r2Base}/releases/v${version}/prism-v${version}.tar.gz`;
+const tarballUrl = `${r2Base}/${keyPrefix}/prism-v${version}.tar.gz`;
 const signatureUrl = `${tarballUrl}.asc`;
 
-const manifest = {
+const manifest: Record<string, unknown> = {
   version,
   channel,
+  ...(commit ? { commit } : {}),
   tarball_url: tarballUrl,
   sha256_url: `${tarballUrl}.sha256`,
   signature_url: signatureUrl,

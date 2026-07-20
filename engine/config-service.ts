@@ -115,7 +115,7 @@ export interface AppConfig {
   // Auto-update settings
   readonly autoUpdate: boolean;
   readonly updateCheckIntervalMs: number;
-  readonly updateChannel: "stable" | "beta" | "dev";
+  readonly updateChannel: "stable" | "beta" | "dev" | "canary";
   readonly updateGithubRepo: string;
   readonly updateAllowDirty: boolean;
   // Force auto-update settings
@@ -747,7 +747,7 @@ const loadConfig = Effect.gen(function* () {
   const updateChannelRaw = yield* Config.string("UPDATE_CHANNEL").pipe(
     Effect.orElseSucceed(() => "stable"),
   );
-  const validChannels = ["stable", "beta", "dev"] as const;
+  const validChannels = ["stable", "beta", "dev", "canary"] as const;
   const updateChannel = validChannels.includes(updateChannelRaw as (typeof validChannels)[number])
     ? (updateChannelRaw as (typeof validChannels)[number])
     : "stable";

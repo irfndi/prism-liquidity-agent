@@ -600,7 +600,8 @@ async function updateFromBundle(
 export const updateCommand = new Command("update")
   .description("Check for and apply updates")
   .option("--check-only", "Only check for updates, don't apply")
-  .option("--channel <channel>", "Release channel (stable, beta, dev)", "stable")
+  .option("--channel <channel>", "Release channel (stable, beta, dev, canary)", "stable")
+  .option("--canary", "Update to the latest canary build (latest main-branch build that passed CI)")
   .option("--r2-url <url>", "R2 public URL for release bundles", R2_PUBLIC_URL)
   .option("--skip-smoke-test", "Skip post-install smoke test")
   .action(async (options) => {
@@ -611,12 +612,20 @@ export const updateCommand = new Command("update")
     try {
       const repo = "irfndi/prism-liquidity-agent";
       const channelValue = String(options.channel);
-      if (channelValue !== "stable" && channelValue !== "beta" && channelValue !== "dev") {
+      if (options.canary && channelValue !== "stable") {
+        throw new UpdateAbort("--canary cannot be combined with --channel");
+      }
+      if (
+        channelValue !== "stable" &&
+        channelValue !== "beta" &&
+        channelValue !== "dev" &&
+        channelValue !== "canary"
+      ) {
         throw new UpdateAbort(
-          `Invalid release channel '${channelValue}'. Use stable, beta, or dev.`,
+          `Invalid release channel '${channelValue}'. Use stable, beta, dev, or canary.`,
         );
       }
-      const channel = channelValue;
+      const channel = options.canary ? "canary" : channelValue;
       const r2Url = options.r2Url as string;
 
       const release = await Effect.runPromise(fetchLatestRelease(repo, channel, r2Url));
@@ -638,6 +647,10 @@ export const updateCommand = new Command("update")
       }
 
       console.log(`Update available: ${current} → ${latest}`);
+      if (release.channel === "canary") {
+        const commitSuffix = release.commit ? ` (commit ${release.commit.slice(0, 8)})` : "";
+        console.log(`Canary build: ${release.version}${commitSuffix}`);
+      }
       console.log(`Source: ${release.source === "r2" ? "Cloudflare R2" : "GitHub Releases"}`);
       if (release.bundleUrl) {
         console.log(`Download: ${release.bundleUrl}`);

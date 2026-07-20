@@ -163,6 +163,7 @@ jobs:
             --warning=no-file-changed \
             --exclude=node_modules \
             --exclude=dist \
+            --exclude=bundles \
             --exclude=engine/sqlite-vec-embedded.ts \
             --exclude=.git \
             --exclude=*.db \
