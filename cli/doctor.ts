@@ -156,11 +156,11 @@ async function probeRpcEndpoint(url: string): Promise<{ ok: boolean; status: num
     if (json.error) {
       return { ok: false, status: res.status, error: maskHeliusUrl(json.error.message ?? "RPC error") };
     }
-    if (json.result === undefined || json.result === null) {
+    if (json.result !== "ok") {
       return {
         ok: false,
         status: res.status,
-        error: "Response is not a valid JSON-RPC envelope (missing result field)",
+        error: `getHealth returned unexpected result: ${JSON.stringify(json.result ?? null)}`,
       };
     }
     return { ok: true, status: res.status };
