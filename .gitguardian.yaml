@@ -7,3 +7,6 @@ paths-ignore:
   # Test files contain synthetic high-entropy strings used to exercise the
   # redaction logic in engine/error-reporter.ts. They are not real secrets.
   - "bench/error-reporter.test.ts"
+  # Holds a deliberately-invalid, low-entropy WALLET_PRIVATE_KEY fixture used to
+  # exercise the "env key present but undecodable" path. Not a credential.
+  - "bench/wallet.test.ts"
