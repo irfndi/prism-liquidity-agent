@@ -82,4 +82,64 @@ describe("normalizeHeliusUrl", () => {
     );
     expect(url).toBe("https://mainnet.helius-rpc.com/?api-key=abc");
   });
+
+  it("replaces empty api-key= value with the configured key", () => {
+    const { url, normalized } = normalizeHeliusUrl(
+      "https://mainnet.helius-rpc.com/?api-key=",
+      "my-real-key",
+    );
+    expect(url).toBe("https://mainnet.helius-rpc.com/?api-key=my-real-key");
+    expect(normalized).toBe(true);
+  });
+
+  it("replaces empty api-key= when followed by other params", () => {
+    const { url, normalized } = normalizeHeliusUrl(
+      "https://mainnet.helius-rpc.com/?api-key=&foo=bar",
+      "my-real-key",
+    );
+    expect(url).toBe("https://mainnet.helius-rpc.com/?api-key=my-real-key&foo=bar");
+    expect(normalized).toBe(true);
+  });
+
+  it("does not modify empty api-key= when no key is configured", () => {
+    const { url, normalized } = normalizeHeliusUrl(
+      "https://mainnet.helius-rpc.com/?api-key=",
+      "",
+    );
+    expect(url).toBe("https://mainnet.helius-rpc.com/?api-key=");
+    expect(normalized).toBe(false);
+  });
+
+  it("rejects attacker domains containing helius-rpc.com as substring", () => {
+    const { url, normalized } = normalizeHeliusUrl(
+      "https://helius-rpc.com.attacker.example/",
+      "my-secret-key",
+    );
+    expect(url).toBe("https://helius-rpc.com.attacker.example/");
+    expect(normalized).toBe(false);
+  });
+
+  it("rejects URLs with helius-rpc.com in the path, not the hostname", () => {
+    const { url, normalized } = normalizeHeliusUrl(
+      "https://evil.com/helius-rpc.com/proxy",
+      "my-secret-key",
+    );
+    expect(url).toBe("https://evil.com/helius-rpc.com/proxy");
+    expect(normalized).toBe(false);
+  });
+
+  it("accepts subdomains of helius-rpc.com", () => {
+    const { url, normalized } = normalizeHeliusUrl(
+      "https://mainnet.helius-rpc.com/",
+      "my-key",
+    );
+    expect(url).toBe("https://mainnet.helius-rpc.com/?api-key=my-key");
+    expect(normalized).toBe(true);
+  });
+
+  it("handles invalid URLs gracefully", () => {
+    const { url, normalized } = normalizeHeliusUrl("not-a-url", "my-key");
+    expect(url).toBe("not-a-url");
+    expect(normalized).toBe(false);
+  });
 });

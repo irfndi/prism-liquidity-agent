@@ -10,6 +10,7 @@ import {
   getPrismLogsDir,
 } from "../engine/paths.js";
 import { isSourceInstall } from "../engine/install-method.js";
+import { normalizeHeliusUrl } from "../engine/config-service.js";
 import { getApiBaseUrl, prismApiPost, readCredentials } from "./api.js";
 
 type DoctorStatus = "pass" | "warn" | "fail";
@@ -140,7 +141,16 @@ async function probeRpcEndpoint(url: string): Promise<{ ok: boolean; status: num
     if (!res.ok) {
       return { ok: false, status: res.status, error: `HTTP ${res.status}` };
     }
-    const json = (await res.json()) as { result?: unknown; error?: { message?: string } };
+    let json: { result?: unknown; error?: { message?: string } };
+    try {
+      json = (await res.json()) as { result?: unknown; error?: { message?: string } };
+    } catch (parseErr) {
+      return {
+        ok: false,
+        status: res.status,
+        error: `Invalid JSON response: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+      };
+    }
     if (json.error) {
       return { ok: false, status: res.status, error: json.error.message ?? "RPC error" };
     }
@@ -166,7 +176,8 @@ async function checkRpcConnectivity(): Promise<DoctorCheck> {
     return check("rpc-connectivity", "warn", "No RPC endpoint configured; skipping live probe");
   }
 
-  const primaryResult = await probeRpcEndpoint(effectivePrimary);
+  const normalizedPrimary = normalizeHeliusUrl(effectivePrimary, helius).url;
+  const primaryResult = await probeRpcEndpoint(normalizedPrimary);
   if (!primaryResult.ok) {
     return check(
       "rpc-connectivity",
@@ -176,7 +187,8 @@ async function checkRpcConnectivity(): Promise<DoctorCheck> {
   }
 
   if (fallback) {
-    const fallbackResult = await probeRpcEndpoint(fallback);
+    const normalizedFallback = normalizeHeliusUrl(fallback, helius).url;
+    const fallbackResult = await probeRpcEndpoint(normalizedFallback);
     if (!fallbackResult.ok) {
       return check(
         "rpc-connectivity",
