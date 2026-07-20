@@ -57,7 +57,7 @@ function which(binary: string): Effect.Effect<string | null, unknown> {
   });
 }
 
-function isGatewayRunning(url: string): Effect.Effect<boolean, unknown> {
+function isGatewayRunning(url: string, token: string): Effect.Effect<boolean, unknown> {
   return Effect.async((resume) => {
     let ws: WebSocket | null = null;
     let settled = false;
@@ -78,7 +78,11 @@ function isGatewayRunning(url: string): Effect.Effect<boolean, unknown> {
     }, 3_000);
 
     try {
-      ws = new WebSocket(url);
+      // Bun's WebSocket takes an options object as the 2nd arg; pass the token on
+      // the upgrade so gateways that reject unauthenticated upgrades still answer.
+      ws = token
+        ? new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } })
+        : new WebSocket(url);
       ws.addEventListener("open", () => {
         clearTimeout(timer);
         // Settle BEFORE closing: Bun dispatches the close listener synchronously
@@ -118,6 +122,7 @@ function isGatewayRunning(url: string): Effect.Effect<boolean, unknown> {
 export function detectAgents(config: {
   readonly agentAcpCommand: string;
   readonly agentGatewayUrl: string;
+  readonly agentGatewayToken: string;
 }): Effect.Effect<AgentRuntimeDetection, unknown> {
   return Effect.gen(function* () {
     logger.info("Detecting agent runtimes...");
@@ -126,7 +131,9 @@ export function detectAgents(config: {
       [
         which(config.agentAcpCommand).pipe(Effect.catchAll(() => Effect.succeed(null))),
         which("openclaw").pipe(Effect.catchAll(() => Effect.succeed(null))),
-        isGatewayRunning(config.agentGatewayUrl).pipe(Effect.catchAll(() => Effect.succeed(false))),
+        isGatewayRunning(config.agentGatewayUrl, config.agentGatewayToken).pipe(
+          Effect.catchAll(() => Effect.succeed(false)),
+        ),
       ],
       { concurrency: 3 },
     );

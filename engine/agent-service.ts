@@ -283,6 +283,7 @@ function createAlertTransports(config: AppConfig): ReadonlyArray<AgentRuntimeTra
     transports.push(
       new OpenClawWebhookTransport({
         url: config.agentOpenclawWebhookUrl,
+        token: config.agentOpenclawWebhookToken,
         timeoutMs: config.agentPromptTimeoutMs,
       }),
     );
@@ -292,7 +293,7 @@ function createAlertTransports(config: AppConfig): ReadonlyArray<AgentRuntimeTra
     transports.push(
       new HermesApiTransport({
         url: config.agentHermesApiUrl,
-        token: "",
+        token: config.agentHermesApiToken,
         timeoutMs: config.agentPromptTimeoutMs,
       }),
     );
@@ -307,6 +308,14 @@ function transportSupportsAlert(
   sendAlert: (alert: AgentRuntimeAlert) => Effect.Effect<void, unknown>;
 } {
   return typeof transport.sendAlert === "function";
+}
+
+function transportSupportsCheckin(
+  transport: AgentRuntimeTransport,
+): transport is AgentRuntimeTransport & {
+  sendCheckin: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, unknown>;
+} {
+  return typeof transport.sendCheckin === "function";
 }
 
 function connectTransport(transport: AgentRuntimeTransport): Effect.Effect<void, unknown> {
@@ -344,6 +353,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
       const detection = yield* detectAgents({
         agentAcpCommand: config.agentAcpCommand,
         agentGatewayUrl: config.agentGatewayUrl,
+        agentGatewayToken: config.agentGatewayToken,
       }).pipe(
         Effect.catchAll(() =>
           Effect.succeed({
@@ -481,16 +491,20 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           }),
 
         sendCheckin: (checkin: AgentRuntimeCheckin) => {
-          if (!transport?.sendCheckin) {
-            return Effect.void;
-          }
-          return transport.sendCheckin(checkin).pipe(
-            Effect.catchAll((err) => {
-              errorCount += 1;
-              logger.warn("Agent check-in failed", { error: String(err) });
-              return Effect.void;
-            }),
+          // Fan the check-in out to every transport that supports it: the primary
+          // runtime (ACP/gateway) plus the HTTP alert transports (OpenClaw webhook,
+          // Hermes HTTP). Each delivery is independent so one failure does not
+          // suppress the others.
+          const effects = allTransports.filter(transportSupportsCheckin).map((t) =>
+            t.sendCheckin(checkin).pipe(
+              Effect.catchAll((err) => {
+                errorCount += 1;
+                logger.warn("Agent check-in failed", { transport: t.name, error: String(err) });
+                return Effect.void;
+              }),
+            ),
           );
+          return Effect.all(effects, { discard: true });
         },
 
         sendAlert: (alert: AgentRuntimeAlert) => {

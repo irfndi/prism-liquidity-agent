@@ -1,6 +1,7 @@
 import { Effect } from "effect";
 import { spawn, type ChildProcess } from "child_process";
 import { createLogger } from "./logger.js";
+import { getCurrentVersion } from "./version.js";
 import type {
   AgentRuntimeContext,
   AgentRuntimeResponse,
@@ -54,7 +55,6 @@ export class AcpTransport implements AgentRuntimeTransport {
   private eventHandler?: (event: AgentRuntimeEvent) => void;
   private buffer = "";
   private sessionText = "";
-  private sessionTextResolve: ((text: string) => void) | undefined;
 
   constructor(private readonly options: AcpTransportOptions) {}
 
@@ -128,20 +128,24 @@ export class AcpTransport implements AgentRuntimeTransport {
       });
       this.process.on("close", () => {
         this.emit({ type: "disconnected", transport: this.name });
-        this.pending.forEach((p) => p.reject(new Error("ACP process closed")));
+        this.pending.forEach((p) => {
+          p.reject(new Error("ACP process closed"));
+        });
         this.pending.clear();
         this.process = null;
         this.sessionId = null;
       });
 
       try {
-        yield* this.request("agent/initialize", {
-          protocolVersion: "2025-06-30",
+        yield* this.request("initialize", {
+          protocolVersion: 1,
           clientCapabilities: {},
+          clientInfo: { name: "prism-liquidity-agent", version: getCurrentVersion() },
         });
 
-        const session = yield* this.request("agent/session/new", {
+        const session = yield* this.request("session/new", {
           cwd: process.cwd(),
+          mcpServers: [],
         });
         this.sessionId = (session as { sessionId?: string })?.sessionId ?? null;
 
@@ -181,8 +185,12 @@ export class AcpTransport implements AgentRuntimeTransport {
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
 
       const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
+      // session/prompt blocks until the agent's response (stopReason) arrives; the
+      // reply itself streams in via session/update notifications, which accumulate
+      // into sessionText during the wait. sessionText is complete on resolution.
+      this.sessionText = "";
       yield* this.request(
-        "agent/session/prompt",
+        "session/prompt",
         {
           sessionId: this.sessionId,
           prompt: [{ type: "text", text: prompt }],
@@ -190,7 +198,7 @@ export class AcpTransport implements AgentRuntimeTransport {
         effectiveTimeout,
       );
 
-      const text = yield* this.collectSessionText(ctx.decision.poolAddress, effectiveTimeout);
+      const text = this.sessionText;
       const latencyMs = Date.now() - startedAt;
       this.emit({ type: "response_received", transport: this.name, latencyMs });
 
@@ -202,11 +210,13 @@ export class AcpTransport implements AgentRuntimeTransport {
     return Effect.gen(this, function* () {
       yield* this.ensureSession();
       const prompt = `Prism check-in (${checkin.trigger}):\n\n${JSON.stringify(checkin, null, 2)}`;
-      yield* this.request("agent/session/prompt", {
+      // Completion is the session/prompt response (stopReason); a check-in does
+      // not need the streamed reply text.
+      this.sessionText = "";
+      yield* this.request("session/prompt", {
         sessionId: this.sessionId,
         prompt: [{ type: "text", text: prompt }],
       });
-      yield* this.collectSessionText("checkin");
     });
   }
 
@@ -216,8 +226,9 @@ export class AcpTransport implements AgentRuntimeTransport {
         yield* this.connect();
       }
       if (!this.sessionId) {
-        const session = yield* this.request("agent/session/new", {
+        const session = yield* this.request("session/new", {
           cwd: process.cwd(),
+          mcpServers: [],
         });
         this.sessionId = (session as { sessionId?: string })?.sessionId ?? null;
       }
@@ -242,8 +253,22 @@ export class AcpTransport implements AgentRuntimeTransport {
     }
   }
 
-  private handleMessage(msg: AcpResponse | AcpNotification): void {
-    if ("id" in msg && typeof msg.id === "number" && this.pending.has(msg.id)) {
+  private handleMessage(msg: AcpResponse | AcpNotification | AcpRequest): void {
+    // Inbound request from the agent (carries both a method and an id). Prism is a
+    // non-interactive ACP client and implements none of the client callbacks
+    // (session/request_permission, fs/*, terminal/*), but it must still reply, or the
+    // agent blocks indefinitely and the prompt times out.
+    if ("method" in msg && "id" in msg && msg.id != null) {
+      this.respondUnsupported(msg.id as number | string, msg.method as string);
+      return;
+    }
+
+    if (
+      "id" in msg &&
+      typeof msg.id === "number" &&
+      !("method" in msg) &&
+      this.pending.has(msg.id)
+    ) {
       const p = this.pending.get(msg.id)!;
       this.pending.delete(msg.id);
       clearTimeout(p.timer);
@@ -255,47 +280,41 @@ export class AcpTransport implements AgentRuntimeTransport {
       return;
     }
 
-    if ("method" in msg && msg.method === "client/session.update") {
-      const params = msg.params ?? {};
-      const updates = (params.updates ?? []) as ReadonlyArray<{
-        readonly type?: string;
-        readonly content?: { readonly text?: string };
-      }>;
-      for (const update of updates) {
-        if (update.type === "text" && update.content?.text) {
-          this.sessionText += update.content.text;
-        }
-      }
-      if (params.stop) {
-        this.sessionTextResolve?.(this.sessionText);
+    if ("method" in msg && msg.method === "session/update") {
+      const params = (msg.params ?? {}) as {
+        readonly update?: {
+          readonly sessionUpdate?: string;
+          readonly content?: { readonly type?: string; readonly text?: string };
+        };
+      };
+      const update = params.update;
+      if (
+        update?.sessionUpdate === "agent_message_chunk" &&
+        update.content?.type === "text" &&
+        update.content.text
+      ) {
+        this.sessionText += update.content.text;
       }
     }
   }
 
-  private collectSessionText(
-    poolAddress: string,
-    timeoutMs?: number,
-  ): Effect.Effect<string, unknown> {
-    return Effect.async((resume) => {
-      this.sessionText = "";
-      let timer: ReturnType<typeof setTimeout>;
-      this.sessionTextResolve = (text: string) => {
-        this.sessionTextResolve = undefined;
-        clearTimeout(timer);
-        resume(Effect.succeed(text));
-      };
-
-      const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
-      timer = setTimeout(() => {
-        this.sessionTextResolve = undefined;
-        resume(Effect.fail(new Error(`ACP prompt timeout for ${poolAddress}`)));
-      }, effectiveTimeout);
-
-      return Effect.sync(() => {
-        clearTimeout(timer);
-        this.sessionTextResolve = undefined;
-      });
+  private respondUnsupported(id: number | string, method: string): void {
+    logger.debug("ACP client request not supported; replying so the agent does not hang", {
+      method,
     });
+    this.write({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32601, message: `Method not supported by the Prism host: ${method}` },
+    });
+  }
+
+  private write(message: unknown): void {
+    try {
+      this.process?.stdin?.write(JSON.stringify(message) + "\n");
+    } catch (err) {
+      logger.warn("Failed to write ACP frame", { error: String(err) });
+    }
   }
 
   private request(

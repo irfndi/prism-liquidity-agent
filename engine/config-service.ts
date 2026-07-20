@@ -1,6 +1,7 @@
 import { Config, Context, Effect, Layer, Option, pipe } from "effect";
 import { ConfigError } from "./errors.js";
 import { getPrismDbPath } from "./paths.js";
+import { loadKeystoreSecretKeyBase58 } from "./wallet-keystore.js";
 import type { AgentProposalMode, EntryStrategyType } from "./types.js";
 import { PublicKey } from "@solana/web3.js";
 import { createLogger } from "./logger.js";
@@ -228,8 +229,12 @@ export interface AppConfig {
   readonly agentCheckinMaxPositions: number;
   /** OpenClaw webhook URL for one-way agent alerts. Empty = disabled. Default "". */
   readonly agentOpenclawWebhookUrl: string;
+  /** Bearer token for the OpenClaw webhook. Empty = no auth header. Default "". */
+  readonly agentOpenclawWebhookToken: string;
   /** Hermes HTTP API URL for one-way agent alerts. Empty = disabled. Default "". */
   readonly agentHermesApiUrl: string;
+  /** Bearer token (Hermes API_SERVER_KEY) for the Hermes HTTP API. Empty = no auth header. Default "". */
+  readonly agentHermesApiToken: string;
   /** Port for the local agent HTTP status API. 0 = disabled. Default 0 (disabled unless explicitly enabled). */
   readonly agentHttpPort: number;
   /** Enable the MCP server for agent runtime tool discovery. Default false (enable only when stdout is isolated). */
@@ -350,8 +355,11 @@ function validatedNumber(name: string, min: number, fallback: number, max?: numb
 const loadConfig = Effect.gen(function* () {
   const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 
+  // WALLET_PRIVATE_KEY (env / .env) takes precedence; otherwise fall back to the local
+  // keystore written by `prism wallet generate|import`, so a generated wallet actually
+  // enables live trading (engine/adapter-service.ts decodes this base58 key).
   const walletPrivateKey = yield* Config.string("WALLET_PRIVATE_KEY").pipe(
-    Effect.orElseSucceed(() => ""),
+    Effect.orElseSucceed(() => loadKeystoreSecretKeyBase58() ?? ""),
   );
   const heliusApiKey = yield* Config.string("HELIUS_API_KEY").pipe(
     Effect.orElseSucceed(() => (isTest ? "test-helius-key" : "")),
@@ -544,7 +552,13 @@ const loadConfig = Effect.gen(function* () {
   const agentOpenclawWebhookUrl = yield* Config.string("AGENT_OPENCLAW_WEBHOOK_URL").pipe(
     Effect.orElseSucceed(() => ""),
   );
+  const agentOpenclawWebhookToken = yield* Config.string("AGENT_OPENCLAW_WEBHOOK_TOKEN").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
   const agentHermesApiUrl = yield* Config.string("AGENT_HERMES_API_URL").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const agentHermesApiToken = yield* Config.string("AGENT_HERMES_API_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
   const agentHttpPort = yield* validatedNumber("AGENT_HTTP_PORT", 0, 0, 65_535);
@@ -894,7 +908,9 @@ const loadConfig = Effect.gen(function* () {
     agentCheckinIncludeHistory,
     agentCheckinMaxPositions,
     agentOpenclawWebhookUrl,
+    agentOpenclawWebhookToken,
     agentHermesApiUrl,
+    agentHermesApiToken,
     agentHttpPort,
     agentMcpEnabled,
     agentProposalMode,

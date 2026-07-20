@@ -98,6 +98,10 @@ export function createDatabase(dbPath = "./prism.db"): Database {
       if (!vecLoaded) {
         logger.warn("sqlite-vec extension could not be loaded; memory will be disabled", {
           error: e instanceof Error ? e.message : String(e),
+          hint:
+            process.platform === "linux"
+              ? "bun:sqlite cannot load extensions without a system libsqlite3. Install it (e.g. `apt-get install -y libsqlite3-0`, `dnf install -y sqlite-libs`) and restart."
+              : "Reinstall or rebuild Prism so the sqlite-vec extension matches this platform.",
         });
         sqliteVecEverFailed = true;
       }

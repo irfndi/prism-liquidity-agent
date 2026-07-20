@@ -7,10 +7,7 @@ describe("normalizeHeliusUrl", () => {
   });
 
   it("returns non-Helius URLs unchanged", () => {
-    const { url, normalized } = normalizeHeliusUrl(
-      "https://api.mainnet-beta.solana.com",
-      "my-key",
-    );
+    const { url, normalized } = normalizeHeliusUrl("https://api.mainnet-beta.solana.com", "my-key");
     expect(url).toBe("https://api.mainnet-beta.solana.com");
     expect(normalized).toBe(false);
   });
@@ -67,19 +64,13 @@ describe("normalizeHeliusUrl", () => {
   });
 
   it("does not append api-key when no key is configured", () => {
-    const { url, normalized } = normalizeHeliusUrl(
-      "https://mainnet.helius-rpc.com/",
-      "",
-    );
+    const { url, normalized } = normalizeHeliusUrl("https://mainnet.helius-rpc.com/", "");
     expect(url).toBe("https://mainnet.helius-rpc.com/");
     expect(normalized).toBe(false);
   });
 
   it("trims whitespace from URLs", () => {
-    const { url } = normalizeHeliusUrl(
-      "  https://mainnet.helius-rpc.com/?api-key=abc  ",
-      "abc",
-    );
+    const { url } = normalizeHeliusUrl("  https://mainnet.helius-rpc.com/?api-key=abc  ", "abc");
     expect(url).toBe("https://mainnet.helius-rpc.com/?api-key=abc");
   });
 
@@ -102,10 +93,7 @@ describe("normalizeHeliusUrl", () => {
   });
 
   it("does not modify empty api-key= when no key is configured", () => {
-    const { url, normalized } = normalizeHeliusUrl(
-      "https://mainnet.helius-rpc.com/?api-key=",
-      "",
-    );
+    const { url, normalized } = normalizeHeliusUrl("https://mainnet.helius-rpc.com/?api-key=", "");
     expect(url).toBe("https://mainnet.helius-rpc.com/?api-key=");
     expect(normalized).toBe(false);
   });
@@ -129,10 +117,7 @@ describe("normalizeHeliusUrl", () => {
   });
 
   it("accepts subdomains of helius-rpc.com", () => {
-    const { url, normalized } = normalizeHeliusUrl(
-      "https://mainnet.helius-rpc.com/",
-      "my-key",
-    );
+    const { url, normalized } = normalizeHeliusUrl("https://mainnet.helius-rpc.com/", "my-key");
     expect(url).toBe("https://mainnet.helius-rpc.com/?api-key=my-key");
     expect(normalized).toBe(true);
   });
