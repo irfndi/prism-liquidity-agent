@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "featureId": "feat_config_a80c5ef0da",
+  "title": "Shell/workflow config deploy-cloudflare.yml",
+  "summary": "Shell or workflow automation in .github/workflows/deploy-cloudflare.yml, including command substitutions and machine-readable command output.",
+  "kind": "config",
+  "source": "shell-workflow-heuristic",
+  "confidence": "medium",
+  "entrypoints": [
+    {
+      "path": ".github/workflows/deploy-cloudflare.yml",
+      "symbol": null,
+      "route": null,
+      "command": null
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": ".github/workflows/deploy-cloudflare.yml",
+      "reason": "entrypoint"
+    }
+  ],
+  "contextFiles": [],
+  "tests": [],
+  "tags": [
+    "config",
+    "shell",
+    "workflow"
+  ],
+  "trustBoundaries": [
+    "process-exec",
+    "filesystem",
+    "network"
+  ],
+  "status": "pending",
+  "lock": null,
+  "findingIds": [],
+  "patchAttemptIds": [],
+  "analysisHistory": [],
+  "createdAt": "2026-07-20T04:19:21.366Z",
+  "updatedAt": "2026-07-20T04:19:21.366Z"
+}

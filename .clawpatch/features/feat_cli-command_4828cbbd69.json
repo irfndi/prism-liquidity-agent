@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "featureId": "feat_cli-command_4828cbbd69",
+  "title": "CLI command prism",
+  "summary": "Package bin 'prism' at ./scripts/prism.sh.",
+  "kind": "cli-command",
+  "source": "package-json-bin",
+  "confidence": "high",
+  "entrypoints": [
+    {
+      "path": "scripts/prism.sh",
+      "symbol": null,
+      "route": null,
+      "command": "prism"
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": "scripts/prism.sh",
+      "reason": "package bin entrypoint"
+    }
+  ],
+  "contextFiles": [
+    {
+      "path": "package.json",
+      "reason": "package manifest"
+    }
+  ],
+  "tests": [],
+  "tags": [
+    "node",
+    "cli"
+  ],
+  "trustBoundaries": [
+    "user-input",
+    "filesystem",
+    "process-exec"
+  ],
+  "status": "pending",
+  "lock": null,
+  "findingIds": [],
+  "patchAttemptIds": [],
+  "analysisHistory": [],
+  "createdAt": "2026-07-20T04:19:21.366Z",
+  "updatedAt": "2026-07-20T04:19:21.366Z"
+}

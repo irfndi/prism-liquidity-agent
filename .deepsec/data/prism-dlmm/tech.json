@@ -1,0 +1,15 @@
+{
+  "tags": [
+    "bun",
+    "docker",
+    "github-actions",
+    "node"
+  ],
+  "sentinels": [
+    "Dockerfile",
+    "bun.lock",
+    "package.json"
+  ],
+  "detectedAt": "2026-07-20T04:19:29.097Z",
+  "rootPath": "/Users/irfandi/Coding/2026/prism-dlmm"
+}

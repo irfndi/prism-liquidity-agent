@@ -1150,13 +1150,10 @@ export const AdapterLive = Layer.effect(
         const quoteData =
           prefetchedQuote ?? (yield* quoteSwapUSDCForToken(outputMint, amountAtomic));
 
-        if (
-          prefetchedQuote &&
-          !quoteMatchesRequest(quoteData, USDC_MINT, outputMint, amountAtomic)
-        ) {
+        if (!quoteMatchesRequest(quoteData, USDC_MINT, outputMint, amountAtomic)) {
           return yield* Effect.fail(
             new AdapterError({
-              message: `Prefetched Jupiter quote does not match request: outputMint=${outputMint}, amount=${amountAtomic.toString()}`,
+              message: `Jupiter quote does not match request: outputMint=${outputMint}, amount=${amountAtomic.toString()}`,
             }),
           );
         }

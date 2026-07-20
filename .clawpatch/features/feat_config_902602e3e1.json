@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "featureId": "feat_config_902602e3e1",
+  "title": "Shell/workflow config ci.yml",
+  "summary": "Shell or workflow automation in .github/workflows/ci.yml, including command substitutions and machine-readable command output.",
+  "kind": "config",
+  "source": "shell-workflow-heuristic",
+  "confidence": "medium",
+  "entrypoints": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "symbol": null,
+      "route": null,
+      "command": null
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "reason": "entrypoint"
+    }
+  ],
+  "contextFiles": [],
+  "tests": [],
+  "tags": [
+    "config",
+    "shell",
+    "workflow"
+  ],
+  "trustBoundaries": [
+    "process-exec",
+    "filesystem",
+    "network"
+  ],
+  "status": "pending",
+  "lock": null,
+  "findingIds": [],
+  "patchAttemptIds": [],
+  "analysisHistory": [],
+  "createdAt": "2026-07-20T04:19:21.366Z",
+  "updatedAt": "2026-07-20T04:19:21.366Z"
+}

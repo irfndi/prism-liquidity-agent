@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "featureId": "feat_test-suite_84ae84a25a",
+  "title": "Package script test",
+  "summary": "Package script 'test': bunx --bun vitest run",
+  "kind": "test-suite",
+  "source": "package-json-script",
+  "confidence": "medium",
+  "entrypoints": [
+    {
+      "path": "package.json",
+      "symbol": "test",
+      "route": null,
+      "command": "test"
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": "package.json",
+      "reason": "entrypoint"
+    }
+  ],
+  "contextFiles": [],
+  "tests": [],
+  "tags": [
+    "node",
+    "package-script",
+    "project:prism-liquidity-agent",
+    "project-root:."
+  ],
+  "trustBoundaries": [],
+  "status": "pending",
+  "lock": null,
+  "findingIds": [],
+  "patchAttemptIds": [],
+  "analysisHistory": [],
+  "createdAt": "2026-07-20T04:19:21.366Z",
+  "updatedAt": "2026-07-20T04:19:21.366Z"
+}

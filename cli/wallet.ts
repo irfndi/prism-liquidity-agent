@@ -160,15 +160,12 @@ function readStdin(): Promise<string> {
       const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
-        terminal: true,
+        terminal: false,
       });
       rl.question("Paste keypair JSON and press Enter: ", (answer) => {
         rl.close();
+        process.stdout.write("\n");
         resolve(answer.trim());
-      });
-      rl.on("line", () => {
-        readline.moveCursor(process.stdout, 0, -1);
-        readline.clearLine(process.stdout, 0);
       });
     } else {
       let data = "";

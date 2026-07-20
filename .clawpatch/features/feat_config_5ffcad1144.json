@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "featureId": "feat_config_5ffcad1144",
+  "title": "Shell/workflow config prism.sh",
+  "summary": "Shell or workflow automation in scripts/prism.sh, including command substitutions and machine-readable command output.",
+  "kind": "config",
+  "source": "shell-workflow-heuristic",
+  "confidence": "medium",
+  "entrypoints": [
+    {
+      "path": "scripts/prism.sh",
+      "symbol": null,
+      "route": null,
+      "command": null
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": "scripts/prism.sh",
+      "reason": "entrypoint"
+    }
+  ],
+  "contextFiles": [],
+  "tests": [],
+  "tags": [
+    "config",
+    "shell",
+    "workflow"
+  ],
+  "trustBoundaries": [
+    "process-exec",
+    "filesystem",
+    "network"
+  ],
+  "status": "pending",
+  "lock": null,
+  "findingIds": [],
+  "patchAttemptIds": [],
+  "analysisHistory": [],
+  "createdAt": "2026-07-20T04:19:21.366Z",
+  "updatedAt": "2026-07-20T04:19:21.366Z"
+}

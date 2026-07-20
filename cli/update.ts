@@ -179,6 +179,18 @@ async function downloadAndVerify(
 
 function extractTarball(tarballPath: string, destDir: string): void {
   mkdirSync(destDir, { recursive: true });
+
+  // Defense-in-depth: reject tarballs with path-traversal or absolute entries
+  // before extraction (bsdtar already blocks these, but GNU tar may not).
+  const listing = runCommandOutput("tar", ["-tzf", tarballPath]);
+  const entries = listing.split("\n").filter(Boolean);
+  const suspicious = entries.filter((e) => e.includes("..") || e.startsWith("/"));
+  if (suspicious.length > 0) {
+    throw new UpdateAbort(
+      `Tarball contains suspicious paths: ${suspicious.slice(0, 3).join(", ")}`,
+    );
+  }
+
   runCommand("tar", ["-xzf", tarballPath, "-C", destDir]);
 }
 

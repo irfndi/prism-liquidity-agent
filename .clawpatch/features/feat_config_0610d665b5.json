@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "featureId": "feat_config_0610d665b5",
+  "title": "Shell/workflow config publish-skills.sh",
+  "summary": "Shell or workflow automation in scripts/publish-skills.sh, including command substitutions and machine-readable command output.",
+  "kind": "config",
+  "source": "shell-workflow-heuristic",
+  "confidence": "medium",
+  "entrypoints": [
+    {
+      "path": "scripts/publish-skills.sh",
+      "symbol": null,
+      "route": null,
+      "command": null
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": "scripts/publish-skills.sh",
+      "reason": "entrypoint"
+    }
+  ],
+  "contextFiles": [],
+  "tests": [],
+  "tags": [
+    "config",
+    "shell",
+    "workflow"
+  ],
+  "trustBoundaries": [
+    "process-exec",
+    "filesystem",
+    "network"
+  ],
+  "status": "pending",
+  "lock": null,
+  "findingIds": [],
+  "patchAttemptIds": [],
+  "analysisHistory": [],
+  "createdAt": "2026-07-20T04:19:21.366Z",
+  "updatedAt": "2026-07-20T04:19:21.366Z"
+}

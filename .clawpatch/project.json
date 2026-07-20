@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "projectId": "prj_https-github-com-irfndi-prism-li_765ef77f5a",
+  "name": "prism-liquidity-agent",
+  "rootPath": "/Users/irfandi/Coding/2026/prism-dlmm",
+  "git": {
+    "remoteUrl": "https://github.com/irfndi/prism-liquidity-agent.git",
+    "defaultBranch": "main",
+    "currentBranch": "fix/pr-review-remediation",
+    "headSha": "0ec3fdc67daa0563a745fe31258d7d3aac8ac710"
+  },
+  "detected": {
+    "languages": [
+      "typescript",
+      "javascript",
+      "python"
+    ],
+    "frameworks": [
+      "vitest"
+    ],
+    "packageManagers": [
+      "bun",
+      "python"
+    ],
+    "commands": {
+      "typecheck": null,
+      "lint": "bun run lint",
+      "format": "bun run format",
+      "test": "bun run test"
+    }
+  },
+  "createdAt": "2026-07-20T04:17:47.402Z",
+  "updatedAt": "2026-07-20T04:17:47.402Z"
+}

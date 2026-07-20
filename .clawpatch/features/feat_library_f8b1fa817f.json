@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "featureId": "feat_library_f8b1fa817f",
+  "title": "Node package prism-liquidity-agent",
+  "summary": "Node package prism-liquidity-agent with package metadata and review context rooted at ..",
+  "kind": "library",
+  "source": "node-package",
+  "confidence": "medium",
+  "entrypoints": [
+    {
+      "path": "package.json",
+      "symbol": "prism-liquidity-agent",
+      "route": null,
+      "command": null
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": "package.json",
+      "reason": "package manifest"
+    },
+    {
+      "path": "tsconfig.json",
+      "reason": "typescript configuration"
+    },
+    {
+      "path": "vitest.config.ts",
+      "reason": "test configuration"
+    },
+    {
+      "path": "tsdown.config.ts",
+      "reason": "build configuration"
+    }
+  ],
+  "contextFiles": [
+    {
+      "path": "README.md",
+      "reason": "package context"
+    },
+    {
+      "path": "AGENTS.md",
+      "reason": "package context"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "reason": "package changelog"
+    },
+    {
+      "path": "scripts/prism.sh",
+      "reason": "package entrypoint"
+    },
+    {
+      "path": "scripts/build-bundle.ts",
+      "reason": "package source overview"
+    },
+    {
+      "path": "scripts/generate-release-manifest.ts",
+      "reason": "package source overview"
+    },
+    {
+      "path": "scripts/generate-vec-embed.ts",
+      "reason": "package source overview"
+    },
+    {
+      "path": "scripts/postinstall.js",
+      "reason": "package source overview"
+    }
+  ],
+  "tests": [],
+  "tags": [
+    "node",
+    "package",
+    "project:prism-liquidity-agent",
+    "project-root:."
+  ],
+  "trustBoundaries": [],
+  "status": "pending",
+  "lock": null,
+  "findingIds": [],
+  "patchAttemptIds": [],
+  "analysisHistory": [],
+  "createdAt": "2026-07-20T04:19:21.366Z",
+  "updatedAt": "2026-07-20T04:19:21.366Z"
+}

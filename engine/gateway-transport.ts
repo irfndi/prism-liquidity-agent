@@ -206,7 +206,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
 
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
 
-      const id = `prompt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const id = `prompt-${crypto.randomUUID()}`;
       const text = yield* this.sendAndWait(id, { type: "prompt", payload: prompt, id }, timeoutMs);
 
       const latencyMs = Date.now() - startedAt;
@@ -219,7 +219,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
   sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, unknown> {
     return Effect.gen(this, function* () {
       yield* this.connect();
-      const id = `checkin-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const id = `checkin-${crypto.randomUUID()}`;
       yield* this.sendAndWait(id, {
         type: "checkin",
         payload: JSON.stringify(checkin, null, 2),

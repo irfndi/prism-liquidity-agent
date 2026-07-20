@@ -1,0 +1,9 @@
+# deepsec parse-failure debug dump
+# phase: investigate
+# agentType: claude-agent-sdk
+# timestamp: 2026-07-20T04:23:06.367Z
+# error: Error: Agent produced output that wasn't a parseable JSON findings array: Unexpected token 'T', "There's an"... is not valid JSON. Tolerant jsonrepair failed: Unexpected character "'" at position 5. First 400 chars: There's an issue with the selected model (qwen3.8-max-preview). It may not exist or you may not have access to it.
+# batch (1 files):
+  - mcp-server/src/tools.ts
+# --- raw agent output begins on next line ---
+There's an issue with the selected model (qwen3.8-max-preview). It may not exist or you may not have access to it.

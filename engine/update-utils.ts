@@ -181,6 +181,12 @@ export function fetchGitHubRelease(
     const maxPages = 3;
 
     while (pageUrl !== null && pageCount < maxPages) {
+      // Never forward credentials to non-GitHub origins (Link header spoofing).
+      const pageOrigin = new URL(pageUrl).origin;
+      if (pageOrigin !== "https://api.github.com") {
+        break;
+      }
+
       pageCount++;
       const pageHeaders: Record<string, string> = {
         "User-Agent": "prism-liquidity-agent",
