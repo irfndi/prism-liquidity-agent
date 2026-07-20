@@ -24,10 +24,26 @@ function isExistingFile(candidate: string): boolean {
   }
 }
 
+// The `prism` wrapper (scripts/prism.sh) `cd`s into the package root before running
+// the CLI, so a relative positional path like `./kp.json` must be resolved against the
+// caller's original directory (captured as PRISM_CALLER_CWD), not the package root.
+// Falls back to cwd for direct `bun cli/index.ts` invocations where no wrapper set it.
+function resolveImportPath(candidate: string): string {
+  if (path.isAbsolute(candidate)) return candidate;
+  const callerCwd = process.env.PRISM_CALLER_CWD;
+  return callerCwd ? path.resolve(callerCwd, candidate) : candidate;
+}
+
 // Effective-wallet resolution mirroring the engine: WALLET_PRIVATE_KEY (base58, decoded
 // exactly like engine/adapter-service.ts) takes precedence over the local keystore.
-// Returns null when neither yields a usable key.
-function resolveEffectivePubkey(): { pubkey: string; source: "env" | "keystore" } | null {
+// If the env key is present but invalid, returns an error instead of silently falling
+// back — the engine resolves the wallet to null in that case, so a silent fallback would
+// report the wrong effective wallet. Returns null when no key is configured anywhere.
+function resolveEffectivePubkey(): {
+  pubkey: string;
+  source: "env" | "keystore";
+  error?: string;
+} | null {
   const envKey = process.env.WALLET_PRIVATE_KEY?.trim();
   if (envKey) {
     try {
@@ -36,7 +52,11 @@ function resolveEffectivePubkey(): { pubkey: string; source: "env" | "keystore" 
         source: "env",
       };
     } catch {
-      // Undecodable env key: fall through to the keystore.
+      return {
+        pubkey: "",
+        source: "env",
+        error: "WALLET_PRIVATE_KEY is set but could not be decoded as a base58 private key.",
+      };
     }
   }
   if (fs.existsSync(WALLET_FILE)) {
@@ -96,16 +116,14 @@ export const walletCommand = new Command("wallet")
       .description("Show the effective wallet pubkey (WALLET_PRIVATE_KEY env, then local keystore)")
       .action(() => {
         const effective = resolveEffectivePubkey();
+        if (effective?.error) {
+          console.error(`Error: ${effective.error}`);
+          process.exit(1);
+        }
         if (!effective) {
-          if (process.env.WALLET_PRIVATE_KEY?.trim()) {
-            console.error(
-              "Error: WALLET_PRIVATE_KEY is set but could not be decoded, and no keystore wallet exists.",
-            );
-          } else {
-            console.error(
-              "Error: No wallet found. Run 'prism wallet generate' first, or set WALLET_PRIVATE_KEY.",
-            );
-          }
+          console.error(
+            "Error: No wallet found. Run 'prism wallet generate' first, or set WALLET_PRIVATE_KEY.",
+          );
           process.exit(1);
         }
         console.log(effective.pubkey);
@@ -146,8 +164,9 @@ Examples:
         let secretKey: number[];
 
         if (options.file) {
+          const filePath = resolveImportPath(options.file);
           try {
-            const fileContent = fs.readFileSync(options.file, "utf-8");
+            const fileContent = fs.readFileSync(filePath, "utf-8");
             secretKey = JSON.parse(fileContent);
           } catch (err) {
             console.error(`Error: Failed to read or parse keypair file '${options.file}'`);
@@ -162,11 +181,13 @@ Examples:
             process.exit(1);
           }
         } else if (keypairStr) {
-          if (isExistingFile(keypairStr)) {
-            // A bare file path passed positionally, e.g. `prism wallet import ./kp.json`.
-            // A JSON array string is never an existing file, so this is unambiguous.
+          const candidatePath = resolveImportPath(keypairStr);
+          if (isExistingFile(candidatePath)) {
+            // A bare file path passed positionally, e.g. `prism wallet import ./kp.json`
+            // (resolved against the caller's directory). A JSON array string is never an
+            // existing file, so this detection is unambiguous.
             try {
-              const fileContent = fs.readFileSync(keypairStr, "utf-8");
+              const fileContent = fs.readFileSync(candidatePath, "utf-8");
               secretKey = JSON.parse(fileContent);
             } catch {
               console.error(`Error: Failed to read or parse keypair file '${keypairStr}'`);

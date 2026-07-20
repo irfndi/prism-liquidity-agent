@@ -20,6 +20,10 @@ if [ $hops -ge 40 ]; then
 fi
 PACKAGE_ROOT=$(cd -- "$(dirname -- "$SOURCE")/.." && pwd)
 
+# Preserve the caller's directory so the CLI can resolve relative paths (e.g.
+# `prism wallet import ./kp.json`) against it after we cd into the package root.
+export PRISM_CALLER_CWD="$PWD"
+
 cd "$PACKAGE_ROOT"
 export PRISM_INSTALL_DIR="$PACKAGE_ROOT"
 
