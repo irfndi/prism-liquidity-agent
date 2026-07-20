@@ -47,3 +47,306 @@ jobs:
 
       - name: Run tests
         run: bun run test
+
+  # Canary release channel: build + publish a per-merge canary bundle to R2
+  # whenever CI passes on main. Mirrors release.yml's bundle/manifest patterns
+  # but publishes to a canary-only R2 prefix and flips a single manifest
+  # pointer (releases/channel/canary.json) last. No GitHub Release, no GPG.
+  canary-prepare:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    concurrency:
+      group: canary-publish
+      cancel-in-progress: true
+    outputs:
+      canary_version: ${{ steps.meta.outputs.canary_version }}
+      build_dir: ${{ steps.meta.outputs.build_dir }}
+      full_sha: ${{ steps.meta.outputs.full_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: canary
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Compute canary version and build dir
+        id: meta
+        run: |
+          NEXT=$(node -e "console.log(require('semver').inc(require('./package.json').version, 'patch'))")
+          TS=$(date -u +%Y%m%dT%H%M%S)
+          SHA8=$(git rev-parse --short=8 HEAD)
+          FULL_SHA=$(git rev-parse HEAD)
+          echo "canary_version=${NEXT}-canary.${TS}" >> "$GITHUB_OUTPUT"
+          echo "build_dir=releases/canary/${TS}-${SHA8}" >> "$GITHUB_OUTPUT"
+          echo "full_sha=${FULL_SHA}" >> "$GITHUB_OUTPUT"
+
+  canary-build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, canary-prepare]
+    concurrency:
+      group: canary-publish
+      cancel-in-progress: true
+    env:
+      VERSION: ${{ needs.canary-prepare.outputs.canary_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform-key: linux-x64
+          - os: ubuntu-24.04-arm
+            platform-key: linux-arm64
+          - os: macos-15-intel
+            platform-key: darwin-x64
+          - os: macos-latest
+            platform-key: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: canary
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Stamp package.json canary version
+        run: |
+          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n');"
+
+      - name: Generate embedded sqlite-vec extension
+        run: |
+          PLATFORM_KEY="${{ matrix.platform-key }}"
+          bun run scripts/generate-vec-embed.ts "${PLATFORM_KEY%%-*}" "${PLATFORM_KEY##*-}"
+
+      - name: Build bundle
+        run: bun run scripts/build-bundle.ts
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: canary-bundle-${{ matrix.platform-key }}
+          path: |
+            prism-v*.tar.gz
+            prism-v*.tar.gz.sha256
+          if-no-files-found: error
+
+  canary-publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, canary-prepare, canary-build]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: canary-publish
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: canary
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Download canary bundle artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: canary-bundle-*
+          path: canary-assets
+
+      - name: Flatten bundle artifacts
+        run: |
+          mkdir -p canary-assets
+          for dir in canary-assets/canary-bundle-*/; do
+            if [ -d "$dir" ]; then
+              mv "$dir"prism-v* canary-assets/ 2>/dev/null || true
+              rmdir "$dir" 2>/dev/null || true
+            fi
+          done
+          ls -lh canary-assets/
+
+      - name: Stamp package.json canary version
+        env:
+          VERSION: ${{ needs.canary-prepare.outputs.canary_version }}
+        run: |
+          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n');"
+
+      - name: Build source tarball
+        env:
+          VERSION: ${{ needs.canary-prepare.outputs.canary_version }}
+        run: |
+          TARBALL_NAME="prism-v${VERSION}.tar.gz"
+          echo "Building ${TARBALL_NAME}"
+          mkdir -p /tmp/prism-release
+          tar -czf "/tmp/prism-release/${TARBALL_NAME}" \
+            --warning=no-file-changed \
+            --exclude=node_modules \
+            --exclude=dist \
+            --exclude=engine/sqlite-vec-embedded.ts \
+            --exclude=.git \
+            --exclude=*.db \
+            --exclude=*.db-journal \
+            --exclude=*.db-wal \
+            --exclude=*.db-shm \
+            --exclude=logs \
+            --exclude=.env \
+            --exclude=.env.* \
+            --exclude=bench/tmp-audit \
+            --exclude=.wrangler \
+            --exclude=cloudflare/.wrangler \
+            --exclude=.omo \
+            --exclude=.rtk \
+            --exclude=.opencode \
+            .
+          cp "/tmp/prism-release/${TARBALL_NAME}" "./${TARBALL_NAME}"
+          sha256sum "${TARBALL_NAME}" > "${TARBALL_NAME}.sha256"
+          mv "${TARBALL_NAME}" "${TARBALL_NAME}.sha256" canary-assets/
+          ls -lh canary-assets/
+
+      - name: Generate canary manifest
+        env:
+          VERSION: ${{ needs.canary-prepare.outputs.canary_version }}
+          BUILD_DIR: ${{ needs.canary-prepare.outputs.build_dir }}
+          FULL_SHA: ${{ needs.canary-prepare.outputs.full_sha }}
+        run: |
+          cd canary-assets
+          VERSION="${VERSION}" CHANNEL=canary COMMIT="${FULL_SHA}" R2_BASE_URL="https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev" R2_KEY_PREFIX="${BUILD_DIR}" REQUIRE_ALL_BUNDLES=true bun run ../scripts/generate-release-manifest.ts
+          cd ..
+          BUNDLE_COUNT=$(jq '.bundles | length' canary-assets/manifest.json)
+          if [ "$BUNDLE_COUNT" -lt 4 ]; then
+            echo "::error::Manifest has only ${BUNDLE_COUNT} platform bundles; expected 4"
+            jq '.bundles | keys' canary-assets/manifest.json
+            exit 1
+          fi
+          echo "→ Manifest has ${BUNDLE_COUNT} platform bundles"
+          cat canary-assets/manifest.json
+
+      - name: Upload canary assets to R2 (before manifest)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BUILD_DIR: ${{ needs.canary-prepare.outputs.build_dir }}
+        run: |
+          for f in canary-assets/*; do
+            [ -f "$f" ] || continue
+            [ "$(basename "$f")" = "manifest.json" ] && continue
+            npx wrangler r2 object put "prism-backups/${BUILD_DIR}/$(basename "$f")" --file "$f" --remote
+          done
+
+      - name: Upload canary manifest pointer to R2 (atomic flip)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler r2 object put "prism-backups/releases/channel/canary.json" --file canary-assets/manifest.json --remote
+
+      - name: Garbage-collect old canary builds
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BUILD_DIR: ${{ needs.canary-prepare.outputs.build_dir }}
+        run: |
+          set +e
+          FAILED=0
+          # wrangler v4 has no `r2 object list`, so list via the Cloudflare R2
+          # admin API and delete each key with `wrangler r2 object delete`.
+          # Keep the 5 newest canary build dirs; never delete the just-published
+          # ${BUILD_DIR}. Emit the keys-to-delete on stdout and the dir names on
+          # stderr, then delete them below.
+          node -e '
+            const token = process.env.CLOUDFLARE_API_TOKEN;
+            const account = process.env.CLOUDFLARE_ACCOUNT_ID;
+            const bucket = "prism-backups";
+            const keep = process.env.BUILD_DIR;
+            const re = /^[0-9]{8}T[0-9]{6}-[0-9a-f]{8}$/;
+            (async () => {
+              const keys = [];
+              let cursor = "";
+              do {
+                const q = new URLSearchParams();
+                q.set("prefix", "releases/canary/");
+                if (cursor) q.set("cursor", cursor);
+                const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/${bucket}/objects?${q.toString()}`, {
+                  headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+                });
+                const body = await res.json();
+                if (!body || body.success !== true) {
+                  console.error("R2 object list failed: " + JSON.stringify(body && body.errors));
+                  process.exit(1);
+                }
+                const result = body.result || {};
+                for (const o of result.objects || []) keys.push(o.key);
+                cursor = result.truncated ? (result.cursor || "") : "";
+              } while (cursor);
+
+              const byDir = new Map();
+              for (const key of keys) {
+                const parts = key.split("/");
+                if (parts.length < 4 || parts[0] !== "releases" || parts[1] !== "canary") continue;
+                const dir = parts[2];
+                if (!re.test(dir)) continue;
+                if (!byDir.has(dir)) byDir.set(dir, []);
+                byDir.get(dir).push(key);
+              }
+
+              const dirs = [...byDir.keys()].sort();
+              const keepDirs = new Set(dirs.slice(Math.max(0, dirs.length - 5)));
+              keepDirs.add(keep);
+
+              for (const dir of dirs) {
+                if (keepDirs.has(dir)) continue;
+                console.error("Deleting canary build dir: " + dir);
+                for (const key of byDir.get(dir)) console.log(key);
+              }
+            })().catch((err) => { console.error("R2 GC error: " + err); process.exit(1); });
+          ' > /tmp/canary-gc-keys.txt
+          if [ $? -ne 0 ]; then
+            echo "WARNING: failed to list canary R2 objects; skipping garbage collection."
+            FAILED=1
+          fi
+
+          while IFS= read -r key; do
+            [ -n "$key" ] || continue
+            npx wrangler r2 object delete "prism-backups/${key}" --remote || FAILED=1
+          done < /tmp/canary-gc-keys.txt
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "WARNING: canary garbage collection hit errors; the published canary is unaffected."
+          fi
+          exit "$FAILED"
+
+      - name: Canary summary
+        env:
+          CANARY_VERSION: ${{ needs.canary-prepare.outputs.canary_version }}
+          FULL_SHA: ${{ needs.canary-prepare.outputs.full_sha }}
+        run: |
+          echo "Canary published: ${CANARY_VERSION} (commit ${FULL_SHA})"
+          echo "Users can install with: prism update --canary"

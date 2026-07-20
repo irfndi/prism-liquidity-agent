@@ -33,7 +33,7 @@ export function isValidVersion(version: string): boolean {
 
 export interface ReleaseInfo {
   readonly version: string;
-  readonly channel: "stable" | "beta" | "dev";
+  readonly channel: "stable" | "beta" | "dev" | "canary";
   readonly tarballUrl: string;
   readonly sha256Url: string;
   readonly signatureUrl: string;
@@ -42,6 +42,7 @@ export interface ReleaseInfo {
   readonly source: "r2" | "github";
   readonly bundleUrl: string;
   readonly bundleSha256Url: string;
+  readonly commit: string;
 }
 
 export interface BundleManifest {
@@ -51,13 +52,14 @@ export interface BundleManifest {
 
 export interface R2Manifest {
   readonly version: string;
-  readonly channel: "stable" | "beta" | "dev";
+  readonly channel: "stable" | "beta" | "dev" | "canary";
   readonly tarball_url: string;
   readonly sha256_url: string;
   readonly signature_url?: string;
   readonly published_at: string;
   readonly min_cli_version: string;
   readonly bundles?: Record<string, BundleManifest>;
+  readonly commit?: string;
 }
 
 export interface GitHubRelease {
@@ -74,14 +76,15 @@ export interface GitHubRelease {
 
 export const R2_PUBLIC_URL = "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev";
 export const R2_RELEASES_BUCKET = "prism-backups";
-export const R2_MANIFEST_PATHS: Record<"stable" | "beta" | "dev", string> = {
+export const R2_MANIFEST_PATHS: Record<"stable" | "beta" | "dev" | "canary", string> = {
   stable: "releases/latest.json",
   beta: "releases/channel/beta.json",
   dev: "releases/channel/dev.json",
+  canary: "releases/channel/canary.json",
 };
 
 export function fetchR2Manifest(
-  channel: "stable" | "beta" | "dev",
+  channel: "stable" | "beta" | "dev" | "canary",
   r2PublicUrl: string = R2_PUBLIC_URL,
 ): Effect.Effect<R2Manifest | null, Error> {
   return Effect.gen(function* () {
@@ -118,7 +121,7 @@ export function fetchR2Manifest(
 
 export function fetchGitHubRelease(
   repo: string,
-  channel: "stable" | "beta" | "dev",
+  channel: "stable" | "beta" | "dev" | "canary",
   token?: string,
 ): Effect.Effect<GitHubRelease | null, Error> {
   return Effect.gen(function* () {
@@ -244,7 +247,7 @@ export function getPlatformKey(): string {
 
 export function githubReleaseToInfo(
   release: GitHubRelease,
-  channel: "stable" | "beta" | "dev",
+  channel: "stable" | "beta" | "dev" | "canary",
 ): ReleaseInfo {
   const platformKey = getPlatformKey();
   const tarballAsset = release.assets.find(
@@ -277,6 +280,7 @@ export function githubReleaseToInfo(
     source: "github",
     bundleUrl: bundleAsset?.browser_download_url ?? "",
     bundleSha256Url: bundleSha256Asset?.browser_download_url ?? "",
+    commit: "",
   };
 }
 
@@ -294,12 +298,13 @@ export function r2ManifestToInfo(manifest: R2Manifest): ReleaseInfo {
     source: "r2",
     bundleUrl: bundle?.url ?? "",
     bundleSha256Url: bundle?.sha256_url ?? "",
+    commit: manifest.commit ?? "",
   };
 }
 
 export function fetchLatestRelease(
   repo: string,
-  channel: "stable" | "beta" | "dev",
+  channel: "stable" | "beta" | "dev" | "canary",
   r2PublicUrl?: string,
   token?: string,
 ): Effect.Effect<ReleaseInfo | null, Error> {
@@ -313,6 +318,20 @@ export function fetchLatestRelease(
       }
     }
     const r2Error = r2Result._tag === "Left" ? r2Result.left : null;
+
+    // Canary builds are R2-only: they have no GitHub Releases representation,
+    // so falling through to the "newest release" GitHub semantics would install
+    // the wrong artifact. Fail with a clear, actionable message instead.
+    if (channel === "canary") {
+      const detail = r2Error ? `: ${r2Error.message}` : " (no valid canary manifest found)";
+      return yield* Effect.fail(
+        new Error(
+          `Canary builds are served exclusively from R2 (releases/channel/canary.json). ` +
+            `Failed to resolve a canary build${detail}. ` +
+            `Check the R2 public URL and that the canary pipeline has published a build.`,
+        ),
+      );
+    }
 
     const ghResult = yield* Effect.either(fetchGitHubRelease(repo, channel, token));
     if (ghResult._tag === "Right") {

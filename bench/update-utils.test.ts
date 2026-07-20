@@ -5,6 +5,7 @@ import {
   githubReleaseToInfo,
   r2ManifestToInfo,
   getPlatformKey,
+  R2_MANIFEST_PATHS,
 } from "../engine/update-utils.js";
 
 describe("update-utils", () => {
@@ -30,6 +31,14 @@ describe("update-utils", () => {
       expect(() => compareVersions("not-a-version", "1.2.3")).toThrow();
       expect(() => compareVersions("1.2.3", "not-a-version")).toThrow();
     });
+
+    it("orders canary versions by timestamp and against stable", () => {
+      expect(
+        compareVersions("0.0.32-canary.20260721T000001", "0.0.32-canary.20260720T000000"),
+      ).toBeGreaterThan(0);
+      expect(compareVersions("0.0.32-canary.20260720T000000", "0.0.31")).toBeGreaterThan(0);
+      expect(compareVersions("0.0.32", "0.0.32-canary.20260720T000000")).toBeGreaterThan(0);
+    });
   });
 
   describe("isValidVersion", () => {
@@ -46,6 +55,16 @@ describe("update-utils", () => {
       expect(isValidVersion("1.2")).toBe(false);
       expect(isValidVersion("1")).toBe(false);
       expect(isValidVersion("1.2.3.4")).toBe(false);
+    });
+
+    it("accepts canary prerelease versions", () => {
+      expect(isValidVersion("0.0.32-canary.20260720T000000")).toBe(true);
+    });
+  });
+
+  describe("R2_MANIFEST_PATHS", () => {
+    it("exposes the canary channel manifest path", () => {
+      expect(R2_MANIFEST_PATHS.canary).toBe("releases/channel/canary.json");
     });
   });
 
@@ -192,6 +211,36 @@ describe("update-utils", () => {
       expect(info.signatureUrl).toBe("");
       expect(info.channel).toBe("dev");
       expect(info.bundleUrl).toBe(bundle.url);
+    });
+
+    it("maps a canary manifest commit onto ReleaseInfo.commit", () => {
+      const manifest = {
+        version: "0.0.32-canary.20260720T000000",
+        channel: "canary" as const,
+        tarball_url: "https://r2.example.com/prism-canary.tar.gz",
+        sha256_url: "https://r2.example.com/prism-canary.tar.gz.sha256",
+        published_at: "2026-07-20T00:00:00Z",
+        min_cli_version: "1.0.0",
+        commit: "abcdef0123456789abcdef0123456789abcdef01",
+      };
+
+      const info = r2ManifestToInfo(manifest);
+      expect(info.channel).toBe("canary");
+      expect(info.commit).toBe("abcdef0123456789abcdef0123456789abcdef01");
+    });
+
+    it("yields an empty commit when the manifest omits it", () => {
+      const manifest = {
+        version: "1.0.0",
+        channel: "stable" as const,
+        tarball_url: "https://r2.example.com/prism-v1.0.0.tar.gz",
+        sha256_url: "https://r2.example.com/prism-v1.0.0.tar.gz.sha256",
+        published_at: "2024-01-01T00:00:00Z",
+        min_cli_version: "1.0.0",
+      };
+
+      const info = r2ManifestToInfo(manifest);
+      expect(info.commit).toBe("");
     });
   });
 });

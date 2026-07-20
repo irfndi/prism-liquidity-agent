@@ -93,6 +93,18 @@ Use `prism update --check-only` and `prism update` for upgrades. Do not edit the
 
 `bun add --global prism` is not a supported command because this project is not published as an npm package named `prism`. A GitHub global install such as `bun add --global github:irfndi/prism-liquidity-agent#<release-tag>` is a source fallback, not the production path; it does not provide the platform bundle or the release installer's checksum guarantee.
 
+### Canary builds
+
+Every merge to `main` that passes CI publishes a canary build -- the latest code, rebuilt and uploaded to R2 automatically, like Bun's own canary channel. A canary is versioned `<next patch>-canary.<UTC timestamp>` and the `releases/channel/canary.json` pointer always tracks the newest one.
+
+```bash
+prism update --canary       # move to the latest canary build
+```
+
+Canary builds are not for production. They run exactly what is on `main` right now, with no tag, no GitHub Release, and no GPG signature -- only the SHA-256 checks the updater always performs. Use them to test an unreleased fix or feature before it ships.
+
+To go back, run plain `prism update`: the next stable release supersedes the canary version and pulls you back onto the stable channel.
+
 ### For AI Agents (OpenClaw, Hermes, acpx, custom agents)
 
 Prism is agent-friendly by design. The CLI is the operating boundary; registration is required before setup/dev so usage, errors, and feedback are tied to the agent account. Telegram remains optional.

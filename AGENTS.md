@@ -310,7 +310,7 @@ Required secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
 4. Builds a source tarball.
 5. Generates SHA-256 checksums and optional GPG signatures.
 6. Uploads assets to Cloudflare R2 (`prism-backups/releases/v{VERSION}/`).
-7. Updates `prism-backups/releases/latest.json` and per-channel manifests (`beta`, `dev`).
+7. Updates `prism-backups/releases/latest.json` and per-channel manifests (`beta`, `dev`; the `canary` pointer is written by `ci.yml` on `main`, NOT by this workflow).
 8. Creates or updates a GitHub Release.
 
 `prism update` downloads from R2 and verifies SHA-256; it falls back to GitHub Releases if R2 is unreachable.
@@ -373,7 +373,7 @@ The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copi
 | `AGENT_APPROVAL_TOKEN`        | `""`                                                               | Bearer token for `/approve` / MCP approve. Required for supervised; no fallback to proposal token.                 |
 | `AGENT_PROPOSAL_MAX_QUEUE_SIZE` | `50`                                                             | Max pending proposals in the in-memory queue.                                                                      |
 | `AUTO_UPDATE`                 | `true`                                                             | Check for releases periodically.                                                                                   |
-| `UPDATE_CHANNEL`              | `stable`                                                           | `stable`, `beta` or `dev`.                                                                                         |
+| `UPDATE_CHANNEL`              | `stable`                                                           | `stable`, `beta`, `dev` or `canary`.                                                                               |
 | `UPDATE_R2_PUBLIC_URL`        | `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev`              | Release CDN. `.env.example` contains a stale `r2.prism-agent.com` value; the code fallback is the source of truth. |
 | `PRISM_CONFIG_DIR`            | `~/.config/prism`                                                  | Override the shared credentials and config directory.                                                              |
 | `PRISM_FEEDBACK_OPT_OUT`      | `false`                                                            | Disable automatic feedback.                                                                                        |
