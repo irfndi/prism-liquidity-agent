@@ -28,7 +28,13 @@ const CONNECT_CHALLENGE_EVENT = "connect.challenge";
 const CHAT_EVENT = "chat";
 const FALLBACK_SESSION_KEY = "main";
 const CONNECT_TIMEOUT_MS = 5_000;
-const CHALLENGE_TIMEOUT_MS = 5_000;
+// The challenge normally arrives immediately after upgrade; this is only the fallback
+// wait for a gateway that omits it. Keep it shorter than the connect step so a slow or
+// omitted challenge still leaves the connect request its full CONNECT_TIMEOUT_MS budget.
+const CHALLENGE_TIMEOUT_MS = 3_000;
+// Outer backstop for the whole handshake (challenge wait + connect + hello-ok) with
+// slack, so the per-phase timeouts below never race this overall deadline.
+const HANDSHAKE_TIMEOUT_MS = CHALLENGE_TIMEOUT_MS + CONNECT_TIMEOUT_MS + 2_000;
 
 export interface GatewayTransportOptions {
   readonly url: string;
@@ -262,7 +268,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
       };
       connectTimer = setTimeout(
         () => fail(new Error("Gateway connect timeout")),
-        CONNECT_TIMEOUT_MS,
+        HANDSHAKE_TIMEOUT_MS,
       );
 
       ws.addEventListener("open", () => {

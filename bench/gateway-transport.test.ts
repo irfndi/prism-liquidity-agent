@@ -267,4 +267,40 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
       server.stop(true);
     }
   });
+
+  it("connects via the fallback when the gateway omits connect.challenge", async () => {
+    // A gateway may omit connect.challenge. The fallback wait is shorter than the
+    // connect step's own budget, all inside the overall handshake backstop, so the
+    // connect still completes with time for hello-ok (regression: with equal 5s timers
+    // the outer deadline raced the challenge wait and aborted the handshake).
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, s) {
+        if (s.upgrade(req)) return;
+        return new Response("not found", { status: 404 });
+      },
+      websocket: {
+        // Deliberately no connect.challenge on open.
+        message(ws, data) {
+          const frame = JSON.parse(String(data)) as Frame;
+          if (frame.type === "req" && frame.method === "connect") {
+            sendFrame(ws, { type: "res", id: frame.id, ok: true, payload: HELLO_OK });
+          }
+        },
+      },
+    });
+
+    try {
+      const transport = new GatewayTransport({
+        url: `ws://127.0.0.1:${server.port}`,
+        token: "",
+        timeoutMs: 5000,
+      });
+      await Effect.runPromise(transport.connect());
+      await Effect.runPromise(transport.disconnect());
+    } finally {
+      server.stop(true);
+    }
+  });
 });
