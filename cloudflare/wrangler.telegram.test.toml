@@ -1,6 +1,6 @@
 name = "prism-telegram-bot-test"
 main = "workers/telegram-bot/index.ts"
-compatibility_date = "2025-02-14"
+compatibility_date = "2026-07-20"
 compatibility_flags = ["nodejs_compat"]
 
 # D1 Database
