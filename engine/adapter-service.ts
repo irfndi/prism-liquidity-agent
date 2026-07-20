@@ -2357,8 +2357,8 @@ export const AdapterLive = Layer.effect(
           }
 
           const txSignatures: string[] = [];
-          const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
           for (const tx of claimTxs) {
+            const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
             tx.feePayer = wallet.publicKey;
             tx.recentBlockhash = blockhash;
             tx.sign(wallet);

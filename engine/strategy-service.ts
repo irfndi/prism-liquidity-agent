@@ -322,7 +322,7 @@ export function resolveRangeHalfWidth(args: {
     args.configuredBaseHalfWidth > 0
       ? args.configuredBaseHalfWidth
       : baselineHalfWidthForBinStep(args.binStep);
-  const halfCap = Math.floor(args.maxFullRangeBins / 2);
+  const halfCap = Math.max(1, Math.floor(args.maxFullRangeBins / 2));
   const effectiveMin = Math.min(MIN_ADAPTIVE_HALF_WIDTH_BINS, halfCap);
   if (
     !args.adaptiveEnabled ||

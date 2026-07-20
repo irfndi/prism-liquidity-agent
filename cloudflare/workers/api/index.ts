@@ -434,18 +434,21 @@ app.post("/v1/register", async (c) => {
 
     // Binding a telegram_id to a fresh account is a bot-only flow — without the
     // shared secret anyone could squat arbitrary Telegram identities. Verify the
-    // secret BEFORE creating the account so a bad secret leaves no orphaned user.
-    if (body.telegram_id && !isBotAuthorized(c.env, c.req.header("X-Bot-Api-Secret"))) {
-      return c.json({ error: "Unauthorized" }, 401);
+    // secret AND telegram_id format BEFORE creating the account so a bad request
+    // leaves no orphaned user.
+    if (body.telegram_id) {
+      if (!isBotAuthorized(c.env, c.req.header("X-Bot-Api-Secret"))) {
+        return c.json({ error: "Unauthorized" }, 401);
+      }
+      if (!/^\d+$/.test(body.telegram_id)) {
+        return c.json({ error: "Invalid telegram_id format. Must be numeric." }, 400);
+      }
     }
 
     const result = yield* registerHandler(DB);
     yield* Effect.tryPromise(() => CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }));
 
     if (body.telegram_id) {
-      if (!/^\d+$/.test(body.telegram_id)) {
-        return c.json({ error: "Invalid telegram_id format. Must be numeric." }, 400);
-      }
       yield* Effect.tryPromise(() =>
         DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?")
           .bind(body.telegram_id, result.userId)
