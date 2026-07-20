@@ -41,7 +41,7 @@ if (fs.existsSync(vec0Path)) {
 
 // Build the engine and CLI bundles.
 run("bun run build");
-run("bunx tsdown --config tsdown.cli.config.ts");
+run("bunx --bun tsdown --config tsdown.cli.config.ts");
 
 // Stage the distribution layout.
 const stageDir = path.join(repoRoot, ".prism-bundle-stage");
