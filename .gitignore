@@ -72,3 +72,7 @@ mcp-server/package-lock.json
 
 # Claude session files
 .claude/scheduled_tasks.lock
+
+# Security scanner tooling state
+.clawpatch/
+.deepsec/data/*/debug/
