@@ -10,12 +10,17 @@ into Prism's opt-in *decision overlay* (`AGENTIC_MODE=true`) to review decisions
 receive check-ins/alerts — see the
 [README agent runtime overlay](../README.md#agent-runtime-overlay) for the env vars.
 
-| Platform / runtime | Operating boundary | Decision overlay (`AGENTIC_MODE=true`) |
-| ------------------ | ------------------ | --------------------------------------- |
-| Hermes | CLI + `skills/prism-hermes/` | **ACP** (`AGENT_RUNTIME=hermes`, `hermes acp`) or **Hermes HTTP API** (`AGENT_HERMES_API_URL`) |
-| OpenClaw | CLI + `skills/prism-openclaw/` | **Gateway WebSocket** (`AGENT_RUNTIME=openclaw`, gateway protocol v4 / OpenClaw >= 2026.7.1, token required) or **webhook** (`AGENT_OPENCLAW_WEBHOOK_URL`) |
+| Platform / runtime | Operating boundary | Decision review (`AGENTIC_MODE=true`) |
+| ------------------ | ------------------ | ------------------------------------- |
+| Hermes | CLI + `skills/prism-hermes/` | **ACP** (`AGENT_RUNTIME=hermes`, `hermes acp`) |
+| OpenClaw | CLI + `skills/prism-openclaw/` | **Gateway WebSocket** (`AGENT_RUNTIME=openclaw`, gateway protocol v4 / OpenClaw >= 2026.7.1, token required) |
 | Any [ACP](https://agentclientprotocol.com) agent (Claude Code, Codex CLI, Gemini CLI, OpenCode, …) | CLI | **ACP** via `AGENT_ACP_COMMAND` / `AGENT_ACP_ARGS` |
-| acpx / custom | CLI wrapper / `skills/prism/` | any of the above, or the local **MCP server** / HTTP pull interfaces |
+| acpx / custom | CLI wrapper / `skills/prism/` | ACP (above), or the local **MCP server** / HTTP pull interfaces |
+
+Decision review is performed by the ACP runtime or the OpenClaw gateway. Independently,
+the HTTP delivery transports — the OpenClaw webhook (`AGENT_OPENCLAW_WEBHOOK_URL`) and
+the Hermes HTTP API (`AGENT_HERMES_API_URL`) — fan out **alerts and check-ins** when
+configured; they do not review decisions.
 
 ## Skills (auto-discovered by agent harnesses)
 

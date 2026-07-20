@@ -217,20 +217,27 @@ Prism integrates with agent harnesses at two layers:
    confidence or change an action to `HOLD`; it can never raise confidence, promote to
    `ENTER`, or force an `EXIT`.
 
-### Supported agent runtimes (overlay)
+### Decision-review runtimes (the overlay)
+
+These review each decision (`sendPrompt` -> a JSON override that can only lower
+confidence or switch to `HOLD`). `AGENT_RUNTIME` (`auto` by default) selects one:
 
 | Runtime | Transport | Config | Notes |
 | ------- | --------- | ------ | ----- |
-| Any [ACP](https://agentclientprotocol.com) agent | stdio JSON-RPC | `AGENT_RUNTIME=hermes` (default), `AGENT_ACP_COMMAND`, `AGENT_ACP_ARGS` | Hermes (`hermes acp`), Claude Code, Codex CLI, Gemini CLI, OpenCode, or any ACP-compatible agent. Prism speaks canonical ACP v1 (`initialize` / `session/new` / `session/prompt`, reply streamed via `session/update`). |
-| OpenClaw | Gateway WebSocket | `AGENT_RUNTIME=openclaw`, `AGENT_GATEWAY_URL`, `AGENT_GATEWAY_TOKEN` | Requires **OpenClaw >= 2026.7.1** (gateway protocol v4). `AGENT_GATEWAY_TOKEN` is required: on loopback a valid shared token lets Prism's `cli` client keep its scopes without device pairing. Prism prompts via `chat.send` and delivers check-ins via `system-event`. |
-| OpenClaw (HTTP) | Webhook | `AGENT_OPENCLAW_WEBHOOK_URL`, `AGENT_OPENCLAW_WEBHOOK_TOKEN` | POSTs check-ins/alerts to the webhook; use when a persistent WebSocket is not desired. |
-| Hermes (HTTP) | OpenAI-compatible API | `AGENT_HERMES_API_URL`, `AGENT_HERMES_API_TOKEN` | Prism POSTs prompts to `{base}/v1/chat/completions` (model `hermes-agent`); the API server key is sent as a Bearer token. |
+| Any [ACP](https://agentclientprotocol.com) agent | stdio JSON-RPC | `AGENT_RUNTIME=hermes` (default), `AGENT_ACP_COMMAND`, `AGENT_ACP_ARGS` | Hermes (`hermes acp`), Claude Code, Codex CLI, Gemini CLI, OpenCode, or any ACP-compatible agent. Prism speaks canonical ACP v1 (`initialize` / `session/new` / `session/prompt`, reply streamed via `session/update`). Point `AGENT_ACP_COMMAND`/`AGENT_ACP_ARGS` at any ACP agent (e.g. `npx -y @agentclientprotocol/codex-acp`). |
+| OpenClaw | Gateway WebSocket | `AGENT_RUNTIME=openclaw`, `AGENT_GATEWAY_URL`, `AGENT_GATEWAY_TOKEN` | Requires **OpenClaw >= 2026.7.1** (gateway protocol v4). `AGENT_GATEWAY_TOKEN` is required: on loopback a valid shared token lets Prism's `cli` client keep its scopes without device pairing. Prism reviews decisions via `chat.send`. |
 
-Prompt review goes through the primary runtime (ACP or the OpenClaw gateway, selected
-by `AGENT_RUNTIME`); the two HTTP webhook transports additionally fan out alerts and
-check-ins when their URLs are set. Any ACP-compatible agent works as the ACP runtime —
-point `AGENT_ACP_COMMAND`/`AGENT_ACP_ARGS` at it (for example `npx -y
-@agentclientprotocol/codex-acp`).
+### Delivery transports (alerts + check-ins)
+
+These fan out **alerts and check-ins** when configured. They do **not** review
+decisions — decision review uses one of the runtimes above — and they run
+independently and additively alongside it.
+
+| Transport | Config | Notes |
+| --------- | ------ | ----- |
+| OpenClaw webhook | `AGENT_OPENCLAW_WEBHOOK_URL`, `AGENT_OPENCLAW_WEBHOOK_TOKEN` | POSTs alerts + check-ins to the webhook; use when a persistent WebSocket is not desired. |
+| Hermes HTTP API | `AGENT_HERMES_API_URL`, `AGENT_HERMES_API_TOKEN` | POSTs alerts + check-ins as user messages to `{base}/v1/chat/completions` (model `hermes-agent`); the Bearer token is Hermes' `API_SERVER_KEY`. |
+
 
 Prism also exposes pull interfaces for agent runtimes to query state on demand:
 
