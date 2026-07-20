@@ -81,12 +81,15 @@ function isGatewayRunning(url: string): Effect.Effect<boolean, unknown> {
       ws = new WebSocket(url);
       ws.addEventListener("open", () => {
         clearTimeout(timer);
+        // Settle BEFORE closing: Bun dispatches the close listener synchronously
+        // during ws.close(), so settle(false) from the close handler would win
+        // if close() ran first.
+        settle(true);
         try {
           ws?.close();
         } catch {
           // ignore close errors during probe success cleanup
         }
-        settle(true);
       });
       ws.addEventListener("error", () => {
         clearTimeout(timer);
