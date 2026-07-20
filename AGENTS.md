@@ -215,6 +215,22 @@ DLMM farms stream up to 2 reward tokens to active-bin liquidity. Prism is farm-a
 - **Accounting.** Rewards are tracked **separately** from swap fees: `cumulative_rewards_claimed_usd` (migration v17) accumulates only the USD-priced portion of claims, while `cumulative_fees_claimed_usd` stays fee-pure (fee APR never includes farm yield). Each claim appends a `CLAIM` row to `position_events` with `fees_usd = NULL` and `metadata.kind = "lm_reward"` carrying the raw `{mint, amountAtomic, amountUsd}` entries and tx signatures. A reward whose mint price is unavailable is still claimed and recorded with `amountUsd: null` (plus a warning memory entry) — claiming never blocks on pricing. Total PnL (unrealized and realized) includes claimed rewards; `prism portfolio` and `prism status` show a `Rewards:` line when the total is positive.
 - **Scoring.** The Data API's `has_farm` + `farm_apr` (annualized percent — note the API's adjacent `apr` is a daily rate; `farm_apr` is not) flow through `enrichPoolWithDatapi` onto `PoolState.hasFarm`/`farmAprPct` and into `PoolMetrics.farmAprPct` (null = no farm or unknown; 0 = farm with no current rate). `weightedEntryScore` adds a bounded farm term, `min(farmAprPct / FARM_APR_SCORE_REFERENCE_PCT (100), 1) × FARM_SCORE_WEIGHT (1)`, so a farm pool outranks an otherwise-identical non-farm pool. The term is a fixed constant, deliberately outside the Darwinian `SignalWeights`, so weight evolution cannot inflate farm yield above fee/IL quality signals.
 
+### Fee accumulation (Wave 13)
+
+After a successful fee claim, `FEE_DESTINATION=compound` redeposits as before; `accumulate-quote` and `accumulate-sol` convert the claimed fee through the typed Jupiter adapter seam and retain the proceeds instead of recompounding. Paper mode records the accumulation without calling Jupiter. Live conversion is fail-closed for missing wallets, missing or malformed routes, zero output, quote/build/confirmation failures, or unsupported destinations.
+
+### Depeg and liquidity-drain alerts (Wave 15)
+
+Allowlisted stablecoin depeg detection and sudden snapshot TVL/volume drain detection produce position-scoped fast `EXIT` signals. They use the existing W5 alert transport, per-rule cooldowns, and fail-open delivery behavior; an alert-delivery failure never blocks the scan cycle.
+
+### Copy-trading signals (Wave 16)
+
+Opt-in copy signals accept only configured wallet allowlists and fresh, validated, deduplicated observations. Retries fail open, the confidence boost is capped at `0.05`, and an incoming signal cannot downgrade `EXIT`; signals are applied before the unchanged risk gates. Copy signals are advisory input, not execution authority.
+
+### Limit-order status (Wave 14)
+
+W14 remains blocked and is not implemented. The current Meteora SDK path provides no trusted linkage between a placed limit order and the engine's position, no reliable fill or expiry reconciliation, no freshness-bearing quote that can safely drive the order lifecycle, and no safe post-withdraw sizing contract for redeposit. Until those lifecycle facts are available from a supported SDK/API path, Prism must not place or cancel limit orders or claim W14 acceptance.
+
 ### Agent runtime overlay
 
 When `AGENTIC_MODE=true`, the engine can talk to a local agent harness (Hermes via ACP, OpenClaw via Gateway WebSocket). It exposes:
@@ -386,7 +402,7 @@ In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaul
 - **Scan metrics.** Cycle logs report `decided`, `executed`, and `failed` pools separately; `decided` is not a success count.
 - **Scan failure semantics.** `failed` counts processing or execution failures; risk and backoff gates are rejected decisions recorded in the audit trail, not execution failures.
 - **sqlite-vec extension.** Source installs rely on `scripts/generate-vec-embed.ts` to create `engine/sqlite-vec-embedded.ts`; bundled installs provide the native extension via `PRISM_VEC0_PATH`.
-- **Backtest is a simplified simulation.** It does not replicate the full decision loop (no risk gates, memory, dynamic ENTER/EXIT sizing, trailing stop). Use it as a regression baseline, not a performance forecast.
+- **Backtest fidelity (Wave 11).** Replay uses the shared decision/risk kernel for position identity, per-pool and portfolio caps, trailing-stop behavior, memory inputs, and dynamic sizing. It remains an offline simulation: it does not submit live transactions, reproduce RPC/SDK transport timing, or forecast execution quality, slippage, or fills. Treat results as deterministic strategy regression and parity checks, not a performance forecast.
 - **Screener bin-utilization filter is bounded.** Discovery data comes from the Data API without per-bin data, so `minBinUtilization` is enforced only for the first 10 screened candidates via an on-chain `getBinArray` probe; the rest pass through and the per-pool scan loop re-applies the gate.
 - **Risk size cap follows `MAX_PER_POOL_ALLOCATION_PCT`.** The per-position cap in `risk-service.ts` is the configured allocation pct (default 40%), not a hardcoded constant.
 - **`.env.example` is stale in places.** For example, its `UPDATE_R2_PUBLIC_URL` default does not match the code fallback. Always verify against `engine/config-service.ts`.

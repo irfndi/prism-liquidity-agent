@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "featureId": "feat_release_775032a0f4",
+  "title": "Package script start",
+  "summary": "Package script 'start': bun dist/index.mjs",
+  "kind": "release",
+  "source": "package-json-script",
+  "confidence": "medium",
+  "entrypoints": [
+    {
+      "path": "package.json",
+      "symbol": "start",
+      "route": null,
+      "command": "start"
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": "package.json",
+      "reason": "entrypoint"
+    }
+  ],
+  "contextFiles": [],
+  "tests": [],
+  "tags": [
+    "node",
+    "package-script",
+    "project:prism-liquidity-agent",
+    "project-root:."
+  ],
+  "trustBoundaries": [
+    "process-exec",
+    "filesystem"
+  ],
+  "status": "needs-fix",
+  "lock": null,
+  "findingIds": [
+    "fnd_sig-feat-release-775032a0f4-14b1_29e3a0b2fc"
+  ],
+  "patchAttemptIds": [],
+  "analysisHistory": [
+    {
+      "runId": "20260720T051243-181602",
+      "kind": "review",
+      "summary": "1 finding(s); prompt=6911 bytes; approxTokens=1728; includedFiles=1; omittedFiles=0",
+      "provider": "pi",
+      "model": null,
+      "reasoningEffort": null,
+      "createdAt": "2026-07-20T05:16:29.531Z"
+    }
+  ],
+  "createdAt": "2026-07-20T04:19:21.366Z",
+  "updatedAt": "2026-07-20T05:16:29.531Z"
+}

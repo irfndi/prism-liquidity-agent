@@ -49,7 +49,7 @@ function cooldownKey(alert: EngineAlert): string {
 }
 
 function parseNumber(raw: string | null): number | null {
-  if (raw === null) return null;
+  if (raw === null || raw.trim() === "") return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
 }
@@ -121,16 +121,17 @@ export const AlertLive: Layer.Layer<AlertService, never, DbService | ConfigServi
         const lastSent = parseNumber(lastRaw);
         if (lastSent !== null && now - lastSent < cooldownMs) return;
 
-        // Mark the attempt before POSTing: a flaky API must not retrigger the
-        // same alert on every scan cycle (throttle beats delivery here).
-        yield* db.setMetadata(key, String(now)).pipe(Effect.catchAll(() => Effect.void));
-
         const apiKey = readPrismApiKey();
         if (!apiKey) {
           // Unregistered install: alerts have nowhere to go. Not an error.
           log.debug("Skipping alert — no Prism credentials registered", { type: alert.type });
           return;
         }
+
+        // Mark the attempt before POSTing: a flaky API must not retrigger the
+        // same alert on every scan cycle (throttle beats delivery here).
+        yield* db.setMetadata(key, String(now)).pipe(Effect.catchAll(() => Effect.void));
+
         yield* postAlert(apiKey, readInstallId(), alert);
       });
 
@@ -157,6 +158,8 @@ export const AlertLive: Layer.Layer<AlertService, never, DbService | ConfigServi
         while (following <= total) {
           following += config.alertFeeMilestoneUsd;
         }
+        const lastCrossed = following - config.alertFeeMilestoneUsd;
+        const crossedCount = (following - nextMilestone) / config.alertFeeMilestoneUsd;
         yield* db
           .setMetadata(FEE_NEXT_MILESTONE_KEY, String(following))
           .pipe(Effect.catchAll(() => Effect.void));
@@ -164,9 +167,9 @@ export const AlertLive: Layer.Layer<AlertService, never, DbService | ConfigServi
         yield* sendAlert({
           type: "fee_milestone",
           severity: "info",
-          message: `Cumulative fees claimed crossed $${nextMilestone.toFixed(2)} (total $${total.toFixed(2)})`,
+          message: `Cumulative fees claimed crossed $${lastCrossed.toFixed(2)} (total $${total.toFixed(2)})`,
           poolAddress,
-          data: { totalFeesUsd: total, milestoneUsd: nextMilestone },
+          data: { totalFeesUsd: total, milestoneUsd: lastCrossed, crossedCount },
         });
       });
 

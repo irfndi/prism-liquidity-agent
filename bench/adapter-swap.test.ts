@@ -140,7 +140,15 @@ describe("AdapterService.swapUSDCForToken", () => {
       const u = url.toString();
       if (u.includes("/swap/v1/quote")) {
         captured.quoteUrl = u;
-        return new Response(JSON.stringify({ routePlan: [{ swapInfo: {} }] }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            inputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            outputMint: SOL_MINT,
+            inAmount: "1000000",
+            routePlan: [{ swapInfo: {} }],
+          }),
+          { status: 200 },
+        );
       }
       if (u.includes("/swap/v1/swap")) {
         captured.swapBody = JSON.parse((init?.body as string | undefined) ?? "{}");
@@ -217,7 +225,15 @@ describe("AdapterService.swapUSDCForToken", () => {
     const restore = mockFetch((async (url: string | URL | Request) => {
       const u = url.toString();
       if (u.includes("/swap/v1/quote")) {
-        return new Response(JSON.stringify({ routePlan: [{ swapInfo: {} }] }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            inputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            outputMint: SOL_MINT,
+            inAmount: "1000000",
+            routePlan: [{ swapInfo: {} }],
+          }),
+          { status: 200 },
+        );
       }
       if (u.includes("/swap/v1/swap")) {
         return new Response("swap error", { status: 503 });
@@ -236,7 +252,15 @@ describe("AdapterService.swapUSDCForToken", () => {
     const restore = mockFetch((async (url: string | URL | Request) => {
       const u = url.toString();
       if (u.includes("/swap/v1/quote")) {
-        return new Response(JSON.stringify({ routePlan: [{ swapInfo: {} }] }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            inputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            outputMint: SOL_MINT,
+            inAmount: "1000000",
+            routePlan: [{ swapInfo: {} }],
+          }),
+          { status: 200 },
+        );
       }
       if (u.includes("/swap/v1/swap")) {
         return new Response(JSON.stringify({ transaction: "ignored" }), { status: 200 });
@@ -304,7 +328,7 @@ describe("AdapterService.swapUSDCForToken", () => {
         buildLayer(),
         SOL_MINT,
         1_000_000n,
-        "Prefetched Jupiter quote does not match request: outputMint=So11111111111111111111111111111111111111112, amount=1000000",
+        "Jupiter quote does not match request: outputMint=So11111111111111111111111111111111111111112, amount=1000000",
         {
           inputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
           outputMint: "OtherMint1111111111111111111111111111111111",
@@ -329,7 +353,7 @@ describe("AdapterService.swapUSDCForToken", () => {
         buildLayer(),
         SOL_MINT,
         1_000_000n,
-        "Prefetched Jupiter quote does not match request: outputMint=So11111111111111111111111111111111111111112, amount=1000000",
+        "Jupiter quote does not match request: outputMint=So11111111111111111111111111111111111111112, amount=1000000",
         {
           inputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
           outputMint: SOL_MINT,

@@ -157,18 +157,23 @@ export const walletCommand = new Command("wallet")
 function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     if (process.stdin.isTTY) {
+      try {
+        Bun.spawnSync(["stty", "-echo"], { stdin: "inherit", stdout: "inherit" });
+      } catch { /* non-POSIX shell */ }
       const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
-        terminal: true,
+        terminal: false,
       });
-      rl.question("Paste keypair JSON and press Enter: ", (answer) => {
+      rl.on("close", () => {
+        try {
+          Bun.spawnSync(["stty", "echo"], { stdin: "inherit", stdout: "inherit" });
+        } catch { /* restore best-effort */ }
+      });
+      rl.question("Paste keypair JSON and press Enter (input hidden): ", (answer) => {
         rl.close();
+        process.stdout.write("\n");
         resolve(answer.trim());
-      });
-      rl.on("line", () => {
-        readline.moveCursor(process.stdout, 0, -1);
-        readline.clearLine(process.stdout, 0);
       });
     } else {
       let data = "";

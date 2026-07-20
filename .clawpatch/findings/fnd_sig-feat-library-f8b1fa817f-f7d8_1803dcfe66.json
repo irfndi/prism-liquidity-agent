@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-library-f8b1fa817f-f7d8_1803dcfe66",
+  "featureId": "feat_library_f8b1fa817f",
+  "title": "Release manifest references a generic tarball URL that the build pipeline never produces",
+  "category": "api-contract",
+  "severity": "medium",
+  "confidence": "medium",
+  "triage": "contract-mismatch",
+  "evidence": [
+    {
+      "path": "scripts/generate-release-manifest.ts",
+      "startLine": 54,
+      "endLine": 55,
+      "symbol": null,
+      "quote": null
+    },
+    {
+      "path": "scripts/build-bundle.ts",
+      "startLine": 62,
+      "endLine": 62,
+      "symbol": "tarballName",
+      "quote": null
+    }
+  ],
+  "reasoning": "generate-release-manifest.ts emits `tarball_url` pointing to `prism-v${version}.tar.gz` (no platform suffix, line 54). However, build-bundle.ts only produces platform-specific tarballs named `prism-v${version}-${platformKey}.tar.gz` (line 62). No step in the included scripts creates the generic (platform-less) tarball. If the update client falls back to `tarball_url` when no platform-specific bundle matches (e.g., an unsupported platform like win32 or freebsd), it will fetch a 404 URL. The manifest also emits `sha256_url` and `signature_url` for this non-existent file.",
+  "reproduction": "Run the full release pipeline (build-bundle for all expected platforms, then generate-release-manifest). Attempt to download the URL in the manifest's top-level `tarball_url` field; it will 404 unless a separate, non-included step uploads that artifact.",
+  "recommendation": "Either (a) add a build step that produces the generic source/fallback tarball referenced by `tarball_url`, or (b) remove the generic `tarball_url`/`sha256_url`/`signature_url` fields from the manifest and have clients use only the per-platform `bundles` map, failing explicitly when no matching platform exists.",
+  "whyTestsDoNotAlreadyCoverThis": "No tests validate the release manifest schema against actual build artifacts. The included test suite (bench/**/*.test.ts) covers engine logic only, not release tooling.",
+  "suggestedRegressionTest": "Add a CI validation step (or unit test) that asserts every URL path in the generated manifest.json corresponds to an artifact that exists in the release output directory.",
+  "minimumFixScope": "Either remove lines 54-55 and the corresponding manifest fields (tarball_url, sha256_url, signature_url) in generate-release-manifest.ts, or add a build step in build-bundle.ts that produces the generic tarball.",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-library-f8b1fa817f_f7d8894fe0",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T051243-181602",
+  "createdAt": "2026-07-20T05:15:21.958Z",
+  "updatedAt": "2026-07-20T05:15:21.958Z"
+}

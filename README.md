@@ -225,7 +225,8 @@ Decisions pass through checks in order before any on-chain action:
 1. EXIT -> always approved (capital protection beats the confidence gate)
 2. Confidence below `CONFIDENCE_THRESHOLD` -> reject
 3. Max concurrent positions reached -> reject ENTER
-   - **Duplicate pool guard** -> reject ENTER if same pool already held
+   - Multiple positions per pool are allowed; `MAX_POSITIONS_PER_POOL` and
+     `MAX_PER_POOL_ALLOCATION_PCT` cap same-pool exposure and aggregate allocation.
 4. Portfolio drawdown > 10% -> pause new entries
 5. Stop-loss triggered (`STOP_LOSS_PCT` exceeded) -> reject HOLD/REBALANCE
 6. Position size > `MAX_PER_POOL_ALLOCATION_PCT` (default 40%) of portfolio -> cap and allow
@@ -240,6 +241,7 @@ HOLD executes nothing, so it skips risk evaluation entirely. Deterministic EXIT 
 - **OOR recovery prediction** (`OOR_RECOVERY_HOLD_THRESHOLD`): if mean-reversion probability > threshold, HOLD and wait for the price to come back; below `OOR_RECOVERY_FORCE_REBALANCE_THRESHOLD`, REBALANCE regardless
 - **Multi-pool allocation** (`MAX_PER_POOL_ALLOCATION_PCT`): ENTER is capped so a single pool cannot exceed this percentage of the portfolio.
 - **Open-positions concurrency** (`MAX_OPEN_POSITIONS`): ENTER is rejected when this many positions are already open.
+- **Same-pool exposure** (`MAX_POSITIONS_PER_POOL` and `MAX_PER_POOL_ALLOCATION_PCT`): multiple positions in one pool are allowed up to the configured count and aggregate allocation cap.
 
 ### Live-trading gate
 

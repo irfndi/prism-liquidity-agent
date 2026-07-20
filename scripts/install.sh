@@ -117,6 +117,12 @@ if [ -z "$VERSION" ]; then
   log_step "Latest ${CHANNEL}: v${VERSION}"
 fi
 
+# Reject shell metacharacters in VERSION before it reaches URLs, tar, or telemetry
+if [ -n "${VERSION:-}" ] && ! printf '%s' "$VERSION" | grep -qE '^[0-9][0-9a-zA-Z._-]*$'; then
+  log_error "Invalid VERSION format: $VERSION"
+  exit 1
+fi
+
 TARBALL_NAME="prism-v${VERSION}-${PLATFORM}.tar.gz"
 TARBALL_URL="${R2_BASE_URL}/releases/v${VERSION}/${TARBALL_NAME}"
 SHA256_URL="${TARBALL_URL}.sha256"

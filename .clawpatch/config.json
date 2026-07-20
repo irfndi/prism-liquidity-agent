@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "stateDir": ".clawpatch",
+  "include": [
+    "**/*"
+  ],
+  "exclude": [
+    "node_modules/**",
+    "dist/**",
+    "build/**",
+    "target/**",
+    ".build/**",
+    ".git/**",
+    ".clawpatch/**"
+  ],
+  "provider": {
+    "name": "codex",
+    "model": null,
+    "reasoningEffort": null,
+    "codexConfig": {}
+  },
+  "commands": {
+    "typecheck": null,
+    "lint": "bun run lint",
+    "format": "bun run format",
+    "test": "bun run test"
+  },
+  "review": {
+    "maxContextFiles": 24,
+    "maxOwnedFiles": 12,
+    "maxFindingsPerFeature": 10,
+    "minConfidenceToFix": "medium"
+  },
+  "git": {
+    "requireCleanWorktreeForFix": true,
+    "commit": false,
+    "openPr": false
+  },
+  "registryVerifier": {
+    "enabled": false
+  }
+}

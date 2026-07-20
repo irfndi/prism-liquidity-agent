@@ -14,10 +14,14 @@ interface Env {
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  // Constant-length comparison: the loop count depends only on the longer string,
+  // never on where the strings differ, so timing does not leak the secret.
+  const maxLen = Math.max(a.length, b.length);
+  let mismatch = a.length === b.length ? 0 : 1;
+  for (let i = 0; i < maxLen; i++) {
+    const ca = i < a.length ? a.charCodeAt(i) : 0;
+    const cb = i < b.length ? b.charCodeAt(i) : 0;
+    mismatch |= ca ^ cb;
   }
   return mismatch === 0;
 }
@@ -528,6 +532,8 @@ const ALERT_TYPE_LABEL: Record<string, string> = {
   exit_executed: "EXIT executed",
   risk_rejection: "Risk gate rejection",
   fee_milestone: "Fee milestone",
+  stablecoin_depeg: "Stablecoin Depeg",
+  liquidity_drain: "Liquidity Drain",
 };
 
 const ALERT_DELIVER_SEVERITIES = new Set(["info", "warning", "critical"]);

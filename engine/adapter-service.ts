@@ -1150,13 +1150,10 @@ export const AdapterLive = Layer.effect(
         const quoteData =
           prefetchedQuote ?? (yield* quoteSwapUSDCForToken(outputMint, amountAtomic));
 
-        if (
-          prefetchedQuote &&
-          !quoteMatchesRequest(quoteData, USDC_MINT, outputMint, amountAtomic)
-        ) {
+        if (!quoteMatchesRequest(quoteData, USDC_MINT, outputMint, amountAtomic)) {
           return yield* Effect.fail(
             new AdapterError({
-              message: `Prefetched Jupiter quote does not match request: outputMint=${outputMint}, amount=${amountAtomic.toString()}`,
+              message: `Jupiter quote does not match request: outputMint=${outputMint}, amount=${amountAtomic.toString()}`,
             }),
           );
         }
@@ -2260,7 +2257,7 @@ export const AdapterLive = Layer.effect(
         Effect.gen(function* () {
           if (!wallet)
             return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
-          if (feeX <= 0 && feeY <= 0)
+          if (!Number.isFinite(feeX) || !Number.isFinite(feeY) || (feeX <= 0 && feeY <= 0))
             return yield* Effect.fail(
               new AdapterError({ message: "Cannot convert zero claimed fees" }),
             );
@@ -2358,6 +2355,9 @@ export const AdapterLive = Layer.effect(
 
           const txSignatures: string[] = [];
           for (const tx of claimTxs) {
+            const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
+            tx.feePayer = wallet.publicKey;
+            tx.recentBlockhash = blockhash;
             tx.sign(wallet);
             const signature = yield* rpcCall((conn) =>
               conn.sendRawTransaction(tx.serialize(), {

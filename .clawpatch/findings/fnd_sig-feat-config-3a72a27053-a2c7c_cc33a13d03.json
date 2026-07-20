@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-config-3a72a27053-a2c7c_cc33a13d03",
+  "featureId": "feat_config_3a72a27053",
+  "title": "CHANNEL variable is empty in the same step where it is written to GITHUB_ENV",
+  "category": "bug",
+  "severity": "low",
+  "confidence": "high",
+  "triage": "confirmed-bug",
+  "evidence": [
+    {
+      "path": ".github/workflows/release.yml",
+      "startLine": 124,
+      "endLine": 132,
+      "symbol": null,
+      "quote": null
+    }
+  ],
+  "reasoning": "GitHub Actions only exposes variables written to $GITHUB_ENV in *subsequent* steps, not the current one. On line 132, `${CHANNEL}` expands to an empty string because the `echo \"CHANNEL=...\" >> \"$GITHUB_ENV\"` on lines 126/128/130 does not update the current shell environment. The log line will always read `CHANNEL=` with no value, making the diagnostic output misleading.",
+  "reproduction": "Push any tag matching v*.*.* and observe the 'Set CHANNEL' step log; CHANNEL will print as empty.",
+  "recommendation": "Set a local shell variable in addition to writing to GITHUB_ENV, e.g. `CHANNEL=stable; echo \"CHANNEL=$CHANNEL\" >> \"$GITHUB_ENV\"` and then reference the local variable in the echo on line 132.",
+  "whyTestsDoNotAlreadyCoverThis": "There are no tests for this workflow file, and the bug is cosmetic (log output only), so it would not be caught by any functional test.",
+  "suggestedRegressionTest": null,
+  "minimumFixScope": "Introduce a local shell variable (e.g. `CHANNEL=...`) before the GITHUB_ENV write and use it in the echo on line 132.",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-config-3a72a27053_a2c7c489d6",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T050927-d7f9e4",
+  "createdAt": "2026-07-20T05:12:01.276Z",
+  "updatedAt": "2026-07-20T05:12:01.276Z"
+}

@@ -3,7 +3,7 @@ import { detectDepegAndLiquidityDrain } from "../engine/depeg-liquidity-detector
 import type { PoolSnapshot, PoolState } from "../engine/types.js";
 
 const config = {
-  stablecoinMints: new Set(["USDC"]),
+  stablecoinMints: new Set(["USDC", "USDT"]),
   depegAbsoluteUsd: 0.02,
   depegRelativePct: 0.02,
   liquidityDrainPct: 0.5,
@@ -12,9 +12,9 @@ const config = {
 const pool: PoolState = {
   address: "pool",
   tokenX: "USDC",
-  tokenY: "SOL",
+  tokenY: "USDT",
   tokenXSymbol: "USDC",
-  tokenYSymbol: "SOL",
+  tokenYSymbol: "USDT",
   tvlUsd: 400,
   volume24hUsd: 400,
   fees24hUsd: 1,
@@ -35,7 +35,7 @@ const snapshot = (tvlUsd: number, volume24hUsd: number): PoolSnapshot => ({
   currentPrice: 1,
   binStep: 10,
   tokenXSymbol: "USDC",
-  tokenYSymbol: "SOL",
+  tokenYSymbol: "USDT",
   binArray: { lowerBinId: 0, upperBinId: 1, bins: [], activeBinId: 1 },
 });
 

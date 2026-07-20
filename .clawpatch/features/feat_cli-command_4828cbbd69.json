@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "featureId": "feat_cli-command_4828cbbd69",
+  "title": "CLI command prism",
+  "summary": "Package bin 'prism' at ./scripts/prism.sh.",
+  "kind": "cli-command",
+  "source": "package-json-bin",
+  "confidence": "high",
+  "entrypoints": [
+    {
+      "path": "scripts/prism.sh",
+      "symbol": null,
+      "route": null,
+      "command": "prism"
+    }
+  ],
+  "ownedFiles": [
+    {
+      "path": "scripts/prism.sh",
+      "reason": "package bin entrypoint"
+    }
+  ],
+  "contextFiles": [
+    {
+      "path": "package.json",
+      "reason": "package manifest"
+    }
+  ],
+  "tests": [],
+  "tags": [
+    "node",
+    "cli"
+  ],
+  "trustBoundaries": [
+    "user-input",
+    "filesystem",
+    "process-exec"
+  ],
+  "status": "needs-fix",
+  "lock": null,
+  "findingIds": [
+    "fnd_sig-feat-cli-command-4828cbbd69-_f06b8dee81"
+  ],
+  "patchAttemptIds": [],
+  "analysisHistory": [
+    {
+      "runId": "20260720T050927-d7f9e4",
+      "kind": "review",
+      "summary": "1 finding(s); prompt=8127 bytes; approxTokens=2032; includedFiles=2; omittedFiles=0",
+      "provider": "pi",
+      "model": null,
+      "reasoningEffort": null,
+      "createdAt": "2026-07-20T05:10:36.183Z"
+    }
+  ],
+  "createdAt": "2026-07-20T04:19:21.366Z",
+  "updatedAt": "2026-07-20T05:10:36.183Z"
+}

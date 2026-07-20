@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "findingId": "fnd_sig-feat-release-775032a0f4-14b1_29e3a0b2fc",
+  "featureId": "feat_release_775032a0f4",
+  "title": "start script has no prestart guard or build dependency for dist/index.mjs",
+  "category": "build-release",
+  "severity": "low",
+  "confidence": "medium",
+  "triage": "risk",
+  "evidence": [
+    {
+      "path": "package.json",
+      "startLine": 26,
+      "endLine": 26,
+      "symbol": "start",
+      "quote": null
+    },
+    {
+      "path": "package.json",
+      "startLine": 28,
+      "endLine": 28,
+      "symbol": "build",
+      "quote": null
+    }
+  ],
+  "reasoning": "The start script executes `bun dist/index.mjs` (line 26), which is the output of the build script (line 28, tsdown). There is no `prestart` script, no `prepare` hook, and no existence check to ensure the build artifact is present before execution. Running `bun start` on a fresh clone or after a clean will produce an opaque MODULE_NOT_FOUND error rather than a clear message directing the user to build first. For an autonomous agent handling real funds, a confusing cold-start failure could delay operators diagnosing deployment issues.",
+  "reproduction": "git clone <repo> && cd prism-liquidity-agent && bun install && bun start  # fails: Cannot find module 'dist/index.mjs'",
+  "recommendation": "Add a `prestart` script such as `\"prestart\": \"test -f dist/index.mjs || (echo 'Run bun run build first' && exit 1)\"` or simply `\"prestart\": \"bun run build\"` if a rebuild-on-start is acceptable.",
+  "whyTestsDoNotAlreadyCoverThis": "No tests are listed for this feature, and unit/integration tests would not exercise the npm/bun script lifecycle or the presence of build artifacts.",
+  "suggestedRegressionTest": "A CI smoke step that runs `bun run start --help` (or a no-op entrypoint check) on a fresh workspace before `bun run build` to assert a clear error, then after build to assert success.",
+  "minimumFixScope": "Add a single `prestart` entry to the scripts object in package.json.",
+  "status": "open",
+  "history": [],
+  "signature": "sig_feat-release-775032a0f4_14b1707ef7",
+  "linkedPatchAttemptIds": [],
+  "createdByRunId": "20260720T051243-181602",
+  "createdAt": "2026-07-20T05:16:29.528Z",
+  "updatedAt": "2026-07-20T05:16:29.528Z"
+}

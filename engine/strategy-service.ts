@@ -322,9 +322,14 @@ export function resolveRangeHalfWidth(args: {
     args.configuredBaseHalfWidth > 0
       ? args.configuredBaseHalfWidth
       : baselineHalfWidthForBinStep(args.binStep);
-  const halfCap = Math.max(MIN_ADAPTIVE_HALF_WIDTH_BINS, Math.floor(args.maxFullRangeBins / 2));
-  if (!args.adaptiveEnabled || args.volatilityStddev <= 0) {
-    return Math.min(halfCap, Math.max(MIN_ADAPTIVE_HALF_WIDTH_BINS, base));
+  const halfCap = Math.max(1, Math.floor(args.maxFullRangeBins / 2));
+  const effectiveMin = Math.min(MIN_ADAPTIVE_HALF_WIDTH_BINS, halfCap);
+  if (
+    !args.adaptiveEnabled ||
+    !Number.isFinite(args.volatilityStddev) ||
+    args.volatilityStddev <= 0
+  ) {
+    return Math.min(halfCap, Math.max(effectiveMin, base));
   }
   const rawMultiplier = args.volatilityStddev / ADAPTIVE_RANGE_REFERENCE_STDDEV;
   const multiplier = Math.min(
@@ -332,7 +337,7 @@ export function resolveRangeHalfWidth(args: {
     Math.max(ADAPTIVE_RANGE_MIN_MULTIPLIER, rawMultiplier),
   );
   const scaled = Math.round(base * multiplier);
-  return Math.min(halfCap, Math.max(MIN_ADAPTIVE_HALF_WIDTH_BINS, scaled));
+  return Math.min(halfCap, Math.max(effectiveMin, scaled));
 }
 
 // ─── Entry strategy shape regime pick (ENTRY_STRATEGY_TYPE=auto) ─────────────

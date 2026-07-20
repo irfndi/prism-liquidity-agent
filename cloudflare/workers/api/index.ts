@@ -19,10 +19,15 @@ export interface Env {
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  // Compare over max length (no early return) so the loop — and therefore the
+  // comparison duration — does not depend on where the strings differ or on the
+  // secret's length. Out-of-range indices read 0, not NaN.
+  const maxLen = Math.max(a.length, b.length);
+  let mismatch = a.length === b.length ? 0 : 1;
+  for (let i = 0; i < maxLen; i++) {
+    const ca = i < a.length ? a.charCodeAt(i) : 0;
+    const cb = i < b.length ? b.charCodeAt(i) : 0;
+    mismatch |= ca ^ cb;
   }
   return mismatch === 0;
 }
@@ -305,22 +310,24 @@ const linkTelegramStartHandler = (db: D1Database, userId: string) =>
       .toUpperCase()}`;
     const expiresAtEpoch = Math.floor(Date.now() / 1000) + 10 * 60; // 10 minutes
 
+    // Invalidate-then-create must be atomic: a failed second statement would
+    // otherwise leave the user with no valid link code. D1 batch is a single
+    // transaction.
     yield* Effect.tryPromise(() =>
-      db
-        .prepare(
-          `UPDATE telegram_link_codes
-           SET used_at = CURRENT_TIMESTAMP
-           WHERE user_id = ? AND used_at IS NULL`,
-        )
-        .bind(userId)
-        .run(),
-    );
-
-    yield* Effect.tryPromise(() =>
-      db
-        .prepare("INSERT INTO telegram_link_codes (code, user_id, expires_at) VALUES (?, ?, ?)")
-        .bind(code, userId, expiresAtEpoch)
-        .run(),
+      db.batch([
+        db
+          .prepare(
+            `UPDATE telegram_link_codes
+             SET used_at = CURRENT_TIMESTAMP
+             WHERE user_id = ? AND used_at IS NULL`,
+          )
+          .bind(userId),
+        db
+          .prepare(
+            "INSERT INTO telegram_link_codes (code, user_id, expires_at) VALUES (?, ?, ?)",
+          )
+          .bind(code, userId, expiresAtEpoch),
+      ]),
     );
 
     // expiresAt stays an ISO string in the API response — the CLI parses it
@@ -418,24 +425,30 @@ app.post("/v1/register", async (c) => {
     }).pipe(Effect.catchAll(() => Effect.succeed({})))) as { telegram_id?: string };
     const rateKey = `rate_limit:register:${clientIp}`;
     const rateData = yield* Effect.tryPromise(() => CACHE.get(rateKey));
-    const count = rateData ? parseInt(rateData, 10) : 0;
+    const parsed = rateData ? parseInt(rateData, 10) : 0;
+    const count = Number.isNaN(parsed) ? 0 : parsed;
 
     if (count >= 5) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
 
-    const result = yield* registerHandler(DB);
-    yield* Effect.tryPromise(() => CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }));
-
+    // Binding a telegram_id to a fresh account is a bot-only flow — without the
+    // shared secret anyone could squat arbitrary Telegram identities. Verify the
+    // secret AND telegram_id format BEFORE creating the account so a bad request
+    // leaves no orphaned user.
     if (body.telegram_id) {
-      // Binding a telegram_id to a fresh account is a bot-only flow — without
-      // the shared secret anyone could squat arbitrary Telegram identities.
       if (!isBotAuthorized(c.env, c.req.header("X-Bot-Api-Secret"))) {
         return c.json({ error: "Unauthorized" }, 401);
       }
       if (!/^\d+$/.test(body.telegram_id)) {
         return c.json({ error: "Invalid telegram_id format. Must be numeric." }, 400);
       }
+    }
+
+    const result = yield* registerHandler(DB);
+    yield* Effect.tryPromise(() => CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }));
+
+    if (body.telegram_id) {
       yield* Effect.tryPromise(() =>
         DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?")
           .bind(body.telegram_id, result.userId)
@@ -534,7 +547,8 @@ app.post("/v1/link-telegram/confirm", async (c) => {
   // not just successful ones, so guessing codes is capped at 10/hour.
   const rateKey = `rate_limit:link_confirm:${clientIp}`;
   const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-  const rateCount = rateData ? parseInt(rateData, 10) : 0;
+  const parsed = rateData ? parseInt(rateData, 10) : 0;
+  const rateCount = Number.isNaN(parsed) ? 0 : parsed;
   if (rateCount >= LINK_CONFIRM_RATE_LIMIT_PER_HOUR) {
     return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
@@ -656,7 +670,8 @@ app.post("/v1/register-telegram", async (c) => {
   // Same 5/hour/IP rate limit as /v1/register.
   const rateKey = `rate_limit:register_telegram:${clientIp}`;
   const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-  const count = rateData ? parseInt(rateData, 10) : 0;
+  const parsed = rateData ? parseInt(rateData, 10) : 0;
+  const count = Number.isNaN(parsed) ? 0 : parsed;
   if (count >= 5) {
     return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
@@ -903,7 +918,8 @@ app.post("/v1/feedback", async (c) => {
   if (CACHE) {
     const rateKey = `rate_limit:feedback:${clientIp}`;
     const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const count = rateData ? parseInt(rateData, 10) : 0;
+    const parsed = rateData ? parseInt(rateData, 10) : 0;
+    const count = Number.isNaN(parsed) ? 0 : parsed;
     if (count >= 10) return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
@@ -925,7 +941,8 @@ app.post("/v1/feedback", async (c) => {
     if (CACHE && !result.duplicate) {
       const rateKey = `rate_limit:feedback:${clientIp}`;
       const rateData = yield* Effect.tryPromise(() => CACHE.get(rateKey));
-      const count = rateData ? parseInt(rateData, 10) : 0;
+      const parsed = rateData ? parseInt(rateData, 10) : 0;
+      const count = Number.isNaN(parsed) ? 0 : parsed;
       yield* Effect.tryPromise(() =>
         CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }),
       );
@@ -1067,7 +1084,8 @@ app.post("/v1/errors/report", async (c) => {
   if (CACHE) {
     const rateKey = `rate_limit:error_report:${clientIp}`;
     const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const count = rateData ? parseInt(rateData, 10) : 0;
+    const parsed = rateData ? parseInt(rateData, 10) : 0;
+    const count = Number.isNaN(parsed) ? 0 : parsed;
     if (count >= 100) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
@@ -1155,7 +1173,8 @@ app.post("/v1/errors/batch", async (c) => {
   if (CACHE) {
     const rateKey = `rate_limit:error_batch:${clientIp}`;
     const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const count = rateData ? parseInt(rateData, 10) : 0;
+    const parsed = rateData ? parseInt(rateData, 10) : 0;
+    const count = Number.isNaN(parsed) ? 0 : parsed;
     if (count >= 50) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
@@ -1294,6 +1313,8 @@ const VALID_ALERT_TYPES = new Set([
   "exit_executed",
   "risk_rejection",
   "fee_milestone",
+  "stablecoin_depeg",
+  "liquidity_drain",
 ]);
 const VALID_ALERT_SEVERITIES = new Set(["info", "warning", "critical"]);
 const MAX_ALERT_MESSAGE_LENGTH = 1000;
@@ -1352,7 +1373,8 @@ app.post("/v1/alerts", async (c) => {
   if (CACHE) {
     const rateKey = `rate_limit:alerts:${user.id}`;
     const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const count = rateData ? parseInt(rateData, 10) : 0;
+    const parsed = rateData ? parseInt(rateData, 10) : 0;
+    const count = Number.isNaN(parsed) ? 0 : parsed;
     if (count >= ALERT_RATE_LIMIT_PER_HOUR) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
@@ -1604,7 +1626,8 @@ app.post("/v1/installs/ping", async (c) => {
   if (CACHE) {
     const rateKey = `rate_limit:install_ping:${clientIp}`;
     const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const count = rateData ? parseInt(rateData, 10) : 0;
+    const parsed = rateData ? parseInt(rateData, 10) : 0;
+    const count = Number.isNaN(parsed) ? 0 : parsed;
     if (count >= 100) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
@@ -1924,7 +1947,8 @@ app.post("/v1/revenue/log", async (c) => {
   if (CACHE) {
     const rateKey = `rate_limit:revenue_log:${clientIp}`;
     const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const count = rateData ? parseInt(rateData, 10) : 0;
+    const parsed = rateData ? parseInt(rateData, 10) : 0;
+    const count = Number.isNaN(parsed) ? 0 : parsed;
     if (count >= 200) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
