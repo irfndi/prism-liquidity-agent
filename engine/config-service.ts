@@ -1,6 +1,7 @@
 import { Config, Context, Effect, Layer, Option, pipe } from "effect";
 import { ConfigError } from "./errors.js";
 import { getPrismDbPath } from "./paths.js";
+import { loadKeystoreSecretKeyBase58 } from "./wallet-keystore.js";
 import type { AgentProposalMode, EntryStrategyType } from "./types.js";
 import { PublicKey } from "@solana/web3.js";
 import { createLogger } from "./logger.js";
@@ -354,8 +355,11 @@ function validatedNumber(name: string, min: number, fallback: number, max?: numb
 const loadConfig = Effect.gen(function* () {
   const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 
+  // WALLET_PRIVATE_KEY (env / .env) takes precedence; otherwise fall back to the local
+  // keystore written by `prism wallet generate|import`, so a generated wallet actually
+  // enables live trading (engine/adapter-service.ts decodes this base58 key).
   const walletPrivateKey = yield* Config.string("WALLET_PRIVATE_KEY").pipe(
-    Effect.orElseSucceed(() => ""),
+    Effect.orElseSucceed(() => loadKeystoreSecretKeyBase58() ?? ""),
   );
   const heliusApiKey = yield* Config.string("HELIUS_API_KEY").pipe(
     Effect.orElseSucceed(() => (isTest ? "test-helius-key" : "")),
