@@ -9,6 +9,48 @@ const logger = createLogger("ConfigService");
 
 export type FeeDestination = "compound" | "accumulate-quote" | "accumulate-sol";
 
+/**
+ * Normalize a Helius RPC URL: fix the common `api_key` → `api-key` typo and
+ * warn when a Helius URL is missing the api-key query parameter entirely.
+ *
+ * Helius currently accepts both spellings, but `api-key` is the documented
+ * form and the one every code-generated URL uses.  User-edited `.env` files
+ * often contain `api_key`, which is a latent breakage waiting for a Helius
+ * API tightening.
+ */
+export function normalizeHeliusUrl(
+  url: string,
+  heliusApiKey: string,
+): { readonly url: string; readonly normalized: boolean } {
+  const trimmed = url.trim();
+  if (!trimmed || !trimmed.includes("helius-rpc.com")) {
+    return { url: trimmed, normalized: false };
+  }
+
+  let result = trimmed;
+  let normalized = false;
+
+  if (result.includes("api_key=")) {
+    result = result.replace(/api_key=/g, "api-key=");
+    normalized = true;
+    logger.warn("Normalized Helius URL: replaced api_key= with api-key=", {
+      original: trimmed,
+      corrected: result,
+    });
+  }
+
+  if (!result.includes("api-key=") && heliusApiKey) {
+    const separator = result.includes("?") ? "&" : "?";
+    result = `${result}${separator}api-key=${heliusApiKey}`;
+    normalized = true;
+    logger.warn("Helius URL was missing api-key parameter; appended configured key", {
+      corrected: result,
+    });
+  }
+
+  return { url: result, normalized };
+}
+
 export interface AppConfig {
   readonly walletPrivateKey: string;
   readonly heliusApiKey: string;
@@ -290,7 +332,7 @@ const loadConfig = Effect.gen(function* () {
       isTest ? "https://example.com" : "https://api.mainnet-beta.solana.com",
     ),
   );
-  const solanaRpcFallbackUrl = yield* Config.string("SOLANA_RPC_FALLBACK_URL").pipe(
+  const solanaRpcFallbackUrlRaw = yield* Config.string("SOLANA_RPC_FALLBACK_URL").pipe(
     Effect.orElseSucceed(() => ""),
   );
 
@@ -299,6 +341,10 @@ const loadConfig = Effect.gen(function* () {
   if (!isTest && !process.env.SOLANA_RPC_URL && heliusApiKey.length > 0) {
     solanaRpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}`;
   }
+
+  const solanaRpcUrlNormalized = normalizeHeliusUrl(solanaRpcUrl, heliusApiKey);
+  solanaRpcUrl = solanaRpcUrlNormalized.url;
+  const solanaRpcFallbackUrl = normalizeHeliusUrl(solanaRpcFallbackUrlRaw, heliusApiKey).url;
   const paperTrading = yield* Config.boolean("PAPER_TRADING").pipe(
     Effect.orElseSucceed(() => true),
   );

@@ -126,6 +126,89 @@ function checkRpc(): DoctorCheck {
   );
 }
 
+async function probeRpcEndpoint(url: string): Promise<{ ok: boolean; status: number; error?: string }> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: "prism-doctor", method: "getHealth" }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, status: res.status, error: `HTTP ${res.status} — API key rejected` };
+    }
+    if (!res.ok) {
+      return { ok: false, status: res.status, error: `HTTP ${res.status}` };
+    }
+    const json = (await res.json()) as { result?: unknown; error?: { message?: string } };
+    if (json.error) {
+      return { ok: false, status: res.status, error: json.error.message ?? "RPC error" };
+    }
+    return { ok: true, status: res.status };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function checkRpcConnectivity(): Promise<DoctorCheck> {
+  const primary = process.env.SOLANA_RPC_URL?.trim() ?? "";
+  const helius = process.env.HELIUS_API_KEY?.trim() ?? "";
+  const fallback = process.env.SOLANA_RPC_FALLBACK_URL?.trim() ?? "";
+
+  const effectivePrimary =
+    primary || (helius ? `https://mainnet.helius-rpc.com/?api-key=${helius}` : "");
+
+  if (!effectivePrimary) {
+    return check("rpc-connectivity", "warn", "No RPC endpoint configured; skipping live probe");
+  }
+
+  const primaryResult = await probeRpcEndpoint(effectivePrimary);
+  if (!primaryResult.ok) {
+    return check(
+      "rpc-connectivity",
+      "fail",
+      `Primary RPC unreachable: ${primaryResult.error}`,
+    );
+  }
+
+  if (fallback) {
+    const fallbackResult = await probeRpcEndpoint(fallback);
+    if (!fallbackResult.ok) {
+      return check(
+        "rpc-connectivity",
+        "warn",
+        `Primary RPC reachable but fallback failed: ${fallbackResult.error}`,
+      );
+    }
+    return check("rpc-connectivity", "pass", "Primary and fallback RPC endpoints reachable");
+  }
+
+  return check("rpc-connectivity", "pass", "Primary RPC endpoint reachable");
+}
+
+async function checkHeliusApiKey(): Promise<DoctorCheck> {
+  const heliusKey = process.env.HELIUS_API_KEY?.trim() ?? "";
+  if (!heliusKey) {
+    return check("helius-api-key", "warn", "HELIUS_API_KEY not set; DAS price lookups disabled");
+  }
+
+  const url = `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`;
+  const result = await probeRpcEndpoint(url);
+  if (!result.ok) {
+    return check(
+      "helius-api-key",
+      "fail",
+      `HELIUS_API_KEY rejected by Helius: ${result.error}`,
+    );
+  }
+
+  return check("helius-api-key", "pass", "Helius API key valid");
+}
+
 function checkWallet(): DoctorCheck {
   if (process.env.PAPER_TRADING !== "false") {
     return check("wallet", "pass", "Paper trading is enabled; no private key required");
@@ -168,6 +251,8 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
       : check("database", "warn", `${getPrismDbPath()} will be created on first run`),
   );
   checks.push(checkRpc());
+  checks.push(await checkRpcConnectivity());
+  checks.push(await checkHeliusApiKey());
   checks.push(checkPriceProviders());
   checks.push(checkWallet());
   checks.push(await checkRegistration());
