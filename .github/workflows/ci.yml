@@ -56,8 +56,11 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
+    # Role-scoped group: prepare and publish must not share a group, or an
+    # older run's publish can cancel a newer run's prepare mid-flight and
+    # publish the older commit. Same-role jobs still supersede each other.
     concurrency:
-      group: canary-publish
+      group: canary-prepare
       cancel-in-progress: true
     outputs:
       canary_version: ${{ steps.meta.outputs.canary_version }}
