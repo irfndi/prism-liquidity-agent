@@ -9,6 +9,77 @@ const logger = createLogger("ConfigService");
 
 export type FeeDestination = "compound" | "accumulate-quote" | "accumulate-sol";
 
+export function maskHeliusUrl(u: string): string {
+  return u.replace(/(api[-_]key=)[^&\s]*/g, "$1[REDACTED]");
+}
+
+function isHeliusHost(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+    const hostname = parsed.hostname;
+    return hostname === "helius-rpc.com" || hostname.endsWith(".helius-rpc.com");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Normalize a Helius RPC URL: fix the common `api_key` → `api-key` typo,
+ * replace empty `api-key=` values with the configured key, and append the
+ * key when the parameter is missing entirely.
+ *
+ * Helius currently accepts both spellings, but `api-key` is the documented
+ * form and the one every code-generated URL uses.  User-edited `.env` files
+ * often contain `api_key`, which is a latent breakage waiting for a Helius
+ * API tightening.
+ *
+ * Security: hostname is validated via URL parsing (not substring match) to
+ * prevent credential leakage to attacker-controlled domains such as
+ * `helius-rpc.com.attacker.example`.  API key values are redacted in logs.
+ */
+export function normalizeHeliusUrl(
+  url: string,
+  heliusApiKey: string,
+): { readonly url: string; readonly normalized: boolean } {
+  const trimmed = url.trim();
+  if (!trimmed || !isHeliusHost(trimmed)) {
+    return { url: trimmed, normalized: false };
+  }
+
+  let result = trimmed;
+  let normalized = false;
+
+  if (result.includes("api_key=")) {
+    result = result.replace(/api_key=/g, "api-key=");
+    normalized = true;
+    logger.warn("Normalized Helius URL: replaced api_key= with api-key=", {
+      original: maskHeliusUrl(trimmed),
+      corrected: maskHeliusUrl(result),
+    });
+  }
+
+  if (heliusApiKey) {
+    const emptyKeyMatch = result.match(/api-key=(&|$)/);
+    if (emptyKeyMatch) {
+      result = result.replace(/api-key=(&|$)/, `api-key=${heliusApiKey}$1`);
+      normalized = true;
+      logger.warn("Helius URL had empty api-key value; replaced with configured key", {
+        corrected: maskHeliusUrl(result),
+      });
+    } else if (!result.includes("api-key=")) {
+      const separator = result.includes("?") ? "&" : "?";
+      result = `${result}${separator}api-key=${heliusApiKey}`;
+      normalized = true;
+      logger.warn("Helius URL was missing api-key parameter; appended configured key", {
+        corrected: maskHeliusUrl(result),
+      });
+    }
+  }
+
+  return { url: result, normalized };
+}
+
 export interface AppConfig {
   readonly walletPrivateKey: string;
   readonly heliusApiKey: string;
@@ -290,7 +361,7 @@ const loadConfig = Effect.gen(function* () {
       isTest ? "https://example.com" : "https://api.mainnet-beta.solana.com",
     ),
   );
-  const solanaRpcFallbackUrl = yield* Config.string("SOLANA_RPC_FALLBACK_URL").pipe(
+  const solanaRpcFallbackUrlRaw = yield* Config.string("SOLANA_RPC_FALLBACK_URL").pipe(
     Effect.orElseSucceed(() => ""),
   );
 
@@ -299,6 +370,10 @@ const loadConfig = Effect.gen(function* () {
   if (!isTest && !process.env.SOLANA_RPC_URL && heliusApiKey.length > 0) {
     solanaRpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}`;
   }
+
+  const solanaRpcUrlNormalized = normalizeHeliusUrl(solanaRpcUrl, heliusApiKey);
+  solanaRpcUrl = solanaRpcUrlNormalized.url;
+  const solanaRpcFallbackUrl = normalizeHeliusUrl(solanaRpcFallbackUrlRaw, heliusApiKey).url;
   const paperTrading = yield* Config.boolean("PAPER_TRADING").pipe(
     Effect.orElseSucceed(() => true),
   );
