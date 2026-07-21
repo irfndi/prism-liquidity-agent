@@ -375,10 +375,21 @@ describe("selectTransport", () => {
     expect(transport).toBeNull();
   });
 
-  it("falls through silently when auto recommends openclaw but the token is empty", () => {
+  it("returns null in auto when the token is empty and no Hermes/ACP transport is available", () => {
     const config = makeConfig({ agentRuntime: "auto", agentGatewayToken: "" });
     const transport = selectTransport(config, openclawDetection(true));
     expect(transport).toBeNull();
+  });
+
+  it("falls back to the ACP transport in auto when the token is empty but Hermes is available", () => {
+    const config = makeConfig({ agentRuntime: "auto", agentGatewayToken: "" });
+    const detection: AgentRuntimeDetection = {
+      hermes: { available: true, path: "/usr/local/bin/hermes" },
+      openclaw: { available: true, path: null, gatewayRunning: true },
+      recommended: "openclaw",
+    };
+    const transport = selectTransport(config, detection);
+    expect(transport?.name).toBe("acp");
   });
 
   it("does not select the gateway transport when the gateway is not running", () => {

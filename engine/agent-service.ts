@@ -269,14 +269,29 @@ export function selectTransport(
   if (runtime === "openclaw" && detection.openclaw.gatewayRunning) {
     // The gateway transport authenticates with the shared token; with no token the
     // connection loses its operator scopes and every per-decision re-handshake fails
-    // (detection only probes the pre-auth WS upgrade, so it cannot catch this). Skip
-    // selection here. Warn once — selectTransport runs only at startup — and only when
-    // the user explicitly chose the openclaw runtime; `auto` falls through silently so
-    // it does not spam when other transports (or none) apply.
+    // (detection only probes the pre-auth WS upgrade, so it cannot catch this). With a
+    // token, use the gateway. Without one, `auto` prefers a working review transport
+    // (Hermes/ACP) over no review — falling back when it is available, otherwise
+    // falling through to null; an EXPLICIT AGENT_RUNTIME=openclaw keeps the
+    // warn-and-disable semantics, since the user asked for the gateway specifically.
     if ((config.agentGatewayToken ?? "").trim() !== "") {
       return new GatewayTransport({
         url: config.agentGatewayUrl,
         token: config.agentGatewayToken,
+        timeoutMs: config.agentPromptTimeoutMs,
+      });
+    }
+    // Tokenless AUTO: prefer a working review transport over no review — fall back
+    // to ACP/Hermes when available. An EXPLICIT AGENT_RUNTIME=openclaw keeps the
+    // warn-and-disable semantics (the user asked for the gateway specifically).
+    if (config.agentRuntime === "auto" && detection.hermes.available) {
+      logger.info(
+        "OpenClaw gateway reachable but AGENT_GATEWAY_TOKEN empty; falling back to the Hermes/ACP transport for decision review",
+        { url: config.agentGatewayUrl },
+      );
+      return new AcpTransport({
+        command: config.agentAcpCommand,
+        args: config.agentAcpArgs,
         timeoutMs: config.agentPromptTimeoutMs,
       });
     }

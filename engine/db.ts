@@ -30,18 +30,22 @@ function setupCustomSQLite() {
 
   if (process.platform === "darwin") {
     // Bun's bundled SQLite cannot load extensions; sqlite-vec needs a system
-    // libsqlite3 built with extension loading. Homebrew first — it is the only
-    // extension-capable candidate. The eager dlopen in setCustomSQLite() doubles
-    // as the existence check, which matters because Apple's /usr/lib library has
-    // no on-disk file (dyld shared cache) yet still dlopens — only to fail vec0
-    // loading, which prism doctor then reports loudly as a last-resort fallback.
+    // libsqlite3 built with extension loading. The eager dlopen in
+    // setCustomSQLite() doubles as the existence check AND commits on the first
+    // success (Database.setCustomSQLite is a process-wide one-shot), so the probe
+    // order IS the selection order. Extension-capable installs must precede
+    // Apple's /usr/lib library: Homebrew first, then MacPorts /opt/local (a real
+    // extension-capable install). Apple's /usr/lib library is the LAST RESORT — it
+    // has no on-disk file (dyld shared cache) yet still dlopens, only to fail vec0
+    // loading, which prism doctor then reports loudly. Probing Apple first would win
+    // the one-shot selection on a MacPorts-only box and kill vector memory.
     const brewPrefix = process.arch === "arm64" ? "/opt/homebrew" : "/usr/local";
     const otherBrewPrefix = process.arch === "arm64" ? "/usr/local" : "/opt/homebrew";
     const candidates = [
       `${brewPrefix}/opt/sqlite/lib/libsqlite3.dylib`,
       `${otherBrewPrefix}/opt/sqlite/lib/libsqlite3.dylib`,
-      "/usr/lib/libsqlite3.dylib",
       "/opt/local/lib/libsqlite3.dylib",
+      "/usr/lib/libsqlite3.dylib",
     ];
     for (const dylib of candidates) {
       try {
