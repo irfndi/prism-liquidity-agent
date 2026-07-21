@@ -407,10 +407,20 @@ export const DbLive = (dbPath?: string) =>
                   const embedding = yield* getEmbedding(entry.content);
                   yield* Effect.try({
                     try: () => {
+                      // vec0 auxiliary DOUBLE columns are strictly typed on
+                      // insert: the bound value must be exactly SQLITE_FLOAT (or
+                      // NULL). Integer-valued JS numbers (e.g. pnlUsd 100,
+                      // confidence 1) bind as SQLITE_INTEGER and are rejected by
+                      // the strict linux vec0 binary with
+                      // "Auxiliary column type mismatch: ... has type FLOAT, but
+                      // INTEGER was provided" (sqlite-vec v0.1.9, xUpdate). Wrapping
+                      // the DOUBLE aux columns in CAST(? AS REAL) coerces any bound
+                      // value to FLOAT; CAST(NULL AS REAL) is NULL, which preserves
+                      // the `?? null` fail-open semantics (NULL is always accepted).
                       runOne(
                         db,
                         `INSERT INTO vec_memory (embedding, id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                   VALUES (?, ?, ?, ?, ?, ?, CAST(? AS REAL), CAST(? AS REAL), ?, ?)`,
                         JSON.stringify(embedding),
                         id,
                         entry.category,
@@ -436,29 +446,42 @@ export const DbLive = (dbPath?: string) =>
                 Effect.gen(function* () {
                   const now = Date.now();
                   const embedding = yield* getEmbedding(queryText);
-                  const sql = poolAddress
-                    ? `SELECT
-                    id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
-                    distance
-                   FROM vec_memory
-                   WHERE embedding MATCH ? AND k = ? AND expiresAt > ? AND pool_address = ?
-                   ORDER BY distance`
-                    : `SELECT
-                    id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
-                    distance
-                   FROM vec_memory
-                   WHERE embedding MATCH ? AND k = ? AND expiresAt > ?
-                   ORDER BY distance`;
-                  const params = poolAddress
-                    ? [JSON.stringify(embedding), topK * 2, now, poolAddress]
-                    : [JSON.stringify(embedding), topK * 2, now];
+                  // vec0 (sqlite-vec) forbids ANY auxiliary-column WHERE constraint
+                  // inside a KNN query: `embedding MATCH ? AND k = ? [ORDER BY
+                  // distance]` is the only legal shape. `expiresAt` and
+                  // `pool_address` are both auxiliary columns, so filtering on them
+                  // in the WHERE raised "An illegal WHERE constraint was provided on
+                  // a vec0 auxiliary column in a KNN query" on the strict linux vec0
+                  // binary (v0.1.9 vec0BestIndex: hasAuxConstraint -> error). Those
+                  // filters are therefore applied in JS after the fetch below.
+                  // Tradeoff: we over-fetch the global nearest `topK * 2` neighbours
+                  // and filter expiry + pool scope in JS, so a query whose nearest
+                  // neighbours are mostly expired or other-pool may return fewer
+                  // than topK rows (the prior SQL WHERE pre-filtered to 2*topK
+                  // matching rows). Recency-blend ranking and ORDER BY distance are
+                  // preserved exactly.
                   const rows = yield* Effect.try({
-                    try: () => queryAll<Record<string, unknown>>(db, sql, ...params),
+                    try: () =>
+                      queryAll<Record<string, unknown>>(
+                        db,
+                        `SELECT
+                    id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
+                    distance
+                   FROM vec_memory
+                   WHERE embedding MATCH ? AND k = ?
+                   ORDER BY distance`,
+                        JSON.stringify(embedding),
+                        topK * 2,
+                      ),
                     catch: (error) => error,
                   });
 
                   const RECENCY_HALFLIFE_MS = 30 * 24 * 60 * 60 * 1000;
                   const ranked = rows
+                    .filter((row) => Number(row.expiresAt ?? 0) > now)
+                    .filter((row) =>
+                      poolAddress ? String(row.pool_address ?? "") === poolAddress : true,
+                    )
                     .map((row) => {
                       const rawDistance = row.distance;
                       const distance =

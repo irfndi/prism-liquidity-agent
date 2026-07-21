@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   fetchTokenRisks,
   consultTokenRisks,
@@ -158,5 +158,63 @@ describe("token-risk-service", () => {
     );
     expect(calls).toBe(0);
     expect(result.size).toBe(0);
+  });
+
+  it("(8) a mint omitted by a SUCCESSFUL refresh is negative-cached, unserved, and not re-queried", async () => {
+    // Date-only fake timers: expire the seeded entry past the TTL without
+    // touching real timers (AbortSignal.timeout stays real and unref'd).
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const t0 = Date.now();
+
+      // Given: the mint is cached as verified via a successful fetch.
+      const seeded = await consultTokenRisks([USDC_MINT], ENABLED, {
+        fetchImpl: okFetch([{ address: USDC_MINT, isVerified: true }]),
+      });
+      expect(seeded.get(USDC_MINT)?.isVerified).toBe(true);
+
+      // Expire the verified entry so the next consult must re-fetch it.
+      vi.setSystemTime(t0 + 31 * 60_000);
+
+      let calls = 0;
+      const omitFetch: FetchLike = async () => {
+        calls += 1;
+        return new Response("[]", { status: 200 }); // successful, but omits the mint
+      };
+
+      // When: the refresh succeeds yet omits the mint (verification revoked).
+      const revoked = await consultTokenRisks([USDC_MINT], ENABLED, { fetchImpl: omitFetch });
+
+      // Then: revoked verification is NOT served, and one fetch ran.
+      expect(calls).toBe(1);
+      expect(revoked.has(USDC_MINT)).toBe(false);
+
+      // And: a third consult within the negative entry's TTL performs ZERO
+      // additional fetches (count still 1) and still omits the mint.
+      const third = await consultTokenRisks([USDC_MINT], ENABLED, { fetchImpl: omitFetch });
+      expect(calls).toBe(1);
+      expect(third.has(USDC_MINT)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("(9) a mint the API never returns is negative-cached so it is not re-queried every cycle", async () => {
+    let calls = 0;
+    const neverReturns: FetchLike = async () => {
+      calls += 1;
+      return new Response("[]", { status: 200 });
+    };
+    const novelMint = "NovelMint111111111111111111111111111111111";
+
+    // Given/When: a never-before-seen mint the API omits → one fetch, absent.
+    const first = await consultTokenRisks([novelMint], ENABLED, { fetchImpl: neverReturns });
+    expect(calls).toBe(1);
+    expect(first.has(novelMint)).toBe(false);
+
+    // Then: a second consult within TTL stays absent and performs no new fetch.
+    const second = await consultTokenRisks([novelMint], ENABLED, { fetchImpl: neverReturns });
+    expect(calls).toBe(1);
+    expect(second.has(novelMint)).toBe(false);
   });
 });

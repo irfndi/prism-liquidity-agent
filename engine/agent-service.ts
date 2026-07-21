@@ -273,7 +273,7 @@ export function selectTransport(
     // selection here. Warn once — selectTransport runs only at startup — and only when
     // the user explicitly chose the openclaw runtime; `auto` falls through silently so
     // it does not spam when other transports (or none) apply.
-    if (config.agentGatewayToken.trim() !== "") {
+    if ((config.agentGatewayToken ?? "").trim() !== "") {
       return new GatewayTransport({
         url: config.agentGatewayUrl,
         token: config.agentGatewayToken,

@@ -217,6 +217,82 @@ describe("DbService memory operations (vec_memory present)", () => {
     expect(result.length).toBeGreaterThan(0);
     expect(result[0]!.content).toBe("SOL/USDC pool performed well");
   });
+
+  it("insertMemory + queryMemory roundtrip with INTEGER-valued pnlUsd/confidence", async () => {
+    const db = tryCreateVecDatabase();
+    if (!db) return; // Skip if sqlite-vec unavailable.
+    db.close();
+
+    const layer = DbLive(":memory:");
+    const result = await run(
+      Effect.gen(function* () {
+        const dbService = yield* DbService;
+        // Integer-valued numbers bind as SQLITE_INTEGER. The vec0 DOUBLE aux
+        // columns reject that under the strict linux binary unless
+        // insertMemory wraps them in CAST(? AS REAL); this locks that path.
+        yield* dbService.insertMemory({
+          content: "integer pnl and confidence roundtrip",
+          category: "outcome",
+          poolAddress: "PoolInt",
+          outcome: "profit",
+          pnlUsd: 100,
+          confidence: 1,
+        });
+        return yield* dbService.queryMemory("integer pnl and confidence roundtrip", 5, "PoolInt");
+      }),
+      layer,
+    );
+    expect(result.length).toBeGreaterThan(0);
+    expect(result[0]!.content).toBe("integer pnl and confidence roundtrip");
+    expect(result[0]!.pnlUsd).toBe(100);
+    expect(result[0]!.confidence).toBe(1);
+  });
+
+  it("queryMemory pool-scoped filtering via the legal KNN shape (no aux-column WHERE)", async () => {
+    const db = tryCreateVecDatabase();
+    if (!db) return; // Skip if sqlite-vec unavailable.
+    db.close();
+
+    const layer = DbLive(":memory:");
+    const result = await run(
+      Effect.gen(function* () {
+        const dbService = yield* DbService;
+        // Two KNN-nearest entries (identical content) on different pools.
+        yield* dbService.insertMemory({
+          content: "shared near-identical memory",
+          category: "pattern",
+          poolAddress: "PoolScopeA",
+          outcome: "profit",
+          pnlUsd: 100,
+          confidence: 1,
+        });
+        yield* dbService.insertMemory({
+          content: "shared near-identical memory",
+          category: "pattern",
+          poolAddress: "PoolScopeB",
+          outcome: "loss",
+          pnlUsd: 50,
+          confidence: 1,
+        });
+        const unscoped = yield* dbService.queryMemory("shared near-identical memory", 5);
+        const scoped = yield* dbService.queryMemory(
+          "shared near-identical memory",
+          5,
+          "PoolScopeA",
+        );
+        return { unscoped, scoped };
+      }),
+      layer,
+    );
+    // Unscoped sees both pools — proves both rows are KNN-nearest neighbours.
+    const unscopedPools = new Set(result.unscoped.map((r) => r.poolAddress));
+    expect(unscopedPools.has("PoolScopeA")).toBe(true);
+    expect(unscopedPools.has("PoolScopeB")).toBe(true);
+    // Scoped returns only PoolScopeA via the post-fetch JS pool filter.
+    expect(result.scoped.length).toBe(1);
+    expect(result.scoped[0]!.poolAddress).toBe("PoolScopeA");
+    expect(result.scoped[0]!.pnlUsd).toBe(100);
+  });
 });
 
 // ─── probeVecAvailability (real environment, doctor seam) ───────────────────

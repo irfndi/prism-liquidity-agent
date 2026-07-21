@@ -142,6 +142,23 @@ interface CacheEntry {
   readonly fetchedAt: number;
 }
 
+/**
+ * Negative-cache marker: a SUCCESSFUL refresh that OMITS a mint (verification
+ * revoked, token delisted, or never listed) is recorded with this all-null/false
+ * signal and a fresh timestamp. It exists purely to stop the per-cycle re-query
+ * spam — fresh negative entries are NOT served in the result, so a revoked
+ * verification stops exempting the pool. Detected by reference equality (real
+ * signals are always freshly-parsed objects, never this shared const).
+ */
+const UNKNOWN_TOKEN_RISK_SIGNAL: TokenRiskSignal = {
+  isVerified: null,
+  organicScore: null,
+  organicScoreLabel: null,
+  isSus: false,
+  freezeAuthorityPresent: false,
+  mintAuthorityPresent: false,
+};
+
 // Mint-global cache: a token's safety signals are not pool-specific, so the key
 // is the mint address alone. Fresh entries are served without any network call.
 const cache = new Map<string, CacheEntry>();
@@ -169,20 +186,25 @@ export async function consultTokenRisks(
   const now = Date.now();
 
   const result = new Map<string, TokenRiskSignal>();
-  const missing: string[] = [];
+  const toFetch: string[] = [];
   for (const mint of mints) {
     const entry = cache.get(mint);
     if (entry === undefined) {
-      missing.push(mint);
-    } else {
-      // Serve the cached signal now (stale-on-error resilience); refresh only
-      // what is older than the TTL.
+      toFetch.push(mint);
+    } else if (now - entry.fetchedAt >= ttlMs) {
+      // Expired: re-fetch. A stale REAL signal is served as resilience in case
+      // the refresh fails; a stale negative entry stays omitted.
+      if (entry.signal !== UNKNOWN_TOKEN_RISK_SIGNAL) result.set(mint, entry.signal);
+      toFetch.push(mint);
+    } else if (entry.signal !== UNKNOWN_TOKEN_RISK_SIGNAL) {
+      // Fresh real signal: serve from cache, no network call. A fresh negative
+      // entry is cached only to stop re-query spam — it is intentionally NOT
+      // served, so a revoked verification stops exempting the pool.
       result.set(mint, entry.signal);
-      if (now - entry.fetchedAt >= ttlMs) missing.push(mint);
     }
   }
 
-  if (missing.length > 0) {
+  if (toFetch.length > 0) {
     // Build the request options without ever assigning `undefined` to an
     // optional field (exactOptionalPropertyTypes): an empty JUPITER_API_KEY is
     // omitted, never sent as an empty header.
@@ -191,15 +213,26 @@ export async function consultTokenRisks(
     if (apiKey) request.apiKey = apiKey;
     if (options.fetchImpl !== undefined) request.fetchImpl = options.fetchImpl;
     try {
-      const fetched = await fetchTokenRisks(missing, request);
+      const fetched = await fetchTokenRisks(toFetch, request);
       const fetchedAt = Date.now();
-      for (const [mint, signal] of fetched) {
-        cache.set(mint, { signal, fetchedAt });
-        result.set(mint, signal);
+      for (const mint of toFetch) {
+        const signal = fetched.get(mint);
+        if (signal !== undefined) {
+          cache.set(mint, { signal, fetchedAt });
+          result.set(mint, signal);
+        } else {
+          // Omitted by a SUCCESSFUL refresh: NEGATIVE cache with a fresh
+          // timestamp (stops per-cycle re-query) and NOT served — revoked
+          // verification must not keep exempting the pool.
+          cache.set(mint, { signal: UNKNOWN_TOKEN_RISK_SIGNAL, fetchedAt });
+          result.delete(mint);
+        }
       }
     } catch (err) {
+      // Fail-open: expired real signals keep their stale value in result;
+      // never-fetched mints stay absent. One warn per failing consult.
       logger.warn("Jupiter token risk fetch failed — serving cached signals (fail-open)", {
-        mints: missing.length,
+        mints: toFetch.length,
         error: err instanceof Error ? err.message : String(err),
       });
     }

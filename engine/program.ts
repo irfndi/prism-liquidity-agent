@@ -2040,9 +2040,12 @@ export const program = Effect.gen(function* () {
           // Token-risk overlay (Wave 18): smart detection for UNTRUSTED
           // freeze-enabled legs. LAZY — Jupiter is consulted only when the
           // overlay is enabled (jupiterTokenRiskEnabled !== false) AND an
-          // untrusted leg is freeze-enabled. Each flagged leg is adjudicated:
-          //   (a) Data API is_verified → exempt,
-          //   (b) Jupiter isSus → hard reject (aggregated RugCheck+Blockaid),
+          // untrusted leg is freeze-enabled. Each flagged leg is adjudicated
+          // (isSus is checked BEFORE any exemption — a Jupiter-flagged token is
+          // rejected even if the Data API or Jupiter marks it verified, so one
+          // spoofed positive cannot cancel the only hard reject):
+          //   (a) Jupiter isSus → hard reject (aggregated RugCheck+Blockaid),
+          //   (b) Data API is_verified → exempt,
           //   (c) Jupiter isVerified → pass via the overlay,
           //   (d) otherwise the leg is unknown → smart-screening or strict reject.
           // Trusted mints were already exempted above, so this only sees untrusted
@@ -2059,9 +2062,12 @@ export const program = Effect.gen(function* () {
             mint: string,
           ): LegStatus | null => {
             if (!flagged) return null;
-            if (datapiVerified) return "datapiVerified";
+            // isSus is checked BEFORE any exemption: a Jupiter-flagged token is
+            // rejected even if the Data API marks it verified — one spoofed
+            // positive must not cancel the only hard reject.
             const signal = riskByMint.get(mint);
             if (signal?.isSus === true) return "sus";
+            if (datapiVerified) return "datapiVerified";
             if (signal?.isVerified === true) return "jupiterVerified";
             return "unknown";
           };
@@ -3175,6 +3181,7 @@ export const program = Effect.gen(function* () {
             // Veto is a safety overlay: it runs independently of the proposal
             // backoff/circuit-breaker path so a transient failure cannot silence it.
             let vetoFetchFailed = false;
+            let vetoWarnEligible = false;
             const enhanced = yield* agent
               .enhanceDecision(decision, {
                 decision,
@@ -3190,13 +3197,17 @@ export const program = Effect.gen(function* () {
                 Effect.catchAll((err) => {
                   vetoFetchFailed = true;
                   const message = underlyingErrorMessage(err);
-                  // Throttle the warn to the veto-warning cadence (vetoWarningThrottle,
-                  // per pool, agentProposalStaleMs) so a persistently failing runtime
-                  // logs once per window instead of per decision per cycle; suppressed
-                  // occurrences stay visible at debug. Fail-open is preserved: this
-                  // always resolves to null and never alters the decision.
-                  const lastWarn = vetoWarningThrottle.get(poolAddress) ?? 0;
-                  if (now - lastWarn > config.agentProposalStaleMs) {
+                  // Compute throttle eligibility ONCE: the catchAll owns the single
+                  // throttle read+set so the warn log and the memory warning below
+                  // fire together exactly once per veto-warning window
+                  // (agentProposalStaleMs, per pool). The memory block reuses
+                  // vetoWarnEligible instead of re-reading the map — a second read
+                  // would see the just-set timestamp and skip the memory write.
+                  // Suppressed occurrences stay at debug with no memory entry.
+                  // Fail-open preserved: always resolves to null, decision unchanged.
+                  vetoWarnEligible =
+                    now - (vetoWarningThrottle.get(poolAddress) ?? 0) > config.agentProposalStaleMs;
+                  if (vetoWarnEligible) {
                     vetoWarningThrottle.set(poolAddress, now);
                     logger.warn("Agent veto fetch failed", {
                       pool: poolAddress,
@@ -3220,18 +3231,16 @@ export const program = Effect.gen(function* () {
                 toConfidence: enhanced.confidence.toFixed(2),
               });
               decision = enhanced;
-            } else if (vetoFetchFailed) {
-              const lastWarn = vetoWarningThrottle.get(poolAddress) ?? 0;
-              if (now - lastWarn > config.agentProposalStaleMs) {
-                vetoWarningThrottle.set(poolAddress, now);
-                yield* memory
-                  .upsert({
-                    category: "warning",
-                    content: `Agent veto fetch failed for ${poolAddress}`,
-                    poolAddress,
-                  })
-                  .pipe(Effect.catchAll(() => Effect.void));
-              }
+            } else if (vetoFetchFailed && vetoWarnEligible) {
+              // Throttle already consumed in the catchAll above: this fires
+              // together with the warn log, exactly once per window.
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Agent veto fetch failed for ${poolAddress}`,
+                  poolAddress,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
             }
           } else {
             // suggest | supervised | full

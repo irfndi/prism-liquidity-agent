@@ -716,4 +716,36 @@ describe("token-risk overlay + freeze screening (Wave 18)", () => {
       restore();
     }
   }, 15_000);
+
+  it("(12) hard-rejects a Data-API-verified untrusted freeze leg when Jupiter flags it isSus (isSus beats verified)", async () => {
+    // Freeze-enabled leg X is ALSO marked is_verified by the Data API. Under the
+    // old datapiVerified-first ordering this leg would be exempted; isSus must be
+    // checked first so the spoofed positive cannot cancel the hard reject.
+    const restore = jupiterFetch([
+      { address: TOKEN_X, audit: { isSus: true }, isVerified: true, organicScoreLabel: "high" },
+    ]);
+    try {
+      const layer = makeTestLayer({
+        adapter: makeAdapter({}),
+        blacklist: noBlacklist,
+        datapi: {
+          getPoolData: () =>
+            Effect.succeed(
+              makeDatapiStats({ tokenXFreezeAuthorityDisabled: false, tokenXVerified: true }),
+            ),
+        },
+        configOverrides: { jupiterTokenRiskEnabled: true },
+      });
+
+      const decisions = await runOneCycle(layer);
+      const forPool = decisions.filter((d) => d.poolAddress === POOL);
+      expect(forPool).toHaveLength(1);
+      expect(forPool[0]!.riskResult.approved).toBe(false);
+      const reasoning = forPool[0]!.reasoning.toLowerCase();
+      expect(reasoning).toContain("suspicious");
+      expect(reasoning).toContain(TOKEN_X.toLowerCase());
+    } finally {
+      restore();
+    }
+  }, 15_000);
 });
