@@ -12,11 +12,13 @@ const SAMPLE_POOL_RESPONSE = {
     address: "So11111111111111111111111111111111111111112",
     symbol: "SOL",
     freeze_authority_disabled: true,
+    is_verified: false,
   },
   token_y: {
     address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     symbol: "USDC",
     freeze_authority_disabled: false,
+    is_verified: true,
   },
   pool_config: { bin_step: 10, base_fee_pct: 0.2, max_fee_pct: 0, protocol_fee_pct: 5 },
   dynamic_fee_pct: 0.05,
@@ -76,6 +78,8 @@ describe("MeteoraDatapiService", () => {
       expect(stats!.isBlacklisted).toBe(false);
       expect(stats!.tokenXFreezeAuthorityDisabled).toBe(true);
       expect(stats!.tokenYFreezeAuthorityDisabled).toBe(false);
+      expect(stats!.tokenXVerified).toBe(false);
+      expect(stats!.tokenYVerified).toBe(true);
     } finally {
       restore();
     }
@@ -158,6 +162,8 @@ describe("enrichPoolWithDatapi", () => {
       isBlacklisted: false,
       tokenXFreezeAuthorityDisabled: true,
       tokenYFreezeAuthorityDisabled: false,
+      tokenXVerified: false,
+      tokenYVerified: true,
     });
     expect(enriched.tvlUsd).toBe(1_000_000);
     expect(enriched.volume24hUsd).toBeCloseTo(456_789.12);

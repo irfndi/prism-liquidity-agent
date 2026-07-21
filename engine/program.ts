@@ -39,9 +39,9 @@ import { shouldDiscoverPools } from "./pool-policy.js";
 
 import { checkForAutoUpdate } from "./update-check.js";
 import type { PositionRecord } from "./db-service.js";
-import { applyCompoundToCostBasis, computeRealizedPnlUsd } from "./pnl.js";
+import { applyCompoundToCostBasis, computeHodlValueUsd, computeRealizedPnlUsd } from "./pnl.js";
 import { buildRewardClaimMetadata, summarizeRewardClaim } from "./rewards.js";
-import { BlacklistError, DiscoverPoolsError } from "./errors.js";
+import { BlacklistError, DiscoverPoolsError, underlyingErrorMessage } from "./errors.js";
 import {
   GAS_TOP_UP_USDC,
   SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
@@ -80,6 +80,7 @@ import {
 import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
 import { AlertLive } from "./alert-service.js";
 import { detectDepegAndLiquidityDrain } from "./depeg-liquidity-detector.js";
+import { consultTokenRisks, type TokenRiskSignal } from "./token-risk-service.js";
 import { CopySignalLive, applyCopySignalBoost } from "./copy-trading-signals.js";
 import type {
   AgentDecision,
@@ -1964,6 +1965,11 @@ export const program = Effect.gen(function* () {
       //    deployer blacklist.
       // 3. Token + deployer blacklist: a loaded blacklist hit rejects the
       //    pool; only unexpected transport/IO errors are swallowed.
+      const recordSafetyWarning = (content: string) =>
+        memory
+          .upsert({ category: "warning", content, poolAddress })
+          .pipe(Effect.catchAll(() => Effect.void));
+
       const rejectForSafety = (reason: string): Effect.Effect<ReadonlyArray<AgentDecision>> =>
         Effect.gen(function* () {
           logger.warn("Pool rejected by safety screening", { pool: poolAddress, reason });
@@ -1980,13 +1986,7 @@ export const program = Effect.gen(function* () {
               paperTrading: config.paperTrading,
             })
             .pipe(Effect.catchAll(() => Effect.void));
-          yield* memory
-            .upsert({
-              category: "warning",
-              content: `Safety screening rejected ${poolAddress}: ${reason}`,
-              poolAddress,
-            })
-            .pipe(Effect.catchAll(() => Effect.void));
+          yield* recordSafetyWarning(`Safety screening rejected ${poolAddress}: ${reason}`);
           return [];
         });
 
@@ -2013,14 +2013,127 @@ export const program = Effect.gen(function* () {
         datapiStats?.tokenXFreezeAuthorityDisabled === false || authX?.freezeAuthority != null;
       const freezeEnabledY =
         datapiStats?.tokenYFreezeAuthorityDisabled === false || authY?.freezeAuthority != null;
+
+      // Per-leg trust exemption: a freeze-enabled leg is exempt when its mint is
+      // on the trusted stablecoin allowlist (STABLECOIN_MINTS). The pool is
+      // rejected only when a NON-trusted leg has freeze authority enabled. Data
+      // API blacklisting above stays fail-closed — the allowlist never exempts it.
+      const trustedX = config.stablecoinMints?.has(pool.tokenX) === true;
+      const trustedY = config.stablecoinMints?.has(pool.tokenY) === true;
+      const untrustedFreezeX = freezeEnabledX && !trustedX;
+      const untrustedFreezeY = freezeEnabledY && !trustedY;
+
       if (freezeEnabledX || freezeEnabledY) {
-        const which = [
-          freezeEnabledX ? `token X (${pool.tokenXSymbol})` : null,
-          freezeEnabledY ? `token Y (${pool.tokenYSymbol})` : null,
-        ]
-          .filter((s) => s !== null)
-          .join(" and ");
-        return yield* rejectForSafety(`Freeze authority enabled on ${which}`);
+        if (!untrustedFreezeX && !untrustedFreezeY) {
+          // Every freeze-enabled leg is a trusted stablecoin — exempt.
+          const exempted = [
+            freezeEnabledX && trustedX ? `${pool.tokenXSymbol} (${pool.tokenX})` : null,
+            freezeEnabledY && trustedY ? `${pool.tokenYSymbol} (${pool.tokenY})` : null,
+          ]
+            .filter((s) => s !== null)
+            .join(" and ");
+          logger.info("Freeze authority exempted via trusted stablecoin allowlist", {
+            pool: poolAddress,
+            exempted,
+          });
+        } else {
+          // Token-risk overlay (Wave 18): smart detection for UNTRUSTED
+          // freeze-enabled legs. LAZY — Jupiter is consulted only when the
+          // overlay is enabled (jupiterTokenRiskEnabled !== false) AND an
+          // untrusted leg is freeze-enabled. Each flagged leg is adjudicated:
+          //   (a) Data API is_verified → exempt,
+          //   (b) Jupiter isSus → hard reject (aggregated RugCheck+Blockaid),
+          //   (c) Jupiter isVerified → pass via the overlay,
+          //   (d) otherwise the leg is unknown → smart-screening or strict reject.
+          // Trusted mints were already exempted above, so this only sees untrusted
+          // legs. Every branch logs its provenance; signals are never fabricated.
+          type LegStatus = "datapiVerified" | "sus" | "jupiterVerified" | "unknown";
+          const riskByMint: ReadonlyMap<string, TokenRiskSignal> =
+            config.jupiterTokenRiskEnabled !== false
+              ? yield* Effect.promise(() => consultTokenRisks([pool.tokenX, pool.tokenY], config))
+              : new Map<string, TokenRiskSignal>();
+
+          const classifyLeg = (
+            flagged: boolean,
+            datapiVerified: boolean,
+            mint: string,
+          ): LegStatus | null => {
+            if (!flagged) return null;
+            if (datapiVerified) return "datapiVerified";
+            const signal = riskByMint.get(mint);
+            if (signal?.isSus === true) return "sus";
+            if (signal?.isVerified === true) return "jupiterVerified";
+            return "unknown";
+          };
+
+          const flaggedLegs: Array<{ symbol: string; mint: string; status: LegStatus }> = [];
+          const legXStatus = classifyLeg(
+            untrustedFreezeX,
+            datapiStats?.tokenXVerified === true,
+            pool.tokenX,
+          );
+          if (legXStatus !== null) {
+            flaggedLegs.push({ symbol: pool.tokenXSymbol, mint: pool.tokenX, status: legXStatus });
+          }
+          const legYStatus = classifyLeg(
+            untrustedFreezeY,
+            datapiStats?.tokenYVerified === true,
+            pool.tokenY,
+          );
+          if (legYStatus !== null) {
+            flaggedLegs.push({ symbol: pool.tokenYSymbol, mint: pool.tokenY, status: legYStatus });
+          }
+          const describe = (legs: ReadonlyArray<{ symbol: string; mint: string }>): string =>
+            legs.map((leg) => `${leg.symbol} (${leg.mint})`).join(" and ");
+
+          const susLegs = flaggedLegs.filter((leg) => leg.status === "sus");
+          if (susLegs.length > 0) {
+            return yield* rejectForSafety(
+              `Jupiter token audit flags ${describe(susLegs)} as suspicious (isSus) with freeze authority enabled`,
+            );
+          }
+
+          for (const leg of flaggedLegs) {
+            if (leg.status === "datapiVerified") {
+              logger.warn("Freeze authority exempted via Data API verification", {
+                pool: poolAddress,
+                token: `${leg.symbol} (${leg.mint})`,
+              });
+              yield* recordSafetyWarning(
+                `${leg.symbol} (${leg.mint}) is a verified token (Meteora Data API) with freeze authority — exempted`,
+              );
+            } else if (leg.status === "jupiterVerified") {
+              logger.warn("Freeze authority passed via Jupiter verification", {
+                pool: poolAddress,
+                token: `${leg.symbol} (${leg.mint})`,
+              });
+              yield* recordSafetyWarning(
+                `${leg.symbol} (${leg.mint}) is a Jupiter Verified token with freeze authority — passed by risk overlay`,
+              );
+            }
+          }
+
+          const unknownLegs = flaggedLegs.filter((leg) => leg.status === "unknown");
+          if (unknownLegs.length > 0) {
+            if (config.freezeSmartScreening === true) {
+              // Smart screening: pass the untrusted freeze-enabled pool through to
+              // the quality pipeline (pre-filters / confidence / risk gates remain
+              // the backstop). No rejected [safety] HOLD audit — the pool genuinely
+              // continues processing.
+              logger.warn("Freeze authority passed to quality pipeline (smart screening)", {
+                pool: poolAddress,
+                freezeEnabled: describe(unknownLegs),
+              });
+              yield* recordSafetyWarning(
+                `Freeze authority enabled on ${describe(unknownLegs)} for ${poolAddress}; FREEZE_SMART_SCREENING active — quality pipeline decides`,
+              );
+            } else {
+              return yield* rejectForSafety(
+                `Freeze authority enabled on ${describe(unknownLegs)}; add trusted stablecoin mints to STABLECOIN_MINTS to exempt, or set FREEZE_SMART_SCREENING=true`,
+              );
+            }
+          }
+        }
       }
 
       const blacklistRejection = yield* blacklist
@@ -2265,6 +2378,43 @@ export const program = Effect.gen(function* () {
       for (const pos of poolPositions) {
         let decision: AgentDecision | null = null;
 
+        // IL-dominance pre-check: computed once before the exit chain so the
+        // else-if below stays a clean boolean. Fires only when IL protection
+        // is enabled, the position is actively out of range (fees stopped
+        // accruing → pure IL bleed), entry legs are known (pre-v16 rows with
+        // NULL legs skip silently = fail-open), and the unrealized IL exceeds
+        // cumulative fees by the configured factor and the USD floor.
+        let ilDominance: { ilUsd: number; hodlValueUsd: number; feesClaimedUsd: number } | null =
+          null;
+        if (
+          config.ilProtectionEnabled === true &&
+          pos.outOfRangeSince !== null &&
+          pos.entryAmountXUsd != null &&
+          pos.entryAmountYUsd != null &&
+          pos.entryPriceUsd != null
+        ) {
+          // currentValueUsd is the heuristic estimatePositionValue mark
+          // refreshed in the per-position value loop above, not an oracle
+          // price; the HODL benchmark is the real on-chain entry legs.
+          const hodlValueUsd = computeHodlValueUsd(
+            pos.entryAmountXUsd,
+            pos.entryAmountYUsd,
+            pos.entryPriceUsd,
+            pool.currentPrice,
+          );
+          if (hodlValueUsd !== null) {
+            const ilUsd = hodlValueUsd - pos.currentValueUsd;
+            const feesClaimedUsd = pos.cumulativeFeesClaimedUsd;
+            if (
+              ilUsd > 0 &&
+              ilUsd > feesClaimedUsd * (config.ilDominanceExitFactor ?? 2) &&
+              ilUsd > (config.ilDominanceMinUsd ?? 5)
+            ) {
+              ilDominance = { ilUsd, hodlValueUsd, feesClaimedUsd };
+            }
+          }
+        }
+
         if (w15Signals.depeg || w15Signals.liquidityDrain) {
           decision = {
             action: "EXIT",
@@ -2277,6 +2427,26 @@ export const program = Effect.gen(function* () {
             ]
               .filter(Boolean)
               .join(" + ")}`,
+          };
+        } else if (ilDominance) {
+          yield* alertSvc.sendAlert({
+            type: "il_dominance",
+            severity: "critical",
+            message: `IL dominance EXIT on ${pool.tokenXSymbol}/${pool.tokenYSymbol} position ${pos.positionId}: IL $${ilDominance.ilUsd.toFixed(2)} exceeds ${config.ilDominanceExitFactor ?? 2}× fees ($${ilDominance.feesClaimedUsd.toFixed(2)})`,
+            poolAddress,
+            positionId: pos.positionId,
+            data: {
+              ilUsd: ilDominance.ilUsd,
+              hodlValueUsd: ilDominance.hodlValueUsd,
+              feesClaimedUsd: ilDominance.feesClaimedUsd,
+            },
+          });
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            positionId: pos.positionId,
+            confidence: 1,
+            reasoning: `IL dominance: $${ilDominance.ilUsd.toFixed(2)} IL exceeds ${config.ilDominanceExitFactor ?? 2}× cumulative fees ($${ilDominance.feesClaimedUsd.toFixed(2)}) while out of range`,
           };
         } else if (tvlVelocity < -config.tvlDropExitPct) {
           decision = {
@@ -2785,6 +2955,82 @@ export const program = Effect.gen(function* () {
             }
           }
 
+          // [token-risk] ENTER gate (Wave 18): Jupiter advisory overlay. Blocks
+          // entry when either leg carries a hard-risk signal — Jupiter isSus
+          // (aggregated RugCheck+Blockaid) or a "low" organic score. Advisory and
+          // fail-open: unknown, disabled or failed signals never block entry.
+          // Reuses the per-cycle token-risk cache, so a second consult costs no
+          // network call when the screening seam already fetched these mints.
+          if (!enterGateRejected && config.jupiterTokenRiskEnabled !== false) {
+            const enterRisk = yield* Effect.promise(() =>
+              consultTokenRisks([pool.tokenX, pool.tokenY], config),
+            );
+            const legRiskReason = (mint: string, symbol: string): string | null => {
+              const signal = enterRisk.get(mint);
+              if (signal === undefined) return null;
+              if (signal.isSus) {
+                return `${symbol} (${mint}): Jupiter audit flags suspicious (isSus)`;
+              }
+              if (signal.organicScoreLabel === "low") {
+                return `${symbol} (${mint}): Jupiter organic score is low`;
+              }
+              return null;
+            };
+            const riskReasons = [
+              legRiskReason(pool.tokenX, pool.tokenXSymbol),
+              legRiskReason(pool.tokenY, pool.tokenYSymbol),
+            ].filter((reason): reason is string => reason !== null);
+            if (riskReasons.length > 0) {
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: 0,
+                  reasoning: `[token-risk] ${riskReasons.join("; ")} — ENTER blocked`,
+                  metrics,
+                  riskResult: {
+                    approved: false,
+                    reason: `[token-risk] ${riskReasons.join("; ")}`,
+                  },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+              enterGateRejected = true;
+            }
+          }
+
+          // [fee-il-gate] hard ENTER floor — expected fees must beat IL. Active
+          // only when IL protection is enabled. feeIlRatio is never null
+          // (0-20, strategy-service.ts) so the numeric compare is fail-closed
+          // on 0; a pool whose fees cannot cover estimated IL never enters.
+          if (
+            !enterGateRejected &&
+            config.ilProtectionEnabled === true &&
+            feeIlRatio < config.minFeeIlRatio
+          ) {
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "ENTER",
+                confidence: 0,
+                reasoning: `[fee-il-gate] Fee/IL ratio ${feeIlRatio.toFixed(2)} below minimum ${config.minFeeIlRatio} — expected fees cannot beat IL`,
+                metrics,
+                riskResult: {
+                  approved: false,
+                  reason: `[fee-il-gate] Fee/IL ${feeIlRatio.toFixed(2)} < ${config.minFeeIlRatio}`,
+                },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+            enterGateRejected = true;
+          }
+
           if (
             !enterGateRejected &&
             feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 &&
@@ -2943,10 +3189,25 @@ export const program = Effect.gen(function* () {
               .pipe(
                 Effect.catchAll((err) => {
                   vetoFetchFailed = true;
-                  logger.warn("Agent veto fetch failed", {
-                    pool: poolAddress,
-                    error: String(err),
-                  });
+                  const message = underlyingErrorMessage(err);
+                  // Throttle the warn to the veto-warning cadence (vetoWarningThrottle,
+                  // per pool, agentProposalStaleMs) so a persistently failing runtime
+                  // logs once per window instead of per decision per cycle; suppressed
+                  // occurrences stay visible at debug. Fail-open is preserved: this
+                  // always resolves to null and never alters the decision.
+                  const lastWarn = vetoWarningThrottle.get(poolAddress) ?? 0;
+                  if (now - lastWarn > config.agentProposalStaleMs) {
+                    vetoWarningThrottle.set(poolAddress, now);
+                    logger.warn("Agent veto fetch failed", {
+                      pool: poolAddress,
+                      error: message,
+                    });
+                  } else {
+                    logger.debug("Agent veto fetch failed (throttled)", {
+                      pool: poolAddress,
+                      error: message,
+                    });
+                  }
                   return Effect.succeed(null);
                 }),
               );

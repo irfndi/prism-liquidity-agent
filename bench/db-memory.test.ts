@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { Effect, Layer } from "effect";
 import { Database } from "bun:sqlite";
-import { createDatabase, hasVecMemoryTable } from "../engine/db.js";
+import { mkdtempSync, readdirSync, rmSync } from "fs";
+import os from "os";
+import path from "path";
+import { createDatabase, hasVecMemoryTable, probeVecAvailability } from "../engine/db.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 
@@ -213,5 +216,49 @@ describe("DbService memory operations (vec_memory present)", () => {
     );
     expect(result.length).toBeGreaterThan(0);
     expect(result[0]!.content).toBe("SOL/USDC pool performed well");
+  });
+});
+
+// ─── probeVecAvailability (real environment, doctor seam) ───────────────────
+
+describe("probeVecAvailability", () => {
+  it("agrees with createDatabase when sqlite-vec can load (skipped in vec0-less environments)", () => {
+    const db = tryCreateVecDatabase();
+    if (!db) {
+      // Environment cannot load sqlite-vec; skip the positive probe test.
+      return;
+    }
+    db.close();
+
+    const result = probeVecAvailability();
+    expect(result.available).toBe(true);
+    expect(result.source).not.toBeNull();
+    expect(result.error).toBeNull();
+  });
+
+  it("creates a queryable vec_memory table from createDatabase (regression: REAL aux columns fail vec0 construction with a misleading chunk_size error)", () => {
+    const db = tryCreateVecDatabase();
+    if (!db) {
+      // Environment cannot load sqlite-vec; skip the schema regression test.
+      return;
+    }
+    expect(hasVecMemoryTable(db)).toBe(true);
+    db.close();
+  });
+
+  it("opens only in-memory databases and never creates a file", () => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "prism-probe-"));
+    const previousCwd = process.cwd();
+    process.chdir(tmpDir);
+    try {
+      const before = readdirSync(tmpDir);
+      const result = probeVecAvailability();
+      const after = readdirSync(tmpDir);
+      expect(after).toEqual(before);
+      expect(typeof result.available).toBe("boolean");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

@@ -534,6 +534,7 @@ const ALERT_TYPE_LABEL: Record<string, string> = {
   fee_milestone: "Fee milestone",
   stablecoin_depeg: "Stablecoin Depeg",
   liquidity_drain: "Liquidity Drain",
+  il_dominance: "IL Dominance",
 };
 
 const ALERT_DELIVER_SEVERITIES = new Set(["info", "warning", "critical"]);

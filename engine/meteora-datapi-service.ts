@@ -71,6 +71,8 @@ export function parseMeteoraPoolStats(raw: unknown): MeteoraPoolStats | null {
     isBlacklisted: readBoolean(raw, "is_blacklisted"),
     tokenXFreezeAuthorityDisabled: readBoolean(tokenX, "freeze_authority_disabled"),
     tokenYFreezeAuthorityDisabled: readBoolean(tokenY, "freeze_authority_disabled"),
+    tokenXVerified: readBoolean(tokenX, "is_verified"),
+    tokenYVerified: readBoolean(tokenY, "is_verified"),
   };
 }
 

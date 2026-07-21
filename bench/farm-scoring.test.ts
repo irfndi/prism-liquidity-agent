@@ -63,6 +63,8 @@ function makeStats(overrides: Partial<MeteoraPoolStats> = {}): MeteoraPoolStats 
     isBlacklisted: null,
     tokenXFreezeAuthorityDisabled: null,
     tokenYFreezeAuthorityDisabled: null,
+    tokenXVerified: null,
+    tokenYVerified: null,
     ...overrides,
   };
 }

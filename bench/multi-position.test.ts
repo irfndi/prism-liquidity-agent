@@ -1229,6 +1229,8 @@ function makeDatapiStats(overrides: Partial<MeteoraPoolStats> = {}): MeteoraPool
     isBlacklisted: null,
     tokenXFreezeAuthorityDisabled: null,
     tokenYFreezeAuthorityDisabled: null,
+    tokenXVerified: null,
+    tokenYVerified: null,
     ...overrides,
   };
 }

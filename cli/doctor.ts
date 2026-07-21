@@ -10,6 +10,7 @@ import {
   getPrismLogsDir,
 } from "../engine/paths.js";
 import { isSourceInstall } from "../engine/install-method.js";
+import { probeVecAvailability, vecRemediationHint, type VecProbeResult } from "../engine/db.js";
 import { normalizeHeliusUrl, maskHeliusUrl } from "../engine/config-service.js";
 import { loadKeystoreSecretKeyBase58 } from "../engine/wallet-keystore.js";
 import { getApiBaseUrl, prismApiPost, readCredentials } from "./api.js";
@@ -251,6 +252,31 @@ function checkWallet(): DoctorCheck {
   );
 }
 
+export function checkMemory(probe: () => VecProbeResult = probeVecAvailability): DoctorCheck {
+  const result = probe();
+  if (result.available) {
+    return check(
+      "memory",
+      "pass",
+      `sqlite-vec vector memory is available (loaded via ${result.source ?? "unknown"})`,
+    );
+  }
+  const detail = result.error ? ` Last error: ${result.error}.` : "";
+  return check(
+    "memory",
+    "fail",
+    `sqlite-vec vector memory is unavailable; the engine will run with memory recall/recording silently disabled. ${vecRemediationHint()}${detail}`,
+  );
+}
+
+export function checkNativeBindings(): DoctorCheck {
+  return check(
+    "native-bindings",
+    "warn",
+    "`bigint: Failed to load bindings` at startup is a harmless warning from bigint-buffer (a @solana/web3.js dependency) using its pure-JS fallback; computation results are identical and no action is needed.",
+  );
+}
+
 function checkPriceProviders(): DoctorCheck {
   const configured = [process.env.JUPITER_API_KEY, process.env.COINGECKO_API_KEY].filter((value) =>
     value?.trim(),
@@ -283,6 +309,8 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
       ? checkFileAccess("database", getPrismDbPath())
       : check("database", "warn", `${getPrismDbPath()} will be created on first run`),
   );
+  checks.push(checkMemory());
+  checks.push(checkNativeBindings());
   checks.push(checkRpc());
   const [rpcConnectivity, heliusApiKey] = await Promise.all([
     checkRpcConnectivity(),

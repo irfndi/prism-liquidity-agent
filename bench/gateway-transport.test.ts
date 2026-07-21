@@ -360,4 +360,145 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
       server.stop(true);
     }
   });
+
+  it("surfaces the gateway error code+message when the connect ack is rejected", async () => {
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, s) {
+        if (s.upgrade(req)) return;
+        return new Response("not found", { status: 404 });
+      },
+      websocket: {
+        open(ws) {
+          sendFrame(ws, challenge("nonce-ack-fail"));
+        },
+        message(ws, data) {
+          const frame = JSON.parse(String(data)) as Frame;
+          if (frame.type === "req" && frame.method === "connect") {
+            sendFrame(ws, {
+              type: "res",
+              id: frame.id,
+              ok: false,
+              error: { code: "1008", message: "operator scopes dropped" },
+            });
+          }
+        },
+      },
+    });
+
+    try {
+      const transport = new GatewayTransport({
+        url: `ws://127.0.0.1:${server.port}`,
+        token: "test-token",
+        timeoutMs: 5000,
+      });
+      let error: unknown = null;
+      try {
+        await Effect.runPromise(transport.sendPrompt("review", makeContext()));
+      } catch (err) {
+        error = err;
+      }
+      expect(error).not.toBeNull();
+      expect(String(error)).toContain("Gateway 1008: operator scopes dropped");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("rejects with a chat run timeout when the gateway acks but streams no reply", async () => {
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, s) {
+        if (s.upgrade(req)) return;
+        return new Response("not found", { status: 404 });
+      },
+      websocket: {
+        open(ws) {
+          sendFrame(ws, challenge("nonce-chat-timeout"));
+        },
+        message(ws, data) {
+          const frame = JSON.parse(String(data)) as Frame;
+          if (frame.type !== "req") return;
+          if (frame.method === "connect") {
+            sendFrame(ws, { type: "res", id: frame.id, ok: true, payload: HELLO_OK });
+          } else if (frame.method === "chat.send") {
+            // Ack the request but stream no chat events, so the registered run timer
+            // is the only thing that can settle the call.
+            const runId = String(frame.params?.idempotencyKey);
+            sendFrame(ws, {
+              type: "res",
+              id: frame.id,
+              ok: true,
+              payload: { runId, status: "started" },
+            });
+          }
+        },
+      },
+    });
+
+    try {
+      const transport = new GatewayTransport({
+        url: `ws://127.0.0.1:${server.port}`,
+        token: "test-token",
+        timeoutMs: 250,
+      });
+      let error: unknown = null;
+      try {
+        await Effect.runPromise(transport.sendPrompt("review", makeContext()));
+      } catch (err) {
+        error = err;
+      }
+      expect(error).not.toBeNull();
+      expect(String(error)).toContain("Gateway chat run timeout");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("rejects the handshake when the gateway speaks a protocol below v4", async () => {
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, s) {
+        if (s.upgrade(req)) return;
+        return new Response("not found", { status: 404 });
+      },
+      websocket: {
+        open(ws) {
+          sendFrame(ws, challenge("nonce-proto-low"));
+        },
+        message(ws, data) {
+          const frame = JSON.parse(String(data)) as Frame;
+          if (frame.type === "req" && frame.method === "connect") {
+            sendFrame(ws, {
+              type: "res",
+              id: frame.id,
+              ok: true,
+              payload: { ...HELLO_OK, protocol: 3 },
+            });
+          }
+        },
+      },
+    });
+
+    try {
+      const transport = new GatewayTransport({
+        url: `ws://127.0.0.1:${server.port}`,
+        token: "test-token",
+        timeoutMs: 5000,
+      });
+      let error: unknown = null;
+      try {
+        await Effect.runPromise(transport.connect());
+      } catch (err) {
+        error = err;
+      }
+      expect(error).not.toBeNull();
+      expect(String(error)).toContain("below required 4");
+    } finally {
+      server.stop(true);
+    }
+  });
 });

@@ -355,6 +355,16 @@ export interface MeteoraPoolStats {
   readonly isBlacklisted: boolean | null;
   readonly tokenXFreezeAuthorityDisabled: boolean | null;
   readonly tokenYFreezeAuthorityDisabled: boolean | null;
+  /**
+   * Jupiter verification status per token leg (`token_x/y.is_verified`). The
+   * disambiguator between "risky freeze authority" and a legitimate
+   * freeze-authority token (USDC/USDT/cbBTC report `is_verified: true` while
+   * keeping freeze authority set). Read directly by the safety screener from
+   * `datapiStats` — deliberately NOT lifted onto `PoolState` by
+   * `enrichPoolWithDatapi`. Null when the API omits it (schema drift).
+   */
+  readonly tokenXVerified: boolean | null;
+  readonly tokenYVerified: boolean | null;
 }
 
 export interface MeteoraDatapiApi {
@@ -1117,7 +1127,8 @@ export type AlertType =
   | "risk_rejection"
   | "fee_milestone"
   | "stablecoin_depeg"
-  | "liquidity_drain";
+  | "liquidity_drain"
+  | "il_dominance";
 
 export type AlertSeverity = "info" | "warning" | "critical";
 

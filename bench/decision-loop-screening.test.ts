@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import fs from "fs";
 import path from "path";
 import { Effect, Layer } from "effect";
@@ -27,13 +27,16 @@ import {
   EntryPrepService,
   MeteoraDatapiService,
   AlertService,
+  MemoryService,
   type AdapterApi,
   type BlacklistApi,
   type MeteoraDatapiApi,
   type MeteoraPoolStats,
+  type MemoryApi,
 } from "../engine/services.js";
-import { defaultAppConfig, makePool, makeBinArray } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, mockFetch } from "./helpers.js";
 import { stringifySafe } from "../engine/bigint-json.js";
+import { clearTokenRiskCache } from "../engine/token-risk-service.js";
 
 // ─── Wave 2: blacklist unswallow + safety screening ──────────────────────────
 
@@ -145,7 +148,32 @@ function makeDatapiStats(overrides: Partial<MeteoraPoolStats> = {}): MeteoraPool
     isBlacklisted: null,
     tokenXFreezeAuthorityDisabled: null,
     tokenYFreezeAuthorityDisabled: null,
+    tokenXVerified: null,
+    tokenYVerified: null,
     ...overrides,
+  };
+}
+
+interface RecordedMemory {
+  category: string;
+  content: string;
+  poolAddress?: string | undefined;
+}
+
+function makeRecordingMemory(record: RecordedMemory[]): MemoryApi {
+  return {
+    initialize: () => Effect.void,
+    upsert: (entry) =>
+      Effect.sync(() => {
+        record.push({
+          category: entry.category,
+          content: entry.content,
+          poolAddress: entry.poolAddress,
+        });
+      }),
+    getRelevantContext: () => Effect.succeed([]),
+    pruneExpired: () => Effect.succeed(0),
+    recordOutcome: () => Effect.void,
   };
 }
 
@@ -153,6 +181,7 @@ function makeTestLayer(opts: {
   adapter: AdapterApi;
   blacklist: BlacklistApi;
   datapi?: MeteoraDatapiApi;
+  memoryRecorded?: RecordedMemory[];
   configOverrides?: Partial<AppConfig>;
 }) {
   const config = defaultAppConfig({
@@ -168,7 +197,9 @@ function makeTestLayer(opts: {
     Layer.succeed(ConfigService, config),
     Layer.succeed(AdapterService, opts.adapter),
     StrategyLive,
-    Layer.provide(MemoryLive, dbLayer),
+    opts.memoryRecorded
+      ? Layer.succeed(MemoryService, makeRecordingMemory(opts.memoryRecorded))
+      : Layer.provide(MemoryLive, dbLayer),
     RiskLive({
       confidenceThreshold: 0.65,
       maxRebalanceRangeBins: 50,
@@ -414,5 +445,275 @@ describe("safety screening + blacklist enforcement (Wave 2)", () => {
       forPool.every((d) => d.riskResult.approved),
       `expected no screening rejections, got: ${stringifySafe(forPool.map((d) => d.riskResult))}`,
     ).toBe(true);
+  }, 15_000);
+});
+
+// ─── Wave 17: freeze-authority allowlist + smart screening ───────────────────
+
+describe("freeze-authority allowlist + smart screening (Wave 17)", () => {
+  const noBlacklist: BlacklistApi = {
+    isDeployerBlacklisted: () => false,
+    isTokenBlacklisted: () => false,
+    checkPool: () => Effect.void,
+  };
+
+  it("processes a pool whose on-chain freeze-authority mint is on the trusted stablecoin allowlist", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter({
+        getMintAuthorities: (mint: string) =>
+          Effect.succeed({
+            mintAuthority: null,
+            // Freeze authority set on the USDC leg, which is allowlisted below.
+            freezeAuthority: mint === TOKEN_Y ? "FreezeAuth1111111111111111111111111" : null,
+          }),
+      }),
+      blacklist: noBlacklist,
+      configOverrides: { stablecoinMints: new Set([TOKEN_Y]) },
+    });
+
+    const decisions = await runOneCycle(layer);
+    const forPool = decisions.filter((d) => d.poolAddress === POOL);
+    expect(forPool.length, "trusted freeze-enabled pool should still be processed").toBeGreaterThan(
+      0,
+    );
+    expect(
+      forPool.every((d) => d.riskResult.approved),
+      `expected no screening rejection for an allowlisted freeze mint, got: ${stringifySafe(forPool.map((d) => d.riskResult))}`,
+    ).toBe(true);
+  }, 15_000);
+
+  it("processes a pool whose Data-API freeze flag is on a stablecoin-listed mint", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter({}),
+      blacklist: noBlacklist,
+      datapi: {
+        getPoolData: () =>
+          Effect.succeed(makeDatapiStats({ tokenXFreezeAuthorityDisabled: false })),
+      },
+      configOverrides: { stablecoinMints: new Set([TOKEN_X]) },
+    });
+
+    const decisions = await runOneCycle(layer);
+    const forPool = decisions.filter((d) => d.poolAddress === POOL);
+    expect(forPool.length, "trusted freeze-enabled pool should still be processed").toBeGreaterThan(
+      0,
+    );
+    expect(
+      forPool.every((d) => d.riskResult.approved),
+      `expected no screening rejection for an allowlisted freeze mint, got: ${stringifySafe(forPool.map((d) => d.riskResult))}`,
+    ).toBe(true);
+  }, 15_000);
+
+  it("passes an UNTRUSTED freeze-enabled pool to the pipeline when FREEZE_SMART_SCREENING is on", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter({
+        getMintAuthorities: (mint: string) =>
+          Effect.succeed({
+            mintAuthority: null,
+            freezeAuthority: mint === TOKEN_Y ? "FreezeAuth1111111111111111111111111" : null,
+          }),
+      }),
+      blacklist: noBlacklist,
+      // defaultAppConfig pins stablecoinMints empty → TOKEN_Y is untrusted.
+      configOverrides: { freezeSmartScreening: true },
+    });
+
+    const decisions = await runOneCycle(layer);
+    const forPool = decisions.filter((d) => d.poolAddress === POOL);
+    expect(
+      forPool.length,
+      "smart-screened freeze pool should continue into the pipeline, not be rejected",
+    ).toBeGreaterThan(0);
+    expect(
+      forPool.every((d) => d.riskResult.approved),
+      `expected an approved pipeline decision (no safety rejection), got: ${stringifySafe(forPool.map((d) => d.riskResult))}`,
+    ).toBe(true);
+    expect(
+      forPool.some((d) => d.reasoning.toLowerCase().includes("[safety]")),
+      "smart pass-through must NOT write a rejected [safety] HOLD audit record",
+    ).toBe(false);
+  }, 15_000);
+
+  it("rejects an UNTRUSTED freeze-enabled pool with an actionable hint when the flag is off", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter({
+        getMintAuthorities: (mint: string) =>
+          Effect.succeed({
+            mintAuthority: null,
+            freezeAuthority: mint === TOKEN_Y ? "FreezeAuth1111111111111111111111111" : null,
+          }),
+      }),
+      blacklist: noBlacklist,
+      // freezeSmartScreening defaults to false in defaultAppConfig.
+    });
+
+    const decisions = await runOneCycle(layer);
+    const forPool = decisions.filter((d) => d.poolAddress === POOL);
+    expect(forPool).toHaveLength(1);
+    expect(forPool[0]!.riskResult.approved).toBe(false);
+    const reasoning = forPool[0]!.reasoning.toLowerCase();
+    expect(reasoning).toContain("freeze authority");
+    expect(reasoning, "rejection must name the actionable remediation knobs").toContain(
+      "stablecoin_mints",
+    );
+    expect(reasoning).toContain("freeze_smart_screening");
+  }, 15_000);
+
+  it("still rejects freeze on a stablecoin-addressed mint when the allowlist is explicitly empty", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter({
+        getMintAuthorities: (mint: string) =>
+          Effect.succeed({
+            mintAuthority: null,
+            // Freeze authority on the USDC-addressed leg.
+            freezeAuthority: mint === TOKEN_Y ? "FreezeAuth1111111111111111111111111" : null,
+          }),
+      }),
+      blacklist: noBlacklist,
+      // STABLECOIN_MINTS="" disables exemptions entirely.
+      configOverrides: { stablecoinMints: new Set() },
+    });
+
+    const decisions = await runOneCycle(layer);
+    const forPool = decisions.filter((d) => d.poolAddress === POOL);
+    expect(forPool).toHaveLength(1);
+    expect(forPool[0]!.riskResult.approved).toBe(false);
+    expect(forPool[0]!.reasoning.toLowerCase()).toContain("freeze authority");
+  }, 15_000);
+});
+
+// ─── Wave 18: token-risk overlay (Jupiter + Data API is_verified) ────────────
+
+// The overlay's module-level cache is keyed by mint and shared across tests, so
+// every test starts from an empty cache (TOKEN_X/TOKEN_Y are reused constants).
+beforeEach(() => {
+  clearTokenRiskCache();
+});
+
+describe("token-risk overlay + freeze screening (Wave 18)", () => {
+  const noBlacklist: BlacklistApi = {
+    isDeployerBlacklisted: () => false,
+    isTokenBlacklisted: () => false,
+    checkPool: () => Effect.void,
+  };
+
+  function jupiterFetch(entries: ReadonlyArray<unknown>): () => void {
+    return mockFetch(async () => new Response(JSON.stringify(entries), { status: 200 }));
+  }
+
+  function freezeOnLegY(): AdapterApi {
+    return makeAdapter({
+      getMintAuthorities: (mint: string) =>
+        Effect.succeed({
+          mintAuthority: null,
+          freezeAuthority: mint === TOKEN_Y ? "FreezeAuth1111111111111111111111111" : null,
+        }),
+    });
+  }
+
+  it("(8) exempts a freeze-enabled untrusted leg the Data API marks is_verified (master off)", async () => {
+    const recordedMemory: RecordedMemory[] = [];
+    const layer = makeTestLayer({
+      adapter: freezeOnLegY(),
+      blacklist: noBlacklist,
+      memoryRecorded: recordedMemory,
+      datapi: {
+        getPoolData: () =>
+          Effect.succeed(
+            makeDatapiStats({ tokenYFreezeAuthorityDisabled: false, tokenYVerified: true }),
+          ),
+      },
+      // master stays pinned false (default fixture) — the Data API verification
+      // exemption does not require a Jupiter fetch.
+    });
+
+    const decisions = await runOneCycle(layer);
+    const forPool = decisions.filter((d) => d.poolAddress === POOL);
+    expect(
+      forPool.length,
+      "Data-API-verified freeze pool should be processed, not rejected",
+    ).toBeGreaterThan(0);
+    expect(
+      forPool.every((d) => d.riskResult.approved),
+      `expected no safety rejection, got: ${stringifySafe(forPool.map((d) => d.riskResult))}`,
+    ).toBe(true);
+    const warnings = recordedMemory.filter((m) => m.category === "warning");
+    expect(
+      warnings.some((m) => m.content.toLowerCase().includes("verified")),
+      `expected a Data API verification exemption warning, got: ${stringifySafe(warnings)}`,
+    ).toBe(true);
+  }, 15_000);
+
+  it("(9) hard-rejects when Jupiter flags the untrusted freeze leg isSus", async () => {
+    const restore = jupiterFetch([
+      { address: TOKEN_Y, audit: { isSus: true }, isVerified: null, organicScore: 5 },
+    ]);
+    try {
+      const layer = makeTestLayer({
+        adapter: freezeOnLegY(),
+        blacklist: noBlacklist,
+        configOverrides: { jupiterTokenRiskEnabled: true },
+      });
+
+      const decisions = await runOneCycle(layer);
+      const forPool = decisions.filter((d) => d.poolAddress === POOL);
+      expect(forPool).toHaveLength(1);
+      expect(forPool[0]!.riskResult.approved).toBe(false);
+      const reasoning = forPool[0]!.reasoning.toLowerCase();
+      expect(reasoning).toContain("suspicious");
+      expect(reasoning).toContain(TOKEN_Y.toLowerCase());
+    } finally {
+      restore();
+    }
+  }, 15_000);
+
+  it("(10) passes a freeze leg that Jupiter marks isVerified (and not isSus)", async () => {
+    const restore = jupiterFetch([
+      { address: TOKEN_Y, audit: { isSus: false }, isVerified: true, organicScoreLabel: "high" },
+    ]);
+    try {
+      const layer = makeTestLayer({
+        adapter: freezeOnLegY(),
+        blacklist: noBlacklist,
+        configOverrides: { jupiterTokenRiskEnabled: true },
+      });
+
+      const decisions = await runOneCycle(layer);
+      const forPool = decisions.filter((d) => d.poolAddress === POOL);
+      expect(
+        forPool.length,
+        "Jupiter-verified freeze pool should be processed, not rejected",
+      ).toBeGreaterThan(0);
+      expect(
+        forPool.every((d) => d.riskResult.approved),
+        `expected no safety rejection, got: ${stringifySafe(forPool.map((d) => d.riskResult))}`,
+      ).toBe(true);
+    } finally {
+      restore();
+    }
+  }, 15_000);
+
+  it("(11) a disabled overlay performs zero fetches and keeps the strict reject", async () => {
+    let calls = 0;
+    const restore = mockFetch(async () => {
+      calls += 1;
+      return new Response("[]", { status: 200 });
+    });
+    try {
+      const layer = makeTestLayer({
+        adapter: freezeOnLegY(),
+        blacklist: noBlacklist,
+        // master pinned false by the default fixture (jupiterTokenRiskEnabled).
+      });
+
+      const decisions = await runOneCycle(layer);
+      const forPool = decisions.filter((d) => d.poolAddress === POOL);
+      expect(forPool).toHaveLength(1);
+      expect(forPool[0]!.riskResult.approved).toBe(false);
+      expect(forPool[0]!.reasoning.toLowerCase()).toContain("freeze authority");
+      expect(calls).toBe(0);
+    } finally {
+      restore();
+    }
   }, 15_000);
 });
