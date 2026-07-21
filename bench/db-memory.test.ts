@@ -293,6 +293,43 @@ describe("DbService memory operations (vec_memory present)", () => {
     expect(result.scoped[0]!.poolAddress).toBe("PoolScopeA");
     expect(result.scoped[0]!.pnlUsd).toBe(100);
   });
+
+  it("queryMemory expands the KNN window when the in-scope pool is a minority of the nearest neighbours", async () => {
+    const db = tryCreateVecDatabase();
+    if (!db) return; // Skip if sqlite-vec unavailable.
+    db.close();
+
+    const layer = DbLive(":memory:");
+    const result = await run(
+      Effect.gen(function* () {
+        const dbService = yield* DbService;
+        // 3 target rows + 15 other-pool rows (18 distinct contents). The target
+        // pool may be a small minority of the global distance ordering, far
+        // beyond the initial topK*2 window; the expanding loop must re-query
+        // with a wider k until the post-filter has enough in-scope rows. The
+        // cap (max(topK*8, 64) = 64 >= 18) makes this deterministic for ANY
+        // embedding distance order — the widest query returns the whole table.
+        for (let i = 0; i < 3; i += 1) {
+          yield* dbService.insertMemory({
+            content: `expanding window target memory ${i}`,
+            category: "pattern",
+            poolAddress: "PoolExpandA",
+          });
+        }
+        for (let i = 0; i < 15; i += 1) {
+          yield* dbService.insertMemory({
+            content: `expanding window noise memory ${i}`,
+            category: "pattern",
+            poolAddress: "PoolExpandB",
+          });
+        }
+        return yield* dbService.queryMemory("expanding window target memory", 2, "PoolExpandA");
+      }),
+      layer,
+    );
+    expect(result).toHaveLength(2);
+    expect(result.every((entry) => entry.poolAddress === "PoolExpandA")).toBe(true);
+  });
 });
 
 // ─── probeVecAvailability (real environment, doctor seam) ───────────────────

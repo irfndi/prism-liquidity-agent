@@ -717,6 +717,42 @@ describe("token-risk overlay + freeze screening (Wave 18)", () => {
     }
   }, 15_000);
 
+  it("(13) a pool rejected by a local ENTER gate performs zero Jupiter fetches (token-risk consult deferred until local eligibility)", async () => {
+    let jupiterCalls = 0;
+    const restore = mockFetch(async (url: string | URL | Request) => {
+      if (String(url).includes("api.jup.ag")) jupiterCalls += 1;
+      // Served ONLY if the gate consults early (pre-fix behavior): this flag
+      // would have stolen the audit reason from the local fee/IL gate.
+      return new Response(JSON.stringify([{ address: TOKEN_Y, audit: { isSus: true } }]), {
+        status: 200,
+      });
+    });
+    try {
+      const layer = makeTestLayer({
+        adapter: makeAdapter({}),
+        blacklist: noBlacklist,
+        // feeIlRatio caps at 20 (strategy-service MAX_FEE_IL_RATIO), so a
+        // floor of 25 guarantees the local [fee-il-gate] rejects this pool
+        // deterministically, independent of computed metrics.
+        configOverrides: {
+          jupiterTokenRiskEnabled: true,
+          ilProtectionEnabled: true,
+          minFeeIlRatio: 25,
+        },
+      });
+
+      const decisions = await runOneCycle(layer);
+      const forPool = decisions.filter((d) => d.poolAddress === POOL);
+      expect(jupiterCalls, "locally-ineligible pool must not trigger a Jupiter consult").toBe(0);
+      expect(forPool.length).toBeGreaterThan(0);
+      const rejected = forPool.find((d) => !d.riskResult.approved);
+      expect(rejected).toBeDefined();
+      expect(rejected!.reasoning.toLowerCase()).toContain("fee-il");
+    } finally {
+      restore();
+    }
+  }, 15_000);
+
   it("(12) hard-rejects a Data-API-verified untrusted freeze leg when Jupiter flags it isSus (isSus beats verified)", async () => {
     // Freeze-enabled leg X is ALSO marked is_verified by the Data API. Under the
     // old datapiVerified-first ordering this leg would be exempted; isSus must be

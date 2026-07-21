@@ -126,7 +126,15 @@ export async function fetchTokenRisks(
       throw new Error(`Jupiter tokens API HTTP ${res.status}`);
     }
     const body: unknown = await res.json();
-    if (!Array.isArray(body)) continue;
+    if (!Array.isArray(body)) {
+      // A 200 with a non-array body (a CDN/intermediary error object or HTML)
+      // is a FAILURE, not an empty success: treating it as success would
+      // negative-cache every requested mint — dropping cached isSus flags and
+      // silently stopping hard-reject enforcement for the whole TTL. Throwing
+      // routes the entire consult into the fail-open catch instead, which
+      // serves stale signals and never negative-caches.
+      throw new Error(`Jupiter tokens API returned a non-array body (${res.status})`);
+    }
     for (const entry of body) {
       const parsed = parseTokenRiskEntry(entry);
       if (parsed !== null) result.set(parsed.mint, parsed.signal);

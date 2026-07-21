@@ -454,34 +454,46 @@ export const DbLive = (dbPath?: string) =>
                   // a vec0 auxiliary column in a KNN query" on the strict linux vec0
                   // binary (v0.1.9 vec0BestIndex: hasAuxConstraint -> error). Those
                   // filters are therefore applied in JS after the fetch below.
-                  // Tradeoff: we over-fetch the global nearest `topK * 2` neighbours
-                  // and filter expiry + pool scope in JS, so a query whose nearest
-                  // neighbours are mostly expired or other-pool may return fewer
-                  // than topK rows (the prior SQL WHERE pre-filtered to 2*topK
-                  // matching rows). Recency-blend ranking and ORDER BY distance are
-                  // preserved exactly.
-                  const rows = yield* Effect.try({
-                    try: () =>
-                      queryAll<Record<string, unknown>>(
-                        db,
-                        `SELECT
-                    id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
-                    distance
-                   FROM vec_memory
-                   WHERE embedding MATCH ? AND k = ?
-                   ORDER BY distance`,
-                        JSON.stringify(embedding),
-                        topK * 2,
-                      ),
-                    catch: (error) => error,
-                  });
+                  // Tradeoff (R1a + expanding window): a single global window of the
+                  // nearest `topK * 2` neighbours can yield fewer than topK in-scope
+                  // rows when the nearest neighbours are mostly expired or
+                  // other-pool, so the window EXPANDS — k doubles (capped at maxK)
+                  // over at most three re-queries — until topK in-scope rows are
+                  // found or the cap is hit. This restores parity with the old SQL
+                  // WHERE pre-filter in realistic cases; only genuine corner cases
+                  // (a table dominated by expired/other-pool rows beyond the maxK
+                  // nearest neighbours) fail-soft with fewer rows. Recency-blend
+                  // ranking and ORDER BY distance are preserved exactly.
+                  const maxK = Math.max(topK * 8, 64);
+                  let k = topK * 2;
+                  let candidates: Record<string, unknown>[] = [];
+                  for (let expansion = 0; expansion < 4; expansion += 1) {
+                    const rows = yield* Effect.try({
+                      try: () =>
+                        queryAll<Record<string, unknown>>(
+                          db,
+                          `SELECT
+                      id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
+                      distance
+                     FROM vec_memory
+                     WHERE embedding MATCH ? AND k = ?
+                      ORDER BY distance`,
+                          JSON.stringify(embedding),
+                          k,
+                        ),
+                      catch: (error) => error,
+                    });
+                    candidates = rows
+                      .filter((row) => Number(row.expiresAt ?? 0) > now)
+                      .filter((row) =>
+                        poolAddress ? String(row.pool_address ?? "") === poolAddress : true,
+                      );
+                    if (candidates.length >= topK || k >= maxK) break;
+                    k = Math.min(k * 2, maxK);
+                  }
 
                   const RECENCY_HALFLIFE_MS = 30 * 24 * 60 * 60 * 1000;
-                  const ranked = rows
-                    .filter((row) => Number(row.expiresAt ?? 0) > now)
-                    .filter((row) =>
-                      poolAddress ? String(row.pool_address ?? "") === poolAddress : true,
-                    )
+                  const ranked = candidates
                     .map((row) => {
                       const rawDistance = row.distance;
                       const distance =

@@ -217,4 +217,64 @@ describe("token-risk-service", () => {
     expect(calls).toBe(1);
     expect(second.has(novelMint)).toBe(false);
   });
+
+  it("(10) fetchTokenRisks rejects when a 200 response body is a JSON object (non-array)", async () => {
+    // A CDN/intermediary returning HTTP 200 with an error object must be a
+    // failure, not an empty success — an empty success would negative-cache
+    // every requested mint (dropping cached isSus for the whole TTL).
+    const objectBodyFetch: FetchLike = async () =>
+      new Response(JSON.stringify({ error: "maintenance" }), { status: 200 });
+
+    await expect(fetchTokenRisks([USDC_MINT], { fetchImpl: objectBodyFetch })).rejects.toThrow(
+      /non-array/,
+    );
+  });
+
+  it("(11) a malformed 200-body refresh serves the stale isSus signal and never negative-caches", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const t0 = Date.now();
+
+      // Given: the mint is cached as suspicious via a successful fetch.
+      const seeded = await consultTokenRisks([USDC_MINT], ENABLED, {
+        fetchImpl: okFetch([{ address: USDC_MINT, audit: { isSus: true } }]),
+      });
+      expect(seeded.get(USDC_MINT)?.isSus).toBe(true);
+
+      // Expire the entry so the next consult must re-fetch it.
+      vi.setSystemTime(t0 + 31 * 60_000);
+
+      let calls = 0;
+      const malformedFetch: FetchLike = async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ error: "maintenance" }), { status: 200 });
+      };
+
+      // When: the refresh comes back as a 200 non-array body → fetch fails →
+      // consult fail-opens with the stale signal (no throw).
+      const stale = await consultTokenRisks([USDC_MINT], ENABLED, { fetchImpl: malformedFetch });
+      expect(calls).toBe(1);
+      expect(stale.get(USDC_MINT)?.isSus).toBe(true);
+
+      // Then: the mint was NOT negative-cached — a subsequent successful
+      // refresh (still past the original TTL) reaches the network again and
+      // updates the signal normally instead of being served as "unknown".
+      vi.setSystemTime(t0 + 32 * 60_000);
+      let refreshCalls = 0;
+      const refreshFetch: FetchLike = async () => {
+        refreshCalls += 1;
+        return new Response(JSON.stringify([{ address: USDC_MINT, isVerified: true }]), {
+          status: 200,
+        });
+      };
+      const refreshed = await consultTokenRisks([USDC_MINT], ENABLED, {
+        fetchImpl: refreshFetch,
+      });
+      expect(refreshCalls).toBe(1);
+      expect(refreshed.get(USDC_MINT)?.isVerified).toBe(true);
+      expect(refreshed.get(USDC_MINT)?.isSus).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
