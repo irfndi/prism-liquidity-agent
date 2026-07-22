@@ -1527,6 +1527,9 @@ describe("program — multiple positions per pool", () => {
     const closedA = closed[0]!;
     expect(closedA.closedAt).not.toBeNull();
     // Realized PnL = final value (500 after the 50% IL-drift estimate) − basis.
+    // A4 paper fee accrual is active for this pool (fees24h 300 > 0) but A is
+    // OUT of range (inRange = 0) so it accrued nothing — this −500 realized pin
+    // is unaffected by the accrual.
     expect(closedA.realizedPnlUsd).toBeCloseTo(-500, 0);
     // A's OOR cycles accumulated independently; B never left range.
     expect(closedA.oorCycleCount).toBeGreaterThanOrEqual(1);
@@ -1538,13 +1541,90 @@ describe("program — multiple positions per pool", () => {
     expect(active[0]!.entryAmountXUsd).toBe(400);
     expect(active[0]!.entryAmountYUsd).toBe(400);
 
-    // The EXIT event targets A's identity; B has no events at all.
+    // The EXIT event targets A's identity. B is in range with fees24h 300 > 0,
+    // so the A4 paper notional-fee accrual booked exactly one CLAIM (kind
+    // paper_accrual); B has NO lifecycle events (no ENTER/REBALANCE/EXIT).
     const exitEvents = events.filter((e) => e.event === "EXIT");
     expect(exitEvents).toHaveLength(1);
     expect(exitEvents[0]!.positionId).toBe("seeded-A");
-    expect(events.filter((e) => e.positionId === "seeded-B")).toHaveLength(0);
+    const bEvents = events.filter((e) => e.positionId === "seeded-B");
+    expect(bEvents).toHaveLength(1);
+    expect(bEvents[0]!.event).toBe("CLAIM");
+    expect(JSON.parse(bEvents[0]!.metadata ?? "{}").kind).toBe("paper_accrual");
 
     const executedExits = decisions.filter((d) => d.action === "EXIT" && d.executed);
     expect(executedExits.length).toBeGreaterThanOrEqual(1);
+  }, 15_000);
+});
+
+describe("A4 paper fee accrual requires Data API stats (statsSource)", () => {
+  // When Data API enrichment is down, getPoolState ships a POSITIVE modeled
+  // fees24hUsd under statsSource "heuristic" — every A4 numeric guard (null /
+  // <= 0 / non-finite / in-range / TVL) still passes. Accrual must be gated on
+  // pool.statsSource === "datapi" so heuristic cycles book no fabricated fee.
+  const POS_ID = "paper-accr";
+
+  async function runAccrualCycle(opts: {
+    statsSource: "datapi" | "heuristic";
+    datapi?: MeteoraDatapiApi;
+  }): Promise<{ accruals: ReadonlyArray<{ feesUsd: number | null }>; accruedUsd: number }> {
+    const layer = makeProgramLayer({
+      // Positive modeled fees + in-range paper position: the numeric A4 guards
+      // all pass, so ONLY the statsSource gate decides whether accrual happens.
+      adapter: makeProgramAdapter({
+        [POOL]: makePool({ address: POOL, fees24hUsd: 400, statsSource: opts.statsSource }),
+      }),
+      ...(opts.datapi !== undefined ? { datapi: opts.datapi } : {}),
+      configOverrides: {
+        watchlistPools: [POOL],
+        paperTrading: true,
+        scanIntervalMs: 600_000,
+      },
+    });
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(
+        makePos({ positionId: POS_ID, lowerBinId: 4980, upperBinId: 5020 }),
+      );
+      yield* Effect.raceFirst(program, Effect.sleep(1_500));
+      const events = yield* db.getPositionEvents(POOL);
+      const pos = yield* db.getPosition(POS_ID);
+      const accruals = events
+        .filter(
+          (e) =>
+            e.positionId === POS_ID &&
+            e.event === "CLAIM" &&
+            JSON.parse(e.metadata ?? "{}").kind === "paper_accrual",
+        )
+        .map((e) => ({ feesUsd: e.feesUsd }));
+      return { accruals, accruedUsd: pos?.cumulativeFeesClaimedUsd ?? 0 };
+    });
+    return Effect.runPromise(
+      Effect.provide(test, layer) as Effect.Effect<
+        { accruals: ReadonlyArray<{ feesUsd: number | null }>; accruedUsd: number },
+        unknown,
+        never
+      >,
+    );
+  }
+
+  it("a heuristic pool with a positive modeled fees24hUsd accrues NOTHING", async () => {
+    const { accruals, accruedUsd } = await runAccrualCycle({ statsSource: "heuristic" });
+    expect(
+      accruals,
+      "heuristic stats must never produce fabricated paper CLAIM income",
+    ).toHaveLength(0);
+    expect(accruedUsd).toBe(0);
+  }, 15_000);
+
+  it("the same pool with Data API stats accrues exactly one notional fee (control)", async () => {
+    // Enrichment flips statsSource to "datapi" over the heuristic base pool,
+    // proving the gate keys off the REAL fee source, not the modeled one.
+    const { accruals, accruedUsd } = await runAccrualCycle({
+      statsSource: "heuristic",
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+    });
+    expect(accruals, "datapi enrichment must enable the notional accrual").toHaveLength(1);
+    expect(accruedUsd).toBeGreaterThan(0);
   }, 15_000);
 });

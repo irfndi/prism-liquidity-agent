@@ -11,6 +11,8 @@ import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountInstruction,
   createTransferInstruction,
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
 } from "@solana/spl-token";
 import DLMM, {
   buildLiquidityStrategyParameters,
@@ -154,7 +156,28 @@ function formatTokenAmount(amount: bigint, decimals: number): string {
   return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
 }
 
+/** Convert atomic token amounts to decimal units without Number() precision
+ * loss above 2^53: split into whole + fractional bigint parts and compose. */
+export function atomicToUnits(amountAtomic: bigint, decimals: number): number {
+  const base = 10n ** BigInt(decimals);
+  const whole = amountAtomic / base;
+  const frac = amountAtomic % base;
+  return Number(whole) + Number(frac) / Number(base);
+}
 const logger = createLogger("adapter-service");
+
+// Mints we have already warned about for being unpriceable during wallet
+// reconciliation. A perpetually-unpriceable token (e.g. a dust ATA with no
+// price feed) warns once per process instead of every scan cycle.
+const warnedUnpricedWalletMints = new Set<string>();
+function warnUnpricedWalletMintOnce(mint: string): void {
+  if (warnedUnpricedWalletMints.has(mint)) return;
+  warnedUnpricedWalletMints.add(mint);
+  logger.warn(
+    "Wallet token has no resolvable USD price — excluded from wallet balance (fail-closed)",
+    { mint },
+  );
+}
 
 // ─── Meteora DLMM Data API response shape ────────────────────────────────────
 // Mirrors the schema in https://dlmm.datapi.meteora.ag/openapi.json (the file
@@ -856,7 +879,13 @@ export const AdapterLive = Layer.effect(
 
     function fetchTokenPrices(
       mints: ReadonlyArray<string>,
+      opts?: { readonly useFallback?: boolean },
     ): Effect.Effect<Record<string, number>, unknown> {
+      // When useFallback is false, an unresolved mint resolves to 0 instead of
+      // its hardcoded fallback price. The wallet reconciliation path opts out
+      // of fallbacks (a fallback SOL price is how the wallet over-reported),
+      // and treats 0 as "unresolvable" so it can skip the token fail-closed.
+      const useFallback = opts?.useFallback ?? true;
       return Effect.gen(function* () {
         const prices: Record<string, number> = {};
         const missing: string[] = [];
@@ -876,7 +905,7 @@ export const AdapterLive = Layer.effect(
           const missFetchedAt = negativePriceCache.get(mint);
           if (missFetchedAt !== undefined) {
             if (Date.now() - missFetchedAt < PRICE_MISS_CACHE_TTL_MS) {
-              prices[mint] = fallbackPrices[mint] ?? 0;
+              prices[mint] = useFallback ? (fallbackPrices[mint] ?? 0) : 0;
               continue;
             }
             negativePriceCache.delete(mint);
@@ -923,7 +952,7 @@ export const AdapterLive = Layer.effect(
 
         for (const mint of unresolved) {
           negativePriceCache.set(mint, Date.now());
-          prices[mint] = fallbackPrices[mint] ?? 0;
+          prices[mint] = useFallback ? (fallbackPrices[mint] ?? 0) : 0;
         }
 
         return prices;
@@ -985,11 +1014,78 @@ export const AdapterLive = Layer.effect(
     function readWalletBalanceUsd(): Effect.Effect<number, unknown> {
       return Effect.gen(function* () {
         if (!wallet) return 0;
+
+        // Native SOL lamports — the system account, read separately from any
+        // wrapped-SOL (wSOL) token accounts below. The two live in distinct
+        // storage, so they never double-count.
         const lamports = Number(yield* readNativeSolBalance());
-        const prices = yield* fetchTokenPrices([SOL_MINT]);
-        const solPrice = prices[SOL_MINT] ?? fallbackPrices[SOL_MINT] ?? 0;
-        const usdcRaw = yield* readTokenBalance(USDC_MINT);
-        return (lamports / 1e9) * solPrice + Number(usdcRaw) / 1e6;
+
+        // Reconcile EVERY SPL token account the wallet holds, across both the
+        // legacy Token Program and Token-2022. Two unfiltered reads (no mint
+        // filter) capture all ATAs — pool-token residues, single-sided-entry
+        // leftovers, reward mints and wSOL ATAs — which the old SOL+USDC-only
+        // read left invisible. Amounts accumulate per mint.
+        const held = new Map<string, { amountAtomic: bigint; decimals: number }>();
+        for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+          const accounts = yield* rpcCall((conn) =>
+            conn.getParsedTokenAccountsByOwner(wallet.publicKey, { programId }),
+          );
+          for (const account of accounts.value) {
+            const data = account.account.data;
+            if (!isObject(data)) continue;
+            const parsed = data["parsed"];
+            if (!isObject(parsed)) continue;
+            const info = parsed["info"];
+            if (!isObject(info)) continue;
+            const mint = info["mint"];
+            if (typeof mint !== "string") continue;
+            const tokenAmount = info["tokenAmount"];
+            if (!isObject(tokenAmount)) continue;
+            const amountRaw = tokenAmount["amount"];
+            const decimals = tokenAmount["decimals"];
+            if (typeof amountRaw !== "string" || typeof decimals !== "number") continue;
+            if (!/^\d+$/.test(amountRaw)) continue;
+            const amountAtomic = BigInt(amountRaw);
+            if (amountAtomic <= 0n) continue; // skip empty / rent-only ATAs
+            const existing = held.get(mint);
+            if (existing) existing.amountAtomic += amountAtomic;
+            else held.set(mint, { amountAtomic, decimals });
+          }
+        }
+
+        // Price every discovered mint plus native SOL in ONE batched call.
+        // useFallback: false — an unresolvable price becomes 0 below (never a
+        // hardcoded fallback), so the valuation can skip it fail-closed.
+        const allMints = [...new Set([...held.keys(), SOL_MINT])];
+        const prices = yield* fetchTokenPrices(allMints, { useFallback: false });
+
+        // FAIL-CLOSED valuation: there is deliberately NO fallback price here.
+        // The old path valued unresolved SOL at a hardcoded $165, which is how
+        // a SOL-heavy wallet over-reported by ~$27. A token with no resolvable
+        // USD price is SKIPPED with a one-time warn: shrinking the measured
+        // portfolio only pauses new entries — EXITs stay free, so capital is
+        // protected, and sizing keeps its own min floor.
+        let totalUsd = 0;
+
+        const solPrice = prices[SOL_MINT];
+        if (lamports > 0) {
+          if (typeof solPrice === "number" && solPrice > 0) {
+            totalUsd += (lamports / 1e9) * solPrice;
+          } else {
+            warnUnpricedWalletMintOnce(SOL_MINT);
+          }
+        }
+
+        for (const [mint, balance] of held) {
+          const price = prices[mint];
+          if (typeof price !== "number" || price <= 0) {
+            warnUnpricedWalletMintOnce(mint);
+            continue;
+          }
+          totalUsd += atomicToUnits(balance.amountAtomic, balance.decimals) * price;
+        }
+
+        return totalUsd;
       });
     }
 
@@ -1791,8 +1887,11 @@ export const AdapterLive = Layer.effect(
             }),
           );
 
-          yield* invalidateBalanceCaches;
+          // Invalidate AFTER confirmation, like every other tx path. Invalidating
+          // before the tx lands re-fills the cache with the pre-entry balance and
+          // keeps serving that stale value for the whole 30s TTL.
           yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
+          yield* invalidateBalanceCaches;
 
           return {
             positionPubKey: positionKeypair.publicKey.toBase58(),
@@ -1827,8 +1926,25 @@ export const AdapterLive = Layer.effect(
           const dlmm = yield* getDlmm(poolAddress);
 
           const position = yield* Effect.tryPromise(() => dlmm.getPosition(positionPubkey));
-          const lowerBinId = position.positionData.lowerBinId;
-          const upperBinId = position.positionData.upperBinId;
+          const positionData = position.positionData;
+          const lowerBinId = positionData.lowerBinId;
+          const upperBinId = positionData.upperBinId;
+
+          // Pre-close snapshot of the exact on-chain amounts about to be
+          // withdrawn. The close batch (`shouldClaimAndClose`) sweeps these
+          // accrued swap fees AND LM rewards on-chain, so withdrawn =
+          // principal + pending fees. The *ExcludeTransferFee variants equal
+          // gross for plain SPL and are correct (net-of-fee) for token-2022.
+          const withdrawnXAtomic = positionData.totalXAmountExcludeTransferFee
+            .add(positionData.feeXExcludeTransferFee)
+            .toString();
+          const withdrawnYAtomic = positionData.totalYAmountExcludeTransferFee
+            .add(positionData.feeYExcludeTransferFee)
+            .toString();
+          const pendingFeeXAtomic = positionData.feeXExcludeTransferFee.toString();
+          const pendingFeeYAtomic = positionData.feeYExcludeTransferFee.toString();
+          const rewardOneAtomic = positionData.rewardOneExcludeTransferFee;
+          const rewardTwoAtomic = positionData.rewardTwoExcludeTransferFee;
 
           const txs = yield* Effect.tryPromise(() =>
             dlmm.removeLiquidity({
@@ -1857,7 +1973,101 @@ export const AdapterLive = Layer.effect(
           }
           yield* invalidateBalanceCaches;
 
-          return { txSignature: "batch-confirmed" };
+          // USD pricing is best-effort and runs ONLY after the close txs land —
+          // it must never abort or delay removing bleeding liquidity. Any
+          // failure resolves the USD legs to null (never 0, never the mark) so
+          // the caller books a NULL realized PnL; atomics are always returned.
+          const accounting = yield* Effect.gen(function* () {
+            const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
+            const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
+            const decimalsX = dlmm.tokenX.mint.decimals;
+            const decimalsY = dlmm.tokenY.mint.decimals;
+
+            const rewardInfos = dlmm.lbPair.rewardInfos;
+            const mintOf = (mint: PublicKey | undefined): string | null => {
+              const base58 = mint?.toBase58();
+              return base58 != null && base58 !== DEFAULT_PUBLIC_KEY ? base58 : null;
+            };
+            const rewardSlots = [
+              { mint: mintOf(rewardInfos[0]?.mint), amountAtomic: Number(rewardOneAtomic.toString()) },
+              { mint: mintOf(rewardInfos[1]?.mint), amountAtomic: Number(rewardTwoAtomic.toString()) },
+            ].filter((s) => Number.isFinite(s.amountAtomic) && s.amountAtomic > 0);
+
+            const priceMints = [
+              tokenXMint,
+              tokenYMint,
+              ...rewardSlots.map((s) => s.mint).filter((m): m is string => m != null),
+            ];
+            // useFallback: false — the static $165/$1 fallback map must NOT pass
+            // the all-or-nothing gate here, or a FABRICATED realized would be
+            // booked instead of NULL. This batch prices the withdraw legs, the
+            // pending-fee legs AND the swept-reward mints, so the opt-out covers
+            // every ledger-booking input at once (mirrors the wallet path).
+            const prices = yield* fetchTokenPrices(priceMints, { useFallback: false }).pipe(
+              Effect.catchAll(() => Effect.succeed({} as Record<string, number>)),
+            );
+
+            // All-or-nothing on the withdrawn/pending legs: ANY unresolved leg
+            // price poisons both (a partial USD value would mis-state realized
+            // PnL). price<=0 (incl. the negative-cache 0) counts as unresolved.
+            const priceX = prices[tokenXMint];
+            const priceY = prices[tokenYMint];
+            let withdrawnUsd: number | null = null;
+            let pendingFeeUsd: number | null = null;
+            if (priceX != null && priceX > 0 && priceY != null && priceY > 0) {
+              withdrawnUsd =
+                atomicToUnits(BigInt(withdrawnXAtomic), decimalsX) * priceX +
+                atomicToUnits(BigInt(withdrawnYAtomic), decimalsY) * priceY;
+              pendingFeeUsd =
+                atomicToUnits(BigInt(pendingFeeXAtomic), decimalsX) * priceX +
+                atomicToUnits(BigInt(pendingFeeYAtomic), decimalsY) * priceY;
+            }
+
+            // Reward slots price independently (mirror claimRewards): an
+            // unpriceable slot records amountUsd null, never blocks the exit.
+            const sweptRewards: ClaimedReward[] = [];
+            for (const slot of rewardSlots) {
+              let amountUsd: number | null = null;
+              if (slot.mint != null) {
+                const price = prices[slot.mint];
+                if (price != null && price > 0) {
+                  const decimals = yield* getTokenMeta(slot.mint).pipe(
+                    Effect.map((m) => m.decimals),
+                    Effect.catchAll(() => Effect.succeed(null)),
+                  );
+                  if (decimals != null) {
+                    amountUsd = atomicToUnits(BigInt(slot.amountAtomic), decimals) * price;
+                  }
+                }
+              }
+              sweptRewards.push({
+                mint: slot.mint ?? "unknown",
+                amountAtomic: slot.amountAtomic,
+                amountUsd,
+              });
+            }
+
+            return { withdrawnUsd, pendingFeeUsd, sweptRewards };
+          }).pipe(
+            Effect.catchAll(() =>
+              Effect.succeed({
+                withdrawnUsd: null as number | null,
+                pendingFeeUsd: null as number | null,
+                sweptRewards: [] as ClaimedReward[],
+              }),
+            ),
+          );
+
+          return {
+            txSignature: "batch-confirmed",
+            withdrawnXAtomic,
+            withdrawnYAtomic,
+            withdrawnUsd: accounting.withdrawnUsd,
+            pendingFeeXAtomic,
+            pendingFeeYAtomic,
+            pendingFeeUsd: accounting.pendingFeeUsd,
+            sweptRewards: accounting.sweptRewards,
+          };
         }).pipe(
           Effect.catchAll((err: unknown) =>
             Effect.fail(
@@ -2086,6 +2296,7 @@ export const AdapterLive = Layer.effect(
               platformFeeY: 0,
               netFeeX: 0,
               netFeeY: 0,
+              netFeesUsd: 0,
             };
           }
 
@@ -2107,6 +2318,7 @@ export const AdapterLive = Layer.effect(
               platformFeeY: 0,
               netFeeX: 0,
               netFeeY: 0,
+              netFeesUsd: 0,
             };
           }
 
@@ -2218,14 +2430,42 @@ export const AdapterLive = Layer.effect(
           yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
           yield* invalidateBalanceCaches;
 
+          const netFeeX = feeX - actualPlatformFeeX;
+          const netFeeY = feeY - actualPlatformFeeY;
+          // Mint-based USD of the NET claim, priced here where dlmm + mints +
+          // decimals are in scope (mirrors simulateRebalance). Null when
+          // either leg is unpriceable so callers fail the compound gate closed
+          // instead of booking a symbol-based mis-estimate. Pricing is
+          // best-effort and must not fail an already-confirmed claim.
+          const netFeesUsd = yield* Effect.gen(function* () {
+            const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
+            const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
+            // useFallback: false — netFeesUsd books into cumulativeFeesClaimedUsd
+            // (the compound gate input), so it carries the same ledger-booking
+            // responsibility as the exit path: a $165/$1 fallback fabrication
+            // here would compound on phantom value. Unresolvable → null → caller
+            // `?? 0` → the compound gate fails closed instead of booking fiction.
+            const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint], {
+              useFallback: false,
+            }).pipe(Effect.catchAll(() => Effect.succeed({} as Record<string, number>)));
+            const priceX = prices[tokenXMint];
+            const priceY = prices[tokenYMint];
+            if (priceX == null || priceX <= 0 || priceY == null || priceY <= 0) return null;
+            return (
+              (netFeeX / 10 ** dlmm.tokenX.mint.decimals) * priceX +
+              (netFeeY / 10 ** dlmm.tokenY.mint.decimals) * priceY
+            );
+          }).pipe(Effect.catchAll(() => Effect.succeed(null as number | null)));
+
           return {
             txSignature: signature,
             feeX,
             feeY,
             platformFeeX: actualPlatformFeeX,
             platformFeeY: actualPlatformFeeY,
-            netFeeX: feeX - actualPlatformFeeX,
-            netFeeY: feeY - actualPlatformFeeY,
+            netFeeX,
+            netFeeY,
+            netFeesUsd,
             ...(transferInstructions.length > 0 ? { feeTransferTxSignature: signature } : {}),
             ...(actualOperatorFeeX > 0 || actualOperatorFeeY > 0
               ? { operatorFeeX: actualOperatorFeeX, operatorFeeY: actualOperatorFeeY }
