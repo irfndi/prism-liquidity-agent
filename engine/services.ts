@@ -130,10 +130,44 @@ export interface AdapterApi {
     },
     unknown
   >;
+  /**
+   * Close a live position via the SDK's `removeLiquidity` (full-withdraw +
+   * `shouldClaimAndClose`, which claims accrued swap fees AND LM rewards
+   * on-chain in the same batch). All accounting fields are OPTIONAL so the
+   * ~16 loop-level mocks that return bare `{txSignature}` compile unchanged —
+   * absent amounts mean "unresolved" to the caller, which records a NULL
+   * realized PnL rather than a fabricated value.
+   *
+   * - `withdrawnXAtomic`/`withdrawnYAtomic`: withdrawn principal + swept fees,
+   *   read from the pre-close position snapshot (the `*ExcludeTransferFee`
+   *   variants — identical to gross for plain SPL, correct for token-2022).
+   * - `withdrawnUsd`: mint-based USD of the withdrawn legs; `null` when ANY
+   *   leg is unpriceable (fail-closed — never 0, never the last mark).
+   * - `pendingFeeXAtomic`/`pendingFeeYAtomic`/`pendingFeeUsd`: the unclaimed
+   *   swap fees the close batch sweeps, priced the same all-or-nothing way.
+   * - `sweptRewards`: LM rewards the close batch claims, priced per
+   *   `claimRewards` semantics (unpriceable slot → `amountUsd: null`).
+   *
+   * Pricing runs under `catchAll → null` and must NEVER abort or delay the
+   * removeLiquidity transactions — closing bleeding liquidity outranks the
+   * ledger. Atomic amounts are always returned even when USD pricing fails.
+   */
   readonly exitPosition: (
     poolAddress: string,
     positionPubKey: string,
-  ) => Effect.Effect<{ txSignature: string }, unknown>;
+  ) => Effect.Effect<
+    {
+      txSignature: string;
+      withdrawnXAtomic?: string | undefined;
+      withdrawnYAtomic?: string | undefined;
+      withdrawnUsd?: number | null | undefined;
+      pendingFeeXAtomic?: string | undefined;
+      pendingFeeYAtomic?: string | undefined;
+      pendingFeeUsd?: number | null | undefined;
+      sweptRewards?: ReadonlyArray<ClaimedReward> | undefined;
+    },
+    unknown
+  >;
   readonly placeLimitOrder?: (
     poolAddress: string,
     request: LimitOrderRequest,
@@ -184,6 +218,16 @@ export interface AdapterApi {
       feeTransferTxSignature?: string;
       operatorFeeX?: number;
       operatorFeeY?: number;
+      /**
+       * Mint-based USD value of the NET claimed fees (the adapter has dlmm +
+       * mints + decimals in scope — mirrors simulateRebalance). `null` when
+       * either leg is unpriceable (fail-closed); the zero-fee shortcut returns
+       * 0. Callers consume `netFeesUsd ?? 0` so an unpriceable claim fails the
+       * compound gate closed instead of booking a symbol-based mis-estimate.
+       * Optional so existing claimFees mocks compile unchanged; callers read
+       * `netFeesUsd ?? 0`.
+       */
+      netFeesUsd?: number | null;
     },
     unknown
   >;

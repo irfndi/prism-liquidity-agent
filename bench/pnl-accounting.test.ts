@@ -13,7 +13,7 @@ import {
   type RevenueConfigApi,
   type EntryPrepApi,
 } from "../engine/services.js";
-import { executePaper, executeLive } from "../engine/program.js";
+import { executePaper, executeLive, computePaperFeeAccrualUsd } from "../engine/program.js";
 import {
   applyCompoundToCostBasis,
   computeFeeAprPct,
@@ -696,6 +696,7 @@ function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
         platformFeeY: 0,
         netFeeX: 0,
         netFeeY: 25_000_000,
+        netFeesUsd: 25, // mint-based USD of the net claim
       }),
     claimRewards: () =>
       Effect.succeed({
@@ -715,6 +716,28 @@ function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
     getMintAuthorities: () => Effect.succeed({ mintAuthority: null, freezeAuthority: null }),
     ...overrides,
   } as AdapterApi;
+}
+
+type ExitResult = Effect.Effect.Success<ReturnType<AdapterApi["exitPosition"]>>;
+
+/**
+ * Full-contract `exitPosition` result with neutral defaults. Absent amounts
+ * mean "unresolved" to the program (NULL realized path), so tests that assert
+ * a concrete realized value MUST override `withdrawnUsd` (and any swept fees /
+ * rewards) — this mirrors the real adapter's fail-closed pricing.
+ */
+function exitResult(overrides: Partial<ExitResult> = {}): ExitResult {
+  return {
+    txSignature: "tx-exit",
+    withdrawnXAtomic: "0",
+    withdrawnYAtomic: "0",
+    withdrawnUsd: null,
+    pendingFeeXAtomic: "0",
+    pendingFeeYAtomic: "0",
+    pendingFeeUsd: null,
+    sweptRewards: [],
+    ...overrides,
+  };
 }
 
 const liveStrategy: StrategyApi = {
@@ -755,28 +778,41 @@ const liveEntryPrep: EntryPrepApi = { prepareEntryTokens: () => Effect.void };
 describe("live lifecycle PnL accounting", () => {
   it("ENTER stores entry basis; REBALANCE inline claim accumulates fees + events; EXIT realizes PnL", async () => {
     const layer = DbLive(":memory:");
-    const trackedPositions = new Map<string, PositionRecord>();
-    const pool = {
-      activeBinId: 5000,
-      binStep: 10,
-      tokenXSymbol: "SOL",
-      tokenYSymbol: "USDC",
-      currentPrice: 100,
-    };
-
-    const outcome = await runDb(
-      Effect.gen(function* () {
-        const db = yield* DbService;
-        const deps = {
-          adapter: makeLiveAdapter(),
-          strategy: liveStrategy,
-          db,
-          revenueConfigSvc: liveRevenueConfig,
-          trackedPositions,
-          entryPrep: liveEntryPrep,
-          solPriceUsd: 150,
-          entryStrategyShape: "spot" as const,
+        const trackedPositions = new Map<string, PositionRecord>();
+        const pool = {
+          activeBinId: 5000,
+          binStep: 10,
+          tokenXSymbol: "SOL",
+          tokenYSymbol: "USDC",
+          currentPrice: 100,
         };
+
+        const outcome = await runDb(
+          Effect.gen(function* () {
+            const db = yield* DbService;
+            const deps = {
+              // The REBALANCE claimed the $25 inline (netFeesUsd: 25). At EXIT
+              // the position's withdrawn value is $1100 with NO new pending fees
+              // (they were already swept by the rebalance claim) → realized =
+              // 1100 + 25 (prior) − 1000 (basis) = 125.
+              adapter: makeLiveAdapter({
+                exitPosition: () =>
+                  Effect.succeed(
+                    exitResult({
+                      withdrawnUsd: 1100,
+                      withdrawnXAtomic: "11000000000",
+                      pendingFeeUsd: 0,
+                    }),
+                  ),
+              }),
+              strategy: liveStrategy,
+              db,
+              revenueConfigSvc: liveRevenueConfig,
+              trackedPositions,
+              entryPrep: liveEntryPrep,
+              solPriceUsd: 150,
+              entryStrategyShape: "spot" as const,
+            };
 
         // 1. ENTER $1000 at price 100.
         const enter = yield* executeLive(
@@ -855,5 +891,336 @@ describe("live lifecycle PnL accounting", () => {
     expect(claimEvent.feesUsd).toBeCloseTo(25, 8);
     const rebalanceEvent = outcome.events[2]!;
     expect(rebalanceEvent.metadata).toContain("4990");
+  });
+
+  // ── Exit-sweep realized-PnL accounting (Oracle-locked ordering) ─────────
+  //
+  // Each scenario ENTERs a live $1000 position (500/500 @ price 100, basis
+  // 1000), optionally seeds prior fee/compound state, then EXITs with a
+  // full-contract exitPosition result and asserts the realized economics.
+
+  async function runLiveExitScenario(options: {
+    exit: ExitResult;
+    seed?: (pos: PositionRecord) => void;
+  }) {
+    const layer = DbLive(":memory:");
+    const trackedPositions = new Map<string, PositionRecord>();
+    const pool = {
+      activeBinId: 5000,
+      binStep: 10,
+      tokenXSymbol: "SOL",
+      tokenYSymbol: "USDC",
+      currentPrice: 100,
+    };
+    return runDb(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const deps = {
+          adapter: makeLiveAdapter({ exitPosition: () => Effect.succeed(options.exit) }),
+          strategy: liveStrategy,
+          db,
+          revenueConfigSvc: liveRevenueConfig,
+          trackedPositions,
+          entryPrep: liveEntryPrep,
+          solPriceUsd: 150,
+          entryStrategyShape: "spot" as const,
+        };
+        const enter = yield* executeLive(
+          deps,
+          { action: "ENTER", poolAddress: "pool1", confidence: 0.8, reasoning: "entry", positionSizeUsd: 1000 },
+          pool,
+        );
+        expect(enter.executed).toBe(true);
+        const pos = trackedPositions.get("pos-1")!;
+        if (options.seed) options.seed(pos);
+        yield* db.savePosition(pos);
+        const exit = yield* executeLive(
+          deps,
+          { action: "EXIT", poolAddress: "pool1", confidence: 0.9, reasoning: "exit" },
+          pool,
+        );
+        expect(exit.executed).toBe(true);
+        const closed = yield* db.getClosedPositions();
+        const events = yield* db.getPositionEvents("pool1");
+        const feeClaims = yield* db.getUnreportedFeeClaims();
+        return { closed, events, feeClaims };
+      }),
+      layer,
+    );
+  }
+
+  it("exit before the claim gate sweeps unclaimed fees into realized PnL (the live-bug pin)", async () => {
+    // Position accrued $25 of fees but was exited before the 24h claim gate,
+    // so cumulativeFeesClaimedUsd is still 0. withdrawn = principal + the $25
+    // swept at close → realized = 1025 + 0 − 1000 = 25 = pendingFeeUsd.
+    const outcome = await runLiveExitScenario({
+      exit: exitResult({
+        withdrawnUsd: 1025,
+        withdrawnXAtomic: "5000000000",
+        withdrawnYAtomic: "525000000",
+        pendingFeeYAtomic: "25000000", // 25 USDC (6 decimals)
+        pendingFeeUsd: 25,
+      }),
+    });
+
+    const closed = outcome.closed[0]!;
+    expect(closed.realizedPnlUsd).toBeCloseTo(25, 8);
+
+    const exitEvent = outcome.events.find((e) => e.event === "EXIT")!;
+    expect(exitEvent.feesUsd).toBeCloseTo(25, 8); // post-credit lifetime fees ≠ 0
+    expect(exitEvent.valueUsd).toBeCloseTo(1025, 8);
+
+    // A fee-claim record tagged as an exit sweep (CLAIM event + fee_claims row).
+    const sweepClaim = outcome.events.find(
+      (e) => e.event === "CLAIM" && JSON.parse(e.metadata ?? "{}").kind === "exit_sweep",
+    )!;
+    expect(sweepClaim).toBeDefined();
+    expect(sweepClaim.feesUsd).toBeCloseTo(25, 8);
+    expect(outcome.feeClaims.some((c) => c.txSignature?.startsWith("exit-sweep:"))).toBe(true);
+  });
+
+  it("exit after a prior claim realizes prior + swept fees; the sweep records only the new fees", async () => {
+    // Prior claim F1 = $10 already in cumulativeFeesClaimedUsd. At exit, $25
+    // more (F2) is unclaimed and swept. realized = withdrawn(1025) + F1(10) −
+    // basis(1000) = 35 = F1 + F2.
+    const outcome = await runLiveExitScenario({
+      seed: (pos) => {
+        pos.cumulativeFeesClaimedUsd = 10;
+      },
+      exit: exitResult({
+        withdrawnUsd: 1025,
+        withdrawnXAtomic: "5000000000",
+        withdrawnYAtomic: "25000000",
+        pendingFeeYAtomic: "25000000",
+        pendingFeeUsd: 25,
+      }),
+    });
+
+    const closed = outcome.closed[0]!;
+    expect(closed.realizedPnlUsd).toBeCloseTo(35, 8);
+    expect(closed.cumulativeFeesClaimedUsd).toBeCloseTo(35, 8); // 10 prior + 25 swept
+
+    const sweepClaim = outcome.events.find(
+      (e) => e.event === "CLAIM" && JSON.parse(e.metadata ?? "{}").kind === "exit_sweep",
+    )!;
+    expect(sweepClaim.feesUsd).toBeCloseTo(25, 8); // sweep records F2 only
+  });
+
+  it("exit after compounding realizes F1+F2 exactly once, never F1+2F2", async () => {
+    // F1 = $10 was claimed AND recompounded: basis rises 1000 → 1010 and the
+    // $10 is in cumulativeFeesClaimedUsd. At exit $25 more (F2) is swept.
+    // withdrawn = 1035 (principal incl. recompounded F1 + F2).
+    // realized = 1035 + 10 (prior) − 1010 (basis) = 35 = F1 + F2.
+    // The pre-crediting regression would give 1035 + (10+25) − 1010 = 60.
+    const outcome = await runLiveExitScenario({
+      seed: (pos) => {
+        const compounded = applyCompoundToCostBasis({
+          depositedUsd: pos.depositedUsd,
+          currentValueUsd: pos.currentValueUsd,
+          highestValueUsd: pos.highestValueUsd,
+          compoundedFeesUsd: 10,
+        });
+        pos.depositedUsd = compounded.depositedUsd; // 1010
+        pos.currentValueUsd = compounded.currentValueUsd;
+        pos.highestValueUsd = compounded.highestValueUsd;
+        pos.cumulativeFeesClaimedUsd = 10;
+      },
+      exit: exitResult({
+        withdrawnUsd: 1035,
+        withdrawnXAtomic: "5000000000",
+        withdrawnYAtomic: "35000000",
+        pendingFeeYAtomic: "25000000",
+        pendingFeeUsd: 25,
+      }),
+    });
+
+    const closed = outcome.closed[0]!;
+    expect(closed.realizedPnlUsd).toBeCloseTo(35, 8);
+    expect(closed.realizedPnlUsd).not.toBeCloseTo(60, 8);
+  });
+
+  it("credits a priced reward at exit (post-compute) and records an exit_sweep_reward CLAIM", async () => {
+    const outcome = await runLiveExitScenario({
+      exit: exitResult({
+        withdrawnUsd: 1000,
+        withdrawnXAtomic: "5000000000",
+        pendingFeeUsd: 0,
+        sweptRewards: [{ mint: "RewardMint111", amountAtomic: 5_000_000, amountUsd: 7 }],
+      }),
+    });
+
+    const closed = outcome.closed[0]!;
+    // Reward is credited AFTER realized compute → realized unaffected: 1000 − 1000 = 0.
+    expect(closed.realizedPnlUsd).toBeCloseTo(0, 8);
+    expect(closed.cumulativeRewardsClaimedUsd).toBeCloseTo(7, 8);
+
+    const rewardClaim = outcome.events.find(
+      (e) => e.event === "CLAIM" && JSON.parse(e.metadata ?? "{}").kind === "exit_sweep_reward",
+    )!;
+    expect(rewardClaim).toBeDefined();
+    expect(rewardClaim.valueUsd).toBeCloseTo(7, 8);
+  });
+
+  it("records an unpriceable reward with null USD, leaves realized unaffected, still closes", async () => {
+    const outcome = await runLiveExitScenario({
+      exit: exitResult({
+        withdrawnUsd: 1000,
+        withdrawnXAtomic: "5000000000",
+        pendingFeeUsd: 0,
+        sweptRewards: [{ mint: "ExoticMint", amountAtomic: 1_000, amountUsd: null }],
+      }),
+    });
+
+    const closed = outcome.closed[0]!;
+    expect(closed.closedAt).not.toBeNull();
+    expect(closed.realizedPnlUsd).toBeCloseTo(0, 8);
+    // Unpriceable reward is NOT credited to cumulativeRewardsClaimedUsd.
+    expect(closed.cumulativeRewardsClaimedUsd).toBeCloseTo(0, 8);
+
+    const rewardClaim = outcome.events.find(
+      (e) => e.event === "CLAIM" && JSON.parse(e.metadata ?? "{}").kind === "exit_sweep_reward",
+    )!;
+    expect(rewardClaim).toBeDefined();
+    expect(rewardClaim.valueUsd).toBeNull();
+  });
+
+  it("records NULL realized when exit pricing is unresolved, but still closes with raw amounts", async () => {
+    const outcome = await runLiveExitScenario({
+      seed: (pos) => {
+        pos.currentValueUsd = 950; // last mark before the unpriced close
+      },
+      exit: exitResult({
+        withdrawnXAtomic: "1111",
+        withdrawnYAtomic: "2222",
+        pendingFeeXAtomic: "555",
+        pendingFeeYAtomic: "0",
+        // withdrawnUsd / pendingFeeUsd left null → unresolved pricing.
+      }),
+    });
+
+    const closed = outcome.closed[0]!;
+    expect(closed.closedAt).not.toBeNull(); // close still happened
+    expect(closed.realizedPnlUsd).toBeNull(); // n/a, never the mark, never 0
+
+    const exitEvent = outcome.events.find((e) => e.event === "EXIT")!;
+    expect(exitEvent.valueUsd).toBeNull();
+    const meta = JSON.parse(exitEvent.metadata ?? "{}") as {
+      pricing?: string;
+      lastMarkUsd?: number;
+      raw?: Record<string, unknown>;
+    };
+    expect(meta.pricing).toBe("unresolved");
+    expect(meta.lastMarkUsd).toBeCloseTo(950, 8);
+    expect(meta.raw?.withdrawnXAtomic).toBe("1111");
+    expect(meta.raw?.pendingFeeXAtomic).toBe("555");
+    // No fee credit when pricing is unresolved.
+    expect(outcome.feeClaims.some((c) => c.txSignature?.startsWith("exit-sweep:"))).toBe(false);
+  });
+
+  it("flags the pool for reconcile when the on-chain close fails (no resurrection, no silent drop)", async () => {
+    const layer = DbLive(":memory:");
+    const trackedPositions = new Map<string, PositionRecord>();
+    const reconcileRequestedPools = new Set<string>();
+    const pool = {
+      activeBinId: 5000,
+      binStep: 10,
+      tokenXSymbol: "SOL",
+      tokenYSymbol: "USDC",
+      currentPrice: 100,
+    };
+    const result = await runDb(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const pos = makePosition({
+          poolAddress: "pool1",
+          positionId: "pos-1",
+          positionPubKey: "pos-1",
+          depositedUsd: 1000,
+          currentValueUsd: 1000,
+        });
+        trackedPositions.set("pos-1", pos);
+        yield* db.savePosition(pos);
+        return yield* executeLive(
+          {
+            adapter: makeLiveAdapter({
+              exitPosition: () => Effect.fail(new Error("close tx failed")),
+            }),
+            strategy: liveStrategy,
+            db,
+            revenueConfigSvc: liveRevenueConfig,
+            trackedPositions,
+            entryPrep: liveEntryPrep,
+            solPriceUsd: 150,
+            entryStrategyShape: "spot" as const,
+            reconcileRequestedPools,
+          },
+          {
+            action: "EXIT",
+            poolAddress: "pool1",
+            confidence: 0.9,
+            reasoning: "exit",
+            positionId: "pos-1",
+          },
+          pool,
+        );
+      }),
+      layer,
+    );
+    // The close failed → not executed, and the pool is flagged so the next
+    // cycle's reconcile re-reads the wallet's real positions and drops the row
+    // if it was half-closed on-chain (the phantom-row guard).
+    expect(result.executed).toBe(false);
+    expect(reconcileRequestedPools.has("pool1")).toBe(true);
+  });
+});
+
+// ─── Paper notional-fee accrual (A4) — pure function ─────────────────────────
+
+describe("computePaperFeeAccrualUsd", () => {
+  const base = {
+    fees24hUsd: 300 as number | null | undefined,
+    tvlUsd: 100_000,
+    depositedUsd: 800,
+    activeBinId: 5000,
+    lowerBinId: 4980,
+    upperBinId: 5020,
+    firstCycle: true,
+    elapsedMs: 0,
+    scanIntervalMs: 600_000,
+  };
+
+  it("accrues the exact proportional share for one in-range scan interval", () => {
+    // share = min(800/100000, 1) = 0.008; inRange = 1; dt = 600000ms.
+    // 300 × 0.008 × 1 × (600000/86400000) = 0.01666…
+    expect(computePaperFeeAccrualUsd(base)).toBeCloseTo(300 * 0.008 * (600_000 / 86_400_000), 12);
+  });
+
+  it("accrues nothing when the active bin is out of range (binary gate)", () => {
+    expect(computePaperFeeAccrualUsd({ ...base, activeBinId: 4000 })).toBe(0);
+    expect(computePaperFeeAccrualUsd({ ...base, activeBinId: 6000 })).toBe(0);
+  });
+
+  it("accrues nothing for heuristic / dead pools (fees null, 0, NaN; zero TVL)", () => {
+    expect(computePaperFeeAccrualUsd({ ...base, fees24hUsd: null })).toBe(0);
+    expect(computePaperFeeAccrualUsd({ ...base, fees24hUsd: 0 })).toBe(0);
+    expect(computePaperFeeAccrualUsd({ ...base, fees24hUsd: Number.NaN })).toBe(0);
+    expect(computePaperFeeAccrualUsd({ ...base, tvlUsd: 0 })).toBe(0);
+  });
+
+  it("caps the elapsed window at 2× scan interval after the first cycle", () => {
+    // 10 intervals of downtime → only 2 intervals of fees are booked.
+    const capped = computePaperFeeAccrualUsd({
+      ...base,
+      firstCycle: false,
+      elapsedMs: 10 * base.scanIntervalMs,
+    });
+    const twoIntervals = 300 * 0.008 * (1_200_000 / 86_400_000);
+    expect(capped).toBeCloseTo(twoIntervals, 12);
+    expect(capped).toBeLessThan(300 * 0.008 * (10 * 600_000) / 86_400_000);
+  });
+
+  it("uses one scan interval on the first cycle regardless of elapsed", () => {
+    const first = computePaperFeeAccrualUsd({ ...base, firstCycle: true, elapsedMs: 999_999_999 });
+    expect(first).toBeCloseTo(computePaperFeeAccrualUsd(base), 12);
   });
 });

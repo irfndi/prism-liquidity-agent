@@ -738,6 +738,11 @@ export interface ClaimFeesUsdInput {
  * compound gate closed. Also fixes the F3 USD-estimation bug where
  * (rawX + rawY) * solPrice added lamports + base-units, producing
  * multi-billion-dollar estimates that bypassed the gate.
+ *
+ * @deprecated Symbol-based — only knows SOL/WSOL/USDC/USDT and books $0 for
+ * every other mint. The live claim paths now consume the adapter's mint-based
+ * `claimFees().netFeesUsd` instead. Retained only because unit tests pin it;
+ * do not use for new accounting.
  */
 export function convertClaimFeesToUsd(input: ClaimFeesUsdInput): number {
   const xDecimals = getTokenDecimals(input.tokenXSymbol);

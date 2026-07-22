@@ -102,6 +102,7 @@ function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
         platformFeeY: 0,
         netFeeX: 0,
         netFeeY: 25_000_000,
+        netFeesUsd: 25, // mint-based USD of the net claim
       }),
     claimRewards: () =>
       Effect.succeed({

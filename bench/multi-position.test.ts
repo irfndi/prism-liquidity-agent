@@ -1527,6 +1527,9 @@ describe("program — multiple positions per pool", () => {
     const closedA = closed[0]!;
     expect(closedA.closedAt).not.toBeNull();
     // Realized PnL = final value (500 after the 50% IL-drift estimate) − basis.
+    // A4 paper fee accrual is active for this pool (fees24h 300 > 0) but A is
+    // OUT of range (inRange = 0) so it accrued nothing — this −500 realized pin
+    // is unaffected by the accrual.
     expect(closedA.realizedPnlUsd).toBeCloseTo(-500, 0);
     // A's OOR cycles accumulated independently; B never left range.
     expect(closedA.oorCycleCount).toBeGreaterThanOrEqual(1);
@@ -1538,11 +1541,16 @@ describe("program — multiple positions per pool", () => {
     expect(active[0]!.entryAmountXUsd).toBe(400);
     expect(active[0]!.entryAmountYUsd).toBe(400);
 
-    // The EXIT event targets A's identity; B has no events at all.
+    // The EXIT event targets A's identity. B is in range with fees24h 300 > 0,
+    // so the A4 paper notional-fee accrual booked exactly one CLAIM (kind
+    // paper_accrual); B has NO lifecycle events (no ENTER/REBALANCE/EXIT).
     const exitEvents = events.filter((e) => e.event === "EXIT");
     expect(exitEvents).toHaveLength(1);
     expect(exitEvents[0]!.positionId).toBe("seeded-A");
-    expect(events.filter((e) => e.positionId === "seeded-B")).toHaveLength(0);
+    const bEvents = events.filter((e) => e.positionId === "seeded-B");
+    expect(bEvents).toHaveLength(1);
+    expect(bEvents[0]!.event).toBe("CLAIM");
+    expect(JSON.parse(bEvents[0]!.metadata ?? "{}").kind).toBe("paper_accrual");
 
     const executedExits = decisions.filter((d) => d.action === "EXIT" && d.executed);
     expect(executedExits.length).toBeGreaterThanOrEqual(1);

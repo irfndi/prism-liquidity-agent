@@ -11,7 +11,6 @@ import {
   evaluateCompoundGate,
   evaluatePerPoolAllocation,
   evaluatePaperValidation,
-  convertClaimFeesToUsd,
 } from "./risk-service.js";
 import {
   computeBinVolatilityStddev,
@@ -310,6 +309,42 @@ export function estimatePositionValue(pos: PositionRecord, pool: PoolState): num
   const driftPct = Math.min(drift / maxDrift, 1);
   const ilFactor = 1 - driftPct * 0.5;
   return pos.depositedUsd * ilFactor;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Paper notional-fee accrual for one cycle (A4 paper/live parity). A paper
+ * position never claims on-chain, so it accrues its proportional share of the
+ * pool's REAL 24h fees while the active bin sits in range. Pure and guard-first:
+ * heuristic pools (fees24h null/NaN/<=0) and dead TVL accrue 0 — never
+ * fabricate. The elapsed window resolves to one scan interval on the first
+ * cycle for a position, and is capped at 2× the scan interval afterwards so a
+ * long downtime cannot dump a lump of fees into a single cycle. `inRange` is a
+ * binary gate (active bin inside [lower, upper]), not a partial weight.
+ */
+export function computePaperFeeAccrualUsd(input: {
+  readonly fees24hUsd: number | null | undefined;
+  readonly tvlUsd: number;
+  readonly depositedUsd: number;
+  readonly activeBinId: number;
+  readonly lowerBinId: number;
+  readonly upperBinId: number;
+  readonly firstCycle: boolean;
+  readonly elapsedMs: number;
+  readonly scanIntervalMs: number;
+}): number {
+  const fees24hUsd = input.fees24hUsd;
+  if (!(input.tvlUsd > 0)) return 0;
+  if (fees24hUsd == null || !Number.isFinite(fees24hUsd) || fees24hUsd <= 0) return 0;
+  const dtMs = input.firstCycle
+    ? input.scanIntervalMs
+    : Math.min(Math.max(input.elapsedMs, 0), 2 * input.scanIntervalMs);
+  if (!(dtMs > 0)) return 0;
+  const tvlShare = Math.min(input.depositedUsd / input.tvlUsd, 1);
+  const inRange =
+    input.activeBinId >= input.lowerBinId && input.activeBinId <= input.upperBinId ? 1 : 0;
+  return fees24hUsd * tvlShare * inRange * (dtMs / DAY_MS);
 }
 
 export interface RebalanceBenefitEstimate {
@@ -831,6 +866,8 @@ export function executeLive(
     entryStrategyShape: EntryStrategyShape;
     entryRangeHalfWidth?: number;
     reconcileRequestedPools?: Set<string>;
+    memory?: MemoryApi;
+    unpricedExitWarnedPools?: Set<string>;
   },
   decision: AgentDecision,
   pool: {
@@ -1004,6 +1041,9 @@ export function executeLive(
       const pos = resolveTargetPosition(trackedPositions, decision);
       let exited = false;
       let exitError: string | undefined = undefined;
+      let exitResultData:
+        | Effect.Effect.Success<ReturnType<AdapterApi["exitPosition"]>>
+        | null = null;
       if (pos?.positionPubKey) {
         const exitResult = yield* adapter
           .exitPosition(decision.poolAddress, pos.positionPubKey)
@@ -1026,6 +1066,15 @@ export function executeLive(
           );
         exited = exitResult.result !== null;
         exitError = exitResult.error;
+        exitResultData = exitResult.result;
+        if (!exited) {
+          // A failed close may have left the position half-closed on-chain
+          // (the $27 phantom-row candidate: wallet holds withdrawn funds while
+          // the row still counts in Σpositions). Flag the pool so the next
+          // cycle's reconcile re-reads the wallet's real positions and drops
+          // the row if it is gone — mirroring the atomic-rebalance failure path.
+          deps.reconcileRequestedPools?.add(decision.poolAddress);
+        }
       } else {
         exited = true;
       }
@@ -1037,12 +1086,133 @@ export function executeLive(
             .pipe(Effect.catchAll(() => Effect.void));
         }
         if (pos) {
-          const realizedPnlUsd = computeRealizedPnlUsd(
-            pos.currentValueUsd,
-            pos.cumulativeFeesClaimedUsd,
-            pos.depositedUsd,
-            pos.cumulativeRewardsClaimedUsd,
-          );
+          // ── Locked realized-PnL ordering (Oracle-locked) ──────────────────
+          // 1. finalValue = the adapter's mint-priced withdrawn USD (incl. the
+          //    unswept fees the close batch claims). When pricing is unresolved
+          //    (null / amounts absent) there is NO trusted value → NULL path:
+          //    realized recorded n/a, never the mark, never 0.
+          const withdrawnUsd = exitResultData?.withdrawnUsd ?? null;
+          const pricingUnresolved = withdrawnUsd === null;
+          // 2. Compute on the PRIOR cumulatives only — the exit sweep is
+          //    credited AFTER this (step 4) so it is never double-counted.
+          //    withdrawn already embeds unswept + recompounded fees; prior
+          //    cumulatives cover earlier claims; basis embeds recompounded fees
+          //    → exactly-once across every FEE_DESTINATION mode.
+          const realizedPnlUsd = pricingUnresolved
+            ? null
+            : computeRealizedPnlUsd(
+                withdrawnUsd,
+                pos.cumulativeFeesClaimedUsd,
+                pos.depositedUsd,
+                pos.cumulativeRewardsClaimedUsd,
+              );
+          // 3. Credit the sweep post-compute — fee-APR / display / event
+          //    continuity only, never a realized input.
+          const pendingFeeUsd = exitResultData?.pendingFeeUsd ?? null;
+          const pendingFeeX = Number(exitResultData?.pendingFeeXAtomic ?? "0");
+          const pendingFeeY = Number(exitResultData?.pendingFeeYAtomic ?? "0");
+          if (typeof pendingFeeUsd === "number") {
+            pos.cumulativeFeesClaimedUsd += pendingFeeUsd;
+            if ((pendingFeeX > 0 || pendingFeeY > 0) && pos.positionPubKey != null) {
+              const sweepTxSignature = `exit-sweep:${pos.positionId}`;
+              yield* db
+                .saveFeeClaim({
+                  id: randomUUID(),
+                  poolAddress: decision.poolAddress,
+                  positionPubkey: pos.positionPubKey,
+                  feeX: pendingFeeX,
+                  feeY: pendingFeeY,
+                  platformFeeX: 0,
+                  platformFeeY: 0,
+                  netFeeX: pendingFeeX,
+                  netFeeY: pendingFeeY,
+                  operatorFeeX: 0,
+                  operatorFeeY: 0,
+                  txSignature: sweepTxSignature,
+                  feeTransferTxSignature: null,
+                  reportedToApi: false,
+                  createdAt: Date.now(),
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+              // CLAIM event mirrors every other fee booking (a CLAIM row beside
+              // the fee_claims record), tagged kind exit_sweep so the swept-fee
+              // leg is distinguishable from periodic claims in the event log.
+              yield* db
+                .savePositionEvent({
+                  id: randomUUID(),
+                  poolAddress: decision.poolAddress,
+                  positionPubKey: pos.positionPubKey,
+                  positionId: pos.positionId,
+                  event: "CLAIM",
+                  valueUsd: null,
+                  feesUsd: pendingFeeUsd,
+                  price: pool.currentPrice,
+                  metadata: { kind: "exit_sweep", txSignature: sweepTxSignature },
+                  createdAt: Date.now(),
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+            }
+          }
+          const sweptRewards = exitResultData?.sweptRewards ?? [];
+          let sweptRewardUsd = 0;
+          let unpricedReward = false;
+          for (const reward of sweptRewards) {
+            if (typeof reward.amountUsd === "number") {
+              pos.cumulativeRewardsClaimedUsd += reward.amountUsd;
+              sweptRewardUsd += reward.amountUsd;
+            } else {
+              unpricedReward = true;
+            }
+          }
+          if (unpricedReward) {
+            logger.warn(
+              "Exit sweep included an unpriceable LM reward — recorded with null USD",
+              { pool: decision.poolAddress, position: pos.positionId },
+            );
+          }
+          if (sweptRewards.length > 0) {
+            yield* db
+              .savePositionEvent({
+                id: randomUUID(),
+                poolAddress: decision.poolAddress,
+                positionPubKey: pos.positionPubKey,
+                positionId: pos.positionId,
+                event: "CLAIM",
+                valueUsd: sweptRewardUsd > 0 ? sweptRewardUsd : null,
+                feesUsd: null,
+                price: pool.currentPrice,
+                metadata: {
+                  kind: "exit_sweep_reward",
+                  rewards: sweptRewards.map((r) => ({
+                    mint: r.mint,
+                    amountAtomic: r.amountAtomic,
+                    amountUsd: r.amountUsd,
+                  })),
+                },
+                createdAt: Date.now(),
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
+          // Persist the credited cumulatives onto the (still-open) row, THEN
+          // close — closePosition runs last so the savePosition upsert (which
+          // writes closed_at) cannot resurrect the row; it sets closed_at +
+          // realized without touching the fee/reward columns just written.
+          yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+          yield* db
+            .closePosition(pos.positionId, realizedPnlUsd)
+            .pipe(Effect.catchAll(() => Effect.void));
+          // 5. EXIT event: withdrawn USD (or null) + post-credit lifetime fees.
+          const exitMetadata: Record<string, unknown> = { realizedPnlUsd };
+          if (pricingUnresolved) {
+            exitMetadata.pricing = "unresolved";
+            exitMetadata.lastMarkUsd = pos.currentValueUsd;
+            exitMetadata.raw = {
+              withdrawnXAtomic: exitResultData?.withdrawnXAtomic,
+              withdrawnYAtomic: exitResultData?.withdrawnYAtomic,
+              pendingFeeXAtomic: exitResultData?.pendingFeeXAtomic,
+              pendingFeeYAtomic: exitResultData?.pendingFeeYAtomic,
+            };
+          }
           yield* db
             .savePositionEvent({
               id: randomUUID(),
@@ -1050,16 +1220,32 @@ export function executeLive(
               positionPubKey: pos.positionPubKey,
               positionId: pos.positionId,
               event: "EXIT",
-              valueUsd: pos.currentValueUsd,
+              valueUsd: withdrawnUsd,
               feesUsd: pos.cumulativeFeesClaimedUsd,
               price: pool.currentPrice,
-              metadata: { realizedPnlUsd },
+              metadata: exitMetadata,
               createdAt: Date.now(),
             })
             .pipe(Effect.catchAll(() => Effect.void));
-          yield* db
-            .closePosition(pos.positionId, realizedPnlUsd)
-            .pipe(Effect.catchAll(() => Effect.void));
+          if (
+            pricingUnresolved &&
+            !(deps.unpricedExitWarnedPools?.has(decision.poolAddress) ?? false)
+          ) {
+            deps.unpricedExitWarnedPools?.add(decision.poolAddress);
+            logger.warn(
+              "EXIT closed without USD pricing (price feeds unresolved) — realized PnL recorded as n/a; raw amounts in event metadata",
+              { pool: decision.poolAddress, position: pos.positionId },
+            );
+            yield* (deps.memory
+              ? deps.memory
+                  .upsert({
+                    category: "warning",
+                    content: `EXIT on ${decision.poolAddress} closed without USD pricing (price feeds unresolved) — realized PnL recorded as n/a; raw amounts in event metadata`,
+                    poolAddress: decision.poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void))
+              : Effect.void);
+          }
           trackedPositions.delete(pos.positionId);
         }
         return { executed: true, error: undefined };
@@ -1107,13 +1293,10 @@ export function executeLive(
             })
             .pipe(Effect.catchAll(() => Effect.void));
 
-          const claimedFeesUsd = convertClaimFeesToUsd({
-            netFeeXRaw: claimResult.netFeeX,
-            netFeeYRaw: claimResult.netFeeY,
-            tokenXSymbol: pos.tokenXSymbol,
-            tokenYSymbol: pos.tokenYSymbol,
-            solPriceUsd,
-          });
+          // Mint-based net-fee USD priced inside the adapter (mirrors
+          // simulateRebalance). Null → 0 fails closed so an unpriceable claim
+          // never inflates cumulative fees or the compound gate.
+          const claimedFeesUsd = claimResult.netFeesUsd ?? 0;
           pos.cumulativeFeesClaimedUsd += claimedFeesUsd;
           yield* db
             .savePositionEvent({
@@ -1537,6 +1720,13 @@ export const program = Effect.gen(function* () {
   // Pools whose atomic rebalance failed mid-execution — re-read on-chain
   // state at the next cycle's reconcile before deciding again.
   const reconcileRequestedPools = new Set<string>();
+  // Pools already warned about an unpriced EXIT this session, so the warning
+  // + memory entry fire once per pool instead of every cycle.
+  const unpricedExitWarnedPools = new Set<string>();
+  // Paper notional-fee accrual clock: positionId → last accrual timestamp.
+  // Session-local (no schema change) so a restart re-establishes the first
+  // cycle as the baseline; downtime catch-up is capped at 2× scan interval.
+  const paperFeeAccrualAt = new Map<string, number>();
   const refreshPoolsToScan = (reconcileResult: PositionReconcileResult) => {
     unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
     poolsToScan = [...approvedPoolAddresses];
@@ -1678,6 +1868,31 @@ export const program = Effect.gen(function* () {
       // F6: tick paper-trading day counter once per cycle.
       if (config.paperTrading) {
         yield* tickPaperDays;
+      }
+
+      // Single chain reconciliation of the wallet value for this cycle. Read
+      // ONCE here and reuse for every pool's risk/sizing context — a per-pool
+      // read both wasted RPC and let a transient failure blank individual
+      // pools. Paper mode (and walletless live) uses the configured paper
+      // portfolio as the single source of truth.
+      let walletDegradationWarned = false;
+      if (adapter.hasWallet() && !config.paperTrading) {
+        lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
+          Effect.catchAll((err) => {
+            // Live degradation only: a transient wallet read must never fail a
+            // pool or blank a cycle's screening. Reuse the last known value
+            // (stale) and warn once for this cycle, then keep evaluating.
+            if (!walletDegradationWarned) {
+              walletDegradationWarned = true;
+              console.error("Live wallet balance unavailable; reusing last known value", {
+                error: String(err),
+              });
+            }
+            return Effect.succeed(lastWalletBalanceUsd);
+          }),
+        );
+      } else {
+        lastWalletBalanceUsd = config.paperPortfolioUsd;
       }
 
       for (const poolAddress of poolsToScan) {
@@ -2358,6 +2573,44 @@ export const program = Effect.gen(function* () {
         if (estimatedValue > highest) {
           pos.highestValueUsd = estimatedValue;
         }
+        // Paper notional-fee accrual (parity with live): a paper position
+        // never claims on-chain, so accrue its proportional share of the
+        // pool's real 24h fees while the active bin sits in range. Do NOT
+        // touch currentValueUsd: unrealized PnL already sums claimed fees
+        // (pnl.ts), so crediting the value column too would double-add.
+        if (config.paperTrading && pos.positionPubKey == null) {
+          const now = Date.now();
+          const lastAccrualAt = paperFeeAccrualAt.get(pos.positionId);
+          paperFeeAccrualAt.set(pos.positionId, now);
+          const deltaFeesUsd = computePaperFeeAccrualUsd({
+            fees24hUsd: pool.fees24hUsd,
+            tvlUsd: pool.tvlUsd,
+            depositedUsd: pos.depositedUsd,
+            activeBinId: pool.activeBinId,
+            lowerBinId: pos.lowerBinId,
+            upperBinId: pos.upperBinId,
+            firstCycle: lastAccrualAt == null,
+            elapsedMs: lastAccrualAt == null ? 0 : now - lastAccrualAt,
+            scanIntervalMs: config.scanIntervalMs,
+          });
+          if (deltaFeesUsd > 0) {
+            pos.cumulativeFeesClaimedUsd += deltaFeesUsd;
+            yield* db
+              .savePositionEvent({
+                id: randomUUID(),
+                poolAddress,
+                positionPubKey: pos.positionPubKey,
+                positionId: pos.positionId,
+                event: "CLAIM",
+                valueUsd: deltaFeesUsd,
+                feesUsd: deltaFeesUsd,
+                price: pool.currentPrice,
+                metadata: { kind: "paper_accrual" },
+                createdAt: now,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
+        }
         yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
       }
 
@@ -2618,27 +2871,11 @@ export const program = Effect.gen(function* () {
         });
 
       // Single persist point happened per position above (OOR + value updates).
-      const exitPending = rawDecisions.some((d) => d.action === "EXIT");
-      const walletBalanceUsd = adapter.hasWallet()
-        ? yield* adapter.getWalletBalanceUsd().pipe(
-            Effect.catchAll((err) => {
-              if (config.paperTrading) return Effect.succeed(config.paperPortfolioUsd);
-              if (exitPending) {
-                console.error("Live wallet balance unavailable; continuing EXIT", {
-                  pool: poolAddress,
-                  error: String(err),
-                });
-                return Effect.succeed(lastWalletBalanceUsd);
-              }
-              console.error("Live wallet balance unavailable; skipping pool", {
-                pool: poolAddress,
-                error: String(err),
-              });
-              return Effect.fail(err);
-            }),
-          )
-        : config.paperPortfolioUsd;
-      lastWalletBalanceUsd = walletBalanceUsd;
+      // The wallet value was reconciled once at the top of this cycle; reuse it
+      // here so every pool in the cycle shares one consistent figure for the
+      // risk/sizing context (a transient read already degraded at cycle top and
+      // never fails an individual pool).
+      const walletBalanceUsd = lastWalletBalanceUsd;
 
       // Portfolio value = wallet + open positions (mirrors refreshAgentState).
       // Using the wallet alone shrinks the drawdown/allocation/size gates as
@@ -3776,6 +4013,8 @@ export const program = Effect.gen(function* () {
               entryStrategyShape,
               entryRangeHalfWidth: rangeHalfWidth,
               reconcileRequestedPools,
+              memory,
+              unpricedExitWarnedPools,
             },
             decision,
             pool,
@@ -3817,6 +4056,8 @@ export const program = Effect.gen(function* () {
               entryStrategyShape,
               entryRangeHalfWidth: rangeHalfWidth,
               reconcileRequestedPools,
+              memory,
+              unpricedExitWarnedPools,
             },
             decision,
             pool,
@@ -4002,13 +4243,9 @@ export const program = Effect.gen(function* () {
             continue;
           }
 
-          const netFeesUsd = convertClaimFeesToUsd({
-            netFeeXRaw: result.netFeeX,
-            netFeeYRaw: result.netFeeY,
-            tokenXSymbol: pos.tokenXSymbol,
-            tokenYSymbol: pos.tokenYSymbol,
-            solPriceUsd: config.solPriceUsd,
-          });
+          // Mint-based net-fee USD from the adapter; null → 0 fails the
+          // compound gate closed (see convertClaimFeesToUsd deprecation).
+          const netFeesUsd = result.netFeesUsd ?? 0;
 
           yield* db
             .saveFeeClaim({
