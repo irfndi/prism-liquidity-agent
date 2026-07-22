@@ -27,7 +27,7 @@ import { BN } from "@coral-xyz/anchor";
 import { Context, Effect, Layer } from "effect";
 import { AdapterService, type AdapterApi } from "./services.js";
 import { ConfigService } from "./config-service.js";
-import { AdapterError } from "./errors.js";
+import { AdapterError, underlyingErrorMessage } from "./errors.js";
 import { DiscoverPoolsError } from "./errors.js";
 import { SwapQuoteError } from "./errors.js";
 import { createLogger } from "./logger.js";
@@ -152,16 +152,6 @@ export function buildAtomicRebalancePlan(args: {
 
 function formatTokenAmount(amount: bigint, decimals: number): string {
   return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
-}
-
-// Effect.tryPromise wraps rejections in UnknownException; surface the original
-// message so gate logs and AdapterErrors stay readable.
-function underlyingErrorMessage(err: unknown): string {
-  if (err && typeof err === "object" && "cause" in err) {
-    const cause = (err as { cause: unknown }).cause;
-    if (cause instanceof Error) return cause.message;
-  }
-  return err instanceof Error ? err.message : String(err);
 }
 
 const logger = createLogger("adapter-service");

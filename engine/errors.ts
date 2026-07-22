@@ -61,3 +61,23 @@ export class EntryPrepError extends Data.TaggedError("EntryPrepError")<{
   readonly poolAddress?: string;
   readonly cause?: unknown;
 }> {}
+
+// Effect.tryPromise wraps rejections in UnknownException, whose `message` is a
+// generic "An error has occurred" wrapper — `String(err)` renders only that
+// wrapper and hides the real failure (e.g. "Gateway 1008: ..."). Walk the `.cause`
+// chain to the deepest non-empty Error message; fall back to `String(err)` when the
+// chain holds no Error with a message. A `seen` set guards self-referential causes.
+export function underlyingErrorMessage(err: unknown): string {
+  let deepest: string | null = null;
+  let current: unknown = err;
+  const seen = new Set<unknown>();
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof Error && current.message.length > 0) {
+      deepest = current.message;
+    }
+    current = "cause" in current ? (current as { readonly cause: unknown }).cause : undefined;
+  }
+  if (deepest !== null) return deepest;
+  return err instanceof Error ? err.message : String(err);
+}

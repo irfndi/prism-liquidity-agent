@@ -141,6 +141,15 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     depegRelativePct: 0.02,
     liquidityDrainPct: 0.5,
     liquidityDrainLookbackSnapshots: 2,
+    freezeSmartScreening: false,
+    // Pinned false (production default is true) to keep existing engine tests byte-identical.
+    ilProtectionEnabled: false,
+    ilDominanceExitFactor: 2,
+    ilDominanceMinUsd: 5,
+    // Pinned false (production default is true) so the token-risk overlay never
+    // fires for the existing ~80 test files; feature tests enable it explicitly.
+    jupiterTokenRiskEnabled: false,
+    jupiterTokenRiskCacheTtlMin: 30,
     rebalanceGasCostSol: 0.01,
     solPriceUsd: 150,
     gasAwareMinDaysOfFeesPaidAhead: 3,

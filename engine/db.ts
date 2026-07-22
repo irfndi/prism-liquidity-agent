@@ -7,18 +7,58 @@ import { getEmbeddedVec0Path } from "./sqlite-vec-embedded.js";
 
 const logger = createLogger("db");
 let sqliteVecEverFailed = false;
+// Database.setCustomSQLite() is a process-wide one-shot; once any candidate
+// wins, later callers (createDatabase, probeVecAvailability) skip the loop.
+let customSQLiteConfigured = false;
+
+/**
+ * Actionable remediation for sqlite-vec load failures. Shared by the runtime
+ * warn paths below and the loud `prism doctor` memory check (cli/doctor.ts).
+ */
+export function vecRemediationHint(platform: string = process.platform): string {
+  if (platform === "darwin") {
+    return "Install an extension-capable SQLite (macOS: `brew install sqlite`) and restart; release bundles ship lib/vec0.dylib, so verify PRISM_VEC0_PATH (set by the prism wrapper) and run `prism doctor`.";
+  }
+  if (platform === "linux") {
+    return "Install an extension-capable SQLite (Linux: `apt-get install -y libsqlite3-0` or `dnf install -y sqlite-libs`) and restart; release bundles ship lib/vec0.so, so verify PRISM_VEC0_PATH and run `prism doctor`.";
+  }
+  return "Install an extension-capable SQLite (compiled with loadable-extension support) and restart; verify PRISM_VEC0_PATH and run `prism doctor`.";
+}
 
 function setupCustomSQLite() {
+  if (customSQLiteConfigured) return;
+
   if (process.platform === "darwin") {
-    try {
-      const brewPrefix = process.arch === "arm64" ? "/opt/homebrew" : "/usr/local";
-      const dylib = `${brewPrefix}/opt/sqlite/lib/libsqlite3.dylib`;
-      if (fs.existsSync(dylib)) {
+    // Bun's bundled SQLite cannot load extensions; sqlite-vec needs a system
+    // libsqlite3 built with extension loading. The eager dlopen in
+    // setCustomSQLite() doubles as the existence check AND commits on the first
+    // success (Database.setCustomSQLite is a process-wide one-shot), so the probe
+    // order IS the selection order. Extension-capable installs must precede
+    // Apple's /usr/lib library: Homebrew first, then MacPorts /opt/local (a real
+    // extension-capable install). Apple's /usr/lib library is the LAST RESORT — it
+    // has no on-disk file (dyld shared cache) yet still dlopens, only to fail vec0
+    // loading, which prism doctor then reports loudly. Probing Apple first would win
+    // the one-shot selection on a MacPorts-only box and kill vector memory.
+    const brewPrefix = process.arch === "arm64" ? "/opt/homebrew" : "/usr/local";
+    const otherBrewPrefix = process.arch === "arm64" ? "/usr/local" : "/opt/homebrew";
+    const candidates = [
+      `${brewPrefix}/opt/sqlite/lib/libsqlite3.dylib`,
+      `${otherBrewPrefix}/opt/sqlite/lib/libsqlite3.dylib`,
+      "/opt/local/lib/libsqlite3.dylib",
+      "/usr/lib/libsqlite3.dylib",
+    ];
+    for (const dylib of candidates) {
+      try {
         Database.setCustomSQLite(dylib);
+        customSQLiteConfigured = true;
+        return;
+      } catch {
+        // candidate missing or not loadable — fall through to the next one
       }
-    } catch {
-      // ignore
     }
+    logger.warn("No loadable libsqlite3.dylib found on macOS; sqlite-vec may not work", {
+      hint: vecRemediationHint("darwin"),
+    });
     return;
   }
 
@@ -43,6 +83,7 @@ function setupCustomSQLite() {
       if (fs.existsSync(soPath)) {
         try {
           Database.setCustomSQLite(soPath);
+          customSQLiteConfigured = true;
           return;
         } catch {
           // fall through to next candidate
@@ -50,7 +91,7 @@ function setupCustomSQLite() {
       }
     }
     logger.warn("No system libsqlite3.so found on Linux; sqlite-vec may not work", {
-      hint: "Install libsqlite3-dev or set Database.setCustomSQLite() manually.",
+      hint: vecRemediationHint("linux"),
     });
   }
 }
@@ -79,6 +120,7 @@ export function createDatabase(dbPath = "./prism.db"): Database {
         } catch (envErr) {
           logger.warn("PRISM_VEC0_PATH sqlite-vec extension could not be loaded", {
             error: envErr instanceof Error ? envErr.message : String(envErr),
+            hint: vecRemediationHint(),
           });
         }
       }
@@ -91,6 +133,7 @@ export function createDatabase(dbPath = "./prism.db"): Database {
           } catch (embeddedErr) {
             logger.warn("Embedded sqlite-vec extension could not be loaded", {
               error: embeddedErr instanceof Error ? embeddedErr.message : String(embeddedErr),
+              hint: vecRemediationHint(),
             });
           }
         }
@@ -98,10 +141,7 @@ export function createDatabase(dbPath = "./prism.db"): Database {
       if (!vecLoaded) {
         logger.warn("sqlite-vec extension could not be loaded; memory will be disabled", {
           error: e instanceof Error ? e.message : String(e),
-          hint:
-            process.platform === "linux"
-              ? "bun:sqlite cannot load extensions without a system libsqlite3. Install it (e.g. `apt-get install -y libsqlite3-0`, `dnf install -y sqlite-libs`) and restart."
-              : "Reinstall or rebuild Prism so the sqlite-vec extension matches this platform.",
+          hint: vecRemediationHint(),
         });
         sqliteVecEverFailed = true;
       }
@@ -115,12 +155,114 @@ export function createDatabase(dbPath = "./prism.db"): Database {
     if (hasVecMemoryTable(db)) {
       logger.info("sqlite-vec vec_memory table self-healed");
     } else {
-      logger.warn("sqlite-vec vec_memory table not queryable; memory disabled");
+      logger.warn("sqlite-vec vec_memory table not queryable; memory disabled", {
+        hint: vecRemediationHint(),
+      });
       sqliteVecEverFailed = true;
     }
   }
 
   return db;
+}
+
+// ─── sqlite-vec availability probe (prism doctor) ───────────────────────────
+
+export interface VecProbeResult {
+  readonly available: boolean;
+  readonly source: "npm" | "env" | "embedded" | null;
+  readonly error: string | null;
+}
+
+function probeErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function vecTableCreateAndQueryError(db: Database): string | null {
+  try {
+    db.exec(VEC_MEMORY_TABLE_SQL);
+  } catch (err) {
+    return `create failed: ${probeErrorMessage(err)}`;
+  }
+  try {
+    db.query("SELECT 1 FROM vec_memory LIMIT 1").get();
+    return null;
+  } catch (err) {
+    return `query failed: ${probeErrorMessage(err)}`;
+  }
+}
+
+/**
+ * Probe sqlite-vec availability without touching any on-disk database file.
+ * Mirrors createDatabase()'s extension chain — sqlite-vec npm package, then
+ * PRISM_VEC0_PATH, then the embedded base64 fallback — against a throwaway
+ * :memory: database and verifies vec_memory can be created and queried.
+ * Deliberately ignores (and does not set) the sqliteVecEverFailed latch, so
+ * it can run in the doctor CLI process independently of the engine.
+ */
+export function probeVecAvailability(): VecProbeResult {
+  setupCustomSQLite();
+
+  let db: Database;
+  try {
+    db = new Database(":memory:");
+  } catch (err) {
+    return {
+      available: false,
+      source: null,
+      error: `could not open probe database: ${probeErrorMessage(err)}`,
+    };
+  }
+
+  try {
+    const failures: string[] = [];
+
+    try {
+      loadVec(db);
+      const npmError = vecTableCreateAndQueryError(db);
+      if (npmError === null) {
+        return { available: true, source: "npm", error: null };
+      }
+      failures.push(`npm: loaded, ${npmError}`);
+    } catch (err) {
+      failures.push(`npm: ${probeErrorMessage(err)}`);
+    }
+
+    const envPath = process.env.PRISM_VEC0_PATH;
+    if (envPath) {
+      try {
+        db.loadExtension(envPath);
+        const envError = vecTableCreateAndQueryError(db);
+        if (envError === null) {
+          return { available: true, source: "env", error: null };
+        }
+        failures.push(`env: loaded, ${envError}`);
+      } catch (err) {
+        failures.push(`env (${envPath}): ${probeErrorMessage(err)}`);
+      }
+    }
+
+    const embeddedPath = getEmbeddedVec0Path();
+    if (embeddedPath) {
+      try {
+        db.loadExtension(embeddedPath);
+        const embeddedError = vecTableCreateAndQueryError(db);
+        if (embeddedError === null) {
+          return { available: true, source: "embedded", error: null };
+        }
+        failures.push(`embedded: loaded, ${embeddedError}`);
+      } catch (err) {
+        failures.push(`embedded (${embeddedPath}): ${probeErrorMessage(err)}`);
+      }
+    }
+
+    return {
+      available: false,
+      source: null,
+      error: failures.length > 0 ? failures.join("; ") : "no sqlite-vec source attempted",
+    };
+  } finally {
+    db.close();
+  }
 }
 
 // ─── Migration system ────────────────────────────────────────────────────────
@@ -147,6 +289,9 @@ function vecMemoryTableIsQueryable(db: Database): boolean {
   }
 }
 
+// vec0 auxiliary columns accept TEXT, INTEGER, DOUBLE and BLOB only — a REAL
+// column fails construction with a misleading "chunk_size must be a non-zero
+// positive integer" error, silently leaving the table uncreated.
 const VEC_MEMORY_TABLE_SQL = `
   CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory USING vec0(
     embedding float[384],
@@ -155,8 +300,8 @@ const VEC_MEMORY_TABLE_SQL = `
     +content TEXT,
     +pool_address TEXT,
     +outcome TEXT,
-    +pnlUsd REAL,
-    +confidence REAL,
+    +pnlUsd DOUBLE,
+    +confidence DOUBLE,
     +createdAt INTEGER,
     +expiresAt INTEGER
   );

@@ -3,6 +3,7 @@ import type { AppConfig } from "./config-service.js";
 import type { AgentDecision, ActionType, PoolMetrics, PoolState, MemoryEntry } from "./types.js";
 import type { AgentApi, DecisionRecord } from "./services.js";
 import { AgentService } from "./services.js";
+import { underlyingErrorMessage } from "./errors.js";
 import { createLogger } from "./logger.js";
 import { detectAgents } from "./agent-detection.js";
 import { AcpTransport } from "./acp-transport.js";
@@ -251,7 +252,7 @@ export function validateOverride(
   };
 }
 
-function selectTransport(
+export function selectTransport(
   config: AppConfig,
   detection: AgentRuntimeDetection,
 ): AgentRuntimeTransport | null {
@@ -266,11 +267,40 @@ function selectTransport(
   }
 
   if (runtime === "openclaw" && detection.openclaw.gatewayRunning) {
-    return new GatewayTransport({
-      url: config.agentGatewayUrl,
-      token: config.agentGatewayToken,
-      timeoutMs: config.agentPromptTimeoutMs,
-    });
+    // The gateway transport authenticates with the shared token; with no token the
+    // connection loses its operator scopes and every per-decision re-handshake fails
+    // (detection only probes the pre-auth WS upgrade, so it cannot catch this). With a
+    // token, use the gateway. Without one, `auto` prefers a working review transport
+    // (Hermes/ACP) over no review — falling back when it is available, otherwise
+    // falling through to null; an EXPLICIT AGENT_RUNTIME=openclaw keeps the
+    // warn-and-disable semantics, since the user asked for the gateway specifically.
+    if ((config.agentGatewayToken ?? "").trim() !== "") {
+      return new GatewayTransport({
+        url: config.agentGatewayUrl,
+        token: config.agentGatewayToken,
+        timeoutMs: config.agentPromptTimeoutMs,
+      });
+    }
+    // Tokenless AUTO: prefer a working review transport over no review — fall back
+    // to ACP/Hermes when available. An EXPLICIT AGENT_RUNTIME=openclaw keeps the
+    // warn-and-disable semantics (the user asked for the gateway specifically).
+    if (config.agentRuntime === "auto" && detection.hermes.available) {
+      logger.info(
+        "OpenClaw gateway reachable but AGENT_GATEWAY_TOKEN empty; falling back to the Hermes/ACP transport for decision review",
+        { url: config.agentGatewayUrl },
+      );
+      return new AcpTransport({
+        command: config.agentAcpCommand,
+        args: config.agentAcpArgs,
+        timeoutMs: config.agentPromptTimeoutMs,
+      });
+    }
+    if (config.agentRuntime === "openclaw") {
+      logger.warn(
+        "AGENT_GATEWAY_TOKEN is required for the OpenClaw gateway runtime; decision review disabled",
+        { url: config.agentGatewayUrl },
+      );
+    }
   }
 
   return null;
@@ -323,6 +353,25 @@ function connectTransport(transport: AgentRuntimeTransport): Effect.Effect<void,
     Effect.catchAll((err) => {
       logger.warn("Failed to connect transport", { transport: transport.name, error: String(err) });
       return Effect.void;
+    }),
+  );
+}
+
+// Connect the review transport and report whether it actually connected. A failed
+// connect is logged and swallowed so a dead runtime never blocks engine startup; the
+// returned boolean is the truthful `connected` value getStatus() surfaces (the prior
+// Effect.tap set connected=true regardless of the catchAll-swallowed failure).
+export function connectReviewTransport(
+  transport: AgentRuntimeTransport,
+): Effect.Effect<boolean, never> {
+  return transport.connect().pipe(
+    Effect.map(() => true),
+    Effect.catchAll((err) => {
+      logger.warn("Failed to connect transport", {
+        transport: transport.name,
+        error: underlyingErrorMessage(err),
+      });
+      return Effect.succeed(false);
     }),
   );
 }
@@ -400,17 +449,10 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
       let errorCount = 0;
 
       if (transport) {
-        yield* connectTransport(transport).pipe(
-          Effect.tap(() => {
-            connected = true;
-          }),
-          Effect.catchAll((err) => {
-            connected = false;
-            errorCount += 1;
-            logger.error("Failed to connect to agent runtime", { error: String(err) });
-            return Effect.void;
-          }),
-        );
+        connected = yield* connectReviewTransport(transport);
+        if (!connected) {
+          errorCount += 1;
+        }
       }
 
       for (const t of alertTransports) {

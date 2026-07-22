@@ -140,6 +140,33 @@ export interface AppConfig {
   readonly liquidityDrainPct?: number;
   readonly liquidityDrainLookbackSnapshots?: number;
 
+  // ─── Freeze screening / IL protection (Wave 17) ───────────────────────────
+  // Optional (not required) so the many standalone test fixtures that omit new
+  // fields keep compiling; loadConfig always sets all four. Absent = safe off.
+  /** Smart freeze screening: pass UNTRUSTED freeze-enabled pools to the
+   *  pipeline (audit reason + warning memory) instead of hard-rejecting.
+   *  Default false (strict reject = today's fail-closed behavior). */
+  readonly freezeSmartScreening?: boolean;
+  /** Master switch for IL-protection gates (ENTER fee/IL floor +
+   *  IL-dominance fast EXIT). Default true. */
+  readonly ilProtectionEnabled?: boolean;
+  /** IL-dominance fast EXIT fires when IL (USD) > cumulative fees claimed ×
+   *  this factor and the position is out of range. Default 2. */
+  readonly ilDominanceExitFactor?: number;
+  /** Minimum IL (USD) before the IL-dominance fast EXIT may fire. Default 5. */
+  readonly ilDominanceMinUsd?: number;
+
+  // ─── Token-risk overlay (Wave 18) ───────────────────────────────────────────
+  // Optional so standalone test fixtures that omit new fields keep compiling;
+  // loadConfig always sets both. Guard contract: `jupiterTokenRiskEnabled !==
+  // false` (production default true; the test fixture pins false to isolate the
+  // existing ~80 test files). Absent = overlay active.
+  /** Master switch for the Jupiter/Data-API token-risk overlay used by the
+   *  freeze-screening seam and ENTER gating. Default true. */
+  readonly jupiterTokenRiskEnabled?: boolean;
+  /** Minutes a Jupiter token-risk signal is cached before refresh. Default 30. */
+  readonly jupiterTokenRiskCacheTtlMin?: number;
+
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
   /** Estimated SOL cost of a single rebalance tx (entry + close). */
   readonly rebalanceGasCostSol: number;
@@ -403,14 +430,14 @@ const loadConfig = Effect.gen(function* () {
   const watchlistPoolsRaw = yield* Config.string("WATCHLIST_POOLS").pipe(
     Effect.orElseSucceed(() => ""),
   );
+  // Default = the verified stablecoin mints (USDC, USDT, PYUSD). An explicit
+  // empty value (STABLECOIN_MINTS=) is present, not absent, so it disables the
+  // allowlist (empty set). Entries are pubkey-validated below, fail-closed.
   const stablecoinMintsRaw = yield* Config.string("STABLECOIN_MINTS").pipe(
-    Effect.orElseSucceed(() => ""),
-  );
-  const stablecoinMints = new Set(
-    stablecoinMintsRaw
-      .split(",")
-      .map((mint) => mint.trim())
-      .filter(Boolean),
+    Effect.orElseSucceed(
+      () =>
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v,Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB,2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+    ),
   );
   const depegAbsoluteUsd = yield* validatedNumber("DEPEG_ABSOLUTE_USD", 0.001, 0.02);
   const depegRelativePct = yield* validatedNumber("DEPEG_RELATIVE_PCT", 0.001, 0.02);
@@ -419,6 +446,24 @@ const loadConfig = Effect.gen(function* () {
     "LIQUIDITY_DRAIN_LOOKBACK_SNAPSHOTS",
     1,
     12,
+  );
+
+  const freezeSmartScreening = yield* Config.boolean("FREEZE_SMART_SCREENING").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const ilProtectionEnabled = yield* Config.boolean("IL_PROTECTION_ENABLED").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const ilDominanceExitFactor = yield* validatedNumber("IL_DOMINANCE_EXIT_FACTOR", 1, 2);
+  const ilDominanceMinUsd = yield* validatedNumber("IL_DOMINANCE_MIN_USD", 0, 5);
+
+  const jupiterTokenRiskEnabled = yield* Config.boolean("JUPITER_TOKEN_RISK_ENABLED").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const jupiterTokenRiskCacheTtlMin = yield* validatedNumber(
+    "JUPITER_TOKEN_RISK_CACHE_TTL_MIN",
+    1,
+    30,
   );
 
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
@@ -823,6 +868,31 @@ const loadConfig = Effect.gen(function* () {
     );
   }
 
+  const stablecoinMintsList = stablecoinMintsRaw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const invalidStablecoinMints = stablecoinMintsList.filter((mint) => {
+    try {
+      new PublicKey(mint);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (invalidStablecoinMints.length > 0) {
+    return yield* Effect.die(
+      new ConfigError({
+        message: `STABLECOIN_MINTS contains invalid Solana public keys: ${invalidStablecoinMints.join(", ")}`,
+        issues: invalidStablecoinMints.map((mint) => ({
+          path: "STABLECOIN_MINTS",
+          message: `Invalid public key: ${mint}`,
+        })),
+      }),
+    );
+  }
+  const stablecoinMints = new Set(stablecoinMintsList);
+
   const cfg: AppConfig = {
     walletPrivateKey,
     heliusApiKey,
@@ -872,6 +942,12 @@ const loadConfig = Effect.gen(function* () {
     depegRelativePct,
     liquidityDrainPct,
     liquidityDrainLookbackSnapshots,
+    freezeSmartScreening,
+    ilProtectionEnabled,
+    ilDominanceExitFactor,
+    ilDominanceMinUsd,
+    jupiterTokenRiskEnabled,
+    jupiterTokenRiskCacheTtlMin,
 
     rebalanceGasCostSol,
     solPriceUsd,

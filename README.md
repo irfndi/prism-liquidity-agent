@@ -180,7 +180,6 @@ Key `.env` variables:
 | `DISCOVERY_MIN_TVL_USD`    | `1000000`    | Minimum TVL for automatic discovery     |
 | `PAPER_TRADING`           | `true`       | Disable to execute on-chain              |
 | `MIN_POOL_TVL_USD`        | `50000`      | Skip pools below this TVL                |
-| `MIN_FEE_IL_RATIO`        | `1.2`        | Minimum fee/IL ratio to hold             |
 | `VOLUME_AUTH_THRESHOLD`   | `0.70`       | Skip pools below this authenticity score |
 | `SCAN_INTERVAL_MS`        | `600000`     | Scan frequency (default 10 min)          |
 | `CONFIDENCE_THRESHOLD`    | `0.65`       | Minimum agent confidence to act          |
@@ -194,7 +193,14 @@ Key `.env` variables:
 | `FEE_DESTINATION`         | `compound`   | Fee routing: compound\|accumulate-quote\|accumulate-sol |
 | `ALERTS_ENABLED`          | `true`       | Proactive Telegram alert delivery        |
 | `COPY_SIGNALS_ENABLED`    | `false`      | Opt-in copy-trading signal boost         |
-| `STABLECOIN_MINTS`        | --           | Comma-separated stablecoin mints for depeg detection |
+| `STABLECOIN_MINTS`        | `USDC/USDT/PYUSD` | Trusted stablecoin mints exempt from freeze screening + depeg detection (allowlist); empty disables |
+| `FREEZE_SMART_SCREENING`  | `false`      | Pass untrusted freeze-enabled pools on instead of rejecting |
+| `IL_PROTECTION_ENABLED`   | `true`       | IL gates: entry fee/IL floor + IL-dominance EXIT |
+| `MIN_FEE_IL_RATIO`        | `1.2`        | Min fee/IL to hold; ENTER floor when IL protection is on |
+| `IL_DOMINANCE_EXIT_FACTOR` | `2`         | IL (USD) over fees × this triggers EXIT when out of range |
+| `IL_DOMINANCE_MIN_USD`    | `5`          | Minimum IL (USD) before the IL-dominance EXIT |
+| `JUPITER_TOKEN_RISK_ENABLED` | `true`    | Jupiter/Data-API token-risk overlay (freeze + ENTER gate) |
+| `JUPITER_TOKEN_RISK_CACHE_TTL_MIN` | `30` | Minutes a token-risk signal is cached (min 1) |
 
 Live entries that fail because the wallet lacks a pool token are backed off
 exponentially for that pool, starting at 30 minutes and capped at 6 hours.
@@ -289,6 +295,12 @@ Decisions pass through checks in order before any on-chain action:
 7. Rebalance range > `MAX_REBALANCE_RANGE_BINS` -> reject REBALANCE
 
 HOLD executes nothing, so it skips risk evaluation entirely. Deterministic EXIT conditions only fire for pools with a tracked position.
+
+### Entry and IL-protection gates (run inside the decision loop)
+
+- **Entry fee/IL floor** (`IL_PROTECTION_ENABLED` + `MIN_FEE_IL_RATIO`): when IL protection is on, ENTER is rejected when the pool's fee/IL ratio is below the minimum — entry fees must beat estimated IL. The ratio is never unknown, so this fails closed on 0.
+- **Token-risk gate** (`JUPITER_TOKEN_RISK_ENABLED`): ENTER is rejected when either leg carries a Jupiter hard-risk signal (aggregated suspicious-audit flag, or a low organic score). Advisory and fail-open — unknown signals never block. Freeze-screening works the same way: freeze-authority tokens on `STABLECOIN_MINTS` are exempt, and other freeze tokens pass when Data-API- or Jupiter-verified instead of being rejected by design.
+- **IL-dominance EXIT**: while a position is out of range, if its impermanent loss (USD) exceeds cumulative claimed fees × `IL_DOMINANCE_EXIT_FACTOR` and `IL_DOMINANCE_MIN_USD`, the position exits immediately.
 
 ### Rebalance-specific gates (run inside the decision loop, not at execution)
 

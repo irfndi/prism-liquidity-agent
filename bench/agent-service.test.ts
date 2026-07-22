@@ -5,12 +5,18 @@ import {
   validateOverride,
   AgentNoOp,
   buildProposalPrompt,
+  selectTransport,
+  connectReviewTransport,
 } from "../engine/agent-service.js";
 import { AcpTransport } from "../engine/acp-transport.js";
 import { GatewayTransport } from "../engine/gateway-transport.js";
 import type { AgentDecision } from "../engine/types.js";
 import type { AppConfig } from "../engine/config-service.js";
-import type { AgentRuntimeContext, AgentRuntimeDetection } from "../engine/agent-transport.js";
+import type {
+  AgentRuntimeContext,
+  AgentRuntimeDetection,
+  AgentRuntimeTransport,
+} from "../engine/agent-transport.js";
 
 function makeDecision(overrides: Partial<AgentDecision> = {}): AgentDecision {
   return {
@@ -341,5 +347,79 @@ describe("transport factories", () => {
       timeoutMs: 15_000,
     });
     expect(transport.name).toBe("gateway");
+  });
+});
+
+describe("selectTransport", () => {
+  const openclawDetection = (gatewayRunning: boolean): AgentRuntimeDetection => ({
+    hermes: { available: false, path: null },
+    openclaw: { available: gatewayRunning, path: null, gatewayRunning },
+    recommended: gatewayRunning ? "openclaw" : "none",
+  });
+
+  it("selects the gateway transport when the gateway is running and a token is set", () => {
+    const config = makeConfig({ agentRuntime: "openclaw", agentGatewayToken: "secret" });
+    const transport = selectTransport(config, openclawDetection(true));
+    expect(transport?.name).toBe("gateway");
+  });
+
+  it("skips the gateway transport when AGENT_GATEWAY_TOKEN is empty (explicit openclaw)", () => {
+    const config = makeConfig({ agentRuntime: "openclaw", agentGatewayToken: "" });
+    const transport = selectTransport(config, openclawDetection(true));
+    expect(transport).toBeNull();
+  });
+
+  it("treats a whitespace-only AGENT_GATEWAY_TOKEN as empty", () => {
+    const config = makeConfig({ agentRuntime: "openclaw", agentGatewayToken: "   " });
+    const transport = selectTransport(config, openclawDetection(true));
+    expect(transport).toBeNull();
+  });
+
+  it("returns null in auto when the token is empty and no Hermes/ACP transport is available", () => {
+    const config = makeConfig({ agentRuntime: "auto", agentGatewayToken: "" });
+    const transport = selectTransport(config, openclawDetection(true));
+    expect(transport).toBeNull();
+  });
+
+  it("falls back to the ACP transport in auto when the token is empty but Hermes is available", () => {
+    const config = makeConfig({ agentRuntime: "auto", agentGatewayToken: "" });
+    const detection: AgentRuntimeDetection = {
+      hermes: { available: true, path: "/usr/local/bin/hermes" },
+      openclaw: { available: true, path: null, gatewayRunning: true },
+      recommended: "openclaw",
+    };
+    const transport = selectTransport(config, detection);
+    expect(transport?.name).toBe("acp");
+  });
+
+  it("does not select the gateway transport when the gateway is not running", () => {
+    const config = makeConfig({ agentRuntime: "openclaw", agentGatewayToken: "secret" });
+    const transport = selectTransport(config, openclawDetection(false));
+    expect(transport).toBeNull();
+  });
+});
+
+describe("connectReviewTransport", () => {
+  const makeTransport = (connect: () => Effect.Effect<void, unknown>): AgentRuntimeTransport => ({
+    name: "gateway",
+    isAvailable: () => Effect.succeed(true),
+    connect,
+    disconnect: () => Effect.void,
+    sendPrompt: () => Effect.succeed({ override: null, raw: "", latencyMs: 0 }),
+    onEvent: () => {},
+  });
+
+  it("reports connected=true when the transport connects", async () => {
+    const transport = makeTransport(() => Effect.void);
+    const connected = await Effect.runPromise(connectReviewTransport(transport));
+    expect(connected).toBe(true);
+  });
+
+  it("reports connected=false when the transport fails to connect", async () => {
+    const transport = makeTransport(() =>
+      Effect.fail(new Error("Gateway closed (1008): policy violation")),
+    );
+    const connected = await Effect.runPromise(connectReviewTransport(transport));
+    expect(connected).toBe(false);
   });
 });

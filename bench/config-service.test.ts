@@ -78,3 +78,77 @@ describe("ConfigService ENTRY_STRATEGY_TYPE", () => {
     expect(cfg.entryStrategyType).toBe("spot");
   });
 });
+
+describe("ConfigService STABLECOIN_MINTS", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults to the three verified stablecoin mints when unset", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.stablecoinMints).toEqual(
+      new Set([
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+        "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+      ]),
+    );
+  });
+
+  it("yields an empty set when explicitly disabled with an empty string", async () => {
+    vi.stubEnv("STABLECOIN_MINTS", "");
+    const cfg = await loadConfig();
+    expect(cfg.stablecoinMints).toEqual(new Set());
+  });
+
+  it("rejects invalid stablecoin mints with an actionable config error", async () => {
+    vi.stubEnv("STABLECOIN_MINTS", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v,not-a-public-key");
+    await expect(loadConfig()).rejects.toThrow("STABLECOIN_MINTS");
+  });
+});
+
+describe("ConfigService freeze screening + IL protection flags", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults FREEZE_SMART_SCREENING to false", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.freezeSmartScreening).toBe(false);
+  });
+
+  it("honours FREEZE_SMART_SCREENING=true", async () => {
+    vi.stubEnv("FREEZE_SMART_SCREENING", "true");
+    const cfg = await loadConfig();
+    expect(cfg.freezeSmartScreening).toBe(true);
+  });
+
+  it("defaults IL_PROTECTION_ENABLED to true", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.ilProtectionEnabled).toBe(true);
+  });
+
+  it("honours IL_PROTECTION_ENABLED=false", async () => {
+    vi.stubEnv("IL_PROTECTION_ENABLED", "false");
+    const cfg = await loadConfig();
+    expect(cfg.ilProtectionEnabled).toBe(false);
+  });
+
+  it("defaults IL_DOMINANCE_EXIT_FACTOR to 2 and clamps below the minimum of 1", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.ilDominanceExitFactor).toBe(2);
+
+    vi.stubEnv("IL_DOMINANCE_EXIT_FACTOR", "0.5");
+    const clamped = await loadConfig();
+    expect(clamped.ilDominanceExitFactor).toBe(1);
+  });
+
+  it("defaults IL_DOMINANCE_MIN_USD to 5 and clamps below the minimum of 0", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.ilDominanceMinUsd).toBe(5);
+
+    vi.stubEnv("IL_DOMINANCE_MIN_USD", "-3");
+    const clamped = await loadConfig();
+    expect(clamped.ilDominanceMinUsd).toBe(0);
+  });
+});

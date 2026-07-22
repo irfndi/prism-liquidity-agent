@@ -1315,6 +1315,7 @@ const VALID_ALERT_TYPES = new Set([
   "fee_milestone",
   "stablecoin_depeg",
   "liquidity_drain",
+  "il_dominance",
 ]);
 const VALID_ALERT_SEVERITIES = new Set(["info", "warning", "critical"]);
 const MAX_ALERT_MESSAGE_LENGTH = 1000;

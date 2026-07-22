@@ -407,10 +407,20 @@ export const DbLive = (dbPath?: string) =>
                   const embedding = yield* getEmbedding(entry.content);
                   yield* Effect.try({
                     try: () => {
+                      // vec0 auxiliary DOUBLE columns are strictly typed on
+                      // insert: the bound value must be exactly SQLITE_FLOAT (or
+                      // NULL). Integer-valued JS numbers (e.g. pnlUsd 100,
+                      // confidence 1) bind as SQLITE_INTEGER and are rejected by
+                      // the strict linux vec0 binary with
+                      // "Auxiliary column type mismatch: ... has type FLOAT, but
+                      // INTEGER was provided" (sqlite-vec v0.1.9, xUpdate). Wrapping
+                      // the DOUBLE aux columns in CAST(? AS REAL) coerces any bound
+                      // value to FLOAT; CAST(NULL AS REAL) is NULL, which preserves
+                      // the `?? null` fail-open semantics (NULL is always accepted).
                       runOne(
                         db,
                         `INSERT INTO vec_memory (embedding, id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                   VALUES (?, ?, ?, ?, ?, ?, CAST(? AS REAL), CAST(? AS REAL), ?, ?)`,
                         JSON.stringify(embedding),
                         id,
                         entry.category,
@@ -436,29 +446,59 @@ export const DbLive = (dbPath?: string) =>
                 Effect.gen(function* () {
                   const now = Date.now();
                   const embedding = yield* getEmbedding(queryText);
-                  const sql = poolAddress
-                    ? `SELECT
-                    id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
-                    distance
-                   FROM vec_memory
-                   WHERE embedding MATCH ? AND k = ? AND expiresAt > ? AND pool_address = ?
-                   ORDER BY distance`
-                    : `SELECT
-                    id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
-                    distance
-                   FROM vec_memory
-                   WHERE embedding MATCH ? AND k = ? AND expiresAt > ?
-                   ORDER BY distance`;
-                  const params = poolAddress
-                    ? [JSON.stringify(embedding), topK * 2, now, poolAddress]
-                    : [JSON.stringify(embedding), topK * 2, now];
-                  const rows = yield* Effect.try({
-                    try: () => queryAll<Record<string, unknown>>(db, sql, ...params),
-                    catch: (error) => error,
-                  });
+                  // vec0 (sqlite-vec) forbids ANY auxiliary-column WHERE constraint
+                  // inside a KNN query: `embedding MATCH ? AND k = ? [ORDER BY
+                  // distance]` is the only legal shape. `expiresAt` and
+                  // `pool_address` are both auxiliary columns, so filtering on them
+                  // in the WHERE raised "An illegal WHERE constraint was provided on
+                  // a vec0 auxiliary column in a KNN query" on the strict linux vec0
+                  // binary (v0.1.9 vec0BestIndex: hasAuxConstraint -> error). Those
+                  // filters are therefore applied in JS after the fetch below.
+                  // Tradeoff (R1a + expanding window): a single global window of the
+                  // nearest `topK * 2` neighbours can yield fewer than topK in-scope
+                  // rows when the nearest neighbours are mostly expired or
+                  // other-pool, so the window EXPANDS — k doubles each pass and the
+                  // loop never stops before querying at the configured cap `maxK`
+                  // (it breaks only after a query, once topK in-scope rows are found
+                  // or `k >= maxK`). k is monotonically non-decreasing toward maxK,
+                  // so the widest query always runs: for topK = 3 that is
+                  // k = 6, 12, 24, 48, 64 — in-scope rows ranked anywhere within
+                  // maxK are examined (worst case ~log2(maxK/topK) + 1 queries).
+                  // This restores parity with the old SQL WHERE pre-filter in
+                  // realistic cases; only genuine corner cases (a table dominated by
+                  // expired/other-pool rows beyond the maxK nearest neighbours)
+                  // fail-soft with fewer rows. Recency-blend ranking and ORDER BY
+                  // distance are preserved exactly.
+                  const maxK = Math.max(topK * 8, 64);
+                  let k = topK * 2;
+                  let candidates: Record<string, unknown>[] = [];
+                  for (;;) {
+                    const rows = yield* Effect.try({
+                      try: () =>
+                        queryAll<Record<string, unknown>>(
+                          db,
+                          `SELECT
+                      id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
+                      distance
+                     FROM vec_memory
+                     WHERE embedding MATCH ? AND k = ?
+                      ORDER BY distance`,
+                          JSON.stringify(embedding),
+                          k,
+                        ),
+                      catch: (error) => error,
+                    });
+                    candidates = rows
+                      .filter((row) => Number(row.expiresAt ?? 0) > now)
+                      .filter((row) =>
+                        poolAddress ? String(row.pool_address ?? "") === poolAddress : true,
+                      );
+                    if (candidates.length >= topK || k >= maxK) break;
+                    k = Math.min(k * 2, maxK);
+                  }
 
                   const RECENCY_HALFLIFE_MS = 30 * 24 * 60 * 60 * 1000;
-                  const ranked = rows
+                  const ranked = candidates
                     .map((row) => {
                       const rawDistance = row.distance;
                       const distance =

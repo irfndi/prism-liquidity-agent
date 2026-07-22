@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { Effect, Layer } from "effect";
 import { Database } from "bun:sqlite";
-import { createDatabase, hasVecMemoryTable } from "../engine/db.js";
+import { mkdtempSync, readdirSync, rmSync } from "fs";
+import os from "os";
+import path from "path";
+import { createDatabase, hasVecMemoryTable, probeVecAvailability } from "../engine/db.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 
@@ -213,5 +216,200 @@ describe("DbService memory operations (vec_memory present)", () => {
     );
     expect(result.length).toBeGreaterThan(0);
     expect(result[0]!.content).toBe("SOL/USDC pool performed well");
+  });
+
+  it("insertMemory + queryMemory roundtrip with INTEGER-valued pnlUsd/confidence", async () => {
+    const db = tryCreateVecDatabase();
+    if (!db) return; // Skip if sqlite-vec unavailable.
+    db.close();
+
+    const layer = DbLive(":memory:");
+    const result = await run(
+      Effect.gen(function* () {
+        const dbService = yield* DbService;
+        // Integer-valued numbers bind as SQLITE_INTEGER. The vec0 DOUBLE aux
+        // columns reject that under the strict linux binary unless
+        // insertMemory wraps them in CAST(? AS REAL); this locks that path.
+        yield* dbService.insertMemory({
+          content: "integer pnl and confidence roundtrip",
+          category: "outcome",
+          poolAddress: "PoolInt",
+          outcome: "profit",
+          pnlUsd: 100,
+          confidence: 1,
+        });
+        return yield* dbService.queryMemory("integer pnl and confidence roundtrip", 5, "PoolInt");
+      }),
+      layer,
+    );
+    expect(result.length).toBeGreaterThan(0);
+    expect(result[0]!.content).toBe("integer pnl and confidence roundtrip");
+    expect(result[0]!.pnlUsd).toBe(100);
+    expect(result[0]!.confidence).toBe(1);
+  });
+
+  it("queryMemory pool-scoped filtering via the legal KNN shape (no aux-column WHERE)", async () => {
+    const db = tryCreateVecDatabase();
+    if (!db) return; // Skip if sqlite-vec unavailable.
+    db.close();
+
+    const layer = DbLive(":memory:");
+    const result = await run(
+      Effect.gen(function* () {
+        const dbService = yield* DbService;
+        // Two KNN-nearest entries (identical content) on different pools.
+        yield* dbService.insertMemory({
+          content: "shared near-identical memory",
+          category: "pattern",
+          poolAddress: "PoolScopeA",
+          outcome: "profit",
+          pnlUsd: 100,
+          confidence: 1,
+        });
+        yield* dbService.insertMemory({
+          content: "shared near-identical memory",
+          category: "pattern",
+          poolAddress: "PoolScopeB",
+          outcome: "loss",
+          pnlUsd: 50,
+          confidence: 1,
+        });
+        const unscoped = yield* dbService.queryMemory("shared near-identical memory", 5);
+        const scoped = yield* dbService.queryMemory(
+          "shared near-identical memory",
+          5,
+          "PoolScopeA",
+        );
+        return { unscoped, scoped };
+      }),
+      layer,
+    );
+    // Unscoped sees both pools — proves both rows are KNN-nearest neighbours.
+    const unscopedPools = new Set(result.unscoped.map((r) => r.poolAddress));
+    expect(unscopedPools.has("PoolScopeA")).toBe(true);
+    expect(unscopedPools.has("PoolScopeB")).toBe(true);
+    // Scoped returns only PoolScopeA via the post-fetch JS pool filter.
+    expect(result.scoped.length).toBe(1);
+    expect(result.scoped[0]!.poolAddress).toBe("PoolScopeA");
+    expect(result.scoped[0]!.pnlUsd).toBe(100);
+  });
+
+  it("queryMemory expands the KNN window when the in-scope pool is a minority of the nearest neighbours", async () => {
+    const db = tryCreateVecDatabase();
+    if (!db) return; // Skip if sqlite-vec unavailable.
+    db.close();
+
+    const layer = DbLive(":memory:");
+    const result = await run(
+      Effect.gen(function* () {
+        const dbService = yield* DbService;
+        // 3 target rows + 15 other-pool rows (18 distinct contents). The target
+        // pool may be a small minority of the global distance ordering, far
+        // beyond the initial topK*2 window; the expanding loop must re-query
+        // with a wider k until the post-filter has enough in-scope rows. The
+        // cap (max(topK*8, 64) = 64 >= 18) makes this deterministic for ANY
+        // embedding distance order — the widest query returns the whole table.
+        for (let i = 0; i < 3; i += 1) {
+          yield* dbService.insertMemory({
+            content: `expanding window target memory ${i}`,
+            category: "pattern",
+            poolAddress: "PoolExpandA",
+          });
+        }
+        for (let i = 0; i < 15; i += 1) {
+          yield* dbService.insertMemory({
+            content: `expanding window noise memory ${i}`,
+            category: "pattern",
+            poolAddress: "PoolExpandB",
+          });
+        }
+        return yield* dbService.queryMemory("expanding window target memory", 2, "PoolExpandA");
+      }),
+      layer,
+    );
+    expect(result).toHaveLength(2);
+    expect(result.every((entry) => entry.poolAddress === "PoolExpandA")).toBe(true);
+  });
+
+  it("queryMemory KNN expansion reliably reaches the configured cap (k = maxK)", async () => {
+    const db = tryCreateVecDatabase();
+    if (!db) return; // Skip if sqlite-vec unavailable.
+    db.close();
+
+    const layer = DbLive(":memory:");
+    const result = await run(
+      Effect.gen(function* () {
+        const dbService = yield* DbService;
+        // 3 target rows + 60 other-pool rows (63 distinct contents).
+        // topK = 3 → maxK = max(3*8, 64) = 64, so the fixed expansion loop's
+        // final k = 64 query covers the whole 63-row table and the post-filter
+        // finds all 3 target rows REGARDLESS of embedding distance order —
+        // this is deterministic for ANY distance order. The OLD bounded loop
+        // (4 iterations → k = 6, 12, 24, 48; k = 64 never queried) could return
+        // fewer than 3 once the target rows ranked 49–63 in a table this size.
+        for (let i = 0; i < 3; i += 1) {
+          yield* dbService.insertMemory({
+            content: `cap reach target memory ${i}`,
+            category: "pattern",
+            poolAddress: "PoolCapA",
+          });
+        }
+        for (let i = 0; i < 60; i += 1) {
+          yield* dbService.insertMemory({
+            content: `cap reach noise memory ${i}`,
+            category: "pattern",
+            poolAddress: "PoolCapB",
+          });
+        }
+        return yield* dbService.queryMemory("cap reach target memory", 3, "PoolCapA");
+      }),
+      layer,
+    );
+    expect(result).toHaveLength(3);
+    expect(result.every((entry) => entry.poolAddress === "PoolCapA")).toBe(true);
+  });
+});
+
+// ─── probeVecAvailability (real environment, doctor seam) ───────────────────
+
+describe("probeVecAvailability", () => {
+  it("agrees with createDatabase when sqlite-vec can load (skipped in vec0-less environments)", () => {
+    const db = tryCreateVecDatabase();
+    if (!db) {
+      // Environment cannot load sqlite-vec; skip the positive probe test.
+      return;
+    }
+    db.close();
+
+    const result = probeVecAvailability();
+    expect(result.available).toBe(true);
+    expect(result.source).not.toBeNull();
+    expect(result.error).toBeNull();
+  });
+
+  it("creates a queryable vec_memory table from createDatabase (regression: REAL aux columns fail vec0 construction with a misleading chunk_size error)", () => {
+    const db = tryCreateVecDatabase();
+    if (!db) {
+      // Environment cannot load sqlite-vec; skip the schema regression test.
+      return;
+    }
+    expect(hasVecMemoryTable(db)).toBe(true);
+    db.close();
+  });
+
+  it("opens only in-memory databases and never creates a file", () => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "prism-probe-"));
+    const previousCwd = process.cwd();
+    process.chdir(tmpDir);
+    try {
+      const before = readdirSync(tmpDir);
+      const result = probeVecAvailability();
+      const after = readdirSync(tmpDir);
+      expect(after).toEqual(before);
+      expect(typeof result.available).toBe("boolean");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
