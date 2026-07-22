@@ -451,7 +451,9 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
         error = err;
       }
       expect(error).not.toBeNull();
-      expect(String(error)).toContain("Gateway chat run timeout");
+      const message = String(error);
+      expect(message).toMatch(/timed out after \d+ms \(elapsed \d+ms\)/);
+      expect(message).toContain("timed out after 250ms");
     } finally {
       server.stop(true);
     }

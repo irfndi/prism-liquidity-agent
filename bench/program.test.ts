@@ -181,6 +181,7 @@ describe("executeLive", () => {
           binUtilization: 0.5,
           tvlVelocity: 0,
           volumeAuthenticityKnown: true,
+          feeIlRatioKnown: true,
           binUtilizationKnown: true,
           farmAprPct: null,
         }) as import("../engine/types.js").PoolMetrics,

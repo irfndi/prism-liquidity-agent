@@ -1557,15 +1557,16 @@ describe("program — multiple positions per pool", () => {
   }, 15_000);
 });
 
-describe("A4 paper fee accrual requires Data API stats (statsSource)", () => {
-  // When Data API enrichment is down, getPoolState ships a POSITIVE modeled
+describe("A4 paper fee accrual requires measured stats (datapi or geckoterminal)", () => {
+  // When both real sources are down, getPoolState ships a POSITIVE modeled
   // fees24hUsd under statsSource "heuristic" — every A4 numeric guard (null /
   // <= 0 / non-finite / in-range / TVL) still passes. Accrual must be gated on
-  // pool.statsSource === "datapi" so heuristic cycles book no fabricated fee.
+  // isMeasuredStatsSource(statsSource) so heuristic cycles book no fabricated
+  // fee, while datapi AND geckoterminal (both carry real fees) accrue.
   const POS_ID = "paper-accr";
 
   async function runAccrualCycle(opts: {
-    statsSource: "datapi" | "heuristic";
+    statsSource: "datapi" | "geckoterminal" | "heuristic";
     datapi?: MeteoraDatapiApi;
   }): Promise<{ accruals: ReadonlyArray<{ feesUsd: number | null }>; accruedUsd: number }> {
     const layer = makeProgramLayer({
@@ -1583,9 +1584,7 @@ describe("A4 paper fee accrual requires Data API stats (statsSource)", () => {
     });
     const test = Effect.gen(function* () {
       const db = yield* DbService;
-      yield* db.savePosition(
-        makePos({ positionId: POS_ID, lowerBinId: 4980, upperBinId: 5020 }),
-      );
+      yield* db.savePosition(makePos({ positionId: POS_ID, lowerBinId: 4980, upperBinId: 5020 }));
       yield* Effect.raceFirst(program, Effect.sleep(1_500));
       const events = yield* db.getPositionEvents(POOL);
       const pos = yield* db.getPosition(POS_ID);
@@ -1625,6 +1624,15 @@ describe("A4 paper fee accrual requires Data API stats (statsSource)", () => {
       datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
     });
     expect(accruals, "datapi enrichment must enable the notional accrual").toHaveLength(1);
+    expect(accruedUsd).toBeGreaterThan(0);
+  }, 15_000);
+
+  it("the same pool with geckoterminal stats accrues exactly one notional fee", async () => {
+    // GeckoTerminal fees are real (real volume × the pool's base-fee rate), so a
+    // geckoterminal-sourced pool accrues just like datapi. Proves the gate keys
+    // off isMeasuredStatsSource, not specifically the Data API.
+    const { accruals, accruedUsd } = await runAccrualCycle({ statsSource: "geckoterminal" });
+    expect(accruals, "geckoterminal real fees must enable the notional accrual").toHaveLength(1);
     expect(accruedUsd).toBeGreaterThan(0);
   }, 15_000);
 });

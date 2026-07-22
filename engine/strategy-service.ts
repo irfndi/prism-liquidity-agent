@@ -8,6 +8,7 @@ import type {
   PriceDriftContext,
   SignalWeights,
 } from "./types.js";
+import { isMeasuredStatsSource } from "./types.js";
 
 /**
  * Upper bound for the fee/IL ratio. Also the value reported when observed
@@ -125,9 +126,12 @@ export const DLMMStrategy: StrategyApi = {
       feeIlRatio,
       volumeAuthenticity: volumeAuthenticity.score,
       binUtilization,
-      // Volume authenticity is only meaningful on real (Data API) stats;
-      // heuristic volume/fees would just re-validate their own assumptions.
-      volumeAuthenticityKnown: pool.statsSource === "datapi",
+      // Volume authenticity + the fee/IL ratio are only meaningful on MEASURED
+      // volume/fees (datapi or geckoterminal); heuristic volume/fees are
+      // fabricated and would just re-validate their own assumptions, so the
+      // gates that consume them must skip rather than act on fiction.
+      volumeAuthenticityKnown: isMeasuredStatsSource(pool.statsSource),
+      feeIlRatioKnown: isMeasuredStatsSource(pool.statsSource),
       binUtilizationKnown: binArray.reservesKnown !== false,
       // Farm APR only flows from the Data API overlay: a pool with a farm but
       // an unknown APR reports 0 (known farm, no rate), non-farm/unknown null.

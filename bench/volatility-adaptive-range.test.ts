@@ -257,9 +257,15 @@ describe("ConfigService Wave 9 env vars", () => {
     );
   }
 
-  it("defaults: 0 (binStep-tier baseline) and adaptive disabled", async () => {
+  it("defaults: 0 (binStep-tier baseline) and adaptive enabled", async () => {
     const cfg = await loadConfig();
     expect(cfg.entryRangeHalfWidthBins).toBe(0);
+    expect(cfg.volatilityAdaptiveRanges).toBe(true);
+  });
+
+  it("parses VOLATILITY_ADAPTIVE_RANGES=false to opt out into static widths", async () => {
+    vi.stubEnv("VOLATILITY_ADAPTIVE_RANGES", "false");
+    const cfg = await loadConfig();
     expect(cfg.volatilityAdaptiveRanges).toBe(false);
   });
 

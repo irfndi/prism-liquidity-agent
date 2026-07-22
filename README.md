@@ -35,6 +35,16 @@ This is what makes it self-improving: it gets slower to enter pools it has been 
 
 Before any decision, the agent scores each pool's volume on a 0-1 scale. Volume/TVL ratio above 10x, fee rate outside the 0.02%-2% band, or low TVL with outsized volume all push the score down. Pools below 0.70 are skipped entirely. This alone filters most of the wash-traded noise on DLMM.
 
+## Pool stats sources
+
+Volume, TVL and fees come from the first source that answers, and the pool is tagged with where they came from:
+
+1. **Meteora Data API** — real TVL/volume/fees, and the only source of the safety signals (blacklist / freeze / verification / farm).
+2. **GeckoTerminal** — real 24h volume and reserve TVL from the keyless public API (fees derived as real volume × the pool's base fee rate), used when the Data API is down.
+3. **Heuristic** — on-chain reserves × a modeled turnover. The last-resort safety net for a total API outage; it fabricates volume/fees.
+
+Fabricated (heuristic) stats never pass a gate: when only the heuristic is available, the volume-authenticity and fee/IL gates are skipped rather than acting on made-up numbers, so a pool is held (not entered or force-exited) until real data returns.
+
 ## Quickstart
 
 **One-liner install — latest stable bundle** (recommended for most users; installs Bun if needed, downloads a compiled bundle for your platform, and drops a `prism` wrapper on your PATH):
@@ -188,7 +198,7 @@ Key `.env` variables:
 | `ENABLE_SNAPSHOT_CAPTURE` | `false`      | Dump pool snapshots to DB (paper only)   |
 | `MAX_POSITIONS_PER_POOL`  | `2`          | Concurrent positions per pool (Wave 10)  |
 | `ENTRY_STRATEGY_TYPE`     | `spot`       | Deposit shape: spot\|curve\|bidask\|auto |
-| `VOLATILITY_ADAPTIVE_RANGES` | `false`   | Scale range width by realized volatility |
+| `VOLATILITY_ADAPTIVE_RANGES` | `true`    | Scale range width by realized volatility (set false for static widths) |
 | `FARM_REWARDS_ENABLED`    | `true`       | Claim LM farm rewards periodically       |
 | `FEE_DESTINATION`         | `compound`   | Fee routing: compound\|accumulate-quote\|accumulate-sol |
 | `ALERTS_ENABLED`          | `true`       | Proactive Telegram alert delivery        |
@@ -262,7 +272,7 @@ Prism also exposes pull interfaces for agent runtimes to query state on demand:
 | `AGENT_OPENCLAW_WEBHOOK_TOKEN`  | ``                         | Bearer token for the OpenClaw webhook                |
 | `AGENT_HERMES_API_URL`          | ``                         | Hermes HTTP API base URL (OpenAI-compatible)         |
 | `AGENT_HERMES_API_TOKEN`        | ``                         | Bearer token (Hermes `API_SERVER_KEY`) for the Hermes HTTP API |
-| `AGENT_PROMPT_TIMEOUT_MS`       | `15000`                    | Prompt/check-in timeout                              |
+| `AGENT_PROMPT_TIMEOUT_MS`       | `60000`                    | Prompt/check-in timeout (slow-model first-token latency can exceed 15s) |
 | `AGENT_CHECKIN_INTERVAL_MS`     | `3600000`                  | Periodic check-in interval                           |
 | `AGENT_CHECKIN_ON_EVENTS`       | `true`                     | Check-in on ENTER/EXIT/REBALANCE                     |
 | `AGENT_CHECKIN_INCLUDE_HISTORY` | `true`                     | Include recent decisions/warnings                    |

@@ -167,6 +167,12 @@ export interface AppConfig {
   /** Minutes a Jupiter token-risk signal is cached before refresh. Default 30. */
   readonly jupiterTokenRiskCacheTtlMin?: number;
 
+  /** Master switch for the GeckoTerminal secondary pool-stats source (tried when
+   *  the Meteora Data API is down). Default true; absent = gecko active. The
+   *  test fixture pins false (like jupiterTokenRiskEnabled) so the existing
+   *  program tests never touch the network and stay byte-identical. */
+  readonly geckoTerminalEnabled?: boolean;
+
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
   /** Estimated SOL cost of a single rebalance tx (entry + close). */
   readonly rebalanceGasCostSol: number;
@@ -244,7 +250,7 @@ export interface AppConfig {
   readonly agentGatewayUrl: string;
   /** Auth token for OpenClaw Gateway. Empty string = no auth. Default "". */
   readonly agentGatewayToken: string;
-  /** Timeout for agent prompt responses. Default 15000 ms. */
+  /** Timeout for agent prompt responses. Default 60000 ms. */
   readonly agentPromptTimeoutMs: number;
   /** Interval between periodic agent check-ins. Default 3600000 ms (1 hour). */
   readonly agentCheckinIntervalMs: number;
@@ -466,6 +472,10 @@ const loadConfig = Effect.gen(function* () {
     30,
   );
 
+  const geckoTerminalEnabled = yield* Config.boolean("GECKO_TERMINAL_ENABLED").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
   const rebalanceGasCostSol = yield* validatedNumber("REBALANCE_GAS_COST_SOL", 0, 0.01);
   const solPriceUsd = yield* validatedNumber("SOL_PRICE_USD", 0, 150, 10_000);
@@ -495,7 +505,7 @@ const loadConfig = Effect.gen(function* () {
     yield* validatedNumber("ENTRY_RANGE_HALF_WIDTH_BINS", 0, 0, 200),
   );
   const volatilityAdaptiveRanges = yield* Config.boolean("VOLATILITY_ADAPTIVE_RANGES").pipe(
-    Effect.orElseSucceed(() => false),
+    Effect.orElseSucceed(() => true),
   );
 
   // ─── F3: Fee compounding / auto-reinvest ─────────────────────────────────────
@@ -581,7 +591,7 @@ const loadConfig = Effect.gen(function* () {
   const agentGatewayToken = yield* Config.string("AGENT_GATEWAY_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const agentPromptTimeoutMs = yield* validatedNumber("AGENT_PROMPT_TIMEOUT_MS", 1_000, 15_000);
+  const agentPromptTimeoutMs = yield* validatedNumber("AGENT_PROMPT_TIMEOUT_MS", 1_000, 60_000);
   const agentCheckinIntervalMs = yield* validatedNumber(
     "AGENT_CHECKIN_INTERVAL_MS",
     0,
@@ -948,6 +958,7 @@ const loadConfig = Effect.gen(function* () {
     ilDominanceMinUsd,
     jupiterTokenRiskEnabled,
     jupiterTokenRiskCacheTtlMin,
+    geckoTerminalEnabled,
 
     rebalanceGasCostSol,
     solPriceUsd,

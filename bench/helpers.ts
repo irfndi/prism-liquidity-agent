@@ -150,6 +150,10 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     // fires for the existing ~80 test files; feature tests enable it explicitly.
     jupiterTokenRiskEnabled: false,
     jupiterTokenRiskCacheTtlMin: 30,
+    // Pinned false (production default true) so the gecko secondary stats source
+    // never touches the network for the existing program tests; stats-pipeline
+    // tests opt in explicitly.
+    geckoTerminalEnabled: false,
     rebalanceGasCostSol: 0.01,
     solPriceUsd: 150,
     gasAwareMinDaysOfFeesPaidAhead: 3,

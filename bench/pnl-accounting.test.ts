@@ -778,41 +778,41 @@ const liveEntryPrep: EntryPrepApi = { prepareEntryTokens: () => Effect.void };
 describe("live lifecycle PnL accounting", () => {
   it("ENTER stores entry basis; REBALANCE inline claim accumulates fees + events; EXIT realizes PnL", async () => {
     const layer = DbLive(":memory:");
-        const trackedPositions = new Map<string, PositionRecord>();
-        const pool = {
-          activeBinId: 5000,
-          binStep: 10,
-          tokenXSymbol: "SOL",
-          tokenYSymbol: "USDC",
-          currentPrice: 100,
-        };
+    const trackedPositions = new Map<string, PositionRecord>();
+    const pool = {
+      activeBinId: 5000,
+      binStep: 10,
+      tokenXSymbol: "SOL",
+      tokenYSymbol: "USDC",
+      currentPrice: 100,
+    };
 
-        const outcome = await runDb(
-          Effect.gen(function* () {
-            const db = yield* DbService;
-            const deps = {
-              // The REBALANCE claimed the $25 inline (netFeesUsd: 25). At EXIT
-              // the position's withdrawn value is $1100 with NO new pending fees
-              // (they were already swept by the rebalance claim) → realized =
-              // 1100 + 25 (prior) − 1000 (basis) = 125.
-              adapter: makeLiveAdapter({
-                exitPosition: () =>
-                  Effect.succeed(
-                    exitResult({
-                      withdrawnUsd: 1100,
-                      withdrawnXAtomic: "11000000000",
-                      pendingFeeUsd: 0,
-                    }),
-                  ),
-              }),
-              strategy: liveStrategy,
-              db,
-              revenueConfigSvc: liveRevenueConfig,
-              trackedPositions,
-              entryPrep: liveEntryPrep,
-              solPriceUsd: 150,
-              entryStrategyShape: "spot" as const,
-            };
+    const outcome = await runDb(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const deps = {
+          // The REBALANCE claimed the $25 inline (netFeesUsd: 25). At EXIT
+          // the position's withdrawn value is $1100 with NO new pending fees
+          // (they were already swept by the rebalance claim) → realized =
+          // 1100 + 25 (prior) − 1000 (basis) = 125.
+          adapter: makeLiveAdapter({
+            exitPosition: () =>
+              Effect.succeed(
+                exitResult({
+                  withdrawnUsd: 1100,
+                  withdrawnXAtomic: "11000000000",
+                  pendingFeeUsd: 0,
+                }),
+              ),
+          }),
+          strategy: liveStrategy,
+          db,
+          revenueConfigSvc: liveRevenueConfig,
+          trackedPositions,
+          entryPrep: liveEntryPrep,
+          solPriceUsd: 150,
+          entryStrategyShape: "spot" as const,
+        };
 
         // 1. ENTER $1000 at price 100.
         const enter = yield* executeLive(
@@ -927,7 +927,13 @@ describe("live lifecycle PnL accounting", () => {
         };
         const enter = yield* executeLive(
           deps,
-          { action: "ENTER", poolAddress: "pool1", confidence: 0.8, reasoning: "entry", positionSizeUsd: 1000 },
+          {
+            action: "ENTER",
+            poolAddress: "pool1",
+            confidence: 0.8,
+            reasoning: "entry",
+            positionSizeUsd: 1000,
+          },
           pool,
         );
         expect(enter.executed).toBe(true);
@@ -1220,7 +1226,7 @@ describe("computePaperFeeAccrualUsd", () => {
     });
     const twoIntervals = 300 * 0.008 * (1_200_000 / 86_400_000);
     expect(capped).toBeCloseTo(twoIntervals, 12);
-    expect(capped).toBeLessThan(300 * 0.008 * (10 * 600_000) / 86_400_000);
+    expect(capped).toBeLessThan((300 * 0.008 * (10 * 600_000)) / 86_400_000);
   });
 
   it("uses one scan interval on the first cycle regardless of elapsed", () => {
