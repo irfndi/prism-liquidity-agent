@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import {
+  BIGINT_FALLBACK_NOTE,
   installBigintWarningFilter,
   resetBigintWarningFilterForTest,
 } from "../engine/bigint-warning-filter.js";
@@ -10,11 +11,15 @@ import {
 const originalWarn = console.warn;
 
 // Install once at module load: the filter is a process-wide singleton. The spy is
-// installed first so the filter captures it as the original console.warn — every
-// non-suppressed warning then routes to the spy, every suppressed one never does.
+// installed FIRST so the filter captures it as the original console.warn — every
+// non-suppressed warning routes to the spy, every suppressed marker does NOT, and
+// the once-per-process fallback note is EMITTED through the spy (the captured
+// original console.warn — the stderr channel), which is exactly what we assert on.
 const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 installBigintWarningFilter();
 const patchedWarn = console.warn;
+
+const MARKER = "bigint: Failed to load bindings, pure JS will be used";
 
 afterEach(() => {
   warnSpy.mockClear();
@@ -26,8 +31,24 @@ afterAll(() => {
 });
 
 describe("bigint-warning-filter", () => {
-  it("suppresses the bigint-buffer bindings warning", () => {
-    console.warn("bigint: Failed to load bindings, pure JS will be used");
+  it("suppresses the marker AND emits the once-note via the captured original warn (stderr), not stdout", () => {
+    // Spy on stdout (console.log) so we can prove the note never takes the old
+    // logger.debug path (logger.debug writes through console.log unconditionally).
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    console.warn(MARKER);
+    // The marker itself never reached the original warn...
+    expect(warnSpy).not.toHaveBeenCalledWith(MARKER);
+    // ...exactly ONE note did — on the captured original console.warn (stderr
+    // channel) and nothing on stdout.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(BIGINT_FALLBACK_NOTE);
+    expect(logSpy).not.toHaveBeenCalled();
+    logSpy.mockRestore();
+  });
+
+  it("emits the note only once across repeated suppressions (idempotent note)", () => {
+    console.warn(MARKER);
+    console.warn(MARKER);
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
@@ -45,19 +66,24 @@ describe("bigint-warning-filter", () => {
   it("is idempotent: a second install keeps the single filter, which still suppresses", () => {
     installBigintWarningFilter();
     expect(console.warn).toBe(patchedWarn);
-    console.warn("bigint: Failed to load bindings, pure JS will be used");
+    console.warn(MARKER);
+    // The module-install's note already fired in the first test; the marker is
+    // still dropped and no further note is emitted.
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it("reset restores the pre-install console.warn so other suites are unaffected", () => {
     resetBigintWarningFilterForTest();
-    // The filter is gone: the marker now reaches the pre-install spy.
-    console.warn("bigint: Failed to load bindings, pure JS will be used");
-    expect(warnSpy).toHaveBeenCalledWith("bigint: Failed to load bindings, pure JS will be used");
-    // The singleton is uninstalled: a fresh install patches and suppresses again.
+    // The filter is gone: the marker now reaches the pre-install spy AS the marker.
+    console.warn(MARKER);
+    expect(warnSpy).toHaveBeenCalledWith(MARKER);
+    // A fresh install patches again: a NEW install closure fires the note once
+    // more, and the marker is dropped.
     warnSpy.mockClear();
     installBigintWarningFilter();
-    console.warn("bigint: Failed to load bindings, pure JS will be used");
-    expect(warnSpy).not.toHaveBeenCalled();
+    console.warn(MARKER);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(BIGINT_FALLBACK_NOTE);
+    expect(warnSpy).not.toHaveBeenCalledWith(MARKER);
   });
 });

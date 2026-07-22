@@ -3331,16 +3331,18 @@ export const program = Effect.gen(function* () {
           // only when IL protection is enabled. feeIlRatio is never null
           // (0-20, strategy-service.ts) so the numeric compare is fail-closed
           // on 0 for REAL stats; a pool whose fees cannot cover estimated IL
-          // never enters. On non-datapi stats (feeIlRatioKnown=false) the gate
-          // SKIPS rather than acting on a modeled/fabricated ratio: heuristic
-          // fees are fabricated, and gecko fees are a binStep base-rate MODEL on
-          // real volume (pool_fee_percentage is null for every CL pool). A
-          // gecko pool can still ENTER via the volume candidate gate below
-          // (volumeAuthenticityKnown is true for gecko): the ×1.5 weighted-score
-          // floor there consumes the modeled ratio and acts CONSERVATIVELY —
-          // modeled fees underrate real fees, so the ratio is understated and
-          // the gate is harder to pass, never easier. A heuristic pool still
-          // cannot enter (volume-unknown path blocks the candidate gate).
+          // never enters. FULL PRINCIPLE — modeled/fabricated fee/IL is EXCLUDED
+          // from EVERY ENTER gate when feeIlRatioKnown=false (datapi-only): this
+          // hard floor, the ×1.5 candidate requirement below, and the
+          // weightedEntryScore fee term all SKIP the modeled ratio. Exclusion,
+          // not directional trust: gecko fees are a generic `0.0025 + binStep/1e4`
+          // base-rate MODEL (pool_fee_percentage is null for every CL pool) and
+          // the Data API exposes per-pool baseFeePct, so the generic model can
+          // OVERSTATE a pool's real base fee — the modeled ratio can OVERSTATE
+          // economics, so it must not vote in either direction. A gecko pool can
+          // still ENTER via the measured candidate conditions below (its volume
+          // IS real → volumeAuthenticityKnown=true). A heuristic pool still cannot
+          // enter (volume-unknown blocks the candidate gate).
           if (
             !enterGateRejected &&
             config.ilProtectionEnabled === true &&
@@ -3367,9 +3369,20 @@ export const program = Effect.gen(function* () {
             enterGateRejected = true;
           }
 
+          // Modeled/fabricated fee/IL (feeIlRatioKnown=false — gecko's binStep
+          // base-rate model, or heuristic) never gates the candidate in EITHER
+          // direction: the Data API exposes per-pool baseFeePct, so the generic
+          // model can OVERSTATE a pool's base fee and the modeled ratio can
+          // OVERSTATE economics — a modeled number gets no vote here. The fee/IL
+          // conjunct is therefore conditional (true when the ratio is unknown) and
+          // the pool is admitted on the MEASURED conditions only — real volume
+          // authenticity, on-chain bin utilization, and TVL. This matches the
+          // [fee-il-gate] floor and the weightedEntryScore fee term above/below,
+          // which also skip the modeled ratio. A heuristic pool still cannot enter:
+          // it fails volumeAuthenticityKnown below.
           if (
             !enterGateRejected &&
-            feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 &&
+            (metrics.feeIlRatioKnown ? feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 : true) &&
             metrics.volumeAuthenticityKnown &&
             volumeAuth > 0.8 &&
             metrics.binUtilizationKnown &&

@@ -133,12 +133,16 @@ export const DLMMStrategy: StrategyApi = {
       // - Fees are MEASURED only under datapi (real per-pool fee data).
       //   GeckoTerminal's `pool_fee_percentage` is null for every CL pool, so
       //   gecko fees are a binStep base-rate MODEL applied to real volume —
-      //   feeIlRatioKnown is datapi-only, and every fee-driven gate (fee/IL
-      //   < 0.5 EXIT, [fee-il-gate] ENTER floor, paper fee accrual) skips
-      //   modeled gecko fees rather than acting on them. The ×1.5
-      //   weighted-score ENTER gate still consumes the ratio under gecko and
-      //   acts conservatively: modeled fees UNDERRATE real fees, so the ratio
-      //   is understated and the gate is HARDER to pass, never easier.
+      //   feeIlRatioKnown is datapi-only, and every fee-driven consumer of the
+      //   ratio — the fee/IL < 0.5 EXIT, the [fee-il-gate] hard ENTER floor, the
+      //   ×1.5 candidate requirement, the weightedEntryScore fee term, and paper
+      //   fee accrual — SKIPS the modeled gecko ratio rather than acting on it.
+      //   Modeling is not a safe directional bet: the Data API exposes per-pool
+      //   baseFeePct, so the generic binStep model can OVERSTATE a pool's base fee
+      //   and the modeled ratio can OVERSTATE economics — the ratio is EXCLUDED
+      //   from every ENTER gate (neither helps nor hurts), not trusted
+      //   conservatively. A high-quality gecko pool still ENTERs via the measured
+      //   volume / bin-util / TVL candidate conditions (its volume IS real).
       // - Heuristic knows nothing (both flags false) — fabricated values would
       //   just re-validate their own assumptions, so no gate touches them.
       volumeAuthenticityKnown: isMeasuredStatsSource(pool.statsSource),
@@ -618,8 +622,20 @@ export const FARM_APR_SCORE_REFERENCE_PCT = 100;
 export const FARM_SCORE_WEIGHT = 1;
 
 export function weightedEntryScore(metrics: PoolMetrics, weights: SignalWeights): number {
-  const cappedFeeIlRatio = Math.min(metrics.feeIlRatio, MAX_FEE_IL_RATIO);
-  const feeContrib = cappedFeeIlRatio * weights.feeIlRatio;
+  // Fee/IL is EXCLUDED from the score (not zeroed-toward-bad, not trusted in
+  // either direction) when the ratio is modeled/fabricated (feeIlRatioKnown=false).
+  // GeckoTerminal's pool_fee_percentage is null for every CL pool, so gecko fees
+  // are a generic `0.0025 + binStep/1e4` base-rate MODEL — and the Data API exposes
+  // per-pool baseFeePct, so the generic model can OVERSTATE a pool's real base fee,
+  // making the modeled ratio OVERSTATE economics. A modeled ratio therefore gets no
+  // vote at all. This is a plain weighted SUM (no normalization by total applied
+  // weight), so excluding the term simply drops its contribution and the remaining
+  // signals keep their absolute scale — the farm tie-breaker (a fixed constant
+  // outside SignalWeights) is unaffected. Mirrors the [fee-il-gate] floor and the
+  // ×1.5 candidate requirement, which likewise skip the modeled ratio (program.ts).
+  const feeContrib = metrics.feeIlRatioKnown
+    ? Math.min(metrics.feeIlRatio, MAX_FEE_IL_RATIO) * weights.feeIlRatio
+    : 0;
   // Unknown metrics contribute 0 (fail-closed) rather than a fabricated 1.0.
   const authContrib =
     (metrics.volumeAuthenticityKnown ? metrics.volumeAuthenticity : 0) * weights.volumeAuthenticity;

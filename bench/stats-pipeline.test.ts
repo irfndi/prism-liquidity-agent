@@ -337,13 +337,15 @@ describe("stats source propagation — datapi vs gecko vs heuristic", () => {
   }, 15_000);
 
   it("a high-quality gecko pool still ENTERs via the volume candidate path (volume known)", async () => {
-    // High real volume on moderate TVL → vol/tvl 4 (authenticity 1.0) and a
-    // fee/IL far above the ×1.5 floor, so the pool clears the FULL ENTER gate
-    // chain on gecko stats: volumeAuthenticityKnown=true (real gecko volume)
-    // unlocks the candidate gate, and the modeled ratio passes the ×1.5
-    // weighted-score floor — conservatively, since modeled fees UNDERRATE real
-    // fees, making that floor HARDER to pass, never easier. The datapi-only
-    // [fee-il-gate] skipping (fees modeled) must not keep a good pool out.
+    // High real volume on moderate TVL → vol/tvl 4 (authenticity 1.0), so the
+    // pool clears the MEASURED ENTER conditions on gecko stats:
+    // volumeAuthenticityKnown=true (real gecko volume) unlocks the candidate gate,
+    // and the modeled fee/IL is EXCLUDED from the ×1.5 candidate requirement and
+    // the weightedEntryScore fee term (the Data API exposes per-pool baseFeePct,
+    // so the binStep model can OVERSTATE fees — exclusion, not directional trust).
+    // With the fee signal absent, the measured auth/bin-util/TVL terms alone clear
+    // the weighted-score threshold; the datapi-only [fee-il-gate] skip (fees
+    // modeled) must not keep a good pool out.
     const restoreGecko = geckoUp(20_000_000, 5_000_000);
     try {
       const layer = makeTestLayer({
@@ -428,6 +430,103 @@ describe("stats source propagation — datapi vs gecko vs heuristic", () => {
     } finally {
       restoreGecko();
     }
+  }, 15_000);
+});
+
+// Data-API stats shaped to yield a KNOWN fee/IL ratio well below the ×1.5
+// candidate floor (fees low relative to real TVL) while authenticity stays 1.0
+// (moderate volume, fee rate in-band). Proves a known ratio still gates the
+// volume-candidate ENTER path that an unknown (gecko) ratio is excluded from.
+function lowFeeDatapiStats(): MeteoraPoolStats {
+  return {
+    ...makeDatapiStats(),
+    tvlUsd: 5_000_000,
+    volume24hUsd: 100_000,
+    fees24hUsd: 50, // ratio ≈ fees/(tvl × ilFraction) < 1.8 for any multiplier ≥ 1
+  };
+}
+
+describe("modeled fee/IL is excluded from EVERY ENTER gate (fees unknown)", () => {
+  // The modeled/fabricated fee/IL ratio (feeIlRatioKnown=false) must not gate
+  // entry in EITHER direction — the Data API exposes per-pool baseFeePct, so the
+  // generic binStep model can OVERSTATE fees and the ratio can OVERSTATE
+  // economics. A gecko pool therefore ENTERs on the measured volume/bin-util/TVL
+  // conditions even when its modeled ratio would FAIL the ×1.5 candidate floor,
+  // while a datapi pool with a genuinely KNOWN low ratio is still gated.
+
+  it("(a) gecko pool ENTERs on measured signals despite a modeled ratio that fails the ×1.5 floor", async () => {
+    // Modest real gecko volume against high TVL → authenticity 1.0 and bin util
+    // 1.0 (every measured condition passes), but fees = volume × 0.0035 are tiny
+    // → the MODELED fee/IL sits far below minFeeIlRatio × 1.5. Pre-fix the
+    // candidate conjunct `feeIlRatio > 1.8` was false, so no ENTER decision
+    // existed (HOLD); post-fix the conjunct is conditional-true for unknown
+    // ratios and the pool is admitted on the measured conditions alone. (The
+    // recorded ENTER decision may still be risk-rejected for confidence — a
+    // separate gate; what proves exclusion is that the candidate gate no longer
+    // blocks on the modeled ratio, so the "Strong pool" decision is recorded.)
+    const restoreGecko = geckoUp(15_000, 5_000_000);
+    try {
+      const layer = makeTestLayer({
+        adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
+        datapi: { getPoolData: () => Effect.succeed(null) }, // datapi down → gecko
+        configOverrides: {
+          watchlistPools: [POOL],
+          ilProtectionEnabled: true,
+          geckoTerminalEnabled: true,
+        },
+      });
+      const rows = await runWithSeed(layer, []);
+      const rows_ = poolRows(rows);
+      const metrics = rows_.find((r) => r.metrics !== undefined)?.metrics;
+      expect(metrics, "expected an audited decision carrying metrics").toBeDefined();
+      expect(metrics!.pool.statsSource).toBe("geckoterminal");
+      expect(metrics!.volumeAuthenticityKnown).toBe(true);
+      expect(metrics!.feeIlRatioKnown, "gecko fees are modeled, not measured").toBe(false);
+      // The modeled ratio WOULD have failed the old ×1.5 candidate conjunct…
+      expect(metrics!.feeIlRatio).toBeLessThan(1.8); // default minFeeIlRatio 1.2 × 1.5
+      // …yet the pool reaches the ENTER push on measured signals (the "Strong
+      // pool" reasoning is set only inside the candidate gate's score branch).
+      const enters = rows_.filter(
+        (d) => d.action === "ENTER" && d.reasoning.includes("Strong pool"),
+      );
+      expect(
+        enters,
+        "gecko pool must ENTER on measured signals despite the failing modeled ratio",
+      ).toHaveLength(1);
+    } finally {
+      restoreGecko();
+    }
+  }, 15_000);
+
+  it("(b) datapi pool with a KNOWN ratio below the ×1.5 floor does NOT enter (known ratio still gates)", async () => {
+    // Measured datapi pool: authenticity 1.0, bin util 1.0, high TVL — every
+    // MEASURED candidate condition passes, but the real fee/IL is below ×1.5.
+    // ilProtectionEnabled=false isolates the volume-candidate path (the hard
+    // [fee-il-gate] floor is off), so the known ratio alone blocks entry — the
+    // mirror image of (a), proving the exclusion is keyed on feeIlRatioKnown.
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
+      datapi: { getPoolData: () => Effect.succeed(lowFeeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        ilProtectionEnabled: false,
+        geckoTerminalEnabled: true,
+      },
+    });
+    const rows = await runWithSeed(layer, []);
+    const rows_ = poolRows(rows);
+    const metrics = rows_.find((r) => r.metrics !== undefined)?.metrics;
+    expect(metrics, "expected an audited decision carrying metrics").toBeDefined();
+    expect(metrics!.pool.statsSource).toBe("datapi");
+    expect(metrics!.feeIlRatioKnown, "datapi fees are measured").toBe(true);
+    expect(metrics!.feeIlRatio).toBeLessThan(1.8); // below the ×1.5 candidate floor
+    const enters = rows_.filter((d) => d.action === "ENTER" && d.reasoning.includes("Strong pool"));
+    expect(enters, "a known sub-×1.5 ratio must still gate the volume candidate").toHaveLength(0);
+    const holds = rows_.filter((d) => d.action === "HOLD");
+    expect(
+      holds,
+      "the pool falls through to HOLD when the known ratio fails the candidate",
+    ).toHaveLength(1);
   }, 15_000);
 });
 

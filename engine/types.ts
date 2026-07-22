@@ -101,10 +101,15 @@ export interface PoolMetrics {
   /** False when volume/fees are heuristic estimates — auth gates must skip. */
   readonly volumeAuthenticityKnown: boolean;
   /**
-   * False when fees24hUsd is a fabricated heuristic estimate — the fee/IL EXIT
-   * gate and the [fee-il-gate] ENTER floor must skip (a fabricated-low ratio
-   * must neither force an exit nor block entry). True for datapi and
-   * geckoterminal sources, where fees derive from real volume.
+   * True ONLY for the datapi source, which measures real per-pool fees. False
+   * for geckoterminal (pool_fee_percentage is null for every CL pool, so gecko
+   * fees are a binStep base-rate MODEL on real volume, not measured) and for
+   * heuristic (fabricated volume AND fees). When false, every consumer of the
+   * ratio skips it: the fee/IL EXIT gate and all three ENTER gates (the
+   * [fee-il-gate] floor, the ×1.5 candidate requirement, and the
+   * weightedEntryScore fee term). The modeled ratio can OVERSTATE economics
+   * (the Data API exposes per-pool baseFeePct the generic model ignores), so it
+   * is EXCLUDED — neither forcing an exit nor blocking/gating entry.
    */
   readonly feeIlRatioKnown: boolean;
   /** False when real per-bin reserves were unavailable — util gates must skip. */

@@ -1,5 +1,3 @@
-import { createLogger } from "./logger.js";
-
 // bigint-buffer's node entry prints this on every startup when its native addon
 // cannot load (always true inside the single-file release bundle, where
 // require('bindings') resolves to nothing). The pure-JS fallback it announces is
@@ -10,16 +8,26 @@ import { createLogger } from "./logger.js";
 // warn can still fire before the alias matters.
 const BIGINT_BINDINGS_MARKER = "bigint: Failed to load bindings";
 
-const logger = createLogger("bigint-warning-filter");
+// Once-per-process note announcing the (silent) fallback. Emitted through the
+// ORIGINAL console.warn — the stderr channel the suppressed warning itself used —
+// NOT the engine logger: logger.debug writes via console.log UNCONDITIONALLY
+// (AGENTS.md: the logger always emits regardless of level), so it put a timestamped
+// debug line on STDOUT before intended output and broke stdout-parsing scripts
+// (e.g. `prism --version`). Routing the note through stderr matches the warning
+// being replaced; the audit-trail file no longer records the note — an acceptable
+// trade for a clean stdout. Exported so tests can assert on the exact channel/text.
+export const BIGINT_FALLBACK_NOTE =
+  "bigint-buffer native addon unavailable — using pure-JS fallback (identical results)";
 
 let installed = false;
 let savedOriginalWarn: typeof console.warn | null = null;
 
 /**
  * Patch console.warn to drop only the bigint-buffer bindings warning, passing
- * every other warning through untouched. Logs a single debug line the first time
- * it suppresses, so the fallback is still recorded in the audit trail. Idempotent:
- * a second call is a no-op (the filter is installed exactly once).
+ * every other warning through untouched. The first time it suppresses, it emits a
+ * single BIGINT_FALLBACK_NOTE through the captured original console.warn (stderr —
+ * the same channel the warning used), keeping stdout clean for output parsers.
+ * Idempotent: a second call is a no-op (the filter is installed exactly once).
  */
 export function installBigintWarningFilter(): void {
   if (installed) return;
@@ -34,9 +42,11 @@ export function installBigintWarningFilter(): void {
     if (typeof first === "string" && first.includes(BIGINT_BINDINGS_MARKER)) {
       if (!loggedOnce) {
         loggedOnce = true;
-        logger.debug(
-          "bigint-buffer native addon unavailable — using pure-JS fallback (identical results)",
-        );
+        // stderr channel (the original console.warn) — NOT logger.debug, which
+        // writes via console.log and would pollute stdout (see BIGINT_FALLBACK_NOTE
+        // above). Non-marker text passes straight through the patch, so this reaches
+        // the real console.warn untouched.
+        originalWarn(BIGINT_FALLBACK_NOTE);
       }
       return;
     }
