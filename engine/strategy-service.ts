@@ -126,12 +126,23 @@ export const DLMMStrategy: StrategyApi = {
       feeIlRatio,
       volumeAuthenticity: volumeAuthenticity.score,
       binUtilization,
-      // Volume authenticity + the fee/IL ratio are only meaningful on MEASURED
-      // volume/fees (datapi or geckoterminal); heuristic volume/fees are
-      // fabricated and would just re-validate their own assumptions, so the
-      // gates that consume them must skip rather than act on fiction.
+      // Known-flag SPLIT by what each source actually measures:
+      // - Volume + TVL are REAL under BOTH datapi and geckoterminal, so
+      //   volumeAuthenticityKnown treats either as measured; only heuristic
+      //   (fabricated) volume is unknown.
+      // - Fees are MEASURED only under datapi (real per-pool fee data).
+      //   GeckoTerminal's `pool_fee_percentage` is null for every CL pool, so
+      //   gecko fees are a binStep base-rate MODEL applied to real volume —
+      //   feeIlRatioKnown is datapi-only, and every fee-driven gate (fee/IL
+      //   < 0.5 EXIT, [fee-il-gate] ENTER floor, paper fee accrual) skips
+      //   modeled gecko fees rather than acting on them. The ×1.5
+      //   weighted-score ENTER gate still consumes the ratio under gecko and
+      //   acts conservatively: modeled fees UNDERRATE real fees, so the ratio
+      //   is understated and the gate is HARDER to pass, never easier.
+      // - Heuristic knows nothing (both flags false) — fabricated values would
+      //   just re-validate their own assumptions, so no gate touches them.
       volumeAuthenticityKnown: isMeasuredStatsSource(pool.statsSource),
-      feeIlRatioKnown: isMeasuredStatsSource(pool.statsSource),
+      feeIlRatioKnown: pool.statsSource === "datapi",
       binUtilizationKnown: binArray.reservesKnown !== false,
       // Farm APR only flows from the Data API overlay: a pool with a farm but
       // an unknown APR reports 0 (known farm, no rate), non-farm/unknown null.

@@ -1557,12 +1557,14 @@ describe("program — multiple positions per pool", () => {
   }, 15_000);
 });
 
-describe("A4 paper fee accrual requires measured stats (datapi or geckoterminal)", () => {
+describe("A4 paper fee accrual requires datapi-MEASURED fees", () => {
   // When both real sources are down, getPoolState ships a POSITIVE modeled
   // fees24hUsd under statsSource "heuristic" — every A4 numeric guard (null /
   // <= 0 / non-finite / in-range / TVL) still passes. Accrual must be gated on
-  // isMeasuredStatsSource(statsSource) so heuristic cycles book no fabricated
-  // fee, while datapi AND geckoterminal (both carry real fees) accrue.
+  // statsSource === "datapi" (the ONLY source of measured per-pool fees):
+  // geckoterminal fees are a binStep base-rate MODEL on real volume
+  // (pool_fee_percentage is null for every CL pool) and heuristic fees are
+  // fabricated — neither may book paper CLAIM income; only datapi accrues.
   const POS_ID = "paper-accr";
 
   async function runAccrualCycle(opts: {
@@ -1627,12 +1629,14 @@ describe("A4 paper fee accrual requires measured stats (datapi or geckoterminal)
     expect(accruedUsd).toBeGreaterThan(0);
   }, 15_000);
 
-  it("the same pool with geckoterminal stats accrues exactly one notional fee", async () => {
-    // GeckoTerminal fees are real (real volume × the pool's base-fee rate), so a
-    // geckoterminal-sourced pool accrues just like datapi. Proves the gate keys
-    // off isMeasuredStatsSource, not specifically the Data API.
+  it("the same pool with geckoterminal stats accrues NOTHING (fees are modeled, not measured)", async () => {
+    // GeckoTerminal fees are a binStep base-rate MODEL on real volume
+    // (pool_fee_percentage is null for every CL pool — only the Data API
+    // measures real fees), so a geckoterminal-sourced pool must NOT accrue.
+    // Proves the gate keys off datapi-measured fees specifically, not the
+    // broader measured-volume sources.
     const { accruals, accruedUsd } = await runAccrualCycle({ statsSource: "geckoterminal" });
-    expect(accruals, "geckoterminal real fees must enable the notional accrual").toHaveLength(1);
-    expect(accruedUsd).toBeGreaterThan(0);
+    expect(accruals, "modeled gecko fees must not produce paper CLAIM income").toHaveLength(0);
+    expect(accruedUsd).toBe(0);
   }, 15_000);
 });

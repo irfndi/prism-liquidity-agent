@@ -258,6 +258,10 @@ describe("ConfigService Wave 9 env vars", () => {
   }
 
   it("defaults: 0 (binStep-tier baseline) and adaptive enabled", async () => {
+    // Explicit removal so a dev/CI export of these vars can't silently bypass
+    // the default assertions; the shared afterEach(unstubAllEnvs) restores them.
+    vi.stubEnv("ENTRY_RANGE_HALF_WIDTH_BINS", undefined);
+    vi.stubEnv("VOLATILITY_ADAPTIVE_RANGES", undefined);
     const cfg = await loadConfig();
     expect(cfg.entryRangeHalfWidthBins).toBe(0);
     expect(cfg.volatilityAdaptiveRanges).toBe(true);

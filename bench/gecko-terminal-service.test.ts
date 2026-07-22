@@ -1,8 +1,9 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import {
   parseGeckoPoolStats,
   enrichPoolFromGecko,
   getGeckoPoolStats,
+  setGeckoRequestIntervalMsForTest,
   type FetchLike,
 } from "../engine/gecko-terminal-service.js";
 import { makePool } from "./helpers.js";
@@ -82,14 +83,15 @@ describe("parseGeckoPoolStats", () => {
     expect(parseGeckoPoolStats(badVolume, BASE_FEE_RATE)).toBeNull();
   });
 
-  it("yields fees of 0 when volume is 0 (zero-volume guard)", () => {
+  it("returns null for non-positive 24h volume (malformed data must not be marked measured)", () => {
     const zeroVol = {
       data: { attributes: { volume_usd: { h24: "0" }, reserve_in_usd: "5000000" } },
     };
-    const stats = parseGeckoPoolStats(zeroVol, BASE_FEE_RATE);
-    expect(stats).not.toBeNull();
-    expect(stats!.volume24hUsd).toBe(0);
-    expect(stats!.fees24hUsd).toBe(0);
+    const negativeVol = {
+      data: { attributes: { volume_usd: { h24: "-123.45" }, reserve_in_usd: "5000000" } },
+    };
+    expect(parseGeckoPoolStats(zeroVol, BASE_FEE_RATE)).toBeNull();
+    expect(parseGeckoPoolStats(negativeVol, BASE_FEE_RATE)).toBeNull();
   });
 
   it("reports null tvl (not a failure) when the reserve is missing", () => {
@@ -99,10 +101,29 @@ describe("parseGeckoPoolStats", () => {
     expect(stats!.tvlUsd).toBeNull();
     expect(stats!.volume24hUsd).toBeCloseTo(1_000_000);
   });
+
+  it("nulls tvl for a negative reserve (malformed) so the caller rejects the stats", () => {
+    const negativeReserve = {
+      data: { attributes: { volume_usd: { h24: "1000000" }, reserve_in_usd: "-42.5" } },
+    };
+    const stats = parseGeckoPoolStats(negativeReserve, BASE_FEE_RATE);
+    // Parsed (volume is usable) but tvlUsd nulled — getGeckoPoolStats then
+    // returns null for a null tvl, rejecting the stats entirely.
+    expect(stats).not.toBeNull();
+    expect(stats!.tvlUsd).toBeNull();
+  });
 });
 
 describe("getGeckoPoolStats", () => {
+  // The production pacing (2.1s/request toward the 30 req/min limit) would
+  // stall these fast unit tests; disable it per test and restore the
+  // production default afterwards.
+  beforeEach(() => {
+    setGeckoRequestIntervalMsForTest(0);
+  });
+
   afterEach(() => {
+    setGeckoRequestIntervalMsForTest(2_100);
     vi.restoreAllMocks();
   });
 
@@ -165,6 +186,39 @@ describe("getGeckoPoolStats", () => {
       "https://gecko.example.test/api/v2/networks/solana/pools/PoolXYZ",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+
+  it("returns null when the pool reports a negative reserve (malformed → unavailable)", async () => {
+    const negativeReserve = {
+      data: { attributes: { volume_usd: { h24: "1000000" }, reserve_in_usd: "-42.5" } },
+    };
+    const stats = await getGeckoPoolStats("SomePool", {
+      baseFeeRate: BASE_FEE_RATE,
+      fetchImpl: fetchReturning(negativeReserve),
+    });
+    expect(stats).toBeNull();
+  });
+});
+
+describe("getGeckoPoolStats request pacing", () => {
+  it("waits until the minimum inter-request interval elapses between fetches", async () => {
+    setGeckoRequestIntervalMsForTest(80);
+    try {
+      const fetchTimes: number[] = [];
+      const fetchImpl: FetchLike = () => {
+        fetchTimes.push(Date.now());
+        return Promise.resolve(new Response(JSON.stringify(LIVE_RESPONSE), { status: 200 }));
+      };
+      await getGeckoPoolStats("PoolA", { baseFeeRate: BASE_FEE_RATE, fetchImpl });
+      await getGeckoPoolStats("PoolB", { baseFeeRate: BASE_FEE_RATE, fetchImpl });
+      const elapsedMs = fetchTimes[1]! - fetchTimes[0]!;
+      expect(
+        elapsedMs,
+        "the second request must wait out the paced interval",
+      ).toBeGreaterThanOrEqual(70);
+    } finally {
+      setGeckoRequestIntervalMsForTest(2_100);
+    }
   });
 });
 

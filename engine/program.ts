@@ -2637,15 +2637,12 @@ export const program = Effect.gen(function* () {
         // pool's real 24h fees while the active bin sits in range. Do NOT
         // touch currentValueUsd: unrealized PnL already sums claimed fees
         // (pnl.ts), so crediting the value column too would double-add.
-        // Fees are only trusted from MEASURED sources (datapi or geckoterminal):
-        // when both are down getPoolState ships a POSITIVE modeled fees24hUsd
-        // under statsSource "heuristic" — accrue nothing in that case so paper
-        // positions never book fabricated CLAIM income.
-        if (
-          config.paperTrading &&
-          pos.positionPubKey == null &&
-          isMeasuredStatsSource(pool.statsSource)
-        ) {
+        // Fees are trusted ONLY from the Data API (real per-pool fee data).
+        // Gecko fees are a binStep base-rate MODEL on real volume
+        // (pool_fee_percentage is null for every CL pool) and heuristic fees
+        // are fabricated — accrue from neither, so paper positions book only
+        // Data-API-measured CLAIM income.
+        if (config.paperTrading && pos.positionPubKey == null && pool.statsSource === "datapi") {
           const now = Date.now();
           const lastAccrualAt = paperFeeAccrualAt.get(pos.positionId);
           paperFeeAccrualAt.set(pos.positionId, now);
@@ -3334,11 +3331,16 @@ export const program = Effect.gen(function* () {
           // only when IL protection is enabled. feeIlRatio is never null
           // (0-20, strategy-service.ts) so the numeric compare is fail-closed
           // on 0 for REAL stats; a pool whose fees cannot cover estimated IL
-          // never enters. On heuristic stats (feeIlRatioKnown=false) the gate
-          // SKIPS rather than rejecting on a fabricated ratio — the volume
-          // candidate gate below requires volumeAuthenticityKnown, so a
-          // heuristic pool still cannot enter (volume-unknown path), it just is
-          // not rejected for a made-up fee/IL number.
+          // never enters. On non-datapi stats (feeIlRatioKnown=false) the gate
+          // SKIPS rather than acting on a modeled/fabricated ratio: heuristic
+          // fees are fabricated, and gecko fees are a binStep base-rate MODEL on
+          // real volume (pool_fee_percentage is null for every CL pool). A
+          // gecko pool can still ENTER via the volume candidate gate below
+          // (volumeAuthenticityKnown is true for gecko): the ×1.5 weighted-score
+          // floor there consumes the modeled ratio and acts CONSERVATIVELY —
+          // modeled fees underrate real fees, so the ratio is understated and
+          // the gate is harder to pass, never easier. A heuristic pool still
+          // cannot enter (volume-unknown path blocks the candidate gate).
           if (
             !enterGateRejected &&
             config.ilProtectionEnabled === true &&

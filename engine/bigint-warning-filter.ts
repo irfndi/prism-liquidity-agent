@@ -13,6 +13,7 @@ const BIGINT_BINDINGS_MARKER = "bigint: Failed to load bindings";
 const logger = createLogger("bigint-warning-filter");
 
 let installed = false;
+let savedOriginalWarn: typeof console.warn | null = null;
 
 /**
  * Patch console.warn to drop only the bigint-buffer bindings warning, passing
@@ -25,6 +26,7 @@ export function installBigintWarningFilter(): void {
   installed = true;
 
   const originalWarn = console.warn.bind(console);
+  savedOriginalWarn = originalWarn;
   let loggedOnce = false;
 
   console.warn = ((...args: unknown[]): void => {
@@ -40,4 +42,19 @@ export function installBigintWarningFilter(): void {
     }
     originalWarn(...args);
   }) as typeof console.warn;
+}
+
+/**
+ * TEST-ONLY: undo the process-wide singleton so a test file that installed the
+ * filter does not leak its console.warn patch into other test files run in the
+ * same process. Restores the console.warn captured before install (if any) and
+ * resets the installed state so a later install can patch again. Production
+ * never calls this — the filter is meant to live for the process lifetime.
+ */
+export function resetBigintWarningFilterForTest(): void {
+  if (savedOriginalWarn !== null) {
+    console.warn = savedOriginalWarn;
+  }
+  installed = false;
+  savedOriginalWarn = null;
 }

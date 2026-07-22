@@ -443,7 +443,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
       this.chatRuns.delete(id);
       rejectRun(
         new Error(
-          `Gateway chat run timed out after ${timeoutMs}ms (elapsed ${elapsedMs}ms) with no model response — raise AGENT_PROMPT_TIMEOUT_MS for slower models`,
+          `Gateway chat run timed out after ${timeoutMs}ms (elapsed ${elapsedMs}ms) with no model response — increase the prompt timeout for slower models`,
         ),
       );
     }, timeoutMs);

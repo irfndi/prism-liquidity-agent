@@ -42,6 +42,28 @@ const logger = createLogger("gecko-terminal");
 const DEFAULT_BASE_URL = "https://api.geckoterminal.com/api/v2";
 const REQUEST_TIMEOUT_MS = 10_000;
 
+// ─── Request pacing (30 req/min keyless endpoint) ────────────────────────────
+// Discovery can fan out ~50 pools per cycle; if the Data API is down mid-scan
+// every one of them falls through to GeckoTerminal, whose keyless tier allows
+// 30 req/min. At ≥2.1s between requests (28/min) a full 50-pool list drains over
+// ~2 minutes instead of exhausting the quota mid-list — the 429 → null
+// fail-through in getGeckoPoolStats remains the backstop for bursts pacing
+// cannot absorb.
+
+const DEFAULT_REQUEST_INTERVAL_MS = 2_100;
+let lastGeckoRequestAt = 0;
+let requestIntervalMs = DEFAULT_REQUEST_INTERVAL_MS;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** TEST-ONLY: override the minimum inter-request interval (call with 0 to
+ *  disable pacing in fast unit tests, or a small value for the pacing test).
+ *  Restore to DEFAULT_REQUEST_INTERVAL_MS afterwards; production never calls
+ *  this and keeps the 2.1s interval. */
+export function setGeckoRequestIntervalMsForTest(ms: number): void {
+  requestIntervalMs = ms;
+}
+
 /**
  * The `fetch` call surface the module needs. A bare call signature rather than
  * the runtime's full `typeof fetch`, so the global `fetch` and a plain injected
@@ -108,17 +130,22 @@ export function parseGeckoPoolStats(raw: unknown, baseFeeRate: number): GeckoPoo
   const volumeUsd = attrs["volume_usd"];
   const volume24hUsd = isObject(volumeUsd) ? readFiniteNumber(volumeUsd["h24"]) : null;
   // Volume is the one field every downstream gate (authenticity, fee/IL) needs;
-  // without it the stats are useless to the engine.
-  if (volume24hUsd === null) return null;
+  // non-positive volume is malformed data (a live pool never reports ≤0 24h
+  // volume) — reject the stats ENTIRELY rather than marking garbage measured.
+  if (volume24hUsd === null || volume24hUsd <= 0) return null;
 
   const feePercentage = parseFeePercentageFraction(attrs["pool_fee_percentage"]);
   const effectiveFeeRate = feePercentage ?? baseFeeRate;
-  const fees24hUsd = volume24hUsd > 0 ? volume24hUsd * effectiveFeeRate : 0;
+
+  // Negative reserves are equally malformed; null them so the caller treats the
+  // stats as unavailable (getGeckoPoolStats → null → heuristic + unknown flags,
+  // the most conservative outcome).
+  const reserveUsd = readFiniteNumber(attrs["reserve_in_usd"]);
 
   return {
-    tvlUsd: readFiniteNumber(attrs["reserve_in_usd"]),
+    tvlUsd: reserveUsd !== null && reserveUsd < 0 ? null : reserveUsd,
     volume24hUsd,
-    fees24hUsd,
+    fees24hUsd: volume24hUsd * effectiveFeeRate,
     basePriceUsd: readFiniteNumber(attrs["base_token_price_usd"]),
     quotePriceUsd: readFiniteNumber(attrs["quote_token_price_usd"]),
   };
@@ -180,6 +207,14 @@ export async function getGeckoPoolStats(
     .replace(/\/+$/, "");
   const effectiveBase = base.length > 0 ? base : DEFAULT_BASE_URL;
   const url = `${effectiveBase}/networks/solana/pools/${poolAddress}`;
+
+  // Pace toward the 30 req/min keyless limit (see the pacing constants above).
+  const now = Date.now();
+  const nextAllowedAt = lastGeckoRequestAt + requestIntervalMs;
+  if (nextAllowedAt > now) {
+    await sleep(nextAllowedAt - now);
+  }
+  lastGeckoRequestAt = Date.now();
 
   try {
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });

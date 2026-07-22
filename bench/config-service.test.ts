@@ -159,6 +159,9 @@ describe("ConfigService agent runtime timeout", () => {
   });
 
   it("defaults AGENT_PROMPT_TIMEOUT_MS to 60000 (slow-model first-token latency)", async () => {
+    // Explicit removal so a dev/CI export of the var can't silently bypass the
+    // default assertion; the shared afterEach(unstubAllEnvs) restores it.
+    vi.stubEnv("AGENT_PROMPT_TIMEOUT_MS", undefined);
     const cfg = await loadConfig();
     expect(cfg.agentPromptTimeoutMs).toBe(60_000);
   });

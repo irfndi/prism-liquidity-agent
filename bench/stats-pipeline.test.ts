@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { Effect, Layer } from "effect";
 import { StrategyLive } from "../engine/strategy-service.js";
 import { program } from "../engine/program.js";
@@ -9,6 +9,7 @@ import { AuditLive } from "../engine/audit-service.js";
 import { AgentNoOp } from "../engine/agent-service.js";
 import { AgentStateMutable } from "../engine/state-service.js";
 import { ConfigService, type AppConfig } from "../engine/config-service.js";
+import { setGeckoRequestIntervalMsForTest } from "../engine/gecko-terminal-service.js";
 import {
   AdapterService,
   BlacklistService,
@@ -26,6 +27,7 @@ import {
   AlertService,
   type AdapterApi,
   type MeteoraDatapiApi,
+  type MeteoraPoolStats,
   type EngineAlert,
 } from "../engine/services.js";
 import type { PoolMetrics } from "../engine/types.js";
@@ -253,21 +255,58 @@ function geckoDown(): () => void {
   return mockFetch(() => Promise.resolve(new Response("rate limited", { status: 429 })));
 }
 
+// Data-API-shaped pool stats (measured fees) for the datapi enrichment path.
+function makeDatapiStats(): MeteoraPoolStats {
+  return {
+    address: POOL,
+    name: "SOL-USDC",
+    tvlUsd: 200_000,
+    volume24hUsd: 40_000,
+    fees24hUsd: 400,
+    apr: 20,
+    apy: 20,
+    currentPrice: 150,
+    feeTvlRatio24h: null,
+    feeTvlRatio12h: null,
+    feeTvlRatio1h: null,
+    dynamicFeePct: null,
+    baseFeePct: null,
+    hasFarm: null,
+    farmApr: null,
+    farmApy: null,
+    isBlacklisted: null,
+    tokenXFreezeAuthorityDisabled: null,
+    tokenYFreezeAuthorityDisabled: null,
+    tokenXVerified: null,
+    tokenYVerified: null,
+  };
+}
+
 const POOL = "PoolStatsPipeline1111111111111111111111111";
 
 function poolRows(rows: ReadonlyArray<DecisionRow>): ReadonlyArray<DecisionRow> {
   return rows.filter((r) => r.poolAddress === POOL);
 }
 
+// Program-level gecko fetches must not be throttled by the 2.1s production
+// pacing (a paced fetch would outrun each cycle's 2s race window).
+beforeEach(() => {
+  setGeckoRequestIntervalMsForTest(0);
+});
+
 afterEach(() => {
+  setGeckoRequestIntervalMsForTest(2_100);
   vi.restoreAllMocks();
 });
 
 describe("stats source propagation — datapi vs gecko vs heuristic", () => {
-  it("datapi down + gecko up → enriches geckoterminal, volume/fee gates active (metrics known)", async () => {
-    // gecko volume 100 × 0.0035 = fees ≈ 0.35 on tvl 100_000 → a real, low
-    // fee/IL ratio (< 1.2). With ilProtectionEnabled the [fee-il-gate] must FIRE
-    // because gecko fees are real (feeIlRatioKnown=true).
+  it("datapi down + gecko up → enriches geckoterminal: volume/TVL known, fees NOT known (modeled) so [fee-il-gate] SKIPS", async () => {
+    // gecko volume 100 × 0.0035 = fees ≈ 0.35 on tvl 100_000 → a low fee/IL
+    // ratio (< 1.2). Gecko volume + TVL are REAL (volumeAuthenticityKnown=true),
+    // but gecko fees are a binStep base-rate MODEL (pool_fee_percentage is null
+    // for every CL pool — only the Data API measures fees), so
+    // feeIlRatioKnown=false and even with ilProtectionEnabled the hard ENTER
+    // floor must SKIP rather than act on the modeled ratio.
     const restoreGecko = geckoUp(100, 100_000);
     try {
       const layer = makeTestLayer({
@@ -284,13 +323,39 @@ describe("stats source propagation — datapi vs gecko vs heuristic", () => {
       const metrics = rows_.find((r) => r.metrics !== undefined)?.metrics;
       expect(metrics, "expected an audited decision carrying metrics").toBeDefined();
       expect(metrics!.pool.statsSource).toBe("geckoterminal");
-      expect(metrics!.volumeAuthenticityKnown).toBe(true);
-      expect(metrics!.feeIlRatioKnown).toBe(true);
-      // Fees are real → the floor gate acts on them.
+      expect(metrics!.volumeAuthenticityKnown, "gecko volume + TVL ARE real").toBe(true);
+      expect(metrics!.feeIlRatioKnown, "gecko fees are modeled, not measured").toBe(false);
       const gateRejects = rows_.filter(
         (d) => d.action === "ENTER" && d.reasoning.includes("[fee-il-gate]"),
       );
-      expect(gateRejects, "gecko real low fee/IL should trip [fee-il-gate]").toHaveLength(1);
+      expect(gateRejects, "modeled gecko fees must not drive the hard fee/IL floor").toHaveLength(
+        0,
+      );
+    } finally {
+      restoreGecko();
+    }
+  }, 15_000);
+
+  it("a high-quality gecko pool still ENTERs via the volume candidate path (volume known)", async () => {
+    // High real volume on moderate TVL → vol/tvl 4 (authenticity 1.0) and a
+    // fee/IL far above the ×1.5 floor, so the pool clears the FULL ENTER gate
+    // chain on gecko stats: volumeAuthenticityKnown=true (real gecko volume)
+    // unlocks the candidate gate, and the modeled ratio passes the ×1.5
+    // weighted-score floor — conservatively, since modeled fees UNDERRATE real
+    // fees, making that floor HARDER to pass, never easier. The datapi-only
+    // [fee-il-gate] skipping (fees modeled) must not keep a good pool out.
+    const restoreGecko = geckoUp(20_000_000, 5_000_000);
+    try {
+      const layer = makeTestLayer({
+        adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
+        datapi: { getPoolData: () => Effect.succeed(null) },
+        configOverrides: { watchlistPools: [POOL], geckoTerminalEnabled: true },
+      });
+      const rows = await runWithSeed(layer, []);
+      const rows_ = poolRows(rows);
+      const enters = rows_.filter((d) => d.action === "ENTER");
+      expect(enters, "volume-known gecko pool must reach the ENTER push").toHaveLength(1);
+      expect(enters[0]!.reasoning).toContain("Strong pool");
     } finally {
       restoreGecko();
     }
@@ -367,8 +432,12 @@ describe("stats source propagation — datapi vs gecko vs heuristic", () => {
 });
 
 describe("paper notional-fee accrual respects the stats source", () => {
-  // In-range paper position; the accrual gate is isMeasuredStatsSource(...)
-  // (datapi or geckoterminal only — heuristic fabricated fees never accrue).
+  // In-range paper position; the accrual gate is statsSource === "datapi":
+  // ONLY Data-API-measured fees accrue. Gecko fees are a binStep base-rate
+  // MODEL on real volume (pool_fee_percentage is null for CL pools) and
+  // heuristic fees are fabricated — neither books paper CLAIM income.
+  const SEEDED_POSITION_ID = `paper-${POOL}`;
+
   function inRangePaperPosition() {
     return makePosition({ poolAddress: POOL, depositedUsd: 1000, currentValueUsd: 1000 });
   }
@@ -379,14 +448,26 @@ describe("paper notional-fee accrual respects the stats source", () => {
       yield* db.savePosition(inRangePaperPosition());
       yield* Effect.raceFirst(program, Effect.sleep(2_000));
       const positions = yield* db.getAllPositions();
-      const pos = positions.find((p) => p.poolAddress === POOL);
+      // Match the seeded row by identity: a high-quality pool may also ENTER in
+      // the same cycle and add a second (zero-fee) position on the pool.
+      const pos = positions.find((p) => p.positionId === SEEDED_POSITION_ID);
       return pos?.cumulativeFeesClaimedUsd ?? -1;
     });
     return Effect.runPromise(Effect.provide(test, layer) as Effect.Effect<number, unknown, never>);
   }
 
-  it("accrues under gecko stats (real fees)", async () => {
-    const restoreGecko = geckoUp(50_000_000, 5_000_000); // high real volume → real fees
+  it("accrues under datapi stats (measured fees)", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: { watchlistPools: [POOL], geckoTerminalEnabled: true },
+    });
+    const accrued = await readAccruedFees(layer);
+    expect(accrued, "datapi measured fees should accrue to a paper position").toBeGreaterThan(0);
+  }, 15_000);
+
+  it("does NOT accrue under gecko stats (fees are a base-rate model, not measured)", async () => {
+    const restoreGecko = geckoUp(50_000_000, 5_000_000); // high real volume → modeled fees
     try {
       const layer = makeTestLayer({
         adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
@@ -394,7 +475,7 @@ describe("paper notional-fee accrual respects the stats source", () => {
         configOverrides: { watchlistPools: [POOL], geckoTerminalEnabled: true },
       });
       const accrued = await readAccruedFees(layer);
-      expect(accrued, "gecko real fees should accrue to a paper position").toBeGreaterThan(0);
+      expect(accrued, "modeled gecko fees must not accrue to a paper position").toBe(0);
     } finally {
       restoreGecko();
     }
