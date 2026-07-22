@@ -784,4 +784,47 @@ describe("token-risk overlay + freeze screening (Wave 18)", () => {
       restore();
     }
   }, 15_000);
+
+  it("(14) an allocation-dead pool performs zero Jupiter fetches (token-risk is the final ENTER gate, after allocation)", async () => {
+    let jupiterCalls = 0;
+    const restore = mockFetch(async (url: string | URL | Request) => {
+      if (String(url).includes("api.jup.ag")) jupiterCalls += 1;
+      // Served ONLY if the allocation-dead pool consults early (pre-fix order):
+      // this isSus flag would have stolen the audit reason from the allocation
+      // gate. With allocation first, it is never observed.
+      return new Response(JSON.stringify([{ address: TOKEN_X, audit: { isSus: true } }]), {
+        status: 200,
+      });
+    });
+    try {
+      const layer = makeTestLayer({
+        // Clean legs (no freeze / no blacklist): the pool passes screening and,
+        // with the strong Data-API stats below, every local ENTER predicate, so
+        // it reaches the allocation gate. Pinning maxPerPoolAllocationPct to 0
+        // (config min is 0) zeroes the per-pool headroom so allocation rejects
+        // deterministically — independent of wallet balance, TVL or metrics.
+        adapter: makeAdapter({}),
+        blacklist: noBlacklist,
+        datapi: {
+          getPoolData: () =>
+            Effect.succeed(
+              makeDatapiStats({ tvlUsd: 200_000, volume24hUsd: 40_000, fees24hUsd: 800 }),
+            ),
+        },
+        configOverrides: {
+          jupiterTokenRiskEnabled: true,
+          maxPerPoolAllocationPct: 0,
+        },
+      });
+
+      const decisions = await runOneCycle(layer);
+      const forPool = decisions.filter((d) => d.poolAddress === POOL);
+      expect(jupiterCalls, "allocation-dead pool must not trigger a Jupiter consult").toBe(0);
+      const rejected = forPool.find((d) => !d.riskResult.approved);
+      expect(rejected, `expected an alloc-gate rejection, got: ${stringifySafe(forPool)}`).toBeDefined();
+      expect(rejected!.reasoning).toContain("alloc-gate");
+    } finally {
+      restore();
+    }
+  }, 15_000);
 });

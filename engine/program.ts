@@ -3020,99 +3020,102 @@ export const program = Effect.gen(function* () {
                 .pipe(Effect.catchAll(() => Effect.void));
               enterGateRejected = true;
             } else {
-              // [token-risk] ENTER gate (Wave 18): Jupiter advisory overlay.
-              // Blocks entry when either leg carries a hard-risk signal —
-              // Jupiter isSus (aggregated RugCheck+Blockaid) or a "low" organic
-              // score. Advisory and fail-open: unknown, disabled or failed
-              // signals never block entry. Deferred to AFTER the local
-              // predicates + weighted-score gate so a locally-ineligible pool
-              // never pays the Jupiter round-trip (when Jupiter is down that
-              // was a 10s timeout per ineligible pool per cycle); audit-reason
-              // precedence follows — pools failing local gates log the LOCAL
-              // reason, not an incidental token-risk one. Reuses the per-cycle
-              // token-risk cache, so a second consult costs no network call
-              // when the screening seam already fetched these mints.
-              if (config.jupiterTokenRiskEnabled !== false) {
-                const enterRisk = yield* Effect.promise(() =>
-                  consultTokenRisks([pool.tokenX, pool.tokenY], config),
-                );
-                const legRiskReason = (mint: string, symbol: string): string | null => {
-                  const signal = enterRisk.get(mint);
-                  if (signal === undefined) return null;
-                  if (signal.isSus) {
-                    return `${symbol} (${mint}): Jupiter audit flags suspicious (isSus)`;
+              const maxPositionSize = Math.min(walletBalanceUsd * 0.5, pool.tvlUsd * 0.005, 500);
+              const proposedSizeUsd = Math.max(maxPositionSize, 10);
+
+              // F5: per-pool allocation cap — aggregate across the pool's
+              // positions so stacked exposure can't dominate the portfolio.
+              const allocation = evaluatePerPoolAllocation({
+                proposedDepositUsd: proposedSizeUsd,
+                portfolioValueUsd,
+                openPositions,
+                maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+                maxOpenPositions: config.maxOpenPositions,
+                poolAddress,
+                maxPositionsPerPool: config.maxPositionsPerPool,
+              });
+              if (!allocation.approved) {
+                console.info(`[alloc-gate] Skipping ENTER ${poolAddress} — ${allocation.reason}`);
+                yield* memory
+                  .upsert({
+                    category: "pattern",
+                    content: `Allocation gate skipped ENTER on ${poolAddress}: ${allocation.reason}`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+                yield* audit
+                  .recordDecision({
+                    timestamp: Date.now(),
+                    cycleId,
+                    poolAddress,
+                    action: "ENTER",
+                    confidence: 0,
+                    reasoning: `[alloc-gate] ${allocation.reason}`,
+                    metrics,
+                    riskResult: { approved: false, reason: `[alloc-gate] ${allocation.reason}` },
+                    executed: false,
+                    paperTrading: config.paperTrading,
+                  })
+                  .pipe(Effect.catchAll(() => Effect.void));
+                enterGateRejected = true;
+              } else {
+                // [token-risk] ENTER gate (Wave 18): Jupiter advisory overlay —
+                // the FINAL ENTER gate. Runs only AFTER every local predicate and
+                // the allocation cap have passed, so an allocation-dead pool (no
+                // headroom, or MAX_OPEN_POSITIONS reached) never pays the Jupiter
+                // round-trip — when Jupiter is down that was up to a 10s serial
+                // timeout per allocation-dead pool per cycle. Blocks entry when
+                // either leg carries a hard-risk signal — Jupiter isSus
+                // (aggregated RugCheck+Blockaid) or a "low" organic score.
+                // Advisory and fail-open: unknown, disabled or failed signals
+                // never block entry. Audit-reason precedence: allocation
+                // rejections log alloc-gate and consult nothing; token-risk
+                // rejections only fire for candidates that survived every local
+                // gate. Reuses the per-cycle token-risk cache, so a second
+                // consult costs no network call when the screening seam already
+                // fetched these mints.
+                if (config.jupiterTokenRiskEnabled !== false) {
+                  const enterRisk = yield* Effect.promise(() =>
+                    consultTokenRisks([pool.tokenX, pool.tokenY], config),
+                  );
+                  const legRiskReason = (mint: string, symbol: string): string | null => {
+                    const signal = enterRisk.get(mint);
+                    if (signal === undefined) return null;
+                    if (signal.isSus) {
+                      return `${symbol} (${mint}): Jupiter audit flags suspicious (isSus)`;
+                    }
+                    if (signal.organicScoreLabel === "low") {
+                      return `${symbol} (${mint}): Jupiter organic score is low`;
+                    }
+                    return null;
+                  };
+                  const riskReasons = [
+                    legRiskReason(pool.tokenX, pool.tokenXSymbol),
+                    legRiskReason(pool.tokenY, pool.tokenYSymbol),
+                  ].filter((reason): reason is string => reason !== null);
+                  if (riskReasons.length > 0) {
+                    yield* audit
+                      .recordDecision({
+                        timestamp: Date.now(),
+                        cycleId,
+                        poolAddress,
+                        action: "ENTER",
+                        confidence: 0,
+                        reasoning: `[token-risk] ${riskReasons.join("; ")} — ENTER blocked`,
+                        metrics,
+                        riskResult: {
+                          approved: false,
+                          reason: `[token-risk] ${riskReasons.join("; ")}`,
+                        },
+                        executed: false,
+                        paperTrading: config.paperTrading,
+                      })
+                      .pipe(Effect.catchAll(() => Effect.void));
+                    enterGateRejected = true;
                   }
-                  if (signal.organicScoreLabel === "low") {
-                    return `${symbol} (${mint}): Jupiter organic score is low`;
-                  }
-                  return null;
-                };
-                const riskReasons = [
-                  legRiskReason(pool.tokenX, pool.tokenXSymbol),
-                  legRiskReason(pool.tokenY, pool.tokenYSymbol),
-                ].filter((reason): reason is string => reason !== null);
-                if (riskReasons.length > 0) {
-                  yield* audit
-                    .recordDecision({
-                      timestamp: Date.now(),
-                      cycleId,
-                      poolAddress,
-                      action: "ENTER",
-                      confidence: 0,
-                      reasoning: `[token-risk] ${riskReasons.join("; ")} — ENTER blocked`,
-                      metrics,
-                      riskResult: {
-                        approved: false,
-                        reason: `[token-risk] ${riskReasons.join("; ")}`,
-                      },
-                      executed: false,
-                      paperTrading: config.paperTrading,
-                    })
-                    .pipe(Effect.catchAll(() => Effect.void));
-                  enterGateRejected = true;
                 }
-              }
 
-              if (!enterGateRejected) {
-                const maxPositionSize = Math.min(walletBalanceUsd * 0.5, pool.tvlUsd * 0.005, 500);
-                const proposedSizeUsd = Math.max(maxPositionSize, 10);
-
-                // F5: per-pool allocation cap — aggregate across the pool's
-                // positions so stacked exposure can't dominate the portfolio.
-                const allocation = evaluatePerPoolAllocation({
-                  proposedDepositUsd: proposedSizeUsd,
-                  portfolioValueUsd,
-                  openPositions,
-                  maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
-                  maxOpenPositions: config.maxOpenPositions,
-                  poolAddress,
-                  maxPositionsPerPool: config.maxPositionsPerPool,
-                });
-                if (!allocation.approved) {
-                  console.info(`[alloc-gate] Skipping ENTER ${poolAddress} — ${allocation.reason}`);
-                  yield* memory
-                    .upsert({
-                      category: "pattern",
-                      content: `Allocation gate skipped ENTER on ${poolAddress}: ${allocation.reason}`,
-                      poolAddress,
-                    })
-                    .pipe(Effect.catchAll(() => Effect.void));
-                  yield* audit
-                    .recordDecision({
-                      timestamp: Date.now(),
-                      cycleId,
-                      poolAddress,
-                      action: "ENTER",
-                      confidence: 0,
-                      reasoning: `[alloc-gate] ${allocation.reason}`,
-                      metrics,
-                      riskResult: { approved: false, reason: `[alloc-gate] ${allocation.reason}` },
-                      executed: false,
-                      paperTrading: config.paperTrading,
-                    })
-                    .pipe(Effect.catchAll(() => Effect.void));
-                  enterGateRejected = true;
-                } else {
+                if (!enterGateRejected) {
                   const positionSizeUsd = allocation.adjustedDepositUsd;
                   rawDecisions.push({
                     action: "ENTER",
