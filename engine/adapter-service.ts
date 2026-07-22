@@ -156,6 +156,14 @@ function formatTokenAmount(amount: bigint, decimals: number): string {
   return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
 }
 
+/** Convert atomic token amounts to decimal units without Number() precision
+ * loss above 2^53: split into whole + fractional bigint parts and compose. */
+export function atomicToUnits(amountAtomic: bigint, decimals: number): number {
+  const base = 10n ** BigInt(decimals);
+  const whole = amountAtomic / base;
+  const frac = amountAtomic % base;
+  return Number(whole) + Number(frac) / Number(base);
+}
 const logger = createLogger("adapter-service");
 
 // Mints we have already warned about for being unpriceable during wallet
@@ -1074,7 +1082,7 @@ export const AdapterLive = Layer.effect(
             warnUnpricedWalletMintOnce(mint);
             continue;
           }
-          totalUsd += (Number(balance.amountAtomic) / 10 ** balance.decimals) * price;
+          totalUsd += atomicToUnits(balance.amountAtomic, balance.decimals) * price;
         }
 
         return totalUsd;
@@ -1990,7 +1998,12 @@ export const AdapterLive = Layer.effect(
               tokenYMint,
               ...rewardSlots.map((s) => s.mint).filter((m): m is string => m != null),
             ];
-            const prices = yield* fetchTokenPrices(priceMints).pipe(
+            // useFallback: false — the static $165/$1 fallback map must NOT pass
+            // the all-or-nothing gate here, or a FABRICATED realized would be
+            // booked instead of NULL. This batch prices the withdraw legs, the
+            // pending-fee legs AND the swept-reward mints, so the opt-out covers
+            // every ledger-booking input at once (mirrors the wallet path).
+            const prices = yield* fetchTokenPrices(priceMints, { useFallback: false }).pipe(
               Effect.catchAll(() => Effect.succeed({} as Record<string, number>)),
             );
 
@@ -2003,11 +2016,11 @@ export const AdapterLive = Layer.effect(
             let pendingFeeUsd: number | null = null;
             if (priceX != null && priceX > 0 && priceY != null && priceY > 0) {
               withdrawnUsd =
-                (Number(withdrawnXAtomic) / 10 ** decimalsX) * priceX +
-                (Number(withdrawnYAtomic) / 10 ** decimalsY) * priceY;
+                atomicToUnits(BigInt(withdrawnXAtomic), decimalsX) * priceX +
+                atomicToUnits(BigInt(withdrawnYAtomic), decimalsY) * priceY;
               pendingFeeUsd =
-                (Number(pendingFeeXAtomic) / 10 ** decimalsX) * priceX +
-                (Number(pendingFeeYAtomic) / 10 ** decimalsY) * priceY;
+                atomicToUnits(BigInt(pendingFeeXAtomic), decimalsX) * priceX +
+                atomicToUnits(BigInt(pendingFeeYAtomic), decimalsY) * priceY;
             }
 
             // Reward slots price independently (mirror claimRewards): an
@@ -2023,7 +2036,7 @@ export const AdapterLive = Layer.effect(
                     Effect.catchAll(() => Effect.succeed(null)),
                   );
                   if (decimals != null) {
-                    amountUsd = (slot.amountAtomic / 10 ** decimals) * price;
+                    amountUsd = atomicToUnits(BigInt(slot.amountAtomic), decimals) * price;
                   }
                 }
               }
@@ -2427,9 +2440,14 @@ export const AdapterLive = Layer.effect(
           const netFeesUsd = yield* Effect.gen(function* () {
             const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
             const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
-            const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint]).pipe(
-              Effect.catchAll(() => Effect.succeed({} as Record<string, number>)),
-            );
+            // useFallback: false — netFeesUsd books into cumulativeFeesClaimedUsd
+            // (the compound gate input), so it carries the same ledger-booking
+            // responsibility as the exit path: a $165/$1 fallback fabrication
+            // here would compound on phantom value. Unresolvable → null → caller
+            // `?? 0` → the compound gate fails closed instead of booking fiction.
+            const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint], {
+              useFallback: false,
+            }).pipe(Effect.catchAll(() => Effect.succeed({} as Record<string, number>)));
             const priceX = prices[tokenXMint];
             const priceY = prices[tokenYMint];
             if (priceX == null || priceX <= 0 || priceY == null || priceY <= 0) return null;

@@ -1050,8 +1050,12 @@ describe("live lifecycle PnL accounting", () => {
     });
 
     const closed = outcome.closed[0]!;
-    // Reward is credited AFTER realized compute → realized unaffected: 1000 − 1000 = 0.
-    expect(closed.realizedPnlUsd).toBeCloseTo(0, 8);
+    // Exactly-once: the PRICED swept reward ($7) is part of the withdrawal, so it
+    // enters realized via the rewards ARGUMENT (computed before the post-compute
+    // credit). realized = withdrawn 1000 + fees 0 + (prior rewards 0 + swept 7) −
+    // basis 1000 = 7. The same $7 is then credited to cumulativeRewardsClaimedUsd
+    // for APR/display only — the two never sum together into realized again.
+    expect(closed.realizedPnlUsd).toBeCloseTo(7, 8);
     expect(closed.cumulativeRewardsClaimedUsd).toBeCloseTo(7, 8);
 
     const rewardClaim = outcome.events.find(

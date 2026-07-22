@@ -1093,6 +1093,18 @@ export function executeLive(
           //    realized recorded n/a, never the mark, never 0.
           const withdrawnUsd = exitResultData?.withdrawnUsd ?? null;
           const pricingUnresolved = withdrawnUsd === null;
+          // The close batch also claims any pending LM rewards on-chain. The
+          // PRICED swept rewards are part of the withdrawal, so they must enter
+          // realized exactly once — folded into the rewards ARGUMENT computed
+          // here, BEFORE the post-compute credit (step 4) touches the cumulative
+          // (which is APR/display only and never re-summed into this realized).
+          // Unpriceable swept rewards (amountUsd null) contribute 0 here — see
+          // the claim-path consistency rationale at the credit block below.
+          const sweptRewards = exitResultData?.sweptRewards ?? [];
+          const pricedSweptRewardUsd = sweptRewards.reduce(
+            (acc, r) => (typeof r.amountUsd === "number" ? acc + r.amountUsd : acc),
+            0,
+          );
           // 2. Compute on the PRIOR cumulatives only — the exit sweep is
           //    credited AFTER this (step 4) so it is never double-counted.
           //    withdrawn already embeds unswept + recompounded fees; prior
@@ -1104,7 +1116,7 @@ export function executeLive(
                 withdrawnUsd,
                 pos.cumulativeFeesClaimedUsd,
                 pos.depositedUsd,
-                pos.cumulativeRewardsClaimedUsd,
+                pos.cumulativeRewardsClaimedUsd + pricedSweptRewardUsd,
               );
           // 3. Credit the sweep post-compute — fee-APR / display / event
           //    continuity only, never a realized input.
@@ -1153,7 +1165,6 @@ export function executeLive(
                 .pipe(Effect.catchAll(() => Effect.void));
             }
           }
-          const sweptRewards = exitResultData?.sweptRewards ?? [];
           let sweptRewardUsd = 0;
           let unpricedReward = false;
           for (const reward of sweptRewards) {
@@ -1492,6 +1503,11 @@ export const program = Effect.gen(function* () {
   let scanCount = 0;
   let lastAgentCheckinAt = 0;
   let lastWalletBalanceUsd = config.paperPortfolioUsd;
+  // False until the first SUCCESSFUL live chain wallet read. The session-local
+  // seed (config.paperPortfolioUsd, default $10,000) is fictional for live mode;
+  // this flag keeps it from ever authorizing a live entry during an RPC outage
+  // before any real balance is known.
+  let walletEverReadSuccessfully = false;
   let lastSnapshotPruneAt = 0;
 
   // F2: per-pool recent active-bin history (in-memory ring buffer; resets on restart)
@@ -1878,6 +1894,14 @@ export const program = Effect.gen(function* () {
       let walletDegradationWarned = false;
       if (adapter.hasWallet() && !config.paperTrading) {
         lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
+          // Runs only on the success channel: a failed read skips this and the
+          // catchAll below reuses the (possibly fictional) stale value, so the
+          // ENTER gate stays fail-closed until a real balance is observed.
+          Effect.tap(() =>
+            Effect.sync(() => {
+              walletEverReadSuccessfully = true;
+            }),
+          ),
           Effect.catchAll((err) => {
             // Live degradation only: a transient wallet read must never fail a
             // pool or blank a cycle's screening. Reuse the last known value
@@ -3138,8 +3162,35 @@ export const program = Effect.gen(function* () {
           logger.info("Skipping ENTER for unmanaged pool", { pool: poolAddress });
           enterGateRejected = true;
         } else {
+          // Fail-closed live-entry gate: until the first SUCCESSFUL chain wallet
+          // read lands, the session seed (config.paperPortfolioUsd) is fiction
+          // and must not size/authorize a live entry (e.g. during an RPC outage
+          // at startup). EXIT is never gated here — capital protection is free.
+          if (!config.paperTrading && !walletEverReadSuccessfully) {
+            cycle.poolsDecided++;
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "ENTER",
+                confidence: 0,
+                reasoning:
+                  "[wallet-read] No successful wallet balance read yet — live entries blocked until chain balance is known",
+                metrics,
+                riskResult: {
+                  approved: false,
+                  reason: "[wallet-read] No successful wallet balance read yet",
+                },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+            enterGateRejected = true;
+          }
+
           const entryBackoff = entryFailureBackoff.get(poolAddress);
-          if (entryBackoff && entryBackoff.nextAttemptAt > Date.now()) {
+          if (!enterGateRejected && entryBackoff && entryBackoff.nextAttemptAt > Date.now()) {
             const retryAfterMs = entryBackoff.nextAttemptAt - Date.now();
             cycle.poolsDecided++;
             yield* audit
@@ -3997,6 +4048,11 @@ export const program = Effect.gen(function* () {
           });
         }
 
+        // True when this decision ran through the live executor and therefore
+        // may have moved funds wallet<->position; only then do we re-read the
+        // wallet so later pools in the same cycle don't double-count capital.
+        let movedLiveFunds = false;
+
         if (paperExitShouldGoLive) {
           console.warn(
             `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${poolAddress}`,
@@ -4023,6 +4079,7 @@ export const program = Effect.gen(function* () {
           );
           executed = liveResult.executed;
           executionError = liveResult.error;
+          movedLiveFunds = true;
         } else if (config.paperTrading) {
           console.info("[PAPER] Would execute", {
             action: decision.action,
@@ -4066,6 +4123,31 @@ export const program = Effect.gen(function* () {
           );
           executed = liveResult.executed;
           executionError = liveResult.error;
+          movedLiveFunds = true;
+        }
+
+        // After a SUCCESSFUL live ENTER/EXIT, funds moved wallet<->position but
+        // later pools still hold the cycle-top wallet capture (which includes
+        // the just-deployed/returned funds) alongside the already-updated
+        // trackedPositions — counting that capital twice. Re-read the wallet so
+        // the next pool's portfolioValue sees the post-mutation balance. The
+        // post-tx cache invalidation in the adapter guarantees a fresh chain
+        // read. REBALANCE moves no NET funds wallet<->position, so skip it.
+        // Paper mode never moves real funds and is excluded (movedLiveFunds is
+        // false on the paper branch).
+        if (
+          movedLiveFunds &&
+          executed &&
+          (decision.action === "ENTER" || decision.action === "EXIT")
+        ) {
+          lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
+            Effect.catchAll(() => {
+              logger.warn("Wallet re-read after live execution failed; keeping cycle-top balance", {
+                pool: poolAddress,
+              });
+              return Effect.succeed(lastWalletBalanceUsd);
+            }),
+          );
         }
 
         if (decision.action !== "HOLD") {
