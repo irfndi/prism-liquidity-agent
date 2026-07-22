@@ -457,17 +457,22 @@ export const DbLive = (dbPath?: string) =>
                   // Tradeoff (R1a + expanding window): a single global window of the
                   // nearest `topK * 2` neighbours can yield fewer than topK in-scope
                   // rows when the nearest neighbours are mostly expired or
-                  // other-pool, so the window EXPANDS — k doubles (capped at maxK)
-                  // over at most three re-queries — until topK in-scope rows are
-                  // found or the cap is hit. This restores parity with the old SQL
-                  // WHERE pre-filter in realistic cases; only genuine corner cases
-                  // (a table dominated by expired/other-pool rows beyond the maxK
-                  // nearest neighbours) fail-soft with fewer rows. Recency-blend
-                  // ranking and ORDER BY distance are preserved exactly.
+                  // other-pool, so the window EXPANDS — k doubles each pass and the
+                  // loop never stops before querying at the configured cap `maxK`
+                  // (it breaks only after a query, once topK in-scope rows are found
+                  // or `k >= maxK`). k is monotonically non-decreasing toward maxK,
+                  // so the widest query always runs: for topK = 3 that is
+                  // k = 6, 12, 24, 48, 64 — in-scope rows ranked anywhere within
+                  // maxK are examined (worst case ~log2(maxK/topK) + 1 queries).
+                  // This restores parity with the old SQL WHERE pre-filter in
+                  // realistic cases; only genuine corner cases (a table dominated by
+                  // expired/other-pool rows beyond the maxK nearest neighbours)
+                  // fail-soft with fewer rows. Recency-blend ranking and ORDER BY
+                  // distance are preserved exactly.
                   const maxK = Math.max(topK * 8, 64);
                   let k = topK * 2;
                   let candidates: Record<string, unknown>[] = [];
-                  for (let expansion = 0; expansion < 4; expansion += 1) {
+                  for (;;) {
                     const rows = yield* Effect.try({
                       try: () =>
                         queryAll<Record<string, unknown>>(

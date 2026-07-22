@@ -330,6 +330,44 @@ describe("DbService memory operations (vec_memory present)", () => {
     expect(result).toHaveLength(2);
     expect(result.every((entry) => entry.poolAddress === "PoolExpandA")).toBe(true);
   });
+
+  it("queryMemory KNN expansion reliably reaches the configured cap (k = maxK)", async () => {
+    const db = tryCreateVecDatabase();
+    if (!db) return; // Skip if sqlite-vec unavailable.
+    db.close();
+
+    const layer = DbLive(":memory:");
+    const result = await run(
+      Effect.gen(function* () {
+        const dbService = yield* DbService;
+        // 3 target rows + 60 other-pool rows (63 distinct contents).
+        // topK = 3 → maxK = max(3*8, 64) = 64, so the fixed expansion loop's
+        // final k = 64 query covers the whole 63-row table and the post-filter
+        // finds all 3 target rows REGARDLESS of embedding distance order —
+        // this is deterministic for ANY distance order. The OLD bounded loop
+        // (4 iterations → k = 6, 12, 24, 48; k = 64 never queried) could return
+        // fewer than 3 once the target rows ranked 49–63 in a table this size.
+        for (let i = 0; i < 3; i += 1) {
+          yield* dbService.insertMemory({
+            content: `cap reach target memory ${i}`,
+            category: "pattern",
+            poolAddress: "PoolCapA",
+          });
+        }
+        for (let i = 0; i < 60; i += 1) {
+          yield* dbService.insertMemory({
+            content: `cap reach noise memory ${i}`,
+            category: "pattern",
+            poolAddress: "PoolCapB",
+          });
+        }
+        return yield* dbService.queryMemory("cap reach target memory", 3, "PoolCapA");
+      }),
+      layer,
+    );
+    expect(result).toHaveLength(3);
+    expect(result.every((entry) => entry.poolAddress === "PoolCapA")).toBe(true);
+  });
 });
 
 // ─── probeVecAvailability (real environment, doctor seam) ───────────────────
