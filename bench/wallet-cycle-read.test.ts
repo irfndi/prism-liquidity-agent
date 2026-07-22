@@ -27,6 +27,7 @@ import {
   AgentStateService,
   type AdapterApi,
   type MeteoraDatapiApi,
+  type MeteoraPoolStats,
 } from "../engine/services.js";
 import type { PrismStateSnapshot } from "../engine/state-service.js";
 import type { PoolSnapshot } from "../engine/types.js";
@@ -103,7 +104,41 @@ function makeAdapter(walletBalanceUsd: () => Effect.Effect<number, unknown>): Ad
 
 const datapi: MeteoraDatapiApi = { getPoolData: () => Effect.succeed(null) };
 
-function makeTestLayer(adapter: AdapterApi, configOverrides: Partial<AppConfig>) {
+function enterableDatapi(overrides: Partial<MeteoraPoolStats> = {}): MeteoraPoolStats {
+  // A strong, positionless-pool-friendly stats payload: high enough TVL/volume
+  // authenticity and fee/IL that the ENTER slot both opens AND passes the
+  // weighted-score + risk gates, so the pool executes a real live ENTER.
+  return {
+    address: "ignored",
+    name: "SOL-USDC",
+    tvlUsd: 200_000,
+    volume24hUsd: 40_000,
+    fees24hUsd: 400,
+    apr: 20,
+    apy: 20,
+    currentPrice: 150,
+    feeTvlRatio24h: null,
+    feeTvlRatio12h: null,
+    feeTvlRatio1h: null,
+    dynamicFeePct: null,
+    baseFeePct: null,
+    hasFarm: null,
+    farmApr: null,
+    farmApy: null,
+    isBlacklisted: null,
+    tokenXFreezeAuthorityDisabled: null,
+    tokenYFreezeAuthorityDisabled: null,
+    tokenXVerified: null,
+    tokenYVerified: null,
+    ...overrides,
+  };
+}
+
+function makeTestLayer(
+  adapter: AdapterApi,
+  configOverrides: Partial<AppConfig>,
+  datapiOverride?: MeteoraDatapiApi,
+) {
   const config = defaultAppConfig({
     scanIntervalMs: 3_600_000,
     agentMcpEnabled: false,
@@ -165,7 +200,7 @@ function makeTestLayer(adapter: AdapterApi, configOverrides: Partial<AppConfig>)
     Layer.succeed(McpServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.void }),
-    Layer.succeed(MeteoraDatapiService, datapi),
+    Layer.succeed(MeteoraDatapiService, datapiOverride ?? datapi),
     Layer.succeed(AlertService, { sendAlert: () => Effect.void, recordFeeClaim: () => Effect.void }),
   );
 }
@@ -628,5 +663,313 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
     expect(balanceCalls, "the post-mutation re-read was attempted").toBeGreaterThanOrEqual(2);
     // … but the stale cycle-top value is kept (degrade, never crash).
     expect(snapshot.portfolio.walletBalanceUsd).toBe(CYCLE_TOP);
+  }, 15_000);
+});
+
+describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)", () => {
+  // After a successful LIVE ENTER, a FAILED post-tx wallet re-read leaves the
+  // stale cycle-top balance (still counting the deployed capital) alongside the
+  // already-tracked new position. Serving that to the next pool double-counts
+  // capital and can breach the allocation cap, so all further entries are
+  // blocked for the rest of the cycle ([wallet-refresh]). EXIT-origin refresh
+  // failures deliberately do NOT block: a stale balance under-counts, so the
+  // gates tighten — the safe direction.
+
+  const POOL_A = "PoolRefreshEnterA111111111111111111111111";
+  const POOL_B = "PoolRefreshEnterB111111111111111111111111";
+  const CYCLE_TOP = 10_000;
+
+  interface FullDecision {
+    readonly poolAddress: string;
+    readonly action: string;
+    readonly reasoning: string;
+    readonly executed: boolean;
+  }
+
+  // Live ENTER requires a native SOL balance above MIN_SOL_FOR_GAS_LAMPORTS
+  // (30_000_000n); give the mock wallet ample SOL so the enter can execute.
+  function enterAdapter(walletBalance: Effect.Effect<number, unknown>): AdapterApi {
+    return {
+      ...makeAdapter(() => walletBalance),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+      getPoolState: (addr: string) =>
+        Effect.succeed(
+          makePool({ address: addr, tvlUsd: 200_000, volume24hUsd: 40_000, fees24hUsd: 400 }),
+        ),
+    } as AdapterApi;
+  }
+
+  const enterableDatapiSvc: MeteoraDatapiApi = {
+    getPoolData: () => Effect.succeed(enterableDatapi()),
+  };
+
+  function runCycle(layer: Layer.Layer<unknown, never, never>) {
+    const test = Effect.gen(function* () {
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const audit = yield* AuditService;
+      const decisions = yield* audit.getRecentDecisions(100);
+      return { decisions: decisions as unknown as FullDecision[] };
+    });
+    return Effect.runPromise(
+      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, unknown, never>,
+    );
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("a failed wallet re-read after a LIVE ENTER blocks the next pool's ENTER ([wallet-refresh])", async () => {
+    let balanceCalls = 0;
+    const balance = Effect.suspend(() => {
+      balanceCalls += 1;
+      // Cycle-top read succeeds (walletEverReadSuccessfully=true so the first
+      // ENTER clears the [wallet-read] gate); the post-ENTER re-capture fails.
+      return balanceCalls === 1 ? Effect.succeed(CYCLE_TOP) : Effect.fail(new Error("re-read down"));
+    });
+    const layer = makeTestLayer(
+      enterAdapter(balance),
+      {
+        watchlistPools: [POOL_A, POOL_B],
+        paperTrading: false,
+        paperPortfolioUsd: CYCLE_TOP,
+        maxOpenPositions: 5,
+      },
+      enterableDatapiSvc,
+    );
+
+    const { decisions } = await runCycle(layer as never);
+
+    const executedEnters = decisions.filter((d) => d.action === "ENTER" && d.executed);
+    expect(
+      executedEnters,
+      "only the first pool enters before the failed refresh blocks the rest",
+    ).toHaveLength(1);
+    const refreshBlock = decisions.find((d) => d.reasoning.includes("[wallet-refresh]"));
+    expect(refreshBlock, "the second pool's ENTER must be fail-closed").toBeDefined();
+    expect(refreshBlock!.executed).toBe(false);
+  }, 15_000);
+
+  it("a successful wallet re-read leaves entries unblocked (both pools enter)", async () => {
+    const layer = makeTestLayer(
+      enterAdapter(Effect.succeed(CYCLE_TOP)),
+      {
+        watchlistPools: [POOL_A, POOL_B],
+        paperTrading: false,
+        paperPortfolioUsd: CYCLE_TOP,
+        maxOpenPositions: 5,
+      },
+      enterableDatapiSvc,
+    );
+
+    const { decisions } = await runCycle(layer as never);
+
+    const executedEnters = decisions.filter((d) => d.action === "ENTER" && d.executed);
+    expect(executedEnters, "both pools enter when the refresh succeeds").toHaveLength(2);
+    expect(
+      decisions.some((d) => d.reasoning.includes("[wallet-refresh]")),
+      "no [wallet-refresh] block when the re-read succeeds",
+    ).toBe(false);
+  }, 15_000);
+
+  it("an EXIT-origin refresh failure does NOT set the entry-block flag", async () => {
+    const POOL_EXIT = "PoolRefreshExitX1111111111111111111111111";
+    const POS_PUBKEY = "PosRefreshExitX11111111111111111111111111";
+    // Order [EXIT pool, ENTER pool]: the EXIT pool runs first and its post-EXIT
+    // re-read fails; the ENTER pool must still enter (EXIT failure ≠ flag).
+    let balanceCalls = 0;
+    const balance = Effect.suspend(() => {
+      balanceCalls += 1;
+      return balanceCalls === 1 ? Effect.succeed(CYCLE_TOP) : Effect.fail(new Error("re-read down"));
+    });
+    const adapter = {
+      ...makeAdapter(() => balance),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+      getPoolState: (addr: string) =>
+        addr === POOL_EXIT
+          ? Effect.succeed(makePool({ address: addr, tvlUsd: 60_000, fees24hUsd: 300 }))
+          : Effect.succeed(
+              makePool({ address: addr, tvlUsd: 200_000, volume24hUsd: 40_000, fees24hUsd: 400 }),
+            ),
+      getAllWalletPositions: () =>
+        Effect.succeed([
+          { poolAddress: POOL_EXIT, positionPubKey: POS_PUBKEY, lowerBinId: 4980, upperBinId: 5020 },
+        ]),
+      getPositions: () => Effect.succeed([{ id: POS_PUBKEY }] as never),
+    } as AdapterApi;
+    // Datapi null for the EXIT pool so its 60k TVL survives enrichment and the
+    // TVL-drop exit fires; the ENTER pool gets strong stats so it can enter.
+    const splitDatapi: MeteoraDatapiApi = {
+      getPoolData: (addr: string) =>
+        addr === POOL_EXIT ? Effect.succeed(null) : Effect.succeed(enterableDatapi()),
+    };
+    const layer = makeTestLayer(
+      adapter,
+      {
+        watchlistPools: [POOL_EXIT, POOL_B],
+        paperTrading: false,
+        paperPortfolioUsd: CYCLE_TOP,
+        tvlDropExitPct: 0.3,
+        maxOpenPositions: 5,
+      },
+      splitDatapi,
+    );
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(
+        makePosition({
+          poolAddress: POOL_EXIT,
+          positionPubKey: POS_PUBKEY,
+          positionId: POS_PUBKEY,
+          lowerBinId: 4980,
+          upperBinId: 5020,
+          depositedUsd: 1_000,
+          currentValueUsd: 1_000,
+        }),
+      );
+      yield* db.saveSnapshot({
+        poolAddress: POOL_EXIT,
+        timestamp: Date.now() - 600_000,
+        activeBinId: 5000,
+        tvlUsd: 100_000, // -40% vs current 60k → exceeds the 30% EXIT threshold
+        volume24hUsd: 30_000,
+        fees24hUsd: 300,
+        apr: 60,
+        currentPrice: 150,
+        binStep: 10,
+        tokenXSymbol: "SOL",
+        tokenYSymbol: "USDC",
+        binArray: makeBinArray(),
+      });
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const audit = yield* AuditService;
+      const decisions = yield* audit.getRecentDecisions(100);
+      return { decisions: decisions as unknown as FullDecision[] };
+    });
+    const { decisions } = await Effect.runPromise(
+      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, unknown, never>,
+    );
+
+    expect(
+      decisions.some((d) => d.poolAddress === POOL_EXIT && d.action === "EXIT" && d.executed),
+      "the EXIT pool exits on the TVL drop despite the failed refresh",
+    ).toBe(true);
+    expect(
+      decisions.some((d) => d.poolAddress === POOL_B && d.action === "ENTER" && d.executed),
+      "an EXIT-origin refresh failure must NOT block a later entry",
+    ).toBe(true);
+    expect(
+      decisions.some((d) => d.reasoning.includes("[wallet-refresh]")),
+      "EXIT-origin failures never set the entry-block flag",
+    ).toBe(false);
+  }, 15_000);
+});
+
+describe("hybrid live EXIT keeps paper sizing paper-pure", () => {
+  // PAPER_TRADING=true + PAPER_MODE_EXIT_LIVE: a hybrid live EXIT sets
+  // movedLiveFunds, but paper cycles must NOT refresh the chain wallet — doing
+  // so would replace paperPortfolioUsd with unrelated chain funds mid-cycle and
+  // corrupt later paper pools' sizing. Refresh is gated on !paperTrading.
+
+  const POOL_EXIT = "PoolHybridExit1111111111111111111111111111";
+  const POOL_PAPER = "PoolHybridPaper111111111111111111111111";
+  const POS_PUBKEY = "PosHybridExit1111111111111111111111111111";
+  const PAPER = 2_500;
+
+  interface FullDecision {
+    readonly poolAddress: string;
+    readonly action: string;
+    readonly executed: boolean;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("does not refresh the chain wallet after a hybrid live EXIT (sizing stays paper-pure)", async () => {
+    let balanceCalls = 0;
+    const adapter = {
+      ...makeAdapter(() =>
+        Effect.sync(() => {
+          balanceCalls += 1;
+          return 99_999;
+        }),
+      ),
+      getPoolState: (addr: string) =>
+        addr === POOL_EXIT
+          ? Effect.succeed(makePool({ address: addr, tvlUsd: 60_000, fees24hUsd: 300 }))
+          : Effect.succeed(makePool({ address: addr })),
+      getAllWalletPositions: () =>
+        Effect.succeed([
+          { poolAddress: POOL_EXIT, positionPubKey: POS_PUBKEY, lowerBinId: 4980, upperBinId: 5020 },
+        ]),
+      getPositions: () => Effect.succeed([{ id: POS_PUBKEY }] as never),
+    } as AdapterApi;
+    const layer = makeTestLayer(adapter, {
+      watchlistPools: [POOL_EXIT, POOL_PAPER],
+      paperTrading: true,
+      paperModeExitLive: true,
+      paperPortfolioUsd: PAPER,
+      tvlDropExitPct: 0.3,
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(
+        makePosition({
+          poolAddress: POOL_EXIT,
+          positionPubKey: POS_PUBKEY,
+          positionId: POS_PUBKEY,
+          lowerBinId: 4980,
+          upperBinId: 5020,
+          depositedUsd: 1_000,
+          currentValueUsd: 1_000,
+        }),
+      );
+      yield* db.saveSnapshot({
+        poolAddress: POOL_EXIT,
+        timestamp: Date.now() - 600_000,
+        activeBinId: 5000,
+        tvlUsd: 100_000, // -40% vs current 60k → exceeds the 30% EXIT threshold
+        volume24hUsd: 30_000,
+        fees24hUsd: 300,
+        apr: 60,
+        currentPrice: 150,
+        binStep: 10,
+        tokenXSymbol: "SOL",
+        tokenYSymbol: "USDC",
+        binArray: makeBinArray(),
+      });
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const audit = yield* AuditService;
+      const state = yield* AgentStateService;
+      const decisions = yield* audit.getRecentDecisions(100);
+      const snapshot = yield* state.getSnapshot();
+      return { decisions: decisions as unknown as FullDecision[], snapshot };
+    });
+    const { decisions, snapshot } = await Effect.runPromise(
+      Effect.provide(test, layer) as Effect.Effect<
+        { decisions: FullDecision[]; snapshot: PrismStateSnapshot },
+        unknown,
+        never
+      >,
+    );
+
+    expect(
+      decisions.some((d) => d.poolAddress === POOL_EXIT && d.action === "EXIT" && d.executed),
+      "the hybrid live exit must still execute",
+    ).toBe(true);
+    expect(
+      balanceCalls,
+      "a paper cycle must never perform a chain wallet re-capture after a hybrid exit",
+    ).toBe(0);
+    expect(snapshot.portfolio.walletBalanceUsd, "paper sizing stays on paperPortfolioUsd").toBe(
+      PAPER,
+    );
+    expect(
+      decisions.some((d) => d.poolAddress === POOL_PAPER),
+      "later paper pools still evaluate normally",
+    ).toBe(true);
   }, 15_000);
 });

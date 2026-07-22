@@ -1508,6 +1508,14 @@ export const program = Effect.gen(function* () {
   // this flag keeps it from ever authorizing a live entry during an RPC outage
   // before any real balance is known.
   let walletEverReadSuccessfully = false;
+  // Set when a post-transaction wallet re-read FAILS after a successful LIVE
+  // ENTER: trackedPositions already holds the new position while the cycle-top
+  // balance still includes the deployed capital, so the next pool would
+  // double-count (wallet + position) and could authorize exposure above the
+  // allocation cap. Blocks all further entries for the rest of the cycle;
+  // reset at the top wallet read every cycle. EXIT-origin failures do NOT set
+  // it (a stale balance under-counts → gates tighten → the safe direction).
+  let liveEntriesBlockedRestOfCycle = false;
   let lastSnapshotPruneAt = 0;
 
   // F2: per-pool recent active-bin history (in-memory ring buffer; resets on restart)
@@ -1892,6 +1900,8 @@ export const program = Effect.gen(function* () {
       // pools. Paper mode (and walletless live) uses the configured paper
       // portfolio as the single source of truth.
       let walletDegradationWarned = false;
+      // Fresh cycle: a previous cycle's blocked-entry state must not leak in.
+      liveEntriesBlockedRestOfCycle = false;
       if (adapter.hasWallet() && !config.paperTrading) {
         lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
           // Runs only on the success channel: a failed read skips this and the
@@ -2602,7 +2612,15 @@ export const program = Effect.gen(function* () {
         // pool's real 24h fees while the active bin sits in range. Do NOT
         // touch currentValueUsd: unrealized PnL already sums claimed fees
         // (pnl.ts), so crediting the value column too would double-add.
-        if (config.paperTrading && pos.positionPubKey == null) {
+        // Fees are only trusted from the Data API: when enrichment is down
+        // getPoolState ships a POSITIVE modeled fees24hUsd under
+        // statsSource "heuristic" — accrue nothing in that case so paper
+        // positions never book fabricated CLAIM income.
+        if (
+          config.paperTrading &&
+          pos.positionPubKey == null &&
+          pool.statsSource === "datapi"
+        ) {
           const now = Date.now();
           const lastAccrualAt = paperFeeAccrualAt.get(pos.positionId);
           paperFeeAccrualAt.set(pos.positionId, now);
@@ -3181,6 +3199,36 @@ export const program = Effect.gen(function* () {
                 riskResult: {
                   approved: false,
                   reason: "[wallet-read] No successful wallet balance read yet",
+                },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+            enterGateRejected = true;
+          }
+
+          // Fail-closed live-entry gate: if a post-transaction wallet re-read
+          // failed after a successful LIVE ENTER earlier this cycle, the stale
+          // cycle-top balance still counts the deployed capital alongside the
+          // already-tracked new position. Serving that to later pools'
+          // allocation gates would authorize exposure above the cap, so block
+          // further entries until the next cycle re-reads the wallet.
+          if (!enterGateRejected && !config.paperTrading && liveEntriesBlockedRestOfCycle) {
+            cycle.poolsDecided++;
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "ENTER",
+                confidence: 0,
+                reasoning:
+                  "[wallet-refresh] Wallet balance refresh failed after a live entry this cycle — further entries blocked until the next cycle keeps allocation caps honest",
+                metrics,
+                riskResult: {
+                  approved: false,
+                  reason:
+                    "[wallet-refresh] Wallet balance refresh failed after a live entry this cycle",
                 },
                 executed: false,
                 paperTrading: config.paperTrading,
@@ -4052,6 +4100,11 @@ export const program = Effect.gen(function* () {
         // may have moved funds wallet<->position; only then do we re-read the
         // wallet so later pools in the same cycle don't double-count capital.
         let movedLiveFunds = false;
+        // True only when the live mutation was an ENTER. A failed post-ENTER
+        // re-read must block further entries this cycle (the deployed capital
+        // is still in the stale balance → double-count); a failed post-EXIT
+        // re-read is safe (stale balance under-counts → gates tighten).
+        let movedLiveFundsFromEnter = false;
 
         if (paperExitShouldGoLive) {
           console.warn(
@@ -4124,6 +4177,7 @@ export const program = Effect.gen(function* () {
           executed = liveResult.executed;
           executionError = liveResult.error;
           movedLiveFunds = true;
+          movedLiveFundsFromEnter = decision.action === "ENTER";
         }
 
         // After a SUCCESSFUL live ENTER/EXIT, funds moved wallet<->position but
@@ -4133,18 +4187,34 @@ export const program = Effect.gen(function* () {
         // the next pool's portfolioValue sees the post-mutation balance. The
         // post-tx cache invalidation in the adapter guarantees a fresh chain
         // read. REBALANCE moves no NET funds wallet<->position, so skip it.
-        // Paper mode never moves real funds and is excluded (movedLiveFunds is
-        // false on the paper branch).
+        // Paper cycles never refresh from chain — gated on !paperTrading so a
+        // hybrid live EXIT (PAPER_MODE_EXIT_LIVE) cannot replace the paper
+        // portfolio with real chain funds mid-cycle and size later paper pools
+        // against an unrelated wallet balance.
         if (
+          !config.paperTrading &&
           movedLiveFunds &&
           executed &&
           (decision.action === "ENTER" || decision.action === "EXIT")
         ) {
           lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
             Effect.catchAll(() => {
-              logger.warn("Wallet re-read after live execution failed; keeping cycle-top balance", {
-                pool: poolAddress,
-              });
+              if (movedLiveFundsFromEnter) {
+                // Fail closed: the new position is already in trackedPositions
+                // while the stale balance still counts its deployed capital, so
+                // later pools would double-count and breach the allocation cap.
+                // Block further entries until the next cycle re-reads the wallet.
+                liveEntriesBlockedRestOfCycle = true;
+                logger.warn(
+                  "Wallet balance refresh failed after a live entry — blocking further entries this cycle",
+                  { pool: poolAddress },
+                );
+              } else {
+                logger.warn(
+                  "Wallet re-read after live execution failed; keeping cycle-top balance",
+                  { pool: poolAddress },
+                );
+              }
               return Effect.succeed(lastWalletBalanceUsd);
             }),
           );
