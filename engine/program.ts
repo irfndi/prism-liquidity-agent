@@ -1960,11 +1960,14 @@ export const program = Effect.gen(function* () {
       // Safety screening (fail-closed on positive signals, fail-open on
       // transport errors):
       // 1. Meteora Data API flags: is_blacklisted, freeze_authority_disabled.
-      // 2. On-chain mint accounts: freeze authority enabled → reject; mint
-      //    authority doubles as the documented deployer fallback for the
-      //    deployer blacklist.
-      // 3. Token + deployer blacklist: a loaded blacklist hit rejects the
-      //    pool; only unexpected transport/IO errors are swallowed.
+      // 2. On-chain mint accounts: mint authority doubles as the documented
+      //    deployer fallback for the deployer blacklist.
+      // 3. Token + deployer blacklist (deterministic local gate): a loaded
+      //    blacklist hit rejects the pool BEFORE the network-dependent
+      //    token-risk overlay consult; only unexpected transport/IO errors
+      //    are swallowed.
+      // 4. Freeze authority screening: a freeze-enabled untrusted leg is
+      //    adjudicated by the lazy Jupiter/Data-API token-risk overlay.
       const recordSafetyWarning = (content: string) =>
         memory
           .upsert({ category: "warning", content, poolAddress })
@@ -2008,6 +2011,35 @@ export const program = Effect.gen(function* () {
         fetchAuthorities(pool.tokenX),
         fetchAuthorities(pool.tokenY),
       ]);
+
+      // Deterministic local rejection precedes any network lookup: a pool
+      // whose token or deployer is already in the loaded blacklist rejects
+      // here, without consuming the token-risk overlay's fetch budget/timeout.
+      const blacklistRejection = yield* blacklist
+        .checkPool(
+          poolAddress,
+          pool.tokenX,
+          pool.tokenY,
+          authX?.mintAuthority ?? undefined,
+          authY?.mintAuthority ?? undefined,
+        )
+        .pipe(
+          Effect.as(null as string | null),
+          Effect.catchIf(
+            (err): err is BlacklistError => err instanceof BlacklistError,
+            (err) => Effect.succeed(err.message),
+          ),
+          Effect.catchAll((err) => {
+            logger.warn("Blacklist check failed — proceeding (fail-open)", {
+              pool: poolAddress,
+              err: String(err),
+            });
+            return Effect.succeed(null);
+          }),
+        );
+      if (blacklistRejection !== null) {
+        return yield* rejectForSafety(blacklistRejection);
+      }
 
       const freezeEnabledX =
         datapiStats?.tokenXFreezeAuthorityDisabled === false || authX?.freezeAuthority != null;
@@ -2140,32 +2172,6 @@ export const program = Effect.gen(function* () {
             }
           }
         }
-      }
-
-      const blacklistRejection = yield* blacklist
-        .checkPool(
-          poolAddress,
-          pool.tokenX,
-          pool.tokenY,
-          authX?.mintAuthority ?? undefined,
-          authY?.mintAuthority ?? undefined,
-        )
-        .pipe(
-          Effect.as(null as string | null),
-          Effect.catchIf(
-            (err): err is BlacklistError => err instanceof BlacklistError,
-            (err) => Effect.succeed(err.message),
-          ),
-          Effect.catchAll((err) => {
-            logger.warn("Blacklist check failed — proceeding (fail-open)", {
-              pool: poolAddress,
-              err: String(err),
-            });
-            return Effect.succeed(null);
-          }),
-        );
-      if (blacklistRejection !== null) {
-        return yield* rejectForSafety(blacklistRejection);
       }
 
       const metrics = strategy.computeMetrics(

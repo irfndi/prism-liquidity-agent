@@ -819,12 +819,92 @@ describe("token-risk overlay + freeze screening (Wave 18)", () => {
 
       const decisions = await runOneCycle(layer);
       const forPool = decisions.filter((d) => d.poolAddress === POOL);
-      expect(jupiterCalls, "allocation-dead pool must not trigger a Jupiter consult").toBe(0);
-      const rejected = forPool.find((d) => !d.riskResult.approved);
-      expect(rejected, `expected an alloc-gate rejection, got: ${stringifySafe(forPool)}`).toBeDefined();
-      expect(rejected!.reasoning).toContain("alloc-gate");
-    } finally {
-      restore();
-    }
-  }, 15_000);
-});
+        expect(jupiterCalls, "allocation-dead pool must not trigger a Jupiter consult").toBe(0);
+        const rejected = forPool.find((d) => !d.riskResult.approved);
+        expect(rejected, `expected an alloc-gate rejection, got: ${stringifySafe(forPool)}`).toBeDefined();
+        expect(rejected!.reasoning).toContain("alloc-gate");
+      } finally {
+        restore();
+      }
+    }, 15_000);
+
+    it("(15) a blacklisted freeze-enabled pool rejects deterministically with zero Jupiter fetches (local blacklist precedes the overlay consult)", async () => {
+      writeBlacklistFiles([], [TOKEN_Y]);
+      let jupiterCalls = 0;
+      const restore = mockFetch(async (url: string | URL | Request) => {
+        if (String(url).includes("api.jup.ag")) jupiterCalls += 1;
+        // Served ONLY if the overlay is consulted before the blacklist gate
+        // (pre-fix order): this isSus flag would have stolen the audit reason
+        // from the deterministic blacklist rejection.
+        return new Response(JSON.stringify([{ address: TOKEN_Y, audit: { isSus: true } }]), {
+          status: 200,
+        });
+      });
+      try {
+        const layer = makeTestLayer({
+          // Untrusted freeze-enabled leg Y (freeze authority on TOKEN_Y, empty
+          // stablecoin allowlist) AND TOKEN_Y is in the loaded token blacklist.
+          adapter: freezeOnLegY(),
+          blacklist: Effect.runSync(
+            Effect.provide(
+              Effect.gen(function* () {
+                return yield* BlacklistService;
+              }),
+              BlacklistLive({ deployerBlacklistPath: deployerPath, tokenBlacklistPath: tokenPath }),
+            ),
+          ),
+          configOverrides: { jupiterTokenRiskEnabled: true },
+        });
+
+        const decisions = await runOneCycle(layer);
+        const forPool = decisions.filter((d) => d.poolAddress === POOL);
+        expect(
+          jupiterCalls,
+          "blacklisted pool must reject before the token-risk overlay consult",
+        ).toBe(0);
+        expect(forPool).toHaveLength(1);
+        expect(forPool[0]!.riskResult.approved).toBe(false);
+        expect(forPool[0]!.reasoning.toLowerCase()).toContain("blacklist");
+      } finally {
+        restore();
+      }
+    }, 15_000);
+
+    it("(16) smart screening cannot rescue a blacklisted freeze-enabled pool (blacklist gate runs first)", async () => {
+      writeBlacklistFiles([], [TOKEN_Y]);
+      let jupiterCalls = 0;
+      const restore = mockFetch(async (url: string | URL | Request) => {
+        if (String(url).includes("api.jup.ag")) jupiterCalls += 1;
+        return new Response("[]", { status: 200 });
+      });
+      try {
+        const layer = makeTestLayer({
+          adapter: freezeOnLegY(),
+          blacklist: Effect.runSync(
+            Effect.provide(
+              Effect.gen(function* () {
+                return yield* BlacklistService;
+              }),
+              BlacklistLive({ deployerBlacklistPath: deployerPath, tokenBlacklistPath: tokenPath }),
+            ),
+          ),
+          // FREEZE_SMART_SCREENING=true passes UNKNOWN freeze legs on — but the
+          // blacklist gate now runs first, so this pool never reaches the
+          // overlay/smart-screening branch.
+          configOverrides: { jupiterTokenRiskEnabled: true, freezeSmartScreening: true },
+        });
+
+        const decisions = await runOneCycle(layer);
+        const forPool = decisions.filter((d) => d.poolAddress === POOL);
+        expect(
+          jupiterCalls,
+          "blacklisted pool must reject before the token-risk overlay consult",
+        ).toBe(0);
+        expect(forPool).toHaveLength(1);
+        expect(forPool[0]!.riskResult.approved).toBe(false);
+        expect(forPool[0]!.reasoning.toLowerCase()).toContain("blacklist");
+      } finally {
+        restore();
+      }
+    }, 15_000);
+  });
