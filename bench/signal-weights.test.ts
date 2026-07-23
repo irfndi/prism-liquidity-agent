@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { computeSignalWeights, weightedEntryScore } from "../engine/strategy-service.js";
+import {
+  computeSignalWeights,
+  weightedEntryScore,
+  MAX_FEE_IL_RATIO,
+  FARM_SCORE_WEIGHT,
+  FARM_APR_SCORE_REFERENCE_PCT,
+} from "../engine/strategy-service.js";
 import type { SignalWeights, PoolMetrics } from "../engine/types.js";
 import type { OutcomeRecord } from "../engine/strategy-service.js";
 
@@ -38,6 +44,7 @@ function makeMetrics(overrides: Partial<PoolMetrics> = {}): PoolMetrics {
     volumeAuthenticity: overrides.volumeAuthenticity ?? 0.85,
     binUtilization: overrides.binUtilization ?? 0.6,
     volumeAuthenticityKnown: overrides.volumeAuthenticityKnown ?? true,
+    feeIlRatioKnown: overrides.feeIlRatioKnown ?? true,
     binUtilizationKnown: overrides.binUtilizationKnown ?? true,
     farmAprPct: overrides.farmAprPct ?? null,
   };
@@ -285,5 +292,79 @@ describe("weightedEntryScore", () => {
     const sentinelScore = weightedEntryScore(sentinelMetrics, weights);
 
     expect(sentinelScore).toBeLessThan(normalScore * 10);
+  });
+});
+
+// The modeled/fabricated fee/IL ratio (feeIlRatioKnown=false — gecko's binStep
+// base-rate model, or heuristic) must be EXCLUDED from the score: the Data API
+// exposes per-pool baseFeePct, so the generic model can OVERSTATE a pool's base
+// fee and the ratio can OVERSTATE economics. A modeled ratio therefore gets no
+// vote in either direction. weightedEntryScore is a plain weighted SUM (no
+// normalization by total weight), so exclusion drops the term outright.
+describe("weightedEntryScore modeled fee/IL exclusion", () => {
+  it("excludes the fee term when feeIlRatioKnown=false — no renormalization", () => {
+    // Isolate the fee term: only its weight is non-zero.
+    const weights = makeWeights({
+      feeIlRatio: 2.0,
+      volumeAuthenticity: 0,
+      binUtilization: 0,
+      tvlUsd: 0,
+      tvlVelocity: 0,
+    });
+    const knownScore = weightedEntryScore(
+      makeMetrics({ feeIlRatio: 1.5, feeIlRatioKnown: true }),
+      weights,
+    );
+    const modeledScore = weightedEntryScore(
+      makeMetrics({ feeIlRatio: 1.5, feeIlRatioKnown: false }),
+      weights,
+    );
+    expect(knownScore).toBeCloseTo(Math.min(1.5, MAX_FEE_IL_RATIO) * 2.0, 10);
+    expect(modeledScore).toBe(0);
+    expect(knownScore - modeledScore).toBeCloseTo(Math.min(1.5, MAX_FEE_IL_RATIO) * 2.0, 10);
+  });
+
+  it("known vs unknown differ by exactly the fee term under full weights", () => {
+    const weights = makeWeights();
+    const base = { feeIlRatio: 1.5, volumeAuthenticity: 0.85, binUtilization: 0.6 };
+    const knownScore = weightedEntryScore(makeMetrics({ ...base, feeIlRatioKnown: true }), weights);
+    const modeledScore = weightedEntryScore(
+      makeMetrics({ ...base, feeIlRatioKnown: false }),
+      weights,
+    );
+    expect(knownScore - modeledScore).toBeCloseTo(
+      Math.min(1.5, MAX_FEE_IL_RATIO) * weights.feeIlRatio,
+      10,
+    );
+  });
+
+  it("a modeled ratio gets no directional vote: high and zero ratio score identically when unknown", () => {
+    const weights = makeWeights();
+    const high = weightedEntryScore(
+      makeMetrics({ feeIlRatio: 20, feeIlRatioKnown: false }),
+      weights,
+    );
+    const zero = weightedEntryScore(
+      makeMetrics({ feeIlRatio: 0, feeIlRatioKnown: false }),
+      weights,
+    );
+    expect(high).toBeCloseTo(zero, 10);
+  });
+
+  it("the farm tie-breaker (outside SignalWeights) still contributes when feeIlRatioKnown=false", () => {
+    const weights = makeWeights();
+    const withFarm = weightedEntryScore(
+      makeMetrics({
+        feeIlRatio: 20,
+        feeIlRatioKnown: false,
+        farmAprPct: FARM_APR_SCORE_REFERENCE_PCT,
+      }),
+      weights,
+    );
+    const noFarm = weightedEntryScore(
+      makeMetrics({ feeIlRatio: 20, feeIlRatioKnown: false, farmAprPct: null }),
+      weights,
+    );
+    expect(withFarm - noFarm).toBeCloseTo(FARM_SCORE_WEIGHT, 10);
   });
 });

@@ -23,6 +23,7 @@ import {
   HttpStatusServerService,
   EntryPrepService,
   MeteoraDatapiService,
+  GeckoTerminalService,
   AlertService,
   AgentStateService,
   type AdapterApi,
@@ -201,7 +202,11 @@ function makeTestLayer(
     Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.void }),
     Layer.succeed(MeteoraDatapiService, datapiOverride ?? datapi),
-    Layer.succeed(AlertService, { sendAlert: () => Effect.void, recordFeeClaim: () => Effect.void }),
+    Layer.succeed(GeckoTerminalService, { getPoolStats: () => Effect.succeed(null) }),
+    Layer.succeed(AlertService, {
+      sendAlert: () => Effect.void,
+      recordFeeClaim: () => Effect.void,
+    }),
   );
 }
 
@@ -219,7 +224,9 @@ function runOneCycle(layer: Layer.Layer<unknown, never, never>): Promise<CycleRe
     const snapshot = yield* state.getSnapshot();
     return { decisions, snapshot };
   });
-  return Effect.runPromise(Effect.provide(test, layer) as Effect.Effect<CycleResult, unknown, never>);
+  return Effect.runPromise(
+    Effect.provide(test, layer) as Effect.Effect<CycleResult, unknown, never>,
+  );
 }
 
 describe("per-cycle wallet reconciliation", () => {
@@ -311,7 +318,8 @@ describe("mid-cycle position close excludes the row from the portfolio sum", () 
   function makeExitingAdapter(): AdapterApi {
     return {
       ...makeAdapter(() => Effect.succeed(PAPER)),
-      getPoolState: () => Effect.succeed(makePool({ address: POOL, tvlUsd: 60_000, fees24hUsd: 300 })),
+      getPoolState: () =>
+        Effect.succeed(makePool({ address: POOL, tvlUsd: 60_000, fees24hUsd: 300 })),
     } as AdapterApi;
   }
 
@@ -360,7 +368,10 @@ describe("mid-cycle position close excludes the row from the portfolio sum", () 
 
     const { decisions, snapshot } = await Effect.runPromise(
       Effect.provide(test, layer) as Effect.Effect<
-        { decisions: ReadonlyArray<{ action: string; reasoning: string }>; snapshot: PrismStateSnapshot },
+        {
+          decisions: ReadonlyArray<{ action: string; reasoning: string }>;
+          snapshot: PrismStateSnapshot;
+        },
         unknown,
         never
       >,
@@ -370,7 +381,9 @@ describe("mid-cycle position close excludes the row from the portfolio sum", () 
       (d) => d.action === "EXIT" && d.reasoning.includes("TVL dropped"),
     );
     expect(exited, "the seeded position must exit on the TVL drop").toBe(true);
-    expect(snapshot.portfolio.totalValueUsd, "closed row must be excluded from the sum").toBe(PAPER);
+    expect(snapshot.portfolio.totalValueUsd, "closed row must be excluded from the sum").toBe(
+      PAPER,
+    );
     expect(snapshot.portfolio.totalValueUsd).not.toBe(PAPER + POSITION_VALUE);
   }, 15_000);
 });
@@ -430,7 +443,10 @@ describe("live wallet-read entry gate", () => {
     const { decisions } = await runCycleFull(layer as never);
 
     const walletGate = decisions.find(
-      (d) => d.poolAddress === ENTER_POOL && d.action === "ENTER" && d.reasoning.includes("[wallet-read]"),
+      (d) =>
+        d.poolAddress === ENTER_POOL &&
+        d.action === "ENTER" &&
+        d.reasoning.includes("[wallet-read]"),
     );
     expect(walletGate, "ENTER must be rejected by the [wallet-read] gate").toBeDefined();
     expect(walletGate!.executed).toBe(false);
@@ -466,7 +482,12 @@ describe("live wallet-read entry gate", () => {
         Effect.succeed(makePool({ address: addr, tvlUsd: 60_000, fees24hUsd: 300 })),
       getAllWalletPositions: () =>
         Effect.succeed([
-          { poolAddress: EXIT_POOL, positionPubKey: POS_PUBKEY, lowerBinId: 4980, upperBinId: 5020 },
+          {
+            poolAddress: EXIT_POOL,
+            positionPubKey: POS_PUBKEY,
+            lowerBinId: 4980,
+            upperBinId: 5020,
+          },
         ]),
       getPositions: () => Effect.succeed([{ id: POS_PUBKEY }] as never),
     } as AdapterApi;
@@ -517,7 +538,10 @@ describe("live wallet-read entry gate", () => {
     );
 
     const exit = decisions.find((d) => d.poolAddress === EXIT_POOL && d.action === "EXIT");
-    expect(exit, "the seeded position must exit on the TVL drop despite the failed wallet read").toBeDefined();
+    expect(
+      exit,
+      "the seeded position must exit on the TVL drop despite the failed wallet read",
+    ).toBeDefined();
     expect(exit!.executed, "EXIT execution is never gated by wallet balance").toBe(true);
     expect(
       decisions.some((d) => d.poolAddress === EXIT_POOL && d.reasoning.includes("[wallet-read]")),
@@ -580,7 +604,8 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
   function exitingAdapter(balance: Effect.Effect<number, unknown>): AdapterApi {
     return {
       ...makeAdapter(() => balance),
-      getPoolState: () => Effect.succeed(makePool({ address: POOL, tvlUsd: 60_000, fees24hUsd: 300 })),
+      getPoolState: () =>
+        Effect.succeed(makePool({ address: POOL, tvlUsd: 60_000, fees24hUsd: 300 })),
       getAllWalletPositions: () =>
         Effect.succeed([
           { poolAddress: POOL, positionPubKey: POS_PUBKEY, lowerBinId: 4980, upperBinId: 5020 },
@@ -634,7 +659,10 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
       decisions.some((d) => d.poolAddress === POOL && d.action === "EXIT" && d.executed),
       "the seeded position must exit",
     ).toBe(true);
-    expect(balanceCalls, "wallet read at cycle top AND after the live mutation").toBeGreaterThanOrEqual(2);
+    expect(
+      balanceCalls,
+      "wallet read at cycle top AND after the live mutation",
+    ).toBeGreaterThanOrEqual(2);
     // The post-mutation re-read updated the cycle value (no double-count left).
     expect(snapshot.portfolio.walletBalanceUsd).toBe(POST_MUTATION);
   }, 15_000);
@@ -644,7 +672,9 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
     const balance = Effect.suspend(() => {
       balanceCalls += 1;
       // Cycle-top read succeeds; every later (post-mutation) re-read fails.
-      return balanceCalls === 1 ? Effect.succeed(CYCLE_TOP) : Effect.fail(new Error("re-read down"));
+      return balanceCalls === 1
+        ? Effect.succeed(CYCLE_TOP)
+        : Effect.fail(new Error("re-read down"));
     });
     const layer = makeTestLayer(exitingAdapter(balance), {
       watchlistPools: [POOL],
@@ -725,7 +755,9 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
       balanceCalls += 1;
       // Cycle-top read succeeds (walletEverReadSuccessfully=true so the first
       // ENTER clears the [wallet-read] gate); the post-ENTER re-capture fails.
-      return balanceCalls === 1 ? Effect.succeed(CYCLE_TOP) : Effect.fail(new Error("re-read down"));
+      return balanceCalls === 1
+        ? Effect.succeed(CYCLE_TOP)
+        : Effect.fail(new Error("re-read down"));
     });
     const layer = makeTestLayer(
       enterAdapter(balance),
@@ -780,7 +812,9 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
     let balanceCalls = 0;
     const balance = Effect.suspend(() => {
       balanceCalls += 1;
-      return balanceCalls === 1 ? Effect.succeed(CYCLE_TOP) : Effect.fail(new Error("re-read down"));
+      return balanceCalls === 1
+        ? Effect.succeed(CYCLE_TOP)
+        : Effect.fail(new Error("re-read down"));
     });
     const adapter = {
       ...makeAdapter(() => balance),
@@ -793,7 +827,12 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
             ),
       getAllWalletPositions: () =>
         Effect.succeed([
-          { poolAddress: POOL_EXIT, positionPubKey: POS_PUBKEY, lowerBinId: 4980, upperBinId: 5020 },
+          {
+            poolAddress: POOL_EXIT,
+            positionPubKey: POS_PUBKEY,
+            lowerBinId: 4980,
+            upperBinId: 5020,
+          },
         ]),
       getPositions: () => Effect.succeed([{ id: POS_PUBKEY }] as never),
     } as AdapterApi;
@@ -902,7 +941,12 @@ describe("hybrid live EXIT keeps paper sizing paper-pure", () => {
           : Effect.succeed(makePool({ address: addr })),
       getAllWalletPositions: () =>
         Effect.succeed([
-          { poolAddress: POOL_EXIT, positionPubKey: POS_PUBKEY, lowerBinId: 4980, upperBinId: 5020 },
+          {
+            poolAddress: POOL_EXIT,
+            positionPubKey: POS_PUBKEY,
+            lowerBinId: 4980,
+            upperBinId: 5020,
+          },
         ]),
       getPositions: () => Effect.succeed([{ id: POS_PUBKEY }] as never),
     } as AdapterApi;

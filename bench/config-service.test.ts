@@ -152,3 +152,27 @@ describe("ConfigService freeze screening + IL protection flags", () => {
     expect(clamped.ilDominanceMinUsd).toBe(0);
   });
 });
+
+describe("ConfigService agent runtime timeout", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults AGENT_PROMPT_TIMEOUT_MS to 60000 (slow-model first-token latency)", async () => {
+    // Explicit removal so a dev/CI export of the var can't silently bypass the
+    // default assertion; the shared afterEach(unstubAllEnvs) restores it.
+    vi.stubEnv("AGENT_PROMPT_TIMEOUT_MS", undefined);
+    const cfg = await loadConfig();
+    expect(cfg.agentPromptTimeoutMs).toBe(60_000);
+  });
+
+  it("honours AGENT_PROMPT_TIMEOUT_MS and clamps below the minimum of 1000", async () => {
+    vi.stubEnv("AGENT_PROMPT_TIMEOUT_MS", "120000");
+    const cfg = await loadConfig();
+    expect(cfg.agentPromptTimeoutMs).toBe(120_000);
+
+    vi.stubEnv("AGENT_PROMPT_TIMEOUT_MS", "10");
+    const clamped = await loadConfig();
+    expect(clamped.agentPromptTimeoutMs).toBe(1_000);
+  });
+});

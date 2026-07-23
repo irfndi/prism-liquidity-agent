@@ -1989,8 +1989,14 @@ export const AdapterLive = Layer.effect(
               return base58 != null && base58 !== DEFAULT_PUBLIC_KEY ? base58 : null;
             };
             const rewardSlots = [
-              { mint: mintOf(rewardInfos[0]?.mint), amountAtomic: Number(rewardOneAtomic.toString()) },
-              { mint: mintOf(rewardInfos[1]?.mint), amountAtomic: Number(rewardTwoAtomic.toString()) },
+              {
+                mint: mintOf(rewardInfos[0]?.mint),
+                amountAtomic: Number(rewardOneAtomic.toString()),
+              },
+              {
+                mint: mintOf(rewardInfos[1]?.mint),
+                amountAtomic: Number(rewardTwoAtomic.toString()),
+              },
             ].filter((s) => Number.isFinite(s.amountAtomic) && s.amountAtomic > 0);
 
             const priceMints = [

@@ -41,48 +41,114 @@ describe("DLMMStrategy", () => {
   describe("checkVolumeAuthenticity", () => {
     it("returns high score for normal volume", () => {
       const pool = makePool({ tvlUsd: 100_000, volume24hUsd: 30_000, fees24hUsd: 300 });
-      const result = DLMMStrategy.checkVolumeAuthenticity(pool);
+      const result = DLMMStrategy.checkVolumeAuthenticity(pool, true);
       expect(result.score).toBeGreaterThanOrEqual(0.8);
       expect(result.flags).toHaveLength(0);
     });
 
     it("penalizes volume/TVL ratio > 10x", () => {
       const pool = makePool({ tvlUsd: 10_000, volume24hUsd: 200_000, fees24hUsd: 1000 });
-      const result = DLMMStrategy.checkVolumeAuthenticity(pool);
+      const result = DLMMStrategy.checkVolumeAuthenticity(pool, true);
       expect(result.score).toBeLessThan(0.8);
       expect(result.flags.some((f: string) => f.includes("suspicious"))).toBe(true);
     });
 
     it("returns 0 for zero TVL pool", () => {
       const pool = makePool({ tvlUsd: 0 });
-      const result = DLMMStrategy.checkVolumeAuthenticity(pool);
+      const result = DLMMStrategy.checkVolumeAuthenticity(pool, true);
       expect(result.score).toBe(0);
     });
 
     it("flags low-tvl high-volume wash pattern", () => {
       const pool = makePool({ tvlUsd: 2_000, volume24hUsd: 500_000, fees24hUsd: 100 });
-      const result = DLMMStrategy.checkVolumeAuthenticity(pool);
+      const result = DLMMStrategy.checkVolumeAuthenticity(pool, true);
       expect(result.score).toBeLessThan(0.3);
       expect(result.flags.some((f: string) => f.includes("wash"))).toBe(true);
     });
 
     it("flags outlier fee rate (too low)", () => {
       const pool = makePool({ volume24hUsd: 100_000, fees24hUsd: 5 });
-      const result = DLMMStrategy.checkVolumeAuthenticity(pool);
+      const result = DLMMStrategy.checkVolumeAuthenticity(pool, true);
       expect(result.flags.some((f: string) => f.includes("outlier"))).toBe(true);
     });
 
     it("flags outlier fee rate (too high)", () => {
       const pool = makePool({ volume24hUsd: 100_000, fees24hUsd: 5_000 });
-      const result = DLMMStrategy.checkVolumeAuthenticity(pool);
+      const result = DLMMStrategy.checkVolumeAuthenticity(pool, true);
       expect(result.flags.some((f: string) => f.includes("outlier"))).toBe(true);
     });
 
     it("flags elevated vol/tvl ratio", () => {
       const pool = makePool({ tvlUsd: 50_000, volume24hUsd: 300_000 });
-      const result = DLMMStrategy.checkVolumeAuthenticity(pool);
+      const result = DLMMStrategy.checkVolumeAuthenticity(pool, true);
       expect(result.score).toBeLessThan(1.0);
       expect(result.flags.some((f: string) => f.includes("elevated"))).toBe(true);
+    });
+  });
+
+  // Round-3 principle: modeled fees must never influence any decision. The
+  // fee-rate-band component of volume authenticity consumes fees24hUsd, which
+  // under gecko is the generic binStep model (0.0025 + binStep/1e4) × real
+  // volume. For binStep > 175 that model exceeds the 2% upper band (binStep 200
+  // → 2.25%), so it would subtract the 0.2 penalty from REAL volume authenticity
+  // and falsely fail the strict volumeAuth > 0.8 ENTER gate / fire a volume-auth
+  // EXIT. The component must be skipped when fees are unmeasured (feesMeasured
+  // === pool.statsSource === "datapi"); the real vol/tvl component stays.
+  describe("checkVolumeAuthenticity modeled-fee exclusion (round-3)", () => {
+    // binStep 200 → modeled gecko fee rate 0.0025 + 200/1e4 = 0.0225 (2.25%),
+    // above the 2% band. Real, healthy volume/TVL (vol/tvl 0.2x, tvl $5M) so the
+    // vol/tvl and low-tvl-wash components contribute nothing.
+    const geckoHighBinStep = makePool({
+      tvlUsd: 5_000_000,
+      volume24hUsd: 1_000_000,
+      fees24hUsd: 1_000_000 * 0.0225,
+      binStep: 200,
+    });
+
+    it("(a) skips the fee-rate penalty for unmeasured (gecko) fees → penalty-free score passes volumeAuth > 0.8", () => {
+      const result = DLMMStrategy.checkVolumeAuthenticity(geckoHighBinStep, false);
+      expect(result.score).toBe(1);
+      expect(result.flags.some((f: string) => f.includes("outlier"))).toBe(false);
+      expect(result.score).toBeGreaterThan(0.8);
+    });
+
+    it("(b) keeps the fee-rate penalty active for measured (datapi) fees at the same rate", () => {
+      const result = DLMMStrategy.checkVolumeAuthenticity(geckoHighBinStep, true);
+      expect(result.score).toBe(0.8);
+      expect(result.flags.some((f: string) => f.includes("outlier"))).toBe(true);
+    });
+
+    it("(d) gecko computeMetrics reports penalty-free, known authenticity → no volume-auth EXIT artifact", () => {
+      const geckoPool = makePool({
+        tvlUsd: 5_000_000,
+        volume24hUsd: 1_000_000,
+        fees24hUsd: 1_000_000 * 0.0225,
+        binStep: 200,
+        statsSource: "geckoterminal",
+      });
+      const binArray = makeBinArray();
+      const metrics = DLMMStrategy.computeMetrics(geckoPool, binArray, 0);
+
+      // Penalty-free real volume/TVL authenticity, still a measured source.
+      expect(metrics.volumeAuthenticity).toBe(1);
+      expect(metrics.volumeAuthenticityKnown).toBe(true);
+      // The modeled artifact (0.8) is gone: an evolved EXIT threshold above 0.8
+      // can no longer fire, and the strict > 0.8 ENTER gate passes.
+      expect(metrics.volumeAuthenticity).toBeGreaterThan(0.8);
+    });
+
+    it("(d) datapi computeMetrics with the same measured rate still penalizes to 0.8", () => {
+      const datapiPool = makePool({
+        tvlUsd: 5_000_000,
+        volume24hUsd: 1_000_000,
+        fees24hUsd: 1_000_000 * 0.0225,
+        binStep: 200,
+        statsSource: "datapi",
+      });
+      const binArray = makeBinArray();
+      const metrics = DLMMStrategy.computeMetrics(datapiPool, binArray, 0);
+      expect(metrics.volumeAuthenticity).toBe(0.8);
+      expect(metrics.volumeAuthenticityKnown).toBe(true);
     });
   });
 

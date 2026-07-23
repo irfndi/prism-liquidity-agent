@@ -37,6 +37,7 @@ import {
   HttpStatusServerService,
   EntryPrepService,
   MeteoraDatapiService,
+  GeckoTerminalService,
   AlertService,
   type AdapterApi,
   type MeteoraDatapiApi,
@@ -1363,6 +1364,7 @@ function makeProgramLayer(opts: {
     Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.void }),
     Layer.succeed(MeteoraDatapiService, opts.datapi ?? { getPoolData: () => Effect.succeed(null) }),
+    Layer.succeed(GeckoTerminalService, { getPoolStats: () => Effect.succeed(null) }),
     Layer.succeed(AlertService, {
       sendAlert: () => Effect.void,
       recordFeeClaim: () => Effect.void,
@@ -1557,15 +1559,18 @@ describe("program — multiple positions per pool", () => {
   }, 15_000);
 });
 
-describe("A4 paper fee accrual requires Data API stats (statsSource)", () => {
-  // When Data API enrichment is down, getPoolState ships a POSITIVE modeled
+describe("A4 paper fee accrual requires datapi-MEASURED fees", () => {
+  // When both real sources are down, getPoolState ships a POSITIVE modeled
   // fees24hUsd under statsSource "heuristic" — every A4 numeric guard (null /
   // <= 0 / non-finite / in-range / TVL) still passes. Accrual must be gated on
-  // pool.statsSource === "datapi" so heuristic cycles book no fabricated fee.
+  // statsSource === "datapi" (the ONLY source of measured per-pool fees):
+  // geckoterminal fees are a binStep base-rate MODEL on real volume
+  // (pool_fee_percentage is null for every CL pool) and heuristic fees are
+  // fabricated — neither may book paper CLAIM income; only datapi accrues.
   const POS_ID = "paper-accr";
 
   async function runAccrualCycle(opts: {
-    statsSource: "datapi" | "heuristic";
+    statsSource: "datapi" | "geckoterminal" | "heuristic";
     datapi?: MeteoraDatapiApi;
   }): Promise<{ accruals: ReadonlyArray<{ feesUsd: number | null }>; accruedUsd: number }> {
     const layer = makeProgramLayer({
@@ -1583,9 +1588,7 @@ describe("A4 paper fee accrual requires Data API stats (statsSource)", () => {
     });
     const test = Effect.gen(function* () {
       const db = yield* DbService;
-      yield* db.savePosition(
-        makePos({ positionId: POS_ID, lowerBinId: 4980, upperBinId: 5020 }),
-      );
+      yield* db.savePosition(makePos({ positionId: POS_ID, lowerBinId: 4980, upperBinId: 5020 }));
       yield* Effect.raceFirst(program, Effect.sleep(1_500));
       const events = yield* db.getPositionEvents(POOL);
       const pos = yield* db.getPosition(POS_ID);
@@ -1626,5 +1629,16 @@ describe("A4 paper fee accrual requires Data API stats (statsSource)", () => {
     });
     expect(accruals, "datapi enrichment must enable the notional accrual").toHaveLength(1);
     expect(accruedUsd).toBeGreaterThan(0);
+  }, 15_000);
+
+  it("the same pool with geckoterminal stats accrues NOTHING (fees are modeled, not measured)", async () => {
+    // GeckoTerminal fees are a binStep base-rate MODEL on real volume
+    // (pool_fee_percentage is null for every CL pool — only the Data API
+    // measures real fees), so a geckoterminal-sourced pool must NOT accrue.
+    // Proves the gate keys off datapi-measured fees specifically, not the
+    // broader measured-volume sources.
+    const { accruals, accruedUsd } = await runAccrualCycle({ statsSource: "geckoterminal" });
+    expect(accruals, "modeled gecko fees must not produce paper CLAIM income").toHaveLength(0);
+    expect(accruedUsd).toBe(0);
   }, 15_000);
 });

@@ -64,6 +64,7 @@ import {
   HttpStatusServerService,
   EntryPrepService,
   MeteoraDatapiService,
+  GeckoTerminalService,
   AlertService,
   CopySignalService,
   type AdapterApi,
@@ -77,6 +78,7 @@ import {
   type AgentStateApi,
 } from "./services.js";
 import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
+import { GeckoTerminalLive, enrichPoolFromGecko } from "./gecko-terminal-service.js";
 import { AlertLive } from "./alert-service.js";
 import { detectDepegAndLiquidityDrain } from "./depeg-liquidity-detector.js";
 import { consultTokenRisks, type TokenRiskSignal } from "./token-risk-service.js";
@@ -95,6 +97,7 @@ import type {
   SignalWeights,
   ActionType,
 } from "./types.js";
+import { isMeasuredStatsSource } from "./types.js";
 import type { AgentRuntimeAlert, AgentRuntimeCheckin } from "./agent-transport.js";
 import { randomUUID } from "crypto";
 import { AgentLive, AgentNoOp } from "./agent-service.js";
@@ -593,6 +596,7 @@ type AllServices =
   | HttpStatusServerService
   | EntryPrepService
   | MeteoraDatapiService
+  | GeckoTerminalService
   | AlertService
   | CopySignalService;
 
@@ -645,6 +649,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged11 = Layer.merge(merged8, revenueConfig);
   const merged11a = Layer.merge(merged11, entryPrep);
   const merged11b = Layer.merge(merged11a, meteoraDatapi);
+  const merged11c = Layer.merge(merged11b, GeckoTerminalLive);
 
   const agentLayer = cfg?.agentiveMode ? AgentLive(cfg) : Layer.succeed(AgentService, AgentNoOp);
 
@@ -664,7 +669,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
           stop: () => Effect.void,
         });
 
-  const merged12 = Layer.merge(merged11b, agentLayer);
+  const merged12 = Layer.merge(merged11c, agentLayer);
   const merged13 = Layer.merge(merged12, agentStateLayer);
   const merged14 = Layer.merge(merged13, mcpLayer);
   const merged15 = Layer.merge(merged14, httpLayer);
@@ -1041,9 +1046,8 @@ export function executeLive(
       const pos = resolveTargetPosition(trackedPositions, decision);
       let exited = false;
       let exitError: string | undefined = undefined;
-      let exitResultData:
-        | Effect.Effect.Success<ReturnType<AdapterApi["exitPosition"]>>
-        | null = null;
+      let exitResultData: Effect.Effect.Success<ReturnType<AdapterApi["exitPosition"]>> | null =
+        null;
       if (pos?.positionPubKey) {
         const exitResult = yield* adapter
           .exitPosition(decision.poolAddress, pos.positionPubKey)
@@ -1176,10 +1180,10 @@ export function executeLive(
             }
           }
           if (unpricedReward) {
-            logger.warn(
-              "Exit sweep included an unpriceable LM reward — recorded with null USD",
-              { pool: decision.poolAddress, position: pos.positionId },
-            );
+            logger.warn("Exit sweep included an unpriceable LM reward — recorded with null USD", {
+              pool: decision.poolAddress,
+              position: pos.positionId,
+            });
           }
           if (sweptRewards.length > 0) {
             yield* db
@@ -1247,7 +1251,7 @@ export function executeLive(
               "EXIT closed without USD pricing (price feeds unresolved) — realized PnL recorded as n/a; raw amounts in event metadata",
               { pool: decision.poolAddress, position: pos.positionId },
             );
-            yield* (deps.memory
+            yield* deps.memory
               ? deps.memory
                   .upsert({
                     category: "warning",
@@ -1255,7 +1259,7 @@ export function executeLive(
                     poolAddress: decision.poolAddress,
                   })
                   .pipe(Effect.catchAll(() => Effect.void))
-              : Effect.void);
+              : Effect.void;
           }
           trackedPositions.delete(pos.positionId);
         }
@@ -1486,6 +1490,7 @@ export const program = Effect.gen(function* () {
   const mcpServer = yield* McpServerService;
   const httpStatusServer = yield* HttpStatusServerService;
   const meteoraDatapi = yield* MeteoraDatapiService;
+  const gecko = yield* GeckoTerminalService;
   const alertSvc = yield* AlertService;
   const copySignalsOption = yield* Effect.serviceOption(CopySignalService);
 
@@ -2156,10 +2161,25 @@ export const program = Effect.gen(function* () {
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, rawPool.activeBinId);
 
-      // Real pool stats from the Meteora Data API; falls back to the
-      // adapter's heuristic stats (with a logged warning) when unavailable.
+      // Real pool stats, resolved datapi (primary) > geckoterminal (secondary)
+      // > the adapter's fabricated heuristic (last-resort safety net). The
+      // chosen source is tagged onto the pool so the volume/fee gates skip
+      // heuristic fiction instead of acting on it. The gecko fee rate is the
+      // pool's binStep-derived base fee applied to REAL gecko volume (gecko's
+      // own pool_fee_percentage is null for every CL pool — see
+      // gecko-terminal-service.ts). Data-API-exclusive safety signals are never
+      // sourced from gecko: they stay null and the screener fails open on null.
       const datapiStats = yield* meteoraDatapi.getPoolData(poolAddress);
-      const pool = datapiStats === null ? rawPool : enrichPoolWithDatapi(rawPool, datapiStats);
+      const geckoStats =
+        datapiStats === null && config.geckoTerminalEnabled !== false
+          ? yield* gecko.getPoolStats(poolAddress, 0.0025 + rawPool.binStep / 10_000)
+          : null;
+      const pool =
+        datapiStats !== null
+          ? enrichPoolWithDatapi(rawPool, datapiStats)
+          : geckoStats !== null
+            ? enrichPoolFromGecko(rawPool, geckoStats)
+            : rawPool;
 
       // TVL velocity + IL price-drift need a previous reference point, so the
       // previous snapshot must be read BEFORE persisting the current one.
@@ -2435,11 +2455,16 @@ export const program = Effect.gen(function* () {
           : undefined,
       );
 
-      if (!metrics.volumeAuthenticityKnown || !metrics.binUtilizationKnown) {
+      if (
+        !metrics.volumeAuthenticityKnown ||
+        !metrics.binUtilizationKnown ||
+        !metrics.feeIlRatioKnown
+      ) {
         logger.warn("Metric data unavailable — skipping the affected gates for this pool", {
           pool: poolAddress,
           volumeAuthenticityKnown: metrics.volumeAuthenticityKnown,
           binUtilizationKnown: metrics.binUtilizationKnown,
+          feeIlRatioKnown: metrics.feeIlRatioKnown,
         });
       }
 
@@ -2612,15 +2637,12 @@ export const program = Effect.gen(function* () {
         // pool's real 24h fees while the active bin sits in range. Do NOT
         // touch currentValueUsd: unrealized PnL already sums claimed fees
         // (pnl.ts), so crediting the value column too would double-add.
-        // Fees are only trusted from the Data API: when enrichment is down
-        // getPoolState ships a POSITIVE modeled fees24hUsd under
-        // statsSource "heuristic" — accrue nothing in that case so paper
-        // positions never book fabricated CLAIM income.
-        if (
-          config.paperTrading &&
-          pos.positionPubKey == null &&
-          pool.statsSource === "datapi"
-        ) {
+        // Fees are trusted ONLY from the Data API (real per-pool fee data).
+        // Gecko fees are a binStep base-rate MODEL on real volume
+        // (pool_fee_percentage is null for every CL pool) and heuristic fees
+        // are fabricated — accrue from neither, so paper positions book only
+        // Data-API-measured CLAIM income.
+        if (config.paperTrading && pos.positionPubKey == null && pool.statsSource === "datapi") {
           const now = Date.now();
           const lastAccrualAt = paperFeeAccrualAt.get(pos.positionId);
           paperFeeAccrualAt.set(pos.positionId, now);
@@ -2795,7 +2817,9 @@ export const program = Effect.gen(function* () {
             `Volume authenticity ${volumeAuth.toFixed(2)} below threshold on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
             { pool, metrics, position: pos },
           );
-        } else if (feeIlRatio < 0.5) {
+        } else if (metrics.feeIlRatioKnown && feeIlRatio < 0.5) {
+          // feeIlRatioUnknown (heuristic) → skip: a fabricated-low ratio must
+          // not force an exit. The metric-unavailability warn above logs the skip.
           decision = {
             action: "EXIT",
             poolAddress,
@@ -3306,10 +3330,23 @@ export const program = Effect.gen(function* () {
           // [fee-il-gate] hard ENTER floor — expected fees must beat IL. Active
           // only when IL protection is enabled. feeIlRatio is never null
           // (0-20, strategy-service.ts) so the numeric compare is fail-closed
-          // on 0; a pool whose fees cannot cover estimated IL never enters.
+          // on 0 for REAL stats; a pool whose fees cannot cover estimated IL
+          // never enters. FULL PRINCIPLE — modeled/fabricated fee/IL is EXCLUDED
+          // from EVERY ENTER gate when feeIlRatioKnown=false (datapi-only): this
+          // hard floor, the ×1.5 candidate requirement below, and the
+          // weightedEntryScore fee term all SKIP the modeled ratio. Exclusion,
+          // not directional trust: gecko fees are a generic `0.0025 + binStep/1e4`
+          // base-rate MODEL (pool_fee_percentage is null for every CL pool) and
+          // the Data API exposes per-pool baseFeePct, so the generic model can
+          // OVERSTATE a pool's real base fee — the modeled ratio can OVERSTATE
+          // economics, so it must not vote in either direction. A gecko pool can
+          // still ENTER via the measured candidate conditions below (its volume
+          // IS real → volumeAuthenticityKnown=true). A heuristic pool still cannot
+          // enter (volume-unknown blocks the candidate gate).
           if (
             !enterGateRejected &&
             config.ilProtectionEnabled === true &&
+            metrics.feeIlRatioKnown &&
             feeIlRatio < config.minFeeIlRatio
           ) {
             yield* audit
@@ -3332,9 +3369,20 @@ export const program = Effect.gen(function* () {
             enterGateRejected = true;
           }
 
+          // Modeled/fabricated fee/IL (feeIlRatioKnown=false — gecko's binStep
+          // base-rate model, or heuristic) never gates the candidate in EITHER
+          // direction: the Data API exposes per-pool baseFeePct, so the generic
+          // model can OVERSTATE a pool's base fee and the modeled ratio can
+          // OVERSTATE economics — a modeled number gets no vote here. The fee/IL
+          // conjunct is therefore conditional (true when the ratio is unknown) and
+          // the pool is admitted on the MEASURED conditions only — real volume
+          // authenticity, on-chain bin utilization, and TVL. This matches the
+          // [fee-il-gate] floor and the weightedEntryScore fee term above/below,
+          // which also skip the modeled ratio. A heuristic pool still cannot enter:
+          // it fails volumeAuthenticityKnown below.
           if (
             !enterGateRejected &&
-            feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 &&
+            (metrics.feeIlRatioKnown ? feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 : true) &&
             metrics.volumeAuthenticityKnown &&
             volumeAuth > 0.8 &&
             metrics.binUtilizationKnown &&
@@ -3565,6 +3613,8 @@ export const program = Effect.gen(function* () {
                     logger.warn("Agent veto fetch failed", {
                       pool: poolAddress,
                       error: message,
+                      timeoutMs: config.agentPromptTimeoutMs,
+                      gatewayUrl: config.agentGatewayUrl,
                     });
                   } else {
                     logger.debug("Agent veto fetch failed (throttled)", {

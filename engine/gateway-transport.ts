@@ -437,9 +437,15 @@ export class GatewayTransport implements AgentRuntimeTransport {
       resolveRun = resolve;
       rejectRun = reject;
     });
+    const startedAt = Date.now();
     const timer = setTimeout(() => {
+      const elapsedMs = Date.now() - startedAt;
       this.chatRuns.delete(id);
-      rejectRun(new Error("Gateway chat run timeout"));
+      rejectRun(
+        new Error(
+          `Gateway chat run timed out after ${timeoutMs}ms (elapsed ${elapsedMs}ms) with no model response — increase the prompt timeout for slower models`,
+        ),
+      );
     }, timeoutMs);
     this.chatRuns.set(id, { resolve: resolveRun, reject: rejectRun, timer, text: "" });
     return promise;

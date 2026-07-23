@@ -8,6 +8,7 @@ import type {
   PriceDriftContext,
   SignalWeights,
 } from "./types.js";
+import { isMeasuredStatsSource } from "./types.js";
 
 /**
  * Upper bound for the fee/IL ratio. Also the value reported when observed
@@ -115,7 +116,15 @@ export const DLMMStrategy: StrategyApi = {
     const tvlVelocity = previousTvlUsd > 0 ? (pool.tvlUsd - previousTvlUsd) / previousTvlUsd : 0;
 
     const feeIlRatio = DLMMStrategy.computeFeeIlRatio(pool, binArray, priceDrift);
-    const volumeAuthenticity = DLMMStrategy.checkVolumeAuthenticity(pool);
+    // Fees are MEASURED only under the Data API (real per-pool fee data) — the
+    // same definition as feeIlRatioKnown below. Gecko's fees are a binStep
+    // base-rate MODEL, so the fee-rate-band component of volume authenticity
+    // must be skipped for gecko (feesMeasured=false); the real volume/TVL
+    // components stay.
+    const volumeAuthenticity = DLMMStrategy.checkVolumeAuthenticity(
+      pool,
+      pool.statsSource === "datapi",
+    );
     const binUtilization = DLMMStrategy.computeBinUtilization(binArray);
 
     return {
@@ -125,9 +134,27 @@ export const DLMMStrategy: StrategyApi = {
       feeIlRatio,
       volumeAuthenticity: volumeAuthenticity.score,
       binUtilization,
-      // Volume authenticity is only meaningful on real (Data API) stats;
-      // heuristic volume/fees would just re-validate their own assumptions.
-      volumeAuthenticityKnown: pool.statsSource === "datapi",
+      // Known-flag SPLIT by what each source actually measures:
+      // - Volume + TVL are REAL under BOTH datapi and geckoterminal, so
+      //   volumeAuthenticityKnown treats either as measured; only heuristic
+      //   (fabricated) volume is unknown.
+      // - Fees are MEASURED only under datapi (real per-pool fee data).
+      //   GeckoTerminal's `pool_fee_percentage` is null for every CL pool, so
+      //   gecko fees are a binStep base-rate MODEL applied to real volume —
+      //   feeIlRatioKnown is datapi-only, and every fee-driven consumer of the
+      //   ratio — the fee/IL < 0.5 EXIT, the [fee-il-gate] hard ENTER floor, the
+      //   ×1.5 candidate requirement, the weightedEntryScore fee term, and paper
+      //   fee accrual — SKIPS the modeled gecko ratio rather than acting on it.
+      //   Modeling is not a safe directional bet: the Data API exposes per-pool
+      //   baseFeePct, so the generic binStep model can OVERSTATE a pool's base fee
+      //   and the modeled ratio can OVERSTATE economics — the ratio is EXCLUDED
+      //   from every ENTER gate (neither helps nor hurts), not trusted
+      //   conservatively. A high-quality gecko pool still ENTERs via the measured
+      //   volume / bin-util / TVL candidate conditions (its volume IS real).
+      // - Heuristic knows nothing (both flags false) — fabricated values would
+      //   just re-validate their own assumptions, so no gate touches them.
+      volumeAuthenticityKnown: isMeasuredStatsSource(pool.statsSource),
+      feeIlRatioKnown: pool.statsSource === "datapi",
       binUtilizationKnown: binArray.reservesKnown !== false,
       // Farm APR only flows from the Data API overlay: a pool with a farm but
       // an unknown APR reports 0 (known farm, no rate), non-farm/unknown null.
@@ -143,7 +170,10 @@ export const DLMMStrategy: StrategyApi = {
     return Math.min(pool.fees24hUsd / estimatedIlDailyUsd, MAX_FEE_IL_RATIO);
   },
 
-  checkVolumeAuthenticity(pool: PoolState): {
+  checkVolumeAuthenticity(
+    pool: PoolState,
+    feesMeasured: boolean,
+  ): {
     score: number;
     flags: ReadonlyArray<string>;
   } {
@@ -164,7 +194,17 @@ export const DLMMStrategy: StrategyApi = {
       flags.push(`vol/tvl=${volTvlRatio.toFixed(1)}x (elevated)`);
     }
 
-    if (pool.volume24hUsd > 0) {
+    // Fee-rate band consumes fees24hUsd, so run it ONLY when fees are MEASURED
+    // (Data API real per-pool fees). Under gecko/heuristic, fees are the generic
+    // binStep base-rate MODEL (0.0025 + binStep/1e4), which exceeds this 2% upper
+    // band for high-binStep pools (binStep > 175): the 0.2 penalty below would then
+    // subtract from REAL volume authenticity and falsely push an otherwise-valid
+    // pool under the strict volumeAuth > 0.8 ENTER gate (or an evolved threshold
+    // into a volume-auth EXIT). Modeled fee rates must never influence authenticity
+    // — in either direction — so the component is skipped when fees are unmeasured.
+    // The vol/tvl and low-tvl-wash components remain: they are real under gecko
+    // (real volume + real reserve TVL).
+    if (feesMeasured && pool.volume24hUsd > 0) {
       const feeRate = pool.fees24hUsd / pool.volume24hUsd;
       if (feeRate < 0.0002 || feeRate > 0.02) {
         score -= 0.2;
@@ -603,8 +643,20 @@ export const FARM_APR_SCORE_REFERENCE_PCT = 100;
 export const FARM_SCORE_WEIGHT = 1;
 
 export function weightedEntryScore(metrics: PoolMetrics, weights: SignalWeights): number {
-  const cappedFeeIlRatio = Math.min(metrics.feeIlRatio, MAX_FEE_IL_RATIO);
-  const feeContrib = cappedFeeIlRatio * weights.feeIlRatio;
+  // Fee/IL is EXCLUDED from the score (not zeroed-toward-bad, not trusted in
+  // either direction) when the ratio is modeled/fabricated (feeIlRatioKnown=false).
+  // GeckoTerminal's pool_fee_percentage is null for every CL pool, so gecko fees
+  // are a generic `0.0025 + binStep/1e4` base-rate MODEL — and the Data API exposes
+  // per-pool baseFeePct, so the generic model can OVERSTATE a pool's real base fee,
+  // making the modeled ratio OVERSTATE economics. A modeled ratio therefore gets no
+  // vote at all. This is a plain weighted SUM (no normalization by total applied
+  // weight), so excluding the term simply drops its contribution and the remaining
+  // signals keep their absolute scale — the farm tie-breaker (a fixed constant
+  // outside SignalWeights) is unaffected. Mirrors the [fee-il-gate] floor and the
+  // ×1.5 candidate requirement, which likewise skip the modeled ratio (program.ts).
+  const feeContrib = metrics.feeIlRatioKnown
+    ? Math.min(metrics.feeIlRatio, MAX_FEE_IL_RATIO) * weights.feeIlRatio
+    : 0;
   // Unknown metrics contribute 0 (fail-closed) rather than a fabricated 1.0.
   const authContrib =
     (metrics.volumeAuthenticityKnown ? metrics.volumeAuthenticity : 0) * weights.volumeAuthenticity;

@@ -32,6 +32,7 @@ import type {
   PortfolioSnapshot,
   PrismStateSnapshot,
 } from "./state-service.js";
+import type { GeckoPoolStats } from "./gecko-terminal-service.js";
 import type { EvolvableThresholds, OutcomeRecord } from "./strategy-service.js";
 import type { ClaimedReward } from "./rewards.js";
 import type { LimitOrderRequest } from "./limit-orders.js";
@@ -338,7 +339,10 @@ export interface StrategyApi {
     previousTvlUsd: number,
     priceDrift?: PriceDriftContext,
   ) => PoolMetrics;
-  readonly checkVolumeAuthenticity: (pool: PoolState) => {
+  readonly checkVolumeAuthenticity: (
+    pool: PoolState,
+    feesMeasured: boolean,
+  ) => {
     score: number;
     flags: ReadonlyArray<string>;
   };
@@ -423,6 +427,30 @@ export interface MeteoraDatapiApi {
 export class MeteoraDatapiService extends Context.Tag("MeteoraDatapiService")<
   MeteoraDatapiService,
   MeteoraDatapiApi
+>() {}
+
+// ─── GeckoTerminal Service ───────────────────────────────────────────────────
+
+export interface GeckoTerminalApi {
+  /**
+   * Fetch real stats for one pool from GeckoTerminal. Never fails: on any
+   * network/HTTP/schema error the underlying client logs a warning and returns
+   * null so callers fall through to the heuristic without crashing the scan
+   * cycle. `baseFeeRate` is the pool's binStep-derived base-fee fraction
+   * (the consumer computes `0.0025 + binStep / 1e4`) used to price REAL volume
+   * into fees — gecko's own `pool_fee_percentage` is null for every CL pool.
+   * The ≥2.1s request pacing is an HTTP-client concern that correctly stays in
+   * the live layer, not here.
+   */
+  readonly getPoolStats: (
+    poolAddress: string,
+    baseFeeRate: number,
+  ) => Effect.Effect<GeckoPoolStats | null, never>;
+}
+
+export class GeckoTerminalService extends Context.Tag("GeckoTerminalService")<
+  GeckoTerminalService,
+  GeckoTerminalApi
 >() {}
 
 // ─── Memory Service ──────────────────────────────────────────────────────────

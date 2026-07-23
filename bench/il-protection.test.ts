@@ -23,9 +23,11 @@ import {
   HttpStatusServerService,
   EntryPrepService,
   MeteoraDatapiService,
+  GeckoTerminalService,
   AlertService,
   type AdapterApi,
   type MeteoraDatapiApi,
+  type MeteoraPoolStats,
   type EngineAlert,
 } from "../engine/services.js";
 import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
@@ -175,6 +177,7 @@ function makeTestLayer(opts: {
     Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.void }),
     Layer.succeed(MeteoraDatapiService, opts.datapi ?? { getPoolData: () => Effect.succeed(null) }),
+    Layer.succeed(GeckoTerminalService, { getPoolStats: () => Effect.succeed(null) }),
     Layer.succeed(AlertService, {
       sendAlert: capture
         ? (alert) =>
@@ -217,12 +220,44 @@ function runWithSeed(
 
 const POOL = "PoolIlProt11111111111111111111111111111111111";
 
+// A minimal Data API stats payload so the pool is enriched to a MEASURED source
+// (feeIlRatioKnown=true). The [fee-il-gate] now only acts on measured fees, so a
+// gate test must supply real datapi stats rather than relying on heuristic fees.
+function makeDatapiStats(overrides: Partial<MeteoraPoolStats> = {}): MeteoraPoolStats {
+  return {
+    address: POOL,
+    name: "SOL-USDC",
+    tvlUsd: 100_000,
+    volume24hUsd: 2_000,
+    fees24hUsd: 1,
+    apr: 0.004,
+    apy: 0.004,
+    currentPrice: 150,
+    feeTvlRatio24h: 0.001,
+    feeTvlRatio12h: 0.001,
+    feeTvlRatio1h: 0.001,
+    dynamicFeePct: null,
+    baseFeePct: 0.2,
+    hasFarm: null,
+    farmApr: null,
+    farmApy: null,
+    isBlacklisted: false,
+    tokenXFreezeAuthorityDisabled: true,
+    tokenYFreezeAuthorityDisabled: true,
+    tokenXVerified: true,
+    tokenYVerified: true,
+    ...overrides,
+  };
+}
+
 describe("IL protection — ENTER fee/IL floor gate (Task 3a)", () => {
   it("rejects ENTER when feeIlRatio < minFeeIlRatio and ilProtectionEnabled", async () => {
-    // fees24hUsd = 1 → fee/IL ratio ≈ 0.4-0.8 (< default minFeeIlRatio 1.2).
-    // No datapi → volumeAuthenticityKnown=false → pre-filter skips auth/binUtil.
+    // datapi fees24hUsd = 1 → fee/IL ratio ≈ 0.4-0.8 (< default minFeeIlRatio
+    // 1.2). Datapi makes it a measured source so feeIlRatioKnown=true and the
+    // [fee-il-gate] acts on the real (low) fee/IL.
     const layer = makeTestLayer({
       adapter: makeAdapter({ [POOL]: makePool({ address: POOL, fees24hUsd: 1 }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
       configOverrides: { watchlistPools: [POOL], ilProtectionEnabled: true },
     });
 
@@ -239,10 +274,12 @@ describe("IL protection — ENTER fee/IL floor gate (Task 3a)", () => {
   }, 15_000);
 
   it("does NOT block ENTER via fee-il-gate when ilProtectionEnabled is false (default pin)", async () => {
-    // Same low-fee pool; defaultAppConfig pins ilProtectionEnabled=false so the
-    // gate must stay silent (existing tests byte-identical).
+    // Same low-fee pool on a MEASURED source (datapi → feeIlRatioKnown=true) so
+    // the ONLY thing silencing the gate is ilProtectionEnabled=false — isolating
+    // that dimension from the known-flag skip.
     const layer = makeTestLayer({
       adapter: makeAdapter({ [POOL]: makePool({ address: POOL, fees24hUsd: 1 }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
       configOverrides: { watchlistPools: [POOL] },
     });
 

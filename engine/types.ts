@@ -38,11 +38,16 @@ export interface PoolState {
   currentPrice: number;
   timestamp: number;
   /**
-   * Where tvl/volume/fees came from. "datapi" = real Meteora Data API values;
-   * "heuristic" = on-chain reserves × price with modeled turnover (fabricated
-   * volume/fees). Volume-authenticity is only meaningful for "datapi" stats.
+   * Where tvl/volume/fees came from, in resolution order:
+   * "datapi" > "geckoterminal" > "heuristic". "datapi" = real Meteora Data API
+   * values (and the only source of safety signals — blacklist/freeze/verified/
+   * farm); "geckoterminal" = real GeckoTerminal 24h volume + reserve TVL with
+   * fees derived from real volume × the pool's base-fee rate; "heuristic" =
+   * on-chain reserves × price with modeled turnover (FABRICATED volume/fees,
+   * last-resort safety net only). Volume-authenticity and the fee/IL ratio are
+   * only meaningful for non-heuristic stats; gates skip them when heuristic.
    */
-  statsSource?: "datapi" | "heuristic" | undefined;
+  statsSource?: "datapi" | "geckoterminal" | "heuristic" | undefined;
   /**
    * Whether the pool has an LM farm, from the Data API's `has_farm`. Only set
    * when statsSource is "datapi"; undefined otherwise (unknown).
@@ -53,6 +58,22 @@ export interface PoolState {
    * Null/undefined when the pool has no farm or the APR is unknown.
    */
   farmAprPct?: number | null | undefined;
+}
+
+/**
+ * Whether a pool's tvl/volume/fees came from a MEASURED source. Only datapi and
+ * geckoterminal carry real volume/fees; "heuristic" is fabricated and undefined
+ * (a fixture/legacy pool that was never enriched) is treated the same — unknown.
+ * Fail-closed: the volume/fee gates and the paper-accrual gate act ONLY on a
+ * measured source, so fabricated values can never silently pass a gate. In
+ * production the adapter always tags raw pools "heuristic", so this is exactly
+ * equivalent to `statsSource !== "heuristic"` over {datapi, geckoterminal,
+ * heuristic} — the positive form additionally fails closed on undefined.
+ */
+export function isMeasuredStatsSource(
+  source: PoolState["statsSource"],
+): source is "datapi" | "geckoterminal" {
+  return source === "datapi" || source === "geckoterminal";
 }
 
 export interface PoolSnapshot {
@@ -79,6 +100,18 @@ export interface PoolMetrics {
   binUtilization: number; // active bins / total bins (0 when unknown)
   /** False when volume/fees are heuristic estimates — auth gates must skip. */
   readonly volumeAuthenticityKnown: boolean;
+  /**
+   * True ONLY for the datapi source, which measures real per-pool fees. False
+   * for geckoterminal (pool_fee_percentage is null for every CL pool, so gecko
+   * fees are a binStep base-rate MODEL on real volume, not measured) and for
+   * heuristic (fabricated volume AND fees). When false, every consumer of the
+   * ratio skips it: the fee/IL EXIT gate and all three ENTER gates (the
+   * [fee-il-gate] floor, the ×1.5 candidate requirement, and the
+   * weightedEntryScore fee term). The modeled ratio can OVERSTATE economics
+   * (the Data API exposes per-pool baseFeePct the generic model ignores), so it
+   * is EXCLUDED — neither forcing an exit nor blocking/gating entry.
+   */
+  readonly feeIlRatioKnown: boolean;
   /** False when real per-bin reserves were unavailable — util gates must skip. */
   readonly binUtilizationKnown: boolean;
   /**
