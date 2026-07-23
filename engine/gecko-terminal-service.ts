@@ -1,4 +1,6 @@
+import { Effect, Layer } from "effect";
 import { createLogger } from "./logger.js";
+import { GeckoTerminalService } from "./services.js";
 import type { PoolState } from "./types.js";
 
 /**
@@ -9,11 +11,11 @@ import type { PoolState } from "./types.js";
  * volume-authenticity, TVL gates and the fee/IL ratio are computed from
  * measured data instead of `tvlUsd × modeled turnover`.
  *
- * Deliberately a module-function design (clone of `token-risk-service.ts`):
- * plain exported functions with an injectable `fetchImpl`, NOT an Effect
- * Context.Tag service, so adding it does not ripple through the ~14 test layers
- * a new required service would touch. program.ts consumes it via
- * `Effect.promise`, exactly like `consultTokenRisks`.
+ * Module-function core with an injectable `fetchImpl` (so the pure parsing and
+ * the pacing stay unit-testable without layers), plus a thin `GeckoTerminalLive`
+ * Effect layer at the bottom. program.ts consumes it through the
+ * `GeckoTerminalService` Context.Tag (symmetric with `meteoraDatapi`) — the
+ * `Effect.promise` network call lives in that layer, not in program logic.
  *
  * LIVE-VERIFIED contract (2026-07-22, 5 pools across meteora/orca/raydium-clmm/
  * pancakeswap-v3-solana + raydium-v4 CPMM):
@@ -248,3 +250,15 @@ export async function getGeckoPoolStats(
     return null;
   }
 }
+
+// ─── Effect service wiring ───────────────────────────────────────────────────
+// Thin live layer so program.ts consumes gecko through the GeckoTerminalService
+// Context.Tag (symmetric with MeteoraDatapiLive) instead of a direct
+// Effect.promise network call. The module functions, injectable FetchLike and
+// the ≥2.1s pacing stay exactly as they are — pacing is an HTTP-client concern
+// and correctly lives at this layer (the rate limit is process-wide by nature).
+
+export const GeckoTerminalLive = Layer.succeed(GeckoTerminalService, {
+  getPoolStats: (poolAddress, baseFeeRate) =>
+    Effect.promise(() => getGeckoPoolStats(poolAddress, { baseFeeRate })),
+});

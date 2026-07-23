@@ -22,6 +22,7 @@ import {
   HttpStatusServerService,
   EntryPrepService,
   MeteoraDatapiService,
+  GeckoTerminalService,
   AlertService,
   type AdapterApi,
 } from "../engine/services.js";
@@ -168,6 +169,7 @@ function makeLoopLayer(opts: { adapter: AdapterApi; configOverrides?: Partial<Ap
     Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.void }),
     Layer.succeed(MeteoraDatapiService, { getPoolData: () => Effect.succeed(null) }),
+    Layer.succeed(GeckoTerminalService, { getPoolStats: () => Effect.succeed(null) }),
     Layer.succeed(AlertService, {
       sendAlert: () => Effect.void,
       recordFeeClaim: () => Effect.void,

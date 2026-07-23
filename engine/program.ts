@@ -64,6 +64,7 @@ import {
   HttpStatusServerService,
   EntryPrepService,
   MeteoraDatapiService,
+  GeckoTerminalService,
   AlertService,
   CopySignalService,
   type AdapterApi,
@@ -77,7 +78,7 @@ import {
   type AgentStateApi,
 } from "./services.js";
 import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
-import { getGeckoPoolStats, enrichPoolFromGecko } from "./gecko-terminal-service.js";
+import { GeckoTerminalLive, enrichPoolFromGecko } from "./gecko-terminal-service.js";
 import { AlertLive } from "./alert-service.js";
 import { detectDepegAndLiquidityDrain } from "./depeg-liquidity-detector.js";
 import { consultTokenRisks, type TokenRiskSignal } from "./token-risk-service.js";
@@ -595,6 +596,7 @@ type AllServices =
   | HttpStatusServerService
   | EntryPrepService
   | MeteoraDatapiService
+  | GeckoTerminalService
   | AlertService
   | CopySignalService;
 
@@ -647,6 +649,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged11 = Layer.merge(merged8, revenueConfig);
   const merged11a = Layer.merge(merged11, entryPrep);
   const merged11b = Layer.merge(merged11a, meteoraDatapi);
+  const merged11c = Layer.merge(merged11b, GeckoTerminalLive);
 
   const agentLayer = cfg?.agentiveMode ? AgentLive(cfg) : Layer.succeed(AgentService, AgentNoOp);
 
@@ -666,7 +669,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
           stop: () => Effect.void,
         });
 
-  const merged12 = Layer.merge(merged11b, agentLayer);
+  const merged12 = Layer.merge(merged11c, agentLayer);
   const merged13 = Layer.merge(merged12, agentStateLayer);
   const merged14 = Layer.merge(merged13, mcpLayer);
   const merged15 = Layer.merge(merged14, httpLayer);
@@ -1487,6 +1490,7 @@ export const program = Effect.gen(function* () {
   const mcpServer = yield* McpServerService;
   const httpStatusServer = yield* HttpStatusServerService;
   const meteoraDatapi = yield* MeteoraDatapiService;
+  const gecko = yield* GeckoTerminalService;
   const alertSvc = yield* AlertService;
   const copySignalsOption = yield* Effect.serviceOption(CopySignalService);
 
@@ -2168,11 +2172,7 @@ export const program = Effect.gen(function* () {
       const datapiStats = yield* meteoraDatapi.getPoolData(poolAddress);
       const geckoStats =
         datapiStats === null && config.geckoTerminalEnabled !== false
-          ? yield* Effect.promise(() =>
-              getGeckoPoolStats(poolAddress, {
-                baseFeeRate: 0.0025 + rawPool.binStep / 10_000,
-              }),
-            )
+          ? yield* gecko.getPoolStats(poolAddress, 0.0025 + rawPool.binStep / 10_000)
           : null;
       const pool =
         datapiStats !== null

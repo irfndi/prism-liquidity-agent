@@ -23,6 +23,7 @@ import {
   HttpStatusServerService,
   EntryPrepService,
   MeteoraDatapiService,
+  GeckoTerminalService,
   AlertService,
   type AdapterApi,
   type MeteoraDatapiApi,
@@ -170,6 +171,7 @@ describe("evaluatePool TVL-drop EXIT (integration)", () => {
       Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
       Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.void }),
       Layer.succeed(MeteoraDatapiService, makeDatapi()),
+      Layer.succeed(GeckoTerminalService, { getPoolStats: () => Effect.succeed(null) }),
       Layer.succeed(AlertService, {
         sendAlert: () => Effect.void,
         recordFeeClaim: () => Effect.void,

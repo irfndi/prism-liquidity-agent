@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { Effect, Layer } from "effect";
 import { StrategyLive } from "../engine/strategy-service.js";
 import { program } from "../engine/program.js";
@@ -9,7 +9,10 @@ import { AuditLive } from "../engine/audit-service.js";
 import { AgentNoOp } from "../engine/agent-service.js";
 import { AgentStateMutable } from "../engine/state-service.js";
 import { ConfigService, type AppConfig } from "../engine/config-service.js";
-import { setGeckoRequestIntervalMsForTest } from "../engine/gecko-terminal-service.js";
+import {
+  type GeckoPoolStats,
+  setGeckoRequestIntervalMsForTest,
+} from "../engine/gecko-terminal-service.js";
 import {
   AdapterService,
   BlacklistService,
@@ -24,6 +27,7 @@ import {
   HttpStatusServerService,
   EntryPrepService,
   MeteoraDatapiService,
+  GeckoTerminalService,
   AlertService,
   type AdapterApi,
   type MeteoraDatapiApi,
@@ -31,14 +35,15 @@ import {
   type EngineAlert,
 } from "../engine/services.js";
 import type { PoolMetrics } from "../engine/types.js";
-import { defaultAppConfig, makePool, makeBinArray, makePosition, mockFetch } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
 
 // ─── Stats source pipeline: datapi > geckoterminal > heuristic ──────────────
 // Fabricated (heuristic) stats must never pass a volume/fee gate. This file
-// drives the FULL scan loop with both fetch layers mocked so each tier's
-// propagation (statsSource + known flags + gate behaviour) is exercised end to
-// end. The gecko client reads global fetch (program.ts passes no fetchImpl), so
-// mockFetch controls it; the datapi client is mocked at the service level.
+// drives the FULL scan loop with both stats sources injected as service stubs
+// so each tier's propagation (statsSource + known flags + gate behaviour) is
+// exercised end to end. The gecko client is consumed through the
+// GeckoTerminalService Context.Tag, so a Layer.succeed stub feeds it directly —
+// no global-fetch mocking; the datapi client is stubbed at its service too.
 
 type MintAuthorities = { mintAuthority: string | null; freezeAuthority: string | null };
 const NO_AUTHORITIES: MintAuthorities = { mintAuthority: null, freezeAuthority: null };
@@ -114,6 +119,7 @@ function makeAdapter(pools: Record<string, ReturnType<typeof makePool>>): Adapte
 function makeTestLayer(opts: {
   adapter: AdapterApi;
   datapi?: MeteoraDatapiApi;
+  gecko?: GeckoPoolStats | null;
   configOverrides?: Partial<AppConfig>;
   alertCapture?: EngineAlert[];
 }) {
@@ -181,6 +187,9 @@ function makeTestLayer(opts: {
     Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.void }),
     Layer.succeed(MeteoraDatapiService, opts.datapi ?? { getPoolData: () => Effect.succeed(null) }),
+    Layer.succeed(GeckoTerminalService, {
+      getPoolStats: () => Effect.succeed(opts.gecko ?? null),
+    }),
     Layer.succeed(AlertService, {
       sendAlert: capture
         ? (alert) =>
@@ -223,36 +232,19 @@ function runWithSeed(
   );
 }
 
-// Live-shaped gecko fixture (strings, pool_fee_percentage null). program.ts
-// derives baseFeeRate = 0.0025 + binStep/1e4 = 0.0035 for the default binStep 10,
-// so fees24hUsd = volume24hUsd × 0.0035.
-function geckoResponse(volume24hUsd: number, reserveUsd: number): unknown {
+// Parsed gecko fixture (what the real client returns after parsing a 200 with
+// pool_fee_percentage null). The default makePool binStep is 10, so the consumer
+// passes baseFeeRate = 0.0025 + binStep/1e4 = 0.0035 and the real client would
+// compute fees24hUsd = volume24hUsd × 0.0035 — baking that value in here keeps
+// the stub byte-for-byte equivalent to the parsed live response.
+function geckoStats(volume24hUsd: number, reserveUsd: number): GeckoPoolStats {
   return {
-    data: {
-      attributes: {
-        name: "SOL / USDC",
-        pool_fee_percentage: null,
-        volume_usd: { h24: String(volume24hUsd) },
-        reserve_in_usd: String(reserveUsd),
-        base_token_price_usd: "150",
-        quote_token_price_usd: "1",
-      },
-    },
+    tvlUsd: reserveUsd,
+    volume24hUsd,
+    fees24hUsd: volume24hUsd * 0.0035,
+    basePriceUsd: 150,
+    quotePriceUsd: 1,
   };
-}
-
-// gecko is the only global-fetch consumer in these cycles (token-risk is pinned
-// off in defaultAppConfig), so the mock answers the gecko pool path directly.
-function geckoUp(volume24hUsd: number, reserveUsd: number): () => void {
-  return mockFetch(() =>
-    Promise.resolve(
-      new Response(JSON.stringify(geckoResponse(volume24hUsd, reserveUsd)), { status: 200 }),
-    ),
-  );
-}
-
-function geckoDown(): () => void {
-  return mockFetch(() => Promise.resolve(new Response("rate limited", { status: 429 })));
 }
 
 // Data-API-shaped pool stats (measured fees) for the datapi enrichment path.
@@ -288,15 +280,15 @@ function poolRows(rows: ReadonlyArray<DecisionRow>): ReadonlyArray<DecisionRow> 
   return rows.filter((r) => r.poolAddress === POOL);
 }
 
-// Program-level gecko fetches must not be throttled by the 2.1s production
-// pacing (a paced fetch would outrun each cycle's 2s race window).
+// The gecko client is now stubbed at the service level, so these cycles never
+// touch the real HTTP client; the pacing hook is kept (and restored) defensively
+// so a shared-module interval change in another test cannot leak into this file.
 beforeEach(() => {
   setGeckoRequestIntervalMsForTest(0);
 });
 
 afterEach(() => {
   setGeckoRequestIntervalMsForTest(2_100);
-  vi.restoreAllMocks();
 });
 
 describe("stats source propagation — datapi vs gecko vs heuristic", () => {
@@ -307,33 +299,27 @@ describe("stats source propagation — datapi vs gecko vs heuristic", () => {
     // for every CL pool — only the Data API measures fees), so
     // feeIlRatioKnown=false and even with ilProtectionEnabled the hard ENTER
     // floor must SKIP rather than act on the modeled ratio.
-    const restoreGecko = geckoUp(100, 100_000);
-    try {
-      const layer = makeTestLayer({
-        adapter: makeAdapter({ [POOL]: makePool({ address: POOL }) }),
-        datapi: { getPoolData: () => Effect.succeed(null) }, // datapi down
-        configOverrides: {
-          watchlistPools: [POOL],
-          ilProtectionEnabled: true,
-          geckoTerminalEnabled: true,
-        },
-      });
-      const rows = await runWithSeed(layer, []);
-      const rows_ = poolRows(rows);
-      const metrics = rows_.find((r) => r.metrics !== undefined)?.metrics;
-      expect(metrics, "expected an audited decision carrying metrics").toBeDefined();
-      expect(metrics!.pool.statsSource).toBe("geckoterminal");
-      expect(metrics!.volumeAuthenticityKnown, "gecko volume + TVL ARE real").toBe(true);
-      expect(metrics!.feeIlRatioKnown, "gecko fees are modeled, not measured").toBe(false);
-      const gateRejects = rows_.filter(
-        (d) => d.action === "ENTER" && d.reasoning.includes("[fee-il-gate]"),
-      );
-      expect(gateRejects, "modeled gecko fees must not drive the hard fee/IL floor").toHaveLength(
-        0,
-      );
-    } finally {
-      restoreGecko();
-    }
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(null) }, // datapi down
+      gecko: geckoStats(100, 100_000),
+      configOverrides: {
+        watchlistPools: [POOL],
+        ilProtectionEnabled: true,
+        geckoTerminalEnabled: true,
+      },
+    });
+    const rows = await runWithSeed(layer, []);
+    const rows_ = poolRows(rows);
+    const metrics = rows_.find((r) => r.metrics !== undefined)?.metrics;
+    expect(metrics, "expected an audited decision carrying metrics").toBeDefined();
+    expect(metrics!.pool.statsSource).toBe("geckoterminal");
+    expect(metrics!.volumeAuthenticityKnown, "gecko volume + TVL ARE real").toBe(true);
+    expect(metrics!.feeIlRatioKnown, "gecko fees are modeled, not measured").toBe(false);
+    const gateRejects = rows_.filter(
+      (d) => d.action === "ENTER" && d.reasoning.includes("[fee-il-gate]"),
+    );
+    expect(gateRejects, "modeled gecko fees must not drive the hard fee/IL floor").toHaveLength(0);
   }, 15_000);
 
   it("a high-quality gecko pool still ENTERs via the volume candidate path (volume known)", async () => {
@@ -346,21 +332,17 @@ describe("stats source propagation — datapi vs gecko vs heuristic", () => {
     // With the fee signal absent, the measured auth/bin-util/TVL terms alone clear
     // the weighted-score threshold; the datapi-only [fee-il-gate] skip (fees
     // modeled) must not keep a good pool out.
-    const restoreGecko = geckoUp(20_000_000, 5_000_000);
-    try {
-      const layer = makeTestLayer({
-        adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
-        datapi: { getPoolData: () => Effect.succeed(null) },
-        configOverrides: { watchlistPools: [POOL], geckoTerminalEnabled: true },
-      });
-      const rows = await runWithSeed(layer, []);
-      const rows_ = poolRows(rows);
-      const enters = rows_.filter((d) => d.action === "ENTER");
-      expect(enters, "volume-known gecko pool must reach the ENTER push").toHaveLength(1);
-      expect(enters[0]!.reasoning).toContain("Strong pool");
-    } finally {
-      restoreGecko();
-    }
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
+      datapi: { getPoolData: () => Effect.succeed(null) },
+      gecko: geckoStats(20_000_000, 5_000_000),
+      configOverrides: { watchlistPools: [POOL], geckoTerminalEnabled: true },
+    });
+    const rows = await runWithSeed(layer, []);
+    const rows_ = poolRows(rows);
+    const enters = rows_.filter((d) => d.action === "ENTER");
+    expect(enters, "volume-known gecko pool must reach the ENTER push").toHaveLength(1);
+    expect(enters[0]!.reasoning).toContain("Strong pool");
   }, 15_000);
 
   it("datapi down + gecko down → heuristic, known-flags false, [fee-il-gate] skipped (volume-unknown blocks entry instead)", async () => {
@@ -368,33 +350,29 @@ describe("stats source propagation — datapi vs gecko vs heuristic", () => {
     // behaviour rejected ENTER via [fee-il-gate] on the FABRICATED ratio; it must
     // now skip — the volume candidate gate (volumeAuthenticityKnown required)
     // keeps the pool out, just not via a made-up fee/IL number.
-    const restoreGecko = geckoDown();
-    try {
-      const layer = makeTestLayer({
-        adapter: makeAdapter({ [POOL]: makePool({ address: POOL, fees24hUsd: 1 }) }),
-        datapi: { getPoolData: () => Effect.succeed(null) },
-        configOverrides: {
-          watchlistPools: [POOL],
-          ilProtectionEnabled: true,
-          geckoTerminalEnabled: true,
-        },
-      });
-      const rows = await runWithSeed(layer, []);
-      const rows_ = poolRows(rows);
-      const metrics = rows_.find((r) => r.metrics !== undefined)?.metrics;
-      expect(metrics).toBeDefined();
-      expect(metrics!.pool.statsSource).toBe("heuristic");
-      expect(metrics!.volumeAuthenticityKnown).toBe(false);
-      expect(metrics!.feeIlRatioKnown).toBe(false);
-      // No [fee-il-gate] rejection (fabricated ratio must not reject), and no
-      // ENTER at all (volume-unknown path).
-      const gateRejects = rows_.filter((d) => d.reasoning.includes("[fee-il-gate]"));
-      expect(gateRejects, "heuristic must not reject via [fee-il-gate]").toHaveLength(0);
-      const enters = rows_.filter((d) => d.action === "ENTER");
-      expect(enters, "volume-unknown heuristic pool must not ENTER").toHaveLength(0);
-    } finally {
-      restoreGecko();
-    }
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL, fees24hUsd: 1 }) }),
+      datapi: { getPoolData: () => Effect.succeed(null) },
+      gecko: null, // gecko down
+      configOverrides: {
+        watchlistPools: [POOL],
+        ilProtectionEnabled: true,
+        geckoTerminalEnabled: true,
+      },
+    });
+    const rows = await runWithSeed(layer, []);
+    const rows_ = poolRows(rows);
+    const metrics = rows_.find((r) => r.metrics !== undefined)?.metrics;
+    expect(metrics).toBeDefined();
+    expect(metrics!.pool.statsSource).toBe("heuristic");
+    expect(metrics!.volumeAuthenticityKnown).toBe(false);
+    expect(metrics!.feeIlRatioKnown).toBe(false);
+    // No [fee-il-gate] rejection (fabricated ratio must not reject), and no
+    // ENTER at all (volume-unknown path).
+    const gateRejects = rows_.filter((d) => d.reasoning.includes("[fee-il-gate]"));
+    expect(gateRejects, "heuristic must not reject via [fee-il-gate]").toHaveLength(0);
+    const enters = rows_.filter((d) => d.action === "ENTER");
+    expect(enters, "volume-unknown heuristic pool must not ENTER").toHaveLength(0);
   }, 15_000);
 
   it("heuristic fee/IL EXIT gate is skipped despite a fabricated-low ratio (tracked position stays)", async () => {
@@ -402,34 +380,30 @@ describe("stats source propagation — datapi vs gecko vs heuristic", () => {
     // < 0.5. The fee/IL EXIT MUST skip (feeIlRatioKnown=false) rather than dump
     // the position on a fabricated low-fee number. No other EXIT fires (stable
     // TVL, in-range, no drawdown), so the position is held.
-    const restoreGecko = geckoDown();
-    try {
-      // fees 0.3 on tvl 100_000 → fee/IL ≈ 0.12-0.24, reliably < 0.5, so the old
-      // (unguarded) code WOULD have fired the fee/IL EXIT here.
-      const layer = makeTestLayer({
-        adapter: makeAdapter({ [POOL]: makePool({ address: POOL, fees24hUsd: 0.3 }) }),
-        datapi: { getPoolData: () => Effect.succeed(null) },
-        configOverrides: { watchlistPools: [POOL], geckoTerminalEnabled: true },
-      });
-      const position = makePosition({
-        poolAddress: POOL,
-        depositedUsd: 1000,
-        currentValueUsd: 1000,
-      });
-      const rows = await runWithSeed(layer, [position]);
-      const rows_ = poolRows(rows);
-      const feeIlExits = rows_.filter(
-        (d) => d.action === "EXIT" && d.reasoning.includes("Fee/IL ratio"),
-      );
-      expect(feeIlExits, "heuristic fabricated-low fee/IL must not force an EXIT").toHaveLength(0);
-      const metrics = rows_.find((r) => r.metrics !== undefined)?.metrics;
-      expect(metrics).toBeDefined();
-      expect(metrics!.feeIlRatioKnown).toBe(false);
-      const exits = rows_.filter((d) => d.action === "EXIT");
-      expect(exits, "stable in-range heuristic position is held, not exited").toHaveLength(0);
-    } finally {
-      restoreGecko();
-    }
+    // fees 0.3 on tvl 100_000 → fee/IL ≈ 0.12-0.24, reliably < 0.5, so the old
+    // (unguarded) code WOULD have fired the fee/IL EXIT here.
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL, fees24hUsd: 0.3 }) }),
+      datapi: { getPoolData: () => Effect.succeed(null) },
+      gecko: null, // gecko down
+      configOverrides: { watchlistPools: [POOL], geckoTerminalEnabled: true },
+    });
+    const position = makePosition({
+      poolAddress: POOL,
+      depositedUsd: 1000,
+      currentValueUsd: 1000,
+    });
+    const rows = await runWithSeed(layer, [position]);
+    const rows_ = poolRows(rows);
+    const feeIlExits = rows_.filter(
+      (d) => d.action === "EXIT" && d.reasoning.includes("Fee/IL ratio"),
+    );
+    expect(feeIlExits, "heuristic fabricated-low fee/IL must not force an EXIT").toHaveLength(0);
+    const metrics = rows_.find((r) => r.metrics !== undefined)?.metrics;
+    expect(metrics).toBeDefined();
+    expect(metrics!.feeIlRatioKnown).toBe(false);
+    const exits = rows_.filter((d) => d.action === "EXIT");
+    expect(exits, "stable in-range heuristic position is held, not exited").toHaveLength(0);
   }, 15_000);
 });
 
@@ -464,38 +438,32 @@ describe("modeled fee/IL is excluded from EVERY ENTER gate (fees unknown)", () =
     // recorded ENTER decision may still be risk-rejected for confidence — a
     // separate gate; what proves exclusion is that the candidate gate no longer
     // blocks on the modeled ratio, so the "Strong pool" decision is recorded.)
-    const restoreGecko = geckoUp(15_000, 5_000_000);
-    try {
-      const layer = makeTestLayer({
-        adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
-        datapi: { getPoolData: () => Effect.succeed(null) }, // datapi down → gecko
-        configOverrides: {
-          watchlistPools: [POOL],
-          ilProtectionEnabled: true,
-          geckoTerminalEnabled: true,
-        },
-      });
-      const rows = await runWithSeed(layer, []);
-      const rows_ = poolRows(rows);
-      const metrics = rows_.find((r) => r.metrics !== undefined)?.metrics;
-      expect(metrics, "expected an audited decision carrying metrics").toBeDefined();
-      expect(metrics!.pool.statsSource).toBe("geckoterminal");
-      expect(metrics!.volumeAuthenticityKnown).toBe(true);
-      expect(metrics!.feeIlRatioKnown, "gecko fees are modeled, not measured").toBe(false);
-      // The modeled ratio WOULD have failed the old ×1.5 candidate conjunct…
-      expect(metrics!.feeIlRatio).toBeLessThan(1.8); // default minFeeIlRatio 1.2 × 1.5
-      // …yet the pool reaches the ENTER push on measured signals (the "Strong
-      // pool" reasoning is set only inside the candidate gate's score branch).
-      const enters = rows_.filter(
-        (d) => d.action === "ENTER" && d.reasoning.includes("Strong pool"),
-      );
-      expect(
-        enters,
-        "gecko pool must ENTER on measured signals despite the failing modeled ratio",
-      ).toHaveLength(1);
-    } finally {
-      restoreGecko();
-    }
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
+      datapi: { getPoolData: () => Effect.succeed(null) }, // datapi down → gecko
+      gecko: geckoStats(15_000, 5_000_000),
+      configOverrides: {
+        watchlistPools: [POOL],
+        ilProtectionEnabled: true,
+        geckoTerminalEnabled: true,
+      },
+    });
+    const rows = await runWithSeed(layer, []);
+    const rows_ = poolRows(rows);
+    const metrics = rows_.find((r) => r.metrics !== undefined)?.metrics;
+    expect(metrics, "expected an audited decision carrying metrics").toBeDefined();
+    expect(metrics!.pool.statsSource).toBe("geckoterminal");
+    expect(metrics!.volumeAuthenticityKnown).toBe(true);
+    expect(metrics!.feeIlRatioKnown, "gecko fees are modeled, not measured").toBe(false);
+    // The modeled ratio WOULD have failed the old ×1.5 candidate conjunct…
+    expect(metrics!.feeIlRatio).toBeLessThan(1.8); // default minFeeIlRatio 1.2 × 1.5
+    // …yet the pool reaches the ENTER push on measured signals (the "Strong
+    // pool" reasoning is set only inside the candidate gate's score branch).
+    const enters = rows_.filter((d) => d.action === "ENTER" && d.reasoning.includes("Strong pool"));
+    expect(
+      enters,
+      "gecko pool must ENTER on measured signals despite the failing modeled ratio",
+    ).toHaveLength(1);
   }, 15_000);
 
   it("(b) datapi pool with a KNOWN ratio below the ×1.5 floor does NOT enter (known ratio still gates)", async () => {
@@ -566,34 +534,26 @@ describe("paper notional-fee accrual respects the stats source", () => {
   }, 15_000);
 
   it("does NOT accrue under gecko stats (fees are a base-rate model, not measured)", async () => {
-    const restoreGecko = geckoUp(50_000_000, 5_000_000); // high real volume → modeled fees
-    try {
-      const layer = makeTestLayer({
-        adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
-        datapi: { getPoolData: () => Effect.succeed(null) },
-        configOverrides: { watchlistPools: [POOL], geckoTerminalEnabled: true },
-      });
-      const accrued = await readAccruedFees(layer);
-      expect(accrued, "modeled gecko fees must not accrue to a paper position").toBe(0);
-    } finally {
-      restoreGecko();
-    }
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
+      datapi: { getPoolData: () => Effect.succeed(null) },
+      gecko: geckoStats(50_000_000, 5_000_000), // high real volume → modeled fees
+      configOverrides: { watchlistPools: [POOL], geckoTerminalEnabled: true },
+    });
+    const accrued = await readAccruedFees(layer);
+    expect(accrued, "modeled gecko fees must not accrue to a paper position").toBe(0);
   }, 15_000);
 
   it("does NOT accrue under heuristic stats (fabricated fees, both sources down)", async () => {
-    const restoreGecko = geckoDown();
-    try {
-      // Heuristic getPoolState ships a POSITIVE modeled fees24hUsd, yet accrual
-      // must stay 0 because statsSource === "heuristic".
-      const layer = makeTestLayer({
-        adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
-        datapi: { getPoolData: () => Effect.succeed(null) },
-        configOverrides: { watchlistPools: [POOL], geckoTerminalEnabled: true },
-      });
-      const accrued = await readAccruedFees(layer);
-      expect(accrued, "heuristic fabricated fees must not accrue").toBe(0);
-    } finally {
-      restoreGecko();
-    }
+    // Heuristic getPoolState ships a POSITIVE modeled fees24hUsd, yet accrual
+    // must stay 0 because statsSource === "heuristic".
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 5_000_000 }) }),
+      datapi: { getPoolData: () => Effect.succeed(null) },
+      gecko: null, // gecko down
+      configOverrides: { watchlistPools: [POOL], geckoTerminalEnabled: true },
+    });
+    const accrued = await readAccruedFees(layer);
+    expect(accrued, "heuristic fabricated fees must not accrue").toBe(0);
   }, 15_000);
 });
