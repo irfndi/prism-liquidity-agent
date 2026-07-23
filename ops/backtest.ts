@@ -227,7 +227,9 @@ export function runBacktestFromTicks(
   for (let i = 0; i < ticks.length; i++) {
     const tick = ticks[i]!;
     const metrics = strategy.computeMetrics(tick.pool, tick.binArray, previousTvl);
-    const auth = strategy.checkVolumeAuthenticity(tick.pool);
+    // Match computeMetrics' wiring so this standalone auth score stays consistent
+    // with metrics.volumeAuthenticity: fees are measured only under the Data API.
+    const auth = strategy.checkVolumeAuthenticity(tick.pool, tick.pool.statsSource === "datapi");
     if (
       !strategy.passesPreFilter(tick.pool, auth.score, metrics.binUtilization, 50_000, 0.7, 0.3)
     ) {

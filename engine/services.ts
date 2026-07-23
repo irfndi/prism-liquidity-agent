@@ -339,7 +339,10 @@ export interface StrategyApi {
     previousTvlUsd: number,
     priceDrift?: PriceDriftContext,
   ) => PoolMetrics;
-  readonly checkVolumeAuthenticity: (pool: PoolState) => {
+  readonly checkVolumeAuthenticity: (
+    pool: PoolState,
+    feesMeasured: boolean,
+  ) => {
     score: number;
     flags: ReadonlyArray<string>;
   };

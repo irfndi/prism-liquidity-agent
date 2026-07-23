@@ -71,7 +71,9 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
                     timestamp: Date.now(),
                   };
 
-                  const auth = strategy.checkVolumeAuthenticity(poolState);
+                  // Discovery data is Data-API-sourced, so these fees are measured
+                  // and the fee-rate-band check legitimately runs.
+                  const auth = strategy.checkVolumeAuthenticity(poolState, true);
                   if (auth.score < screenerConfig.volumeAuthThreshold) return null;
 
                   // Annualized fee-to-TVL heuristic for screening (not the same as

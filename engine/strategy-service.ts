@@ -116,7 +116,15 @@ export const DLMMStrategy: StrategyApi = {
     const tvlVelocity = previousTvlUsd > 0 ? (pool.tvlUsd - previousTvlUsd) / previousTvlUsd : 0;
 
     const feeIlRatio = DLMMStrategy.computeFeeIlRatio(pool, binArray, priceDrift);
-    const volumeAuthenticity = DLMMStrategy.checkVolumeAuthenticity(pool);
+    // Fees are MEASURED only under the Data API (real per-pool fee data) — the
+    // same definition as feeIlRatioKnown below. Gecko's fees are a binStep
+    // base-rate MODEL, so the fee-rate-band component of volume authenticity
+    // must be skipped for gecko (feesMeasured=false); the real volume/TVL
+    // components stay.
+    const volumeAuthenticity = DLMMStrategy.checkVolumeAuthenticity(
+      pool,
+      pool.statsSource === "datapi",
+    );
     const binUtilization = DLMMStrategy.computeBinUtilization(binArray);
 
     return {
@@ -162,7 +170,10 @@ export const DLMMStrategy: StrategyApi = {
     return Math.min(pool.fees24hUsd / estimatedIlDailyUsd, MAX_FEE_IL_RATIO);
   },
 
-  checkVolumeAuthenticity(pool: PoolState): {
+  checkVolumeAuthenticity(
+    pool: PoolState,
+    feesMeasured: boolean,
+  ): {
     score: number;
     flags: ReadonlyArray<string>;
   } {
@@ -183,7 +194,17 @@ export const DLMMStrategy: StrategyApi = {
       flags.push(`vol/tvl=${volTvlRatio.toFixed(1)}x (elevated)`);
     }
 
-    if (pool.volume24hUsd > 0) {
+    // Fee-rate band consumes fees24hUsd, so run it ONLY when fees are MEASURED
+    // (Data API real per-pool fees). Under gecko/heuristic, fees are the generic
+    // binStep base-rate MODEL (0.0025 + binStep/1e4), which exceeds this 2% upper
+    // band for high-binStep pools (binStep > 175): the 0.2 penalty below would then
+    // subtract from REAL volume authenticity and falsely push an otherwise-valid
+    // pool under the strict volumeAuth > 0.8 ENTER gate (or an evolved threshold
+    // into a volume-auth EXIT). Modeled fee rates must never influence authenticity
+    // — in either direction — so the component is skipped when fees are unmeasured.
+    // The vol/tvl and low-tvl-wash components remain: they are real under gecko
+    // (real volume + real reserve TVL).
+    if (feesMeasured && pool.volume24hUsd > 0) {
       const feeRate = pool.fees24hUsd / pool.volume24hUsd;
       if (feeRate < 0.0002 || feeRate > 0.02) {
         score -= 0.2;
