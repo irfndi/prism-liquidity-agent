@@ -1,0 +1,22 @@
+{
+  "name": "@prism-liquidity-agent/infra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Alchemy IaC composition root for the Prism Cloudflare stack (Effect 4 runtime)",
+  "type": "module",
+  "scripts": {
+    "dev": "alchemy dev",
+    "deploy": "alchemy deploy --stage prod --yes",
+    "plan": "alchemy deploy --stage prod --dry-run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "4.0.0-beta.102",
+    "@effect/platform-node": "4.0.0-beta.102",
+    "alchemy": "2.0.0-beta.64",
+    "effect": "4.0.0-beta.102"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}

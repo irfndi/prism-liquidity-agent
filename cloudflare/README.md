@@ -15,15 +15,30 @@ cloudflare/
 │   └── telegram-bot/                # Telegram webhook handler
 │       ├── index.ts                 # Bot commands: /start, /register, /link, /whoami, /status
 │       └── telegram-bot.test.ts     # Bot tests (vitest-pool-workers)
+├── infra/                           # Bun workspace package — Alchemy IaC (Effect 4 runtime)
+│   ├── alchemy.run.ts               # Alchemy composition root: both workers + D1/KV/R2/Vectorize
+│   ├── package.json                 # @prism-liquidity-agent/infra: alchemy (pinned) + effect@4
+│   └── tsconfig.json                # Strict config for the composition root
 ├── migrations/
 │   └── NNNN_*.sql                   # D1 schema migrations (users, api_keys, telegram_link_codes, …)
-├── wrangler.toml                    # API worker config
-├── wrangler.telegram.toml           # Telegram bot worker config
-├── wrangler.telegram.test.toml      # Telegram bot test config (no service bindings)
+├── wrangler.telegram.test.toml      # Test-only config (vitest-pool-workers), never deployed
 ├── vitest.config.ts                 # Vitest config with @cloudflare/vitest-pool-workers
-├── tsconfig.json                    # TypeScript strict config
-└── package.json                     # Dependencies: hono, effect, @cloudflare/workers-types
+├── tsconfig.json                    # TypeScript strict config (workers)
+└── package.json                     # Workspace root; workers on effect@3 (hono); dev: wrangler, vitest
 ```
+
+> **Two Effect runtimes, one workspace.** The Worker runtime code (`workers/`,
+> `hono`) is pinned to `effect@^3.22.0`. Alchemy v2 (`alchemy@2.0.0-beta.64`)
+> requires the Effect 4 runtime (`peerDependencies effect
+> ">=4.0.0-beta.100 || >=4.0.0"`), which cannot share a dependency tree with the
+> workers. The Alchemy program is therefore isolated in its own Bun workspace
+> package, `infra/`, which carries `effect@4.0.0-beta.102` plus the
+> `@effect/platform-bun` / `@effect/platform-node` peers the Cloudflare provider
+> imports. A single `bun install` at `cloudflare/` installs both, nesting
+> `effect@4` under `infra/node_modules` while the workers resolve `effect@3` from
+> the workspace root. The worker `main` entries (`../workers/...`) are bundled by
+> Alchemy with a resolver rooted at the entry file, so they keep resolving
+> `effect@3` exactly as before.
 
 ## Live Deployment (Production)
 
@@ -34,111 +49,92 @@ cloudflare/
 | Telegram Bot Username | @prism_agent_bot                              | ✅ Active |
 | Cloudflare Account ID | `a37da71c38a2f7ab732057d87d5d0f6e`            | Active    |
 
-## Quick Setup (for an AI agent to execute)
+## Deploying via Alchemy
 
-### Prerequisites
+Infrastructure is declared in TypeScript in `cloudflare/infra/alchemy.run.ts` (Alchemy v2, "Infrastructure-as-Effects"). One typed program declares both Workers plus the D1 / KV / R2 / Vectorize resources they bind, replacing the old `wrangler.toml` / `wrangler.telegram.toml` pipeline (both files are deleted). `wrangler` stays a devDependency of the workspace root only for the vitest-pool-workers test suite and the out-of-band release R2 writes; the Alchemy CLI ships in the `infra/` workspace package as the exact-pinned dependency `alchemy@2.0.0-beta.64` (with the Effect-4 runtime its peers require — see the workspace note above).
+
+`cloudflare/infra/alchemy.run.ts` is the source of truth when this document and the code disagree. The docs it is grounded on:
+
+- Workers: https://alchemy.run/cloudflare/compute/workers
+- D1: https://alchemy.run/cloudflare/data/d1
+- KV: https://alchemy.run/cloudflare/data/kv
+- R2: https://alchemy.run/cloudflare/data/r2
+- Vectorize: https://alchemy.run/cloudflare/ai/vectorize
+- Secrets & env: https://alchemy.run/cloudflare/security/secrets-env
+
+### Resources (pre-existing, adopted by name)
+
+The stack does NOT create new resources. On a first deploy (empty Alchemy state), every provider finds the live resource in the account by the exact physical name in `alchemy.run.ts` and adopts it. No data migration, no new IDs.
+
+| Binding   | Resource | Physical name  | ID / config                                 |
+| --------- | -------- | -------------- | ------------------------------------------- |
+| `DB`      | D1       | `prism-db`     | `0657c2b3-fdea-4b33-b11b-8d0a7b27cbc8`      |
+| `CACHE`   | KV       | `prism-cache`  | `78d7fb5d3fab494dbc8f2940e524f22d`          |
+| `BACKUPS` | R2       | `prism-backups`|                                             |
+| `MEMORY`  | Vectorize| `prism-memory` | 384 dimensions, cosine                      |
+
+Physical identity comes from these names, so the `prod` stage never renames anything; the stage only scopes the Alchemy state keyspace.
+
+### Guardrails
+
+> **Never change a resource `name` / `title` in `alchemy.run.ts`.** The same goes for the D1 `jurisdiction` / location hint and the Vectorize `dimensions` / `metric`. All of them are creation-immutable, and editing any one breaks adoption and plans a **destructive REPLACE** (drop + recreate) of a production resource.
+>
+> The `prism-backups` R2 bucket is also written out-of-band by `release.yml` / `ci.yml` (`wrangler r2 object put`). It is declared here only so the `BACKUPS` binding exists. **Never run `alchemy destroy` against it.**
+
+### One-time bootstrap (before the first CI deploy)
+
+The Alchemy remote state store (a worker + Durable Object backed by the account's Secrets Store) must exist before a CI deploy can succeed. Run this once, locally, with an authenticated admin profile:
 
 ```bash
-# Required: Bun 1.4.0+
-curl -fsSL https://bun.sh/install | bash
-
-# Required: wrangler CLI v4+
-bun add -g wrangler
-
-# Required: authenticated with Cloudflare
-wrangler login
+cd cloudflare/infra
+bun alchemy cloudflare bootstrap
 ```
 
-### 1. Clone and install
+Afterwards CI (`CI=true`, set automatically by GitHub Actions) resolves state-store credentials from the Cloudflare Secrets Store on every run; runners hold no local state.
+
+### Worker secrets (no longer `wrangler secret put`)
+
+Worker secrets are declared as `Config.redacted("<NAME>")` in `alchemy.run.ts`. They resolve from environment variables **at deploy time** and are uploaded to the workers as `secret_text`. There is no separate secret-setting step. In CI they come from GitHub repo secrets (checklist under CI/CD below); for a manual local deploy, export the env vars in your shell first.
+
+The bot↔API contract is unchanged:
+
+- `BOT_API_SECRET` must be identical on both workers. The bot sends it as the `X-Bot-Api-Secret` header; the API rejects telegram_id-keyed endpoints without it.
+- `TELEGRAM_WEBHOOK_SECRET` gates the webhook: the bot worker rejects all webhook POSTs without it (fail closed).
+- Both workers fail closed when their required secrets are unset.
+
+### D1 migrations
+
+Alchemy applies `cloudflare/migrations/*.sql` on every deploy, using the wrangler-compatible `d1_migrations` tracking table. The 13 wrangler-applied migrations are already recorded there, so they are recognized and skipped. Adding a migration means dropping a new `NNNN_name.sql` file into `cloudflare/migrations/`; it applies on the next deploy. The stack deploys the data resources before the workers, so pending migrations apply before the workers that bind them.
+
+### Manual local deploy
 
 ```bash
 git clone https://github.com/irfndi/prism-liquidity-agent.git
-cd prism-liquidity-agent
-bun install
-cd cloudflare && bun install
+cd prism-liquidity-agent/cloudflare
+bun install                        # workspace install: workers (effect@3) + infra (effect@4)
+
+# Secrets resolve from env at deploy time (see above):
+export TELEGRAM_BOT_TOKEN=...
+export TELEGRAM_WEBHOOK_SECRET=...
+export BOT_API_SECRET=...
+export ADMIN_API_KEY=...
+export FEE_WALLET_ADDRESS=...
+
+# These root scripts delegate to the infra workspace package (cd infra):
+bun run plan     # alchemy deploy --stage prod --dry-run
+bun run deploy   # alchemy deploy --stage prod --yes
 ```
 
-### 2. Create Cloudflare resources (one-time)
+Cloudflare credentials resolve from the standard `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` env vars (or an authenticated Alchemy profile, e.g. `cd cloudflare/infra && bun alchemy login --profile admin`).
+
+### Telegram webhook (out-of-band manual step)
+
+Telegram webhook registration is NOT managed by Alchemy. It is the same manual step under either pipeline:
 
 ```bash
-# Set account ID for all subsequent commands
-export CLOUDFLARE_ACCOUNT_ID=a37da71c38a2f7ab732057d87d5d0f6e
-
-# D1 database
-wrangler d1 create prism-db
-# Note the database_id from output, update wrangler.toml
-
-# KV namespace
-wrangler kv namespace create "prism-cache"
-# Note the id from output, update wrangler.toml
-
-# R2 bucket
-wrangler r2 bucket create prism-backups
-
-# Vectorize index (384 dimensions, cosine similarity)
-wrangler vectorize create prism-memory --dimensions=384 --metric=cosine
-```
-
-### 3. Configure `wrangler.toml`
-
-Replace the IDs in `wrangler.toml` and `wrangler.telegram.toml`:
-
-```toml
-[[d1_databases]]
-binding = "DB"
-database_name = "prism-db"
-database_id = "YOUR_D1_DATABASE_ID"  # from step 2
-
-[[kv_namespaces]]
-binding = "CACHE"
-id = "YOUR_KV_NAMESPACE_ID"  # from step 2
-```
-
-### 4. Run database migrations
-
-```bash
-# Apply migrations to remote (production) D1
-wrangler d1 migrations apply prism-db --remote
-
-# Or to local D1 for development
-wrangler d1 migrations apply prism-db --local
-```
-
-### 5. Set secrets
-
-```bash
-# Telegram bot token (get from @BotFather)
-echo "YOUR_TELEGRAM_BOT_TOKEN" | wrangler secret put TELEGRAM_BOT_TOKEN
-
-# REQUIRED: webhook secret — the bot worker rejects all webhook POSTs without it
-echo "RANDOM_SECRET" | wrangler secret put TELEGRAM_WEBHOOK_SECRET
-
-# REQUIRED: shared secret between the telegram bot and API workers.
-# The bot sends it as the X-Bot-Api-Secret header; the API rejects
-# telegram_id-keyed endpoints without it. Use the SAME value in both workers:
-echo "RANDOM_SHARED_SECRET" | wrangler secret put BOT_API_SECRET
-echo "RANDOM_SHARED_SECRET" | wrangler secret put BOT_API_SECRET --config wrangler.telegram.toml
-
-# Optional: fee collection wallet (Solana address)
-echo "YOUR_SOLANA_ADDRESS" | wrangler secret put FEE_WALLET_ADDRESS
-```
-
-### 6. Deploy both workers
-
-```bash
-# Deploy API worker
-wrangler deploy
-
-# Deploy Telegram bot worker
-wrangler deploy --config wrangler.telegram.toml
-```
-
-### 7. Setup Telegram webhook
-
-```bash
-# Replace YOUR_BOT_TOKEN with the token from step 5.
-# secret_token MUST match TELEGRAM_WEBHOOK_SECRET — the worker fails closed without it.
-curl "https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook?url=https://prism-telegram-bot.YOUR_SUBDOMAIN.workers.dev/webhook&secret_token=YOUR_WEBHOOK_SECRET"
+# Replace YOUR_BOT_TOKEN with the @BotFather token.
+# secret_token MUST match TELEGRAM_WEBHOOK_SECRET; the worker fails closed without it.
+curl "https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook?url=https://prism-telegram-bot.irfndi.workers.dev/webhook&secret_token=YOUR_WEBHOOK_SECRET"
 
 # Verify
 curl "https://api.telegram.org/botYOUR_BOT_TOKEN/getWebhookInfo"
@@ -227,6 +223,8 @@ wrangler tail prism-telegram-bot
 
 ## Testing
 
+The vitest-pool-workers suite uses `wrangler.telegram.test.toml` internally (the only wrangler config left in this directory; it is not used for deployment).
+
 ### Run all tests
 
 ```bash
@@ -259,67 +257,48 @@ bunx vitest run workers/telegram-bot/telegram-bot.test.ts
 ```bash
 cd cloudflare
 
-# Run API worker locally
-wrangler dev
-
-# Run Telegram bot locally (separate terminal)
-wrangler dev --config wrangler.telegram.toml
+# Run both workers locally (Alchemy dev server)
+bun run dev
 
 # Type check
 bun run typecheck
 ```
 
-### Local D1 database
-
-```bash
-# Apply migrations to local D1
-wrangler d1 migrations apply prism-db --local
-
-# Query local D1
-wrangler d1 execute prism-db --local --command "SELECT * FROM users;"
-```
-
 ### Adding a new migration
 
+Drop a new file into `cloudflare/migrations/` following the existing numbering:
+
 ```bash
-# Create new migration file
-touch cloudflare/migrations/0002_add_field.sql
-
-# Add SQL (use CREATE TABLE IF NOT EXISTS, etc.)
-# Apply locally
-wrangler d1 migrations apply prism-db --local
-
-# Apply to production
-wrangler d1 migrations apply prism-db --remote
+touch cloudflare/migrations/0014_add_field.sql
 ```
+
+Write the SQL; it applies to the production D1 on the next `bun run deploy` (manual or CI). The `d1_migrations` tracking table keeps already-applied migrations from re-running.
 
 ## CI/CD
 
-GitHub Actions workflow at `.github/workflows/deploy-cloudflare.yml` automatically:
+The GitHub Actions workflow at `.github/workflows/deploy-cloudflare.yml` runs on pushes and PRs to `main` that touch `cloudflare/**`:
 
-1. Runs on push to `main` (when `cloudflare/**` changes)
-2. Installs dependencies with Bun
-3. Runs type check
-4. Applies D1 migrations to remote
-5. Deploys API worker
-6. Deploys Telegram bot worker
+1. Installs dependencies with Bun at `cloudflare/` (the workspace install covers the `infra/` package)
+2. Runs the type check (`bun run typecheck`), which covers both the workers' `tsc` and the `infra` package's `tsc`
+3. **On PRs, stops there.** The deploy runs only on merge to `main`: `bun run deploy`, which delegates to `infra/` and runs `alchemy deploy --stage prod --yes`
 
-**Required GitHub Secrets:**
+**There are no PR preview deploys, by design.** Every stage would share the single production D1 / KV / R2 / Vectorize, so a per-PR stage destroyed on PR close could drop production data. One production stack, stage `prod`.
 
-- `CLOUDFLARE_API_TOKEN` — Cloudflare API token with Workers, D1, KV, R2, Vectorize write access
-- `CLOUDFLARE_ACCOUNT_ID` — `a37da71c38a2f7ab732057d87d5d0f6e`
+**Required GitHub secrets:**
+
+| Secret                      | Status       | Purpose                                                                   |
+| --------------------------- | ------------ | ------------------------------------------------------------------------- |
+| `CLOUDFLARE_API_TOKEN`      | Existing     | Cloudflare API token (Workers, D1, KV, R2, Vectorize write); also Alchemy auth + remote state store |
+| `CLOUDFLARE_ACCOUNT_ID`     | Existing     | `a37da71c38a2f7ab732057d87d5d0f6e`                                        |
+| `TELEGRAM_BOT_TOKEN`        | **NEW**      | @BotFather token (both workers)                                           |
+| `TELEGRAM_WEBHOOK_SECRET`   | **NEW**      | Telegram `setWebhook` secret_token (bot worker)                           |
+| `BOT_API_SECRET`            | **NEW**      | Shared bot↔API secret; one value, set on both workers                     |
+| `ADMIN_API_KEY`             | **NEW**      | Admin endpoints, e.g. `/v1/audit` (API worker)                            |
+| `FEE_WALLET_ADDRESS`        | **NEW**      | Fee collection wallet, Solana address (API worker)                        |
+
+The five marked **NEW** must be added by the operator: their values cannot be extracted from the old wrangler secrets, so re-supply them. CI passes each one into the deploy environment, where `Config.redacted` resolves and uploads it as `secret_text`.
 
 ## Troubleshooting
-
-### "No workers bound to this worker"
-
-This means the worker has no cron triggers. To add one:
-
-```toml
-# In wrangler.toml
-[triggers]
-crons = ["0 */6 * * *"]  # every 6 hours
-```
 
 ### "ReferenceError: handle is not defined"
 
@@ -364,7 +343,7 @@ curl -X POST https://prism-api.example.workers.dev/v1/login \
 
 ### KV namespace not found
 
-Make sure the KV namespace ID in `wrangler.toml` matches the actual namespace. List namespaces:
+Bindings resolve by the physical title declared in `alchemy.run.ts` (`prism-cache`), not by an ID in a config file. Verify the namespace still exists in the account:
 
 ```bash
 wrangler kv namespace list
@@ -372,7 +351,7 @@ wrangler kv namespace list
 
 ## Environment Variables (non-secret)
 
-In `[vars]` section of `wrangler.toml`:
+Declared as literal strings in each worker's `env: {}` block in `alchemy.run.ts` (there is no toml `[vars]` section anymore):
 
 | Variable               | Default                                                 | Description                    |
 | ---------------------- | ------------------------------------------------------- | ------------------------------ |
@@ -380,25 +359,6 @@ In `[vars]` section of `wrangler.toml`:
 | `TELEGRAM_WEBHOOK_URL` | `https://prism-telegram-bot.irfndi.workers.dev/webhook` | Webhook URL                    |
 | `TELEGRAM_BOT_URL`     | `https://prism-telegram-bot.irfndi.workers.dev`         | Bot worker base URL (alert push) |
 | `API_BASE_URL`         | `https://prism-api.irfndi.workers.dev`                  | API URL (used by Telegram bot) |
-
-## Staging Environment
-
-To deploy a staging environment:
-
-1. Create separate resources:
-
-   ```bash
-   wrangler d1 create prism-db-staging
-   wrangler kv namespace create "prism-cache-staging"
-   ```
-
-2. Update `[env.staging]` section in `wrangler.toml` with staging IDs
-
-3. Deploy:
-   ```bash
-   wrangler deploy --env staging
-   wrangler deploy --config wrangler.telegram.toml --env staging
-   ```
 
 ## Related Documentation
 
