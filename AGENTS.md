@@ -301,8 +301,8 @@ Veto-fetch failures log the underlying gateway error (Effect wraps rejections in
 - `bench/audit.test.ts` writes to `bench/tmp-audit/` — do not commit it.
 - Coverage is configured in `vitest.config.ts`:
   - Thresholds: `statements 75`, `branches 60`, `functions 75`, `lines 75`.
-  - Excluded from coverage: `engine/index.ts`, `engine/program.ts`, `engine/adapter-service.ts`, `engine/services.ts`, `engine/types.ts`, `engine/logger.ts`, `engine/config-service.ts`, `engine/memory-service.ts`, `engine/screener-service.ts`.
-- Cloudflare tests live in `cloudflare/workers/**/*.test.ts` and run with `@cloudflare/vitest-pool-workers`.
+  - Excluded from coverage: `engine/index.ts`, `engine/types.ts`, `engine/services.ts`, `engine/logger.ts`, `engine/adapter-service.ts`, `engine/program.ts`, `engine/acp-transport.ts`, `engine/agent-detection.ts`, `engine/agent-transport.ts`, `engine/gateway-transport.ts`, `engine/hermes-api-transport.ts`, `engine/openclaw-webhook-transport.ts`, `engine/run-engine.ts`, `engine/load-env.ts`. The transport/entrypoint modules need external processes, WebSockets, or live HTTP; the rationale lives in the comments next to each exclusion in `vitest.config.ts`.
+- Cloudflare tests live in `cloudflare/workers/**/*.test.ts`, run with `@cloudflare/vitest-pool-workers`, and are a required CI check: the `cloudflare-tests` job in `.github/workflows/ci.yml` runs `bunx vitest run` inside `cloudflare/` (no path filter, no secrets — D1/KV/R2 are simulated locally).
 - The `mcp-server` subproject uses Node's built-in test runner with `tsx`.
 
 ## Deployment and release
