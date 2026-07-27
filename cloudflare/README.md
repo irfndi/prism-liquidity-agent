@@ -15,14 +15,30 @@ cloudflare/
 │   └── telegram-bot/                # Telegram webhook handler
 │       ├── index.ts                 # Bot commands: /start, /register, /link, /whoami, /status
 │       └── telegram-bot.test.ts     # Bot tests (vitest-pool-workers)
+├── infra/                           # Bun workspace package — Alchemy IaC (Effect 4 runtime)
+│   ├── alchemy.run.ts               # Alchemy composition root: both workers + D1/KV/R2/Vectorize
+│   ├── package.json                 # @prism-liquidity-agent/infra: alchemy (pinned) + effect@4
+│   └── tsconfig.json                # Strict config for the composition root
 ├── migrations/
 │   └── NNNN_*.sql                   # D1 schema migrations (users, api_keys, telegram_link_codes, …)
-├── alchemy.run.ts                   # Alchemy composition root: both workers + D1/KV/R2/Vectorize
 ├── wrangler.telegram.test.toml      # Test-only config (vitest-pool-workers), never deployed
 ├── vitest.config.ts                 # Vitest config with @cloudflare/vitest-pool-workers
-├── tsconfig.json                    # TypeScript strict config
-└── package.json                     # Dependencies: hono, effect; dev: alchemy (pinned), wrangler
+├── tsconfig.json                    # TypeScript strict config (workers)
+└── package.json                     # Workspace root; workers on effect@3 (hono); dev: wrangler, vitest
 ```
+
+> **Two Effect runtimes, one workspace.** The Worker runtime code (`workers/`,
+> `hono`) is pinned to `effect@^3.22.0`. Alchemy v2 (`alchemy@2.0.0-beta.64`)
+> requires the Effect 4 runtime (`peerDependencies effect
+> ">=4.0.0-beta.100 || >=4.0.0"`), which cannot share a dependency tree with the
+> workers. The Alchemy program is therefore isolated in its own Bun workspace
+> package, `infra/`, which carries `effect@4.0.0-beta.102` plus the
+> `@effect/platform-bun` / `@effect/platform-node` peers the Cloudflare provider
+> imports. A single `bun install` at `cloudflare/` installs both, nesting
+> `effect@4` under `infra/node_modules` while the workers resolve `effect@3` from
+> the workspace root. The worker `main` entries (`../workers/...`) are bundled by
+> Alchemy with a resolver rooted at the entry file, so they keep resolving
+> `effect@3` exactly as before.
 
 ## Live Deployment (Production)
 
@@ -35,9 +51,9 @@ cloudflare/
 
 ## Deploying via Alchemy
 
-Infrastructure is declared in TypeScript in `cloudflare/alchemy.run.ts` (Alchemy v2, "Infrastructure-as-Effects"). One typed program declares both Workers plus the D1 / KV / R2 / Vectorize resources they bind, replacing the old `wrangler.toml` / `wrangler.telegram.toml` pipeline (both files are deleted). `wrangler` stays a devDependency only for the vitest-pool-workers test suite and the out-of-band release R2 writes; the Alchemy CLI is the exact-pinned devDependency `alchemy@2.0.0-beta.64`.
+Infrastructure is declared in TypeScript in `cloudflare/infra/alchemy.run.ts` (Alchemy v2, "Infrastructure-as-Effects"). One typed program declares both Workers plus the D1 / KV / R2 / Vectorize resources they bind, replacing the old `wrangler.toml` / `wrangler.telegram.toml` pipeline (both files are deleted). `wrangler` stays a devDependency of the workspace root only for the vitest-pool-workers test suite and the out-of-band release R2 writes; the Alchemy CLI ships in the `infra/` workspace package as the exact-pinned dependency `alchemy@2.0.0-beta.64` (with the Effect-4 runtime its peers require — see the workspace note above).
 
-`cloudflare/alchemy.run.ts` is the source of truth when this document and the code disagree. The docs it is grounded on:
+`cloudflare/infra/alchemy.run.ts` is the source of truth when this document and the code disagree. The docs it is grounded on:
 
 - Workers: https://alchemy.run/cloudflare/compute/workers
 - D1: https://alchemy.run/cloudflare/data/d1
@@ -70,7 +86,7 @@ Physical identity comes from these names, so the `prod` stage never renames anyt
 The Alchemy remote state store (a worker + Durable Object backed by the account's Secrets Store) must exist before a CI deploy can succeed. Run this once, locally, with an authenticated admin profile:
 
 ```bash
-cd cloudflare
+cd cloudflare/infra
 bun alchemy cloudflare bootstrap
 ```
 
@@ -95,7 +111,7 @@ Alchemy applies `cloudflare/migrations/*.sql` on every deploy, using the wrangle
 ```bash
 git clone https://github.com/irfndi/prism-liquidity-agent.git
 cd prism-liquidity-agent/cloudflare
-bun install
+bun install                        # workspace install: workers (effect@3) + infra (effect@4)
 
 # Secrets resolve from env at deploy time (see above):
 export TELEGRAM_BOT_TOKEN=...
@@ -104,11 +120,12 @@ export BOT_API_SECRET=...
 export ADMIN_API_KEY=...
 export FEE_WALLET_ADDRESS=...
 
-bun run plan     # dry-run: review the planned diff without applying
+# These root scripts delegate to the infra workspace package (cd infra):
+bun run plan     # alchemy deploy --stage prod --dry-run
 bun run deploy   # alchemy deploy --stage prod --yes
 ```
 
-Cloudflare credentials resolve from the standard `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` env vars (or an authenticated Alchemy profile, e.g. `bun alchemy login --profile admin`).
+Cloudflare credentials resolve from the standard `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` env vars (or an authenticated Alchemy profile, e.g. `cd cloudflare/infra && bun alchemy login --profile admin`).
 
 ### Telegram webhook (out-of-band manual step)
 
@@ -261,9 +278,9 @@ Write the SQL; it applies to the production D1 on the next `bun run deploy` (man
 
 The GitHub Actions workflow at `.github/workflows/deploy-cloudflare.yml` runs on pushes and PRs to `main` that touch `cloudflare/**`:
 
-1. Installs dependencies with Bun
-2. Runs the type check (`bun run typecheck`)
-3. **On PRs, stops there.** The deploy runs only on merge to `main`: `bun run deploy`, i.e. `alchemy deploy --stage prod --yes`
+1. Installs dependencies with Bun at `cloudflare/` (the workspace install covers the `infra/` package)
+2. Runs the type check (`bun run typecheck`), which covers both the workers' `tsc` and the `infra` package's `tsc`
+3. **On PRs, stops there.** The deploy runs only on merge to `main`: `bun run deploy`, which delegates to `infra/` and runs `alchemy deploy --stage prod --yes`
 
 **There are no PR preview deploys, by design.** Every stage would share the single production D1 / KV / R2 / Vectorize, so a per-PR stage destroyed on PR close could drop production data. One production stack, stage `prod`.
 

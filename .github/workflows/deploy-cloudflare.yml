@@ -1,13 +1,22 @@
 name: Deploy Cloudflare Workers
 
-# Infrastructure is managed as TypeScript by Alchemy (`cloudflare/alchemy.run.ts`),
-# not wrangler.toml (removed — see commit). One production stack, stage `prod`.
+# Infrastructure is managed as TypeScript by Alchemy
+# (`cloudflare/infra/alchemy.run.ts`), not wrangler.toml (removed — see commit).
+# One production stack, stage `prod`.
+#
+# The Alchemy program lives in its own Bun workspace package (`cloudflare/infra`)
+# because alchemy@2.0.0-beta.64 requires the Effect 4 runtime
+# (peerDependencies effect `>=4.0.0-beta.100 || >=4.0.0`), while the Worker
+# runtime code is pinned to effect@^3.22.0. `cloudflare` is the workspace root;
+# a single `bun install` at `./cloudflare` installs both, nesting effect@4 under
+# `infra/node_modules` and keeping effect@3 for the workers. The root scripts
+# (`typecheck`, `deploy`, `plan`, `dev`) delegate to the infra package.
 #
 # REQUIRED ONE-TIME OPERATOR BOOTSTRAP (before the first deploy from this
 # workflow can succeed): the Alchemy remote state store must exist in the
 # account. Run once, locally, with an admin profile:
-#     cd cloudflare && bun alchemy login --profile admin
-#     cd cloudflare && bun alchemy cloudflare bootstrap --profile admin
+#     cd cloudflare/infra && bun alchemy login --profile admin
+#     cd cloudflare/infra && bun alchemy cloudflare bootstrap --profile admin
 # CI runners have no local state on disk, so `CI=true` (set automatically by
 # GitHub Actions) makes Alchemy resolve the state-store credentials from the
 # account's Cloudflare Secrets Store on every run.
@@ -44,14 +53,17 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      # Type check covers BOTH workspace packages: the root workers' tsc and the
+      # infra package's tsc (the root `typecheck` script chains them).
       - name: Type check
         run: bun run typecheck
 
-      # Production deploy (main only). `bun run deploy` runs the pinned
-      # `alchemy deploy --stage prod --yes`; the Alchemy CLI ships as the
-      # exact-pinned `alchemy` devDependency installed above. Config.redacted
-      # worker secrets resolve from these env vars at deploy time and are
-      # uploaded to Cloudflare as `secret_text`.
+      # Production deploy (main only). `bun run deploy` at the workspace root
+      # delegates to `bun run --cwd infra deploy`, i.e. the pinned
+      # `alchemy deploy --stage prod --yes` run from `cloudflare/infra` (where the
+      # alchemy CLI + its Effect-4 runtime resolve). Config.redacted worker
+      # secrets resolve from these env vars at deploy time and are uploaded to
+      # Cloudflare as `secret_text`.
       - name: Deploy via Alchemy
         if: github.ref == 'refs/heads/main'
         run: bun run deploy

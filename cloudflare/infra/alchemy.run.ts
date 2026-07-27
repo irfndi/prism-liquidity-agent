@@ -45,7 +45,7 @@ import * as Effect from "effect/Effect";
  */
 export const database = Cloudflare.D1.Database("database", {
   name: "prism-db",
-  migrationsDir: "./migrations",
+  migrationsDir: "../migrations",
   migrationsTable: "d1_migrations",
 });
 
@@ -110,7 +110,7 @@ const observability = {
 /** API worker — `prism-api.irfndi.workers.dev`. */
 export const api = Cloudflare.Worker("api", {
   name: "prism-api",
-  main: "./workers/api/index.ts",
+  main: "../workers/api/index.ts",
   compatibility,
   observability,
   env: {
@@ -134,7 +134,7 @@ export const api = Cloudflare.Worker("api", {
 /** Telegram bot worker — `prism-telegram-bot.irfndi.workers.dev`. */
 export const telegramBot = Cloudflare.Worker("telegramBot", {
   name: "prism-telegram-bot",
-  main: "./workers/telegram-bot/index.ts",
+  main: "../workers/telegram-bot/index.ts",
   compatibility,
   observability,
   env: {
