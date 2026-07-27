@@ -1,28 +1,13 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { env, createExecutionContext } from "cloudflare:test";
 import worker, { type Env } from "./index";
+import { buildRequest, setupCommonSchema } from "./test-utils";
 
 // Shared bot secret for bot-authenticated endpoints (X-Bot-Api-Secret header).
 const BOT_SECRET = "test-bot-api-secret";
 const testEnv = { ...env, BOT_API_SECRET: BOT_SECRET } as unknown as Env;
 // Environment without the secret configured — endpoints must fail closed.
 const noSecretEnv = env as unknown as Env;
-
-function buildRequest(
-  method: string,
-  path: string,
-  body?: unknown,
-  headers?: Record<string, string>,
-): Request {
-  const init: RequestInit = {
-    method,
-    headers: { "Content-Type": "application/json", ...headers },
-  };
-  if (body !== undefined) {
-    init.body = JSON.stringify(body);
-  }
-  return new Request(`https://example.com${path}`, init);
-}
 
 function withBotSecret(req: Request, secret: string = BOT_SECRET): Request {
   return new Request(req.url, {
@@ -40,35 +25,7 @@ async function insertUser(id: string, telegramId?: string): Promise<void> {
 
 describe("Telegram binding routes", () => {
   beforeAll(async () => {
-    await env.DB.prepare(
-      `CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        telegram_id TEXT UNIQUE,
-        tier TEXT NOT NULL DEFAULT 'free',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-    ).run();
-    await env.DB.prepare(
-      `CREATE TABLE IF NOT EXISTS api_keys (
-        key_hash TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_used_at DATETIME
-      )`,
-    ).run();
-    await env.DB.prepare(
-      `CREATE TABLE IF NOT EXISTS subscriptions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        tier TEXT NOT NULL,
-        period_start DATETIME NOT NULL,
-        period_end DATETIME NOT NULL,
-        payment_method TEXT,
-        payment_tx_signature TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-    ).run();
+    await setupCommonSchema(env.DB);
     await env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

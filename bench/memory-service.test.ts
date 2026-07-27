@@ -40,7 +40,8 @@ const PATTERN_TTL_MS = 90 * DAY_MS;
 const WARNING_TTL_MS = 60 * DAY_MS;
 const OUTCOME_TTL_MS = 180 * DAY_MS;
 
-/** Detect sqlite-vec once so vec-dependent tests skip cleanly where it is absent
+/** Detect sqlite-vec once so vec-dependent tests report as explicit skips
+ * (it.skipIf) instead of silent passes where it is absent
  * (mirrors bench/db-memory.test.ts). */
 const vecAvailable = (() => {
   try {
@@ -127,8 +128,7 @@ describe("MemoryLive.initialize", () => {
 // ─── upsert + getRelevantContext roundtrip ─────────────────────────────────────
 
 describe("MemoryLive.upsert + getRelevantContext roundtrip", () => {
-  it("recalls a recorded entry with all fields passed through", async () => {
-    if (!vecAvailable) return;
+  it.skipIf(!vecAvailable)("recalls a recorded entry with all fields passed through", async () => {
     const content = "SOL/USDC pool performed well under steady volume";
     const result = await run(
       Effect.gen(function* () {
@@ -166,8 +166,7 @@ describe("MemoryLive.upsert + getRelevantContext roundtrip", () => {
   // forbids; exercising it would require a type suppression. Documented, not
   // forced.
 
-  it("returns [] on an empty store without throwing", async () => {
-    if (!vecAvailable) return;
+  it.skipIf(!vecAvailable)("returns [] on an empty store without throwing", async () => {
     const result = await run(
       Effect.gen(function* () {
         const memory = yield* MemoryService;
@@ -178,8 +177,7 @@ describe("MemoryLive.upsert + getRelevantContext roundtrip", () => {
     expect(result).toEqual([]);
   });
 
-  it("applies the default topK of 5 when no limit is given", async () => {
-    if (!vecAvailable) return;
+  it.skipIf(!vecAvailable)("applies the default topK of 5 when no limit is given", async () => {
     const exact = "needle memory we must find";
     const result = await run(
       Effect.gen(function* () {
@@ -201,8 +199,7 @@ describe("MemoryLive.upsert + getRelevantContext roundtrip", () => {
     expect(result.some((e) => e.content === exact)).toBe(true);
   });
 
-  it("respects an explicit topK limit", async () => {
-    if (!vecAvailable) return;
+  it.skipIf(!vecAvailable)("respects an explicit topK limit", async () => {
     const exact = "cap probe memory";
     const result = await run(
       Effect.gen(function* () {
@@ -227,31 +224,32 @@ describe("MemoryLive.upsert + getRelevantContext roundtrip", () => {
 // ─── relevance ranking (fallback hash embedding) ─────────────────────────────
 
 describe("MemoryLive.getRelevantContext ranking", () => {
-  it("ranks an exact-text match above unrelated memories (lexical, not semantic)", async () => {
-    if (!vecAvailable) return;
-    const target = "pool gamma fees compounded daily";
-    const result = await run(
-      Effect.gen(function* () {
-        const memory = yield* MemoryService;
-        yield* memory.upsert({ content: "zzz qqq unrelated noise blob", category: "pattern" });
-        yield* memory.upsert({ content: target, category: "pattern" });
-        yield* memory.upsert({ content: "completely different text here", category: "pattern" });
-        return yield* memory.getRelevantContext(target, 5);
-      }),
-      memoryLayer(),
-    );
-    expect(result.length).toBe(3);
-    // Identical text → identical normalized vector → distance 0 → simScore 1,
-    // which no different-text row can beat (all else equal on recency). Rank 0.
-    expect(result[0]!.content).toBe(target);
-  });
+  it.skipIf(!vecAvailable)(
+    "ranks an exact-text match above unrelated memories (lexical, not semantic)",
+    async () => {
+      const target = "pool gamma fees compounded daily";
+      const result = await run(
+        Effect.gen(function* () {
+          const memory = yield* MemoryService;
+          yield* memory.upsert({ content: "zzz qqq unrelated noise blob", category: "pattern" });
+          yield* memory.upsert({ content: target, category: "pattern" });
+          yield* memory.upsert({ content: "completely different text here", category: "pattern" });
+          return yield* memory.getRelevantContext(target, 5);
+        }),
+        memoryLayer(),
+      );
+      expect(result.length).toBe(3);
+      // Identical text → identical normalized vector → distance 0 → simScore 1,
+      // which no different-text row can beat (all else equal on recency). Rank 0.
+      expect(result[0]!.content).toBe(target);
+    },
+  );
 });
 
 // ─── pool-scoped filtering ───────────────────────────────────────────────────
 
 describe("MemoryLive.getRelevantContext pool scoping", () => {
-  it("returns only the requested pool's entries when scoped", async () => {
-    if (!vecAvailable) return;
+  it.skipIf(!vecAvailable)("returns only the requested pool's entries when scoped", async () => {
     const shared = "shared memory text for scoping";
     const result = await run(
       Effect.gen(function* () {
@@ -298,23 +296,23 @@ describe("MemoryLive.recordOutcome", () => {
     return { outcome: entry.outcome, category: entry.category, content: entry.content };
   }
 
-  it("classifies positive PnL as profit and stores it as an outcome", async () => {
-    if (!vecAvailable) return;
-    const r = await recordAndRecall(42.5);
-    expect(r.category).toBe("outcome");
-    expect(r.outcome).toBe("profit");
-    expect(r.content).toContain("PnL=$42.50");
-  });
+  it.skipIf(!vecAvailable)(
+    "classifies positive PnL as profit and stores it as an outcome",
+    async () => {
+      const r = await recordAndRecall(42.5);
+      expect(r.category).toBe("outcome");
+      expect(r.outcome).toBe("profit");
+      expect(r.content).toContain("PnL=$42.50");
+    },
+  );
 
-  it("classifies negative PnL as loss", async () => {
-    if (!vecAvailable) return;
+  it.skipIf(!vecAvailable)("classifies negative PnL as loss", async () => {
     const r = await recordAndRecall(-17.25);
     expect(r.outcome).toBe("loss");
     expect(r.content).toContain("PnL=$-17.25");
   });
 
-  it("classifies zero PnL as neutral", async () => {
-    if (!vecAvailable) return;
+  it.skipIf(!vecAvailable)("classifies zero PnL as neutral", async () => {
     const r = await recordAndRecall(0);
     expect(r.outcome).toBe("neutral");
     expect(r.content).toContain("PnL=$0.00");
@@ -324,8 +322,7 @@ describe("MemoryLive.recordOutcome", () => {
 // ─── TTL assignment ──────────────────────────────────────────────────────────
 
 describe("MemoryLive TTL assignment", () => {
-  it("sets a pattern entry's expiry to createdAt + 90 days", async () => {
-    if (!vecAvailable) return;
+  it.skipIf(!vecAvailable)("sets a pattern entry's expiry to createdAt + 90 days", async () => {
     const content = "ttl pattern probe";
     const result = await run(
       Effect.gen(function* () {
@@ -339,8 +336,7 @@ describe("MemoryLive TTL assignment", () => {
     expect(entry.expiresAt - entry.createdAt).toBe(PATTERN_TTL_MS);
   });
 
-  it("sets an outcome entry's expiry to createdAt + 180 days", async () => {
-    if (!vecAvailable) return;
+  it.skipIf(!vecAvailable)("sets an outcome entry's expiry to createdAt + 180 days", async () => {
     const pool = "PoolTtl";
     const expectedContent = `HOLD on ${pool}: PnL=$5.00. Context: steady`;
     const result = await run(
@@ -355,8 +351,7 @@ describe("MemoryLive TTL assignment", () => {
     expect(entry.expiresAt - entry.createdAt).toBe(OUTCOME_TTL_MS);
   });
 
-  it("sets a warning entry's expiry to createdAt + 60 days", async () => {
-    if (!vecAvailable) return;
+  it.skipIf(!vecAvailable)("sets a warning entry's expiry to createdAt + 60 days", async () => {
     const content = "ttl warning probe";
     const result = await run(
       Effect.gen(function* () {
@@ -374,76 +369,79 @@ describe("MemoryLive TTL assignment", () => {
 // ─── expiry (backdated rows) + pruneExpired ──────────────────────────────────
 
 describe("MemoryLive expiry + pruneExpired", () => {
-  it("getRelevantContext omits expired rows but returns fresh ones", async () => {
-    if (!vecAvailable) return;
-    const expired = "expired ghost memory";
-    const fresh = "fresh living memory";
-    const result = await run(
-      Effect.gen(function* () {
-        const memory = yield* MemoryService;
-        const dbService = yield* DbService;
-        const raw = dbService.db as Database;
-        const now = Date.now();
-        // Expired 10 days ago (created 100 days ago, well past the 60d warning TTL).
-        yield* Effect.promise(() =>
-          insertBackdated(raw, {
-            content: expired,
-            category: "warning",
-            createdAt: now - 100 * DAY_MS,
-            expiresAt: now - 10 * DAY_MS,
-          }),
-        );
-        // Fresh row via the service path (expiresAt = now + TTL, in the future).
-        yield* memory.upsert({ content: fresh, category: "warning" });
-        return yield* memory.getRelevantContext(fresh, 10);
-      }),
-      memoryWithDbLayer(),
-    );
-    const contents = result.map((e) => e.content);
-    expect(contents).toContain(fresh);
-    expect(contents).not.toContain(expired);
-  });
+  it.skipIf(!vecAvailable)(
+    "getRelevantContext omits expired rows but returns fresh ones",
+    async () => {
+      const expired = "expired ghost memory";
+      const fresh = "fresh living memory";
+      const result = await run(
+        Effect.gen(function* () {
+          const memory = yield* MemoryService;
+          const dbService = yield* DbService;
+          const raw = dbService.db as Database;
+          const now = Date.now();
+          // Expired 10 days ago (created 100 days ago, well past the 60d warning TTL).
+          yield* Effect.promise(() =>
+            insertBackdated(raw, {
+              content: expired,
+              category: "warning",
+              createdAt: now - 100 * DAY_MS,
+              expiresAt: now - 10 * DAY_MS,
+            }),
+          );
+          // Fresh row via the service path (expiresAt = now + TTL, in the future).
+          yield* memory.upsert({ content: fresh, category: "warning" });
+          return yield* memory.getRelevantContext(fresh, 10);
+        }),
+        memoryWithDbLayer(),
+      );
+      const contents = result.map((e) => e.content);
+      expect(contents).toContain(fresh);
+      expect(contents).not.toContain(expired);
+    },
+  );
 
-  it("pruneExpired deletes exactly the expired rows and is idempotent", async () => {
-    if (!vecAvailable) return;
-    const fresh = "survivor memory";
-    const result = await run(
-      Effect.gen(function* () {
-        const memory = yield* MemoryService;
-        const dbService = yield* DbService;
-        const raw = dbService.db as Database;
-        const now = Date.now();
-        yield* Effect.promise(() =>
-          insertBackdated(raw, {
-            content: "expired row one",
-            category: "pattern",
-            createdAt: now - 200 * DAY_MS,
-            expiresAt: now - 50 * DAY_MS,
-          }),
-        );
-        yield* Effect.promise(() =>
-          insertBackdated(raw, {
-            content: "expired row two",
-            category: "outcome",
-            createdAt: now - 300 * DAY_MS,
-            expiresAt: now - 1 * DAY_MS,
-          }),
-        );
-        yield* memory.upsert({ content: fresh, category: "pattern" });
-        const firstPrune = yield* memory.pruneExpired();
-        const secondPrune = yield* memory.pruneExpired();
-        const survivors = yield* memory.getRelevantContext(fresh, 10);
-        return { firstPrune, secondPrune, survivors };
-      }),
-      memoryWithDbLayer(),
-    );
-    expect(result.firstPrune).toBe(2);
-    expect(result.secondPrune).toBe(0);
-    expect(result.survivors.map((e) => e.content)).toContain(fresh);
-  });
+  it.skipIf(!vecAvailable)(
+    "pruneExpired deletes exactly the expired rows and is idempotent",
+    async () => {
+      const fresh = "survivor memory";
+      const result = await run(
+        Effect.gen(function* () {
+          const memory = yield* MemoryService;
+          const dbService = yield* DbService;
+          const raw = dbService.db as Database;
+          const now = Date.now();
+          yield* Effect.promise(() =>
+            insertBackdated(raw, {
+              content: "expired row one",
+              category: "pattern",
+              createdAt: now - 200 * DAY_MS,
+              expiresAt: now - 50 * DAY_MS,
+            }),
+          );
+          yield* Effect.promise(() =>
+            insertBackdated(raw, {
+              content: "expired row two",
+              category: "outcome",
+              createdAt: now - 300 * DAY_MS,
+              expiresAt: now - 1 * DAY_MS,
+            }),
+          );
+          yield* memory.upsert({ content: fresh, category: "pattern" });
+          const firstPrune = yield* memory.pruneExpired();
+          const secondPrune = yield* memory.pruneExpired();
+          const survivors = yield* memory.getRelevantContext(fresh, 10);
+          return { firstPrune, secondPrune, survivors };
+        }),
+        memoryWithDbLayer(),
+      );
+      expect(result.firstPrune).toBe(2);
+      expect(result.secondPrune).toBe(0);
+      expect(result.survivors.map((e) => e.content)).toContain(fresh);
+    },
+  );
 
-  it("returns 0 and keeps every row when nothing is expired", async () => {
-    if (!vecAvailable) return;
+  it.skipIf(!vecAvailable)("returns 0 and keeps every row when nothing is expired", async () => {
     const result = await run(
       Effect.gen(function* () {
         const memory = yield* MemoryService;
@@ -464,23 +462,26 @@ describe("MemoryLive expiry + pruneExpired", () => {
 // ─── degraded mode: vec_memory absent ────────────────────────────────────────
 
 describe("MemoryLive degraded mode (vec_memory absent)", () => {
-  it("upsert no-ops, recall returns [], prune returns 0 after vec_memory is dropped", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const memory = yield* MemoryService;
-        const dbService = yield* DbService;
-        const raw = dbService.db as Database;
-        // Knock the vector table out from under the live service. Every memory
-        // op guards on hasVecMemoryTable(db) and degrades to a no-op/[].
-        raw.exec("DROP TABLE vec_memory");
-        yield* memory.upsert({ content: "orphan", category: "pattern", poolAddress: "PoolX" });
-        const recalled = yield* memory.getRelevantContext("orphan", 5);
-        const pruned = yield* memory.pruneExpired();
-        return { recalled, pruned };
-      }),
-      memoryWithDbLayer(),
-    );
-    expect(result.recalled).toEqual([]);
-    expect(result.pruned).toBe(0);
-  });
+  it.skipIf(!vecAvailable)(
+    "upsert no-ops, recall returns [], prune returns 0 after vec_memory is dropped",
+    async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const memory = yield* MemoryService;
+          const dbService = yield* DbService;
+          const raw = dbService.db as Database;
+          // Knock the vector table out from under the live service. Every memory
+          // op guards on hasVecMemoryTable(db) and degrades to a no-op/[].
+          raw.exec("DROP TABLE vec_memory");
+          yield* memory.upsert({ content: "orphan", category: "pattern", poolAddress: "PoolX" });
+          const recalled = yield* memory.getRelevantContext("orphan", 5);
+          const pruned = yield* memory.pruneExpired();
+          return { recalled, pruned };
+        }),
+        memoryWithDbLayer(),
+      );
+      expect(result.recalled).toEqual([]);
+      expect(result.pruned).toBe(0);
+    },
+  );
 });

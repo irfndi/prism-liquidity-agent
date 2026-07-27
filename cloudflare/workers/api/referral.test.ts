@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { env, createExecutionContext } from "cloudflare:test";
 import worker, { type Env } from "./index";
+import { buildRequest, clearRegisterRateLimit, setupCommonSchema } from "./test-utils";
 
 const testEnv = env as unknown as Env;
 let referrerKey = "";
@@ -11,22 +12,6 @@ let refereeId = "";
 // Codes are 8 chars from the unambiguous alphabet ABCDEFGHJKLMNPQRSTUVWXYZ23456789
 // (no I, O, 0, 1) — see generateReferralCode() in the worker.
 const REFERRAL_CODE_RE = /^[A-HJ-NP-Z2-9]{8}$/;
-
-function buildRequest(
-  method: string,
-  path: string,
-  body?: unknown,
-  headers?: Record<string, string>,
-): Request {
-  const init: RequestInit = {
-    method,
-    headers: { "Content-Type": "application/json", ...headers },
-  };
-  if (body !== undefined) {
-    init.body = JSON.stringify(body);
-  }
-  return new Request(`https://example.com${path}`, init);
-}
 
 async function registerCliUser(): Promise<{ apiKey: string; userId: string }> {
   const response = await worker.fetch(
@@ -53,35 +38,7 @@ async function issueCode(key: string): Promise<string> {
 
 describe("Referral API", () => {
   beforeAll(async () => {
-    await env.DB.prepare(
-      `CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        telegram_id TEXT UNIQUE,
-        tier TEXT NOT NULL DEFAULT 'free',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-    ).run();
-    await env.DB.prepare(
-      `CREATE TABLE IF NOT EXISTS api_keys (
-        key_hash TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_used_at DATETIME
-      )`,
-    ).run();
-    await env.DB.prepare(
-      `CREATE TABLE IF NOT EXISTS subscriptions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        tier TEXT NOT NULL,
-        period_start DATETIME NOT NULL,
-        period_end DATETIME NOT NULL,
-        payment_method TEXT,
-        payment_tx_signature TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-    ).run();
+    await setupCommonSchema(env.DB);
     await env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS referral_codes (
         code TEXT PRIMARY KEY,
@@ -113,9 +70,7 @@ describe("Referral API", () => {
     await env.DB.prepare("DELETE FROM user_credits").run();
     await env.DB.prepare("DELETE FROM referrals").run();
     await env.DB.prepare("DELETE FROM referral_codes").run();
-    await env.DB.prepare("DELETE FROM api_keys").run();
-    await env.DB.prepare("DELETE FROM users").run();
-    await env.CACHE.delete("rate_limit:register:unknown");
+    await clearRegisterRateLimit(env.CACHE);
 
     const referrer = await registerCliUser();
     referrerKey = referrer.apiKey;

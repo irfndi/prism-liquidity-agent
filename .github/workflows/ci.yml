@@ -50,6 +50,32 @@ jobs:
       - name: Run tests with coverage gate
         run: bun run coverage
 
+  # Cloudflare worker suites (API route tests + Telegram bot) on
+  # vitest-pool-workers, which simulates D1/KV/R2 locally — no Cloudflare
+  # credentials needed. The root coverage gate only measures bench/** and
+  # deploy-cloudflare.yml only typechecks, so without this job a regression in
+  # the worker suites could pass every required check and reach the live
+  # Workers. Deliberately standalone (no `needs: build`) and limited to the
+  # cloudflare/ subproject so it stays green independent of engine changes.
+  cloudflare-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: canary
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: cloudflare
+
+      - name: Run worker tests
+        run: bunx vitest run
+        working-directory: cloudflare
+
   # Canary release channel: build + publish a per-merge canary bundle to R2
   # whenever CI passes on main. Mirrors release.yml's bundle/manifest patterns
   # but publishes to a canary-only R2 prefix and flips a single manifest
