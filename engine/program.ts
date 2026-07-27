@@ -421,6 +421,23 @@ export function positionsForPool(
 }
 
 /**
+ * Idle-redeploy confidence (P2 3654054423): repo doctrine (AGENTS.md
+ * §decision-loop) gives a modeled/fabricated fee/IL ratio NO vote in an ENTER
+ * gate in EITHER direction. gecko candidates reach the pass with
+ * feeIlRatioKnown=false (their fee figure is a binStep base-rate MODEL on real
+ * volume), so the fee term is applied ONLY when the ratio is measured (datapi);
+ * otherwise confidence stays at the neutral base. This exactly mirrors how
+ * weightedEntryScore drops its fee term when feeIlRatioKnown is false — a
+ * modeled ratio can neither RAISE nor LOWER redeploy confidence.
+ */
+export function computeIdleRedeployConfidence(args: {
+  readonly feeIlRatio: number;
+  readonly feeIlRatioKnown: boolean;
+}): number {
+  return args.feeIlRatioKnown ? Math.min(0.5 + args.feeIlRatio * 0.05, 0.85) : 0.5;
+}
+
+/**
  * A pool that passed this cycle's ENTER candidate conditions + weighted entry
  * score in-pool but whose normal ENTER did not consume the slot — eligible
  * for the opt-in idle-capital redeploy pass after the pools loop. The pass
@@ -1980,6 +1997,22 @@ export const program = Effect.gen(function* () {
           })
           .pipe(Effect.catchAll(() => Effect.void));
 
+      // P2 (3654054425, entry backoff): if this pool's normal ENTER failed with
+      // an insufficient-token-balance error earlier THIS cycle (or earlier),
+      // entryFailureBackoff was armed. Retrying the redeploy at the larger
+      // widened size would repeat a known-doomed entry and amplify RPC/tx work.
+      // Honor the SAME active-backoff predicate the normal ENTER gate uses
+      // (evaluatePool's `[entry-backoff]` block) — an active entry backoff on the
+      // chosen candidate skips the whole pass (the pass dispatches at most once).
+      const redeployEntryBackoff = entryFailureBackoff.get(candidate.poolAddress);
+      if (redeployEntryBackoff && redeployEntryBackoff.nextAttemptAt > Date.now()) {
+        yield* recordRedeploySkip(
+          `[idle-redeploy] skipped — entry backoff active (insufficient token balance; retry in ${Math.ceil((redeployEntryBackoff.nextAttemptAt - Date.now()) / 60_000)} minutes)`,
+          "[idle-redeploy] entry-failure backoff active",
+        );
+        return;
+      }
+
       // The pass never pushes past the hard open-position cap; the same count
       // is re-checked against fresh state by allocation below and by risk
       // gate 6 at execution.
@@ -2033,10 +2066,242 @@ export const program = Effect.gen(function* () {
       let decision: AgentDecision = {
         action: "ENTER",
         poolAddress: candidate.poolAddress,
-        confidence: Math.min(0.5 + candidate.feeIlRatio * 0.05, 0.85),
+        // P2 (3654054423): fee/IL votes on confidence ONLY when measured
+        // (datapi); a modeled ratio (gecko, feeIlRatioKnown=false) gets the
+        // neutral base — see computeIdleRedeployConfidence.
+        confidence: computeIdleRedeployConfidence({
+          feeIlRatio: candidate.feeIlRatio,
+          feeIlRatioKnown: candidate.metrics.feeIlRatioKnown,
+        }),
         reasoning: `[idle-redeploy] Deploying $${idleCapitalUsd.toFixed(0)} idle capital — Fee/IL ${candidate.feeIlRatio.toFixed(2)}, score ${candidate.entryScore.toFixed(3)}, TVL $${candidate.pool.tvlUsd.toFixed(0)}`,
         positionSizeUsd: allocation.adjustedDepositUsd,
       };
+
+      // ── Agent overlay (P1 3654054419): the redeploy deploys capital exactly
+      // like a normal ENTER, so under AGENTIC_MODE it must pass through the SAME
+      // per-decision overlay evaluatePool's tail uses, BEFORE risk evaluation —
+      // supervised requires an approved queued proposal, veto may lower
+      // confidence or force HOLD, and full/suggest are honored within their
+      // documented bounds. The overlay can only CONSTRAIN an already-qualified
+      // candidate (proceed, adjust-within-bounds, or skip); it never promotes
+      // the redeploy past what a normal ENTER would be allowed. Invokes the SAME
+      // shared functions in the SAME order as the in-slot tail. AGENTIC_MODE=false
+      // (default) skips the whole block → zero behavior change.
+      let overlayAppliedProposalId: string | undefined;
+      if (config.agentiveMode) {
+        const proposalMode = config.agentProposalMode;
+        const now = Date.now();
+        const overlayPoolAddress = candidate.poolAddress;
+        const overlayHasOpenPosition =
+          positionsForPool(trackedPositions, overlayPoolAddress).length > 0;
+        const overlayWarnings = yield* memory
+          .getRelevantContext(`warnings for pool ${overlayPoolAddress}`, 3, overlayPoolAddress)
+          .pipe(Effect.catchAll(() => Effect.succeed([])));
+        const overlayRecentDecisions = yield* audit
+          .getRecentDecisions(10)
+          .pipe(Effect.catchAll(() => Effect.succeed([])));
+        let overlaySkip = false;
+
+        if (proposalMode === "veto") {
+          // Veto is a safety overlay, applied fail-open exactly as the tail does:
+          // a fetch failure leaves the decision unchanged; a returned override is
+          // adopted (it may lower confidence or force HOLD).
+          const enhanced = yield* agent
+            .enhanceDecision(decision, {
+              decision,
+              pool: candidate.pool,
+              metrics: candidate.metrics,
+              warnings: overlayWarnings,
+              recentDecisions: overlayRecentDecisions,
+              hasOpenPosition: overlayHasOpenPosition,
+            })
+            .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          if (enhanced) {
+            idleRedeployLogger.info("Agent veto override on idle-redeploy", {
+              pool: overlayPoolAddress,
+              from: decision.action,
+              to: enhanced.action,
+              fromConfidence: decision.confidence.toFixed(2),
+              toConfidence: enhanced.confidence.toFixed(2),
+            });
+            decision = enhanced;
+          }
+        } else {
+          // suggest | supervised | full — resolve a queued proposal first
+          // (supervised NEVER syncs, mirroring the tail's `!== "supervised"`
+          // guard); for full/suggest a sync advisor proposal is attempted within
+          // circuit-breaker / backoff bounds. A validated proposal is applied only
+          // while the redeploy stays an ENTER; any other adjusted action cancels
+          // the redeploy (the overlay constrains, it never turns the redeploy into
+          // a different lifecycle action).
+          const snapshot = yield* agentState.getSnapshot();
+          let agentProposal: AgentProposal | null =
+            findPendingProposal(
+              snapshot.pendingProposals,
+              overlayPoolAddress,
+              proposalMode,
+              config.agentProposalStaleMs,
+              now,
+            ) ?? null;
+          let proposalSource: "queue" | "sync" | undefined = agentProposal ? "queue" : undefined;
+
+          if (!agentProposal && proposalMode !== "supervised") {
+            const agentStatus = yield* agent.getStatus().pipe(
+              Effect.catchAll(() =>
+                Effect.succeed({
+                  connected: false,
+                  transport: null,
+                  lastPromptAt: null,
+                  errorCount: 0,
+                }),
+              ),
+            );
+            if (
+              hasSyncProposalTransport(agentStatus) &&
+              getPoolCircuitBreaker(overlayPoolAddress).canTry(now) &&
+              !isProposalBackoffActive(proposalBackoff.get(overlayPoolAddress), now)
+            ) {
+              const syncProposal = yield* agent
+                .enhanceDecision(decision, {
+                  decision,
+                  pool: candidate.pool,
+                  metrics: candidate.metrics,
+                  warnings: overlayWarnings,
+                  recentDecisions: overlayRecentDecisions,
+                  hasOpenPosition: overlayHasOpenPosition,
+                })
+                .pipe(Effect.catchAll(() => Effect.succeed(null)));
+              if (syncProposal && isAgentProposal(syncProposal)) {
+                agentProposal = syncProposal;
+                proposalSource = "sync";
+              }
+            }
+          }
+
+          if (agentProposal) {
+            const proposalToEvaluate: AgentProposal = {
+              ...agentProposal,
+              ...(agentProposal.originalAction === undefined
+                ? { originalAction: decision.action }
+                : {}),
+              ...(agentProposal.originalConfidence === undefined
+                ? { originalConfidence: decision.confidence }
+                : {}),
+            };
+            const validation = evaluateAgentProposal(
+              proposalToEvaluate,
+              {
+                openPositions,
+                portfolioValueUsd,
+                recentPnlUsd,
+                poolAddress: overlayPoolAddress,
+                originalDecision: decision,
+                activeBinId: candidate.pool.activeBinId,
+              },
+              config,
+            );
+            if (validation.valid && validation.adjustedDecision) {
+              if (proposalMode === "suggest") {
+                // Advisory only — the deterministic redeploy decision is kept.
+                idleRedeployLogger.info("Agent proposal suggested (advisory) on idle-redeploy", {
+                  source: proposalSource,
+                  pool: overlayPoolAddress,
+                  suggested: validation.adjustedDecision.action,
+                });
+              } else if (validation.adjustedDecision.action === "ENTER") {
+                idleRedeployLogger.info("Agent proposal applied to idle-redeploy", {
+                  source: proposalSource,
+                  pool: overlayPoolAddress,
+                  to: validation.adjustedDecision.action,
+                });
+                decision = validation.adjustedDecision;
+                if (proposalSource === "queue" && agentProposal.proposalId) {
+                  overlayAppliedProposalId = agentProposal.proposalId;
+                }
+              } else {
+                idleRedeployLogger.info("Agent proposal cancelled idle-redeploy", {
+                  source: proposalSource,
+                  pool: overlayPoolAddress,
+                  to: validation.adjustedDecision.action,
+                });
+                yield* recordRedeploySkip(
+                  `[idle-redeploy] [${proposalMode}] agent proposal adjusted to ${validation.adjustedDecision.action} — redeploy cancelled`,
+                  `[idle-redeploy] agent proposal adjusted to ${validation.adjustedDecision.action}`,
+                );
+                overlaySkip = true;
+              }
+            } else {
+              // An invalid full/supervised/suggest proposal must not let the
+              // redeploy proceed as if unconstrained; arm backoff (mirrors the
+              // tail) and skip.
+              idleRedeployLogger.warn("Agent proposal rejected on idle-redeploy", {
+                source: proposalSource,
+                pool: overlayPoolAddress,
+                reason: validation.reason,
+              });
+              proposalBackoff.set(
+                overlayPoolAddress,
+                nextProposalBackoff(proposalBackoff.get(overlayPoolAddress), now, {
+                  baseMs: config.agentProposalBackoffBaseMs,
+                  maxMs: config.agentProposalBackoffMaxMs,
+                }),
+              );
+              getPoolCircuitBreaker(overlayPoolAddress).recordFailure(now);
+              if (proposalSource === "queue" && agentProposal.proposalId) {
+                yield* agentState
+                  .rejectProposal(agentProposal.proposalId)
+                  .pipe(Effect.catchAll(() => Effect.void));
+              }
+            }
+          }
+        }
+
+        // Supervised mode gates execution on human approval: without an applied
+        // approved queued proposal an ENTER (the redeploy) is held — and the
+        // redeploy has no HOLD execution path, so a held redeploy is a skip. Same
+        // shared predicate the in-slot tail uses.
+        if (
+          !overlaySkip &&
+          shouldHoldForSupervisedApproval(
+            config.agentiveMode,
+            config.agentProposalMode,
+            overlayAppliedProposalId !== undefined,
+            decision.action,
+          )
+        ) {
+          idleRedeployLogger.info("Supervised mode: holding idle-redeploy pending approval", {
+            pool: overlayPoolAddress,
+          });
+          yield* recordRedeploySkip(
+            `[idle-redeploy] [supervised] awaiting approved proposal — redeploy held (${decision.action})`,
+            "[idle-redeploy] supervised mode requires an approved proposal",
+          );
+          overlaySkip = true;
+        }
+
+        // A veto/proposal that forces HOLD means "don't enter"; a defensive
+        // non-ENTER override (EXIT/REBALANCE) has no position to act on. The
+        // redeploy has nothing to hold or exit, so either is a skip.
+        if (!overlaySkip && decision.action !== "ENTER") {
+          idleRedeployLogger.info("Idle-redeploy overlay forced non-ENTER — skipping", {
+            pool: overlayPoolAddress,
+            action: decision.action,
+          });
+          yield* recordRedeploySkip(
+            decision.action === "HOLD"
+              ? "[idle-redeploy] vetoed to HOLD by agent overlay — redeploy skipped"
+              : `[idle-redeploy] agent overlay adjusted to ${decision.action} — redeploy skipped`,
+            decision.action === "HOLD"
+              ? "[idle-redeploy] agent overlay forced HOLD"
+              : `[idle-redeploy] agent overlay adjusted to ${decision.action}`,
+          );
+          overlaySkip = true;
+        }
+
+        if (overlaySkip) {
+          return;
+        }
+      }
 
       const riskResult: RiskResult = risk.evaluate(decision, {
         openPositions,
@@ -2078,6 +2343,28 @@ export const program = Effect.gen(function* () {
             paperTrading: config.paperTrading,
           })
           .pipe(Effect.catchAll(() => Effect.void));
+        return;
+      }
+
+      // P2 (3654054429, widened size): the feature's promise is a WIDER entry on
+      // an already-qualified pool. Comparison point is the POST-CAP deposit the
+      // redeploy would actually deploy — decision.positionSizeUsd after risk
+      // gate 6 caps it (riskResult.adjustedSizeUsd was applied above), not the raw
+      // proposed/widened figure. It must STRICTLY EXCEED the candidate's normal
+      // entry size; otherwise the pass would open a SMALLER second position that
+      // consumes a slot and fragments capital despite the feature being a wider
+      // entry. A modeled/unknown size (undefined) fails closed to 0 → skip.
+      const finalRedeploySizeUsd = decision.positionSizeUsd ?? 0;
+      if (finalRedeploySizeUsd <= candidate.normalEntrySizeUsd) {
+        idleRedeployLogger.info("Idle redeploy widened size does not exceed normal entry", {
+          pool: candidate.poolAddress,
+          finalSizeUsd: finalRedeploySizeUsd,
+          normalEntrySizeUsd: candidate.normalEntrySizeUsd,
+        });
+        yield* recordRedeploySkip(
+          `[idle-redeploy] widened size $${finalRedeploySizeUsd.toFixed(2)} does not exceed normal entry $${candidate.normalEntrySizeUsd.toFixed(2)} — skipped`,
+          "[idle-redeploy] widened size does not exceed normal entry size",
+        );
         return;
       }
 
@@ -2194,6 +2481,16 @@ export const program = Effect.gen(function* () {
       } else if (executed) {
         entryFailureBackoff.delete(candidate.poolAddress);
       }
+
+      // Consume an approved queued proposal (supervised) once the redeploy
+      // outcome is final — same helper the in-slot tail uses. A failed execution
+      // retains it for retry next cycle.
+      yield* finalizeAppliedProposal(
+        agentState,
+        overlayAppliedProposalId,
+        executed,
+        decision.action,
+      );
 
       if (executed) {
         cycle.poolsExecuted++;

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Effect, Layer } from "effect";
 import { DbLive, type PositionRecord } from "../engine/db-service.js";
-import { program } from "../engine/program.js";
+import { program, computeIdleRedeployConfidence } from "../engine/program.js";
 import {
   computeEntrySizeUsd,
   computeIdleRedeploySizeUsd,
@@ -29,6 +29,7 @@ import {
   RevenueConfigService,
   ReferralService,
   AgentService,
+  AgentStateService,
   McpServerService,
   HttpStatusServerService,
   EntryPrepService,
@@ -36,10 +37,13 @@ import {
   GeckoTerminalService,
   AlertService,
   type AdapterApi,
+  type AgentApi,
+  type GeckoTerminalApi,
   type MeteoraDatapiApi,
   type MeteoraPoolStats,
 } from "../engine/services.js";
-import type { PoolState } from "../engine/types.js";
+import type { AgentDecision, PoolState } from "../engine/types.js";
+import { USDC_MINT } from "../engine/constants.js";
 import { defaultAppConfig, makePool, makeBinArray } from "./helpers.js";
 
 // ─── Pure entry sizing ───────────────────────────────────────────────────────
@@ -229,6 +233,9 @@ function makeProgramLayer(opts: {
   adapter: AdapterApi;
   datapi?: MeteoraDatapiApi;
   configOverrides?: Partial<AppConfig>;
+  agentApi?: AgentApi;
+  agentStateLayer?: Layer.Layer<AgentStateService, never, never>;
+  gecko?: GeckoTerminalApi;
 }) {
   const config = defaultAppConfig({
     paperTrading: true,
@@ -288,13 +295,13 @@ function makeProgramLayer(opts: {
       applyReferral: () => Effect.void,
       getReferralCount: () => Effect.succeed(0),
     }),
-    Layer.succeed(AgentService, AgentNoOp),
-    AgentStateMutable({ maxPendingProposals: 50 }).layer,
+    Layer.succeed(AgentService, opts.agentApi ?? AgentNoOp),
+    opts.agentStateLayer ?? AgentStateMutable({ maxPendingProposals: 50 }).layer,
     Layer.succeed(McpServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.void }),
     Layer.succeed(MeteoraDatapiService, opts.datapi ?? { getPoolData: () => Effect.succeed(null) }),
-    Layer.succeed(GeckoTerminalService, { getPoolStats: () => Effect.succeed(null) }),
+    Layer.succeed(GeckoTerminalService, opts.gecko ?? { getPoolStats: () => Effect.succeed(null) }),
     Layer.succeed(AlertService, {
       sendAlert: () => Effect.void,
       recordFeeClaim: () => Effect.void,
@@ -342,6 +349,7 @@ interface CycleResult {
     executed: boolean;
     reasoning: string;
     poolAddress: string;
+    confidence: number;
   }>;
 }
 
@@ -412,7 +420,7 @@ describe("program — idle-capital auto-redeploy gate", () => {
     expect(redeployExecuted[0]!.poolAddress).toBe(POOL);
   }, 15_000);
 
-  it("lets the allocation gate shrink the widened size to the pool's remaining headroom", async () => {
+  it("skips when the post-cap widened size does not exceed the normal entry (P2 3654054429)", async () => {
     const layer = makeProgramLayer({
       adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
       datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
@@ -423,8 +431,41 @@ describe("program — idle-capital auto-redeploy gate", () => {
         idleRedeployMaxSizeUsd: 2000,
         // Tight portfolio: normal ENTER $500 (min(750, 1000, 500)); idle
         // 1_500 − 500 = 1_000 → widened min(500, 2_000×0.4=800, 2_000) = 500,
-        // but headroom = 800 − 500 = 300 → allocation caps the redeploy to 300.
+        // but headroom = 800 − 500 = 300 → allocation caps the redeploy to 300,
+        // which is ≤ the normal entry size ($500). The widened-size guard now
+        // skips it — a smaller second position would fragment capital despite
+        // the feature being a WIDER entry.
         paperPortfolioUsd: 1500,
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+      },
+    });
+    const { positions, decisions } = await runOneCycle(layer as never);
+
+    // Only the normal ENTER opens; the sub-normal redeploy is skipped.
+    expect(positions).toHaveLength(1);
+    expect(positions[0]!.depositedUsd).toBe(500);
+    const redeploySkips = decisions.filter(
+      (d) => d.reasoning.includes("[idle-redeploy]") && !d.executed,
+    );
+    expect(redeploySkips.length).toBeGreaterThanOrEqual(1);
+    expect(redeploySkips.some((d) => d.reasoning.includes("does not exceed normal entry"))).toBe(
+      true,
+    );
+  }, 15_000);
+
+  it("dispatches when the post-cap widened size just exceeds the normal entry (P2 3654054429)", async () => {
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        idleRedeployEnabled: true,
+        idleRedeployThresholdUsd: 100,
+        // Normal ENTER $500 (min(5000, 1000, 500)); idle 10_000 − 500 = 9_500.
+        // Ceiling pins the widened size at $600 — just ABOVE the normal $500 — so
+        // the size guard passes and the redeploy dispatches.
+        idleRedeployMaxSizeUsd: 600,
         maxPositionsPerPool: 2,
         maxOpenPositions: 5,
       },
@@ -433,7 +474,7 @@ describe("program — idle-capital auto-redeploy gate", () => {
 
     expect(positions).toHaveLength(2);
     const sizes = positions.map((p) => p.depositedUsd).sort((a, b) => a - b);
-    expect(sizes).toEqual([300, 500]);
+    expect(sizes).toEqual([500, 600]);
   }, 15_000);
 
   it("skips the pass when idle capital is below the threshold", async () => {
@@ -510,5 +551,263 @@ describe("program — idle-capital auto-redeploy gate", () => {
 
     expect(positions).toHaveLength(0);
     expect(decisions.some((d) => d.reasoning.includes("[idle-redeploy]"))).toBe(false);
+  }, 15_000);
+});
+
+// ─── Redeploy confidence (P2 3654054423) — modeled fee/IL gets no vote ───────
+
+describe("computeIdleRedeployConfidence — modeled fee/IL excluded", () => {
+  it("measured (datapi) ratio: fee-aware formula, capped at 0.85", () => {
+    expect(computeIdleRedeployConfidence({ feeIlRatio: 0, feeIlRatioKnown: true })).toBe(0.5);
+    expect(computeIdleRedeployConfidence({ feeIlRatio: 2, feeIlRatioKnown: true })).toBeCloseTo(
+      0.6,
+      10,
+    );
+    expect(computeIdleRedeployConfidence({ feeIlRatio: 7, feeIlRatioKnown: true })).toBe(0.85);
+    expect(computeIdleRedeployConfidence({ feeIlRatio: 20, feeIlRatioKnown: true })).toBe(0.85);
+  });
+
+  it("modeled (gecko) ratio: exactly the neutral base regardless of the value", () => {
+    // A modeled-high ratio must NOT raise confidence...
+    expect(computeIdleRedeployConfidence({ feeIlRatio: 20, feeIlRatioKnown: false })).toBe(0.5);
+    expect(computeIdleRedeployConfidence({ feeIlRatio: 8, feeIlRatioKnown: false })).toBe(0.5);
+    // ...and a modeled-low ratio must NOT lower it.
+    expect(computeIdleRedeployConfidence({ feeIlRatio: 0, feeIlRatioKnown: false })).toBe(0.5);
+    expect(computeIdleRedeployConfidence({ feeIlRatio: 0.1, feeIlRatioKnown: false })).toBe(0.5);
+  });
+});
+
+// ─── Program: redeploy agent-overlay routing (P1 3654054419) ─────────────────
+
+describe("program — idle-redeploy agent-overlay routing (P1)", () => {
+  const redeployOn = {
+    idleRedeployEnabled: true,
+    idleRedeployThresholdUsd: 500,
+    idleRedeployMaxSizeUsd: 2000,
+    maxPositionsPerPool: 2,
+    maxOpenPositions: 5,
+  };
+
+  it("AGENTIC_MODE=false (default): overlay never consulted — redeploy dispatches unchanged", async () => {
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: { watchlistPools: [POOL], ...redeployOn },
+    });
+    const { positions, decisions } = await runOneCycle(layer as never);
+
+    expect(positions).toHaveLength(2);
+    expect(decisions.some((d) => d.reasoning.includes("[idle-redeploy]") && d.executed)).toBe(true);
+    expect(decisions.some((d) => d.reasoning.includes("[supervised]"))).toBe(false);
+  }, 15_000);
+
+  it("supervised mode without an approved proposal: redeploy held → skipped with audit", async () => {
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        ...redeployOn,
+        agentiveMode: true,
+        agentProposalMode: "supervised",
+      },
+      // Default agent-state layer carries no pending/approved proposals.
+    });
+    const { positions, decisions } = await runOneCycle(layer as never);
+
+    // Supervised mode without approval holds EVERY ENTER — the normal one too —
+    // so nothing opens; the redeploy specifically records the [supervised] skip.
+    expect(positions).toHaveLength(0);
+    const redeploy = decisions.filter((d) => d.reasoning.includes("[idle-redeploy]"));
+    expect(redeploy.length).toBeGreaterThanOrEqual(1);
+    expect(redeploy.every((d) => !d.executed)).toBe(true);
+    expect(redeploy.some((d) => d.reasoning.includes("[supervised]"))).toBe(true);
+  }, 15_000);
+
+  it("veto forcing HOLD: redeploy skipped (a vetoed entry means don't enter)", async () => {
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        ...redeployOn,
+        agentiveMode: true,
+        agentProposalMode: "veto",
+      },
+      // Veto targets the redeploy entry only; the normal ENTER is left to the
+      // deterministic path (enhance returns null → no change).
+      agentApi: {
+        ...AgentNoOp,
+        enhanceDecision: (decision) =>
+          Effect.succeed(
+            decision.reasoning.includes("[idle-redeploy]")
+              ? { action: "HOLD", poolAddress: POOL, confidence: 0.3, reasoning: "vetoed" }
+              : null,
+          ),
+      },
+    });
+    const { positions, decisions } = await runOneCycle(layer as never);
+
+    expect(positions).toHaveLength(1); // normal ENTER opens; vetoed redeploy skips
+    const redeploy = decisions.filter((d) => d.reasoning.includes("[idle-redeploy]"));
+    expect(redeploy.some((d) => d.reasoning.includes("vetoed to HOLD"))).toBe(true);
+    expect(redeploy.every((d) => !d.executed)).toBe(true);
+  }, 15_000);
+
+  it("veto lowering confidence: still routed through the risk confidence gate (no dispatch)", async () => {
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        ...redeployOn,
+        agentiveMode: true,
+        agentProposalMode: "veto",
+      },
+      agentApi: {
+        ...AgentNoOp,
+        enhanceDecision: (decision) =>
+          Effect.succeed(
+            decision.reasoning.includes("[idle-redeploy]")
+              ? {
+                  action: "ENTER",
+                  poolAddress: POOL,
+                  confidence: 0.1, // below the 0.65 confidence threshold
+                  reasoning: "veto nudged confidence down",
+                  positionSizeUsd: 2000,
+                }
+              : null,
+          ),
+      },
+    });
+    const { positions, decisions } = await runOneCycle(layer as never);
+
+    // No redeploy opened; the vetoed confidence is replaced onto the decision and
+    // flows to risk.evaluate (NOT the supervised/veto-HOLD skip path), where the
+    // confidence gate rejects it.
+    expect(positions).toHaveLength(1);
+    const rejectedLowConfidenceEnter = decisions.some(
+      (d) => d.poolAddress === POOL && d.action === "ENTER" && !d.executed && d.confidence < 0.65,
+    );
+    expect(rejectedLowConfidenceEnter).toBe(true);
+    expect(
+      decisions.some(
+        (d) => d.reasoning.includes("[supervised]") || d.reasoning.includes("vetoed to HOLD"),
+      ),
+    ).toBe(false);
+  }, 15_000);
+});
+
+// ─── Program: redeploy entry-backoff guard (P2 3654054425) ───────────────────
+
+describe("program — idle-redeploy entry-backoff guard (P2)", () => {
+  it("skips the redeploy when the pool has an active entry-failure backoff", async () => {
+    // Live mode so the normal ENTER's insufficient-funds failure arms the SAME
+    // entryFailureBackoff the redeploy guard consults. A $0 native SOL balance
+    // makes executeLive bail with "Insufficient SOL for gas" (an
+    // isInsufficientTokenBalanceError match) — arming the backoff THIS cycle,
+    // after the candidate was captured at decision-build time.
+    const usdcHoldings = new Map<string, { amountAtomic: bigint; decimals: number }>();
+    usdcHoldings.set(USDC_MINT, { amountAtomic: 9_500_000_000n, decimals: 6 }); // $9,500 idle
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter(
+        { [POOL]: makePool({ address: POOL }) },
+        {
+          hasWallet: () => true,
+          getWalletHoldings: () => Effect.succeed(usdcHoldings),
+          getNativeSolBalance: () => Effect.succeed(0n),
+        },
+      ),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        paperTrading: false,
+        idleRedeployEnabled: true,
+        idleRedeployThresholdUsd: 500,
+        idleRedeployMaxSizeUsd: 2000,
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+      },
+    });
+    const { positions, decisions } = await runOneCycle(layer as never);
+
+    // Normal ENTER failed (armed backoff); redeploy honored it → nothing opens.
+    expect(positions).toHaveLength(0);
+    const redeploy = decisions.filter((d) => d.reasoning.includes("[idle-redeploy]"));
+    expect(redeploy.some((d) => d.reasoning.includes("entry backoff active"))).toBe(true);
+    expect(redeploy.every((d) => !d.executed)).toBe(true);
+  }, 20_000);
+});
+
+// ─── Program: redeploy confidence uses known signals only (P2 3654054423) ────
+
+describe("program — idle-redeploy confidence uses known signals only (P2)", () => {
+  it("datapi candidate: confidence is the fee-aware formula (above the neutral base)", async () => {
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        idleRedeployEnabled: true,
+        idleRedeployThresholdUsd: 500,
+        idleRedeployMaxSizeUsd: 2000,
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+      },
+    });
+    const { decisions } = await runOneCycle(layer as never);
+    const redeploy = decisions.find((d) => d.reasoning.includes("[idle-redeploy]") && d.executed);
+
+    expect(redeploy).toBeDefined();
+    // feeIlRatioKnown=true (datapi) → min(0.5 + feeIlRatio*0.05, 0.85); the
+    // fixture's positive fee/IL pushes it strictly above the neutral base.
+    expect(redeploy!.confidence).toBeGreaterThan(0.5);
+    expect(redeploy!.confidence).toBeLessThanOrEqual(0.85);
+  }, 15_000);
+
+  it("gecko candidate: modeled fee/IL → confidence stays exactly the neutral 0.5", async () => {
+    // datapi down → gecko overlays real volume/TVL (statsSource=geckoterminal →
+    // feeIlRatioKnown=false). A high modeled fee/IL must NOT raise redeploy
+    // confidence off the neutral base.
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(null) },
+      gecko: {
+        getPoolStats: () =>
+          Effect.succeed({
+            tvlUsd: 200_000,
+            volume24hUsd: 300_000,
+            fees24hUsd: 1_050,
+            basePriceUsd: 150,
+            quotePriceUsd: 1,
+          }),
+      },
+      configOverrides: {
+        watchlistPools: [POOL],
+        // The test fixture pins gecko off; opt back in so the secondary source
+        // (statsSource=geckoterminal → feeIlRatioKnown=false) is exercised.
+        geckoTerminalEnabled: true,
+        idleRedeployEnabled: true,
+        idleRedeployThresholdUsd: 500,
+        idleRedeployMaxSizeUsd: 2000,
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+        // The fee/IL term is dropped from the gecko score; a low threshold lets
+        // the (fee-less) score still capture a candidate. The assertion is on the
+        // CONFIDENCE, which the modeled ratio must not move off the neutral base.
+        weightedEntryScoreThreshold: 0.05,
+      },
+    });
+    const { decisions } = await runOneCycle(layer as never);
+    const redeploy = decisions.find((d) => d.reasoning.includes("[idle-redeploy]"));
+
+    expect(redeploy).toBeDefined();
+    // Modeled fee/IL (gecko, Fee/IL 20 here) → the NEUTRAL base 0.5 exactly. The
+    // pre-fix formula min(0.5 + 20*0.05, 0.85) = 0.85 would have let the modeled
+    // ratio authorize the redeploy; it must not vote in either direction.
+    expect(redeploy!.confidence).toBe(0.5);
+    // 0.5 sits below the 0.65 confidence threshold, so the modeled-fee redeploy
+    // does not dispatch — the doctrine working end to end.
+    expect(redeploy!.executed).toBe(false);
   }, 15_000);
 });
