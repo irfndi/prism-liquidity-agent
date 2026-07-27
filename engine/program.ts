@@ -119,6 +119,7 @@ import {
   ProposalCircuitBreaker,
   type ProposalBackoff,
 } from "./proposal-backoff.js";
+import { computeCooldownForExit } from "./cooldown.js";
 
 const logger = createLogger("program");
 const idleRedeployLogger = createLogger("idle-redeploy");
@@ -2876,6 +2877,7 @@ export const program = Effect.gen(function* () {
           apr: pool.apr,
           currentPrice: pool.currentPrice,
           binStep: pool.binStep,
+          statsSource: pool.statsSource,
           tokenXSymbol: pool.tokenXSymbol,
           tokenYSymbol: pool.tokenYSymbol,
           binArray:
@@ -3545,7 +3547,7 @@ export const program = Effect.gen(function* () {
         }
       }
 
-      const computeCooldownForExit = (
+      const resolveExitCooldown = (
         exitDecision: AgentDecision,
         position: PositionRecord | undefined,
       ): Effect.Effect<
@@ -3575,10 +3577,12 @@ export const program = Effect.gen(function* () {
 
           if (isOorExit) {
             const newOorCount = existingOorCount + 1;
-            const cooldownDuration =
-              newOorCount >= config.maxOorCooldownExits
-                ? config.repeatOorCooldownMs
-                : config.oorCooldownMs;
+            const cooldownDuration = computeCooldownForExit({
+              trigger: "oor",
+              consecutiveOorExits: existingOorCount,
+              config,
+              feeDensityPerDay: null,
+            });
             const cooldownUntil = Date.now() + cooldownDuration;
             const hours = (cooldownDuration / 3_600_000).toFixed(1);
             console.info(
@@ -3591,7 +3595,27 @@ export const program = Effect.gen(function* () {
               consecutiveOorExits: newOorCount,
             };
           } else if (isLowYieldExit) {
-            const cooldownDuration = config.oorCooldownMs;
+            // Fee density is trusted ONLY from the Data API (the only source
+            // of measured per-pool fees — same precedent as the paper fee
+            // accrual gate above). Gecko fees are a binStep base-rate MODEL
+            // on real volume and heuristic fees are fabricated, so by repo
+            // convention modeled/fabricated numbers get no gate vote: only
+            // datapi feeds the density scaling, everything else passes null
+            // and keeps the static legacy duration. Deliberately NOT
+            // isMeasuredStatsSource(), which would admit gecko.
+            const feeDensityPerDay =
+              pool.statsSource === "datapi" &&
+              pool.tvlUsd > 0 &&
+              Number.isFinite(pool.fees24hUsd) &&
+              pool.fees24hUsd >= 0
+                ? pool.fees24hUsd / pool.tvlUsd
+                : null;
+            const cooldownDuration = computeCooldownForExit({
+              trigger: "low-yield",
+              consecutiveOorExits: existingOorCount,
+              config,
+              feeDensityPerDay,
+            });
             const cooldownUntil = Date.now() + cooldownDuration;
             const hours = (cooldownDuration / 3_600_000).toFixed(1);
             console.info(
@@ -4363,6 +4387,7 @@ export const program = Effect.gen(function* () {
             // backoff/circuit-breaker path so a transient failure cannot silence it.
             let vetoFetchFailed = false;
             let vetoWarnEligible = false;
+            const vetoStartedAt = Date.now();
             const enhanced = yield* agent
               .enhanceDecision(decision, {
                 decision,
@@ -4375,8 +4400,22 @@ export const program = Effect.gen(function* () {
                 hasOpenPosition,
               })
               .pipe(
+                // Bound the ENTIRE veto op by the veto deadline, CONNECT included.
+                // sendPrompt's per-request timer only starts AFTER the transport
+                // (re)connects (Gateway ~10s handshake; ACP ensureSession on the
+                // general AGENT_PROMPT_TIMEOUT_MS), so an outer deadline is the only
+                // thing keeping a stalled reconnect from delaying a capital-protecting
+                // EXIT past AGENT_VETO_TIMEOUT_MS. Fails open via the catchAll below.
+                Effect.timeoutFail({
+                  duration: `${config.agentVetoTimeoutMs} millis`,
+                  onTimeout: () =>
+                    new Error(
+                      `Agent veto review timed out after ${config.agentVetoTimeoutMs}ms (transport connect/session establishment + prompt exceeded the veto budget)`,
+                    ),
+                }),
                 Effect.catchAll((err) => {
                   vetoFetchFailed = true;
+                  const elapsedMs = Date.now() - vetoStartedAt;
                   const message = underlyingErrorMessage(err);
                   // Compute throttle eligibility ONCE: the catchAll owns the single
                   // throttle read+set so the warn log and the memory warning below
@@ -4393,13 +4432,15 @@ export const program = Effect.gen(function* () {
                     logger.warn("Agent veto fetch failed", {
                       pool: poolAddress,
                       error: message,
-                      timeoutMs: config.agentPromptTimeoutMs,
+                      elapsedMs,
+                      timeoutMs: config.agentVetoTimeoutMs,
                       gatewayUrl: config.agentGatewayUrl,
                     });
                   } else {
                     logger.debug("Agent veto fetch failed (throttled)", {
                       pool: poolAddress,
                       error: message,
+                      elapsedMs,
                     });
                   }
                   return Effect.succeed(null);
@@ -4836,7 +4877,7 @@ export const program = Effect.gen(function* () {
         });
 
         if (decision.action === "EXIT") {
-          const pendingCooldown = yield* computeCooldownForExit(decision, pos);
+          const pendingCooldown = yield* resolveExitCooldown(decision, pos);
           if (pendingCooldown) {
             yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catchAll(() => Effect.void));
           }

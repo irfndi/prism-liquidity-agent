@@ -192,7 +192,7 @@ export interface AppConfig {
   // ─── Wave 9: Volatility-adaptive range width ──────────────────────────────
   /** Static baseline range half-width (bins each side). 0 = binStep-tiered default (25/20/15). */
   readonly entryRangeHalfWidthBins: number;
-  /** Scale entry/rebalance range width by measured realized volatility. Default false (opt-in). */
+  /** Scale entry/rebalance range width by measured realized volatility. Default true (opt-out). */
   readonly volatilityAdaptiveRanges: boolean;
 
   // ─── F3: Fee compounding / auto-reinvest ─────────────────────────────────────
@@ -237,6 +237,29 @@ export interface AppConfig {
   readonly repeatOorCooldownMs: number;
   readonly maxOorCooldownExits: number;
 
+  // ─── Fee-density-driven low-yield exit cooldowns ────────────────────────────
+  /**
+   * Scale the low-yield exit cooldown by measured fee density (datapi
+   * `fees24hUsd / tvlUsd` only): high-fee-density pools re-enter sooner,
+   * thin pools stay cooled down for the full static `oorCooldownMs`.
+   * Off (or density unavailable) → static legacy behavior. Default true.
+   */
+  readonly feeDensityCooldowns: boolean;
+  /** Cooldown floor for fee-density-scaled low-yield exits (the duration a
+   *  high-fee-density pool cools down for). Must be below `oorCooldownMs`;
+   *  an inverted relationship (min >= static) would swap the settings'
+   *  meanings, so the loader warns and clamps the floor to just under the
+   *  static value (`oorCooldownMs - 1`, floored at 0) — `OOR_COOLDOWN_MS`
+   *  itself is never adjusted. Default 3600000 (1 h). */
+  readonly feeDensityCooldownMinMs: number;
+  /** Fee density (fees/TVL per day) at/above which the low-yield cooldown
+   *  hits `feeDensityCooldownMinMs`. Default 0.005 (0.5 %/day). */
+  readonly feeDensityHighPct: number;
+  /** Fee density (fees/TVL per day) at/below which the low-yield cooldown
+   *  stays at the static `oorCooldownMs`. Must be < `feeDensityHighPct`;
+   *  an inverted band falls back to defaults for both. Default 0.0005. */
+  readonly feeDensityLowPct: number;
+
   // ─── Agentic mode / agent runtime overlay ────────────────────────────
   /** Enable non-deterministic agent reasoning overlay. Only active when Prism runs under an agent runtime (Hermes/OpenClaw). Default false. */
   readonly agentiveMode: boolean;
@@ -252,6 +275,8 @@ export interface AppConfig {
   readonly agentGatewayToken: string;
   /** Timeout for agent prompt responses. Default 60000 ms. */
   readonly agentPromptTimeoutMs: number;
+  /** Timeout for inline veto review. Defaults to agentPromptTimeoutMs; clamp [1s, 5min]. */
+  readonly agentVetoTimeoutMs: number;
   /** Interval between periodic agent check-ins. Default 3600000 ms (1 hour). */
   readonly agentCheckinIntervalMs: number;
   /** Send check-ins on significant trade/position events. Default true. */
@@ -584,6 +609,71 @@ const loadConfig = Effect.gen(function* () {
   );
   const maxOorCooldownExits = yield* validatedNumber("MAX_OOR_COOLDOWN_EXITS", 1, 3);
 
+  // ─── Fee-density-driven low-yield exit cooldowns ────────────────────────────
+  const feeDensityCooldowns = yield* Config.boolean("FEE_DENSITY_COOLDOWNS").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const DEFAULT_FEE_DENSITY_COOLDOWN_MIN_MS = 60 * 60 * 1000;
+  const feeDensityCooldownMinMsRaw = yield* validatedNumber(
+    "FEE_DENSITY_COOLDOWN_MIN_MS",
+    0,
+    DEFAULT_FEE_DENSITY_COOLDOWN_MIN_MS,
+  );
+  // The floor must sit strictly below the static duration. An inverted
+  // relationship (min >= static) would swap the settings' meanings —
+  // high-density exits getting the static duration and thin pools the larger
+  // "minimum" — so clamp the floor just under the static value (same warn
+  // channel as validatedNumber / the band guard below). OOR_COOLDOWN_MS
+  // itself is left untouched; when the static duration is 0 the floor is
+  // pinned at 0 (cooldown.ts's guard then returns the static duration for
+  // every density in that degenerate case).
+  const feeDensityCooldownMinMsInverted = feeDensityCooldownMinMsRaw >= oorCooldownMs;
+  if (feeDensityCooldownMinMsInverted) {
+    logger.warn(
+      "FEE_DENSITY_COOLDOWN_MIN_MS must be below OOR_COOLDOWN_MS; clamping the floor just under the static value",
+      {
+        feeDensityCooldownMinMs: feeDensityCooldownMinMsRaw,
+        oorCooldownMs,
+        fallback: Math.min(feeDensityCooldownMinMsRaw, Math.max(oorCooldownMs - 1, 0)),
+      },
+    );
+  }
+  const feeDensityCooldownMinMs = feeDensityCooldownMinMsInverted
+    ? Math.min(feeDensityCooldownMinMsRaw, Math.max(oorCooldownMs - 1, 0))
+    : feeDensityCooldownMinMsRaw;
+  const DEFAULT_FEE_DENSITY_HIGH_PCT = 0.005;
+  const DEFAULT_FEE_DENSITY_LOW_PCT = 0.0005;
+  const feeDensityHighPctRaw = yield* validatedNumber(
+    "FEE_DENSITY_HIGH_PCT",
+    0,
+    DEFAULT_FEE_DENSITY_HIGH_PCT,
+  );
+  const feeDensityLowPctRaw = yield* validatedNumber(
+    "FEE_DENSITY_LOW_PCT",
+    0,
+    DEFAULT_FEE_DENSITY_LOW_PCT,
+  );
+  // An inverted (or collapsed) band breaks the interpolation; fall back to
+  // defaults for BOTH so the pair stays sane (same warn channel as
+  // validatedNumber). This also catches high == 0, since low >= 0.
+  const feeDensityBandInverted = feeDensityLowPctRaw >= feeDensityHighPctRaw;
+  if (feeDensityBandInverted) {
+    logger.warn("FEE_DENSITY_LOW_PCT must be below FEE_DENSITY_HIGH_PCT; using defaults for both", {
+      feeDensityHighPct: feeDensityHighPctRaw,
+      feeDensityLowPct: feeDensityLowPctRaw,
+      fallback: {
+        feeDensityHighPct: DEFAULT_FEE_DENSITY_HIGH_PCT,
+        feeDensityLowPct: DEFAULT_FEE_DENSITY_LOW_PCT,
+      },
+    });
+  }
+  const feeDensityHighPct = feeDensityBandInverted
+    ? DEFAULT_FEE_DENSITY_HIGH_PCT
+    : feeDensityHighPctRaw;
+  const feeDensityLowPct = feeDensityBandInverted
+    ? DEFAULT_FEE_DENSITY_LOW_PCT
+    : feeDensityLowPctRaw;
+
   // ─── Agentic mode / agent runtime overlay ────────────────────────────
   const agentiveMode = yield* Config.boolean("AGENTIC_MODE").pipe(
     Effect.orElseSucceed(() => false),
@@ -613,7 +703,21 @@ const loadConfig = Effect.gen(function* () {
   const agentGatewayToken = yield* Config.string("AGENT_GATEWAY_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const agentPromptTimeoutMs = yield* validatedNumber("AGENT_PROMPT_TIMEOUT_MS", 1_000, 60_000);
+  const agentPromptTimeoutMs = yield* validatedNumber(
+    "AGENT_PROMPT_TIMEOUT_MS",
+    1_000,
+    60_000,
+    300_000,
+  );
+  // Veto runs inline in the per-pool scan loop, so it gets its own latency budget.
+  // Defaults to AGENT_PROMPT_TIMEOUT_MS when unset; clamped to the same [1s, 5min]
+  // band so an absurd value cannot stall scan cycles.
+  const agentVetoTimeoutMs = yield* validatedNumber(
+    "AGENT_VETO_TIMEOUT_MS",
+    1_000,
+    agentPromptTimeoutMs,
+    300_000,
+  );
   const agentCheckinIntervalMs = yield* validatedNumber(
     "AGENT_CHECKIN_INTERVAL_MS",
     0,
@@ -1005,6 +1109,10 @@ const loadConfig = Effect.gen(function* () {
     oorCooldownMs,
     repeatOorCooldownMs,
     maxOorCooldownExits,
+    feeDensityCooldowns,
+    feeDensityCooldownMinMs,
+    feeDensityHighPct,
+    feeDensityLowPct,
     agentiveMode,
     agentRuntime,
     agentAcpCommand,
@@ -1012,6 +1120,7 @@ const loadConfig = Effect.gen(function* () {
     agentGatewayUrl,
     agentGatewayToken,
     agentPromptTimeoutMs,
+    agentVetoTimeoutMs,
     agentCheckinIntervalMs,
     agentCheckinOnEvents,
     agentCheckinIncludeHistory,

@@ -273,6 +273,7 @@ Prism also exposes pull interfaces for agent runtimes to query state on demand:
 | `AGENT_HERMES_API_URL`          | ``                         | Hermes HTTP API base URL (OpenAI-compatible)         |
 | `AGENT_HERMES_API_TOKEN`        | ``                         | Bearer token (Hermes `API_SERVER_KEY`) for the Hermes HTTP API |
 | `AGENT_PROMPT_TIMEOUT_MS`       | `60000`                    | Prompt/check-in timeout (slow-model first-token latency can exceed 15s) |
+| `AGENT_VETO_TIMEOUT_MS`         | `AGENT_PROMPT_TIMEOUT_MS`  | Inline veto-review timeout; clamp [1s, 5min]               |
 | `AGENT_CHECKIN_INTERVAL_MS`     | `3600000`                  | Periodic check-in interval                           |
 | `AGENT_CHECKIN_ON_EVENTS`       | `true`                     | Check-in on ENTER/EXIT/REBALANCE                     |
 | `AGENT_CHECKIN_INCLUDE_HISTORY` | `true`                     | Include recent decisions/warnings                    |

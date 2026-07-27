@@ -38,6 +38,7 @@ function makeSnapshot(overrides: Partial<PoolSnapshot> = {}): PoolSnapshot {
     tokenXSymbol: overrides.tokenXSymbol ?? "SOL",
     tokenYSymbol: overrides.tokenYSymbol ?? "USDC",
     binArray: overrides.binArray ?? binArray,
+    statsSource: overrides.statsSource,
   };
 }
 
@@ -64,6 +65,51 @@ describe("DbService — snapshots", () => {
         // bigints must survive the JSON round-trip
         expect(got.binArray.bins[0]!.reserveX).toBe(BigInt(1_000_000));
         expect(got.binArray.bins[7]!.liquiditySupply).toBe(BigInt(10_000_007));
+      }),
+      layer,
+    );
+  });
+
+  it("persists and restores an explicit statsSource ('datapi' round-trips)", () => {
+    const layer = DbLive(":memory:");
+    const snap = makeSnapshot({ statsSource: "datapi" });
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* db.saveSnapshot(snap);
+        const all = yield* db.getSnapshots(
+          snap.poolAddress,
+          snap.timestamp - 1,
+          snap.timestamp + 1,
+        );
+        expect(all).toHaveLength(1);
+        // A Data-API snapshot must replay as "datapi" so the measured-fee-rate
+        // authenticity gate stays active on replay.
+        expect(all[0]!.statsSource).toBe("datapi");
+      }),
+      layer,
+    );
+  });
+
+  it("normalizes a legacy snapshot without statsSource to conservative 'heuristic' (never 'datapi')", () => {
+    const layer = DbLive(":memory:");
+    const snap = makeSnapshot(); // no statsSource → unknown provenance
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* db.saveSnapshot(snap);
+        const all = yield* db.getSnapshots(
+          snap.poolAddress,
+          snap.timestamp - 1,
+          snap.timestamp + 1,
+        );
+        expect(all).toHaveLength(1);
+        // Unknown provenance fails closed: treated as fabricated, NOT datapi, so
+        // the measured-fee-rate gate stays DISABLED exactly as the trust model
+        // intends for a source-less pool.
+        expect(all[0]!.statsSource).toBe("heuristic");
       }),
       layer,
     );
@@ -246,5 +292,99 @@ describe("snapshot replay", () => {
     expect(result.totalFeesUsd).toBeGreaterThan(0);
     expect(result.totalRebalances).toBeGreaterThanOrEqual(0);
     expect(result.netPnlUsd).toBeGreaterThan(-result.totalIlUsd);
+  });
+});
+
+// ─── Stats-source trust model across the replay round-trip ───────────────────
+
+// Elevated (not wash) volume/TVL plus an outlier fee rate — the exact shape the
+// reviewer flagged: vol/tvl 6.0x → "elevated" (-0.15); fee rate 2.5% → above the
+// 2% band (-0.2, ONLY when fees are measured). With the fee-rate component
+// disabled the pool scores 0.85 and passes the 0.7 prefilter; with it enabled
+// (datapi) it scores 0.65 and is rejected.
+function replayPool(
+  base: Pick<PoolSnapshot, "tvlUsd" | "volume24hUsd" | "fees24hUsd" | "statsSource">,
+): PoolState {
+  return {
+    address: "Pool111111111111111111111111111111111111111",
+    tokenX: "",
+    tokenY: "",
+    tokenXSymbol: "SOL",
+    tokenYSymbol: "USDC",
+    tvlUsd: base.tvlUsd,
+    volume24hUsd: base.volume24hUsd,
+    fees24hUsd: base.fees24hUsd,
+    apr: 60,
+    activeBinId: 4,
+    binStep: 10,
+    currentPrice: 100,
+    timestamp: 1_700_000_000_000,
+    statsSource: base.statsSource,
+  };
+}
+
+describe("snapshot statsSource trust model on replay", () => {
+  const outlierFees = {
+    tvlUsd: 100_000,
+    volume24hUsd: 600_000,
+    fees24hUsd: 600_000 * 0.025,
+  };
+
+  it("a datapi snapshot restores gate-on: the outlier measured fee rate now rejects at the 0.7 prefilter", () => {
+    const layer = DbLive(":memory:");
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* db.saveSnapshot(makeSnapshot({ ...outlierFees, statsSource: "datapi" }));
+        const [restored] = yield* db.getSnapshots(
+          "Pool111111111111111111111111111111111111111",
+          1_700_000_000_000 - 1,
+          1_700_000_000_000 + 1,
+        );
+        // A Data-API snapshot replays as datapi…
+        expect(restored!.statsSource).toBe("datapi");
+        const pool = replayPool({ ...outlierFees, statsSource: restored!.statsSource });
+        // …so the measured-fee-rate component fires (mirrors the backtest gate:
+        // checkVolumeAuthenticity(pool, statsSource === "datapi")).
+        const auth = DLMMStrategy.checkVolumeAuthenticity(pool, pool.statsSource === "datapi");
+        expect(auth.flags.some((f: string) => f.includes("outlier"))).toBe(true);
+        expect(auth.score).toBeCloseTo(0.65, 5);
+        expect(DLMMStrategy.passesPreFilter(pool, auth.score, 0.5, 50_000, 0.7, 0.3)).toBe(false);
+      }),
+      layer,
+    );
+  });
+
+  it("a source-less snapshot restores conservative 'heuristic': the gate stays DISABLED and the same pool passes", () => {
+    const layer = DbLive(":memory:");
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* db.saveSnapshot(makeSnapshot({ ...outlierFees })); // no statsSource
+        const [restored] = yield* db.getSnapshots(
+          "Pool111111111111111111111111111111111111111",
+          1_700_000_000_000 - 1,
+          1_700_000_000_000 + 1,
+        );
+        expect(restored!.statsSource).toBe("heuristic");
+        const pool = replayPool({ ...outlierFees, statsSource: restored!.statsSource });
+        const auth = DLMMStrategy.checkVolumeAuthenticity(pool, pool.statsSource === "datapi");
+        // Fee-rate penalty NOT applied: outlier fee rate cannot push a healthy
+        // pool under the prefilter when the source is unknown (deterministic).
+        expect(auth.flags.some((f: string) => f.includes("outlier"))).toBe(false);
+        expect(auth.score).toBeCloseTo(0.85, 5);
+        expect(DLMMStrategy.passesPreFilter(pool, auth.score, 0.5, 50_000, 0.7, 0.3)).toBe(true);
+      }),
+      layer,
+    );
+  });
+
+  it("a synthetic tick is classified 'heuristic' (not 'datapi'), keeping the fee-rate gate off", () => {
+    const pool = replayPool({ ...outlierFees, statsSource: "heuristic" });
+    expect(pool.statsSource).toBe("heuristic");
+    expect(pool.statsSource).not.toBe("datapi");
+    const auth = DLMMStrategy.checkVolumeAuthenticity(pool, pool.statsSource === "datapi");
+    expect(auth.flags.some((f: string) => f.includes("outlier"))).toBe(false);
+    expect(DLMMStrategy.passesPreFilter(pool, auth.score, 0.5, 50_000, 0.7, 0.3)).toBe(true);
   });
 });

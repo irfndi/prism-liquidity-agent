@@ -27,6 +27,7 @@ import {
   GeckoTerminalService,
   AlertService,
   type AdapterApi,
+  type AgentApi,
   type MemoryApi,
   type MeteoraDatapiApi,
   type MeteoraPoolStats,
@@ -164,6 +165,7 @@ function makeTestLayer(opts: {
   memoryRecorded?: RecordedMemory[];
   datapi?: MeteoraDatapiApi;
   configOverrides?: Partial<AppConfig>;
+  agent?: AgentApi;
 }) {
   const config = defaultAppConfig({
     scanIntervalMs: 3_600_000,
@@ -224,7 +226,7 @@ function makeTestLayer(opts: {
       applyReferral: () => Effect.void,
       getReferralCount: () => Effect.succeed(0),
     }),
-    Layer.succeed(AgentService, AgentNoOp),
+    Layer.succeed(AgentService, opts.agent ?? AgentNoOp),
     AgentStateMutable({ maxPendingProposals: 50 }).layer,
     Layer.succeed(McpServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
@@ -507,5 +509,64 @@ describe("pool snapshot retention (Wave 2)", () => {
 
     expect(oldRows, "30-day-old snapshot was not pruned").toHaveLength(0);
     expect(recentRows.length, "fresh per-cycle snapshot must be retained").toBeGreaterThan(0);
+  }, 15_000);
+});
+
+describe("veto deadline bounds the entire transport operation (P1)", () => {
+  const POOL = "PoolVetoDeadline111111111111111111111111";
+
+  it("interrupts a veto op stalled in connect within the veto budget and fails open", async () => {
+    // enhanceDecision models a disconnected transport whose reconnect/session
+    // never settles: it blocks for 60s (far past the 300ms veto deadline)
+    // instead of resolving. The deadline in the veto path must interrupt it so
+    // the deterministic decision proceeds — a stalled reconnect may never
+    // delay a capital-protecting EXIT past AGENT_VETO_TIMEOUT_MS.
+    let vetoCompleted = false;
+    const stalledAgent: AgentApi = {
+      ...AgentNoOp,
+      enhanceDecision: () =>
+        Effect.sleep(60_000).pipe(
+          Effect.map(() => {
+            vetoCompleted = true;
+            return null;
+          }),
+        ),
+    };
+    const recordedMemory: RecordedMemory[] = [];
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL }) }),
+      memoryRecorded: recordedMemory,
+      agent: stalledAgent,
+      configOverrides: {
+        watchlistPools: [POOL],
+        agentiveMode: true,
+        agentProposalMode: "veto",
+        agentVetoTimeoutMs: 300,
+        scanIntervalMs: 350, // several veto failures inside the race window
+      },
+    });
+
+    const startedAt = Date.now();
+    const decisions = await runCycles(layer, 2_000);
+    const wallMs = Date.now() - startedAt;
+    const forPool = decisions.filter((d) => d.poolAddress === POOL);
+
+    // Without the outer deadline the stalled veto blocks pool evaluation for
+    // the whole window and NO decision is ever recorded (race kills program
+    // while it is still stuck inside enhanceDecision).
+    expect(forPool.length, "a stalled veto must not block the decision loop").toBeGreaterThan(0);
+    expect(
+      vetoCompleted,
+      "the veto deadline must interrupt the stalled op, not let it resolve",
+    ).toBe(false);
+    // Fail-open throttle intact: several veto failures in ONE warning window
+    // (agentProposalStaleMs = 300s) produce exactly ONE warning memory.
+    const vetoWarnings = recordedMemory.filter((m) =>
+      m.content.includes("Agent veto fetch failed"),
+    );
+    expect(vetoWarnings, "exactly one veto warning memory per window").toHaveLength(1);
+    expect(wallMs, "cycle cost is the veto budget (~300ms), not the 60s stall").toBeLessThan(
+      10_000,
+    );
   }, 15_000);
 });
