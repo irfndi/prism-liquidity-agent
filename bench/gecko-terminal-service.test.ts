@@ -112,6 +112,27 @@ describe("parseGeckoPoolStats", () => {
     expect(stats).not.toBeNull();
     expect(stats!.tvlUsd).toBeNull();
   });
+
+  it("nulls tvl for a ZERO reserve with positive volume (dead/wash data must not be measured)", () => {
+    const zeroReserve = {
+      data: { attributes: { volume_usd: { h24: "23551730.42" }, reserve_in_usd: "0" } },
+    };
+    const stats = parseGeckoPoolStats(zeroReserve, BASE_FEE_RATE);
+    // Volume is usable so the payload parses, but tvlUsd is nulled so
+    // getGeckoPoolStats rejects the stats and the pipeline falls through to the
+    // heuristic — the pool is never tagged "geckoterminal" on a fallback TVL.
+    expect(stats).not.toBeNull();
+    expect(stats!.tvlUsd).toBeNull();
+  });
+
+  it("accepts the smallest strictly-positive reserve (boundary: > 0 is usable)", () => {
+    const tinyReserve = {
+      data: { attributes: { volume_usd: { h24: "1000000" }, reserve_in_usd: "0.000001" } },
+    };
+    const stats = parseGeckoPoolStats(tinyReserve, BASE_FEE_RATE);
+    expect(stats).not.toBeNull();
+    expect(stats!.tvlUsd).toBeCloseTo(0.000001);
+  });
 });
 
 describe("getGeckoPoolStats", () => {

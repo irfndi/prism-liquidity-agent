@@ -45,7 +45,13 @@ import {
   GAS_TOP_UP_USDC,
   SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
   MIN_SOL_FOR_GAS_LAMPORTS,
+  USDC_MINT,
 } from "./constants.js";
+import {
+  computeEntrySizeUsd,
+  computeIdleRedeploySizeUsd,
+  ENTRY_SIZE_FLOOR_USD,
+} from "./entry-sizing.js";
 import {
   AdapterService,
   StrategyService,
@@ -113,8 +119,10 @@ import {
   ProposalCircuitBreaker,
   type ProposalBackoff,
 } from "./proposal-backoff.js";
+import { computeCooldownForExit } from "./cooldown.js";
 
 const logger = createLogger("program");
+const idleRedeployLogger = createLogger("idle-redeploy");
 
 /**
  * How far back to look for a previous pool snapshot when computing TVL
@@ -411,6 +419,43 @@ export function positionsForPool(
     if (pos.poolAddress === poolAddress) out.push(pos);
   }
   return out;
+}
+
+/**
+ * Idle-redeploy confidence (P2 3654054423): repo doctrine (AGENTS.md
+ * §decision-loop) gives a modeled/fabricated fee/IL ratio NO vote in an ENTER
+ * gate in EITHER direction. gecko candidates reach the pass with
+ * feeIlRatioKnown=false (their fee figure is a binStep base-rate MODEL on real
+ * volume), so the fee term is applied ONLY when the ratio is measured (datapi);
+ * otherwise confidence stays at the neutral base. This exactly mirrors how
+ * weightedEntryScore drops its fee term when feeIlRatioKnown is false — a
+ * modeled ratio can neither RAISE nor LOWER redeploy confidence.
+ */
+export function computeIdleRedeployConfidence(args: {
+  readonly feeIlRatio: number;
+  readonly feeIlRatioKnown: boolean;
+}): number {
+  return args.feeIlRatioKnown ? Math.min(0.5 + args.feeIlRatio * 0.05, 0.85) : 0.5;
+}
+
+/**
+ * A pool that passed this cycle's ENTER candidate conditions + weighted entry
+ * score in-pool but whose normal ENTER did not consume the slot — eligible
+ * for the opt-in idle-capital redeploy pass after the pools loop. The pass
+ * re-runs evaluatePerPoolAllocation and the full risk tail verbatim before
+ * executing, so the candidate record carries no authority to bypass anything;
+ * it only seeds the pass's score-ranked choice.
+ */
+interface IdleRedeployCandidate {
+  readonly poolAddress: string;
+  readonly pool: PoolState;
+  readonly metrics: PoolMetrics;
+  readonly entryScore: number;
+  readonly feeIlRatio: number;
+  /** The size the normal conservative path chose (or proposed) for this pool. */
+  readonly normalEntrySizeUsd: number;
+  readonly volatilityStddev: number;
+  readonly netDriftBins: number;
 }
 
 /**
@@ -1870,6 +1915,614 @@ export const program = Effect.gen(function* () {
       });
     });
 
+  // ─── Idle-capital auto-redeploy pass (opt-in) ─────────────────────────────
+
+  /**
+   * Deploy idle wallet capital into the cycle's best qualified entry
+   * candidate at a wider (still fully capped) size. Candidates passed their
+   * in-pool ENTER gates this cycle; this pass re-runs
+   * evaluatePerPoolAllocation and the risk tail VERBATIM before execution —
+   * caps can reject or shrink, the pass never bypasses a gate, and never
+   * re-runs pool screening (cooldown, wallet-read, paper-validation and
+   * token-risk stand as decided in-pool). At most one redeploy ENTER per
+   * cycle. Failures degrade to an audited skip.
+   */
+  const runIdleRedeployPass = (
+    candidates: ReadonlyArray<IdleRedeployCandidate>,
+    cycle: AgentCycle,
+  ): Effect.Effect<void, never, EntryPrepService> =>
+    Effect.gen(function* () {
+      const cycleId = cycle.cycleId;
+
+      // Idle capital: live = USDC wallet holdings at par (the adapter read
+      // shares the balance cache — no extra RPC); paper = the portfolio seed
+      // minus deployed value. A failed live holdings read degrades to "no
+      // idle detected" (fail-open — the cycle never fails and never deploys
+      // on stale data).
+      const deployedUsd = Array.from(trackedPositions.values()).reduce(
+        (sum, pos) => sum + pos.currentValueUsd,
+        0,
+      );
+      let idleCapitalUsd: number;
+      if (config.paperTrading || !adapter.hasWallet()) {
+        idleCapitalUsd = Math.max(config.paperPortfolioUsd - deployedUsd, 0);
+      } else {
+        const holdings = yield* adapter.getWalletHoldings().pipe(
+          Effect.catchAll((err) => {
+            idleRedeployLogger.warn(
+              "Wallet holdings read failed — idle redeploy skipped this cycle",
+              { error: String(err) },
+            );
+            return Effect.succeed(
+              new Map<string, { readonly amountAtomic: bigint; readonly decimals: number }>(),
+            );
+          }),
+        );
+        const usdcHolding = holdings.get(USDC_MINT);
+        idleCapitalUsd =
+          usdcHolding === undefined
+            ? 0
+            : Number(usdcHolding.amountAtomic) / 10 ** usdcHolding.decimals;
+      }
+
+      if (idleCapitalUsd <= config.idleRedeployThresholdUsd) {
+        idleRedeployLogger.debug("Idle capital below redeploy threshold", {
+          idleCapitalUsd,
+          thresholdUsd: config.idleRedeployThresholdUsd,
+          candidates: candidates.length,
+        });
+        return;
+      }
+
+      // Fresh portfolio context — positions moved during the pools loop, so
+      // the gates measure current state, not the cycle-top capture.
+      const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
+      const portfolioValueUsd =
+        lastWalletBalanceUsd + openPositions.reduce((sum, pos) => sum + pos.currentValueUsd, 0);
+      const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
+      const candidate = [...candidates].sort((a, b) => b.entryScore - a.entryScore)[0]!;
+
+      const recordRedeploySkip = (reasoning: string, riskReason: string) =>
+        audit
+          .recordDecision({
+            timestamp: Date.now(),
+            cycleId,
+            poolAddress: candidate.poolAddress,
+            action: "ENTER",
+            confidence: 0,
+            reasoning,
+            metrics: candidate.metrics,
+            riskResult: { approved: false, reason: riskReason },
+            executed: false,
+            paperTrading: config.paperTrading,
+          })
+          .pipe(Effect.catchAll(() => Effect.void));
+
+      // P2 (3654054425, entry backoff): if this pool's normal ENTER failed with
+      // an insufficient-token-balance error earlier THIS cycle (or earlier),
+      // entryFailureBackoff was armed. Retrying the redeploy at the larger
+      // widened size would repeat a known-doomed entry and amplify RPC/tx work.
+      // Honor the SAME active-backoff predicate the normal ENTER gate uses
+      // (evaluatePool's `[entry-backoff]` block) — an active entry backoff on the
+      // chosen candidate skips the whole pass (the pass dispatches at most once).
+      const redeployEntryBackoff = entryFailureBackoff.get(candidate.poolAddress);
+      if (redeployEntryBackoff && redeployEntryBackoff.nextAttemptAt > Date.now()) {
+        yield* recordRedeploySkip(
+          `[idle-redeploy] skipped — entry backoff active (insufficient token balance; retry in ${Math.ceil((redeployEntryBackoff.nextAttemptAt - Date.now()) / 60_000)} minutes)`,
+          "[idle-redeploy] entry-failure backoff active",
+        );
+        return;
+      }
+
+      // The pass never pushes past the hard open-position cap; the same count
+      // is re-checked against fresh state by allocation below and by risk
+      // gate 6 at execution.
+      if (openPositions.length >= config.maxOpenPositions) {
+        yield* recordRedeploySkip(
+          `[idle-redeploy] skipped — max open positions reached (${openPositions.length}/${config.maxOpenPositions})`,
+          `[idle-redeploy] max open positions reached (${openPositions.length}/${config.maxOpenPositions})`,
+        );
+        return;
+      }
+
+      // Wider size: half the idle capital, bounded by the per-pool allocation
+      // share of the portfolio AND the configured idle ceiling.
+      // evaluatePerPoolAllocation shrinks it to the pool's real remaining
+      // headroom and risk gate 6 caps it again before execution.
+      const proposedSizeUsd = computeIdleRedeploySizeUsd({
+        idleCapitalUsd,
+        portfolioValueUsd,
+        maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+        maxSizeUsd: config.idleRedeployMaxSizeUsd,
+      });
+      if (proposedSizeUsd < ENTRY_SIZE_FLOOR_USD) {
+        yield* recordRedeploySkip(
+          `[idle-redeploy] skipped — widened size $${proposedSizeUsd.toFixed(2)} below $${ENTRY_SIZE_FLOOR_USD} floor`,
+          "[idle-redeploy] proposed size below entry floor",
+        );
+        return;
+      }
+
+      const allocation = evaluatePerPoolAllocation({
+        proposedDepositUsd: proposedSizeUsd,
+        portfolioValueUsd,
+        openPositions,
+        maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+        maxOpenPositions: config.maxOpenPositions,
+        poolAddress: candidate.poolAddress,
+        maxPositionsPerPool: config.maxPositionsPerPool,
+      });
+      if (!allocation.approved) {
+        idleRedeployLogger.info("Idle redeploy capped by allocation", {
+          pool: candidate.poolAddress,
+          reason: allocation.reason,
+        });
+        yield* recordRedeploySkip(
+          `[idle-redeploy] capped — ${allocation.reason}`,
+          `[idle-redeploy] ${allocation.reason}`,
+        );
+        return;
+      }
+
+      let decision: AgentDecision = {
+        action: "ENTER",
+        poolAddress: candidate.poolAddress,
+        // P2 (3654054423): fee/IL votes on confidence ONLY when measured
+        // (datapi); a modeled ratio (gecko, feeIlRatioKnown=false) gets the
+        // neutral base — see computeIdleRedeployConfidence.
+        confidence: computeIdleRedeployConfidence({
+          feeIlRatio: candidate.feeIlRatio,
+          feeIlRatioKnown: candidate.metrics.feeIlRatioKnown,
+        }),
+        reasoning: `[idle-redeploy] Deploying $${idleCapitalUsd.toFixed(0)} idle capital — Fee/IL ${candidate.feeIlRatio.toFixed(2)}, score ${candidate.entryScore.toFixed(3)}, TVL $${candidate.pool.tvlUsd.toFixed(0)}`,
+        positionSizeUsd: allocation.adjustedDepositUsd,
+      };
+
+      // ── Agent overlay (P1 3654054419): the redeploy deploys capital exactly
+      // like a normal ENTER, so under AGENTIC_MODE it must pass through the SAME
+      // per-decision overlay evaluatePool's tail uses, BEFORE risk evaluation —
+      // supervised requires an approved queued proposal, veto may lower
+      // confidence or force HOLD, and full/suggest are honored within their
+      // documented bounds. The overlay can only CONSTRAIN an already-qualified
+      // candidate (proceed, adjust-within-bounds, or skip); it never promotes
+      // the redeploy past what a normal ENTER would be allowed. Invokes the SAME
+      // shared functions in the SAME order as the in-slot tail. AGENTIC_MODE=false
+      // (default) skips the whole block → zero behavior change.
+      let overlayAppliedProposalId: string | undefined;
+      if (config.agentiveMode) {
+        const proposalMode = config.agentProposalMode;
+        const now = Date.now();
+        const overlayPoolAddress = candidate.poolAddress;
+        const overlayHasOpenPosition =
+          positionsForPool(trackedPositions, overlayPoolAddress).length > 0;
+        const overlayWarnings = yield* memory
+          .getRelevantContext(`warnings for pool ${overlayPoolAddress}`, 3, overlayPoolAddress)
+          .pipe(Effect.catchAll(() => Effect.succeed([])));
+        const overlayRecentDecisions = yield* audit
+          .getRecentDecisions(10)
+          .pipe(Effect.catchAll(() => Effect.succeed([])));
+        let overlaySkip = false;
+
+        if (proposalMode === "veto") {
+          // Veto is a safety overlay, applied fail-open exactly as the tail does:
+          // a fetch failure leaves the decision unchanged; a returned override is
+          // adopted (it may lower confidence or force HOLD).
+          const enhanced = yield* agent
+            .enhanceDecision(decision, {
+              decision,
+              pool: candidate.pool,
+              metrics: candidate.metrics,
+              warnings: overlayWarnings,
+              recentDecisions: overlayRecentDecisions,
+              hasOpenPosition: overlayHasOpenPosition,
+            })
+            .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          if (enhanced) {
+            idleRedeployLogger.info("Agent veto override on idle-redeploy", {
+              pool: overlayPoolAddress,
+              from: decision.action,
+              to: enhanced.action,
+              fromConfidence: decision.confidence.toFixed(2),
+              toConfidence: enhanced.confidence.toFixed(2),
+            });
+            decision = enhanced;
+          }
+        } else {
+          // suggest | supervised | full — resolve a queued proposal first
+          // (supervised NEVER syncs, mirroring the tail's `!== "supervised"`
+          // guard); for full/suggest a sync advisor proposal is attempted within
+          // circuit-breaker / backoff bounds. A validated proposal is applied only
+          // while the redeploy stays an ENTER; any other adjusted action cancels
+          // the redeploy (the overlay constrains, it never turns the redeploy into
+          // a different lifecycle action).
+          const snapshot = yield* agentState.getSnapshot();
+          let agentProposal: AgentProposal | null =
+            findPendingProposal(
+              snapshot.pendingProposals,
+              overlayPoolAddress,
+              proposalMode,
+              config.agentProposalStaleMs,
+              now,
+            ) ?? null;
+          let proposalSource: "queue" | "sync" | undefined = agentProposal ? "queue" : undefined;
+
+          if (!agentProposal && proposalMode !== "supervised") {
+            const agentStatus = yield* agent.getStatus().pipe(
+              Effect.catchAll(() =>
+                Effect.succeed({
+                  connected: false,
+                  transport: null,
+                  lastPromptAt: null,
+                  errorCount: 0,
+                }),
+              ),
+            );
+            if (
+              hasSyncProposalTransport(agentStatus) &&
+              getPoolCircuitBreaker(overlayPoolAddress).canTry(now) &&
+              !isProposalBackoffActive(proposalBackoff.get(overlayPoolAddress), now)
+            ) {
+              const syncProposal = yield* agent
+                .enhanceDecision(decision, {
+                  decision,
+                  pool: candidate.pool,
+                  metrics: candidate.metrics,
+                  warnings: overlayWarnings,
+                  recentDecisions: overlayRecentDecisions,
+                  hasOpenPosition: overlayHasOpenPosition,
+                })
+                .pipe(Effect.catchAll(() => Effect.succeed(null)));
+              if (syncProposal && isAgentProposal(syncProposal)) {
+                agentProposal = syncProposal;
+                proposalSource = "sync";
+              }
+            }
+          }
+
+          if (agentProposal) {
+            const proposalToEvaluate: AgentProposal = {
+              ...agentProposal,
+              ...(agentProposal.originalAction === undefined
+                ? { originalAction: decision.action }
+                : {}),
+              ...(agentProposal.originalConfidence === undefined
+                ? { originalConfidence: decision.confidence }
+                : {}),
+            };
+            const validation = evaluateAgentProposal(
+              proposalToEvaluate,
+              {
+                openPositions,
+                portfolioValueUsd,
+                recentPnlUsd,
+                poolAddress: overlayPoolAddress,
+                originalDecision: decision,
+                activeBinId: candidate.pool.activeBinId,
+              },
+              config,
+            );
+            if (validation.valid && validation.adjustedDecision) {
+              if (proposalMode === "suggest") {
+                // Advisory only — the deterministic redeploy decision is kept.
+                idleRedeployLogger.info("Agent proposal suggested (advisory) on idle-redeploy", {
+                  source: proposalSource,
+                  pool: overlayPoolAddress,
+                  suggested: validation.adjustedDecision.action,
+                });
+              } else if (validation.adjustedDecision.action === "ENTER") {
+                idleRedeployLogger.info("Agent proposal applied to idle-redeploy", {
+                  source: proposalSource,
+                  pool: overlayPoolAddress,
+                  to: validation.adjustedDecision.action,
+                });
+                decision = validation.adjustedDecision;
+                if (proposalSource === "queue" && agentProposal.proposalId) {
+                  overlayAppliedProposalId = agentProposal.proposalId;
+                }
+              } else {
+                idleRedeployLogger.info("Agent proposal cancelled idle-redeploy", {
+                  source: proposalSource,
+                  pool: overlayPoolAddress,
+                  to: validation.adjustedDecision.action,
+                });
+                yield* recordRedeploySkip(
+                  `[idle-redeploy] [${proposalMode}] agent proposal adjusted to ${validation.adjustedDecision.action} — redeploy cancelled`,
+                  `[idle-redeploy] agent proposal adjusted to ${validation.adjustedDecision.action}`,
+                );
+                overlaySkip = true;
+              }
+            } else {
+              // An invalid full/supervised/suggest proposal must not let the
+              // redeploy proceed as if unconstrained; arm backoff (mirrors the
+              // tail) and skip.
+              idleRedeployLogger.warn("Agent proposal rejected on idle-redeploy", {
+                source: proposalSource,
+                pool: overlayPoolAddress,
+                reason: validation.reason,
+              });
+              proposalBackoff.set(
+                overlayPoolAddress,
+                nextProposalBackoff(proposalBackoff.get(overlayPoolAddress), now, {
+                  baseMs: config.agentProposalBackoffBaseMs,
+                  maxMs: config.agentProposalBackoffMaxMs,
+                }),
+              );
+              getPoolCircuitBreaker(overlayPoolAddress).recordFailure(now);
+              if (proposalSource === "queue" && agentProposal.proposalId) {
+                yield* agentState
+                  .rejectProposal(agentProposal.proposalId)
+                  .pipe(Effect.catchAll(() => Effect.void));
+              }
+            }
+          }
+        }
+
+        // Supervised mode gates execution on human approval: without an applied
+        // approved queued proposal an ENTER (the redeploy) is held — and the
+        // redeploy has no HOLD execution path, so a held redeploy is a skip. Same
+        // shared predicate the in-slot tail uses.
+        if (
+          !overlaySkip &&
+          shouldHoldForSupervisedApproval(
+            config.agentiveMode,
+            config.agentProposalMode,
+            overlayAppliedProposalId !== undefined,
+            decision.action,
+          )
+        ) {
+          idleRedeployLogger.info("Supervised mode: holding idle-redeploy pending approval", {
+            pool: overlayPoolAddress,
+          });
+          yield* recordRedeploySkip(
+            `[idle-redeploy] [supervised] awaiting approved proposal — redeploy held (${decision.action})`,
+            "[idle-redeploy] supervised mode requires an approved proposal",
+          );
+          overlaySkip = true;
+        }
+
+        // A veto/proposal that forces HOLD means "don't enter"; a defensive
+        // non-ENTER override (EXIT/REBALANCE) has no position to act on. The
+        // redeploy has nothing to hold or exit, so either is a skip.
+        if (!overlaySkip && decision.action !== "ENTER") {
+          idleRedeployLogger.info("Idle-redeploy overlay forced non-ENTER — skipping", {
+            pool: overlayPoolAddress,
+            action: decision.action,
+          });
+          yield* recordRedeploySkip(
+            decision.action === "HOLD"
+              ? "[idle-redeploy] vetoed to HOLD by agent overlay — redeploy skipped"
+              : `[idle-redeploy] agent overlay adjusted to ${decision.action} — redeploy skipped`,
+            decision.action === "HOLD"
+              ? "[idle-redeploy] agent overlay forced HOLD"
+              : `[idle-redeploy] agent overlay adjusted to ${decision.action}`,
+          );
+          overlaySkip = true;
+        }
+
+        if (overlaySkip) {
+          return;
+        }
+      }
+
+      const riskResult: RiskResult = risk.evaluate(decision, {
+        openPositions,
+        portfolioValueUsd,
+        recentPnlUsd,
+        poolAddress: candidate.poolAddress,
+        activeBinId: candidate.pool.activeBinId,
+      });
+      if (riskResult.adjustedSizeUsd) {
+        decision = {
+          ...decision,
+          positionSizeUsd: riskResult.adjustedSizeUsd,
+          reasoning: `${decision.reasoning} (size capped to $${riskResult.adjustedSizeUsd.toFixed(0)})`,
+        };
+      }
+      if (!riskResult.approved) {
+        idleRedeployLogger.info("Idle redeploy rejected by risk gate", {
+          pool: candidate.poolAddress,
+          reason: riskResult.reason,
+        });
+        yield* alertSvc.sendAlert({
+          type: "risk_rejection",
+          severity: "warning",
+          message: `Risk gate rejected idle-redeploy ENTER on ${candidate.pool.tokenXSymbol}/${candidate.pool.tokenYSymbol}: ${riskResult.reason}`,
+          poolAddress: candidate.poolAddress,
+          data: { action: "ENTER", reason: riskResult.reason },
+        });
+        yield* audit
+          .recordDecision({
+            timestamp: Date.now(),
+            cycleId,
+            poolAddress: candidate.poolAddress,
+            action: "ENTER",
+            confidence: decision.confidence,
+            reasoning: decision.reasoning,
+            metrics: candidate.metrics,
+            riskResult,
+            executed: false,
+            paperTrading: config.paperTrading,
+          })
+          .pipe(Effect.catchAll(() => Effect.void));
+        return;
+      }
+
+      // P2 (3654054429, widened size): the feature's promise is a WIDER entry on
+      // an already-qualified pool. Comparison point is the POST-CAP deposit the
+      // redeploy would actually deploy — decision.positionSizeUsd after risk
+      // gate 6 caps it (riskResult.adjustedSizeUsd was applied above), not the raw
+      // proposed/widened figure. It must STRICTLY EXCEED the candidate's normal
+      // entry size; otherwise the pass would open a SMALLER second position that
+      // consumes a slot and fragments capital despite the feature being a wider
+      // entry. A modeled/unknown size (undefined) fails closed to 0 → skip.
+      const finalRedeploySizeUsd = decision.positionSizeUsd ?? 0;
+      if (finalRedeploySizeUsd <= candidate.normalEntrySizeUsd) {
+        idleRedeployLogger.info("Idle redeploy widened size does not exceed normal entry", {
+          pool: candidate.poolAddress,
+          finalSizeUsd: finalRedeploySizeUsd,
+          normalEntrySizeUsd: candidate.normalEntrySizeUsd,
+        });
+        yield* recordRedeploySkip(
+          `[idle-redeploy] widened size $${finalRedeploySizeUsd.toFixed(2)} does not exceed normal entry $${candidate.normalEntrySizeUsd.toFixed(2)} — skipped`,
+          "[idle-redeploy] widened size does not exceed normal entry size",
+        );
+        return;
+      }
+
+      const signalTimestamp = Date.now();
+      const signalSnapshotId = yield* db
+        .saveSignalSnapshot({
+          poolAddress: candidate.poolAddress,
+          timestamp: signalTimestamp,
+          feeIlRatio: candidate.metrics.feeIlRatio,
+          volumeAuthenticity: candidate.metrics.volumeAuthenticity,
+          binUtilization: candidate.metrics.binUtilization,
+          tvlUsd: candidate.pool.tvlUsd,
+          tvlVelocity: candidate.metrics.tvlVelocity,
+          volatilityStddev: candidate.volatilityStddev,
+          binStep: candidate.pool.binStep,
+          action: decision.action,
+          confidence: decision.confidence,
+        })
+        .pipe(Effect.catchAll(() => Effect.succeed(null)));
+
+      // Same entry-shape / range-width resolution the in-slot tail uses.
+      const entryStrategyShape: EntryStrategyShape =
+        config.entryStrategyType === "auto"
+          ? recommendStrategyShape({
+              volatilityStddev: candidate.volatilityStddev,
+              highVolThreshold: config.volatilityExitStddev,
+              netDriftBins: candidate.netDriftBins,
+            })
+          : config.entryStrategyType;
+      const entryRangeHalfWidth = resolveRangeHalfWidth({
+        binStep: candidate.pool.binStep,
+        configuredBaseHalfWidth: config.entryRangeHalfWidthBins,
+        adaptiveEnabled: config.volatilityAdaptiveRanges,
+        volatilityStddev: candidate.volatilityStddev,
+        maxFullRangeBins: config.maxRebalanceRangeBins,
+      });
+
+      let executed = false;
+      let executionError: string | undefined = undefined;
+      if (config.paperTrading) {
+        const paperResult = yield* executePaper(
+          { db, trackedPositions, strategy, entryStrategyShape, entryRangeHalfWidth },
+          decision,
+          candidate.pool,
+          signalTimestamp,
+          signalSnapshotId ?? undefined,
+        );
+        executed = paperResult.executed;
+        executionError = paperResult.error;
+      } else {
+        // The live path runs the unchanged paper-validation gate first.
+        const paperDays = yield* readPaperDays;
+        const validation = evaluatePaperValidation({
+          paperTrading: false,
+          paperDaysAccumulated: paperDays,
+          minDays: config.paperValidationMinDays,
+          enforce: config.paperValidationEnforce,
+        });
+        if (!validation.approved) {
+          idleRedeployLogger.warn("Idle redeploy blocked by paper-validation gate", {
+            pool: candidate.poolAddress,
+            reason: validation.reason,
+          });
+          yield* recordRedeploySkip(
+            `[idle-redeploy] [paper-validation] ${validation.reason}`,
+            validation.reason,
+          );
+          return;
+        }
+        const entryPrep = yield* EntryPrepService;
+        const liveResult = yield* executeLive(
+          {
+            adapter,
+            strategy,
+            db,
+            revenueConfigSvc,
+            trackedPositions,
+            entryPrep,
+            solPriceUsd: config.solPriceUsd,
+            entryStrategyShape,
+            entryRangeHalfWidth,
+            reconcileRequestedPools,
+            memory,
+            unpricedExitWarnedPools,
+          },
+          decision,
+          candidate.pool,
+          signalTimestamp,
+          signalSnapshotId ?? undefined,
+        );
+        executed = liveResult.executed;
+        executionError = liveResult.error;
+        // A live redeploy moved funds out of the wallet: re-read so the rest
+        // of the engine sees the post-transaction balance (mirrors the
+        // in-slot tail). A failed re-read blocks further entries this cycle,
+        // exactly as after a normal live ENTER.
+        if (executed) {
+          lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
+            Effect.catchAll(() => {
+              liveEntriesBlockedRestOfCycle = true;
+              idleRedeployLogger.warn(
+                "Wallet balance refresh failed after live idle-redeploy entry — blocking further entries this cycle",
+                { pool: candidate.poolAddress },
+              );
+              return Effect.succeed(lastWalletBalanceUsd);
+            }),
+          );
+        }
+      }
+
+      if (isInsufficientTokenBalanceError(executionError)) {
+        const backoff = nextEntryFailureBackoff(entryFailureBackoff.get(candidate.poolAddress));
+        entryFailureBackoff.set(candidate.poolAddress, backoff);
+      } else if (executed) {
+        entryFailureBackoff.delete(candidate.poolAddress);
+      }
+
+      // Consume an approved queued proposal (supervised) once the redeploy
+      // outcome is final — same helper the in-slot tail uses. A failed execution
+      // retains it for retry next cycle.
+      yield* finalizeAppliedProposal(
+        agentState,
+        overlayAppliedProposalId,
+        executed,
+        decision.action,
+      );
+
+      if (executed) {
+        cycle.poolsExecuted++;
+        idleRedeployLogger.info("Idle capital redeployed", {
+          pool: candidate.poolAddress,
+          sizeUsd: decision.positionSizeUsd,
+          idleCapitalUsd,
+          paperTrading: config.paperTrading,
+        });
+      } else {
+        cycle.poolsFailed++;
+      }
+
+      yield* audit
+        .recordDecision({
+          timestamp: Date.now(),
+          cycleId,
+          poolAddress: candidate.poolAddress,
+          action: "ENTER",
+          confidence: decision.confidence,
+          reasoning: decision.reasoning,
+          metrics: candidate.metrics,
+          riskResult,
+          executed,
+          error: executionError,
+          paperTrading: config.paperTrading,
+        })
+        .pipe(Effect.catchAll(() => Effect.void));
+      cycle.decisions.push(decision);
+    });
+
   // ─── Scan cycle ────────────────────────────────────────────────────────────
 
   const runScanCycle = (): Effect.Effect<void, never, EntryPrepService> =>
@@ -1934,9 +2587,13 @@ export const program = Effect.gen(function* () {
         lastWalletBalanceUsd = config.paperPortfolioUsd;
       }
 
+      // Qualified-but-unconsumed ENTER candidates for the opt-in idle-capital
+      // redeploy pass (empty and never read when the feature is off).
+      const idleRedeployCandidates: IdleRedeployCandidate[] = [];
+
       for (const poolAddress of poolsToScan) {
         // A pool yields one decision per held position plus at most one ENTER.
-        const decisions = yield* evaluatePool(poolAddress, cycle).pipe(
+        const decisions = yield* evaluatePool(poolAddress, cycle, idleRedeployCandidates).pipe(
           Effect.catchAll((err) => {
             cycle.poolsFailed++;
             console.error("Error processing pool", { poolAddress, err: String(err) });
@@ -1949,6 +2606,20 @@ export const program = Effect.gen(function* () {
           cycle.poolsDecided++;
         }
         cycle.poolsScanned++;
+      }
+
+      // Idle-capital auto-redeploy pass (opt-in): when idle wallet capital
+      // exceeds the threshold and qualified candidates exist, deploy into the
+      // top-scored one — routed through the UNCHANGED allocation + risk tail,
+      // so caps can reject/shrink but no gate is bypassed. A live-entry block
+      // (failed post-tx wallet re-read earlier this cycle) skips the pass so
+      // allocation math never runs on a stale balance.
+      if (
+        config.idleRedeployEnabled &&
+        idleRedeployCandidates.length > 0 &&
+        !liveEntriesBlockedRestOfCycle
+      ) {
+        yield* runIdleRedeployPass(idleRedeployCandidates, cycle);
       }
 
       cycle.completedAt = Date.now();
@@ -2154,6 +2825,7 @@ export const program = Effect.gen(function* () {
   const evaluatePool = (
     poolAddress: string,
     cycle: AgentCycle,
+    idleRedeployCandidates: IdleRedeployCandidate[],
   ): Effect.Effect<ReadonlyArray<AgentDecision>, unknown, EntryPrepService> =>
     Effect.gen(function* () {
       const cycleId = cycle.cycleId;
@@ -2205,6 +2877,7 @@ export const program = Effect.gen(function* () {
           apr: pool.apr,
           currentPrice: pool.currentPrice,
           binStep: pool.binStep,
+          statsSource: pool.statsSource,
           tokenXSymbol: pool.tokenXSymbol,
           tokenYSymbol: pool.tokenYSymbol,
           binArray:
@@ -2874,7 +3547,7 @@ export const program = Effect.gen(function* () {
         }
       }
 
-      const computeCooldownForExit = (
+      const resolveExitCooldown = (
         exitDecision: AgentDecision,
         position: PositionRecord | undefined,
       ): Effect.Effect<
@@ -2904,10 +3577,12 @@ export const program = Effect.gen(function* () {
 
           if (isOorExit) {
             const newOorCount = existingOorCount + 1;
-            const cooldownDuration =
-              newOorCount >= config.maxOorCooldownExits
-                ? config.repeatOorCooldownMs
-                : config.oorCooldownMs;
+            const cooldownDuration = computeCooldownForExit({
+              trigger: "oor",
+              consecutiveOorExits: existingOorCount,
+              config,
+              feeDensityPerDay: null,
+            });
             const cooldownUntil = Date.now() + cooldownDuration;
             const hours = (cooldownDuration / 3_600_000).toFixed(1);
             console.info(
@@ -2920,7 +3595,27 @@ export const program = Effect.gen(function* () {
               consecutiveOorExits: newOorCount,
             };
           } else if (isLowYieldExit) {
-            const cooldownDuration = config.oorCooldownMs;
+            // Fee density is trusted ONLY from the Data API (the only source
+            // of measured per-pool fees — same precedent as the paper fee
+            // accrual gate above). Gecko fees are a binStep base-rate MODEL
+            // on real volume and heuristic fees are fabricated, so by repo
+            // convention modeled/fabricated numbers get no gate vote: only
+            // datapi feeds the density scaling, everything else passes null
+            // and keeps the static legacy duration. Deliberately NOT
+            // isMeasuredStatsSource(), which would admit gecko.
+            const feeDensityPerDay =
+              pool.statsSource === "datapi" &&
+              pool.tvlUsd > 0 &&
+              Number.isFinite(pool.fees24hUsd) &&
+              pool.fees24hUsd >= 0
+                ? pool.fees24hUsd / pool.tvlUsd
+                : null;
+            const cooldownDuration = computeCooldownForExit({
+              trigger: "low-yield",
+              consecutiveOorExits: existingOorCount,
+              config,
+              feeDensityPerDay,
+            });
             const cooldownUntil = Date.now() + cooldownDuration;
             const hours = (cooldownDuration / 3_600_000).toFixed(1);
             console.info(
@@ -3191,6 +3886,43 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      // Recent-bin drift shared by the entry-shape resolution and the
+      // idle-redeploy capture (identical expression the shape path used inline).
+      const netDriftBins =
+        recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0;
+
+      // Idle-redeploy capture helper (opt-in): the candidate conditions +
+      // weighted-score gate, evaluated for a pool whose ENTER slot was skipped
+      // by the per-pool position cap. Allocation and token-risk are NOT
+      // checked here — dispatch from the pass is structurally impossible for
+      // a pool AT the per-pool cap (risk gate 3a and allocation gate 2 re-run
+      // and re-reject verbatim), so no gate they guard can be bypassed.
+      const evaluateIdleRedeployCandidate = (): IdleRedeployCandidate | null => {
+        if (
+          (metrics.feeIlRatioKnown ? feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 : true) &&
+          metrics.volumeAuthenticityKnown &&
+          volumeAuth > 0.8 &&
+          metrics.binUtilizationKnown &&
+          binUtilization > 0.4 &&
+          pool.tvlUsd > config.minPoolTvlUsd * 2
+        ) {
+          const entryScore = weightedEntryScore(metrics, signalWeights);
+          if (entryScore > config.weightedEntryScoreThreshold) {
+            return {
+              poolAddress,
+              pool,
+              metrics,
+              entryScore,
+              feeIlRatio,
+              normalEntrySizeUsd: computeEntrySizeUsd({ walletBalanceUsd, tvlUsd: pool.tvlUsd }),
+              volatilityStddev,
+              netDriftBins,
+            };
+          }
+        }
+        return null;
+      };
+
       // ── ENTER slot: one per pool per cycle, under the per-pool cap ──────
       // A pool already exiting this cycle never re-enters in the same cycle;
       // the count cap (MAX_POSITIONS_PER_POOL) bounds stacked positions while
@@ -3410,8 +4142,10 @@ export const program = Effect.gen(function* () {
                 .pipe(Effect.catchAll(() => Effect.void));
               enterGateRejected = true;
             } else {
-              const maxPositionSize = Math.min(walletBalanceUsd * 0.5, pool.tvlUsd * 0.005, 500);
-              const proposedSizeUsd = Math.max(maxPositionSize, 10);
+              const proposedSizeUsd = computeEntrySizeUsd({
+                walletBalanceUsd,
+                tvlUsd: pool.tvlUsd,
+              });
 
               // F5: per-pool allocation cap — aggregate across the pool's
               // positions so stacked exposure can't dominate the portfolio.
@@ -3447,6 +4181,44 @@ export const program = Effect.gen(function* () {
                     paperTrading: config.paperTrading,
                   })
                   .pipe(Effect.catchAll(() => Effect.void));
+                // Idle-redeploy capture: candidate conditions + score passed
+                // but allocation has no headroom (typically MAX_OPEN_POSITIONS
+                // reached — a slot can free mid-cycle when a LATER pool exits).
+                // The pass could dispatch this pool, so consult token-risk
+                // first EXACTLY as the in-slot gate does: a hard-risk signal
+                // disqualifies the candidate. Reuses the per-cycle token-risk
+                // cache, so this costs no round-trip when the screening seam
+                // already fetched these mints.
+                if (config.idleRedeployEnabled) {
+                  let redeployTokenRiskClean = true;
+                  if (config.jupiterTokenRiskEnabled !== false) {
+                    const redeployLegRisks = yield* Effect.promise(() =>
+                      consultTokenRisks([pool.tokenX, pool.tokenY], config),
+                    );
+                    for (const legMint of [pool.tokenX, pool.tokenY]) {
+                      const legSignal = redeployLegRisks.get(legMint);
+                      if (
+                        legSignal !== undefined &&
+                        (legSignal.isSus || legSignal.organicScoreLabel === "low")
+                      ) {
+                        redeployTokenRiskClean = false;
+                        break;
+                      }
+                    }
+                  }
+                  if (redeployTokenRiskClean) {
+                    idleRedeployCandidates.push({
+                      poolAddress,
+                      pool,
+                      metrics,
+                      entryScore,
+                      feeIlRatio,
+                      normalEntrySizeUsd: proposedSizeUsd,
+                      volatilityStddev,
+                      netDriftBins,
+                    });
+                  }
+                }
                 enterGateRejected = true;
               } else {
                 // [token-risk] ENTER gate (Wave 18): Jupiter advisory overlay —
@@ -3514,11 +4286,44 @@ export const program = Effect.gen(function* () {
                     reasoning: `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL $${pool.tvlUsd.toFixed(0)}`,
                     positionSizeUsd,
                   });
+                  // Idle-redeploy capture: the pool passed every in-slot gate
+                  // (conditions, score, allocation, token-risk), so it is a
+                  // fully-vetted candidate whether or not this ENTER executes
+                  // — a second position on the same pool (Wave 10) or a
+                  // risk-tail rejection both leave idle capital deployable.
+                  if (config.idleRedeployEnabled) {
+                    idleRedeployCandidates.push({
+                      poolAddress,
+                      pool,
+                      metrics,
+                      entryScore,
+                      feeIlRatio,
+                      normalEntrySizeUsd: positionSizeUsd,
+                      volatilityStddev,
+                      netDriftBins,
+                    });
+                  }
                 }
               }
             }
           }
         }
+      }
+
+      // Idle-redeploy capture: the per-pool position cap skipped the ENTER
+      // slot entirely. A pool that still passes the candidate conditions +
+      // score keeps the pass's ranking honest; dispatch is structurally
+      // impossible this cycle (the cap did not move — allocation gate and risk
+      // gate 3a re-run and re-reject verbatim), so no skipped gate can bite.
+      if (
+        config.idleRedeployEnabled &&
+        !poolExitFired &&
+        poolPositions.length >= config.maxPositionsPerPool &&
+        !unresolvedPoolAddresses.has(poolAddress) &&
+        approvedPoolAddresses.includes(poolAddress)
+      ) {
+        const redeployCandidate = evaluateIdleRedeployCandidate();
+        if (redeployCandidate) idleRedeployCandidates.push(redeployCandidate);
       }
 
       if (rawDecisions.length === 0 && !enterGateRejected) {
@@ -3549,8 +4354,7 @@ export const program = Effect.gen(function* () {
           ? recommendStrategyShape({
               volatilityStddev,
               highVolThreshold: config.volatilityExitStddev,
-              netDriftBins:
-                recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0,
+              netDriftBins,
             })
           : config.entryStrategyType;
 
@@ -3583,6 +4387,7 @@ export const program = Effect.gen(function* () {
             // backoff/circuit-breaker path so a transient failure cannot silence it.
             let vetoFetchFailed = false;
             let vetoWarnEligible = false;
+            const vetoStartedAt = Date.now();
             const enhanced = yield* agent
               .enhanceDecision(decision, {
                 decision,
@@ -3595,8 +4400,22 @@ export const program = Effect.gen(function* () {
                 hasOpenPosition,
               })
               .pipe(
+                // Bound the ENTIRE veto op by the veto deadline, CONNECT included.
+                // sendPrompt's per-request timer only starts AFTER the transport
+                // (re)connects (Gateway ~10s handshake; ACP ensureSession on the
+                // general AGENT_PROMPT_TIMEOUT_MS), so an outer deadline is the only
+                // thing keeping a stalled reconnect from delaying a capital-protecting
+                // EXIT past AGENT_VETO_TIMEOUT_MS. Fails open via the catchAll below.
+                Effect.timeoutFail({
+                  duration: `${config.agentVetoTimeoutMs} millis`,
+                  onTimeout: () =>
+                    new Error(
+                      `Agent veto review timed out after ${config.agentVetoTimeoutMs}ms (transport connect/session establishment + prompt exceeded the veto budget)`,
+                    ),
+                }),
                 Effect.catchAll((err) => {
                   vetoFetchFailed = true;
+                  const elapsedMs = Date.now() - vetoStartedAt;
                   const message = underlyingErrorMessage(err);
                   // Compute throttle eligibility ONCE: the catchAll owns the single
                   // throttle read+set so the warn log and the memory warning below
@@ -3613,13 +4432,15 @@ export const program = Effect.gen(function* () {
                     logger.warn("Agent veto fetch failed", {
                       pool: poolAddress,
                       error: message,
-                      timeoutMs: config.agentPromptTimeoutMs,
+                      elapsedMs,
+                      timeoutMs: config.agentVetoTimeoutMs,
                       gatewayUrl: config.agentGatewayUrl,
                     });
                   } else {
                     logger.debug("Agent veto fetch failed (throttled)", {
                       pool: poolAddress,
                       error: message,
+                      elapsedMs,
                     });
                   }
                   return Effect.succeed(null);
@@ -4056,7 +4877,7 @@ export const program = Effect.gen(function* () {
         });
 
         if (decision.action === "EXIT") {
-          const pendingCooldown = yield* computeCooldownForExit(decision, pos);
+          const pendingCooldown = yield* resolveExitCooldown(decision, pos);
           if (pendingCooldown) {
             yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catchAll(() => Effect.void));
           }
@@ -4134,8 +4955,7 @@ export const program = Effect.gen(function* () {
         if (decision.action === "ENTER" && config.entryStrategyType === "auto") {
           console.info(`[strategy-shape] auto resolved ${entryStrategyShape} for ${poolAddress}`, {
             volatilityStddev,
-            netDriftBins:
-              recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0,
+            netDriftBins,
           });
         }
         if (decision.action === "ENTER" && config.volatilityAdaptiveRanges) {

@@ -89,6 +89,18 @@ export interface PoolSnapshot {
   tokenXSymbol: string;
   tokenYSymbol: string;
   binArray: BinArray;
+  /**
+   * Where the snapshot's tvl/volume/fees came from — persisted so a replay tick
+   * keeps the live stats-source trust model (a `datapi` snapshot replays as
+   * `datapi` and the measured-fee-rate authenticity gate applies; an
+   * `heuristic`/unknown snapshot replays gate-off). Optional at the type level
+   * because legacy capture sites (and the off-limits live capture in program.ts)
+   * may omit it; the DB layer normalizes an omitted value to `"heuristic"` on
+   * write and always restores a concrete member, so NO replayed tick is left
+   * `undefined`. Conservative fail-closed default: a snapshot whose provenance
+   * was never recorded is treated as fabricated (`heuristic`), NOT datapi.
+   */
+  statsSource?: "datapi" | "geckoterminal" | "heuristic" | undefined;
 }
 
 export interface PoolMetrics {

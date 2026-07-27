@@ -153,6 +153,47 @@ describe("ConfigService freeze screening + IL protection flags", () => {
   });
 });
 
+describe("ConfigService fee-density cooldown floor guards", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("keeps the default floor (1 h) below the default static cooldown (4 h)", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.feeDensityCooldownMinMs).toBe(3_600_000);
+    expect(cfg.oorCooldownMs).toBe(14_400_000);
+  });
+
+  it("clamps the default floor under a static cooldown lowered below it", async () => {
+    // Operator lowers OOR_COOLDOWN_MS under the 1 h default floor without
+    // touching FEE_DENSITY_COOLDOWN_MIN_MS; OOR_COOLDOWN_MS stays untouched.
+    vi.stubEnv("OOR_COOLDOWN_MS", "1800000");
+    const cfg = await loadConfig();
+    expect(cfg.oorCooldownMs).toBe(1_800_000);
+    expect(cfg.feeDensityCooldownMinMs).toBe(1_799_999);
+  });
+
+  it("clamps a floor that equals the static cooldown", async () => {
+    vi.stubEnv("OOR_COOLDOWN_MS", "3600000"); // floor default == static
+    const cfg = await loadConfig();
+    expect(cfg.feeDensityCooldownMinMs).toBe(3_599_999);
+  });
+
+  it("clamps an explicit floor above the static cooldown", async () => {
+    vi.stubEnv("OOR_COOLDOWN_MS", "3600000");
+    vi.stubEnv("FEE_DENSITY_COOLDOWN_MIN_MS", "7200000");
+    const cfg = await loadConfig();
+    expect(cfg.feeDensityCooldownMinMs).toBe(3_599_999);
+  });
+
+  it("preserves an in-range floor untouched", async () => {
+    vi.stubEnv("OOR_COOLDOWN_MS", "7200000");
+    vi.stubEnv("FEE_DENSITY_COOLDOWN_MIN_MS", "1800000");
+    const cfg = await loadConfig();
+    expect(cfg.feeDensityCooldownMinMs).toBe(1_800_000);
+  });
+});
+
 describe("ConfigService agent runtime timeout", () => {
   afterEach(() => {
     vi.unstubAllEnvs();

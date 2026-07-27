@@ -65,6 +65,20 @@ export interface AdapterApi {
   readonly hasWallet: () => boolean;
   readonly getWalletAddress: () => string | null;
   readonly getWalletBalanceUsd: () => Effect.Effect<number, unknown>;
+  /**
+   * Per-mint SPL holdings the wallet-balance read already scans (Token
+   * Program + Token-2022, zero-amount ATAs skipped). Served from the SAME
+   * 30s cached snapshot as getWalletBalanceUsd — identical TTL, cleared by
+   * the same post-transaction invalidation — so the two reads never
+   * disagree and a holdings read costs no extra RPC. Empty map in paper
+   * mode (no wallet). A live read failure FAILS the Effect (the balance
+   * semantics); idle-capital consumers catch it fail-open and treat the
+   * cycle as having no idle capital. Native SOL is not included.
+   */
+  readonly getWalletHoldings: () => Effect.Effect<
+    ReadonlyMap<string, { readonly amountAtomic: bigint; readonly decimals: number }>,
+    unknown
+  >;
   readonly getNativeSolBalance: () => Effect.Effect<bigint, unknown>;
   readonly getPoolState: (poolAddress: string) => Effect.Effect<PoolState, unknown>;
   readonly getBinArray: (poolAddress: string) => Effect.Effect<BinArray, unknown>;

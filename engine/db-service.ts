@@ -568,8 +568,8 @@ export const DbLive = (dbPath?: string) =>
               `INSERT OR REPLACE INTO pool_snapshots (
               pool_address, timestamp, active_bin_id, tvl_usd, volume_24h_usd,
               fees_24h_usd, apr, current_price, bin_step,
-              token_x_symbol, token_y_symbol, bin_array_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              token_x_symbol, token_y_symbol, bin_array_json, stats_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               snapshot.poolAddress,
               snapshot.timestamp,
               snapshot.activeBinId,
@@ -582,6 +582,7 @@ export const DbLive = (dbPath?: string) =>
               snapshot.tokenXSymbol,
               snapshot.tokenYSymbol,
               serializeBinArray(snapshot.binArray),
+              snapshot.statsSource ?? "heuristic",
             );
           }),
 
@@ -1088,6 +1089,15 @@ function rowToPositionEvent(row: Record<string, unknown>): PositionEventRecord {
   };
 }
 
+// Narrow the TEXT column back to the stats-source union. Anything outside the
+// known members (legacy NULL, an unexpected literal) is treated as the
+// conservative, fail-closed "heuristic" — never silently upgraded to "datapi",
+// so an unknown provenance keeps the measured-fee-rate gate disabled on replay.
+function parseStatsSource(value: unknown): "datapi" | "geckoterminal" | "heuristic" {
+  if (value === "datapi" || value === "geckoterminal" || value === "heuristic") return value;
+  return "heuristic";
+}
+
 function rowToSnapshot(row: Record<string, unknown>): PoolSnapshot {
   return {
     poolAddress: String(row.pool_address),
@@ -1102,6 +1112,7 @@ function rowToSnapshot(row: Record<string, unknown>): PoolSnapshot {
     tokenXSymbol: String(row.token_x_symbol ?? ""),
     tokenYSymbol: String(row.token_y_symbol ?? ""),
     binArray: deserializeBinArray(String(row.bin_array_json)),
+    statsSource: parseStatsSource(row.stats_source),
   };
 }
 

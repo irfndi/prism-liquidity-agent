@@ -41,6 +41,8 @@ describe("evaluatePool TVL-drop EXIT (integration)", () => {
       hasWallet: () => false,
       getWalletAddress: () => null,
       getWalletBalanceUsd: () => Effect.succeed(10_000),
+      getWalletHoldings: () =>
+        Effect.succeed(new Map<string, { amountAtomic: bigint; decimals: number }>()),
       getNativeSolBalance: () => Effect.succeed(0n),
       getPoolState: () =>
         Effect.succeed(
