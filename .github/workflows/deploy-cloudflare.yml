@@ -64,9 +64,23 @@ jobs:
       # alchemy CLI + its Effect-4 runtime resolve). Config.redacted worker
       # secrets resolve from these env vars at deploy time and are uploaded to
       # Cloudflare as `secret_text`.
+      # Alchemy's deploy is idempotent (adopt-by-read + reconcile), so bounded
+      # retries are safe and absorb transient Cloudflare API failures
+      # (observed in production: 504 gateway timeouts with retry_after=120s).
       - name: Deploy via Alchemy
         if: github.ref == 'refs/heads/main'
-        run: bun run deploy
+        run: |
+          for attempt in 1 2 3; do
+            if bun run deploy; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Deploy attempt $attempt failed — retrying in 130s (Cloudflare API backoff)..."
+              sleep 130
+            fi
+          done
+          echo "::error::Deploy failed after 3 attempts"
+          exit 1
         env:
           # Cloudflare provider credentials (Alchemy auth + remote state store).
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

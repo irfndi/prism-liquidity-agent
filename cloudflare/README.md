@@ -281,6 +281,7 @@ The GitHub Actions workflow at `.github/workflows/deploy-cloudflare.yml` runs on
 1. Installs dependencies with Bun at `cloudflare/` (the workspace install covers the `infra/` package)
 2. Runs the type check (`bun run typecheck`), which covers both the workers' `tsc` and the `infra` package's `tsc`
 3. **On PRs, stops there.** The deploy runs only on merge to `main`: `bun run deploy`, which delegates to `infra/` and runs `alchemy deploy --stage prod --yes`
+4. Deploys retry up to **3 attempts** (~130s apart) on transient Cloudflare API errors (observed: 504s with `retry_after=120s`). Alchemy deploys are idempotent (adopt-by-read + reconcile), so retries are safe.
 
 **There are no PR preview deploys, by design.** Every stage would share the single production D1 / KV / R2 / Vectorize, so a per-PR stage destroyed on PR close could drop production data. One production stack, stage `prod`.
 
