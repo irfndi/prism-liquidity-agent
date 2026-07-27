@@ -79,9 +79,18 @@ export const memory = Cloudflare.Vectorize.Index("memory", {
 });
 
 // ---------------------------------------------------------------------------
-// Workers — plain Hono `export default { fetch }` modules, bound as async
-// Workers. Secrets are `Config.redacted("<NAME>")` values: resolved from CI
-// env vars at deploy time and uploaded as Cloudflare `secret_text`.
+// Workers — plain Hono modules, bound as async Workers. Secrets are
+// `Config.redacted("<NAME>")` values: resolved from CI env vars at deploy
+// time and uploaded as Cloudflare `secret_text`.
+//
+// BUNDLING: `main` points at PREBUILT single-file ESM bundles
+// (`bun run build:workers` at the workspace root, chained by `deploy`) and
+// `bundle: false` makes Alchemy upload them byte-for-byte (Wrangler's
+// `no_bundle` contract — no rolldown, no minification, no transformation).
+// Deliberate: alchemy@2.0.0-beta.64's rolldown pipeline stripped the Hono
+// route registrations from our entries in production deploys — uploads
+// "succeeded" but workers answered 404 for every path. esbuild reproduces
+// the wrangler-era bundling that ran production for months.
 // ---------------------------------------------------------------------------
 
 const compatibility = {
@@ -110,7 +119,8 @@ const observability = {
 /** API worker — `prism-api.irfndi.workers.dev`. */
 export const api = Cloudflare.Worker("api", {
   name: "prism-api",
-  main: "../workers/api/index.ts",
+  main: "../dist/api/index.mjs",
+  bundle: false,
   compatibility,
   observability,
   env: {
@@ -134,7 +144,8 @@ export const api = Cloudflare.Worker("api", {
 /** Telegram bot worker — `prism-telegram-bot.irfndi.workers.dev`. */
 export const telegramBot = Cloudflare.Worker("telegramBot", {
   name: "prism-telegram-bot",
-  main: "../workers/telegram-bot/index.ts",
+  main: "../dist/telegram-bot/index.mjs",
+  bundle: false,
   compatibility,
   observability,
   env: {

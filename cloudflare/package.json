@@ -8,8 +8,9 @@
   "type": "module",
   "scripts": {
     "dev": "bun run --cwd infra dev",
-    "deploy": "bun run --cwd infra deploy",
-    "plan": "bun run --cwd infra plan",
+    "build:workers": "esbuild workers/api/index.ts --bundle --format=esm --target=es2022 --conditions=workerd,worker,browser --minify --outfile=dist/api/index.mjs && esbuild workers/telegram-bot/index.ts --bundle --format=esm --target=es2022 --conditions=workerd,worker,browser --minify --outfile=dist/telegram-bot/index.mjs",
+    "deploy": "bun run build:workers && bun run --cwd infra deploy",
+    "plan": "bun run build:workers && bun run --cwd infra plan",
     "typecheck": "tsc --noEmit && bun run --cwd infra typecheck"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
     "@cloudflare/workers-types": "^5.20260726.1",
     "@vitest/runner": "^4.1.10",
     "@vitest/snapshot": "^4.1.10",
+    "esbuild": "0.25.12",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10",
     "wrangler": "^4.114.0"
