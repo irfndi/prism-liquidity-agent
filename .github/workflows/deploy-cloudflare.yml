@@ -1,5 +1,22 @@
 name: Deploy Cloudflare Workers
 
+# Infrastructure is managed as TypeScript by Alchemy (`cloudflare/alchemy.run.ts`),
+# not wrangler.toml (removed — see commit). One production stack, stage `prod`.
+#
+# REQUIRED ONE-TIME OPERATOR BOOTSTRAP (before the first deploy from this
+# workflow can succeed): the Alchemy remote state store must exist in the
+# account. Run once, locally, with an admin profile:
+#     cd cloudflare && bun alchemy login --profile admin
+#     cd cloudflare && bun alchemy cloudflare bootstrap --profile admin
+# CI runners have no local state on disk, so `CI=true` (set automatically by
+# GitHub Actions) makes Alchemy resolve the state-store credentials from the
+# account's Cloudflare Secrets Store on every run.
+#
+# PR PREVIEW DEPLOYS ARE DELIBERATELY DISABLED: all stages share the single
+# production D1/KV/R2/Vectorize. A per-PR stage that destroyed on PR close
+# could drop production data, so PRs only typecheck — the prod deploy runs on
+# merge to main.
+
 on:
   push:
     branches: [main]
@@ -30,38 +47,21 @@ jobs:
       - name: Type check
         run: bun run typecheck
 
-      - name: Run D1 Migrations
+      # Production deploy (main only). `bun run deploy` runs the pinned
+      # `alchemy deploy --stage prod --yes`; the Alchemy CLI ships as the
+      # exact-pinned `alchemy` devDependency installed above. Config.redacted
+      # worker secrets resolve from these env vars at deploy time and are
+      # uploaded to Cloudflare as `secret_text`.
+      - name: Deploy via Alchemy
         if: github.ref == 'refs/heads/main'
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: "cloudflare"
-          command: d1 migrations apply prism-db
-
-      - name: Deploy API Worker
-        if: github.ref == 'refs/heads/main'
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: "cloudflare"
-          command: deploy
-
-      - name: Deploy Telegram Bot Worker
-        if: github.ref == 'refs/heads/main'
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: "cloudflare"
-          command: deploy --config wrangler.telegram.toml
-
-      - name: Deploy to Staging
-        if: github.ref == 'refs/heads/develop'
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: "cloudflare"
-          command: deploy --env staging
+        run: bun run deploy
+        env:
+          # Cloudflare provider credentials (Alchemy auth + remote state store).
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Worker secrets (Config.redacted -> secret_text on the workers).
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          BOT_API_SECRET: ${{ secrets.BOT_API_SECRET }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+          FEE_WALLET_ADDRESS: ${{ secrets.FEE_WALLET_ADDRESS }}

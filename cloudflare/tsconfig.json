@@ -20,5 +20,10 @@
     "isolatedModules": true,
     "noEmit": true
   },
-  "include": ["workers/**/*", "migrations/**/*", "worker-configuration.d.ts"]
+  "include": [
+    "workers/**/*",
+    "migrations/**/*",
+    "worker-configuration.d.ts",
+    "alchemy.run.ts"
+  ]
 }
