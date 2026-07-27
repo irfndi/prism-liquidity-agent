@@ -106,6 +106,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     agentGatewayUrl: "",
     agentGatewayToken: "",
     agentPromptTimeoutMs: 15_000,
+    agentVetoTimeoutMs: 15_000,
     agentCheckinIntervalMs: 3_600_000,
     agentCheckinOnEvents: true,
     agentCheckinIncludeHistory: true,

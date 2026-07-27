@@ -3583,6 +3583,7 @@ export const program = Effect.gen(function* () {
             // backoff/circuit-breaker path so a transient failure cannot silence it.
             let vetoFetchFailed = false;
             let vetoWarnEligible = false;
+            const vetoStartedAt = Date.now();
             const enhanced = yield* agent
               .enhanceDecision(decision, {
                 decision,
@@ -3597,6 +3598,7 @@ export const program = Effect.gen(function* () {
               .pipe(
                 Effect.catchAll((err) => {
                   vetoFetchFailed = true;
+                  const elapsedMs = Date.now() - vetoStartedAt;
                   const message = underlyingErrorMessage(err);
                   // Compute throttle eligibility ONCE: the catchAll owns the single
                   // throttle read+set so the warn log and the memory warning below
@@ -3613,13 +3615,15 @@ export const program = Effect.gen(function* () {
                     logger.warn("Agent veto fetch failed", {
                       pool: poolAddress,
                       error: message,
-                      timeoutMs: config.agentPromptTimeoutMs,
+                      elapsedMs,
+                      timeoutMs: config.agentVetoTimeoutMs,
                       gatewayUrl: config.agentGatewayUrl,
                     });
                   } else {
                     logger.debug("Agent veto fetch failed (throttled)", {
                       pool: poolAddress,
                       error: message,
+                      elapsedMs,
                     });
                   }
                   return Effect.succeed(null);

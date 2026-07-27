@@ -180,6 +180,7 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     agentGatewayUrl: "ws://127.0.0.1:18789",
     agentGatewayToken: "",
     agentPromptTimeoutMs: 15_000,
+    agentVetoTimeoutMs: 15_000,
     agentCheckinIntervalMs: 3_600_000,
     agentCheckinOnEvents: true,
     agentCheckinIncludeHistory: true,
