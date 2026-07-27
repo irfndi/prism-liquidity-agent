@@ -209,3 +209,117 @@ describe("AdapterService wallet balance reconciliation", () => {
     }
   });
 });
+
+describe("AdapterService wallet holdings seam (getWalletHoldings)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function readWalletHoldings() {
+    const layer = buildAdapterLayerWithWallet();
+    const program = Effect.gen(function* () {
+      const adapter = yield* AdapterService;
+      return yield* adapter.getWalletHoldings();
+    }).pipe(Effect.provide(layer));
+    return Effect.runPromise(program);
+  }
+
+  it("returns per-mint holdings with accumulated atomics across both token programs", async () => {
+    const restore = mockJupiterPrices({ [USDC_MINT]: 1, [EXOTIC_MINT]: 5 });
+    vi.spyOn(Connection.prototype, "getBalance").mockResolvedValue(0);
+    mockTokenAccountsByProgram(
+      [
+        { mint: USDC_MINT, amount: "1000000", decimals: 6 },
+        { mint: USDC_MINT, amount: "2000000", decimals: 6 },
+      ],
+      [{ mint: EXOTIC_MINT, amount: "2000000", decimals: 6 }],
+    );
+
+    try {
+      const holdings = await readWalletHoldings();
+      expect(holdings.size).toBe(2);
+      expect(holdings.get(USDC_MINT)).toEqual({ amountAtomic: 3_000_000n, decimals: 6 });
+      expect(holdings.get(EXOTIC_MINT)).toEqual({ amountAtomic: 2_000_000n, decimals: 6 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("omits zero-amount token accounts from the holdings map", async () => {
+    const restore = mockJupiterPrices({ [USDC_MINT]: 1 });
+    vi.spyOn(Connection.prototype, "getBalance").mockResolvedValue(0);
+    mockTokenAccountsByProgram([
+      { mint: USDC_MINT, amount: "0", decimals: 6 },
+      { mint: USDC_MINT, amount: "1000000", decimals: 6 },
+    ]);
+
+    try {
+      const holdings = await readWalletHoldings();
+      expect(holdings.get(USDC_MINT)).toEqual({ amountAtomic: 1_000_000n, decimals: 6 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("serves the balance AND the holdings from one cached snapshot read", async () => {
+    // One snapshot = two token-account reads (Token Program + Token-2022);
+    // the same mint reported under both programs accumulates to 2 USDC.
+    // Balance + holdings + a repeat holdings read all share that snapshot.
+    const restore = mockJupiterPrices({ [USDC_MINT]: 1 });
+    vi.spyOn(Connection.prototype, "getBalance").mockResolvedValue(0);
+    let tokenAccountReads = 0;
+    vi.spyOn(Connection.prototype, "getParsedTokenAccountsByOwner").mockImplementation(async () => {
+      tokenAccountReads += 1;
+      return {
+        value: [tokenAccount({ mint: USDC_MINT, amount: "1000000", decimals: 6 })],
+      } as unknown as TokenAccountsResult;
+    });
+
+    try {
+      const layer = buildAdapterLayerWithWallet();
+      const program = Effect.gen(function* () {
+        const adapter = yield* AdapterService;
+        return yield* Effect.all([
+          adapter.getWalletBalanceUsd(),
+          adapter.getWalletHoldings(),
+          adapter.getWalletHoldings(),
+        ]);
+      }).pipe(Effect.provide(layer));
+
+      const [balance, holdings, repeatHoldings] = await Effect.runPromise(program);
+      expect(balance).toBeCloseTo(2, 5);
+      expect(holdings.get(USDC_MINT)).toEqual({ amountAtomic: 2_000_000n, decimals: 6 });
+      expect(repeatHoldings.get(USDC_MINT)).toEqual({ amountAtomic: 2_000_000n, decimals: 6 });
+      expect(tokenAccountReads).toBe(2);
+    } finally {
+      restore();
+    }
+  });
+
+  it("returns an empty map when no wallet is configured (paper mode)", async () => {
+    const configLayer = Layer.succeed(
+      ConfigService,
+      defaultAppConfig({
+        walletPrivateKey: "",
+        solanaRpcUrl: "https://example.com",
+        solanaRpcFallbackUrl: "",
+        sqliteDbPath: ":memory:",
+        autoUpdate: false,
+      }),
+    );
+    const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
+    const layer = Layer.provide(AdapterLive, Layer.merge(configLayer, auditLayer)) as Layer.Layer<
+      AdapterService,
+      never,
+      never
+    >;
+
+    const holdings = await Effect.runPromise(
+      Effect.gen(function* () {
+        const adapter = yield* AdapterService;
+        return yield* adapter.getWalletHoldings();
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(holdings.size).toBe(0);
+  });
+});

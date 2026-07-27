@@ -364,6 +364,21 @@ export interface AppConfig {
    */
   readonly entryStrategyType: EntryStrategyType;
 
+  // ─── Idle-capital auto-redeploy (opt-in) ──────────────────────────────────
+  /** Master switch for the per-cycle idle-capital redeploy gate. Default
+   *  false — the pass is inert unless explicitly opted in. When on, idle
+   *  capital above the threshold is deployed into the cycle's top qualified
+   *  entry candidate at a wider size; every existing risk gate still runs
+   *  verbatim on the redeploy (caps can reject or shrink, never bypassed). */
+  readonly idleRedeployEnabled: boolean;
+  /** Idle capital (USD) that must sit un-deployed before the redeploy pass
+   *  considers acting. Live: USDC wallet balance; paper: the paper portfolio
+   *  seed minus open-position value. Default 500. */
+  readonly idleRedeployThresholdUsd: number;
+  /** Hard ceiling (USD) on a single idle-redeploy entry, on top of the
+   *  per-pool allocation cap the risk tail re-applies. Default 2000. */
+  readonly idleRedeployMaxSizeUsd: number;
+
   /** Master switch for periodic LM farm reward claims (Wave 8). Default true;
    *  scoring stays farm-aware regardless — this only gates on-chain claims. */
   readonly farmRewardsEnabled: boolean;
@@ -571,6 +586,13 @@ const loadConfig = Effect.gen(function* () {
   );
   const maxOpenPositions = yield* validatedNumber("MAX_OPEN_POSITIONS", 1, 3);
   const maxPositionsPerPool = yield* validatedNumber("MAX_POSITIONS_PER_POOL", 1, 2);
+
+  // ─── Idle-capital auto-redeploy (opt-in) ─────────────────────────────────
+  const idleRedeployEnabled = yield* Config.boolean("IDLE_REDEPLOY_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const idleRedeployThresholdUsd = yield* validatedNumber("IDLE_REDEPLOY_THRESHOLD_USD", 0, 500);
+  const idleRedeployMaxSizeUsd = yield* validatedNumber("IDLE_REDEPLOY_MAX_SIZE_USD", 0, 2000);
 
   // ─── F6: Paper-trading validation period ────────────────────────────────────
   const paperValidationMinDays = yield* validatedNumber("PAPER_VALIDATION_MIN_DAYS", 0, 7);
@@ -1133,6 +1155,9 @@ const loadConfig = Effect.gen(function* () {
     weightedEntryScoreThreshold,
     autoSwapEntry,
     entryStrategyType,
+    idleRedeployEnabled,
+    idleRedeployThresholdUsd,
+    idleRedeployMaxSizeUsd,
     farmRewardsEnabled,
     limitOrdersEnabled,
     limitOrderMode,
