@@ -49,7 +49,7 @@ function readApiKey(): Effect.Effect<string | null, never> {
   }).pipe(Effect.catchAll(() => Effect.succeed(null)));
 }
 
-function parseRevenueConfig(data: unknown): RevenueConfig | null {
+export function parseRevenueConfig(data: unknown): RevenueConfig | null {
   if (typeof data !== "object" || data === null) return null;
   const obj = data as Record<string, unknown>;
   return {
@@ -63,7 +63,7 @@ function parseRevenueConfig(data: unknown): RevenueConfig | null {
   };
 }
 
-function fetchConfigFromApi(apiKey: string): Effect.Effect<RevenueConfig, unknown> {
+export function fetchConfigFromApi(apiKey: string): Effect.Effect<RevenueConfig, unknown> {
   return Effect.gen(function* () {
     const res = yield* Effect.tryPromise(() =>
       fetch(`${API_BASE_URL}/v1/config`, {

@@ -45,8 +45,10 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Run tests
-        run: bun run test
+      # Coverage was local-only; this also enforces the istanbul thresholds
+      # configured in vitest.config.ts so PRs can't silently regress them.
+      - name: Run tests with coverage gate
+        run: bun run coverage
 
   # Canary release channel: build + publish a per-merge canary bundle to R2
   # whenever CI passes on main. Mirrors release.yml's bundle/manifest patterns
