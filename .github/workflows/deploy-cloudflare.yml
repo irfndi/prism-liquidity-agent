@@ -60,9 +60,12 @@ jobs:
 
       # Production deploy (main only). `bun run deploy` at the workspace root
       # delegates to `bun run --cwd infra deploy`, i.e. the pinned
-      # `alchemy deploy --stage prod --yes` run from `cloudflare/infra` (where the
-      # alchemy CLI + its Effect-4 runtime resolve). Config.redacted worker
-      # secrets resolve from these env vars at deploy time and are uploaded to
+      # `alchemy deploy --stage prod --adopt --yes` run from `cloudflare/infra`
+      # (where the alchemy CLI + its Effect-4 runtime resolve). `--adopt` takes
+      # over the wrangler-created workers (workers carry ownership tags, so
+      # unlike the data resources they are not silently adopted); it is a no-op
+      # for resources this stack already owns. Config.redacted worker secrets
+      # resolve from these env vars at deploy time and are uploaded to
       # Cloudflare as `secret_text`.
       # Alchemy's deploy is idempotent (adopt-by-read + reconcile), so bounded
       # retries are safe and absorb transient Cloudflare API failures
