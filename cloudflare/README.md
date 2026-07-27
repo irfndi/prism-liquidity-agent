@@ -92,6 +92,10 @@ bun alchemy cloudflare bootstrap
 
 Afterwards CI (`CI=true`, set automatically by GitHub Actions) resolves state-store credentials from the Cloudflare Secrets Store on every run; runners hold no local state.
 
+### Worker bundling (prebuilt, uploaded as-is)
+
+Workers are built with **esbuild** before every deploy (`bun run build:workers` — the root `deploy` script chains it), producing one runtime-ready ESM module each under `cloudflare/dist/`. Alchemy uploads these with `bundle: false` (Wrangler's `no_bundle` contract: byte-for-byte, no rolldown, no transformation). This is deliberate: alchemy's beta rolldown pipeline produced successful-looking uploads whose bundles had the Hono route registrations stripped — deployed workers answered `404 Not Found` on every path. esbuild reproduces the wrangler-era bundling that served production.
+
 ### Worker secrets (no longer `wrangler secret put`)
 
 Worker secrets are declared as `Config.redacted("<NAME>")` in `alchemy.run.ts`. They resolve from environment variables **at deploy time** and are uploaded to the workers as `secret_text`. There is no separate secret-setting step. In CI they come from GitHub repo secrets (checklist under CI/CD below); for a manual local deploy, export the env vars in your shell first.

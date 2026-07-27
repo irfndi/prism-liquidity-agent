@@ -53,20 +53,23 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      # Type check covers BOTH workspace packages: the root workers' tsc and the
-      # infra package's tsc (the root `typecheck` script chains them).
-      - name: Type check
-        run: bun run typecheck
+      # Type check covers BOTH workspace packages, and the worker bundles are
+      # built here too so PRs gate on the exact artifacts alchemy uploads
+      # (prebuilt esbuild bundles in cloudflare/dist/ — see the deploy step).
+      - name: Type check + build workers
+        run: bun run typecheck && bun run build:workers
 
       # Production deploy (main only). `bun run deploy` at the workspace root
-      # delegates to `bun run --cwd infra deploy`, i.e. the pinned
-      # `alchemy deploy --stage prod --adopt --yes` run from `cloudflare/infra`
-      # (where the alchemy CLI + its Effect-4 runtime resolve). `--adopt` takes
-      # over the wrangler-created workers (workers carry ownership tags, so
-      # unlike the data resources they are not silently adopted); it is a no-op
-      # for resources this stack already owns. Config.redacted worker secrets
-      # resolve from these env vars at deploy time and are uploaded to
-      # Cloudflare as `secret_text`.
+      # chains `build:workers` (esbuild → cloudflare/dist/), then delegates to
+      # `bun run --cwd infra deploy` = `alchemy deploy --stage prod --adopt
+      # --yes` from `cloudflare/infra` (where the alchemy CLI + its Effect-4
+      # runtime resolve). Alchemy uploads the prebuilt bundles byte-for-byte
+      # (`bundle: false`) — its beta rolldown pipeline stripped routes from
+      # source entries in production. `--adopt` takes over the wrangler-created
+      # workers (workers carry ownership tags, so unlike the data resources
+      # they are not silently adopted); it is a no-op for resources this stack
+      # already owns. Config.redacted worker secrets resolve from these env
+      # vars at deploy time and are uploaded to Cloudflare as `secret_text`.
       # Alchemy's deploy is idempotent (adopt-by-read + reconcile), so bounded
       # retries are safe and absorb transient Cloudflare API failures
       # (observed in production: 504 gateway timeouts with retry_after=120s).
