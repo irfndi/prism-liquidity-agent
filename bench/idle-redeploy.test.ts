@@ -556,24 +556,115 @@ describe("program — idle-capital auto-redeploy gate", () => {
 
 // ─── Redeploy confidence (P2 3654054423) — modeled fee/IL gets no vote ───────
 
-describe("computeIdleRedeployConfidence — modeled fee/IL excluded", () => {
-  it("measured (datapi) ratio: fee-aware formula, capped at 0.85", () => {
-    expect(computeIdleRedeployConfidence({ feeIlRatio: 0, feeIlRatioKnown: true })).toBe(0.5);
-    expect(computeIdleRedeployConfidence({ feeIlRatio: 2, feeIlRatioKnown: true })).toBeCloseTo(
-      0.6,
-      10,
-    );
-    expect(computeIdleRedeployConfidence({ feeIlRatio: 7, feeIlRatioKnown: true })).toBe(0.85);
-    expect(computeIdleRedeployConfidence({ feeIlRatio: 20, feeIlRatioKnown: true })).toBe(0.85);
+describe("computeIdleRedeployConfidence — modeled fee/IL excluded, known signals vote", () => {
+  // Known-signal args are irrelevant on the fee-known path (it short-circuits);
+  // a neutral fixture keeps the calls readable.
+  const NO_KNOWN_SIGNALS = {
+    volumeAuthenticity: 0,
+    volumeAuthenticityKnown: false,
+    binUtilization: 0,
+    binUtilizationKnown: false,
+  };
+
+  it("measured (datapi) ratio: unchanged fee-aware formula, capped at 0.85", () => {
+    expect(
+      computeIdleRedeployConfidence({ feeIlRatio: 0, feeIlRatioKnown: true, ...NO_KNOWN_SIGNALS }),
+    ).toBe(0.5);
+    expect(
+      computeIdleRedeployConfidence({ feeIlRatio: 2, feeIlRatioKnown: true, ...NO_KNOWN_SIGNALS }),
+    ).toBeCloseTo(0.6, 10);
+    expect(
+      computeIdleRedeployConfidence({ feeIlRatio: 7, feeIlRatioKnown: true, ...NO_KNOWN_SIGNALS }),
+    ).toBe(0.85);
+    expect(
+      computeIdleRedeployConfidence({ feeIlRatio: 20, feeIlRatioKnown: true, ...NO_KNOWN_SIGNALS }),
+    ).toBe(0.85);
   });
 
-  it("modeled (gecko) ratio: exactly the neutral base regardless of the value", () => {
-    // A modeled-high ratio must NOT raise confidence...
-    expect(computeIdleRedeployConfidence({ feeIlRatio: 20, feeIlRatioKnown: false })).toBe(0.5);
-    expect(computeIdleRedeployConfidence({ feeIlRatio: 8, feeIlRatioKnown: false })).toBe(0.5);
-    // ...and a modeled-low ratio must NOT lower it.
-    expect(computeIdleRedeployConfidence({ feeIlRatio: 0, feeIlRatioKnown: false })).toBe(0.5);
-    expect(computeIdleRedeployConfidence({ feeIlRatio: 0.1, feeIlRatioKnown: false })).toBe(0.5);
+  it("fee unknown + NO known signals: exactly the neutral base regardless of the modeled fee", () => {
+    // The modeled fee value must move nothing when it is the only signal absent
+    // and nothing else is known: a modeled-high ratio must NOT raise confidence…
+    expect(
+      computeIdleRedeployConfidence({
+        feeIlRatio: 20,
+        feeIlRatioKnown: false,
+        ...NO_KNOWN_SIGNALS,
+      }),
+    ).toBe(0.5);
+    expect(
+      computeIdleRedeployConfidence({ feeIlRatio: 8, feeIlRatioKnown: false, ...NO_KNOWN_SIGNALS }),
+    ).toBe(0.5);
+    // …and a modeled-low ratio must NOT lower it.
+    expect(
+      computeIdleRedeployConfidence({ feeIlRatio: 0, feeIlRatioKnown: false, ...NO_KNOWN_SIGNALS }),
+    ).toBe(0.5);
+    expect(
+      computeIdleRedeployConfidence({
+        feeIlRatio: 0.1,
+        feeIlRatioKnown: false,
+        ...NO_KNOWN_SIGNALS,
+      }),
+    ).toBe(0.5);
+  });
+
+  it("fee unknown + known signals: confidence derived from volume + bin utilization, clamped to 0.85", () => {
+    // volume term = 0.1 + max(0, auth-0.8)*0.25 ; bin term = 0.05 + util*0.1.
+    // auth 0.85 known + util 0.5 known → 0.5 + (0.1+0.0125) + (0.05+0.05) = 0.7125.
+    expect(
+      computeIdleRedeployConfidence({
+        feeIlRatio: 20,
+        feeIlRatioKnown: false,
+        volumeAuthenticity: 0.85,
+        volumeAuthenticityKnown: true,
+        binUtilization: 0.5,
+        binUtilizationKnown: true,
+      }),
+    ).toBeCloseTo(0.7125, 10);
+    // Only volume known (auth 0.9) → 0.5 + (0.1 + 0.025) = 0.625.
+    expect(
+      computeIdleRedeployConfidence({
+        feeIlRatio: 0,
+        feeIlRatioKnown: false,
+        volumeAuthenticity: 0.9,
+        volumeAuthenticityKnown: true,
+        binUtilization: 0.9,
+        binUtilizationKnown: false,
+      }),
+    ).toBeCloseTo(0.625, 10);
+    // Clamp: extreme known signals never exceed 0.85 (and the modeled fee — 20
+    // here — still votes nothing).
+    expect(
+      computeIdleRedeployConfidence({
+        feeIlRatio: 20,
+        feeIlRatioKnown: false,
+        volumeAuthenticity: 5,
+        volumeAuthenticityKnown: true,
+        binUtilization: 5,
+        binUtilizationKnown: true,
+      }),
+    ).toBe(0.85);
+  });
+
+  it("REQUIRED PROPERTY: any entry-candidate (volumeAuth>0.8 known, binUtil>0.4 known) clears the 0.65 threshold", () => {
+    // The entry candidate conditions are volumeAuthenticity > 0.8 (known) and
+    // binUtilization > 0.4 (known). At those strict lower bounds the confidence
+    // is 0.5 + 0.1 + (0.05 + 0.04) = 0.69 — already ≥ 0.65 — and it only grows
+    // with stronger signals, so a qualified gecko candidate is never fail-closed
+    // by an absent (modeled) fee signal.
+    for (const volumeAuthenticity of [0.81, 0.85, 0.95, 1.0]) {
+      for (const binUtilization of [0.41, 0.5, 0.75, 1.0]) {
+        expect(
+          computeIdleRedeployConfidence({
+            feeIlRatio: 0,
+            feeIlRatioKnown: false,
+            volumeAuthenticity,
+            volumeAuthenticityKnown: true,
+            binUtilization,
+            binUtilizationKnown: true,
+          }),
+        ).toBeGreaterThanOrEqual(0.65);
+      }
+    }
   });
 });
 
@@ -765,10 +856,13 @@ describe("program — idle-redeploy confidence uses known signals only (P2)", ()
     expect(redeploy!.confidence).toBeLessThanOrEqual(0.85);
   }, 15_000);
 
-  it("gecko candidate: modeled fee/IL → confidence stays exactly the neutral 0.5", async () => {
+  it("gecko candidate (follow-up 3655288403): known signals drive confidence above threshold → executes", async () => {
     // datapi down → gecko overlays real volume/TVL (statsSource=geckoterminal →
-    // feeIlRatioKnown=false). A high modeled fee/IL must NOT raise redeploy
-    // confidence off the neutral base.
+    // feeIlRatioKnown=false, volumeAuthenticityKnown=true) and bin utilization is
+    // on-chain (binUtilizationKnown=true). Follow-up 3655288403: an absent fee
+    // signal must neither HELP nor BLOCK — confidence is derived from the known
+    // volume + bin signals instead of a flat fail-closed 0.5, so a qualified
+    // gecko candidate clears CONFIDENCE_THRESHOLD=0.65 and executes.
     const layer = makeProgramLayer({
       adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
       datapi: { getPoolData: () => Effect.succeed(null) },
@@ -793,8 +887,7 @@ describe("program — idle-redeploy confidence uses known signals only (P2)", ()
         maxPositionsPerPool: 2,
         maxOpenPositions: 5,
         // The fee/IL term is dropped from the gecko score; a low threshold lets
-        // the (fee-less) score still capture a candidate. The assertion is on the
-        // CONFIDENCE, which the modeled ratio must not move off the neutral base.
+        // the (fee-less) score still capture a candidate.
         weightedEntryScoreThreshold: 0.05,
       },
     });
@@ -802,12 +895,239 @@ describe("program — idle-redeploy confidence uses known signals only (P2)", ()
     const redeploy = decisions.find((d) => d.reasoning.includes("[idle-redeploy]"));
 
     expect(redeploy).toBeDefined();
-    // Modeled fee/IL (gecko, Fee/IL 20 here) → the NEUTRAL base 0.5 exactly. The
-    // pre-fix formula min(0.5 + 20*0.05, 0.85) = 0.85 would have let the modeled
-    // ratio authorize the redeploy; it must not vote in either direction.
-    expect(redeploy!.confidence).toBe(0.5);
-    // 0.5 sits below the 0.65 confidence threshold, so the modeled-fee redeploy
-    // does not dispatch — the doctrine working end to end.
-    expect(redeploy!.executed).toBe(false);
+    // Known volume + bin signals lift confidence above the neutral base AND the
+    // 0.65 threshold, so the gecko redeploy dispatches (pre-fix it was a flat
+    // 0.5 and never executed). The modeled Fee/IL here is 20 — had the fee
+    // formula voted, confidence would be min(0.5 + 20*0.05, 0.85) = 0.85; it does
+    // not, so the modeled fee neither raised nor lowered the known-signal value.
+    expect(redeploy!.confidence).toBeGreaterThan(0.65);
+    expect(redeploy!.confidence).toBeLessThan(0.85);
+    expect(redeploy!.executed).toBe(true);
+  }, 15_000);
+});
+
+// ─── Program: post-merge follow-up fidelity gaps (P2 review round) ───────────
+
+describe("program — idle-redeploy follow-up fidelity (post-merge review)", () => {
+  it("(a) 3655288389: paper seed is the portfolio TOTAL — redeploy respects 40% of the $10k seed", async () => {
+    const POOL_OTHER = "PoolIdleOo111111111111111111111111111111111";
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        paperPortfolioUsd: 10_000,
+        idleRedeployEnabled: true,
+        idleRedeployThresholdUsd: 500,
+        // Generous ceiling so the per-pool allocation share binds, not the cap.
+        idleRedeployMaxSizeUsd: 5000,
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+      },
+    });
+    // A $1,500 position on an UNWATCHED pool counts toward deployed capital but
+    // not toward POOL's per-pool headroom. At the pass: normal ENTER on POOL =
+    // $500, deployed = $2,000, idle = $8,000. With the seed as the TOTAL
+    // ($10,000) the widened size = min(8_000/2, 10_000×0.4, 5_000) = $4,000, then
+    // allocation caps it to POOL headroom = 4_000 − 500 = $3,500.
+    const { positions } = await runOneCycle(layer as never, (db) =>
+      Effect.gen(function* () {
+        yield* db.savePosition(
+          makeSeededPosition({
+            positionId: "seed-other",
+            poolAddress: POOL_OTHER,
+            depositedUsd: 1500,
+            currentValueUsd: 1500,
+          }),
+        );
+      }),
+    );
+
+    const poolPositions = positions.filter((p) => p.poolAddress === POOL);
+    const redeployPosition = poolPositions.find((p) => p.depositedUsd > 500);
+    expect(redeployPosition).toBeDefined();
+    expect(redeployPosition!.depositedUsd).toBe(3500);
+    // POOL aggregate = 500 + 3_500 = $4,000 = exactly 40% of the $10k seed. The
+    // pre-fix formula evaluated the portfolio as seed + deployed ($12,000) and
+    // grew POOL to $4,500 (45% of the real paper portfolio).
+    const poolAggregate = poolPositions.reduce((sum, p) => sum + p.depositedUsd, 0);
+    expect(poolAggregate).toBeLessThanOrEqual(0.4 * 10_000);
+  }, 15_000);
+
+  it("(b) 3655288395: walks past a blocked top candidate to the first executable one (one deploy)", async () => {
+    const POOL_A = "PoolIdleAa111111111111111111111111111111111";
+    const POOL_B = "PoolIdleBb111111111111111111111111111111111";
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({
+        [POOL_A]: makePool({ address: POOL_A }),
+        [POOL_B]: makePool({ address: POOL_B }),
+      }),
+      datapi: {
+        getPoolData: (addr: string) => Effect.succeed(makeDatapiStats({ address: addr })),
+      },
+      configOverrides: {
+        watchlistPools: [POOL_A, POOL_B],
+        paperPortfolioUsd: 10_000,
+        idleRedeployEnabled: true,
+        idleRedeployThresholdUsd: 500,
+        idleRedeployMaxSizeUsd: 2000,
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+      },
+    });
+    // POOL_A is already at MAX_POSITIONS_PER_POOL (2 seeded): its in-slot ENTER
+    // is skipped and it is captured via the per-pool-cap path, but the pass's
+    // allocation re-check rejects it again (per-pool count full). Equal entry
+    // scores keep POOL_A first in score order, so the walk must audit-skip it and
+    // continue to the fully-executable POOL_B — deploying exactly once.
+    const { positions, decisions } = await runOneCycle(layer as never, (db) =>
+      Effect.gen(function* () {
+        yield* db.savePosition(makeSeededPosition({ positionId: "a-1", poolAddress: POOL_A }));
+        yield* db.savePosition(makeSeededPosition({ positionId: "a-2", poolAddress: POOL_A }));
+      }),
+    );
+
+    const redeployExecuted = decisions.filter(
+      (d) => d.reasoning.includes("[idle-redeploy]") && d.executed && d.action === "ENTER",
+    );
+    expect(redeployExecuted).toHaveLength(1);
+    expect(redeployExecuted[0]!.poolAddress).toBe(POOL_B);
+
+    // POOL_A got its own per-candidate audit skip; POOL_B opened normal + redeploy.
+    expect(
+      decisions.some(
+        (d) => d.reasoning.includes("[idle-redeploy]") && !d.executed && d.poolAddress === POOL_A,
+      ),
+    ).toBe(true);
+    expect(positions.filter((p) => p.poolAddress === POOL_B)).toHaveLength(2);
+  }, 15_000);
+
+  // A full-mode SYNC advisor: getStatus reports a real transport so the overlay
+  // takes the sync-proposal path; enhanceDecision answers per-decision below.
+  const SYNC_TRANSPORT_STATUS = {
+    connected: true,
+    transport: "acp",
+    lastPromptAt: null,
+    errorCount: 0,
+  };
+
+  it("(g) 3655404934: widened-size guard compares against the agent-ENLARGED normal entry", async () => {
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        paperPortfolioUsd: 10_000,
+        // Let a full-mode proposal enlarge the normal entry up to 50% of portfolio.
+        agentProposalMaxPositionSizePct: 0.5,
+        idleRedeployEnabled: true,
+        idleRedeployThresholdUsd: 500,
+        idleRedeployMaxSizeUsd: 2000,
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+        agentiveMode: true,
+        agentProposalMode: "full",
+      },
+      agentApi: {
+        ...AgentNoOp,
+        getStatus: () => Effect.succeed(SYNC_TRANSPORT_STATUS),
+        // Enlarge the deterministic normal ENTER to $3,000; leave the redeploy
+        // decision untouched so it runs its deterministic path.
+        enhanceDecision: (decision) =>
+          Effect.succeed(
+            decision.action === "ENTER" && !decision.reasoning.includes("[idle-redeploy]")
+              ? {
+                  action: "ENTER" as const,
+                  poolAddress: POOL,
+                  confidence: 0.8,
+                  reasoning: "advisor enlarged entry",
+                  positionSizeUsd: 3000,
+                  proposalId: "sync-g",
+                  proposedAt: Date.now(),
+                  expiresAt: Date.now() + 300_000,
+                  source: "sync-prompt" as const,
+                  status: "pending" as const,
+                }
+              : null,
+          ),
+      },
+    });
+    const { positions, decisions } = await runOneCycle(layer as never);
+
+    // Normal ENTER enlarged to $3,000 and executed; the fix synced that FINAL
+    // size onto the candidate. The redeploy caps to POOL headroom (4_000 − 3_000
+    // = $1,000), which is ≤ the enlarged $3,000 → skipped. Without the sync, the
+    // candidate would carry the stale $500 and the $1,000 redeploy would deploy.
+    const poolPositions = positions.filter((p) => p.poolAddress === POOL);
+    expect(poolPositions).toHaveLength(1);
+    expect(poolPositions[0]!.depositedUsd).toBe(3000);
+    expect(
+      decisions.some((d) => d.reasoning.includes("does not exceed normal entry") && !d.executed),
+    ).toBe(true);
+    expect(decisions.some((d) => d.reasoning.includes("[idle-redeploy]") && d.executed)).toBe(
+      false,
+    );
+  }, 15_000);
+
+  it("(f) 3655404926: a pool whose EXIT executed this cycle is excluded from redeploy", async () => {
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        paperPortfolioUsd: 10_000,
+        idleRedeployEnabled: true,
+        idleRedeployThresholdUsd: 500,
+        idleRedeployMaxSizeUsd: 2000,
+        // Single position per pool: the seeded position fills the cap, so the
+        // in-slot ENTER is structurally skipped (captured as a redeploy candidate
+        // via the per-pool-cap path) — the redeploy is the ONLY re-entry path.
+        maxPositionsPerPool: 1,
+        maxOpenPositions: 5,
+        agentiveMode: true,
+        agentProposalMode: "full",
+      },
+      agentApi: {
+        ...AgentNoOp,
+        getStatus: () => Effect.succeed(SYNC_TRANSPORT_STATUS),
+        // Flip the seeded position's deterministic HOLD to EXIT (and execute it);
+        // leave the redeploy decision untouched.
+        enhanceDecision: (decision) =>
+          Effect.succeed(
+            decision.action === "HOLD" && !decision.reasoning.includes("[idle-redeploy]")
+              ? {
+                  action: "EXIT" as const,
+                  poolAddress: POOL,
+                  confidence: 0.8,
+                  reasoning: "advisor exit",
+                  proposalId: "sync-f",
+                  proposedAt: Date.now(),
+                  expiresAt: Date.now() + 300_000,
+                  source: "sync-prompt" as const,
+                  status: "pending" as const,
+                }
+              : null,
+          ),
+      },
+    });
+    const { positions, decisions } = await runOneCycle(layer as never, (db) =>
+      Effect.gen(function* () {
+        yield* db.savePosition(makeSeededPosition({ positionId: "seeded-pos", poolAddress: POOL }));
+      }),
+    );
+
+    // The advisor EXIT executed (closing the seeded position) and added POOL to
+    // executedExitPools. The redeploy candidate — captured before the exit freed
+    // the slot — is then excluded: no same-cycle re-entry despite the free slot.
+    expect(positions.filter((p) => p.poolAddress === POOL)).toHaveLength(0);
+    expect(
+      decisions.some(
+        (d) =>
+          d.reasoning.includes("[idle-redeploy]") && d.reasoning.includes("no exit-and-reenter"),
+      ),
+    ).toBe(true);
+    expect(decisions.some((d) => d.reasoning.includes("[idle-redeploy]") && d.executed)).toBe(
+      false,
+    );
   }, 15_000);
 });
