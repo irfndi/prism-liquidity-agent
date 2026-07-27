@@ -113,6 +113,7 @@ import {
   ProposalCircuitBreaker,
   type ProposalBackoff,
 } from "./proposal-backoff.js";
+import { computeCooldownForExit } from "./cooldown.js";
 
 const logger = createLogger("program");
 
@@ -2874,7 +2875,7 @@ export const program = Effect.gen(function* () {
         }
       }
 
-      const computeCooldownForExit = (
+      const resolveExitCooldown = (
         exitDecision: AgentDecision,
         position: PositionRecord | undefined,
       ): Effect.Effect<
@@ -2904,10 +2905,12 @@ export const program = Effect.gen(function* () {
 
           if (isOorExit) {
             const newOorCount = existingOorCount + 1;
-            const cooldownDuration =
-              newOorCount >= config.maxOorCooldownExits
-                ? config.repeatOorCooldownMs
-                : config.oorCooldownMs;
+            const cooldownDuration = computeCooldownForExit({
+              trigger: "oor",
+              consecutiveOorExits: existingOorCount,
+              config,
+              feeDensityPerDay: null,
+            });
             const cooldownUntil = Date.now() + cooldownDuration;
             const hours = (cooldownDuration / 3_600_000).toFixed(1);
             console.info(
@@ -2920,7 +2923,27 @@ export const program = Effect.gen(function* () {
               consecutiveOorExits: newOorCount,
             };
           } else if (isLowYieldExit) {
-            const cooldownDuration = config.oorCooldownMs;
+            // Fee density is trusted ONLY from the Data API (the only source
+            // of measured per-pool fees — same precedent as the paper fee
+            // accrual gate above). Gecko fees are a binStep base-rate MODEL
+            // on real volume and heuristic fees are fabricated, so by repo
+            // convention modeled/fabricated numbers get no gate vote: only
+            // datapi feeds the density scaling, everything else passes null
+            // and keeps the static legacy duration. Deliberately NOT
+            // isMeasuredStatsSource(), which would admit gecko.
+            const feeDensityPerDay =
+              pool.statsSource === "datapi" &&
+              pool.tvlUsd > 0 &&
+              Number.isFinite(pool.fees24hUsd) &&
+              pool.fees24hUsd >= 0
+                ? pool.fees24hUsd / pool.tvlUsd
+                : null;
+            const cooldownDuration = computeCooldownForExit({
+              trigger: "low-yield",
+              consecutiveOorExits: existingOorCount,
+              config,
+              feeDensityPerDay,
+            });
             const cooldownUntil = Date.now() + cooldownDuration;
             const hours = (cooldownDuration / 3_600_000).toFixed(1);
             console.info(
@@ -4056,7 +4079,7 @@ export const program = Effect.gen(function* () {
         });
 
         if (decision.action === "EXIT") {
-          const pendingCooldown = yield* computeCooldownForExit(decision, pos);
+          const pendingCooldown = yield* resolveExitCooldown(decision, pos);
           if (pendingCooldown) {
             yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catchAll(() => Effect.void));
           }
