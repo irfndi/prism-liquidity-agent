@@ -222,11 +222,16 @@ function buildSnapshot(meta: PoolMeta, candle: OhlcvCandle, volume24hUsd: number
     tokenXSymbol: meta.tokenXSymbol,
     tokenYSymbol: meta.tokenYSymbol,
     binArray,
-    // OHLCV-imported candles: fees are the MODELED base rate (0.0025 + binStep/
-    // 1e4) on reconstructed volume, never measured per-pool fees. Classify as the
-    // fabricated source so the measured-fee-rate authenticity gate stays DISABLED
-    // on replay (unknown != datapi) rather than acting on modeled fee rates.
-    statsSource: "heuristic",
+    // OHLCV-imported candles carry MEASURED provenance: reserve TVL is fetched
+    // from GeckoTerminal (fetchPoolMeta) and volume is real rolling trade volume
+    // from the Gecko OHLCV endpoint (rollingVolume24h) — only the fee is MODELED
+    // (base rate 0.0025 + binStep/1e4 on that real volume, never measured per-pool
+    // fees). Classify as geckoterminal so replay keeps the real volume/TVL signal
+    // (volumeAuthenticityKnown stays true); the stats-source split already keeps
+    // feeIlRatioKnown false for geckoterminal, so the modeled-fee gates stay
+    // disabled without discarding volume provenance. NOT heuristic — that would
+    // null the measured volume authenticity too.
+    statsSource: "geckoterminal",
   };
 }
 
