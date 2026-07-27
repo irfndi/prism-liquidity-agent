@@ -45,7 +45,7 @@
     "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.98.4",
     "@xenova/transformers": "^2.17.2",
-    "chalk": "^5.6.2",
+    "chalk": "^6.0.0",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
     "effect": "^3.22.0",
