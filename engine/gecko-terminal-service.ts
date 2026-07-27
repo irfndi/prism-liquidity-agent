@@ -139,13 +139,16 @@ export function parseGeckoPoolStats(raw: unknown, baseFeeRate: number): GeckoPoo
   const feePercentage = parseFeePercentageFraction(attrs["pool_fee_percentage"]);
   const effectiveFeeRate = feePercentage ?? baseFeeRate;
 
-  // Negative reserves are equally malformed; null them so the caller treats the
-  // stats as unavailable (getGeckoPoolStats → null → heuristic + unknown flags,
-  // the most conservative outcome).
+  // Non-positive reserves are equally malformed; null them so the caller treats
+  // the stats as unavailable (getGeckoPoolStats → null → heuristic + unknown
+  // flags, the most conservative outcome). A ZERO reserve with positive volume
+  // is dead/wash data — enriching with it would substitute the fallback TVL yet
+  // still tag the pool "geckoterminal", flipping volumeAuthenticityKnown true on
+  // a TVL gecko never measured. Only a strictly positive reserve is usable.
   const reserveUsd = readFiniteNumber(attrs["reserve_in_usd"]);
 
   return {
-    tvlUsd: reserveUsd !== null && reserveUsd < 0 ? null : reserveUsd,
+    tvlUsd: reserveUsd !== null && reserveUsd <= 0 ? null : reserveUsd,
     volume24hUsd,
     fees24hUsd: volume24hUsd * effectiveFeeRate,
     basePriceUsd: readFiniteNumber(attrs["base_token_price_usd"]),

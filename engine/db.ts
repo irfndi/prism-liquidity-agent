@@ -784,6 +784,26 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       }
     },
   },
+  {
+    version: 19,
+    name: "pool_snapshots_stats_source",
+    up(db) {
+      // Persist the tvl/volume/fees provenance so a replayed snapshot keeps the
+      // live stats-source trust model. Additive + non-destructive: a guarded ADD
+      // COLUMN (never a table rebuild). Legacy rows predate the capture of the
+      // source, so they backfill to the conservative default "heuristic" — an
+      // unknown provenance is treated as fabricated and NEVER as datapi, keeping
+      // the measured-fee-rate authenticity gate fail-closed on replay.
+      // Guarded on table existence too: partial legacy fixtures mark v4 (which
+      // creates pool_snapshots) applied in _migrations without physically
+      // creating the table; a real migrated DB always has it by this version.
+      if (hasTable(db, "pool_snapshots") && !hasColumn(db, "pool_snapshots", "stats_source")) {
+        db.exec(
+          "ALTER TABLE pool_snapshots ADD COLUMN stats_source TEXT NOT NULL DEFAULT 'heuristic'",
+        );
+      }
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

@@ -2205,6 +2205,7 @@ export const program = Effect.gen(function* () {
           apr: pool.apr,
           currentPrice: pool.currentPrice,
           binStep: pool.binStep,
+          statsSource: pool.statsSource,
           tokenXSymbol: pool.tokenXSymbol,
           tokenYSymbol: pool.tokenYSymbol,
           binArray:
@@ -3596,6 +3597,19 @@ export const program = Effect.gen(function* () {
                 hasOpenPosition,
               })
               .pipe(
+                // Bound the ENTIRE veto op by the veto deadline, CONNECT included.
+                // sendPrompt's per-request timer only starts AFTER the transport
+                // (re)connects (Gateway ~10s handshake; ACP ensureSession on the
+                // general AGENT_PROMPT_TIMEOUT_MS), so an outer deadline is the only
+                // thing keeping a stalled reconnect from delaying a capital-protecting
+                // EXIT past AGENT_VETO_TIMEOUT_MS. Fails open via the catchAll below.
+                Effect.timeoutFail({
+                  duration: `${config.agentVetoTimeoutMs} millis`,
+                  onTimeout: () =>
+                    new Error(
+                      `Agent veto review timed out after ${config.agentVetoTimeoutMs}ms (transport connect/session establishment + prompt exceeded the veto budget)`,
+                    ),
+                }),
                 Effect.catchAll((err) => {
                   vetoFetchFailed = true;
                   const elapsedMs = Date.now() - vetoStartedAt;

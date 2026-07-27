@@ -222,6 +222,11 @@ function buildSnapshot(meta: PoolMeta, candle: OhlcvCandle, volume24hUsd: number
     tokenXSymbol: meta.tokenXSymbol,
     tokenYSymbol: meta.tokenYSymbol,
     binArray,
+    // OHLCV-imported candles: fees are the MODELED base rate (0.0025 + binStep/
+    // 1e4) on reconstructed volume, never measured per-pool fees. Classify as the
+    // fabricated source so the measured-fee-rate authenticity gate stays DISABLED
+    // on replay (unknown != datapi) rather than acting on modeled fee rates.
+    statsSource: "heuristic",
   };
 }
 
