@@ -116,6 +116,11 @@ function generateMockHistory(poolAddress: string, days: number, startTvl: number
       binStep: 10,
       currentPrice: price,
       timestamp,
+      // Synthetic ticks FABRICATE volume/fees, so they are explicitly classified
+      // as the fabricated source — NOT datapi. This keeps the measured-fee-rate
+      // authenticity check DISABLED here, exactly as the trust model intends for
+      // a source-less pool (unknown != datapi).
+      statsSource: "heuristic",
     };
 
     const bins = Array.from({ length: 40 }, (_, j) => ({
@@ -378,6 +383,10 @@ function snapshotsToTicks(snaps: ReadonlyArray<PoolSnapshot>): HistoryTick[] {
       binStep: s.binStep,
       currentPrice: s.currentPrice,
       timestamp: s.timestamp,
+      // Restore the persisted provenance so replay keeps the live trust model: a
+      // datapi snapshot replays gate-on, a source-less legacy row replays as the
+      // conservative "heuristic" (gate off). Never leave the tick undefined.
+      statsSource: s.statsSource ?? "heuristic",
     };
     return { pool, binArray: s.binArray };
   });

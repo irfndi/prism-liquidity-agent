@@ -351,7 +351,10 @@ function transportSupportsCheckin(
 function connectTransport(transport: AgentRuntimeTransport): Effect.Effect<void, unknown> {
   return transport.connect().pipe(
     Effect.catchAll((err) => {
-      logger.warn("Failed to connect transport", { transport: transport.name, error: String(err) });
+      logger.warn("Failed to connect transport", {
+        transport: transport.name,
+        error: underlyingErrorMessage(err),
+      });
       return Effect.void;
     }),
   );
@@ -383,7 +386,10 @@ function sendToAlertTransports(
   const effects = transports.filter(transportSupportsAlert).map((transport) =>
     transport.sendAlert(alert).pipe(
       Effect.catchAll((err) => {
-        logger.warn("Failed to send alert", { transport: transport.name, error: String(err) });
+        logger.warn("Failed to send alert", {
+          transport: transport.name,
+          error: underlyingErrorMessage(err),
+        });
         return Effect.void;
       }),
     ),
@@ -467,7 +473,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           const proposalMode = config.agentProposalMode;
           if (proposalMode === "veto") {
             const prompt = buildPrompt(decision, context);
-            return transport.sendPrompt(prompt, context).pipe(
+            return transport.sendPrompt(prompt, context, config.agentVetoTimeoutMs).pipe(
               Effect.map((response: AgentRuntimeResponse) => {
                 lastPromptAt = Date.now();
                 const parsed = parseResponse(response.raw);
@@ -510,7 +516,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
               errorCount += 1;
               logger.warn("Agent proposal failed", {
                 pool: decision.poolAddress,
-                error: String(err),
+                error: underlyingErrorMessage(err),
               });
               return Effect.succeed(null);
             }),
@@ -541,7 +547,10 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             t.sendCheckin(checkin).pipe(
               Effect.catchAll((err) => {
                 errorCount += 1;
-                logger.warn("Agent check-in failed", { transport: t.name, error: String(err) });
+                logger.warn("Agent check-in failed", {
+                  transport: t.name,
+                  error: underlyingErrorMessage(err),
+                });
                 return Effect.void;
               }),
             ),
@@ -568,7 +577,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
                 Effect.catchAll((err) => {
                   logger.warn("Failed to disconnect transport", {
                     transport: t.name,
-                    error: String(err),
+                    error: underlyingErrorMessage(err),
                   });
                   return Effect.void;
                 }),
@@ -580,7 +589,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
     }).pipe(
       Effect.catchAll((err) => {
         logger.error("Agent service initialization failed; falling back to no-op", {
-          error: String(err),
+          error: underlyingErrorMessage(err),
         });
         return Effect.succeed(AgentNoOp);
       }),

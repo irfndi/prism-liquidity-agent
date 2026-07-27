@@ -192,7 +192,7 @@ export interface AppConfig {
   // ─── Wave 9: Volatility-adaptive range width ──────────────────────────────
   /** Static baseline range half-width (bins each side). 0 = binStep-tiered default (25/20/15). */
   readonly entryRangeHalfWidthBins: number;
-  /** Scale entry/rebalance range width by measured realized volatility. Default false (opt-in). */
+  /** Scale entry/rebalance range width by measured realized volatility. Default true (opt-out). */
   readonly volatilityAdaptiveRanges: boolean;
 
   // ─── F3: Fee compounding / auto-reinvest ─────────────────────────────────────
@@ -252,6 +252,8 @@ export interface AppConfig {
   readonly agentGatewayToken: string;
   /** Timeout for agent prompt responses. Default 60000 ms. */
   readonly agentPromptTimeoutMs: number;
+  /** Timeout for inline veto review. Defaults to agentPromptTimeoutMs; clamp [1s, 5min]. */
+  readonly agentVetoTimeoutMs: number;
   /** Interval between periodic agent check-ins. Default 3600000 ms (1 hour). */
   readonly agentCheckinIntervalMs: number;
   /** Send check-ins on significant trade/position events. Default true. */
@@ -591,7 +593,21 @@ const loadConfig = Effect.gen(function* () {
   const agentGatewayToken = yield* Config.string("AGENT_GATEWAY_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  const agentPromptTimeoutMs = yield* validatedNumber("AGENT_PROMPT_TIMEOUT_MS", 1_000, 60_000);
+  const agentPromptTimeoutMs = yield* validatedNumber(
+    "AGENT_PROMPT_TIMEOUT_MS",
+    1_000,
+    60_000,
+    300_000,
+  );
+  // Veto runs inline in the per-pool scan loop, so it gets its own latency budget.
+  // Defaults to AGENT_PROMPT_TIMEOUT_MS when unset; clamped to the same [1s, 5min]
+  // band so an absurd value cannot stall scan cycles.
+  const agentVetoTimeoutMs = yield* validatedNumber(
+    "AGENT_VETO_TIMEOUT_MS",
+    1_000,
+    agentPromptTimeoutMs,
+    300_000,
+  );
   const agentCheckinIntervalMs = yield* validatedNumber(
     "AGENT_CHECKIN_INTERVAL_MS",
     0,
@@ -990,6 +1006,7 @@ const loadConfig = Effect.gen(function* () {
     agentGatewayUrl,
     agentGatewayToken,
     agentPromptTimeoutMs,
+    agentVetoTimeoutMs,
     agentCheckinIntervalMs,
     agentCheckinOnEvents,
     agentCheckinIncludeHistory,
