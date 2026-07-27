@@ -13,6 +13,12 @@
  * at/below `feeDensityLowPct` → the static duration; between → linear
  * interpolation, clamped to the two durations. When the feature is off or
  * the density is unavailable (null), the static legacy duration is returned.
+ *
+ * The floor must sit strictly below the static duration. When it does not
+ * (an inverted relationship the config loader also clamps at load time),
+ * every density returns the static duration: normalizing the two values
+ * (swapping min/max) would INVERT their meanings — high-density exits would
+ * get the static duration and thin pools the larger "minimum".
  */
 
 export type ExitCooldownTrigger = "oor" | "low-yield";
@@ -56,10 +62,15 @@ function computeLowYieldCooldownMs(
   if (!(highPct > lowPct)) return staticMs;
 
   const minMs = config.feeDensityCooldownMinMs;
-  // Normalize the clamp interval so an operator setting min > static still
-  // yields a bounded (rather than NaN) duration.
-  const floorMs = Math.min(minMs, staticMs);
-  const ceilingMs = Math.max(minMs, staticMs);
+  // The floor must sit strictly below the static duration. An inverted
+  // relationship (min >= static) is rejected rather than normalized: swapping
+  // min/max would hand high-density exits the static duration and thin pools
+  // the larger "minimum". Guard instead — every density gets the static
+  // duration (the config loader also clamps this relationship at load time;
+  // `!(minMs < staticMs)` keeps a NaN floor safe too).
+  if (!(minMs < staticMs)) return staticMs;
+  const floorMs = minMs;
+  const ceilingMs = staticMs;
 
   if (feeDensityPerDay >= highPct) return floorMs;
   if (feeDensityPerDay <= lowPct) return ceilingMs;

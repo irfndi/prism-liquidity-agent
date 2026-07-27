@@ -246,7 +246,11 @@ export interface AppConfig {
    */
   readonly feeDensityCooldowns: boolean;
   /** Cooldown floor for fee-density-scaled low-yield exits (the duration a
-   *  high-fee-density pool cools down for). Default 3600000 (1 h). */
+   *  high-fee-density pool cools down for). Must be below `oorCooldownMs`;
+   *  an inverted relationship (min >= static) would swap the settings'
+   *  meanings, so the loader warns and clamps the floor to just under the
+   *  static value (`oorCooldownMs - 1`, floored at 0) — `OOR_COOLDOWN_MS`
+   *  itself is never adjusted. Default 3600000 (1 h). */
   readonly feeDensityCooldownMinMs: number;
   /** Fee density (fees/TVL per day) at/above which the low-yield cooldown
    *  hits `feeDensityCooldownMinMs`. Default 0.005 (0.5 %/day). */
@@ -585,11 +589,34 @@ const loadConfig = Effect.gen(function* () {
   const feeDensityCooldowns = yield* Config.boolean("FEE_DENSITY_COOLDOWNS").pipe(
     Effect.orElseSucceed(() => true),
   );
-  const feeDensityCooldownMinMs = yield* validatedNumber(
+  const DEFAULT_FEE_DENSITY_COOLDOWN_MIN_MS = 60 * 60 * 1000;
+  const feeDensityCooldownMinMsRaw = yield* validatedNumber(
     "FEE_DENSITY_COOLDOWN_MIN_MS",
     0,
-    60 * 60 * 1000,
+    DEFAULT_FEE_DENSITY_COOLDOWN_MIN_MS,
   );
+  // The floor must sit strictly below the static duration. An inverted
+  // relationship (min >= static) would swap the settings' meanings —
+  // high-density exits getting the static duration and thin pools the larger
+  // "minimum" — so clamp the floor just under the static value (same warn
+  // channel as validatedNumber / the band guard below). OOR_COOLDOWN_MS
+  // itself is left untouched; when the static duration is 0 the floor is
+  // pinned at 0 (cooldown.ts's guard then returns the static duration for
+  // every density in that degenerate case).
+  const feeDensityCooldownMinMsInverted = feeDensityCooldownMinMsRaw >= oorCooldownMs;
+  if (feeDensityCooldownMinMsInverted) {
+    logger.warn(
+      "FEE_DENSITY_COOLDOWN_MIN_MS must be below OOR_COOLDOWN_MS; clamping the floor just under the static value",
+      {
+        feeDensityCooldownMinMs: feeDensityCooldownMinMsRaw,
+        oorCooldownMs,
+        fallback: Math.min(feeDensityCooldownMinMsRaw, Math.max(oorCooldownMs - 1, 0)),
+      },
+    );
+  }
+  const feeDensityCooldownMinMs = feeDensityCooldownMinMsInverted
+    ? Math.min(feeDensityCooldownMinMsRaw, Math.max(oorCooldownMs - 1, 0))
+    : feeDensityCooldownMinMsRaw;
   const DEFAULT_FEE_DENSITY_HIGH_PCT = 0.005;
   const DEFAULT_FEE_DENSITY_LOW_PCT = 0.0005;
   const feeDensityHighPctRaw = yield* validatedNumber(

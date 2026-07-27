@@ -166,16 +166,17 @@ describe("cooldown duration math", () => {
       }
     });
 
-    it("stays bounded when the operator sets the floor above the static duration", () => {
+    it("returns the static duration for every density when the floor exceeds it (never inverts)", () => {
+      // The old normalization swapped min/max here and handed thin pools the
+      // larger "minimum" while high-density exits got the static duration;
+      // the guard rejects the inverted relationship instead.
       const inverted = { feeDensityCooldownMinMs: 10 * HOUR };
-      // high density → the smaller of the two bound durations, never NaN
-      expect(lowYield(0.01, inverted)).toBe(4 * HOUR);
-      // low density → the larger bound
-      expect(lowYield(0, inverted)).toBe(10 * HOUR);
-      // midpoint → bounded between them
-      const mid = lowYield((config.feeDensityHighPct + config.feeDensityLowPct) / 2, inverted);
-      expect(mid).toBeGreaterThanOrEqual(4 * HOUR);
-      expect(mid).toBeLessThanOrEqual(10 * HOUR);
+      const mid = (config.feeDensityHighPct + config.feeDensityLowPct) / 2;
+      expect(lowYield(0.01, inverted)).toBe(4 * HOUR); // high density
+      expect(lowYield(mid, inverted)).toBe(4 * HOUR); // interpolated density
+      expect(lowYield(0, inverted)).toBe(4 * HOUR); // low density
+      expect(lowYield(null, inverted)).toBe(4 * HOUR); // missing density
+      expect(lowYield(Number.NaN, inverted)).toBe(4 * HOUR);
     });
 
     it("collapses to a single value when the floor equals the static duration", () => {
