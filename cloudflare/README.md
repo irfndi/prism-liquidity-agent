@@ -73,7 +73,7 @@ The stack does NOT create new resources. On a first deploy (empty Alchemy state)
 | `BACKUPS` | R2       | `prism-backups`|                                             |
 | `MEMORY`  | Vectorize| `prism-memory` | 384 dimensions, cosine                      |
 
-Physical identity comes from these names, so the `prod` stage never renames anything; the stage only scopes the Alchemy state keyspace.
+Physical identity comes from these names, so the `prod` stage never renames anything; the stage only scopes the Alchemy state keyspace. Data resources adopt implicitly. The two WORKERS adopt explicitly: workers carry ownership tags, and these were created by wrangler (unowned), so the deploy scripts run with `--adopt` — a one-time takeover that tags them for this stack, and a no-op on every later deploy for resources the stack already owns.
 
 ### Guardrails
 
