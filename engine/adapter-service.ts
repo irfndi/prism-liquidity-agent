@@ -1011,9 +1011,30 @@ export const AdapterLive = Layer.effect(
       });
     }
 
-    function readWalletBalanceUsd(): Effect.Effect<number, unknown> {
+    /**
+     * One chain reconciliation of the wallet: the aggregate USD balance AND
+     * the per-mint SPL holdings it is computed from. Both are served from the
+     * SAME cached snapshot (same TTL, same invalidation after every mutating
+     * tx), so a balance read and a holdings read can never disagree, and a
+     * holdings read never triggers an extra RPC round. Paper mode / walletless
+     * live returns 0 + an empty map. A failed read FAILS the Effect (mirroring
+     * the balance semantics); consumers of getWalletHoldings degrade
+     * fail-open (treat it as "no idle capital" for the cycle).
+     */
+    function readWalletSnapshot(): Effect.Effect<
+      {
+        totalUsd: number;
+        held: ReadonlyMap<string, { readonly amountAtomic: bigint; readonly decimals: number }>;
+      },
+      unknown
+    > {
       return Effect.gen(function* () {
-        if (!wallet) return 0;
+        if (!wallet) {
+          return {
+            totalUsd: 0,
+            held: new Map<string, { readonly amountAtomic: bigint; readonly decimals: number }>(),
+          };
+        }
 
         // Native SOL lamports — the system account, read separately from any
         // wrapped-SOL (wSOL) token accounts below. The two live in distinct
@@ -1085,19 +1106,21 @@ export const AdapterLive = Layer.effect(
           totalUsd += atomicToUnits(balance.amountAtomic, balance.decimals) * price;
         }
 
-        return totalUsd;
+        return { totalUsd, held };
       });
     }
 
-    const [cachedWalletBalance, invalidateWalletBalance] = yield* Effect.cachedInvalidateWithTTL(
-      readWalletBalanceUsd(),
+    const [cachedWalletSnapshot, invalidateWalletSnapshot] = yield* Effect.cachedInvalidateWithTTL(
+      readWalletSnapshot(),
       WALLET_BALANCE_CACHE_TTL_MS,
     );
+    const cachedWalletBalance = Effect.map(cachedWalletSnapshot, (snapshot) => snapshot.totalUsd);
+    const cachedWalletHoldings = Effect.map(cachedWalletSnapshot, (snapshot) => snapshot.held);
 
     const invalidateBalanceCaches = Effect.sync(() => {
       tokenBalanceCache.clear();
       nativeSolBalanceCache = undefined;
-    }).pipe(Effect.zipRight(invalidateWalletBalance));
+    }).pipe(Effect.zipRight(invalidateWalletSnapshot));
 
     function quoteMatchesRequest(
       quoteData: Record<string, unknown>,
@@ -1435,6 +1458,8 @@ export const AdapterLive = Layer.effect(
       getWalletAddress: () => wallet?.publicKey.toBase58() ?? null,
 
       getWalletBalanceUsd: () => cachedWalletBalance,
+
+      getWalletHoldings: () => cachedWalletHoldings,
 
       getNativeSolBalance: () =>
         Effect.gen(function* () {

@@ -45,7 +45,13 @@ import {
   GAS_TOP_UP_USDC,
   SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
   MIN_SOL_FOR_GAS_LAMPORTS,
+  USDC_MINT,
 } from "./constants.js";
+import {
+  computeEntrySizeUsd,
+  computeIdleRedeploySizeUsd,
+  ENTRY_SIZE_FLOOR_USD,
+} from "./entry-sizing.js";
 import {
   AdapterService,
   StrategyService,
@@ -115,6 +121,7 @@ import {
 } from "./proposal-backoff.js";
 
 const logger = createLogger("program");
+const idleRedeployLogger = createLogger("idle-redeploy");
 
 /**
  * How far back to look for a previous pool snapshot when computing TVL
@@ -411,6 +418,26 @@ export function positionsForPool(
     if (pos.poolAddress === poolAddress) out.push(pos);
   }
   return out;
+}
+
+/**
+ * A pool that passed this cycle's ENTER candidate conditions + weighted entry
+ * score in-pool but whose normal ENTER did not consume the slot — eligible
+ * for the opt-in idle-capital redeploy pass after the pools loop. The pass
+ * re-runs evaluatePerPoolAllocation and the full risk tail verbatim before
+ * executing, so the candidate record carries no authority to bypass anything;
+ * it only seeds the pass's score-ranked choice.
+ */
+interface IdleRedeployCandidate {
+  readonly poolAddress: string;
+  readonly pool: PoolState;
+  readonly metrics: PoolMetrics;
+  readonly entryScore: number;
+  readonly feeIlRatio: number;
+  /** The size the normal conservative path chose (or proposed) for this pool. */
+  readonly normalEntrySizeUsd: number;
+  readonly volatilityStddev: number;
+  readonly netDriftBins: number;
 }
 
 /**
@@ -1870,6 +1897,334 @@ export const program = Effect.gen(function* () {
       });
     });
 
+  // ─── Idle-capital auto-redeploy pass (opt-in) ─────────────────────────────
+
+  /**
+   * Deploy idle wallet capital into the cycle's best qualified entry
+   * candidate at a wider (still fully capped) size. Candidates passed their
+   * in-pool ENTER gates this cycle; this pass re-runs
+   * evaluatePerPoolAllocation and the risk tail VERBATIM before execution —
+   * caps can reject or shrink, the pass never bypasses a gate, and never
+   * re-runs pool screening (cooldown, wallet-read, paper-validation and
+   * token-risk stand as decided in-pool). At most one redeploy ENTER per
+   * cycle. Failures degrade to an audited skip.
+   */
+  const runIdleRedeployPass = (
+    candidates: ReadonlyArray<IdleRedeployCandidate>,
+    cycle: AgentCycle,
+  ): Effect.Effect<void, never, EntryPrepService> =>
+    Effect.gen(function* () {
+      const cycleId = cycle.cycleId;
+
+      // Idle capital: live = USDC wallet holdings at par (the adapter read
+      // shares the balance cache — no extra RPC); paper = the portfolio seed
+      // minus deployed value. A failed live holdings read degrades to "no
+      // idle detected" (fail-open — the cycle never fails and never deploys
+      // on stale data).
+      const deployedUsd = Array.from(trackedPositions.values()).reduce(
+        (sum, pos) => sum + pos.currentValueUsd,
+        0,
+      );
+      let idleCapitalUsd: number;
+      if (config.paperTrading || !adapter.hasWallet()) {
+        idleCapitalUsd = Math.max(config.paperPortfolioUsd - deployedUsd, 0);
+      } else {
+        const holdings = yield* adapter.getWalletHoldings().pipe(
+          Effect.catchAll((err) => {
+            idleRedeployLogger.warn(
+              "Wallet holdings read failed — idle redeploy skipped this cycle",
+              { error: String(err) },
+            );
+            return Effect.succeed(
+              new Map<string, { readonly amountAtomic: bigint; readonly decimals: number }>(),
+            );
+          }),
+        );
+        const usdcHolding = holdings.get(USDC_MINT);
+        idleCapitalUsd =
+          usdcHolding === undefined
+            ? 0
+            : Number(usdcHolding.amountAtomic) / 10 ** usdcHolding.decimals;
+      }
+
+      if (idleCapitalUsd <= config.idleRedeployThresholdUsd) {
+        idleRedeployLogger.debug("Idle capital below redeploy threshold", {
+          idleCapitalUsd,
+          thresholdUsd: config.idleRedeployThresholdUsd,
+          candidates: candidates.length,
+        });
+        return;
+      }
+
+      // Fresh portfolio context — positions moved during the pools loop, so
+      // the gates measure current state, not the cycle-top capture.
+      const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
+      const portfolioValueUsd =
+        lastWalletBalanceUsd + openPositions.reduce((sum, pos) => sum + pos.currentValueUsd, 0);
+      const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
+      const candidate = [...candidates].sort((a, b) => b.entryScore - a.entryScore)[0]!;
+
+      const recordRedeploySkip = (reasoning: string, riskReason: string) =>
+        audit
+          .recordDecision({
+            timestamp: Date.now(),
+            cycleId,
+            poolAddress: candidate.poolAddress,
+            action: "ENTER",
+            confidence: 0,
+            reasoning,
+            metrics: candidate.metrics,
+            riskResult: { approved: false, reason: riskReason },
+            executed: false,
+            paperTrading: config.paperTrading,
+          })
+          .pipe(Effect.catchAll(() => Effect.void));
+
+      // The pass never pushes past the hard open-position cap; the same count
+      // is re-checked against fresh state by allocation below and by risk
+      // gate 6 at execution.
+      if (openPositions.length >= config.maxOpenPositions) {
+        yield* recordRedeploySkip(
+          `[idle-redeploy] skipped — max open positions reached (${openPositions.length}/${config.maxOpenPositions})`,
+          `[idle-redeploy] max open positions reached (${openPositions.length}/${config.maxOpenPositions})`,
+        );
+        return;
+      }
+
+      // Wider size: half the idle capital, bounded by the per-pool allocation
+      // share of the portfolio AND the configured idle ceiling.
+      // evaluatePerPoolAllocation shrinks it to the pool's real remaining
+      // headroom and risk gate 6 caps it again before execution.
+      const proposedSizeUsd = computeIdleRedeploySizeUsd({
+        idleCapitalUsd,
+        portfolioValueUsd,
+        maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+        maxSizeUsd: config.idleRedeployMaxSizeUsd,
+      });
+      if (proposedSizeUsd < ENTRY_SIZE_FLOOR_USD) {
+        yield* recordRedeploySkip(
+          `[idle-redeploy] skipped — widened size $${proposedSizeUsd.toFixed(2)} below $${ENTRY_SIZE_FLOOR_USD} floor`,
+          "[idle-redeploy] proposed size below entry floor",
+        );
+        return;
+      }
+
+      const allocation = evaluatePerPoolAllocation({
+        proposedDepositUsd: proposedSizeUsd,
+        portfolioValueUsd,
+        openPositions,
+        maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+        maxOpenPositions: config.maxOpenPositions,
+        poolAddress: candidate.poolAddress,
+        maxPositionsPerPool: config.maxPositionsPerPool,
+      });
+      if (!allocation.approved) {
+        idleRedeployLogger.info("Idle redeploy capped by allocation", {
+          pool: candidate.poolAddress,
+          reason: allocation.reason,
+        });
+        yield* recordRedeploySkip(
+          `[idle-redeploy] capped — ${allocation.reason}`,
+          `[idle-redeploy] ${allocation.reason}`,
+        );
+        return;
+      }
+
+      let decision: AgentDecision = {
+        action: "ENTER",
+        poolAddress: candidate.poolAddress,
+        confidence: Math.min(0.5 + candidate.feeIlRatio * 0.05, 0.85),
+        reasoning: `[idle-redeploy] Deploying $${idleCapitalUsd.toFixed(0)} idle capital — Fee/IL ${candidate.feeIlRatio.toFixed(2)}, score ${candidate.entryScore.toFixed(3)}, TVL $${candidate.pool.tvlUsd.toFixed(0)}`,
+        positionSizeUsd: allocation.adjustedDepositUsd,
+      };
+
+      const riskResult: RiskResult = risk.evaluate(decision, {
+        openPositions,
+        portfolioValueUsd,
+        recentPnlUsd,
+        poolAddress: candidate.poolAddress,
+        activeBinId: candidate.pool.activeBinId,
+      });
+      if (riskResult.adjustedSizeUsd) {
+        decision = {
+          ...decision,
+          positionSizeUsd: riskResult.adjustedSizeUsd,
+          reasoning: `${decision.reasoning} (size capped to $${riskResult.adjustedSizeUsd.toFixed(0)})`,
+        };
+      }
+      if (!riskResult.approved) {
+        idleRedeployLogger.info("Idle redeploy rejected by risk gate", {
+          pool: candidate.poolAddress,
+          reason: riskResult.reason,
+        });
+        yield* alertSvc.sendAlert({
+          type: "risk_rejection",
+          severity: "warning",
+          message: `Risk gate rejected idle-redeploy ENTER on ${candidate.pool.tokenXSymbol}/${candidate.pool.tokenYSymbol}: ${riskResult.reason}`,
+          poolAddress: candidate.poolAddress,
+          data: { action: "ENTER", reason: riskResult.reason },
+        });
+        yield* audit
+          .recordDecision({
+            timestamp: Date.now(),
+            cycleId,
+            poolAddress: candidate.poolAddress,
+            action: "ENTER",
+            confidence: decision.confidence,
+            reasoning: decision.reasoning,
+            metrics: candidate.metrics,
+            riskResult,
+            executed: false,
+            paperTrading: config.paperTrading,
+          })
+          .pipe(Effect.catchAll(() => Effect.void));
+        return;
+      }
+
+      const signalTimestamp = Date.now();
+      const signalSnapshotId = yield* db
+        .saveSignalSnapshot({
+          poolAddress: candidate.poolAddress,
+          timestamp: signalTimestamp,
+          feeIlRatio: candidate.metrics.feeIlRatio,
+          volumeAuthenticity: candidate.metrics.volumeAuthenticity,
+          binUtilization: candidate.metrics.binUtilization,
+          tvlUsd: candidate.pool.tvlUsd,
+          tvlVelocity: candidate.metrics.tvlVelocity,
+          volatilityStddev: candidate.volatilityStddev,
+          binStep: candidate.pool.binStep,
+          action: decision.action,
+          confidence: decision.confidence,
+        })
+        .pipe(Effect.catchAll(() => Effect.succeed(null)));
+
+      // Same entry-shape / range-width resolution the in-slot tail uses.
+      const entryStrategyShape: EntryStrategyShape =
+        config.entryStrategyType === "auto"
+          ? recommendStrategyShape({
+              volatilityStddev: candidate.volatilityStddev,
+              highVolThreshold: config.volatilityExitStddev,
+              netDriftBins: candidate.netDriftBins,
+            })
+          : config.entryStrategyType;
+      const entryRangeHalfWidth = resolveRangeHalfWidth({
+        binStep: candidate.pool.binStep,
+        configuredBaseHalfWidth: config.entryRangeHalfWidthBins,
+        adaptiveEnabled: config.volatilityAdaptiveRanges,
+        volatilityStddev: candidate.volatilityStddev,
+        maxFullRangeBins: config.maxRebalanceRangeBins,
+      });
+
+      let executed = false;
+      let executionError: string | undefined = undefined;
+      if (config.paperTrading) {
+        const paperResult = yield* executePaper(
+          { db, trackedPositions, strategy, entryStrategyShape, entryRangeHalfWidth },
+          decision,
+          candidate.pool,
+          signalTimestamp,
+          signalSnapshotId ?? undefined,
+        );
+        executed = paperResult.executed;
+        executionError = paperResult.error;
+      } else {
+        // The live path runs the unchanged paper-validation gate first.
+        const paperDays = yield* readPaperDays;
+        const validation = evaluatePaperValidation({
+          paperTrading: false,
+          paperDaysAccumulated: paperDays,
+          minDays: config.paperValidationMinDays,
+          enforce: config.paperValidationEnforce,
+        });
+        if (!validation.approved) {
+          idleRedeployLogger.warn("Idle redeploy blocked by paper-validation gate", {
+            pool: candidate.poolAddress,
+            reason: validation.reason,
+          });
+          yield* recordRedeploySkip(
+            `[idle-redeploy] [paper-validation] ${validation.reason}`,
+            validation.reason,
+          );
+          return;
+        }
+        const entryPrep = yield* EntryPrepService;
+        const liveResult = yield* executeLive(
+          {
+            adapter,
+            strategy,
+            db,
+            revenueConfigSvc,
+            trackedPositions,
+            entryPrep,
+            solPriceUsd: config.solPriceUsd,
+            entryStrategyShape,
+            entryRangeHalfWidth,
+            reconcileRequestedPools,
+            memory,
+            unpricedExitWarnedPools,
+          },
+          decision,
+          candidate.pool,
+          signalTimestamp,
+          signalSnapshotId ?? undefined,
+        );
+        executed = liveResult.executed;
+        executionError = liveResult.error;
+        // A live redeploy moved funds out of the wallet: re-read so the rest
+        // of the engine sees the post-transaction balance (mirrors the
+        // in-slot tail). A failed re-read blocks further entries this cycle,
+        // exactly as after a normal live ENTER.
+        if (executed) {
+          lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
+            Effect.catchAll(() => {
+              liveEntriesBlockedRestOfCycle = true;
+              idleRedeployLogger.warn(
+                "Wallet balance refresh failed after live idle-redeploy entry — blocking further entries this cycle",
+                { pool: candidate.poolAddress },
+              );
+              return Effect.succeed(lastWalletBalanceUsd);
+            }),
+          );
+        }
+      }
+
+      if (isInsufficientTokenBalanceError(executionError)) {
+        const backoff = nextEntryFailureBackoff(entryFailureBackoff.get(candidate.poolAddress));
+        entryFailureBackoff.set(candidate.poolAddress, backoff);
+      } else if (executed) {
+        entryFailureBackoff.delete(candidate.poolAddress);
+      }
+
+      if (executed) {
+        cycle.poolsExecuted++;
+        idleRedeployLogger.info("Idle capital redeployed", {
+          pool: candidate.poolAddress,
+          sizeUsd: decision.positionSizeUsd,
+          idleCapitalUsd,
+          paperTrading: config.paperTrading,
+        });
+      } else {
+        cycle.poolsFailed++;
+      }
+
+      yield* audit
+        .recordDecision({
+          timestamp: Date.now(),
+          cycleId,
+          poolAddress: candidate.poolAddress,
+          action: "ENTER",
+          confidence: decision.confidence,
+          reasoning: decision.reasoning,
+          metrics: candidate.metrics,
+          riskResult,
+          executed,
+          error: executionError,
+          paperTrading: config.paperTrading,
+        })
+        .pipe(Effect.catchAll(() => Effect.void));
+      cycle.decisions.push(decision);
+    });
+
   // ─── Scan cycle ────────────────────────────────────────────────────────────
 
   const runScanCycle = (): Effect.Effect<void, never, EntryPrepService> =>
@@ -1934,9 +2289,13 @@ export const program = Effect.gen(function* () {
         lastWalletBalanceUsd = config.paperPortfolioUsd;
       }
 
+      // Qualified-but-unconsumed ENTER candidates for the opt-in idle-capital
+      // redeploy pass (empty and never read when the feature is off).
+      const idleRedeployCandidates: IdleRedeployCandidate[] = [];
+
       for (const poolAddress of poolsToScan) {
         // A pool yields one decision per held position plus at most one ENTER.
-        const decisions = yield* evaluatePool(poolAddress, cycle).pipe(
+        const decisions = yield* evaluatePool(poolAddress, cycle, idleRedeployCandidates).pipe(
           Effect.catchAll((err) => {
             cycle.poolsFailed++;
             console.error("Error processing pool", { poolAddress, err: String(err) });
@@ -1949,6 +2308,20 @@ export const program = Effect.gen(function* () {
           cycle.poolsDecided++;
         }
         cycle.poolsScanned++;
+      }
+
+      // Idle-capital auto-redeploy pass (opt-in): when idle wallet capital
+      // exceeds the threshold and qualified candidates exist, deploy into the
+      // top-scored one — routed through the UNCHANGED allocation + risk tail,
+      // so caps can reject/shrink but no gate is bypassed. A live-entry block
+      // (failed post-tx wallet re-read earlier this cycle) skips the pass so
+      // allocation math never runs on a stale balance.
+      if (
+        config.idleRedeployEnabled &&
+        idleRedeployCandidates.length > 0 &&
+        !liveEntriesBlockedRestOfCycle
+      ) {
+        yield* runIdleRedeployPass(idleRedeployCandidates, cycle);
       }
 
       cycle.completedAt = Date.now();
@@ -2154,6 +2527,7 @@ export const program = Effect.gen(function* () {
   const evaluatePool = (
     poolAddress: string,
     cycle: AgentCycle,
+    idleRedeployCandidates: IdleRedeployCandidate[],
   ): Effect.Effect<ReadonlyArray<AgentDecision>, unknown, EntryPrepService> =>
     Effect.gen(function* () {
       const cycleId = cycle.cycleId;
@@ -3191,6 +3565,43 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      // Recent-bin drift shared by the entry-shape resolution and the
+      // idle-redeploy capture (identical expression the shape path used inline).
+      const netDriftBins =
+        recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0;
+
+      // Idle-redeploy capture helper (opt-in): the candidate conditions +
+      // weighted-score gate, evaluated for a pool whose ENTER slot was skipped
+      // by the per-pool position cap. Allocation and token-risk are NOT
+      // checked here — dispatch from the pass is structurally impossible for
+      // a pool AT the per-pool cap (risk gate 3a and allocation gate 2 re-run
+      // and re-reject verbatim), so no gate they guard can be bypassed.
+      const evaluateIdleRedeployCandidate = (): IdleRedeployCandidate | null => {
+        if (
+          (metrics.feeIlRatioKnown ? feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 : true) &&
+          metrics.volumeAuthenticityKnown &&
+          volumeAuth > 0.8 &&
+          metrics.binUtilizationKnown &&
+          binUtilization > 0.4 &&
+          pool.tvlUsd > config.minPoolTvlUsd * 2
+        ) {
+          const entryScore = weightedEntryScore(metrics, signalWeights);
+          if (entryScore > config.weightedEntryScoreThreshold) {
+            return {
+              poolAddress,
+              pool,
+              metrics,
+              entryScore,
+              feeIlRatio,
+              normalEntrySizeUsd: computeEntrySizeUsd({ walletBalanceUsd, tvlUsd: pool.tvlUsd }),
+              volatilityStddev,
+              netDriftBins,
+            };
+          }
+        }
+        return null;
+      };
+
       // ── ENTER slot: one per pool per cycle, under the per-pool cap ──────
       // A pool already exiting this cycle never re-enters in the same cycle;
       // the count cap (MAX_POSITIONS_PER_POOL) bounds stacked positions while
@@ -3410,8 +3821,10 @@ export const program = Effect.gen(function* () {
                 .pipe(Effect.catchAll(() => Effect.void));
               enterGateRejected = true;
             } else {
-              const maxPositionSize = Math.min(walletBalanceUsd * 0.5, pool.tvlUsd * 0.005, 500);
-              const proposedSizeUsd = Math.max(maxPositionSize, 10);
+              const proposedSizeUsd = computeEntrySizeUsd({
+                walletBalanceUsd,
+                tvlUsd: pool.tvlUsd,
+              });
 
               // F5: per-pool allocation cap — aggregate across the pool's
               // positions so stacked exposure can't dominate the portfolio.
@@ -3447,6 +3860,44 @@ export const program = Effect.gen(function* () {
                     paperTrading: config.paperTrading,
                   })
                   .pipe(Effect.catchAll(() => Effect.void));
+                // Idle-redeploy capture: candidate conditions + score passed
+                // but allocation has no headroom (typically MAX_OPEN_POSITIONS
+                // reached — a slot can free mid-cycle when a LATER pool exits).
+                // The pass could dispatch this pool, so consult token-risk
+                // first EXACTLY as the in-slot gate does: a hard-risk signal
+                // disqualifies the candidate. Reuses the per-cycle token-risk
+                // cache, so this costs no round-trip when the screening seam
+                // already fetched these mints.
+                if (config.idleRedeployEnabled) {
+                  let redeployTokenRiskClean = true;
+                  if (config.jupiterTokenRiskEnabled !== false) {
+                    const redeployLegRisks = yield* Effect.promise(() =>
+                      consultTokenRisks([pool.tokenX, pool.tokenY], config),
+                    );
+                    for (const legMint of [pool.tokenX, pool.tokenY]) {
+                      const legSignal = redeployLegRisks.get(legMint);
+                      if (
+                        legSignal !== undefined &&
+                        (legSignal.isSus || legSignal.organicScoreLabel === "low")
+                      ) {
+                        redeployTokenRiskClean = false;
+                        break;
+                      }
+                    }
+                  }
+                  if (redeployTokenRiskClean) {
+                    idleRedeployCandidates.push({
+                      poolAddress,
+                      pool,
+                      metrics,
+                      entryScore,
+                      feeIlRatio,
+                      normalEntrySizeUsd: proposedSizeUsd,
+                      volatilityStddev,
+                      netDriftBins,
+                    });
+                  }
+                }
                 enterGateRejected = true;
               } else {
                 // [token-risk] ENTER gate (Wave 18): Jupiter advisory overlay —
@@ -3514,11 +3965,44 @@ export const program = Effect.gen(function* () {
                     reasoning: `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL $${pool.tvlUsd.toFixed(0)}`,
                     positionSizeUsd,
                   });
+                  // Idle-redeploy capture: the pool passed every in-slot gate
+                  // (conditions, score, allocation, token-risk), so it is a
+                  // fully-vetted candidate whether or not this ENTER executes
+                  // — a second position on the same pool (Wave 10) or a
+                  // risk-tail rejection both leave idle capital deployable.
+                  if (config.idleRedeployEnabled) {
+                    idleRedeployCandidates.push({
+                      poolAddress,
+                      pool,
+                      metrics,
+                      entryScore,
+                      feeIlRatio,
+                      normalEntrySizeUsd: positionSizeUsd,
+                      volatilityStddev,
+                      netDriftBins,
+                    });
+                  }
                 }
               }
             }
           }
         }
+      }
+
+      // Idle-redeploy capture: the per-pool position cap skipped the ENTER
+      // slot entirely. A pool that still passes the candidate conditions +
+      // score keeps the pass's ranking honest; dispatch is structurally
+      // impossible this cycle (the cap did not move — allocation gate and risk
+      // gate 3a re-run and re-reject verbatim), so no skipped gate can bite.
+      if (
+        config.idleRedeployEnabled &&
+        !poolExitFired &&
+        poolPositions.length >= config.maxPositionsPerPool &&
+        !unresolvedPoolAddresses.has(poolAddress) &&
+        approvedPoolAddresses.includes(poolAddress)
+      ) {
+        const redeployCandidate = evaluateIdleRedeployCandidate();
+        if (redeployCandidate) idleRedeployCandidates.push(redeployCandidate);
       }
 
       if (rawDecisions.length === 0 && !enterGateRejected) {
@@ -3549,8 +4033,7 @@ export const program = Effect.gen(function* () {
           ? recommendStrategyShape({
               volatilityStddev,
               highVolThreshold: config.volatilityExitStddev,
-              netDriftBins:
-                recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0,
+              netDriftBins,
             })
           : config.entryStrategyType;
 
@@ -4134,8 +4617,7 @@ export const program = Effect.gen(function* () {
         if (decision.action === "ENTER" && config.entryStrategyType === "auto") {
           console.info(`[strategy-shape] auto resolved ${entryStrategyShape} for ${poolAddress}`, {
             volatilityStddev,
-            netDriftBins:
-              recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0,
+            netDriftBins,
           });
         }
         if (decision.action === "ENTER" && config.volatilityAdaptiveRanges) {

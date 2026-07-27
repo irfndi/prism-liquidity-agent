@@ -46,6 +46,8 @@ function makeAdapter(walletBalanceUsd: () => Effect.Effect<number, unknown>): Ad
     hasWallet: () => true,
     getWalletAddress: () => "WalletAddress1111111111111111111111111111111",
     getWalletBalanceUsd: walletBalanceUsd,
+    getWalletHoldings: () =>
+      Effect.succeed(new Map<string, { amountAtomic: bigint; decimals: number }>()),
     getNativeSolBalance: () => Effect.succeed(0n),
     getPoolState: (addr: string) => Effect.succeed(makePool({ address: addr, fees24hUsd: 100 })),
     getBinArray: () => Effect.succeed(makeBinArray()),

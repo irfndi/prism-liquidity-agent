@@ -45,6 +45,8 @@ function makeLoopAdapter(claimRewards: AdapterApi["claimRewards"]): AdapterApi {
     hasWallet: () => true,
     getWalletAddress: () => "Wallet111",
     getWalletBalanceUsd: () => Effect.succeed(10_000),
+    getWalletHoldings: () =>
+      Effect.succeed(new Map<string, { amountAtomic: bigint; decimals: number }>()),
     getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
     getPoolState: (addr: string) =>
       addr === FARM_POOL

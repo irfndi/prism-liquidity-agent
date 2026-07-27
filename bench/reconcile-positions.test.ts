@@ -15,6 +15,8 @@ function makeMockAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
     hasWallet: () => true,
     getWalletAddress: () => "Wallet111111111111111111111111111111111111111",
     getWalletBalanceUsd: () => Effect.succeed(0),
+    getWalletHoldings: () =>
+      Effect.succeed(new Map<string, { amountAtomic: bigint; decimals: number }>()),
     getNativeSolBalance: () => Effect.succeed(0n),
     getTokenBalance: () => Effect.succeed(0n),
     getTokenPrices: () => Effect.succeed({}),

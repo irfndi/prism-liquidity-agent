@@ -72,6 +72,8 @@ describe("executeLive", () => {
       hasWallet: () => true,
       getWalletAddress: () => "mock-wallet",
       getWalletBalanceUsd: () => Effect.succeed(10_000),
+      getWalletHoldings: () =>
+        Effect.succeed(new Map<string, { amountAtomic: bigint; decimals: number }>()),
       getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
       getPoolState: () =>
         Effect.succeed({
