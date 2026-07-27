@@ -72,6 +72,8 @@ function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
     hasWallet: () => true,
     getWalletAddress: () => "Wallet111",
     getWalletBalanceUsd: () => Effect.succeed(10_000),
+    getWalletHoldings: () =>
+      Effect.succeed(new Map<string, { amountAtomic: bigint; decimals: number }>()),
     getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
     getPoolState: () => Effect.fail(new Error("not used")),
     getBinArray: () => Effect.fail(new Error("not used")),
@@ -341,6 +343,8 @@ function makeLoopAdapter(opts: {
     hasWallet: () => true,
     getWalletAddress: () => "Wallet111",
     getWalletBalanceUsd: () => Effect.succeed(10_000),
+    getWalletHoldings: () =>
+      Effect.succeed(new Map<string, { amountAtomic: bigint; decimals: number }>()),
     getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
     getPoolState: (addr: string) => {
       const pool = opts.pools[addr];

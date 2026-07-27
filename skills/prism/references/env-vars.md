@@ -40,7 +40,8 @@ value not set in `.env`.
 | `AGENT_ACP_ARGS` | `acp` | Arguments passed to ACP command. |
 | `AGENT_GATEWAY_URL` | `ws://127.0.0.1:18789` | OpenClaw Gateway WebSocket URL. |
 | `AGENT_GATEWAY_TOKEN` | — | Optional Gateway auth token. |
-| `AGENT_PROMPT_TIMEOUT_MS` | `15000` | Prompt/check-in timeout. |
+| `AGENT_PROMPT_TIMEOUT_MS` | `60000` | Prompt/check-in timeout. |
+| `AGENT_VETO_TIMEOUT_MS` | `AGENT_PROMPT_TIMEOUT_MS` | Inline veto-review timeout; clamp [1s, 5min]. |
 | `AGENT_CHECKIN_INTERVAL_MS` | `3600000` | Periodic check-in interval. |
 | `AGENT_CHECKIN_ON_EVENTS` | `true` | Check-in on ENTER/EXIT/REBALANCE. |
 | `AGENT_CHECKIN_INCLUDE_HISTORY` | `true` | Include recent decisions/warnings. |

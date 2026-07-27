@@ -20,11 +20,14 @@ export default defineConfig({
         "engine/types.ts",
         "engine/services.ts",
         "engine/logger.ts",
+        // Measured 2026-07: program.ts has ~13 scenario test files but sits at
+        // 63.6% stmts / 70.3% branch / 65.3% lines — the ~4700-line Effect.gen
+        // loop has deep branches mocks don't reach. adapter-service.ts sits at
+        // 66.6% stmts / 66.9% lines on mock-SDK tests. Both are tested; they
+        // fail the 75% gate, so they stay excluded pending branch-level tests
+        // rather than diluting the gate for everything else.
         "engine/adapter-service.ts",
         "engine/program.ts",
-        "engine/config-service.ts",
-        "engine/memory-service.ts",
-        "engine/screener-service.ts",
         // Runtime boundaries require external processes, WebSockets, or live
         // HTTP endpoints. They are covered by integration/manual checks rather
         // than the deterministic engine-unit coverage gate.
