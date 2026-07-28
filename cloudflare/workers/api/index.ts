@@ -442,7 +442,16 @@ const agentStatusReportHandler = (db: D1Database, cache: KVNamespace, apiKey: st
             JSON.stringify({ status, positions, pnl, reportedAt: Date.now() }),
             { expirationTtl: AGENT_STATUS_CACHE_TTL_SEC },
           ),
-        ).pipe(Effect.catchAll(() => Effect.void)),
+        ).pipe(
+          Effect.catchAll((err) =>
+            Effect.sync(() =>
+              console.error("agent-status KV write failed", {
+                userId,
+                err: String(err),
+              }),
+            ),
+          ),
+        ),
     };
   });
 

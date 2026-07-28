@@ -131,60 +131,67 @@ const idleRedeployLogger = createLogger("idle-redeploy");
 const statusLogger = createLogger("engine-status");
 
 /**
- * Post the engine's current status to the Prism Cloud API so the Telegram
- * bot's /status command can serve real data. Reads the API key from the
- * on-disk credentials file and uses fire-and-forget fetch so a transient
- * network error never blocks the scan cycle.
+ * Read the Prism Cloud API key from the on-disk credentials file. Returns null
+ * when the user has not registered — a normal condition, not an error, so status
+ * reporting simply no-ops.
+ */
+const readEngineStatusApiKey = (): string | null => {
+  try {
+    const credentialsFile = join(getPrismUserConfigDir(), "credentials.json");
+    if (!existsSync(credentialsFile)) return null;
+    const value: unknown = JSON.parse(readFileSync(credentialsFile, "utf-8"));
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      typeof (value as Record<string, unknown>).apiKey === "string"
+    ) {
+      return (value as { apiKey: string }).apiKey;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Post the engine's current status to the Prism Cloud API so the Telegram bot's
+ * /status command can serve real data. Runs fully inside the Effect boundary
+ * (filesystem read + HTTP request) and never fails — a missing API key or a
+ * transient network error is logged and swallowed so it can never block the scan
+ * cycle or the shutdown path. Mirrors the fire-and-forget `reportFeeCollection`
+ * reporting pattern in this file.
  */
 function postEngineStatus(
   status: "running" | "stopped",
   positions: number,
-  pnl: number,
-): void {
+  unrealizedPnlUsd: number,
+): Effect.Effect<void> {
   const DEFAULT_API_BASE_URL = "https://prism-api.irfndi.workers.dev";
-  const baseUrl = process.env.PRISM_API_URL ?? DEFAULT_API_BASE_URL;
   const TIMEOUT_MS = 5_000;
-
-  let apiKey: string | null = null;
-  try {
-    const credentialsFile = join(getPrismUserConfigDir(), "credentials.json");
-    if (existsSync(credentialsFile)) {
-      const value: unknown = JSON.parse(readFileSync(credentialsFile, "utf-8"));
-      if (
-        typeof value === "object" &&
-        value !== null &&
-        typeof (value as Record<string, unknown>).apiKey === "string"
-      ) {
-        apiKey = (value as { apiKey: string }).apiKey;
-      }
+  return Effect.gen(function* () {
+    const baseUrl = process.env.PRISM_API_URL ?? DEFAULT_API_BASE_URL;
+    const apiKey = yield* Effect.sync(readEngineStatusApiKey);
+    if (apiKey == null) return;
+    const response = yield* Effect.tryPromise(() =>
+      fetch(`${baseUrl}/v1/agent-status/report`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ status, positions, pnl: unrealizedPnlUsd }),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      }),
+    );
+    if (!response.ok) {
+      statusLogger.warn("Engine status report rejected", { status: response.status });
     }
-  } catch {
-    // No credentials — nothing to report.
-  }
-
-  if (!apiKey) return;
-
-  fetch(`${baseUrl}/v1/agent-status/report`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ status, positions, pnl }),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  }).then(
-    (response) => {
-      if (!response.ok) {
-        statusLogger.warn("Engine status report rejected", {
-          status: response.status,
-        });
-      }
-    },
-    (error: unknown) => {
-      statusLogger.warn("Engine status report failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    },
+  }).pipe(
+    Effect.catchAllCause((cause) =>
+      Effect.sync(() =>
+        statusLogger.warn("Engine status report failed", { cause: String(cause) }),
+      ),
+    ),
   );
 }
 
@@ -2904,13 +2911,23 @@ export const program = Effect.gen(function* () {
         }
 
       // Report engine status to the Prism Cloud API after every scan cycle.
+      // PnL is the aggregate UNREALIZED figure across tracked positions and
+      // INCLUDES claimed fees + claimed rewards (which live on PositionRecord, not
+      // the reduced PositionSnapshot), matching the canonical unrealized-PnL
+      // formula in engine/pnl.ts. Forked fire-and-forget so a transient report
+      // never blocks the cycle.
       {
-        const positions = buildPositionSnapshots(trackedPositions.values());
-        const pnl = positions.reduce(
-          (sum, p) => sum + (p.currentValueUsd - p.depositedUsd),
-          0,
+        let pnl = 0;
+        for (const p of trackedPositions.values()) {
+          pnl +=
+            p.currentValueUsd +
+            p.cumulativeFeesClaimedUsd +
+            p.cumulativeRewardsClaimedUsd -
+            p.depositedUsd;
+        }
+        yield* Effect.fork(postEngineStatus("running", trackedPositions.size, pnl)).pipe(
+          Effect.asVoid,
         );
-        postEngineStatus("running", trackedPositions.size, pnl);
       }
 
       scanCount += 1;
@@ -5806,9 +5823,27 @@ export const program = Effect.gen(function* () {
     if (shuttingDown) return;
     shuttingDown = true;
     console.info(`Received ${signal} — shutting down`);
+    // Report a final "stopped" heartbeat so Telegram /status does not keep serving
+    // a stale "running" until the 30-minute KV TTL expires. Awaited inline (with a
+    // hard timeout) BEFORE process.exit so the fetch is not killed mid-flight; the
+    // per-cycle "running" report stays fire-and-forget.
+    let pnl = 0;
+    for (const p of trackedPositions.values()) {
+      pnl +=
+        p.currentValueUsd +
+        p.cumulativeFeesClaimedUsd +
+        p.cumulativeRewardsClaimedUsd -
+        p.depositedUsd;
+    }
     Effect.runFork(
       Fiber.interrupt(schedulerFiber).pipe(
         Effect.zipRight(agent.disconnect()),
+        Effect.zipRight(
+          postEngineStatus("stopped", trackedPositions.size, pnl).pipe(
+            Effect.timeout("4 seconds"),
+            Effect.catchAll(() => Effect.void),
+          ),
+        ),
         Effect.ensuring(Effect.sync(() => process.exit(0))),
       ),
     );
