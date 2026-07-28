@@ -207,7 +207,11 @@ export class GatewayTransport implements AgentRuntimeTransport {
 
       const startedAt = Date.now();
       const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
-      const text = yield* Effect.tryPromise(() => this.sendChat(prompt, effectiveTimeout));
+      // Request minimal reasoning effort — this is a yes/no review (veto) and
+      // does not need the model's full thinking budget.
+      const text = yield* Effect.tryPromise(() =>
+        this.sendChat(prompt, effectiveTimeout, { reasoningEffort: "low" }),
+      );
 
       const latencyMs = Date.now() - startedAt;
       this.emit({ type: "response_received", transport: this.name, latencyMs });
@@ -366,7 +370,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
 
   // ─── App layer ───────────────────────────────────────────────────────────────
 
-  private async sendChat(message: string, timeoutMs: number): Promise<string> {
+  private async sendChat(message: string, timeoutMs: number, opts?: { reasoningEffort?: "low" | "medium" | "high" }): Promise<string> {
     const id = crypto.randomUUID();
     const runPromise = this.registerChatRun(id, timeoutMs);
     try {
@@ -377,10 +381,20 @@ export class GatewayTransport implements AgentRuntimeTransport {
       // rejection is still handled. Promise.all attaches a handler to both; otherwise an
       // awaited-alone run promise could reject with no handler and Bun would treat it as
       // an unhandled rejection, terminating the whole process rather than just the call.
+      const chatParams: Record<string, unknown> = {
+        sessionKey: this.sessionKey,
+        message,
+        idempotencyKey: id,
+      };
+      // Request minimal thinking effort for quick turnarounds (used by veto reviews).
+      // The gateway maps reasoningEffort to the underlying model's thinking budget.
+      if (opts?.reasoningEffort) {
+        chatParams.modelParams = { reasoning_effort: opts.reasoningEffort };
+      }
       const [, reply] = await Promise.all([
         this.request(
           "chat.send",
-          { sessionKey: this.sessionKey, message, idempotencyKey: id },
+          chatParams,
           timeoutMs,
           id,
         ),

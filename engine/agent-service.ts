@@ -454,6 +454,21 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
       let lastPromptAt: number | null = null;
       let errorCount = 0;
 
+      // ── Rolling p95 latency tracker for adaptive veto skip ─────────────
+      // Maintains a simple sliding window of recent prompt latencies. When the
+      // p95 of the last VETO_WINDOW_SIZE responses exceeds the configured veto
+      // timeout, the veto is skipped (fail-open with WARN) because the model
+      // cannot answer quickly enough for a budget-constrained yes/no review.
+      const VETO_WINDOW_SIZE = 20;
+      const vetoLatencies: number[] = [];
+
+      function computeP95(values: number[]): number | null {
+        if (values.length === 0) return null;
+        const sorted = [...values].sort((a, b) => a - b);
+        const idx = Math.ceil(sorted.length * 0.95) - 1;
+        return sorted[Math.max(0, Math.min(idx, sorted.length - 1))]!;
+      }
+
       if (transport) {
         connected = yield* connectReviewTransport(transport);
         if (!connected) {
@@ -472,10 +487,28 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           }
           const proposalMode = config.agentProposalMode;
           if (proposalMode === "veto") {
+            const vetoBudgetMs = config.agentVetoTimeoutMs;
+            const p95 = computeP95(vetoLatencies);
+            if (p95 !== null && p95 >= vetoBudgetMs * 0.95) {
+              logger.warn(
+                "Skipping veto review — rolling p95 latency exceeds 95% of veto budget",
+                {
+                  pool: decision.poolAddress,
+                  p95Ms: Math.round(p95),
+                  budgetMs: vetoBudgetMs,
+                  windowSize: vetoLatencies.length,
+                },
+              );
+              return Effect.succeed(null);
+            }
             const prompt = buildPrompt(decision, context);
-            return transport.sendPrompt(prompt, context, config.agentVetoTimeoutMs).pipe(
+            return transport.sendPrompt(prompt, context, vetoBudgetMs).pipe(
               Effect.map((response: AgentRuntimeResponse) => {
                 lastPromptAt = Date.now();
+                vetoLatencies.push(response.latencyMs);
+                if (vetoLatencies.length > VETO_WINDOW_SIZE) {
+                  vetoLatencies.shift();
+                }
                 const parsed = parseResponse(response.raw);
                 const override = validateOverride(decision, parsed);
                 if (override) {
@@ -485,9 +518,24 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
                     newAction: override.action,
                     originalConfidence: decision.confidence.toFixed(2),
                     newConfidence: override.confidence.toFixed(2),
+                    latencyMs: response.latencyMs,
                   });
                 }
                 return override;
+              }),
+              Effect.catchAll((err) => {
+                errorCount += 1;
+                // Record the timeout/failure latency so the rolling p95 converges
+                // even when the veto consistently times out.
+                vetoLatencies.push(vetoBudgetMs);
+                if (vetoLatencies.length > VETO_WINDOW_SIZE) {
+                  vetoLatencies.shift();
+                }
+                logger.warn("Veto review failed", {
+                  pool: decision.poolAddress,
+                  error: underlyingErrorMessage(err),
+                });
+                return Effect.succeed(null);
               }),
             );
           }

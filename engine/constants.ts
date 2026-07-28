@@ -20,6 +20,13 @@ export const GAS_TOP_UP_USDC = 2;
 // top-up and the post-swap SOL recheck so all three gates stay aligned.
 export const MIN_SOL_FOR_GAS_LAMPORTS = 30_000_000n;
 
+// Minimum native SOL for a live ENTER including position rent-exempt reserve,
+// bin-array initialization, ATA creation, and priority fee buffer. The audit
+// showed a live entry needed ~0.183 SOL (182,798,329 lamports) for a standard
+// DLMM position. This buffer ensures the transaction simulation succeeds;
+// the error message reports available, needed, and reserve components.
+export const MIN_SOL_FOR_ENTRY_LAMPORTS = 180_000_000n;
+
 // Native SOL threshold below which `swapUSDCForSOL` performs a gas top-up.
 // Kept in sync with the live entry gate to avoid reserving a top-up that the
 // gate would reject anyway.

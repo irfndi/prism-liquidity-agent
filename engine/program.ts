@@ -45,6 +45,7 @@ import {
   GAS_TOP_UP_USDC,
   SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
   MIN_SOL_FOR_GAS_LAMPORTS,
+  MIN_SOL_FOR_ENTRY_LAMPORTS,
   USDC_MINT,
 } from "./constants.js";
 import {
@@ -1008,9 +1009,24 @@ export function executeLive(
         return { executed: false, error: nativeBalance.error };
       }
       const solBalance = nativeBalance.value;
-      if (solBalance < MIN_SOL_FOR_GAS_LAMPORTS) {
-        console.warn("Insufficient SOL for gas — skipping ENTER");
-        return { executed: false, error: "Insufficient SOL for gas — skipping ENTER" };
+      if (solBalance < MIN_SOL_FOR_ENTRY_LAMPORTS) {
+        const availableLamports = Number(solBalance);
+        const neededLamports = Number(MIN_SOL_FOR_ENTRY_LAMPORTS);
+        const reserve = neededLamports - Number(MIN_SOL_FOR_GAS_LAMPORTS);
+        const availableHuman = (availableLamports / 1e9).toFixed(4);
+        const neededHuman = (neededLamports / 1e9).toFixed(4);
+        const reserveHuman = (reserve / 1e9).toFixed(4);
+        console.warn(
+          `Insufficient SOL for ENTER — available ${availableHuman} SOL, need ${neededHuman} SOL ` +
+          `(gas ${(Number(MIN_SOL_FOR_GAS_LAMPORTS) / 1e9).toFixed(4)} + rent/fee reserve ${reserveHuman})`,
+        );
+        return {
+          executed: false,
+          error:
+            `Insufficient SOL for ENTER — available: ${availableHuman} SOL, ` +
+            `needed: ${neededHuman} SOL, ` +
+            `reserve: ${reserveHuman} SOL`,
+        };
       }
     }
 
@@ -2764,6 +2780,28 @@ export const program = Effect.gen(function* () {
         );
       } else {
         lastWalletBalanceUsd = config.paperPortfolioUsd;
+      }
+
+      // Periodic wallet composition log for drift auditability.
+      if (adapter.hasWallet() && !config.paperTrading && scanCount % 10 === 0) {
+        yield* Effect.fork(
+          Effect.gen(function* () {
+            const holdings = yield* adapter.getWalletHoldings().pipe(
+              Effect.catchAll(() => Effect.succeed(new Map())),
+            );
+            if (holdings.size > 0) {
+              const breakdown = Array.from(holdings.entries()).map(([mint, bal]) => ({
+                mint: `${mint.slice(0, 8)}...`,
+                amount: (Number(bal.amountAtomic) / 10 ** bal.decimals).toFixed(Math.min(bal.decimals, 6)),
+              }));
+              logger.info("Wallet composition snapshot (every 10 cycles)", {
+                totalUsd: lastWalletBalanceUsd.toFixed(2),
+                tokens: breakdown,
+                scanCount,
+              });
+            }
+          }).pipe(Effect.catchAll(() => Effect.void)),
+        );
       }
 
       // Qualified-but-unconsumed ENTER candidates for the opt-in idle-capital

@@ -170,12 +170,24 @@ const logger = createLogger("adapter-service");
 // reconciliation. A perpetually-unpriceable token (e.g. a dust ATA with no
 // price feed) warns once per process instead of every scan cycle.
 const warnedUnpricedWalletMints = new Set<string>();
-function warnUnpricedWalletMintOnce(mint: string): void {
+function warnUnpricedWalletMintOnce(
+  mint: string,
+  opts?: { readonly amountAtomic?: bigint; readonly decimals?: number; readonly attemptedSources?: string },
+): void {
   if (warnedUnpricedWalletMints.has(mint)) return;
   warnedUnpricedWalletMints.add(mint);
+  const amountHuman =
+    opts?.amountAtomic !== undefined && opts?.decimals !== undefined
+      ? formatTokenAmount(opts.amountAtomic, opts.decimals)
+      : "unknown";
   logger.warn(
     "Wallet token has no resolvable USD price — excluded from wallet balance (fail-closed)",
-    { mint },
+    {
+      mint,
+      amount: amountHuman,
+      attemptedSources: opts?.attemptedSources ?? "helius,jupiter,coingecko",
+      amountUsd: "$0.00 (excluded)",
+    },
   );
 }
 
@@ -1093,14 +1105,20 @@ export const AdapterLive = Layer.effect(
           if (typeof solPrice === "number" && solPrice > 0) {
             totalUsd += (lamports / 1e9) * solPrice;
           } else {
-            warnUnpricedWalletMintOnce(SOL_MINT);
+            warnUnpricedWalletMintOnce(SOL_MINT, {
+              amountAtomic: BigInt(lamports),
+              decimals: 9,
+            });
           }
         }
 
         for (const [mint, balance] of held) {
           const price = prices[mint];
           if (typeof price !== "number" || price <= 0) {
-            warnUnpricedWalletMintOnce(mint);
+            warnUnpricedWalletMintOnce(mint, {
+              amountAtomic: balance.amountAtomic,
+              decimals: balance.decimals,
+            });
             continue;
           }
           totalUsd += atomicToUnits(balance.amountAtomic, balance.decimals) * price;
