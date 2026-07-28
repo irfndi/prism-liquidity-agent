@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { env, createExecutionContext } from "cloudflare:test";
 import worker from "./index";
 
@@ -600,6 +600,230 @@ describe("Telegram Bot Worker", () => {
         createExecutionContext(),
       );
       expect(response.status).toBe(200);
+    });
+  });
+});
+
+describe("/internal/flush-alerts (D1 alert poll)", () => {
+  // Base `env` (from wrangler.telegram.test.toml) has no BOT_API_SECRET, so it
+  // exercises the fail-closed path; testEnv (defined above) sets it.
+  function postFlush(options: { secret?: string; omitSecretHeader?: boolean } = {}): Request {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (!options.omitSecretHeader) {
+      headers["X-Bot-Api-Secret"] = options.secret ?? BOT_API_SECRET;
+    }
+    return new Request("https://example.com/internal/flush-alerts", {
+      method: "POST",
+      headers,
+      body: "{}",
+    });
+  }
+
+  async function seedUser(
+    id = "user-1",
+    telegramId: string | null = "12345",
+    alertsEnabled = 1,
+  ): Promise<void> {
+    await env.DB.prepare("INSERT INTO users (id, telegram_id, alerts_enabled) VALUES (?, ?, ?)")
+      .bind(id, telegramId, alertsEnabled)
+      .run();
+  }
+
+  async function seedAlert(
+    opts: {
+      id?: string;
+      userId?: string;
+      type?: string;
+      severity?: string;
+      message?: string;
+      poolAddress?: string | null;
+      deliveryAttempts?: number;
+    } = {},
+  ): Promise<void> {
+    await env.DB.prepare(
+      `INSERT INTO alerts
+         (id, user_id, type, pool_address, severity, message, delivery_attempts)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        opts.id ?? "alert-1",
+        opts.userId ?? "user-1",
+        opts.type ?? "position_out_of_range",
+        opts.poolAddress ?? "Pool1111111111111111111111111111111111111",
+        opts.severity ?? "critical",
+        opts.message ?? "Position out of range on SOL/USDC",
+        opts.deliveryAttempts ?? 0,
+      )
+      .run();
+  }
+
+  beforeAll(async () => {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS users (
+         id TEXT PRIMARY KEY,
+         telegram_id TEXT,
+         tier TEXT NOT NULL DEFAULT 'free',
+         alerts_enabled INTEGER NOT NULL DEFAULT 1,
+         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+       )`,
+    ).run();
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS alerts (
+         id TEXT PRIMARY KEY,
+         user_id TEXT NOT NULL,
+         type TEXT NOT NULL,
+         pool_address TEXT,
+         severity TEXT NOT NULL,
+         message TEXT NOT NULL,
+         data TEXT,
+         delivered_at DATETIME,
+         delivery_attempts INTEGER NOT NULL DEFAULT 0,
+         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+       )`,
+    ).run();
+    // Defensive: a shared D1 may predate these columns from an earlier file run.
+    await env.DB.prepare(
+      "ALTER TABLE alerts ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0",
+    )
+      .run()
+      .catch(() => {});
+    await env.DB.prepare("ALTER TABLE users ADD COLUMN alerts_enabled INTEGER NOT NULL DEFAULT 1")
+      .run()
+      .catch(() => {});
+  });
+
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    await env.DB.prepare("DELETE FROM alerts").run();
+    await env.DB.prepare("DELETE FROM users").run();
+  });
+
+  describe("auth", () => {
+    it("rejects requests without the bot secret (401)", async () => {
+      const response = await worker.fetch(
+        postFlush({ omitSecretHeader: true }),
+        testEnv,
+        createExecutionContext(),
+      );
+      expect(response.status).toBe(401);
+    });
+
+    it("rejects requests with a wrong bot secret (401)", async () => {
+      const response = await worker.fetch(
+        postFlush({ secret: "wrong-secret" }),
+        testEnv,
+        createExecutionContext(),
+      );
+      expect(response.status).toBe(401);
+    });
+
+    it("fails closed when BOT_API_SECRET is unset on the worker", async () => {
+      const response = await worker.fetch(postFlush(), env, createExecutionContext());
+      expect(response.status).toBe(401);
+    });
+  });
+
+  describe("delivery", () => {
+    it("delivers a pending alert to Telegram and marks delivered_at", async () => {
+      await seedUser();
+      await seedAlert({ id: "alert-a", message: "First alert" });
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+      const response = await worker.fetch(postFlush(), testEnv, createExecutionContext());
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: boolean;
+        checked: number;
+        delivered: number;
+        failed: number;
+      };
+      expect(body).toMatchObject({ ok: true, checked: 1, delivered: 1, failed: 0 });
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(String(url)).toContain("api.telegram.org/bot");
+      const sent = JSON.parse(String(init.body)) as Record<string, unknown>;
+      expect(sent.chat_id).toBe(12345);
+      const text = String(sent.text);
+      expect(text).toContain("🚨");
+      expect(text).toContain("Position out of range");
+
+      const row = await env.DB.prepare(
+        "SELECT delivered_at, delivery_attempts FROM alerts WHERE id = ?",
+      )
+        .bind("alert-a")
+        .first();
+      expect(row?.delivered_at).not.toBeNull();
+    });
+
+    it("increments delivery_attempts and leaves delivered_at NULL on failure", async () => {
+      await seedUser();
+      await seedAlert({ id: "alert-b" });
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ ok: false }), { status: 400 }),
+      );
+
+      const response = await worker.fetch(postFlush(), testEnv, createExecutionContext());
+      const body = (await response.json()) as { delivered: number; failed: number };
+      expect(body.delivered).toBe(0);
+      expect(body.failed).toBe(1);
+
+      const row = await env.DB.prepare(
+        "SELECT delivered_at, delivery_attempts FROM alerts WHERE id = ?",
+      )
+        .bind("alert-b")
+        .first();
+      expect(row?.delivered_at).toBeNull();
+      expect(row?.delivery_attempts).toBe(1);
+    });
+
+    it("skips rows whose user has disabled alerts or no telegram link", async () => {
+      await seedUser("user-off", "222", 0);
+      await seedUser("user-nolink", null, 1);
+      await seedAlert({ id: "alert-off", userId: "user-off" });
+      await seedAlert({ id: "alert-nolink", userId: "user-nolink" });
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+      const response = await worker.fetch(postFlush(), testEnv, createExecutionContext());
+      const body = (await response.json()) as { checked: number; delivered: number };
+      expect(body.checked).toBe(0);
+      expect(body.delivered).toBe(0);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("abandons a row at 5 attempts and never retries it", async () => {
+      await seedUser();
+      await seedAlert({ id: "alert-c", deliveryAttempts: 4 });
+
+      // First flush: send fails -> attempts 4 -> 5.
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ ok: false }), { status: 400 }),
+      );
+      await worker.fetch(postFlush(), testEnv, createExecutionContext());
+      let row = await env.DB.prepare("SELECT delivery_attempts FROM alerts WHERE id = ?")
+        .bind("alert-c")
+        .first();
+      expect(row?.delivery_attempts).toBe(5);
+
+      // Second flush: filtered out (attempts >= 5) -> not retried. Restore the
+      // shared fetch spy first so its call history is clean for this assertion.
+      vi.restoreAllMocks();
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      const response = await worker.fetch(postFlush(), testEnv, createExecutionContext());
+      const body = (await response.json()) as {
+        checked: number;
+        delivered: number;
+        abandoned: number;
+      };
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(body.checked).toBe(0);
+      expect(body.abandoned).toBe(1);
     });
   });
 });

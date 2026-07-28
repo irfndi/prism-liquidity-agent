@@ -1,0 +1,41 @@
+# Flush undelivered Telegram alerts.
+#
+# The telegram-bot worker delivers alerts by polling D1 via its authenticated
+# POST /internal/flush-alerts endpoint. Cloudflare rejects API->bot worker->
+# worker fetches on the same workers.dev zone (error 1042) and the alchemy beta
+# has no scheduled-trigger support for workers, so this external GitHub Actions
+# cron is the trigger. Delivery latency is bounded by the cron cadence (<= 5 min).
+#
+# Alerts are non-critical: continue-on-error keeps a failed flush from turning
+# the cron history red, while the echoed response/exit code stays visible.
+
+name: Alert Delivery Flush
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  flush:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Flush undelivered alerts via the bot
+        continue-on-error: true
+        env:
+          BOT_API_SECRET: ${{ secrets.BOT_API_SECRET }}
+        run: |
+          set +e
+          body=$(curl -sS -f -X POST \
+            https://prism-telegram-bot.irfndi.workers.dev/internal/flush-alerts \
+            -H "X-Bot-Api-Secret: $BOT_API_SECRET")
+          code=$?
+          echo "response body: $body"
+          echo "curl exit code: $code"
+          if [ "$code" -ne 0 ]; then
+            echo "::error::alert flush failed (curl exit $code)"
+            exit "$code"
+          fi

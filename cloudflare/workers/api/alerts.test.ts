@@ -182,14 +182,15 @@ describe("Alerts API", () => {
     });
   });
 
-  describe("POST /v1/alerts — storage and forwarding", () => {
-    it("stores a valid alert and forwards it when telegram is linked", async () => {
+  describe("POST /v1/alerts — storage", () => {
+    // Delivery is the bot's job now (it polls D1 via /internal/flush-alerts,
+    // driven by a GHA cron). The API only stores: delivered is always false at
+    // POST time and fetch must NEVER be called to the bot URL (error 1042).
+    it("stores a valid alert, returns delivered:false, and does not forward", async () => {
       await env.DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?")
         .bind("555777", userId)
         .run();
-      const fetchSpy = vi
-        .spyOn(globalThis, "fetch")
-        .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
 
       const response = await worker.fetch(
         authed("/v1/alerts", VALID_ALERT, apiKey),
@@ -199,9 +200,9 @@ describe("Alerts API", () => {
       expect(response.status).toBe(200);
       const body = (await response.json()) as { id: string; delivered: boolean };
       expect(body.id).toBeTruthy();
-      expect(body.delivered).toBe(true);
+      expect(body.delivered).toBe(false);
 
-      // Stored in D1 with delivered_at set.
+      // Stored in D1 with delivered_at still NULL (the cron marks it later).
       const row = await env.DB.prepare(
         "SELECT type, severity, message, pool_address, delivered_at FROM alerts WHERE id = ?",
       )
@@ -211,22 +212,13 @@ describe("Alerts API", () => {
       expect(row?.severity).toBe("critical");
       expect(row?.message).toBe(VALID_ALERT.message);
       expect(row?.pool_address).toBe(VALID_ALERT.poolAddress);
-      expect(row?.delivered_at).not.toBeNull();
+      expect(row?.delivered_at).toBeNull();
 
-      // Forwarded to the bot worker's internal endpoint with the shared secret.
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      const [forwardUrl, forwardInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
-      expect(String(forwardUrl)).toBe(`${BOT_URL}/internal/deliver-alert`);
-      const headers = new Headers(forwardInit.headers);
-      expect(headers.get("X-Bot-Api-Secret")).toBe(BOT_SECRET);
-      const forwardBody = JSON.parse(String(forwardInit.body)) as Record<string, unknown>;
-      expect(forwardBody.telegram_id).toBe("555777");
-      expect(forwardBody.type).toBe("position_out_of_range");
-      expect(forwardBody.severity).toBe("critical");
-      expect(forwardBody.message).toBe(VALID_ALERT.message);
+      // No worker->worker forward: fetch is never invoked in the store path.
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
 
-    it("stores but does not forward when the user has no telegram link", async () => {
+    it("stores without forwarding when the user has no telegram link", async () => {
       const fetchSpy = vi.spyOn(globalThis, "fetch");
 
       const response = await worker.fetch(
@@ -246,7 +238,7 @@ describe("Alerts API", () => {
       expect(row?.delivered_at).toBeNull();
     });
 
-    it("stores but does not forward when alerts_enabled = 0", async () => {
+    it("stores without forwarding when alerts_enabled = 0", async () => {
       await env.DB.prepare("UPDATE users SET telegram_id = ?, alerts_enabled = 0 WHERE id = ?")
         .bind("555777", userId)
         .run();
@@ -266,11 +258,13 @@ describe("Alerts API", () => {
       expect(count?.n).toBe(1);
     });
 
-    it("fails open (200, delivered:false) when the bot worker is unreachable", async () => {
+    it("still stores (200, delivered:false) with no fetch even if a rejecting fetch mock is installed", async () => {
       await env.DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?")
         .bind("555777", userId)
         .run();
-      vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("connection refused"));
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(new Error("connection refused"));
 
       const response = await worker.fetch(
         authed("/v1/alerts", VALID_ALERT, apiKey),
@@ -280,6 +274,8 @@ describe("Alerts API", () => {
       expect(response.status).toBe(200);
       const body = (await response.json()) as { id: string; delivered: boolean };
       expect(body.delivered).toBe(false);
+      // The store path never reaches fetch, so the rejecting mock is not hit.
+      expect(fetchSpy).not.toHaveBeenCalled();
 
       const row = await env.DB.prepare("SELECT delivered_at FROM alerts WHERE id = ?")
         .bind(body.id)
