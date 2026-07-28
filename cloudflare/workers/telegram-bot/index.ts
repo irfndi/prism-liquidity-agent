@@ -142,9 +142,24 @@ function callPrismApi(
       }),
     );
     if (!response.ok) {
+      // Prefer the API's own error message ("Code expired", "Too many
+      // attempts") over the bare status line ("404 Not Found" / "500
+      // Internal Server Error"), which tells the user nothing actionable.
+      const statusText = `${response.status} ${response.statusText}`;
+      const apiError = yield* Effect.tryPromise(() => response.text()).pipe(
+        Effect.map((text) => {
+          try {
+            const parsed = JSON.parse(text) as { error?: unknown };
+            return typeof parsed.error === "string" ? parsed.error : null;
+          } catch {
+            return null;
+          }
+        }),
+        Effect.orElseSucceed(() => null),
+      );
       return {
         ok: false,
-        error: `Prism API error: ${response.status} ${response.statusText}`,
+        error: `Prism API error: ${apiError ?? statusText}`,
       };
     }
     const data = yield* Effect.tryPromise(() => response.json()).pipe(

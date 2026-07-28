@@ -306,6 +306,23 @@ describe("Telegram Bot Worker", () => {
       expect(headers.get("X-Bot-Api-Secret")).toBe(BOT_API_SECRET);
     });
 
+    it("surfaces the API error message to the user on confirm failure", async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(
+          new Response(JSON.stringify({ error: "Code expired" }), { status: 400 }),
+        );
+
+      const { url, ...init } = postWebhook(privateMessage(205, "LINK-EXPIRED1"));
+      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      expect(response.status).toBe(200);
+
+      // The bot's reply (last fetch call = Telegram sendMessage) must carry the
+      // API's own error, not a bare "400 Bad Request" status line.
+      const lastCall = fetchSpy.mock.calls.at(-1) as [string, RequestInit];
+      expect(String(lastCall[1].body)).toContain("Link failed: Prism API error: Code expired");
+    });
+
     it("should ignore non-link-code text messages", async () => {
       const fetchSpy = vi
         .spyOn(globalThis, "fetch")
