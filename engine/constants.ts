@@ -16,9 +16,11 @@ export const SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS = 50_000_000n;
 // so a flat $2 no longer blocks entry when the wallet has plenty of USDC.
 export const GAS_TOP_UP_USDC = 2;
 
-// Minimum native SOL the live entry gate requires before it will submit an
-// ENTER transaction (0.03 SOL). This is also the threshold used for the gas
-// top-up and the post-swap SOL recheck so all three gates stay aligned.
+// Pure gas + non-position System Program fee floor (0.03 SOL), used as the
+// "gas" component when decomposing the entry reserve in insufficient-SOL error
+// messages. The live ENTER gate and the automatic top-up trigger both use
+// MIN_SOL_FOR_ENTRY_LAMPORTS (0.18 SOL); this constant is not a threshold for
+// either of those paths — see SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS.
 export const MIN_SOL_FOR_GAS_LAMPORTS = 30_000_000n;
 
 // Minimum native SOL for a live ENTER including position rent-exempt reserve,

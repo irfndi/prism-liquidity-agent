@@ -185,7 +185,7 @@ function warnUnpricedWalletMintOnce(
     {
       mint,
       amount: amountHuman,
-      attemptedSources: opts?.attemptedSources ?? "helius,jupiter,coingecko",
+      attemptedSources: opts?.attemptedSources ?? "unknown",
       amountUsd: "$0.00 (excluded)",
     },
   );

@@ -998,14 +998,15 @@ export function executeLive(
       // below it wastes USDC that token preparation downstream still needs, and
       // can fail an otherwise fundable ENTER. SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS
       // aliases the reserve, so the swap trigger and the entry gate share one
-      // value. Falls back to the flat GAS_TOP_UP_USDC when the price is unknown
-      // or the balance read fails.
+      // value. When the balance read fails (null), skip the top-up entirely —
+      // the post-swap recheck below will independently reject the ENTER if the
+      // SOL balance cannot be confirmed.
       const entryReserveSol = Number(SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS) / 1e9;
       const preSwapSol = yield* adapter.getNativeSolBalance().pipe(
         Effect.map((lamports) => Number(lamports) / 1e9),
-        Effect.catchAll(() => Effect.succeed(0)),
+        Effect.catchAll(() => Effect.succeed(null)),
       );
-      if (preSwapSol < entryReserveSol) {
+      if (preSwapSol !== null && preSwapSol < entryReserveSol) {
         const deficitSol = entryReserveSol - preSwapSol;
         const topUpUsdc =
           solPriceUsd > 0

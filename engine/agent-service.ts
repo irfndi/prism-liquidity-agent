@@ -470,6 +470,15 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
       // Do not act on latency history until this many fresh samples have been
       // collected — prevents one slow veto from latching the skip on.
       const VETO_SKIP_MIN_SAMPLES = 5;
+      // Require at least this many samples to individually exceed 95% of the
+      // veto budget before the skip can engage. With a nearest-rank p95 and a
+      // partially-filled window the p95 equals the window maximum, so a single
+      // timeout among otherwise quick reviews would otherwise latch the skip on
+      // until that one outlier ages out (up to 30 min). Because skipped calls
+      // record no samples, this count is the only thing that can turn the skip
+      // back off once it has engaged — the slow outliers must all age out
+      // together before the count drops below this threshold again.
+      const VETO_SKIP_MIN_SLOW_SAMPLES = 3;
       // Fresh samples older than this are evicted, bounding the skip's blind
       // spot and guaranteeing the window drains after a transient slow period.
       const VETO_SAMPLE_MAX_AGE_MS = 30 * 60 * 1000;
@@ -518,14 +527,19 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           const proposalMode = config.agentProposalMode;
           if (proposalMode === "veto") {
             const vetoBudgetMs = config.agentVetoTimeoutMs;
+            const vetoSlowThreshold = vetoBudgetMs * 0.95;
             // Drop stale samples first so a transient slow period ages out and
             // the skip cannot latch on a polluted window.
             evictStaleVetoSamples(Date.now());
             const p95 = computeP95(vetoLatencies);
+            // Count individuals above the slow threshold — see the constant
+            // comment above for why p95 alone is insufficient as a gate.
+            const slowCount = vetoLatencies.filter((v) => v.latencyMs >= vetoSlowThreshold).length;
             if (
               vetoLatencies.length >= VETO_SKIP_MIN_SAMPLES &&
+              slowCount >= VETO_SKIP_MIN_SLOW_SAMPLES &&
               p95 !== null &&
-              p95 >= vetoBudgetMs * 0.95
+              p95 >= vetoSlowThreshold
             ) {
               logger.warn(
                 "Skipping veto review — rolling p95 latency exceeds 95% of veto budget",
@@ -563,13 +577,12 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
                 errorCount += 1;
                 // Record the timeout/failure latency (timestamped) so the rolling
                 // p95 reflects sustained slowness, while aging prevents it from
-                // latching forever once the model recovers.
+                // latching forever once the model recovers. Then re-fail so the
+                // CALLER (program.ts) applies its throttled warn + memory warning
+                // via vetoFetchFailed/vetoWarningThrottle instead of this layer
+                // emitting an unthrottled warning for every pool and cycle.
                 recordVetoLatency(vetoBudgetMs);
-                logger.warn("Veto review failed", {
-                  pool: decision.poolAddress,
-                  error: underlyingErrorMessage(err),
-                });
-                return Effect.succeed(null);
+                return Effect.fail(err);
               }),
             );
           }
