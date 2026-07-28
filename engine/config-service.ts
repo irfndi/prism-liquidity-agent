@@ -173,6 +173,23 @@ export interface AppConfig {
    *  program tests never touch the network and stay byte-identical. */
   readonly geckoTerminalEnabled?: boolean;
 
+  // ─── Pyth Hermes price feeds ─────────────────────────────────────────────────
+  // Optional so standalone test fixtures that omit new fields keep compiling;
+  // loadConfig always sets all four. SERVICE-ONLY: the poller layer is
+  // available but NO decision code consumes it yet (consumer wiring is a
+  // deliberate follow-up). Guard contract: `pythEnabled !== false` (production
+  // default true; absent = active).
+  /** Master switch for the Pyth Hermes price poller. Default true. */
+  readonly pythEnabled?: boolean;
+  /** Optional Hermes API key (Authorization: Bearer). Empty = public access,
+   *  which Pyth ends shortly after 2026-07-31; a key is required after that. */
+  readonly pythApiKey?: string;
+  /** Max age of a Hermes publish_time before the price is treated as stale
+   *  (→ null). Default 60000, min 5000. */
+  readonly pythMaxStalenessMs?: number;
+  /** Hermes base URL. Default https://hermes.pyth.network. */
+  readonly pythBaseUrl?: string;
+
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
   /** Estimated SOL cost of a single rebalance tx (entry + close). */
   readonly rebalanceGasCostSol: number;
@@ -514,6 +531,14 @@ const loadConfig = Effect.gen(function* () {
 
   const geckoTerminalEnabled = yield* Config.boolean("GECKO_TERMINAL_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
+  );
+
+  // ─── Pyth Hermes price feeds ──────────────────────────────────────────────
+  const pythEnabled = yield* Config.boolean("PYTH_ENABLED").pipe(Effect.orElseSucceed(() => true));
+  const pythApiKey = yield* Config.string("PYTH_API_KEY").pipe(Effect.orElseSucceed(() => ""));
+  const pythMaxStalenessMs = yield* validatedNumber("PYTH_MAX_STALENESS_MS", 5_000, 60_000);
+  const pythBaseUrl = yield* Config.string("PYTH_BASE_URL").pipe(
+    Effect.orElseSucceed(() => "https://hermes.pyth.network"),
   );
 
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
@@ -1085,6 +1110,11 @@ const loadConfig = Effect.gen(function* () {
     jupiterTokenRiskEnabled,
     jupiterTokenRiskCacheTtlMin,
     geckoTerminalEnabled,
+
+    pythEnabled,
+    pythApiKey,
+    pythMaxStalenessMs,
+    pythBaseUrl,
 
     rebalanceGasCostSol,
     solPriceUsd,
