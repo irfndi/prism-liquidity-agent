@@ -379,9 +379,13 @@ const registerTelegramHandler = (db: D1Database, telegramId: string, firstName: 
     return { user_id: userId, api_key: apiKey, first_name: firstName };
   });
 
-// Agent status (called by the Telegram bot). Placeholder until the live agent
-// runtime exposes telemetry; real numbers can replace this later.
-const agentStatusHandler = (db: D1Database, telegramId: string) =>
+// Agent status (called by the Telegram bot). Query KV for the latest engine
+// status reported by the live agent runtime. Returns the stored status when
+// fresh (within the KV TTL, approximately 2× the scan interval); falls back
+// to not_running when no recent heartbeat exists or when KV is unavailable.
+const AGENT_STATUS_CACHE_TTL_SEC = 30 * 60; // 30 minutes
+
+const agentStatusHandler = (db: D1Database, cache: KVNamespace, telegramId: string) =>
   Effect.gen(function* () {
     const result = yield* Effect.tryPromise(() =>
       db.prepare("SELECT id FROM users WHERE telegram_id = ?").bind(telegramId).first(),
@@ -391,7 +395,55 @@ const agentStatusHandler = (db: D1Database, telegramId: string) =>
       return yield* Effect.fail(new Error("User not found"));
     }
 
+    const userId = typeof result.id === "string" ? result.id : null;
+    if (!userId) {
+      return { status: "not_running", positions: 0, pnl: 0 };
+    }
+
+    // Try KV first for the latest engine heartbeat.
+    const cached = yield* Effect.tryPromise(() =>
+      cache.get(`agent_status:${userId}`),
+    ).pipe(Effect.catchAll(() => Effect.succeed(null)));
+
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached) as {
+          status: string;
+          positions: number;
+          pnl: number;
+          reportedAt: number;
+        };
+        return {
+          status: parsed.status,
+          positions: parsed.positions,
+          pnl: parsed.pnl,
+        };
+      } catch {
+        // Malformed JSON — fall through to not_running.
+      }
+    }
+
     return { status: "not_running", positions: 0, pnl: 0 };
+  });
+
+// Engine status report (called by the engine itself via its API key).
+// Stores the engine's live state in KV so the Telegram bot can query it.
+const agentStatusReportHandler = (db: D1Database, cache: KVNamespace, apiKey: string) =>
+  Effect.gen(function* () {
+    const loginResult = yield* loginHandler(db, apiKey);
+    const userId = (loginResult as { id: string }).id;
+
+    return {
+      userId,
+      storeStatus: (status: string, positions: number, pnl: number) =>
+        Effect.tryPromise(() =>
+          cache.put(
+            `agent_status:${userId}`,
+            JSON.stringify({ status, positions, pnl, reportedAt: Date.now() }),
+            { expirationTtl: AGENT_STATUS_CACHE_TTL_SEC },
+          ),
+        ).pipe(Effect.catchAll(() => Effect.void)),
+    };
   });
 
 // Main app
@@ -716,7 +768,7 @@ app.post("/v1/register-telegram", async (c) => {
 });
 
 app.post("/v1/agent-status", async (c) => {
-  const { DB } = c.env;
+  const { DB, CACHE } = c.env;
   if (!isBotAuthorized(c.env, c.req.header("X-Bot-Api-Secret"))) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -727,7 +779,7 @@ app.post("/v1/agent-status", async (c) => {
   }
 
   return Effect.runPromise(
-    agentStatusHandler(DB, body.telegram_id).pipe(
+    agentStatusHandler(DB, CACHE, body.telegram_id).pipe(
       Effect.match({
         onFailure: (cause) => {
           const message = causeMessage(cause);
@@ -736,6 +788,54 @@ app.post("/v1/agent-status", async (c) => {
             : c.json({ error: "Status unavailable" }, 500);
         },
         onSuccess: (result) => c.json(result),
+      }),
+    ),
+  );
+});
+
+// Engine status report endpoint — called periodically by the running engine to
+// report its live state (running, positions, P&L). Authenticated via Bearer
+// API key. Stored in KV with a 30-minute TTL; the bot-facing /v1/agent-status
+// endpoint reads it to serve the Telegram /status command.
+app.post("/v1/agent-status/report", async (c) => {
+  const { DB, CACHE } = c.env;
+  const apiKey = c.get("apiKey") as string;
+  if (!apiKey) {
+    return c.json({ error: "API key required" }, 401);
+  }
+
+  const body = await Effect.runPromise(
+    readJsonBody<{ status?: string; positions?: number; pnl?: number }>(c.req),
+  );
+
+  if (body.status !== "running" && body.status !== "stopped") {
+    return c.json({ error: "status must be 'running' or 'stopped'" }, 400);
+  }
+  if (typeof body.positions !== "number" || !Number.isFinite(body.positions) || body.positions < 0) {
+    return c.json({ error: "positions must be a non-negative number" }, 400);
+  }
+  const positions = Math.floor(body.positions);
+  if (typeof body.pnl !== "number" || !Number.isFinite(body.pnl)) {
+    return c.json({ error: "pnl must be a finite number" }, 400);
+  }
+  const pnl = body.pnl;
+
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const handler = yield* agentStatusReportHandler(DB, CACHE, apiKey).pipe(
+        Effect.catchAll(() =>
+          Effect.fail(new Error("Authentication failed")),
+        ),
+      );
+      yield* handler.storeStatus(body.status!, positions, pnl);
+      return c.json({ ok: true });
+    }).pipe(
+      Effect.match({
+        onFailure: (cause) => {
+          const message = causeMessage(cause);
+          return c.json({ error: message }, 401);
+        },
+        onSuccess: (response) => response,
       }),
     ),
   );

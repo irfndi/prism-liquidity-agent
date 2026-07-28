@@ -35,8 +35,11 @@ import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
+import { getPrismUserConfigDir } from "./paths.js";
 
 import { checkForAutoUpdate } from "./update-check.js";
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
 import type { PositionRecord } from "./db-service.js";
 import { applyCompoundToCostBasis, computeHodlValueUsd, computeRealizedPnlUsd } from "./pnl.js";
 import { buildRewardClaimMetadata, summarizeRewardClaim } from "./rewards.js";
@@ -125,6 +128,65 @@ import { computeCooldownForExit } from "./cooldown.js";
 
 const logger = createLogger("program");
 const idleRedeployLogger = createLogger("idle-redeploy");
+const statusLogger = createLogger("engine-status");
+
+/**
+ * Post the engine's current status to the Prism Cloud API so the Telegram
+ * bot's /status command can serve real data. Reads the API key from the
+ * on-disk credentials file and uses fire-and-forget fetch so a transient
+ * network error never blocks the scan cycle.
+ */
+function postEngineStatus(
+  status: "running" | "stopped",
+  positions: number,
+  pnl: number,
+): void {
+  const DEFAULT_API_BASE_URL = "https://prism-api.irfndi.workers.dev";
+  const baseUrl = process.env.PRISM_API_URL ?? DEFAULT_API_BASE_URL;
+  const TIMEOUT_MS = 5_000;
+
+  let apiKey: string | null = null;
+  try {
+    const credentialsFile = join(getPrismUserConfigDir(), "credentials.json");
+    if (existsSync(credentialsFile)) {
+      const value: unknown = JSON.parse(readFileSync(credentialsFile, "utf-8"));
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        typeof (value as Record<string, unknown>).apiKey === "string"
+      ) {
+        apiKey = (value as { apiKey: string }).apiKey;
+      }
+    }
+  } catch {
+    // No credentials — nothing to report.
+  }
+
+  if (!apiKey) return;
+
+  fetch(`${baseUrl}/v1/agent-status/report`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ status, positions, pnl }),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  }).then(
+    (response) => {
+      if (!response.ok) {
+        statusLogger.warn("Engine status report rejected", {
+          status: response.status,
+        });
+      }
+    },
+    (error: unknown) => {
+      statusLogger.warn("Engine status report failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    },
+  );
+}
 
 /**
  * How far back to look for a previous pool snapshot when computing TVL
@@ -2838,8 +2900,17 @@ export const program = Effect.gen(function* () {
           console.info("[snapshot-retention] Pruned old pool snapshots", {
             pruned,
             retentionDays: config.snapshotRetentionDays,
-          });
+          });          }
         }
+
+      // Report engine status to the Prism Cloud API after every scan cycle.
+      {
+        const positions = buildPositionSnapshots(trackedPositions.values());
+        const pnl = positions.reduce(
+          (sum, p) => sum + (p.currentValueUsd - p.depositedUsd),
+          0,
+        );
+        postEngineStatus("running", trackedPositions.size, pnl);
       }
 
       scanCount += 1;
