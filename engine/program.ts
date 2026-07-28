@@ -71,6 +71,7 @@ import {
   EntryPrepService,
   MeteoraDatapiService,
   GeckoTerminalService,
+  PythPriceService,
   AlertService,
   CopySignalService,
   type AdapterApi,
@@ -85,6 +86,7 @@ import {
 } from "./services.js";
 import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
 import { GeckoTerminalLive, enrichPoolFromGecko } from "./gecko-terminal-service.js";
+import { PythPriceLive } from "./pyth-price-service.js";
 import { AlertLive } from "./alert-service.js";
 import { detectDepegAndLiquidityDrain } from "./depeg-liquidity-detector.js";
 import { consultTokenRisks, type TokenRiskSignal } from "./token-risk-service.js";
@@ -672,6 +674,7 @@ type AllServices =
   | EntryPrepService
   | MeteoraDatapiService
   | GeckoTerminalService
+  | PythPriceService
   | AlertService
   | CopySignalService;
 
@@ -683,6 +686,9 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const memory = Layer.provide(MemoryLive, dbLayer);
   const audit = Layer.provide(AuditLive, dbLayer);
   const meteoraDatapi = Layer.provide(MeteoraDatapiLive, configLayer);
+  // Available-but-unconsumed: PythPriceLive exposes USD prices through the
+  // PythPriceService Tag; no decision/risk code reads it yet (follow-up).
+  const pythPrice = Layer.provide(PythPriceLive, configLayer);
 
   const screenerDeps = Layer.merge(adapter, StrategyLive);
   const screener = Layer.provide(
@@ -725,6 +731,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged11a = Layer.merge(merged11, entryPrep);
   const merged11b = Layer.merge(merged11a, meteoraDatapi);
   const merged11c = Layer.merge(merged11b, GeckoTerminalLive);
+  const merged11d = Layer.merge(merged11c, pythPrice);
 
   const agentLayer = cfg?.agentiveMode ? AgentLive(cfg) : Layer.succeed(AgentService, AgentNoOp);
 
@@ -744,7 +751,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
           stop: () => Effect.void,
         });
 
-  const merged12 = Layer.merge(merged11c, agentLayer);
+  const merged12 = Layer.merge(merged11d, agentLayer);
   const merged13 = Layer.merge(merged12, agentStateLayer);
   const merged14 = Layer.merge(merged13, mcpLayer);
   const merged15 = Layer.merge(merged14, httpLayer);

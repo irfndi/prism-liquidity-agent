@@ -467,6 +467,34 @@ export class GeckoTerminalService extends Context.Tag("GeckoTerminalService")<
   GeckoTerminalApi
 >() {}
 
+// ─── Pyth Price Service ──────────────────────────────────────────────────────
+
+export interface PythPriceApi {
+  /**
+   * Fetch a USD price for one Pyth feed ID from Hermes. Never fails: on any
+   * network/HTTP/schema error, or a publish_time older than the configured
+   * staleness window, the underlying client logs a warning and returns null so
+   * callers fall back to their own price source without crashing the scan
+   * cycle. Results are TTL-cached inside the module (~30s) so a tight loop of
+   * consumers shares one Hermes request. This is SERVICE-ONLY: nothing in the
+   * decision loop consumes it yet (consumer wiring — trailing-stop marks, HODL
+   * benchmark, hedge marks — is a deliberate follow-up).
+   */
+  readonly getPythPriceUsd: (feedId: string) => Effect.Effect<number | null, never>;
+  /**
+   * Resolve a symbol (SOL, USDC, USDT — the built-in map) to its verified
+   * mainnet feed ID and fetch its USD price. Unknown symbol → null, no fetch.
+   */
+  readonly getPriceBySymbol: (symbol: string) => Effect.Effect<number | null, never>;
+  /** Convenience wrapper: SOL/USD via the verified mainnet feed ID. */
+  readonly getSolPriceUsd: () => Effect.Effect<number | null, never>;
+}
+
+export class PythPriceService extends Context.Tag("PythPriceService")<
+  PythPriceService,
+  PythPriceApi
+>() {}
+
 // ─── Memory Service ──────────────────────────────────────────────────────────
 
 export interface MemoryApi {
