@@ -595,6 +595,26 @@ function shortenAddress(address: string): string {
   return address.length > 12 ? `${address.slice(0, 4)}…${address.slice(-4)}` : address;
 }
 
+// Shared alert formatting for BOTH the push endpoint (/internal/deliver-alert)
+// and the poll endpoint (/internal/flush-alerts): severity emoji + bold type
+// label + optional shortened pool address + message, all escapeHtml'd before
+// being interpolated into a parse_mode: HTML message.
+function formatAlertLines(
+  type: unknown,
+  severity: string,
+  message: string,
+  poolAddress: string | null,
+): string[] {
+  const typeLabel = typeof type === "string" ? (ALERT_TYPE_LABEL[type] ?? "Alert") : "Alert";
+  const emoji = ALERT_SEVERITY_EMOJI[severity] ?? ALERT_SEVERITY_EMOJI.info;
+  const lines = [`${emoji} <b>${escapeHtml(typeLabel)}</b>`];
+  if (poolAddress) {
+    lines.push(`Pool: <code>${escapeHtml(shortenAddress(poolAddress))}</code>`);
+  }
+  lines.push(escapeHtml(message));
+  return lines;
+}
+
 function deliverTelegramMessage(
   botToken: string,
   chatId: number,
@@ -652,15 +672,7 @@ app.post("/internal/deliver-alert", async (c) => {
     typeof body.pool_address === "string" && body.pool_address.length > 0
       ? body.pool_address.slice(0, 64)
       : null;
-  const typeLabel =
-    typeof body.type === "string" ? (ALERT_TYPE_LABEL[body.type] ?? "Alert") : "Alert";
-
-  const emoji = ALERT_SEVERITY_EMOJI[body.severity] ?? ALERT_SEVERITY_EMOJI.info;
-  const lines = [`${emoji} <b>${escapeHtml(typeLabel)}</b>`];
-  if (poolAddress) {
-    lines.push(`Pool: <code>${escapeHtml(shortenAddress(poolAddress))}</code>`);
-  }
-  lines.push(escapeHtml(body.message));
+  const lines = formatAlertLines(body.type, body.severity, body.message, poolAddress);
 
   const delivered = await Effect.runPromise(
     deliverTelegramMessage(c.env.TELEGRAM_BOT_TOKEN, Number(body.telegram_id), lines.join("\n")),
@@ -668,6 +680,123 @@ app.post("/internal/deliver-alert", async (c) => {
   return delivered
     ? c.json({ ok: true, delivered: true })
     : c.json({ error: "Telegram delivery failed" }, 502);
+});
+
+// ── Internal alert delivery poll (D1 → bot → Telegram) ──────────────────────
+// Cloudflare rejects worker->worker fetches over the same workers.dev zone with
+// error 1042, so the API worker can no longer push alerts here. Instead the bot
+// POLLS D1 for undelivered rows; an external GitHub Actions cron (no worker
+// scheduled-trigger support on the alchemy beta) triggers this endpoint on a
+// fixed cadence. Same BOT_API_SECRET gate as /internal/deliver-alert (fail
+// closed). A row at FLUSH_ABANDON_ATTEMPTS is dropped from future flushes so a
+// permanently undeliverable alert is never retried forever. One bad row must
+// not abort the batch: every row runs under Effect.catchAll and is counted.
+
+const FLUSH_BATCH_LIMIT = 10;
+const FLUSH_ABANDON_ATTEMPTS = 5;
+
+app.post("/internal/flush-alerts", async (c) => {
+  const botSecret = c.env.BOT_API_SECRET;
+  const headerSecret = c.req.header("X-Bot-Api-Secret");
+  if (!botSecret || !headerSecret || !constantTimeEqual(headerSecret, botSecret)) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const rows = yield* Effect.tryPromise(() =>
+        c.env.DB.prepare(
+          `SELECT a.id, a.type, a.severity, a.message, a.pool_address, u.telegram_id
+           FROM alerts a
+           JOIN users u ON a.user_id = u.id
+           WHERE a.delivered_at IS NULL
+             AND a.delivery_attempts < ?
+             AND u.telegram_id IS NOT NULL
+             AND u.alerts_enabled != 0
+           ORDER BY a.created_at ASC
+           LIMIT ?`,
+        )
+          .bind(FLUSH_ABANDON_ATTEMPTS, FLUSH_BATCH_LIMIT)
+          .all(),
+      );
+
+      let checked = 0;
+      let delivered = 0;
+      let failed = 0;
+
+      for (const raw of rows.results) {
+        const id = typeof raw.id === "string" ? raw.id : null;
+        const severity = typeof raw.severity === "string" ? raw.severity : "info";
+        const message = typeof raw.message === "string" ? raw.message : "";
+        const poolAddress =
+          typeof raw.pool_address === "string" && raw.pool_address.length > 0
+            ? raw.pool_address
+            : null;
+        const telegramId =
+          typeof raw.telegram_id === "string" && /^\d+$/.test(raw.telegram_id)
+            ? raw.telegram_id
+            : null;
+
+        checked += 1;
+        const outcome = yield* Effect.gen(function* () {
+          if (id === null || telegramId === null) return "failed" as const;
+          const lines = formatAlertLines(raw.type, severity, message, poolAddress);
+          const ok = yield* deliverTelegramMessage(
+            c.env.TELEGRAM_BOT_TOKEN,
+            Number(telegramId),
+            lines.join("\n"),
+          );
+          if (ok) {
+            yield* Effect.tryPromise(() =>
+              c.env.DB.prepare("UPDATE alerts SET delivered_at = CURRENT_TIMESTAMP WHERE id = ?")
+                .bind(id)
+                .run(),
+            );
+            return "delivered" as const;
+          }
+          yield* Effect.tryPromise(() =>
+            c.env.DB.prepare(
+              "UPDATE alerts SET delivery_attempts = delivery_attempts + 1 WHERE id = ?",
+            )
+              .bind(id)
+              .run(),
+          );
+          return "failed" as const;
+        }).pipe(Effect.catchAll(() => Effect.succeed("failed" as const)));
+
+        if (outcome === "delivered") {
+          delivered += 1;
+        } else {
+          failed += 1;
+        }
+      }
+
+      const abandonedRow = (yield* Effect.tryPromise(() =>
+        c.env.DB.prepare(
+          `SELECT COUNT(*) as n
+           FROM alerts a
+           JOIN users u ON a.user_id = u.id
+           WHERE a.delivered_at IS NULL
+             AND a.delivery_attempts >= ?
+             AND u.telegram_id IS NOT NULL
+             AND u.alerts_enabled != 0`,
+        )
+          .bind(FLUSH_ABANDON_ATTEMPTS)
+          .first(),
+      )) as { n?: unknown } | null;
+      const abandoned = abandonedRow && typeof abandonedRow.n === "number" ? abandonedRow.n : 0;
+
+      return { ok: true, checked, delivered, failed, abandoned };
+    }).pipe(
+      Effect.catchAll((error) =>
+        Effect.sync(() => console.error("Alert flush failed", error)).pipe(
+          Effect.as({ ok: false, checked: 0, delivered: 0, failed: 0, abandoned: 0 }),
+        ),
+      ),
+    ),
+  );
+
+  return c.json(result);
 });
 
 export default {

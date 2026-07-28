@@ -1311,10 +1311,12 @@ app.get("/v1/errors/stats", async (c) => {
 });
 
 // ── Proactive Telegram alerts (Wave 5) ──────────────────────────────────────
-// Engine POSTs alert events with its API key. Every alert is persisted first
-// (delivered_at NULL), then pushed to the telegram-bot worker, which is the
-// only component that can reach the Telegram API. Push is best-effort: the
-// row stays auditable even when delivery is skipped or fails.
+// Engine POSTs alert events with its API key. Every alert is persisted
+// (delivered_at NULL). Delivery is handled by the telegram-bot worker POLLING
+// D1 via its /internal/flush-alerts endpoint, triggered by an external GitHub
+// Actions cron: Cloudflare rejects API->bot worker->worker fetches over the
+// same workers.dev zone (error 1042) and the alchemy beta has no scheduled-
+// trigger support for workers. The API only stores; the cron marks delivered_at.
 
 const VALID_ALERT_TYPES = new Set([
   "position_out_of_range",
@@ -1330,7 +1332,6 @@ const VALID_ALERT_SEVERITIES = new Set(["info", "warning", "critical"]);
 const MAX_ALERT_MESSAGE_LENGTH = 1000;
 const MAX_ALERT_DATA_LENGTH = 4096;
 const ALERT_RATE_LIMIT_PER_HOUR = 60;
-const ALERT_FORWARD_TIMEOUT_MS = 5000;
 
 app.post("/v1/alerts", async (c) => {
   const { DB, CACHE } = c.env;
@@ -1394,10 +1395,8 @@ app.post("/v1/alerts", async (c) => {
   const alertType = body.type;
   const alertSeverity = body.severity;
   const alertMessage = body.message;
-  const botUrl = c.env.TELEGRAM_BOT_URL;
-  const botSecret = c.env.BOT_API_SECRET;
 
-  const storeAndForward = Effect.gen(function* () {
+  const storeAlert = Effect.gen(function* () {
     const id = generateId();
     yield* Effect.tryPromise(() =>
       DB.prepare(
@@ -1416,59 +1415,15 @@ app.post("/v1/alerts", async (c) => {
         .run(),
     );
 
-    const userRow = yield* Effect.tryPromise(() =>
-      DB.prepare("SELECT telegram_id, alerts_enabled FROM users WHERE id = ?")
-        .bind(user.id)
-        .first(),
-    );
-    const telegramId =
-      userRow && typeof userRow.telegram_id === "string" && userRow.telegram_id.length > 0
-        ? userRow.telegram_id
-        : null;
-    const alertsEnabled = !userRow || userRow.alerts_enabled !== 0;
-
-    let delivered = false;
-    if (telegramId && alertsEnabled && botUrl && botSecret) {
-      const forward = yield* Effect.tryPromise(() =>
-        fetch(`${botUrl}/internal/deliver-alert`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Bot-Api-Secret": botSecret,
-          },
-          body: JSON.stringify({
-            alert_id: id,
-            telegram_id: telegramId,
-            type: alertType,
-            severity: alertSeverity,
-            message: alertMessage,
-            pool_address: body.poolAddress ?? null,
-            data: body.data ?? null,
-          }),
-          signal: AbortSignal.timeout(ALERT_FORWARD_TIMEOUT_MS),
-        }),
-      ).pipe(Effect.catchAll(() => Effect.succeed(null)));
-
-      if (forward?.ok) {
-        delivered = true;
-        yield* Effect.tryPromise(() =>
-          DB.prepare("UPDATE alerts SET delivered_at = CURRENT_TIMESTAMP WHERE id = ?")
-            .bind(id)
-            .run(),
-        ).pipe(Effect.catchAll(() => Effect.succeed(null)));
-      } else {
-        console.error(
-          "[Alerts] telegram-bot forward failed",
-          forward ? `status ${forward.status}` : "network error",
-        );
-      }
-    }
-
-    return c.json({ id, delivered });
+    // Delivery happens via the bot's /internal/flush-alerts poll (GitHub
+    // Actions cron), not here: Cloudflare rejects API->bot worker->worker
+    // fetches over the same workers.dev zone (error 1042). delivered:false
+    // until the cron marks delivered_at.
+    return c.json({ id, delivered: false });
   });
 
   return Effect.runPromise(
-    storeAndForward.pipe(
+    storeAlert.pipe(
       Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to store alert" }, 500))),
     ),
   );
