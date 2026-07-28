@@ -8,6 +8,11 @@ interface Env {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
   API_BASE_URL: string;
+  // Service binding to the API worker (preferred path for bot->API calls).
+  // Cloudflare forbids worker->worker fetches over the same-zone
+  // workers.dev hostname (error 1042); the binding is the sanctioned
+  // transport. Absent in local dev/older deploys -> hostname fallback.
+  API_SERVICE?: Fetcher;
   // Shared secret presented as X-Bot-Api-Secret on bot->API calls. The API
   // rejects telegram_id-keyed endpoints without it (fail closed).
   BOT_API_SECRET?: string;
@@ -129,17 +134,25 @@ function callPrismApi(
   path: string,
   body: Record<string, unknown>,
   botApiSecret?: string,
+  fetcher?: Fetcher,
 ): Effect.Effect<{ ok: boolean; data?: unknown; error?: string }, never> {
   return Effect.gen(function* () {
+    const init = {
+      method: "POST" as const,
+      headers: {
+        "Content-Type": "application/json",
+        ...(botApiSecret ? { "X-Bot-Api-Secret": botApiSecret } : {}),
+      },
+      body: JSON.stringify(body),
+    };
+    // The service binding is the only worker->worker transport Cloudflare
+    // allows: same-zone workers.dev hostname fetches are rejected with
+    // error 1042 (proven live via the bot's own subrequest). The hostname
+    // fallback exists only for local dev / deploys that predate the binding.
     const response = yield* Effect.tryPromise(() =>
-      fetch(`${baseUrl}${path}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(botApiSecret ? { "X-Bot-Api-Secret": botApiSecret } : {}),
-        },
-        body: JSON.stringify(body),
-      }),
+      fetcher
+        ? fetcher.fetch(new Request(`${baseUrl}${path}`, init))
+        : fetch(`${baseUrl}${path}`, init),
     );
     if (!response.ok) {
       // Prefer the API's own error message ("Code expired", "Too many
@@ -214,6 +227,7 @@ function handleRegister(
   telegramId: string,
   firstName: string,
   botApiSecret?: string,
+  fetcher?: Fetcher,
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
     const result = yield* callPrismApi(
@@ -224,6 +238,7 @@ function handleRegister(
         first_name: firstName,
       },
       botApiSecret,
+      fetcher,
     );
 
     if (result.ok && result.data) {
@@ -270,6 +285,7 @@ function handleWhoami(
   chatId: number,
   telegramId: string,
   botApiSecret?: string,
+  fetcher?: Fetcher,
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
     const result = yield* callPrismApi(
@@ -279,6 +295,7 @@ function handleWhoami(
         telegram_id: telegramId,
       },
       botApiSecret,
+      fetcher,
     );
 
     if (result.ok && result.data) {
@@ -300,6 +317,7 @@ function handleStatus(
   chatId: number,
   telegramId: string,
   botApiSecret?: string,
+  fetcher?: Fetcher,
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
     const result = yield* callPrismApi(
@@ -309,6 +327,7 @@ function handleStatus(
         telegram_id: telegramId,
       },
       botApiSecret,
+      fetcher,
     );
 
     if (result.ok && result.data) {
@@ -335,6 +354,7 @@ function handleAlerts(
   telegramId: string,
   args: string,
   botApiSecret?: string,
+  fetcher?: Fetcher,
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
     const arg = args.trim().toLowerCase();
@@ -353,6 +373,7 @@ function handleAlerts(
       "/v1/alerts/preferences",
       { telegram_id: telegramId, enabled },
       botApiSecret,
+      fetcher,
     );
     if (result.ok) {
       yield* sendMessage(
@@ -420,6 +441,7 @@ function processUpdate(
             telegramId,
             firstName,
             env.BOT_API_SECRET,
+            env.API_SERVICE,
           );
           break;
         case "/link":
@@ -435,6 +457,7 @@ function processUpdate(
             chatId,
             telegramId,
             env.BOT_API_SECRET,
+            env.API_SERVICE,
           );
           break;
         case "/status":
@@ -444,6 +467,7 @@ function processUpdate(
             chatId,
             telegramId,
             env.BOT_API_SECRET,
+            env.API_SERVICE,
           );
           break;
         case "/alerts":
@@ -454,6 +478,7 @@ function processUpdate(
             telegramId,
             text.slice(rawCommand.length),
             env.BOT_API_SECRET,
+            env.API_SERVICE,
           );
           break;
         default:
@@ -483,6 +508,7 @@ function processUpdate(
           telegram_id: telegramId,
         },
         env.BOT_API_SECRET,
+        env.API_SERVICE,
       );
 
       if (result.ok) {
