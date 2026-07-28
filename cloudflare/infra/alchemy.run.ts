@@ -154,6 +154,10 @@ export const telegramBot = Cloudflare.Worker("telegramBot", {
     CACHE: cache,
     // Plain var: the workers.dev HTTPS URL the bot calls (NOT a service binding).
     API_BASE_URL: "https://prism-api.irfndi.workers.dev",
+    // Service binding to the API worker. Cloudflare rejects worker->worker
+    // fetches over the same-zone workers.dev hostname (error 1042); the
+    // binding is the sanctioned transport. `api` is declared above, so no TDZ.
+    API_SERVICE: api,
     // Secrets.
     TELEGRAM_BOT_TOKEN: Config.redacted("TELEGRAM_BOT_TOKEN"),
     TELEGRAM_WEBHOOK_SECRET: Config.redacted("TELEGRAM_WEBHOOK_SECRET"),

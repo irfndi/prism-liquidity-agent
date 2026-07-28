@@ -63,7 +63,10 @@ function groupMessage(updateId: number, text: string) {
 }
 
 /** Extracts the JSON body of the nth mocked fetch call. */
-function sentJson(fetchSpy: ReturnType<typeof vi.spyOn>, callIndex: number): Record<string, unknown> {
+function sentJson(
+  fetchSpy: ReturnType<typeof vi.spyOn>,
+  callIndex: number,
+): Record<string, unknown> {
   const init = fetchSpy.mock.calls[callIndex]?.[1] as { body?: string } | undefined;
   return JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
 }
@@ -92,19 +95,31 @@ describe("Telegram Bot Worker", () => {
   describe("Webhook Security", () => {
     it("should reject webhook without secret token when configured", async () => {
       const { url, ...init } = postWebhook({ update_id: 1 }, { omitSecretHeader: true });
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(401);
     });
 
     it("should reject webhook with a wrong secret token", async () => {
       const { url, ...init } = postWebhook({ update_id: 1 }, { secret: "not-the-secret" });
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(401);
     });
 
     it("should accept webhook with valid secret token", async () => {
       const { url, ...init } = postWebhook({ update_id: 1 });
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
     });
 
@@ -124,7 +139,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(privateMessage(1, "/start"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
 
       // Verify Telegram API was called
@@ -140,7 +159,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(privateMessage(2, "/help"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -151,7 +174,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(privateMessage(3, "/link"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -162,7 +189,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(privateMessage(4, "/unknown"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -173,7 +204,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(groupMessage(100, "/start@prism_agent_bot"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       const sentBody = fetchSpy.mock.calls[0]?.[1] as { body?: string } | undefined;
       expect(sentBody?.body).toContain("Welcome to Prism");
@@ -185,7 +220,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(privateMessage(5, "/start", "<b>Evil</b>"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       const sent = sentJson(fetchSpy, 0);
       expect(sent.text).toContain("&lt;b&gt;Evil&lt;/b&gt;");
@@ -203,7 +242,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(groupMessage(updateId, text));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
 
       // Exactly one call: the refusal message to Telegram. No Prism API call.
@@ -246,7 +289,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(privateMessage(200, "LINK-ABC123"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       expect(fetchSpy).toHaveBeenCalled();
       const parsed = sentJson(fetchSpy, 0) as { code?: string };
@@ -259,7 +306,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(privateMessage(201, "abc123"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       const parsed = sentJson(fetchSpy, 0) as { code?: string };
       // The server stores codes with LINK- prefix; a bare 6-char must be
@@ -273,7 +324,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(privateMessage(202, "LINK-A1B2C3D4E5F60718"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       const parsed = sentJson(fetchSpy, 0) as { code?: string };
       expect(parsed.code).toBe("LINK-A1B2C3D4E5F60718");
@@ -285,7 +340,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(privateMessage(203, "ABC123"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -296,7 +355,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook(privateMessage(204, "LINK-ABC123"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
 
       // First fetch call goes to the Prism API and must carry the shared secret.
@@ -314,7 +377,11 @@ describe("Telegram Bot Worker", () => {
         );
 
       const { url, ...init } = postWebhook(privateMessage(205, "LINK-EXPIRED1"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
 
       // The bot's reply (last fetch call = Telegram sendMessage) must carry the
@@ -323,15 +390,55 @@ describe("Telegram Bot Worker", () => {
       expect(String(lastCall[1].body)).toContain("Link failed: Prism API error: Code expired");
     });
 
+    it("routes the confirm call over the API_SERVICE binding when present", async () => {
+      // Cloudflare rejects same-zone workers.dev worker->worker fetches
+      // (error 1042); the service binding is the sanctioned transport. When
+      // API_SERVICE is present, callPrismApi must call fetcher.fetch() and
+      // never the global fetch for the API call. A partial mock stands in for
+      // the binding (the full Fetcher interface is not needed at runtime).
+      const bindingFetch = vi
+        .fn()
+        .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      const boundEnv = {
+        ...testEnv,
+        API_SERVICE: { fetch: bindingFetch } as unknown as Fetcher,
+      } as unknown as typeof env;
+
+      const globalFetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+      const { url, ...init } = postWebhook(privateMessage(300, "LINK-ABC123"));
+      const response = await worker.fetch(
+        new Request(url, init),
+        boundEnv,
+        createExecutionContext(),
+      );
+      expect(response.status).toBe(200);
+
+      // The API call went through the binding, carrying the prefixed code.
+      expect(bindingFetch).toHaveBeenCalledTimes(1);
+      const boundRequest = bindingFetch.mock.calls[0]?.[0] as Request;
+      expect(boundRequest.url).toContain("/v1/link-telegram/confirm");
+
+      // Global fetch is used ONLY for the Telegram reply, never the API call.
+      expect(globalFetchSpy).toHaveBeenCalled();
+      for (const call of globalFetchSpy.mock.calls) {
+        expect(String(call[0])).toContain("api.telegram.org");
+      }
+    });
+
     it("should ignore non-link-code text messages", async () => {
       const fetchSpy = vi
         .spyOn(globalThis, "fetch")
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
-      const { url, ...init } = postWebhook(
-        privateMessage(6, "Hello, this is a regular message"),
+      const { url, ...init } = postWebhook(privateMessage(6, "Hello, this is a regular message"));
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
       );
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
       expect(response.status).toBe(200);
       // Should not call Telegram API for non-command, non-code messages
       expect(fetchSpy).not.toHaveBeenCalled();
@@ -350,7 +457,11 @@ describe("Telegram Bot Worker", () => {
         );
 
       const { url, ...init } = postWebhook(privateMessage(7, "/register"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       // Should call both Prism API and Telegram API
       expect(fetchSpy).toHaveBeenCalled();
@@ -364,7 +475,11 @@ describe("Telegram Bot Worker", () => {
       );
 
       const { url, ...init } = postWebhook(privateMessage(8, "/register"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -379,7 +494,11 @@ describe("Telegram Bot Worker", () => {
       );
 
       const { url, ...init } = postWebhook(privateMessage(9, "/whoami"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -392,7 +511,11 @@ describe("Telegram Bot Worker", () => {
         );
 
       const { url, ...init } = postWebhook(privateMessage(10, "/whoami"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -411,7 +534,11 @@ describe("Telegram Bot Worker", () => {
       );
 
       const { url, ...init } = postWebhook(privateMessage(11, "/status"));
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -424,7 +551,11 @@ describe("Telegram Bot Worker", () => {
         .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
 
       const { url, ...init } = postWebhook({ update_id: 12 });
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       expect(fetchSpy).not.toHaveBeenCalled();
     });
@@ -446,7 +577,11 @@ describe("Telegram Bot Worker", () => {
       };
 
       const { url, ...init } = postWebhook(update);
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
       expect(fetchSpy).not.toHaveBeenCalled();
     });
@@ -459,7 +594,11 @@ describe("Telegram Bot Worker", () => {
 
       const { url, ...init } = postWebhook(privateMessage(14, "/start"));
       // Webhook MUST return 200; Telegram retries on >=400 which would cause a retry storm
-      const response = await worker.fetch(new Request(url, init), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        new Request(url, init),
+        testEnv,
+        createExecutionContext(),
+      );
       expect(response.status).toBe(200);
     });
   });

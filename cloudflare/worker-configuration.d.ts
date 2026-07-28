@@ -10,6 +10,7 @@ declare namespace Cloudflare {
     ENVIRONMENT: string;
     TELEGRAM_WEBHOOK_URL: string;
     API_BASE_URL: string;
+    API_SERVICE?: Fetcher;
     FEE_WALLET_ADDRESS?: string;
     TELEGRAM_BOT_TOKEN?: string;
     TELEGRAM_WEBHOOK_SECRET?: string;
