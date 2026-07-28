@@ -584,28 +584,37 @@ app.post("/v1/link-telegram/confirm", async (c) => {
       return c.json({ error: "Code expired" }, 400);
     }
 
-    const updateResult = yield* Effect.tryPromise(() =>
-      DB.prepare(
-        `UPDATE telegram_link_codes
-         SET used_at = CURRENT_TIMESTAMP
-         WHERE code = ? AND used_at IS NULL`,
-      )
-        .bind(body.code)
-        .run(),
-    );
-
-    if (!updateResult.success || updateResult.meta.changes === 0) {
-      return c.json({ error: "Code already used" }, 400);
-    }
-
     const userId = typeof codeRow.user_id === "string" ? codeRow.user_id : null;
     if (!userId) return c.json({ error: "Linking failed" }, 500);
 
-    yield* Effect.tryPromise(() =>
-      DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?")
-        .bind(body.telegram_id, userId)
-        .run(),
+    // Atomic link: claim the code AND bind the telegram_id in ONE D1 batch
+    // (a single transaction). Claim-then-link used to be separate statements;
+    // a transient D1 failure between them burnt the code without linking the
+    // account, stranding the user with a dead code (observed in production:
+    // the bot's second confirm hit 500 mid-link and the code was unusable).
+    // In one batch, a failure rolls BOTH statements back and the code stays
+    // usable; a lost claim race (concurrent confirm) surfaces as "already used".
+    const linkBatch = yield* Effect.tryPromise(() =>
+      DB.batch([
+        DB.prepare(
+          `UPDATE telegram_link_codes
+           SET used_at = CURRENT_TIMESTAMP
+           WHERE code = ? AND used_at IS NULL`,
+        ).bind(body.code),
+        DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?").bind(
+          body.telegram_id,
+          userId,
+        ),
+      ]),
     );
+    const [claimResult, linkResult] = linkBatch;
+    if (!claimResult?.success || claimResult.meta.changes === 0) {
+      return c.json({ error: "Code already used" }, 400);
+    }
+    if (!linkResult?.success || linkResult.meta.changes === 0) {
+      return c.json({ error: "Linking failed" }, 500);
+    }
+
     yield* logAudit(DB, userId, "telegram_link", { telegram_id: body.telegram_id });
 
     return c.json({ success: true, user_id: userId });

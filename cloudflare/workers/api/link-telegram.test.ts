@@ -188,6 +188,53 @@ describe("Telegram linking security", () => {
       expect(body.error).toMatch(/invalid code/i);
     });
 
+    it("does not burn the code when the link write fails (atomic batch)", async () => {
+      await insertUser("user-1");
+      // user-2 already owns the target telegram_id, so the users UPDATE hits
+      // the UNIQUE constraint and the batch fails. Because claim + link run
+      // in ONE transaction, the claim rolls back too — the code must survive
+      // the failure and confirm successfully once the conflict is cleared.
+      await env.DB.prepare("INSERT INTO users (id, telegram_id) VALUES (?, ?)")
+        .bind("user-2", "555000001")
+        .run();
+      await insertCode("LINK-ATOMIC1", "user-1", nowEpoch() + 600);
+
+      const failed = await worker.fetch(
+        buildRequest("POST", "/v1/link-telegram/confirm", {
+          code: "LINK-ATOMIC1",
+          telegram_id: "555000001",
+        }),
+        testEnv,
+        createExecutionContext(),
+      );
+      expect(failed.status).toBe(500);
+
+      const notBurnt = await env.DB.prepare(
+        "SELECT used_at FROM telegram_link_codes WHERE code = ?",
+      )
+        .bind("LINK-ATOMIC1")
+        .first();
+      expect(notBurnt?.used_at).toBeNull();
+
+      await env.DB.prepare("DELETE FROM users WHERE id = ?").bind("user-2").run();
+      const retry = await worker.fetch(
+        buildRequest("POST", "/v1/link-telegram/confirm", {
+          code: "LINK-ATOMIC1",
+          telegram_id: "555000001",
+        }),
+        testEnv,
+        createExecutionContext(),
+      );
+      expect(retry.status).toBe(200);
+      const body = (await retry.json()) as { success: boolean; user_id: string };
+      expect(body.success).toBe(true);
+      expect(body.user_id).toBe("user-1");
+      const linked = await env.DB.prepare("SELECT telegram_id FROM users WHERE id = ?")
+        .bind("user-1")
+        .first();
+      expect(linked?.telegram_id).toBe("555000001");
+    });
+
     it("burns a code after 5 attempts (6th attempt rejected)", async () => {
       await insertUser("user-1");
       await insertCode("LINK-BURN01", "user-1", nowEpoch() + 600);
