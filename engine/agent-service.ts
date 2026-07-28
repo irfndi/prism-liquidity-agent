@@ -455,16 +455,46 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
       let errorCount = 0;
 
       // ── Rolling p95 latency tracker for adaptive veto skip ─────────────
-      // Maintains a simple sliding window of recent prompt latencies. When the
-      // p95 of the last VETO_WINDOW_SIZE responses exceeds the configured veto
-      // timeout, the veto is skipped (fail-open with WARN) because the model
-      // cannot answer quickly enough for a budget-constrained yes/no review.
+      // Maintains a sliding window of recent prompt latencies, each timestamped
+      // so stale samples age out. When the p95 of the fresh window exceeds the
+      // configured veto timeout AND the window holds enough samples, the veto is
+      // skipped (fail-open with WARN) because the model cannot answer quickly
+      // enough for a budget-constrained yes/no review.
+      //
+      // Liveness: the skip is gated on VETO_SKIP_MIN_SAMPLES fresh samples, so a
+      // single timeout can never disable review permanently. Samples older than
+      // VETO_SAMPLE_MAX_AGE_MS are evicted, so once the model recovers the window
+      // drains, p95 falls back below the threshold, and veto review resumes on
+      // its own without a process restart.
       const VETO_WINDOW_SIZE = 20;
-      const vetoLatencies: number[] = [];
+      // Do not act on latency history until this many fresh samples have been
+      // collected — prevents one slow veto from latching the skip on.
+      const VETO_SKIP_MIN_SAMPLES = 5;
+      // Fresh samples older than this are evicted, bounding the skip's blind
+      // spot and guaranteeing the window drains after a transient slow period.
+      const VETO_SAMPLE_MAX_AGE_MS = 30 * 60 * 1000;
+      const vetoLatencies: Array<{ latencyMs: number; at: number }> = [];
 
-      function computeP95(values: number[]): number | null {
+      function evictStaleVetoSamples(now: number): void {
+        const cutoff = now - VETO_SAMPLE_MAX_AGE_MS;
+        while (vetoLatencies.length > 0) {
+          const oldest = vetoLatencies[0]!;
+          if (oldest.at < cutoff || vetoLatencies.length > VETO_WINDOW_SIZE) {
+            vetoLatencies.shift();
+          } else {
+            break;
+          }
+        }
+      }
+
+      function recordVetoLatency(latencyMs: number): void {
+        vetoLatencies.push({ latencyMs, at: Date.now() });
+        evictStaleVetoSamples(Date.now());
+      }
+
+      function computeP95(values: Array<{ latencyMs: number }>): number | null {
         if (values.length === 0) return null;
-        const sorted = [...values].sort((a, b) => a - b);
+        const sorted = values.map((v) => v.latencyMs).sort((a, b) => a - b);
         const idx = Math.ceil(sorted.length * 0.95) - 1;
         return sorted[Math.max(0, Math.min(idx, sorted.length - 1))]!;
       }
@@ -488,8 +518,15 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           const proposalMode = config.agentProposalMode;
           if (proposalMode === "veto") {
             const vetoBudgetMs = config.agentVetoTimeoutMs;
+            // Drop stale samples first so a transient slow period ages out and
+            // the skip cannot latch on a polluted window.
+            evictStaleVetoSamples(Date.now());
             const p95 = computeP95(vetoLatencies);
-            if (p95 !== null && p95 >= vetoBudgetMs * 0.95) {
+            if (
+              vetoLatencies.length >= VETO_SKIP_MIN_SAMPLES &&
+              p95 !== null &&
+              p95 >= vetoBudgetMs * 0.95
+            ) {
               logger.warn(
                 "Skipping veto review — rolling p95 latency exceeds 95% of veto budget",
                 {
@@ -505,10 +542,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             return transport.sendPrompt(prompt, context, vetoBudgetMs).pipe(
               Effect.map((response: AgentRuntimeResponse) => {
                 lastPromptAt = Date.now();
-                vetoLatencies.push(response.latencyMs);
-                if (vetoLatencies.length > VETO_WINDOW_SIZE) {
-                  vetoLatencies.shift();
-                }
+                recordVetoLatency(response.latencyMs);
                 const parsed = parseResponse(response.raw);
                 const override = validateOverride(decision, parsed);
                 if (override) {
@@ -525,12 +559,10 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
               }),
               Effect.catchAll((err) => {
                 errorCount += 1;
-                // Record the timeout/failure latency so the rolling p95 converges
-                // even when the veto consistently times out.
-                vetoLatencies.push(vetoBudgetMs);
-                if (vetoLatencies.length > VETO_WINDOW_SIZE) {
-                  vetoLatencies.shift();
-                }
+                // Record the timeout/failure latency (timestamped) so the rolling
+                // p95 reflects sustained slowness, while aging prevents it from
+                // latching forever once the model recovers.
+                recordVetoLatency(vetoBudgetMs);
                 logger.warn("Veto review failed", {
                   pool: decision.poolAddress,
                   error: underlyingErrorMessage(err),

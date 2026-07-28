@@ -992,8 +992,19 @@ export function executeLive(
     // live mode honors maxOpenPositions.
 
     if (decision.action === "ENTER") {
+      // Align the automatic top-up with the live-entry SOL reserve: trigger
+      // whenever the wallet is below the reserve (SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS
+      // aliases it) and swap enough USDC to cover a worst-case deficit up to the
+      // reserve plus a slippage/fee buffer, so a wallet with sufficient USDC can
+      // actually reach the entry gate instead of being rejected after a $2 top-up.
+      // Falls back to the flat GAS_TOP_UP_USDC when the SOL price is unavailable.
+      const entryReserveSol = Number(MIN_SOL_FOR_ENTRY_LAMPORTS) / 1e9;
+      const topUpUsdc =
+        solPriceUsd > 0
+          ? Math.max(GAS_TOP_UP_USDC, Math.ceil(entryReserveSol * solPriceUsd * 1.2))
+          : GAS_TOP_UP_USDC;
       yield* adapter
-        .swapUSDCForSOL(Number(SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS) / 1e9, GAS_TOP_UP_USDC)
+        .swapUSDCForSOL(Number(SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS) / 1e9, topUpUsdc)
         .pipe(Effect.catchAll(() => Effect.void));
 
       const nativeBalance = yield* adapter.getNativeSolBalance().pipe(
@@ -2782,18 +2793,34 @@ export const program = Effect.gen(function* () {
         lastWalletBalanceUsd = config.paperPortfolioUsd;
       }
 
-      // Periodic wallet composition log for drift auditability.
+      // Periodic wallet composition log for drift auditability. Native SOL is
+      // held by the System Program — not an SPL mint — so getWalletHoldings()
+      // omits it. Read it separately and include it so SOL-heavy wallets
+      // (including SOL-only wallets, which previously produced no snapshot at
+      // all) are fully explained by the drift log.
       if (adapter.hasWallet() && !config.paperTrading && scanCount % 10 === 0) {
         yield* Effect.fork(
           Effect.gen(function* () {
-            const holdings = yield* adapter.getWalletHoldings().pipe(
-              Effect.catchAll(() => Effect.succeed(new Map())),
-            );
-            if (holdings.size > 0) {
-              const breakdown = Array.from(holdings.entries()).map(([mint, bal]) => ({
+            const [holdings, nativeSolLamports] = yield* Effect.all([
+              adapter.getWalletHoldings().pipe(Effect.catchAll(() => Effect.succeed(new Map()))),
+              adapter.getNativeSolBalance().pipe(Effect.catchAll(() => Effect.succeed(0n))),
+            ]);
+            const breakdown: Array<{ mint: string; amount: string }> = [];
+            if (nativeSolLamports > 0n) {
+              breakdown.push({
+                mint: "(native SOL)",
+                amount: (Number(nativeSolLamports) / 1e9).toFixed(6),
+              });
+            }
+            for (const [mint, bal] of holdings.entries()) {
+              breakdown.push({
                 mint: `${mint.slice(0, 8)}...`,
-                amount: (Number(bal.amountAtomic) / 10 ** bal.decimals).toFixed(Math.min(bal.decimals, 6)),
-              }));
+                amount: (Number(bal.amountAtomic) / 10 ** bal.decimals).toFixed(
+                  Math.min(bal.decimals, 6),
+                ),
+              });
+            }
+            if (breakdown.length > 0) {
               logger.info("Wallet composition snapshot (every 10 cycles)", {
                 totalUsd: lastWalletBalanceUsd.toFixed(2),
                 tokens: breakdown,

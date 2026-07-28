@@ -10,9 +10,10 @@ export const GAS_RESERVE_LAMPORTS = 20_000_000n;
 // transaction-balance check does not fail after the swap.
 export const SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS = 50_000_000n;
 
-// Amount of USDC the live-entry gas top-up swaps for SOL when the wallet's
-// native balance is below the threshold. Must be kept in sync with the value
-// passed to `adapter.swapUSDCForSOL` in `program.ts`.
+// Fallback / floor amount of USDC the live-entry gas top-up swaps for SOL.
+// `program.ts` computes a price-aware top-up sized to the entry reserve and
+// uses this only as a minimum (and as the value when the SOL price is unknown),
+// so a flat $2 no longer blocks entry when the wallet has plenty of USDC.
 export const GAS_TOP_UP_USDC = 2;
 
 // Minimum native SOL the live entry gate requires before it will submit an
@@ -22,12 +23,13 @@ export const MIN_SOL_FOR_GAS_LAMPORTS = 30_000_000n;
 
 // Minimum native SOL for a live ENTER including position rent-exempt reserve,
 // bin-array initialization, ATA creation, and priority fee buffer. The audit
-// showed a live entry needed ~0.183 SOL (182,798,329 lamports) for a standard
-// DLMM position. This buffer ensures the transaction simulation succeeds;
-// the error message reports available, needed, and reserve components.
+// measured a live entry needing on the order of ~0.18 SOL; the reserve is set
+// to a round 180,000,000 lamports (0.18 SOL) so the transaction simulation
+// succeeds. The error message reports available, needed, and reserve components.
 export const MIN_SOL_FOR_ENTRY_LAMPORTS = 180_000_000n;
 
-// Native SOL threshold below which `swapUSDCForSOL` performs a gas top-up.
-// Kept in sync with the live entry gate to avoid reserving a top-up that the
-// gate would reject anyway.
-export const SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS = MIN_SOL_FOR_GAS_LAMPORTS;
+// Native SOL threshold below which `swapUSDCForSOL` performs a top-up. Aliased
+// to the live-entry reserve so the top-up trigger and the entry gate cannot
+// drift: any wallet below the entry reserve gets topped up before the gate
+// rejects it for insufficient SOL.
+export const SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS = MIN_SOL_FOR_ENTRY_LAMPORTS;
