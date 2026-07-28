@@ -200,6 +200,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
     prompt: string,
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
+    opts?: { reasoningEffort?: "low" | "medium" | "high" },
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
     return Effect.gen(this, function* () {
       yield* this.connect();
@@ -207,10 +208,11 @@ export class GatewayTransport implements AgentRuntimeTransport {
 
       const startedAt = Date.now();
       const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
-      // Request minimal reasoning effort — this is a yes/no review (veto) and
-      // does not need the model's full thinking budget.
+      // reasoningEffort is supplied only by the veto branch (a yes/no review that
+      // needs no full thinking budget). Proposal modes omit it so prompts that in
+      // `full` mode can alter executable actions keep the model's default effort.
       const text = yield* Effect.tryPromise(() =>
-        this.sendChat(prompt, effectiveTimeout, { reasoningEffort: "low" }),
+        this.sendChat(prompt, effectiveTimeout, opts),
       );
 
       const latencyMs = Date.now() - startedAt;
@@ -386,8 +388,9 @@ export class GatewayTransport implements AgentRuntimeTransport {
         message,
         idempotencyKey: id,
       };
-      // Request minimal thinking effort for quick turnarounds (used by veto reviews).
-      // The gateway maps reasoningEffort to the underlying model's thinking budget.
+      // When the caller requests a reasoning budget (veto reviews pass "low"),
+      // map it onto the model's thinking budget; otherwise leave the model's
+      // default effort untouched so action-altering prompts reason fully.
       if (opts?.reasoningEffort) {
         chatParams.modelParams = { reasoning_effort: opts.reasoningEffort };
       }

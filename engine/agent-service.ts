@@ -539,7 +539,9 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
               return Effect.succeed(null);
             }
             const prompt = buildPrompt(decision, context);
-            return transport.sendPrompt(prompt, context, vetoBudgetMs).pipe(
+            return transport
+              .sendPrompt(prompt, context, vetoBudgetMs, { reasoningEffort: "low" })
+              .pipe(
               Effect.map((response: AgentRuntimeResponse) => {
                 lastPromptAt = Date.now();
                 recordVetoLatency(response.latencyMs);
