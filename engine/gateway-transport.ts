@@ -208,11 +208,8 @@ export class GatewayTransport implements AgentRuntimeTransport {
 
       const startedAt = Date.now();
       const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
-      // reasoningEffort is supplied only by the veto branch (a yes/no review that
-      // needs no full thinking budget). Proposal modes omit it so prompts that in
-      // `full` mode can alter executable actions keep the model's default effort.
       const text = yield* Effect.tryPromise(() =>
-        this.sendChat(prompt, effectiveTimeout, opts),
+        this.sendChat(prompt, effectiveTimeout),
       );
 
       const latencyMs = Date.now() - startedAt;
@@ -372,7 +369,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
 
   // ─── App layer ───────────────────────────────────────────────────────────────
 
-  private async sendChat(message: string, timeoutMs: number, opts?: { reasoningEffort?: "low" | "medium" | "high" }): Promise<string> {
+  private async sendChat(message: string, timeoutMs: number): Promise<string> {
     const id = crypto.randomUUID();
     const runPromise = this.registerChatRun(id, timeoutMs);
     try {
@@ -388,12 +385,6 @@ export class GatewayTransport implements AgentRuntimeTransport {
         message,
         idempotencyKey: id,
       };
-      // When the caller requests a reasoning budget (veto reviews pass "low"),
-      // map it onto the model's thinking budget; otherwise leave the model's
-      // default effort untouched so action-altering prompts reason fully.
-      if (opts?.reasoningEffort) {
-        chatParams.modelParams = { reasoning_effort: opts.reasoningEffort };
-      }
       const [, reply] = await Promise.all([
         this.request(
           "chat.send",
