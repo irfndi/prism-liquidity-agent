@@ -64,9 +64,13 @@ export const devCommand = new Command("dev")
       cleanup(code);
     };
 
+    // The engine owns SIGINT/SIGTERM: its gracefulShutdown posts a final
+    // "stopped" status to the API before exiting, so Telegram /status updates
+    // on shutdown. If the CLI also handled these signals here and called
+    // process.exit first, that stopped report would never run and /status would
+    // show a stale "running" until the KV TTL expired. We hook only "exit" to
+    // guarantee the lockfile is released once the process actually ends.
     process.on("exit", () => cleanup());
-    process.on("SIGINT", () => doCleanup(130));
-    process.on("SIGTERM", () => doCleanup(143));
 
     console.log("Starting Prism trading agent...");
     await runEngine();

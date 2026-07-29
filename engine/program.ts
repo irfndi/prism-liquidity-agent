@@ -35,8 +35,11 @@ import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
+import { getPrismUserConfigDir } from "./paths.js";
 
 import { checkForAutoUpdate } from "./update-check.js";
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
 import type { PositionRecord } from "./db-service.js";
 import { applyCompoundToCostBasis, computeHodlValueUsd, computeRealizedPnlUsd } from "./pnl.js";
 import { buildRewardClaimMetadata, summarizeRewardClaim } from "./rewards.js";
@@ -125,6 +128,72 @@ import { computeCooldownForExit } from "./cooldown.js";
 
 const logger = createLogger("program");
 const idleRedeployLogger = createLogger("idle-redeploy");
+const statusLogger = createLogger("engine-status");
+
+/**
+ * Read the Prism Cloud API key from the on-disk credentials file. Returns null
+ * when the user has not registered — a normal condition, not an error, so status
+ * reporting simply no-ops.
+ */
+const readEngineStatusApiKey = (): string | null => {
+  try {
+    const credentialsFile = join(getPrismUserConfigDir(), "credentials.json");
+    if (!existsSync(credentialsFile)) return null;
+    const value: unknown = JSON.parse(readFileSync(credentialsFile, "utf-8"));
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      typeof (value as Record<string, unknown>).apiKey === "string"
+    ) {
+      return (value as { apiKey: string }).apiKey;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Post the engine's current status to the Prism Cloud API so the Telegram bot's
+ * /status command can serve real data. Runs fully inside the Effect boundary
+ * (filesystem read + HTTP request) and never fails — a missing API key or a
+ * transient network error is logged and swallowed so it can never block the scan
+ * cycle or the shutdown path. Mirrors the fire-and-forget `reportFeeCollection`
+ * reporting pattern in this file.
+ */
+function postEngineStatus(
+  status: "running" | "stopped",
+  positions: number,
+  unrealizedPnlUsd: number,
+): Effect.Effect<void> {
+  const DEFAULT_API_BASE_URL = "https://prism-api.irfndi.workers.dev";
+  const TIMEOUT_MS = 5_000;
+  return Effect.gen(function* () {
+    const baseUrl = process.env.PRISM_API_URL ?? DEFAULT_API_BASE_URL;
+    const apiKey = yield* Effect.sync(readEngineStatusApiKey);
+    if (apiKey == null) return;
+    const response = yield* Effect.tryPromise(() =>
+      fetch(`${baseUrl}/v1/agent-status/report`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ status, positions, pnl: unrealizedPnlUsd }),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      }),
+    );
+    if (!response.ok) {
+      statusLogger.warn("Engine status report rejected", { status: response.status });
+    }
+  }).pipe(
+    Effect.catchAllCause((cause) =>
+      Effect.sync(() =>
+        statusLogger.warn("Engine status report failed", { cause: String(cause) }),
+      ),
+    ),
+  );
+}
 
 /**
  * How far back to look for a previous pool snapshot when computing TVL
@@ -2838,8 +2907,27 @@ export const program = Effect.gen(function* () {
           console.info("[snapshot-retention] Pruned old pool snapshots", {
             pruned,
             retentionDays: config.snapshotRetentionDays,
-          });
+          });          }
         }
+
+      // Report engine status to the Prism Cloud API after every scan cycle.
+      // PnL is the aggregate UNREALIZED figure across tracked positions and
+      // INCLUDES claimed fees + claimed rewards (which live on PositionRecord, not
+      // the reduced PositionSnapshot), matching the canonical unrealized-PnL
+      // formula in engine/pnl.ts. Forked fire-and-forget so a transient report
+      // never blocks the cycle.
+      {
+        let pnl = 0;
+        for (const p of trackedPositions.values()) {
+          pnl +=
+            p.currentValueUsd +
+            p.cumulativeFeesClaimedUsd +
+            p.cumulativeRewardsClaimedUsd -
+            p.depositedUsd;
+        }
+        yield* Effect.fork(postEngineStatus("running", trackedPositions.size, pnl)).pipe(
+          Effect.asVoid,
+        );
       }
 
       scanCount += 1;
@@ -5735,9 +5823,27 @@ export const program = Effect.gen(function* () {
     if (shuttingDown) return;
     shuttingDown = true;
     console.info(`Received ${signal} — shutting down`);
+    // Report a final "stopped" heartbeat so Telegram /status does not keep serving
+    // a stale "running" until the 30-minute KV TTL expires. Awaited inline (with a
+    // hard timeout) BEFORE process.exit so the fetch is not killed mid-flight; the
+    // per-cycle "running" report stays fire-and-forget.
+    let pnl = 0;
+    for (const p of trackedPositions.values()) {
+      pnl +=
+        p.currentValueUsd +
+        p.cumulativeFeesClaimedUsd +
+        p.cumulativeRewardsClaimedUsd -
+        p.depositedUsd;
+    }
     Effect.runFork(
       Fiber.interrupt(schedulerFiber).pipe(
         Effect.zipRight(agent.disconnect()),
+        Effect.zipRight(
+          postEngineStatus("stopped", trackedPositions.size, pnl).pipe(
+            Effect.timeout("4 seconds"),
+            Effect.catchAll(() => Effect.void),
+          ),
+        ),
         Effect.ensuring(Effect.sync(() => process.exit(0))),
       ),
     );
