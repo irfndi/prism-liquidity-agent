@@ -554,26 +554,30 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             }
             const prompt = buildPrompt(decision, context);
             const attemptStart = Date.now();
-            return transport
-              .sendPrompt(prompt, context, vetoBudgetMs, { reasoningEffort: "low" })
-              .pipe(
-              Effect.map((response: AgentRuntimeResponse) => {
-                lastPromptAt = Date.now();
-                recordVetoLatency(response.latencyMs);
-                const parsed = parseResponse(response.raw);
-                const override = validateOverride(decision, parsed);
-                if (override) {
-                  logger.info("Agent override", {
-                    pool: decision.poolAddress,
-                    originalAction: decision.action,
-                    newAction: override.action,
-                    originalConfidence: decision.confidence.toFixed(2),
-                    newConfidence: override.confidence.toFixed(2),
-                    latencyMs: response.latencyMs,
-                  });
-                }
-                return override;
-              }),
+             return transport
+               .sendPrompt(prompt, context, vetoBudgetMs, { reasoningEffort: "low" })
+               .pipe(
+               Effect.map((response: AgentRuntimeResponse) => {
+                 lastPromptAt = Date.now();
+                 // Wall-clock latency from before transport.connect() —
+                 // includes session establishment time so the p95
+                 // reflects the actual scan-blocking duration, not just
+                 // the wire round-trip after the connection is up.
+                 recordVetoLatency(Math.min(Date.now() - attemptStart, vetoBudgetMs));
+                 const parsed = parseResponse(response.raw);
+                 const override = validateOverride(decision, parsed);
+                 if (override) {
+                   logger.info("Agent override", {
+                     pool: decision.poolAddress,
+                     originalAction: decision.action,
+                     newAction: override.action,
+                     originalConfidence: decision.confidence.toFixed(2),
+                     newConfidence: override.confidence.toFixed(2),
+                     latencyMs: response.latencyMs,
+                   });
+                 }
+                 return override;
+               }),
               Effect.catchAllCause((cause) => {
                 errorCount += 1;
                 // Record actual elapsed duration for ALL failure modes:

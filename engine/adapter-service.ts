@@ -935,7 +935,10 @@ export const AdapterLive = Layer.effect(
 
         if (missing.length === 0) return prices;
 
+        const sourcesAttempted: string[] = [];
+
         const heliusPrices = yield* fetchHeliusPrices(missing);
+        if (config.heliusApiKey) sourcesAttempted.push("helius");
         const stillMissing: string[] = [];
         for (const mint of missing) {
           const price = heliusPrices[mint];
@@ -946,8 +949,14 @@ export const AdapterLive = Layer.effect(
           }
         }
 
-        if (stillMissing.length === 0) return prices;
+        if (stillMissing.length === 0) {
+          if (provenanceOut && !useFallback) {
+            for (const mint of missing) provenanceOut.set(mint, sourcesAttempted.join(","));
+          }
+          return prices;
+        }
 
+        sourcesAttempted.push("jupiter");
         const jupiterPrices = yield* fetchJupiterPrices(stillMissing);
         const coinGeckoMissing: string[] = [];
         for (const mint of stillMissing) {
@@ -958,6 +967,8 @@ export const AdapterLive = Layer.effect(
             coinGeckoMissing.push(mint);
           }
         }
+
+        if (coinGeckoMissing.length > 0) sourcesAttempted.push("coingecko");
 
         const cgPrices = yield* fetchCoinGeckoPrices(coinGeckoMissing);
         const unresolved: string[] = [];
@@ -974,7 +985,7 @@ export const AdapterLive = Layer.effect(
           negativePriceCache.set(mint, Date.now());
           prices[mint] = useFallback ? (fallbackPrices[mint] ?? 0) : 0;
           if (provenanceOut && !useFallback) {
-            provenanceOut.set(mint, "helius,jupiter,coingecko");
+            provenanceOut.set(mint, sourcesAttempted.join(","));
           }
         }
 
