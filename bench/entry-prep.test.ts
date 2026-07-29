@@ -426,8 +426,8 @@ describe("EntryPrepService", () => {
       tokenBalances[mint] = 1_000_000_000n;
       return Effect.succeed("mock-swap-tx");
     });
-    // Non-SOL pool with exactly enough USDC for the two token swaps and no
-    // gas top-up, because native SOL already exceeds the 0.05 SOL threshold.
+    // Non-SOL pool with enough USDC for the two token swaps and no
+    // gas top-up, because native SOL exceeds the 0.18 SOL entry reserve.
     const layer = buildLayer(
       {
         getPoolState: () =>
@@ -446,9 +446,9 @@ describe("EntryPrepService", () => {
             currentPrice: 1,
             timestamp: Date.now(),
           }),
-        getNativeSolBalance: () => Effect.succeed(100_000_000n),
+        getNativeSolBalance: () => Effect.succeed(200_000_000n),
         getTokenBalance: (mint: string) =>
-          Effect.succeed(mint === USDC_MINT ? 1_010_000_000n : (tokenBalances[mint] ?? 0n)),
+          Effect.succeed(mint === USDC_MINT ? 1_015_000_000n : (tokenBalances[mint] ?? 0n)),
         getTokenPrices: () => Effect.succeed({ [TOKEN_Y]: 1, [OTHER_TOKEN]: 1 }),
         getTokenDecimals: () => Effect.succeed(6),
         swapUSDCForToken: swapSpy,

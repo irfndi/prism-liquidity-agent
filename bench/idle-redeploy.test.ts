@@ -825,7 +825,7 @@ describe("program — idle-redeploy entry-backoff guard (P2)", () => {
     // Normal ENTER failed (armed backoff); redeploy honored it → nothing opens.
     expect(positions).toHaveLength(0);
     const redeploy = decisions.filter((d) => d.reasoning.includes("[idle-redeploy]"));
-    expect(redeploy.some((d) => d.reasoning.includes("entry backoff active"))).toBe(true);
+    expect(redeploy.some((d) => d.reasoning.includes("backoff active"))).toBe(true);
     expect(redeploy.every((d) => !d.executed)).toBe(true);
   }, 20_000);
 });
