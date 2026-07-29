@@ -1504,7 +1504,8 @@ export const AdapterLive = Layer.effect(
 
       getTokenBalance: (mintAddress: string) => readTokenBalance(mintAddress),
 
-      getTokenPrices: (mints: ReadonlyArray<string>) => fetchTokenPrices(mints),
+      getTokenPrices: (mints: ReadonlyArray<string>, opts?: { readonly useFallback?: boolean }) =>
+        fetchTokenPrices(mints, opts),
 
       getTokenDecimals: (mintAddress: string) =>
         getTokenMeta(mintAddress).pipe(Effect.map((m) => m.decimals)),

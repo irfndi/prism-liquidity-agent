@@ -574,20 +574,18 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
                 }
                 return override;
               }),
-              Effect.catchAll((err) => {
+              Effect.catchAllCause((cause) => {
                 errorCount += 1;
-                // Record the ACTUAL elapsed duration, not the full timeout budget.
-                // Fast failures (disconnect, handshake rejection) resolve in
-                // milliseconds; recording vetoBudgetMs for them makes five quick
-                // errors look like near-timeouts and disables veto review for up
-                // to 30 minutes after the transport recovers. Cap at vetoBudgetMs
-                // because a timeout rejection may report slightly above the budget.
+                // Record actual elapsed duration for ALL failure modes:
+                // typed failures (disconnect, handshake) via catchAll above,
+                // and outer timeouts (AGENT_VETO_TIMEOUT_MS from program.ts
+                // timeoutFail) which interrupt this fiber without reaching
+                // catchAll. Interruption is the only cause type that
+                // catchAll would not see. Record min(elapsed, budget) to
+                // avoid a single hard timeout from dominating the window.
                 const elapsedMs = Math.min(Date.now() - attemptStart, vetoBudgetMs);
                 recordVetoLatency(elapsedMs);
-                // Re-fail so the CALLER (program.ts) applies its throttled warn +
-                // memory warning via vetoFetchFailed/vetoWarningThrottle instead of
-                // this layer emitting an unthrottled warning for every pool/cycle.
-                return Effect.fail(err);
+                return Effect.failCause(cause);
               }),
             );
           }

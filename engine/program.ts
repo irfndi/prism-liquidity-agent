@@ -1015,7 +1015,7 @@ export function executeLive(
         // swap and the post-swap balance check rejects an otherwise-fundable
         // ENTER. A failed price lookup falls back to the config value.
         const liveSolPrice = yield* adapter
-          .getTokenPrices([SOL_MINT])
+          .getTokenPrices([SOL_MINT], { useFallback: false })
           .pipe(
             Effect.map((prices) => prices[SOL_MINT]),
             Effect.catchAll(() => Effect.succeed(undefined)),

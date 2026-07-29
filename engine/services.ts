@@ -305,6 +305,7 @@ export interface AdapterApi {
   readonly getTokenBalance: (mintAddress: string) => Effect.Effect<bigint, unknown>;
   readonly getTokenPrices: (
     mints: ReadonlyArray<string>,
+    opts?: { readonly useFallback?: boolean },
   ) => Effect.Effect<Record<string, number>, unknown>;
   readonly getTokenDecimals: (mintAddress: string) => Effect.Effect<number, unknown>;
   /**
