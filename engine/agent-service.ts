@@ -553,6 +553,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
               return Effect.succeed(null);
             }
             const prompt = buildPrompt(decision, context);
+            const attemptStart = Date.now();
             return transport
               .sendPrompt(prompt, context, vetoBudgetMs, { reasoningEffort: "low" })
               .pipe(
@@ -575,13 +576,17 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
               }),
               Effect.catchAll((err) => {
                 errorCount += 1;
-                // Record the timeout/failure latency (timestamped) so the rolling
-                // p95 reflects sustained slowness, while aging prevents it from
-                // latching forever once the model recovers. Then re-fail so the
-                // CALLER (program.ts) applies its throttled warn + memory warning
-                // via vetoFetchFailed/vetoWarningThrottle instead of this layer
-                // emitting an unthrottled warning for every pool and cycle.
-                recordVetoLatency(vetoBudgetMs);
+                // Record the ACTUAL elapsed duration, not the full timeout budget.
+                // Fast failures (disconnect, handshake rejection) resolve in
+                // milliseconds; recording vetoBudgetMs for them makes five quick
+                // errors look like near-timeouts and disables veto review for up
+                // to 30 minutes after the transport recovers. Cap at vetoBudgetMs
+                // because a timeout rejection may report slightly above the budget.
+                const elapsedMs = Math.min(Date.now() - attemptStart, vetoBudgetMs);
+                recordVetoLatency(elapsedMs);
+                // Re-fail so the CALLER (program.ts) applies its throttled warn +
+                // memory warning via vetoFetchFailed/vetoWarningThrottle instead of
+                // this layer emitting an unthrottled warning for every pool/cycle.
                 return Effect.fail(err);
               }),
             );

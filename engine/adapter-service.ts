@@ -172,7 +172,7 @@ const logger = createLogger("adapter-service");
 const warnedUnpricedWalletMints = new Set<string>();
 function warnUnpricedWalletMintOnce(
   mint: string,
-  opts?: { readonly amountAtomic?: bigint; readonly decimals?: number; readonly attemptedSources?: string },
+  opts?: { readonly amountAtomic?: bigint; readonly decimals?: number; readonly attemptedSources?: string | undefined },
 ): void {
   if (warnedUnpricedWalletMints.has(mint)) return;
   warnedUnpricedWalletMints.add(mint);
@@ -891,13 +891,18 @@ export const AdapterLive = Layer.effect(
 
     function fetchTokenPrices(
       mints: ReadonlyArray<string>,
-      opts?: { readonly useFallback?: boolean },
+      opts?: {
+        readonly useFallback?: boolean;
+        /** Mutable out-param: populated with per-mint provenance for unresolved
+         * mints (those resolving to 0 when useFallback is false). Callers in the
+         * wallet reconciliation path pass this so warnUnpricedWalletMintOnce can
+         * report which pricing sources were actually attempted vs. short-
+         * circuited by the negative cache. */
+        readonly provenanceOut?: Map<string, string>;
+      },
     ): Effect.Effect<Record<string, number>, unknown> {
-      // When useFallback is false, an unresolved mint resolves to 0 instead of
-      // its hardcoded fallback price. The wallet reconciliation path opts out
-      // of fallbacks (a fallback SOL price is how the wallet over-reported),
-      // and treats 0 as "unresolvable" so it can skip the token fail-closed.
       const useFallback = opts?.useFallback ?? true;
+      const provenanceOut = opts?.provenanceOut;
       return Effect.gen(function* () {
         const prices: Record<string, number> = {};
         const missing: string[] = [];
@@ -918,6 +923,9 @@ export const AdapterLive = Layer.effect(
           if (missFetchedAt !== undefined) {
             if (Date.now() - missFetchedAt < PRICE_MISS_CACHE_TTL_MS) {
               prices[mint] = useFallback ? (fallbackPrices[mint] ?? 0) : 0;
+              if (provenanceOut && !useFallback && prices[mint] === 0) {
+                provenanceOut.set(mint, "negative-cache");
+              }
               continue;
             }
             negativePriceCache.delete(mint);
@@ -965,6 +973,9 @@ export const AdapterLive = Layer.effect(
         for (const mint of unresolved) {
           negativePriceCache.set(mint, Date.now());
           prices[mint] = useFallback ? (fallbackPrices[mint] ?? 0) : 0;
+          if (provenanceOut && !useFallback) {
+            provenanceOut.set(mint, "helius,jupiter,coingecko");
+          }
         }
 
         return prices;
@@ -1090,7 +1101,11 @@ export const AdapterLive = Layer.effect(
         // useFallback: false — an unresolvable price becomes 0 below (never a
         // hardcoded fallback), so the valuation can skip it fail-closed.
         const allMints = [...new Set([...held.keys(), SOL_MINT])];
-        const prices = yield* fetchTokenPrices(allMints, { useFallback: false });
+        const priceProvenance = new Map<string, string>();
+        const prices = yield* fetchTokenPrices(allMints, {
+          useFallback: false,
+          provenanceOut: priceProvenance,
+        });
 
         // FAIL-CLOSED valuation: there is deliberately NO fallback price here.
         // The old path valued unresolved SOL at a hardcoded $165, which is how
@@ -1108,6 +1123,7 @@ export const AdapterLive = Layer.effect(
             warnUnpricedWalletMintOnce(SOL_MINT, {
               amountAtomic: BigInt(lamports),
               decimals: 9,
+              attemptedSources: priceProvenance.get(SOL_MINT),
             });
           }
         }
@@ -1118,6 +1134,7 @@ export const AdapterLive = Layer.effect(
             warnUnpricedWalletMintOnce(mint, {
               amountAtomic: balance.amountAtomic,
               decimals: balance.decimals,
+              attemptedSources: priceProvenance.get(mint),
             });
             continue;
           }

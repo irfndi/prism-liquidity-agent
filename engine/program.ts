@@ -46,6 +46,7 @@ import {
   SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
   MIN_SOL_FOR_GAS_LAMPORTS,
   MIN_SOL_FOR_ENTRY_LAMPORTS,
+  SOL_MINT,
   USDC_MINT,
 } from "./constants.js";
 import {
@@ -1008,9 +1009,22 @@ export function executeLive(
       );
       if (preSwapSol !== null && preSwapSol < entryReserveSol) {
         const deficitSol = entryReserveSol - preSwapSol;
+        // Prefer a live SOL price from the adapter's price chain over the static
+        // config fallback: when the market price exceeds solPriceUsd (default
+        // $150) by more than the 20% buffer, the static value underfunds the
+        // swap and the post-swap balance check rejects an otherwise-fundable
+        // ENTER. A failed price lookup falls back to the config value.
+        const liveSolPrice = yield* adapter
+          .getTokenPrices([SOL_MINT])
+          .pipe(
+            Effect.map((prices) => prices[SOL_MINT]),
+            Effect.catchAll(() => Effect.succeed(undefined)),
+          );
+        const effectiveSolPrice =
+          typeof liveSolPrice === "number" && liveSolPrice > 0 ? liveSolPrice : solPriceUsd;
         const topUpUsdc =
-          solPriceUsd > 0
-            ? Math.max(GAS_TOP_UP_USDC, Math.ceil(deficitSol * solPriceUsd * 1.2))
+          effectiveSolPrice > 0
+            ? Math.max(GAS_TOP_UP_USDC, Math.ceil(deficitSol * effectiveSolPrice * 1.2))
             : GAS_TOP_UP_USDC;
         yield* adapter
           .swapUSDCForSOL(entryReserveSol, topUpUsdc)
