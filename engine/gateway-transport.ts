@@ -200,7 +200,6 @@ export class GatewayTransport implements AgentRuntimeTransport {
     prompt: string,
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
-    opts?: { reasoningEffort?: "low" | "medium" | "high" },
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
     return Effect.gen(this, function* () {
       yield* this.connect();

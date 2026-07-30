@@ -554,9 +554,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             }
             const prompt = buildPrompt(decision, context);
             const attemptStart = Date.now();
-             return transport
-               .sendPrompt(prompt, context, vetoBudgetMs, { reasoningEffort: "low" })
-               .pipe(
+             return transport.sendPrompt(prompt, context, vetoBudgetMs).pipe(
                Effect.map((response: AgentRuntimeResponse) => {
                  lastPromptAt = Date.now();
                  // Wall-clock latency from before transport.connect() —

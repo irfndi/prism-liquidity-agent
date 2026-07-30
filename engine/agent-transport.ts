@@ -123,7 +123,6 @@ export interface AgentRuntimeTransport {
     prompt: string,
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
-    opts?: { reasoningEffort?: "low" | "medium" | "high" },
   ) => Effect.Effect<AgentRuntimeResponse, unknown>;
   readonly sendCheckin?: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, unknown>;
   readonly sendAlert?: (alert: AgentRuntimeAlert) => Effect.Effect<void, unknown>;
