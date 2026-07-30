@@ -207,7 +207,9 @@ export class GatewayTransport implements AgentRuntimeTransport {
 
       const startedAt = Date.now();
       const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
-      const text = yield* Effect.tryPromise(() => this.sendChat(prompt, effectiveTimeout));
+      const text = yield* Effect.tryPromise(() =>
+        this.sendChat(prompt, effectiveTimeout),
+      );
 
       const latencyMs = Date.now() - startedAt;
       this.emit({ type: "response_received", transport: this.name, latencyMs });
@@ -377,10 +379,15 @@ export class GatewayTransport implements AgentRuntimeTransport {
       // rejection is still handled. Promise.all attaches a handler to both; otherwise an
       // awaited-alone run promise could reject with no handler and Bun would treat it as
       // an unhandled rejection, terminating the whole process rather than just the call.
+      const chatParams: Record<string, unknown> = {
+        sessionKey: this.sessionKey,
+        message,
+        idempotencyKey: id,
+      };
       const [, reply] = await Promise.all([
         this.request(
           "chat.send",
-          { sessionKey: this.sessionKey, message, idempotencyKey: id },
+          chatParams,
           timeoutMs,
           id,
         ),
