@@ -160,7 +160,7 @@ const liveRevenueConfig: RevenueConfigApi = {
     }),
 };
 
-const liveEntryPrep: EntryPrepApi = { prepareEntryTokens: () => Effect.void };
+const liveEntryPrep: EntryPrepApi = { prepareEntryTokens: () => Effect.succeed(undefined) };
 
 const livePool = {
   activeBinId: 5000,
@@ -486,7 +486,7 @@ function makeLoopLayer(opts: {
     AgentStateMutable({ maxPendingProposals: 50 }).layer,
     Layer.succeed(McpServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
-    Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.void }),
+    Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.succeed(undefined) }),
     Layer.succeed(MeteoraDatapiService, opts.datapi ?? { getPoolData: () => Effect.succeed(null) }),
     Layer.succeed(GeckoTerminalService, { getPoolStats: () => Effect.succeed(null) }),
     Layer.succeed(AlertService, {
