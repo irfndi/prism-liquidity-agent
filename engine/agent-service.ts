@@ -554,15 +554,13 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             }
             const prompt = buildPrompt(decision, context);
             const attemptStart = Date.now();
-            const attemptLatencyMs = Math.min(
-              Date.now() - attemptStart,
-              vetoBudgetMs,
-            );
             let vetoLatencyRecorded = false;
             const recordAttemptLatency = () => {
               if (!vetoLatencyRecorded) {
                 vetoLatencyRecorded = true;
-                recordVetoLatency(attemptLatencyMs);
+                recordVetoLatency(
+                  Math.min(Date.now() - attemptStart, vetoBudgetMs),
+                );
               }
             };
              return transport.sendPrompt(prompt, context, vetoBudgetMs).pipe(

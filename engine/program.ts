@@ -2825,10 +2825,14 @@ export const program = Effect.gen(function* () {
       if (adapter.hasWallet() && !config.paperTrading && scanCount % 10 === 0) {
         yield* Effect.fork(
           Effect.gen(function* () {
-            const [holdings, nativeSolLamports] = yield* Effect.all([
-              adapter.getWalletHoldings().pipe(Effect.catchAll(() => Effect.succeed(new Map()))),
-              adapter.getNativeSolBalance().pipe(Effect.catchAll(() => Effect.succeed(0n))),
+            const raw = yield* Effect.all([
+              adapter.getWalletHoldings().pipe(Effect.catchAll(() => Effect.succeed(null))),
+              adapter.getNativeSolBalance().pipe(Effect.catchAll(() => Effect.succeed(null))),
             ]);
+            const [holdings, nativeSolLamports] = raw;
+            if (holdings === null || nativeSolLamports === null) {
+              return;
+            }
             const breakdown: Array<{ mint: string; amount: string }> = [];
             if (nativeSolLamports > 0n) {
               breakdown.push({
