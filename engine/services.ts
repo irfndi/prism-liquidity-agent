@@ -63,6 +63,7 @@ export interface DiscoveredPool {
   readonly binStep: number;
   readonly tokenX: string;
   readonly tokenY: string;
+  readonly createdAtMs?: number;
 }
 
 export interface SwapRequest {
@@ -680,6 +681,7 @@ export interface ScreenedPool {
   readonly binUtilization: number;
   readonly tokenX: string;
   readonly tokenY: string;
+  readonly createdAtMs?: number;
 }
 
 export interface ScreenerApi {

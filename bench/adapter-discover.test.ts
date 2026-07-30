@@ -534,19 +534,19 @@ describe("Meteora discovery pagination", () => {
       );
     }) as unknown as typeof fetch);
 
-    // When
-    await runRecurringDiscover(
-      buildAdapterLayer({
-        meteoraPoolsUrl: "https://example.test/pools?filter_by=is_blacklisted=false",
-      }),
-    );
-
-    // Then
-    expect(requestedUrls).toEqual([
-      "https://example.test/pools?filter_by=is_blacklisted%3Dfalse&page=1&page_size=1000",
-      "https://example.test/pools?filter_by=is_blacklisted%3Dfalse&page=2&page_size=1000",
-    ]);
-    restore();
+    try {
+      await runRecurringDiscover(
+        buildAdapterLayer({
+          meteoraPoolsUrl: "https://example.test/pools?filter_by=is_blacklisted=false",
+        }),
+      );
+      expect(requestedUrls).toEqual([
+        "https://example.test/pools?filter_by=is_blacklisted%3Dfalse&page=1&page_size=1000",
+        "https://example.test/pools?filter_by=is_blacklisted%3Dfalse&page=2&page_size=1000",
+      ]);
+    } finally {
+      restore();
+    }
   });
 
   it("rotates discovery pages deterministically across recurring scans", () => {

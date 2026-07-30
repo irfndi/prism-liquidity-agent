@@ -98,6 +98,7 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
                     binUtilization: 0,
                     tokenX: pool.tokenX,
                     tokenY: pool.tokenY,
+                    ...(pool.createdAtMs === undefined ? {} : { createdAtMs: pool.createdAtMs }),
                   };
                 },
                 catch: (error) => error,

@@ -1086,26 +1086,31 @@ export const DbLive = (dbPath?: string) =>
           }),
 
         getTokenCandidate: (id) =>
-          Effect.sync(() => {
-            const row = queryOne<Record<string, unknown>>(
-              db,
-              "SELECT * FROM token_candidates WHERE id = ?",
-              id,
-            );
-            return row === null ? null : rowToTokenCandidate(row);
+          Effect.try({
+            try: () => {
+              const row = queryOne<Record<string, unknown>>(
+                db,
+                "SELECT * FROM token_candidates WHERE id = ?",
+                id,
+              );
+              return row === null ? null : rowToTokenCandidate(row);
+            },
+            catch: (error) => error,
           }),
 
         listTokenCandidates: (walletAddress, agentInstanceId) =>
-          Effect.sync(() =>
-            queryAll<Record<string, unknown>>(
-              db,
-              `SELECT * FROM token_candidates
+          Effect.try({
+            try: () =>
+              queryAll<Record<string, unknown>>(
+                db,
+                `SELECT * FROM token_candidates
                WHERE wallet_address = ? AND agent_instance_id = ?
                ORDER BY updated_at ASC, id ASC`,
-              walletAddress,
-              agentInstanceId,
-            ).map(rowToTokenCandidate),
-          ),
+                walletAddress,
+                agentInstanceId,
+              ).map(rowToTokenCandidate),
+            catch: (error) => error,
+          }),
 
         saveExecutionOperation: (operation) =>
           Effect.sync(() => {
@@ -1147,26 +1152,31 @@ export const DbLive = (dbPath?: string) =>
           }),
 
         getExecutionOperation: (id) =>
-          Effect.sync(() => {
-            const row = queryOne<Record<string, unknown>>(
-              db,
-              "SELECT * FROM execution_operations WHERE id = ?",
-              id,
-            );
-            return row === null ? null : rowToExecutionOperation(row);
+          Effect.try({
+            try: () => {
+              const row = queryOne<Record<string, unknown>>(
+                db,
+                "SELECT * FROM execution_operations WHERE id = ?",
+                id,
+              );
+              return row === null ? null : rowToExecutionOperation(row);
+            },
+            catch: (error) => error,
           }),
 
         listExecutionOperations: (walletAddress, agentInstanceId) =>
-          Effect.sync(() =>
-            queryAll<Record<string, unknown>>(
-              db,
-              `SELECT * FROM execution_operations
+          Effect.try({
+            try: () =>
+              queryAll<Record<string, unknown>>(
+                db,
+                `SELECT * FROM execution_operations
                WHERE wallet_address = ? AND agent_instance_id = ?
                ORDER BY created_at ASC, id ASC`,
-              walletAddress,
-              agentInstanceId,
-            ).map(rowToExecutionOperation),
-          ),
+                walletAddress,
+                agentInstanceId,
+              ).map(rowToExecutionOperation),
+            catch: (error) => error,
+          }),
 
         saveSettlementJob: (job) =>
           Effect.sync(() => {
@@ -1224,26 +1234,31 @@ export const DbLive = (dbPath?: string) =>
           }),
 
         getSettlementJob: (id) =>
-          Effect.sync(() => {
-            const row = queryOne<Record<string, unknown>>(
-              db,
-              "SELECT * FROM settlement_jobs WHERE id = ?",
-              id,
-            );
-            return row === null ? null : rowToSettlementJob(row);
+          Effect.try({
+            try: () => {
+              const row = queryOne<Record<string, unknown>>(
+                db,
+                "SELECT * FROM settlement_jobs WHERE id = ?",
+                id,
+              );
+              return row === null ? null : rowToSettlementJob(row);
+            },
+            catch: (error) => error,
           }),
 
         listSettlementJobs: (walletAddress, agentInstanceId) =>
-          Effect.sync(() =>
-            queryAll<Record<string, unknown>>(
-              db,
-              `SELECT * FROM settlement_jobs
+          Effect.try({
+            try: () =>
+              queryAll<Record<string, unknown>>(
+                db,
+                `SELECT * FROM settlement_jobs
                WHERE wallet_address = ? AND agent_instance_id = ?
                ORDER BY created_at ASC, id ASC`,
-              walletAddress,
-              agentInstanceId,
-            ).map(rowToSettlementJob),
-          ),
+                walletAddress,
+                agentInstanceId,
+              ).map(rowToSettlementJob),
+            catch: (error) => error,
+          }),
 
         saveSafetyPause: (pause) =>
           Effect.sync(() => {
@@ -1265,15 +1280,18 @@ export const DbLive = (dbPath?: string) =>
           }),
 
         getSafetyPause: (walletAddress, agentInstanceId) =>
-          Effect.sync(() => {
-            const row = queryOne<Record<string, unknown>>(
-              db,
-              `SELECT * FROM wallet_safety_pauses
+          Effect.try({
+            try: () => {
+              const row = queryOne<Record<string, unknown>>(
+                db,
+                `SELECT * FROM wallet_safety_pauses
                WHERE wallet_address = ? AND agent_instance_id = ?`,
-              walletAddress,
-              agentInstanceId,
-            );
-            return row === null ? null : rowToSafetyPause(row);
+                walletAddress,
+                agentInstanceId,
+              );
+              return row === null ? null : rowToSafetyPause(row);
+            },
+            catch: (error) => error,
           }),
       };
 
@@ -1400,21 +1418,6 @@ function rowToExecutionOperation(row: Record<string, unknown>): ExecutionOperati
 }
 
 function rowToSettlementJob(row: Record<string, unknown>): SettlementJobRecord {
-  const finalization =
-    row.confirmed_output_atomic != null ||
-    row.output_usd != null ||
-    row.execution_cost_usd != null ||
-    row.finalized_at != null ||
-    row.realized_pnl_usd != null
-      ? {
-          confirmedOutputAtomic:
-            row.confirmed_output_atomic == null ? null : String(row.confirmed_output_atomic),
-          outputUsd: row.output_usd == null ? null : Number(row.output_usd),
-          executionCostUsd: row.execution_cost_usd == null ? null : Number(row.execution_cost_usd),
-          finalizedAt: row.finalized_at == null ? null : Number(row.finalized_at),
-          realizedPnlUsd: row.realized_pnl_usd == null ? null : Number(row.realized_pnl_usd),
-        }
-      : {};
   return {
     id: String(row.id),
     walletAddress: String(row.wallet_address),
@@ -1428,7 +1431,12 @@ function rowToSettlementJob(row: Record<string, unknown>): SettlementJobRecord {
     attempts: Number(row.attempts),
     nextRetryAt: row.next_retry_at === null ? null : Number(row.next_retry_at),
     txSignature: row.tx_signature === null ? null : String(row.tx_signature),
-    ...finalization,
+    confirmedOutputAtomic:
+      row.confirmed_output_atomic == null ? null : String(row.confirmed_output_atomic),
+    outputUsd: row.output_usd == null ? null : Number(row.output_usd),
+    executionCostUsd: row.execution_cost_usd == null ? null : Number(row.execution_cost_usd),
+    finalizedAt: row.finalized_at == null ? null : Number(row.finalized_at),
+    realizedPnlUsd: row.realized_pnl_usd == null ? null : Number(row.realized_pnl_usd),
     expiresAt: Number(row.expires_at),
     error: row.error === null ? null : String(row.error),
     createdAt: Number(row.created_at),

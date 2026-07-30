@@ -741,7 +741,7 @@ export const EntryPrepLive = Layer.effect(
           }
 
           logger.info("Entry token preparation complete", { poolAddress });
-        }).pipe(Effect.asVoid),
+        }),
     };
 
     return api;

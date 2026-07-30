@@ -55,7 +55,10 @@ export interface SettlementProcessorInput {
 }
 
 function atomicUsd(amountAtomic: bigint, decimals: number, priceUsd: number): number {
-  return (Number(amountAtomic) / 10 ** decimals) * priceUsd;
+  const scale = 10n ** BigInt(decimals);
+  const whole = amountAtomic / scale;
+  const remainder = amountAtomic % scale;
+  return (Number(whole) + Number(remainder) / Number(scale)) * priceUsd;
 }
 
 function retryableJob(job: SettlementJobRecord, now: number, error: unknown): SettlementJobRecord {
@@ -101,6 +104,11 @@ export function processSettlementJobs(
             return { ...job, status: "submitted" as const, updatedAt: input.now };
           }
         }
+        if (job.status === "prepared" && job.txSignature === null) {
+          return yield* Effect.fail(
+            new Error("Prepared settlement requires operator reconciliation"),
+          );
+        }
         const amountAtomic = BigInt(job.amountAtomic);
         const prices = yield* input.adapter.getTokenPrices([job.tokenMint, SOL_MINT]);
         const solPriceUsd = prices[SOL_MINT] ?? 0;
@@ -135,27 +143,33 @@ export function processSettlementJobs(
         yield* simulateSwap(prepared);
         const inputDecimals = yield* input.adapter.getTokenDecimals(job.tokenMint);
         const inputPriceUsd = prices[job.tokenMint] ?? 0;
-        const outputUsd = atomicUsd(quote.outAmountAtomic, 9, solPriceUsd);
-        const inputUsd =
-          inputPriceUsd > 0 ? atomicUsd(amountAtomic, inputDecimals, inputPriceUsd) : outputUsd;
-        const executionCostUsd = Math.max(0, inputUsd - outputUsd);
+        const nativeBefore = yield* input.adapter.getNativeSolBalance();
         yield* input.db.saveSettlementJob({
           ...job,
           status: "prepared",
           attempts: job.attempts + 1,
-          confirmedOutputAtomic: quote.outAmountAtomic.toString(),
-          outputUsd,
-          executionCostUsd,
+          confirmedOutputAtomic: null,
+          outputUsd: null,
+          executionCostUsd: null,
           updatedAt: input.now,
         });
         const signature = yield* submitSwap(prepared);
+        const nativeAfter = yield* input.adapter.getNativeSolBalance();
+        const confirmedOutputAtomic = nativeAfter > nativeBefore ? nativeAfter - nativeBefore : 0n;
+        if (confirmedOutputAtomic <= 0n) {
+          return yield* Effect.fail(new Error("Settlement output balance delta unavailable"));
+        }
+        const outputUsd = atomicUsd(confirmedOutputAtomic, 9, solPriceUsd);
+        const inputUsd =
+          inputPriceUsd > 0 ? atomicUsd(amountAtomic, inputDecimals, inputPriceUsd) : outputUsd;
+        const executionCostUsd = Math.max(0, inputUsd - outputUsd);
         return {
           ...job,
           status: "confirmed" as const,
           attempts: job.attempts + 1,
           nextRetryAt: null,
           txSignature: signature,
-          confirmedOutputAtomic: quote.outAmountAtomic.toString(),
+          confirmedOutputAtomic: confirmedOutputAtomic.toString(),
           outputUsd,
           executionCostUsd,
           error: null,

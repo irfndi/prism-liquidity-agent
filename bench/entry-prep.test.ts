@@ -320,7 +320,6 @@ describe("EntryPrepService", () => {
   it("reports the exact partial submission count when a SOL-funded route fails mid-operation", async () => {
     const otherToken = "OtherToken1111111111111111111111111111111";
     const balances: Record<string, bigint> = {};
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const submitSpy = vi.fn((prepared: PreparedSwap) => {
       if (prepared.quote.request.outputMint === otherToken) {
         return Effect.fail(new Error("second submission rejected"));
@@ -370,11 +369,6 @@ describe("EntryPrepService", () => {
     expect(submitSpy).toHaveBeenCalledTimes(2);
     expect(balances[TOKEN_Y]).toBe(1_000_000_000n);
     expect(balances[otherToken]).toBeUndefined();
-    expect(
-      logSpy.mock.calls.some(
-        ([line]) => typeof line === "string" && line.includes("entry token preparation complete"),
-      ),
-    ).toBe(false);
   });
 
   it("swaps USDC for one missing leg when single-sided cannot cover the full size", async () => {

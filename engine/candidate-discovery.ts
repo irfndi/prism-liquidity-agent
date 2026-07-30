@@ -68,7 +68,9 @@ export function advanceScreenedCandidates(
           requiredMints: [pool.tokenX, pool.tokenY],
           now: input.now,
           maxMarketDataAgeMs: input.maxMarketDataAgeMs,
-          routeAvailable: input.routeAvailableMints.has(tokenMint),
+          routeAvailable: [pool.tokenX, pool.tokenY].every(
+            (mint) => mint === SOL_MINT || input.routeAvailableMints.has(mint),
+          ),
           screenerAccepted: true,
           marketDataAvailable:
             Number.isFinite(pool.tvlUsd) &&

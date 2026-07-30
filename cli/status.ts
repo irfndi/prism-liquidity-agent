@@ -118,23 +118,22 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
           const summary = computeSummary(positions);
           const effectiveWallet = resolveEffectivePubkey();
           const walletAddress = effectiveWallet?.error ? null : (effectiveWallet?.pubkey ?? null);
-          const autonomous =
-            walletAddress === null
-              ? {
-                  candidates: [],
-                  operations: [],
-                  settlements: [],
-                  safetyPause: null,
-                }
-              : {
-                  candidates: yield* db.listTokenCandidates(walletAddress, config.agentInstanceId),
-                  operations: yield* db.listExecutionOperations(
-                    walletAddress,
-                    config.agentInstanceId,
-                  ),
-                  settlements: yield* db.listSettlementJobs(walletAddress, config.agentInstanceId),
-                  safetyPause: yield* db.getSafetyPause(walletAddress, config.agentInstanceId),
-                };
+          const autonomousWalletAddress = walletAddress ?? "paper";
+          const autonomous = {
+            candidates: yield* db.listTokenCandidates(
+              autonomousWalletAddress,
+              config.agentInstanceId,
+            ),
+            operations: yield* db.listExecutionOperations(
+              autonomousWalletAddress,
+              config.agentInstanceId,
+            ),
+            settlements: yield* db.listSettlementJobs(
+              autonomousWalletAddress,
+              config.agentInstanceId,
+            ),
+            safetyPause: yield* db.getSafetyPause(autonomousWalletAddress, config.agentInstanceId),
+          };
 
           const activePositions = positions.filter((p) => p.paperExitedAt === null);
           const prices = new Map<string, number>();
@@ -295,7 +294,8 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
                 : []),
               `  Unrealized:  ${pnlText}`,
               `  ${agentStatus}`,
-              `  Autonomous:  ${config.autonomousTokenMode} (${walletAddress ?? "wallet unavailable"})`,
+              `  Autonomous:  ${config.autonomousTokenMode} (${walletAddress ?? "paper"})`,
+              ...(effectiveWallet?.error ? [`  Wallet error: ${effectiveWallet.error}`] : []),
               `  Candidates:  ${autonomous.candidates.length}`,
               `  Operations:  ${autonomous.operations.length}`,
               `  Settlements: ${autonomous.settlements.length}`,

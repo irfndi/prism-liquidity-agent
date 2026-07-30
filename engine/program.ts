@@ -1081,6 +1081,11 @@ function settlementJobsForReceipts(input: {
     attempts: 0,
     nextRetryAt: input.now,
     txSignature: null,
+    confirmedOutputAtomic: null,
+    outputUsd: null,
+    executionCostUsd: null,
+    finalizedAt: null,
+    realizedPnlUsd: null,
     expiresAt: input.now + input.context.settlementMaxPendingMs,
     error: null,
     createdAt: input.now,
@@ -1147,7 +1152,7 @@ export function executeLive(
     // live mode honors maxOpenPositions.
 
     let entryOperation: ExecutionOperationRecord | null = null;
-    if (decision.action === "ENTER" && decision.positionSizeUsd && autonomous) {
+    if (decision.action === "ENTER" && decision.positionSizeUsd && autonomous && pool.tokenX) {
       const now = Date.now();
       entryOperation = operationRecord({
         context: autonomous,
@@ -1155,7 +1160,7 @@ export function executeLive(
         candidateId: null,
         positionId: null,
         poolAddress: decision.poolAddress,
-        tokenMint: pool.tokenX ?? "",
+        tokenMint: pool.tokenX,
         operationType: "entry",
         status: "planned",
         amountAtomic: null,
@@ -1426,7 +1431,7 @@ export function executeLive(
     } else if (decision.action === "EXIT") {
       const pos = resolveTargetPosition(trackedPositions, decision);
       let exitOperation: ExecutionOperationRecord | null = null;
-      if (autonomous && pos) {
+      if (autonomous && pos && pool.tokenX) {
         const now = Date.now();
         exitOperation = operationRecord({
           context: autonomous,
@@ -1434,7 +1439,7 @@ export function executeLive(
           candidateId: null,
           positionId: pos.positionId,
           poolAddress: decision.poolAddress,
-          tokenMint: pool.tokenX ?? "",
+          tokenMint: pool.tokenX,
           operationType: "exit",
           status: "planned",
           amountAtomic: null,
@@ -1541,12 +1546,69 @@ export function executeLive(
               attempts: 0,
               nextRetryAt: now,
               txSignature: null,
+              confirmedOutputAtomic: null,
+              outputUsd: null,
+              executionCostUsd: null,
+              finalizedAt: null,
+              realizedPnlUsd: null,
               expiresAt: now + autonomous.settlementMaxPendingMs,
               error: null,
               createdAt: now,
               updatedAt: now,
             };
             yield* db.saveSettlementJob(job).pipe(Effect.catchAll(() => Effect.void));
+          }
+          const pendingFeeUsd = exitResultData.pendingFeeUsd;
+          if (typeof pendingFeeUsd === "number") {
+            pos.cumulativeFeesClaimedUsd += pendingFeeUsd;
+            yield* db
+              .savePositionEvent({
+                id: randomUUID(),
+                poolAddress: decision.poolAddress,
+                positionPubKey: pos.positionPubKey,
+                positionId: pos.positionId,
+                event: "CLAIM",
+                valueUsd: null,
+                feesUsd: pendingFeeUsd,
+                price: pool.currentPrice,
+                metadata: { kind: "exit_sweep" },
+                createdAt: now,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
+          for (const reward of exitResultData.sweptRewards ?? []) {
+            if (typeof reward.amountUsd === "number") {
+              pos.cumulativeRewardsClaimedUsd += reward.amountUsd;
+            }
+          }
+          if ((exitResultData.sweptRewards ?? []).length > 0) {
+            yield* db
+              .savePositionEvent({
+                id: randomUUID(),
+                poolAddress: decision.poolAddress,
+                positionPubKey: pos.positionPubKey,
+                positionId: pos.positionId,
+                event: "CLAIM",
+                valueUsd:
+                  (exitResultData.sweptRewards ?? []).reduce(
+                    (sum, reward) => sum + (reward.amountUsd ?? 0),
+                    0,
+                  ) || null,
+                feesUsd: null,
+                price: pool.currentPrice,
+                metadata: { kind: "exit_sweep_reward" },
+                createdAt: now,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
+          yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+          if (pos.entrySignalSnapshotId != null) {
+            yield* db
+              .recordSignalOutcome(
+                pos.entrySignalSnapshotId,
+                pos.currentValueUsd - pos.depositedUsd,
+              )
+              .pipe(Effect.catchAll(() => Effect.void));
           }
           yield* db.closePosition(pos.positionId, null).pipe(Effect.catchAll(() => Effect.void));
           trackedPositions.delete(pos.positionId);
@@ -2006,6 +2068,12 @@ export const program = Effect.gen(function* () {
           .pipe(Effect.catchAll(() => Effect.succeed(null)));
   let consecutiveCoreDataFailures = 0;
   let consecutiveExecutionFailures = 0;
+  let coreDataFailuresThisCycle = 0;
+  let executionFailuresThisCycle = 0;
+  let executionSuccessesThisCycle = 0;
+  let dailyBaselineDay = "";
+  let dailyBaselineEquityUsd = 0;
+  let dailyDrawdownPct = 0;
 
   // Agent check-in state
   const programStartTime = Date.now();
@@ -2297,7 +2365,14 @@ export const program = Effect.gen(function* () {
           return Effect.succeed([] as ReadonlyArray<ScreenedPool>);
         }),
       );
-      const candidatePools = screened.slice(0, config.candidateScanLimit);
+      const now = Date.now();
+      const candidatePools = screened
+        .filter(
+          (pool) =>
+            pool.createdAtMs === undefined ||
+            now - pool.createdAtMs >= config.candidateMinPoolAgeMs,
+        )
+        .slice(0, config.candidateScanLimit);
       const mints = [...new Set(candidatePools.flatMap((pool) => [pool.tokenX, pool.tokenY]))];
       const priceEvidence =
         adapter.getTokenPriceEvidence === undefined
@@ -2354,7 +2429,7 @@ export const program = Effect.gen(function* () {
           ),
         );
       }
-      if (config.autonomousTokenMode !== "live") return;
+      autonomousCandidatePools.clear();
       for (const poolAddress of advanced.eligiblePoolAddresses) {
         autonomousCandidatePools.add(poolAddress);
         if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
@@ -3185,6 +3260,7 @@ export const program = Effect.gen(function* () {
 
         if (executed) {
           cycle.poolsExecuted++;
+          executionSuccessesThisCycle++;
           idleRedeployLogger.info("Idle capital redeployed", {
             pool: candidate.poolAddress,
             sizeUsd: decision.positionSizeUsd,
@@ -3193,6 +3269,7 @@ export const program = Effect.gen(function* () {
           });
         } else {
           cycle.poolsFailed++;
+          executionFailuresThisCycle++;
         }
 
         yield* audit
@@ -3222,6 +3299,9 @@ export const program = Effect.gen(function* () {
 
   const runScanCycle = (): Effect.Effect<void, never, EntryPrepService> =>
     Effect.gen(function* () {
+      coreDataFailuresThisCycle = 0;
+      executionFailuresThisCycle = 0;
+      executionSuccessesThisCycle = 0;
       const cycle: AgentCycle = {
         cycleId: randomUUID(),
         startedAt: Date.now(),
@@ -3244,7 +3324,7 @@ export const program = Effect.gen(function* () {
             autonomousExecution.agentInstanceId,
           )
           .pipe(Effect.catchAll(() => Effect.succeed([])));
-        yield* processSettlementJobs({
+        const processedJobs = yield* processSettlementJobs({
           adapter,
           db,
           jobs: settlementJobs,
@@ -3252,7 +3332,7 @@ export const program = Effect.gen(function* () {
           now: Date.now(),
           maxSwapSlippageBps: config.maxSwapSlippageBps,
         });
-        const oldestSettlementAgeMs = settlementJobs
+        const oldestSettlementAgeMs = processedJobs
           .filter((job) => job.status !== "confirmed" && job.status !== "terminal")
           .reduce((oldest, job) => Math.max(oldest, Date.now() - job.createdAt), 0);
         if (
@@ -3380,6 +3460,7 @@ export const program = Effect.gen(function* () {
         ).pipe(
           Effect.catchAll((err) => {
             cycle.poolsFailed++;
+            coreDataFailuresThisCycle++;
             console.error("Error processing pool", { poolAddress, err: String(err) });
             return Effect.succeed(null);
           }),
@@ -3407,31 +3488,18 @@ export const program = Effect.gen(function* () {
       }
 
       consecutiveCoreDataFailures =
-        cycle.poolsScanned > 0 && cycle.poolsFailed >= cycle.poolsScanned
+        cycle.poolsScanned > 0 && coreDataFailuresThisCycle >= cycle.poolsScanned
           ? consecutiveCoreDataFailures + 1
           : 0;
       consecutiveExecutionFailures =
-        cycle.poolsFailed > 0
-          ? consecutiveExecutionFailures + cycle.poolsFailed
-          : cycle.poolsExecuted > 0
+        executionFailuresThisCycle > 0
+          ? consecutiveExecutionFailures + executionFailuresThisCycle
+          : executionSuccessesThisCycle > 0
             ? 0
             : consecutiveExecutionFailures;
       if (autonomousExecution && activeSafetyPause?.resolvedAt !== null) {
-        const basisUsd = [...trackedPositions.values()].reduce(
-          (sum, position) => sum + position.depositedUsd,
-          0,
-        );
-        const pnlUsd = [...trackedPositions.values()].reduce(
-          (sum, position) =>
-            sum +
-            position.currentValueUsd +
-            position.cumulativeFeesClaimedUsd +
-            position.cumulativeRewardsClaimedUsd -
-            position.depositedUsd,
-          0,
-        );
         const pauseReason = shouldTriggerSafetyPause({
-          dailyDrawdownPct: basisUsd > 0 && pnlUsd < 0 ? (Math.abs(pnlUsd) / basisUsd) * 100 : 0,
+          dailyDrawdownPct,
           maxDailyDrawdownPct: config.maxDailyDrawdownPct,
           consecutiveCoreDataFailures,
           consecutiveExecutionFailures,
@@ -4494,6 +4562,29 @@ export const program = Effect.gen(function* () {
       const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
       const portfolioValueUsd =
         walletBalanceUsd + openPositions.reduce((sum, p) => sum + p.currentValueUsd, 0);
+      const dayStart = new Date(Date.now()).setUTCHours(0, 0, 0, 0);
+      const dayKey = new Date(dayStart).toISOString().slice(0, 10);
+      const closedToday = yield* db
+        .getClosedPositions()
+        .pipe(Effect.catchAll(() => Effect.succeed([])));
+      const realizedTodayUsd = closedToday.reduce(
+        (sum, position) =>
+          position.closedAt !== null &&
+          position.closedAt >= dayStart &&
+          position.realizedPnlUsd !== null
+            ? sum + position.realizedPnlUsd
+            : sum,
+        0,
+      );
+      if (dailyBaselineDay !== dayKey) {
+        dailyBaselineDay = dayKey;
+        dailyBaselineEquityUsd = portfolioValueUsd + realizedTodayUsd;
+      }
+      const dailyEquityUsd = portfolioValueUsd + realizedTodayUsd;
+      dailyDrawdownPct =
+        dailyBaselineEquityUsd > 0 && dailyEquityUsd < dailyBaselineEquityUsd
+          ? ((dailyBaselineEquityUsd - dailyEquityUsd) / dailyBaselineEquityUsd) * 100
+          : 0;
       const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
 
       // ── Phase 2: REBALANCE / HOLD per surviving position ────────────────
@@ -5880,10 +5971,7 @@ export const program = Effect.gen(function* () {
           );
           executed = paperResult.executed;
           executionError = paperResult.error;
-        } else if (
-          config.autonomousTokenMode === "shadow" &&
-          (decision.action === "ENTER" || decision.action === "REBALANCE")
-        ) {
+        } else if (config.autonomousTokenMode === "shadow" && decision.action !== "HOLD") {
           executionError = "Shadow mode records decisions without sending transactions";
         } else {
           const liveResult = yield* executeLive(
@@ -5956,8 +6044,10 @@ export const program = Effect.gen(function* () {
         if (decision.action !== "HOLD") {
           if (executed) {
             cycle.poolsExecuted++;
+            executionSuccessesThisCycle++;
           } else {
             cycle.poolsFailed++;
+            executionFailuresThisCycle++;
           }
         }
         if (executed && decision.action === "EXIT") {

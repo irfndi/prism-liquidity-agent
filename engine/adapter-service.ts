@@ -1191,8 +1191,17 @@ export const AdapterLive = Layer.effect(
     }).pipe(Effect.zipRight(invalidateWalletSnapshot));
 
     const quotedByRawPayload = new WeakMap<Record<string, unknown>, SwapQuote>();
-    const preparedTransactions = new Set<string>();
-    const simulatedTransactions = new Set<string>();
+    const preparedTransactions = new Map<string, number>();
+    const simulatedTransactions = new Map<string, number>();
+
+    function prunePreparedState(now: number): void {
+      for (const [transaction, createdAt] of preparedTransactions) {
+        if (now - createdAt > MAX_SWAP_QUOTE_AGE_MS) preparedTransactions.delete(transaction);
+      }
+      for (const [transaction, createdAt] of simulatedTransactions) {
+        if (now - createdAt > MAX_SWAP_QUOTE_AGE_MS) simulatedTransactions.delete(transaction);
+      }
+    }
 
     function isRecord(value: unknown): value is Record<string, unknown> {
       return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1508,8 +1517,10 @@ export const AdapterLive = Layer.effect(
           );
         }
         const signed = yield* decodeAndSignSwapTransaction(payload.swapTransaction);
-        preparedTransactions.add(signed.transactionBase64);
-        return { quote, ...signed, preparedAt: Date.now() };
+        const preparedAt = Date.now();
+        prunePreparedState(preparedAt);
+        preparedTransactions.set(signed.transactionBase64, preparedAt);
+        return { quote, ...signed, preparedAt };
       });
     }
 
@@ -1556,7 +1567,9 @@ export const AdapterLive = Layer.effect(
             ),
           );
         }
-        simulatedTransactions.add(prepared.transactionBase64);
+        const simulatedAt = Date.now();
+        prunePreparedState(simulatedAt);
+        simulatedTransactions.set(prepared.transactionBase64, simulatedAt);
         return {
           successful: true,
           logs: simulation.value.logs ?? [],
@@ -1568,6 +1581,7 @@ export const AdapterLive = Layer.effect(
     function submitSwap(prepared: PreparedSwap): Effect.Effect<string, unknown> {
       return Effect.gen(function* () {
         yield* ensureFreshQuote(prepared.quote, "submit");
+        prunePreparedState(Date.now());
         if (!simulatedTransactions.delete(prepared.transactionBase64)) {
           return yield* Effect.fail(
             swapValidationError(
@@ -3113,13 +3127,18 @@ export const AdapterLive = Layer.effect(
               }),
             );
           }
+          let pageSize = 1000;
+          try {
+            const configured = Number(new URL(baseUrl).searchParams.get("page_size") ?? 1000);
+            if (Number.isSafeInteger(configured) && configured > 0) pageSize = configured;
+          } catch {}
           const url =
             requestedPage === null
               ? baseUrl
               : buildMeteoraDiscoveryPageUrl({
                   baseUrl,
                   page: requestedPage,
-                  pageSize: 1000,
+                  pageSize,
                 });
           if (url === null) {
             return yield* Effect.fail(
@@ -3168,7 +3187,13 @@ export const AdapterLive = Layer.effect(
               }),
             );
           }
-          const { data, total, pages, current_page: currentPage, page_size: pageSize } = parsed;
+          const {
+            data,
+            total,
+            pages,
+            current_page: currentPage,
+            page_size: responsePageSize,
+          } = parsed;
           const paginationValid =
             Number.isSafeInteger(total) &&
             total >= 0 &&
@@ -3176,9 +3201,9 @@ export const AdapterLive = Layer.effect(
             pages >= 0 &&
             Number.isSafeInteger(currentPage) &&
             currentPage >= 1 &&
-            Number.isSafeInteger(pageSize) &&
-            pageSize >= 0 &&
-            (total === 0 || (pages >= 1 && pageSize >= 1 && currentPage <= pages));
+            Number.isSafeInteger(responsePageSize) &&
+            responsePageSize >= 0 &&
+            (total === 0 || (pages >= 1 && responsePageSize >= 1 && currentPage <= pages));
           if (!paginationValid) {
             return yield* Effect.fail(
               new DiscoverPoolsError({
@@ -3223,6 +3248,7 @@ export const AdapterLive = Layer.effect(
               binStep: p.pool_config.bin_step,
               tokenX: p.token_x.address,
               tokenY: p.token_y.address,
+              createdAtMs: p.created_at > 1_000_000_000_000 ? p.created_at : p.created_at * 1000,
             }))
             .slice(0, 50);
         }),

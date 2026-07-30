@@ -76,11 +76,11 @@ export interface SettlementJobRecord {
   readonly attempts: number;
   readonly nextRetryAt: number | null;
   readonly txSignature: string | null;
-  readonly confirmedOutputAtomic?: string | null;
-  readonly outputUsd?: number | null;
-  readonly executionCostUsd?: number | null;
-  readonly finalizedAt?: number | null;
-  readonly realizedPnlUsd?: number | null;
+  readonly confirmedOutputAtomic: string | null;
+  readonly outputUsd: number | null;
+  readonly executionCostUsd: number | null;
+  readonly finalizedAt: number | null;
+  readonly realizedPnlUsd: number | null;
   readonly expiresAt: number;
   readonly error: string | null;
   readonly createdAt: number;
