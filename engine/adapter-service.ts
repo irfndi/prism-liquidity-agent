@@ -931,9 +931,16 @@ export const AdapterLive = Layer.effect(
           }
           const metadataPrice = tokenMetaCache.get(mint)?.priceUsd;
           if (metadataPrice !== undefined && Number.isFinite(metadataPrice) && metadataPrice > 0) {
-            setCachedPrice(mint, metadataPrice);
-            prices[mint] = metadataPrice;
-            continue;
+            const metadataFetchedAt = tokenMetaCache.get(mint)?.priceFetchedAt;
+            if (
+              metadataFetchedAt === undefined ||
+              Date.now() - metadataFetchedAt <= PRICE_CACHE_TTL_MS
+            ) {
+              setCachedPrice(mint, metadataPrice);
+              prices[mint] = metadataPrice;
+              continue;
+            }
+            tokenMetaCache.delete(mint);
           }
           const missFetchedAt = negativePriceCache.get(mint);
           if (missFetchedAt !== undefined) {
@@ -1375,9 +1382,6 @@ export const AdapterLive = Layer.effect(
 
     function quoteSwap(request: SwapRequest): Effect.Effect<SwapQuote, unknown> {
       return Effect.gen(function* () {
-        if (!wallet) {
-          return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
-        }
         if (request.amountAtomic <= 0n) {
           return yield* Effect.fail(
             new SwapQuoteError({
@@ -1650,6 +1654,7 @@ export const AdapterLive = Layer.effect(
       outputMint: string,
       amountAtomic: bigint,
     ): Effect.Effect<Record<string, unknown>, unknown> {
+      if (!wallet) return Effect.fail(new AdapterError({ message: "No wallet configured" }));
       return quoteSwap({
         inputMint: USDC_MINT,
         outputMint,
@@ -3206,7 +3211,9 @@ export const AdapterLive = Layer.effect(
             currentPage >= 1 &&
             Number.isSafeInteger(responsePageSize) &&
             responsePageSize >= 0 &&
-            (total === 0 || (pages >= 1 && responsePageSize >= 1 && currentPage <= pages));
+            (total === 0 || (pages >= 1 && responsePageSize >= 1 && currentPage <= pages)) &&
+            (requestedPage === null ||
+              (currentPage === requestedPage && responsePageSize === pageSize));
           if (!paginationValid) {
             return yield* Effect.fail(
               new DiscoverPoolsError({
@@ -3251,7 +3258,9 @@ export const AdapterLive = Layer.effect(
               binStep: p.pool_config.bin_step,
               tokenX: p.token_x.address,
               tokenY: p.token_y.address,
-              ...(typeof p.created_at === "number" && Number.isFinite(p.created_at)
+              ...(typeof p.created_at === "number" &&
+              Number.isFinite(p.created_at) &&
+              p.created_at > 0
                 ? {
                     createdAtMs:
                       p.created_at > 1_000_000_000_000 ? p.created_at : p.created_at * 1000,

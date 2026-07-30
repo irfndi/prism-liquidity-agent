@@ -1534,6 +1534,7 @@ export function executeLive(
               return false;
             }
           });
+          let settlementPersisted = true;
           for (const item of attributable) {
             const job: SettlementJobRecord = {
               id: randomUUID(),
@@ -1558,7 +1559,29 @@ export function executeLive(
               createdAt: now,
               updatedAt: now,
             };
-            yield* db.saveSettlementJob(job).pipe(Effect.catchAll(() => Effect.void));
+            yield* db.saveSettlementJob(job).pipe(
+              Effect.catchAll(() =>
+                Effect.sync(() => {
+                  settlementPersisted = false;
+                }),
+              ),
+            );
+          }
+          if (!settlementPersisted) {
+            deps.reconcileRequestedPools?.add(decision.poolAddress);
+            yield* db
+              .saveSafetyPause({
+                walletAddress: autonomous.walletAddress,
+                agentInstanceId: autonomous.agentInstanceId,
+                reason: "settlement_persistence_failed",
+                triggeredAt: now,
+                resolvedAt: null,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+            return {
+              executed: false,
+              error: "Unable to persist all exit settlement jobs; reconciliation required",
+            };
           }
           const pendingFeeUsd = exitResultData.pendingFeeUsd;
           if (typeof pendingFeeUsd === "number") {
@@ -2363,6 +2386,24 @@ export const program = Effect.gen(function* () {
         }),
       );
       const now = Date.now();
+      for (const candidate of autonomousCandidates.values()) {
+        if (candidate.state === "cooling_down" && candidate.cooldownUntil !== null) {
+          const advancedCandidate = transitionCandidate(
+            candidate,
+            { kind: "cooldown_elapsed", occurredAt: now },
+            {
+              minHealthyScans: config.candidateMinHealthyScans,
+              minObservationMs: config.candidateMinObservationMs,
+            },
+          );
+          if (advancedCandidate !== candidate) {
+            autonomousCandidates.set(advancedCandidate.id, advancedCandidate);
+            yield* db
+              .saveTokenCandidate(advancedCandidate)
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
+        }
+      }
       const candidatePools = screened
         .filter(
           (pool) =>
@@ -4577,7 +4618,7 @@ export const program = Effect.gen(function* () {
       );
       if (dailyBaselineDay !== dayKey) {
         dailyBaselineDay = dayKey;
-        dailyBaselineEquityUsd = portfolioValueUsd + realizedTodayUsd;
+        dailyBaselineEquityUsd = portfolioValueUsd - realizedTodayUsd;
       }
       const dailyEquityUsd = portfolioValueUsd;
       dailyDrawdownPct =
@@ -5849,6 +5890,7 @@ export const program = Effect.gen(function* () {
         // Execute
         let executed = false;
         let executionError: string | undefined = undefined;
+        let executionSkipped = false;
 
         // F6: paper-trading validation gate — only blocks ENTER, runs only in live mode
         if (!config.paperTrading && decision.action === "ENTER") {
@@ -5971,7 +6013,7 @@ export const program = Effect.gen(function* () {
           executed = paperResult.executed;
           executionError = paperResult.error;
         } else if (config.autonomousTokenMode === "shadow" && decision.action !== "HOLD") {
-          executionError = "Shadow mode records decisions without sending transactions";
+          executionSkipped = true;
         } else {
           const liveResult = yield* executeLive(
             {
@@ -6058,7 +6100,7 @@ export const program = Effect.gen(function* () {
           }
         }
 
-        if (decision.action !== "HOLD") {
+        if (decision.action !== "HOLD" && !executionSkipped) {
           if (executed) {
             cycle.poolsExecuted++;
             executionSuccessesThisCycle++;
@@ -6068,6 +6110,25 @@ export const program = Effect.gen(function* () {
           }
         }
         if (executed && decision.action === "EXIT") {
+          const candidate = [...autonomousCandidates.values()].find(
+            (item) => item.poolAddress === poolAddress && item.state === "entered",
+          );
+          if (candidate) {
+            const coolingCandidate = transitionCandidate(
+              candidate,
+              {
+                kind: "cooldown_started",
+                occurredAt: Date.now(),
+                cooldownUntil: Date.now() + config.oorCooldownMs,
+              },
+              {
+                minHealthyScans: config.candidateMinHealthyScans,
+                minObservationMs: config.candidateMinObservationMs,
+              },
+            );
+            autonomousCandidates.set(coolingCandidate.id, coolingCandidate);
+            yield* db.saveTokenCandidate(coolingCandidate).pipe(Effect.catchAll(() => Effect.void));
+          }
           // Follow-up 3655404926: record every executed EXIT (deterministic or
           // agent-adjusted) so the redeploy pass cannot re-enter this pool the
           // same cycle once the freed slot re-passes the position-count checks.

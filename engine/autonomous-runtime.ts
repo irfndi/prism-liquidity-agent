@@ -157,7 +157,7 @@ export function processSettlementJobs(
             attempts: job.attempts + 1,
             nextRetryAt: null,
             confirmedOutputAtomic: "0",
-            outputUsd: 0,
+            outputUsd: inputUsd,
             executionCostUsd: 0,
             error: "settlement dust skipped",
             updatedAt: input.now,

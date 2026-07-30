@@ -528,8 +528,15 @@ describe("Meteora discovery pagination", () => {
     const requestedUrls: string[] = [];
     const restore = mockFetch((async (input: unknown) => {
       requestedUrls.push(String(input));
+      const requested = new URL(String(input)).searchParams;
       return new Response(
-        JSON.stringify({ total: 3, pages: 3, current_page: 1, page_size: 1, data: [] }),
+        JSON.stringify({
+          total: 3,
+          pages: 3,
+          current_page: Number(requested.get("page") ?? 1),
+          page_size: Number(requested.get("page_size") ?? 1000),
+          data: [],
+        }),
         { status: 200 },
       );
     }) as unknown as typeof fetch);
