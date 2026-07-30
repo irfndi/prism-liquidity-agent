@@ -554,6 +554,17 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             }
             const prompt = buildPrompt(decision, context);
             const attemptStart = Date.now();
+            const attemptLatencyMs = Math.min(
+              Date.now() - attemptStart,
+              vetoBudgetMs,
+            );
+            let vetoLatencyRecorded = false;
+            const recordAttemptLatency = () => {
+              if (!vetoLatencyRecorded) {
+                vetoLatencyRecorded = true;
+                recordVetoLatency(attemptLatencyMs);
+              }
+            };
              return transport.sendPrompt(prompt, context, vetoBudgetMs).pipe(
                Effect.map((response: AgentRuntimeResponse) => {
                  lastPromptAt = Date.now();
@@ -562,7 +573,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
                 // inside sendPrompt (e.g., gateway), but excludes the
                 // initial startup connection which already completed
                 // in connectReviewTransport above.
-                 recordVetoLatency(Math.min(Date.now() - attemptStart, vetoBudgetMs));
+                 recordAttemptLatency();
                  const parsed = parseResponse(response.raw);
                  const override = validateOverride(decision, parsed);
                  if (override) {
@@ -586,8 +597,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
                 // catchAll. Interruption is the only cause type that
                 // catchAll would not see. Record min(elapsed, budget) to
                 // avoid a single hard timeout from dominating the window.
-                const elapsedMs = Math.min(Date.now() - attemptStart, vetoBudgetMs);
-                recordVetoLatency(elapsedMs);
+                recordAttemptLatency();
                 return Effect.failCause(cause);
               }),
             );
