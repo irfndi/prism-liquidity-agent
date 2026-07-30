@@ -38,6 +38,7 @@ function candidateId(
   return `${walletAddress}:${agentInstanceId}:${poolAddress}:${tokenMint}`;
 }
 
+/** Advances screened pools through candidate health and returns newly eligible pools. */
 export function advanceScreenedCandidates(
   input: AdvanceScreenedCandidatesInput,
 ): ScreenedCandidateAdvance {

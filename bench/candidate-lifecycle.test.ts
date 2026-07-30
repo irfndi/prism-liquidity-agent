@@ -102,6 +102,77 @@ describe("candidate lifecycle", () => {
     });
   });
 
+  it.each([
+    [
+      "stale price evidence",
+      {
+        priceEvidence: [
+          { mint: "mint-1", priceUsd: 2.5, observedAt: 0, fallbackUsed: false as const },
+        ],
+        routeAvailable: true,
+        screenerAccepted: true,
+        marketDataAvailable: true,
+        now: 300_001,
+      },
+      { kind: "transient_failure", reason: "price_evidence_stale" },
+    ],
+    [
+      "unavailable price evidence",
+      {
+        priceEvidence: [],
+        routeAvailable: true,
+        screenerAccepted: true,
+        marketDataAvailable: true,
+      },
+      { kind: "transient_failure", reason: "price_evidence_unavailable" },
+    ],
+    [
+      "unavailable route",
+      {
+        priceEvidence: strictPriceEvidence(1),
+        routeAvailable: false,
+        screenerAccepted: true,
+        marketDataAvailable: true,
+      },
+      { kind: "transient_failure", reason: "route_unavailable" },
+    ],
+    [
+      "rejected screener result",
+      {
+        priceEvidence: strictPriceEvidence(1),
+        routeAvailable: true,
+        screenerAccepted: false,
+        marketDataAvailable: true,
+      },
+      { kind: "transient_failure", reason: "screener_rejected" },
+    ],
+    [
+      "unavailable market data",
+      {
+        priceEvidence: strictPriceEvidence(1),
+        routeAvailable: true,
+        screenerAccepted: true,
+        marketDataAvailable: false,
+      },
+      { kind: "transient_failure", reason: "market_data_unavailable" },
+    ],
+  ])("classifies %s as a transient candidate failure", (_name, overrides, expected) => {
+    // Given
+    const input = {
+      safety: { kind: "safe" as const },
+      requiredMints: ["mint-1"],
+      now: 1,
+      maxMarketDataAgeMs: 300_000,
+      ...overrides,
+    };
+
+    // When
+    const health = evaluateCandidateHealth(input);
+
+    // Then
+    expect(health).toEqual(expected);
+  });
+
   it("rejects a candidate permanently when safety reports a hard failure", () => {
     // Given
     const candidate = createTokenCandidate({ ...candidateIdentity, firstSeenAt: 0 });

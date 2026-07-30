@@ -9,6 +9,7 @@ export interface MeteoraDiscoveryPageUrlInput {
   readonly pageSize: number;
 }
 
+/** Selects the deterministic discovery page for a recurring scan ordinal. */
 export function selectRecurringDiscoveryPage(input: RecurringDiscoveryPageInput): number | null {
   if (
     !Number.isSafeInteger(input.scanOrdinal) ||
@@ -21,6 +22,7 @@ export function selectRecurringDiscoveryPage(input: RecurringDiscoveryPageInput)
   return (input.scanOrdinal % input.pageCount) + 1;
 }
 
+/** Builds and validates a recurring Meteora discovery URL for the selected page. */
 export function buildMeteoraDiscoveryPageUrl(input: MeteoraDiscoveryPageUrlInput): string | null {
   if (
     !Number.isSafeInteger(input.page) ||

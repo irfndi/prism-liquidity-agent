@@ -60,7 +60,7 @@ function atOrAfter(previous: number, observed: number): number {
 function updateSeen(
   candidate: TokenCandidateRecord,
   occurredAt: number,
-  updates: Partial<TokenCandidateRecord>,
+  updates: Omit<Partial<TokenCandidateRecord>, "lastSeenAt" | "updatedAt">,
 ): TokenCandidateRecord {
   const updatedAt = atOrAfter(candidate.updatedAt, occurredAt);
   return {
@@ -85,6 +85,7 @@ function isFreshPriceEvidence(
   );
 }
 
+/** Returns true only when every required mint has fresh non-fallback price evidence. */
 export function hasFreshPriceEvidence(input: CandidateHealthInput): boolean {
   return (
     input.requiredMints.length > 0 &&
@@ -98,6 +99,7 @@ export function hasFreshPriceEvidence(input: CandidateHealthInput): boolean {
   );
 }
 
+/** Classifies a screened candidate as healthy, transiently unavailable, or unsafe. */
 export function evaluateCandidateHealth(input: CandidateHealthInput): CandidateHealth {
   switch (input.safety.kind) {
     case "hard_safety_failure":
@@ -123,6 +125,7 @@ export function evaluateCandidateHealth(input: CandidateHealthInput): CandidateH
   return { kind: "healthy" };
 }
 
+/** Creates the persisted initial state for a newly discovered token candidate. */
 export function createTokenCandidate(identity: CandidateIdentity): TokenCandidateRecord {
   return {
     id: identity.id,
@@ -143,6 +146,7 @@ export function createTokenCandidate(identity: CandidateIdentity): TokenCandidat
   };
 }
 
+/** Checks whether a candidate has met both its scan-count and observation-age gates. */
 export function isCandidateEligible(
   candidate: TokenCandidateRecord,
   policy: CandidatePolicy,
@@ -218,6 +222,7 @@ function recordScan(
   }
 }
 
+/** Applies one persisted lifecycle event while preserving monotonic timestamps. */
 export function transitionCandidate(
   candidate: TokenCandidateRecord,
   event: CandidateLifecycleEvent,
