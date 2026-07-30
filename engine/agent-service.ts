@@ -454,6 +454,60 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
       let lastPromptAt: number | null = null;
       let errorCount = 0;
 
+      // ── Rolling p95 latency tracker for adaptive veto skip ─────────────
+      // Maintains a sliding window of recent prompt latencies, each timestamped
+      // so stale samples age out. When the p95 of the fresh window exceeds the
+      // configured veto timeout AND the window holds enough samples, the veto is
+      // skipped (fail-open with WARN) because the model cannot answer quickly
+      // enough for a budget-constrained yes/no review.
+      //
+      // Liveness: the skip is gated on VETO_SKIP_MIN_SAMPLES fresh samples, so a
+      // single timeout can never disable review permanently. Samples older than
+      // VETO_SAMPLE_MAX_AGE_MS are evicted, so once the model recovers the window
+      // drains, p95 falls back below the threshold, and veto review resumes on
+      // its own without a process restart.
+      const VETO_WINDOW_SIZE = 20;
+      // Do not act on latency history until this many fresh samples have been
+      // collected — prevents one slow veto from latching the skip on.
+      const VETO_SKIP_MIN_SAMPLES = 5;
+      // Require at least this many samples to individually exceed 95% of the
+      // veto budget before the skip can engage. With a nearest-rank p95 and a
+      // partially-filled window the p95 equals the window maximum, so a single
+      // timeout among otherwise quick reviews would otherwise latch the skip on
+      // until that one outlier ages out (up to 30 min). Because skipped calls
+      // record no samples, this count is the only thing that can turn the skip
+      // back off once it has engaged — the slow outliers must all age out
+      // together before the count drops below this threshold again.
+      const VETO_SKIP_MIN_SLOW_SAMPLES = 3;
+      // Fresh samples older than this are evicted, bounding the skip's blind
+      // spot and guaranteeing the window drains after a transient slow period.
+      const VETO_SAMPLE_MAX_AGE_MS = 30 * 60 * 1000;
+      const vetoLatencies: Array<{ latencyMs: number; at: number }> = [];
+
+      function evictStaleVetoSamples(now: number): void {
+        const cutoff = now - VETO_SAMPLE_MAX_AGE_MS;
+        while (vetoLatencies.length > 0) {
+          const oldest = vetoLatencies[0]!;
+          if (oldest.at < cutoff || vetoLatencies.length > VETO_WINDOW_SIZE) {
+            vetoLatencies.shift();
+          } else {
+            break;
+          }
+        }
+      }
+
+      function recordVetoLatency(latencyMs: number): void {
+        vetoLatencies.push({ latencyMs, at: Date.now() });
+        evictStaleVetoSamples(Date.now());
+      }
+
+      function computeP95(values: Array<{ latencyMs: number }>): number | null {
+        if (values.length === 0) return null;
+        const sorted = values.map((v) => v.latencyMs).sort((a, b) => a - b);
+        const idx = Math.ceil(sorted.length * 0.95) - 1;
+        return sorted[Math.max(0, Math.min(idx, sorted.length - 1))]!;
+      }
+
       if (transport) {
         connected = yield* connectReviewTransport(transport);
         if (!connected) {
@@ -472,10 +526,47 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           }
           const proposalMode = config.agentProposalMode;
           if (proposalMode === "veto") {
+            const vetoBudgetMs = config.agentVetoTimeoutMs;
+            const vetoSlowThreshold = vetoBudgetMs * 0.95;
+            // Drop stale samples first so a transient slow period ages out and
+            // the skip cannot latch on a polluted window.
+            evictStaleVetoSamples(Date.now());
+            const p95 = computeP95(vetoLatencies);
+            // Count individuals above the slow threshold — see the constant
+            // comment above for why p95 alone is insufficient as a gate.
+            const slowCount = vetoLatencies.filter((v) => v.latencyMs >= vetoSlowThreshold).length;
+            if (
+              vetoLatencies.length >= VETO_SKIP_MIN_SAMPLES &&
+              slowCount >= VETO_SKIP_MIN_SLOW_SAMPLES &&
+              p95 !== null &&
+              p95 >= vetoSlowThreshold
+            ) {
+              logger.warn("Skipping veto review — rolling p95 latency exceeds 95% of veto budget", {
+                pool: decision.poolAddress,
+                p95Ms: Math.round(p95),
+                budgetMs: vetoBudgetMs,
+                windowSize: vetoLatencies.length,
+              });
+              return Effect.succeed(null);
+            }
             const prompt = buildPrompt(decision, context);
-            return transport.sendPrompt(prompt, context, config.agentVetoTimeoutMs).pipe(
+            const attemptStart = Date.now();
+            let vetoLatencyRecorded = false;
+            const recordAttemptLatency = () => {
+              if (!vetoLatencyRecorded) {
+                vetoLatencyRecorded = true;
+                recordVetoLatency(Math.min(Date.now() - attemptStart, vetoBudgetMs));
+              }
+            };
+            return transport.sendPrompt(prompt, context, vetoBudgetMs).pipe(
               Effect.map((response: AgentRuntimeResponse) => {
                 lastPromptAt = Date.now();
+                // Wall-clock latency from just before sendPrompt —
+                // captures the prompt round-trip plus any reconnect
+                // inside sendPrompt (e.g., gateway), but excludes the
+                // initial startup connection which already completed
+                // in connectReviewTransport above.
+                recordAttemptLatency();
                 const parsed = parseResponse(response.raw);
                 const override = validateOverride(decision, parsed);
                 if (override) {
@@ -485,9 +576,22 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
                     newAction: override.action,
                     originalConfidence: decision.confidence.toFixed(2),
                     newConfidence: override.confidence.toFixed(2),
+                    latencyMs: response.latencyMs,
                   });
                 }
                 return override;
+              }),
+              Effect.catchAllCause((cause) => {
+                errorCount += 1;
+                // Record actual elapsed duration for ALL failure modes:
+                // typed failures (disconnect, handshake) via catchAll above,
+                // and outer timeouts (AGENT_VETO_TIMEOUT_MS from program.ts
+                // timeoutFail) which interrupt this fiber without reaching
+                // catchAll. Interruption is the only cause type that
+                // catchAll would not see. Record min(elapsed, budget) to
+                // avoid a single hard timeout from dominating the window.
+                recordAttemptLatency();
+                return Effect.failCause(cause);
               }),
             );
           }

@@ -1,6 +1,0 @@
-$ oxfmt --check engine ops bench cli
-Checking formatting...
-
-All matched files use the correct format.
-Finished in 299ms on 205 files using 8 threads.
-exit=0

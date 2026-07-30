@@ -1,2 +1,0 @@
-$ tsc --noEmit && oxlint engine ops bench cli
-exit=0

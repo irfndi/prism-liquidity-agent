@@ -377,13 +377,13 @@ export class GatewayTransport implements AgentRuntimeTransport {
       // rejection is still handled. Promise.all attaches a handler to both; otherwise an
       // awaited-alone run promise could reject with no handler and Bun would treat it as
       // an unhandled rejection, terminating the whole process rather than just the call.
+      const chatParams: Record<string, unknown> = {
+        sessionKey: this.sessionKey,
+        message,
+        idempotencyKey: id,
+      };
       const [, reply] = await Promise.all([
-        this.request(
-          "chat.send",
-          { sessionKey: this.sessionKey, message, idempotencyKey: id },
-          timeoutMs,
-          id,
-        ),
+        this.request("chat.send", chatParams, timeoutMs, id),
         runPromise,
       ]);
       return reply;

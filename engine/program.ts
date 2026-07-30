@@ -54,6 +54,7 @@ import {
   GAS_TOP_UP_USDC,
   SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
   MIN_SOL_FOR_GAS_LAMPORTS,
+  MIN_SOL_FOR_ENTRY_LAMPORTS,
   SOL_MINT,
   USDC_MINT,
 } from "./constants.js";
@@ -1173,9 +1174,41 @@ export function executeLive(
     }
 
     if (decision.action === "ENTER") {
-      yield* adapter
-        .swapUSDCForSOL(Number(SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS) / 1e9, GAS_TOP_UP_USDC)
-        .pipe(Effect.catchAll(() => Effect.void));
+      // Align the automatic top-up with the live-entry SOL reserve, but size the
+      // swap to the ACTUAL DEFICIT (plus a slippage/fee buffer), not the full
+      // reserve: swapping the whole reserve when the wallet is only slightly
+      // below it wastes USDC that token preparation downstream still needs, and
+      // can fail an otherwise fundable ENTER. SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS
+      // aliases the reserve, so the swap trigger and the entry gate share one
+      // value. When the balance read fails (null), skip the top-up entirely —
+      // the post-swap recheck below will independently reject the ENTER if the
+      // SOL balance cannot be confirmed.
+      const entryReserveSol = Number(SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS) / 1e9;
+      const preSwapSol = yield* adapter.getNativeSolBalance().pipe(
+        Effect.map((lamports) => Number(lamports) / 1e9),
+        Effect.catchAll(() => Effect.succeed(null)),
+      );
+      if (preSwapSol !== null && preSwapSol < entryReserveSol) {
+        const deficitSol = entryReserveSol - preSwapSol;
+        // Prefer a live SOL price from the adapter's price chain over the static
+        // config fallback: when the market price exceeds solPriceUsd (default
+        // $150) by more than the 20% buffer, the static value underfunds the
+        // swap and the post-swap balance check rejects an otherwise-fundable
+        // ENTER. A failed price lookup falls back to the config value.
+        const liveSolPrice = yield* adapter.getTokenPrices([SOL_MINT], { useFallback: false }).pipe(
+          Effect.map((prices) => prices[SOL_MINT]),
+          Effect.catchAll(() => Effect.succeed(undefined)),
+        );
+        const effectiveSolPrice =
+          typeof liveSolPrice === "number" && liveSolPrice > 0 ? liveSolPrice : solPriceUsd;
+        const topUpUsdc =
+          effectiveSolPrice > 0
+            ? Math.max(GAS_TOP_UP_USDC, Math.ceil(deficitSol * effectiveSolPrice * 1.2))
+            : GAS_TOP_UP_USDC;
+        yield* adapter
+          .swapUSDCForSOL(entryReserveSol, topUpUsdc)
+          .pipe(Effect.catchAll(() => Effect.void));
+      }
 
       const nativeBalance = yield* adapter.getNativeSolBalance().pipe(
         Effect.map((lamports) => ({ value: lamports, error: undefined as string | undefined })),
@@ -1190,9 +1223,24 @@ export function executeLive(
         return { executed: false, error: nativeBalance.error };
       }
       const solBalance = nativeBalance.value;
-      if (solBalance < MIN_SOL_FOR_GAS_LAMPORTS) {
-        console.warn("Insufficient SOL for gas — skipping ENTER");
-        return { executed: false, error: "Insufficient SOL for gas — skipping ENTER" };
+      if (solBalance < MIN_SOL_FOR_ENTRY_LAMPORTS) {
+        const availableLamports = Number(solBalance);
+        const neededLamports = Number(MIN_SOL_FOR_ENTRY_LAMPORTS);
+        const reserve = neededLamports - Number(MIN_SOL_FOR_GAS_LAMPORTS);
+        const availableHuman = (availableLamports / 1e9).toFixed(4);
+        const neededHuman = (neededLamports / 1e9).toFixed(4);
+        const reserveHuman = (reserve / 1e9).toFixed(4);
+        console.warn(
+          `Insufficient SOL for ENTER — available ${availableHuman} SOL, need ${neededHuman} SOL ` +
+            `(gas ${(Number(MIN_SOL_FOR_GAS_LAMPORTS) / 1e9).toFixed(4)} + rent/fee reserve ${reserveHuman})`,
+        );
+        return {
+          executed: false,
+          error:
+            `Insufficient SOL for ENTER — available: ${availableHuman} SOL, ` +
+            `needed: ${neededHuman} SOL, ` +
+            `reserve: ${reserveHuman} SOL`,
+        };
       }
     }
 
@@ -3269,6 +3317,48 @@ export const program = Effect.gen(function* () {
         );
       } else {
         lastWalletBalanceUsd = config.paperPortfolioUsd;
+      }
+
+      // Periodic wallet composition log for drift auditability. Native SOL is
+      // held by the System Program — not an SPL mint — so getWalletHoldings()
+      // omits it. Read it separately and include it so SOL-heavy wallets
+      // (including SOL-only wallets, which previously produced no snapshot at
+      // all) are fully explained by the drift log.
+      if (adapter.hasWallet() && !config.paperTrading && scanCount % 10 === 0) {
+        yield* Effect.fork(
+          Effect.gen(function* () {
+            const raw = yield* Effect.all([
+              adapter.getWalletHoldings().pipe(Effect.catchAll(() => Effect.succeed(null))),
+              adapter.getNativeSolBalance().pipe(Effect.catchAll(() => Effect.succeed(null))),
+            ]);
+            const [holdings, nativeSolLamports] = raw;
+            if (holdings === null || nativeSolLamports === null) {
+              return;
+            }
+            const breakdown: Array<{ mint: string; amount: string }> = [];
+            if (nativeSolLamports > 0n) {
+              breakdown.push({
+                mint: "(native SOL)",
+                amount: (Number(nativeSolLamports) / 1e9).toFixed(6),
+              });
+            }
+            for (const [mint, bal] of holdings.entries()) {
+              breakdown.push({
+                mint: `${mint.slice(0, 8)}...`,
+                amount: (Number(bal.amountAtomic) / 10 ** bal.decimals).toFixed(
+                  Math.min(bal.decimals, 6),
+                ),
+              });
+            }
+            if (breakdown.length > 0) {
+              logger.info("Wallet composition snapshot (every 10 cycles)", {
+                totalUsd: lastWalletBalanceUsd.toFixed(2),
+                tokens: breakdown,
+                scanCount,
+              });
+            }
+          }).pipe(Effect.catchAll(() => Effect.void)),
+        );
       }
 
       // Qualified-but-unconsumed ENTER candidates for the opt-in idle-capital

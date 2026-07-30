@@ -1,7 +1,0 @@
-{
-  "safe": true,
-  "confirmCalls": 1,
-  "settledBeforeConfirmation": false,
-  "settledAfterConfirmation": true,
-  "signature": "confirmation-driver-sig"
-}

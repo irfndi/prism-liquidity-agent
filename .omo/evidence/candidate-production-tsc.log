@@ -1,4 +1,0 @@
-bench/cli-autonomous-status.test.ts(50,3): error TS2322: Type 'object' is not assignable to type 'Record<string, unknown>'.
-  Index signature for type 'string' is missing in type '{}'.
-engine/program.ts(1490,15): error TS2322: Type 'string | number' is not assignable to type 'string'.
-  Type 'number' is not assignable to type 'string'.
