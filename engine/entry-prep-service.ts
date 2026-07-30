@@ -529,16 +529,33 @@ export const EntryPrepLive = Layer.effect(
                 ),
               );
               submittedCount += 1;
-              const balanceAfter = yield* readTokenBalance(deficit.mint);
+              receipts.push({
+                inputMint: SOL_MINT,
+                outputMint: deficit.mint,
+                inputAmountAtomic: operation.quote.request.amountAtomic,
+                acquiredAmountAtomic: operation.quote.outAmountAtomic,
+                txSignature: signature,
+              });
+              const balanceAfter = yield* readTokenBalance(deficit.mint).pipe(
+                Effect.mapError((err) =>
+                  makePrepError(
+                    "SWAP_TRANSACTION_FAILED",
+                    `Swap ${signature} submitted but fill could not be read: ${String(err)}`,
+                    poolAddress,
+                    err,
+                    { status: "partial", receipts: [...receipts] },
+                  ),
+                ),
+              );
               const acquiredAmountAtomic =
                 balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0n;
-              receipts.push({
+              receipts[receipts.length - 1] = {
                 inputMint: SOL_MINT,
                 outputMint: deficit.mint,
                 inputAmountAtomic: operation.quote.request.amountAtomic,
                 acquiredAmountAtomic,
                 txSignature: signature,
-              });
+              };
               logger.info("Submitted SOL-funded pool-token swap", {
                 poolAddress,
                 mint: deficit.mint,

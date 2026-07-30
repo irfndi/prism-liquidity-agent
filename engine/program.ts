@@ -36,6 +36,7 @@ import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
+import { transitionCandidate } from "./candidate-policy.js";
 import { getPrismUserConfigDir } from "./paths.js";
 
 import { checkForAutoUpdate } from "./update-check.js";
@@ -1026,6 +1027,7 @@ interface AutonomousExecutionContext {
   readonly walletAddress: string;
   readonly agentInstanceId: string;
   readonly settlementMaxPendingMs: number;
+  readonly settlementDustUsd: number;
 }
 
 function operationRecord(input: {
@@ -2027,6 +2029,7 @@ export const program = Effect.gen(function* () {
           walletAddress: executionWalletAddress,
           agentInstanceId: config.agentInstanceId,
           settlementMaxPendingMs: config.settlementMaxPendingMs,
+          settlementDustUsd: config.settlementDustUsd,
         }
       : null;
   const strategy = yield* StrategyService;
@@ -2363,8 +2366,9 @@ export const program = Effect.gen(function* () {
       const candidatePools = screened
         .filter(
           (pool) =>
-            pool.createdAtMs === undefined ||
-            now - pool.createdAtMs >= config.candidateMinPoolAgeMs,
+            config.candidateMinPoolAgeMs <= 0 ||
+            (pool.createdAtMs !== undefined &&
+              now - pool.createdAtMs >= config.candidateMinPoolAgeMs),
         )
         .slice(0, config.candidateScanLimit);
       const mints = [...new Set(candidatePools.flatMap((pool) => [pool.tokenX, pool.tokenY]))];
@@ -3325,6 +3329,7 @@ export const program = Effect.gen(function* () {
           mode: autonomousExecution.mode,
           now: Date.now(),
           maxSwapSlippageBps: config.maxSwapSlippageBps,
+          settlementDustUsd: autonomousExecution.settlementDustUsd,
         });
         const oldestSettlementAgeMs = processedJobs
           .filter((job) => job.status !== "confirmed")
@@ -4574,7 +4579,7 @@ export const program = Effect.gen(function* () {
         dailyBaselineDay = dayKey;
         dailyBaselineEquityUsd = portfolioValueUsd + realizedTodayUsd;
       }
-      const dailyEquityUsd = portfolioValueUsd + realizedTodayUsd;
+      const dailyEquityUsd = portfolioValueUsd;
       dailyDrawdownPct =
         dailyBaselineEquityUsd > 0 && dailyEquityUsd < dailyBaselineEquityUsd
           ? ((dailyBaselineEquityUsd - dailyEquityUsd) / dailyBaselineEquityUsd) * 100
@@ -6033,6 +6038,24 @@ export const program = Effect.gen(function* () {
               return Effect.succeed(lastWalletBalanceUsd);
             }),
           );
+        }
+
+        if (executed && decision.action === "ENTER" && autonomousExecution) {
+          const candidate = [...autonomousCandidates.values()].find(
+            (item) => item.poolAddress === poolAddress && item.state === "eligible",
+          );
+          if (candidate) {
+            const enteredCandidate = transitionCandidate(
+              candidate,
+              { kind: "entry_confirmed", occurredAt: Date.now() },
+              {
+                minHealthyScans: config.candidateMinHealthyScans,
+                minObservationMs: config.candidateMinObservationMs,
+              },
+            );
+            autonomousCandidates.set(enteredCandidate.id, enteredCandidate);
+            yield* db.saveTokenCandidate(enteredCandidate).pipe(Effect.catchAll(() => Effect.void));
+          }
         }
 
         if (decision.action !== "HOLD") {

@@ -52,6 +52,7 @@ export interface SettlementProcessorInput {
   readonly mode: AutonomousTokenMode;
   readonly now: number;
   readonly maxSwapSlippageBps: number;
+  readonly settlementDustUsd?: number;
 }
 
 function atomicUsd(amountAtomic: bigint, decimals: number, priceUsd: number): number {
@@ -73,6 +74,21 @@ function retryableJob(job: SettlementJobRecord, now: number, error: unknown): Se
   };
 }
 
+function reconciliationJob(
+  job: SettlementJobRecord,
+  now: number,
+  error: unknown,
+): SettlementJobRecord {
+  return {
+    ...job,
+    status: "prepared",
+    attempts: job.attempts + 1,
+    nextRetryAt: null,
+    error: error instanceof Error ? error.message : String(error),
+    updatedAt: now,
+  };
+}
+
 export function processSettlementJobs(
   input: SettlementProcessorInput,
 ): Effect.Effect<ReadonlyArray<SettlementJobRecord>, never> {
@@ -88,6 +104,7 @@ export function processSettlementJobs(
         processed.push(job);
         continue;
       }
+      let submitted = false;
       const result = yield* Effect.gen(function* () {
         if (job.txSignature && input.adapter.getSwapStatus) {
           const status = yield* input.adapter.getSwapStatus(job.txSignature);
@@ -126,6 +143,26 @@ export function processSettlementJobs(
             updatedAt: input.now,
           };
         }
+        const inputDecimals = yield* input.adapter.getTokenDecimals(job.tokenMint);
+        const inputPriceUsd = prices[job.tokenMint] ?? 0;
+        const inputUsd = atomicUsd(amountAtomic, inputDecimals, inputPriceUsd);
+        if (
+          (input.settlementDustUsd ?? 0) > 0 &&
+          inputPriceUsd > 0 &&
+          inputUsd < input.settlementDustUsd!
+        ) {
+          return {
+            ...job,
+            status: "confirmed" as const,
+            attempts: job.attempts + 1,
+            nextRetryAt: null,
+            confirmedOutputAtomic: "0",
+            outputUsd: 0,
+            executionCostUsd: 0,
+            error: "settlement dust skipped",
+            updatedAt: input.now,
+          };
+        }
         const quoteSwap = input.adapter.quoteSwap;
         const prepareSwap = input.adapter.prepareSwap;
         const simulateSwap = input.adapter.simulateSwap;
@@ -141,8 +178,6 @@ export function processSettlementJobs(
         });
         const prepared = yield* prepareSwap(quote);
         yield* simulateSwap(prepared);
-        const inputDecimals = yield* input.adapter.getTokenDecimals(job.tokenMint);
-        const inputPriceUsd = prices[job.tokenMint] ?? 0;
         const nativeBefore = yield* input.adapter.getNativeSolBalance();
         yield* input.db.saveSettlementJob({
           ...job,
@@ -154,15 +189,16 @@ export function processSettlementJobs(
           updatedAt: input.now,
         });
         const signature = yield* submitSwap(prepared);
+        submitted = true;
         const nativeAfter = yield* input.adapter.getNativeSolBalance();
         const confirmedOutputAtomic = nativeAfter > nativeBefore ? nativeAfter - nativeBefore : 0n;
         if (confirmedOutputAtomic <= 0n) {
           return yield* Effect.fail(new Error("Settlement output balance delta unavailable"));
         }
         const outputUsd = atomicUsd(confirmedOutputAtomic, 9, solPriceUsd);
-        const inputUsd =
+        const realizedInputUsd =
           inputPriceUsd > 0 ? atomicUsd(amountAtomic, inputDecimals, inputPriceUsd) : outputUsd;
-        const executionCostUsd = Math.max(0, inputUsd - outputUsd);
+        const executionCostUsd = Math.max(0, realizedInputUsd - outputUsd);
         return {
           ...job,
           status: "confirmed" as const,
@@ -175,7 +211,15 @@ export function processSettlementJobs(
           error: null,
           updatedAt: input.now,
         };
-      }).pipe(Effect.catchAll((error) => Effect.succeed(retryableJob(job, input.now, error))));
+      }).pipe(
+        Effect.catchAll((error) =>
+          Effect.succeed(
+            submitted
+              ? reconciliationJob(job, input.now, error)
+              : retryableJob(job, input.now, error),
+          ),
+        ),
+      );
       yield* input.db.saveSettlementJob(result).pipe(Effect.catchAll(() => Effect.void));
       processed.push(result);
     }

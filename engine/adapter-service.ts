@@ -1834,9 +1834,12 @@ export const AdapterLive = Layer.effect(
       getTokenPriceEvidence: (mints: ReadonlyArray<string>) =>
         fetchTokenPrices(mints, { useFallback: false }).pipe(
           Effect.map((prices) => {
-            const observedAt = Date.now();
             return [...new Set(mints)].flatMap((mint) => {
               const priceUsd = prices[mint];
+              const observedAt =
+                tokenMetaCache.get(mint)?.priceFetchedAt ??
+                priceCache.get(mint)?.fetchedAt ??
+                Date.now();
               return priceUsd !== undefined && Number.isFinite(priceUsd) && priceUsd > 0
                 ? [{ mint, priceUsd, observedAt, fallbackUsed: false as const }]
                 : [];
