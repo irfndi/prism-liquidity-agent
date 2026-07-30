@@ -35,6 +35,7 @@ import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
+import { advanceScreenedCandidates } from "./candidate-discovery.js";
 import { getPrismUserConfigDir } from "./paths.js";
 
 import { checkForAutoUpdate } from "./update-check.js";
@@ -43,11 +44,17 @@ import { join } from "path";
 import type { PositionRecord } from "./db-service.js";
 import { applyCompoundToCostBasis, computeHodlValueUsd, computeRealizedPnlUsd } from "./pnl.js";
 import { buildRewardClaimMetadata, summarizeRewardClaim } from "./rewards.js";
-import { BlacklistError, DiscoverPoolsError, underlyingErrorMessage } from "./errors.js";
+import {
+  BlacklistError,
+  DiscoverPoolsError,
+  EntryPrepError,
+  underlyingErrorMessage,
+} from "./errors.js";
 import {
   GAS_TOP_UP_USDC,
   SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
   MIN_SOL_FOR_GAS_LAMPORTS,
+  SOL_MINT,
   USDC_MINT,
 } from "./constants.js";
 import {
@@ -85,6 +92,7 @@ import {
   type StrategyApi,
   type RevenueConfigApi,
   type EntryPrepApi,
+  type EntryPreparationOutcome,
   type AgentStateApi,
 } from "./services.js";
 import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
@@ -107,6 +115,10 @@ import type {
   RebalanceParams,
   SignalWeights,
   ActionType,
+  AutonomousTokenMode,
+  ExecutionOperationRecord,
+  SettlementJobRecord,
+  TokenCandidateRecord,
 } from "./types.js";
 import { isMeasuredStatsSource } from "./types.js";
 import type { AgentRuntimeAlert, AgentRuntimeCheckin } from "./agent-transport.js";
@@ -125,6 +137,11 @@ import {
   type ProposalBackoff,
 } from "./proposal-backoff.js";
 import { computeCooldownForExit } from "./cooldown.js";
+import {
+  isActionAllowedDuringSafetyPause,
+  processSettlementJobs,
+  shouldTriggerSafetyPause,
+} from "./autonomous-runtime.js";
 
 const logger = createLogger("program");
 const idleRedeployLogger = createLogger("idle-redeploy");
@@ -188,9 +205,7 @@ function postEngineStatus(
     }
   }).pipe(
     Effect.catchAllCause((cause) =>
-      Effect.sync(() =>
-        statusLogger.warn("Engine status report failed", { cause: String(cause) }),
-      ),
+      Effect.sync(() => statusLogger.warn("Engine status report failed", { cause: String(cause) })),
     ),
   );
 }
@@ -1005,6 +1020,73 @@ export function executePaper(
 
 // ─── Live execution ──────────────────────────────────────────────────────────
 
+interface AutonomousExecutionContext {
+  readonly mode: Exclude<AutonomousTokenMode, "off">;
+  readonly walletAddress: string;
+  readonly agentInstanceId: string;
+  readonly settlementMaxPendingMs: number;
+}
+
+function operationRecord(input: {
+  readonly context: AutonomousExecutionContext;
+  readonly id: string;
+  readonly candidateId: string | null;
+  readonly positionId: string | null;
+  readonly poolAddress: string;
+  readonly tokenMint: string;
+  readonly operationType: ExecutionOperationRecord["operationType"];
+  readonly status: ExecutionOperationRecord["status"];
+  readonly amountAtomic: string | null;
+  readonly txSignature: string | null;
+  readonly error: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}): ExecutionOperationRecord {
+  return {
+    id: input.id,
+    walletAddress: input.context.walletAddress,
+    agentInstanceId: input.context.agentInstanceId,
+    candidateId: input.candidateId,
+    positionId: input.positionId,
+    poolAddress: input.poolAddress,
+    tokenMint: input.tokenMint,
+    operationType: input.operationType,
+    status: input.status,
+    amountAtomic: input.amountAtomic,
+    txSignature: input.txSignature,
+    error: input.error,
+    createdAt: input.createdAt,
+    updatedAt: input.updatedAt,
+  };
+}
+
+function settlementJobsForReceipts(input: {
+  readonly context: AutonomousExecutionContext;
+  readonly positionId: string;
+  readonly poolAddress: string;
+  readonly receipts: EntryPreparationOutcome["receipts"];
+  readonly now: number;
+}): ReadonlyArray<SettlementJobRecord> {
+  return input.receipts.map((receipt) => ({
+    id: randomUUID(),
+    walletAddress: input.context.walletAddress,
+    agentInstanceId: input.context.agentInstanceId,
+    positionId: input.positionId,
+    poolAddress: input.poolAddress,
+    tokenMint: receipt.outputMint,
+    amountAtomic: receipt.acquiredAmountAtomic.toString(),
+    destinationAsset: "SOL",
+    status: "pending",
+    attempts: 0,
+    nextRetryAt: input.now,
+    txSignature: null,
+    expiresAt: input.now + input.context.settlementMaxPendingMs,
+    error: null,
+    createdAt: input.now,
+    updatedAt: input.now,
+  }));
+}
+
 /**
  * Execute a live decision. `entryPrep` is only used for ENTER actions; callers
  * must still provide it because the function signature does not conditionally
@@ -1024,6 +1106,7 @@ export function executeLive(
     reconcileRequestedPools?: Set<string>;
     memory?: MemoryApi;
     unpricedExitWarnedPools?: Set<string>;
+    autonomous?: AutonomousExecutionContext;
   },
   decision: AgentDecision,
   pool: {
@@ -1031,6 +1114,8 @@ export function executeLive(
     binStep: number;
     tokenXSymbol: string;
     tokenYSymbol: string;
+    tokenX?: string;
+    tokenY?: string;
     currentPrice: number;
   },
   signalTimestamp?: number,
@@ -1048,6 +1133,7 @@ export function executeLive(
       entryStrategyShape,
       entryRangeHalfWidth,
     } = deps;
+    const autonomous = deps.autonomous;
 
     if (!adapter.hasWallet()) {
       console.error("Live trading enabled but no wallet configured");
@@ -1058,6 +1144,33 @@ export function executeLive(
     // positions via evaluatePerPoolAllocation (rejected in the decision
     // flow before we reach executeLive). No additional hard cap here so
     // live mode honors maxOpenPositions.
+
+    let entryOperation: ExecutionOperationRecord | null = null;
+    if (decision.action === "ENTER" && decision.positionSizeUsd && autonomous) {
+      const now = Date.now();
+      entryOperation = operationRecord({
+        context: autonomous,
+        id: randomUUID(),
+        candidateId: null,
+        positionId: null,
+        poolAddress: decision.poolAddress,
+        tokenMint: pool.tokenX ?? "",
+        operationType: "entry",
+        status: "planned",
+        amountAtomic: null,
+        txSignature: null,
+        error: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const persisted = yield* db.saveExecutionOperation(entryOperation).pipe(
+        Effect.as(true),
+        Effect.catchAll(() => Effect.succeed(false)),
+      );
+      if (!persisted) {
+        return { executed: false, error: "Unable to persist entry operation before execution" };
+      }
+    }
 
     if (decision.action === "ENTER") {
       yield* adapter
@@ -1083,21 +1196,58 @@ export function executeLive(
       }
     }
 
+    let preparation: EntryPreparationOutcome | null = null;
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
       const prepResult = yield* entryPrep
         .prepareEntryTokens(decision.poolAddress, decision.positionSizeUsd)
         .pipe(
           Effect.matchEffect({
-            onSuccess: () => Effect.succeed({ error: undefined as string | undefined }),
-            onFailure: (err) =>
+            onSuccess: (outcome) =>
               Effect.succeed({
-                error: `Entry token preparation failed: ${err instanceof Error ? err.message : String(err)}`,
+                outcome: outcome ?? null,
+                partial: null,
+                error: undefined as string | undefined,
               }),
+            onFailure: (err) => {
+              const partial =
+                err instanceof EntryPrepError ? (err.partialPreparation ?? null) : null;
+              return Effect.succeed({
+                outcome: null,
+                partial,
+                error: `Entry token preparation failed: ${err instanceof Error ? err.message : String(err)}`,
+              });
+            },
           }),
         );
       if (prepResult.error) {
+        if (autonomous && entryOperation) {
+          const now = Date.now();
+          for (const job of settlementJobsForReceipts({
+            context: autonomous,
+            positionId: `rollback:${entryOperation.id}`,
+            poolAddress: decision.poolAddress,
+            receipts: prepResult.partial?.receipts ?? [],
+            now,
+          })) {
+            yield* db.saveSettlementJob(job).pipe(Effect.catchAll(() => Effect.void));
+          }
+          yield* db
+            .saveExecutionOperation({
+              ...entryOperation,
+              operationType: "rollback",
+              status: prepResult.partial ? "retryable" : "failed",
+              error: prepResult.error,
+              updatedAt: now,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+        }
         console.warn(prepResult.error, { pool: decision.poolAddress });
         return { executed: false, error: prepResult.error };
+      }
+      preparation = prepResult.outcome;
+      if (entryOperation) {
+        entryOperation = { ...entryOperation, status: "prepared", updatedAt: Date.now() };
+        yield* db.saveExecutionOperation(entryOperation).pipe(Effect.catchAll(() => Effect.void));
       }
     }
 
@@ -1188,13 +1338,71 @@ export function executeLive(
             createdAt: Date.now(),
           })
           .pipe(Effect.catchAll(() => Effect.void));
+        if (entryOperation) {
+          yield* db
+            .saveExecutionOperation({
+              ...entryOperation,
+              positionId: pos.positionId,
+              status: "confirmed",
+              txSignature: enterResult.result.txSignature,
+              updatedAt: Date.now(),
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+        }
         return { executed: true, error: undefined };
+      }
+      if (autonomous && entryOperation && preparation) {
+        const now = Date.now();
+        for (const job of settlementJobsForReceipts({
+          context: autonomous,
+          positionId: `rollback:${entryOperation.id}`,
+          poolAddress: decision.poolAddress,
+          receipts: preparation.receipts,
+          now,
+        })) {
+          yield* db.saveSettlementJob(job).pipe(Effect.catchAll(() => Effect.void));
+        }
+        yield* db
+          .saveExecutionOperation({
+            ...entryOperation,
+            operationType: "rollback",
+            status: "retryable",
+            error: enterResult.error ?? "Position entry failed after funding swaps",
+            updatedAt: now,
+          })
+          .pipe(Effect.catchAll(() => Effect.void));
       }
       return { executed: false, error: enterResult.error };
     } else if (decision.action === "ENTER") {
       return { executed: false, error: "ENTER decision missing position size" };
     } else if (decision.action === "EXIT") {
       const pos = resolveTargetPosition(trackedPositions, decision);
+      let exitOperation: ExecutionOperationRecord | null = null;
+      if (autonomous && pos) {
+        const now = Date.now();
+        exitOperation = operationRecord({
+          context: autonomous,
+          id: randomUUID(),
+          candidateId: null,
+          positionId: pos.positionId,
+          poolAddress: decision.poolAddress,
+          tokenMint: pool.tokenX ?? "",
+          operationType: "exit",
+          status: "planned",
+          amountAtomic: null,
+          txSignature: null,
+          error: null,
+          createdAt: now,
+          updatedAt: now,
+        });
+        const persisted = yield* db.saveExecutionOperation(exitOperation).pipe(
+          Effect.as(true),
+          Effect.catchAll(() => Effect.succeed(false)),
+        );
+        if (!persisted) {
+          return { executed: false, error: "Unable to persist exit operation before execution" };
+        }
+      }
       let exited = false;
       let exitError: string | undefined = undefined;
       let exitResultData: Effect.Effect.Success<ReturnType<AdapterApi["exitPosition"]>> | null =
@@ -1222,6 +1430,15 @@ export function executeLive(
         exited = exitResult.result !== null;
         exitError = exitResult.error;
         exitResultData = exitResult.result;
+        if (exitOperation && exitResult.result) {
+          exitOperation = {
+            ...exitOperation,
+            status: "confirmed",
+            txSignature: exitResult.result.txSignature,
+            updatedAt: Date.now(),
+          };
+          yield* db.saveExecutionOperation(exitOperation).pipe(Effect.catchAll(() => Effect.void));
+        }
         if (!exited) {
           // A failed close may have left the position half-closed on-chain
           // (the $27 phantom-row candidate: wallet holds withdrawn funds while
@@ -1234,6 +1451,76 @@ export function executeLive(
         exited = true;
       }
       if (exited) {
+        if (
+          autonomous &&
+          pos &&
+          exitResultData &&
+          pool.tokenX !== undefined &&
+          pool.tokenY !== undefined
+        ) {
+          const now = Date.now();
+          const attributable = [
+            {
+              mint: pool.tokenX,
+              amountAtomic: exitResultData.withdrawnXAtomic ?? "0",
+            },
+            {
+              mint: pool.tokenY,
+              amountAtomic: exitResultData.withdrawnYAtomic ?? "0",
+            },
+            ...(exitResultData.sweptRewards ?? []).map((reward) => ({
+              mint: reward.mint,
+              amountAtomic: reward.amountAtomic,
+            })),
+          ].filter(({ amountAtomic }) => {
+            try {
+              return BigInt(amountAtomic) > 0n;
+            } catch {
+              return false;
+            }
+          });
+          for (const item of attributable) {
+            const job: SettlementJobRecord = {
+              id: randomUUID(),
+              walletAddress: autonomous.walletAddress,
+              agentInstanceId: autonomous.agentInstanceId,
+              positionId: pos.positionId,
+              poolAddress: decision.poolAddress,
+              tokenMint: item.mint,
+              amountAtomic: String(item.amountAtomic),
+              destinationAsset: "SOL",
+              status: "pending",
+              attempts: 0,
+              nextRetryAt: now,
+              txSignature: null,
+              expiresAt: now + autonomous.settlementMaxPendingMs,
+              error: null,
+              createdAt: now,
+              updatedAt: now,
+            };
+            yield* db.saveSettlementJob(job).pipe(Effect.catchAll(() => Effect.void));
+          }
+          yield* db.closePosition(pos.positionId, null).pipe(Effect.catchAll(() => Effect.void));
+          trackedPositions.delete(pos.positionId);
+          yield* db
+            .savePositionEvent({
+              id: randomUUID(),
+              poolAddress: decision.poolAddress,
+              positionPubKey: pos.positionPubKey,
+              positionId: pos.positionId,
+              event: "EXIT",
+              valueUsd: exitResultData.withdrawnUsd ?? null,
+              feesUsd: pos.cumulativeFeesClaimedUsd,
+              price: pool.currentPrice,
+              metadata: {
+                settlementPending: attributable.length,
+                txSignature: exitResultData.txSignature,
+              },
+              createdAt: now,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          return { executed: true, error: undefined };
+        }
         if (pos?.entrySignalSnapshotId != null) {
           const pnlUsd = pos.currentValueUsd - pos.depositedUsd;
           yield* db
@@ -1628,6 +1915,16 @@ export const buildPositionSnapshots = (
 export const program = Effect.gen(function* () {
   const config = yield* ConfigService;
   const adapter = yield* AdapterService;
+  const executionWalletAddress = adapter.getWalletAddress();
+  const autonomousExecution: AutonomousExecutionContext | null =
+    config.autonomousTokenMode !== "off" && executionWalletAddress !== null
+      ? {
+          mode: config.autonomousTokenMode,
+          walletAddress: executionWalletAddress,
+          agentInstanceId: config.agentInstanceId,
+          settlementMaxPendingMs: config.settlementMaxPendingMs,
+        }
+      : null;
   const strategy = yield* StrategyService;
   const memory = yield* MemoryService;
   const risk = yield* RiskService;
@@ -1653,6 +1950,14 @@ export const program = Effect.gen(function* () {
     trackedPositions.set(pos.positionId, pos);
   }
   const entryFailureBackoff = new Map<string, EntryFailureBackoff>();
+  let activeSafetyPause =
+    autonomousExecution === null
+      ? null
+      : yield* db
+          .getSafetyPause(autonomousExecution.walletAddress, autonomousExecution.agentInstanceId)
+          .pipe(Effect.catchAll(() => Effect.succeed(null)));
+  let consecutiveCoreDataFailures = 0;
+  let consecutiveExecutionFailures = 0;
 
   // Agent check-in state
   const programStartTime = Date.now();
@@ -1858,6 +2163,16 @@ export const program = Effect.gen(function* () {
   // ─── Pool discovery ────────────────────────────────────────────────────────
 
   let poolsToScan = [...config.watchlistPools];
+  const autonomousCandidateWallet = executionWalletAddress ?? "paper";
+  const autonomousCandidates = new Map<string, TokenCandidateRecord>();
+  const autonomousCandidatePools = new Set<string>();
+
+  if (config.autonomousTokenMode !== "off") {
+    const persistedCandidates = yield* db
+      .listTokenCandidates(autonomousCandidateWallet, config.agentInstanceId)
+      .pipe(Effect.catchAll(() => Effect.succeed([])));
+    for (const candidate of persistedCandidates) autonomousCandidates.set(candidate.id, candidate);
+  }
 
   if (!shouldDiscoverPools(config) && config.enablePoolDiscovery) {
     logger.warn("Live pool discovery is disabled; configure WATCHLIST_POOLS for approved pools.", {
@@ -1865,7 +2180,7 @@ export const program = Effect.gen(function* () {
     });
   }
 
-  if (shouldDiscoverPools(config)) {
+  if (shouldDiscoverPools(config) && config.autonomousTokenMode === "off") {
     const screened = yield* screener.screenPools().pipe(
       Effect.catchAll((err) => {
         if (
@@ -1910,6 +2225,9 @@ export const program = Effect.gen(function* () {
   const refreshPoolsToScan = (reconcileResult: PositionReconcileResult) => {
     unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
     poolsToScan = [...approvedPoolAddresses];
+    for (const poolAddress of autonomousCandidatePools) {
+      if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
+    }
     if (!reconcileResult.succeeded) {
       return;
     }
@@ -1921,6 +2239,79 @@ export const program = Effect.gen(function* () {
       }
     }
   };
+
+  const refreshAutonomousCandidates = (scanOrdinal: number): Effect.Effect<void, never> =>
+    Effect.gen(function* () {
+      if (config.autonomousTokenMode === "off") return;
+      const screened = yield* screener.screenPools(scanOrdinal).pipe(
+        Effect.catchAll((error) => {
+          logger.warn("Autonomous candidate discovery failed", { error: String(error) });
+          return Effect.succeed([] as ReadonlyArray<ScreenedPool>);
+        }),
+      );
+      const candidatePools = screened.slice(0, config.candidateScanLimit);
+      const mints = [...new Set(candidatePools.flatMap((pool) => [pool.tokenX, pool.tokenY]))];
+      const priceEvidence =
+        adapter.getTokenPriceEvidence === undefined
+          ? []
+          : yield* adapter
+              .getTokenPriceEvidence(mints)
+              .pipe(Effect.catchAll(() => Effect.succeed([])));
+      const routeAvailableMints = new Set<string>();
+      if (adapter.quoteSwap !== undefined) {
+        for (const mint of mints) {
+          if (mint === SOL_MINT) continue;
+          const routeAvailable = yield* adapter
+            .quoteSwap({
+              inputMint: SOL_MINT,
+              outputMint: mint,
+              amountAtomic: 1_000_000n,
+              slippageBps: config.maxSwapSlippageBps,
+            })
+            .pipe(
+              Effect.as(true),
+              Effect.catchAll(() => Effect.succeed(false)),
+            );
+          if (routeAvailable) routeAvailableMints.add(mint);
+        }
+      }
+      const advanced = advanceScreenedCandidates({
+        walletAddress: autonomousCandidateWallet,
+        agentInstanceId: config.agentInstanceId,
+        screenedPools: candidatePools,
+        existingCandidates: Array.from(autonomousCandidates.values()),
+        priceEvidence,
+        routeAvailableMints,
+        now: Date.now(),
+        policy: {
+          minHealthyScans: config.candidateMinHealthyScans,
+          minObservationMs: config.candidateMinObservationMs,
+        },
+        maxMarketDataAgeMs: config.maxMarketDataAgeMs,
+      });
+      for (const candidate of advanced.updatedCandidates) {
+        yield* db.saveTokenCandidate(candidate).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              autonomousCandidates.set(candidate.id, candidate);
+            }),
+          ),
+          Effect.catchAll((error) =>
+            Effect.sync(() => {
+              logger.warn("Autonomous candidate persistence failed", {
+                candidate: candidate.id,
+                error: String(error),
+              });
+            }),
+          ),
+        );
+      }
+      if (config.autonomousTokenMode !== "live") return;
+      for (const poolAddress of advanced.eligiblePoolAddresses) {
+        autonomousCandidatePools.add(poolAddress);
+        if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
+      }
+    });
 
   const initialReconcileResult = yield* reconcilePositions(
     adapter,
@@ -2517,7 +2908,14 @@ export const program = Effect.gen(function* () {
           poolAddress: candidate.poolAddress,
           activeBinId: candidate.pool.activeBinId,
         };
-        const riskResult: RiskResult = risk.evaluate(decision, riskCtx);
+        const riskResult: RiskResult =
+          activeSafetyPause?.resolvedAt === null &&
+          !isActionAllowedDuringSafetyPause(decision.action)
+            ? {
+                approved: false,
+                reason: `Wallet safety pause active: ${activeSafetyPause.reason}`,
+              }
+            : risk.evaluate(decision, riskCtx);
         if (riskResult.adjustedSizeUsd) {
           decision = {
             ...decision,
@@ -2693,6 +3091,7 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
+              ...(autonomousExecution ? { autonomous: autonomousExecution } : {}),
             },
             decision,
             candidate.pool,
@@ -2789,6 +3188,43 @@ export const program = Effect.gen(function* () {
 
       console.info("Scan cycle started", { cycleId: cycle.cycleId });
 
+      yield* refreshAutonomousCandidates(scanCount);
+      if (autonomousExecution) {
+        const settlementJobs = yield* db
+          .listSettlementJobs(
+            autonomousExecution.walletAddress,
+            autonomousExecution.agentInstanceId,
+          )
+          .pipe(Effect.catchAll(() => Effect.succeed([])));
+        yield* processSettlementJobs({
+          adapter,
+          db,
+          jobs: settlementJobs,
+          mode: autonomousExecution.mode,
+          now: Date.now(),
+          maxSwapSlippageBps: config.maxSwapSlippageBps,
+        });
+        const oldestSettlementAgeMs = settlementJobs
+          .filter((job) => job.status !== "confirmed" && job.status !== "terminal")
+          .reduce((oldest, job) => Math.max(oldest, Date.now() - job.createdAt), 0);
+        if (
+          oldestSettlementAgeMs > config.settlementMaxPendingMs &&
+          activeSafetyPause?.resolvedAt !== null
+        ) {
+          activeSafetyPause = {
+            walletAddress: autonomousExecution.walletAddress,
+            agentInstanceId: autonomousExecution.agentInstanceId,
+            reason: "settlement_overdue",
+            triggeredAt: Date.now(),
+            resolvedAt: null,
+          };
+          yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+        }
+        activeSafetyPause = yield* db
+          .getSafetyPause(autonomousExecution.walletAddress, autonomousExecution.agentInstanceId)
+          .pipe(Effect.catchAll(() => Effect.succeed(activeSafetyPause)));
+      }
+
       if (poolsToScan.length === 0) {
         console.info("No pools configured — skipping cycle");
         cycle.completedAt = Date.now();
@@ -2880,6 +3316,51 @@ export const program = Effect.gen(function* () {
         yield* runIdleRedeployPass(idleRedeployCandidates, cycle, executedExitPools);
       }
 
+      consecutiveCoreDataFailures =
+        cycle.poolsScanned > 0 && cycle.poolsFailed >= cycle.poolsScanned
+          ? consecutiveCoreDataFailures + 1
+          : 0;
+      consecutiveExecutionFailures =
+        cycle.poolsFailed > 0
+          ? consecutiveExecutionFailures + cycle.poolsFailed
+          : cycle.poolsExecuted > 0
+            ? 0
+            : consecutiveExecutionFailures;
+      if (autonomousExecution && activeSafetyPause?.resolvedAt !== null) {
+        const basisUsd = [...trackedPositions.values()].reduce(
+          (sum, position) => sum + position.depositedUsd,
+          0,
+        );
+        const pnlUsd = [...trackedPositions.values()].reduce(
+          (sum, position) =>
+            sum +
+            position.currentValueUsd +
+            position.cumulativeFeesClaimedUsd +
+            position.cumulativeRewardsClaimedUsd -
+            position.depositedUsd,
+          0,
+        );
+        const pauseReason = shouldTriggerSafetyPause({
+          dailyDrawdownPct: basisUsd > 0 && pnlUsd < 0 ? (Math.abs(pnlUsd) / basisUsd) * 100 : 0,
+          maxDailyDrawdownPct: config.maxDailyDrawdownPct,
+          consecutiveCoreDataFailures,
+          consecutiveExecutionFailures,
+          maxConsecutiveExecutionFailures: config.maxConsecutiveExecutionFailures,
+          oldestSettlementAgeMs: 0,
+          settlementMaxPendingMs: config.settlementMaxPendingMs,
+        });
+        if (pauseReason) {
+          activeSafetyPause = {
+            walletAddress: autonomousExecution.walletAddress,
+            agentInstanceId: autonomousExecution.agentInstanceId,
+            reason: pauseReason,
+            triggeredAt: Date.now(),
+            resolvedAt: null,
+          };
+          yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+        }
+      }
+
       cycle.completedAt = Date.now();
       const durationMs = cycle.completedAt - cycle.startedAt;
       console.info("Scan cycle complete", {
@@ -2907,8 +3388,9 @@ export const program = Effect.gen(function* () {
           console.info("[snapshot-retention] Pruned old pool snapshots", {
             pruned,
             retentionDays: config.snapshotRetentionDays,
-          });          }
+          });
         }
+      }
 
       // Report engine status to the Prism Cloud API after every scan cycle.
       // PnL is the aggregate UNREALIZED figure across tracked positions and
@@ -5062,9 +5544,15 @@ export const program = Effect.gen(function* () {
           positionId: decision.positionId,
         };
         const riskResult: RiskResult =
-          decision.action === "HOLD"
-            ? { approved: true, reason: "HOLD — no execution; risk gates skipped" }
-            : risk.evaluate(decision, riskCtx);
+          activeSafetyPause?.resolvedAt === null &&
+          !isActionAllowedDuringSafetyPause(decision.action)
+            ? {
+                approved: false,
+                reason: `Wallet safety pause active: ${activeSafetyPause.reason}`,
+              }
+            : decision.action === "HOLD"
+              ? { approved: true, reason: "HOLD — no execution; risk gates skipped" }
+              : risk.evaluate(decision, riskCtx);
 
         // Apply risk-adjusted position size cap
         if (riskResult.adjustedSizeUsd && decision.action === "ENTER") {
@@ -5272,6 +5760,7 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
+              ...(autonomousExecution ? { autonomous: autonomousExecution } : {}),
             },
             decision,
             pool,
@@ -5301,6 +5790,11 @@ export const program = Effect.gen(function* () {
           );
           executed = paperResult.executed;
           executionError = paperResult.error;
+        } else if (
+          config.autonomousTokenMode === "shadow" &&
+          (decision.action === "ENTER" || decision.action === "REBALANCE")
+        ) {
+          executionError = "Shadow mode records decisions without sending transactions";
         } else {
           const liveResult = yield* executeLive(
             {
@@ -5316,6 +5810,7 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
+              ...(autonomousExecution ? { autonomous: autonomousExecution } : {}),
             },
             decision,
             pool,

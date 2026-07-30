@@ -245,6 +245,17 @@ describe("executeLive", () => {
       getPoolCooldown: () => Effect.succeed(null),
       setPoolCooldown: () => Effect.void,
       clearPoolCooldown: () => Effect.void,
+      saveTokenCandidate: () => Effect.void,
+      getTokenCandidate: () => Effect.succeed(null),
+      listTokenCandidates: () => Effect.succeed([]),
+      saveExecutionOperation: () => Effect.void,
+      getExecutionOperation: () => Effect.succeed(null),
+      listExecutionOperations: () => Effect.succeed([]),
+      saveSettlementJob: () => Effect.void,
+      getSettlementJob: () => Effect.succeed(null),
+      listSettlementJobs: () => Effect.succeed([]),
+      saveSafetyPause: () => Effect.void,
+      getSafetyPause: () => Effect.succeed(null),
     };
   }
 

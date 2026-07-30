@@ -6,6 +6,10 @@ import { ConfigService } from "../engine/config-service.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { defaultAppConfig, mockFetch } from "./helpers.js";
+import {
+  buildMeteoraDiscoveryPageUrl,
+  selectRecurringDiscoveryPage,
+} from "../engine/discovery-policy.js";
 
 function buildAdapterLayer(
   overrides: Parameters<typeof defaultAppConfig>[0] = {},
@@ -36,6 +40,16 @@ async function runDiscover(layer: Layer.Layer<AdapterService, never, never>) {
   const program = Effect.gen(function* () {
     const adapter = yield* AdapterService;
     return yield* adapter.discoverPools();
+  });
+  return Effect.runPromise(Effect.provide(program, layer));
+}
+
+async function runRecurringDiscover(layer: Layer.Layer<AdapterService, never, never>) {
+  const program = Effect.gen(function* () {
+    const adapter = yield* AdapterService;
+    const first = yield* adapter.discoverPools(0);
+    const second = yield* adapter.discoverPools(1);
+    return { first, second };
   });
   return Effect.runPromise(Effect.provide(program, layer));
 }
@@ -505,5 +519,71 @@ describe("AdapterService.discoverPools", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("Meteora discovery pagination", () => {
+  it("uses the API page count to rotate AdapterLive discovery requests", async () => {
+    // Given
+    const requestedUrls: string[] = [];
+    const restore = mockFetch((async (input: unknown) => {
+      requestedUrls.push(String(input));
+      return new Response(
+        JSON.stringify({ total: 3, pages: 3, current_page: 1, page_size: 1, data: [] }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch);
+
+    // When
+    await runRecurringDiscover(
+      buildAdapterLayer({
+        meteoraPoolsUrl: "https://example.test/pools?filter_by=is_blacklisted=false",
+      }),
+    );
+
+    // Then
+    expect(requestedUrls).toEqual([
+      "https://example.test/pools?filter_by=is_blacklisted%3Dfalse&page=1&page_size=1000",
+      "https://example.test/pools?filter_by=is_blacklisted%3Dfalse&page=2&page_size=1000",
+    ]);
+    restore();
+  });
+
+  it("rotates discovery pages deterministically across recurring scans", () => {
+    // Given
+    const pageCount = 3;
+
+    // When
+    const pages = [0, 1, 2, 3, 4].map((scanOrdinal) =>
+      selectRecurringDiscoveryPage({ scanOrdinal, pageCount }),
+    );
+
+    // Then
+    expect(pages).toEqual([1, 2, 3, 1, 2]);
+  });
+
+  it("preserves Meteora filters while replacing page pagination parameters", () => {
+    // Given
+    const baseUrl =
+      "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc";
+
+    // When
+    const pageUrl = buildMeteoraDiscoveryPageUrl({ baseUrl, page: 2, pageSize: 50 });
+
+    // Then
+    expect(pageUrl).toBe(
+      "https://dlmm.datapi.meteora.ag/pools?page=2&page_size=50&filter_by=is_blacklisted%3Dfalse&sort_by=tvl%3Adesc",
+    );
+  });
+
+  it("fails closed on malformed page metadata instead of inventing a page", () => {
+    // Given
+    const malformedPageCount = 0;
+
+    // When
+    const page = selectRecurringDiscoveryPage({ scanOrdinal: 0, pageCount: malformedPageCount });
+
+    // Then
+    expect(page).toBeNull();
   });
 });

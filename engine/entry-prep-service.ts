@@ -1,5 +1,11 @@
 import { Effect, Layer } from "effect";
-import { AdapterService, EntryPrepService, type EntryPrepApi } from "./services.js";
+import {
+  AdapterService,
+  EntryPrepService,
+  type EntryPreparationOutcome,
+  type EntryPreparationReceipt,
+  type EntryPrepApi,
+} from "./services.js";
 import { ConfigService } from "./config-service.js";
 import { EntryPrepError, SwapQuoteError } from "./errors.js";
 import { createLogger } from "./logger.js";
@@ -60,17 +66,43 @@ export function computeUsdcInputAtomic(amount: bigint, decimals: number, price: 
   return remainder === 0n ? quotient : quotient + 1n;
 }
 
+export function computeSwapInputAtomic(
+  outputAmount: bigint,
+  outputDecimals: number,
+  outputPriceUsd: number,
+  inputDecimals: number,
+  inputPriceUsd: number,
+): bigint {
+  if (
+    !isValidDecimals(outputDecimals) ||
+    !isValidDecimals(inputDecimals) ||
+    outputPriceUsd <= 0 ||
+    inputPriceUsd <= 0
+  ) {
+    return 0n;
+  }
+  const outputPriceScaled = numberToScaledBigInt(outputPriceUsd);
+  const inputPriceScaled = numberToScaledBigInt(inputPriceUsd);
+  if (outputPriceScaled <= 0n || inputPriceScaled <= 0n) return 0n;
+  const numerator = outputAmount * outputPriceScaled * 10n ** BigInt(inputDecimals) * 101n;
+  const denominator = 10n ** BigInt(outputDecimals) * inputPriceScaled * 100n;
+  const quotient = numerator / denominator;
+  return numerator % denominator === 0n ? quotient : quotient + 1n;
+}
+
 function makePrepError(
   code: EntryPrepError["code"],
   message: string,
   poolAddress: string,
   cause?: unknown,
+  partialPreparation?: EntryPreparationOutcome,
 ): EntryPrepError {
   return new EntryPrepError({
     code,
     message: `[${code}] ${message}`,
     poolAddress,
     cause,
+    ...(partialPreparation === undefined ? {} : { partialPreparation }),
   });
 }
 
@@ -122,7 +154,9 @@ export const EntryPrepLive = Layer.effect(
     const api: EntryPrepApi = {
       prepareEntryTokens: (poolAddress, positionSizeUsd) =>
         Effect.gen(function* () {
-          if (!config.autoSwapEntry) {
+          const autonomousMode = config.autonomousTokenMode ?? "off";
+          const solFunded = autonomousMode === "canary" || autonomousMode === "live";
+          if (!config.autoSwapEntry && !solFunded) {
             return;
           }
 
@@ -148,7 +182,9 @@ export const EntryPrepLive = Layer.effect(
           const [prices, tokenXDecimals, tokenYDecimals] = yield* Effect.all(
             [
               adapter
-                .getTokenPrices([pool.tokenX, pool.tokenY])
+                .getTokenPrices(
+                  solFunded ? [pool.tokenX, pool.tokenY, SOL_MINT] : [pool.tokenX, pool.tokenY],
+                )
                 .pipe(
                   Effect.mapError((err) =>
                     makePrepError(
@@ -321,7 +357,7 @@ export const EntryPrepLive = Layer.effect(
             price: number;
           }> = [];
           if (requiredX > availableX) {
-            if (pool.tokenX === USDC_MINT) {
+            if (!solFunded && pool.tokenX === USDC_MINT) {
               return yield* Effect.fail(
                 makePrepError(
                   "INSUFFICIENT_USDC_BALANCE",
@@ -330,15 +366,17 @@ export const EntryPrepLive = Layer.effect(
                 ),
               );
             }
-            deficits.push({
-              mint: pool.tokenX,
-              amount: requiredX - availableX,
-              decimals: tokenXDecimals,
-              price: priceX,
-            });
+            if (!solFunded || pool.tokenX !== SOL_MINT) {
+              deficits.push({
+                mint: pool.tokenX,
+                amount: requiredX - availableX,
+                decimals: tokenXDecimals,
+                price: priceX,
+              });
+            }
           }
           if (requiredY > availableY) {
-            if (pool.tokenY === USDC_MINT) {
+            if (!solFunded && pool.tokenY === USDC_MINT) {
               return yield* Effect.fail(
                 makePrepError(
                   "INSUFFICIENT_USDC_BALANCE",
@@ -347,17 +385,193 @@ export const EntryPrepLive = Layer.effect(
                 ),
               );
             }
-            deficits.push({
-              mint: pool.tokenY,
-              amount: requiredY - availableY,
-              decimals: tokenYDecimals,
-              price: priceY,
-            });
+            if (!solFunded || pool.tokenY !== SOL_MINT) {
+              deficits.push({
+                mint: pool.tokenY,
+                amount: requiredY - availableY,
+                decimals: tokenYDecimals,
+                price: priceY,
+              });
+            }
           }
 
           if (deficits.length === 0) {
             logger.info("Pool token balances sufficient for entry", { poolAddress });
             return;
+          }
+
+          if (solFunded) {
+            const quoteSwap = adapter.quoteSwap;
+            const prepareSwap = adapter.prepareSwap;
+            const simulateSwap = adapter.simulateSwap;
+            const submitSwap = adapter.submitSwap;
+            if (!quoteSwap || !prepareSwap || !simulateSwap || !submitSwap) {
+              return yield* Effect.fail(
+                makePrepError(
+                  "SWAP_TRANSACTION_FAILED",
+                  "Generic swap operations are unavailable for SOL-funded entry",
+                  poolAddress,
+                ),
+              );
+            }
+            const solPrice = prices[SOL_MINT] ?? 0;
+            if (!Number.isFinite(solPrice) || solPrice <= 0) {
+              return yield* Effect.fail(
+                makePrepError(
+                  "PRICE_UNAVAILABLE",
+                  `Invalid or missing SOL price: ${solPrice}`,
+                  poolAddress,
+                ),
+              );
+            }
+            const requests = deficits.map((deficit) => ({
+              deficit,
+              amountAtomic: computeSwapInputAtomic(
+                deficit.amount,
+                deficit.decimals,
+                deficit.price,
+                9,
+                solPrice,
+              ),
+            }));
+            if (requests.some(({ amountAtomic }) => amountAtomic <= 0n)) {
+              return yield* Effect.fail(
+                makePrepError(
+                  "SWAP_QUOTE_FAILED",
+                  "Computed SOL input is too small for a pool-token deficit",
+                  poolAddress,
+                ),
+              );
+            }
+            const poolSolRequirement =
+              (pool.tokenX === SOL_MINT ? requiredX : 0n) +
+              (pool.tokenY === SOL_MINT ? requiredY : 0n);
+            const totalSolRequired =
+              poolSolRequirement +
+              requests.reduce((total, request) => total + request.amountAtomic, 0n);
+            const spendableSol =
+              nativeSolLamports > GAS_RESERVE_LAMPORTS
+                ? nativeSolLamports - GAS_RESERVE_LAMPORTS
+                : 0n;
+            if (spendableSol < totalSolRequired) {
+              return yield* Effect.fail(
+                makePrepError(
+                  "INSUFFICIENT_BALANCE_AFTER_SWAP",
+                  `Spendable SOL ${formatAtomic(spendableSol, 9)} is less than required ${formatAtomic(totalSolRequired, 9)} for entry funding`,
+                  poolAddress,
+                ),
+              );
+            }
+            const quoted = yield* Effect.all(
+              requests.map(({ deficit, amountAtomic }) =>
+                quoteSwap({
+                  inputMint: SOL_MINT,
+                  outputMint: deficit.mint,
+                  amountAtomic,
+                  slippageBps: Math.min(config.maxSwapSlippageBps ?? 50, 50),
+                }).pipe(
+                  Effect.mapError((err) =>
+                    makePrepError(
+                      "SWAP_QUOTE_FAILED",
+                      `Failed to quote swap SOL -> ${deficit.mint}: ${String(err)}`,
+                      poolAddress,
+                      err,
+                    ),
+                  ),
+                  Effect.flatMap((quote) =>
+                    quote.minimumOutAmountAtomic >= deficit.amount
+                      ? Effect.succeed({ deficit, quote })
+                      : Effect.fail(
+                          makePrepError(
+                            "SWAP_QUOTE_FAILED",
+                            `Guaranteed output for ${deficit.mint} is below its deficit`,
+                            poolAddress,
+                          ),
+                        ),
+                  ),
+                ),
+              ),
+              { concurrency: "unbounded" },
+            );
+            const prepared = yield* Effect.all(
+              quoted.map(({ deficit, quote }) =>
+                prepareSwap(quote).pipe(
+                  Effect.flatMap((operation) =>
+                    simulateSwap(operation).pipe(Effect.as({ deficit, operation })),
+                  ),
+                  Effect.mapError((err) =>
+                    makePrepError(
+                      "SWAP_TRANSACTION_FAILED",
+                      `Failed to prepare or simulate SOL -> ${deficit.mint}: ${String(err)}`,
+                      poolAddress,
+                      err,
+                    ),
+                  ),
+                ),
+              ),
+              { concurrency: "unbounded" },
+            );
+            let submittedCount = 0;
+            const receipts: EntryPreparationReceipt[] = [];
+            for (const { deficit, operation } of prepared) {
+              const signature = yield* submitSwap(operation).pipe(
+                Effect.mapError((err) =>
+                  makePrepError(
+                    "SWAP_TRANSACTION_FAILED",
+                    `SOL-funded entry stopped after ${submittedCount} of ${prepared.length} submissions while swapping ${deficit.mint}: ${String(err)}`,
+                    poolAddress,
+                    err,
+                    receipts.length === 0
+                      ? undefined
+                      : { status: "partial", receipts: [...receipts] },
+                  ),
+                ),
+              );
+              submittedCount += 1;
+              receipts.push({
+                inputMint: SOL_MINT,
+                outputMint: deficit.mint,
+                inputAmountAtomic: operation.quote.request.amountAtomic,
+                acquiredAmountAtomic: operation.quote.outAmountAtomic,
+                txSignature: signature,
+              });
+              logger.info("Submitted SOL-funded pool-token swap", {
+                poolAddress,
+                mint: deficit.mint,
+                tx: signature,
+                submittedCount,
+                total: prepared.length,
+              });
+            }
+            const nativeSolAfter = yield* readNativeSolBalance();
+            const balanceXAfter =
+              pool.tokenX === SOL_MINT ? nativeSolAfter : yield* readTokenBalance(pool.tokenX);
+            const balanceYAfter =
+              pool.tokenY === SOL_MINT ? nativeSolAfter : yield* readTokenBalance(pool.tokenY);
+            if (balanceXAfter < requiredX || balanceYAfter < requiredY) {
+              return yield* Effect.fail(
+                makePrepError(
+                  "INSUFFICIENT_BALANCE_AFTER_SWAP",
+                  `Balances still insufficient after SOL-funded swaps: X=${formatAtomic(balanceXAfter, tokenXDecimals)}/${formatAtomic(requiredX, tokenXDecimals)}, Y=${formatAtomic(balanceYAfter, tokenYDecimals)}/${formatAtomic(requiredY, tokenYDecimals)}`,
+                  poolAddress,
+                  undefined,
+                  { status: "partial", receipts: [...receipts] },
+                ),
+              );
+            }
+            if (nativeSolAfter < MIN_SOL_FOR_GAS_LAMPORTS) {
+              return yield* Effect.fail(
+                makePrepError(
+                  "INSUFFICIENT_BALANCE_AFTER_SWAP",
+                  `Native SOL balance ${formatAtomic(nativeSolAfter, 9)} is below the gas minimum after swaps`,
+                  poolAddress,
+                  undefined,
+                  { status: "partial", receipts: [...receipts] },
+                ),
+              );
+            }
+            logger.info("SOL-funded entry token preparation complete", { poolAddress });
+            return { status: "complete", receipts };
           }
 
           const usdcBalance = yield* readTokenBalance(USDC_MINT);

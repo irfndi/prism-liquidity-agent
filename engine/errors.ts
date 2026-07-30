@@ -1,4 +1,5 @@
 import { Data } from "effect";
+import type { EntryPreparationOutcome } from "./services.js";
 
 export class ConfigError extends Data.TaggedError("ConfigError")<{
   readonly message: string;
@@ -12,6 +13,22 @@ export class AdapterError extends Data.TaggedError("AdapterError")<{
 }> {}
 
 export class SwapQuoteError extends Data.TaggedError("SwapQuoteError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
+export class SwapValidationError extends Data.TaggedError("SwapValidationError")<{
+  readonly stage: "quote" | "prepare" | "simulate" | "submit" | "status";
+  readonly reason:
+    | "malformed_payload"
+    | "mint_mismatch"
+    | "amount_mismatch"
+    | "route_mismatch"
+    | "stale_quote"
+    | "slippage_exceeded"
+    | "price_impact_exceeded"
+    | "simulation_failed"
+    | "simulation_required";
   readonly message: string;
   readonly cause?: unknown;
 }> {}
@@ -60,6 +77,13 @@ export class EntryPrepError extends Data.TaggedError("EntryPrepError")<{
   readonly message: string;
   readonly poolAddress?: string;
   readonly cause?: unknown;
+  readonly partialPreparation?: EntryPreparationOutcome;
+}> {}
+
+export class PersistenceContractError extends Data.TaggedError("PersistenceContractError")<{
+  readonly entity: "token_candidate" | "execution_operation" | "settlement_job";
+  readonly field: "state" | "operation_type" | "status" | "destination_asset";
+  readonly value: string;
 }> {}
 
 // Effect.tryPromise wraps rejections in UnknownException, whose `message` is a

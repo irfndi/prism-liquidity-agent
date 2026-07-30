@@ -31,23 +31,25 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
       const strategy = yield* StrategyService;
 
       const api: ScreenerApi = {
-        screenPools: () =>
+        screenPools: (scanOrdinal) =>
           Effect.gen(function* () {
-            const pools: ReadonlyArray<DiscoveredPool> = yield* adapter.discoverPools().pipe(
-              Effect.catchAll((err) => {
-                if (
-                  err instanceof DiscoverPoolsError ||
-                  (err as { _tag?: string })?._tag === "DiscoverPoolsError"
-                ) {
-                  logger.warn(
-                    "Pool discovery failed; falling back to watchlist-only mode:",
-                    err.message,
-                  );
-                  return Effect.succeed([] as ReadonlyArray<DiscoveredPool>);
-                }
-                return Effect.fail(err);
-              }),
-            );
+            const pools: ReadonlyArray<DiscoveredPool> = yield* adapter
+              .discoverPools(scanOrdinal)
+              .pipe(
+                Effect.catchAll((err) => {
+                  if (
+                    err instanceof DiscoverPoolsError ||
+                    (err as { _tag?: string })?._tag === "DiscoverPoolsError"
+                  ) {
+                    logger.warn(
+                      "Pool discovery failed; falling back to watchlist-only mode:",
+                      err.message,
+                    );
+                    return Effect.succeed([] as ReadonlyArray<DiscoveredPool>);
+                  }
+                  return Effect.fail(err);
+                }),
+              );
             const screened: ScreenedPool[] = [];
 
             for (const pool of pools) {

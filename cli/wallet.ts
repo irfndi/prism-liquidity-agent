@@ -42,7 +42,7 @@ function resolveImportPath(candidate: string): string {
 // engine's signing wallet. If the env key is present but invalid, returns an error rather
 // than silently falling back (the engine resolves the wallet to null on a bad env key).
 // Returns null when no key is configured or stored anywhere.
-function resolveEffectivePubkey(): {
+export function resolveEffectivePubkey(): {
   pubkey: string;
   source: "env" | "keystore";
   error?: string;

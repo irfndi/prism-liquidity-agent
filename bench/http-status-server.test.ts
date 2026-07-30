@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Effect } from "effect";
 import { HttpStatusServer } from "../engine/http-status-server.js";
-import type { AppConfig } from "../engine/config-service.js";
+import { AUTONOMOUS_TOKEN_CONFIG_DEFAULTS, type AppConfig } from "../engine/config-service.js";
 import type { AgentStateApi } from "../engine/services.js";
 import type { AgentProposal } from "../engine/types.js";
 import type { PrismStateSnapshot } from "../engine/state-service.js";
@@ -13,6 +13,7 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     solanaRpcUrl: "",
     solanaRpcFallbackUrl: "",
     paperTrading: true,
+    ...AUTONOMOUS_TOKEN_CONFIG_DEFAULTS,
     scanIntervalMs: 600_000,
     minPoolTvlUsd: 50_000,
     minFeeIlRatio: 1.2,

@@ -1,3 +1,100 @@
+export type AutonomousTokenMode = "off" | "shadow" | "canary" | "live";
+
+export type SettlementAsset = "SOL";
+
+export type TokenCandidateState =
+  | "discovered"
+  | "observing"
+  | "eligible"
+  | "entered"
+  | "cooling_down"
+  | "rejected";
+
+export type ExecutionOperationType = "entry" | "exit" | "rollback" | "settlement";
+
+export type ExecutionOperationStatus =
+  | "planned"
+  | "prepared"
+  | "submitted"
+  | "confirmed"
+  | "retryable"
+  | "failed";
+
+export type SettlementJobStatus =
+  | "pending"
+  | "prepared"
+  | "submitted"
+  | "confirmed"
+  | "retryable"
+  | "terminal";
+
+export interface TokenCandidateRecord {
+  readonly id: string;
+  readonly walletAddress: string;
+  readonly agentInstanceId: string;
+  readonly poolAddress: string;
+  readonly tokenMint: string;
+  readonly state: TokenCandidateState;
+  readonly healthyScanCount: number;
+  readonly firstSeenAt: number;
+  readonly lastSeenAt: number;
+  readonly eligibleAt: number | null;
+  readonly enteredAt: number | null;
+  readonly cooldownUntil: number | null;
+  readonly rejectionReason: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface ExecutionOperationRecord {
+  readonly id: string;
+  readonly walletAddress: string;
+  readonly agentInstanceId: string;
+  readonly candidateId: string | null;
+  readonly positionId: string | null;
+  readonly poolAddress: string;
+  readonly tokenMint: string;
+  readonly operationType: ExecutionOperationType;
+  readonly status: ExecutionOperationStatus;
+  readonly amountAtomic: string | null;
+  readonly txSignature: string | null;
+  readonly error: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface SettlementJobRecord {
+  readonly id: string;
+  readonly walletAddress: string;
+  readonly agentInstanceId: string;
+  readonly positionId: string;
+  readonly poolAddress: string;
+  readonly tokenMint: string;
+  readonly amountAtomic: string;
+  readonly destinationAsset: SettlementAsset;
+  readonly status: SettlementJobStatus;
+  readonly attempts: number;
+  readonly nextRetryAt: number | null;
+  readonly txSignature: string | null;
+  readonly confirmedOutputAtomic?: string | null;
+  readonly outputUsd?: number | null;
+  readonly executionCostUsd?: number | null;
+  readonly finalizedAt?: number | null;
+  readonly realizedPnlUsd?: number | null;
+  readonly expiresAt: number;
+  readonly error: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface SafetyPauseRecord {
+  readonly walletAddress: string;
+  readonly agentInstanceId: string;
+  readonly reason: string;
+  readonly triggeredAt: number;
+  readonly resolvedAt: number | null;
+}
+
 // ─── Pool & Bin ──────────────────────────────────────────────────────────────
 
 export interface BinData {

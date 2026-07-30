@@ -152,6 +152,28 @@ export function computeRealizedPnlUsd(
   return finalValueUsd + cumulativeFeesClaimedUsd + cumulativeRewardsClaimedUsd - costBasisUsd;
 }
 
+export interface NetRealizedPnlInput {
+  readonly finalValueUsd: number;
+  readonly cumulativeFeesClaimedUsd: number;
+  readonly cumulativeRewardsClaimedUsd: number;
+  readonly costBasisUsd: number;
+  readonly settlementCostUsd: number;
+  readonly executionCostUsd: number;
+}
+
+export function computeNetRealizedPnlUsd(input: NetRealizedPnlInput): number {
+  return (
+    computeRealizedPnlUsd(
+      input.finalValueUsd,
+      input.cumulativeFeesClaimedUsd,
+      input.costBasisUsd,
+      input.cumulativeRewardsClaimedUsd,
+    ) -
+    input.settlementCostUsd -
+    input.executionCostUsd
+  );
+}
+
 /**
  * Cost-basis bookkeeping for an auto-compound of already-claimed fees.
  *

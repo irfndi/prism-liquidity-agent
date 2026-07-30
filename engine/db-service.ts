@@ -11,11 +11,21 @@ import type {
   BinArray,
   SignalSnapshot,
   SignalWeights,
+  ExecutionOperationRecord,
+  ExecutionOperationStatus,
+  ExecutionOperationType,
+  SafetyPauseRecord,
+  SettlementAsset,
+  SettlementJobRecord,
+  SettlementJobStatus,
+  TokenCandidateRecord,
+  TokenCandidateState,
 } from "./types.js";
 import type { EvolvableThresholds, OutcomeRecord } from "./strategy-service.js";
 import { DbService, type DbApi } from "./services.js";
 import { bigintReplacer } from "./bigint-json.js";
 import { randomUUID } from "crypto";
+import { PersistenceContractError } from "./errors.js";
 
 export interface PositionRecord {
   /**
@@ -1033,11 +1043,408 @@ export const DbLive = (dbPath?: string) =>
           Effect.sync(() => {
             runOne(db, "DELETE FROM pool_cooldowns WHERE pool_address = ?", poolAddress);
           }),
+
+        saveTokenCandidate: (candidate) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              `INSERT INTO token_candidates (
+                id, wallet_address, agent_instance_id, pool_address, token_mint, state,
+                healthy_scan_count, first_seen_at, last_seen_at, eligible_at, entered_at,
+                cooldown_until, rejection_reason, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                wallet_address = excluded.wallet_address,
+                agent_instance_id = excluded.agent_instance_id,
+                pool_address = excluded.pool_address,
+                token_mint = excluded.token_mint,
+                state = excluded.state,
+                healthy_scan_count = excluded.healthy_scan_count,
+                first_seen_at = excluded.first_seen_at,
+                last_seen_at = excluded.last_seen_at,
+                eligible_at = excluded.eligible_at,
+                entered_at = excluded.entered_at,
+                cooldown_until = excluded.cooldown_until,
+                rejection_reason = excluded.rejection_reason,
+                updated_at = excluded.updated_at`,
+              candidate.id,
+              candidate.walletAddress,
+              candidate.agentInstanceId,
+              candidate.poolAddress,
+              candidate.tokenMint,
+              candidate.state,
+              candidate.healthyScanCount,
+              candidate.firstSeenAt,
+              candidate.lastSeenAt,
+              candidate.eligibleAt,
+              candidate.enteredAt,
+              candidate.cooldownUntil,
+              candidate.rejectionReason,
+              candidate.createdAt,
+              candidate.updatedAt,
+            );
+          }),
+
+        getTokenCandidate: (id) =>
+          Effect.sync(() => {
+            const row = queryOne<Record<string, unknown>>(
+              db,
+              "SELECT * FROM token_candidates WHERE id = ?",
+              id,
+            );
+            return row === null ? null : rowToTokenCandidate(row);
+          }),
+
+        listTokenCandidates: (walletAddress, agentInstanceId) =>
+          Effect.sync(() =>
+            queryAll<Record<string, unknown>>(
+              db,
+              `SELECT * FROM token_candidates
+               WHERE wallet_address = ? AND agent_instance_id = ?
+               ORDER BY updated_at ASC, id ASC`,
+              walletAddress,
+              agentInstanceId,
+            ).map(rowToTokenCandidate),
+          ),
+
+        saveExecutionOperation: (operation) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              `INSERT INTO execution_operations (
+                id, wallet_address, agent_instance_id, candidate_id, position_id,
+                pool_address, token_mint, operation_type, status, amount_atomic,
+                tx_signature, error, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                wallet_address = excluded.wallet_address,
+                agent_instance_id = excluded.agent_instance_id,
+                candidate_id = excluded.candidate_id,
+                position_id = excluded.position_id,
+                pool_address = excluded.pool_address,
+                token_mint = excluded.token_mint,
+                operation_type = excluded.operation_type,
+                status = excluded.status,
+                amount_atomic = excluded.amount_atomic,
+                tx_signature = excluded.tx_signature,
+                error = excluded.error,
+                updated_at = excluded.updated_at`,
+              operation.id,
+              operation.walletAddress,
+              operation.agentInstanceId,
+              operation.candidateId,
+              operation.positionId,
+              operation.poolAddress,
+              operation.tokenMint,
+              operation.operationType,
+              operation.status,
+              operation.amountAtomic,
+              operation.txSignature,
+              operation.error,
+              operation.createdAt,
+              operation.updatedAt,
+            );
+          }),
+
+        getExecutionOperation: (id) =>
+          Effect.sync(() => {
+            const row = queryOne<Record<string, unknown>>(
+              db,
+              "SELECT * FROM execution_operations WHERE id = ?",
+              id,
+            );
+            return row === null ? null : rowToExecutionOperation(row);
+          }),
+
+        listExecutionOperations: (walletAddress, agentInstanceId) =>
+          Effect.sync(() =>
+            queryAll<Record<string, unknown>>(
+              db,
+              `SELECT * FROM execution_operations
+               WHERE wallet_address = ? AND agent_instance_id = ?
+               ORDER BY created_at ASC, id ASC`,
+              walletAddress,
+              agentInstanceId,
+            ).map(rowToExecutionOperation),
+          ),
+
+        saveSettlementJob: (job) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              `INSERT INTO settlement_jobs (
+                id, wallet_address, agent_instance_id, position_id, pool_address,
+                token_mint, amount_atomic, destination_asset, status, attempts,
+                next_retry_at, tx_signature, confirmed_output_atomic, output_usd,
+                execution_cost_usd, finalized_at, realized_pnl_usd, expires_at,
+                error, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                wallet_address = excluded.wallet_address,
+                agent_instance_id = excluded.agent_instance_id,
+                position_id = excluded.position_id,
+                pool_address = excluded.pool_address,
+                token_mint = excluded.token_mint,
+                amount_atomic = excluded.amount_atomic,
+                destination_asset = excluded.destination_asset,
+                status = excluded.status,
+                attempts = excluded.attempts,
+                next_retry_at = excluded.next_retry_at,
+                tx_signature = excluded.tx_signature,
+                confirmed_output_atomic = excluded.confirmed_output_atomic,
+                output_usd = excluded.output_usd,
+                execution_cost_usd = excluded.execution_cost_usd,
+                finalized_at = excluded.finalized_at,
+                realized_pnl_usd = excluded.realized_pnl_usd,
+                expires_at = excluded.expires_at,
+                error = excluded.error,
+                updated_at = excluded.updated_at`,
+              job.id,
+              job.walletAddress,
+              job.agentInstanceId,
+              job.positionId,
+              job.poolAddress,
+              job.tokenMint,
+              job.amountAtomic,
+              job.destinationAsset,
+              job.status,
+              job.attempts,
+              job.nextRetryAt,
+              job.txSignature,
+              job.confirmedOutputAtomic ?? null,
+              job.outputUsd ?? null,
+              job.executionCostUsd ?? null,
+              job.finalizedAt ?? null,
+              job.realizedPnlUsd ?? null,
+              job.expiresAt,
+              job.error,
+              job.createdAt,
+              job.updatedAt,
+            );
+          }),
+
+        getSettlementJob: (id) =>
+          Effect.sync(() => {
+            const row = queryOne<Record<string, unknown>>(
+              db,
+              "SELECT * FROM settlement_jobs WHERE id = ?",
+              id,
+            );
+            return row === null ? null : rowToSettlementJob(row);
+          }),
+
+        listSettlementJobs: (walletAddress, agentInstanceId) =>
+          Effect.sync(() =>
+            queryAll<Record<string, unknown>>(
+              db,
+              `SELECT * FROM settlement_jobs
+               WHERE wallet_address = ? AND agent_instance_id = ?
+               ORDER BY created_at ASC, id ASC`,
+              walletAddress,
+              agentInstanceId,
+            ).map(rowToSettlementJob),
+          ),
+
+        saveSafetyPause: (pause) =>
+          Effect.sync(() => {
+            runOne(
+              db,
+              `INSERT INTO wallet_safety_pauses (
+                wallet_address, agent_instance_id, reason, triggered_at, resolved_at
+              ) VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(wallet_address, agent_instance_id) DO UPDATE SET
+                reason = excluded.reason,
+                triggered_at = excluded.triggered_at,
+                resolved_at = excluded.resolved_at`,
+              pause.walletAddress,
+              pause.agentInstanceId,
+              pause.reason,
+              pause.triggeredAt,
+              pause.resolvedAt,
+            );
+          }),
+
+        getSafetyPause: (walletAddress, agentInstanceId) =>
+          Effect.sync(() => {
+            const row = queryOne<Record<string, unknown>>(
+              db,
+              `SELECT * FROM wallet_safety_pauses
+               WHERE wallet_address = ? AND agent_instance_id = ?`,
+              walletAddress,
+              agentInstanceId,
+            );
+            return row === null ? null : rowToSafetyPause(row);
+          }),
       };
 
       return api;
     }),
   );
+
+function parseTokenCandidateState(value: unknown): TokenCandidateState {
+  switch (value) {
+    case "discovered":
+    case "observing":
+    case "eligible":
+    case "entered":
+    case "cooling_down":
+    case "rejected":
+      return value;
+    default:
+      throw new PersistenceContractError({
+        entity: "token_candidate",
+        field: "state",
+        value: String(value),
+      });
+  }
+}
+
+function parseExecutionOperationType(value: unknown): ExecutionOperationType {
+  switch (value) {
+    case "entry":
+    case "exit":
+    case "rollback":
+    case "settlement":
+      return value;
+    default:
+      throw new PersistenceContractError({
+        entity: "execution_operation",
+        field: "operation_type",
+        value: String(value),
+      });
+  }
+}
+
+function parseExecutionOperationStatus(value: unknown): ExecutionOperationStatus {
+  switch (value) {
+    case "planned":
+    case "prepared":
+    case "submitted":
+    case "confirmed":
+    case "retryable":
+    case "failed":
+      return value;
+    default:
+      throw new PersistenceContractError({
+        entity: "execution_operation",
+        field: "status",
+        value: String(value),
+      });
+  }
+}
+
+function parseSettlementJobStatus(value: unknown): SettlementJobStatus {
+  switch (value) {
+    case "pending":
+    case "prepared":
+    case "submitted":
+    case "confirmed":
+    case "retryable":
+    case "terminal":
+      return value;
+    default:
+      throw new PersistenceContractError({
+        entity: "settlement_job",
+        field: "status",
+        value: String(value),
+      });
+  }
+}
+
+function parseSettlementAsset(value: unknown): SettlementAsset {
+  if (value === "SOL") return value;
+  throw new PersistenceContractError({
+    entity: "settlement_job",
+    field: "destination_asset",
+    value: String(value),
+  });
+}
+
+function rowToTokenCandidate(row: Record<string, unknown>): TokenCandidateRecord {
+  return {
+    id: String(row.id),
+    walletAddress: String(row.wallet_address),
+    agentInstanceId: String(row.agent_instance_id),
+    poolAddress: String(row.pool_address),
+    tokenMint: String(row.token_mint),
+    state: parseTokenCandidateState(row.state),
+    healthyScanCount: Number(row.healthy_scan_count),
+    firstSeenAt: Number(row.first_seen_at),
+    lastSeenAt: Number(row.last_seen_at),
+    eligibleAt: row.eligible_at === null ? null : Number(row.eligible_at),
+    enteredAt: row.entered_at === null ? null : Number(row.entered_at),
+    cooldownUntil: row.cooldown_until === null ? null : Number(row.cooldown_until),
+    rejectionReason: row.rejection_reason === null ? null : String(row.rejection_reason),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+function rowToExecutionOperation(row: Record<string, unknown>): ExecutionOperationRecord {
+  return {
+    id: String(row.id),
+    walletAddress: String(row.wallet_address),
+    agentInstanceId: String(row.agent_instance_id),
+    candidateId: row.candidate_id === null ? null : String(row.candidate_id),
+    positionId: row.position_id === null ? null : String(row.position_id),
+    poolAddress: String(row.pool_address),
+    tokenMint: String(row.token_mint),
+    operationType: parseExecutionOperationType(row.operation_type),
+    status: parseExecutionOperationStatus(row.status),
+    amountAtomic: row.amount_atomic === null ? null : String(row.amount_atomic),
+    txSignature: row.tx_signature === null ? null : String(row.tx_signature),
+    error: row.error === null ? null : String(row.error),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+function rowToSettlementJob(row: Record<string, unknown>): SettlementJobRecord {
+  const finalization =
+    row.confirmed_output_atomic != null ||
+    row.output_usd != null ||
+    row.execution_cost_usd != null ||
+    row.finalized_at != null ||
+    row.realized_pnl_usd != null
+      ? {
+          confirmedOutputAtomic:
+            row.confirmed_output_atomic == null ? null : String(row.confirmed_output_atomic),
+          outputUsd: row.output_usd == null ? null : Number(row.output_usd),
+          executionCostUsd: row.execution_cost_usd == null ? null : Number(row.execution_cost_usd),
+          finalizedAt: row.finalized_at == null ? null : Number(row.finalized_at),
+          realizedPnlUsd: row.realized_pnl_usd == null ? null : Number(row.realized_pnl_usd),
+        }
+      : {};
+  return {
+    id: String(row.id),
+    walletAddress: String(row.wallet_address),
+    agentInstanceId: String(row.agent_instance_id),
+    positionId: String(row.position_id),
+    poolAddress: String(row.pool_address),
+    tokenMint: String(row.token_mint),
+    amountAtomic: String(row.amount_atomic),
+    destinationAsset: parseSettlementAsset(row.destination_asset),
+    status: parseSettlementJobStatus(row.status),
+    attempts: Number(row.attempts),
+    nextRetryAt: row.next_retry_at === null ? null : Number(row.next_retry_at),
+    txSignature: row.tx_signature === null ? null : String(row.tx_signature),
+    ...finalization,
+    expiresAt: Number(row.expires_at),
+    error: row.error === null ? null : String(row.error),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+function rowToSafetyPause(row: Record<string, unknown>): SafetyPauseRecord {
+  return {
+    walletAddress: String(row.wallet_address),
+    agentInstanceId: String(row.agent_instance_id),
+    reason: String(row.reason),
+    triggeredAt: Number(row.triggered_at),
+    resolvedAt: row.resolved_at === null ? null : Number(row.resolved_at),
+  };
+}
 
 function rowToPosition(row: Record<string, unknown>): PositionRecord {
   return {

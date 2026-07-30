@@ -10,6 +10,7 @@ import { createLogger } from "../engine/logger.js";
 
 import { readLockfile, isProcessAlive, findRunningEngineProcess } from "./lockfile.js";
 import { getPrismDbPath } from "../engine/paths.js";
+import { resolveEffectivePubkey } from "./wallet.js";
 
 const logger = createLogger("status-cli");
 
@@ -36,6 +37,49 @@ export interface StatusJsonOutput {
     executed: boolean;
     paperTrading: boolean;
   }>;
+  autonomous: {
+    mode: "off" | "shadow" | "canary" | "live";
+    walletAddress: string | null;
+    agentInstanceId: string;
+    candidates: Array<{
+      id: string;
+      state: string;
+      poolAddress: string;
+      tokenMint: string;
+      healthyScanCount: number;
+      updatedAt: string;
+    }>;
+    operations: Array<{
+      id: string;
+      candidateId: string | null;
+      positionId: string | null;
+      type: string;
+      status: string;
+      poolAddress: string;
+      tokenMint: string;
+      txSignature: string | null;
+      error: string | null;
+      updatedAt: string;
+    }>;
+    settlements: Array<{
+      id: string;
+      positionId: string;
+      status: string;
+      poolAddress: string;
+      tokenMint: string;
+      attempts: number;
+      nextRetryAt: string | null;
+      expiresAt: string;
+      txSignature: string | null;
+      error: string | null;
+    }>;
+    safetyPause: {
+      active: boolean;
+      reason: string;
+      triggeredAt: string;
+      resolvedAt: string | null;
+    } | null;
+  };
 }
 
 function buildProgram(): Layer.Layer<DbService | AuditService | ConfigService, unknown, never> {
@@ -72,6 +116,25 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
           const positions = yield* db.getAllPositions();
           const recentAudit = yield* audit.getRecentDecisions(10);
           const summary = computeSummary(positions);
+          const effectiveWallet = resolveEffectivePubkey();
+          const walletAddress = effectiveWallet?.error ? null : (effectiveWallet?.pubkey ?? null);
+          const autonomous =
+            walletAddress === null
+              ? {
+                  candidates: [],
+                  operations: [],
+                  settlements: [],
+                  safetyPause: null,
+                }
+              : {
+                  candidates: yield* db.listTokenCandidates(walletAddress, config.agentInstanceId),
+                  operations: yield* db.listExecutionOperations(
+                    walletAddress,
+                    config.agentInstanceId,
+                  ),
+                  settlements: yield* db.listSettlementJobs(walletAddress, config.agentInstanceId),
+                  safetyPause: yield* db.getSafetyPause(walletAddress, config.agentInstanceId),
+                };
 
           const activePositions = positions.filter((p) => p.paperExitedAt === null);
           const prices = new Map<string, number>();
@@ -114,6 +177,58 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
                 executed: d.executed,
                 paperTrading: d.paperTrading,
               })),
+              autonomous: {
+                mode: config.autonomousTokenMode,
+                walletAddress,
+                agentInstanceId: config.agentInstanceId,
+                candidates: autonomous.candidates.map((candidate) => ({
+                  id: candidate.id,
+                  state: candidate.state,
+                  poolAddress: candidate.poolAddress,
+                  tokenMint: candidate.tokenMint,
+                  healthyScanCount: candidate.healthyScanCount,
+                  updatedAt: new Date(candidate.updatedAt).toISOString(),
+                })),
+                operations: autonomous.operations.map((operation) => ({
+                  id: operation.id,
+                  candidateId: operation.candidateId,
+                  positionId: operation.positionId,
+                  type: operation.operationType,
+                  status: operation.status,
+                  poolAddress: operation.poolAddress,
+                  tokenMint: operation.tokenMint,
+                  txSignature: operation.txSignature,
+                  error: operation.error,
+                  updatedAt: new Date(operation.updatedAt).toISOString(),
+                })),
+                settlements: autonomous.settlements.map((settlement) => ({
+                  id: settlement.id,
+                  positionId: settlement.positionId,
+                  status: settlement.status,
+                  poolAddress: settlement.poolAddress,
+                  tokenMint: settlement.tokenMint,
+                  attempts: settlement.attempts,
+                  nextRetryAt:
+                    settlement.nextRetryAt === null
+                      ? null
+                      : new Date(settlement.nextRetryAt).toISOString(),
+                  expiresAt: new Date(settlement.expiresAt).toISOString(),
+                  txSignature: settlement.txSignature,
+                  error: settlement.error,
+                })),
+                safetyPause:
+                  autonomous.safetyPause === null
+                    ? null
+                    : {
+                        active: autonomous.safetyPause.resolvedAt === null,
+                        reason: autonomous.safetyPause.reason,
+                        triggeredAt: new Date(autonomous.safetyPause.triggeredAt).toISOString(),
+                        resolvedAt:
+                          autonomous.safetyPause.resolvedAt === null
+                            ? null
+                            : new Date(autonomous.safetyPause.resolvedAt).toISOString(),
+                      },
+              },
             };
             console.log(JSON.stringify(json, null, 2));
             return;
@@ -180,6 +295,17 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
                 : []),
               `  Unrealized:  ${pnlText}`,
               `  ${agentStatus}`,
+              `  Autonomous:  ${config.autonomousTokenMode} (${walletAddress ?? "wallet unavailable"})`,
+              `  Candidates:  ${autonomous.candidates.length}`,
+              `  Operations:  ${autonomous.operations.length}`,
+              `  Settlements: ${autonomous.settlements.length}`,
+              `  Safety pause: ${
+                autonomous.safetyPause === null
+                  ? "none"
+                  : autonomous.safetyPause.resolvedAt === null
+                    ? `ACTIVE (${autonomous.safetyPause.reason})`
+                    : `resolved (${autonomous.safetyPause.reason})`
+              }`,
               "",
               `  Recent decisions: ${recentAudit.length}`,
               ...recentAudit
