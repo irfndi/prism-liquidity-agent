@@ -514,6 +514,7 @@ export const EntryPrepLive = Layer.effect(
             let submittedCount = 0;
             const receipts: EntryPreparationReceipt[] = [];
             for (const { deficit, operation } of prepared) {
+              const balanceBefore = yield* readTokenBalance(deficit.mint);
               const signature = yield* submitSwap(operation).pipe(
                 Effect.mapError((err) =>
                   makePrepError(
@@ -528,11 +529,14 @@ export const EntryPrepLive = Layer.effect(
                 ),
               );
               submittedCount += 1;
+              const balanceAfter = yield* readTokenBalance(deficit.mint);
+              const acquiredAmountAtomic =
+                balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0n;
               receipts.push({
                 inputMint: SOL_MINT,
                 outputMint: deficit.mint,
                 inputAmountAtomic: operation.quote.request.amountAtomic,
-                acquiredAmountAtomic: operation.quote.outAmountAtomic,
+                acquiredAmountAtomic,
                 txSignature: signature,
               });
               logger.info("Submitted SOL-funded pool-token swap", {

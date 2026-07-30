@@ -1560,7 +1560,6 @@ export function executeLive(
           }
           const pendingFeeUsd = exitResultData.pendingFeeUsd;
           if (typeof pendingFeeUsd === "number") {
-            pos.cumulativeFeesClaimedUsd += pendingFeeUsd;
             yield* db
               .savePositionEvent({
                 id: randomUUID(),
@@ -1575,11 +1574,6 @@ export function executeLive(
                 createdAt: now,
               })
               .pipe(Effect.catchAll(() => Effect.void));
-          }
-          for (const reward of exitResultData.sweptRewards ?? []) {
-            if (typeof reward.amountUsd === "number") {
-              pos.cumulativeRewardsClaimedUsd += reward.amountUsd;
-            }
           }
           if ((exitResultData.sweptRewards ?? []).length > 0) {
             yield* db
@@ -3333,7 +3327,7 @@ export const program = Effect.gen(function* () {
           maxSwapSlippageBps: config.maxSwapSlippageBps,
         });
         const oldestSettlementAgeMs = processedJobs
-          .filter((job) => job.status !== "confirmed" && job.status !== "terminal")
+          .filter((job) => job.status !== "confirmed")
           .reduce((oldest, job) => Math.max(oldest, Date.now() - job.createdAt), 0);
         if (
           oldestSettlementAgeMs > config.settlementMaxPendingMs &&

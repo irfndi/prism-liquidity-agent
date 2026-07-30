@@ -3248,7 +3248,12 @@ export const AdapterLive = Layer.effect(
               binStep: p.pool_config.bin_step,
               tokenX: p.token_x.address,
               tokenY: p.token_y.address,
-              createdAtMs: p.created_at > 1_000_000_000_000 ? p.created_at : p.created_at * 1000,
+              ...(typeof p.created_at === "number" && Number.isFinite(p.created_at)
+                ? {
+                    createdAtMs:
+                      p.created_at > 1_000_000_000_000 ? p.created_at : p.created_at * 1000,
+                  }
+                : {}),
             }))
             .slice(0, 50);
         }),
