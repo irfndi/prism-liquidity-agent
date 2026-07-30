@@ -1,10 +1,91 @@
 import { describe, expect, it } from "vitest";
+import { Effect } from "effect";
 import {
   isActionAllowedDuringSafetyPause,
   nextSettlementRetryAt,
+  processSettlementJobs,
   shouldTriggerSafetyPause,
 } from "../engine/autonomous-runtime.js";
+import { SOL_MINT } from "../engine/constants.js";
 import { computeNetRealizedPnlUsd } from "../engine/pnl.js";
+import type {
+  AdapterApi,
+  DbApi,
+  PreparedSwap,
+  SwapQuote,
+  SwapSimulation,
+} from "../engine/services.js";
+import type { SettlementJobRecord } from "../engine/types.js";
+import type { AutonomousTokenMode } from "../engine/types.js";
+
+function settlementJob(overrides: Partial<SettlementJobRecord> = {}): SettlementJobRecord {
+  return {
+    id: "settlement-1",
+    walletAddress: "wallet-1",
+    agentInstanceId: "primary",
+    positionId: "position-1",
+    poolAddress: "pool-1",
+    tokenMint: "token-1",
+    amountAtomic: "9007199254740993",
+    destinationAsset: "SOL",
+    status: "pending",
+    attempts: 0,
+    nextRetryAt: null,
+    txSignature: null,
+    confirmedOutputAtomic: null,
+    outputUsd: null,
+    executionCostUsd: null,
+    finalizedAt: null,
+    realizedPnlUsd: null,
+    expiresAt: 1_000_000,
+    error: null,
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  };
+}
+
+function swapQuote(job: SettlementJobRecord): SwapQuote {
+  return {
+    request: {
+      inputMint: job.tokenMint,
+      outputMint: SOL_MINT,
+      amountAtomic: BigInt(job.amountAtomic),
+      slippageBps: 50,
+    },
+    outAmountAtomic: 1n,
+    minimumOutAmountAtomic: 1n,
+    priceImpactBps: 1,
+    quotedAt: 1,
+    route: [{ inputMint: job.tokenMint, outputMint: SOL_MINT }],
+    rawQuote: {},
+  };
+}
+
+function runSettlementProcessor(
+  jobs: ReadonlyArray<SettlementJobRecord>,
+  adapter: AdapterApi,
+  savedJobs: SettlementJobRecord[],
+  mode: AutonomousTokenMode = "live",
+): Promise<ReadonlyArray<SettlementJobRecord>> {
+  const db = {
+    saveSettlementJob: (job: SettlementJobRecord) =>
+      Effect.sync(() => {
+        savedJobs.push(job);
+      }),
+    getPosition: () => Effect.succeed(null),
+  } as unknown as DbApi;
+  return Effect.runPromise(
+    processSettlementJobs({
+      adapter,
+      db,
+      jobs,
+      mode,
+      now: 10_000,
+      maxSwapSlippageBps: 50,
+    }),
+  );
+}
 
 describe("autonomous token runtime policy", () => {
   it("allows exits but blocks entry and rebalance during a persistent safety pause", () => {
@@ -82,5 +163,176 @@ describe("autonomous token runtime policy", () => {
 
     // Then
     expect(pnl).toBe(125);
+  });
+});
+
+describe("settlement job processing", () => {
+  it.each(["off", "shadow"] as const)("does not process jobs in %s mode", async (mode) => {
+    // Given
+    const job = settlementJob();
+    const savedJobs: SettlementJobRecord[] = [];
+
+    // When
+    const [processed] = await runSettlementProcessor([job], {} as AdapterApi, savedJobs, mode);
+
+    // Then
+    expect(processed).toEqual(job);
+    expect(savedJobs).toEqual([]);
+  });
+
+  it("terminalizes an expired job instead of retrying it", async () => {
+    // Given
+    const job = settlementJob({ expiresAt: 9_999 });
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getTokenPrices: () => Effect.fail(new Error("expired settlement")),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
+
+    // Then
+    expect(processed).toMatchObject({ status: "terminal", nextRetryAt: null });
+    expect(savedJobs).toEqual([processed]);
+  });
+
+  it("marks a due job retryable when generic swap operations are unavailable", async () => {
+    // Given
+    const job = settlementJob();
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
+      getTokenDecimals: () => Effect.succeed(6),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
+
+    // Then
+    expect(processed).toMatchObject({ status: "retryable", attempts: 1 });
+    expect(processed?.error).toContain("Generic settlement swap operations unavailable");
+  });
+
+  it("schedules a retry while a broadcast transaction is still processing", async () => {
+    // Given
+    const job = settlementJob({ status: "submitted", txSignature: "signature-1", attempts: 2 });
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getSwapStatus: () => Effect.succeed({ state: "processed", error: null }),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
+
+    // Then
+    expect(processed).toMatchObject({
+      status: "submitted",
+      txSignature: "signature-1",
+      nextRetryAt: 14_000,
+    });
+    expect(savedJobs).toEqual([processed]);
+  });
+
+  it("keeps the broadcast signature when the post-submit output delta is unavailable", async () => {
+    // Given
+    const job = settlementJob();
+    const quote = swapQuote(job);
+    const prepared: PreparedSwap = {
+      quote,
+      transactionBase64: "prepared",
+      transactionFormat: "versioned",
+      preparedAt: 1,
+    };
+    const simulation: SwapSimulation = { successful: true, logs: [], unitsConsumed: null };
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      quoteSwap: () => Effect.succeed(quote),
+      prepareSwap: () => Effect.succeed(prepared),
+      simulateSwap: () => Effect.succeed(simulation),
+      getNativeSolBalance: () => Effect.succeed(100n),
+      submitSwap: (
+        _prepared: PreparedSwap,
+        onBroadcast: ((signature: string) => Effect.Effect<void, unknown>) | undefined,
+      ) =>
+        Effect.gen(function* () {
+          if (onBroadcast) yield* onBroadcast("broadcast-signature");
+          return "broadcast-signature";
+        }),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
+
+    // Then
+    expect(processed).toMatchObject({
+      status: "prepared",
+      txSignature: "broadcast-signature",
+      confirmedOutputAtomic: "0",
+      nextRetryAt: null,
+    });
+    expect(savedJobs.at(-1)).toEqual(processed);
+  });
+
+  it("preserves decimal precision when converting large atomic amounts to USD", async () => {
+    // Given
+    const job = settlementJob({ tokenMint: SOL_MINT });
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1 }),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
+
+    // Then
+    expect(processed?.outputUsd).toBe(9007199.254740993);
+  });
+
+  it("records the finalized PnL and signal outcome after all settlement jobs confirm", async () => {
+    // Given
+    const job = settlementJob({
+      status: "confirmed",
+      outputUsd: 100,
+      executionCostUsd: 2,
+      confirmedOutputAtomic: "1",
+    });
+    const position = {
+      cumulativeFeesClaimedUsd: 10,
+      cumulativeRewardsClaimedUsd: 0,
+      depositedUsd: 100,
+      entrySignalSnapshotId: 42,
+    };
+    let closedPnl: number | null = null;
+    let outcome: { snapshotId: number; pnl: number } | null = null;
+    const db = {
+      saveSettlementJob: () => Effect.void,
+      getPosition: () => Effect.succeed(position),
+      closePosition: (_positionId: string, realizedPnlUsd: number | null) =>
+        Effect.sync(() => {
+          closedPnl = realizedPnlUsd;
+        }),
+      recordSignalOutcome: (snapshotId: number, pnl: number) =>
+        Effect.sync(() => {
+          outcome = { snapshotId, pnl };
+        }),
+    } as unknown as DbApi;
+
+    // When
+    await Effect.runPromise(
+      processSettlementJobs({
+        adapter: {} as AdapterApi,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+      }),
+    );
+
+    // Then
+    expect(closedPnl).toBe(10);
+    expect(outcome).toEqual({ snapshotId: 42, pnl: 10 });
   });
 });

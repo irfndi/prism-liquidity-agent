@@ -46,6 +46,7 @@ function isValidDecimals(decimals: number): boolean {
   return Number.isInteger(decimals) && decimals >= 0 && decimals <= 255;
 }
 
+/** Converts a USD leg requirement into the smallest token unit without floating-point division. */
 export function computeRequiredAtomic(halfUsd: number, price: number, decimals: number): bigint {
   if (halfUsd <= 0 || price <= 0 || !isValidDecimals(decimals)) return 0n;
   const usdScaled = numberToScaledBigInt(halfUsd);
@@ -54,6 +55,7 @@ export function computeRequiredAtomic(halfUsd: number, price: number, decimals: 
   return (usdScaled * 10n ** BigInt(decimals)) / priceScaled;
 }
 
+/** Computes the buffered USDC input needed to acquire a token amount. */
 export function computeUsdcInputAtomic(amount: bigint, decimals: number, price: number): bigint {
   if (!isValidDecimals(decimals)) return 0n;
   // Scale the floating price to a fixed-point integer without converting `amount` to Number.
@@ -66,6 +68,7 @@ export function computeUsdcInputAtomic(amount: bigint, decimals: number, price: 
   return remainder === 0n ? quotient : quotient + 1n;
 }
 
+/** Computes the buffered input amount needed for a priced token-to-token swap. */
 export function computeSwapInputAtomic(
   outputAmount: bigint,
   outputDecimals: number,
@@ -529,13 +532,6 @@ export const EntryPrepLive = Layer.effect(
                 ),
               );
               submittedCount += 1;
-              receipts.push({
-                inputMint: SOL_MINT,
-                outputMint: deficit.mint,
-                inputAmountAtomic: operation.quote.request.amountAtomic,
-                acquiredAmountAtomic: operation.quote.outAmountAtomic,
-                txSignature: signature,
-              });
               const balanceAfter = yield* readTokenBalance(deficit.mint).pipe(
                 Effect.mapError((err) =>
                   makePrepError(
@@ -543,19 +539,31 @@ export const EntryPrepLive = Layer.effect(
                     `Swap ${signature} submitted but fill could not be read: ${String(err)}`,
                     poolAddress,
                     err,
-                    { status: "partial", receipts: [...receipts] },
+                    {
+                      status: "partial",
+                      receipts: [
+                        ...receipts,
+                        {
+                          inputMint: SOL_MINT,
+                          outputMint: deficit.mint,
+                          inputAmountAtomic: operation.quote.request.amountAtomic,
+                          acquiredAmountAtomic: 0n,
+                          txSignature: signature,
+                        },
+                      ],
+                    },
                   ),
                 ),
               );
               const acquiredAmountAtomic =
                 balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0n;
-              receipts[receipts.length - 1] = {
+              receipts.push({
                 inputMint: SOL_MINT,
                 outputMint: deficit.mint,
                 inputAmountAtomic: operation.quote.request.amountAtomic,
                 acquiredAmountAtomic,
                 txSignature: signature,
-              };
+              });
               logger.info("Submitted SOL-funded pool-token swap", {
                 poolAddress,
                 mint: deficit.mint,
@@ -564,11 +572,46 @@ export const EntryPrepLive = Layer.effect(
                 total: prepared.length,
               });
             }
-            const nativeSolAfter = yield* readNativeSolBalance();
+            const partialPreparation = { status: "partial" as const, receipts: [...receipts] };
+            const nativeSolAfter = yield* readNativeSolBalance().pipe(
+              Effect.mapError((err) =>
+                makePrepError(
+                  "SWAP_TRANSACTION_FAILED",
+                  `Final SOL balance reconciliation failed: ${String(err)}`,
+                  poolAddress,
+                  err,
+                  partialPreparation,
+                ),
+              ),
+            );
             const balanceXAfter =
-              pool.tokenX === SOL_MINT ? nativeSolAfter : yield* readTokenBalance(pool.tokenX);
+              pool.tokenX === SOL_MINT
+                ? nativeSolAfter
+                : yield* readTokenBalance(pool.tokenX).pipe(
+                    Effect.mapError((err) =>
+                      makePrepError(
+                        "SWAP_TRANSACTION_FAILED",
+                        `Final ${pool.tokenX} balance reconciliation failed: ${String(err)}`,
+                        poolAddress,
+                        err,
+                        partialPreparation,
+                      ),
+                    ),
+                  );
             const balanceYAfter =
-              pool.tokenY === SOL_MINT ? nativeSolAfter : yield* readTokenBalance(pool.tokenY);
+              pool.tokenY === SOL_MINT
+                ? nativeSolAfter
+                : yield* readTokenBalance(pool.tokenY).pipe(
+                    Effect.mapError((err) =>
+                      makePrepError(
+                        "SWAP_TRANSACTION_FAILED",
+                        `Final ${pool.tokenY} balance reconciliation failed: ${String(err)}`,
+                        poolAddress,
+                        err,
+                        partialPreparation,
+                      ),
+                    ),
+                  );
             if (balanceXAfter < requiredX || balanceYAfter < requiredY) {
               return yield* Effect.fail(
                 makePrepError(

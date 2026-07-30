@@ -4,6 +4,7 @@ import { computeNetRealizedPnlUsd } from "./pnl.js";
 import type { AdapterApi, DbApi } from "./services.js";
 import type { ActionType, AutonomousTokenMode, SettlementJobRecord } from "./types.js";
 
+/** Returns whether an action remains permitted while the wallet safety pause is active. */
 export function isActionAllowedDuringSafetyPause(action: ActionType): boolean {
   return action === "EXIT" || action === "HOLD";
 }
@@ -24,6 +25,7 @@ export type SafetyPauseReason =
   | "execution_failures"
   | "settlement_overdue";
 
+/** Evaluates configured wallet safety thresholds in priority order. */
 export function shouldTriggerSafetyPause(
   input: SafetyPauseThresholdInput,
 ): SafetyPauseReason | null {
@@ -40,6 +42,7 @@ export function shouldTriggerSafetyPause(
   return null;
 }
 
+/** Computes the bounded retry timestamp for a settlement attempt. */
 export function nextSettlementRetryAt(now: number, attempts: number): number {
   const exponent = Math.max(0, Math.min(attempts - 1, 30));
   return now + Math.min(2 ** exponent * 1_000, 300_000);
@@ -89,6 +92,7 @@ function reconciliationJob(
   };
 }
 
+/** Processes due settlement jobs and finalizes positions whose settlements completed. */
 export function processSettlementJobs(
   input: SettlementProcessorInput,
 ): Effect.Effect<ReadonlyArray<SettlementJobRecord>, never> {
@@ -105,6 +109,8 @@ export function processSettlementJobs(
         continue;
       }
       let submitted = false;
+      let capturedSignature: string | null = null;
+      let capturedConfirmedOutputAtomic: bigint = 0n;
       const result = yield* Effect.gen(function* () {
         if (job.txSignature && input.adapter.getSwapStatus) {
           const status = yield* input.adapter.getSwapStatus(job.txSignature);
@@ -118,7 +124,12 @@ export function processSettlementJobs(
             };
           }
           if (status.state !== "failed" && status.state !== "not_found") {
-            return { ...job, status: "submitted" as const, updatedAt: input.now };
+            return {
+              ...job,
+              status: "submitted" as const,
+              nextRetryAt: nextSettlementRetryAt(input.now, job.attempts + 1),
+              updatedAt: input.now,
+            };
           }
         }
         if (job.status === "prepared" && job.txSignature === null) {
@@ -146,17 +157,14 @@ export function processSettlementJobs(
         const inputDecimals = yield* input.adapter.getTokenDecimals(job.tokenMint);
         const inputPriceUsd = prices[job.tokenMint] ?? 0;
         const inputUsd = atomicUsd(amountAtomic, inputDecimals, inputPriceUsd);
-        if (
-          (input.settlementDustUsd ?? 0) > 0 &&
-          inputPriceUsd > 0 &&
-          inputUsd < input.settlementDustUsd!
-        ) {
+        const settlementDustUsd = input.settlementDustUsd ?? 0;
+        if (settlementDustUsd > 0 && inputPriceUsd > 0 && inputUsd < settlementDustUsd) {
           return {
             ...job,
             status: "confirmed" as const,
             attempts: job.attempts + 1,
             nextRetryAt: null,
-            confirmedOutputAtomic: "0",
+            confirmedOutputAtomic: amountAtomic.toString(),
             outputUsd: inputUsd,
             executionCostUsd: 0,
             error: "settlement dust skipped",
@@ -188,10 +196,23 @@ export function processSettlementJobs(
           executionCostUsd: null,
           updatedAt: input.now,
         });
-        const signature = yield* submitSwap(prepared);
+        const signature = yield* submitSwap(prepared, (broadcastSignature) => {
+          submitted = true;
+          capturedSignature = broadcastSignature;
+          return input.db.saveSettlementJob({
+            ...job,
+            status: "submitted",
+            attempts: job.attempts + 1,
+            nextRetryAt: nextSettlementRetryAt(input.now, job.attempts + 1),
+            txSignature: broadcastSignature,
+            updatedAt: input.now,
+          });
+        });
         submitted = true;
+        capturedSignature = signature;
         const nativeAfter = yield* input.adapter.getNativeSolBalance();
         const confirmedOutputAtomic = nativeAfter > nativeBefore ? nativeAfter - nativeBefore : 0n;
+        capturedConfirmedOutputAtomic = confirmedOutputAtomic;
         if (confirmedOutputAtomic <= 0n) {
           return yield* Effect.fail(new Error("Settlement output balance delta unavailable"));
         }
@@ -215,7 +236,15 @@ export function processSettlementJobs(
         Effect.catchAll((error) =>
           Effect.succeed(
             submitted
-              ? reconciliationJob(job, input.now, error)
+              ? reconciliationJob(
+                  {
+                    ...job,
+                    txSignature: capturedSignature ?? job.txSignature,
+                    confirmedOutputAtomic: capturedConfirmedOutputAtomic.toString(),
+                  },
+                  input.now,
+                  error,
+                )
               : retryableJob(job, input.now, error),
           ),
         ),
@@ -244,6 +273,11 @@ export function processSettlementJobs(
       yield* input.db
         .closePosition(positionId, realizedPnlUsd)
         .pipe(Effect.catchAll(() => Effect.void));
+      if (position.entrySignalSnapshotId !== null && realizedPnlUsd !== null) {
+        yield* input.db
+          .recordSignalOutcome(position.entrySignalSnapshotId, realizedPnlUsd)
+          .pipe(Effect.catchAll(() => Effect.void));
+      }
       for (const job of jobs) {
         const finalized = {
           ...job,
