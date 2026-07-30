@@ -557,10 +557,11 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
              return transport.sendPrompt(prompt, context, vetoBudgetMs).pipe(
                Effect.map((response: AgentRuntimeResponse) => {
                  lastPromptAt = Date.now();
-                 // Wall-clock latency from before transport.connect() —
-                 // includes session establishment time so the p95
-                 // reflects the actual scan-blocking duration, not just
-                 // the wire round-trip after the connection is up.
+                // Wall-clock latency from just before sendPrompt —
+                // captures the prompt round-trip plus any reconnect
+                // inside sendPrompt (e.g., gateway), but excludes the
+                // initial startup connection which already completed
+                // in connectReviewTransport above.
                  recordVetoLatency(Math.min(Date.now() - attemptStart, vetoBudgetMs));
                  const parsed = parseResponse(response.raw);
                  const override = validateOverride(decision, parsed);

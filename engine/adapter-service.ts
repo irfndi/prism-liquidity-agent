@@ -944,15 +944,15 @@ export const AdapterLive = Layer.effect(
           const price = heliusPrices[mint];
           if (price !== undefined) {
             prices[mint] = price;
+            if (provenanceOut && !useFallback) {
+              provenanceOut.set(mint, sourcesAttempted.join(","));
+            }
           } else {
             stillMissing.push(mint);
           }
         }
 
         if (stillMissing.length === 0) {
-          if (provenanceOut && !useFallback) {
-            for (const mint of missing) provenanceOut.set(mint, sourcesAttempted.join(","));
-          }
           return prices;
         }
 
@@ -963,6 +963,9 @@ export const AdapterLive = Layer.effect(
           const price = jupiterPrices[mint];
           if (price !== undefined) {
             prices[mint] = price;
+            if (provenanceOut && !useFallback) {
+              provenanceOut.set(mint, sourcesAttempted.join(","));
+            }
           } else {
             coinGeckoMissing.push(mint);
           }
@@ -976,6 +979,9 @@ export const AdapterLive = Layer.effect(
           const cgPrice = cgPrices[mint];
           if (cgPrice !== undefined) {
             prices[mint] = cgPrice;
+            if (provenanceOut && !useFallback) {
+              provenanceOut.set(mint, sourcesAttempted.join(","));
+            }
           } else {
             unresolved.push(mint);
           }
