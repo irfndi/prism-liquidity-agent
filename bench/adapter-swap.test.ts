@@ -483,7 +483,7 @@ describe("AdapterService generic Jupiter swaps", () => {
     }
   });
 
-  it("does not resolve a submitted swap until RPC confirmation propagates", async () => {
+  it("resolves a submitted swap with the signature once broadcast, confirmation is best-effort", async () => {
     const outputMint = Keypair.generate().publicKey.toBase58();
     const amountAtomic = 1_000_000n;
     const message = new TransactionMessage({
@@ -524,8 +524,7 @@ describe("AdapterService generic Jupiter swaps", () => {
         return signature;
       });
       await vi.waitFor(() => expect(confirmSpy).toHaveBeenCalledWith("delayed-sig", "confirmed"));
-      expect(settled).toBe(false);
-      releaseConfirmation?.();
+      expect(settled).toBe(true);
       await expect(result).resolves.toBe("delayed-sig");
     } finally {
       releaseConfirmation?.();
@@ -645,5 +644,205 @@ describe("AdapterService generic Jupiter swaps", () => {
     );
 
     expect(status).toEqual({ state: "confirmed", error: null });
+  });
+
+  it("returns the broadcast signature even when confirmation fails", async () => {
+    const outputMint = Keypair.generate().publicKey.toBase58();
+    const amountAtomic = 1_000_000n;
+    const message = new TransactionMessage({
+      payerKey: walletKeypair.publicKey,
+      recentBlockhash: "11111111111111111111111111111111",
+      instructions: [],
+    }).compileToV0Message();
+    const transactionBase64 = Buffer.from(new VersionedTransaction(message).serialize()).toString(
+      "base64",
+    );
+    const restore = mockFetch(async (url: string | URL | Request) =>
+      url.toString().includes("/swap/v1/quote")
+        ? new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)))
+        : new Response(JSON.stringify({ swapTransaction: transactionBase64 })),
+    );
+    vi.spyOn(Connection.prototype, "simulateTransaction").mockResolvedValue({
+      context: { slot: 1 },
+      value: { err: null, logs: [], unitsConsumed: 1 },
+    });
+    vi.spyOn(Connection.prototype, "sendRawTransaction").mockResolvedValue("sig");
+    vi.spyOn(Connection.prototype, "confirmTransaction").mockResolvedValue({
+      context: { slot: 2 },
+      value: { err: new Error("confirmation failed") },
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const sig = await Effect.runPromise(
+        genericSwapEffect(buildLayer(), SOL_MINT, outputMint, amountAtomic),
+      );
+      expect(sig).toBe("sig");
+      await vi.waitFor(() =>
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("confirmation check failed"),
+          expect.any(Error),
+        ),
+      );
+    } finally {
+      warnSpy.mockRestore();
+      restore();
+    }
+  });
+
+  it("fails swapToken when prefetched quote inputMint does not match", async () => {
+    const outputMint = Keypair.generate().publicKey.toBase58();
+    const amountAtomic = 1_000_000n;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
+      url.toString().includes("/swap/v1/quote")
+        ? new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)))
+        : new Response("unexpected", { status: 500 }),
+    );
+    const restore = mockFetch(fetchImpl);
+
+    try {
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const adapter = yield* AdapterService;
+          if (!adapter.quoteSwap) {
+            return yield* Effect.fail(new Error("generic swap API unavailable"));
+          }
+          const quote = yield* adapter.quoteSwap({
+            inputMint: SOL_MINT,
+            outputMint,
+            amountAtomic,
+            slippageBps: 50,
+          });
+          const swapToken = (
+            adapter as unknown as {
+              swapToken: (
+                inputMint: string,
+                outputMint: string,
+                amountAtomic: bigint,
+                quoteData?: Record<string, unknown>,
+              ) => Effect.Effect<string, unknown>;
+            }
+          ).swapToken;
+          if (!swapToken) return yield* Effect.fail(new Error("swapToken unavailable"));
+          return yield* swapToken(
+            "WrongMint1111111111111111111111111111111111",
+            quote.request.outputMint,
+            quote.request.amountAtomic,
+            quote.rawQuote,
+          );
+        }).pipe(Effect.provide(buildLayer())),
+      );
+      expect(result).toBe("unexpected-success");
+    } catch (err) {
+      expect((err as { message?: string }).message).toContain(
+        "Jupiter quote does not match request",
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("fails swapToken when prefetched quote outputMint does not match", async () => {
+    const outputMint = Keypair.generate().publicKey.toBase58();
+    const amountAtomic = 1_000_000n;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
+      url.toString().includes("/swap/v1/quote")
+        ? new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)))
+        : new Response("unexpected", { status: 500 }),
+    );
+    const restore = mockFetch(fetchImpl);
+
+    try {
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const adapter = yield* AdapterService;
+          if (!adapter.quoteSwap) {
+            return yield* Effect.fail(new Error("generic swap API unavailable"));
+          }
+          const quote = yield* adapter.quoteSwap({
+            inputMint: SOL_MINT,
+            outputMint,
+            amountAtomic,
+            slippageBps: 50,
+          });
+          const swapToken = (
+            adapter as unknown as {
+              swapToken: (
+                inputMint: string,
+                outputMint: string,
+                amountAtomic: bigint,
+                quoteData?: Record<string, unknown>,
+              ) => Effect.Effect<string, unknown>;
+            }
+          ).swapToken;
+          if (!swapToken) return yield* Effect.fail(new Error("swapToken unavailable"));
+          return yield* swapToken(
+            quote.request.inputMint,
+            "WrongMint1111111111111111111111111111111111",
+            quote.request.amountAtomic,
+            quote.rawQuote,
+          );
+        }).pipe(Effect.provide(buildLayer())),
+      );
+      expect(result).toBe("unexpected-success");
+    } catch (err) {
+      expect((err as { message?: string }).message).toContain(
+        "Jupiter quote does not match request",
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("fails swapToken when prefetched quote amount does not match", async () => {
+    const outputMint = Keypair.generate().publicKey.toBase58();
+    const amountAtomic = 1_000_000n;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
+      url.toString().includes("/swap/v1/quote")
+        ? new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)))
+        : new Response("unexpected", { status: 500 }),
+    );
+    const restore = mockFetch(fetchImpl);
+
+    try {
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const adapter = yield* AdapterService;
+          if (!adapter.quoteSwap) {
+            return yield* Effect.fail(new Error("generic swap API unavailable"));
+          }
+          const quote = yield* adapter.quoteSwap({
+            inputMint: SOL_MINT,
+            outputMint,
+            amountAtomic,
+            slippageBps: 50,
+          });
+          const swapToken = (
+            adapter as unknown as {
+              swapToken: (
+                inputMint: string,
+                outputMint: string,
+                amountAtomic: bigint,
+                quoteData?: Record<string, unknown>,
+              ) => Effect.Effect<string, unknown>;
+            }
+          ).swapToken;
+          if (!swapToken) return yield* Effect.fail(new Error("swapToken unavailable"));
+          return yield* swapToken(
+            quote.request.inputMint,
+            quote.request.outputMint,
+            2_000_000n,
+            quote.rawQuote,
+          );
+        }).pipe(Effect.provide(buildLayer())),
+      );
+      expect(result).toBe("unexpected-success");
+    } catch (err) {
+      expect((err as { message?: string }).message).toContain(
+        "Jupiter quote does not match request",
+      );
+    } finally {
+      restore();
+    }
   });
 });

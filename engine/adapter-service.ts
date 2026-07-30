@@ -385,6 +385,7 @@ export interface RevenueShareResult {
   isCircular: boolean;
 }
 
+/** Calculates operator and platform fee shares from a collected fee amount. */
 export function calculateRevenueShare(
   feeX: number,
   feeY: number,
@@ -816,13 +817,15 @@ export const AdapterLive = Layer.effect(
                 });
                 return Effect.succeed(null);
               }),
-              Effect.map((asset) => {
-                const price = asset ? readHeliusPrice(asset) : undefined;
-                if (price !== undefined) {
-                  result[mint] = price;
-                  setCachedPrice(mint, price);
-                }
-              }),
+              Effect.tap((asset) =>
+                Effect.sync(() => {
+                  const price = asset ? readHeliusPrice(asset) : undefined;
+                  if (price !== undefined) {
+                    result[mint] = price;
+                    setCachedPrice(mint, price);
+                  }
+                }),
+              ),
             ),
           { concurrency: 5 },
         );
@@ -1582,7 +1585,10 @@ export const AdapterLive = Layer.effect(
       });
     }
 
-    function submitSwap(prepared: PreparedSwap): Effect.Effect<string, unknown> {
+    function submitSwap(
+      prepared: PreparedSwap,
+      onBroadcast?: (signature: string) => Effect.Effect<void, unknown>,
+    ): Effect.Effect<string, unknown> {
       return Effect.gen(function* () {
         yield* ensureFreshQuote(prepared.quote, "submit");
         prunePreparedState(Date.now());
@@ -1612,17 +1618,20 @@ export const AdapterLive = Layer.effect(
             preflightCommitment: "confirmed",
           }),
         );
-        const confirmation = yield* rpcCall((conn) =>
-          conn.confirmTransaction(signature, "confirmed"),
+        if (onBroadcast) yield* onBroadcast(signature);
+        yield* Effect.forkDaemon(
+          rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")).pipe(
+            Effect.flatMap((confirmation) =>
+              confirmation.value.err === null ? Effect.void : Effect.fail(confirmation.value.err),
+            ),
+            Effect.catchAll((err) =>
+              Effect.sync(() => {
+                console.warn(`Swap transaction ${signature} confirmation check failed:`, err);
+              }),
+            ),
+          ),
         );
-        if (confirmation.value.err !== null) {
-          return yield* Effect.fail(
-            new AdapterError({
-              message: `Swap transaction ${signature} failed confirmation`,
-              cause: confirmation.value.err,
-            }),
-          );
-        }
+        yield* Effect.sleep(0);
         yield* invalidateBalanceCaches;
         return signature;
       });
@@ -1635,7 +1644,7 @@ export const AdapterLive = Layer.effect(
         );
         const status = response.value[0];
         if (!status) return { state: "not_found", error: null };
-        if (status.err !== null) return { state: "failed", error: status.err };
+        if (status.err !== null) return { state: "failed", error: String(status.err) };
         switch (status.confirmationStatus) {
           case "finalized":
             return { state: "finalized", error: null };
@@ -1728,6 +1737,17 @@ export const AdapterLive = Layer.effect(
         if (!quote) {
           return yield* Effect.fail(
             new AdapterError({ message: "Validated Jupiter quote is unavailable or stale" }),
+          );
+        }
+        if (
+          quote.request.inputMint !== inputMint ||
+          quote.request.outputMint !== outputMint ||
+          quote.request.amountAtomic !== amountAtomic
+        ) {
+          return yield* Effect.fail(
+            new AdapterError({
+              message: `Jupiter quote does not match request: inputMint=${inputMint}, outputMint=${outputMint}, amount=${amountAtomic.toString()}`,
+            }),
           );
         }
         return yield* executeValidatedQuote(quote);
@@ -3298,6 +3318,23 @@ export const AdapterLive = Layer.effect(
             Effect.fail(
               new AdapterError({
                 message: `swapUSDCForToken failed: ${String(err)}`,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
+
+      swapToken: (
+        inputMint: string,
+        outputMint: string,
+        amountAtomic: bigint,
+        quoteData?: Record<string, unknown>,
+      ) =>
+        swapToken(inputMint, outputMint, amountAtomic, quoteData).pipe(
+          Effect.catchAll((err) =>
+            Effect.fail(
+              new AdapterError({
+                message: `swapToken failed: ${String(err)}`,
                 cause: err,
               }),
             ),
