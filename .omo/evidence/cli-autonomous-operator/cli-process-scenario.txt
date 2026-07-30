@@ -1,0 +1,3 @@
+qa_dir=/tmp/prism-autonomous-qa.23YyqB
+db=/tmp/prism-autonomous-qa.23YyqB/prism.db
+wallet=8jFzDp8C5JnWa1cZNNQ1gFyeVJBt85yQunCexkxw7ene

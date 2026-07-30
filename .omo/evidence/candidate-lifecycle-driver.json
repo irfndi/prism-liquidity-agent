@@ -1,0 +1,31 @@
+{
+  "eligible": {
+    "state": "eligible",
+    "healthyScanCount": 6,
+    "eligibleAt": 3600000
+  },
+  "transient": {
+    "health": {
+      "kind": "transient_failure",
+      "reason": "price_evidence_unavailable"
+    },
+    "state": "observing",
+    "healthyScanCount": 0
+  },
+  "rejected": {
+    "state": "rejected",
+    "rejectionReason": "blacklisted"
+  },
+  "resumed": {
+    "state": "eligible",
+    "healthyScanCount": 6
+  },
+  "recurringPages": [
+    1,
+    2,
+    3,
+    1,
+    2
+  ],
+  "malformedPageMetadata": null
+}

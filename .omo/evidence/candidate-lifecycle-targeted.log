@@ -1,0 +1,10 @@
+$ bunx --bun vitest run bench/candidate-lifecycle.test.ts bench/adapter-discover.test.ts
+
+ RUN  v4.1.10 /Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm
+
+
+ Test Files  2 passed (2)
+      Tests  27 passed (27)
+   Start at  11:16:10
+   Duration  13.17s (transform 4.92s, setup 0ms, import 9.20s, tests 3.08s, environment 3ms)
+

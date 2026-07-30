@@ -1,0 +1,4 @@
+    1801 .omo/evidence/runtime-integration/hook-claim-2-complete-transcript.txt
+    3591 .omo/evidence/runtime-integration/DoneClaim.md
+    2210 .omo/evidence/runtime-integration/manual-driver.mjs
+    7602 total

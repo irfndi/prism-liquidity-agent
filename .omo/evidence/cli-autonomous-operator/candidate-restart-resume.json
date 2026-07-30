@@ -1,0 +1,42 @@
+{
+  "phase": "resume",
+  "persisted": [
+    {
+      "id": "paper:primary:restart-pool:restart-mint",
+      "walletAddress": "paper",
+      "agentInstanceId": "primary",
+      "poolAddress": "restart-pool",
+      "tokenMint": "restart-mint",
+      "state": "observing",
+      "healthyScanCount": 1,
+      "firstSeenAt": 1000,
+      "lastSeenAt": 1000,
+      "eligibleAt": null,
+      "enteredAt": null,
+      "cooldownUntil": null,
+      "rejectionReason": null,
+      "createdAt": 1000,
+      "updatedAt": 1000
+    }
+  ],
+  "resumed": {
+    "id": "paper:primary:restart-pool:restart-mint",
+    "walletAddress": "paper",
+    "agentInstanceId": "primary",
+    "poolAddress": "restart-pool",
+    "tokenMint": "restart-mint",
+    "state": "eligible",
+    "healthyScanCount": 2,
+    "firstSeenAt": 1000,
+    "lastSeenAt": 2000,
+    "eligibleAt": 2000,
+    "enteredAt": null,
+    "cooldownUntil": null,
+    "rejectionReason": null,
+    "createdAt": 1000,
+    "updatedAt": 2000
+  },
+  "eligiblePoolAddresses": [
+    "restart-pool"
+  ]
+}

@@ -1,0 +1,39 @@
+$ bunx --bun vitest run bench/adapter-discover.test.ts
+
+ RUN  v4.1.10 /Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm
+
+ ❯ bench/adapter-discover.test.ts (20 tests | 1 failed) 1610ms
+     × uses the API page count to rotate AdapterLive discovery requests 118ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  bench/adapter-discover.test.ts > Meteora discovery pagination > uses the API page count to rotate AdapterLive discovery requests
+AssertionError: expected [ …(2) ] to deeply equal [ …(2) ]
+
+- Expected
++ Received
+
+  [
+-   "https://example.test/pools?filter_by=is_blacklisted%3Dfalse&page=1&page_size=1000",
+-   "https://example.test/pools?filter_by=is_blacklisted%3Dfalse&page=2&page_size=1000",
++   "https://example.test/pools?filter_by=is_blacklisted=false",
++   "https://example.test/pools?filter_by=is_blacklisted=false",
+  ]
+
+ ❯ bench/adapter-discover.test.ts:543:27
+    541|
+    542|     // Then
+    543|     expect(requestedUrls).toEqual([
+       |                           ^
+    544|       "https://example.test/pools?filter_by=is_blacklisted%3Dfalse&pag…
+    545|       "https://example.test/pools?filter_by=is_blacklisted%3Dfalse&pag…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 19 passed (20)
+   Start at  11:27:27
+   Duration  9.04s (transform 3.08s, setup 0ms, import 6.83s, tests 1.61s, environment 1ms)
+
+error: script "test" exited with code 1

@@ -1,0 +1,11 @@
+^D$ bunx --bun vitest run bench/adapter-swap.test.ts bench/entry-prep.test.ts
+[?25l
+ RUN  v4.1.10 /Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm
+
+
+ Test Files  2 passed (2)
+      Tests  53 passed (53)
+   Start at  11:12:04
+   Duration  6.12s (transform 1.24s, setup 0ms, import 3.54s, tests 4.06s, environment 1ms)
+
+[?25hbench/adapter-swap.test.ts(578,11): error TS2353: Object literal may only specify known properties, and 'status' does not exist in type 'SignatureStatus'.

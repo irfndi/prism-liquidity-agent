@@ -1,0 +1,10 @@
+$ bunx --bun vitest run bench/program-autonomous-token.test.ts bench/autonomous-token-foundation.test.ts bench/candidate-lifecycle.test.ts bench/entry-prep.test.ts bench/program.test.ts
+
+ RUN  v4.1.10 /Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm
+
+
+ Test Files  5 passed (5)
+      Tests  109 passed (109)
+   Start at  11:44:00
+   Duration  18.89s (transform 19.12s, setup 0ms, import 35.26s, tests 9.44s, environment 3ms)
+

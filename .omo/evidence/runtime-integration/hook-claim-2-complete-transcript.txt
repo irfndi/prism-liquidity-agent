@@ -1,0 +1,41 @@
+COMMAND: rtk bun run test -- bench/program-autonomous-token.test.ts bench/autonomous-token-foundation.test.ts bench/candidate-lifecycle.test.ts bench/entry-prep.test.ts bench/program.test.ts
+$ bunx --bun vitest run bench/program-autonomous-token.test.ts bench/autonomous-token-foundation.test.ts bench/candidate-lifecycle.test.ts bench/entry-prep.test.ts bench/program.test.ts
+
+ RUN  v4.1.10 /Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm
+
+
+ Test Files  5 passed (5)
+      Tests  109 passed (109)
+   Start at  11:46:11
+   Duration  4.46s (transform 5.10s, setup 0ms, import 10.74s, tests 1.50s, environment 3ms)
+
+EXIT targeted=0
+COMMAND: rtk bun run test -- bench/adapter-swap.test.ts bench/adapter-discover.test.ts bench/candidate-lifecycle.test.ts
+$ bunx --bun vitest run bench/adapter-swap.test.ts bench/adapter-discover.test.ts bench/candidate-lifecycle.test.ts
+
+ RUN  v4.1.10 /Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm
+
+
+ Test Files  3 passed (3)
+      Tests  46 passed (46)
+   Start at  11:46:16
+   Duration  2.36s (transform 1.05s, setup 0ms, import 2.63s, tests 1.54s, environment 1ms)
+
+EXIT adversarial=0
+COMMAND: rtk bunx tsc --noEmit
+EXIT tsc=0
+COMMAND: rtk bunx oxlint [changed files]
+EXIT lint=0
+COMMAND: rtk bunx oxfmt --check [changed files]
+Checking formatting...
+
+All matched files use the correct format.
+Finished in 168ms on 10 files using 8 threads.
+EXIT format=0
+COMMAND: rtk git diff --check
+
+EXIT diff=0
+COMMAND: rtk bun .omo/evidence/runtime-integration/manual-driver.mjs
+{"shadow":{"sends":0,"unchanged":true},"failure":{"status":"retryable","attempts":1,"persistedStatus":"retryable"},"pause":{"enterAllowed":false,"exitAllowed":true}}
+EXIT manual=0
+FINAL targeted=0 adversarial=0 tsc=0 lint=0 format=0 diff=0 manual=0

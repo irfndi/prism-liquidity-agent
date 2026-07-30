@@ -1,0 +1,2 @@
+INVOCATION: bunx tsc --noEmit
+EXIT_CODE=0

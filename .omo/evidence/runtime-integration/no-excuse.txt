@@ -1,0 +1,21 @@
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/program.ts:889:11: [no-non-null-assertion] `x!` — use narrowing or optional chaining
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/program.ts:4652:34: [no-non-null-assertion] `x!` — use narrowing or optional chaining
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/program.ts:4652:71: [no-non-null-assertion] `x!` — use narrowing or optional chaining
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/pnl.ts:124:11: [no-non-null-assertion] `x!` — use narrowing or optional chaining
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/pnl.ts:125:11: [no-non-null-assertion] `x!` — use narrowing or optional chaining
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/pnl.ts:126:11: [no-non-null-assertion] `x!` — use narrowing or optional chaining
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db.ts:55:9: [empty-catch] empty `catch` block — handle, re-throw, or remove the try/catch
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db.ts:88:11: [empty-catch] empty `catch` block — handle, re-throw, or remove the try/catch
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db.ts:183:5: [catch-without-narrowing] `catch` without `instanceof` narrowing or re-throw — narrow the error type or re-throw
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db.ts:189:5: [catch-without-narrowing] `catch` without `instanceof` narrowing or re-throw — narrow the error type or re-throw
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db.ts:208:5: [catch-without-narrowing] `catch` without `instanceof` narrowing or re-throw — narrow the error type or re-throw
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db.ts:226:7: [catch-without-narrowing] `catch` without `instanceof` narrowing or re-throw — narrow the error type or re-throw
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db.ts:239:9: [catch-without-narrowing] `catch` without `instanceof` narrowing or re-throw — narrow the error type or re-throw
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db.ts:253:9: [catch-without-narrowing] `catch` without `instanceof` narrowing or re-throw — narrow the error type or re-throw
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db-service.ts:97:11: [no-unknown-assertion] `as unknown` — redesign the types
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db-service.ts:101:11: [no-unknown-assertion] `as unknown` — redesign the types
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db-service.ts:135:10: [no-unknown-assertion] `as unknown` — redesign the types
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db-service.ts:1562:22: [no-unknown-assertion] `as unknown` — redesign the types
+/Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/engine/db-service.ts:1566:7: [empty-catch] empty `catch` block — handle, re-throw, or remove the try/catch
+
+19 violation(s) in 10 file(s).

@@ -1,0 +1,11 @@
+AUDIT=static_contracts
+INVOCATION=bunx tsc --noEmit
+TYPECHECK_EXIT_CODE=0
+INVOCATION=bunx oxfmt --check touched-files
+Checking formatting...
+
+All matched files use the correct format.
+Finished in 240ms on 9 files using 8 threads.
+FORMAT_EXIT_CODE=0
+INVOCATION=bunx oxlint touched-files
+LINT_EXIT_CODE=0

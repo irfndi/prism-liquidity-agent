@@ -1,0 +1,60 @@
+TEMP_DB=/var/folders/_s/x4kzj7hj3611_2_wjj3nhn640000gn/T//prism-foundation-reverify.yBChE5/prism.db
+SCENARIO: isolated CLI status in autonomous mode off, followed by restart/idempotence probe
+INVOCATION: NODE_ENV=test AUTONOMOUS_TOKEN_MODE=off SQLITE_DB_PATH=<temp>/prism.db bun cli/index.ts status --json (twice)
+{
+  "running": false,
+  "dbPath": "/var/folders/_s/x4kzj7hj3611_2_wjj3nhn640000gn/T//prism-foundation-reverify.yBChE5/prism.db",
+  "timestamp": "2026-07-30T03:51:48.634Z",
+  "agentRuntime": {
+    "enabled": false,
+    "runtime": "auto",
+    "acpCommand": "hermes",
+    "gatewayUrl": "ws://127.0.0.1:18789",
+    "checkinIntervalMs": 3600000,
+    "checkinOnEvents": true
+  },
+  "portfolio": {
+    "totalDepositedUsd": 0,
+    "totalCurrentValueUsd": 0,
+    "totalUnrealizedPnlUsd": 0,
+    "totalUnrealizedPnlPct": 0,
+    "totalFeesClaimedUsd": 0,
+    "totalRewardsClaimedUsd": 0,
+    "positionCount": 0
+  },
+  "positions": [],
+  "recentDecisions": []
+}
+{
+  "running": false,
+  "dbPath": "/var/folders/_s/x4kzj7hj3611_2_wjj3nhn640000gn/T//prism-foundation-reverify.yBChE5/prism.db",
+  "timestamp": "2026-07-30T03:51:49.605Z",
+  "agentRuntime": {
+    "enabled": false,
+    "runtime": "auto",
+    "acpCommand": "hermes",
+    "gatewayUrl": "ws://127.0.0.1:18789",
+    "checkinIntervalMs": 3600000,
+    "checkinOnEvents": true
+  },
+  "portfolio": {
+    "totalDepositedUsd": 0,
+    "totalCurrentValueUsd": 0,
+    "totalUnrealizedPnlUsd": 0,
+    "totalUnrealizedPnlPct": 0,
+    "totalFeesClaimedUsd": 0,
+    "totalRewardsClaimedUsd": 0,
+    "positionCount": 0
+  },
+  "positions": [],
+  "recentDecisions": []
+}
+INVOCATION: sqlite3 <temp>/prism.db migration/table probe
+migration_v20=1
+table=execution_operations
+table=settlement_jobs
+table=token_candidates
+table=wallet_safety_pauses
+FIRST_STATUS_EXIT_CODE=0
+SECOND_STATUS_EXIT_CODE=0
+DB_PROBE_EXIT_CODE=0

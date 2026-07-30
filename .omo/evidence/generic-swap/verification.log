@@ -1,0 +1,14 @@
+^D$ bunx --bun vitest run bench/adapter-swap.test.ts bench/entry-prep.test.ts
+[?25l
+ RUN  v4.1.10 /Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm
+
+
+ Test Files  2 passed (2)
+      Tests  52 passed (52)
+   Start at  11:10:31
+   Duration  6.27s (transform 3.81s, setup 0ms, import 8.11s, tests 2.79s, environment 1ms)
+
+[?25hChecking formatting...
+
+All matched files use the correct format.
+Finished in 225ms on 7 files using 8 threads.

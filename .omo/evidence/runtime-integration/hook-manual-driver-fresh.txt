@@ -1,0 +1,1 @@
+{"shadow":{"sends":0,"unchanged":true},"failure":{"status":"retryable","attempts":1,"persistedStatus":"retryable"},"pause":{"enterAllowed":false,"exitAllowed":true}}

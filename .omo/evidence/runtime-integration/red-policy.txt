@@ -1,0 +1,19 @@
+$ bunx --bun vitest run bench/program-autonomous-token.test.ts
+
+ RUN  v4.1.10 /Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm
+
+ ❯ bench/program-autonomous-token.test.ts (0 test)
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  bench/program-autonomous-token.test.ts [ bench/program-autonomous-token.test.ts ]
+Error: Cannot find module '../engine/autonomous-runtime.js' imported from /Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm/bench/program-autonomous-token.test.ts
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  no tests
+   Start at  11:24:35
+   Duration  3.85s (transform 1.17s, setup 0ms, import 0ms, tests 0ms, environment 0ms)
+
+error: script "test" exited with code 1

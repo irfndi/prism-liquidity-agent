@@ -1,0 +1,35 @@
+$ bunx --bun vitest run bench/pool-policy.test.ts
+
+ RUN  v4.1.10 /Users/irfandi/Coding/2026/worktrees/prism-dlmm/humble-kitten/prism-dlmm
+
+ ❯ bench/pool-policy.test.ts (4 tests | 1 failed) 26ms
+     × enables recurring discovery for autonomous token mode outside paper trading 13ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  bench/pool-policy.test.ts > shouldDiscoverPools > enables recurring discovery for autonomous token mode outside paper trading
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ bench/pool-policy.test.ts:24:7
+     22|         autonomousTokenMode: "shadow",
+     23|       }),
+     24|     ).toBe(true);
+       |       ^
+     25|   });
+     26| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 3 passed (4)
+   Start at  11:32:22
+   Duration  429ms (transform 74ms, setup 0ms, import 101ms, tests 26ms, environment 0ms)
+
+error: script "test" exited with code 1
