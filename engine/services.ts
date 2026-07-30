@@ -101,7 +101,7 @@ export interface SwapSimulation {
 
 export interface SwapStatus {
   readonly state: "not_found" | "processed" | "confirmed" | "finalized" | "failed";
-  readonly error: unknown | null;
+  readonly error: string | null;
 }
 
 export interface TokenPriceEvidence {
@@ -382,10 +382,19 @@ export interface AdapterApi {
     amountAtomic: bigint,
     quoteData?: Record<string, unknown>,
   ) => Effect.Effect<string, unknown>;
+  readonly swapToken?: (
+    inputMint: string,
+    outputMint: string,
+    amountAtomic: bigint,
+    quoteData?: Record<string, unknown>,
+  ) => Effect.Effect<string, unknown>;
   readonly quoteSwap?: (request: SwapRequest) => Effect.Effect<SwapQuote, unknown>;
   readonly prepareSwap?: (quote: SwapQuote) => Effect.Effect<PreparedSwap, unknown>;
   readonly simulateSwap?: (prepared: PreparedSwap) => Effect.Effect<SwapSimulation, unknown>;
-  readonly submitSwap?: (prepared: PreparedSwap) => Effect.Effect<string, unknown>;
+  readonly submitSwap?: (
+    prepared: PreparedSwap,
+    onBroadcast?: (signature: string) => Effect.Effect<void, unknown>,
+  ) => Effect.Effect<string, unknown>;
   readonly getSwapStatus?: (signature: string) => Effect.Effect<SwapStatus, unknown>;
 }
 
@@ -397,7 +406,7 @@ export interface EntryPrepApi {
   readonly prepareEntryTokens: (
     poolAddress: string,
     positionSizeUsd: number,
-  ) => Effect.Effect<EntryPreparationOutcome | void, EntryPrepError>;
+  ) => Effect.Effect<EntryPreparationOutcome | undefined, EntryPrepError>;
 }
 
 export interface EntryPreparationReceipt {

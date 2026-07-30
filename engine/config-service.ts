@@ -576,12 +576,13 @@ const loadConfig = Effect.gen(function* () {
     1,
     AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.maxMarketDataAgeMs,
   );
-  const maxSwapSlippageBps = yield* validatedNumber(
+  const configuredMaxSwapSlippageBps = yield* validatedNumber(
     "MAX_SWAP_SLIPPAGE_BPS",
     0,
     AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.maxSwapSlippageBps,
     10_000,
   );
+  const maxSwapSlippageBps = Math.min(configuredMaxSwapSlippageBps, 50);
   const maxSwapPriceImpactBps = yield* validatedNumber(
     "MAX_SWAP_PRICE_IMPACT_BPS",
     0,
