@@ -6083,7 +6083,8 @@ export const program = Effect.gen(function* () {
         const autonomousCandidateId = autonomousExecution
           ? [...autonomousCandidates.values()].find(
               (candidate) =>
-                candidate.poolAddress === poolAddress && candidate.state === "eligible",
+                candidate.poolAddress === poolAddress &&
+                (candidate.state === "eligible" || candidate.state === "entered"),
             )?.id
           : undefined;
 
