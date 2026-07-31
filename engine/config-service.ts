@@ -576,6 +576,22 @@ const loadConfig = Effect.gen(function* () {
     1,
     AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.maxMarketDataAgeMs,
   );
+  const maxSwapSlippageBpsRaw = yield* Config.string("MAX_SWAP_SLIPPAGE_BPS").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  if (maxSwapSlippageBpsRaw && !Number.isInteger(Number(maxSwapSlippageBpsRaw))) {
+    return yield* Effect.die(
+      new ConfigError({
+        message: "MAX_SWAP_SLIPPAGE_BPS must be an integer",
+        issues: [
+          {
+            path: "MAX_SWAP_SLIPPAGE_BPS",
+            message: `Expected integer, got ${maxSwapSlippageBpsRaw}`,
+          },
+        ],
+      }),
+    );
+  }
   const configuredMaxSwapSlippageBps = yield* validatedNumber(
     "MAX_SWAP_SLIPPAGE_BPS",
     0,

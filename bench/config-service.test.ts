@@ -194,6 +194,46 @@ describe("ConfigService fee-density cooldown floor guards", () => {
   });
 });
 
+describe("ConfigService MAX_SWAP_SLIPPAGE_BPS integer validation", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("rejects fractional values with a configuration error naming the variable", async () => {
+    // Given: MAX_SWAP_SLIPPAGE_BPS is set to a fractional value
+    vi.stubEnv("MAX_SWAP_SLIPPAGE_BPS", "12.5");
+    // When: the config is loaded
+    // Then: it throws a ConfigError that mentions MAX_SWAP_SLIPPAGE_BPS
+    await expect(loadConfig()).rejects.toThrow("MAX_SWAP_SLIPPAGE_BPS");
+  });
+
+  it("accepts integer 12 and preserves it before the hard 50 bps cap", async () => {
+    // Given: MAX_SWAP_SLIPPAGE_BPS is set to a valid integer
+    vi.stubEnv("MAX_SWAP_SLIPPAGE_BPS", "12");
+    // When: the config is loaded
+    const cfg = await loadConfig();
+    // Then: the value is accepted and not clamped by the 50 bps ceiling
+    expect(cfg.maxSwapSlippageBps).toBe(12);
+  });
+
+  it("clamps values above 50 to the hard adapter cap", async () => {
+    // Given: MAX_SWAP_SLIPPAGE_BPS is set above the hard cap
+    vi.stubEnv("MAX_SWAP_SLIPPAGE_BPS", "100");
+    // When: the config is loaded
+    const cfg = await loadConfig();
+    // Then: the value is clamped to 50
+    expect(cfg.maxSwapSlippageBps).toBe(50);
+  });
+
+  it("defaults to 50 when unset", async () => {
+    // Given: MAX_SWAP_SLIPPAGE_BPS is not set
+    // When: the config is loaded
+    const cfg = await loadConfig();
+    // Then: it falls back to the default of 50
+    expect(cfg.maxSwapSlippageBps).toBe(50);
+  });
+});
+
 describe("ConfigService agent runtime timeout", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
