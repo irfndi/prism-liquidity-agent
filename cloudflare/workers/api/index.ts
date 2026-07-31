@@ -131,6 +131,13 @@ interface NormalizedErrorReport {
   readonly fingerprint: string;
 }
 
+class TelemetryValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TelemetryValidationError";
+  }
+}
+
 function normalizeErrorReport(
   report: {
     readonly id?: string;
@@ -146,18 +153,22 @@ function normalizeErrorReport(
     readonly isRecoverable?: number;
   },
   batchVersion?: string,
-): Effect.Effect<NormalizedErrorReport, string> {
+): Effect.Effect<NormalizedErrorReport, Error> {
   return Effect.gen(function* () {
     const errorType = report.errorType ?? report.category;
     const prismVersion = report.prismVersion ?? batchVersion ?? "unknown";
     if (!report.id || !errorType || !report.message || !prismVersion) {
-      return yield* Effect.fail("Each report requires id, message, and error type/version");
+      return yield* Effect.fail(
+        new TelemetryValidationError("Each report requires id, message, and error type/version"),
+      );
     }
     if (report.message.length > MAX_ERROR_MESSAGE_LENGTH) {
-      return yield* Effect.fail(`message exceeds ${MAX_ERROR_MESSAGE_LENGTH} characters`);
+      return yield* Effect.fail(
+        new TelemetryValidationError(`message exceeds ${MAX_ERROR_MESSAGE_LENGTH} characters`),
+      );
     }
     const fingerprint = yield* hashKey(`${errorType}:${report.message.trim().toLowerCase()}`).pipe(
-      Effect.mapError(() => "Unable to fingerprint error report"),
+      Effect.mapError(() => new Error("Unable to fingerprint error report")),
     );
     return {
       id: report.id,
@@ -214,7 +225,10 @@ function upsertErrorReports(
   archive: R2Bucket | undefined,
   userId: string,
   reports: ReadonlyArray<NormalizedErrorReport>,
-): Effect.Effect<{ readonly processed: number; readonly archived: number }, unknown> {
+): Effect.Effect<
+  { readonly inserted: number; readonly duplicates: number; readonly archived: number },
+  unknown
+> {
   return Effect.gen(function* () {
     const statements = reports.flatMap((report) => [
       db
@@ -275,9 +289,13 @@ function upsertErrorReports(
         )
         .bind(userId, report.id),
     ]);
-    yield* Effect.tryPromise(() => db.batch(statements));
+    const results = yield* Effect.tryPromise(() => db.batch(statements));
+    const inserted = reports.reduce((count, _report, index) => {
+      const changes = results[index * 3]?.meta.changes;
+      return count + (typeof changes === "number" && changes > 0 ? 1 : 0);
+    }, 0);
     const archived = yield* archiveErrorReports(archive, userId, reports);
-    return { processed: reports.length, archived };
+    return { inserted, duplicates: reports.length - inserted, archived };
   });
 }
 
@@ -1383,7 +1401,14 @@ app.post("/v1/errors/report", async (c) => {
 
   return Effect.runPromise(
     report.pipe(
-      Effect.catchAll((cause) => Effect.succeed(c.json({ error: causeMessage(cause) }, 400))),
+      Effect.catchAll((cause) => {
+        console.error("[Telemetry] Failed to store error report", causeMessage(cause));
+        return Effect.succeed(
+          cause instanceof TelemetryValidationError
+            ? c.json({ error: cause.message }, 400)
+            : c.json({ error: "Failed to store error report" }, 500),
+        );
+      }),
     ),
   );
 });
@@ -1440,17 +1465,27 @@ app.post("/v1/errors/batch", async (c) => {
     const validReports: NormalizedErrorReport[] = [];
     for (const report of reports) {
       const normalized = yield* normalizeErrorReport(report, body.version).pipe(
-        Effect.mapError((error) => `${error} (${report.id ?? "missing id"})`),
+        Effect.mapError(
+          (error) =>
+            new TelemetryValidationError(`${error.message} (${report.id ?? "missing id"})`),
+        ),
       );
       validReports.push(normalized);
     }
     const result = yield* upsertErrorReports(DB, c.env.TELEMETRY_ARCHIVE, user.id, validReports);
-    return c.json({ inserted: result.processed, duplicates: 0, archived: result.archived });
+    return c.json(result);
   });
 
   return Effect.runPromise(
     batch.pipe(
-      Effect.catchAll((cause) => Effect.succeed(c.json({ error: causeMessage(cause) }, 400))),
+      Effect.catchAll((cause) => {
+        console.error("[Telemetry] Failed to store error batch", causeMessage(cause));
+        return Effect.succeed(
+          cause instanceof TelemetryValidationError
+            ? c.json({ error: cause.message }, 400)
+            : c.json({ error: "Failed to store error reports" }, 500),
+        );
+      }),
     ),
   );
 });

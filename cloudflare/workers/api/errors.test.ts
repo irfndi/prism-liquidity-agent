@@ -266,6 +266,24 @@ describe("Error Reporting API", () => {
       expect(body.inserted).toBe(3);
     });
 
+    it("reports duplicate receipt counts without leaking internal errors", async () => {
+      const report = {
+        id: "batch-duplicate-1",
+        agentId: "hashed-wallet-xyz",
+        errorType: "SQLite_Vec",
+        message: "Vector dimension mismatch",
+        prismVersion: "1.2.3",
+      };
+      await worker.fetch(buildRequest("POST", "/v1/errors/batch", { reports: [report] }), testEnv, createExecutionContext());
+      const response = await worker.fetch(
+        buildRequest("POST", "/v1/errors/batch", { reports: [report] }),
+        testEnv,
+        createExecutionContext(),
+      );
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ inserted: 0, duplicates: 1 });
+    });
+
     it("should return 400 when no reports provided", async () => {
       const ctx = createExecutionContext();
       const request = buildRequest("POST", "/v1/errors/batch", { reports: [] });
