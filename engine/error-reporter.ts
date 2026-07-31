@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from "fs";
 import { Effect } from "effect";
 import { join } from "path";
 import { getPrismUserConfigDir } from "./paths.js";
+import { readTelemetryPreference } from "./telemetry-preference.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,7 @@ export interface ReportContext {
 
 export interface ErrorReport {
   readonly id: string;
+  readonly agentId: string;
   readonly ts: string;
   readonly message: string;
   readonly stack: string;
@@ -51,6 +53,8 @@ export interface ErrorReport {
 export interface ErrorReporterConfig {
   readonly endpoint?: string;
   readonly enabled?: boolean;
+  readonly optOut?: boolean;
+  readonly agentId?: string;
   readonly flushIntervalMs?: number;
   readonly batchSize?: number;
 }
@@ -172,9 +176,11 @@ export class ErrorReporter {
   private readonly enabled: boolean;
   private readonly batchSize: number;
   private readonly flushIntervalMs: number;
+  private readonly agentId: string;
   private readonly pending: Array<ErrorReport> = [];
   private timerId: ReturnType<typeof setInterval> | null = null;
   private appVersion: string = "0.0.0";
+  private _missingCredentialWarned = false;
 
   constructor(config: ErrorReporterConfig = {}) {
     const explicitEndpoint =
@@ -182,15 +188,14 @@ export class ErrorReporter {
       (typeof process !== "undefined" ? process.env.PRISM_ERROR_ENDPOINT : undefined);
     const reportingEnv =
       typeof process !== "undefined" ? process.env.PRISM_ERROR_REPORTING : undefined;
-    const hasCredentials = Effect.runSync(readPrismApiKey()) !== null;
-    const implicitReporting =
-      reportingEnv !== "false" && (reportingEnv === "true" || hasCredentials);
+    const optOut = config.optOut ?? !readTelemetryPreference().enabled;
+    const explicitEnabled = config.enabled ?? reportingEnv !== "false";
+    const envDisabled = reportingEnv === "false";
     this.endpoint =
       explicitEndpoint ??
-      (config.enabled === true || (config.enabled === undefined && implicitReporting)
-        ? DEFAULT_ERROR_ENDPOINT
-        : undefined);
-    this.enabled = config.enabled !== undefined ? config.enabled : implicitReporting;
+      (explicitEnabled && !envDisabled && !optOut ? DEFAULT_ERROR_ENDPOINT : undefined);
+    this.enabled = explicitEnabled && !envDisabled && !optOut;
+    this.agentId = config.agentId ?? process.env.PRISM_AGENT_ID ?? "engine";
     this.batchSize = config.batchSize ?? DEFAULT_BATCH_SIZE;
     this.flushIntervalMs = config.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
 
@@ -220,6 +225,7 @@ export class ErrorReporter {
 
     const report: ErrorReport = {
       id: generateId(),
+      agentId: this.agentId,
       ts: new Date().toISOString(),
       message: sanitizedMessage,
       stack: sanitizedStack,
@@ -251,7 +257,18 @@ export class ErrorReporter {
 
     return Effect.gen(this, function* () {
       const apiKey = yield* readPrismApiKey();
-      if (!apiKey && endpoint.includes("prism-api.irfndi.workers.dev")) return;
+      if (!apiKey && endpoint === DEFAULT_ERROR_ENDPOINT) {
+        // Credential-bounded: never send without an API key. Re-queue the
+        // batch so reports are not lost, but avoid spamming warnings on
+        // every flush when credentials are absent.
+        if (!this._missingCredentialWarned) {
+          this._missingCredentialWarned = true;
+          console.warn("[ErrorReporter] Skipping error report batch: no API key available");
+        }
+        this.requeueBatch(batch);
+        return;
+      }
+      this._missingCredentialWarned = false;
       const payload: BatchPayload = {
         app: "prism-liquidity-agent",
         version: this.appVersion,
@@ -263,7 +280,7 @@ export class ErrorReporter {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+              Authorization: `Bearer ${apiKey}`,
             },
             body: JSON.stringify(payload),
             signal: AbortSignal.timeout(timeoutMs),

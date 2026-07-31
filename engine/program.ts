@@ -45,6 +45,7 @@ import { join } from "path";
 import type { PositionRecord } from "./db-service.js";
 import { applyCompoundToCostBasis, computeHodlValueUsd, computeRealizedPnlUsd } from "./pnl.js";
 import { buildRewardClaimMetadata, summarizeRewardClaim } from "./rewards.js";
+import { errorReporter } from "./error-reporter.js";
 import {
   BlacklistError,
   DiscoverPoolsError,
@@ -3674,6 +3675,18 @@ export const program = Effect.gen(function* () {
             cycle.poolsFailed++;
             coreDataFailuresThisCycle++;
             console.error("Error processing pool", { poolAddress, err: String(err) });
+            try {
+              errorReporter.report(err instanceof Error ? err : new Error(String(err)), {
+                severity: "medium",
+                cycleId: cycle.cycleId,
+                poolAddress,
+              });
+            } catch (telemetryError) {
+              console.warn("Error reporter failed while recording pool failure", {
+                poolAddress,
+                error: String(telemetryError),
+              });
+            }
             return Effect.succeed(null);
           }),
         );
