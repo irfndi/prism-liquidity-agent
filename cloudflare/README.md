@@ -71,6 +71,7 @@ The stack does NOT create new resources. On a first deploy (empty Alchemy state)
 | `DB`      | D1       | `prism-db`     | `0657c2b3-fdea-4b33-b11b-8d0a7b27cbc8`      |
 | `CACHE`   | KV       | `prism-cache`  | `78d7fb5d3fab494dbc8f2940e524f22d`          |
 | `BACKUPS` | R2       | `prism-backups`|                                             |
+| `TELEMETRY_ARCHIVE` | R2 | `prism-telemetry` | Deduplicated error summaries |
 | `MEMORY`  | Vectorize| `prism-memory` | 384 dimensions, cosine                      |
 
 Physical identity comes from these names, so the `prod` stage never renames anything; the stage only scopes the Alchemy state keyspace. Data resources adopt implicitly. The two WORKERS adopt explicitly: workers carry ownership tags, and these were created by wrangler (unowned), so the deploy scripts run with `--adopt` — a one-time takeover that tags them for this stack, and a no-op on every later deploy for resources the stack already owns.
@@ -210,6 +211,7 @@ replies.
 - **DB** (D1): `prism-db` — accounts, feedback, errors, installs, audit summaries, and trading metadata
 - **CACHE** (KV): `prism-cache` — rate limits, session cache
 - **BACKUPS** (R2): `prism-backups` — database backups
+- **TELEMETRY_ARCHIVE** (R2): `prism-telemetry` — latest deduplicated error summaries
 - **MEMORY** (Vectorize): `prism-memory` — embeddings (384d, cosine)
 
 ## Observability
@@ -224,6 +226,12 @@ wrangler tail prism-telegram-bot
 # Historical (Cloudflare dashboard)
 # https://dash.cloudflare.com → Workers & Pages → prism-api → Logs
 ```
+
+Client errors are summarized in D1 by user and normalized error fingerprint;
+the summary tracks first seen, last seen, and occurrence count. The latest
+sanitized summary for each fingerprint is mirrored to the `prism-telemetry`
+R2 bucket under `telemetry/errors/`. Retries with the same report ID are
+idempotent and do not increment the occurrence count.
 
 ## Testing
 
