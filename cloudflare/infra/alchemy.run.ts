@@ -65,6 +65,10 @@ export const backups = Cloudflare.R2.Bucket("backups", {
   name: "prism-backups",
 });
 
+export const telemetryArchive = Cloudflare.R2.Bucket("telemetryArchive", {
+  name: "prism-telemetry",
+});
+
 /**
  * Vectorize: `prism-memory`. Bound as `MEMORY` for embeddings.
  *
@@ -128,6 +132,7 @@ export const api = Cloudflare.Worker("api", {
     DB: database,
     CACHE: cache,
     BACKUPS: backups,
+    TELEMETRY_ARCHIVE: telemetryArchive,
     MEMORY: memory,
     // Plain vars (literal string -> `plain_text`).
     ENVIRONMENT: "production",
@@ -187,6 +192,7 @@ export default Alchemy.Stack(
     const db = yield* database;
     yield* cache;
     yield* backups;
+    yield* telemetryArchive;
     yield* memory;
 
     const apiWorker = yield* api;
