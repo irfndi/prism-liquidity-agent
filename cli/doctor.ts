@@ -14,6 +14,7 @@ import { probeVecAvailability, vecRemediationHint, type VecProbeResult } from ".
 import { normalizeHeliusUrl, maskHeliusUrl } from "../engine/config-service.js";
 import { loadKeystoreSecretKeyBase58 } from "../engine/wallet-keystore.js";
 import { getApiBaseUrl, prismApiPost, readCredentials } from "./api.js";
+import { readTelemetryPreference } from "../engine/telemetry-preference.js";
 
 type DoctorStatus = "pass" | "warn" | "fail";
 
@@ -321,10 +322,12 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
   checks.push(checkPriceProviders());
   checks.push(checkWallet());
   checks.push(await checkRegistration());
+  const telemetryEnabled =
+    process.env.PRISM_ERROR_REPORTING !== "false" && readTelemetryPreference().enabled;
   checks.push(
-    process.env.PRISM_ERROR_REPORTING === "false"
-      ? check("error telemetry", "warn", "Disabled by PRISM_ERROR_REPORTING=false")
-      : check("error telemetry", "pass", "Enabled for registered agents or explicit opt-in"),
+    telemetryEnabled
+      ? check("error telemetry", "pass", "Enabled by default for registered agents")
+      : check("error telemetry", "warn", "Disabled by explicit local or environment opt-out"),
   );
 
   return {
