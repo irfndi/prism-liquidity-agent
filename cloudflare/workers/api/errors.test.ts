@@ -51,9 +51,32 @@ describe("Error Reporting API", () => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
     ).run();
-    await env.DB.prepare("ALTER TABLE error_logs ADD COLUMN user_id TEXT")
-      .run()
-      .catch(() => {});
+    await env.DB.prepare("ALTER TABLE error_logs ADD COLUMN user_id TEXT").run().catch((error) => {
+      if (!String(error).toLowerCase().includes("duplicate column")) throw error;
+    });
+    for (const statement of [
+      "ALTER TABLE error_logs ADD COLUMN fingerprint TEXT",
+      "ALTER TABLE error_logs ADD COLUMN first_seen_at DATETIME",
+      "ALTER TABLE error_logs ADD COLUMN last_seen_at DATETIME",
+      "ALTER TABLE error_logs ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 1",
+      "ALTER TABLE error_logs ADD COLUMN last_report_id TEXT",
+    ]) {
+      await env.DB.prepare(statement).run().catch((error) => {
+        if (!String(error).toLowerCase().includes("duplicate column")) throw error;
+      });
+    }
+    await env.DB.prepare(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_error_logs_user_fingerprint ON error_logs(user_id, fingerprint)",
+    ).run();
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS error_report_receipts (
+        user_id TEXT NOT NULL,
+        report_id TEXT NOT NULL,
+        summary_applied INTEGER NOT NULL DEFAULT 0,
+        received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, report_id)
+      )`,
+    ).run();
     await env.DB.prepare(
       `CREATE INDEX IF NOT EXISTS idx_error_logs_agent_created ON error_logs(agent_id, created_at)`,
     ).run();
@@ -72,6 +95,7 @@ describe("Error Reporting API", () => {
   describe("POST /v1/errors/report", () => {
     beforeEach(async () => {
       await env.DB.prepare("DELETE FROM error_logs").run();
+      await env.DB.prepare("DELETE FROM error_report_receipts").run();
     });
     it("should return 200 with id on valid report", async () => {
       const ctx = createExecutionContext();
@@ -172,6 +196,52 @@ describe("Error Reporting API", () => {
       expect(res2.status).toBe(200);
       const body = (await res2.json()) as { id: string };
       expect(body.id).toBe("dup-uuid");
+    });
+
+    it("increments one signature without counting the same report id twice", async () => {
+      const report = {
+        id: "same-signature-1",
+        agentId: "hashed-wallet-abc",
+        errorType: "SQLite_Vec",
+        message: "Vector dimension mismatch",
+        prismVersion: "1.2.3",
+      };
+      await worker.fetch(buildRequest("POST", "/v1/errors/report", report), testEnv, createExecutionContext());
+      await worker.fetch(buildRequest("POST", "/v1/errors/report", report), testEnv, createExecutionContext());
+      await worker.fetch(
+        buildRequest("POST", "/v1/errors/report", { ...report, id: "same-signature-2" }),
+        testEnv,
+        createExecutionContext(),
+      );
+      const row = await env.DB.prepare(
+        "SELECT occurrence_count FROM error_logs WHERE user_id = ? AND fingerprint IS NOT NULL",
+      )
+        .bind((await env.DB.prepare("SELECT id FROM users LIMIT 1").first<{ id: string }>())?.id)
+        .first<{ occurrence_count: number }>();
+      expect(row?.occurrence_count).toBe(2);
+    });
+
+    it("does not count an older report retry after a newer report", async () => {
+      const first = {
+        id: "ordered-signature-1",
+        agentId: "hashed-wallet-abc",
+        errorType: "SQLite_Vec",
+        message: "Vector dimension mismatch",
+        prismVersion: "1.2.3",
+      };
+      await worker.fetch(buildRequest("POST", "/v1/errors/report", first), testEnv, createExecutionContext());
+      await worker.fetch(
+        buildRequest("POST", "/v1/errors/report", { ...first, id: "ordered-signature-2" }),
+        testEnv,
+        createExecutionContext(),
+      );
+      await worker.fetch(buildRequest("POST", "/v1/errors/report", first), testEnv, createExecutionContext());
+      const row = await env.DB.prepare(
+        "SELECT occurrence_count FROM error_logs WHERE user_id = ? AND fingerprint IS NOT NULL",
+      )
+        .bind((await env.DB.prepare("SELECT id FROM users LIMIT 1").first<{ id: string }>())?.id)
+        .first<{ occurrence_count: number }>();
+      expect(row?.occurrence_count).toBe(2);
     });
   });
 

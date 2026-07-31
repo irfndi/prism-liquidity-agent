@@ -47,6 +47,20 @@ describe("Install Telemetry API", () => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
     ).run();
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS install_event_summary (
+        install_id TEXT NOT NULL,
+        event TEXT NOT NULL,
+        version TEXT,
+        channel TEXT,
+        platform TEXT,
+        user_id TEXT,
+        first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        occurrence_count INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (install_id, event)
+      )`,
+    ).run();
     await env.DB.prepare("DELETE FROM api_keys").run();
     await env.DB.prepare("DELETE FROM users").run();
     await env.CACHE.delete("rate_limit:register:unknown");
@@ -63,6 +77,7 @@ describe("Install Telemetry API", () => {
   describe("POST /v1/installs/ping", () => {
     beforeEach(async () => {
       await env.DB.prepare("DELETE FROM installs").run();
+      await env.DB.prepare("DELETE FROM install_event_summary").run();
     });
 
     it("returns 200 with id on valid install ping", async () => {
@@ -101,7 +116,9 @@ describe("Install Telemetry API", () => {
       });
       await worker.fetch(request, testEnv, ctx);
 
-      const rows = await env.DB.prepare("SELECT user_id FROM installs WHERE install_id = ?")
+      const rows = await env.DB.prepare(
+        "SELECT user_id FROM install_event_summary WHERE install_id = ?",
+      )
         .bind("user-id-test-install-aaaa")
         .all();
       const results = rows.results ?? [];
@@ -173,7 +190,7 @@ describe("Install Telemetry API", () => {
       await worker.fetch(request, testEnv, ctx);
 
       const rows = await env.DB.prepare(
-        "SELECT install_id, event, version, channel, platform FROM installs WHERE install_id = ?",
+        "SELECT install_id, event, version, channel, platform FROM install_event_summary WHERE install_id = ?",
       )
         .bind("persist-test-install-id-aaaaaaaa")
         .all();
@@ -184,6 +201,24 @@ describe("Install Telemetry API", () => {
       expect(row.version).toBe("0.0.3");
       expect(row.channel).toBe("stable");
       expect(row.platform).toBe("linux");
+    });
+
+    it("summarizes repeated pings instead of inserting duplicate rows", async () => {
+      const payload = {
+        installId: "summary-test-install-aaaa",
+        event: "dev_start",
+        version: "0.0.3",
+        channel: "stable",
+        platform: "linux",
+      };
+      await worker.fetch(buildRequest("POST", "/v1/installs/ping", payload), testEnv, createExecutionContext());
+      await worker.fetch(buildRequest("POST", "/v1/installs/ping", payload), testEnv, createExecutionContext());
+      const row = await env.DB.prepare(
+        "SELECT occurrence_count FROM install_event_summary WHERE install_id = ? AND event = ?",
+      )
+        .bind(payload.installId, payload.event)
+        .first<{ occurrence_count: number }>();
+      expect(row?.occurrence_count).toBe(2);
     });
   });
 });

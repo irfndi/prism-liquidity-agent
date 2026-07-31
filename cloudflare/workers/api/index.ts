@@ -6,6 +6,7 @@ export interface Env {
   DB: D1Database;
   CACHE: KVNamespace;
   BACKUPS: R2Bucket;
+  TELEMETRY_ARCHIVE?: R2Bucket;
   MEMORY: VectorizeIndex;
   FEE_WALLET_ADDRESS: string;
   TELEGRAM_BOT_TOKEN: string;
@@ -116,6 +117,169 @@ const hashKey = (key: string): Effect.Effect<string, unknown> =>
       return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
     }),
   );
+
+interface NormalizedErrorReport {
+  readonly id: string;
+  readonly agentId: string;
+  readonly errorType: string;
+  readonly message: string;
+  readonly prismVersion: string;
+  readonly stackTrace: string | null;
+  readonly platform: string | null;
+  readonly severity: string;
+  readonly isRecoverable: number;
+  readonly fingerprint: string;
+}
+
+function normalizeErrorReport(
+  report: {
+    readonly id?: string;
+    readonly agentId?: string;
+    readonly errorType?: string;
+    readonly category?: string;
+    readonly message?: string;
+    readonly stackTrace?: string;
+    readonly stack?: string;
+    readonly prismVersion?: string;
+    readonly platform?: string;
+    readonly severity?: string;
+    readonly isRecoverable?: number;
+  },
+  batchVersion?: string,
+): Effect.Effect<NormalizedErrorReport, string> {
+  return Effect.gen(function* () {
+    const errorType = report.errorType ?? report.category;
+    const prismVersion = report.prismVersion ?? batchVersion ?? "unknown";
+    if (!report.id || !errorType || !report.message || !prismVersion) {
+      return yield* Effect.fail("Each report requires id, message, and error type/version");
+    }
+    if (report.message.length > MAX_ERROR_MESSAGE_LENGTH) {
+      return yield* Effect.fail(`message exceeds ${MAX_ERROR_MESSAGE_LENGTH} characters`);
+    }
+    const fingerprint = yield* hashKey(`${errorType}:${report.message.trim().toLowerCase()}`).pipe(
+      Effect.mapError(() => "Unable to fingerprint error report"),
+    );
+    return {
+      id: report.id,
+      agentId: report.agentId ?? "engine",
+      errorType,
+      message: report.message,
+      prismVersion,
+      stackTrace: report.stackTrace ?? report.stack ?? null,
+      platform: report.platform ?? null,
+      severity: report.severity ?? "error",
+      isRecoverable: report.isRecoverable ? 1 : 0,
+      fingerprint,
+    };
+  });
+}
+
+function archiveErrorReports(
+  archive: R2Bucket | undefined,
+  userId: string,
+  reports: ReadonlyArray<NormalizedErrorReport>,
+): Effect.Effect<number, never> {
+  if (!archive) return Effect.succeed(0);
+  const uniqueReports = [...new Map(reports.map((report) => [report.fingerprint, report])).values()];
+  return Effect.gen(function* () {
+    let archived = 0;
+    for (const report of uniqueReports) {
+      const key = `telemetry/errors/${userId}/${report.fingerprint}.json`;
+      const result = yield* Effect.tryPromise({
+        try: () =>
+          archive.put(
+            key,
+            JSON.stringify({ ...report, archivedAt: new Date().toISOString() }),
+            { httpMetadata: { contentType: "application/json" } },
+          ),
+        catch: (cause) => cause,
+      }).pipe(
+        Effect.map(() => 1),
+        Effect.catchAll((cause) => {
+          console.error("[Telemetry] Failed to archive error summary", {
+            key,
+            error: causeMessage(cause),
+          });
+          return Effect.succeed(0);
+        }),
+      );
+      archived += result;
+    }
+    return archived;
+  });
+}
+
+function upsertErrorReports(
+  db: D1Database,
+  archive: R2Bucket | undefined,
+  userId: string,
+  reports: ReadonlyArray<NormalizedErrorReport>,
+): Effect.Effect<{ readonly processed: number; readonly archived: number }, unknown> {
+  return Effect.gen(function* () {
+    const statements = reports.flatMap((report) => [
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO error_report_receipts (user_id, report_id)
+           VALUES (?, ?)`,
+        )
+        .bind(userId, report.id),
+      db
+        .prepare(
+          `INSERT INTO error_logs
+            (id, user_id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable, fingerprint, first_seen_at, last_seen_at, occurrence_count, last_report_id)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, ?
+           WHERE EXISTS (
+             SELECT 1 FROM error_report_receipts
+             WHERE user_id = ? AND report_id = ? AND summary_applied = 0
+           )
+           ON CONFLICT(user_id, fingerprint) DO UPDATE SET
+             agent_id = excluded.agent_id,
+             error_type = excluded.error_type,
+             message = excluded.message,
+             stack_trace = excluded.stack_trace,
+             prism_version = excluded.prism_version,
+             platform = excluded.platform,
+             severity = excluded.severity,
+             is_recoverable = excluded.is_recoverable,
+             last_seen_at = CURRENT_TIMESTAMP,
+             occurrence_count = error_logs.occurrence_count + 1,
+             last_report_id = excluded.last_report_id
+           WHERE EXISTS (
+             SELECT 1 FROM error_report_receipts
+             WHERE user_id = ? AND report_id = ? AND summary_applied = 0
+           )`,
+        )
+        .bind(
+          report.id,
+          userId,
+          report.agentId,
+          report.errorType,
+          report.message,
+          report.stackTrace,
+          report.prismVersion,
+          report.platform,
+          report.severity,
+          report.isRecoverable,
+          report.fingerprint,
+          report.id,
+          userId,
+          report.id,
+          userId,
+          report.id,
+        ),
+      db
+        .prepare(
+          `UPDATE error_report_receipts
+           SET summary_applied = 1
+           WHERE user_id = ? AND report_id = ? AND summary_applied = 0`,
+        )
+        .bind(userId, report.id),
+    ]);
+    yield* Effect.tryPromise(() => db.batch(statements));
+    const archived = yield* archiveErrorReports(archive, userId, reports);
+    return { processed: reports.length, archived };
+  });
+}
 
 // Helper to generate referral codes
 function generateReferralCode(): string {
@@ -1187,7 +1351,6 @@ app.post("/v1/errors/report", async (c) => {
     }>(c.req),
   );
 
-  // Validate required fields
   if (!body.id || !body.agentId || !body.errorType || !body.message || !body.prismVersion) {
     return c.json(
       { error: "Missing required fields: id, agentId, errorType, message, prismVersion" },
@@ -1210,43 +1373,17 @@ app.post("/v1/errors/report", async (c) => {
     await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
   }
 
-  const report = Effect.gen(function* () {
-    const severity = body.severity ?? "error";
-    const isRecoverable = body.isRecoverable ? 1 : 0;
-
-    yield* Effect.tryPromise(() =>
-      DB.prepare(
-        `INSERT INTO error_logs (user_id, id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-        .bind(
-          user.id,
-          body.id,
-          body.agentId,
-          body.errorType,
-          body.message,
-          body.stackTrace ?? null,
-          body.prismVersion,
-          body.platform ?? null,
-          severity,
-          isRecoverable,
-        )
-        .run(),
-    );
-
-    return c.json({ id: body.id });
-  });
+  const report = normalizeErrorReport(body).pipe(
+    Effect.flatMap((normalized) =>
+      upsertErrorReports(DB, c.env.TELEMETRY_ARCHIVE, user.id, [normalized]).pipe(
+        Effect.map(() => c.json({ id: normalized.id, archived: c.env.TELEMETRY_ARCHIVE !== undefined })),
+      ),
+    ),
+  );
 
   return Effect.runPromise(
     report.pipe(
-      Effect.catchAll((cause) => {
-        const message = causeMessage(cause);
-        return Effect.succeed(
-          message.includes("UNIQUE constraint")
-            ? c.json({ id: body.id })
-            : c.json({ error: "Failed to store error report" }, 500),
-        );
-      }),
+      Effect.catchAll((cause) => Effect.succeed(c.json({ error: causeMessage(cause) }, 400))),
     ),
   );
 });
@@ -1299,94 +1436,21 @@ app.post("/v1/errors/batch", async (c) => {
     await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
   }
 
-  // Validate all reports — accept both engine format (category, stack, version top-level)
-  // and direct API format (errorType, stackTrace, prismVersion per-report)
-  const validReports: Array<{
-    id: string;
-    agentId: string;
-    errorType: string;
-    message: string;
-    prismVersion: string;
-    stackTrace: string | null;
-    platform: string | null;
-    severity: string;
-    isRecoverable: number;
-  }> = [];
-
-  for (const r of reports) {
-    const errorType = r.errorType ?? r.category;
-    const prismVersion = r.prismVersion ?? body.version ?? "unknown";
-    const stackTrace = r.stackTrace ?? r.stack ?? null;
-    const agentId = r.agentId ?? "engine";
-
-    if (!r.id || !errorType || !r.message || !prismVersion) {
-      return c.json(
-        {
-          error:
-            "Each report requires id, message, and either errorType/category with prismVersion/version",
-          reportId: r.id ?? "(missing id)",
-        },
-        400,
-      );
-    }
-    if (r.message.length > MAX_ERROR_MESSAGE_LENGTH) {
-      return c.json(
-        {
-          error: `message exceeds ${MAX_ERROR_MESSAGE_LENGTH} characters`,
-          reportId: r.id,
-        },
-        400,
-      );
-    }
-    validReports.push({
-      id: r.id,
-      agentId,
-      errorType,
-      message: r.message,
-      prismVersion,
-      stackTrace,
-      platform: r.platform ?? null,
-      severity: r.severity ?? "error",
-      isRecoverable: r.isRecoverable ? 1 : 0,
-    });
-  }
-
   const batch = Effect.gen(function* () {
-    const stmt = DB.prepare(
-      `INSERT OR IGNORE INTO error_logs (user_id, id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
-
-    const batchStatements = validReports.map((r) =>
-      stmt.bind(
-        user.id,
-        r.id,
-        r.agentId,
-        r.errorType,
-        r.message,
-        r.stackTrace,
-        r.prismVersion,
-        r.platform,
-        r.severity,
-        r.isRecoverable,
-      ),
-    );
-
-    const results = yield* Effect.tryPromise(() => DB.batch(batchStatements));
-    const inserted = results.reduce(
-      (sum, r) => sum + (typeof r.meta.changes === "number" ? r.meta.changes : 0),
-      0,
-    );
-    const duplicates = validReports.length - inserted;
-
-    return c.json({ inserted, duplicates });
+    const validReports: NormalizedErrorReport[] = [];
+    for (const report of reports) {
+      const normalized = yield* normalizeErrorReport(report, body.version).pipe(
+        Effect.mapError((error) => `${error} (${report.id ?? "missing id"})`),
+      );
+      validReports.push(normalized);
+    }
+    const result = yield* upsertErrorReports(DB, c.env.TELEMETRY_ARCHIVE, user.id, validReports);
+    return c.json({ inserted: result.processed, duplicates: 0, archived: result.archived });
   });
 
   return Effect.runPromise(
     batch.pipe(
-      Effect.catchAll(() =>
-        Effect.succeed(c.json({ error: "Failed to store error reports" }, 500)),
-      ),
+      Effect.catchAll((cause) => Effect.succeed(c.json({ error: causeMessage(cause) }, 400))),
     ),
   );
 });
@@ -1405,10 +1469,11 @@ app.get("/v1/errors/stats", async (c) => {
 
   const stats = Effect.tryPromise(() =>
     DB.prepare(
-      `SELECT error_type, COUNT(*) as count
-       FROM error_logs
-       WHERE created_at >= datetime('now', '-1 day')
-       GROUP BY error_type
+       `SELECT error_type, SUM(occurrence_count) as count, COUNT(*) as signatures,
+               MIN(first_seen_at) as first_seen_at, MAX(last_seen_at) as last_seen_at
+        FROM error_logs
+        WHERE COALESCE(last_seen_at, created_at) >= datetime('now', '-1 day')
+        GROUP BY error_type
        ORDER BY count DESC`,
     ).all(),
   ).pipe(
@@ -1711,11 +1776,18 @@ app.post("/v1/installs/ping", async (c) => {
   const id = generateId();
   const ping = Effect.tryPromise(() =>
     DB.prepare(
-      `INSERT INTO installs (id, install_id, event, version, channel, platform, user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO install_event_summary
+         (install_id, event, version, channel, platform, user_id, first_seen_at, last_seen_at, occurrence_count)
+       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+       ON CONFLICT(install_id, event) DO UPDATE SET
+         version = excluded.version,
+         channel = excluded.channel,
+         platform = excluded.platform,
+         user_id = COALESCE(excluded.user_id, install_event_summary.user_id),
+         last_seen_at = CURRENT_TIMESTAMP,
+         occurrence_count = install_event_summary.occurrence_count + 1`,
     )
       .bind(
-        id,
         body.installId,
         body.event,
         body.version ?? null,
