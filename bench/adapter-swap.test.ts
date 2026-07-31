@@ -8,6 +8,7 @@ import {
   TransactionInstruction,
   TransactionMessage,
   VersionedTransaction,
+  type VersionedTransactionResponse,
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import { AdapterService } from "../engine/services.js";
@@ -483,7 +484,7 @@ describe("AdapterService generic Jupiter swaps", () => {
     }
   });
 
-  it("resolves a submitted swap with the signature once broadcast, confirmation is best-effort", async () => {
+  it("resolves a submitted swap with the signature only after confirmation succeeds", async () => {
     const outputMint = Keypair.generate().publicKey.toBase58();
     const amountAtomic = 1_000_000n;
     const message = new TransactionMessage({
@@ -524,8 +525,10 @@ describe("AdapterService generic Jupiter swaps", () => {
         return signature;
       });
       await vi.waitFor(() => expect(confirmSpy).toHaveBeenCalledWith("delayed-sig", "confirmed"));
-      expect(settled).toBe(true);
+      expect(settled).toBe(false);
+      releaseConfirmation?.();
       await expect(result).resolves.toBe("delayed-sig");
+      expect(settled).toBe(true);
     } finally {
       releaseConfirmation?.();
       restore();
@@ -646,7 +649,61 @@ describe("AdapterService generic Jupiter swaps", () => {
     expect(status).toEqual({ state: "confirmed", error: null });
   });
 
-  it("returns the broadcast signature even when confirmation fails", async () => {
+  it("returns output and fee from a confirmed transaction", async () => {
+    const response: VersionedTransactionResponse = {
+      slot: 1,
+      transaction: {
+        message: new TransactionMessage({
+          payerKey: walletKeypair.publicKey,
+          recentBlockhash: "11111111111111111111111111111111",
+          instructions: [],
+        }).compileToV0Message(),
+        signatures: [],
+      },
+      blockTime: null,
+      meta: {
+        fee: 5_000,
+        preBalances: [1_000_000_000],
+        postBalances: [1_001_000_000],
+        err: null,
+        innerInstructions: null,
+        logMessages: null,
+        preTokenBalances: null,
+        postTokenBalances: null,
+      },
+    };
+    vi.spyOn(Connection.prototype, "getTransaction").mockResolvedValue(response);
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const adapter = yield* AdapterService;
+        if (!adapter.getConfirmedSwapOutput) {
+          return yield* Effect.fail(new Error("swap output API unavailable"));
+        }
+        return yield* adapter.getConfirmedSwapOutput("mock-sig");
+      }).pipe(Effect.provide(buildLayer())),
+    );
+
+    expect(result).toEqual({ outputAtomic: 1_000_000n, feeAtomic: 5_000n });
+  });
+
+  it("returns null when the confirmed transaction is unavailable", async () => {
+    vi.spyOn(Connection.prototype, "getTransaction").mockResolvedValue(null);
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const adapter = yield* AdapterService;
+        if (!adapter.getConfirmedSwapOutput) {
+          return yield* Effect.fail(new Error("swap output API unavailable"));
+        }
+        return yield* adapter.getConfirmedSwapOutput("mock-sig");
+      }).pipe(Effect.provide(buildLayer())),
+    );
+
+    expect(result).toBeNull();
+  });
+
+  it("propagates confirmation failure before resolving the swap effect", async () => {
     const outputMint = Keypair.generate().publicKey.toBase58();
     const amountAtomic = 1_000_000n;
     const message = new TransactionMessage({
@@ -671,21 +728,70 @@ describe("AdapterService generic Jupiter swaps", () => {
       context: { slot: 2 },
       value: { err: new Error("confirmation failed") },
     });
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     try {
-      const sig = await Effect.runPromise(
-        genericSwapEffect(buildLayer(), SOL_MINT, outputMint, amountAtomic),
+      const result = await Effect.runPromise(
+        genericSwapEffect(buildLayer(), SOL_MINT, outputMint, amountAtomic).pipe(Effect.either),
       );
-      expect(sig).toBe("sig");
-      await vi.waitFor(() =>
-        expect(warnSpy).toHaveBeenCalledWith(
-          expect.stringContaining("confirmation check failed"),
-          expect.any(Error),
-        ),
-      );
+      expect(result._tag).toBe("Left");
+      if (result._tag !== "Left") return;
+      expect((result.left as { message?: string }).message).toContain("confirmation failed");
     } finally {
-      warnSpy.mockRestore();
+      restore();
+    }
+  });
+
+  it("remains pending until confirmTransaction settles, and rejects on confirmation failure", async () => {
+    const outputMint = Keypair.generate().publicKey.toBase58();
+    const amountAtomic = 1_000_000n;
+    const message = new TransactionMessage({
+      payerKey: walletKeypair.publicKey,
+      recentBlockhash: "11111111111111111111111111111111",
+      instructions: [],
+    }).compileToV0Message();
+    const transactionBase64 = Buffer.from(new VersionedTransaction(message).serialize()).toString(
+      "base64",
+    );
+    const restore = mockFetch(async (url: string | URL | Request) =>
+      url.toString().includes("/swap/v1/quote")
+        ? new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)))
+        : new Response(JSON.stringify({ swapTransaction: transactionBase64 })),
+    );
+    vi.spyOn(Connection.prototype, "simulateTransaction").mockResolvedValue({
+      context: { slot: 1 },
+      value: { err: null, logs: [], unitsConsumed: 1 },
+    });
+    vi.spyOn(Connection.prototype, "sendRawTransaction").mockResolvedValue("pending-sig");
+    let releaseConfirmation: (() => void) | undefined;
+    const confirmation = new Promise<{
+      context: { slot: number };
+      value: { err: Error };
+    }>((resolve) => {
+      releaseConfirmation = () =>
+        resolve({ context: { slot: 2 }, value: { err: new Error("confirmation failed") } });
+    });
+    const confirmSpy = vi
+      .spyOn(Connection.prototype, "confirmTransaction")
+      .mockImplementation(() => confirmation);
+    let settled = false;
+
+    try {
+      const result = Effect.runPromise(
+        genericSwapEffect(buildLayer(), SOL_MINT, outputMint, amountAtomic).pipe(Effect.either),
+      ).then((outcome) => {
+        settled = true;
+        return outcome;
+      });
+      await vi.waitFor(() => expect(confirmSpy).toHaveBeenCalledWith("pending-sig", "confirmed"));
+      expect(settled).toBe(false);
+      releaseConfirmation?.();
+      const outcome = await result;
+      expect(settled).toBe(true);
+      expect(outcome._tag).toBe("Left");
+      if (outcome._tag !== "Left") return;
+      expect((outcome.left as { message?: string }).message).toContain("confirmation failed");
+    } finally {
+      releaseConfirmation?.();
       restore();
     }
   });

@@ -396,6 +396,9 @@ export interface AdapterApi {
     onBroadcast?: (signature: string) => Effect.Effect<void, unknown>,
   ) => Effect.Effect<string, unknown>;
   readonly getSwapStatus?: (signature: string) => Effect.Effect<SwapStatus, unknown>;
+  readonly getConfirmedSwapOutput?: (
+    signature: string,
+  ) => Effect.Effect<{ outputAtomic: bigint; feeAtomic: bigint } | null, unknown>;
 }
 
 export class AdapterService extends Context.Tag("AdapterService")<AdapterService, AdapterApi>() {}

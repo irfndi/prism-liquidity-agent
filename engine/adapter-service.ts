@@ -1619,19 +1619,11 @@ export const AdapterLive = Layer.effect(
           }),
         );
         if (onBroadcast) yield* onBroadcast(signature);
-        yield* Effect.forkDaemon(
-          rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")).pipe(
-            Effect.flatMap((confirmation) =>
-              confirmation.value.err === null ? Effect.void : Effect.fail(confirmation.value.err),
-            ),
-            Effect.catchAll((err) =>
-              Effect.sync(() => {
-                console.warn(`Swap transaction ${signature} confirmation check failed:`, err);
-              }),
-            ),
+        yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")).pipe(
+          Effect.flatMap((confirmation) =>
+            confirmation.value.err === null ? Effect.void : Effect.fail(confirmation.value.err),
           ),
         );
-        yield* Effect.sleep(0);
         yield* invalidateBalanceCaches;
         return signature;
       });
@@ -1657,6 +1649,48 @@ export const AdapterLive = Layer.effect(
         }
         return { state: "processed", error: null };
       });
+    }
+
+    function getConfirmedSwapOutput(
+      signature: string,
+    ): Effect.Effect<{ outputAtomic: bigint; feeAtomic: bigint } | null, unknown> {
+      return Effect.gen(function* () {
+        if (!wallet) return null;
+        const response = yield* rpcCall((conn) =>
+          conn.getTransaction(signature, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          }),
+        );
+        if (!response || !response.meta) return null;
+
+        const message = response.transaction.message;
+        const accountKeys =
+          message.version === 0
+            ? message.getAccountKeys({
+                accountKeysFromLookups: response.meta.loadedAddresses ?? null,
+              })
+            : message.getAccountKeys();
+        let walletIndex = -1;
+        for (let index = 0; index < accountKeys.length; index += 1) {
+          if (accountKeys.get(index)?.equals(wallet.publicKey)) {
+            walletIndex = index;
+            break;
+          }
+        }
+        if (walletIndex === -1) return null;
+
+        const preBalance = response.meta.preBalances[walletIndex];
+        const postBalance = response.meta.postBalances[walletIndex];
+        if (typeof preBalance !== "number" || typeof postBalance !== "number") return null;
+
+        const outputAtomic = BigInt(postBalance - preBalance);
+        const feeAtomic = BigInt(response.meta.fee);
+
+        if (outputAtomic <= 0n) return null;
+
+        return { outputAtomic, feeAtomic };
+      }).pipe(Effect.catchAll(() => Effect.succeed(null)));
     }
 
     function quoteSwapUSDCForToken(
@@ -3307,6 +3341,17 @@ export const AdapterLive = Layer.effect(
       simulateSwap,
       submitSwap,
       getSwapStatus,
+      getConfirmedSwapOutput: (signature) =>
+        getConfirmedSwapOutput(signature).pipe(
+          Effect.catchAll((err) =>
+            Effect.fail(
+              new AdapterError({
+                message: `getConfirmedSwapOutput failed: ${String(err)}`,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
 
       swapUSDCForToken: (
         outputMint: string,
