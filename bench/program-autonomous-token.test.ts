@@ -335,4 +335,167 @@ describe("settlement job processing", () => {
     expect(closedPnl).toBe(10);
     expect(outcome).toEqual({ snapshotId: 42, pnl: 10 });
   });
+
+  it("reconciles confirmed swap output from transaction evidence when fields are missing", async () => {
+    // Given
+    const job = settlementJob({
+      status: "confirmed",
+      txSignature: "confirmed-sig",
+      confirmedOutputAtomic: null,
+      outputUsd: null,
+      executionCostUsd: null,
+    });
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
+      getConfirmedSwapOutput: () =>
+        Effect.succeed({ outputAtomic: 1_000_000_000n, feeAtomic: 5_000_000n }),
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100 }),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
+
+    // Then
+    expect(processed).toMatchObject({
+      status: "confirmed",
+      confirmedOutputAtomic: "1000000000",
+      outputUsd: 100,
+      executionCostUsd: 0.5,
+    });
+  });
+
+  it("preserves existing confirmed output fields when getSwapStatus reports confirmed", async () => {
+    // Given
+    const job = settlementJob({
+      status: "confirmed",
+      txSignature: "confirmed-sig",
+      confirmedOutputAtomic: "500000000",
+      outputUsd: 50,
+      executionCostUsd: 0.25,
+    });
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
+
+    // Then
+    expect(processed).toMatchObject({
+      status: "confirmed",
+      confirmedOutputAtomic: "500000000",
+      outputUsd: 50,
+      executionCostUsd: 0.25,
+    });
+  });
+
+  it("marks a confirmed job for reconciliation when swap output evidence is unavailable", async () => {
+    // Given
+    const job = settlementJob({
+      status: "confirmed",
+      txSignature: "confirmed-sig",
+      confirmedOutputAtomic: null,
+      outputUsd: null,
+      executionCostUsd: null,
+    });
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
+      getConfirmedSwapOutput: () => Effect.succeed(null),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
+
+    // Then
+    expect(processed).toMatchObject({
+      status: "prepared",
+      error: "Confirmed swap output evidence unavailable",
+    });
+  });
+
+  it("skips finalization for already-finalized settlement groups", async () => {
+    // Given
+    const job = settlementJob({
+      status: "confirmed",
+      outputUsd: 100,
+      executionCostUsd: 2,
+      confirmedOutputAtomic: "1",
+      finalizedAt: 5_000,
+    });
+    const savedJobs: SettlementJobRecord[] = [];
+    let finalizedCount = 0;
+    const db = {
+      saveSettlementJob: (j: SettlementJobRecord) =>
+        Effect.sync(() => {
+          savedJobs.push(j);
+          if (j.finalizedAt !== null) finalizedCount++;
+        }),
+      getPosition: () => Effect.succeed(null),
+    } as unknown as DbApi;
+
+    // When
+    await runSettlementProcessor([job], {} as AdapterApi, savedJobs);
+
+    // Then
+    expect(finalizedCount).toBe(0);
+  });
+
+  it("finalizes confirmed-but-unfinalized jobs while skipping already-finalized ones", async () => {
+    // Given
+    const unfinalizedJob = settlementJob({
+      id: "unfinalized",
+      status: "confirmed",
+      outputUsd: 100,
+      executionCostUsd: 2,
+      confirmedOutputAtomic: "1",
+      finalizedAt: null,
+    });
+    const finalizedJob = settlementJob({
+      id: "finalized",
+      status: "confirmed",
+      outputUsd: 50,
+      executionCostUsd: 1,
+      confirmedOutputAtomic: "1",
+      finalizedAt: 5_000,
+    });
+    const savedJobs: SettlementJobRecord[] = [];
+    let finalizedCount = 0;
+    const position = {
+      cumulativeFeesClaimedUsd: 0,
+      cumulativeRewardsClaimedUsd: 0,
+      depositedUsd: 100,
+      entrySignalSnapshotId: null,
+    };
+    const db = {
+      saveSettlementJob: (j: SettlementJobRecord) =>
+        Effect.sync(() => {
+          savedJobs.push(j);
+          if (j.finalizedAt !== null) finalizedCount++;
+        }),
+      getPosition: () => Effect.succeed(position),
+      closePosition: () => Effect.void,
+      recordSignalOutcome: () => Effect.void,
+    } as unknown as DbApi;
+
+    // When
+    await Effect.runPromise(
+      processSettlementJobs({
+        adapter: {} as AdapterApi,
+        db,
+        jobs: [unfinalizedJob, finalizedJob],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+      }),
+    );
+
+    // Then
+    expect(finalizedCount).toBe(1);
+    const lastUnfinalized = savedJobs.find((j) => j.id === "unfinalized");
+    expect(lastUnfinalized?.finalizedAt).not.toBeNull();
+    expect(savedJobs.find((j) => j.id === "finalized")).toBeUndefined();
+  });
 });

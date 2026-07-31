@@ -100,10 +100,15 @@ export function processSettlementJobs(
     if (input.mode === "off" || input.mode === "shadow") return input.jobs;
     const processed: SettlementJobRecord[] = [];
     for (const job of input.jobs) {
+      if (job.status === "terminal" || (job.nextRetryAt !== null && job.nextRetryAt > input.now)) {
+        processed.push(job);
+        continue;
+      }
       if (
-        job.status === "confirmed" ||
-        job.status === "terminal" ||
-        (job.nextRetryAt !== null && job.nextRetryAt > input.now)
+        job.status === "confirmed" &&
+        job.confirmedOutputAtomic !== null &&
+        job.outputUsd !== null &&
+        job.executionCostUsd !== null
       ) {
         processed.push(job);
         continue;
@@ -115,13 +120,47 @@ export function processSettlementJobs(
         if (job.txSignature && input.adapter.getSwapStatus) {
           const status = yield* input.adapter.getSwapStatus(job.txSignature);
           if (status.state === "confirmed" || status.state === "finalized") {
-            return {
-              ...job,
-              status: "confirmed" as const,
-              nextRetryAt: null,
-              error: null,
-              updatedAt: input.now,
-            };
+            if (
+              job.confirmedOutputAtomic !== null &&
+              job.outputUsd !== null &&
+              job.executionCostUsd !== null
+            ) {
+              return {
+                ...job,
+                status: "confirmed" as const,
+                nextRetryAt: null,
+                error: null,
+                updatedAt: input.now,
+              };
+            }
+
+            if (input.adapter.getConfirmedSwapOutput) {
+              const evidence = yield* input.adapter.getConfirmedSwapOutput(job.txSignature);
+              if (evidence && evidence.outputAtomic > 0n) {
+                const prices = yield* input.adapter.getTokenPrices([SOL_MINT]);
+                const solPriceUsd = prices[SOL_MINT] ?? 0;
+                if (solPriceUsd > 0) {
+                  const outputUsd = atomicUsd(evidence.outputAtomic, 9, solPriceUsd);
+                  const executionCostUsd = atomicUsd(evidence.feeAtomic, 9, solPriceUsd);
+                  return {
+                    ...job,
+                    status: "confirmed" as const,
+                    confirmedOutputAtomic: evidence.outputAtomic.toString(),
+                    outputUsd,
+                    executionCostUsd,
+                    nextRetryAt: null,
+                    error: null,
+                    updatedAt: input.now,
+                  };
+                }
+              }
+            }
+
+            return reconciliationJob(
+              job,
+              input.now,
+              new Error("Confirmed swap output evidence unavailable"),
+            );
           }
           if (status.state !== "failed" && status.state !== "not_found") {
             return {
@@ -255,13 +294,18 @@ export function processSettlementJobs(
 
     const byPosition = Map.groupBy(processed, (job) => job.positionId);
     for (const [positionId, jobs] of byPosition) {
-      if (jobs.length === 0 || jobs.some((job) => job.status !== "confirmed")) continue;
+      const unfinalized = jobs.filter((job) => job.finalizedAt === null);
+      if (unfinalized.length === 0) continue;
+      if (unfinalized.some((job) => job.status !== "confirmed")) continue;
       const position = yield* input.db
         .getPosition(positionId)
         .pipe(Effect.catchAll(() => Effect.succeed(null)));
       if (!position) continue;
-      const outputUsd = jobs.reduce((sum, job) => sum + (job.outputUsd ?? 0), 0);
-      const executionCostUsd = jobs.reduce((sum, job) => sum + (job.executionCostUsd ?? 0), 0);
+      const outputUsd = unfinalized.reduce((sum, job) => sum + (job.outputUsd ?? 0), 0);
+      const executionCostUsd = unfinalized.reduce(
+        (sum, job) => sum + (job.executionCostUsd ?? 0),
+        0,
+      );
       const realizedPnlUsd = computeNetRealizedPnlUsd({
         finalValueUsd: outputUsd + executionCostUsd,
         cumulativeFeesClaimedUsd: position.cumulativeFeesClaimedUsd,
@@ -278,7 +322,7 @@ export function processSettlementJobs(
           .recordSignalOutcome(position.entrySignalSnapshotId, realizedPnlUsd)
           .pipe(Effect.catchAll(() => Effect.void));
       }
-      for (const job of jobs) {
+      for (const job of unfinalized) {
         const finalized = {
           ...job,
           finalizedAt: input.now,
