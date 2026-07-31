@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS install_event_summary (
 CREATE INDEX IF NOT EXISTS idx_install_event_summary_last_seen
   ON install_event_summary(last_seen_at);
 
-INSERT INTO install_event_summary
+INSERT OR IGNORE INTO install_event_summary
   (install_id, event, version, channel, platform, user_id, first_seen_at, last_seen_at, occurrence_count)
 SELECT install_id,
        event,
