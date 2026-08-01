@@ -281,6 +281,43 @@ export const DbLive = (dbPath?: string) =>
             );
           }),
 
+        finalizeSettlementGroup: (input) =>
+          Effect.try({
+            try: () => {
+              db.transaction(() => {
+                runOne(
+                  db,
+                  "UPDATE positions SET closed_at = ?, realized_pnl_usd = ? WHERE position_id = ?",
+                  input.finalizedAt,
+                  input.realizedPnlUsd,
+                  input.positionId,
+                );
+                if (input.signalSnapshotId !== null && input.realizedPnlUsd !== null) {
+                  runOne(
+                    db,
+                    "UPDATE signal_snapshots SET outcome_pnl_usd = ?, outcome_recorded_at = ? WHERE id = ?",
+                    input.realizedPnlUsd,
+                    input.finalizedAt,
+                    input.signalSnapshotId,
+                  );
+                }
+                for (const jobId of input.jobIds) {
+                  runOne(
+                    db,
+                    "UPDATE settlement_jobs SET finalized_at = ?, realized_pnl_usd = ? WHERE id = ?",
+                    input.finalizedAt,
+                    input.realizedPnlUsd,
+                    jobId,
+                  );
+                }
+              })();
+            },
+            catch: (error) =>
+              new Error(
+                `finalizeSettlementGroup failed: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+          }),
+
         savePositionEvent: (event) =>
           Effect.sync(() => {
             runOne(

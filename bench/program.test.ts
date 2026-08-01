@@ -205,6 +205,7 @@ describe("executeLive", () => {
       deletePosition: () => Effect.void,
       markPaperExited: () => Effect.void,
       closePosition: () => Effect.void,
+      finalizeSettlementGroup: () => Effect.void,
       getClosedPositions: () => Effect.succeed([]),
       savePositionEvent: () => Effect.void,
       getPositionEvents: () => Effect.succeed([]),

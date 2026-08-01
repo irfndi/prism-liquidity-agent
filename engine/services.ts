@@ -848,6 +848,13 @@ export interface DbApi {
     positionId: string,
     realizedPnlUsd: number | null,
   ) => Effect.Effect<void, unknown>;
+  readonly finalizeSettlementGroup: (input: {
+    readonly positionId: string;
+    readonly realizedPnlUsd: number | null;
+    readonly jobIds: ReadonlyArray<string>;
+    readonly finalizedAt: number;
+    readonly signalSnapshotId: number | null;
+  }) => Effect.Effect<void, unknown>;
   readonly getClosedPositions: () => Effect.Effect<
     ReadonlyArray<{
       positionId: string;
