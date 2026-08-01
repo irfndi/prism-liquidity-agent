@@ -1619,12 +1619,13 @@ export const AdapterLive = Layer.effect(
           }),
         );
         if (onBroadcast) yield* onBroadcast(signature);
-        yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed")).pipe(
-          Effect.flatMap((confirmation) =>
-            confirmation.value.err === null ? Effect.void : Effect.fail(confirmation.value.err),
-          ),
+        const confirmation = yield* rpcCall((conn) =>
+          conn.confirmTransaction(signature, "confirmed"),
         );
         yield* invalidateBalanceCaches;
+        if (confirmation.value.err !== null) {
+          return yield* Effect.fail(confirmation.value.err);
+        }
         return signature;
       });
     }

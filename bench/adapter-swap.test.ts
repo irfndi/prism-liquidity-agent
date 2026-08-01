@@ -104,6 +104,38 @@ function genericSwapEffect(
   }).pipe(Effect.provide(layer));
 }
 
+function genericSwapAndReadBalanceEffect(
+  layer: Layer.Layer<AdapterService, never, never>,
+  inputMint: string,
+  outputMint: string,
+  amountAtomic: bigint,
+) {
+  return Effect.gen(function* () {
+    const adapter = yield* AdapterService;
+    const before = yield* adapter.getNativeSolBalance();
+    const cached = yield* adapter.getNativeSolBalance();
+    if (
+      !adapter.quoteSwap ||
+      !adapter.prepareSwap ||
+      !adapter.simulateSwap ||
+      !adapter.submitSwap
+    ) {
+      return yield* Effect.fail(new Error("generic swap API unavailable"));
+    }
+    const quote = yield* adapter.quoteSwap({
+      inputMint,
+      outputMint,
+      amountAtomic,
+      slippageBps: 50,
+    });
+    const prepared = yield* adapter.prepareSwap(quote);
+    yield* adapter.simulateSwap(prepared);
+    const outcome = yield* adapter.submitSwap(prepared).pipe(Effect.either);
+    const after = yield* adapter.getNativeSolBalance();
+    return { before, cached, after, outcome };
+  }).pipe(Effect.provide(layer));
+}
+
 function jupiterQuote(
   inputMint: string,
   outputMint: string,
@@ -703,7 +735,7 @@ describe("AdapterService generic Jupiter swaps", () => {
     expect(result).toBeNull();
   });
 
-  it("propagates confirmation failure before resolving the swap effect", async () => {
+  it("invalidates balance caches when confirmation reports an on-chain failure", async () => {
     const outputMint = Keypair.generate().publicKey.toBase58();
     const amountAtomic = 1_000_000n;
     const message = new TransactionMessage({
@@ -724,6 +756,9 @@ describe("AdapterService generic Jupiter swaps", () => {
       value: { err: null, logs: [], unitsConsumed: 1 },
     });
     vi.spyOn(Connection.prototype, "sendRawTransaction").mockResolvedValue("sig");
+    const getBalanceSpy = vi
+      .spyOn(Connection.prototype, "getBalance")
+      .mockResolvedValue(1_000_000_000);
     vi.spyOn(Connection.prototype, "confirmTransaction").mockResolvedValue({
       context: { slot: 2 },
       value: { err: new Error("confirmation failed") },
@@ -731,11 +766,13 @@ describe("AdapterService generic Jupiter swaps", () => {
 
     try {
       const result = await Effect.runPromise(
-        genericSwapEffect(buildLayer(), SOL_MINT, outputMint, amountAtomic).pipe(Effect.either),
+        genericSwapAndReadBalanceEffect(buildLayer(), SOL_MINT, outputMint, amountAtomic),
       );
-      expect(result._tag).toBe("Left");
-      if (result._tag !== "Left") return;
-      expect((result.left as { message?: string }).message).toContain("confirmation failed");
+      expect(result.before).toBe(1_000_000_000n);
+      expect(result.cached).toBe(result.before);
+      expect(result.after).toBe(result.before);
+      expect(result.outcome._tag).toBe("Left");
+      expect(getBalanceSpy).toHaveBeenCalledTimes(2);
     } finally {
       restore();
     }
