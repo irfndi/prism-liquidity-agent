@@ -1621,8 +1621,7 @@ export const AdapterLive = Layer.effect(
         if (onBroadcast) yield* onBroadcast(signature);
         const confirmation = yield* rpcCall((conn) =>
           conn.confirmTransaction(signature, "confirmed"),
-        );
-        yield* invalidateBalanceCaches;
+        ).pipe(Effect.ensuring(invalidateBalanceCaches));
         if (confirmation.value.err !== null) {
           return yield* Effect.fail(confirmation.value.err);
         }
