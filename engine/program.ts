@@ -141,9 +141,12 @@ import {
 import { computeCooldownForExit } from "./cooldown.js";
 import {
   isActionAllowedDuringSafetyPause,
+  loadDailyEquityBaseline,
+  persistDailyEquityBaseline,
   processSettlementJobs,
   shouldTriggerSafetyPause,
 } from "./autonomous-runtime.js";
+import { routeProbeAmountAtomic } from "./route-probe.js";
 
 const logger = createLogger("program");
 const idleRedeployLogger = createLogger("idle-redeploy");
@@ -2178,8 +2181,9 @@ export const program = Effect.gen(function* () {
   let consecutiveCoreDataFailures = 0;
   let consecutiveExecutionFailures = 0;
   let coreDataFailuresThisCycle = 0;
-  let dailyBaselineDay = "";
-  let dailyBaselineEquityUsd = 0;
+  const dailyBaseline = yield* loadDailyEquityBaseline(db);
+  let dailyBaselineDay = dailyBaseline.day;
+  let dailyBaselineEquityUsd = dailyBaseline.equityUsd;
   let dailyDrawdownPct = 0;
 
   // Agent check-in state
@@ -2513,13 +2517,33 @@ export const program = Effect.gen(function* () {
       if (adapter.quoteSwap !== undefined) {
         const quoteSwap = adapter.quoteSwap;
         const nonSolMints = mints.filter((mint) => mint !== SOL_MINT);
-        const routeProbes = nonSolMints.map((mint) =>
-          Effect.all(
+        const prices = yield* adapter
+          .getTokenPrices([SOL_MINT], { useFallback: false })
+          .pipe(Effect.catchAll(() => Effect.succeed<Record<string, number>>({})));
+        const solPrice = prices[SOL_MINT] ?? 0;
+        const tokenPrices = new Map(
+          priceEvidence.map((evidence) => [evidence.mint, evidence.priceUsd]),
+        );
+        const decimalsByMint = new Map<string, number>();
+        for (const mint of nonSolMints) {
+          const decimals = yield* adapter
+            .getTokenDecimals(mint)
+            .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          if (decimals !== null) decimalsByMint.set(mint, decimals);
+        }
+        const routeProbes = nonSolMints.map((mint) => {
+          const tokenPrice = tokenPrices.get(mint) ?? 0;
+          const decimals = decimalsByMint.get(mint);
+          const solAtomic = routeProbeAmountAtomic(solPrice, 9);
+          const tokenAtomic =
+            decimals === undefined ? 0n : routeProbeAmountAtomic(tokenPrice, decimals);
+          if (solAtomic === 0n || tokenAtomic === 0n) return Effect.succeed(false);
+          return Effect.all(
             [
               quoteSwap({
                 inputMint: SOL_MINT,
                 outputMint: mint,
-                amountAtomic: 1_000_000n,
+                amountAtomic: solAtomic,
                 slippageBps: config.maxSwapSlippageBps,
               }).pipe(
                 Effect.as(true),
@@ -2528,7 +2552,7 @@ export const program = Effect.gen(function* () {
               quoteSwap({
                 inputMint: mint,
                 outputMint: SOL_MINT,
-                amountAtomic: 1_000_000n,
+                amountAtomic: tokenAtomic,
                 slippageBps: config.maxSwapSlippageBps,
               }).pipe(
                 Effect.as(true),
@@ -2536,8 +2560,8 @@ export const program = Effect.gen(function* () {
               ),
             ],
             { concurrency: 4 },
-          ).pipe(Effect.map(([solToToken, tokenToSol]) => solToToken && tokenToSol)),
-        );
+          ).pipe(Effect.map(([solToToken, tokenToSol]) => solToToken && tokenToSol));
+        });
         const routeAvailableResults = yield* Effect.all(routeProbes, { concurrency: 4 });
         for (let i = 0; i < nonSolMints.length; i++) {
           const mint = nonSolMints[i];
@@ -4718,6 +4742,10 @@ export const program = Effect.gen(function* () {
       if (dailyBaselineDay !== dayKey) {
         dailyBaselineDay = dayKey;
         dailyBaselineEquityUsd = portfolioValueUsd - realizedTodayUsd;
+        yield* persistDailyEquityBaseline(db, {
+          day: dailyBaselineDay,
+          equityUsd: dailyBaselineEquityUsd,
+        });
       }
       const dailyEquityUsd = portfolioValueUsd;
       dailyDrawdownPct =

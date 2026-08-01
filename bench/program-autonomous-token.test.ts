@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { Effect } from "effect";
 import {
   isActionAllowedDuringSafetyPause,
+  loadDailyEquityBaseline,
   nextSettlementRetryAt,
+  persistDailyEquityBaseline,
   processSettlementJobs,
   shouldTriggerSafetyPause,
 } from "../engine/autonomous-runtime.js";
@@ -309,13 +311,15 @@ describe("settlement job processing", () => {
     const db = {
       saveSettlementJob: () => Effect.void,
       getPosition: () => Effect.succeed(position),
-      closePosition: (_positionId: string, realizedPnlUsd: number | null) =>
+      finalizeSettlementGroup: (input: {
+        readonly realizedPnlUsd: number | null;
+        readonly signalSnapshotId: number | null;
+      }) =>
         Effect.sync(() => {
-          closedPnl = realizedPnlUsd;
-        }),
-      recordSignalOutcome: (snapshotId: number, pnl: number) =>
-        Effect.sync(() => {
-          outcome = { snapshotId, pnl };
+          closedPnl = input.realizedPnlUsd;
+          if (input.signalSnapshotId !== null && input.realizedPnlUsd !== null) {
+            outcome = { snapshotId: input.signalSnapshotId, pnl: input.realizedPnlUsd };
+          }
         }),
     } as unknown as DbApi;
 
@@ -416,6 +420,33 @@ describe("settlement job processing", () => {
     });
   });
 
+  it("distinguishes confirmed swap evidence from an unavailable SOL price", async () => {
+    // Given
+    const job = settlementJob({
+      status: "confirmed",
+      txSignature: "confirmed-sig",
+      confirmedOutputAtomic: null,
+      outputUsd: null,
+      executionCostUsd: null,
+    });
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
+      getConfirmedSwapOutput: () =>
+        Effect.succeed({ outputAtomic: 1_000_000_000n, feeAtomic: 5_000_000n }),
+      getTokenPrices: () => Effect.succeed({}),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
+
+    // Then
+    expect(processed).toMatchObject({
+      status: "prepared",
+      error: "Confirmed swap output found but SOL price unavailable for USD conversion",
+    });
+  });
+
   it("skips finalization for already-finalized settlement groups", async () => {
     // Given
     const job = settlementJob({
@@ -434,6 +465,7 @@ describe("settlement job processing", () => {
           if (j.finalizedAt !== null) finalizedCount++;
         }),
       getPosition: () => Effect.succeed(null),
+      finalizeSettlementGroup: () => Effect.void,
     } as unknown as DbApi;
 
     // When
@@ -461,8 +493,10 @@ describe("settlement job processing", () => {
       confirmedOutputAtomic: "1",
       finalizedAt: 5_000,
     });
-    const savedJobs: SettlementJobRecord[] = [];
-    let finalizedCount = 0;
+    const finalizedGroups: Array<{
+      readonly positionId: string;
+      readonly jobIds: ReadonlyArray<string>;
+    }> = [];
     const position = {
       cumulativeFeesClaimedUsd: 0,
       cumulativeRewardsClaimedUsd: 0,
@@ -470,14 +504,15 @@ describe("settlement job processing", () => {
       entrySignalSnapshotId: null,
     };
     const db = {
-      saveSettlementJob: (j: SettlementJobRecord) =>
-        Effect.sync(() => {
-          savedJobs.push(j);
-          if (j.finalizedAt !== null) finalizedCount++;
-        }),
+      saveSettlementJob: () => Effect.void,
       getPosition: () => Effect.succeed(position),
-      closePosition: () => Effect.void,
-      recordSignalOutcome: () => Effect.void,
+      finalizeSettlementGroup: (input: {
+        readonly positionId: string;
+        readonly jobIds: ReadonlyArray<string>;
+      }) =>
+        Effect.sync(() => {
+          finalizedGroups.push(input);
+        }),
     } as unknown as DbApi;
 
     // When
@@ -493,9 +528,40 @@ describe("settlement job processing", () => {
     );
 
     // Then
-    expect(finalizedCount).toBe(1);
-    const lastUnfinalized = savedJobs.find((j) => j.id === "unfinalized");
-    expect(lastUnfinalized?.finalizedAt).not.toBeNull();
-    expect(savedJobs.find((j) => j.id === "finalized")).toBeUndefined();
+    expect(finalizedGroups).toEqual([
+      {
+        positionId: "position-1",
+        jobIds: ["unfinalized", "finalized"],
+        realizedPnlUsd: 50,
+        finalizedAt: 10_000,
+        signalSnapshotId: null,
+      },
+    ]);
+  });
+
+  it("loads and persists the daily equity baseline through metadata", async () => {
+    // Given
+    const metadata = new Map([
+      ["dailyBaselineDay", "2026-08-01"],
+      ["dailyBaselineEquityUsd", "50000"],
+    ]);
+    const db = {
+      getMetadata: (key: string) => Effect.succeed(metadata.get(key) ?? null),
+      setMetadataBatch: (entries: ReadonlyArray<{ key: string; value: string }>) =>
+        Effect.sync(() => {
+          for (const entry of entries) metadata.set(entry.key, entry.value);
+        }),
+    };
+
+    // When
+    const loaded = await Effect.runPromise(loadDailyEquityBaseline(db));
+    await Effect.runPromise(
+      persistDailyEquityBaseline(db, { day: "2026-08-02", equityUsd: 49_500 }),
+    );
+
+    // Then
+    expect(loaded).toEqual({ day: "2026-08-01", equityUsd: 50_000 });
+    expect(metadata.get("dailyBaselineDay")).toBe("2026-08-02");
+    expect(metadata.get("dailyBaselineEquityUsd")).toBe("49500");
   });
 });

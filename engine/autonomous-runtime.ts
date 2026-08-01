@@ -58,6 +58,44 @@ export interface SettlementProcessorInput {
   readonly settlementDustUsd?: number;
 }
 
+export const DAILY_BASELINE_DAY_KEY = "dailyBaselineDay";
+export const DAILY_BASELINE_EQUITY_KEY = "dailyBaselineEquityUsd";
+
+export interface DailyEquityBaseline {
+  readonly day: string;
+  readonly equityUsd: number;
+}
+
+export function loadDailyEquityBaseline(
+  db: Pick<DbApi, "getMetadata">,
+): Effect.Effect<DailyEquityBaseline, never> {
+  return Effect.gen(function* () {
+    const day = yield* db
+      .getMetadata(DAILY_BASELINE_DAY_KEY)
+      .pipe(Effect.catchAll(() => Effect.succeed(null)));
+    const equity = yield* db
+      .getMetadata(DAILY_BASELINE_EQUITY_KEY)
+      .pipe(Effect.catchAll(() => Effect.succeed(null)));
+    const equityUsd = equity === null ? 0 : Number(equity);
+    return {
+      day: day ?? "",
+      equityUsd: Number.isFinite(equityUsd) && equityUsd >= 0 ? equityUsd : 0,
+    };
+  });
+}
+
+export function persistDailyEquityBaseline(
+  db: Pick<DbApi, "setMetadataBatch">,
+  baseline: DailyEquityBaseline,
+): Effect.Effect<void, never> {
+  return db
+    .setMetadataBatch([
+      { key: DAILY_BASELINE_DAY_KEY, value: baseline.day },
+      { key: DAILY_BASELINE_EQUITY_KEY, value: String(baseline.equityUsd) },
+    ])
+    .pipe(Effect.catchAll(() => Effect.void));
+}
+
 function atomicUsd(amountAtomic: bigint, decimals: number, priceUsd: number): number {
   const scale = 10n ** BigInt(decimals);
   const whole = amountAtomic / scale;
@@ -153,6 +191,13 @@ export function processSettlementJobs(
                     updatedAt: input.now,
                   };
                 }
+                return reconciliationJob(
+                  job,
+                  input.now,
+                  new Error(
+                    "Confirmed swap output found but SOL price unavailable for USD conversion",
+                  ),
+                );
               }
             }
 
@@ -296,16 +341,18 @@ export function processSettlementJobs(
     for (const [positionId, jobs] of byPosition) {
       const unfinalized = jobs.filter((job) => job.finalizedAt === null);
       if (unfinalized.length === 0) continue;
-      if (unfinalized.some((job) => job.status !== "confirmed")) continue;
+      if (jobs.some((job) => job.status !== "confirmed")) continue;
+      const completeJobs = jobs.filter(
+        (job): job is SettlementJobRecord & { outputUsd: number; executionCostUsd: number } =>
+          job.outputUsd !== null && job.executionCostUsd !== null,
+      );
+      if (completeJobs.length !== jobs.length) continue;
       const position = yield* input.db
         .getPosition(positionId)
         .pipe(Effect.catchAll(() => Effect.succeed(null)));
       if (!position) continue;
-      const outputUsd = unfinalized.reduce((sum, job) => sum + (job.outputUsd ?? 0), 0);
-      const executionCostUsd = unfinalized.reduce(
-        (sum, job) => sum + (job.executionCostUsd ?? 0),
-        0,
-      );
+      const outputUsd = completeJobs.reduce((sum, job) => sum + job.outputUsd, 0);
+      const executionCostUsd = completeJobs.reduce((sum, job) => sum + job.executionCostUsd, 0);
       const realizedPnlUsd = computeNetRealizedPnlUsd({
         finalValueUsd: outputUsd + executionCostUsd,
         cumulativeFeesClaimedUsd: position.cumulativeFeesClaimedUsd,
@@ -315,22 +362,14 @@ export function processSettlementJobs(
         executionCostUsd: 0,
       });
       yield* input.db
-        .closePosition(positionId, realizedPnlUsd)
-        .pipe(Effect.catchAll(() => Effect.void));
-      if (position.entrySignalSnapshotId !== null && realizedPnlUsd !== null) {
-        yield* input.db
-          .recordSignalOutcome(position.entrySignalSnapshotId, realizedPnlUsd)
-          .pipe(Effect.catchAll(() => Effect.void));
-      }
-      for (const job of unfinalized) {
-        const finalized = {
-          ...job,
-          finalizedAt: input.now,
+        .finalizeSettlementGroup({
+          positionId,
           realizedPnlUsd,
-          updatedAt: input.now,
-        };
-        yield* input.db.saveSettlementJob(finalized).pipe(Effect.catchAll(() => Effect.void));
-      }
+          jobIds: jobs.map((job) => job.id),
+          finalizedAt: input.now,
+          signalSnapshotId: position.entrySignalSnapshotId,
+        })
+        .pipe(Effect.catchAll(() => Effect.void));
     }
     return processed;
   });
