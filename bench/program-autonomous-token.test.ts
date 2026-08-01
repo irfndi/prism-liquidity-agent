@@ -539,11 +539,55 @@ describe("settlement job processing", () => {
     ]);
   });
 
+  it("does not finalize a settlement result that was not durably saved", async () => {
+    // Given
+    const job = settlementJob({
+      status: "submitted",
+      txSignature: "submitted-sig",
+    });
+    let finalizedCount = 0;
+    const db = {
+      saveSettlementJob: () => Effect.fail(new Error("database unavailable")),
+      getPosition: () =>
+        Effect.succeed({
+          cumulativeFeesClaimedUsd: 0,
+          cumulativeRewardsClaimedUsd: 0,
+          depositedUsd: 100,
+          entrySignalSnapshotId: null,
+        }),
+      finalizeSettlementGroup: () =>
+        Effect.sync(() => {
+          finalizedCount++;
+        }),
+    } as unknown as DbApi;
+    const adapter = {
+      getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
+      getConfirmedSwapOutput: () => Effect.succeed(null),
+    } as unknown as AdapterApi;
+
+    // When
+    const processed = await Effect.runPromise(
+      processSettlementJobs({
+        adapter,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+      }),
+    );
+
+    // Then
+    expect(processed).toEqual([]);
+    expect(finalizedCount).toBe(0);
+  });
+
   it("loads and persists the daily equity baseline through metadata", async () => {
     // Given
+    const scope = { walletAddress: "wallet-1", agentInstanceId: "primary" };
     const metadata = new Map([
-      ["dailyBaselineDay", "2026-08-01"],
-      ["dailyBaselineEquityUsd", "50000"],
+      ["dailyBaseline:wallet-1:primary:day", "2026-08-01"],
+      ["dailyBaseline:wallet-1:primary:equityUsd", "50000"],
     ]);
     const db = {
       getMetadata: (key: string) => Effect.succeed(metadata.get(key) ?? null),
@@ -554,14 +598,14 @@ describe("settlement job processing", () => {
     };
 
     // When
-    const loaded = await Effect.runPromise(loadDailyEquityBaseline(db));
+    const loaded = await Effect.runPromise(loadDailyEquityBaseline(db, scope));
     await Effect.runPromise(
-      persistDailyEquityBaseline(db, { day: "2026-08-02", equityUsd: 49_500 }),
+      persistDailyEquityBaseline(db, scope, { day: "2026-08-02", equityUsd: 49_500 }),
     );
 
     // Then
     expect(loaded).toEqual({ day: "2026-08-01", equityUsd: 50_000 });
-    expect(metadata.get("dailyBaselineDay")).toBe("2026-08-02");
-    expect(metadata.get("dailyBaselineEquityUsd")).toBe("49500");
+    expect(metadata.get("dailyBaseline:wallet-1:primary:day")).toBe("2026-08-02");
+    expect(metadata.get("dailyBaseline:wallet-1:primary:equityUsd")).toBe("49500");
   });
 });

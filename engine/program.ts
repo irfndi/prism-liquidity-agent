@@ -2181,7 +2181,11 @@ export const program = Effect.gen(function* () {
   let consecutiveCoreDataFailures = 0;
   let consecutiveExecutionFailures = 0;
   let coreDataFailuresThisCycle = 0;
-  const dailyBaseline = yield* loadDailyEquityBaseline(db);
+  const dailyBaselineScope = {
+    walletAddress: executionWalletAddress ?? "paper",
+    agentInstanceId: config.agentInstanceId,
+  };
+  const dailyBaseline = yield* loadDailyEquityBaseline(db, dailyBaselineScope);
   let dailyBaselineDay = dailyBaseline.day;
   let dailyBaselineEquityUsd = dailyBaseline.equityUsd;
   let dailyDrawdownPct = 0;
@@ -2396,12 +2400,17 @@ export const program = Effect.gen(function* () {
   const autonomousCandidateWallet = executionWalletAddress ?? "paper";
   const autonomousCandidates = new Map<string, TokenCandidateRecord>();
   const autonomousCandidatePools = new Set<string>();
+  const autonomousCandidatePoolAddresses = new Set<string>();
 
   if (config.autonomousTokenMode !== "off") {
     const persistedCandidates = yield* db
       .listTokenCandidates(autonomousCandidateWallet, config.agentInstanceId)
       .pipe(Effect.catchAll(() => Effect.succeed([])));
-    for (const candidate of persistedCandidates) autonomousCandidates.set(candidate.id, candidate);
+    for (const candidate of persistedCandidates) {
+      autonomousCandidates.set(candidate.id, candidate);
+      autonomousCandidatePools.add(candidate.poolAddress);
+      autonomousCandidatePoolAddresses.add(candidate.poolAddress);
+    }
   }
 
   if (!shouldDiscoverPools(config) && config.enablePoolDiscovery) {
@@ -2583,6 +2592,7 @@ export const program = Effect.gen(function* () {
         maxMarketDataAgeMs: config.maxMarketDataAgeMs,
       });
       for (const candidate of advanced.updatedCandidates) {
+        autonomousCandidatePoolAddresses.add(candidate.poolAddress);
         yield* db.saveTokenCandidate(candidate).pipe(
           Effect.tap(() =>
             Effect.sync(() => {
@@ -2606,13 +2616,9 @@ export const program = Effect.gen(function* () {
       }
     });
 
-  const initialReconcileResult = yield* reconcilePositions(
-    adapter,
-    db,
-    memory,
-    trackedPositions,
-    approvedPoolAddresses,
-  );
+  const initialReconcileResult = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+    ...new Set([...approvedPoolAddresses, ...autonomousCandidatePools]),
+  ]);
   refreshPoolsToScan(initialReconcileResult);
 
   // Seed the agent state snapshot with current positions before exposing the
@@ -3416,6 +3422,25 @@ export const program = Effect.gen(function* () {
           entryFailureBackoff.set(candidate.poolAddress, backoff);
         } else if (executed) {
           entryFailureBackoff.delete(candidate.poolAddress);
+          if (autonomousExecution) {
+            const autonomousCandidate = [...autonomousCandidates.values()].find(
+              (item) => item.poolAddress === candidate.poolAddress && item.state === "eligible",
+            );
+            if (autonomousCandidate) {
+              const enteredCandidate = transitionCandidate(
+                autonomousCandidate,
+                { kind: "entry_confirmed", occurredAt: Date.now() },
+                {
+                  minHealthyScans: config.candidateMinHealthyScans,
+                  minObservationMs: config.candidateMinObservationMs,
+                },
+              );
+              autonomousCandidates.set(enteredCandidate.id, enteredCandidate);
+              yield* db
+                .saveTokenCandidate(enteredCandidate)
+                .pipe(Effect.catchAll(() => Effect.void));
+            }
+          }
         }
 
         // Consume an approved queued proposal (supervised) once the redeploy
@@ -4742,7 +4767,7 @@ export const program = Effect.gen(function* () {
       if (dailyBaselineDay !== dayKey) {
         dailyBaselineDay = dayKey;
         dailyBaselineEquityUsd = portfolioValueUsd - realizedTodayUsd;
-        yield* persistDailyEquityBaseline(db, {
+        yield* persistDailyEquityBaseline(db, dailyBaselineScope, {
           day: dailyBaselineDay,
           equityUsd: dailyBaselineEquityUsd,
         });
@@ -6706,13 +6731,9 @@ export const program = Effect.gen(function* () {
         pools: [...reconcileRequestedPools],
       });
     }
-    const reconcileResult = yield* reconcilePositions(
-      adapter,
-      db,
-      memory,
-      trackedPositions,
-      approvedPoolAddresses,
-    );
+    const reconcileResult = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+      ...new Set([...approvedPoolAddresses, ...autonomousCandidatePoolAddresses]),
+    ]);
     reconcileRequestedPools.clear();
     refreshPoolsToScan(reconcileResult);
     yield* claimAllFees();

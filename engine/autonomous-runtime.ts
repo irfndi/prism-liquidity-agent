@@ -58,23 +58,33 @@ export interface SettlementProcessorInput {
   readonly settlementDustUsd?: number;
 }
 
-export const DAILY_BASELINE_DAY_KEY = "dailyBaselineDay";
-export const DAILY_BASELINE_EQUITY_KEY = "dailyBaselineEquityUsd";
+export interface DailyEquityBaselineScope {
+  readonly walletAddress: string;
+  readonly agentInstanceId: string;
+}
 
 export interface DailyEquityBaseline {
   readonly day: string;
   readonly equityUsd: number;
 }
 
+function dailyBaselineKeys(scope: DailyEquityBaselineScope): {
+  readonly day: string;
+  readonly equity: string;
+} {
+  const prefix = `dailyBaseline:${encodeURIComponent(scope.walletAddress)}:${encodeURIComponent(scope.agentInstanceId)}`;
+  return { day: `${prefix}:day`, equity: `${prefix}:equityUsd` };
+}
+
 export function loadDailyEquityBaseline(
   db: Pick<DbApi, "getMetadata">,
+  scope: DailyEquityBaselineScope,
 ): Effect.Effect<DailyEquityBaseline, never> {
   return Effect.gen(function* () {
-    const day = yield* db
-      .getMetadata(DAILY_BASELINE_DAY_KEY)
-      .pipe(Effect.catchAll(() => Effect.succeed(null)));
+    const keys = dailyBaselineKeys(scope);
+    const day = yield* db.getMetadata(keys.day).pipe(Effect.catchAll(() => Effect.succeed(null)));
     const equity = yield* db
-      .getMetadata(DAILY_BASELINE_EQUITY_KEY)
+      .getMetadata(keys.equity)
       .pipe(Effect.catchAll(() => Effect.succeed(null)));
     const equityUsd = equity === null ? 0 : Number(equity);
     return {
@@ -86,12 +96,14 @@ export function loadDailyEquityBaseline(
 
 export function persistDailyEquityBaseline(
   db: Pick<DbApi, "setMetadataBatch">,
+  scope: DailyEquityBaselineScope,
   baseline: DailyEquityBaseline,
 ): Effect.Effect<void, never> {
+  const keys = dailyBaselineKeys(scope);
   return db
     .setMetadataBatch([
-      { key: DAILY_BASELINE_DAY_KEY, value: baseline.day },
-      { key: DAILY_BASELINE_EQUITY_KEY, value: String(baseline.equityUsd) },
+      { key: keys.day, value: baseline.day },
+      { key: keys.equity, value: String(baseline.equityUsd) },
     ])
     .pipe(Effect.catchAll(() => Effect.void));
 }
@@ -333,8 +345,11 @@ export function processSettlementJobs(
           ),
         ),
       );
-      yield* input.db.saveSettlementJob(result).pipe(Effect.catchAll(() => Effect.void));
-      processed.push(result);
+      const persisted = yield* input.db.saveSettlementJob(result).pipe(
+        Effect.as(true),
+        Effect.catchAll(() => Effect.succeed(false)),
+      );
+      if (persisted) processed.push(result);
     }
 
     const byPosition = Map.groupBy(processed, (job) => job.positionId);
