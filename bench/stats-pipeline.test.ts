@@ -187,7 +187,7 @@ function makeTestLayer(opts: {
     AgentStateMutable({ maxPendingProposals: 50 }).layer,
     Layer.succeed(McpServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
-    Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.void }),
+    Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.succeed(undefined) }),
     Layer.succeed(MeteoraDatapiService, opts.datapi ?? { getPoolData: () => Effect.succeed(null) }),
     Layer.succeed(GeckoTerminalService, {
       getPoolStats: () => Effect.succeed(opts.gecko ?? null),

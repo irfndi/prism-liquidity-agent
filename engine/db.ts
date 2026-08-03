@@ -804,6 +804,115 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       }
     },
   },
+  {
+    version: 20,
+    name: "autonomous_token_foundation",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS token_candidates (
+          id TEXT PRIMARY KEY,
+          wallet_address TEXT NOT NULL,
+          agent_instance_id TEXT NOT NULL,
+          pool_address TEXT NOT NULL,
+          token_mint TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (
+            state IN ('discovered', 'observing', 'eligible', 'entered', 'cooling_down', 'rejected')
+          ),
+          healthy_scan_count INTEGER NOT NULL DEFAULT 0 CHECK (healthy_scan_count >= 0),
+          first_seen_at INTEGER NOT NULL,
+          last_seen_at INTEGER NOT NULL,
+          eligible_at INTEGER,
+          entered_at INTEGER,
+          cooldown_until INTEGER,
+          rejection_reason TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE (wallet_address, agent_instance_id, pool_address, token_mint)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_token_candidates_scan
+          ON token_candidates(wallet_address, agent_instance_id, state, updated_at);
+
+        CREATE TABLE IF NOT EXISTS execution_operations (
+          id TEXT PRIMARY KEY,
+          wallet_address TEXT NOT NULL,
+          agent_instance_id TEXT NOT NULL,
+          candidate_id TEXT,
+          position_id TEXT,
+          pool_address TEXT NOT NULL,
+          token_mint TEXT NOT NULL,
+          operation_type TEXT NOT NULL CHECK (
+            operation_type IN ('entry', 'exit', 'rollback', 'settlement')
+          ),
+          status TEXT NOT NULL CHECK (
+            status IN ('planned', 'prepared', 'submitted', 'confirmed', 'retryable', 'failed')
+          ),
+          amount_atomic TEXT,
+          tx_signature TEXT,
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_execution_operations_pending
+          ON execution_operations(wallet_address, agent_instance_id, status, updated_at);
+
+        CREATE TABLE IF NOT EXISTS settlement_jobs (
+          id TEXT PRIMARY KEY,
+          wallet_address TEXT NOT NULL,
+          agent_instance_id TEXT NOT NULL,
+          position_id TEXT NOT NULL,
+          pool_address TEXT NOT NULL,
+          token_mint TEXT NOT NULL,
+          amount_atomic TEXT NOT NULL,
+          destination_asset TEXT NOT NULL CHECK (destination_asset = 'SOL'),
+          status TEXT NOT NULL CHECK (
+            status IN ('pending', 'prepared', 'submitted', 'confirmed', 'retryable', 'terminal')
+          ),
+          attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+          next_retry_at INTEGER,
+          tx_signature TEXT,
+          expires_at INTEGER NOT NULL,
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_settlement_jobs_pending
+          ON settlement_jobs(wallet_address, agent_instance_id, status, next_retry_at);
+
+        CREATE TABLE IF NOT EXISTS wallet_safety_pauses (
+          wallet_address TEXT NOT NULL,
+          agent_instance_id TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          triggered_at INTEGER NOT NULL,
+          resolved_at INTEGER,
+          PRIMARY KEY (wallet_address, agent_instance_id)
+        );
+      `);
+    },
+  },
+  {
+    version: 21,
+    name: "settlement_finalization_fields",
+    up(db) {
+      if (!hasColumn(db, "settlement_jobs", "confirmed_output_atomic")) {
+        db.exec("ALTER TABLE settlement_jobs ADD COLUMN confirmed_output_atomic TEXT");
+      }
+      if (!hasColumn(db, "settlement_jobs", "output_usd")) {
+        db.exec("ALTER TABLE settlement_jobs ADD COLUMN output_usd REAL");
+      }
+      if (!hasColumn(db, "settlement_jobs", "execution_cost_usd")) {
+        db.exec("ALTER TABLE settlement_jobs ADD COLUMN execution_cost_usd REAL");
+      }
+      if (!hasColumn(db, "settlement_jobs", "finalized_at")) {
+        db.exec("ALTER TABLE settlement_jobs ADD COLUMN finalized_at INTEGER");
+      }
+      if (!hasColumn(db, "settlement_jobs", "realized_pnl_usd")) {
+        db.exec("ALTER TABLE settlement_jobs ADD COLUMN realized_pnl_usd REAL");
+      }
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

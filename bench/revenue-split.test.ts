@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Effect, Layer } from "effect";
-import { ConfigService } from "../engine/config-service.js";
+import { AUTONOMOUS_TOKEN_CONFIG_DEFAULTS, ConfigService } from "../engine/config-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { calculateRevenueShare } from "../engine/adapter-service.js";
@@ -16,6 +16,7 @@ function buildLayer() {
     solanaRpcUrl: "",
     solanaRpcFallbackUrl: "",
     paperTrading: true,
+    ...AUTONOMOUS_TOKEN_CONFIG_DEFAULTS,
     scanIntervalMs: 600_000,
     minPoolTvlUsd: 50_000,
     minFeeIlRatio: 1.2,

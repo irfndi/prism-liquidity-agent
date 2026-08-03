@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { Effect, Layer } from "effect";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
+import type { SettlementJobRecord } from "../engine/types.js";
 
 function run<T, R>(
   effect: Effect.Effect<T, unknown, R>,
@@ -205,6 +206,61 @@ describe("DbService — paper-exit tracking", () => {
     );
 
     expect(result).toEqual([]);
+  });
+});
+
+describe("DbService — atomic settlement finalization", () => {
+  it("closes the position and finalizes every settlement job in one operation", () => {
+    const layer = DbLive(":memory:");
+    const position = makePosition("PoolAtomic");
+    const settlement: SettlementJobRecord = {
+      id: "settlement-atomic",
+      walletAddress: "wallet-1",
+      agentInstanceId: "primary",
+      positionId: position.positionId,
+      poolAddress: position.poolAddress,
+      tokenMint: "mint-1",
+      amountAtomic: "1000000",
+      destinationAsset: "SOL",
+      status: "confirmed",
+      attempts: 1,
+      nextRetryAt: null,
+      txSignature: "signature-1",
+      confirmedOutputAtomic: "900000000",
+      outputUsd: 90,
+      executionCostUsd: 1,
+      finalizedAt: null,
+      realizedPnlUsd: null,
+      expiresAt: 100_000,
+      error: null,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    const result = run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* db.savePosition(position);
+        yield* db.saveSettlementJob(settlement);
+        yield* db.finalizeSettlementGroup({
+          positionId: position.positionId,
+          realizedPnlUsd: -10,
+          jobIds: [settlement.id],
+          finalizedAt: 10_000,
+          signalSnapshotId: null,
+        });
+        return {
+          position: yield* db.getPosition(position.positionId),
+          settlement: yield* db.getSettlementJob(settlement.id),
+        };
+      }),
+      layer,
+    );
+
+    expect(result.position?.closedAt).toBe(10_000);
+    expect(result.position?.realizedPnlUsd).toBe(-10);
+    expect(result.settlement?.finalizedAt).toBe(10_000);
+    expect(result.settlement?.realizedPnlUsd).toBe(-10);
   });
 });
 

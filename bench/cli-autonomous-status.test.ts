@@ -1,0 +1,185 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { Effect } from "effect";
+import { Keypair } from "@solana/web3.js";
+import bs58 from "bs58";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { fileURLToPath } from "url";
+import { DbLive } from "../engine/db-service.js";
+import { DbService } from "../engine/services.js";
+
+const CLI = join(fileURLToPath(new URL("..", import.meta.url)), "cli", "index.ts");
+
+let testDirectory: string | null = null;
+
+afterEach(() => {
+  if (testDirectory !== null) {
+    rmSync(testDirectory, { recursive: true, force: true });
+    testDirectory = null;
+  }
+});
+
+function createChildEnvironment(
+  overrides: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const environment: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) environment[key] = value;
+  }
+  return { ...environment, ...overrides };
+}
+
+function runCli(args: ReadonlyArray<string>, environment: Readonly<Record<string, string>>) {
+  return Bun.spawnSync([process.execPath, CLI, ...args], {
+    env: createChildEnvironment(environment),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+}
+
+function decode(output: Uint8Array): string {
+  return new TextDecoder().decode(output);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function decodeJsonObject(output: Uint8Array): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(decode(output));
+  if (!isRecord(parsed)) {
+    throw new Error("CLI JSON output must be an object");
+  }
+  return parsed;
+}
+
+async function seedAutonomousState(
+  dbPath: string,
+  walletAddress: string,
+  agentInstanceId: string,
+): Promise<void> {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.saveTokenCandidate({
+        id: "candidate-1",
+        walletAddress,
+        agentInstanceId,
+        poolAddress: "pool-1",
+        tokenMint: "mint-1",
+        state: "eligible",
+        healthyScanCount: 6,
+        firstSeenAt: 1_000,
+        lastSeenAt: 2_000,
+        eligibleAt: 2_000,
+        enteredAt: null,
+        cooldownUntil: null,
+        rejectionReason: null,
+        createdAt: 1_000,
+        updatedAt: 2_000,
+      });
+      yield* db.saveExecutionOperation({
+        id: "operation-1",
+        walletAddress,
+        agentInstanceId,
+        candidateId: "candidate-1",
+        positionId: null,
+        poolAddress: "pool-1",
+        tokenMint: "mint-1",
+        operationType: "entry",
+        status: "prepared",
+        amountAtomic: "100",
+        txSignature: null,
+        error: null,
+        createdAt: 3_000,
+        updatedAt: 3_000,
+      });
+      yield* db.saveSettlementJob({
+        id: "settlement-1",
+        walletAddress,
+        agentInstanceId,
+        positionId: "position-1",
+        poolAddress: "pool-1",
+        tokenMint: "mint-1",
+        amountAtomic: "99",
+        destinationAsset: "SOL",
+        status: "retryable",
+        attempts: 2,
+        nextRetryAt: 4_000,
+        txSignature: null,
+        confirmedOutputAtomic: null,
+        outputUsd: null,
+        executionCostUsd: null,
+        finalizedAt: null,
+        realizedPnlUsd: null,
+        expiresAt: 5_000,
+        error: "rpc unavailable",
+        createdAt: 3_000,
+        updatedAt: 3_000,
+      });
+      yield* db.saveSafetyPause({
+        walletAddress,
+        agentInstanceId,
+        reason: "settlement_overdue",
+        triggeredAt: 3_000,
+        resolvedAt: null,
+      });
+    }).pipe(Effect.provide(DbLive(dbPath))),
+  );
+}
+
+describe("autonomous CLI operator surface", () => {
+  it("shows current-wallet candidate, operation, settlement, and active pause state in JSON", async () => {
+    // Given
+    testDirectory = mkdtempSync(join(tmpdir(), "prism-cli-autonomous-status-"));
+    const dbPath = join(testDirectory, "prism.db");
+    const walletKeypair = Keypair.generate();
+    const wallet = walletKeypair.publicKey.toBase58();
+    const agentInstanceId = "operator-test";
+    await seedAutonomousState(dbPath, wallet, agentInstanceId);
+
+    // When
+    const result = runCli(["status", "--json"], {
+      SQLITE_DB_PATH: dbPath,
+      AGENT_INSTANCE_ID: agentInstanceId,
+      WALLET_PRIVATE_KEY: bs58.encode(walletKeypair.secretKey),
+    });
+
+    // Then
+    expect(result.exitCode).toBe(0);
+    const output = decodeJsonObject(result.stdout);
+    expect(output["autonomous"]).toMatchObject({
+      walletAddress: wallet,
+      agentInstanceId,
+      candidates: [{ id: "candidate-1", state: "eligible" }],
+      operations: [{ id: "operation-1", status: "prepared" }],
+      settlements: [{ id: "settlement-1", status: "retryable" }],
+      safetyPause: { active: true, reason: "settlement_overdue" },
+    });
+  });
+
+  it("marks the current wallet's active safety pause resolved without live execution", async () => {
+    // Given
+    testDirectory = mkdtempSync(join(tmpdir(), "prism-cli-autonomous-resume-"));
+    const dbPath = join(testDirectory, "prism.db");
+    const walletKeypair = Keypair.generate();
+    const wallet = walletKeypair.publicKey.toBase58();
+    const agentInstanceId = "operator-test";
+    await seedAutonomousState(dbPath, wallet, agentInstanceId);
+    const environment = {
+      SQLITE_DB_PATH: dbPath,
+      AGENT_INSTANCE_ID: agentInstanceId,
+      WALLET_PRIVATE_KEY: bs58.encode(walletKeypair.secretKey),
+    };
+
+    // When
+    const resume = runCli(["resume"], environment);
+    const status = runCli(["status", "--json"], environment);
+
+    // Then
+    expect(resume.exitCode).toBe(0);
+    const output = decodeJsonObject(status.stdout);
+    expect(output["autonomous"]).toMatchObject({ safetyPause: { active: false } });
+  });
+});

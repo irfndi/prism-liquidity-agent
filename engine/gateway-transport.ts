@@ -207,9 +207,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
 
       const startedAt = Date.now();
       const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
-      const text = yield* Effect.tryPromise(() =>
-        this.sendChat(prompt, effectiveTimeout),
-      );
+      const text = yield* Effect.tryPromise(() => this.sendChat(prompt, effectiveTimeout));
 
       const latencyMs = Date.now() - startedAt;
       this.emit({ type: "response_received", transport: this.name, latencyMs });
@@ -385,12 +383,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
         idempotencyKey: id,
       };
       const [, reply] = await Promise.all([
-        this.request(
-          "chat.send",
-          chatParams,
-          timeoutMs,
-          id,
-        ),
+        this.request("chat.send", chatParams, timeoutMs, id),
         runPromise,
       ]);
       return reply;

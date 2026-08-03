@@ -541,15 +541,12 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
               p95 !== null &&
               p95 >= vetoSlowThreshold
             ) {
-              logger.warn(
-                "Skipping veto review — rolling p95 latency exceeds 95% of veto budget",
-                {
-                  pool: decision.poolAddress,
-                  p95Ms: Math.round(p95),
-                  budgetMs: vetoBudgetMs,
-                  windowSize: vetoLatencies.length,
-                },
-              );
+              logger.warn("Skipping veto review — rolling p95 latency exceeds 95% of veto budget", {
+                pool: decision.poolAddress,
+                p95Ms: Math.round(p95),
+                budgetMs: vetoBudgetMs,
+                windowSize: vetoLatencies.length,
+              });
               return Effect.succeed(null);
             }
             const prompt = buildPrompt(decision, context);
@@ -558,34 +555,32 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             const recordAttemptLatency = () => {
               if (!vetoLatencyRecorded) {
                 vetoLatencyRecorded = true;
-                recordVetoLatency(
-                  Math.min(Date.now() - attemptStart, vetoBudgetMs),
-                );
+                recordVetoLatency(Math.min(Date.now() - attemptStart, vetoBudgetMs));
               }
             };
-             return transport.sendPrompt(prompt, context, vetoBudgetMs).pipe(
-               Effect.map((response: AgentRuntimeResponse) => {
-                 lastPromptAt = Date.now();
+            return transport.sendPrompt(prompt, context, vetoBudgetMs).pipe(
+              Effect.map((response: AgentRuntimeResponse) => {
+                lastPromptAt = Date.now();
                 // Wall-clock latency from just before sendPrompt —
                 // captures the prompt round-trip plus any reconnect
                 // inside sendPrompt (e.g., gateway), but excludes the
                 // initial startup connection which already completed
                 // in connectReviewTransport above.
-                 recordAttemptLatency();
-                 const parsed = parseResponse(response.raw);
-                 const override = validateOverride(decision, parsed);
-                 if (override) {
-                   logger.info("Agent override", {
-                     pool: decision.poolAddress,
-                     originalAction: decision.action,
-                     newAction: override.action,
-                     originalConfidence: decision.confidence.toFixed(2),
-                     newConfidence: override.confidence.toFixed(2),
-                     latencyMs: response.latencyMs,
-                   });
-                 }
-                 return override;
-               }),
+                recordAttemptLatency();
+                const parsed = parseResponse(response.raw);
+                const override = validateOverride(decision, parsed);
+                if (override) {
+                  logger.info("Agent override", {
+                    pool: decision.poolAddress,
+                    originalAction: decision.action,
+                    newAction: override.action,
+                    originalConfidence: decision.confidence.toFixed(2),
+                    newConfidence: override.confidence.toFixed(2),
+                    latencyMs: response.latencyMs,
+                  });
+                }
+                return override;
+              }),
               Effect.catchAllCause((cause) => {
                 errorCount += 1;
                 // Record actual elapsed duration for ALL failure modes:

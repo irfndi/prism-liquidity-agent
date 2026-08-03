@@ -911,7 +911,7 @@ describe("executeLive — two positions on one pool", () => {
       db: db as never,
       revenueConfigSvc: revenueConfigSvc as never,
       trackedPositions,
-      entryPrep: { prepareEntryTokens: () => Effect.void } as never,
+      entryPrep: { prepareEntryTokens: () => Effect.succeed(undefined) } as never,
       solPriceUsd: 150,
       entryStrategyShape: "spot" as const,
     };
@@ -1362,7 +1362,7 @@ function makeProgramLayer(opts: {
     AgentStateMutable({ maxPendingProposals: 50 }).layer,
     Layer.succeed(McpServerService, { start: () => Effect.void, stop: () => Effect.void }),
     Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
-    Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.void }),
+    Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.succeed(undefined) }),
     Layer.succeed(MeteoraDatapiService, opts.datapi ?? { getPoolData: () => Effect.succeed(null) }),
     Layer.succeed(GeckoTerminalService, { getPoolStats: () => Effect.succeed(null) }),
     Layer.succeed(AlertService, {

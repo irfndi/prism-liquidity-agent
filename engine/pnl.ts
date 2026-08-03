@@ -104,6 +104,7 @@ export function computeTimeInRangePct(
   return ratio * 100;
 }
 
+/** Computes the display analytics for one open or closed position. */
 export function computePositionAnalytics(
   input: PositionAnalyticsInput,
   currentPriceUsd: number | null,
@@ -150,6 +151,29 @@ export function computeRealizedPnlUsd(
   cumulativeRewardsClaimedUsd = 0,
 ): number {
   return finalValueUsd + cumulativeFeesClaimedUsd + cumulativeRewardsClaimedUsd - costBasisUsd;
+}
+
+export interface NetRealizedPnlInput {
+  readonly finalValueUsd: number;
+  readonly cumulativeFeesClaimedUsd: number;
+  readonly cumulativeRewardsClaimedUsd: number;
+  readonly costBasisUsd: number;
+  readonly settlementCostUsd: number;
+  readonly executionCostUsd: number;
+}
+
+/** Computes realized PnL after settlement and execution costs are deducted. */
+export function computeNetRealizedPnlUsd(input: NetRealizedPnlInput): number {
+  return (
+    computeRealizedPnlUsd(
+      input.finalValueUsd,
+      input.cumulativeFeesClaimedUsd,
+      input.costBasisUsd,
+      input.cumulativeRewardsClaimedUsd,
+    ) -
+    input.settlementCostUsd -
+    input.executionCostUsd
+  );
 }
 
 /**

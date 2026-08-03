@@ -13,4 +13,14 @@ describe("shouldDiscoverPools", () => {
   it("blocks discovery when it is not enabled", () => {
     expect(shouldDiscoverPools({ enablePoolDiscovery: false, paperTrading: true })).toBe(false);
   });
+
+  it("enables recurring discovery for autonomous token mode outside paper trading", () => {
+    expect(
+      shouldDiscoverPools({
+        enablePoolDiscovery: false,
+        paperTrading: false,
+        autonomousTokenMode: "shadow",
+      }),
+    ).toBe(true);
+  });
 });

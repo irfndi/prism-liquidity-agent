@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
-import { ConfigService, type AppConfig } from "../engine/config-service.js";
+import {
+  AUTONOMOUS_TOKEN_CONFIG_DEFAULTS,
+  ConfigService,
+  type AppConfig,
+} from "../engine/config-service.js";
 import {
   AdapterService,
   AuditService,
@@ -22,6 +26,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     solanaRpcUrl: "https://api.mainnet.helius-rpc.com",
     solanaRpcFallbackUrl: "",
     paperTrading: true,
+    ...AUTONOMOUS_TOKEN_CONFIG_DEFAULTS,
     scanIntervalMs: 600_000,
     minPoolTvlUsd: 50_000,
     minFeeIlRatio: 1.2,

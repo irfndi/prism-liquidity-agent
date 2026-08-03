@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
-import { EntryPrepService } from "../engine/services.js";
+import {
+  EntryPrepService,
+  type PreparedSwap,
+  type SwapQuote,
+  type SwapRequest,
+} from "../engine/services.js";
 import {
   EntryPrepLive,
   computeRequiredAtomic,
@@ -97,11 +102,39 @@ function makeAdapter(mock: Partial<AdapterApi> = {}): AdapterApi {
   };
 }
 
-function buildLayer(adapterMock: Partial<AdapterApi> = {}, autoSwapEntry = false) {
+function buildLayer(
+  adapterMock: Partial<AdapterApi> = {},
+  autoSwapEntry = false,
+  autonomousTokenMode: "off" | "shadow" | "canary" | "live" = "off",
+) {
   const adapter = makeAdapter(adapterMock);
   const adapterLayer = Layer.succeed(AdapterService, adapter);
-  const configLayer = Layer.succeed(ConfigService, defaultAppConfig({ autoSwapEntry }));
+  const configLayer = Layer.succeed(
+    ConfigService,
+    defaultAppConfig({ autoSwapEntry, autonomousTokenMode }),
+  );
   return Layer.provide(EntryPrepLive, Layer.merge(adapterLayer, configLayer));
+}
+
+function makeQuote(request: SwapRequest): SwapQuote {
+  return {
+    request,
+    outAmountAtomic: 1_000_000_000n,
+    minimumOutAmountAtomic: 1_000_000_000n,
+    priceImpactBps: 10,
+    quotedAt: Date.now(),
+    route: [{ inputMint: request.inputMint, outputMint: request.outputMint }],
+    rawQuote: {},
+  };
+}
+
+function makePrepared(quote: SwapQuote): PreparedSwap {
+  return {
+    quote,
+    transactionBase64: Buffer.from(quote.request.outputMint).toString("base64"),
+    transactionFormat: "versioned",
+    preparedAt: Date.now(),
+  };
 }
 
 describe("EntryPrepService", () => {
@@ -150,6 +183,192 @@ describe("EntryPrepService", () => {
     );
 
     expect(swapSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not fund or submit swaps in autonomous shadow mode", async () => {
+    const quoteSpy = vi.fn((request: SwapRequest) => Effect.succeed(makeQuote(request)));
+    const submitSpy = vi.fn(() => Effect.succeed("must-not-submit"));
+    const layer = buildLayer(
+      {
+        quoteSwap: quoteSpy,
+        prepareSwap: (quote) => Effect.succeed(makePrepared(quote)),
+        simulateSwap: () => Effect.succeed({ successful: true, logs: [], unitsConsumed: null }),
+        submitSwap: submitSpy,
+      },
+      false,
+      "shadow",
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const prep = yield* EntryPrepService;
+        return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(quoteSpy).not.toHaveBeenCalled();
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("funds non-SOL pool legs from native SOL in autonomous mode", async () => {
+    const otherToken = "OtherToken1111111111111111111111111111111";
+    const balances: Record<string, bigint> = {};
+    const quoteSpy = vi.fn((request: SwapRequest) => Effect.succeed(makeQuote(request)));
+    const prepareSpy = vi.fn((quote: SwapQuote) => Effect.succeed(makePrepared(quote)));
+    const simulateSpy = vi.fn(() =>
+      Effect.succeed({ successful: true as const, logs: [], unitsConsumed: 1 }),
+    );
+    const submitSpy = vi.fn((prepared: PreparedSwap) => {
+      balances[prepared.quote.request.outputMint] = 1_000_000_000n;
+      return Effect.succeed(`sig-${prepared.quote.request.outputMint}`);
+    });
+    const layer = buildLayer(
+      {
+        getPoolState: () =>
+          Effect.succeed({
+            address: POOL_ADDRESS,
+            tokenX: TOKEN_Y,
+            tokenY: otherToken,
+            tokenXSymbol: "FAKE",
+            tokenYSymbol: "OTHER",
+            tvlUsd: 100_000,
+            volume24hUsd: 30_000,
+            fees24hUsd: 300,
+            apr: 60,
+            activeBinId: 5000,
+            binStep: 10,
+            currentPrice: 1,
+            timestamp: Date.now(),
+          }),
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: (mint: string) => Effect.succeed(balances[mint] ?? 0n),
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 150, [TOKEN_Y]: 1, [otherToken]: 1 }),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === SOL_MINT ? 9 : 6),
+        quoteSwap: quoteSpy,
+        prepareSwap: prepareSpy,
+        simulateSwap: simulateSpy,
+        submitSwap: submitSpy,
+      },
+      false,
+      "live",
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const prep = yield* EntryPrepService;
+        return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(quoteSpy).toHaveBeenCalledTimes(2);
+    expect(quoteSpy.mock.calls.every(([request]) => request.inputMint === SOL_MINT)).toBe(true);
+    expect(prepareSpy).toHaveBeenCalledTimes(2);
+    expect(simulateSpy).toHaveBeenCalledTimes(2);
+    expect(submitSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("prepares and simulates every SOL-funded route before submitting any transaction", async () => {
+    const otherToken = "OtherToken1111111111111111111111111111111";
+    const submitSpy = vi.fn(() => Effect.succeed("must-not-submit"));
+    const quoteSpy = vi.fn((request: SwapRequest) =>
+      request.outputMint === otherToken
+        ? Effect.fail(new SwapQuoteError({ message: "invalid second route" }))
+        : Effect.succeed(makeQuote(request)),
+    );
+    const layer = buildLayer(
+      {
+        getPoolState: () =>
+          Effect.succeed({
+            address: POOL_ADDRESS,
+            tokenX: TOKEN_Y,
+            tokenY: otherToken,
+            tokenXSymbol: "FAKE",
+            tokenYSymbol: "OTHER",
+            tvlUsd: 100_000,
+            volume24hUsd: 30_000,
+            fees24hUsd: 300,
+            apr: 60,
+            activeBinId: 5000,
+            binStep: 10,
+            currentPrice: 1,
+            timestamp: Date.now(),
+          }),
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: () => Effect.succeed(0n),
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 150, [TOKEN_Y]: 1, [otherToken]: 1 }),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === SOL_MINT ? 9 : 6),
+        quoteSwap: quoteSpy,
+        prepareSwap: (quote) => Effect.succeed(makePrepared(quote)),
+        simulateSwap: () => Effect.succeed({ successful: true, logs: [], unitsConsumed: null }),
+        submitSwap: submitSpy,
+      },
+      false,
+      "live",
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/SWAP_QUOTE_FAILED/);
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("reports the exact partial submission count when a SOL-funded route fails mid-operation", async () => {
+    const otherToken = "OtherToken1111111111111111111111111111111";
+    const balances: Record<string, bigint> = {};
+    const submitSpy = vi.fn((prepared: PreparedSwap) => {
+      if (prepared.quote.request.outputMint === otherToken) {
+        return Effect.fail(new Error("second submission rejected"));
+      }
+      balances[prepared.quote.request.outputMint] = 1_000_000_000n;
+      return Effect.succeed("first-sig");
+    });
+    const layer = buildLayer(
+      {
+        getPoolState: () =>
+          Effect.succeed({
+            address: POOL_ADDRESS,
+            tokenX: TOKEN_Y,
+            tokenY: otherToken,
+            tokenXSymbol: "FAKE",
+            tokenYSymbol: "OTHER",
+            tvlUsd: 100_000,
+            volume24hUsd: 30_000,
+            fees24hUsd: 300,
+            apr: 60,
+            activeBinId: 5000,
+            binStep: 10,
+            currentPrice: 1,
+            timestamp: Date.now(),
+          }),
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n),
+        getTokenBalance: (mint: string) => Effect.succeed(balances[mint] ?? 0n),
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 150, [TOKEN_Y]: 1, [otherToken]: 1 }),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === SOL_MINT ? 9 : 6),
+        quoteSwap: (request) => Effect.succeed(makeQuote(request)),
+        prepareSwap: (quote) => Effect.succeed(makePrepared(quote)),
+        simulateSwap: () => Effect.succeed({ successful: true, logs: [], unitsConsumed: null }),
+        submitSwap: submitSpy,
+      },
+      false,
+      "live",
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow(/stopped after 1 of 2 submissions/);
+    expect(submitSpy).toHaveBeenCalledTimes(2);
+    expect(balances[TOKEN_Y]).toBe(1_000_000_000n);
+    expect(balances[otherToken]).toBeUndefined();
   });
 
   it("swaps USDC for one missing leg when single-sided cannot cover the full size", async () => {

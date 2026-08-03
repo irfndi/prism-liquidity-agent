@@ -19,6 +19,10 @@ import type {
   PriceDriftContext,
   SignalSnapshot,
   SignalWeights,
+  ExecutionOperationRecord,
+  SafetyPauseRecord,
+  SettlementJobRecord,
+  TokenCandidateRecord,
 } from "./types.js";
 import type {
   AgentRuntimeContext,
@@ -59,6 +63,52 @@ export interface DiscoveredPool {
   readonly binStep: number;
   readonly tokenX: string;
   readonly tokenY: string;
+  readonly createdAtMs?: number;
+}
+
+export interface SwapRequest {
+  readonly inputMint: string;
+  readonly outputMint: string;
+  readonly amountAtomic: bigint;
+  readonly slippageBps: number;
+}
+
+export interface SwapQuote {
+  readonly request: SwapRequest;
+  readonly outAmountAtomic: bigint;
+  readonly minimumOutAmountAtomic: bigint;
+  readonly priceImpactBps: number;
+  readonly quotedAt: number;
+  readonly route: ReadonlyArray<{
+    readonly inputMint: string;
+    readonly outputMint: string;
+  }>;
+  readonly rawQuote: Record<string, unknown>;
+}
+
+export interface PreparedSwap {
+  readonly quote: SwapQuote;
+  readonly transactionBase64: string;
+  readonly transactionFormat: "legacy" | "versioned";
+  readonly preparedAt: number;
+}
+
+export interface SwapSimulation {
+  readonly successful: true;
+  readonly logs: ReadonlyArray<string>;
+  readonly unitsConsumed: number | null;
+}
+
+export interface SwapStatus {
+  readonly state: "not_found" | "processed" | "confirmed" | "finalized" | "failed";
+  readonly error: string | null;
+}
+
+export interface TokenPriceEvidence {
+  readonly mint: string;
+  readonly priceUsd: number;
+  readonly observedAt: number;
+  readonly fallbackUsed: false;
 }
 
 export interface AdapterApi {
@@ -284,7 +334,9 @@ export interface AdapterApi {
     },
     unknown
   >;
-  readonly discoverPools: () => Effect.Effect<ReadonlyArray<DiscoveredPool>, DiscoverPoolsError>;
+  readonly discoverPools: (
+    scanOrdinal?: number,
+  ) => Effect.Effect<ReadonlyArray<DiscoveredPool>, DiscoverPoolsError>;
   readonly reportFeeCollection: (event: {
     poolAddress: string;
     positionPubkey?: string;
@@ -307,6 +359,9 @@ export interface AdapterApi {
     mints: ReadonlyArray<string>,
     opts?: { readonly useFallback?: boolean },
   ) => Effect.Effect<Record<string, number>, unknown>;
+  readonly getTokenPriceEvidence?: (
+    mints: ReadonlyArray<string>,
+  ) => Effect.Effect<ReadonlyArray<TokenPriceEvidence>, unknown>;
   readonly getTokenDecimals: (mintAddress: string) => Effect.Effect<number, unknown>;
   /**
    * On-chain mint/freeze authority for a token mint, from the parsed mint
@@ -327,6 +382,23 @@ export interface AdapterApi {
     amountAtomic: bigint,
     quoteData?: Record<string, unknown>,
   ) => Effect.Effect<string, unknown>;
+  readonly swapToken?: (
+    inputMint: string,
+    outputMint: string,
+    amountAtomic: bigint,
+    quoteData?: Record<string, unknown>,
+  ) => Effect.Effect<string, unknown>;
+  readonly quoteSwap?: (request: SwapRequest) => Effect.Effect<SwapQuote, unknown>;
+  readonly prepareSwap?: (quote: SwapQuote) => Effect.Effect<PreparedSwap, unknown>;
+  readonly simulateSwap?: (prepared: PreparedSwap) => Effect.Effect<SwapSimulation, unknown>;
+  readonly submitSwap?: (
+    prepared: PreparedSwap,
+    onBroadcast?: (signature: string) => Effect.Effect<void, unknown>,
+  ) => Effect.Effect<string, unknown>;
+  readonly getSwapStatus?: (signature: string) => Effect.Effect<SwapStatus, unknown>;
+  readonly getConfirmedSwapOutput?: (
+    signature: string,
+  ) => Effect.Effect<{ outputAtomic: bigint; feeAtomic: bigint } | null, unknown>;
 }
 
 export class AdapterService extends Context.Tag("AdapterService")<AdapterService, AdapterApi>() {}
@@ -337,7 +409,20 @@ export interface EntryPrepApi {
   readonly prepareEntryTokens: (
     poolAddress: string,
     positionSizeUsd: number,
-  ) => Effect.Effect<void, EntryPrepError>;
+  ) => Effect.Effect<EntryPreparationOutcome | undefined, EntryPrepError>;
+}
+
+export interface EntryPreparationReceipt {
+  readonly inputMint: string;
+  readonly outputMint: string;
+  readonly inputAmountAtomic: bigint;
+  readonly acquiredAmountAtomic: bigint;
+  readonly txSignature: string;
+}
+
+export interface EntryPreparationOutcome {
+  readonly status: "complete" | "partial";
+  readonly receipts: ReadonlyArray<EntryPreparationReceipt>;
 }
 
 export class EntryPrepService extends Context.Tag("EntryPrepService")<
@@ -608,10 +693,13 @@ export interface ScreenedPool {
   readonly binUtilization: number;
   readonly tokenX: string;
   readonly tokenY: string;
+  readonly createdAtMs?: number;
 }
 
 export interface ScreenerApi {
-  readonly screenPools: () => Effect.Effect<ReadonlyArray<ScreenedPool>, unknown>;
+  readonly screenPools: (
+    scanOrdinal?: number,
+  ) => Effect.Effect<ReadonlyArray<ScreenedPool>, unknown>;
 }
 
 export class ScreenerService extends Context.Tag("ScreenerService")<
@@ -760,6 +848,13 @@ export interface DbApi {
     positionId: string,
     realizedPnlUsd: number | null,
   ) => Effect.Effect<void, unknown>;
+  readonly finalizeSettlementGroup: (input: {
+    readonly positionId: string;
+    readonly realizedPnlUsd: number | null;
+    readonly jobIds: ReadonlyArray<string>;
+    readonly finalizedAt: number;
+    readonly signalSnapshotId: number | null;
+  }) => Effect.Effect<void, unknown>;
   readonly getClosedPositions: () => Effect.Effect<
     ReadonlyArray<{
       positionId: string;
@@ -1068,6 +1163,37 @@ export interface DbApi {
   readonly getPoolCooldown: (poolAddress: string) => Effect.Effect<PoolCooldown | null, unknown>;
   readonly setPoolCooldown: (cooldown: PoolCooldown) => Effect.Effect<void, unknown>;
   readonly clearPoolCooldown: (poolAddress: string) => Effect.Effect<void, unknown>;
+
+  readonly saveTokenCandidate: (candidate: TokenCandidateRecord) => Effect.Effect<void, unknown>;
+  readonly getTokenCandidate: (id: string) => Effect.Effect<TokenCandidateRecord | null, unknown>;
+  readonly listTokenCandidates: (
+    walletAddress: string,
+    agentInstanceId: string,
+  ) => Effect.Effect<ReadonlyArray<TokenCandidateRecord>, unknown>;
+
+  readonly saveExecutionOperation: (
+    operation: ExecutionOperationRecord,
+  ) => Effect.Effect<void, unknown>;
+  readonly getExecutionOperation: (
+    id: string,
+  ) => Effect.Effect<ExecutionOperationRecord | null, unknown>;
+  readonly listExecutionOperations: (
+    walletAddress: string,
+    agentInstanceId: string,
+  ) => Effect.Effect<ReadonlyArray<ExecutionOperationRecord>, unknown>;
+
+  readonly saveSettlementJob: (job: SettlementJobRecord) => Effect.Effect<void, unknown>;
+  readonly getSettlementJob: (id: string) => Effect.Effect<SettlementJobRecord | null, unknown>;
+  readonly listSettlementJobs: (
+    walletAddress: string,
+    agentInstanceId: string,
+  ) => Effect.Effect<ReadonlyArray<SettlementJobRecord>, unknown>;
+
+  readonly saveSafetyPause: (pause: SafetyPauseRecord) => Effect.Effect<void, unknown>;
+  readonly getSafetyPause: (
+    walletAddress: string,
+    agentInstanceId: string,
+  ) => Effect.Effect<SafetyPauseRecord | null, unknown>;
 }
 
 export class DbService extends Context.Tag("DbService")<DbService, DbApi>() {}

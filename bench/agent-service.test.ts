@@ -11,7 +11,7 @@ import {
 import { AcpTransport } from "../engine/acp-transport.js";
 import { GatewayTransport } from "../engine/gateway-transport.js";
 import type { AgentDecision } from "../engine/types.js";
-import type { AppConfig } from "../engine/config-service.js";
+import { AUTONOMOUS_TOKEN_CONFIG_DEFAULTS, type AppConfig } from "../engine/config-service.js";
 import type {
   AgentRuntimeContext,
   AgentRuntimeDetection,
@@ -35,6 +35,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     solanaRpcUrl: "",
     solanaRpcFallbackUrl: "",
     paperTrading: true,
+    ...AUTONOMOUS_TOKEN_CONFIG_DEFAULTS,
     scanIntervalMs: 600_000,
     minPoolTvlUsd: 50_000,
     minFeeIlRatio: 1.2,

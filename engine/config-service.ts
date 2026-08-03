@@ -2,13 +2,35 @@ import { Config, Context, Effect, Layer, Option, pipe } from "effect";
 import { ConfigError } from "./errors.js";
 import { getPrismDbPath } from "./paths.js";
 import { loadKeystoreSecretKeyBase58 } from "./wallet-keystore.js";
-import type { AgentProposalMode, EntryStrategyType } from "./types.js";
+import type {
+  AgentProposalMode,
+  AutonomousTokenMode,
+  EntryStrategyType,
+  SettlementAsset,
+} from "./types.js";
 import { PublicKey } from "@solana/web3.js";
 import { createLogger } from "./logger.js";
 
 const logger = createLogger("ConfigService");
 
 export type FeeDestination = "compound" | "accumulate-quote" | "accumulate-sol";
+
+export const AUTONOMOUS_TOKEN_CONFIG_DEFAULTS = {
+  autonomousTokenMode: "off",
+  settlementAsset: "SOL",
+  candidateMinHealthyScans: 6,
+  candidateMinObservationMs: 3_600_000,
+  candidateScanLimit: 20,
+  candidateMinPoolAgeMs: 86_400_000,
+  maxMarketDataAgeMs: 300_000,
+  maxSwapSlippageBps: 50,
+  maxSwapPriceImpactBps: 100,
+  settlementDustUsd: 0.1,
+  settlementMaxPendingMs: 3_600_000,
+  maxDailyDrawdownPct: 5,
+  maxConsecutiveExecutionFailures: 3,
+  agentInstanceId: "primary",
+} as const;
 
 export function maskHeliusUrl(u: string): string {
   return u.replace(/(api[-_]key=)[^&\s]*/g, "$1[REDACTED]");
@@ -87,6 +109,20 @@ export interface AppConfig {
   readonly solanaRpcUrl: string;
   readonly solanaRpcFallbackUrl: string;
   readonly paperTrading: boolean;
+  readonly autonomousTokenMode: AutonomousTokenMode;
+  readonly settlementAsset: SettlementAsset;
+  readonly candidateMinHealthyScans: number;
+  readonly candidateMinObservationMs: number;
+  readonly candidateScanLimit: number;
+  readonly candidateMinPoolAgeMs: number;
+  readonly maxMarketDataAgeMs: number;
+  readonly maxSwapSlippageBps: number;
+  readonly maxSwapPriceImpactBps: number;
+  readonly settlementDustUsd: number;
+  readonly settlementMaxPendingMs: number;
+  readonly maxDailyDrawdownPct: number;
+  readonly maxConsecutiveExecutionFailures: number;
+  readonly agentInstanceId: string;
   readonly scanIntervalMs: number;
   readonly minPoolTvlUsd: number;
   readonly minFeeIlRatio: number;
@@ -475,6 +511,135 @@ const loadConfig = Effect.gen(function* () {
   const paperTrading = yield* Config.boolean("PAPER_TRADING").pipe(
     Effect.orElseSucceed(() => true),
   );
+  const autonomousTokenModeRaw = yield* Config.string("AUTONOMOUS_TOKEN_MODE").pipe(
+    Effect.orElseSucceed(() => AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.autonomousTokenMode),
+  );
+  let autonomousTokenMode: AutonomousTokenMode;
+  switch (autonomousTokenModeRaw) {
+    case "off":
+    case "shadow":
+    case "canary":
+    case "live":
+      autonomousTokenMode = autonomousTokenModeRaw;
+      break;
+    default:
+      return yield* Effect.die(
+        new ConfigError({
+          message: "AUTONOMOUS_TOKEN_MODE must be one of: off, shadow, canary, live",
+          issues: [
+            {
+              path: "AUTONOMOUS_TOKEN_MODE",
+              message: `Unknown mode: ${autonomousTokenModeRaw}`,
+            },
+          ],
+        }),
+      );
+  }
+  const settlementAssetRaw = yield* Config.string("SETTLEMENT_ASSET").pipe(
+    Effect.orElseSucceed(() => AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.settlementAsset),
+  );
+  if (settlementAssetRaw !== "SOL") {
+    return yield* Effect.die(
+      new ConfigError({
+        message: "SETTLEMENT_ASSET must be SOL",
+        issues: [{ path: "SETTLEMENT_ASSET", message: `Unsupported asset: ${settlementAssetRaw}` }],
+      }),
+    );
+  }
+  const settlementAsset: SettlementAsset = settlementAssetRaw;
+  const candidateMinHealthyScans = Math.floor(
+    yield* validatedNumber(
+      "CANDIDATE_MIN_HEALTHY_SCANS",
+      1,
+      AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.candidateMinHealthyScans,
+    ),
+  );
+  const candidateMinObservationMs = yield* validatedNumber(
+    "CANDIDATE_MIN_OBSERVATION_MS",
+    0,
+    AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.candidateMinObservationMs,
+  );
+  const candidateScanLimit = Math.floor(
+    yield* validatedNumber(
+      "CANDIDATE_SCAN_LIMIT",
+      1,
+      AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.candidateScanLimit,
+    ),
+  );
+  const candidateMinPoolAgeMs = yield* validatedNumber(
+    "CANDIDATE_MIN_POOL_AGE_MS",
+    0,
+    AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.candidateMinPoolAgeMs,
+  );
+  const maxMarketDataAgeMs = yield* validatedNumber(
+    "MAX_MARKET_DATA_AGE_MS",
+    1,
+    AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.maxMarketDataAgeMs,
+  );
+  const maxSwapSlippageBpsRaw = yield* Config.string("MAX_SWAP_SLIPPAGE_BPS").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  if (maxSwapSlippageBpsRaw && !Number.isInteger(Number(maxSwapSlippageBpsRaw))) {
+    return yield* Effect.die(
+      new ConfigError({
+        message: "MAX_SWAP_SLIPPAGE_BPS must be an integer",
+        issues: [
+          {
+            path: "MAX_SWAP_SLIPPAGE_BPS",
+            message: `Expected integer, got ${maxSwapSlippageBpsRaw}`,
+          },
+        ],
+      }),
+    );
+  }
+  const configuredMaxSwapSlippageBps = yield* validatedNumber(
+    "MAX_SWAP_SLIPPAGE_BPS",
+    0,
+    AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.maxSwapSlippageBps,
+    10_000,
+  );
+  const maxSwapSlippageBps = Math.min(configuredMaxSwapSlippageBps, 50);
+  const maxSwapPriceImpactBps = yield* validatedNumber(
+    "MAX_SWAP_PRICE_IMPACT_BPS",
+    0,
+    AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.maxSwapPriceImpactBps,
+    10_000,
+  );
+  const settlementDustUsd = yield* validatedNumber(
+    "SETTLEMENT_DUST_USD",
+    0,
+    AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.settlementDustUsd,
+  );
+  const settlementMaxPendingMs = yield* validatedNumber(
+    "SETTLEMENT_MAX_PENDING_MS",
+    1,
+    AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.settlementMaxPendingMs,
+  );
+  const maxDailyDrawdownPct = yield* validatedNumber(
+    "MAX_DAILY_DRAWDOWN_PCT",
+    0,
+    AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.maxDailyDrawdownPct,
+    100,
+  );
+  const maxConsecutiveExecutionFailures = Math.floor(
+    yield* validatedNumber(
+      "MAX_CONSECUTIVE_EXECUTION_FAILURES",
+      1,
+      AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.maxConsecutiveExecutionFailures,
+    ),
+  );
+  const agentInstanceIdRaw = yield* Config.string("AGENT_INSTANCE_ID").pipe(
+    Effect.orElseSucceed(() => AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.agentInstanceId),
+  );
+  const agentInstanceId = agentInstanceIdRaw.trim();
+  if (agentInstanceId.length === 0) {
+    return yield* Effect.die(
+      new ConfigError({
+        message: "AGENT_INSTANCE_ID must not be blank",
+        issues: [{ path: "AGENT_INSTANCE_ID", message: "Agent instance ID is required" }],
+      }),
+    );
+  }
   const scanIntervalMs = yield* validatedNumber("SCAN_INTERVAL_MS", 10_000, 600_000);
   const minPoolTvlUsd = yield* validatedNumber("MIN_POOL_TVL_USD", 0, 50_000);
   const minFeeIlRatio = yield* validatedNumber("MIN_FEE_IL_RATIO", 0, 1.2);
@@ -1060,6 +1225,20 @@ const loadConfig = Effect.gen(function* () {
     solanaRpcUrl,
     solanaRpcFallbackUrl,
     paperTrading,
+    autonomousTokenMode,
+    settlementAsset,
+    candidateMinHealthyScans,
+    candidateMinObservationMs,
+    candidateScanLimit,
+    candidateMinPoolAgeMs,
+    maxMarketDataAgeMs,
+    maxSwapSlippageBps,
+    maxSwapPriceImpactBps,
+    settlementDustUsd,
+    settlementMaxPendingMs,
+    maxDailyDrawdownPct,
+    maxConsecutiveExecutionFailures,
+    agentInstanceId,
     scanIntervalMs,
     minPoolTvlUsd,
     minFeeIlRatio,

@@ -773,7 +773,7 @@ const liveRevenueConfig: RevenueConfigApi = {
     }),
 };
 
-const liveEntryPrep: EntryPrepApi = { prepareEntryTokens: () => Effect.void };
+const liveEntryPrep: EntryPrepApi = { prepareEntryTokens: () => Effect.succeed(undefined) };
 
 describe("live lifecycle PnL accounting", () => {
   it("ENTER stores entry basis; REBALANCE inline claim accumulates fees + events; EXIT realizes PnL", async () => {

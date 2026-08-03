@@ -35,6 +35,8 @@ import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
+import { advanceScreenedCandidates } from "./candidate-discovery.js";
+import { transitionCandidate } from "./candidate-policy.js";
 import { getPrismUserConfigDir } from "./paths.js";
 
 import { checkForAutoUpdate } from "./update-check.js";
@@ -43,7 +45,12 @@ import { join } from "path";
 import type { PositionRecord } from "./db-service.js";
 import { applyCompoundToCostBasis, computeHodlValueUsd, computeRealizedPnlUsd } from "./pnl.js";
 import { buildRewardClaimMetadata, summarizeRewardClaim } from "./rewards.js";
-import { BlacklistError, DiscoverPoolsError, underlyingErrorMessage } from "./errors.js";
+import {
+  BlacklistError,
+  DiscoverPoolsError,
+  EntryPrepError,
+  underlyingErrorMessage,
+} from "./errors.js";
 import {
   GAS_TOP_UP_USDC,
   SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS,
@@ -87,6 +94,7 @@ import {
   type StrategyApi,
   type RevenueConfigApi,
   type EntryPrepApi,
+  type EntryPreparationOutcome,
   type AgentStateApi,
 } from "./services.js";
 import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
@@ -109,6 +117,10 @@ import type {
   RebalanceParams,
   SignalWeights,
   ActionType,
+  AutonomousTokenMode,
+  ExecutionOperationRecord,
+  SettlementJobRecord,
+  TokenCandidateRecord,
 } from "./types.js";
 import { isMeasuredStatsSource } from "./types.js";
 import type { AgentRuntimeAlert, AgentRuntimeCheckin } from "./agent-transport.js";
@@ -127,6 +139,14 @@ import {
   type ProposalBackoff,
 } from "./proposal-backoff.js";
 import { computeCooldownForExit } from "./cooldown.js";
+import {
+  isActionAllowedDuringSafetyPause,
+  loadDailyEquityBaseline,
+  persistDailyEquityBaseline,
+  processSettlementJobs,
+  shouldTriggerSafetyPause,
+} from "./autonomous-runtime.js";
+import { routeProbeAmountAtomic } from "./route-probe.js";
 
 const logger = createLogger("program");
 const idleRedeployLogger = createLogger("idle-redeploy");
@@ -190,9 +210,7 @@ function postEngineStatus(
     }
   }).pipe(
     Effect.catchAllCause((cause) =>
-      Effect.sync(() =>
-        statusLogger.warn("Engine status report failed", { cause: String(cause) }),
-      ),
+      Effect.sync(() => statusLogger.warn("Engine status report failed", { cause: String(cause) })),
     ),
   );
 }
@@ -938,12 +956,6 @@ export function executePaper(
           error: `Skipping EXIT for live position in paper mode: ${pos.positionId}`,
         };
       }
-      if (pos?.entrySignalSnapshotId != null) {
-        const pnlUsd = pos.currentValueUsd - pos.depositedUsd;
-        yield* db
-          .recordSignalOutcome(pos.entrySignalSnapshotId, pnlUsd)
-          .pipe(Effect.catchAll(() => Effect.void));
-      }
       if (pos) {
         const realizedPnlUsd = computeRealizedPnlUsd(
           pos.currentValueUsd,
@@ -968,6 +980,11 @@ export function executePaper(
         yield* db
           .closePosition(pos.positionId, realizedPnlUsd)
           .pipe(Effect.catchAll(() => Effect.void));
+        if (pos.entrySignalSnapshotId != null) {
+          yield* db
+            .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
+            .pipe(Effect.catchAll(() => Effect.void));
+        }
         yield* db.markPaperExited(pos.positionId).pipe(Effect.catchAll(() => Effect.void));
         trackedPositions.delete(pos.positionId);
       }
@@ -1007,6 +1024,79 @@ export function executePaper(
 
 // ─── Live execution ──────────────────────────────────────────────────────────
 
+interface AutonomousExecutionContext {
+  readonly mode: Exclude<AutonomousTokenMode, "off">;
+  readonly walletAddress: string;
+  readonly agentInstanceId: string;
+  readonly settlementMaxPendingMs: number;
+  readonly settlementDustUsd: number;
+}
+
+function operationRecord(input: {
+  readonly context: AutonomousExecutionContext;
+  readonly id: string;
+  readonly candidateId: string | null;
+  readonly positionId: string | null;
+  readonly poolAddress: string;
+  readonly tokenMint: string;
+  readonly operationType: ExecutionOperationRecord["operationType"];
+  readonly status: ExecutionOperationRecord["status"];
+  readonly amountAtomic: string | null;
+  readonly txSignature: string | null;
+  readonly error: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}): ExecutionOperationRecord {
+  return {
+    id: input.id,
+    walletAddress: input.context.walletAddress,
+    agentInstanceId: input.context.agentInstanceId,
+    candidateId: input.candidateId,
+    positionId: input.positionId,
+    poolAddress: input.poolAddress,
+    tokenMint: input.tokenMint,
+    operationType: input.operationType,
+    status: input.status,
+    amountAtomic: input.amountAtomic,
+    txSignature: input.txSignature,
+    error: input.error,
+    createdAt: input.createdAt,
+    updatedAt: input.updatedAt,
+  };
+}
+
+function settlementJobsForReceipts(input: {
+  readonly context: AutonomousExecutionContext;
+  readonly positionId: string;
+  readonly poolAddress: string;
+  readonly receipts: EntryPreparationOutcome["receipts"];
+  readonly now: number;
+}): ReadonlyArray<SettlementJobRecord> {
+  return input.receipts.map((receipt) => ({
+    id: randomUUID(),
+    walletAddress: input.context.walletAddress,
+    agentInstanceId: input.context.agentInstanceId,
+    positionId: input.positionId,
+    poolAddress: input.poolAddress,
+    tokenMint: receipt.outputMint,
+    amountAtomic: receipt.acquiredAmountAtomic.toString(),
+    destinationAsset: "SOL",
+    status: "pending",
+    attempts: 0,
+    nextRetryAt: input.now,
+    txSignature: null,
+    confirmedOutputAtomic: null,
+    outputUsd: null,
+    executionCostUsd: null,
+    finalizedAt: null,
+    realizedPnlUsd: null,
+    expiresAt: input.now + input.context.settlementMaxPendingMs,
+    error: null,
+    createdAt: input.now,
+    updatedAt: input.now,
+  }));
+}
+
 /**
  * Execute a live decision. `entryPrep` is only used for ENTER actions; callers
  * must still provide it because the function signature does not conditionally
@@ -1026,6 +1116,8 @@ export function executeLive(
     reconcileRequestedPools?: Set<string>;
     memory?: MemoryApi;
     unpricedExitWarnedPools?: Set<string>;
+    autonomous?: AutonomousExecutionContext;
+    candidateId?: string;
   },
   decision: AgentDecision,
   pool: {
@@ -1033,6 +1125,8 @@ export function executeLive(
     binStep: number;
     tokenXSymbol: string;
     tokenYSymbol: string;
+    tokenX?: string;
+    tokenY?: string;
     currentPrice: number;
   },
   signalTimestamp?: number,
@@ -1050,6 +1144,7 @@ export function executeLive(
       entryStrategyShape,
       entryRangeHalfWidth,
     } = deps;
+    const autonomous = deps.autonomous;
 
     if (!adapter.hasWallet()) {
       console.error("Live trading enabled but no wallet configured");
@@ -1060,6 +1155,33 @@ export function executeLive(
     // positions via evaluatePerPoolAllocation (rejected in the decision
     // flow before we reach executeLive). No additional hard cap here so
     // live mode honors maxOpenPositions.
+
+    let entryOperation: ExecutionOperationRecord | null = null;
+    if (decision.action === "ENTER" && decision.positionSizeUsd && autonomous && pool.tokenX) {
+      const now = Date.now();
+      entryOperation = operationRecord({
+        context: autonomous,
+        id: randomUUID(),
+        candidateId: null,
+        positionId: null,
+        poolAddress: decision.poolAddress,
+        tokenMint: pool.tokenX,
+        operationType: "entry",
+        status: "planned",
+        amountAtomic: null,
+        txSignature: null,
+        error: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const persisted = yield* db.saveExecutionOperation(entryOperation).pipe(
+        Effect.as(true),
+        Effect.catchAll(() => Effect.succeed(false)),
+      );
+      if (!persisted) {
+        return { executed: false, error: "Unable to persist entry operation before execution" };
+      }
+    }
 
     if (decision.action === "ENTER") {
       // Align the automatic top-up with the live-entry SOL reserve, but size the
@@ -1083,12 +1205,10 @@ export function executeLive(
         // $150) by more than the 20% buffer, the static value underfunds the
         // swap and the post-swap balance check rejects an otherwise-fundable
         // ENTER. A failed price lookup falls back to the config value.
-        const liveSolPrice = yield* adapter
-          .getTokenPrices([SOL_MINT], { useFallback: false })
-          .pipe(
-            Effect.map((prices) => prices[SOL_MINT]),
-            Effect.catchAll(() => Effect.succeed(undefined)),
-          );
+        const liveSolPrice = yield* adapter.getTokenPrices([SOL_MINT], { useFallback: false }).pipe(
+          Effect.map((prices) => prices[SOL_MINT]),
+          Effect.catchAll(() => Effect.succeed(undefined)),
+        );
         const effectiveSolPrice =
           typeof liveSolPrice === "number" && liveSolPrice > 0 ? liveSolPrice : solPriceUsd;
         const topUpUsdc =
@@ -1122,7 +1242,7 @@ export function executeLive(
         const reserveHuman = (reserve / 1e9).toFixed(4);
         console.warn(
           `Insufficient SOL for ENTER — available ${availableHuman} SOL, need ${neededHuman} SOL ` +
-          `(gas ${(Number(MIN_SOL_FOR_GAS_LAMPORTS) / 1e9).toFixed(4)} + rent/fee reserve ${reserveHuman})`,
+            `(gas ${(Number(MIN_SOL_FOR_GAS_LAMPORTS) / 1e9).toFixed(4)} + rent/fee reserve ${reserveHuman})`,
         );
         return {
           executed: false,
@@ -1134,21 +1254,98 @@ export function executeLive(
       }
     }
 
+    let preparation: EntryPreparationOutcome | null = null;
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
       const prepResult = yield* entryPrep
         .prepareEntryTokens(decision.poolAddress, decision.positionSizeUsd)
         .pipe(
           Effect.matchEffect({
-            onSuccess: () => Effect.succeed({ error: undefined as string | undefined }),
-            onFailure: (err) =>
+            onSuccess: (outcome) =>
               Effect.succeed({
-                error: `Entry token preparation failed: ${err instanceof Error ? err.message : String(err)}`,
+                outcome: outcome ?? null,
+                partial: null,
+                error: undefined as string | undefined,
               }),
+            onFailure: (err) => {
+              const partial =
+                err instanceof EntryPrepError ? (err.partialPreparation ?? null) : null;
+              return Effect.succeed({
+                outcome: null,
+                partial,
+                error: `Entry token preparation failed: ${err instanceof Error ? err.message : String(err)}`,
+              });
+            },
           }),
         );
       if (prepResult.error) {
+        if (autonomous && entryOperation) {
+          const now = Date.now();
+          let settlementPersisted = true;
+          for (const job of settlementJobsForReceipts({
+            context: autonomous,
+            positionId: `rollback:${entryOperation.id}`,
+            poolAddress: decision.poolAddress,
+            receipts: prepResult.partial?.receipts ?? [],
+            now,
+          })) {
+            yield* db.saveSettlementJob(job).pipe(
+              Effect.catchAll(() =>
+                Effect.sync(() => {
+                  settlementPersisted = false;
+                }),
+              ),
+            );
+            if (!settlementPersisted) {
+              deps.reconcileRequestedPools?.add(decision.poolAddress);
+              yield* db
+                .saveSafetyPause({
+                  walletAddress: autonomous.walletAddress,
+                  agentInstanceId: autonomous.agentInstanceId,
+                  reason: "settlement_persistence_failed",
+                  triggeredAt: now,
+                  resolvedAt: null,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+              break;
+            }
+          }
+          if (settlementPersisted) {
+            yield* db
+              .saveExecutionOperation({
+                ...entryOperation,
+                operationType: "rollback",
+                status: prepResult.partial ? "retryable" : "failed",
+                error: prepResult.error,
+                updatedAt: now,
+              })
+              .pipe(
+                Effect.catchAll(() =>
+                  Effect.sync(() => {
+                    settlementPersisted = false;
+                  }),
+                ),
+              );
+          }
+          if (!settlementPersisted) {
+            deps.reconcileRequestedPools?.add(decision.poolAddress);
+            yield* db
+              .saveSafetyPause({
+                walletAddress: autonomous.walletAddress,
+                agentInstanceId: autonomous.agentInstanceId,
+                reason: "settlement_persistence_failed",
+                triggeredAt: now,
+                resolvedAt: null,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
+        }
         console.warn(prepResult.error, { pool: decision.poolAddress });
         return { executed: false, error: prepResult.error };
+      }
+      preparation = prepResult.outcome;
+      if (entryOperation) {
+        entryOperation = { ...entryOperation, status: "prepared", updatedAt: Date.now() };
+        yield* db.saveExecutionOperation(entryOperation).pipe(Effect.catchAll(() => Effect.void));
       }
     }
 
@@ -1239,13 +1436,111 @@ export function executeLive(
             createdAt: Date.now(),
           })
           .pipe(Effect.catchAll(() => Effect.void));
+        if (entryOperation) {
+          yield* db
+            .saveExecutionOperation({
+              ...entryOperation,
+              positionId: pos.positionId,
+              status: "confirmed",
+              txSignature: enterResult.result.txSignature,
+              updatedAt: Date.now(),
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+        }
         return { executed: true, error: undefined };
+      }
+      if (autonomous && entryOperation && preparation) {
+        const now = Date.now();
+        let settlementPersisted = true;
+        for (const job of settlementJobsForReceipts({
+          context: autonomous,
+          positionId: `rollback:${entryOperation.id}`,
+          poolAddress: decision.poolAddress,
+          receipts: preparation.receipts,
+          now,
+        })) {
+          yield* db.saveSettlementJob(job).pipe(
+            Effect.catchAll(() =>
+              Effect.sync(() => {
+                settlementPersisted = false;
+              }),
+            ),
+          );
+          if (!settlementPersisted) {
+            deps.reconcileRequestedPools?.add(decision.poolAddress);
+            yield* db
+              .saveSafetyPause({
+                walletAddress: autonomous.walletAddress,
+                agentInstanceId: autonomous.agentInstanceId,
+                reason: "settlement_persistence_failed",
+                triggeredAt: now,
+                resolvedAt: null,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+            break;
+          }
+        }
+        if (settlementPersisted) {
+          yield* db
+            .saveExecutionOperation({
+              ...entryOperation,
+              operationType: "rollback",
+              status: "retryable",
+              error: enterResult.error ?? "Position entry failed after funding swaps",
+              updatedAt: now,
+            })
+            .pipe(
+              Effect.catchAll(() =>
+                Effect.sync(() => {
+                  settlementPersisted = false;
+                }),
+              ),
+            );
+        }
+        if (!settlementPersisted) {
+          deps.reconcileRequestedPools?.add(decision.poolAddress);
+          yield* db
+            .saveSafetyPause({
+              walletAddress: autonomous.walletAddress,
+              agentInstanceId: autonomous.agentInstanceId,
+              reason: "settlement_persistence_failed",
+              triggeredAt: now,
+              resolvedAt: null,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+        }
       }
       return { executed: false, error: enterResult.error };
     } else if (decision.action === "ENTER") {
       return { executed: false, error: "ENTER decision missing position size" };
     } else if (decision.action === "EXIT") {
       const pos = resolveTargetPosition(trackedPositions, decision);
+      let exitOperation: ExecutionOperationRecord | null = null;
+      if (autonomous && pos && pool.tokenX) {
+        const now = Date.now();
+        exitOperation = operationRecord({
+          context: autonomous,
+          id: randomUUID(),
+          candidateId: deps.candidateId ?? null,
+          positionId: pos.positionId,
+          poolAddress: decision.poolAddress,
+          tokenMint: pool.tokenX ?? null,
+          operationType: "exit",
+          status: "planned",
+          amountAtomic: null,
+          txSignature: null,
+          error: null,
+          createdAt: now,
+          updatedAt: now,
+        });
+        const persisted = yield* db.saveExecutionOperation(exitOperation).pipe(
+          Effect.as(true),
+          Effect.catchAll(() => Effect.succeed(false)),
+        );
+        if (!persisted) {
+          return { executed: false, error: "Unable to persist exit operation before execution" };
+        }
+      }
       let exited = false;
       let exitError: string | undefined = undefined;
       let exitResultData: Effect.Effect.Success<ReturnType<AdapterApi["exitPosition"]>> | null =
@@ -1273,6 +1568,15 @@ export function executeLive(
         exited = exitResult.result !== null;
         exitError = exitResult.error;
         exitResultData = exitResult.result;
+        if (exitOperation && exitResult.result) {
+          exitOperation = {
+            ...exitOperation,
+            status: "confirmed",
+            txSignature: exitResult.result.txSignature,
+            updatedAt: Date.now(),
+          };
+          yield* db.saveExecutionOperation(exitOperation).pipe(Effect.catchAll(() => Effect.void));
+        }
         if (!exited) {
           // A failed close may have left the position half-closed on-chain
           // (the $27 phantom-row candidate: wallet holds withdrawn funds while
@@ -1285,11 +1589,159 @@ export function executeLive(
         exited = true;
       }
       if (exited) {
-        if (pos?.entrySignalSnapshotId != null) {
-          const pnlUsd = pos.currentValueUsd - pos.depositedUsd;
+        if (
+          autonomous &&
+          pos &&
+          exitResultData &&
+          pool.tokenX !== undefined &&
+          pool.tokenY !== undefined
+        ) {
+          const now = Date.now();
+          const attributable = [
+            {
+              mint: pool.tokenX,
+              amountAtomic: exitResultData.withdrawnXAtomic ?? "0",
+            },
+            {
+              mint: pool.tokenY,
+              amountAtomic: exitResultData.withdrawnYAtomic ?? "0",
+            },
+            ...(exitResultData.sweptRewards ?? [])
+              .filter((reward) => reward.mint !== "unknown")
+              .map((reward) => ({
+                mint: reward.mint,
+                amountAtomic: reward.amountAtomic,
+              })),
+          ].filter(({ amountAtomic }) => {
+            try {
+              return BigInt(amountAtomic) > 0n;
+            } catch {
+              return false;
+            }
+          });
+          let settlementPersisted = true;
+          for (const item of attributable) {
+            const job: SettlementJobRecord = {
+              id: randomUUID(),
+              walletAddress: autonomous.walletAddress,
+              agentInstanceId: autonomous.agentInstanceId,
+              positionId: pos.positionId,
+              poolAddress: decision.poolAddress,
+              tokenMint: item.mint,
+              amountAtomic: String(item.amountAtomic),
+              destinationAsset: "SOL",
+              status: "pending",
+              attempts: 0,
+              nextRetryAt: now,
+              txSignature: null,
+              confirmedOutputAtomic: null,
+              outputUsd: null,
+              executionCostUsd: null,
+              finalizedAt: null,
+              realizedPnlUsd: null,
+              expiresAt: now + autonomous.settlementMaxPendingMs,
+              error: null,
+              createdAt: now,
+              updatedAt: now,
+            };
+            yield* db.saveSettlementJob(job).pipe(
+              Effect.catchAll(() =>
+                Effect.sync(() => {
+                  settlementPersisted = false;
+                }),
+              ),
+            );
+            if (!settlementPersisted) {
+              deps.reconcileRequestedPools?.add(decision.poolAddress);
+              yield* db
+                .saveSafetyPause({
+                  walletAddress: autonomous.walletAddress,
+                  agentInstanceId: autonomous.agentInstanceId,
+                  reason: "settlement_persistence_failed",
+                  triggeredAt: now,
+                  resolvedAt: null,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+              break;
+            }
+          }
+          if (!settlementPersisted) {
+            return {
+              executed: false,
+              error: "Unable to persist all exit settlement jobs; reconciliation required",
+            };
+          }
+          const pendingFeeUsd = exitResultData.pendingFeeUsd;
+          if (typeof pendingFeeUsd === "number") {
+            yield* db
+              .savePositionEvent({
+                id: randomUUID(),
+                poolAddress: decision.poolAddress,
+                positionPubKey: pos.positionPubKey,
+                positionId: pos.positionId,
+                event: "CLAIM",
+                valueUsd: null,
+                feesUsd: pendingFeeUsd,
+                price: pool.currentPrice,
+                metadata: { kind: "exit_sweep" },
+                createdAt: now,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
+          if ((exitResultData.sweptRewards ?? []).length > 0) {
+            yield* db
+              .savePositionEvent({
+                id: randomUUID(),
+                poolAddress: decision.poolAddress,
+                positionPubKey: pos.positionPubKey,
+                positionId: pos.positionId,
+                event: "CLAIM",
+                valueUsd:
+                  (exitResultData.sweptRewards ?? []).reduce(
+                    (sum, reward) => sum + (reward.amountUsd ?? 0),
+                    0,
+                  ) || null,
+                feesUsd: null,
+                price: pool.currentPrice,
+                metadata: { kind: "exit_sweep_reward" },
+                createdAt: now,
+              })
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
+          const withdrawnUsd = exitResultData.withdrawnUsd ?? null;
+          const pricingUnresolved = withdrawnUsd === null;
+          const realizedPnlUsd =
+            pricingUnresolved || attributable.length > 0
+              ? null
+              : computeRealizedPnlUsd(
+                  withdrawnUsd,
+                  pos.cumulativeFeesClaimedUsd,
+                  pos.depositedUsd,
+                  pos.cumulativeRewardsClaimedUsd,
+                );
+          yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
           yield* db
-            .recordSignalOutcome(pos.entrySignalSnapshotId, pnlUsd)
+            .closePosition(pos.positionId, realizedPnlUsd)
             .pipe(Effect.catchAll(() => Effect.void));
+          trackedPositions.delete(pos.positionId);
+          yield* db
+            .savePositionEvent({
+              id: randomUUID(),
+              poolAddress: decision.poolAddress,
+              positionPubKey: pos.positionPubKey,
+              positionId: pos.positionId,
+              event: "EXIT",
+              valueUsd: exitResultData.withdrawnUsd ?? null,
+              feesUsd: pos.cumulativeFeesClaimedUsd,
+              price: pool.currentPrice,
+              metadata: {
+                settlementPending: attributable.length,
+                txSignature: exitResultData.txSignature,
+              },
+              createdAt: now,
+            })
+            .pipe(Effect.catchAll(() => Effect.void));
+          return { executed: true, error: undefined };
         }
         if (pos) {
           // ── Locked realized-PnL ordering (Oracle-locked) ──────────────────
@@ -1418,6 +1870,11 @@ export function executeLive(
           yield* db
             .closePosition(pos.positionId, realizedPnlUsd)
             .pipe(Effect.catchAll(() => Effect.void));
+          if (pos.entrySignalSnapshotId != null && realizedPnlUsd != null) {
+            yield* db
+              .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
           // 5. EXIT event: withdrawn USD (or null) + post-credit lifetime fees.
           const exitMetadata: Record<string, unknown> = { realizedPnlUsd };
           if (pricingUnresolved) {
@@ -1679,6 +2136,17 @@ export const buildPositionSnapshots = (
 export const program = Effect.gen(function* () {
   const config = yield* ConfigService;
   const adapter = yield* AdapterService;
+  const executionWalletAddress = adapter.getWalletAddress();
+  const autonomousExecution: AutonomousExecutionContext | null =
+    config.autonomousTokenMode !== "off" && executionWalletAddress !== null
+      ? {
+          mode: config.autonomousTokenMode,
+          walletAddress: executionWalletAddress,
+          agentInstanceId: config.agentInstanceId,
+          settlementMaxPendingMs: config.settlementMaxPendingMs,
+          settlementDustUsd: config.settlementDustUsd,
+        }
+      : null;
   const strategy = yield* StrategyService;
   const memory = yield* MemoryService;
   const risk = yield* RiskService;
@@ -1704,6 +2172,23 @@ export const program = Effect.gen(function* () {
     trackedPositions.set(pos.positionId, pos);
   }
   const entryFailureBackoff = new Map<string, EntryFailureBackoff>();
+  let activeSafetyPause =
+    autonomousExecution === null
+      ? null
+      : yield* db
+          .getSafetyPause(autonomousExecution.walletAddress, autonomousExecution.agentInstanceId)
+          .pipe(Effect.catchAll(() => Effect.succeed(null)));
+  let consecutiveCoreDataFailures = 0;
+  let consecutiveExecutionFailures = 0;
+  let coreDataFailuresThisCycle = 0;
+  const dailyBaselineScope = {
+    walletAddress: executionWalletAddress ?? "paper",
+    agentInstanceId: config.agentInstanceId,
+  };
+  const dailyBaseline = yield* loadDailyEquityBaseline(db, dailyBaselineScope);
+  let dailyBaselineDay = dailyBaseline.day;
+  let dailyBaselineEquityUsd = dailyBaseline.equityUsd;
+  let dailyDrawdownPct = 0;
 
   // Agent check-in state
   const programStartTime = Date.now();
@@ -1723,6 +2208,9 @@ export const program = Effect.gen(function* () {
   // reset at the top wallet read every cycle. EXIT-origin failures do NOT set
   // it (a stale balance under-counts → gates tighten → the safe direction).
   let liveEntriesBlockedRestOfCycle = false;
+  const recordExecutionOutcome = (executed: boolean): void => {
+    consecutiveExecutionFailures = executed ? 0 : consecutiveExecutionFailures + 1;
+  };
   let lastSnapshotPruneAt = 0;
 
   // F2: per-pool recent active-bin history (in-memory ring buffer; resets on restart)
@@ -1909,6 +2397,21 @@ export const program = Effect.gen(function* () {
   // ─── Pool discovery ────────────────────────────────────────────────────────
 
   let poolsToScan = [...config.watchlistPools];
+  const autonomousCandidateWallet = executionWalletAddress ?? "paper";
+  const autonomousCandidates = new Map<string, TokenCandidateRecord>();
+  const autonomousCandidatePools = new Set<string>();
+  const autonomousCandidatePoolAddresses = new Set<string>();
+
+  if (config.autonomousTokenMode !== "off") {
+    const persistedCandidates = yield* db
+      .listTokenCandidates(autonomousCandidateWallet, config.agentInstanceId)
+      .pipe(Effect.catchAll(() => Effect.succeed([])));
+    for (const candidate of persistedCandidates) {
+      autonomousCandidates.set(candidate.id, candidate);
+      autonomousCandidatePools.add(candidate.poolAddress);
+      autonomousCandidatePoolAddresses.add(candidate.poolAddress);
+    }
+  }
 
   if (!shouldDiscoverPools(config) && config.enablePoolDiscovery) {
     logger.warn("Live pool discovery is disabled; configure WATCHLIST_POOLS for approved pools.", {
@@ -1916,7 +2419,7 @@ export const program = Effect.gen(function* () {
     });
   }
 
-  if (shouldDiscoverPools(config)) {
+  if (shouldDiscoverPools(config) && config.autonomousTokenMode === "off") {
     const screened = yield* screener.screenPools().pipe(
       Effect.catchAll((err) => {
         if (
@@ -1961,6 +2464,9 @@ export const program = Effect.gen(function* () {
   const refreshPoolsToScan = (reconcileResult: PositionReconcileResult) => {
     unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
     poolsToScan = [...approvedPoolAddresses];
+    for (const poolAddress of autonomousCandidatePools) {
+      if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
+    }
     if (!reconcileResult.succeeded) {
       return;
     }
@@ -1973,13 +2479,146 @@ export const program = Effect.gen(function* () {
     }
   };
 
-  const initialReconcileResult = yield* reconcilePositions(
-    adapter,
-    db,
-    memory,
-    trackedPositions,
-    approvedPoolAddresses,
-  );
+  const refreshAutonomousCandidates = (scanOrdinal: number): Effect.Effect<void, never> =>
+    Effect.gen(function* () {
+      if (config.autonomousTokenMode === "off") return;
+      const screened = yield* screener.screenPools(scanOrdinal).pipe(
+        Effect.catchAll((error) => {
+          logger.warn("Autonomous candidate discovery failed", { error: String(error) });
+          return Effect.succeed([] as ReadonlyArray<ScreenedPool>);
+        }),
+      );
+      const now = Date.now();
+      for (const candidate of autonomousCandidates.values()) {
+        if (candidate.state === "cooling_down" && candidate.cooldownUntil !== null) {
+          const advancedCandidate = transitionCandidate(
+            candidate,
+            { kind: "cooldown_elapsed", occurredAt: now },
+            {
+              minHealthyScans: config.candidateMinHealthyScans,
+              minObservationMs: config.candidateMinObservationMs,
+            },
+          );
+          if (advancedCandidate !== candidate) {
+            autonomousCandidates.set(advancedCandidate.id, advancedCandidate);
+            yield* db
+              .saveTokenCandidate(advancedCandidate)
+              .pipe(Effect.catchAll(() => Effect.void));
+          }
+        }
+      }
+      const candidatePools = screened
+        .filter(
+          (pool) =>
+            config.candidateMinPoolAgeMs <= 0 ||
+            (pool.createdAtMs !== undefined &&
+              now - pool.createdAtMs >= config.candidateMinPoolAgeMs),
+        )
+        .slice(0, config.candidateScanLimit);
+      const mints = [...new Set(candidatePools.flatMap((pool) => [pool.tokenX, pool.tokenY]))];
+      const priceEvidence =
+        adapter.getTokenPriceEvidence === undefined
+          ? []
+          : yield* adapter
+              .getTokenPriceEvidence(mints)
+              .pipe(Effect.catchAll(() => Effect.succeed([])));
+      const routeAvailableMints = new Set<string>();
+      if (adapter.quoteSwap !== undefined) {
+        const quoteSwap = adapter.quoteSwap;
+        const nonSolMints = mints.filter((mint) => mint !== SOL_MINT);
+        const prices = yield* adapter
+          .getTokenPrices([SOL_MINT], { useFallback: false })
+          .pipe(Effect.catchAll(() => Effect.succeed<Record<string, number>>({})));
+        const solPrice = prices[SOL_MINT] ?? 0;
+        const tokenPrices = new Map(
+          priceEvidence.map((evidence) => [evidence.mint, evidence.priceUsd]),
+        );
+        const decimalsByMint = new Map<string, number>();
+        for (const mint of nonSolMints) {
+          const decimals = yield* adapter
+            .getTokenDecimals(mint)
+            .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          if (decimals !== null) decimalsByMint.set(mint, decimals);
+        }
+        const routeProbes = nonSolMints.map((mint) => {
+          const tokenPrice = tokenPrices.get(mint) ?? 0;
+          const decimals = decimalsByMint.get(mint);
+          const solAtomic = routeProbeAmountAtomic(solPrice, 9);
+          const tokenAtomic =
+            decimals === undefined ? 0n : routeProbeAmountAtomic(tokenPrice, decimals);
+          if (solAtomic === 0n || tokenAtomic === 0n) return Effect.succeed(false);
+          return Effect.all(
+            [
+              quoteSwap({
+                inputMint: SOL_MINT,
+                outputMint: mint,
+                amountAtomic: solAtomic,
+                slippageBps: config.maxSwapSlippageBps,
+              }).pipe(
+                Effect.as(true),
+                Effect.catchAll(() => Effect.succeed(false)),
+              ),
+              quoteSwap({
+                inputMint: mint,
+                outputMint: SOL_MINT,
+                amountAtomic: tokenAtomic,
+                slippageBps: config.maxSwapSlippageBps,
+              }).pipe(
+                Effect.as(true),
+                Effect.catchAll(() => Effect.succeed(false)),
+              ),
+            ],
+            { concurrency: 4 },
+          ).pipe(Effect.map(([solToToken, tokenToSol]) => solToToken && tokenToSol));
+        });
+        const routeAvailableResults = yield* Effect.all(routeProbes, { concurrency: 4 });
+        for (let i = 0; i < nonSolMints.length; i++) {
+          const mint = nonSolMints[i];
+          if (mint && routeAvailableResults[i]) routeAvailableMints.add(mint);
+        }
+      }
+      const advanced = advanceScreenedCandidates({
+        walletAddress: autonomousCandidateWallet,
+        agentInstanceId: config.agentInstanceId,
+        screenedPools: candidatePools,
+        existingCandidates: Array.from(autonomousCandidates.values()),
+        priceEvidence,
+        routeAvailableMints,
+        now: Date.now(),
+        policy: {
+          minHealthyScans: config.candidateMinHealthyScans,
+          minObservationMs: config.candidateMinObservationMs,
+        },
+        maxMarketDataAgeMs: config.maxMarketDataAgeMs,
+      });
+      for (const candidate of advanced.updatedCandidates) {
+        autonomousCandidatePoolAddresses.add(candidate.poolAddress);
+        yield* db.saveTokenCandidate(candidate).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              autonomousCandidates.set(candidate.id, candidate);
+            }),
+          ),
+          Effect.catchAll((error) =>
+            Effect.sync(() => {
+              logger.warn("Autonomous candidate persistence failed", {
+                candidate: candidate.id,
+                error: String(error),
+              });
+            }),
+          ),
+        );
+      }
+      autonomousCandidatePools.clear();
+      for (const poolAddress of advanced.eligiblePoolAddresses) {
+        autonomousCandidatePools.add(poolAddress);
+        if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
+      }
+    });
+
+  const initialReconcileResult = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+    ...new Set([...approvedPoolAddresses, ...autonomousCandidatePools]),
+  ]);
   refreshPoolsToScan(initialReconcileResult);
 
   // Seed the agent state snapshot with current positions before exposing the
@@ -2568,7 +3207,14 @@ export const program = Effect.gen(function* () {
           poolAddress: candidate.poolAddress,
           activeBinId: candidate.pool.activeBinId,
         };
-        const riskResult: RiskResult = risk.evaluate(decision, riskCtx);
+        const riskResult: RiskResult =
+          activeSafetyPause?.resolvedAt === null &&
+          !isActionAllowedDuringSafetyPause(decision.action)
+            ? {
+                approved: false,
+                reason: `Wallet safety pause active: ${activeSafetyPause.reason}`,
+              }
+            : risk.evaluate(decision, riskCtx);
         if (riskResult.adjustedSizeUsd) {
           decision = {
             ...decision,
@@ -2709,6 +3355,23 @@ export const program = Effect.gen(function* () {
           );
           executed = paperResult.executed;
           executionError = paperResult.error;
+        } else if (config.autonomousTokenMode === "shadow") {
+          // Shadow mode is no-send for live execution. The in-slot tail skips
+          // every non-HOLD decision in shadow mode; the redeploy pass must apply
+          // the same contract BEFORE dispatching — otherwise a shadow-mode live
+          // setup (PAPER_TRADING=false) would fund and open a REAL position
+          // through executeLive while the operator believes nothing sends (and
+          // the autonomous context would even tag the tx as an autonomous
+          // operation). The redeploy has no HOLD execution path, so the
+          // shadow-skipped redeploy is a recorded skip, not a paper entry.
+          idleRedeployLogger.info("Shadow mode: idle redeploy skipped (no-send)", {
+            pool: candidate.poolAddress,
+          });
+          yield* recordRedeploySkip(
+            "[idle-redeploy] skipped — AUTONOMOUS_TOKEN_MODE=shadow blocks live execution (no-send)",
+            "[idle-redeploy] shadow mode is no-send for live entries",
+          );
+          continue;
         } else {
           // The live path runs the unchanged paper-validation gate first.
           const paperDays = yield* readPaperDays;
@@ -2744,6 +3407,7 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
+              ...(autonomousExecution ? { autonomous: autonomousExecution } : {}),
             },
             decision,
             candidate.pool,
@@ -2775,6 +3439,25 @@ export const program = Effect.gen(function* () {
           entryFailureBackoff.set(candidate.poolAddress, backoff);
         } else if (executed) {
           entryFailureBackoff.delete(candidate.poolAddress);
+          if (autonomousExecution) {
+            const autonomousCandidate = [...autonomousCandidates.values()].find(
+              (item) => item.poolAddress === candidate.poolAddress && item.state === "eligible",
+            );
+            if (autonomousCandidate) {
+              const enteredCandidate = transitionCandidate(
+                autonomousCandidate,
+                { kind: "entry_confirmed", occurredAt: Date.now() },
+                {
+                  minHealthyScans: config.candidateMinHealthyScans,
+                  minObservationMs: config.candidateMinObservationMs,
+                },
+              );
+              autonomousCandidates.set(enteredCandidate.id, enteredCandidate);
+              yield* db
+                .saveTokenCandidate(enteredCandidate)
+                .pipe(Effect.catchAll(() => Effect.void));
+            }
+          }
         }
 
         // Consume an approved queued proposal (supervised) once the redeploy
@@ -2789,6 +3472,7 @@ export const program = Effect.gen(function* () {
 
         if (executed) {
           cycle.poolsExecuted++;
+          recordExecutionOutcome(true);
           idleRedeployLogger.info("Idle capital redeployed", {
             pool: candidate.poolAddress,
             sizeUsd: decision.positionSizeUsd,
@@ -2797,6 +3481,7 @@ export const program = Effect.gen(function* () {
           });
         } else {
           cycle.poolsFailed++;
+          recordExecutionOutcome(false);
         }
 
         yield* audit
@@ -2826,6 +3511,7 @@ export const program = Effect.gen(function* () {
 
   const runScanCycle = (): Effect.Effect<void, never, EntryPrepService> =>
     Effect.gen(function* () {
+      coreDataFailuresThisCycle = 0;
       const cycle: AgentCycle = {
         cycleId: randomUUID(),
         startedAt: Date.now(),
@@ -2839,6 +3525,45 @@ export const program = Effect.gen(function* () {
       };
 
       console.info("Scan cycle started", { cycleId: cycle.cycleId });
+
+      let oldestSettlementAgeMs = 0;
+      yield* refreshAutonomousCandidates(scanCount);
+      if (autonomousExecution) {
+        const settlementJobs = yield* db
+          .listSettlementJobs(
+            autonomousExecution.walletAddress,
+            autonomousExecution.agentInstanceId,
+          )
+          .pipe(Effect.catchAll(() => Effect.succeed([])));
+        const processedJobs = yield* processSettlementJobs({
+          adapter,
+          db,
+          jobs: settlementJobs,
+          mode: autonomousExecution.mode,
+          now: Date.now(),
+          maxSwapSlippageBps: config.maxSwapSlippageBps,
+          settlementDustUsd: autonomousExecution.settlementDustUsd,
+        });
+        oldestSettlementAgeMs = processedJobs
+          .filter((job) => job.status !== "confirmed")
+          .reduce((oldest, job) => Math.max(oldest, Date.now() - job.createdAt), 0);
+        if (
+          oldestSettlementAgeMs > config.settlementMaxPendingMs &&
+          activeSafetyPause?.resolvedAt !== null
+        ) {
+          activeSafetyPause = {
+            walletAddress: autonomousExecution.walletAddress,
+            agentInstanceId: autonomousExecution.agentInstanceId,
+            reason: "settlement_overdue",
+            triggeredAt: Date.now(),
+            resolvedAt: null,
+          };
+          yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+        }
+        activeSafetyPause = yield* db
+          .getSafetyPause(autonomousExecution.walletAddress, autonomousExecution.agentInstanceId)
+          .pipe(Effect.catchAll(() => Effect.succeed(activeSafetyPause)));
+      }
 
       if (poolsToScan.length === 0) {
         console.info("No pools configured — skipping cycle");
@@ -2947,6 +3672,7 @@ export const program = Effect.gen(function* () {
         ).pipe(
           Effect.catchAll((err) => {
             cycle.poolsFailed++;
+            coreDataFailuresThisCycle++;
             console.error("Error processing pool", { poolAddress, err: String(err) });
             return Effect.succeed(null);
           }),
@@ -2971,6 +3697,32 @@ export const program = Effect.gen(function* () {
         !liveEntriesBlockedRestOfCycle
       ) {
         yield* runIdleRedeployPass(idleRedeployCandidates, cycle, executedExitPools);
+      }
+
+      consecutiveCoreDataFailures =
+        cycle.poolsScanned > 0 && coreDataFailuresThisCycle >= cycle.poolsScanned
+          ? consecutiveCoreDataFailures + 1
+          : 0;
+      if (autonomousExecution && activeSafetyPause?.resolvedAt !== null) {
+        const pauseReason = shouldTriggerSafetyPause({
+          dailyDrawdownPct,
+          maxDailyDrawdownPct: config.maxDailyDrawdownPct,
+          consecutiveCoreDataFailures,
+          consecutiveExecutionFailures,
+          maxConsecutiveExecutionFailures: config.maxConsecutiveExecutionFailures,
+          oldestSettlementAgeMs,
+          settlementMaxPendingMs: config.settlementMaxPendingMs,
+        });
+        if (pauseReason) {
+          activeSafetyPause = {
+            walletAddress: autonomousExecution.walletAddress,
+            agentInstanceId: autonomousExecution.agentInstanceId,
+            reason: pauseReason,
+            triggeredAt: Date.now(),
+            resolvedAt: null,
+          };
+          yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+        }
       }
 
       cycle.completedAt = Date.now();
@@ -3000,8 +3752,9 @@ export const program = Effect.gen(function* () {
           console.info("[snapshot-retention] Pruned old pool snapshots", {
             pruned,
             retentionDays: config.snapshotRetentionDays,
-          });          }
+          });
         }
+      }
 
       // Report engine status to the Prism Cloud API after every scan cycle.
       // PnL is the aggregate UNREALIZED figure across tracked positions and
@@ -4015,6 +4768,48 @@ export const program = Effect.gen(function* () {
       const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
       const portfolioValueUsd =
         walletBalanceUsd + openPositions.reduce((sum, p) => sum + p.currentValueUsd, 0);
+      const dayStart = new Date(Date.now()).setUTCHours(0, 0, 0, 0);
+      const dayKey = new Date(dayStart).toISOString().slice(0, 10);
+      const closedToday = yield* db
+        .getClosedPositions()
+        .pipe(Effect.catchAll(() => Effect.succeed([])));
+      const realizedTodayUsd = closedToday.reduce(
+        (sum, position) =>
+          position.closedAt !== null &&
+          position.closedAt >= dayStart &&
+          position.realizedPnlUsd !== null
+            ? sum + position.realizedPnlUsd
+            : sum,
+        0,
+      );
+      if (dailyBaselineDay !== dayKey) {
+        dailyBaselineDay = dayKey;
+        dailyBaselineEquityUsd = portfolioValueUsd - realizedTodayUsd;
+        yield* persistDailyEquityBaseline(db, dailyBaselineScope, {
+          day: dailyBaselineDay,
+          equityUsd: dailyBaselineEquityUsd,
+        });
+      }
+      const dailyEquityUsd = portfolioValueUsd;
+      dailyDrawdownPct =
+        dailyBaselineEquityUsd > 0 && dailyEquityUsd < dailyBaselineEquityUsd
+          ? ((dailyBaselineEquityUsd - dailyEquityUsd) / dailyBaselineEquityUsd) * 100
+          : 0;
+      if (
+        autonomousExecution &&
+        activeSafetyPause?.resolvedAt !== null &&
+        config.maxDailyDrawdownPct > 0 &&
+        dailyDrawdownPct >= config.maxDailyDrawdownPct
+      ) {
+        activeSafetyPause = {
+          walletAddress: autonomousExecution.walletAddress,
+          agentInstanceId: autonomousExecution.agentInstanceId,
+          reason: "daily_drawdown",
+          triggeredAt: Date.now(),
+          resolvedAt: null,
+        };
+        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+      }
       const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
 
       // ── Phase 2: REBALANCE / HOLD per surviving position ────────────────
@@ -4303,7 +5098,10 @@ export const program = Effect.gen(function* () {
         if (unresolvedPoolAddresses.has(poolAddress)) {
           logger.warn("Skipping ENTER for unresolved pool", { pool: poolAddress });
           enterGateRejected = true;
-        } else if (!approvedPoolAddresses.includes(poolAddress)) {
+        } else if (
+          !approvedPoolAddresses.includes(poolAddress) &&
+          !autonomousCandidatePools.has(poolAddress)
+        ) {
           logger.info("Skipping ENTER for unmanaged pool", { pool: poolAddress });
           enterGateRejected = true;
         } else {
@@ -5155,9 +5953,15 @@ export const program = Effect.gen(function* () {
           positionId: decision.positionId,
         };
         const riskResult: RiskResult =
-          decision.action === "HOLD"
-            ? { approved: true, reason: "HOLD — no execution; risk gates skipped" }
-            : risk.evaluate(decision, riskCtx);
+          activeSafetyPause?.resolvedAt === null &&
+          !isActionAllowedDuringSafetyPause(decision.action)
+            ? {
+                approved: false,
+                reason: `Wallet safety pause active: ${activeSafetyPause.reason}`,
+              }
+            : decision.action === "HOLD"
+              ? { approved: true, reason: "HOLD — no execution; risk gates skipped" }
+              : risk.evaluate(decision, riskCtx);
 
         // Apply risk-adjusted position size cap
         if (riskResult.adjustedSizeUsd && decision.action === "ENTER") {
@@ -5274,6 +6078,7 @@ export const program = Effect.gen(function* () {
         // Execute
         let executed = false;
         let executionError: string | undefined = undefined;
+        let executionSkipped = false;
 
         // F6: paper-trading validation gate — only blocks ENTER, runs only in live mode
         if (!config.paperTrading && decision.action === "ENTER") {
@@ -5346,6 +6151,13 @@ export const program = Effect.gen(function* () {
         // is still in the stale balance → double-count); a failed post-EXIT
         // re-read is safe (stale balance under-counts → gates tighten).
         let movedLiveFundsFromEnter = false;
+        const autonomousCandidateId = autonomousExecution
+          ? [...autonomousCandidates.values()].find(
+              (candidate) =>
+                candidate.poolAddress === poolAddress &&
+                (candidate.state === "eligible" || candidate.state === "entered"),
+            )?.id
+          : undefined;
 
         if (paperExitShouldGoLive) {
           console.warn(
@@ -5365,6 +6177,10 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
+              ...(autonomousCandidateId !== undefined
+                ? { candidateId: autonomousCandidateId }
+                : {}),
+              ...(autonomousExecution ? { autonomous: autonomousExecution } : {}),
             },
             decision,
             pool,
@@ -5394,6 +6210,8 @@ export const program = Effect.gen(function* () {
           );
           executed = paperResult.executed;
           executionError = paperResult.error;
+        } else if (config.autonomousTokenMode === "shadow" && decision.action !== "HOLD") {
+          executionSkipped = true;
         } else {
           const liveResult = yield* executeLive(
             {
@@ -5409,6 +6227,10 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
+              ...(autonomousCandidateId !== undefined
+                ? { candidateId: autonomousCandidateId }
+                : {}),
+              ...(autonomousExecution ? { autonomous: autonomousExecution } : {}),
             },
             decision,
             pool,
@@ -5461,14 +6283,53 @@ export const program = Effect.gen(function* () {
           );
         }
 
-        if (decision.action !== "HOLD") {
+        if (executed && decision.action === "ENTER" && autonomousExecution) {
+          const candidate = [...autonomousCandidates.values()].find(
+            (item) => item.poolAddress === poolAddress && item.state === "eligible",
+          );
+          if (candidate) {
+            const enteredCandidate = transitionCandidate(
+              candidate,
+              { kind: "entry_confirmed", occurredAt: Date.now() },
+              {
+                minHealthyScans: config.candidateMinHealthyScans,
+                minObservationMs: config.candidateMinObservationMs,
+              },
+            );
+            autonomousCandidates.set(enteredCandidate.id, enteredCandidate);
+            yield* db.saveTokenCandidate(enteredCandidate).pipe(Effect.catchAll(() => Effect.void));
+          }
+        }
+
+        if (decision.action !== "HOLD" && !executionSkipped) {
           if (executed) {
             cycle.poolsExecuted++;
+            recordExecutionOutcome(true);
           } else {
             cycle.poolsFailed++;
+            recordExecutionOutcome(false);
           }
         }
         if (executed && decision.action === "EXIT") {
+          const candidate = [...autonomousCandidates.values()].find(
+            (item) => item.poolAddress === poolAddress && item.state === "entered",
+          );
+          if (candidate) {
+            const coolingCandidate = transitionCandidate(
+              candidate,
+              {
+                kind: "cooldown_started",
+                occurredAt: Date.now(),
+                cooldownUntil: Date.now() + config.oorCooldownMs,
+              },
+              {
+                minHealthyScans: config.candidateMinHealthyScans,
+                minObservationMs: config.candidateMinObservationMs,
+              },
+            );
+            autonomousCandidates.set(coolingCandidate.id, coolingCandidate);
+            yield* db.saveTokenCandidate(coolingCandidate).pipe(Effect.catchAll(() => Effect.void));
+          }
           // Follow-up 3655404926: record every executed EXIT (deterministic or
           // agent-adjusted) so the redeploy pass cannot re-enter this pool the
           // same cycle once the freed slot re-passes the position-count checks.
@@ -5888,13 +6749,9 @@ export const program = Effect.gen(function* () {
         pools: [...reconcileRequestedPools],
       });
     }
-    const reconcileResult = yield* reconcilePositions(
-      adapter,
-      db,
-      memory,
-      trackedPositions,
-      approvedPoolAddresses,
-    );
+    const reconcileResult = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+      ...new Set([...approvedPoolAddresses, ...autonomousCandidatePoolAddresses]),
+    ]);
     reconcileRequestedPools.clear();
     refreshPoolsToScan(reconcileResult);
     yield* claimAllFees();
