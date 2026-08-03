@@ -75,4 +75,4 @@ mcp-server/package-lock.json
 
 # Security scanner tooling state
 .clawpatch/
-.deepsec/data/*/debug/
+.deepsec/data/

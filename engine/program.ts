@@ -154,6 +154,25 @@ const idleRedeployLogger = createLogger("idle-redeploy");
 const statusLogger = createLogger("engine-status");
 
 /**
+ * Run a DB persistence effect, logging (not swallowing) failures so a desync
+ * between in-memory trackedPositions and SQLite is observable. Best-effort by
+ * design — reconcilePositions and the on-chain record are the backstop — but
+ * silent loss of a capital-state write is a reliability gap.
+ */
+function persist<T>(
+  label: string,
+  effect: Effect.Effect<T, unknown, never>,
+): Effect.Effect<void, never, never> {
+  return Effect.catchAll(effect, (err) =>
+    Effect.sync(() =>
+      logger.warn(
+        `DB persistence failed for ${label}: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    ),
+  );
+}
+
+/**
  * Read the Prism Cloud API key from the on-disk credentials file. Returns null
  * when the user has not registered — a normal condition, not an error, so status
  * reporting simply no-ops.
@@ -641,7 +660,7 @@ export function reconcilePositions(
           `Reconciling: position ${positionId} on ${pos.poolAddress} no longer on-chain — removing from tracking`,
         );
         trackedPositions.delete(positionId);
-        yield* db.deletePosition(positionId).pipe(Effect.catchAll(() => Effect.void));
+        yield* persist(`deletePosition ${positionId}`, db.deletePosition(positionId));
         yield* memory
           .upsert({
             category: "warning",
@@ -672,7 +691,7 @@ export function reconcilePositions(
             upperBinId: onChainPos.upperBinId,
           };
           trackedPositions.set(onChainPos.positionPubKey, updated);
-          yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
+          yield* persist(`savePosition ${updated.positionId}`, db.savePosition(updated));
           yield* memory
             .upsert({
               category: "warning",
@@ -728,7 +747,7 @@ export function reconcilePositions(
             realizedPnlUsd: null,
           };
           trackedPositions.set(onChainPos.positionPubKey, pos);
-          yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+          yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
           yield* memory
             .upsert({
               category: "warning",
@@ -924,7 +943,7 @@ export function executePaper(
         realizedPnlUsd: null,
       };
       trackedPositions.set(pos.positionId, pos);
-      yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+      yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
       yield* db
         .savePositionEvent({
           id: randomUUID(),
@@ -978,15 +997,16 @@ export function executePaper(
             createdAt: Date.now(),
           })
           .pipe(Effect.catchAll(() => Effect.void));
-        yield* db
-          .closePosition(pos.positionId, realizedPnlUsd)
-          .pipe(Effect.catchAll(() => Effect.void));
+        yield* persist(
+          `closePosition ${pos.positionId}`,
+          db.closePosition(pos.positionId, realizedPnlUsd),
+        );
         if (pos.entrySignalSnapshotId != null) {
           yield* db
             .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
             .pipe(Effect.catchAll(() => Effect.void));
         }
-        yield* db.markPaperExited(pos.positionId).pipe(Effect.catchAll(() => Effect.void));
+        yield* persist(`markPaperExited ${pos.positionId}`, db.markPaperExited(pos.positionId));
         trackedPositions.delete(pos.positionId);
       }
     } else if (decision.action === "REBALANCE" && decision.rebalanceParams) {
@@ -999,7 +1019,7 @@ export function executePaper(
           lastRebalanceAt: Date.now(),
         };
         trackedPositions.set(updated.positionId, updated);
-        yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
+        yield* persist(`savePosition ${updated.positionId}`, db.savePosition(updated));
         yield* db
           .savePositionEvent({
             id: randomUUID(),
@@ -1416,7 +1436,7 @@ export function executeLive(
           realizedPnlUsd: null,
         };
         trackedPositions.set(pos.positionId, pos);
-        yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+        yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
         yield* db
           .savePositionEvent({
             id: randomUUID(),
@@ -1720,10 +1740,11 @@ export function executeLive(
                   pos.depositedUsd,
                   pos.cumulativeRewardsClaimedUsd,
                 );
-          yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
-          yield* db
-            .closePosition(pos.positionId, realizedPnlUsd)
-            .pipe(Effect.catchAll(() => Effect.void));
+          yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
+          yield* persist(
+            `closePosition ${pos.positionId}`,
+            db.closePosition(pos.positionId, realizedPnlUsd),
+          );
           trackedPositions.delete(pos.positionId);
           yield* db
             .savePositionEvent({
@@ -1867,10 +1888,11 @@ export function executeLive(
           // close — closePosition runs last so the savePosition upsert (which
           // writes closed_at) cannot resurrect the row; it sets closed_at +
           // realized without touching the fee/reward columns just written.
-          yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
-          yield* db
-            .closePosition(pos.positionId, realizedPnlUsd)
-            .pipe(Effect.catchAll(() => Effect.void));
+          yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
+          yield* persist(
+            `closePosition ${pos.positionId}`,
+            db.closePosition(pos.positionId, realizedPnlUsd),
+          );
           if (pos.entrySignalSnapshotId != null && realizedPnlUsd != null) {
             yield* db
               .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
@@ -2069,10 +2091,10 @@ export function executeLive(
             // pubkey ever changed, the identity and its row must move with it
             // — otherwise the stale row would linger as a phantom position.
             trackedPositions.delete(pos.positionId);
-            yield* db.deletePosition(pos.positionId).pipe(Effect.catchAll(() => Effect.void));
+            yield* persist(`deletePosition ${pos.positionId}`, db.deletePosition(pos.positionId));
           }
           trackedPositions.set(updated.positionId, updated);
-          yield* db.savePosition(updated).pipe(Effect.catchAll(() => Effect.void));
+          yield* persist(`savePosition ${updated.positionId}`, db.savePosition(updated));
           yield* db
             .savePositionEvent({
               id: randomUUID(),
@@ -2382,7 +2404,7 @@ export const program = Effect.gen(function* () {
       }
       for (const pos of paperExited) {
         if (!pos.positionPubKey) {
-          yield* db.deletePosition(pos.positionId).pipe(Effect.catchAll(() => Effect.void));
+          yield* persist(`deletePosition ${pos.positionId}`, db.deletePosition(pos.positionId));
         }
       }
     }
@@ -2390,7 +2412,7 @@ export const program = Effect.gen(function* () {
     for (const [positionId, pos] of trackedPositions) {
       if (!pos.positionPubKey) {
         trackedPositions.delete(positionId);
-        yield* db.deletePosition(positionId).pipe(Effect.catchAll(() => Effect.void));
+        yield* persist(`deletePosition ${positionId}`, db.deletePosition(positionId));
       }
     }
   }
@@ -4396,7 +4418,10 @@ export const program = Effect.gen(function* () {
                   `Per-cycle reconcile: position ${pos.positionId} on ${poolAddress} no longer on-chain — removing from tracking`,
                 );
                 trackedPositions.delete(pos.positionId);
-                yield* db.deletePosition(pos.positionId).pipe(Effect.catchAll(() => Effect.void));
+                yield* persist(
+                  `deletePosition ${pos.positionId}`,
+                  db.deletePosition(pos.positionId),
+                );
                 yield* memory
                   .upsert({
                     category: "warning",
@@ -4485,7 +4510,7 @@ export const program = Effect.gen(function* () {
               .pipe(Effect.catchAll(() => Effect.void));
           }
         }
-        yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+        yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
       }
 
       // ── Phase 1: EXIT evaluation per position ───────────────────────────
@@ -6467,7 +6492,7 @@ export const program = Effect.gen(function* () {
               // (their claim path never updates the timestamp on a zero
               // result, which would otherwise re-fire every scan cycle).
               pos.lastFeeClaimAt = Date.now();
-              yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+              yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
               yield* db
                 .savePositionEvent({
                   id: randomUUID(),
@@ -6589,7 +6614,7 @@ export const program = Effect.gen(function* () {
 
           pos.lastFeeClaimAt = Date.now();
           pos.cumulativeFeesClaimedUsd += netFeesUsd;
-          yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+          yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
 
           yield* db
             .savePositionEvent({
@@ -6700,7 +6725,10 @@ export const program = Effect.gen(function* () {
                   // Defensive re-key (same contract as the atomic rebalance
                   // path): the identity and its row move with the pubkey.
                   trackedPositions.delete(pos.positionId);
-                  yield* db.deletePosition(pos.positionId).pipe(Effect.catchAll(() => Effect.void));
+                  yield* persist(
+                    `deletePosition ${pos.positionId}`,
+                    db.deletePosition(pos.positionId),
+                  );
                   pos.positionId = compoundResult.positionPubKey;
                   trackedPositions.set(pos.positionId, pos);
                 }
@@ -6718,7 +6746,7 @@ export const program = Effect.gen(function* () {
                 pos.depositedUsd = compounded.depositedUsd;
                 pos.currentValueUsd = compounded.currentValueUsd;
                 pos.highestValueUsd = compounded.highestValueUsd;
-                yield* db.savePosition(pos).pipe(Effect.catchAll(() => Effect.void));
+                yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
                 yield* db
                   .savePositionEvent({
                     id: randomUUID(),

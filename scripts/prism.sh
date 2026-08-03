@@ -31,7 +31,7 @@ export PRISM_INSTALL_DIR="$PACKAGE_ROOT"
 # always persist it to a shell rc, so a fresh shell or systemd unit may not have
 # it on PATH. Resolve PATH first, then the standard install location.
 BUN_BIN="$(command -v bun || true)"
-if [ -z "$BUN_BIN" ] && [ -x "$HOME/.bun/bin/bun" ]; then
+if [ -z "$BUN_BIN" ] && [ -n "${HOME:-}" ] && [ -x "$HOME/.bun/bin/bun" ]; then
   BUN_BIN="$HOME/.bun/bin/bun"
 fi
 if [ -z "$BUN_BIN" ]; then
@@ -39,5 +39,31 @@ if [ -z "$BUN_BIN" ]; then
   echo "Install it with: curl -fsSL https://bun.sh/install | bash" >&2
   exit 1
 fi
-exec "$BUN_BIN" "$PACKAGE_ROOT/cli/index.ts" "$@"
+
+# Enforce the declared engines.bun >= 1.4.0-canary.1 constraint so an old bun
+# fails with an actionable message instead of a confusing runtime error.
+MIN_BUN_VERSION="1.4.0"
+BUN_VERSION_RAW="$("$BUN_BIN" --version 2>/dev/null || true)"
+BUN_VERSION_NUM="${BUN_VERSION_RAW%%-*}"
+if [ -z "$BUN_VERSION_NUM" ]; then
+  echo "ERROR: could not determine bun version from '$BUN_BIN'" >&2
+  exit 1
+fi
+# Portable dotted-version comparison (awk, no GNU sort -V on macOS).
+if ! awk -v a="$BUN_VERSION_NUM" -v b="$MIN_BUN_VERSION" 'BEGIN {
+  split(a, A, "."); split(b, B, ".");
+  for (i = 1; i <= 3; i++) {
+    na = (i in A) ? A[i] + 0 : 0;
+    nb = (i in B) ? B[i] + 0 : 0;
+    if (na < nb) exit 1;
+    if (na > nb) exit 0;
+  }
+  exit 0;
+}'; then
+  echo "ERROR: bun $BUN_VERSION_RAW is too old; prism requires bun >= $MIN_BUN_VERSION" >&2
+  echo "Upgrade it with: curl -fsSL https://bun.sh/install | bash" >&2
+  exit 1
+fi
+
+exec "$BUN_BIN" "$PACKAGE_ROOT/cli/index.ts" ${1+"$@"}
 

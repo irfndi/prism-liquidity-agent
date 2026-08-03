@@ -14,7 +14,12 @@ const arch = process.arch;
 
 const extensionSuffix = platform === "win32" ? "dll" : platform === "darwin" ? "dylib" : "so";
 const platformPackageName = `sqlite-vec-${platform === "win32" ? "windows" : platform}-${arch}`;
-const vec0Path = path.join(repoRoot, "node_modules", platformPackageName, `vec0.${extensionSuffix}`);
+const vec0Path = path.join(
+  repoRoot,
+  "node_modules",
+  platformPackageName,
+  `vec0.${extensionSuffix}`,
+);
 const platformKey = `${platform === "win32" ? "windows" : platform}-${arch}`;
 
 function run(cmd: string): void {
@@ -62,10 +67,7 @@ if (fs.existsSync(vec0Path)) {
 const tarballName = `prism-v${version}-${platformKey}.tar.gz`;
 const tarballPath = path.join(repoRoot, tarballName);
 
-execSync(
-  `tar -czf ${tarballName} -C ${stageDir} dist lib`,
-  { cwd: repoRoot, stdio: "inherit" },
-);
+execSync(`tar -czf ${tarballName} -C ${stageDir} dist lib`, { cwd: repoRoot, stdio: "inherit" });
 
 fs.writeFileSync(`${tarballPath}.sha256`, `${sha256(tarballPath)}  ${tarballName}\n`);
 

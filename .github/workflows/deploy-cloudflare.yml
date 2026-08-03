@@ -31,14 +31,25 @@ on:
     branches: [main]
     paths:
       - "cloudflare/**"
+      - ".github/workflows/deploy-cloudflare.yml"
   pull_request:
     branches: [main]
     paths:
       - "cloudflare/**"
+      - ".github/workflows/deploy-cloudflare.yml"
+
+# Serialize production deploys: back-to-back pushes must not run two
+# simultaneous `alchemy deploy --stage prod` jobs against the shared stack.
+# cancel-in-progress: false (never cancel mid-apply — that can leave the
+# stack partially updated).
+concurrency:
+  group: deploy-cloudflare-prod
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: ./cloudflare
@@ -58,6 +69,23 @@ jobs:
       # (prebuilt esbuild bundles in cloudflare/dist/ — see the deploy step).
       - name: Type check + build workers
         run: bun run typecheck && bun run build:workers
+
+      # Fail fast if any required secret is unset, instead of deploying with
+      # empty secret_text values that fail closed in production.
+      - name: Validate required secrets
+        run: |
+          for v in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET BOT_API_SECRET ADMIN_API_KEY FEE_WALLET_ADDRESS; do
+            if [ -z "$(printenv "$v")" ]; then
+              echo "::error::$v is not set; refusing to deploy"
+              exit 1
+            fi
+          done
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          BOT_API_SECRET: ${{ secrets.BOT_API_SECRET }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+          FEE_WALLET_ADDRESS: ${{ secrets.FEE_WALLET_ADDRESS }}
 
       # Production deploy (main only). `bun run deploy` at the workspace root
       # chains `build:workers` (esbuild → cloudflare/dist/), then delegates to

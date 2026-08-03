@@ -115,26 +115,25 @@ function main() {
   // Generate the embedded sqlite-vec extension for source installs so that
   // `bun run build` works immediately after `bun install`. The extension is
   // platform-specific, so this only runs when the engine source tree is present.
+  // Failure here aborts the install: bundled installs provide the native
+  // extension via PRISM_VEC0_PATH, but source installs need the embed.
   const engineDir = path.join(REPO_ROOT, "engine");
   const vecEmbedPath = path.join(engineDir, "sqlite-vec-embedded.ts");
   if (fs.existsSync(engineDir) && !fs.existsSync(vecEmbedPath)) {
-    try {
-      const result = spawnSync(
-        "bun",
-        [
-          "run",
-          path.join(REPO_ROOT, "scripts", "generate-vec-embed.ts"),
-          process.platform,
-          process.arch,
-        ],
-        { cwd: REPO_ROOT, stdio: "ignore" },
-      );
-      if (result.status === 0) {
-        console.log("✓ Generated embedded sqlite-vec extension for source build");
-      }
-    } catch {
-      // Non-fatal: engine/db.ts has fallback chains for missing vec-embed.
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        path.join(REPO_ROOT, "scripts", "generate-vec-embed.ts"),
+        process.platform,
+        process.arch,
+      ],
+      { cwd: REPO_ROOT, stdio: "inherit" },
+    );
+    if (result.status !== 0) {
+      throw new Error(`generate-vec-embed.ts failed with exit code ${result.status ?? "null"}`);
     }
+    console.log("✓ Generated embedded sqlite-vec extension for source build");
   }
 
   console.log("");

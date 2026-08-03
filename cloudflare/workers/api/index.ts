@@ -107,6 +107,49 @@ const cachePut = (
   options?: KVNamespacePutOptions,
 ) => Effect.tryPromise(() => cache.put(key, value, options));
 
+// Atomic per-key rate-limit counter on D1. KV's get→check→put is a TOCTOU
+// race under concurrency; this increments in one statement and returns the
+// post-increment count, so a burst cannot all pass the check. Returns true
+// when the request is within the limit (count <= max), false when exceeded.
+// Counts reset one hour after the last increment (mirroring the old KV
+// expirationTtl: 3600), and the table is created idempotently on first use so
+// the counter works even before the migration has been applied (e.g. test
+// databases).
+const rateLimitHit = (
+  db: D1Database,
+  key: string,
+  max: number,
+): Effect.Effect<boolean, unknown> =>
+  Effect.tryPromise(async () => {
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS rate_limits (
+           key TEXT PRIMARY KEY,
+           count INTEGER NOT NULL DEFAULT 0,
+           updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+         )`,
+      )
+      .run();
+    const { results } = await db
+      .prepare(
+        `INSERT INTO rate_limits (key, count, updated_at) VALUES (?, 1, unixepoch())
+         ON CONFLICT (key) DO UPDATE SET
+           count = CASE
+             WHEN updated_at < unixepoch() - 3600 THEN 1
+             ELSE count + 1
+           END,
+           updated_at = CASE
+             WHEN updated_at < unixepoch() - 3600 THEN unixepoch()
+             ELSE updated_at
+           END
+         RETURNING count`,
+      )
+      .bind(key)
+      .all<{ count: number }>();
+    const count = results[0]?.count ?? 1;
+    return count <= max;
+  });
+
 // Helper to hash API keys
 const hashKey = (key: string): Effect.Effect<string, unknown> =>
   Effect.tryPromise(() => {
@@ -334,12 +377,16 @@ function upsertErrorReports(
   });
 }
 
-// Helper to generate referral codes
+// Helper to generate referral codes. Referral codes can grant bonuses, so use
+// a CSPRNG (not Math.random) to prevent prediction/forgery.
 function generateReferralCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const randBytes = new Uint8Array(8);
+  crypto.getRandomValues(randBytes);
   let code = "";
   for (let i = 0; i < 8; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)];
+    const byte = randBytes[i];
+    if (byte !== undefined) code += chars[byte % chars.length];
   }
   return code;
 }
@@ -700,11 +747,8 @@ app.post("/v1/register", async (c) => {
       catch: (cause) => cause,
     }).pipe(Effect.catchAll(() => Effect.succeed({})))) as { telegram_id?: string };
     const rateKey = `rate_limit:register:${clientIp}`;
-    const rateData = yield* Effect.tryPromise(() => CACHE.get(rateKey));
-    const parsed = rateData ? parseInt(rateData, 10) : 0;
-    const count = Number.isNaN(parsed) ? 0 : parsed;
-
-    if (count >= 5) {
+    const withinLimit = yield* rateLimitHit(DB, rateKey, 5);
+    if (!withinLimit) {
       return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
     }
 
@@ -722,7 +766,6 @@ app.post("/v1/register", async (c) => {
     }
 
     const result = yield* registerHandler(DB);
-    yield* Effect.tryPromise(() => CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }));
 
     if (body.telegram_id) {
       yield* Effect.tryPromise(() =>
@@ -822,13 +865,12 @@ app.post("/v1/link-telegram/confirm", async (c) => {
   // Brute-force defense: every attempt counts against the per-IP budget,
   // not just successful ones, so guessing codes is capped at 10/hour.
   const rateKey = `rate_limit:link_confirm:${clientIp}`;
-  const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-  const parsed = rateData ? parseInt(rateData, 10) : 0;
-  const rateCount = Number.isNaN(parsed) ? 0 : parsed;
-  if (rateCount >= LINK_CONFIRM_RATE_LIMIT_PER_HOUR) {
+  const withinLimit = await Effect.runPromise(
+    rateLimitHit(DB, rateKey, LINK_CONFIRM_RATE_LIMIT_PER_HOUR),
+  );
+  if (!withinLimit) {
     return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
-  await Effect.runPromise(cachePut(CACHE, rateKey, String(rateCount + 1), { expirationTtl: 3600 }));
 
   const linking = Effect.gen(function* () {
     const codeRow = yield* Effect.tryPromise(() =>
@@ -951,16 +993,13 @@ app.post("/v1/register-telegram", async (c) => {
 
   // Same 5/hour/IP rate limit as /v1/register.
   const rateKey = `rate_limit:register_telegram:${clientIp}`;
-  const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-  const parsed = rateData ? parseInt(rateData, 10) : 0;
-  const count = Number.isNaN(parsed) ? 0 : parsed;
-  if (count >= 5) {
+  const withinLimit = await Effect.runPromise(rateLimitHit(DB, rateKey, 5));
+  if (!withinLimit) {
     return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
   const registration = Effect.gen(function* () {
     const result = yield* registerTelegramHandler(DB, telegramId, body.first_name ?? "");
-    yield* Effect.tryPromise(() => CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }));
     yield* logAudit(DB, result.user_id, "register", { tier: "free", source: "telegram" });
     return c.json({
       user_id: result.user_id,
@@ -1158,12 +1197,10 @@ app.post("/v1/issue", async (c) => {
   }
   const title = body.title;
 
-  if (CACHE) {
-    const rateKey = `rate_limit:feedback:${clientIp}`;
-    const current = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const count = current ? parseInt(current, 10) : 0;
-    if (count >= 10) return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
-  }
+  const withinLimit = await Effect.runPromise(
+    rateLimitHit(DB, `rate_limit:feedback:${clientIp}`, 10),
+  );
+  if (!withinLimit) return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
 
   const issue = Effect.gen(function* () {
     const details = body.body ?? "";
@@ -1180,14 +1217,6 @@ app.post("/v1/issue", async (c) => {
       hash,
       reportedAt: Date.now(),
     });
-    if (CACHE && !result.duplicate) {
-      const rateKey = `rate_limit:feedback:${clientIp}`;
-      const current = yield* Effect.tryPromise(() => CACHE.get(rateKey));
-      const count = current ? parseInt(current, 10) : 0;
-      yield* Effect.tryPromise(() =>
-        CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }),
-      );
-    }
     return c.json(result);
   });
 
@@ -1247,13 +1276,10 @@ app.post("/v1/feedback", async (c) => {
   const feedbackSummary = body.summary;
   const feedbackHash = body.hash;
 
-  if (CACHE) {
-    const rateKey = `rate_limit:feedback:${clientIp}`;
-    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const parsed = rateData ? parseInt(rateData, 10) : 0;
-    const count = Number.isNaN(parsed) ? 0 : parsed;
-    if (count >= 10) return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
-  }
+  const withinLimit = await Effect.runPromise(
+    rateLimitHit(DB, `rate_limit:feedback:${clientIp}`, 10),
+  );
+  if (!withinLimit) return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
 
   const feedback = Effect.gen(function* () {
     const result = yield* storeFeedback(DB, {
@@ -1270,15 +1296,6 @@ app.post("/v1/feedback", async (c) => {
       reportedAt: body.reportedAt ?? Date.now(),
     });
 
-    if (CACHE && !result.duplicate) {
-      const rateKey = `rate_limit:feedback:${clientIp}`;
-      const rateData = yield* Effect.tryPromise(() => CACHE.get(rateKey));
-      const parsed = rateData ? parseInt(rateData, 10) : 0;
-      const count = Number.isNaN(parsed) ? 0 : parsed;
-      yield* Effect.tryPromise(() =>
-        CACHE.put(rateKey, String(count + 1), { expirationTtl: 3600 }),
-      );
-    }
     return c.json(result);
   });
 
@@ -1412,15 +1429,11 @@ app.post("/v1/errors/report", async (c) => {
   }
 
   // Rate limit: 100 reports per IP per hour
-  if (CACHE) {
-    const rateKey = `rate_limit:error_report:${clientIp}`;
-    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const parsed = rateData ? parseInt(rateData, 10) : 0;
-    const count = Number.isNaN(parsed) ? 0 : parsed;
-    if (count >= 100) {
-      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
-    }
-    await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
+  const withinLimit = await Effect.runPromise(
+    rateLimitHit(DB, `rate_limit:error_report:${clientIp}`, 100),
+  );
+  if (!withinLimit) {
+    return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
   const report = normalizeErrorReport(body).pipe(
@@ -1482,15 +1495,11 @@ app.post("/v1/errors/batch", async (c) => {
   }
 
   // Rate limit: 50 batches per IP per hour
-  if (CACHE) {
-    const rateKey = `rate_limit:error_batch:${clientIp}`;
-    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const parsed = rateData ? parseInt(rateData, 10) : 0;
-    const count = Number.isNaN(parsed) ? 0 : parsed;
-    if (count >= 50) {
-      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
-    }
-    await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
+  const withinLimit = await Effect.runPromise(
+    rateLimitHit(DB, `rate_limit:error_batch:${clientIp}`, 50),
+  );
+  if (!withinLimit) {
+    return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
   const batch = Effect.gen(function* () {
@@ -1632,15 +1641,11 @@ app.post("/v1/alerts", async (c) => {
   }
 
   // Per-user (not per-IP) cap: an engine bug must not spam a user's Telegram.
-  if (CACHE) {
-    const rateKey = `rate_limit:alerts:${user.id}`;
-    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const parsed = rateData ? parseInt(rateData, 10) : 0;
-    const count = Number.isNaN(parsed) ? 0 : parsed;
-    if (count >= ALERT_RATE_LIMIT_PER_HOUR) {
-      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
-    }
-    await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
+  const withinLimit = await Effect.runPromise(
+    rateLimitHit(DB, `rate_limit:alerts:${user.id}`, ALERT_RATE_LIMIT_PER_HOUR),
+  );
+  if (!withinLimit) {
+    return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
   const alertType = body.type;
@@ -1839,15 +1844,11 @@ app.post("/v1/installs/ping", async (c) => {
   }
 
   // Rate limit: 100 pings per IP per hour (same as error reports).
-  if (CACHE) {
-    const rateKey = `rate_limit:install_ping:${clientIp}`;
-    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const parsed = rateData ? parseInt(rateData, 10) : 0;
-    const count = Number.isNaN(parsed) ? 0 : parsed;
-    if (count >= 100) {
-      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
-    }
-    await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
+  const withinLimit = await Effect.runPromise(
+    rateLimitHit(DB, `rate_limit:install_ping:${clientIp}`, 100),
+  );
+  if (!withinLimit) {
+    return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
   const id = generateId();
@@ -2167,15 +2168,11 @@ app.post("/v1/revenue/log", async (c) => {
     }
   }
 
-  if (CACHE) {
-    const rateKey = `rate_limit:revenue_log:${clientIp}`;
-    const rateData = await Effect.runPromise(cacheGet(CACHE, rateKey));
-    const parsed = rateData ? parseInt(rateData, 10) : 0;
-    const count = Number.isNaN(parsed) ? 0 : parsed;
-    if (count >= 200) {
-      return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
-    }
-    await Effect.runPromise(cachePut(CACHE, rateKey, String(count + 1), { expirationTtl: 3600 }));
+  const withinLimit = await Effect.runPromise(
+    rateLimitHit(DB, `rate_limit:revenue_log:${clientIp}`, 200),
+  );
+  if (!withinLimit) {
+    return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 
   const revenue = Effect.gen(function* () {

@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*.*.*"
+      - "v*.*.*-*"
 
 # Security: keep the secret out of job-level env so it is only exposed
 # to steps that need it. The boolean flag gates the `if:` checks below.
@@ -12,7 +13,6 @@ env:
 
 permissions:
   contents: write
-  packages: read
 
 jobs:
   version-guard:
@@ -49,7 +49,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: canary
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun install
@@ -89,7 +89,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: canary
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun install
@@ -110,7 +110,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [version-guard, build-bundles]
+    needs: [version-guard, test, build-bundles]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version-guard.outputs.version }}
@@ -126,6 +126,9 @@ jobs:
             echo "CHANNEL=beta" >> "$GITHUB_ENV"
           elif [[ "${GITHUB_REF_NAME}" == *-dev* ]]; then
             echo "CHANNEL=dev" >> "$GITHUB_ENV"
+          elif [[ "${GITHUB_REF_NAME}" != v*.*.* ]]; then
+            echo "::error::unsupported prerelease tag '${GITHUB_REF_NAME}'; use vX.Y.Z-beta.N or vX.Y.Z-dev.N"
+            exit 1
           else
             echo "CHANNEL=stable" >> "$GITHUB_ENV"
           fi
@@ -139,7 +142,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: canary
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun install
@@ -229,7 +232,8 @@ jobs:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
           echo "$GPG_PRIVATE_KEY" | gpg --import
-          for f in release-assets/prism-v${VERSION}*.tar.gz; do
+          for f in release-assets/prism-v${VERSION}.tar.gz release-assets/prism-v${VERSION}-*.tar.gz; do
+            [ -e "$f" ] || continue
             gpg --batch --yes --armor --detach-sign "$f"
           done
 
@@ -304,13 +308,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ASSETS=$(ls release-assets/* | tr '\n' ' ')
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "Release ${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --verify-tag \
-            ${ASSETS} \
-            2>/dev/null || \
-          gh release upload "${GITHUB_REF_NAME}" \
-            release-assets/* \
-            --clobber
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
+          else
+            ASSETS=$(ls release-assets/* | tr '\n' ' ')
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "Release ${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag \
+              ${ASSETS}
+          fi
