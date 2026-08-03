@@ -50,10 +50,28 @@ const retryLogState = new Map<string, { lastLoggedAt: number; suppressed: number
 const RETRY_LOG_INTERVAL_MS = 10_000;
 const RETRY_LOG_MAX_ENTRIES = 512;
 
+function errorMessage(err: unknown): string {
+  if (hasMessage(err)) return err.message;
+  if (isObject(err)) {
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  }
+  return String(err);
+}
+
 function safeErrorMessage(err: unknown): string {
-  return String(err)
+  return errorMessage(err)
     .replace(/([?&](?:api[-_]?key|token|authorization)=)[^&\s]+/gi, "$1***")
-    .replace(/(Bearer\s+)[^\s]+/gi, "$1***");
+    .replace(/(Bearer\s+)[^\s]+/gi, "$1***")
+    .replace(/\b(x-api-(?:key|token|secret)|x-auth-token)\s*[:=]\s*[^\s,;]+/gi, "$1: ***")
+    .replace(
+      /(?<![?&])(["']?(?:api[-_]?key|secret|password)["']?\s*[:=]\s*["']?)[^"',\s}]+/gi,
+      "$1***",
+    )
+    .replace(/(https?:\/\/)[^/@\s]+@/gi, "$1***@");
 }
 
 function logRetry(err: unknown, message: string): void {

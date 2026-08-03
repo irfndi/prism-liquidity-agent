@@ -206,7 +206,7 @@ describe("HttpStatusServer", () => {
   it("serves status endpoint", async () => {
     const port = 18_799;
     const server = new HttpStatusServer(
-      baseConfig({ agentHttpPort: port }),
+      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
       mockState({
         programStartTime: Date.now() - 1000,
         scanCount: 3,
@@ -225,7 +225,9 @@ describe("HttpStatusServer", () => {
     );
     await Effect.runPromise(server.start());
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/status`);
+      const response = await fetch(`http://127.0.0.1:${port}/status`, {
+        headers: { Authorization: "Bearer secret-token" },
+      });
       expect(response.status).toBe(200);
       const body = (await response.json()) as {
         scanCount: number;
@@ -241,7 +243,7 @@ describe("HttpStatusServer", () => {
   it("serves positions endpoint with filter", async () => {
     const port = 18_798;
     const server = new HttpStatusServer(
-      baseConfig({ agentHttpPort: port }),
+      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
       mockState({
         programStartTime: Date.now(),
         scanCount: 0,
@@ -280,7 +282,9 @@ describe("HttpStatusServer", () => {
     );
     await Effect.runPromise(server.start());
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/positions?pool=poolA`);
+      const response = await fetch(`http://127.0.0.1:${port}/positions?pool=poolA`, {
+        headers: { Authorization: "Bearer secret-token" },
+      });
       expect(response.status).toBe(200);
       const body = (await response.json()) as { positions: ReadonlyArray<{ poolAddress: string }> };
       expect(body.positions).toHaveLength(1);
@@ -292,10 +296,15 @@ describe("HttpStatusServer", () => {
 
   it("serves sanitized config endpoint", async () => {
     const port = 18_797;
-    const server = new HttpStatusServer(baseConfig({ agentHttpPort: port }), mockState());
+    const server = new HttpStatusServer(
+      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
+      mockState(),
+    );
     await Effect.runPromise(server.start());
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/config`);
+      const response = await fetch(`http://127.0.0.1:${port}/config`, {
+        headers: { Authorization: "Bearer secret-token" },
+      });
       expect(response.status).toBe(200);
       const body = (await response.json()) as { paperTrading: boolean };
       expect(body.paperTrading).toBe(true);
@@ -324,15 +333,40 @@ describe("HttpStatusServer", () => {
     const port = 18_795;
     const policy = { ...baseSnapshot().agentPolicy, mode: "suggest" as const };
     const server = new HttpStatusServer(
-      baseConfig({ agentHttpPort: port }),
+      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
       mockAgentState(baseSnapshot({ agentPolicy: policy })),
     );
     await Effect.runPromise(server.start());
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/agent-policy`);
+      const response = await fetch(`http://127.0.0.1:${port}/agent-policy`, {
+        headers: { Authorization: "Bearer secret-token" },
+      });
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body).toEqual(policy);
+    } finally {
+      await Effect.runPromise(server.stop());
+    }
+  });
+
+  it("rejects unauthenticated read endpoints", async () => {
+    const port = 18_794;
+    const server = new HttpStatusServer(
+      baseConfig({ agentHttpPort: port, agentProposalToken: "secret-token" }),
+      mockState(),
+    );
+    await Effect.runPromise(server.start());
+    try {
+      for (const path of ["/status", "/positions", "/decisions", "/config", "/agent-policy"]) {
+        const response = await fetch(`http://127.0.0.1:${port}${path}`);
+        expect(response.status).toBe(401);
+      }
+      const wrongToken = await fetch(`http://127.0.0.1:${port}/status`, {
+        headers: { Authorization: "Bearer wrong-token" },
+      });
+      expect(wrongToken.status).toBe(401);
+      const health = await fetch(`http://127.0.0.1:${port}/health`);
+      expect(health.status).toBe(200);
     } finally {
       await Effect.runPromise(server.stop());
     }

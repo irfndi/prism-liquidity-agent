@@ -1250,8 +1250,24 @@ export function executeLive(
           }),
         ),
       );
+      // A planned entry operation is abandoned here — the ENTER is rejected by
+      // the SOL gate before any on-chain action. Close it out (failed) so the
+      // execution_operations ledger does not retain a dangling 'planned' row.
+      const failPlannedEntry = (operation: ExecutionOperationRecord, error: string) =>
+        db
+          .saveExecutionOperation({
+            ...operation,
+            status: "failed",
+            error,
+            updatedAt: Date.now(),
+          })
+          .pipe(Effect.catchAll(() => Effect.void));
       if (nativeBalance.value === null) {
-        return { executed: false, error: nativeBalance.error };
+        const error = nativeBalance.error ?? "Unable to read native SOL balance";
+        if (autonomous && entryOperation) {
+          yield* failPlannedEntry(entryOperation, error);
+        }
+        return { executed: false, error };
       }
       const solBalance = nativeBalance.value;
       if (solBalance < MIN_SOL_FOR_ENTRY_LAMPORTS) {
@@ -1265,13 +1281,14 @@ export function executeLive(
           `Insufficient SOL for ENTER — available ${availableHuman} SOL, need ${neededHuman} SOL ` +
             `(gas ${(Number(MIN_SOL_FOR_GAS_LAMPORTS) / 1e9).toFixed(4)} + rent/fee reserve ${reserveHuman})`,
         );
-        return {
-          executed: false,
-          error:
-            `Insufficient SOL for ENTER — available: ${availableHuman} SOL, ` +
-            `needed: ${neededHuman} SOL, ` +
-            `reserve: ${reserveHuman} SOL`,
-        };
+        const error =
+          `Insufficient SOL for ENTER — available: ${availableHuman} SOL, ` +
+          `needed: ${neededHuman} SOL, ` +
+          `reserve: ${reserveHuman} SOL`;
+        if (autonomous && entryOperation) {
+          yield* failPlannedEntry(entryOperation, error);
+        }
+        return { executed: false, error };
       }
     }
 

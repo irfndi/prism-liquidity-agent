@@ -29,6 +29,13 @@ describe("Feedback API", () => {
       )`,
     ).run();
     await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS rate_limits (
+        key TEXT PRIMARY KEY,
+        count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )`,
+    ).run();
+    await env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS api_keys (
         key_hash TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -67,6 +74,7 @@ describe("Feedback API", () => {
     await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_feedback_hash ON feedback(hash)`).run();
     await env.DB.prepare("DELETE FROM api_keys").run();
     await env.DB.prepare("DELETE FROM users").run();
+    await env.DB.prepare("DELETE FROM rate_limits").run();
     await env.CACHE.delete("rate_limit:register:unknown");
     const response = await worker.fetch(
       buildRequest("POST", "/v1/register", {}),
@@ -104,10 +112,12 @@ describe("Feedback API", () => {
       const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(200);
       const body = (await response.json()) as { id: string };
-      expect(body.id).toBe("fb-uuid-1");
+      // The returned id is namespaced with the authenticated user id so a
+      // client can never collide with (or overwrite) another user's row.
+      expect(body.id.endsWith(":fb-uuid-1")).toBe(true);
 
       const rows = await env.DB.prepare("SELECT summary FROM feedback WHERE id = ?")
-        .bind("fb-uuid-1")
+        .bind(body.id)
         .all();
       expect(rows.results).toHaveLength(1);
     });
@@ -199,7 +209,7 @@ describe("Feedback API", () => {
       );
       expect(second.status).toBe(200);
       const body = (await second.json()) as { id: string; duplicate: boolean };
-      expect(body.id).toBe("fb-dup");
+      expect(body.id.endsWith(":fb-dup")).toBe(true);
       expect(body.duplicate).toBe(true);
     });
   });

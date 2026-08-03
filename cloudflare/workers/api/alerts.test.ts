@@ -64,6 +64,13 @@ describe("Alerts API", () => {
       .run()
       .catch(() => {});
     await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS rate_limits (
+        key TEXT PRIMARY KEY,
+        count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )`,
+    ).run();
+    await env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS api_keys (
         key_hash TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -99,6 +106,7 @@ describe("Alerts API", () => {
 
     await env.DB.prepare("DELETE FROM api_keys").run();
     await env.DB.prepare("DELETE FROM users").run();
+    await env.DB.prepare("DELETE FROM rate_limits").run();
     await env.CACHE.delete("rate_limit:register:unknown");
     const response = await worker.fetch(
       buildRequest("POST", "/v1/register", {}),
@@ -112,6 +120,7 @@ describe("Alerts API", () => {
 
   beforeEach(async () => {
     await env.DB.prepare("DELETE FROM alerts").run();
+    await env.DB.prepare("DELETE FROM rate_limits").run();
     if (userId) {
       await env.DB.prepare("UPDATE users SET telegram_id = NULL, alerts_enabled = 1 WHERE id = ?")
         .bind(userId)

@@ -56,11 +56,19 @@ export function getEmbeddedVec0Path(): string | null {
   const prefix = hashPrefix(EMBEDDED_VEC0.data);
   const tmpDir = path.join(os.tmpdir(), \`prism-vec0-\${prefix}\`);
   fs.mkdirSync(tmpDir, { recursive: true });
+  // Restrict the temp dir so only the owner can access the loader path.
+  fs.chmodSync(tmpDir, 0o700);
   const tmpPath = path.join(tmpDir, \`vec0.\${EMBEDDED_VEC0.ext}\`);
-  if (!fs.existsSync(tmpPath)) {
-    fs.writeFileSync(tmpPath, Buffer.from(EMBEDDED_VEC0.data, "base64"));
-    fs.chmodSync(tmpPath, 0o755);
+  const embedded = Buffer.from(EMBEDDED_VEC0.data, "base64");
+  if (fs.existsSync(tmpPath)) {
+    const existing = fs.readFileSync(tmpPath);
+    if (existing.equals(embedded)) {
+      return tmpPath;
+    }
+    console.warn(\`Existing \${tmpPath} does not match the embedded vec0; overwriting\`);
   }
+  fs.writeFileSync(tmpPath, embedded);
+  fs.chmodSync(tmpPath, 0o755);
   return tmpPath;
 }
 `;

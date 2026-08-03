@@ -41,9 +41,10 @@ on:
 # Serialize production deploys: back-to-back pushes must not run two
 # simultaneous `alchemy deploy --stage prod` jobs against the shared stack.
 # cancel-in-progress: false (never cancel mid-apply — that can leave the
-# stack partially updated).
+# stack partially updated). Scoped to main so fork PRs (which only typecheck)
+# cannot hold the prod group and stall a real deploy.
 concurrency:
-  group: deploy-cloudflare-prod
+  group: ${{ github.ref == 'refs/heads/main' && 'deploy-cloudflare-prod' || format('deploy-cloudflare-pr-{0}', github.event.pull_request.number) }}
   cancel-in-progress: false
 
 jobs:
@@ -71,8 +72,11 @@ jobs:
         run: bun run typecheck && bun run build:workers
 
       # Fail fast if any required secret is unset, instead of deploying with
-      # empty secret_text values that fail closed in production.
+      # empty secret_text values that fail closed in production. Main-only:
+      # GitHub does not provide secrets to fork PRs, so this step must not run
+      # on PRs (the typecheck above is the PR gate; the deploy below is main-only).
       - name: Validate required secrets
+        if: github.ref == 'refs/heads/main'
         run: |
           for v in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET BOT_API_SECRET ADMIN_API_KEY FEE_WALLET_ADDRESS; do
             if [ -z "$(printenv "$v")" ]; then

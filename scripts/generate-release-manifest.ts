@@ -30,10 +30,11 @@ const expectedPlatforms = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm
 const bundles: Record<string, { url: string; sha256_url: string }> = {};
 
 for (const file of files) {
-  const escaped = version.replace(/\./g, "\\.");
-  const match = new RegExp(`^prism-v${escaped}-(.+)\\.tar\\.gz$`).exec(file);
-  if (!match) continue;
-  const platformKey = match[1]!;
+  // Reconstruct the platform key from the fixed file-name shape instead of
+  // interpolating the version into a regex (a `+` in semver build metadata
+  // would otherwise be parsed as a quantifier and break the match).
+  const platformKey = file.slice(`prism-v${version}-`.length, -".tar.gz".length);
+  if (!platformKey) continue;
   const sha256File = `${file}.sha256`;
   if (!fs.existsSync(path.join(cwd, sha256File))) {
     console.warn(`Missing checksum for ${file}, skipping`);

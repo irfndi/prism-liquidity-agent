@@ -8,6 +8,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only token: the build job needs no write scope (checkout uses
+# persist-credentials: false below), and a compromised step must not be able
+# to push or mutate releases.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -22,6 +28,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -82,6 +90,10 @@ jobs:
         run: bun install
         working-directory: cloudflare
 
+      - name: Type check workers
+        run: bun run typecheck
+        working-directory: cloudflare
+
       - name: Run worker tests
         run: bunx vitest run
         working-directory: cloudflare
@@ -125,7 +137,9 @@ jobs:
           TS=$(date -u +%Y%m%dT%H%M%S)
           SHA8=$(git rev-parse --short=8 HEAD)
           FULL_SHA=$(git rev-parse HEAD)
-          echo "canary_version=${NEXT}-canary.${TS}" >> "$GITHUB_OUTPUT"
+          # Embed the short SHA in the version so two pushes within the same
+          # second cannot collide on one canary version string.
+          echo "canary_version=${NEXT}-canary.${TS}-${SHA8}" >> "$GITHUB_OUTPUT"
           echo "build_dir=releases/canary/${TS}-${SHA8}" >> "$GITHUB_OUTPUT"
           echo "full_sha=${FULL_SHA}" >> "$GITHUB_OUTPUT"
 
@@ -363,7 +377,17 @@ jobs:
 
               const dirs = [...byDir.keys()].sort();
               const keepDirs = new Set(dirs.slice(Math.max(0, dirs.length - 5)));
+              // BUILD_DIR is the full R2 path (releases/canary/<TS>-<sha8>); the
+              // parsed dir above is the bare <TS>-<sha8>. Normalize so the
+              // just-published dir is actually protected, and fail loudly if the
+              // listing doesn't contain it (the invariant would otherwise be
+              // silently dropped).
+              const keep = String(process.env.BUILD_DIR).split("/").pop();
               keepDirs.add(keep);
+              if (!keepDirs.has(keep) || !byDir.has(keep)) {
+                console.error("Just-published canary dir missing from R2 listing: " + keep);
+                process.exit(1);
+              }
 
               for (const dir of dirs) {
                 if (keepDirs.has(dir)) continue;

@@ -26,6 +26,40 @@ log_warn()  { printf "⚠ %s\n" "$*"; }
 log_error() { printf "✘ %s\n" "$*" >&2; }
 log_done()  { printf "✓ %s\n" "$*"; }
 
+# INSTALL_DIR is passed to rm -rf and interpolated into the generated wrapper
+# heredoc, so it must be a safe absolute path (never empty, /, or $HOME) with
+# no shell metacharacters before any destructive operation runs.
+validate_install_dir() {
+  local dir="$1"
+  # Normalize trailing slashes so "$HOME/" is caught by the "$HOME" check below.
+  while [ "$dir" != "/" ] && [ "${dir%/}" != "$dir" ]; do
+    dir="${dir%/}"
+  done
+  if [ -z "$dir" ] || [ "$dir" = "/" ] || [ "$dir" = "$HOME" ]; then
+    log_error "Refusing to install to unsafe PRISM_INSTALL_DIR: ${INSTALL_DIR}"
+    log_error "PRISM_INSTALL_DIR must be an absolute path, not empty, /, or \$HOME."
+    return 1
+  fi
+  # Must be an absolute path with at least two components (a named directory below the root).
+  if [[ "$dir" != /* ]] || [ "$(basename "$dir")" = "/" ]; then
+    log_error "Refusing to install to unsafe PRISM_INSTALL_DIR: ${INSTALL_DIR}"
+    log_error "PRISM_INSTALL_DIR must be an absolute path with at least two components (e.g. \$HOME/.prism)."
+    return 1
+  fi
+  # The value is embedded in the generated wrapper heredoc; reject shell metacharacters.
+  if ! printf '%s' "$dir" | grep -qE '^[A-Za-z0-9_./-]+$'; then
+    log_error "Refusing to install to unsafe PRISM_INSTALL_DIR: ${INSTALL_DIR}"
+    log_error "PRISM_INSTALL_DIR contains shell metacharacters; only [A-Za-z0-9_./-] are allowed."
+    return 1
+  fi
+  INSTALL_DIR="$dir"
+  return 0
+}
+
+if ! validate_install_dir "$INSTALL_DIR"; then
+  exit 1
+fi
+
 normalize_version() {
   printf '%s' "$1" \
     | sed -E 's/^v//; s/-[A-Za-z0-9.+].*$//' \
@@ -36,7 +70,17 @@ version_gte() {
   local installed min
   installed="$(normalize_version "$1")"
   min="$(normalize_version "$2")"
-  [ "$(printf '%s\n%s\n' "$installed" "$min" | sort -V | head -n1)" = "$min" ]
+  # Portable dotted-version comparison (awk, no GNU sort -V on macOS).
+  awk -v a="$installed" -v b="$min" 'BEGIN {
+    split(a, A, "."); split(b, B, ".");
+    for (i = 1; i <= 3; i++) {
+      na = (i in A) ? A[i] + 0 : 0;
+      nb = (i in B) ? B[i] + 0 : 0;
+      if (na < nb) exit 1;
+      if (na > nb) exit 0;
+    }
+    exit 0;
+  }'
 }
 
 ensure_bun() {

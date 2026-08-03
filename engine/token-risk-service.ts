@@ -171,6 +171,24 @@ const UNKNOWN_TOKEN_RISK_SIGNAL: TokenRiskSignal = {
 // is the mint address alone. Fresh entries are served without any network call.
 const cache = new Map<string, CacheEntry>();
 
+/** Hard cap on cached token entries; the oldest (insertion-order) entries are
+ *  evicted once the cap is exceeded so the cache cannot grow without bound. */
+const MAX_CACHE_ENTRIES = 1000;
+
+/**
+ * Insert a cache entry under the hard cap, evicting the oldest entries (Map
+ * insertion order) when the cap is exceeded. TTL expiry is pruned separately
+ * on each consult; this bounds memory even when the TTL is very large.
+ */
+function setCacheEntry(mint: string, entry: CacheEntry): void {
+  cache.set(mint, entry);
+  while (cache.size > MAX_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
 /** Test/observability hook: drop all cached signals (production never resets). */
 export function clearTokenRiskCache(): void {
   cache.clear();
@@ -226,13 +244,13 @@ export async function consultTokenRisks(
       for (const mint of toFetch) {
         const signal = fetched.get(mint);
         if (signal !== undefined) {
-          cache.set(mint, { signal, fetchedAt });
+          setCacheEntry(mint, { signal, fetchedAt });
           result.set(mint, signal);
         } else {
           // Omitted by a SUCCESSFUL refresh: NEGATIVE cache with a fresh
           // timestamp (stops per-cycle re-query) and NOT served — revoked
           // verification must not keep exempting the pool.
-          cache.set(mint, { signal: UNKNOWN_TOKEN_RISK_SIGNAL, fetchedAt });
+          setCacheEntry(mint, { signal: UNKNOWN_TOKEN_RISK_SIGNAL, fetchedAt });
           result.delete(mint);
         }
       }
@@ -244,6 +262,13 @@ export async function consultTokenRisks(
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // Prune TTL-expired entries so the cache cannot grow without bound across
+  // scan cycles. Runs after the fetch/resolve pass so a stale signal served
+  // for this consult (fail-open) is not removed mid-flight.
+  for (const [mint, entry] of cache) {
+    if (now - entry.fetchedAt >= ttlMs) cache.delete(mint);
   }
 
   return result;

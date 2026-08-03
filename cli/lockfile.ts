@@ -159,30 +159,64 @@ export function acquireLock(
     return { acquired: false, pid: 0 };
   }
 
-  // existing is valid and PID is dead — safe to replace
+  // `existing` is a valid stale lock (dead PID) — replace it atomically. The
+  // old unlink-then-create flow had a TOCTOU window: a concurrent launcher
+  // could re-acquire the lock between our unlink and our exclusive create, and
+  // our unlink would delete their fresh lock, leaving both launchers believing
+  // they hold it. Renaming the stale file aside first is atomic, and checking
+  // the moved copy (not the live path) detects a concurrent re-acquisition
+  // without a check-then-act race; the exclusive create can then only fail if
+  // another launcher already owns the lock.
+  const backupPath = `${lockfilePath}.${process.pid}.${Date.now()}.tmp`;
   try {
-    fs.unlinkSync(lockfilePath);
+    fs.renameSync(lockfilePath, backupPath);
   } catch (err) {
     if (!isNodeError(err) || err.code !== "ENOENT") {
       throw err;
     }
+    // The lock vanished between our read and rename — another launcher is
+    // replacing it. Only an exclusive create can win now.
+    const created = tryAtomicCreate();
+    return created.acquired
+      ? { acquired: true }
+      : { acquired: false, pid: created.existing?.pid ?? 0 };
   }
 
-  const second = tryAtomicCreate();
-  if (second.acquired) {
-    // Re-validate ownership: another concurrent launcher may have created
-    // the lock between our unlink and create. Fail closed if the file does
-    // not contain our PID.
-    const reRead = readLockfile(lockfilePath);
-    if (reRead && reRead.pid === process.pid) {
-      return second;
+  try {
+    const moved = readLockfile(backupPath);
+    if (moved === null || moved.pid !== existing.pid || moved.timestamp !== existing.timestamp) {
+      // The moved file is not the stale lock we read — a concurrent launcher
+      // re-acquired it (or the file was mid-write). Restore it with a hard
+      // link (never clobbers a lock that appeared in the meantime) and fail
+      // with the owner we displaced, falling back to the current owner.
+      try {
+        fs.linkSync(backupPath, lockfilePath);
+        try {
+          fs.unlinkSync(backupPath);
+        } catch {
+          // Best-effort cleanup of the restored lock.
+        }
+      } catch (restoreErr) {
+        if (!isNodeError(restoreErr) || restoreErr.code !== "EEXIST") {
+          throw restoreErr;
+        }
+      }
+      const current = readLockfile(lockfilePath);
+      return { acquired: false, pid: current?.pid ?? moved?.pid ?? 0 };
     }
-    return { acquired: false, pid: reRead?.pid ?? 0 };
+
+    const second = tryAtomicCreate();
+    if (second.acquired) {
+      return { acquired: true };
+    }
+    return { acquired: false, pid: second.existing?.pid ?? 0 };
+  } finally {
+    try {
+      fs.unlinkSync(backupPath);
+    } catch {
+      // Best-effort cleanup of the moved stale lock.
+    }
   }
-  if (second.existing) {
-    return { acquired: false, pid: second.existing.pid };
-  }
-  return { acquired: false, pid: 0 };
 }
 
 export function releaseLock(lockfilePath = LOCKFILE_PATH): void {

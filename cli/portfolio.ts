@@ -9,6 +9,23 @@ import { getPrismDbPath } from "../engine/paths.js";
 
 const logger = createLogger("portfolio-cli");
 
+// On-chain token symbols are attacker-controlled; strip ANSI escape sequences
+// and terminal control characters before printing so a crafted symbol cannot
+// corrupt the terminal or inject log output. Built with String.fromCharCode so
+// the control bytes are not written as regex-literal escapes (no-control-regex).
+const ANSI_ESCAPE_RE = new RegExp(
+  `[${String.fromCharCode(0x1b, 0x9b)}][[\\]()#;?]*(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d/#&.:=?%@~_]+)*)?${String.fromCharCode(0x07)}|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))`,
+  "g",
+);
+const CONTROL_CHAR_RE = new RegExp(
+  `[${String.fromCharCode(0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0b, 0x0c, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x7f)}]`,
+  "g",
+);
+
+function sanitizeSymbol(value: string): string {
+  return value.replace(ANSI_ESCAPE_RE, "").replace(CONTROL_CHAR_RE, "");
+}
+
 function buildProgram(): Layer.Layer<DbService, never, never> {
   return DbLive(process.env.SQLITE_DB_PATH ?? getPrismDbPath());
 }
@@ -94,7 +111,7 @@ export function formatPosition(pos: PositionRecord, currentPriceUsd: number | nu
   const pnlText = `${formatCurrency(analytics.unrealizedPnlUsd)} (${formatPct(analytics.unrealizedPnlPct)})`;
   const coloredPnl = colorize(pnlText, analytics.unrealizedPnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m");
 
-  const poolName = `${pos.tokenXSymbol}/${pos.tokenYSymbol}`;
+  const poolName = `${sanitizeSymbol(pos.tokenXSymbol)}/${sanitizeSymbol(pos.tokenYSymbol)}`;
   const range = `[${pos.lowerBinId}–${pos.upperBinId}]`;
   const age = formatAge(pos.timestamp);
   const ilText =
@@ -210,7 +227,7 @@ function formatHistoryList(positions: ReadonlyArray<PositionRecord>): string {
     const coloredPnl = colorize(pnlText, pnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m");
     const exitedAt = pos.closedAt ?? pos.paperExitedAt;
 
-    lines.push(`  ${pos.tokenXSymbol}/${pos.tokenYSymbol}`);
+    lines.push(`  ${sanitizeSymbol(pos.tokenXSymbol)}/${sanitizeSymbol(pos.tokenYSymbol)}`);
     lines.push(`    Pool:       ${pos.poolAddress}`);
     lines.push(`    Position:   ${pos.positionId}`);
     lines.push(`    Deposited:  ${formatCurrency(pos.depositedUsd)}`);

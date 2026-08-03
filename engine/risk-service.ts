@@ -58,22 +58,33 @@ export function evaluateRisk(
   }
 
   // 4. Drawdown check
-  if (decision.action === "ENTER" && ctx.portfolioValueUsd > 0) {
-    const drawdownPct = Math.abs(ctx.recentPnlUsd) / ctx.portfolioValueUsd;
-    if (ctx.recentPnlUsd < 0 && drawdownPct > 0.1) {
+  if (decision.action === "ENTER") {
+    if (!Number.isFinite(ctx.portfolioValueUsd) || !Number.isFinite(ctx.recentPnlUsd)) {
       return {
         approved: false,
-        reason: `Portfolio drawdown ${(drawdownPct * 100).toFixed(1)}% exceeds 10% — pausing new entries`,
+        reason: "Portfolio drawdown data is not finite — pausing new entries",
       };
+    }
+    if (ctx.portfolioValueUsd > 0) {
+      const drawdownPct = Math.abs(ctx.recentPnlUsd) / ctx.portfolioValueUsd;
+      if (ctx.recentPnlUsd < 0 && drawdownPct > 0.1) {
+        return {
+          approved: false,
+          reason: `Portfolio drawdown ${(drawdownPct * 100).toFixed(1)}% exceeds 10% — pausing new entries`,
+        };
+      }
     }
   }
 
   // 5. Stop-loss check — targets the decision's own position when identified
-  // (a pool may hold several positions with independent PnL).
+  // (a pool may hold several positions with independent PnL). The decision's
+  // positionId is authoritative (deterministic decisions and agent proposals
+  // both carry it); ctx.positionId is only the legacy alias callers set.
   if (decision.action === "HOLD" || decision.action === "REBALANCE") {
+    const targetId = decision.positionId ?? ctx.positionId;
     const pos =
-      ctx.positionId !== undefined
-        ? ctx.openPositions.find((p) => p.id === ctx.positionId)
+      targetId !== undefined
+        ? ctx.openPositions.find((p) => p.id === targetId)
         : ctx.openPositions.find((p) => p.poolAddress === decision.poolAddress);
     if (pos && pos.depositedUsd > 0) {
       const lossPct = (pos.currentValueUsd - pos.depositedUsd) / pos.depositedUsd;
@@ -94,6 +105,16 @@ export function evaluateRisk(
     const existingPoolExposureUsd = ctx.openPositions
       .filter((p) => p.poolAddress === decision.poolAddress)
       .reduce((sum, p) => sum + p.currentValueUsd, 0);
+    if (
+      !Number.isFinite(decision.positionSizeUsd) ||
+      !Number.isFinite(ctx.portfolioValueUsd) ||
+      !Number.isFinite(existingPoolExposureUsd)
+    ) {
+      return {
+        approved: false,
+        reason: "Position size or portfolio data is not finite — refusing entry",
+      };
+    }
     const maxSize = Math.max(ctx.portfolioValueUsd * capPct - existingPoolExposureUsd, 0);
     if (decision.positionSizeUsd > maxSize) {
       if (maxSize <= 0) {
@@ -344,7 +365,19 @@ export function evaluateAgentProposal(
   // with exactly one open position resolves to it. Anything else stays
   // untargeted and fails closed at execution.
   let positionId = proposal.positionId ?? ctx.originalDecision?.positionId;
-  if (positionId === undefined && (proposal.action === "EXIT" || proposal.action === "REBALANCE")) {
+  if (positionId !== undefined) {
+    // A named position must resolve to an open position on the proposal's pool
+    // (gate 2 already pinned poolAddress to the evaluated pool) — an advisor
+    // must not be able to route execution at a position on a different pool
+    // than the proposal claims. Fail closed when the id is unknown or foreign.
+    const target = ctx.openPositions.find((p) => p.id === positionId);
+    if (target === undefined || target.poolAddress !== proposal.poolAddress) {
+      return {
+        valid: false,
+        reason: `Position ${positionId} does not belong to pool ${proposal.poolAddress}`,
+      };
+    }
+  } else if (proposal.action === "EXIT" || proposal.action === "REBALANCE") {
     const poolPositions = ctx.openPositions.filter((p) => p.poolAddress === proposal.poolAddress);
     if (poolPositions.length === 1) {
       positionId = poolPositions[0]!.id;
@@ -466,6 +499,15 @@ export function evaluateGasGate(input: GasGateInput): GasGateResult {
   const gasCostUsd = input.rebalanceGasCostSol * input.solPriceUsd;
   const feesThresholdUsd = input.positionDailyFeesUsd * input.minDaysOfFeesPaidAhead;
 
+  if (!Number.isFinite(gasCostUsd) || !Number.isFinite(feesThresholdUsd)) {
+    return {
+      approved: false,
+      reason: "Gas-gate inputs are not finite — refusing rebalance",
+      gasCostUsd,
+      feesThresholdUsd,
+    };
+  }
+
   if (gasCostUsd <= 0) {
     return {
       approved: false,
@@ -529,6 +571,20 @@ export function evaluateCompoundGate(input: CompoundGateInput): CompoundGateResu
   const thresholdUsd =
     input.minCompoundFeesUsd + input.compoundGasBufferUsd + input.rebalanceGasCostUsd;
   const savingsUsd = input.netFeesUsd - thresholdUsd;
+
+  if (
+    !Number.isFinite(input.netFeesUsd) ||
+    !Number.isFinite(input.minCompoundFeesUsd) ||
+    !Number.isFinite(input.compoundGasBufferUsd) ||
+    !Number.isFinite(input.rebalanceGasCostUsd)
+  ) {
+    return {
+      approved: false,
+      reason: "Compound-gate inputs are not finite — nothing to compound",
+      thresholdUsd,
+      savingsUsd,
+    };
+  }
 
   if (input.netFeesUsd <= 0) {
     return {
@@ -609,8 +665,21 @@ export function evaluatePerPoolAllocation(input: PerPoolAllocationInput): PerPoo
     };
   }
 
-  const perPoolCapUsd = Math.max(input.portfolioValueUsd * input.maxPerPoolAllocationPct, 0);
   const existingPoolExposureUsd = poolPositions.reduce((sum, p) => sum + p.currentValueUsd, 0);
+  if (
+    !Number.isFinite(input.proposedDepositUsd) ||
+    !Number.isFinite(input.portfolioValueUsd) ||
+    !Number.isFinite(input.maxPerPoolAllocationPct) ||
+    !Number.isFinite(existingPoolExposureUsd)
+  ) {
+    return {
+      approved: false,
+      reason: "Per-pool allocation inputs are not finite — refusing entry",
+      adjustedDepositUsd: 0,
+    };
+  }
+
+  const perPoolCapUsd = Math.max(input.portfolioValueUsd * input.maxPerPoolAllocationPct, 0);
   const headroomUsd = Math.max(perPoolCapUsd - existingPoolExposureUsd, 0);
   const adjusted = Math.min(input.proposedDepositUsd, headroomUsd);
 

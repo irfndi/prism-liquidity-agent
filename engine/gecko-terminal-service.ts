@@ -53,7 +53,10 @@ const REQUEST_TIMEOUT_MS = 10_000;
 // cannot absorb.
 
 const DEFAULT_REQUEST_INTERVAL_MS = 2_100;
-let lastGeckoRequestAt = 0;
+// Absolute timestamp of the next slot a request may occupy. Reserved
+// synchronously (before any await) so concurrent callers cannot all pass the
+// pacing check at once and burst past the keyless rate limit.
+let nextGeckoRequestAt = 0;
 let requestIntervalMs = DEFAULT_REQUEST_INTERVAL_MS;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -214,12 +217,15 @@ export async function getGeckoPoolStats(
   const url = `${effectiveBase}/networks/solana/pools/${poolAddress}`;
 
   // Pace toward the 30 req/min keyless limit (see the pacing constants above).
+  // JS is single-threaded: reserving the next slot is a synchronous
+  // read-modify-write before any await, so concurrent callers each advance
+  // nextGeckoRequestAt exactly once and can never observe the same free slot.
   const now = Date.now();
-  const nextAllowedAt = lastGeckoRequestAt + requestIntervalMs;
-  if (nextAllowedAt > now) {
-    await sleep(nextAllowedAt - now);
+  const delayMs = Math.max(0, nextGeckoRequestAt - now);
+  nextGeckoRequestAt = Math.max(now, nextGeckoRequestAt) + requestIntervalMs;
+  if (delayMs > 0) {
+    await sleep(delayMs);
   }
-  lastGeckoRequestAt = Date.now();
 
   try {
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });

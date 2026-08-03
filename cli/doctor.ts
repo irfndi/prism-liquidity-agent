@@ -39,6 +39,25 @@ function check(name: string, status: DoctorStatus, message: string): DoctorCheck
   return { name, status, message };
 }
 
+// Mirror engine/config-service.ts PAPER_TRADING parsing (Effect Config.boolean):
+// true/yes/on/1 = paper, false/no/off/0 = live, anything else = default paper.
+function isPaperTrading(): boolean {
+  switch (process.env.PAPER_TRADING?.trim().toLowerCase()) {
+    case "true":
+    case "yes":
+    case "on":
+    case "1":
+      return true;
+    case "false":
+    case "no":
+    case "off":
+    case "0":
+      return false;
+    default:
+      return true;
+  }
+}
+
 function checkDirectory(name: string, directory: string, fix: boolean): DoctorCheck {
   try {
     if (!existsSync(directory)) {
@@ -105,7 +124,7 @@ function checkRpc(): DoctorCheck {
   const primary = process.env.SOLANA_RPC_URL?.trim() ?? "";
   const helius = process.env.HELIUS_API_KEY?.trim() ?? "";
   const fallback = process.env.SOLANA_RPC_FALLBACK_URL?.trim() ?? "";
-  const paperTrading = process.env.PAPER_TRADING !== "false";
+  const paperTrading = isPaperTrading();
   const effectivePrimary = primary || (helius ? "helius" : "");
   if (!effectivePrimary) {
     return check("rpc", "fail", "No SOLANA_RPC_URL or HELIUS_API_KEY configured");
@@ -142,6 +161,9 @@ async function probeRpcEndpoint(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: "prism-doctor", method: "getHealth" }),
       signal: AbortSignal.timeout(8_000),
+      // The API key rides in the URL query string; never follow a redirect
+      // that would forward it to another host.
+      redirect: "error",
     });
     if (res.status === 401 || res.status === 403) {
       return { ok: false, status: res.status, error: `HTTP ${res.status} — API key rejected` };
@@ -235,7 +257,7 @@ async function checkHeliusApiKey(): Promise<DoctorCheck> {
 }
 
 function checkWallet(): DoctorCheck {
-  if (process.env.PAPER_TRADING !== "false") {
+  if (isPaperTrading()) {
     return check("wallet", "pass", "Paper trading is enabled; no private key required");
   }
   // Live trading signs with WALLET_PRIVATE_KEY, falling back to the local keystore the

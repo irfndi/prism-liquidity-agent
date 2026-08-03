@@ -43,8 +43,10 @@ function parseArgs(argv: ReadonlyArray<string>): CliArgs {
     const next = argv[i + 1];
     if (a === "--days" && next) {
       const parsed = Number(next);
-      if (Number.isNaN(parsed) || parsed <= 0) {
-        throw new Error(`Invalid --days value: ${next}. Must be a positive number.`);
+      if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 3650) {
+        throw new Error(
+          `Invalid --days value: ${next}. Must be a finite number between 1 and 3650.`,
+        );
       }
       out.days = parsed;
       i++;
@@ -225,7 +227,10 @@ export function runBacktestFromTicks(
   function feesForTick(tick: HistoryTick): number {
     const tvl = tick.pool.tvlUsd;
     if (tvl <= 0) return 0;
-    const positionShare = Math.min(portfolioValue / tvl, 1);
+    // Fee share is the deployed position size, not the whole portfolio; fall
+    // back to the portfolio value when no position size is recorded yet.
+    const size = positionSizeUsd > 0 ? positionSizeUsd : portfolioValue;
+    const positionShare = Math.min(size / tvl, 1);
     return (tick.pool.fees24hUsd / ticksPerYear) * 365 * positionShare;
   }
 
@@ -335,6 +340,10 @@ export function runBacktestFromTicks(
       hasPosition = false;
     } else if (!hasPosition && binDrift < 0.3) {
       hasPosition = true;
+      // Same proposed size the replay ENTER path uses, so position value and
+      // fee accrual stay consistent after an automatic re-entry.
+      positionSizeUsd = Math.min(portfolioValue * 0.2, 2_000);
+      positionPeakUsd = positionSizeUsd;
       currentLowerBinId = tick.pool.activeBinId - cfg.halfWidth;
       currentUpperBinId = tick.pool.activeBinId + cfg.halfWidth;
       lastRebalanceTick = i;

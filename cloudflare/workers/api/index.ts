@@ -1269,7 +1269,10 @@ app.post("/v1/feedback", async (c) => {
   if (!body.hash || typeof body.hash !== "string") {
     return c.json({ error: "hash is required" }, 400);
   }
-  const feedbackId = body.id;
+  // The id is client-supplied and used as the PK in the shared feedback table.
+  // Namespace it with the authenticated user so a client can never collide
+  // with (or overwrite) another user's row while keeping per-user idempotency.
+  const feedbackId = `${user.id}:${body.id}`;
   const feedbackAgentId = body.agentId;
   const feedbackCategory = body.category;
   const feedbackSeverity = body.severity;

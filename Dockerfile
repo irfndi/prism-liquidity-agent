@@ -33,8 +33,14 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
 
-# Logs directory writable by agent user
-RUN mkdir -p /app/logs && chown -R agent:agent /app/logs
+# Data directory writable by agent user (db, logs, credentials). The engine's
+# paths resolve from PRISM_DATA_DIR / PRISM_CONFIG_DIR / SQLITE_DB_PATH; the
+# agent user has no home dir (--no-create-home), so /app/data is the anchor.
+RUN mkdir -p /app/data && chown -R agent:agent /app/data
+
+ENV PRISM_DATA_DIR=/app/data \
+    PRISM_CONFIG_DIR=/app/data \
+    SQLITE_DB_PATH=/app/data/prism.db
 
 USER agent
 

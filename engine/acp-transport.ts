@@ -12,6 +12,11 @@ import type {
 
 const logger = createLogger("AcpTransport");
 
+// A chatty ACP agent can stream unbounded data; cap the partial-frame buffer
+// and the per-prompt reply text so memory stays bounded.
+const MAX_INCOMPLETE_BUFFER_BYTES = 1 << 20; // 1 MiB
+const MAX_SESSION_TEXT_LENGTH = 64 * 1024; // 64 KiB
+
 interface AcpRequest {
   readonly jsonrpc: "2.0";
   readonly id: number;
@@ -237,6 +242,12 @@ export class AcpTransport implements AgentRuntimeTransport {
 
   private onData(chunk: Buffer): void {
     this.buffer += chunk.toString("utf-8");
+    // Keep only the tail of an unfinished frame; a frame larger than the cap
+    // is unparseable garbage anyway (JSON-RPC lines are small), and a chatty
+    // agent must not grow memory unboundedly.
+    if (this.buffer.length > MAX_INCOMPLETE_BUFFER_BYTES) {
+      this.buffer = this.buffer.slice(-MAX_INCOMPLETE_BUFFER_BYTES);
+    }
     const lines = this.buffer.split(/\r?\n/);
     this.buffer = lines.pop() ?? "";
     for (const line of lines) {
@@ -293,7 +304,11 @@ export class AcpTransport implements AgentRuntimeTransport {
         update.content?.type === "text" &&
         update.content.text
       ) {
-        this.sessionText += update.content.text;
+        // Cap the streamed reply so a chatty agent cannot grow sessionText
+        // unboundedly; the reply is only used for the veto/raw text surface.
+        if (this.sessionText.length < MAX_SESSION_TEXT_LENGTH) {
+          this.sessionText += update.content.text;
+        }
       }
     }
   }
