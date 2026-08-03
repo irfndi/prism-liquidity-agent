@@ -202,32 +202,35 @@ function archiveErrorReports(
   const uniqueReports = [
     ...new Map(reports.map((report) => [report.fingerprint, report])).values(),
   ];
-  return Effect.forEach(uniqueReports, (report) => {
-    const key = `telemetry/errors/${userId}/${report.fingerprint}.json`;
-    return Effect.tryPromise({
-      try: () =>
-        archive.put(key, JSON.stringify({ ...report, archivedAt: new Date().toISOString() }), {
-          httpMetadata: { contentType: "application/json" },
+  return Effect.forEach(
+    uniqueReports,
+    (report) => {
+      const key = `telemetry/errors/${userId}/${report.fingerprint}.json`;
+      return Effect.tryPromise({
+        try: () =>
+          archive.put(key, JSON.stringify({ ...report, archivedAt: new Date().toISOString() }), {
+            httpMetadata: { contentType: "application/json" },
+          }),
+        catch: (cause) => cause,
+      }).pipe(
+        Effect.map(() => 1),
+        Effect.catchAll((cause) => {
+          console.error("[Telemetry] Failed to archive error summary", {
+            key,
+            error: causeMessage(cause),
+          });
+          return Effect.succeed(0);
         }),
-      catch: (cause) => cause,
-    }).pipe(
-      Effect.map(() => 1),
-      Effect.catchAll((cause) => {
-        console.error("[Telemetry] Failed to archive error summary", {
-          key,
-          error: causeMessage(cause),
-        });
-        return Effect.succeed(0);
-      }),
-      Effect.timeout("5 seconds"),
-      Effect.catchAll(() => Effect.succeed(0)),
-    );
-  }).pipe(
+        Effect.timeout("5 seconds"),
+        Effect.catchAll(() => Effect.succeed(0)),
+      );
+    },
+    { concurrency: 4 },
+  ).pipe(
     Effect.map((results) => results.reduce((sum, count) => sum + count, 0)),
     Effect.catchAll(() => Effect.succeed(0)),
   );
 }
-
 function upsertErrorReports(
   db: D1Database,
   archive: R2Bucket | undefined,
@@ -254,9 +257,11 @@ function upsertErrorReports(
     ];
     for (const report of reports) {
       // Server-derived row id scoped to the user so a client-supplied report id
-      // can never collide across users on the error_logs primary key. The
-      // client report id is preserved in last_report_id and the receipts row.
-      const rowId = `${userId.slice(0, 16)}-${report.fingerprint.slice(0, 32)}`;
+      // can never collide across users on the error_logs primary key. The id
+      // is a hash of the full userId + fingerprint so two users sharing a
+      // truncated id prefix cannot collide. The client report id is preserved
+      // in last_report_id and the receipts row.
+      const rowId = `err-${(yield* hashKey(`${userId}:${report.fingerprint}`)).slice(0, 64)}`;
       statements.push(
         db
           .prepare(

@@ -1,10 +1,10 @@
 /**
  * Shared test-schema setup for the API worker tests.
  *
- * The vitest-pool-workers sandbox does not expose fs access to the
- * migrations/ directory, so the 0015 telemetry schema is inlined here as the
- * single source of truth for both errors.test.ts and installs.test.ts. Keep
- * this in sync with cloudflare/migrations/0015_telemetry_summaries.sql.
+ * The vitest-pool-workers sandbox virtualizes fs (reads fail against the
+ * bundle), so the 0015 telemetry schema is inlined here as the single source
+ * of truth for both errors.test.ts and installs.test.ts. Keep this in sync
+ * with cloudflare/migrations/0015_telemetry_summaries.sql.
  */
 const MIGRATION_0015_STATEMENTS = [
   `ALTER TABLE error_logs ADD COLUMN fingerprint TEXT`,
@@ -13,6 +13,14 @@ const MIGRATION_0015_STATEMENTS = [
   `ALTER TABLE error_logs ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 1`,
   `ALTER TABLE error_logs ADD COLUMN last_report_id TEXT`,
 ];
+
+/** Statement-count summary asserted by the migration-sync test. */
+export const MIGRATION_0015_SUMMARY = {
+  alterErrorLogsCount: 5,
+  hasReceiptsTable: true,
+  hasInstallSummaryTable: true,
+  hasUserFingerprintIndex: true,
+} as const;
 
 /**
  * Applies the 0015 telemetry migration statements to the test database.

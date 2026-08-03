@@ -10,15 +10,15 @@ SET first_seen_at = COALESCE(first_seen_at, created_at),
     last_report_id = COALESCE(last_report_id, id)
 WHERE first_seen_at IS NULL OR last_seen_at IS NULL OR last_report_id IS NULL;
 
--- Backfill fingerprint for legacy rows so pre-existing rows participate in
--- deduplication. NULL fingerprints are treated as distinct by SQLite's unique
--- index, so unmigrated rows would never match ON CONFLICT(user_id, fingerprint)
--- and every first new report for an existing signature would create a second
--- row. A stable non-null placeholder keeps them inside deduplication without
--- re-hashing the raw message/error-type (the worker's fingerprint is
--- sha256(errorType:message) — recomputing it here would require reimplementing
--- the client hash in SQL; using the row id as the seed preserves one row per
--- legacy signature while new reports merge onto the placeholder fingerprint).
+-- Backfill fingerprint for legacy rows so pre-existing rows do not carry NULL
+-- fingerprints. SQLite treats NULLs as distinct in a unique index, so NULL
+-- fingerprints would never match ON CONFLICT(user_id, fingerprint) and every
+-- first new report for an existing signature would create a second row. The
+-- placeholder ('legacy:' || id) gives each legacy row a stable non-null value
+-- so the unique index is satisfied; new reports still compute their own
+-- sha256(errorType:message) fingerprint, so legacy rows remain distinct from
+-- (and do not merge into) new summaries — the placeholder only prevents
+-- index-level NULL collisions.
 UPDATE error_logs
 SET fingerprint = COALESCE(fingerprint, 'legacy:' || id)
 WHERE fingerprint IS NULL;
