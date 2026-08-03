@@ -41,6 +41,8 @@ function isBotAuthorized(env: Env, headerSecret: string | undefined): boolean {
 }
 
 const MAX_ERROR_MESSAGE_LENGTH = 4096;
+const MAX_ERROR_TYPE_LENGTH = 128;
+const MAX_STACK_TRACE_LENGTH = 8192;
 
 const VALID_INSTALL_EVENTS = new Set(["install", "setup", "dev_start", "register"]);
 const AUDIT_ACTIONS = new Set(["register", "telegram_link", "wallet_sync"]);
@@ -167,6 +169,12 @@ function normalizeErrorReport(
         new TelemetryValidationError(`message exceeds ${MAX_ERROR_MESSAGE_LENGTH} characters`),
       );
     }
+    if (errorType.length > MAX_ERROR_TYPE_LENGTH) {
+      return yield* Effect.fail(
+        new TelemetryValidationError(`error type exceeds ${MAX_ERROR_TYPE_LENGTH} characters`),
+      );
+    }
+    const rawStack = report.stackTrace ?? report.stack ?? null;
     const fingerprint = yield* hashKey(`${errorType}:${report.message.trim().toLowerCase()}`).pipe(
       Effect.mapError(() => new Error("Unable to fingerprint error report")),
     );
@@ -176,7 +184,7 @@ function normalizeErrorReport(
       errorType,
       message: report.message,
       prismVersion,
-      stackTrace: report.stackTrace ?? report.stack ?? null,
+      stackTrace: rawStack === null ? null : rawStack.slice(0, MAX_STACK_TRACE_LENGTH),
       platform: report.platform ?? null,
       severity: report.severity ?? "error",
       isRecoverable: report.isRecoverable ? 1 : 0,
@@ -191,33 +199,33 @@ function archiveErrorReports(
   reports: ReadonlyArray<NormalizedErrorReport>,
 ): Effect.Effect<number, never> {
   if (!archive) return Effect.succeed(0);
-  const uniqueReports = [...new Map(reports.map((report) => [report.fingerprint, report])).values()];
-  return Effect.gen(function* () {
-    let archived = 0;
-    for (const report of uniqueReports) {
-      const key = `telemetry/errors/${userId}/${report.fingerprint}.json`;
-      const result = yield* Effect.tryPromise({
-        try: () =>
-          archive.put(
-            key,
-            JSON.stringify({ ...report, archivedAt: new Date().toISOString() }),
-            { httpMetadata: { contentType: "application/json" } },
-          ),
-        catch: (cause) => cause,
-      }).pipe(
-        Effect.map(() => 1),
-        Effect.catchAll((cause) => {
-          console.error("[Telemetry] Failed to archive error summary", {
-            key,
-            error: causeMessage(cause),
-          });
-          return Effect.succeed(0);
+  const uniqueReports = [
+    ...new Map(reports.map((report) => [report.fingerprint, report])).values(),
+  ];
+  return Effect.forEach(uniqueReports, (report) => {
+    const key = `telemetry/errors/${userId}/${report.fingerprint}.json`;
+    return Effect.tryPromise({
+      try: () =>
+        archive.put(key, JSON.stringify({ ...report, archivedAt: new Date().toISOString() }), {
+          httpMetadata: { contentType: "application/json" },
         }),
-      );
-      archived += result;
-    }
-    return archived;
-  });
+      catch: (cause) => cause,
+    }).pipe(
+      Effect.map(() => 1),
+      Effect.catchAll((cause) => {
+        console.error("[Telemetry] Failed to archive error summary", {
+          key,
+          error: causeMessage(cause),
+        });
+        return Effect.succeed(0);
+      }),
+      Effect.timeout("5 seconds"),
+      Effect.catchAll(() => Effect.succeed(0)),
+    );
+  }).pipe(
+    Effect.map((results) => results.reduce((sum, count) => sum + count, 0)),
+    Effect.catchAll(() => Effect.succeed(0)),
+  );
 }
 
 function upsertErrorReports(
@@ -229,72 +237,94 @@ function upsertErrorReports(
   { readonly inserted: number; readonly duplicates: number; readonly archived: number },
   unknown
 > {
+  const STATEMENTS_PER_REPORT = 3;
+  // Receipts exist only to deduplicate the client retry window; older rows can
+  // never be re-sent by a retrying client, so prune them opportunistically on
+  // every report write to keep the table bounded (the received_at index exists
+  // for exactly this cleanup).
+  const RECEIPT_RETENTION_DAYS = 7;
   return Effect.gen(function* () {
-    const statements = reports.flatMap((report) => [
+    const statements: D1PreparedStatement[] = [
       db
         .prepare(
-          `INSERT OR IGNORE INTO error_report_receipts (user_id, report_id)
-           VALUES (?, ?)`,
+          `DELETE FROM error_report_receipts
+           WHERE received_at < datetime('now', ?)`,
         )
-        .bind(userId, report.id),
-      db
-        .prepare(
-          `INSERT INTO error_logs
-            (id, user_id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable, fingerprint, first_seen_at, last_seen_at, occurrence_count, last_report_id)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, ?
-           WHERE EXISTS (
-             SELECT 1 FROM error_report_receipts
-             WHERE user_id = ? AND report_id = ? AND summary_applied = 0
-           )
-           ON CONFLICT(user_id, fingerprint) DO UPDATE SET
-             agent_id = excluded.agent_id,
-             error_type = excluded.error_type,
-             message = excluded.message,
-             stack_trace = excluded.stack_trace,
-             prism_version = excluded.prism_version,
-             platform = excluded.platform,
-             severity = excluded.severity,
-             is_recoverable = excluded.is_recoverable,
-             last_seen_at = CURRENT_TIMESTAMP,
-             occurrence_count = error_logs.occurrence_count + 1,
-             last_report_id = excluded.last_report_id
-           WHERE EXISTS (
-             SELECT 1 FROM error_report_receipts
-             WHERE user_id = ? AND report_id = ? AND summary_applied = 0
-           )`,
-        )
-        .bind(
-          report.id,
-          userId,
-          report.agentId,
-          report.errorType,
-          report.message,
-          report.stackTrace,
-          report.prismVersion,
-          report.platform,
-          report.severity,
-          report.isRecoverable,
-          report.fingerprint,
-          report.id,
-          userId,
-          report.id,
-          userId,
-          report.id,
-        ),
-      db
-        .prepare(
-          `UPDATE error_report_receipts
-           SET summary_applied = 1
-           WHERE user_id = ? AND report_id = ? AND summary_applied = 0`,
-        )
-        .bind(userId, report.id),
-    ]);
+        .bind(`-${RECEIPT_RETENTION_DAYS} days`),
+    ];
+    for (const report of reports) {
+      // Server-derived row id scoped to the user so a client-supplied report id
+      // can never collide across users on the error_logs primary key. The
+      // client report id is preserved in last_report_id and the receipts row.
+      const rowId = `${userId.slice(0, 16)}-${report.fingerprint.slice(0, 32)}`;
+      statements.push(
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO error_report_receipts (user_id, report_id)
+             VALUES (?, ?)`,
+          )
+          .bind(userId, report.id),
+        db
+          .prepare(
+            `INSERT INTO error_logs
+              (id, user_id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable, fingerprint, first_seen_at, last_seen_at, occurrence_count, last_report_id)
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, ?
+             WHERE EXISTS (
+               SELECT 1 FROM error_report_receipts
+               WHERE user_id = ? AND report_id = ? AND summary_applied = 0
+             )
+             ORDER BY true
+             ON CONFLICT(user_id, fingerprint) DO UPDATE SET
+               agent_id = excluded.agent_id,
+               error_type = excluded.error_type,
+               message = excluded.message,
+               stack_trace = excluded.stack_trace,
+               prism_version = excluded.prism_version,
+               platform = excluded.platform,
+               severity = excluded.severity,
+               is_recoverable = excluded.is_recoverable,
+               last_seen_at = CURRENT_TIMESTAMP,
+               occurrence_count = error_logs.occurrence_count + 1,
+               last_report_id = excluded.last_report_id
+             WHERE EXISTS (
+               SELECT 1 FROM error_report_receipts
+               WHERE user_id = ? AND report_id = ? AND summary_applied = 0
+             )`,
+          )
+          .bind(
+            rowId,
+            userId,
+            report.agentId,
+            report.errorType,
+            report.message,
+            report.stackTrace,
+            report.prismVersion,
+            report.platform,
+            report.severity,
+            report.isRecoverable,
+            report.fingerprint,
+            report.id,
+            userId,
+            report.id,
+            userId,
+            report.id,
+          ),
+        db
+          .prepare(
+            `UPDATE error_report_receipts
+             SET summary_applied = 1
+             WHERE user_id = ? AND report_id = ? AND summary_applied = 0`,
+          )
+          .bind(userId, report.id),
+      );
+    }
     const results = yield* Effect.tryPromise(() => db.batch(statements));
-    const inserted = reports.reduce((count, _report, index) => {
-      const changes = results[index * 3]?.meta.changes;
-      return count + (typeof changes === "number" && changes > 0 ? 1 : 0);
-    }, 0);
-    const archived = yield* archiveErrorReports(archive, userId, reports);
+    const appliedReports = reports.filter((_report, index) => {
+      const changes = results[1 + index * STATEMENTS_PER_REPORT]?.meta.changes;
+      return typeof changes === "number" && changes > 0;
+    });
+    const inserted = appliedReports.length;
+    const archived = yield* archiveErrorReports(archive, userId, appliedReports);
     return { inserted, duplicates: reports.length - inserted, archived };
   });
 }
@@ -505,9 +535,7 @@ const linkTelegramStartHandler = (db: D1Database, userId: string) =>
           )
           .bind(userId),
         db
-          .prepare(
-            "INSERT INTO telegram_link_codes (code, user_id, expires_at) VALUES (?, ?, ?)",
-          )
+          .prepare("INSERT INTO telegram_link_codes (code, user_id, expires_at) VALUES (?, ?, ?)")
           .bind(code, userId, expiresAtEpoch),
       ]),
     );
@@ -583,9 +611,9 @@ const agentStatusHandler = (db: D1Database, cache: KVNamespace, telegramId: stri
     }
 
     // Try KV first for the latest engine heartbeat.
-    const cached = yield* Effect.tryPromise(() =>
-      cache.get(`agent_status:${userId}`),
-    ).pipe(Effect.catchAll(() => Effect.succeed(null)));
+    const cached = yield* Effect.tryPromise(() => cache.get(`agent_status:${userId}`)).pipe(
+      Effect.catchAll(() => Effect.succeed(null)),
+    );
 
     if (cached) {
       try {
@@ -844,10 +872,7 @@ app.post("/v1/link-telegram/confirm", async (c) => {
            SET used_at = CURRENT_TIMESTAMP
            WHERE code = ? AND used_at IS NULL`,
         ).bind(body.code),
-        DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?").bind(
-          body.telegram_id,
-          userId,
-        ),
+        DB.prepare("UPDATE users SET telegram_id = ? WHERE id = ?").bind(body.telegram_id, userId),
       ]),
     );
     const [claimResult, linkResult] = linkBatch;
@@ -1002,7 +1027,11 @@ app.post("/v1/agent-status/report", async (c) => {
   if (body.status !== "running" && body.status !== "stopped") {
     return c.json({ error: "status must be 'running' or 'stopped'" }, 400);
   }
-  if (typeof body.positions !== "number" || !Number.isFinite(body.positions) || body.positions < 0) {
+  if (
+    typeof body.positions !== "number" ||
+    !Number.isFinite(body.positions) ||
+    body.positions < 0
+  ) {
     return c.json({ error: "positions must be a non-negative number" }, 400);
   }
   const positions = Math.floor(body.positions);
@@ -1014,9 +1043,7 @@ app.post("/v1/agent-status/report", async (c) => {
   return Effect.runPromise(
     Effect.gen(function* () {
       const handler = yield* agentStatusReportHandler(DB, CACHE, apiKey).pipe(
-        Effect.catchAll(() =>
-          Effect.fail(new Error("Authentication failed")),
-        ),
+        Effect.catchAll(() => Effect.fail(new Error("Authentication failed"))),
       );
       yield* handler.storeStatus(body.status!, positions, pnl);
       return c.json({ ok: true });
@@ -1394,7 +1421,7 @@ app.post("/v1/errors/report", async (c) => {
   const report = normalizeErrorReport(body).pipe(
     Effect.flatMap((normalized) =>
       upsertErrorReports(DB, c.env.TELEMETRY_ARCHIVE, user.id, [normalized]).pipe(
-        Effect.map(() => c.json({ id: normalized.id, archived: c.env.TELEMETRY_ARCHIVE !== undefined })),
+        Effect.map((result) => c.json({ id: normalized.id, archived: result.archived > 0 })),
       ),
     ),
   );
@@ -1463,17 +1490,27 @@ app.post("/v1/errors/batch", async (c) => {
 
   const batch = Effect.gen(function* () {
     const validReports: NormalizedErrorReport[] = [];
+    const rejected: Array<{ id: string; error: string }> = [];
     for (const report of reports) {
-      const normalized = yield* normalizeErrorReport(report, body.version).pipe(
-        Effect.mapError(
-          (error) =>
-            new TelemetryValidationError(`${error.message} (${report.id ?? "missing id"})`),
+      const outcome = yield* Effect.either(
+        normalizeErrorReport(report, body.version).pipe(
+          Effect.mapError(
+            (error) =>
+              new TelemetryValidationError(`${error.message} (${report.id ?? "missing id"})`),
+          ),
         ),
       );
-      validReports.push(normalized);
+      if (outcome._tag === "Left") {
+        rejected.push({ id: report.id ?? "missing id", error: outcome.left.message });
+        continue;
+      }
+      validReports.push(outcome.right);
+    }
+    if (validReports.length === 0 && rejected.length > 0) {
+      return c.json({ error: "No valid reports", rejected }, 400);
     }
     const result = yield* upsertErrorReports(DB, c.env.TELEMETRY_ARCHIVE, user.id, validReports);
-    return c.json(result);
+    return c.json({ ...result, rejected });
   });
 
   return Effect.runPromise(
@@ -1504,10 +1541,10 @@ app.get("/v1/errors/stats", async (c) => {
 
   const stats = Effect.tryPromise(() =>
     DB.prepare(
-       `SELECT error_type, SUM(occurrence_count) as count, COUNT(*) as signatures,
+      `SELECT error_type, SUM(occurrence_count) as count, COUNT(*) as signatures,
                MIN(first_seen_at) as first_seen_at, MAX(last_seen_at) as last_seen_at
         FROM error_logs
-        WHERE COALESCE(last_seen_at, created_at) >= datetime('now', '-1 day')
+        WHERE first_seen_at >= datetime('now', '-1 day')
         GROUP BY error_type
        ORDER BY count DESC`,
     ).all(),
@@ -1815,9 +1852,9 @@ app.post("/v1/installs/ping", async (c) => {
          (install_id, event, version, channel, platform, user_id, first_seen_at, last_seen_at, occurrence_count)
        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
        ON CONFLICT(install_id, event) DO UPDATE SET
-         version = excluded.version,
-         channel = excluded.channel,
-         platform = excluded.platform,
+         version = COALESCE(excluded.version, install_event_summary.version),
+         channel = COALESCE(excluded.channel, install_event_summary.channel),
+         platform = COALESCE(excluded.platform, install_event_summary.platform),
          user_id = COALESCE(excluded.user_id, install_event_summary.user_id),
          last_seen_at = CURRENT_TIMESTAMP,
          occurrence_count = install_event_summary.occurrence_count + 1`,

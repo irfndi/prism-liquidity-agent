@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { env, createExecutionContext } from "cloudflare:test";
 import worker, { type Env } from "./index";
+import { applyMigration } from "./migration-helper";
 
 const testEnv = env as unknown as Env;
 let apiKey = "";
@@ -47,20 +48,7 @@ describe("Install Telemetry API", () => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
     ).run();
-    await env.DB.prepare(
-      `CREATE TABLE IF NOT EXISTS install_event_summary (
-        install_id TEXT NOT NULL,
-        event TEXT NOT NULL,
-        version TEXT,
-        channel TEXT,
-        platform TEXT,
-        user_id TEXT,
-        first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        occurrence_count INTEGER NOT NULL DEFAULT 1,
-        PRIMARY KEY (install_id, event)
-      )`,
-    ).run();
+    await applyMigration(env.DB, "0015_telemetry_summaries.sql");
     await env.DB.prepare("DELETE FROM api_keys").run();
     await env.DB.prepare("DELETE FROM users").run();
     await env.CACHE.delete("rate_limit:register:unknown");
@@ -211,14 +199,52 @@ describe("Install Telemetry API", () => {
         channel: "stable",
         platform: "linux",
       };
-      await worker.fetch(buildRequest("POST", "/v1/installs/ping", payload), testEnv, createExecutionContext());
-      await worker.fetch(buildRequest("POST", "/v1/installs/ping", payload), testEnv, createExecutionContext());
+      await worker.fetch(
+        buildRequest("POST", "/v1/installs/ping", payload),
+        testEnv,
+        createExecutionContext(),
+      );
+      await worker.fetch(
+        buildRequest("POST", "/v1/installs/ping", payload),
+        testEnv,
+        createExecutionContext(),
+      );
       const row = await env.DB.prepare(
-        "SELECT occurrence_count FROM install_event_summary WHERE install_id = ? AND event = ?",
+        "SELECT occurrence_count, COUNT(*) as rows FROM install_event_summary WHERE install_id = ? AND event = ?",
       )
         .bind(payload.installId, payload.event)
-        .first<{ occurrence_count: number }>();
+        .first<{ occurrence_count: number; rows: number }>();
       expect(row?.occurrence_count).toBe(2);
+      expect(row?.rows).toBe(1);
+    });
+
+    it("keeps known metadata when a later ping omits it", async () => {
+      const installId = "summary-partial-install-aaaa";
+      const full = {
+        installId,
+        event: "dev_start",
+        version: "0.0.3",
+        channel: "stable",
+        platform: "linux",
+      };
+      await worker.fetch(
+        buildRequest("POST", "/v1/installs/ping", full),
+        testEnv,
+        createExecutionContext(),
+      );
+      await worker.fetch(
+        buildRequest("POST", "/v1/installs/ping", { installId, event: "dev_start" }),
+        testEnv,
+        createExecutionContext(),
+      );
+      const row = await env.DB.prepare(
+        "SELECT version, channel, platform FROM install_event_summary WHERE install_id = ? AND event = ?",
+      )
+        .bind(installId, "dev_start")
+        .first<{ version: string | null; channel: string | null; platform: string | null }>();
+      expect(row?.version).toBe("0.0.3");
+      expect(row?.channel).toBe("stable");
+      expect(row?.platform).toBe("linux");
     });
   });
 });

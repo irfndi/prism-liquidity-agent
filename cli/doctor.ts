@@ -324,11 +324,22 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
   checks.push(await checkRegistration());
   const telemetryEnabled =
     process.env.PRISM_ERROR_REPORTING !== "false" && readTelemetryPreference().enabled;
-  checks.push(
-    telemetryEnabled
-      ? check("error telemetry", "pass", "Enabled by default for registered agents")
-      : check("error telemetry", "warn", "Disabled by explicit local or environment opt-out"),
-  );
+  const telemetryRegistered = readCredentials() !== null;
+  if (!telemetryEnabled) {
+    checks.push(
+      check("error telemetry", "warn", "Disabled by explicit local or environment opt-out"),
+    );
+  } else if (!telemetryRegistered) {
+    checks.push(
+      check(
+        "error telemetry",
+        "warn",
+        "Enabled but not registered — error reports are queued until an API key is available",
+      ),
+    );
+  } else {
+    checks.push(check("error telemetry", "pass", "Enabled by default for registered agents"));
+  }
 
   return {
     ok: checks.every((item) => item.status !== "fail"),

@@ -274,14 +274,17 @@ export class ErrorReporter {
         version: this.appVersion,
         reports: batch,
       };
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (apiKey) {
+        headers.Authorization = `Bearer ${apiKey}`;
+      }
       const response = yield* Effect.tryPromise({
         try: () =>
           fetch(endpoint, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${apiKey}`,
-            },
+            headers,
             body: JSON.stringify(payload),
             signal: AbortSignal.timeout(timeoutMs),
           }),

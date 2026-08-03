@@ -7,7 +7,8 @@
     "types": [
       "@cloudflare/workers-types",
       "@cloudflare/vitest-pool-workers/types",
-      "vitest/globals"
+      "vitest/globals",
+      "node"
     ],
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,

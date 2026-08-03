@@ -7,7 +7,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
 import { getPrismUserConfigDir } from "./paths.js";
 
 const TELEMETRY_PREFERENCE_FILE = "telemetry-preference.json";
@@ -43,9 +43,12 @@ export function readTelemetryPreference(): TelemetryPreference {
   }
 }
 
-export function writeTelemetryPreference(enabled: boolean): void {
+export function writeTelemetryPreference(enabled: boolean): {
+  readonly ok: boolean;
+  readonly error?: string;
+} {
   const path = getTelemetryPreferencePath();
-  const dir = join(path, "..");
+  const dir = dirname(path);
   try {
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -55,8 +58,10 @@ export function writeTelemetryPreference(enabled: boolean): void {
       updatedAt: new Date().toISOString(),
     };
     writeFileSync(path, JSON.stringify(data, null, 2), { mode: 0o600 });
+    return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`[telemetry] Failed to write preference file: ${message}`);
+    return { ok: false, error: message };
   }
 }

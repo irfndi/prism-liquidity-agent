@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { env, createExecutionContext } from "cloudflare:test";
 import worker, { type Env } from "./index";
+import { applyMigration } from "./migration-helper";
 
 const testEnv = env as unknown as Env;
 let apiKey = "";
+let userId = "";
 
 function buildRequest(method: string, path: string, body?: unknown, token?: string): Request {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -51,32 +53,7 @@ describe("Error Reporting API", () => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
     ).run();
-    await env.DB.prepare("ALTER TABLE error_logs ADD COLUMN user_id TEXT").run().catch((error) => {
-      if (!String(error).toLowerCase().includes("duplicate column")) throw error;
-    });
-    for (const statement of [
-      "ALTER TABLE error_logs ADD COLUMN fingerprint TEXT",
-      "ALTER TABLE error_logs ADD COLUMN first_seen_at DATETIME",
-      "ALTER TABLE error_logs ADD COLUMN last_seen_at DATETIME",
-      "ALTER TABLE error_logs ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 1",
-      "ALTER TABLE error_logs ADD COLUMN last_report_id TEXT",
-    ]) {
-      await env.DB.prepare(statement).run().catch((error) => {
-        if (!String(error).toLowerCase().includes("duplicate column")) throw error;
-      });
-    }
-    await env.DB.prepare(
-      "CREATE UNIQUE INDEX IF NOT EXISTS idx_error_logs_user_fingerprint ON error_logs(user_id, fingerprint)",
-    ).run();
-    await env.DB.prepare(
-      `CREATE TABLE IF NOT EXISTS error_report_receipts (
-        user_id TEXT NOT NULL,
-        report_id TEXT NOT NULL,
-        summary_applied INTEGER NOT NULL DEFAULT 0,
-        received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (user_id, report_id)
-      )`,
-    ).run();
+    await applyMigration(env.DB, "0015_telemetry_summaries.sql");
     await env.DB.prepare(
       `CREATE INDEX IF NOT EXISTS idx_error_logs_agent_created ON error_logs(agent_id, created_at)`,
     ).run();
@@ -88,8 +65,9 @@ describe("Error Reporting API", () => {
       testEnv,
       createExecutionContext(),
     );
-    const body = (await response.json()) as { api_key: string };
+    const body = (await response.json()) as { api_key: string; user_id: string };
     apiKey = body.api_key;
+    userId = body.user_id;
   });
 
   describe("POST /v1/errors/report", () => {
@@ -194,8 +172,9 @@ describe("Error Reporting API", () => {
       const req2 = buildRequest("POST", "/v1/errors/report", report);
       const res2 = await worker.fetch(req2, testEnv, ctx);
       expect(res2.status).toBe(200);
-      const body = (await res2.json()) as { id: string };
+      const body = (await res2.json()) as { id: string; archived: boolean };
       expect(body.id).toBe("dup-uuid");
+      expect(body.archived).toBe(false); // duplicate — nothing newly archived
     });
 
     it("increments one signature without counting the same report id twice", async () => {
@@ -206,8 +185,16 @@ describe("Error Reporting API", () => {
         message: "Vector dimension mismatch",
         prismVersion: "1.2.3",
       };
-      await worker.fetch(buildRequest("POST", "/v1/errors/report", report), testEnv, createExecutionContext());
-      await worker.fetch(buildRequest("POST", "/v1/errors/report", report), testEnv, createExecutionContext());
+      await worker.fetch(
+        buildRequest("POST", "/v1/errors/report", report),
+        testEnv,
+        createExecutionContext(),
+      );
+      await worker.fetch(
+        buildRequest("POST", "/v1/errors/report", report),
+        testEnv,
+        createExecutionContext(),
+      );
       await worker.fetch(
         buildRequest("POST", "/v1/errors/report", { ...report, id: "same-signature-2" }),
         testEnv,
@@ -216,7 +203,7 @@ describe("Error Reporting API", () => {
       const row = await env.DB.prepare(
         "SELECT occurrence_count FROM error_logs WHERE user_id = ? AND fingerprint IS NOT NULL",
       )
-        .bind((await env.DB.prepare("SELECT id FROM users LIMIT 1").first<{ id: string }>())?.id)
+        .bind(userId)
         .first<{ occurrence_count: number }>();
       expect(row?.occurrence_count).toBe(2);
     });
@@ -229,17 +216,25 @@ describe("Error Reporting API", () => {
         message: "Vector dimension mismatch",
         prismVersion: "1.2.3",
       };
-      await worker.fetch(buildRequest("POST", "/v1/errors/report", first), testEnv, createExecutionContext());
+      await worker.fetch(
+        buildRequest("POST", "/v1/errors/report", first),
+        testEnv,
+        createExecutionContext(),
+      );
       await worker.fetch(
         buildRequest("POST", "/v1/errors/report", { ...first, id: "ordered-signature-2" }),
         testEnv,
         createExecutionContext(),
       );
-      await worker.fetch(buildRequest("POST", "/v1/errors/report", first), testEnv, createExecutionContext());
+      await worker.fetch(
+        buildRequest("POST", "/v1/errors/report", first),
+        testEnv,
+        createExecutionContext(),
+      );
       const row = await env.DB.prepare(
         "SELECT occurrence_count FROM error_logs WHERE user_id = ? AND fingerprint IS NOT NULL",
       )
-        .bind((await env.DB.prepare("SELECT id FROM users LIMIT 1").first<{ id: string }>())?.id)
+        .bind(userId)
         .first<{ occurrence_count: number }>();
       expect(row?.occurrence_count).toBe(2);
     });
@@ -274,14 +269,23 @@ describe("Error Reporting API", () => {
         message: "Vector dimension mismatch",
         prismVersion: "1.2.3",
       };
-      await worker.fetch(buildRequest("POST", "/v1/errors/batch", { reports: [report] }), testEnv, createExecutionContext());
+      await worker.fetch(
+        buildRequest("POST", "/v1/errors/batch", { reports: [report] }),
+        testEnv,
+        createExecutionContext(),
+      );
       const response = await worker.fetch(
         buildRequest("POST", "/v1/errors/batch", { reports: [report] }),
         testEnv,
         createExecutionContext(),
       );
       expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toMatchObject({ inserted: 0, duplicates: 1 });
+      await expect(response.json()).resolves.toMatchObject({
+        inserted: 0,
+        duplicates: 1,
+        archived: 0,
+        rejected: [],
+      });
     });
 
     it("should return 400 when no reports provided", async () => {
@@ -305,11 +309,34 @@ describe("Error Reporting API", () => {
       expect(response.status).toBe(400);
     });
 
+    it("accepts valid reports and rejects invalid ones in a mixed batch", async () => {
+      const ctx = createExecutionContext();
+      const reports = [
+        {
+          id: "mixed-valid-1",
+          agentId: "hash",
+          errorType: "TypeA",
+          message: "ok",
+          prismVersion: "1.0",
+        },
+        { id: "mixed-invalid-1", agentId: "hash", errorType: "TypeB", prismVersion: "1.0" }, // missing message
+      ];
+      const request = buildRequest("POST", "/v1/errors/batch", { reports });
+      const response = await worker.fetch(request, testEnv, ctx);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        inserted: number;
+        rejected: Array<{ id: string; error: string }>;
+      };
+      expect(body.inserted).toBe(1);
+      expect(body.rejected).toHaveLength(1);
+      expect(body.rejected[0]?.id).toBe("mixed-invalid-1");
+    });
+
     it("should return 400 when a report in batch is missing required fields", async () => {
       const ctx = createExecutionContext();
       const reports = [
-        { id: "valid-1", agentId: "hash", errorType: "TypeA", message: "ok", prismVersion: "1.0" },
-        { id: "invalid-1", agentId: "hash", errorType: "TypeB", prismVersion: "1.0" }, // missing message
+        { id: "invalid-only-1", agentId: "hash", errorType: "TypeB", prismVersion: "1.0" }, // missing message
       ];
       const request = buildRequest("POST", "/v1/errors/batch", { reports });
       const response = await worker.fetch(request, testEnv, ctx);
@@ -323,8 +350,8 @@ describe("Error Reporting API", () => {
     beforeAll(async () => {
       // Seed some error data for stats
       const stmt = env.DB.prepare(
-        `INSERT INTO error_logs (user_id, id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO error_logs (user_id, id, agent_id, error_type, message, stack_trace, prism_version, platform, severity, is_recoverable, fingerprint, first_seen_at, last_seen_at, occurrence_count, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const now = new Date();
       const seeds = [
@@ -366,6 +393,10 @@ describe("Error Reporting API", () => {
             "linux",
             "error",
             0,
+            `legacy:${s.id}`,
+            s.createdAt,
+            s.createdAt,
+            1,
             s.createdAt,
           )
           .run();

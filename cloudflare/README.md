@@ -62,19 +62,21 @@ Infrastructure is declared in TypeScript in `cloudflare/infra/alchemy.run.ts` (A
 - Vectorize: https://alchemy.run/cloudflare/ai/vectorize
 - Secrets & env: https://alchemy.run/cloudflare/security/secrets-env
 
-### Resources (pre-existing, adopted by name)
+### Resources (adopted or created by the stack)
 
-The stack does NOT create new resources. On a first deploy (empty Alchemy state), every provider finds the live resource in the account by the exact physical name in `alchemy.run.ts` and adopts it. No data migration, no new IDs.
+The stack adopts pre-existing resources by their exact physical name on first deploy — no data migration, no new IDs — and creates any that do not exist yet.
 
 | Binding   | Resource | Physical name  | ID / config                                 |
 | --------- | -------- | -------------- | ------------------------------------------- |
 | `DB`      | D1       | `prism-db`     | `0657c2b3-fdea-4b33-b11b-8d0a7b27cbc8`      |
 | `CACHE`   | KV       | `prism-cache`  | `78d7fb5d3fab494dbc8f2940e524f22d`          |
 | `BACKUPS` | R2       | `prism-backups`|                                             |
-| `TELEMETRY_ARCHIVE` | R2 | `prism-telemetry` | Deduplicated error summaries |
+| `TELEMETRY_ARCHIVE` | R2 | `prism-telemetry` | Deduplicated error summaries — **created by the stack** if absent |
 | `MEMORY`  | Vectorize| `prism-memory` | 384 dimensions, cosine                      |
 
 Physical identity comes from these names, so the `prod` stage never renames anything; the stage only scopes the Alchemy state keyspace. Data resources adopt implicitly. The two WORKERS adopt explicitly: workers carry ownership tags, and these were created by wrangler (unowned), so the deploy scripts run with `--adopt` — a one-time takeover that tags them for this stack, and a no-op on every later deploy for resources the stack already owns.
+
+`prism-telemetry` is the one exception to "adopted by name": it did not exist before this stack, so the first deploy creates it. The `alchemy destroy` guardrail below applies to it — `prism-telemetry` holds deduplicated error summaries and must never be destroyed by an accidental `alchemy destroy`.
 
 ### Guardrails
 
