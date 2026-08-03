@@ -420,6 +420,50 @@ describe("program — idle-capital auto-redeploy gate", () => {
     expect(redeployExecuted[0]!.poolAddress).toBe(POOL);
   }, 15_000);
 
+  it("keeps idle redeploy from executing live in autonomous shadow mode (no-send)", async () => {
+    // A shadow-mode live setup (PAPER_TRADING=false, real wallet) must never
+    // fund or open a real position through the redeploy pass: the in-slot tail
+    // skips live execution in shadow mode, and the pass must apply the same
+    // contract BEFORE dispatching executeLive — which would otherwise send a
+    // real transaction (tagged as an autonomous operation) while the operator
+    // believes nothing sends.
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter(
+        { [POOL]: makePool({ address: POOL }) },
+        {
+          hasWallet: () => true,
+          getWalletAddress: () => "shadow-wallet",
+          getWalletHoldings: () =>
+            Effect.succeed(
+              new Map<string, { amountAtomic: bigint; decimals: number }>([
+                [USDC_MINT, { amountAtomic: 20_000_000_000n, decimals: 6 }], // $20k idle
+              ]),
+            ),
+        },
+      ),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        paperTrading: false,
+        autonomousTokenMode: "shadow",
+        watchlistPools: [POOL],
+        idleRedeployEnabled: true,
+        idleRedeployThresholdUsd: 500,
+        idleRedeployMaxSizeUsd: 2000,
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+      },
+    });
+    const { positions, decisions } = await runOneCycle(layer as never);
+
+    // No real position may open on ANY path in shadow mode; the redeploy pass
+    // records the shadow skip instead of sending.
+    expect(positions).toHaveLength(0);
+    const redeployDecisions = decisions.filter((d) => d.reasoning.includes("[idle-redeploy]"));
+    expect(redeployDecisions.length).toBeGreaterThanOrEqual(1);
+    expect(redeployDecisions.some((d) => d.reasoning.includes("shadow"))).toBe(true);
+    expect(redeployDecisions.every((d) => !d.executed)).toBe(true);
+  }, 15_000);
+
   it("skips when the post-cap widened size does not exceed the normal entry (P2 3654054429)", async () => {
     const layer = makeProgramLayer({
       adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),

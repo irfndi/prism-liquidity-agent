@@ -3355,6 +3355,23 @@ export const program = Effect.gen(function* () {
           );
           executed = paperResult.executed;
           executionError = paperResult.error;
+        } else if (config.autonomousTokenMode === "shadow") {
+          // Shadow mode is no-send for live execution. The in-slot tail skips
+          // every non-HOLD decision in shadow mode; the redeploy pass must apply
+          // the same contract BEFORE dispatching — otherwise a shadow-mode live
+          // setup (PAPER_TRADING=false) would fund and open a REAL position
+          // through executeLive while the operator believes nothing sends (and
+          // the autonomous context would even tag the tx as an autonomous
+          // operation). The redeploy has no HOLD execution path, so the
+          // shadow-skipped redeploy is a recorded skip, not a paper entry.
+          idleRedeployLogger.info("Shadow mode: idle redeploy skipped (no-send)", {
+            pool: candidate.poolAddress,
+          });
+          yield* recordRedeploySkip(
+            "[idle-redeploy] skipped — AUTONOMOUS_TOKEN_MODE=shadow blocks live execution (no-send)",
+            "[idle-redeploy] shadow mode is no-send for live entries",
+          );
+          continue;
         } else {
           // The live path runs the unchanged paper-validation gate first.
           const paperDays = yield* readPaperDays;

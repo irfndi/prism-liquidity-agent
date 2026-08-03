@@ -235,6 +235,75 @@ describe("settlement job processing", () => {
     expect(savedJobs).toEqual([processed]);
   });
 
+  it("retains the submitted signature instead of resubmitting when getSwapStatus transiently reports not_found", async () => {
+    // Given: a broadcast settlement whose signature is not yet visible to the
+    // RPC (e.g. recovered after a confirmation/RPC failure). Resubmitting the
+    // full amount would sell the same tokens twice if the first tx later lands.
+    const job = settlementJob({ status: "submitted", txSignature: "signature-1", attempts: 1 });
+    const savedJobs: SettlementJobRecord[] = [];
+    let quoteCalls = 0;
+    const adapter = {
+      getSwapStatus: () => Effect.succeed({ state: "not_found", error: null }),
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      quoteSwap: () =>
+        Effect.sync(() => {
+          quoteCalls++;
+          return swapQuote(job);
+        }),
+      prepareSwap: () => Effect.fail(new Error("must not be called")),
+      simulateSwap: () => Effect.fail(new Error("must not be called")),
+      submitSwap: () => Effect.fail(new Error("must not be called")),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
+
+    // Then: no re-quote/re-submit — the submitted state + signature are
+    // retained and the status is re-queried at the next retry.
+    expect(quoteCalls).toBe(0);
+    expect(processed).toMatchObject({
+      status: "submitted",
+      txSignature: "signature-1",
+      nextRetryAt: 12_000,
+    });
+    expect(savedJobs).toEqual([processed]);
+  });
+
+  it("terminalizes a not-found signature once the max-pending window is past", async () => {
+    // Given: the same transient not_found condition, but past the job's
+    // expiresAt — the transaction can no longer land, so the job stops
+    // retrying instead of rearming submission.
+    const job = settlementJob({
+      status: "submitted",
+      txSignature: "signature-1",
+      attempts: 1,
+      expiresAt: 9_999,
+    });
+    const savedJobs: SettlementJobRecord[] = [];
+    let quoteCalls = 0;
+    const adapter = {
+      getSwapStatus: () => Effect.succeed({ state: "not_found", error: null }),
+      quoteSwap: () =>
+        Effect.sync(() => {
+          quoteCalls++;
+          return swapQuote(job);
+        }),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
+
+    // Then
+    expect(quoteCalls).toBe(0);
+    expect(processed).toMatchObject({
+      status: "terminal",
+      nextRetryAt: null,
+      error: "Swap signature not found until expiry — requires operator reconciliation",
+    });
+    expect(savedJobs).toEqual([processed]);
+  });
+
   it("keeps the broadcast signature when the post-submit output delta is unavailable", async () => {
     // Given
     const job = settlementJob();

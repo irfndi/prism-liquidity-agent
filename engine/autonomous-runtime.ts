@@ -219,7 +219,7 @@ export function processSettlementJobs(
               new Error("Confirmed swap output evidence unavailable"),
             );
           }
-          if (status.state !== "failed" && status.state !== "not_found") {
+          if (status.state === "processed") {
             return {
               ...job,
               status: "submitted" as const,
@@ -227,6 +227,32 @@ export function processSettlementJobs(
               updatedAt: input.now,
             };
           }
+          if (status.state === "not_found") {
+            // A broadcast settlement recovered after a confirmation/RPC failure
+            // can transiently read `not_found` before the original signature
+            // becomes visible. Treating that like a definitive failure re-quotes
+            // and resubmits the FULL token amount — if the first transaction
+            // later lands (and the wallet has pre-existing balance), the tokens
+            // are sold twice. Retain the submitted state with the signature so
+            // the next retry re-queries the status instead of rearming
+            // submission. Once the job's max-pending window is definitively
+            // past, the transaction can no longer land: terminalize it like any
+            // other unrecoverable settlement so it stops retrying.
+            const attempts = job.attempts + 1;
+            const expired = input.now >= job.expiresAt;
+            return {
+              ...job,
+              status: expired ? ("terminal" as const) : ("submitted" as const),
+              attempts,
+              nextRetryAt: expired ? null : nextSettlementRetryAt(input.now, attempts),
+              error: expired
+                ? "Swap signature not found until expiry — requires operator reconciliation"
+                : job.error,
+              updatedAt: input.now,
+            };
+          }
+          // status.state === "failed": the transaction definitively failed on
+          // chain — fall through and submit a fresh swap.
         }
         if (job.status === "prepared" && job.txSignature === null) {
           return yield* Effect.fail(
