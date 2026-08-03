@@ -3526,6 +3526,7 @@ export const program = Effect.gen(function* () {
 
       console.info("Scan cycle started", { cycleId: cycle.cycleId });
 
+      let oldestSettlementAgeMs = 0;
       yield* refreshAutonomousCandidates(scanCount);
       if (autonomousExecution) {
         const settlementJobs = yield* db
@@ -3543,7 +3544,7 @@ export const program = Effect.gen(function* () {
           maxSwapSlippageBps: config.maxSwapSlippageBps,
           settlementDustUsd: autonomousExecution.settlementDustUsd,
         });
-        const oldestSettlementAgeMs = processedJobs
+        oldestSettlementAgeMs = processedJobs
           .filter((job) => job.status !== "confirmed")
           .reduce((oldest, job) => Math.max(oldest, Date.now() - job.createdAt), 0);
         if (
@@ -3709,7 +3710,7 @@ export const program = Effect.gen(function* () {
           consecutiveCoreDataFailures,
           consecutiveExecutionFailures,
           maxConsecutiveExecutionFailures: config.maxConsecutiveExecutionFailures,
-          oldestSettlementAgeMs: 0,
+          oldestSettlementAgeMs,
           settlementMaxPendingMs: config.settlementMaxPendingMs,
         });
         if (pauseReason) {
