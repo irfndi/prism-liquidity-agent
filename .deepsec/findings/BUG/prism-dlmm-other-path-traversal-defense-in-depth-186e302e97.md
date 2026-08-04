@@ -18,4 +18,5 @@ Add explicit path traversal protection flags: use 'tar --no-absolute-paths -xzf'
 
 ## Recent committers (`git log`)
 
-- Irfandi Marsya <join.mantap@gmail.com> (2026-07-18)
+- Irfandi Marsya <join.mantap@gmail.com> (2026-07-20)
+- irfandi marsya <irfandi@users.noreply.github.com> (2026-07-20)

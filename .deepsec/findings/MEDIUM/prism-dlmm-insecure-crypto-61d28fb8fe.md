@@ -18,4 +18,5 @@ Encrypt the secret key at rest using a user-provided passphrase (e.g., scrypt/ar
 
 ## Recent committers (`git log`)
 
-- irfandi marsya <join.mantap@gmail.com> (2026-06-10)
+- Irfandi Marsya <join.mantap@gmail.com> (2026-08-03)
+- irfandi marsya <irfandi@users.noreply.github.com> (2026-07-20)

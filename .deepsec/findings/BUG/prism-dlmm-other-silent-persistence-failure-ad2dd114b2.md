@@ -6,7 +6,7 @@
 
 ## Owners
 
-**Suggested assignee:** `irfandi@users.noreply.github.com` _(via last-committer)_
+**Suggested assignee:** `join.mantap@gmail.com` _(via last-committer)_
 
 ## Finding
 
@@ -18,5 +18,4 @@ At minimum log persistence failures (logger.warn with the positionId and error) 
 
 ## Recent committers (`git log`)
 
-- irfandi marsya <irfandi@users.noreply.github.com> (2026-07-20)
-- irfandi marsya <join.mantap@gmail.com> (2026-07-19)
+- irfndi <join.mantap@gmail.com> (2026-08-03)
