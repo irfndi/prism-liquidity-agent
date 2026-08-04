@@ -4,6 +4,7 @@ import worker, { type Env } from "./index";
 
 const testEnv = env as unknown as Env;
 let apiKey = "";
+let userId = "";
 
 function buildRequest(method: string, path: string, body?: unknown, token?: string): Request {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -26,6 +27,13 @@ describe("Feedback API", () => {
         tier TEXT NOT NULL DEFAULT 'free',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+    ).run();
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS rate_limits (
+        key TEXT PRIMARY KEY,
+        count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
       )`,
     ).run();
     await env.DB.prepare(
@@ -67,14 +75,16 @@ describe("Feedback API", () => {
     await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_feedback_hash ON feedback(hash)`).run();
     await env.DB.prepare("DELETE FROM api_keys").run();
     await env.DB.prepare("DELETE FROM users").run();
+    await env.DB.prepare("DELETE FROM rate_limits").run();
     await env.CACHE.delete("rate_limit:register:unknown");
     const response = await worker.fetch(
       buildRequest("POST", "/v1/register", {}),
       testEnv,
       createExecutionContext(),
     );
-    const body = (await response.json()) as { api_key: string };
+    const body = (await response.json()) as { api_key: string; user_id: string };
     apiKey = body.api_key;
+    userId = body.user_id;
   });
 
   beforeEach(async () => {
@@ -104,10 +114,12 @@ describe("Feedback API", () => {
       const response = await worker.fetch(request, testEnv, ctx);
       expect(response.status).toBe(200);
       const body = (await response.json()) as { id: string };
-      expect(body.id).toBe("fb-uuid-1");
+      // The returned id is namespaced with the authenticated user id so a
+      // client can never collide with (or overwrite) another user's row.
+      expect(body.id).toBe(`${userId}:fb-uuid-1`);
 
       const rows = await env.DB.prepare("SELECT summary FROM feedback WHERE id = ?")
-        .bind("fb-uuid-1")
+        .bind(body.id)
         .all();
       expect(rows.results).toHaveLength(1);
     });
@@ -199,7 +211,7 @@ describe("Feedback API", () => {
       );
       expect(second.status).toBe(200);
       const body = (await second.json()) as { id: string; duplicate: boolean };
-      expect(body.id).toBe("fb-dup");
+      expect(body.id).toBe(`${userId}:fb-dup`);
       expect(body.duplicate).toBe(true);
     });
   });

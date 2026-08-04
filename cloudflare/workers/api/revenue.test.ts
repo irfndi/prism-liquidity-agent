@@ -43,6 +43,13 @@ describe("Revenue Tracking API", () => {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
     ).run();
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS rate_limits (
+      key TEXT PRIMARY KEY,
+      count INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )`,
+  ).run();
     await env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS api_keys (
         key_hash TEXT PRIMARY KEY,

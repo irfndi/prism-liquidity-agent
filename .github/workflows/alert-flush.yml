@@ -29,11 +29,16 @@ jobs:
           BOT_API_SECRET: ${{ secrets.BOT_API_SECRET }}
         run: |
           set +e
-          body=$(curl -sS -f -X POST \
+          body=$(curl -sS --max-time 60 -X POST \
             https://prism-telegram-bot.irfndi.workers.dev/internal/flush-alerts \
-            -H "X-Bot-Api-Secret: $BOT_API_SECRET")
+            -H "X-Bot-Api-Secret: $BOT_API_SECRET" \
+            -w '\nHTTP_STATUS:%{http_code}')
           code=$?
-          echo "response body: $body"
+          # Sanitize '::'-prefixed lines: GitHub Actions parses them as workflow
+          # commands, and the response body embeds alert-derived (user-influenced)
+          # text, so a crafted value could inject log annotations.
+          clean=$(printf '%s\n' "$body" | sed 's/^::/:: /')
+          echo "response body: $clean"
           echo "curl exit code: $code"
           if [ "$code" -ne 0 ]; then
             echo "::error::alert flush failed (curl exit $code)"

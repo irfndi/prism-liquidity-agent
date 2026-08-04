@@ -55,6 +55,7 @@ describe("Telegram binding routes", () => {
     await env.DB.prepare("DELETE FROM audit_event_summary").run();
     await env.DB.prepare("DELETE FROM api_keys").run();
     await env.DB.prepare("DELETE FROM users").run();
+    await env.DB.prepare("DELETE FROM rate_limits").run();
     await env.CACHE.delete("rate_limit:register_telegram:unknown");
   });
 

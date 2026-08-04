@@ -5,6 +5,7 @@ import {
   isRpcNetworkError,
   retryWithBackoff,
   retryAfterMs,
+  safeErrorMessage,
   CircuitBreaker,
   CircuitBreakerOpenError,
 } from "../engine/adapter-retry.js";
@@ -467,5 +468,33 @@ describe("isRpcNetworkError", () => {
 
   it("returns false for undefined", () => {
     expect(isRpcNetworkError(undefined)).toBe(false);
+  });
+});
+
+describe("safeErrorMessage redaction", () => {
+  it("redacts the full Authorization header value including multi-word credentials", () => {
+    expect(safeErrorMessage(new Error("Authorization: Custom credential"))).toBe(
+      "Authorization: ***",
+    );
+  });
+
+  it("redacts Bearer, Basic, and token schemes", () => {
+    expect(safeErrorMessage(new Error("Authorization: Bearer abc123"))).toBe("Authorization: ***");
+    expect(safeErrorMessage(new Error("Authorization: Basic dXNlcjpwYXNz"))).toBe(
+      "Authorization: ***",
+    );
+  });
+
+  it("redacts query-string and structured credential keys", () => {
+    expect(safeErrorMessage(new Error("https://rpc.example.com?api-key=secret"))).toBe(
+      "https://rpc.example.com?api-key=***",
+    );
+    expect(safeErrorMessage(new Error('{"token":"secret"}'))).toBe('{"token":"***"}');
+  });
+
+  it("does not let a redacted Authorization leak the next line", () => {
+    expect(safeErrorMessage(new Error("Authorization: Custom credential\nnext line"))).toBe(
+      "Authorization: ***\nnext line",
+    );
   });
 });

@@ -118,11 +118,25 @@ export const CopySignalLive = Layer.effect(
       staleMs: config.copySignalsStaleMs ?? 900_000,
       maxBoost: config.copySignalsMaxBoost ?? MAX_BOOST,
     };
+    // Fetch the signal feed at most once per staleness window instead of once
+    // per pool per cycle; the raw feed is shared by every pool in the cycle.
+    let cachedFeed: { readonly fetchedAt: number; readonly raw: unknown } | null = null;
     const getBoost = (poolAddress: string, now: number): Effect.Effect<CopySignalResult, never> => {
       if (!settings.enabled || settings.endpoint.length === 0 || settings.wallets.length === 0) {
         return Effect.succeed({ boost: 0, wallets: [], ignored: 0 });
       }
-      return fetchSignals(settings).pipe(
+      const fetchFeed = (): Effect.Effect<unknown, unknown> =>
+        fetchSignals(settings).pipe(
+          Effect.map((raw) => {
+            cachedFeed = { fetchedAt: now, raw };
+            return raw;
+          }),
+        );
+      const feed =
+        cachedFeed !== null && now - cachedFeed.fetchedAt < settings.staleMs
+          ? Effect.succeed(cachedFeed.raw)
+          : fetchFeed();
+      return feed.pipe(
         Effect.map((raw) => {
           const allowed = new Set(settings.wallets);
           const seen = new Set<string>();

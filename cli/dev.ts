@@ -47,6 +47,10 @@ export const devCommand = new Command("dev")
         "⚠️  PAPER_MODE_EXIT_LIVE enabled — paper mode will execute live transactions for EXIT",
       );
       process.env.PAPER_MODE_EXIT_LIVE = "true";
+    } else {
+      // Do not let an ambient PAPER_MODE_EXIT_LIVE silently enable live on-chain
+      // EXITs in paper mode; the explicit --exit-live flag is the only opt-in.
+      delete process.env.PAPER_MODE_EXIT_LIVE;
     }
     process.env.PRISM_ALLOW_DIRECT = "true";
 

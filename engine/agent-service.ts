@@ -93,6 +93,7 @@ RULES (strict — you must follow them):
 - You may NEVER increase confidence.
 - You may NEVER promote a non-ENTER action to ENTER.
 - You may NEVER change HOLD/ENTER/REBALANCE into EXIT.
+- You may NEVER change EXIT into HOLD or any other action.
 - If the decision looks reasonable, return the same action and confidence.
 
 DECISION TO REVIEW:
@@ -230,6 +231,11 @@ export function validateOverride(
 
   let newAction = original.action;
   if (action) {
+    // A deterministic capital-protection EXIT must never be downgraded to a
+    // less-defensive action (mirrors the agent-proposal gate in risk-service).
+    if (original.action === "EXIT" && action !== "EXIT") {
+      return null;
+    }
     if (action === "HOLD") {
       newAction = "HOLD";
     } else if (action === original.action) {

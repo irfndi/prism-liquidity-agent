@@ -23,19 +23,19 @@
     "bun": ">=1.4.0-canary.1"
   },
   "scripts": {
-    "start": "bun dist/index.mjs",
-    "dev": "bun run --watch engine/index.ts",
-    "build": "bunx --bun tsdown",
+    "start": "bun cli/index.ts dev",
+    "dev": "bun run --watch cli/index.ts dev",
+    "build": "bun tsdown",
     "setup": "bun cli/index.ts setup",
     "setup:env": "bun run scripts/postinstall.js",
-    "postinstall": "bun run scripts/postinstall.js || true",
+    "postinstall": "bun run scripts/postinstall.js",
     "backtest": "bun cli/index.ts backtest",
-    "test": "bunx --bun vitest run",
-    "test:watch": "bunx --bun vitest",
-    "lint": "tsc --noEmit && oxlint engine ops bench cli",
-    "format": "oxfmt --write engine ops bench cli",
-    "format:check": "oxfmt --check engine ops bench cli",
-    "coverage": "bunx --bun vitest run --coverage"
+    "test": "bun --bun vitest run",
+    "test:watch": "bun --bun vitest",
+    "lint": "tsc --noEmit && oxlint engine ops bench cli scripts",
+    "format": "oxfmt --write engine ops bench cli scripts",
+    "format:check": "oxfmt --check engine ops bench cli scripts",
+    "coverage": "bun --bun vitest run --coverage"
   },
   "dependencies": {
     "@clack/prompts": "^1.7.0",

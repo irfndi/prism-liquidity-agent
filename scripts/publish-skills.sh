@@ -4,7 +4,25 @@
 
 set -euo pipefail
 
-DRY_RUN="${1:-}"
+# Reject any invocation with more than one positional argument so an extra
+# argument can never silently switch the run from dry-run to real publishing.
+if [ "$#" -gt 1 ]; then
+  echo "ERROR: unexpected extra arguments" >&2
+  echo "Usage: ./scripts/publish-skills.sh [--dry-run]" >&2
+  exit 2
+fi
+
+# Validate the single positional argument: only an empty value or --dry-run is
+# accepted. Anything else is a usage error — a typo must never silently switch
+# the run from dry-run to real publishing.
+case "${1:-}" in
+  "" | "--dry-run") DRY_RUN="${1:-}" ;;
+  *)
+    echo "ERROR: unknown argument '$1' (expected nothing or --dry-run)" >&2
+    echo "Usage: ./scripts/publish-skills.sh [--dry-run]" >&2
+    exit 2
+    ;;
+esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -61,17 +79,26 @@ publish_python_pkg() {
   log_info "Publishing $pkg_name to PyPI..."
   cd "$pkg_dir"
 
-  if [ ! -d "dist" ]; then
+  if [ ! -d "dist" ] || [ -z "$(ls -A dist 2>/dev/null)" ]; then
     log_warn "$pkg_name not built. Running python3 -m build..."
     if [ "$DRY_RUN" != "--dry-run" ]; then
       python3 -m build
     fi
   fi
 
+  # Fail fast on an empty dist instead of passing a literal glob to twine.
+  shopt -s nullglob
+  local dist_files=(dist/*)
+  shopt -u nullglob
+  if [ "${#dist_files[@]}" -eq 0 ]; then
+    log_error "$pkg_name dist is empty after build; aborting."
+    exit 1
+  fi
+
   if [ "$DRY_RUN" = "--dry-run" ]; then
-    log_info "$(dry_run_prefix)python3 -m twine upload dist/*"
+    log_info "$(dry_run_prefix)python3 -m twine upload ${dist_files[*]}"
   else
-      python3 -m twine upload dist/*
+    python3 -m twine upload "${dist_files[@]}"
   fi
 
   log_info "$pkg_name published."
@@ -99,6 +126,17 @@ main() {
 
   if ! command -v python3 &>/dev/null; then
     log_error "python3 is required but not installed."
+    exit 1
+  fi
+
+  # Preflight the Python build/publish toolchain before any publish runs so a
+  # mid-run failure does not leave a partial release.
+  if ! python3 -m build --version &>/dev/null; then
+    log_error "python3 -m build is required but not available (pip install build)."
+    exit 1
+  fi
+  if ! python3 -m twine --version &>/dev/null; then
+    log_error "python3 -m twine is required but not available (pip install twine)."
     exit 1
   fi
 

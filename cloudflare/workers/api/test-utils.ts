@@ -60,9 +60,17 @@ export async function setupCommonSchema(db: D1Database): Promise<void> {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`,
   ).run();
+  await db.prepare(
+    `CREATE TABLE IF NOT EXISTS rate_limits (
+      key TEXT PRIMARY KEY,
+      count INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )`,
+  ).run();
   await db.prepare("DELETE FROM subscriptions").run();
   await db.prepare("DELETE FROM api_keys").run();
   await db.prepare("DELETE FROM users").run();
+  await db.prepare("DELETE FROM rate_limits").run();
 }
 
 /**

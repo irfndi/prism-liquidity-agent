@@ -247,16 +247,16 @@ function handleRegister(
         botToken,
         chatId,
         `Registration successful!\n\n` +
-          `User ID: <code>${data.user_id}</code>\n` +
-          `API Key: <code>${data.api_key}</code>\n\n` +
+          `User ID: <code>${escapeHtml(data.user_id)}</code>\n` +
+          `API Key: <code>${escapeHtml(data.api_key)}</code>\n\n` +
           `Save your API key securely. Use it with:\n` +
-          `<code>prism login ${data.api_key.slice(0, 8)}...</code>`,
+          `<code>prism login ${escapeHtml(data.api_key.slice(0, 8))}...</code>`,
       );
     } else {
       yield* sendMessage(
         botToken,
         chatId,
-        `Registration failed: ${result.error ?? "Unknown error"}`,
+        `Registration failed: ${escapeHtml(result.error ?? "Unknown error")}`,
       );
     }
   });
@@ -303,7 +303,9 @@ function handleWhoami(
       yield* sendMessage(
         botToken,
         chatId,
-        `Account Info:\n\n` + `User ID: <code>${data.user_id}</code>\n` + `Tier: ${data.tier}`,
+        `Account Info:\n\n` +
+          `User ID: <code>${escapeHtml(data.user_id)}</code>\n` +
+          `Tier: ${escapeHtml(data.tier)}`,
       );
     } else {
       yield* sendMessage(botToken, chatId, `Not registered. Use /register to create an account.`);
@@ -336,9 +338,9 @@ function handleStatus(
         botToken,
         chatId,
         `Agent Status:\n\n` +
-          `Status: ${data.status}\n` +
+          `Status: ${escapeHtml(data.status)}\n` +
           `Active Positions: ${data.positions}\n` +
-          `P&L: $${data.pnl.toFixed(2)}`,
+          `P&L: $${escapeHtml(data.pnl.toFixed(2))}`,
       );
     } else {
       yield* sendMessage(botToken, chatId, `Agent not running or not linked.`);
@@ -387,7 +389,7 @@ function handleAlerts(
       yield* sendMessage(
         botToken,
         chatId,
-        `Could not update alert preferences: ${result.error ?? "unknown error"}. ` +
+        `Could not update alert preferences: ${escapeHtml(result.error ?? "unknown error")}. ` +
           `Make sure your account is linked with /link.`,
       );
     }
@@ -517,7 +519,7 @@ function processUpdate(
         yield* sendMessage(
           env.TELEGRAM_BOT_TOKEN,
           chatId,
-          `Link failed: ${result.error ?? "Invalid or expired code"}`,
+          `Link failed: ${escapeHtml(result.error ?? "Invalid or expired code")}`,
         );
       }
     }
@@ -694,6 +696,11 @@ app.post("/internal/deliver-alert", async (c) => {
 
 const FLUSH_BATCH_LIMIT = 10;
 const FLUSH_ABANDON_ATTEMPTS = 5;
+// A claim older than this (ms) is considered interrupted (the flush that made
+// it crashed) and is reclaimed as pending on the next flush. Flushes run on a
+// 5-minute cron and a single flush takes seconds, so 5 minutes is a wide,
+// safe window: it never reclaims a genuinely in-flight claim.
+const CLAIM_RECLAIM_MS = 5 * 60 * 1000;
 
 app.post("/internal/flush-alerts", async (c) => {
   const botSecret = c.env.BOT_API_SECRET;
@@ -704,19 +711,61 @@ app.post("/internal/flush-alerts", async (c) => {
 
   const result = await Effect.runPromise(
     Effect.gen(function* () {
+      // Reclaim stale claims first: a flush that crashed after its claim
+      // UPDATE would otherwise leave rows stuck at delivered_at = 'claim:...'
+      // forever (later flushes only select delivered_at IS NULL). The claim
+      // token embeds the claim time, so any claim older than the reclaim
+      // window is treated as interrupted and pushed back to pending with an
+      // extra delivery_attempt (so repeated claim-crash cycles eventually hit
+      // the abandoned threshold).
+      yield* Effect.tryPromise(() =>
+        c.env.DB.prepare(
+          `UPDATE alerts
+           SET delivered_at = NULL, delivery_attempts = delivery_attempts + 1
+           WHERE delivered_at LIKE 'claim:%'
+             AND CAST(substr(delivered_at, 7) AS INTEGER) < ?`,
+        )
+          .bind(Date.now() - CLAIM_RECLAIM_MS)
+          .all(),
+      );
+
+      // Atomic claim: a single UPDATE marks the batch as claimed by storing a
+      // unique claim token in delivered_at, so two concurrent flushes cannot
+      // both select (and therefore both deliver) the same rows. The pending
+      // and abandoned queries both filter on delivered_at IS NULL, so in-flight
+      // claims are invisible to every other flush. A row is released back to
+      // pending (delivered_at = NULL) on delivery failure.
+      const claimToken = `claim:${Date.now()}:${crypto.randomUUID()}`;
+      yield* Effect.tryPromise(() =>
+        c.env.DB.prepare(
+          `UPDATE alerts
+           SET delivered_at = ?
+           WHERE id IN (
+             SELECT a.id
+             FROM alerts a
+             JOIN users u ON a.user_id = u.id
+             WHERE a.delivered_at IS NULL
+               AND a.delivery_attempts < ?
+               AND u.telegram_id IS NOT NULL
+               AND u.alerts_enabled != 0
+             ORDER BY a.created_at ASC
+             LIMIT ?
+           )`,
+        )
+          .bind(claimToken, FLUSH_ABANDON_ATTEMPTS, FLUSH_BATCH_LIMIT)
+          .all(),
+      );
+
+      // Resolve the claimed rows' telegram targets. The claim token is unique
+      // to this flush, so only rows this flush owns are returned.
       const rows = yield* Effect.tryPromise(() =>
         c.env.DB.prepare(
           `SELECT a.id, a.type, a.severity, a.message, a.pool_address, u.telegram_id
            FROM alerts a
            JOIN users u ON a.user_id = u.id
-           WHERE a.delivered_at IS NULL
-             AND a.delivery_attempts < ?
-             AND u.telegram_id IS NOT NULL
-             AND u.alerts_enabled != 0
-           ORDER BY a.created_at ASC
-           LIMIT ?`,
+           WHERE a.delivered_at = ?`,
         )
-          .bind(FLUSH_ABANDON_ATTEMPTS, FLUSH_BATCH_LIMIT)
+          .bind(claimToken)
           .all(),
       );
 
@@ -754,9 +803,10 @@ app.post("/internal/flush-alerts", async (c) => {
             );
             return "delivered" as const;
           }
+          // Release the claim so the row is retried on a later flush.
           yield* Effect.tryPromise(() =>
             c.env.DB.prepare(
-              "UPDATE alerts SET delivery_attempts = delivery_attempts + 1 WHERE id = ?",
+              "UPDATE alerts SET delivered_at = NULL, delivery_attempts = delivery_attempts + 1 WHERE id = ?",
             )
               .bind(id)
               .run(),

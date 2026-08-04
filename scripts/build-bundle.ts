@@ -2,7 +2,7 @@
 import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -14,7 +14,12 @@ const arch = process.arch;
 
 const extensionSuffix = platform === "win32" ? "dll" : platform === "darwin" ? "dylib" : "so";
 const platformPackageName = `sqlite-vec-${platform === "win32" ? "windows" : platform}-${arch}`;
-const vec0Path = path.join(repoRoot, "node_modules", platformPackageName, `vec0.${extensionSuffix}`);
+const vec0Path = path.join(
+  repoRoot,
+  "node_modules",
+  platformPackageName,
+  `vec0.${extensionSuffix}`,
+);
 const platformKey = `${platform === "win32" ? "windows" : platform}-${arch}`;
 
 function run(cmd: string): void {
@@ -31,6 +36,17 @@ const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as { version: string }
 // In CI the git tag is the source of truth; package.json may be stale at the
 // tagged commit. Prefer VERSION env so bundles are named after the release.
 const version = process.env.VERSION ?? pkg.version;
+
+// VERSION is interpolated into the tarball filename and reused across the
+// release pipeline; reject anything that could inject shell commands or
+// escape the repo root (e.g. "/", "..", ";", "$(...)", backticks).
+if (!/^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(version)) {
+  console.error(`Invalid VERSION: ${version}`);
+  console.error(
+    "VERSION must start with a letter or digit and contain only letters, digits, '.', '_', '-' or '+'.",
+  );
+  process.exit(1);
+}
 
 // Generate embedded sqlite-vec fallback for the current platform.
 if (fs.existsSync(vec0Path)) {
@@ -62,10 +78,10 @@ if (fs.existsSync(vec0Path)) {
 const tarballName = `prism-v${version}-${platformKey}.tar.gz`;
 const tarballPath = path.join(repoRoot, tarballName);
 
-execSync(
-  `tar -czf ${tarballName} -C ${stageDir} dist lib`,
-  { cwd: repoRoot, stdio: "inherit" },
-);
+execFileSync("tar", ["-czf", tarballName, "-C", stageDir, "dist", "lib"], {
+  cwd: repoRoot,
+  stdio: "inherit",
+});
 
 fs.writeFileSync(`${tarballPath}.sha256`, `${sha256(tarballPath)}  ${tarballName}\n`);
 

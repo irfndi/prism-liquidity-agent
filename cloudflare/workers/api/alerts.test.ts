@@ -64,6 +64,13 @@ describe("Alerts API", () => {
       .run()
       .catch(() => {});
     await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS rate_limits (
+        key TEXT PRIMARY KEY,
+        count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )`,
+    ).run();
+    await env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS api_keys (
         key_hash TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -99,6 +106,7 @@ describe("Alerts API", () => {
 
     await env.DB.prepare("DELETE FROM api_keys").run();
     await env.DB.prepare("DELETE FROM users").run();
+    await env.DB.prepare("DELETE FROM rate_limits").run();
     await env.CACHE.delete("rate_limit:register:unknown");
     const response = await worker.fetch(
       buildRequest("POST", "/v1/register", {}),
@@ -112,6 +120,7 @@ describe("Alerts API", () => {
 
   beforeEach(async () => {
     await env.DB.prepare("DELETE FROM alerts").run();
+    await env.DB.prepare("DELETE FROM rate_limits").run();
     if (userId) {
       await env.DB.prepare("UPDATE users SET telegram_id = NULL, alerts_enabled = 1 WHERE id = ?")
         .bind(userId)
@@ -300,6 +309,47 @@ describe("Alerts API", () => {
         createExecutionContext(),
       );
       expect(sixtyFirst.status).toBe(429);
+    });
+
+    it("extends the window on accepted requests but not on rejected ones", async () => {
+      // Seed a row one below the limit with a fresh window anchor (within the
+      // hour) so the next request is accepted and slides the window forward.
+      const anchor = Math.floor(Date.now() / 1000) - 3500;
+      await env.DB.prepare(
+        "INSERT INTO rate_limits (key, count, updated_at) VALUES (?, 59, ?)",
+      )
+        .bind(`rate_limit:alerts:${userId}`, anchor)
+        .run();
+
+      const accepted = await worker.fetch(
+        authed("/v1/alerts", VALID_ALERT, apiKey),
+        testEnv,
+        createExecutionContext(),
+      );
+      expect(accepted.status).toBe(200);
+      const afterAccepted = await env.DB.prepare(
+        "SELECT count, updated_at FROM rate_limits WHERE key = ?",
+      )
+        .bind(`rate_limit:alerts:${userId}`)
+        .first();
+      expect(afterAccepted?.count).toBe(60);
+      expect(Number(afterAccepted?.updated_at)).toBeGreaterThan(anchor);
+
+      // The rejected request must not slide the window forward: updated_at
+      // stays at the anchor set by the accepted request.
+      const rejected = await worker.fetch(
+        authed("/v1/alerts", VALID_ALERT, apiKey),
+        testEnv,
+        createExecutionContext(),
+      );
+      expect(rejected.status).toBe(429);
+      const afterRejected = await env.DB.prepare(
+        "SELECT count, updated_at FROM rate_limits WHERE key = ?",
+      )
+        .bind(`rate_limit:alerts:${userId}`)
+        .first();
+      expect(afterRejected?.count).toBe(61);
+      expect(afterRejected?.updated_at).toBe(afterAccepted?.updated_at);
     });
   });
 

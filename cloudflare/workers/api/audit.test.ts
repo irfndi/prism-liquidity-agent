@@ -35,6 +35,13 @@ describe("Audit Logging API", () => {
       )`,
     ).run();
     await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS rate_limits (
+        key TEXT PRIMARY KEY,
+        count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )`,
+    ).run();
+    await env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS api_keys (
         key_hash TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -103,6 +110,7 @@ describe("Audit Logging API", () => {
     await env.DB.prepare("DELETE FROM telegram_link_codes").run();
     await env.DB.prepare("DELETE FROM api_keys").run();
     await env.DB.prepare("DELETE FROM users").run();
+    await env.DB.prepare("DELETE FROM rate_limits").run();
     await env.CACHE.delete("rate_limit:register:unknown");
     await env.CACHE.delete("rate_limit:link_confirm:unknown");
 

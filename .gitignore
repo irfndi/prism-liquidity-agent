@@ -75,4 +75,7 @@ mcp-server/package-lock.json
 
 # Security scanner tooling state
 .clawpatch/
-.deepsec/data/*/debug/
+.deepsec/
+
+# Agent preference/learning artifacts (regenerated per session)
+.commandcode/

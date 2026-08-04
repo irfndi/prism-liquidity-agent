@@ -758,6 +758,73 @@ describe("/internal/flush-alerts (D1 alert poll)", () => {
       expect(row?.delivered_at).not.toBeNull();
     });
 
+    it("reclaims a stale claim left by an interrupted flush and delivers it", async () => {
+      await seedUser();
+      await seedAlert({ id: "alert-stale", message: "Stale claim" });
+      // Simulate a flush that claimed the row then crashed: delivered_at holds
+      // a claim token timestamped well outside the reclaim window.
+      const staleClaim = `claim:${Date.now() - 10 * 60 * 1000}:${crypto.randomUUID()}`;
+      await env.DB.prepare("UPDATE alerts SET delivered_at = ? WHERE id = ?")
+        .bind(staleClaim, "alert-stale")
+        .run();
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+      const response = await worker.fetch(postFlush(), testEnv, createExecutionContext());
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: boolean;
+        checked: number;
+        delivered: number;
+        failed: number;
+      };
+      expect(body).toMatchObject({ ok: true, checked: 1, delivered: 1, failed: 0 });
+
+      const row = await env.DB.prepare(
+        "SELECT delivered_at, delivery_attempts FROM alerts WHERE id = ?",
+      )
+        .bind("alert-stale")
+        .first();
+      // The reclaimed row was delivered (delivered_at is a real timestamp, not
+      // the stale claim token).
+      expect(String(row?.delivered_at)).not.toMatch(/^claim:/);
+      expect(row?.delivered_at).not.toBeNull();
+    });
+
+    it("does not reclaim a fresh in-flight claim from another flush", async () => {
+      await seedUser();
+      await seedAlert({ id: "alert-fresh", message: "Fresh claim" });
+      // A concurrent flush claimed this row seconds ago; it must NOT be
+      // reclaimed by this flush.
+      const freshClaim = `claim:${Date.now()}:${crypto.randomUUID()}`;
+      await env.DB.prepare("UPDATE alerts SET delivered_at = ? WHERE id = ?")
+        .bind(freshClaim, "alert-fresh")
+        .run();
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+      const response = await worker.fetch(postFlush(), testEnv, createExecutionContext());
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: boolean;
+        checked: number;
+        delivered: number;
+        failed: number;
+      };
+      // The fresh-claim row is invisible to this flush (claimed by another).
+      expect(body).toMatchObject({ ok: true, checked: 0, delivered: 0, failed: 0 });
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      const row = await env.DB.prepare(
+        "SELECT delivered_at FROM alerts WHERE id = ?",
+      )
+        .bind("alert-fresh")
+        .first();
+      expect(String(row?.delivered_at)).toBe(freshClaim);
+    });
+
     it("increments delivery_attempts and leaves delivered_at NULL on failure", async () => {
       await seedUser();
       await seedAlert({ id: "alert-b" });

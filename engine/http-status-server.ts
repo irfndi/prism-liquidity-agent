@@ -41,22 +41,22 @@ export class HttpStatusServer {
     private readonly state: AgentStateApi,
   ) {}
 
-  private async handlePropose(request: Request): Promise<Response> {
+  private isAuthorized(request: Request, expectedToken: string): boolean {
+    if (expectedToken.length === 0) return false;
     const authHeader = request.headers.get("Authorization") ?? "";
     const providedToken = authHeader.startsWith("Bearer ")
       ? authHeader.slice("Bearer ".length)
       : "";
-    const expectedToken = this.config.agentProposalToken;
-    if (expectedToken.length === 0) {
-      return new Response("Unauthorized", { status: 401 });
-    }
-
     const expectedBuf = Buffer.from(expectedToken);
     const actualBuf = Buffer.from(providedToken);
-    if (
-      actualBuf.length !== expectedBuf.length ||
-      !crypto.timingSafeEqual(actualBuf, expectedBuf)
-    ) {
+    return (
+      actualBuf.length === expectedBuf.length && crypto.timingSafeEqual(actualBuf, expectedBuf)
+    );
+  }
+
+  private async handlePropose(request: Request): Promise<Response> {
+    const expectedToken = this.config.agentProposalToken;
+    if (!this.isAuthorized(request, expectedToken)) {
       return new Response("Unauthorized", { status: 401 });
     }
 
@@ -256,24 +256,11 @@ export class HttpStatusServer {
   }
 
   private async handleApprove(request: Request): Promise<Response> {
-    const authHeader = request.headers.get("Authorization") ?? "";
-    const providedToken = authHeader.startsWith("Bearer ")
-      ? authHeader.slice("Bearer ".length)
-      : "";
     // Fail-closed: approve requires an explicit approval token. Do not fall
     // back to the proposal enqueue credential — that would collapse the
     // supervised human boundary if a single token leaks.
     const expectedToken = this.config.agentApprovalToken;
-    if (expectedToken.length === 0) {
-      return new Response("Unauthorized", { status: 401 });
-    }
-
-    const expectedBuf = Buffer.from(expectedToken);
-    const actualBuf = Buffer.from(providedToken);
-    if (
-      actualBuf.length !== expectedBuf.length ||
-      !crypto.timingSafeEqual(actualBuf, expectedBuf)
-    ) {
+    if (!this.isAuthorized(request, expectedToken)) {
       return new Response("Unauthorized", { status: 401 });
     }
 
@@ -341,6 +328,21 @@ export class HttpStatusServer {
               uptimeMs: Date.now() - snapshot.programStartTime,
               version: getCurrentVersion(),
             });
+          }
+
+          // Read endpoints expose portfolio/positions/decisions on loopback;
+          // require the same Bearer credential as /propose (fail-closed when
+          // no token is configured). Only /health stays open as a liveness probe.
+          if (
+            url.pathname === "/status" ||
+            url.pathname === "/positions" ||
+            url.pathname === "/decisions" ||
+            url.pathname === "/config" ||
+            url.pathname === "/agent-policy"
+          ) {
+            if (!this.isAuthorized(request, this.config.agentProposalToken)) {
+              return new Response("Unauthorized", { status: 401 });
+            }
           }
 
           if (url.pathname === "/status") {
