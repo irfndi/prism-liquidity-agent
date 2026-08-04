@@ -4,6 +4,7 @@ import worker, { type Env } from "./index";
 
 const testEnv = env as unknown as Env;
 let apiKey = "";
+let userId = "";
 
 function buildRequest(method: string, path: string, body?: unknown, token?: string): Request {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -81,8 +82,9 @@ describe("Feedback API", () => {
       testEnv,
       createExecutionContext(),
     );
-    const body = (await response.json()) as { api_key: string };
+    const body = (await response.json()) as { api_key: string; user_id: string };
     apiKey = body.api_key;
+    userId = body.user_id;
   });
 
   beforeEach(async () => {
@@ -114,7 +116,7 @@ describe("Feedback API", () => {
       const body = (await response.json()) as { id: string };
       // The returned id is namespaced with the authenticated user id so a
       // client can never collide with (or overwrite) another user's row.
-      expect(body.id.endsWith(":fb-uuid-1")).toBe(true);
+      expect(body.id).toBe(`${userId}:fb-uuid-1`);
 
       const rows = await env.DB.prepare("SELECT summary FROM feedback WHERE id = ?")
         .bind(body.id)
@@ -209,7 +211,7 @@ describe("Feedback API", () => {
       );
       expect(second.status).toBe(200);
       const body = (await second.json()) as { id: string; duplicate: boolean };
-      expect(body.id.endsWith(":fb-dup")).toBe(true);
+      expect(body.id).toBe(`${userId}:fb-dup`);
       expect(body.duplicate).toBe(true);
     });
   });

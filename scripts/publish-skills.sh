@@ -4,6 +4,14 @@
 
 set -euo pipefail
 
+# Reject any invocation with more than one positional argument so an extra
+# argument can never silently switch the run from dry-run to real publishing.
+if [ "$#" -gt 1 ]; then
+  echo "ERROR: unexpected extra arguments" >&2
+  echo "Usage: ./scripts/publish-skills.sh [--dry-run]" >&2
+  exit 2
+fi
+
 # Validate the single positional argument: only an empty value or --dry-run is
 # accepted. Anything else is a usage error — a typo must never silently switch
 # the run from dry-run to real publishing.

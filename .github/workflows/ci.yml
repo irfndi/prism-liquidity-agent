@@ -56,12 +56,14 @@ jobs:
       # Smoke-test the shell wrapper (the package `bin` and primary user entry
       # point). `bash -n` catches quoting/unbound-variable regressions and the
       # version invocation proves it resolves bun and launches the CLI — the
-      # wrapper was previously excluded from every lint/format/test gate.
+      # wrapper was previously excluded from every lint/format/test gate. The
+      # HOME-unset run executes the wrapper to prove the PATH-based bun lookup
+      # works without a home directory (systemd units, cron, minimal images).
       - name: Smoke test scripts/prism.sh
         run: |
           bash -n scripts/prism.sh
           scripts/prism.sh --version
-          env -u HOME PATH="$PATH" bash -n scripts/prism.sh
+          env -u HOME PATH="$PATH" scripts/prism.sh --version
 
       # Coverage was local-only; this also enforces the istanbul thresholds
       # configured in vitest.config.ts so PRs can't silently regress them.

@@ -242,16 +242,22 @@ export class AcpTransport implements AgentRuntimeTransport {
 
   private onData(chunk: Buffer): void {
     this.buffer += chunk.toString("utf-8");
-    // Keep only the tail of an unfinished frame; a frame larger than the cap
-    // is unparseable garbage anyway (JSON-RPC lines are small), and a chatty
-    // agent must not grow memory unboundedly.
+    // Split complete newline-delimited frames FIRST so the cap below cannot
+    // drop a complete frame (a dropped response leaves its request pending
+    // until timeout). The cap applies only to the residual incomplete line.
+    const lines = this.buffer.split(/\r?\n/);
+    this.buffer = lines.pop() ?? "";
     if (this.buffer.length > MAX_INCOMPLETE_BUFFER_BYTES) {
       this.buffer = this.buffer.slice(-MAX_INCOMPLETE_BUFFER_BYTES);
     }
-    const lines = this.buffer.split(/\r?\n/);
-    this.buffer = lines.pop() ?? "";
     for (const line of lines) {
       if (!line.trim()) continue;
+      if (line.length > MAX_INCOMPLETE_BUFFER_BYTES) {
+        // A single complete line larger than the allowed frame size is
+        // unparseable garbage; drop it rather than buffering it.
+        logger.warn("Dropping oversized ACP frame", { bytes: line.length });
+        continue;
+      }
       try {
         const msg = JSON.parse(line) as AcpResponse | AcpNotification;
         this.handleMessage(msg);
@@ -307,7 +313,10 @@ export class AcpTransport implements AgentRuntimeTransport {
         // Cap the streamed reply so a chatty agent cannot grow sessionText
         // unboundedly; the reply is only used for the veto/raw text surface.
         if (this.sessionText.length < MAX_SESSION_TEXT_LENGTH) {
-          this.sessionText += update.content.text;
+          this.sessionText += update.content.text.slice(
+            0,
+            MAX_SESSION_TEXT_LENGTH - this.sessionText.length,
+          );
         }
       }
     }

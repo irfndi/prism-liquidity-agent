@@ -42,15 +42,17 @@ fi
 
 # Enforce the declared engines.bun >= 1.4.0-canary.1 constraint so an old bun
 # fails with an actionable message instead of a confusing runtime error.
-MIN_BUN_VERSION="1.4.0"
+MIN_BUN_VERSION="1.4.0-canary.1"
 BUN_VERSION_RAW="$("$BUN_BIN" --version 2>/dev/null || true)"
-BUN_VERSION_NUM="${BUN_VERSION_RAW%%-*}"
-if [ -z "$BUN_VERSION_NUM" ]; then
+if [ -z "$BUN_VERSION_RAW" ]; then
   echo "ERROR: could not determine bun version from '$BUN_BIN'" >&2
   exit 1
 fi
 # Portable dotted-version comparison (awk, no GNU sort -V on macOS).
-if ! awk -v a="$BUN_VERSION_NUM" -v b="$MIN_BUN_VERSION" 'BEGIN {
+# Prerelease-aware: X.Y.Z compares numerically; when equal, a version with a
+# prerelease is lower than one without, and prerelease labels compare
+# lexicographically (canary.1 >= canary.0).
+if ! awk -v a="$BUN_VERSION_RAW" -v b="$MIN_BUN_VERSION" 'BEGIN {
   split(a, A, "."); split(b, B, ".");
   for (i = 1; i <= 3; i++) {
     na = (i in A) ? A[i] + 0 : 0;
@@ -58,6 +60,12 @@ if ! awk -v a="$BUN_VERSION_NUM" -v b="$MIN_BUN_VERSION" 'BEGIN {
     if (na < nb) exit 1;
     if (na > nb) exit 0;
   }
+  pa = (index(a, "-") > 0) ? substr(a, index(a, "-") + 1) : "";
+  pb = (index(b, "-") > 0) ? substr(b, index(b, "-") + 1) : "";
+  if (pa == "" && pb != "") exit 0;
+  if (pa != "" && pb == "") exit 1;
+  if (pa < pb) exit 1;
+  if (pa > pb) exit 0;
   exit 0;
 }'; then
   echo "ERROR: bun $BUN_VERSION_RAW is too old; prism requires bun >= $MIN_BUN_VERSION" >&2

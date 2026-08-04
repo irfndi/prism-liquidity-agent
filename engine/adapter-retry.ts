@@ -65,10 +65,11 @@ function errorMessage(err: unknown): string {
 function safeErrorMessage(err: unknown): string {
   return errorMessage(err)
     .replace(/([?&](?:api[-_]?key|token|authorization)=)[^&\s]+/gi, "$1***")
-    .replace(/(Bearer\s+)[^\s]+/gi, "$1***")
+    .replace(/((?:bearer|basic|digest|token)\s+)[^\s]+/gi, "$1***")
     .replace(/\b(x-api-(?:key|token|secret)|x-auth-token)\s*[:=]\s*[^\s,;]+/gi, "$1: ***")
+    .replace(/\b(authorization)\s*[:=]\s*[^\s,;]+/gi, "$1: ***")
     .replace(
-      /(?<![?&])(["']?(?:api[-_]?key|secret|password)["']?\s*[:=]\s*["']?)[^"',\s}]+/gi,
+      /(?<![?&])(["']?(?:api[-_]?key|secret|password|token|authorization)["']?\s*[:=]\s*["']?)[^"',\s}]+/gi,
       "$1***",
     )
     .replace(/(https?:\/\/)[^/@\s]+@/gi, "$1***@");

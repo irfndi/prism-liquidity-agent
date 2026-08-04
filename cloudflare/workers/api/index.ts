@@ -111,7 +111,10 @@ const cachePut = (
 // race under concurrency; this increments in one statement and returns the
 // post-increment count, so a burst cannot all pass the check. Returns true
 // when the request is within the limit (count <= max), false when exceeded.
-// Counts reset one hour after the last increment (mirroring the old KV
+// The one-hour window is anchored at the last ACCEPTED request: accepted
+// increments refresh updated_at, rejected increments leave it untouched, so
+// hammering rejected requests cannot slide the window forward. Counts reset
+// one hour after the last accepted increment (mirroring the old KV
 // expirationTtl: 3600), and the table is created idempotently on first use so
 // the counter works even before the migration has been applied (e.g. test
 // databases).
@@ -140,11 +143,12 @@ const rateLimitHit = (
            END,
            updated_at = CASE
              WHEN updated_at < unixepoch() - 3600 THEN unixepoch()
+             WHEN count < ? THEN unixepoch()
              ELSE updated_at
            END
          RETURNING count`,
       )
-      .bind(key)
+      .bind(key, max)
       .all<{ count: number }>();
     const count = results[0]?.count ?? 1;
     return count <= max;

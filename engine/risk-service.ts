@@ -30,7 +30,14 @@ export function evaluateRisk(
     return { approved: true, reason: "EXIT approved: capital protection" };
   }
 
-  // 2. Confidence gate
+  // 2. Confidence gate — a non-finite confidence (NaN/Infinity) must not pass
+  // the comparison (NaN < x is false), so reject it explicitly first.
+  if (!Number.isFinite(decision.confidence)) {
+    return {
+      approved: false,
+      reason: "Decision confidence is not finite — rejecting",
+    };
+  }
   if (decision.confidence < riskConfig.confidenceThreshold) {
     return {
       approved: false,

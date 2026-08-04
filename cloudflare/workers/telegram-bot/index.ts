@@ -696,6 +696,11 @@ app.post("/internal/deliver-alert", async (c) => {
 
 const FLUSH_BATCH_LIMIT = 10;
 const FLUSH_ABANDON_ATTEMPTS = 5;
+// A claim older than this (ms) is considered interrupted (the flush that made
+// it crashed) and is reclaimed as pending on the next flush. Flushes run on a
+// 5-minute cron and a single flush takes seconds, so 5 minutes is a wide,
+// safe window: it never reclaims a genuinely in-flight claim.
+const CLAIM_RECLAIM_MS = 5 * 60 * 1000;
 
 app.post("/internal/flush-alerts", async (c) => {
   const botSecret = c.env.BOT_API_SECRET;
@@ -706,13 +711,31 @@ app.post("/internal/flush-alerts", async (c) => {
 
   const result = await Effect.runPromise(
     Effect.gen(function* () {
+      // Reclaim stale claims first: a flush that crashed after its claim
+      // UPDATE would otherwise leave rows stuck at delivered_at = 'claim:...'
+      // forever (later flushes only select delivered_at IS NULL). The claim
+      // token embeds the claim time, so any claim older than the reclaim
+      // window is treated as interrupted and pushed back to pending with an
+      // extra delivery_attempt (so repeated claim-crash cycles eventually hit
+      // the abandoned threshold).
+      yield* Effect.tryPromise(() =>
+        c.env.DB.prepare(
+          `UPDATE alerts
+           SET delivered_at = NULL, delivery_attempts = delivery_attempts + 1
+           WHERE delivered_at LIKE 'claim:%'
+             AND CAST(substr(delivered_at, 7) AS INTEGER) < ?`,
+        )
+          .bind(Date.now() - CLAIM_RECLAIM_MS)
+          .all(),
+      );
+
       // Atomic claim: a single UPDATE marks the batch as claimed by storing a
       // unique claim token in delivered_at, so two concurrent flushes cannot
       // both select (and therefore both deliver) the same rows. The pending
       // and abandoned queries both filter on delivered_at IS NULL, so in-flight
       // claims are invisible to every other flush. A row is released back to
       // pending (delivered_at = NULL) on delivery failure.
-      const claimToken = `claim:${crypto.randomUUID()}`;
+      const claimToken = `claim:${Date.now()}:${crypto.randomUUID()}`;
       yield* Effect.tryPromise(() =>
         c.env.DB.prepare(
           `UPDATE alerts

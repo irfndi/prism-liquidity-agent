@@ -40,10 +40,10 @@ const version = process.env.VERSION ?? pkg.version;
 // VERSION is interpolated into the tarball filename and reused across the
 // release pipeline; reject anything that could inject shell commands or
 // escape the repo root (e.g. "/", "..", ";", "$(...)", backticks).
-if (!/^[0-9A-Za-z][0-9A-Za-z._-]*$/.test(version)) {
+if (!/^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(version)) {
   console.error(`Invalid VERSION: ${version}`);
   console.error(
-    "VERSION must start with a letter or digit and contain only letters, digits, '.', '_' or '-'.",
+    "VERSION must start with a letter or digit and contain only letters, digits, '.', '_', '-' or '+'.",
   );
   process.exit(1);
 }

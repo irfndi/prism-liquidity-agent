@@ -14,7 +14,20 @@ interface RiskResult {
 function parseRiskResult(json: string | null): RiskResult {
   if (!json) return { approved: false, reason: "unknown" };
   try {
-    return JSON.parse(json) as RiskResult;
+    const parsed: unknown = JSON.parse(json);
+    // DB-sourced riskResultJson is untrusted: validate the shape instead of
+    // asserting, so a null/array/odd-typed value cannot masquerade as a
+    // valid risk result (which would fail the caller's fallback logic).
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      typeof (parsed as { approved?: unknown }).approved === "boolean" &&
+      ((parsed as { reason?: unknown }).reason === undefined ||
+        typeof (parsed as { reason?: unknown }).reason === "string")
+    ) {
+      return parsed as RiskResult;
+    }
+    return { approved: false, reason: "unknown" };
   } catch {
     // DB-sourced riskResultJson may be malformed (older rows, partial writes);
     // a bad parse must never fail the whole getRecentDecisions call.

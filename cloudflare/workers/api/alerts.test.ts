@@ -310,6 +310,47 @@ describe("Alerts API", () => {
       );
       expect(sixtyFirst.status).toBe(429);
     });
+
+    it("extends the window on accepted requests but not on rejected ones", async () => {
+      // Seed a row one below the limit with a fresh window anchor (within the
+      // hour) so the next request is accepted and slides the window forward.
+      const anchor = Math.floor(Date.now() / 1000) - 3500;
+      await env.DB.prepare(
+        "INSERT INTO rate_limits (key, count, updated_at) VALUES (?, 59, ?)",
+      )
+        .bind(`rate_limit:alerts:${userId}`, anchor)
+        .run();
+
+      const accepted = await worker.fetch(
+        authed("/v1/alerts", VALID_ALERT, apiKey),
+        testEnv,
+        createExecutionContext(),
+      );
+      expect(accepted.status).toBe(200);
+      const afterAccepted = await env.DB.prepare(
+        "SELECT count, updated_at FROM rate_limits WHERE key = ?",
+      )
+        .bind(`rate_limit:alerts:${userId}`)
+        .first();
+      expect(afterAccepted?.count).toBe(60);
+      expect(Number(afterAccepted?.updated_at)).toBeGreaterThan(anchor);
+
+      // The rejected request must not slide the window forward: updated_at
+      // stays at the anchor set by the accepted request.
+      const rejected = await worker.fetch(
+        authed("/v1/alerts", VALID_ALERT, apiKey),
+        testEnv,
+        createExecutionContext(),
+      );
+      expect(rejected.status).toBe(429);
+      const afterRejected = await env.DB.prepare(
+        "SELECT count, updated_at FROM rate_limits WHERE key = ?",
+      )
+        .bind(`rate_limit:alerts:${userId}`)
+        .first();
+      expect(afterRejected?.count).toBe(61);
+      expect(afterRejected?.updated_at).toBe(afterAccepted?.updated_at);
+    });
   });
 
   describe("POST /v1/alerts/preferences", () => {
