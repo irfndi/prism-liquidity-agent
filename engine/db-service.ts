@@ -60,6 +60,12 @@ export interface PositionRecord {
   cumulativeRewardsClaimedUsd: number;
   closedAt: number | null;
   realizedPnlUsd: number | null;
+  /** Fallen-angel position mode: "fallen-angel" when active, else null. */
+  positionMode?: string | null;
+  /** Serialized TP-ladder JSON (see engine/tp-ladder.ts); null for non-FA. */
+  tpLadderJson?: string | null;
+  /** Invalidation stop price; null for non-FA positions. */
+  invalidationStopPrice?: number | null;
 }
 
 export type PositionEventType = "ENTER" | "EXIT" | "REBALANCE" | "CLAIM" | "COMPOUND";
@@ -157,8 +163,9 @@ export const DbLive = (dbPath?: string) =>
               entry_signal_snapshot_id,
               entry_price_usd, entry_amount_x_usd, entry_amount_y_usd,
               cumulative_fees_claimed_usd, cumulative_rewards_claimed_usd,
-              closed_at, realized_pnl_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              closed_at, realized_pnl_usd,
+              position_mode, tp_ladder_json, invalidation_stop_price
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(position_id) DO UPDATE SET
               pool_address = excluded.pool_address,
               position_pubkey = COALESCE(excluded.position_pubkey, positions.position_pubkey),
@@ -185,7 +192,13 @@ export const DbLive = (dbPath?: string) =>
               cumulative_fees_claimed_usd = excluded.cumulative_fees_claimed_usd,
               cumulative_rewards_claimed_usd = excluded.cumulative_rewards_claimed_usd,
               closed_at = excluded.closed_at,
-              realized_pnl_usd = excluded.realized_pnl_usd`,
+              realized_pnl_usd = excluded.realized_pnl_usd,
+              position_mode = COALESCE(excluded.position_mode, positions.position_mode),
+              tp_ladder_json = COALESCE(excluded.tp_ladder_json, positions.tp_ladder_json),
+              invalidation_stop_price = COALESCE(
+                excluded.invalidation_stop_price,
+                positions.invalidation_stop_price
+              )`,
               pos.positionId,
               pos.poolAddress,
               pos.positionPubKey,
@@ -213,6 +226,9 @@ export const DbLive = (dbPath?: string) =>
               pos.cumulativeRewardsClaimedUsd,
               pos.closedAt,
               pos.realizedPnlUsd,
+              pos.positionMode ?? null,
+              pos.tpLadderJson ?? null,
+              pos.invalidationStopPrice ?? null,
             );
           }),
 
@@ -1528,6 +1544,10 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     cumulativeRewardsClaimedUsd: Number(row.cumulative_rewards_claimed_usd ?? 0),
     closedAt: row.closed_at != null ? Number(row.closed_at) : null,
     realizedPnlUsd: row.realized_pnl_usd != null ? Number(row.realized_pnl_usd) : null,
+    positionMode: row.position_mode != null ? String(row.position_mode) : null,
+    tpLadderJson: row.tp_ladder_json != null ? String(row.tp_ladder_json) : null,
+    invalidationStopPrice:
+      row.invalidation_stop_price != null ? Number(row.invalidation_stop_price) : null,
   };
 }
 

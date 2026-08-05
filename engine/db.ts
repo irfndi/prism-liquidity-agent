@@ -913,6 +913,24 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       }
     },
   },
+  {
+    version: 22,
+    name: "fallen_angel_position_fields",
+    up(db) {
+      // Fallen-angel lifecycle state (Wave 19): position mode, serialized
+      // TP-ladder JSON and invalidation stop. Additive + non-destructive;
+      // legacy rows stay NULL (non-FA positions).
+      if (!hasColumn(db, "positions", "position_mode")) {
+        db.exec("ALTER TABLE positions ADD COLUMN position_mode TEXT");
+      }
+      if (!hasColumn(db, "positions", "tp_ladder_json")) {
+        db.exec("ALTER TABLE positions ADD COLUMN tp_ladder_json TEXT");
+      }
+      if (!hasColumn(db, "positions", "invalidation_stop_price")) {
+        db.exec("ALTER TABLE positions ADD COLUMN invalidation_stop_price REAL");
+      }
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

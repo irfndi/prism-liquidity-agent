@@ -745,6 +745,10 @@ export interface DbApi {
     cumulativeRewardsClaimedUsd: number;
     closedAt: number | null;
     realizedPnlUsd: number | null;
+    /** Fallen-angel lifecycle state (Wave 19); optional so legacy callers compile. */
+    positionMode?: string | null;
+    tpLadderJson?: string | null;
+    invalidationStopPrice?: number | null;
   }) => Effect.Effect<void, unknown>;
   readonly getPosition: (positionId: string) => Effect.Effect<
     {
@@ -775,6 +779,9 @@ export interface DbApi {
       cumulativeRewardsClaimedUsd: number;
       closedAt: number | null;
       realizedPnlUsd: number | null;
+      positionMode?: string | null;
+      tpLadderJson?: string | null;
+      invalidationStopPrice?: number | null;
     } | null,
     unknown
   >;
@@ -807,6 +814,9 @@ export interface DbApi {
       cumulativeRewardsClaimedUsd: number;
       closedAt: number | null;
       realizedPnlUsd: number | null;
+      positionMode?: string | null;
+      tpLadderJson?: string | null;
+      invalidationStopPrice?: number | null;
     }>,
     unknown
   >;
@@ -839,6 +849,9 @@ export interface DbApi {
       cumulativeRewardsClaimedUsd: number;
       closedAt: number | null;
       realizedPnlUsd: number | null;
+      positionMode?: string | null;
+      tpLadderJson?: string | null;
+      invalidationStopPrice?: number | null;
     }>,
     unknown
   >;
@@ -884,6 +897,9 @@ export interface DbApi {
       cumulativeRewardsClaimedUsd: number;
       closedAt: number | null;
       realizedPnlUsd: number | null;
+      positionMode?: string | null;
+      tpLadderJson?: string | null;
+      invalidationStopPrice?: number | null;
     }>,
     unknown
   >;
