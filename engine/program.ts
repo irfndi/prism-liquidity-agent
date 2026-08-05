@@ -4878,7 +4878,10 @@ export const program = Effect.gen(function* () {
               `Trailing stop triggered on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: value dropped ${(drawdown * 100).toFixed(1)}% from peak $${highest.toFixed(2)} (confirmed ${breaches} cycles)`,
               { pool, metrics, position: pos },
             );
-          } else {
+          } else if (!breached) {
+            // Only a genuinely non-breaching cycle emits the large-pnl warning;
+            // a breached-but-unconfirmed cycle is on the path to a trailing-stop
+            // EXIT and the confirmed critical alert — no warning spam first.
             const pnlPct =
               pos.depositedUsd > 0 ? (estimatedValue - pos.depositedUsd) / pos.depositedUsd : 0;
             if (pnlPct < -0.15) {
