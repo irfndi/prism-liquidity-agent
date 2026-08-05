@@ -40,6 +40,14 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 /** Exponential backoff for failing pools: base 5 min, cap 1 h. */
 const BACKOFF_BASE_MS = 5 * 60 * 1000;
 const BACKOFF_MAX_MS = 60 * 60 * 1000;
+/**
+ * Max age of a cached/backoff entry before it is pruned (24h). Bounds the
+ * in-process maps to ~a day of active pools so a long-lived process scanning
+ * many/rotating pools does not grow memory without bound.
+ */
+const MAX_RETENTION_MS = 24 * 60 * 60 * 1000;
+/** Hard size cap on both maps as an absolute bound regardless of age. */
+const MAX_CACHE_ENTRIES = 1000;
 /** A single daily OHLCV bar. timestamps are unix seconds. */
 export interface GeckoOhlcvBar {
   readonly timestampSec: number;
@@ -211,6 +219,29 @@ export function resetGeckoOhlcvCache(): void {
 }
 
 /**
+ * Opportunistic eviction (called on every fetch): drop entries older than
+ * MAX_RETENTION_MS, then enforce the hard size cap via insertion-order
+ * eviction so the maps stay bounded even under sustained pool rotation.
+ */
+function pruneOhlcvState(nowMs: number): void {
+  for (const [pool, entry] of lastGoodCache) {
+    if (nowMs - entry.fetchedAt > MAX_RETENTION_MS) lastGoodCache.delete(pool);
+  }
+  for (const [pool, entry] of backoff) {
+    if (nowMs - entry.nextAttemptAt > MAX_RETENTION_MS) backoff.delete(pool);
+  }
+  while (lastGoodCache.size >= MAX_CACHE_ENTRIES) {
+    const oldest = lastGoodCache.keys().next().value;
+    if (oldest === undefined) break;
+    lastGoodCache.delete(oldest);
+  }
+  while (backoff.size >= MAX_CACHE_ENTRIES) {
+    const oldest = backoff.keys().next().value;
+    if (oldest === undefined) break;
+    backoff.delete(oldest);
+  }
+}
+/**
  * Fetch a daily OHLCV series for a pool. NEVER throws and NEVER crashes the
  * scan: 404/429/5xx, timeout, fetch failure, or parse failure all return null
  * so the caller treats the drawdown as unknown (fail-closed for the positive
@@ -241,6 +272,7 @@ export async function getGeckoPoolOhlcv(
   const effectiveBase = base.length > 0 ? base : DEFAULT_BASE_URL;
   const limit = options.limit ?? DEFAULT_OHLCV_LIMIT;
   const url = `${effectiveBase}/networks/solana/pools/${poolAddress}/ohlcv/day?limit=${limit}`;
+  pruneOhlcvState(Date.now());
 
   const cached = lastGoodCache.get(poolAddress);
   if (cached && Date.now() - cached.fetchedAt < (options.cacheTtlMs ?? CACHE_TTL_MS)) {
@@ -271,7 +303,7 @@ export async function getGeckoPoolOhlcv(
   try {
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) {
-      logger.warn("GeckoTerminal OHLCV unavailable — drawdown unknown", {
+      logger.warn("GeckoTerminal OHLCV request failed", {
         pool: poolAddress,
         status: res.status,
       });
@@ -288,7 +320,7 @@ export async function getGeckoPoolOhlcv(
     backoff.delete(poolAddress);
     return signals;
   } catch (err) {
-    logger.warn("GeckoTerminal OHLCV fetch failed — drawdown unknown", {
+    logger.warn("GeckoTerminal OHLCV fetch threw", {
       pool: poolAddress,
       error: err instanceof Error ? err.message : String(err),
     });
