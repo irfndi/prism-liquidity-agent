@@ -6,6 +6,8 @@ import {
   nextSettlementRetryAt,
   persistDailyEquityBaseline,
   processSettlementJobs,
+  safetyPauseBlockReason,
+  shouldAutoResolveDailyDrawdownPause,
   shouldTriggerSafetyPause,
 } from "../engine/autonomous-runtime.js";
 import { SOL_MINT } from "../engine/constants.js";
@@ -98,6 +100,37 @@ describe("autonomous token runtime policy", () => {
     expect(isActionAllowedDuringSafetyPause("REBALANCE")).toBe(false);
   });
 
+  it("enforces the safety pause at risk gates except in shadow mode (issue #148)", () => {
+    // Given an unresolved pause on a live account.
+    const pause = {
+      walletAddress: "wallet-1",
+      agentInstanceId: "primary",
+      reason: "daily_drawdown",
+      triggeredAt: 1_000,
+      resolvedAt: null as number | null,
+    };
+
+    // Live blocks entry/rebalance but permits EXIT/HOLD.
+    expect(safetyPauseBlockReason("live", pause, "ENTER")).toBe(
+      "Wallet safety pause active: daily_drawdown",
+    );
+    expect(safetyPauseBlockReason("live", pause, "REBALANCE")).toBe(
+      "Wallet safety pause active: daily_drawdown",
+    );
+    expect(safetyPauseBlockReason("live", pause, "EXIT")).toBeNull();
+    expect(safetyPauseBlockReason("live", pause, "HOLD")).toBeNull();
+
+    // Shadow is informational only — never blocks any action.
+    expect(safetyPauseBlockReason("shadow", pause, "ENTER")).toBeNull();
+    expect(safetyPauseBlockReason("shadow", pause, "REBALANCE")).toBeNull();
+
+    // A resolved pause does not block.
+    expect(safetyPauseBlockReason("live", { ...pause, resolvedAt: 2_000 }, "ENTER")).toBeNull();
+
+    // No pause never blocks.
+    expect(safetyPauseBlockReason("live", null, "ENTER")).toBeNull();
+  });
+
   it("triggers each wallet safety threshold at its configured boundary", () => {
     // Given / When / Then
     expect(
@@ -144,6 +177,77 @@ describe("autonomous token runtime policy", () => {
         settlementMaxPendingMs: 3_600_000,
       }),
     ).toBe("settlement_overdue");
+  });
+
+  it("auto-resolves a latched daily_drawdown pause per the mode table (issue #148)", () => {
+    // Given a disabled threshold (gate off) — a leftover pause never latches.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "live",
+        dailyDrawdownPct: 99,
+        maxDailyDrawdownPct: 0,
+        dayRolledOver: false,
+      }),
+    ).toBe(true);
+
+    // Shadow is informational only — always auto-resolve, never latch.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "shadow",
+        dailyDrawdownPct: 99,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: false,
+      }),
+    ).toBe(true);
+
+    // Canary auto-clears at the day-boundary rollover even while still breached.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "canary",
+        dailyDrawdownPct: 99,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: true,
+      }),
+    ).toBe(true);
+
+    // Canary also clears as soon as the drawdown recovers below the threshold.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "canary",
+        dailyDrawdownPct: 4,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: false,
+      }),
+    ).toBe(true);
+
+    // Canary stays latched while breached and no rollover has occurred.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "canary",
+        dailyDrawdownPct: 6,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: false,
+      }),
+    ).toBe(false);
+
+    // Live re-evaluates fresh each cycle — recovery (or a fresh-day baseline
+    // that drops the measured drawdown to ~0) clears it; a live breach latches.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "live",
+        dailyDrawdownPct: 4,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "live",
+        dailyDrawdownPct: 6,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: true,
+      }),
+    ).toBe(false);
   });
 
   it("caps deterministic settlement retry backoff", () => {

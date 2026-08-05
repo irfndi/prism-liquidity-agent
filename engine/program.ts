@@ -141,10 +141,11 @@ import {
 } from "./proposal-backoff.js";
 import { computeCooldownForExit } from "./cooldown.js";
 import {
-  isActionAllowedDuringSafetyPause,
   loadDailyEquityBaseline,
   persistDailyEquityBaseline,
   processSettlementJobs,
+  safetyPauseBlockReason,
+  shouldAutoResolveDailyDrawdownPause,
   shouldTriggerSafetyPause,
 } from "./autonomous-runtime.js";
 import { routeProbeAmountAtomic } from "./route-probe.js";
@@ -3247,14 +3248,20 @@ export const program = Effect.gen(function* () {
           poolAddress: candidate.poolAddress,
           activeBinId: candidate.pool.activeBinId,
         };
+        // Issue #148: the wallet safety pause is informational in shadow mode
+        // (no-send by design) — it must never block a decision there.
+        const pauseBlockReason = safetyPauseBlockReason(
+          autonomousExecution?.mode,
+          activeSafetyPause,
+          decision.action,
+        );
         const riskResult: RiskResult =
-          activeSafetyPause?.resolvedAt === null &&
-          !isActionAllowedDuringSafetyPause(decision.action)
-            ? {
+          pauseBlockReason === null
+            ? risk.evaluate(decision, riskCtx)
+            : {
                 approved: false,
-                reason: `Wallet safety pause active: ${activeSafetyPause.reason}`,
-              }
-            : risk.evaluate(decision, riskCtx);
+                reason: pauseBlockReason,
+              };
         if (riskResult.adjustedSizeUsd) {
           decision = {
             ...decision,
@@ -4837,7 +4844,8 @@ export const program = Effect.gen(function* () {
             : sum,
         0,
       );
-      if (dailyBaselineDay !== dayKey) {
+      const dayRolledOver = dailyBaselineDay !== dayKey;
+      if (dayRolledOver) {
         dailyBaselineDay = dayKey;
         dailyBaselineEquityUsd = portfolioValueUsd - realizedTodayUsd;
         yield* persistDailyEquityBaseline(db, dailyBaselineScope, {
@@ -4850,6 +4858,27 @@ export const program = Effect.gen(function* () {
         dailyBaselineEquityUsd > 0 && dailyEquityUsd < dailyBaselineEquityUsd
           ? ((dailyBaselineEquityUsd - dailyEquityUsd) / dailyBaselineEquityUsd) * 100
           : 0;
+      // Issue #148: a latched daily_drawdown pause must not outlive the
+      // condition that raised it. The daily baseline re-seeds on rollover but
+      // the pause itself only cleared via `prism resume` — auto-resolve it
+      // mode-aware so a fresh-day baseline (or a recovered drawdown) does not
+      // leave the agent silently paused. The trigger block below re-arms it
+      // when the recomputed drawdown still breaches the threshold.
+      if (
+        autonomousExecution &&
+        activeSafetyPause !== null &&
+        activeSafetyPause.resolvedAt === null &&
+        activeSafetyPause.reason === "daily_drawdown" &&
+        shouldAutoResolveDailyDrawdownPause({
+          mode: autonomousExecution.mode,
+          dailyDrawdownPct,
+          maxDailyDrawdownPct: config.maxDailyDrawdownPct,
+          dayRolledOver,
+        })
+      ) {
+        activeSafetyPause = { ...activeSafetyPause, resolvedAt: Date.now() };
+        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+      }
       if (
         autonomousExecution &&
         activeSafetyPause?.resolvedAt !== null &&
@@ -6007,16 +6036,19 @@ export const program = Effect.gen(function* () {
           activeBinId: pool.activeBinId,
           positionId: decision.positionId,
         };
+        // Issue #148: the wallet safety pause is informational in shadow mode
+        // (no-send by design) — it must never block a decision there.
+        const pauseBlockReason = safetyPauseBlockReason(
+          autonomousExecution?.mode,
+          activeSafetyPause,
+          decision.action,
+        );
         const riskResult: RiskResult =
-          activeSafetyPause?.resolvedAt === null &&
-          !isActionAllowedDuringSafetyPause(decision.action)
-            ? {
-                approved: false,
-                reason: `Wallet safety pause active: ${activeSafetyPause.reason}`,
-              }
-            : decision.action === "HOLD"
+          pauseBlockReason === null
+            ? decision.action === "HOLD"
               ? { approved: true, reason: "HOLD — no execution; risk gates skipped" }
-              : risk.evaluate(decision, riskCtx);
+              : risk.evaluate(decision, riskCtx)
+            : { approved: false, reason: pauseBlockReason };
 
         // Apply risk-adjusted position size cap
         if (riskResult.adjustedSizeUsd && decision.action === "ENTER") {

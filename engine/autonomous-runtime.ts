@@ -2,11 +2,33 @@ import { Effect } from "effect";
 import { SOL_MINT } from "./constants.js";
 import { computeNetRealizedPnlUsd } from "./pnl.js";
 import type { AdapterApi, DbApi } from "./services.js";
-import type { ActionType, AutonomousTokenMode, SettlementJobRecord } from "./types.js";
+import type {
+  ActionType,
+  AutonomousTokenMode,
+  SafetyPauseRecord,
+  SettlementJobRecord,
+} from "./types.js";
 
 /** Returns whether an action remains permitted while the wallet safety pause is active. */
 export function isActionAllowedDuringSafetyPause(action: ActionType): boolean {
   return action === "EXIT" || action === "HOLD";
+}
+
+/**
+ * Returns the reject reason when an active wallet safety pause should block
+ * a decision, or null when the decision proceeds. The pause is informational
+ * in `shadow` mode (no-send by design) — it never blocks a decision there.
+ * EXIT/HOLD remain permitted while the pause is active.
+ */
+export function safetyPauseBlockReason(
+  autonomousMode: AutonomousTokenMode | undefined,
+  activeSafetyPause: SafetyPauseRecord | null,
+  action: ActionType,
+): string | null {
+  if (autonomousMode === "shadow") return null;
+  if (activeSafetyPause === null || activeSafetyPause.resolvedAt !== null) return null;
+  if (isActionAllowedDuringSafetyPause(action)) return null;
+  return `Wallet safety pause active: ${activeSafetyPause.reason}`;
 }
 
 export interface SafetyPauseThresholdInput {
@@ -40,6 +62,48 @@ export function shouldTriggerSafetyPause(
     return "settlement_overdue";
   }
   return null;
+}
+
+export interface DailyDrawdownAutoResolveInput {
+  readonly mode: AutonomousTokenMode;
+  readonly dailyDrawdownPct: number;
+  readonly maxDailyDrawdownPct: number;
+  readonly dayRolledOver: boolean;
+}
+
+/**
+ * Mode-aware auto-resolution for a latched `daily_drawdown` safety pause
+ * (issue #148). The daily equity baseline re-seeds every day, but nothing
+ * ever re-evaluated an existing pause — only `prism resume` could clear it,
+ * so the pause silently latched into new days. This mirrors the autonomy
+ * contract:
+ *
+ * - `shadow` — informational only: the pause never blocks and never requires
+ *   a manual resume, so always auto-resolve.
+ * - `canary` — auto-clear at the day-boundary rollover, or as soon as the
+ *   drawdown recovers below `MAX_DAILY_DRAWDOWN_PCT`.
+ * - `live` — re-evaluate fresh every cycle: auto-resolve when the drawdown no
+ *   longer breaches the threshold (a fresh daily baseline after rollover
+ *   normally drops the measured drawdown to ~0).
+ *
+ * A disabled threshold (`maxDailyDrawdownPct <= 0`) means the gate is off, so
+ * a leftover pause from when it was enabled should not latch either.
+ *
+ * Returns true when the caller should clear the active pause (`resolvedAt`).
+ */
+export function shouldAutoResolveDailyDrawdownPause(input: DailyDrawdownAutoResolveInput): boolean {
+  if (input.maxDailyDrawdownPct <= 0) return true;
+  switch (input.mode) {
+    case "shadow":
+      return true;
+    case "canary":
+      return input.dayRolledOver || input.dailyDrawdownPct < input.maxDailyDrawdownPct;
+    case "live":
+    case "off":
+      return input.dailyDrawdownPct < input.maxDailyDrawdownPct;
+    default:
+      throw new Error(`Unhandled autonomous token mode: ${input.mode}`);
+  }
 }
 
 /** Computes the bounded retry timestamp for a settlement attempt. */
