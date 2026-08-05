@@ -1,6 +1,6 @@
 {
   "name": "prism-liquidity-agent",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Autonomous liquidity agent for Solana pools (currently Meteora DLMM)",
   "keywords": [
     "ai-agent",
@@ -19,9 +19,6 @@
     "prism": "./scripts/prism.sh"
   },
   "type": "module",
-  "engines": {
-    "bun": ">=1.4.0-canary.1"
-  },
   "scripts": {
     "start": "bun cli/index.ts dev",
     "dev": "bun run --watch cli/index.ts dev",
@@ -66,5 +63,8 @@
   },
   "overrides": {
     "typescript": "$typescript"
+  },
+  "engines": {
+    "bun": ">=1.4.0-canary.1"
   }
 }

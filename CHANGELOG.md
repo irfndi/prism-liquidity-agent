@@ -2,6 +2,101 @@
 
 All notable changes to Prism are documented here.
 
+## [0.1.5] — 2026-08-05
+
+### Added
+
+- Fallen-angel mode — mean-reversion strategy with DB-backed config, Gecko OHLCV + RugCheck fetchers, any-TVL discovery, and TP-ladder + invalidation-stop lifecycle (#152)
+- Sharded worker and engine test suites across parallel CI runners
+
+### Fixed
+
+- `prism portfolio` / `prism status` now surface true wallet equity (#151)
+- Mode-aware auto-resolve for the latched daily-drawdown safety pause (#150)
+- Remediated deepsec & clawpatch security review findings (#147)
+
+### Changed
+
+- Bumped version to 0.1.5.
+
+## [0.1.4] — 2026-08-04
+
+### Added
+
+- Autonomous multi-token agent mode (#143)
+- Telemetry default-on: D1 summary migration, report deduplication, archive bucket, `prism telemetry` preference commands, credential-bounded error reporting
+
+### Fixed
+
+- Telegram `/status` now returns real engine data via KV-backed status reporting (#141)
+- Audit findings from the 0.1.3 release run (P0/P1/P2) (#142)
+- deepsec & clawpatch security review findings (#147)
+
+## [0.1.3] — 2026-07-28
+
+### Added
+
+- Fee-density-driven exit cooldowns (#128)
+- Idle capital auto-redeploy gate (opt-in) (#129)
+- Pyth Hermes price poller service with optional API key (#139)
+- Alerts delivered via D1 poll + bot flush endpoint (error 1042 workaround) (#140)
+
+### Fixed
+
+- Real secondary stats source (GeckoTerminal), 60s veto timeout, adaptive ranges on by default, silent bigint fallback (#124)
+- Veto timeout budget, elapsed telemetry, transport error unwrapping (#125)
+- Redeploy follow-ups — portfolio base, candidate iteration, known-signal confidence, overlay bookkeeping (#133, #135)
+- Cloudflare infra: Alchemy IaC migration, transient-error retries, wrangler-created worker adoption, esbuild prebuild with un-bundled upload (#127, #132, #134, #136)
+- Atomic Telegram link + API errors surfaced in bot replies (#137)
+- Bot→API calls routed over Cloudflare service bindings (error 1042) (#138)
+
+### Changed
+
+- Coverage gate enforced in CI; property, memory, and API-route test suites added (#126)
+
+## [0.1.2] — 2026-07-22
+
+### Fixed
+
+- Stablecoin allowlist + token-risk smart screening, IL protection, sqlite-vec memory repair, veto robustness (#122)
+- Realized PnL fee leg at EXIT + wallet chain reconciliation (#123)
+
+## [0.1.1] — 2026-07-20
+
+### Added
+
+- Canary release channel — `prism update --canary` (#120)
+
+### Fixed
+
+- Gateway probe settles before close to fix Bun false-negative (#116)
+- Helius RPC URL normalization + live connectivity probes in `prism doctor` (#119)
+- Agent runtime transports (OpenClaw gateway, ACP, Hermes HTTP) + CLI/install/wallet bugs (#118)
+
+### Changed
+
+- Updated all dependencies to latest (#121)
+
+## [0.1.0] — 2026-07-20
+
+### Added
+
+- Per-position PnL accounting (Wave 4) (#99)
+- Atomic rebalance via SDK `rebalancePosition` (Wave 6) (#100)
+- DLMM strategy shapes + single-sided entry (Wave 7) (#101)
+- DLMM farm reward awareness (Wave 8) (#102)
+- Volatility-adaptive range width (Wave 9) (#103)
+- Multiple positions per pool (Wave 10) (#104)
+- Backtest fidelity (Wave 11) (#105)
+- Automatic fee accumulation (Wave 13) (#107)
+- Stablecoin depeg and liquidity-drain alerts (W15) (#108)
+- Opt-in copy-trading signals (W16) (#109)
+- W14 limit-order fail-closed seam — blocked/deferred, not a working feature (#110)
+
+### Fixed
+
+- 20 unresolved PR review findings from #95–#110 (#111)
+
 ## [0.0.31] — 2026-07-13
 
 ### Fixed
