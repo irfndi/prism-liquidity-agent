@@ -6,6 +6,7 @@ import {
   nextSettlementRetryAt,
   persistDailyEquityBaseline,
   processSettlementJobs,
+  safetyPauseBlockReason,
   shouldAutoResolveDailyDrawdownPause,
   shouldTriggerSafetyPause,
 } from "../engine/autonomous-runtime.js";
@@ -97,6 +98,37 @@ describe("autonomous token runtime policy", () => {
     expect(isActionAllowedDuringSafetyPause("HOLD")).toBe(true);
     expect(isActionAllowedDuringSafetyPause("ENTER")).toBe(false);
     expect(isActionAllowedDuringSafetyPause("REBALANCE")).toBe(false);
+  });
+
+  it("enforces the safety pause at risk gates except in shadow mode (issue #148)", () => {
+    // Given an unresolved pause on a live account.
+    const pause = {
+      walletAddress: "wallet-1",
+      agentInstanceId: "primary",
+      reason: "daily_drawdown",
+      triggeredAt: 1_000,
+      resolvedAt: null as number | null,
+    };
+
+    // Live blocks entry/rebalance but permits EXIT/HOLD.
+    expect(safetyPauseBlockReason("live", pause, "ENTER")).toBe(
+      "Wallet safety pause active: daily_drawdown",
+    );
+    expect(safetyPauseBlockReason("live", pause, "REBALANCE")).toBe(
+      "Wallet safety pause active: daily_drawdown",
+    );
+    expect(safetyPauseBlockReason("live", pause, "EXIT")).toBeNull();
+    expect(safetyPauseBlockReason("live", pause, "HOLD")).toBeNull();
+
+    // Shadow is informational only — never blocks any action.
+    expect(safetyPauseBlockReason("shadow", pause, "ENTER")).toBeNull();
+    expect(safetyPauseBlockReason("shadow", pause, "REBALANCE")).toBeNull();
+
+    // A resolved pause does not block.
+    expect(safetyPauseBlockReason("live", { ...pause, resolvedAt: 2_000 }, "ENTER")).toBeNull();
+
+    // No pause never blocks.
+    expect(safetyPauseBlockReason("live", null, "ENTER")).toBeNull();
   });
 
   it("triggers each wallet safety threshold at its configured boundary", () => {

@@ -2,11 +2,33 @@ import { Effect } from "effect";
 import { SOL_MINT } from "./constants.js";
 import { computeNetRealizedPnlUsd } from "./pnl.js";
 import type { AdapterApi, DbApi } from "./services.js";
-import type { ActionType, AutonomousTokenMode, SettlementJobRecord } from "./types.js";
+import type {
+  ActionType,
+  AutonomousTokenMode,
+  SafetyPauseRecord,
+  SettlementJobRecord,
+} from "./types.js";
 
 /** Returns whether an action remains permitted while the wallet safety pause is active. */
 export function isActionAllowedDuringSafetyPause(action: ActionType): boolean {
   return action === "EXIT" || action === "HOLD";
+}
+
+/**
+ * Returns the reject reason when an active wallet safety pause should block
+ * a decision, or null when the decision proceeds. The pause is informational
+ * in `shadow` mode (no-send by design) — it never blocks a decision there.
+ * EXIT/HOLD remain permitted while the pause is active.
+ */
+export function safetyPauseBlockReason(
+  autonomousMode: AutonomousTokenMode | undefined,
+  activeSafetyPause: SafetyPauseRecord | null,
+  action: ActionType,
+): string | null {
+  if (autonomousMode === "shadow") return null;
+  if (activeSafetyPause === null || activeSafetyPause.resolvedAt !== null) return null;
+  if (isActionAllowedDuringSafetyPause(action)) return null;
+  return `Wallet safety pause active: ${activeSafetyPause.reason}`;
 }
 
 export interface SafetyPauseThresholdInput {
@@ -71,11 +93,17 @@ export interface DailyDrawdownAutoResolveInput {
  */
 export function shouldAutoResolveDailyDrawdownPause(input: DailyDrawdownAutoResolveInput): boolean {
   if (input.maxDailyDrawdownPct <= 0) return true;
-  if (input.mode === "shadow") return true;
-  if (input.mode === "canary") {
-    return input.dayRolledOver || input.dailyDrawdownPct < input.maxDailyDrawdownPct;
+  switch (input.mode) {
+    case "shadow":
+      return true;
+    case "canary":
+      return input.dayRolledOver || input.dailyDrawdownPct < input.maxDailyDrawdownPct;
+    case "live":
+    case "off":
+      return input.dailyDrawdownPct < input.maxDailyDrawdownPct;
+    default:
+      throw new Error(`Unhandled autonomous token mode: ${input.mode}`);
   }
-  return input.dailyDrawdownPct < input.maxDailyDrawdownPct;
 }
 
 /** Computes the bounded retry timestamp for a settlement attempt. */

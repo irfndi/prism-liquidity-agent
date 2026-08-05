@@ -141,10 +141,10 @@ import {
 } from "./proposal-backoff.js";
 import { computeCooldownForExit } from "./cooldown.js";
 import {
-  isActionAllowedDuringSafetyPause,
   loadDailyEquityBaseline,
   persistDailyEquityBaseline,
   processSettlementJobs,
+  safetyPauseBlockReason,
   shouldAutoResolveDailyDrawdownPause,
   shouldTriggerSafetyPause,
 } from "./autonomous-runtime.js";
@@ -3250,16 +3250,18 @@ export const program = Effect.gen(function* () {
         };
         // Issue #148: the wallet safety pause is informational in shadow mode
         // (no-send by design) — it must never block a decision there.
+        const pauseBlockReason = safetyPauseBlockReason(
+          autonomousExecution?.mode,
+          activeSafetyPause,
+          decision.action,
+        );
         const riskResult: RiskResult =
-          autonomousExecution !== null &&
-          autonomousExecution.mode !== "shadow" &&
-          activeSafetyPause?.resolvedAt === null &&
-          !isActionAllowedDuringSafetyPause(decision.action)
-            ? {
+          pauseBlockReason === null
+            ? risk.evaluate(decision, riskCtx)
+            : {
                 approved: false,
-                reason: `Wallet safety pause active: ${activeSafetyPause.reason}`,
-              }
-            : risk.evaluate(decision, riskCtx);
+                reason: pauseBlockReason,
+              };
         if (riskResult.adjustedSizeUsd) {
           decision = {
             ...decision,
@@ -6036,18 +6038,17 @@ export const program = Effect.gen(function* () {
         };
         // Issue #148: the wallet safety pause is informational in shadow mode
         // (no-send by design) — it must never block a decision there.
+        const pauseBlockReason = safetyPauseBlockReason(
+          autonomousExecution?.mode,
+          activeSafetyPause,
+          decision.action,
+        );
         const riskResult: RiskResult =
-          autonomousExecution !== null &&
-          autonomousExecution.mode !== "shadow" &&
-          activeSafetyPause?.resolvedAt === null &&
-          !isActionAllowedDuringSafetyPause(decision.action)
-            ? {
-                approved: false,
-                reason: `Wallet safety pause active: ${activeSafetyPause.reason}`,
-              }
-            : decision.action === "HOLD"
+          pauseBlockReason === null
+            ? decision.action === "HOLD"
               ? { approved: true, reason: "HOLD — no execution; risk gates skipped" }
-              : risk.evaluate(decision, riskCtx);
+              : risk.evaluate(decision, riskCtx)
+            : { approved: false, reason: pauseBlockReason };
 
         // Apply risk-adjusted position size cap
         if (riskResult.adjustedSizeUsd && decision.action === "ENTER") {
