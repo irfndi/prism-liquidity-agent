@@ -919,14 +919,16 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
     up(db) {
       // Fallen-angel lifecycle state (Wave 19): position mode, serialized
       // TP-ladder JSON and invalidation stop. Additive + non-destructive;
-      // legacy rows stay NULL (non-FA positions).
-      if (!hasColumn(db, "positions", "position_mode")) {
+      // legacy rows stay NULL (non-FA positions). Guarded on table existence
+      // like v19's pool_snapshots guard — partial legacy fixtures may mark
+      // v18 applied without physically creating `positions`.
+      if (hasTable(db, "positions") && !hasColumn(db, "positions", "position_mode")) {
         db.exec("ALTER TABLE positions ADD COLUMN position_mode TEXT");
       }
-      if (!hasColumn(db, "positions", "tp_ladder_json")) {
+      if (hasTable(db, "positions") && !hasColumn(db, "positions", "tp_ladder_json")) {
         db.exec("ALTER TABLE positions ADD COLUMN tp_ladder_json TEXT");
       }
-      if (!hasColumn(db, "positions", "invalidation_stop_price")) {
+      if (hasTable(db, "positions") && !hasColumn(db, "positions", "invalidation_stop_price")) {
         db.exec("ALTER TABLE positions ADD COLUMN invalidation_stop_price REAL");
       }
     },
