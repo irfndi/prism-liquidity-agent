@@ -58,7 +58,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: canary
 
       - name: Install dependencies
         run: bun install
@@ -98,7 +98,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: canary
 
       - name: Install dependencies
         run: bun install
@@ -151,7 +151,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: canary
 
       - name: Install dependencies
         run: bun install
@@ -241,7 +241,7 @@ jobs:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
           echo "$GPG_PRIVATE_KEY" | gpg --import
-          for f in release-assets/prism-v${VERSION}.tar.gz release-assets/prism-v${VERSION}-*.tar.gz; do
+          for f in "release-assets/prism-v${VERSION}.tar.gz" "release-assets/prism-v${VERSION}"-*.tar.gz; do
             [ -e "$f" ] || continue
             gpg --batch --yes --armor --detach-sign "$f"
           done
@@ -265,7 +265,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          for f in release-assets/prism-v${VERSION}-*.tar.gz; do
+          for f in "release-assets/prism-v${VERSION}"-*.tar.gz; do
             [ -e "$f" ] || continue
             npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
           done
@@ -275,7 +275,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          for f in release-assets/prism-v${VERSION}-*.tar.gz.sha256; do
+          for f in "release-assets/prism-v${VERSION}"-*.tar.gz.sha256; do
             [ -e "$f" ] || continue
             npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
           done
@@ -286,7 +286,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          for f in release-assets/prism-v${VERSION}*.tar.gz.asc; do
+          for f in "release-assets/prism-v${VERSION}"*.tar.gz.asc; do
             [ -e "$f" ] || continue
             npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
           done
@@ -320,10 +320,9 @@ jobs:
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
           else
-            ASSETS=$(ls release-assets/* | tr '\n' ' ')
             gh release create "${GITHUB_REF_NAME}" \
               --title "Release ${GITHUB_REF_NAME}" \
               --generate-notes \
               --verify-tag \
-              ${ASSETS}
+              release-assets/*
           fi
