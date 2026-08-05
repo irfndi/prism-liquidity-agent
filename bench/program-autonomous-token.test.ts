@@ -6,6 +6,7 @@ import {
   nextSettlementRetryAt,
   persistDailyEquityBaseline,
   processSettlementJobs,
+  shouldAutoResolveDailyDrawdownPause,
   shouldTriggerSafetyPause,
 } from "../engine/autonomous-runtime.js";
 import { SOL_MINT } from "../engine/constants.js";
@@ -144,6 +145,77 @@ describe("autonomous token runtime policy", () => {
         settlementMaxPendingMs: 3_600_000,
       }),
     ).toBe("settlement_overdue");
+  });
+
+  it("auto-resolves a latched daily_drawdown pause per the mode table (issue #148)", () => {
+    // Given a disabled threshold (gate off) — a leftover pause never latches.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "live",
+        dailyDrawdownPct: 99,
+        maxDailyDrawdownPct: 0,
+        dayRolledOver: false,
+      }),
+    ).toBe(true);
+
+    // Shadow is informational only — always auto-resolve, never latch.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "shadow",
+        dailyDrawdownPct: 99,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: false,
+      }),
+    ).toBe(true);
+
+    // Canary auto-clears at the day-boundary rollover even while still breached.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "canary",
+        dailyDrawdownPct: 99,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: true,
+      }),
+    ).toBe(true);
+
+    // Canary also clears as soon as the drawdown recovers below the threshold.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "canary",
+        dailyDrawdownPct: 4,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: false,
+      }),
+    ).toBe(true);
+
+    // Canary stays latched while breached and no rollover has occurred.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "canary",
+        dailyDrawdownPct: 6,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: false,
+      }),
+    ).toBe(false);
+
+    // Live re-evaluates fresh each cycle — recovery (or a fresh-day baseline
+    // that drops the measured drawdown to ~0) clears it; a live breach latches.
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "live",
+        dailyDrawdownPct: 4,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAutoResolveDailyDrawdownPause({
+        mode: "live",
+        dailyDrawdownPct: 6,
+        maxDailyDrawdownPct: 5,
+        dayRolledOver: true,
+      }),
+    ).toBe(false);
   });
 
   it("caps deterministic settlement retry backoff", () => {

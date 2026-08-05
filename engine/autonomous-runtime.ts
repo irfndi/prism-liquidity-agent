@@ -42,6 +42,42 @@ export function shouldTriggerSafetyPause(
   return null;
 }
 
+export interface DailyDrawdownAutoResolveInput {
+  readonly mode: AutonomousTokenMode;
+  readonly dailyDrawdownPct: number;
+  readonly maxDailyDrawdownPct: number;
+  readonly dayRolledOver: boolean;
+}
+
+/**
+ * Mode-aware auto-resolution for a latched `daily_drawdown` safety pause
+ * (issue #148). The daily equity baseline re-seeds every day, but nothing
+ * ever re-evaluated an existing pause — only `prism resume` could clear it,
+ * so the pause silently latched into new days. This mirrors the autonomy
+ * contract:
+ *
+ * - `shadow` — informational only: the pause never blocks and never requires
+ *   a manual resume, so always auto-resolve.
+ * - `canary` — auto-clear at the day-boundary rollover, or as soon as the
+ *   drawdown recovers below `MAX_DAILY_DRAWDOWN_PCT`.
+ * - `live` — re-evaluate fresh every cycle: auto-resolve when the drawdown no
+ *   longer breaches the threshold (a fresh daily baseline after rollover
+ *   normally drops the measured drawdown to ~0).
+ *
+ * A disabled threshold (`maxDailyDrawdownPct <= 0`) means the gate is off, so
+ * a leftover pause from when it was enabled should not latch either.
+ *
+ * Returns true when the caller should clear the active pause (`resolvedAt`).
+ */
+export function shouldAutoResolveDailyDrawdownPause(input: DailyDrawdownAutoResolveInput): boolean {
+  if (input.maxDailyDrawdownPct <= 0) return true;
+  if (input.mode === "shadow") return true;
+  if (input.mode === "canary") {
+    return input.dayRolledOver || input.dailyDrawdownPct < input.maxDailyDrawdownPct;
+  }
+  return input.dailyDrawdownPct < input.maxDailyDrawdownPct;
+}
+
 /** Computes the bounded retry timestamp for a settlement attempt. */
 export function nextSettlementRetryAt(now: number, attempts: number): number {
   const exponent = Math.max(0, Math.min(attempts - 1, 30));
