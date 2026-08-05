@@ -77,6 +77,48 @@ describe("DbService — positions", () => {
     );
   });
 
+  it("round-trips fallen-angel lifecycle fields", () => {
+    const layer = makeLayer();
+    const pos = makePosition({
+      positionId: "paper-FA1",
+      poolAddress: "pool-fa",
+      positionPubKey: null,
+    });
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* db.savePosition({
+          ...pos,
+          positionMode: "fallen-angel",
+          tpLadderJson: '{"rungs":[{"targetPrice":115,"fraction":0.4}]}',
+          invalidationStopPrice: 75,
+        });
+        const retrieved = yield* db.getPosition(pos.positionId);
+        expect(retrieved!.positionMode).toBe("fallen-angel");
+        expect(retrieved!.tpLadderJson).toContain("targetPrice");
+        expect(retrieved!.invalidationStopPrice).toBe(75);
+      }),
+      layer,
+    );
+  });
+
+  it("defaults fallen-angel fields to null for legacy rows", () => {
+    const layer = makeLayer();
+    const pos = makePosition();
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* db.savePosition(pos);
+        const retrieved = yield* db.getPosition(pos.positionId);
+        expect(retrieved!.positionMode).toBeNull();
+        expect(retrieved!.tpLadderJson).toBeNull();
+        expect(retrieved!.invalidationStopPrice).toBeNull();
+      }),
+      layer,
+    );
+  });
   it("upserts on duplicate position id", () => {
     const layer = makeLayer();
     const pos1 = makePosition({ depositedUsd: 1000 });

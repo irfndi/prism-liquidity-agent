@@ -230,6 +230,7 @@ describe("executeLive", () => {
       listFeedbackForAgent: () => Effect.succeed([]),
       getMetadata: () => Effect.succeed(null),
       setMetadata: () => Effect.void,
+      deleteMetadata: () => Effect.void,
       setMetadataBatch: () => Effect.void,
       saveFeeClaim: () => Effect.void,
       getUnreportedFeeClaims: () => Effect.succeed([]),

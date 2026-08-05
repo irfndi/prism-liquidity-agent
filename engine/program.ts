@@ -92,6 +92,7 @@ import {
   type MemoryApi,
   type RiskResult,
   type ScreenedPool,
+  type DiscoveredPool,
   type StrategyApi,
   type RevenueConfigApi,
   type EntryPrepApi,
@@ -105,6 +106,17 @@ import { AlertLive } from "./alert-service.js";
 import { detectDepegAndLiquidityDrain } from "./depeg-liquidity-detector.js";
 import { consultTokenRisks, type TokenRiskSignal } from "./token-risk-service.js";
 import { CopySignalLive, applyCopySignalBoost } from "./copy-trading-signals.js";
+import { evaluateFallenAngelDiscovery } from "./fallen-angel-discovery.js";
+import { identifyAssetMint } from "./fallen-angel-service.js";
+import {
+  buildTpLadder,
+  evaluateTpLadder,
+  parseTpLadder,
+  serializeTpLadder,
+  type TpLadder,
+} from "./tp-ladder.js";
+import { getGeckoPoolOhlcv, type GeckoOhlcvSignals } from "./gecko-ohlcv-service.js";
+import { getRugCheckReport, type RugCheckReport } from "./rugcheck-service.js";
 import type {
   AgentDecision,
   AgentProposal,
@@ -942,6 +954,9 @@ export function executePaper(
         cumulativeRewardsClaimedUsd: 0,
         closedAt: null,
         realizedPnlUsd: null,
+        positionMode: decision.positionMode ?? null,
+        tpLadderJson: decision.tpLadderJson ?? null,
+        invalidationStopPrice: decision.invalidationStopPrice ?? null,
       };
       trackedPositions.set(pos.positionId, pos);
       yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
@@ -1452,6 +1467,9 @@ export function executeLive(
           cumulativeRewardsClaimedUsd: 0,
           closedAt: null,
           realizedPnlUsd: null,
+          positionMode: decision.positionMode ?? null,
+          tpLadderJson: decision.tpLadderJson ?? null,
+          invalidationStopPrice: decision.invalidationStopPrice ?? null,
         };
         trackedPositions.set(pos.positionId, pos);
         yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
@@ -2441,6 +2459,15 @@ export const program = Effect.gen(function* () {
   const autonomousCandidateWallet = executionWalletAddress ?? "paper";
   const autonomousCandidates = new Map<string, TokenCandidateRecord>();
   const autonomousCandidatePools = new Set<string>();
+  // Fallen-angel candidates (Wave 19): pools that cleared the fallen-angel
+  // gate (RugCheck security + GeckoTerminal drawdown/vol). Opt-in, inert when
+  // FALLEN_ANGEL_ENABLED is off. `fallenAngelSignals` carries the per-pool
+  // qualification so the ENTER gate can re-confirm without re-fetching.
+  const fallenAngelCandidatePools = new Set<string>();
+  const fallenAngelSignals = new Map<
+    string,
+    { readonly assetMint: string; readonly drawdownPct: number }
+  >();
   const autonomousCandidatePoolAddresses = new Set<string>();
 
   if (config.autonomousTokenMode !== "off") {
@@ -2506,6 +2533,9 @@ export const program = Effect.gen(function* () {
     unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
     poolsToScan = [...approvedPoolAddresses];
     for (const poolAddress of autonomousCandidatePools) {
+      if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
+    }
+    for (const poolAddress of fallenAngelCandidatePools) {
       if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
     }
     if (!reconcileResult.succeeded) {
@@ -2654,6 +2684,91 @@ export const program = Effect.gen(function* () {
       for (const poolAddress of advanced.eligiblePoolAddresses) {
         autonomousCandidatePools.add(poolAddress);
         if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
+      }
+    });
+
+  // Fallen-angel discovery refresh (Wave 19). Opt-in via FALLEN_ANGEL_ENABLED.
+  // Re-runs the gate each cycle over a fresh discovery page (any TVL above
+  // fallenAngelMinTvlUsd) and feeds qualified pools into poolsToScan. RugCheck
+  // reports are cached per mint for the process lifetime so repeat pages do
+  // not re-fetch; the gecko OHLCV fetch is shared with the main stats path and
+  // bounded by the discovery page size.
+  const refreshFallenAngelCandidates = (scanOrdinal: number): Effect.Effect<void, never> =>
+    Effect.gen(function* () {
+      if (config.fallenAngelEnabled !== true || !shouldDiscoverPools(config)) return;
+      const discovered = yield* adapter
+        .discoverPools(scanOrdinal)
+        .pipe(Effect.catchAll(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)));
+      if (discovered.length === 0) return;
+
+      const rugcheckCache = new Map<string, RugCheckReport | null>();
+      const fetchSignals = async (pool: {
+        readonly address: string;
+        readonly tokenX: string;
+        readonly tokenY: string;
+      }) => {
+        // Single-sourced asset-leg resolution (same helper the gate uses), so
+        // the RugCheck report is fetched for the exact mint the gate evaluates.
+        const assetMint = identifyAssetMint(
+          pool.tokenX,
+          pool.tokenY,
+          config.stablecoinMints,
+          SOL_MINT,
+        );
+        const ohlcv: GeckoOhlcvSignals | null = await getGeckoPoolOhlcv(pool.address);
+        let rugcheck: RugCheckReport | null = null;
+        if (assetMint) {
+          if (!rugcheckCache.has(assetMint)) {
+            rugcheckCache.set(assetMint, await getRugCheckReport(assetMint));
+          }
+          rugcheck = rugcheckCache.get(assetMint) ?? null;
+        }
+        return { ohlcv, rugcheck };
+      };
+
+      const result = yield* Effect.promise(() =>
+        evaluateFallenAngelDiscovery(
+          discovered.filter(
+            (p) => Number.isFinite(p.tvlUsd) && p.tvlUsd >= (config.fallenAngelMinTvlUsd ?? 0),
+          ),
+          {
+            minTvlUsd: config.fallenAngelMinTvlUsd ?? 0,
+            minDrawdownPct: config.fallenAngelMinDrawdownPct ?? 0.6,
+            maxDrawdownPct: config.fallenAngelMaxDrawdownPct ?? 0.95,
+            volBaselineMin: config.fallenAngelVolBaselineMin ?? 0.02,
+            volBaselineMax: config.fallenAngelVolBaselineMax ?? 0.35,
+            maxRugcheckScore: config.fallenAngelMaxRugcheckScore ?? 60,
+            minHolders: config.fallenAngelMinHolders ?? 300,
+            maxTop10HolderPct: config.fallenAngelMaxTop10HolderPct ?? 0.5,
+          },
+          config.stablecoinMints,
+          SOL_MINT,
+          fetchSignals,
+        ),
+      );
+
+      fallenAngelCandidatePools.clear();
+      fallenAngelSignals.clear();
+      for (const qualified of result.qualified) {
+        fallenAngelCandidatePools.add(qualified.poolAddress);
+        fallenAngelSignals.set(qualified.poolAddress, {
+          assetMint: qualified.assetMint,
+          drawdownPct: qualified.drawdownPct,
+        });
+        if (!poolsToScan.includes(qualified.poolAddress)) {
+          poolsToScan.push(qualified.poolAddress);
+        }
+      }
+      if (result.qualified.length > 0) {
+        logger.info(`Fallen-angel discovery: ${result.qualified.length} qualified pool(s)`, {
+          pools: result.qualified.map((q) => q.poolAddress),
+        });
+      }
+      for (const rejected of result.rejected.slice(0, 5)) {
+        logger.debug("Fallen-angel candidate rejected", {
+          pool: rejected.poolAddress,
+          reasons: rejected.reasons,
+        });
       }
     });
 
@@ -3575,6 +3690,7 @@ export const program = Effect.gen(function* () {
 
       let oldestSettlementAgeMs = 0;
       yield* refreshAutonomousCandidates(scanCount);
+      yield* refreshFallenAngelCandidates(scanCount);
       if (autonomousExecution) {
         const settlementJobs = yield* db
           .listSettlementJobs(
@@ -4603,7 +4719,44 @@ export const program = Effect.gen(function* () {
           }
         }
 
-        if (w15Signals.depeg || w15Signals.liquidityDrain) {
+        // ── Fallen-angel lifecycle (Wave 19) ─────────────────────────────
+        // A fallen-angel position exits via its TP-ladder (a rung is hit —
+        // scale out, close-and-reopen) or its invalidation stop (thesis
+        // broken — capital protection at confidence 1). Both are
+        // position-targeted deterministic exits and take precedence over the
+        // ordinary EXIT chain below.
+        let faLifecycle: { status: "tp" | "invalidation"; reasoning: string } | null = null;
+        if (config.fallenAngelEnabled === true && pos.positionMode === "fallen-angel") {
+          const faLadderParsed = parseTpLadder(pos.tpLadderJson);
+          if (faLadderParsed !== null && pos.invalidationStopPrice != null) {
+            const faEval = evaluateTpLadder(
+              pool.currentPrice,
+              faLadderParsed,
+              pos.invalidationStopPrice,
+            );
+            if (faEval.status === "invalidation") {
+              faLifecycle = {
+                status: "invalidation",
+                reasoning: `[fa-invalidation] Price ${pool.currentPrice.toFixed(6)} <= invalidation stop ${pos.invalidationStopPrice.toFixed(6)} — thesis broken`,
+              };
+            } else if (faEval.status === "tp" && faEval.rungReached) {
+              faLifecycle = {
+                status: "tp",
+                reasoning: `[fa-tp-ladder] Price ${pool.currentPrice.toFixed(6)} reached target ${faEval.rungReached.targetPrice.toFixed(6)} — scale out ${(faEval.scaleOutFraction ?? 0) * 100}%`,
+              };
+            }
+          }
+        }
+
+        if (faLifecycle) {
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            positionId: pos.positionId,
+            confidence: 1,
+            reasoning: faLifecycle.reasoning,
+          };
+        } else if (w15Signals.depeg || w15Signals.liquidityDrain) {
           decision = {
             action: "EXIT",
             poolAddress,
@@ -5308,6 +5461,81 @@ export const program = Effect.gen(function* () {
                   paperTrading: config.paperTrading,
                 })
                 .pipe(Effect.catchAll(() => Effect.void));
+              enterGateRejected = true;
+            }
+          }
+
+          // ── Fallen-angel ENTER (Wave 19) ───────────────────────────────
+          // A pool that cleared the fallen-angel gate (RugCheck security +
+          // GeckoTerminal drawdown/vol) enters on the MEAN-REVERSION thesis:
+          // the fee-harvesting quality gates below ([fee-il-gate], ×1.5
+          // candidate conditions, weighted score) do not apply — a deeply
+          // drawn-down token has thin fee/IL by construction. Allocation,
+          // token-risk and the risk tail still run verbatim. The decision
+          // carries the FA lifecycle (ladder + invalidation) so execution
+          // stamps the position row.
+          const faSignal = fallenAngelSignals.get(poolAddress);
+          const openFaPositions = Array.from(trackedPositions.values()).filter(
+            (p) => p.positionMode === "fallen-angel",
+          ).length;
+          const faMaxPositions = config.fallenAngelMaxPositions ?? 2;
+          if (
+            !enterGateRejected &&
+            config.fallenAngelEnabled === true &&
+            faSignal !== undefined &&
+            openFaPositions < faMaxPositions
+          ) {
+            const faLadder = buildTpLadder(pool.currentPrice, {
+              rungs: config.fallenAngelTpRungs ?? [0.15, 0.3, 0.5],
+              fractions: config.fallenAngelTpFractions ?? [0.4, 0.3, 0.3],
+              invalidationStopPct: config.fallenAngelInvalidationStopPct ?? 0.25,
+            });
+            const faProposedSizeUsd = computeEntrySizeUsd({
+              walletBalanceUsd,
+              tvlUsd: pool.tvlUsd,
+            });
+            const faAllocation = evaluatePerPoolAllocation({
+              proposedDepositUsd: faProposedSizeUsd,
+              portfolioValueUsd,
+              openPositions,
+              maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+              maxOpenPositions: config.maxOpenPositions,
+              poolAddress,
+              maxPositionsPerPool: config.maxPositionsPerPool,
+            });
+            if (!faAllocation.approved) {
+              console.info(
+                `[fa-alloc-gate] Skipping FA ENTER ${poolAddress} — ${faAllocation.reason}`,
+              );
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: 0,
+                  reasoning: `[fa-alloc-gate] ${faAllocation.reason}`,
+                  metrics,
+                  riskResult: { approved: false, reason: `[fa-alloc-gate] ${faAllocation.reason}` },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catchAll(() => Effect.void));
+              enterGateRejected = true;
+            } else if (faLadder !== null) {
+              rawDecisions.push({
+                action: "ENTER",
+                poolAddress,
+                confidence: 0.75,
+                reasoning: `Fallen-angel: ${faSignal.assetMint} down ${(faSignal.drawdownPct * 100).toFixed(0)}% from ATH, RugCheck-clean, TVL $${pool.tvlUsd.toFixed(0)}`,
+                positionSizeUsd: faAllocation.adjustedDepositUsd,
+                positionMode: "fallen-angel",
+                tpLadderJson: serializeTpLadder(faLadder.ladder) ?? undefined,
+                invalidationStopPrice: faLadder.invalidationPrice,
+              });
+              // Consume the ENTER slot: the FA branch already pushed the
+              // decision, so the quality gates below must not run and push a
+              // duplicate ENTER for the same pool this cycle.
               enterGateRejected = true;
             }
           }
