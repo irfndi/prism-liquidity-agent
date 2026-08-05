@@ -1,11 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import {
   parseGeckoOhlcv,
   summarizeGeckoOhlcv,
   getGeckoPoolOhlcv,
+  resetGeckoOhlcvCache,
   type GeckoOhlcvBar,
 } from "../engine/gecko-ohlcv-service.js";
 
+beforeEach(() => resetGeckoOhlcvCache());
 // Live-verified payload fragment (2026-08-05, pool 54Vp27uLaw4wNLo5n7r4fcC6zLamoQc28xBARjss4EUJ).
 // ohlcv_list rows are [unixSeconds, open, high, low, close, volume].
 const LIVE_OHLCV = {
@@ -168,5 +170,41 @@ describe("getGeckoPoolOhlcv", () => {
     };
     await getGeckoPoolOhlcv("abc", { fetchImpl, baseUrl: "https://x.example/api/v2", limit: 60 });
     expect(calledUrl).toContain("/networks/solana/pools/abc/ohlcv/day?limit=60");
+  });
+
+  it("serves a fresh last-good series from cache without re-fetching", async () => {
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls += 1;
+      return new Response(JSON.stringify(LIVE_OHLCV), { status: 200 });
+    };
+    await getGeckoPoolOhlcv("cached-pool", { fetchImpl });
+    const second = await getGeckoPoolOhlcv("cached-pool", { fetchImpl });
+    expect(second).not.toBeNull();
+    expect(calls).toBe(1);
+  });
+
+  it("reuses the stale last-good series when a later fetch fails (#154)", async () => {
+    const ok = async () => new Response(JSON.stringify(LIVE_OHLCV), { status: 200 });
+    await getGeckoPoolOhlcv("stale-pool", { fetchImpl: ok });
+    const failing = async () => new Response("{}", { status: 429 });
+    const result = await getGeckoPoolOhlcv("stale-pool", {
+      fetchImpl: failing,
+      cacheTtlMs: 0, // force the cached series stale so the fetch runs
+    });
+    expect(result).not.toBeNull();
+    expect(result!.barCount).toBe(5);
+  });
+
+  it("does not re-fetch a pool inside its backoff window", async () => {
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls += 1;
+      return new Response("{}", { status: 500 });
+    };
+    await getGeckoPoolOhlcv("backoff-pool", { fetchImpl });
+    const second = await getGeckoPoolOhlcv("backoff-pool", { fetchImpl });
+    expect(second).toBeNull();
+    expect(calls).toBe(1);
   });
 });
