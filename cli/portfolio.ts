@@ -1,9 +1,15 @@
 import { Command } from "commander";
 import { Effect, Layer } from "effect";
 import { DbLive } from "../engine/db-service.js";
-import { DbService, type DbApi } from "../engine/services.js";
+import { DbService, type DbApi, AdapterService } from "../engine/services.js";
+import { AdapterLive } from "../engine/adapter-service.js";
+import { ConfigLive } from "../engine/config-service.js";
 import type { PositionRecord } from "../engine/db-service.js";
-import { computePositionAnalytics } from "../engine/pnl.js";
+import {
+  computePositionAnalytics,
+  computePortfolioEquity,
+  type PortfolioEquity,
+} from "../engine/pnl.js";
 import { createLogger } from "../engine/logger.js";
 import { getPrismDbPath } from "../engine/paths.js";
 
@@ -26,10 +32,43 @@ function sanitizeSymbol(value: string): string {
   return value.replace(ANSI_ESCAPE_RE, "").replace(CONTROL_CHAR_RE, "");
 }
 
-function buildProgram(): Layer.Layer<DbService, never, never> {
-  return DbLive(process.env.SQLITE_DB_PATH ?? getPrismDbPath());
+function buildProgram(): Layer.Layer<DbService | AdapterService, unknown, never> {
+  const dbPath = process.env.SQLITE_DB_PATH ?? getPrismDbPath();
+  const dbLayer = DbLive(dbPath);
+  const adapterLayer = Layer.provide(AdapterLive, ConfigLive);
+  return Layer.mergeAll(dbLayer, adapterLayer);
 }
 
+/**
+ * Read the wallet's liquid balance once, fail-open, bounded. Returns null when
+ * the wallet cannot be read (no wallet, RPC down, timeout) so the caller
+ * falls back to positions-only equity — never fabricates a number.
+ */
+export function readCliWalletBalance(): Effect.Effect<number | null, never, AdapterService> {
+  return Effect.gen(function* () {
+    const adapter = yield* AdapterService;
+    // No wallet configured → the liquid balance is NOT a chain-read wallet
+    // (paper mode seeds paperPortfolioUsd, which positions-only already
+    // reflects). Treat as unknown so equity falls back to positions-only
+    // rather than presenting a fake $0 wallet.
+    if (!adapter.hasWallet()) return null;
+    return yield* adapter.getWalletBalanceUsd().pipe(
+      Effect.timeout(15_000),
+      Effect.matchEffect({
+        onFailure: (err) => {
+          // A genuine read failure (RPC down, parse error) is logged so it is
+          // not silently masked as "no wallet"; the caller still degrades to
+          // positions-only equity (fail-open for a reporting CLI).
+          logger.warn("Wallet balance read failed; equity is positions-only", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return Effect.succeed(null as number | null);
+        },
+        onSuccess: (value) => Effect.succeed(value ?? null),
+      }),
+    );
+  });
+}
 export interface PortfolioSummary {
   totalDepositedUsd: number;
   totalCurrentValueUsd: number;
@@ -38,29 +77,45 @@ export interface PortfolioSummary {
   totalFeesClaimedUsd: number;
   totalRewardsClaimedUsd: number;
   positionCount: number;
+  /** Liquid wallet balance (SOL + SPL). Null when unreadable → positions-only. */
+  walletBalanceUsd: number | null;
+  /** True equity = positions value + wallet. Equals totalCurrentValueUsd when wallet unknown. */
+  totalEquityUsd: number;
+  /** False when the wallet balance could not be read (equity is positions-only). */
+  walletKnown: boolean;
 }
 
 export function computeSummary(positions: ReadonlyArray<PositionRecord>): PortfolioSummary {
-  const totalDepositedUsd = positions.reduce((sum, p) => sum + p.depositedUsd, 0);
-  const totalCurrentValueUsd = positions.reduce((sum, p) => sum + p.currentValueUsd, 0);
-  const totalFeesClaimedUsd = positions.reduce((sum, p) => sum + p.cumulativeFeesClaimedUsd, 0);
-  const totalRewardsClaimedUsd = positions.reduce(
-    (sum, p) => sum + p.cumulativeRewardsClaimedUsd,
-    0,
-  );
-  const totalUnrealizedPnlUsd =
-    totalCurrentValueUsd + totalFeesClaimedUsd + totalRewardsClaimedUsd - totalDepositedUsd;
+  return computeSummaryWithEquity(positions, null);
+}
+
+/**
+ * Positions summary extended with the wallet's liquid balance (issue #149).
+ * When `walletBalanceUsd` is null (unreadable / not configured) the summary
+ * falls back to positions-only equity — never fabricates a wallet figure.
+ */
+export function computeSummaryWithEquity(
+  positions: ReadonlyArray<PositionRecord>,
+  walletBalanceUsd: number | null,
+): PortfolioSummary {
+  const equity = computePortfolioEquity({ walletBalanceUsd, positions });
   const totalUnrealizedPnlPct =
-    totalDepositedUsd > 0 ? (totalUnrealizedPnlUsd / totalDepositedUsd) * 100 : 0;
+    equity.totalDepositedUsd > 0 ? (equity.unrealizedPnlUsd / equity.totalDepositedUsd) * 100 : 0;
 
   return {
-    totalDepositedUsd,
-    totalCurrentValueUsd,
-    totalUnrealizedPnlUsd,
+    totalDepositedUsd: equity.totalDepositedUsd,
+    totalCurrentValueUsd: equity.positionsValueUsd,
+    totalUnrealizedPnlUsd: equity.unrealizedPnlUsd,
     totalUnrealizedPnlPct,
-    totalFeesClaimedUsd,
-    totalRewardsClaimedUsd,
+    totalFeesClaimedUsd: equity.totalFeesClaimedUsd,
+    totalRewardsClaimedUsd: equity.totalRewardsClaimedUsd,
     positionCount: positions.length,
+    // computePortfolioEquity is the single source of truth for wallet/equity
+    // normalization (non-finite -> 0, walletKnown flag); the summary mirrors
+    // it so the two surfaces can never diverge.
+    walletBalanceUsd: equity.walletKnown ? equity.walletBalanceUsd : null,
+    totalEquityUsd: equity.totalEquityUsd,
+    walletKnown: equity.walletKnown,
   };
 }
 
@@ -172,7 +227,11 @@ function formatSummary(summary: PortfolioSummary): string {
     "=================",
     `  Positions:        ${summary.positionCount}`,
     `  Total Deposited:  ${formatCurrency(summary.totalDepositedUsd)}`,
+    ...(summary.walletKnown
+      ? [`  Wallet Balance:  ${formatCurrency(summary.walletBalanceUsd ?? 0)}`]
+      : []),
     `  Total Current:    ${formatCurrency(summary.totalCurrentValueUsd)}`,
+    `  Total Equity:     ${formatCurrency(summary.totalEquityUsd)}`,
     `  Fees Claimed:     ${formatCurrency(summary.totalFeesClaimedUsd)}`,
     ...(summary.totalRewardsClaimedUsd > 0
       ? [`  Rewards Claimed:  ${formatCurrency(summary.totalRewardsClaimedUsd)}`]
@@ -268,14 +327,25 @@ export interface PortfolioJsonOutput {
     outOfRangeSince: number | null;
     age: string;
   }>;
+  /** Wallet liquid balance read (null when unreadable). Issue #149. */
+  wallet: { balanceUsd: number | null; known: boolean };
+  /** True equity summary = positions + wallet. Issue #149. */
+  equity: PortfolioSummary;
+  /** Positions-only summary (kept for backward compatibility). */
   summary: PortfolioSummary;
 }
 
 export function toJsonOutput(
   positions: ReadonlyArray<PositionRecord>,
   prices: ReadonlyMap<string, number> = new Map(),
+  walletBalanceUsd: number | null = null,
 ): PortfolioJsonOutput {
   return {
+    wallet: {
+      balanceUsd: walletBalanceUsd,
+      known: walletBalanceUsd !== null && Number.isFinite(walletBalanceUsd),
+    },
+    equity: computeSummaryWithEquity(positions, walletBalanceUsd),
     positions: positions.map((pos) => {
       const analytics = computePositionAnalytics(
         {
@@ -397,14 +467,15 @@ portfolioCommand.action(async function (this: Command, opts: { json?: boolean })
         const db = yield* DbService;
         const positions = yield* db.getAllPositions();
         const prices = yield* latestPrices(db, positions);
+        const walletBalanceUsd = yield* readCliWalletBalance();
 
         if (isJson) {
-          console.log(JSON.stringify(toJsonOutput(positions, prices), null, 2));
+          console.log(JSON.stringify(toJsonOutput(positions, prices, walletBalanceUsd), null, 2));
           return;
         }
 
         console.log(formatPositionsList(positions, prices));
-        console.log(formatSummary(computeSummary(positions)));
+        console.log(formatSummary(computeSummaryWithEquity(positions, walletBalanceUsd)));
       }).pipe(Effect.provide(program)),
     );
   });
@@ -425,7 +496,8 @@ portfolioCommand
         Effect.gen(function* () {
           const db = yield* DbService;
           const positions = yield* db.getAllPositions();
-          const summary = computeSummary(positions);
+          const walletBalanceUsd = yield* readCliWalletBalance();
+          const summary = computeSummaryWithEquity(positions, walletBalanceUsd);
 
           if (isJson) {
             console.log(JSON.stringify({ summary }, null, 2));
