@@ -1,6 +1,7 @@
 # Fallen-angel mode — plan (decision-complete)
 
-Status: plan locked. Implementation starts after this document.
+Status: **implemented and merged-ready** (Waves A-D2 complete). 7 feature commits + 1 follow-up,
+PR #152. All 115 test files / 1464 tests pass.
 
 ## What "fallen-angel" means here
 
