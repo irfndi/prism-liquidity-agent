@@ -257,22 +257,25 @@ describe("evaluateFallenAngelGate", () => {
 
 describe("identifyAssetMint", () => {
   const stables = new Set(["USDC", "USDT"]);
+  const SOL = "So11111111111111111111111111111111111111112";
 
-  it("picks the non-stablecoin leg", () => {
-    expect(identifyAssetMint("SOL", "USDC", stables)).toBe("SOL");
-    expect(identifyAssetMint("USDC", "JUP", stables)).toBe("JUP");
+  it("picks the non-stablecoin, non-SOL leg", () => {
+    expect(identifyAssetMint(SOL, "USDC", stables, SOL)).toBeNull(); // SOL+stable → no asset
+    expect(identifyAssetMint("USDC", "JUP", stables, SOL)).toBe("JUP");
+  });
+
+  it("treats SOL as a settlement leg, never the asset", () => {
+    // SOL/JUP with a stable allowlist: SOL is excluded → JUP is the asset.
+    expect(identifyAssetMint(SOL, "JUP", stables, SOL)).toBe("JUP");
+    expect(identifyAssetMint("JUP", SOL, stables, SOL)).toBe("JUP");
   });
 
   it("returns null for a stablecoin pair (no asset leg)", () => {
-    expect(identifyAssetMint("USDC", "USDT", stables)).toBeNull();
-  });
-
-  it("returns the first leg when neither is stable", () => {
-    expect(identifyAssetMint("SOL", "JUP", stables)).toBe("SOL");
+    expect(identifyAssetMint("USDC", "USDT", stables, SOL)).toBeNull();
   });
 
   it("returns null when the allowlist is empty (no notion of stable)", () => {
-    expect(identifyAssetMint("USDC", "USDT", undefined)).toBeNull();
+    expect(identifyAssetMint("USDC", "USDT", undefined, SOL)).toBeNull();
   });
 });
 

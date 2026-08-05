@@ -59,13 +59,16 @@ export function buildTpLadder(
   const rungCount = Math.min(config.rungs.length, config.fractions.length);
   if (rungCount === 0) return null;
 
-  const rawRungs: Array<{ targetPrice: number; fraction: number }> = config.rungs
+  // Pair each rung pct with its fraction BEFORE sorting, so an unsorted
+  // input keeps each fraction attached to the target it belongs to.
+  const pairs: Array<{ pct: number; fraction: number }> = config.rungs
     .slice(0, rungCount)
-    .sort((a, b) => a - b)
-    .map((pct, i) => ({
-      targetPrice: entryPrice * (1 + pct),
-      fraction: config.fractions[i]!,
-    }));
+    .map((pct, i) => ({ pct, fraction: config.fractions[i]! }));
+  pairs.sort((a, b) => a.pct - b.pct);
+  const rawRungs: Array<{ targetPrice: number; fraction: number }> = pairs.map((pair) => ({
+    targetPrice: entryPrice * (1 + pair.pct),
+    fraction: pair.fraction,
+  }));
 
   const total = rawRungs.reduce((sum, rung) => sum + rung.fraction, 0);
   // Renormalize so the ladder never scales out more than the whole position

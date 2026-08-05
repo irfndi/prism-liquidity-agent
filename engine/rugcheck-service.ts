@@ -77,7 +77,7 @@ export interface RugCheckReport {
   readonly risks: ReadonlyArray<RugCheckRisk>;
   /** Sum of top-10 holder pct (0..100); null when topHolders is absent. */
   readonly top10HolderPct: number | null;
-  /** 1 + index of the first danger risk (1-based for human display), else 0. */
+  /** Number of risks with level "danger" (0 = none). */
   readonly dangerRiskCount: number;
 }
 

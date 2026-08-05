@@ -19,6 +19,7 @@ const CONFIG = {
 };
 
 const STABLES = new Set(["USDC", "USDT"]);
+const SOL = "So11111111111111111111111111111111111111112";
 
 const CLEAN_OHLCV: GeckoOhlcvSignals = {
   bars: [],
@@ -70,7 +71,7 @@ function signals(overrides: Partial<FallenAngelPoolSignals> = {}): FallenAngelPo
 
 describe("evaluateFallenAngelDiscovery", () => {
   it("qualifies a clean fallen-angel pool", async () => {
-    const result = await evaluateFallenAngelDiscovery([pool()], CONFIG, STABLES, async () =>
+    const result = await evaluateFallenAngelDiscovery([pool()], CONFIG, STABLES, SOL, async () =>
       signals(),
     );
     expect(result.qualified).toHaveLength(1);
@@ -86,6 +87,7 @@ describe("evaluateFallenAngelDiscovery", () => {
       [pool({ tvlUsd: 10_000 })],
       CONFIG,
       STABLES,
+      SOL,
       async () => {
         fetched++;
         return signals();
@@ -97,7 +99,7 @@ describe("evaluateFallenAngelDiscovery", () => {
   });
 
   it("rejects a pool with danger risks and records the reason", async () => {
-    const result = await evaluateFallenAngelDiscovery([pool()], CONFIG, STABLES, async () =>
+    const result = await evaluateFallenAngelDiscovery([pool()], CONFIG, STABLES, SOL, async () =>
       signals({ rugcheck: RISKY_RUGCHECK }),
     );
     expect(result.qualified).toHaveLength(0);
@@ -110,6 +112,7 @@ describe("evaluateFallenAngelDiscovery", () => {
       [pool({ tokenX: "USDC", tokenY: "USDT" })],
       CONFIG,
       STABLES,
+      SOL,
       async () => signals(),
     );
     expect(result.qualified).toHaveLength(0);
@@ -117,7 +120,7 @@ describe("evaluateFallenAngelDiscovery", () => {
   });
 
   it("rejects when signals are unavailable (fail-closed)", async () => {
-    const result = await evaluateFallenAngelDiscovery([pool()], CONFIG, STABLES, async () => ({
+    const result = await evaluateFallenAngelDiscovery([pool()], CONFIG, STABLES, SOL, async () => ({
       ohlcv: null,
       rugcheck: null,
     }));
@@ -132,6 +135,7 @@ describe("evaluateFallenAngelDiscovery", () => {
       [pool({ address: "a", tvlUsd: 10_000 }), pool({ address: "b" })],
       CONFIG,
       STABLES,
+      SOL,
       async (p) => {
         fetched.add(p.address);
         return signals();

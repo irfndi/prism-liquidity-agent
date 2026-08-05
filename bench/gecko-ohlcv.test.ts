@@ -50,10 +50,25 @@ describe("parseGeckoOhlcv", () => {
     expect(bars[0]!.volumeQuote).toBeCloseTo(1890678.01, 1);
   });
 
-  it("keeps newest bar last (ascending order preserved)", () => {
+  it("preserves the API's newest-first row order in the parsed bars", () => {
     const bars = parseGeckoOhlcv(LIVE_OHLCV);
+    // GeckoTerminal returns ohlcv_list newest-first; parsing must preserve
+    // that (summarizeGeckoOhlcv normalizes to ascending internally).
     expect(bars[bars.length - 1]!.timestampSec).toBeLessThan(bars[0]!.timestampSec);
     expect(bars[bars.length - 1]!.close).toBeCloseTo(0.0439028, 6);
+  });
+
+  it("computes drawdown from the LATEST close even when input is newest-first", () => {
+    // Newest bar first (timestamp 3, close 1.25); oldest last (timestamp 1).
+    const newestFirst: GeckoOhlcvBar[] = [
+      { timestampSec: 3, open: 1.2, high: 1.5, low: 1.1, close: 1.25, volumeQuote: 100 },
+      { timestampSec: 2, open: 1.0, high: 1.6, low: 0.9, close: 1.4, volumeQuote: 100 },
+      { timestampSec: 1, open: 1.0, high: 2.0, low: 0.8, close: 1.5, volumeQuote: 100 },
+    ];
+    const s = summarizeGeckoOhlcv(newestFirst);
+    // ATH = 2.0 (all highs); latest = the NEWEST close 1.25 → drawdown = 1 - 1.25/2.
+    expect(s.latestClose).toBeCloseTo(1.25, 6);
+    expect(s.drawdownFromAth).toBeCloseTo(1 - 1.25 / 2, 6);
   });
 
   it("returns [] for malformed / empty payloads", () => {

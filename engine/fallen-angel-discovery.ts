@@ -57,6 +57,7 @@ export function evaluateFallenAngelDiscovery(
   pools: ReadonlyArray<FallenAngelDiscoveredPool>,
   config: FallenAngelGateConfig,
   stablecoinMints: ReadonlySet<string> | undefined,
+  solMint: string,
   fetchSignals: (pool: FallenAngelDiscoveredPool) => Promise<FallenAngelPoolSignals>,
 ): Promise<FallenAngelDiscoveryResult> {
   return (async () => {
@@ -72,7 +73,7 @@ export function evaluateFallenAngelDiscovery(
         // Below the floor — not a rejection, just out of universe.
         continue;
       }
-      const assetMint = identifyAssetMint(pool.tokenX, pool.tokenY, stablecoinMints);
+      const assetMint = identifyAssetMint(pool.tokenX, pool.tokenY, stablecoinMints, solMint);
       if (assetMint === null) {
         rejected.push({
           poolAddress: pool.address,

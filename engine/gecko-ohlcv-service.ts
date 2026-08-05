@@ -140,21 +140,28 @@ export function summarizeGeckoOhlcv(bars: ReadonlyArray<GeckoOhlcvBar>): GeckoOh
     };
   }
 
+  // GeckoTerminal returns OHLCV newest-FIRST (verified live). Normalize to
+  // ascending timestamp so "latest" is always the last bar and consecutive
+  // log-returns are computed in chronological order — otherwise drawdown
+  // would be measured against the OLDEST close and daily stddev would flip
+  // the sign of every return.
+  const ascending = [...bars].sort((a, b) => a.timestampSec - b.timestampSec);
+
   let atlHigh = 0;
   let totalVolumeQuote = 0;
-  for (const bar of bars) {
+  for (const bar of ascending) {
     if (bar.high > atlHigh) atlHigh = bar.high;
     totalVolumeQuote += bar.volumeQuote;
   }
-  const latestClose = bars[bars.length - 1]!.close;
+  const latestClose = ascending[ascending.length - 1]!.close;
   const drawdownFromAth = atlHigh > 0 ? Math.max(0, 1 - latestClose / atlHigh) : 0;
 
   let dailyReturnStddev = 0;
-  if (bars.length >= 2) {
+  if (ascending.length >= 2) {
     const logReturns: number[] = [];
-    for (let i = 1; i < bars.length; i++) {
-      const prev = bars[i - 1]!.close;
-      const cur = bars[i]!.close;
+    for (let i = 1; i < ascending.length; i++) {
+      const prev = ascending[i - 1]!.close;
+      const cur = ascending[i]!.close;
       if (prev > 0 && cur > 0) {
         logReturns.push(Math.log(cur / prev));
       }

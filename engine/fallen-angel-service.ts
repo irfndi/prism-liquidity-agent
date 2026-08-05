@@ -144,22 +144,26 @@ export function evaluateFallenAngelGate(input: FallenAngelGateInput): FallenAnge
 }
 
 /**
- * Pick the asset leg of a pool pair: the mint that is NOT on the stablecoin
- * allowlist. When both legs are stablecoins there is no obvious asset — return
- * null and let the caller fail closed. When the allowlist is empty (undefined)
- * there is no notion of a stable leg, so the pair is unclassifiable — return
- * null (fail closed) rather than guessing.
+ * Pick the asset leg of a pool pair: the mint that is NOT a stablecoin and
+ * NOT SOL (the base settlement asset). When both legs are stablecoins there is
+ * no obvious asset — return null and let the caller fail closed. When the
+ * allowlist is empty (undefined) there is no notion of a stable leg, so the
+ * pair is unclassifiable — return null (fail closed) rather than guessing.
+ * SOL is always excluded: it is the settlement/quote leg, never the
+ * fallen-angel asset (RugCheck reports for SOL carry no useful signal).
  */
 export function identifyAssetMint(
   tokenX: string,
   tokenY: string,
   stablecoinMints: ReadonlySet<string> | undefined,
+  solMint: string,
 ): string | null {
   if (stablecoinMints === undefined || stablecoinMints.size === 0) return null;
-  const xIsStable = stablecoinMints.has(tokenX);
-  const yIsStable = stablecoinMints.has(tokenY);
+  const xIsStable = stablecoinMints.has(tokenX) || tokenX === solMint;
+  const yIsStable = stablecoinMints.has(tokenY) || tokenY === solMint;
   if (!xIsStable && yIsStable) return tokenX;
   if (xIsStable && !yIsStable) return tokenY;
   if (xIsStable && yIsStable) return null;
+  // Neither leg is stable/SOL — prefer the first (tokenX) as the asset.
   return tokenX;
 }

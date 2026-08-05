@@ -107,6 +107,7 @@ import { detectDepegAndLiquidityDrain } from "./depeg-liquidity-detector.js";
 import { consultTokenRisks, type TokenRiskSignal } from "./token-risk-service.js";
 import { CopySignalLive, applyCopySignalBoost } from "./copy-trading-signals.js";
 import { evaluateFallenAngelDiscovery } from "./fallen-angel-discovery.js";
+import { identifyAssetMint } from "./fallen-angel-service.js";
 import {
   buildTpLadder,
   evaluateTpLadder,
@@ -2688,9 +2689,10 @@ export const program = Effect.gen(function* () {
 
   // Fallen-angel discovery refresh (Wave 19). Opt-in via FALLEN_ANGEL_ENABLED.
   // Re-runs the gate each cycle over a fresh discovery page (any TVL above
-  // fallenAngelMinTvlUsd) and feeds qualified pools into poolsToScan. Network
-  // calls are paced at the HTTP layer (gecko ≥2.1s, per-mint RugCheck cached
-  // for the process lifetime) so a 50-pool page does not hammer the APIs.
+  // fallenAngelMinTvlUsd) and feeds qualified pools into poolsToScan. RugCheck
+  // reports are cached per mint for the process lifetime so repeat pages do
+  // not re-fetch; the gecko OHLCV fetch is shared with the main stats path and
+  // bounded by the discovery page size.
   const refreshFallenAngelCandidates = (scanOrdinal: number): Effect.Effect<void, never> =>
     Effect.gen(function* () {
       if (config.fallenAngelEnabled !== true || !shouldDiscoverPools(config)) return;
@@ -2705,8 +2707,13 @@ export const program = Effect.gen(function* () {
         readonly tokenX: string;
         readonly tokenY: string;
       }) => {
-        const assetMint = [pool.tokenX, pool.tokenY].find(
-          (mint) => mint !== SOL_MINT && !(config.stablecoinMints?.has(mint) === true),
+        // Single-sourced asset-leg resolution (same helper the gate uses), so
+        // the RugCheck report is fetched for the exact mint the gate evaluates.
+        const assetMint = identifyAssetMint(
+          pool.tokenX,
+          pool.tokenY,
+          config.stablecoinMints,
+          SOL_MINT,
         );
         const ohlcv: GeckoOhlcvSignals | null = await getGeckoPoolOhlcv(pool.address);
         let rugcheck: RugCheckReport | null = null;
@@ -2735,6 +2742,7 @@ export const program = Effect.gen(function* () {
             maxTop10HolderPct: config.fallenAngelMaxTop10HolderPct ?? 0.5,
           },
           config.stablecoinMints,
+          SOL_MINT,
           fetchSignals,
         ),
       );
@@ -5467,7 +5475,16 @@ export const program = Effect.gen(function* () {
           // carries the FA lifecycle (ladder + invalidation) so execution
           // stamps the position row.
           const faSignal = fallenAngelSignals.get(poolAddress);
-          if (!enterGateRejected && config.fallenAngelEnabled === true && faSignal !== undefined) {
+          const openFaPositions = Array.from(trackedPositions.values()).filter(
+            (p) => p.positionMode === "fallen-angel",
+          ).length;
+          const faMaxPositions = config.fallenAngelMaxPositions ?? 2;
+          if (
+            !enterGateRejected &&
+            config.fallenAngelEnabled === true &&
+            faSignal !== undefined &&
+            openFaPositions < faMaxPositions
+          ) {
             const faLadder = buildTpLadder(pool.currentPrice, {
               rungs: config.fallenAngelTpRungs ?? [0.15, 0.3, 0.5],
               fractions: config.fallenAngelTpFractions ?? [0.4, 0.3, 0.3],
@@ -5516,6 +5533,10 @@ export const program = Effect.gen(function* () {
                 tpLadderJson: serializeTpLadder(faLadder.ladder) ?? undefined,
                 invalidationStopPrice: faLadder.invalidationPrice,
               });
+              // Consume the ENTER slot: the FA branch already pushed the
+              // decision, so the quality gates below must not run and push a
+              // duplicate ENTER for the same pool this cycle.
+              enterGateRejected = true;
             }
           }
 

@@ -10,3 +10,7 @@ paths-ignore:
   # Holds a deliberately-invalid, low-entropy WALLET_PRIVATE_KEY fixture used to
   # exercise the "env key present but undecodable" path. Not a credential.
   - "bench/wallet.test.ts"
+  # Fallen-angel fetcher tests embed public Solana mint addresses (JitoSOL,
+  # ANTFUN) as live-verified API fixtures. Public token addresses, not secrets.
+  - "bench/rugcheck.test.ts"
+  - "bench/gecko-ohlcv.test.ts"
