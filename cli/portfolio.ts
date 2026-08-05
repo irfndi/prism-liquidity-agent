@@ -36,7 +36,7 @@ function buildProgram(): Layer.Layer<DbService | AdapterService, unknown, never>
   const dbPath = process.env.SQLITE_DB_PATH ?? getPrismDbPath();
   const dbLayer = DbLive(dbPath);
   const adapterLayer = Layer.provide(AdapterLive, ConfigLive);
-  return Layer.merge(dbLayer, adapterLayer);
+  return Layer.mergeAll(dbLayer, adapterLayer);
 }
 
 /**
@@ -53,11 +53,19 @@ export function readCliWalletBalance(): Effect.Effect<number | null, never, Adap
     // rather than presenting a fake $0 wallet.
     if (!adapter.hasWallet()) return null;
     return yield* adapter.getWalletBalanceUsd().pipe(
-      Effect.timeoutFail({
-        duration: 15_000,
-        onTimeout: () => null as number | null,
+      Effect.timeout(15_000),
+      Effect.matchEffect({
+        onFailure: (err) => {
+          // A genuine read failure (RPC down, parse error) is logged so it is
+          // not silently masked as "no wallet"; the caller still degrades to
+          // positions-only equity (fail-open for a reporting CLI).
+          logger.warn("Wallet balance read failed; equity is positions-only", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return Effect.succeed(null as number | null);
+        },
+        onSuccess: (value) => Effect.succeed(value ?? null),
       }),
-      Effect.catchAll(() => Effect.succeed(null as number | null)),
     );
   });
 }
@@ -90,30 +98,24 @@ export function computeSummaryWithEquity(
   positions: ReadonlyArray<PositionRecord>,
   walletBalanceUsd: number | null,
 ): PortfolioSummary {
-  const totalDepositedUsd = positions.reduce((sum, p) => sum + p.depositedUsd, 0);
-  const totalCurrentValueUsd = positions.reduce((sum, p) => sum + p.currentValueUsd, 0);
-  const totalFeesClaimedUsd = positions.reduce((sum, p) => sum + p.cumulativeFeesClaimedUsd, 0);
-  const totalRewardsClaimedUsd = positions.reduce(
-    (sum, p) => sum + p.cumulativeRewardsClaimedUsd,
-    0,
-  );
   const equity = computePortfolioEquity({ walletBalanceUsd, positions });
-  const walletKnown = walletBalanceUsd !== null && Number.isFinite(walletBalanceUsd);
-  const totalUnrealizedPnlUsd = equity.unrealizedPnlUsd;
   const totalUnrealizedPnlPct =
-    totalDepositedUsd > 0 ? (totalUnrealizedPnlUsd / totalDepositedUsd) * 100 : 0;
+    equity.totalDepositedUsd > 0 ? (equity.unrealizedPnlUsd / equity.totalDepositedUsd) * 100 : 0;
 
   return {
-    totalDepositedUsd,
-    totalCurrentValueUsd,
-    totalUnrealizedPnlUsd,
+    totalDepositedUsd: equity.totalDepositedUsd,
+    totalCurrentValueUsd: equity.positionsValueUsd,
+    totalUnrealizedPnlUsd: equity.unrealizedPnlUsd,
     totalUnrealizedPnlPct,
-    totalFeesClaimedUsd,
-    totalRewardsClaimedUsd,
+    totalFeesClaimedUsd: equity.totalFeesClaimedUsd,
+    totalRewardsClaimedUsd: equity.totalRewardsClaimedUsd,
     positionCount: positions.length,
-    walletBalanceUsd: walletKnown ? walletBalanceUsd : null,
+    // computePortfolioEquity is the single source of truth for wallet/equity
+    // normalization (non-finite -> 0, walletKnown flag); the summary mirrors
+    // it so the two surfaces can never diverge.
+    walletBalanceUsd: equity.walletKnown ? equity.walletBalanceUsd : null,
     totalEquityUsd: equity.totalEquityUsd,
-    walletKnown,
+    walletKnown: equity.walletKnown,
   };
 }
 

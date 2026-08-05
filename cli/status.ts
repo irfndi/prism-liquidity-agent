@@ -97,7 +97,7 @@ function buildProgram(): Layer.Layer<
   const auditLayer = Layer.provide(AuditLive, dbLayer);
   const configLayer = ConfigLive;
   const adapterLayer = Layer.provide(AdapterLive, configLayer);
-  return Layer.merge(auditLayer, Layer.merge(dbLayer, Layer.merge(configLayer, adapterLayer)));
+  return Layer.mergeAll(dbLayer, auditLayer, configLayer, adapterLayer);
 }
 
 export const statusCommand = new Command("status")
