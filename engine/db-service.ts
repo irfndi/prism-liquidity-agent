@@ -760,6 +760,11 @@ export const DbLive = (dbPath?: string) =>
             );
           }),
 
+        deleteMetadata: (key) =>
+          Effect.sync(() => {
+            runOne(db, "DELETE FROM metadata WHERE key = ?", key);
+          }),
+
         setMetadataBatch: (entries) =>
           Effect.try({
             try: () => {

@@ -10,6 +10,7 @@ import type {
 } from "./types.js";
 import { PublicKey } from "@solana/web3.js";
 import { createLogger } from "./logger.js";
+import { applyDbConfigOverrides, readDbConfigOverrides } from "./db-config.js";
 
 const logger = createLogger("ConfigService");
 
@@ -453,6 +454,54 @@ export interface AppConfig {
   readonly copySignalWallets?: ReadonlyArray<string>;
   readonly copySignalsStaleMs?: number;
   readonly copySignalsMaxBoost?: number;
+
+  // ─── Fallen-angel mode (Wave 19) ───────────────────────────────────────────
+  // Optional so standalone test fixtures that omit new fields keep compiling;
+  // loadConfig always sets all of them. Guard contract: `fallenAngelEnabled ===
+  // true` activates the mode (absent/undefined = safe off).
+  /** Master switch for fallen-angel mode (mean-reversion on distressed but
+   *  clean tokens): any-TVL discovery + RugCheck security + GeckoTerminal
+   *  drawdown gate + spot TP-ladder / invalidation-stop lifecycle. Default
+   *  false — the whole pipeline is inert unless explicitly opted in. */
+  readonly fallenAngelEnabled?: boolean;
+  /** Floor (USD) for fallen-angel discovery. Default 50k — normally far below
+   *  the standard DISCOVERY_MIN_TVL_USD so under-adopted fallen tokens are
+   *  reachable; set 0 for truly any TVL. */
+  readonly fallenAngelMinTvlUsd?: number;
+  /** Token must be down at LEAST this much from its GeckoTerminal window ATH
+   *  to qualify (0..1 fraction, default 0.6 = down 60%). */
+  readonly fallenAngelMinDrawdownPct?: number;
+  /** Token must be down AT MOST this much from its ATH (0..1 default 0.95) —
+   *  deeper than this is a dead/abandoned token, not a fallen angel. */
+  readonly fallenAngelMaxDrawdownPct?: number;
+  /** Minimum daily-return stddev (default 0.02) — below this the OHLCV series
+   *  is too dead to mean-revert. */
+  readonly fallenAngelVolBaselineMin?: number;
+  /** Maximum daily-return stddev (default 0.35) — above this is a lunatic
+   *  token, not an oversold gem. */
+  readonly fallenAngelVolBaselineMax?: number;
+  /** Minimum RugCheck normalised score (0..1 default 0.7) for a fallen-angel
+   *  token. Fail-closed: a missing/unknown score rejects the candidate. */
+  readonly fallenAngelMinRugcheckScore?: number;
+  /** Minimum RugCheck holder count (default 300) — a token with no real
+   *  holder base can't be an angel. */
+  readonly fallenAngelMinHolders?: number;
+  /** Maximum top-10 holder concentration (0..1 default 0.5) per RugCheck
+   *  topHolders; missing concentration data fails open (skip). */
+  readonly fallenAngelMaxTop10HolderPct?: number;
+  /** TP-ladder take-profit targets as fractions ABOVE entry (e.g. "0.15,0.30,0.50"
+   *  = +15%, +30%, +50%). Default "0.15,0.30,0.50". */
+  readonly fallenAngelTpRungs?: ReadonlyArray<number>;
+  /** Fraction of the position to scale out at each rung (must sum ≤ 1).
+   *  Default "0.4,0.3,0.3" = 40%/30%/30%. Excess over 1 is renormalized. */
+  readonly fallenAngelTpFractions?: ReadonlyArray<number>;
+  /** Invalidation-stop: EXIT at confidence 1 when price falls below
+   *  entry × (1 − pct). Default 0.25 (= cut at −25%). */
+  readonly fallenAngelInvalidationStopPct?: number;
+  /** Max simultaneous fallen-angel positions portfolio-wide. Default 2 — the
+   *  mode is concentrated in nature; the standard MAX_OPEN_POSITIONS cap still
+   *  applies on top of this. */
+  readonly fallenAngelMaxPositions?: number;
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
@@ -1094,6 +1143,71 @@ const loadConfig = Effect.gen(function* () {
   const alertCooldownMinutes = yield* validatedNumber("ALERT_COOLDOWN_MINUTES", 1, 120);
   const alertFeeMilestoneUsd = yield* validatedNumber("ALERT_FEE_MILESTONE_USD", 0.01, 10);
 
+  // ─── Fallen-angel mode (Wave 19) ───────────────────────────────────────────
+  const fallenAngelEnabled = yield* Config.boolean("FALLEN_ANGEL_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const fallenAngelMinTvlUsd = yield* validatedNumber("FALLEN_ANGEL_MIN_TVL_USD", 0, 50_000);
+  const fallenAngelMinDrawdownPct = yield* validatedNumber(
+    "FALLEN_ANGEL_MIN_DRAWDOWN_PCT",
+    0,
+    0.6,
+    1,
+  );
+  const fallenAngelMaxDrawdownPct = yield* validatedNumber(
+    "FALLEN_ANGEL_MAX_DRAWDOWN_PCT",
+    0,
+    0.95,
+    1,
+  );
+  const fallenAngelVolBaselineMin = yield* validatedNumber(
+    "FALLEN_ANGEL_VOL_BASELINE_MIN",
+    0,
+    0.02,
+  );
+  const fallenAngelVolBaselineMax = yield* validatedNumber(
+    "FALLEN_ANGEL_VOL_BASELINE_MAX",
+    0,
+    0.35,
+  );
+  const fallenAngelMinRugcheckScore = yield* validatedNumber(
+    "FALLEN_ANGEL_MIN_RUGCHECK_SCORE",
+    0,
+    0.7,
+    1,
+  );
+  const fallenAngelMinHolders = yield* validatedNumber("FALLEN_ANGEL_MIN_HOLDERS", 1, 300);
+  const fallenAngelMaxTop10HolderPct = yield* validatedNumber(
+    "FALLEN_ANGEL_MAX_TOP10_HOLDER_PCT",
+    0,
+    0.5,
+    1,
+  );
+  const parsePctList = (raw: string): ReadonlyArray<number> =>
+    raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .map(Number)
+      .filter((n) => Number.isFinite(n));
+  const fallenAngelTpRungs = parsePctList(
+    yield* Config.string("FALLEN_ANGEL_TP_RUNGS").pipe(
+      Effect.orElseSucceed(() => "0.15,0.30,0.50"),
+    ),
+  );
+  const fallenAngelTpFractions = parsePctList(
+    yield* Config.string("FALLEN_ANGEL_TP_FRACTIONS").pipe(
+      Effect.orElseSucceed(() => "0.4,0.3,0.3"),
+    ),
+  );
+  const fallenAngelInvalidationStopPct = yield* validatedNumber(
+    "FALLEN_ANGEL_INVALIDATION_STOP_PCT",
+    0,
+    0.25,
+    1,
+  );
+  const fallenAngelMaxPositions = yield* validatedNumber("FALLEN_ANGEL_MAX_POSITIONS", 1, 2);
+
   // New feature configs
   const stopLossPct = yield* validatedNumber("STOP_LOSS_PCT", 0, 0.15);
   const trailingStopPct = yield* validatedNumber("TRAILING_STOP_PCT", 0, 0.1);
@@ -1380,7 +1494,33 @@ const loadConfig = Effect.gen(function* () {
     copySignalWallets,
     copySignalsStaleMs,
     copySignalsMaxBoost,
+    fallenAngelEnabled,
+    fallenAngelMinTvlUsd,
+    fallenAngelMinDrawdownPct,
+    fallenAngelMaxDrawdownPct,
+    fallenAngelVolBaselineMin,
+    fallenAngelVolBaselineMax,
+    fallenAngelMinRugcheckScore,
+    fallenAngelMinHolders,
+    fallenAngelMaxTop10HolderPct,
+    fallenAngelTpRungs,
+    fallenAngelTpFractions,
+    fallenAngelInvalidationStopPct,
+    fallenAngelMaxPositions,
   };
+
+  // ─── DB-backed config sidecar (env > DB > defaults) ───────────────────────
+  // After env resolution, apply persisted overrides from the SQLite `metadata`
+  // table for keys whose env var is UNSET. Fail-open: a missing/unreadable DB
+  // leaves the env/defaults untouched. Skipped entirely in test mode so the
+  // suite stays deterministic and DB-free. See engine/db-config.ts.
+  const cfgFromEnv = cfg as Readonly<AppConfig>;
+  const dbOverrides = isTest
+    ? new Map<string, string>()
+    : readDbConfigOverrides(cfgFromEnv.sqliteDbPath);
+  if (dbOverrides.size > 0) {
+    return applyDbConfigOverrides(cfg, dbOverrides);
+  }
 
   return cfg;
 });

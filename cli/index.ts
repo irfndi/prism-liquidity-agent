@@ -20,6 +20,7 @@ import { statusCommand } from "./status.js";
 import { doctorCommand } from "./doctor.js";
 import { resumeCommand } from "./resume.js";
 import { telemetryCommand } from "./telemetry.js";
+import { configCommand } from "./config.js";
 import { getCurrentVersion } from "../engine/version.js";
 
 const program = new Command();
@@ -50,5 +51,6 @@ program.addCommand(statusCommand);
 program.addCommand(doctorCommand);
 program.addCommand(resumeCommand);
 program.addCommand(telemetryCommand);
+program.addCommand(configCommand);
 
 await program.parseAsync();
