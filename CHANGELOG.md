@@ -2,6 +2,17 @@
 
 All notable changes to Prism are documented here.
 
+## [0.1.6] — 2026-08-05
+
+### Fixed
+
+- Trailing-stop EXITs now require the drawdown breach to persist across consecutive cycles (`TRAILING_STOP_CONFIRM_CYCLES`, default 2) — kills the phantom EXIT churn caused by unstable tracked-peak references (#153, #156)
+- GeckoTerminal OHLCV fetches are resilient: last-good series cached per pool (6h TTL, 24h retention), failing pools back off exponentially (5 min → 1 h), and stale data is reused on transient outages so fallen-angel discovery is no longer starved of drawdown/vol signals (#154, #155)
+
+### Changed
+
+- Bumped version to 0.1.6.
+
 ## [0.1.5] — 2026-08-05
 
 ### Added
