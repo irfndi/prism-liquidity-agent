@@ -57,6 +57,7 @@ function buildLayer(
     watchlistPools: [],
     stopLossPct: 0.15,
     trailingStopPct: 0.1,
+    trailingStopConfirmCycles: 2,
     oorGracePeriodCycles: 3,
     feeClaimIntervalMs: 86_400_000,
     enablePoolDiscovery: false,
