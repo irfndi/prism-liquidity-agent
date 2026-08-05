@@ -40,6 +40,15 @@ jobs:
   test:
     needs: version-guard
     runs-on: ubuntu-latest
+    # Split the engine test suite across parallel shards (Vitest --shard).
+    # Each shard runs a disjoint subset of bench/**/*.test.ts; the whole suite
+    # is only "green" when every shard passes. Run on the canary Bun runtime
+    # so the engine tests exercise the same runtime that ships with the agent.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+        total: [4]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -60,8 +69,8 @@ jobs:
       - name: Run lint
         run: bun run lint
 
-      - name: Run tests
-        run: bun run test
+      - name: Run tests (shard ${{ matrix.shard }}/${{ matrix.total }})
+        run: bun run test -- --shard=${{ matrix.shard }}/${{ matrix.total }}
 
   build-bundles:
     needs: [version-guard, test]
