@@ -5,7 +5,6 @@ import { parseRugCheckReport, getRugCheckReport } from "../engine/rugcheck-servi
 // score_normalised 56 = RISKY (higher=riskier); has danger risks + topHolders.
 const LIVE_RISKY = {
   mint: "CWZ6BsdnjkDVTGkmL6bGbJXXig6ceef12KvyGQW14cMt",
-  ***REMOVED***
   token: { mintAuthority: null, freezeAuthority: null, decimals: 6 },
   tokenMeta: { name: "AntFun", symbol: "ANTFUN", mutable: false },
   topHolders: [
