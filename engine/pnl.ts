@@ -202,3 +202,95 @@ export function applyCompoundToCostBasis(input: {
   const highest = Math.max(input.highestValueUsd ?? input.depositedUsd, currentValueUsd);
   return { depositedUsd, currentValueUsd, highestValueUsd: highest };
 }
+
+// ─── Portfolio equity (issue #149) ───────────────────────────────────────────
+//
+// The wallet's liquid balance (SOL + SPL across Token Program and Token-2022)
+// is real operator equity that the per-position rows do not hold. Reporting
+// positions-only equity understates the portfolio by the full liquid balance,
+// which trips phantom drawdown pauses and misleads the operator/Telegram.
+// One canonical function: equity = liquid wallet + open-position value. The
+// equity-based unrealized P&L is (equity + claimed fees + claimed rewards −
+// total deposits) — the same shape as the per-position model, extended to the
+// whole wallet.
+
+export interface PortfolioEquityInput {
+  /** Liquid wallet balance (native SOL + SPL), or null when unreadable. */
+  readonly walletBalanceUsd: number | null;
+  readonly positions: ReadonlyArray<{
+    readonly currentValueUsd: number;
+    readonly depositedUsd: number;
+    readonly cumulativeFeesClaimedUsd: number;
+    readonly cumulativeRewardsClaimedUsd?: number | undefined;
+  }>;
+}
+
+export interface PortfolioEquity {
+  /** Current value of all positions. */
+  readonly positionsValueUsd: number;
+  /** Liquid wallet balance (same as input; 0 when unknown). */
+  readonly walletBalanceUsd: number;
+  /** True equity = positions + wallet. */
+  readonly totalEquityUsd: number;
+  /** Sum of position cost bases. */
+  readonly totalDepositedUsd: number;
+  /** Sum of claimed swap fees across positions. */
+  readonly totalFeesClaimedUsd: number;
+  /** Sum of claimed farm rewards across positions. */
+  readonly totalRewardsClaimedUsd: number;
+  /**
+   * Equity-based unrealized P&L: (equity + fees + rewards − deposits).
+   * When the wallet balance is unknown (null input), this falls back to the
+   * positions-only figure exactly as before — never fabricates a wallet.
+   */
+  readonly unrealizedPnlUsd: number;
+  /** unrealizedPnlUsd / totalDepositedUsd (0 when no deposits). */
+  readonly unrealizedPnlPct: number;
+  /** False when the wallet balance could not be read (equity is positions-only). */
+  readonly walletKnown: boolean;
+}
+
+export function computePortfolioEquity(input: PortfolioEquityInput): PortfolioEquity {
+  const positionsValueUsd = input.positions.reduce(
+    (sum, pos) => (Number.isFinite(pos.currentValueUsd) ? sum + pos.currentValueUsd : sum),
+    0,
+  );
+  const totalDepositedUsd = input.positions.reduce(
+    (sum, pos) => (Number.isFinite(pos.depositedUsd) ? sum + pos.depositedUsd : sum),
+    0,
+  );
+  const totalFeesClaimedUsd = input.positions.reduce(
+    (sum, pos) =>
+      Number.isFinite(pos.cumulativeFeesClaimedUsd) ? sum + pos.cumulativeFeesClaimedUsd : sum,
+    0,
+  );
+  const totalRewardsClaimedUsd = input.positions.reduce(
+    (sum, pos) =>
+      Number.isFinite(pos.cumulativeRewardsClaimedUsd ?? 0)
+        ? sum + (pos.cumulativeRewardsClaimedUsd ?? 0)
+        : sum,
+    0,
+  );
+
+  const walletBalanceUsd =
+    input.walletBalanceUsd !== null && Number.isFinite(input.walletBalanceUsd)
+      ? input.walletBalanceUsd
+      : 0;
+  const walletKnown = input.walletBalanceUsd !== null && Number.isFinite(input.walletBalanceUsd);
+  const totalEquityUsd = positionsValueUsd + walletBalanceUsd;
+  const unrealizedPnlUsd =
+    totalEquityUsd + totalFeesClaimedUsd + totalRewardsClaimedUsd - totalDepositedUsd;
+  const unrealizedPnlPct = totalDepositedUsd > 0 ? (unrealizedPnlUsd / totalDepositedUsd) * 100 : 0;
+
+  return {
+    positionsValueUsd,
+    walletBalanceUsd,
+    totalEquityUsd,
+    totalDepositedUsd,
+    totalFeesClaimedUsd,
+    totalRewardsClaimedUsd,
+    unrealizedPnlUsd,
+    unrealizedPnlPct,
+    walletKnown,
+  };
+}

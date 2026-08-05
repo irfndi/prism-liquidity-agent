@@ -1,13 +1,18 @@
 import { Command } from "commander";
 import { Effect, Layer } from "effect";
 import { DbLive } from "../engine/db-service.js";
-import { DbService, AuditService } from "../engine/services.js";
+import { DbService, AuditService, AdapterService } from "../engine/services.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { ConfigLive, ConfigService } from "../engine/config-service.js";
+import { AdapterLive } from "../engine/adapter-service.js";
 import type { PositionRecord } from "../engine/db-service.js";
-import { computeSummary, toJsonOutput, type PortfolioSummary } from "./portfolio.js";
+import {
+  computeSummaryWithEquity,
+  readCliWalletBalance,
+  toJsonOutput,
+  type PortfolioSummary,
+} from "./portfolio.js";
 import { createLogger } from "../engine/logger.js";
-
 import { readLockfile, isProcessAlive, findRunningEngineProcess } from "./lockfile.js";
 import { getPrismDbPath } from "../engine/paths.js";
 import { resolveEffectivePubkey } from "./wallet.js";
@@ -82,12 +87,17 @@ export interface StatusJsonOutput {
   };
 }
 
-function buildProgram(): Layer.Layer<DbService | AuditService | ConfigService, unknown, never> {
+function buildProgram(): Layer.Layer<
+  DbService | AuditService | ConfigService | AdapterService,
+  unknown,
+  never
+> {
   const dbPath = process.env.SQLITE_DB_PATH ?? getPrismDbPath();
   const dbLayer = DbLive(dbPath);
   const auditLayer = Layer.provide(AuditLive, dbLayer);
   const configLayer = ConfigLive;
-  return Layer.merge(auditLayer, Layer.merge(dbLayer, configLayer));
+  const adapterLayer = Layer.provide(AdapterLive, configLayer);
+  return Layer.merge(auditLayer, Layer.merge(dbLayer, Layer.merge(configLayer, adapterLayer)));
 }
 
 export const statusCommand = new Command("status")
@@ -115,7 +125,8 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
 
           const positions = yield* db.getAllPositions();
           const recentAudit = yield* audit.getRecentDecisions(10);
-          const summary = computeSummary(positions);
+          const walletBalanceUsd = yield* readCliWalletBalance();
+          const summary = computeSummaryWithEquity(positions, walletBalanceUsd);
           const effectiveWallet = resolveEffectivePubkey();
           const walletAddress = effectiveWallet?.error ? null : (effectiveWallet?.pubkey ?? null);
           const autonomousWalletAddress = walletAddress ?? "paper";
@@ -256,6 +267,10 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
               `Positions: ${activePositions.length} active`,
               `Deposited: $${summary.totalDepositedUsd.toFixed(2)}`,
               `Current:   $${summary.totalCurrentValueUsd.toFixed(2)}`,
+              ...(summary.walletKnown
+                ? [`Wallet:    $${(summary.walletBalanceUsd ?? 0).toFixed(2)}`]
+                : []),
+              `Equity:    $${summary.totalEquityUsd.toFixed(2)}`,
               `Fees:      $${summary.totalFeesClaimedUsd.toFixed(2)}`,
               ...(summary.totalRewardsClaimedUsd > 0
                 ? [`Rewards:   $${summary.totalRewardsClaimedUsd.toFixed(2)}`]
@@ -288,6 +303,10 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
               `  Positions:   ${activePositions.length} active`,
               `  Deposited:   $${summary.totalDepositedUsd.toFixed(2)}`,
               `  Current:     $${summary.totalCurrentValueUsd.toFixed(2)}`,
+              ...(summary.walletKnown
+                ? [`  Wallet:      $${(summary.walletBalanceUsd ?? 0).toFixed(2)}`]
+                : []),
+              `  Equity:      $${summary.totalEquityUsd.toFixed(2)}`,
               `  Fees:        $${summary.totalFeesClaimedUsd.toFixed(2)}`,
               ...(summary.totalRewardsClaimedUsd > 0
                 ? [`  Rewards:     $${summary.totalRewardsClaimedUsd.toFixed(2)}`]
