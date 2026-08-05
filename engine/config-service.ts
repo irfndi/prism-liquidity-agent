@@ -139,6 +139,8 @@ export interface AppConfig {
   // New features
   readonly stopLossPct: number;
   readonly trailingStopPct: number;
+  /** Consecutive cycles the trailing-stop drawdown must persist before EXIT (anti-phantom). */
+  readonly trailingStopConfirmCycles: number;
   readonly oorGracePeriodCycles: number;
   readonly feeClaimIntervalMs: number;
   readonly enablePoolDiscovery: boolean;
@@ -1214,6 +1216,12 @@ const loadConfig = Effect.gen(function* () {
   // New feature configs
   const stopLossPct = yield* validatedNumber("STOP_LOSS_PCT", 0, 0.15);
   const trailingStopPct = yield* validatedNumber("TRAILING_STOP_PCT", 0, 0.1);
+  const trailingStopConfirmCycles = yield* validatedNumber(
+    "TRAILING_STOP_CONFIRM_CYCLES",
+    1,
+    2,
+    10,
+  );
   const oorGracePeriodCycles = yield* validatedNumber("OOR_GRACE_PERIOD_CYCLES", 0, 3);
   const feeClaimIntervalMs = yield* validatedNumber(
     "FEE_CLAIM_INTERVAL_MS",
@@ -1370,6 +1378,7 @@ const loadConfig = Effect.gen(function* () {
     watchlistPools,
     stopLossPct,
     trailingStopPct,
+    trailingStopConfirmCycles,
     oorGracePeriodCycles,
     feeClaimIntervalMs,
     enablePoolDiscovery,

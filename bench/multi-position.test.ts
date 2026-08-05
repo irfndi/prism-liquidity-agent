@@ -1485,6 +1485,9 @@ describe("program — multiple positions per pool", () => {
         watchlistPools: [POOL],
         maxPositionsPerPool: 2,
         maxOpenPositions: 5,
+        // Single-cycle trailing-stop EXIT assertion — the #153 debounce is
+        // exercised in cycle-evaluate-pool/program tests, not here.
+        trailingStopConfirmCycles: 1,
         // Exactly one scan cycle: the long interval never fires inside the
         // test window, so no replacement ENTER can happen after A exits.
         scanIntervalMs: 600_000,
@@ -1523,7 +1526,10 @@ describe("program — multiple positions per pool", () => {
     // A was far out of range (range [4900,4910] vs active bin 5000): its value
     // estimate collapsed past the trailing stop and it exited. B is in range
     // and untouched.
-    expect(active.map((p) => p.positionId)).toEqual(["seeded-B"]);
+    // Later cycles may ENTER a fresh paper position on the strong pool,
+    // so assert only the seeded identities: B survives, A exited.
+    expect(active.map((p) => p.positionId)).toContain("seeded-B");
+    expect(active.map((p) => p.positionId)).not.toContain("seeded-A");
     expect(closed.map((p) => p.positionId)).toEqual(["seeded-A"]);
 
     const closedA = closed[0]!;
@@ -1556,6 +1562,108 @@ describe("program — multiple positions per pool", () => {
 
     const executedExits = decisions.filter((d) => d.action === "EXIT" && d.executed);
     expect(executedExits.length).toBeGreaterThanOrEqual(1);
+  }, 15_000);
+
+  it("does NOT exit on a single-cycle trailing-stop breach (#153 confirmation)", async () => {
+    const seededA = makePos({
+      positionId: "seeded-A",
+      lowerBinId: 4900,
+      upperBinId: 4910,
+      depositedUsd: 1000,
+      currentValueUsd: 1000,
+    });
+    const seededB = makePos({ positionId: "seeded-B" });
+
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+        // Default TRAILING_STOP_CONFIRM_CYCLES = 2; long interval so exactly
+        // one scan cycle runs inside the test window.
+        scanIntervalMs: 600_000,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(seededA);
+      yield* db.savePosition(seededB);
+      yield* Effect.raceFirst(program, Effect.sleep(1_500));
+      const active = yield* db.getAllPositions();
+      const closed = yield* db.getClosedPositions();
+      const audit = yield* AuditService;
+      const decisions = yield* audit.getRecentDecisions(200);
+      return { active, closed, decisions };
+    });
+    const { active, closed, decisions } = await Effect.runPromise(
+      Effect.provide(test, layer) as Effect.Effect<
+        {
+          active: ReadonlyArray<PositionRecord>;
+          closed: ReadonlyArray<PositionRecord>;
+          decisions: ReadonlyArray<{ action: string }>;
+        },
+        unknown,
+        never
+      >,
+    );
+
+    // A's estimate collapsed (~50% drawdown) on cycle 1, but the breach must
+    // persist for 2 consecutive cycles — one noisy snapshot cannot fire EXIT.
+    expect(active.map((p) => p.positionId)).toEqual(["seeded-A", "seeded-B"]);
+    expect(closed).toHaveLength(0);
+    expect(decisions.filter((d) => d.action === "EXIT")).toHaveLength(0);
+  }, 15_000);
+
+  it("exits only after the trailing-stop breach persists across cycles (#153)", async () => {
+    const seededA = makePos({
+      positionId: "seeded-A",
+      lowerBinId: 4900,
+      upperBinId: 4910,
+      depositedUsd: 1000,
+      currentValueUsd: 1000,
+    });
+    const seededB = makePos({ positionId: "seeded-B" });
+
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(seededA);
+      yield* db.savePosition(seededB);
+      // Default 1s scan interval: the persisted breach (A stays out of range
+      // with the active bin fixed at 5000) spans 2+ cycles, so EXIT fires.
+      yield* Effect.raceFirst(program, Effect.sleep(2_500));
+      const active = yield* db.getAllPositions();
+      const closed = yield* db.getClosedPositions();
+      return { active, closed };
+    });
+    const { active, closed } = await Effect.runPromise(
+      Effect.provide(test, layer) as Effect.Effect<
+        {
+          active: ReadonlyArray<PositionRecord>;
+          closed: ReadonlyArray<PositionRecord>;
+        },
+        unknown,
+        never
+      >,
+    );
+
+    // Later cycles may ENTER a fresh paper position on the strong pool,
+    // so assert only the seeded identities: B survives, A exited.
+    expect(active.map((p) => p.positionId)).toContain("seeded-B");
+    expect(active.map((p) => p.positionId)).not.toContain("seeded-A");
+    expect(closed.map((p) => p.positionId)).toEqual(["seeded-A"]);
   }, 15_000);
 });
 

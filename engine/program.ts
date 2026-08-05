@@ -2529,6 +2529,11 @@ export const program = Effect.gen(function* () {
   // Session-local (no schema change) so a restart re-establishes the first
   // cycle as the baseline; downtime catch-up is capped at 2× scan interval.
   const paperFeeAccrualAt = new Map<string, number>();
+  // Trailing-stop phantom-EXIT guard (#153): consecutive cycles the drawdown
+  // has breached the stop. EXIT fires only after the breach persists for
+  // TRAILING_STOP_CONFIRM_CYCLES cycles, so a single noisy snapshot read
+  // (unstable tracked-peak / value) cannot trigger EXIT churn. Session-local.
+  const trailingStopBreachCount = new Map<string, number>();
   const refreshPoolsToScan = (reconcileResult: PositionReconcileResult) => {
     unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
     poolsToScan = [...approvedPoolAddresses];
@@ -4852,18 +4857,25 @@ export const program = Effect.gen(function* () {
           const estimatedValue = pos.currentValueUsd;
           const highest = pos.highestValueUsd ?? pos.depositedUsd;
           const drawdown = highest > 0 ? (highest - estimatedValue) / highest : 0;
-          if (drawdown > config.trailingStopPct) {
+          const breached = drawdown > config.trailingStopPct;
+          const breaches = breached ? (trailingStopBreachCount.get(pos.positionId) ?? 0) + 1 : 0;
+          if (breached) trailingStopBreachCount.set(pos.positionId, breaches);
+          else trailingStopBreachCount.delete(pos.positionId);
+          // #153: a single noisy snapshot (unstable tracked-peak/value) must
+          // not fire EXIT — require the breach to persist across consecutive
+          // cycles so phantom triggers churn into nothing instead of EXITs.
+          if (breached && breaches >= config.trailingStopConfirmCycles) {
             decision = {
               action: "EXIT",
               poolAddress,
               positionId: pos.positionId,
               confidence: 0.8,
-              reasoning: `Trailing stop: value dropped ${(drawdown * 100).toFixed(1)}% from peak $${highest.toFixed(2)}`,
+              reasoning: `Trailing stop: value dropped ${(drawdown * 100).toFixed(1)}% from peak $${highest.toFixed(2)} (${breaches}/${config.trailingStopConfirmCycles} cycles)`,
             };
             yield* sendAgentAlert(
               "critical",
               "trailing_stop",
-              `Trailing stop triggered on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: value dropped ${(drawdown * 100).toFixed(1)}% from peak $${highest.toFixed(2)}`,
+              `Trailing stop triggered on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: value dropped ${(drawdown * 100).toFixed(1)}% from peak $${highest.toFixed(2)} (confirmed ${breaches} cycles)`,
               { pool, metrics, position: pos },
             );
           } else {
