@@ -1,0 +1,5 @@
+{
+  "$schema": "https://pi-lens.dev/schema.json",
+  "disabledServers": ["deno"],
+  "ignore": ["node_modules/**", "dist/**", "logs/**", "bench/tmp-audit/**"]
+}

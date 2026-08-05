@@ -480,9 +480,12 @@ export interface AppConfig {
   /** Maximum daily-return stddev (default 0.35) — above this is a lunatic
    *  token, not an oversold gem. */
   readonly fallenAngelVolBaselineMax?: number;
-  /** Minimum RugCheck normalised score (0..1 default 0.7) for a fallen-angel
-   *  token. Fail-closed: a missing/unknown score rejects the candidate. */
-  readonly fallenAngelMinRugcheckScore?: number;
+  /** Maximum RugCheck score_normalised (0..100 RISK index — higher = riskier:
+   *  SOL≈1, BONK≈7, a dangerous LP-unlocked token ≈56, mint-authority-enabled
+   *  ≈71; verified live 2026-08-05) for a fallen-angel token. Default 60.
+   *  The hard security gate is the `risks[].level === "danger"` check; this is
+   *  the secondary floor. Fail-closed: a missing/unknown score rejects. */
+  readonly fallenAngelMaxRugcheckScore?: number;
   /** Minimum RugCheck holder count (default 300) — a token with no real
    *  holder base can't be an angel. */
   readonly fallenAngelMinHolders?: number;
@@ -1170,11 +1173,11 @@ const loadConfig = Effect.gen(function* () {
     0,
     0.35,
   );
-  const fallenAngelMinRugcheckScore = yield* validatedNumber(
-    "FALLEN_ANGEL_MIN_RUGCHECK_SCORE",
+  const fallenAngelMaxRugcheckScore = yield* validatedNumber(
+    "FALLEN_ANGEL_MAX_RUGCHECK_SCORE",
     0,
-    0.7,
-    1,
+    60,
+    100,
   );
   const fallenAngelMinHolders = yield* validatedNumber("FALLEN_ANGEL_MIN_HOLDERS", 1, 300);
   const fallenAngelMaxTop10HolderPct = yield* validatedNumber(
@@ -1500,7 +1503,7 @@ const loadConfig = Effect.gen(function* () {
     fallenAngelMaxDrawdownPct,
     fallenAngelVolBaselineMin,
     fallenAngelVolBaselineMax,
-    fallenAngelMinRugcheckScore,
+    fallenAngelMaxRugcheckScore,
     fallenAngelMinHolders,
     fallenAngelMaxTop10HolderPct,
     fallenAngelTpRungs,

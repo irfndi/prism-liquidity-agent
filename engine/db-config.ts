@@ -107,11 +107,11 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
     min: 0,
   },
   {
-    envKey: "FALLEN_ANGEL_MIN_RUGCHECK_SCORE",
+    envKey: "FALLEN_ANGEL_MAX_RUGCHECK_SCORE",
     kind: "number",
-    field: "fallenAngelMinRugcheckScore",
+    field: "fallenAngelMaxRugcheckScore",
     min: 0,
-    max: 1,
+    max: 100,
   },
   {
     envKey: "FALLEN_ANGEL_MIN_HOLDERS",

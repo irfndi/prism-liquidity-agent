@@ -26,12 +26,12 @@ function baseConfig(): AppConfig {
     fallenAngelMaxDrawdownPct: 0.95,
     fallenAngelVolBaselineMin: 0.02,
     fallenAngelVolBaselineMax: 0.35,
-    fallenAngelMinRugcheckScore: 0.7,
+    fallenAngelMaxRugcheckScore: 0.7,
     fallenAngelMinHolders: 300,
     fallenAngelMaxTop10HolderPct: 0.5,
     fallenAngelInvalidationStopPct: 0.25,
     fallenAngelMaxPositions: 2,
-  } as AppConfig;
+  } as unknown as AppConfig;
 }
 
 // Bun auto-loads `.env` into process.env, and this repo's own .env sets many of
