@@ -46,6 +46,7 @@ import {
 import type { AgentDecision, PoolState, Position } from "../engine/types.js";
 import { defaultAppConfig, makePool, makeBinArray, mockFetch, run } from "./helpers.js";
 import { randomUUID } from "crypto";
+import { stringifySafe } from "../engine/bigint-json.js";
 
 // ─── Shared fixtures ─────────────────────────────────────────────────────────
 
@@ -1757,6 +1758,70 @@ describe("program — multiple positions per pool", () => {
       (d) => d.action === "EXIT" && (d.reasoning ?? "").includes("[dust-cleanup]"),
     );
     expect(dustExits.length).toBeGreaterThanOrEqual(1);
+  }, 15_000);
+
+  it("honors a genuine 0 on-chain mark instead of falling back to the HODL estimate", async () => {
+    // The value loop must use an explicit null check (`realMark !== null`),
+    // not `??`: a 0 mark from getPositionValueUsd is REAL data (a genuinely
+    // worthless position → dust), not "unavailable". `??` would treat 0 as
+    // nullish and silently replace it with the HODL-anchored estimate —
+    // 500×(100/100)+500 = 1000 at the unchanged pool price — keeping a
+    // zero-valued position alive instead of dust-cleaning it.
+    const seeded = makePos({
+      positionId: "zero-mark-live",
+      positionPubKey: "zero-mark-live",
+      depositedUsd: 1000,
+      currentValueUsd: 1000,
+      entryPriceUsd: 100,
+      entryAmountXUsd: 500,
+      entryAmountYUsd: 500,
+      lowerBinId: 4980,
+      upperBinId: 5020,
+    });
+
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter(
+        { [POOL]: makePool({ address: POOL, currentPrice: 100 }) },
+        { getPositionValueUsd: () => Effect.succeed(0) },
+      ),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: { watchlistPools: [POOL] },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(seeded);
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const persisted = yield* db.getPosition("zero-mark-live");
+      const audit = yield* AuditService;
+      const decisions = yield* audit.getRecentDecisions(200);
+      return { persisted, decisions };
+    });
+    const { persisted, decisions } = await Effect.runPromise(
+      Effect.provide(test, layer) as Effect.Effect<
+        {
+          persisted: PositionRecord | null;
+          decisions: ReadonlyArray<{ action: string; reasoning: string | null }>;
+        },
+        unknown,
+        never
+      >,
+    );
+
+    // The real 0 mark is honored: any non-zero persisted value would mean the
+    // fallback swallowed the genuine mark.
+    expect(persisted?.currentValueUsd).toBe(0);
+    // The 0 mark lands below the dust threshold → deterministic [dust-cleanup]
+    // EXIT (the HODL fallback of 1000 would never exit).
+    const dustExits = decisions.filter(
+      (d) => d.action === "EXIT" && (d.reasoning ?? "").includes("[dust-cleanup]"),
+    );
+    expect(
+      dustExits,
+      `expected a [dust-cleanup] EXIT on the 0 mark, got: ${stringifySafe(decisions)}`,
+    ).not.toHaveLength(0);
+    // The dust EXIT reasoned from the REAL 0 mark ($0.00), not a fallback.
+    expect(dustExits[0]?.reasoning).toContain("$0.00");
   }, 15_000);
 });
 

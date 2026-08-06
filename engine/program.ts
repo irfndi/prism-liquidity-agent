@@ -4649,7 +4649,11 @@ export const program = Effect.gen(function* () {
                 .getPositionValueUsd(poolAddress, pos.positionPubKey)
                 .pipe(Effect.catchAll(() => Effect.succeed(null)))
             : null;
-        const estimatedValue = realMark ?? estimatePositionValue(pos, pool);
+        // Explicit null check (not `??`): the adapter contract returns null
+        // when the mark is unavailable, never 0 — a genuine 0-valued position
+        // is real data (dust) and must not silently fall back to the
+        // price-anchored mark.
+        const estimatedValue = realMark !== null ? realMark : estimatePositionValue(pos, pool);
         pos.currentValueUsd = estimatedValue;
         const highest = pos.highestValueUsd ?? pos.depositedUsd;
         if (estimatedValue > highest) {
