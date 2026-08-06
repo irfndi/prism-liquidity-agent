@@ -17,6 +17,13 @@ import type { AppConfig } from "./config-service.js";
  *   2. DB row `config.<ENV_KEY>`             — wins when the env var is UNSET
  *   3. compiled-in default in loadConfig     — baseline
  *
+ * Effect timing: the engine loads config ONCE at startup (ConfigLive), so a
+ * DB override takes effect on the NEXT engine start — `prism config set`
+ * prints this hint. Hot-reload of the running program is deliberately NOT
+ * supported: `config` is captured by reference throughout the scan loop, and
+ * silently mutating it mid-cycle would make sizing/risk decisions
+ * non-deterministic.
+ *
  * Design rules (locked user decision #1):
  * - Only an explicit allowlist (`DB_CONFIG_KEYS`) is overridable. Secrets,
  *   wallet keys, RPC URLs, paths and channel names are NOT in it — a DB row
@@ -44,8 +51,14 @@ export interface DbConfigSpec {
   /** The env-style key the user sets, e.g. "MIN_POOL_TVL_USD". */
   readonly envKey: string;
   readonly kind: DbConfigKind;
-  /** AppConfig field this override lands on. */
-  readonly field: keyof AppConfig;
+  /**
+   * AppConfig field this override lands on. Typed as string so specs can
+   * reference fields introduced by newer feature branches (market-scan etc.)
+   * while this module compiles against older bases; applyDbConfigOverrides
+   * narrows at runtime via the kind parse. A typo fails loudly: the row is
+   * skipped with a warning and the key is invisible to `prism config list`.
+   */
+  readonly field: string;
   readonly min?: number;
   readonly max?: number;
 }
@@ -138,6 +151,127 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
     kind: "number",
     field: "fallenAngelMaxPositions",
     min: 1,
+  },
+  // ── Market-scan mode (runtime-tunable without a restart) ─────────────────
+  { envKey: "MARKET_SCAN_ENABLED", kind: "boolean", field: "marketScanEnabled" },
+  {
+    envKey: "MARKET_SCAN_REFRESH_INTERVAL_MS",
+    kind: "number",
+    field: "marketScanRefreshIntervalMs",
+    min: 60_000,
+  },
+  {
+    envKey: "MARKET_SCAN_UNIVERSE_PAGES",
+    kind: "number",
+    field: "marketScanUniversePages",
+    min: 1,
+    max: 10,
+  },
+  {
+    envKey: "MARKET_SCAN_MIN_TVL_USD",
+    kind: "number",
+    field: "marketScanMinTvlUsd",
+    min: 0,
+  },
+  {
+    envKey: "MARKET_SCAN_MIN_FEE_APR",
+    kind: "number",
+    field: "marketScanMinFeeApr",
+    min: 0,
+  },
+  {
+    envKey: "MARKET_SCAN_TOP_K",
+    kind: "number",
+    field: "marketScanTopK",
+    min: 1,
+    max: 200,
+  },
+  {
+    envKey: "MARKET_SCAN_MAX_POOLS",
+    kind: "number",
+    field: "marketScanMaxPools",
+    min: 1,
+    max: 500,
+  },
+  {
+    envKey: "MARKET_SCAN_MIN_HOLDERS",
+    kind: "number",
+    field: "marketScanMinHolders",
+    min: 0,
+  },
+  {
+    envKey: "MARKET_SCAN_MIN_BIN_STEP",
+    kind: "number",
+    field: "marketScanMinBinStep",
+    min: 0,
+    max: 100,
+  },
+  {
+    envKey: "MARKET_SCAN_MAX_BIN_STEP",
+    kind: "number",
+    field: "marketScanMaxBinStep",
+    min: 1,
+    max: 2000,
+  },
+  // ── Post-#157 tuning knobs (churn / dust / range) ────────────────────────
+  { envKey: "DUST_EXIT_USD", kind: "number", field: "dustExitUsd", min: 0 },
+  {
+    envKey: "TRAILING_STOP_CONFIRM_CYCLES",
+    kind: "number",
+    field: "trailingStopConfirmCycles",
+    min: 1,
+    max: 10,
+  },
+  {
+    envKey: "VOLATILITY_EXIT_STDDEV",
+    kind: "number",
+    field: "volatilityExitStddev",
+    min: 0,
+  },
+  {
+    envKey: "ENTRY_RANGE_HALF_WIDTH_BINS",
+    kind: "number",
+    field: "entryRangeHalfWidthBins",
+    min: 0,
+    max: 200,
+  },
+  {
+    envKey: "MAX_REBALANCE_RANGE_BINS",
+    kind: "number",
+    field: "maxRebalanceRangeBins",
+    min: 1,
+  },
+  { envKey: "OOR_COOLDOWN_MS", kind: "number", field: "oorCooldownMs", min: 0 },
+  {
+    envKey: "OOR_GRACE_PERIOD_CYCLES",
+    kind: "number",
+    field: "oorGracePeriodCycles",
+    min: 1,
+  },
+  {
+    envKey: "FEE_CLAIM_INTERVAL_MS",
+    kind: "number",
+    field: "feeClaimIntervalMs",
+    min: 60_000,
+  },
+  {
+    envKey: "MIN_REBALANCE_INTERVAL_MS",
+    kind: "number",
+    field: "minRebalanceIntervalMs",
+    min: 0,
+  },
+  { envKey: "IDLE_REDEPLOY_ENABLED", kind: "boolean", field: "idleRedeployEnabled" },
+  {
+    envKey: "IDLE_REDEPLOY_THRESHOLD_USD",
+    kind: "number",
+    field: "idleRedeployThresholdUsd",
+    min: 0,
+  },
+  {
+    envKey: "IDLE_REDEPLOY_MAX_SIZE_USD",
+    kind: "number",
+    field: "idleRedeployMaxSizeUsd",
+    min: 0,
   },
 ];
 

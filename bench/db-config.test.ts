@@ -59,6 +59,46 @@ describe("db-config registry", () => {
     expect(findDbConfigSpec("WALLET_PRIVATE_KEY")).toBeUndefined();
   });
 
+  it("covers the market-scan and post-#157 tuning knobs (runtime-tunable)", () => {
+    for (const envKey of [
+      "MARKET_SCAN_ENABLED",
+      "MARKET_SCAN_REFRESH_INTERVAL_MS",
+      "MARKET_SCAN_UNIVERSE_PAGES",
+      "MARKET_SCAN_MIN_TVL_USD",
+      "MARKET_SCAN_MIN_FEE_APR",
+      "MARKET_SCAN_TOP_K",
+      "MARKET_SCAN_MAX_POOLS",
+      "MARKET_SCAN_MIN_HOLDERS",
+      "MARKET_SCAN_MIN_BIN_STEP",
+      "MARKET_SCAN_MAX_BIN_STEP",
+      "DUST_EXIT_USD",
+      "TRAILING_STOP_CONFIRM_CYCLES",
+      "VOLATILITY_EXIT_STDDEV",
+      "ENTRY_RANGE_HALF_WIDTH_BINS",
+      "MAX_REBALANCE_RANGE_BINS",
+      "OOR_COOLDOWN_MS",
+      "IDLE_REDEPLOY_ENABLED",
+    ]) {
+      expect(findDbConfigSpec(envKey), `${envKey} must be DB-overridable`).toBeDefined();
+    }
+  });
+
+  it("applies a market-scan override onto the config (env unset)", () => {
+    const base = baseConfig();
+    const overridden = applyDbConfigOverrides(
+      base,
+      new Map([[dbConfigKey("MARKET_SCAN_ENABLED"), "true"]]),
+    );
+    expect((overridden as unknown as Record<string, unknown>).marketScanEnabled).toBe(true);
+  });
+
+  it("clamps market-scan values to their bounds", () => {
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_TOP_K")!, "999")).toBe(200);
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_REFRESH_INTERVAL_MS")!, "1000")).toBe(
+      60_000,
+    );
+  });
+
   it("rejects edits to non-allowlisted values (secrets cannot be stored)", () => {
     for (const spec of DB_CONFIG_KEYS) {
       expect(["WALLET_PRIVATE_KEY", "HELIUS_API_KEY", "SOLANA_RPC_URL"]).not.toContain(spec.envKey);

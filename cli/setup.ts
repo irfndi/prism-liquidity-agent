@@ -5,6 +5,7 @@ import path from "path";
 import os from "os";
 import { pingInstall, requireRegistered, type PrismCredentials } from "./api.js";
 import { ensurePrismConfigDir, getPrismEnvPath, getPrismDbPath } from "../engine/paths.js";
+import { mergeEnvContent } from "./env-merge.js";
 
 export const setupCommand = new Command("setup")
   .description("Configure Prism trading agent")
@@ -191,12 +192,18 @@ export const setupCommand = new Command("setup")
 
     ensurePrismConfigDir();
     const envPath = getPrismEnvPath();
-    if (fs.existsSync(envPath)) {
+    const existingEnv = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf-8") : null;
+    if (existingEnv !== null) {
       const backupPath = `${envPath}.backup.${Date.now()}`;
       fs.copyFileSync(envPath, backupPath);
       console.warn(`⚠ Existing .env found. Backup created at: ${backupPath}`);
     }
-    fs.writeFileSync(envPath, envContent, { mode: 0o600 });
+    // MERGE, never replace: unknown user keys (WATCHLIST_POOLS, MARKET_SCAN_*,
+    // AGENTIC_MODE, custom comments) survive a re-run; managed keys get the
+    // fresh wizard values; new defaults are appended. An empty wizard value
+    // never wipes a non-empty existing value.
+    const mergedEnv = existingEnv === null ? envContent : mergeEnvContent(existingEnv, envContent);
+    fs.writeFileSync(envPath, mergedEnv, { mode: 0o600 });
     fs.chmodSync(envPath, 0o600);
     await pingInstall("setup", { userId: credentials.userId });
 
