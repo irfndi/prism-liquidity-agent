@@ -1203,6 +1203,11 @@ export const AdapterLive = Layer.effect(
     const invalidateBalanceCaches = Effect.sync(() => {
       tokenBalanceCache.clear();
       nativeSolBalanceCache = undefined;
+      // Position marks read the same on-chain accounts a mutation rewrites:
+      // a rebalance preserves positionPubKey, so without clearing this cache
+      // the next valuation would serve a pre-mutation mark (up to 60s) into
+      // trailing-stop / IL / dust decisions.
+      positionValueCache.clear();
     }).pipe(Effect.zipRight(invalidateWalletSnapshot));
 
     const quotedByRawPayload = new WeakMap<Record<string, unknown>, SwapQuote>();
@@ -2073,15 +2078,22 @@ export const AdapterLive = Layer.effect(
           const positionData = position.positionData;
           const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
           const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
-          const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint]);
+          // No static fallback prices: a fabricated mark would skip the
+          // HODL-anchored fallback in the decision loop and could drive
+          // trailing-stop / IL / dust decisions on made-up numbers. Live
+          // prices only; any missing or non-positive leg fails open to null.
+          const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint], {
+            useFallback: false,
+          });
+          const priceX = prices[tokenXMint];
+          const priceY = prices[tokenYMint];
+          if (priceX === undefined || priceX <= 0 || priceY === undefined || priceY <= 0) {
+            return null;
+          }
           const decimalsX = dlmm.tokenX.mint.decimals;
           const decimalsY = dlmm.tokenY.mint.decimals;
-          const xUsd =
-            (Number(positionData.totalXAmount.toString()) / 10 ** decimalsX) *
-            (prices[tokenXMint] ?? 0);
-          const yUsd =
-            (Number(positionData.totalYAmount.toString()) / 10 ** decimalsY) *
-            (prices[tokenYMint] ?? 0);
+          const xUsd = (Number(positionData.totalXAmount.toString()) / 10 ** decimalsX) * priceX;
+          const yUsd = (Number(positionData.totalYAmount.toString()) / 10 ** decimalsY) * priceY;
           const valueUsd = xUsd + yUsd;
           if (!Number.isFinite(valueUsd) || valueUsd <= 0) return null;
           positionValueCache.set(cacheKey, { fetchedAt: Date.now(), value: valueUsd });
