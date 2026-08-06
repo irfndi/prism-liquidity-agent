@@ -1460,12 +1460,19 @@ describe("program — multiple positions per pool", () => {
   }, 15_000);
 
   it("runs an independent lifecycle per position: OOR + trailing-stop EXIT on A leaves B intact", async () => {
+    // Pool price halves to $75: with the price-anchored HODL mark (the old
+    // bin-drift heuristic is gone), A's value genuinely collapses (400 X-leg
+    // at 150 → 200 at 75, plus 400 Y = 600 → 40% drawdown) while B's
+    // Y-heavy mix (100 X + 700 Y) only dips 6.25% (750 vs 800) — no breach.
     const seededA = makePos({
       positionId: "seeded-A",
       lowerBinId: 4900,
       upperBinId: 4910,
       depositedUsd: 1000,
       currentValueUsd: 1000,
+      entryPriceUsd: 150,
+      entryAmountXUsd: 400,
+      entryAmountYUsd: 400,
     });
     const seededB = makePos({
       positionId: "seeded-B",
@@ -1474,12 +1481,12 @@ describe("program — multiple positions per pool", () => {
       depositedUsd: 800,
       currentValueUsd: 800,
       entryPriceUsd: 150,
-      entryAmountXUsd: 400,
-      entryAmountYUsd: 400,
+      entryAmountXUsd: 100,
+      entryAmountYUsd: 700,
     });
 
     const layer = makeProgramLayer({
-      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 75 }) }),
       datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
       configOverrides: {
         watchlistPools: [POOL],
@@ -1523,8 +1530,7 @@ describe("program — multiple positions per pool", () => {
       >,
     );
 
-    // A was far out of range (range [4900,4910] vs active bin 5000): its value
-    // estimate collapsed past the trailing stop and it exited. B is in range
+    // A's value collapsed past the trailing stop and it exited. B is in range
     // and untouched.
     // Later cycles may ENTER a fresh paper position on the strong pool,
     // so assert only the seeded identities: B survives, A exited.
@@ -1534,11 +1540,11 @@ describe("program — multiple positions per pool", () => {
 
     const closedA = closed[0]!;
     expect(closedA.closedAt).not.toBeNull();
-    // Realized PnL = final value (500 after the 50% IL-drift estimate) − basis.
-    // A4 paper fee accrual is active for this pool (fees24h 300 > 0) but A is
-    // OUT of range (inRange = 0) so it accrued nothing — this −500 realized pin
-    // is unaffected by the accrual.
-    expect(closedA.realizedPnlUsd).toBeCloseTo(-500, 0);
+    // Realized PnL = final value (600: the HODL mark after the price halved
+    // the X leg) − basis. A4 paper fee accrual is active for this pool
+    // (fees24h 300 > 0) but A is OUT of range (inRange = 0) so it accrued
+    // nothing — this −400 realized pin is unaffected by the accrual.
+    expect(closedA.realizedPnlUsd).toBeCloseTo(-400, 0);
     // A's OOR cycles accumulated independently; B never left range.
     expect(closedA.oorCycleCount).toBeGreaterThanOrEqual(1);
     expect(active[0]!.oorCycleCount).toBe(0);
@@ -1546,8 +1552,8 @@ describe("program — multiple positions per pool", () => {
     // B's entry accounting survived A's exit byte-for-byte.
     expect(active[0]!.depositedUsd).toBe(800);
     expect(active[0]!.entryPriceUsd).toBe(150);
-    expect(active[0]!.entryAmountXUsd).toBe(400);
-    expect(active[0]!.entryAmountYUsd).toBe(400);
+    expect(active[0]!.entryAmountXUsd).toBe(100);
+    expect(active[0]!.entryAmountYUsd).toBe(700);
 
     // The EXIT event targets A's identity. B is in range with fees24h 300 > 0,
     // so the A4 paper notional-fee accrual booked exactly one CLAIM (kind
@@ -1565,17 +1571,27 @@ describe("program — multiple positions per pool", () => {
   }, 15_000);
 
   it("does NOT exit on a single-cycle trailing-stop breach (#153 confirmation)", async () => {
+    // A breaches hard (400 X-leg at 150 → 200 at $75 pool price → 40%
+    // drawdown); B's Y-heavy mix (100 X + 900 Y) only dips 5% — no breach.
     const seededA = makePos({
       positionId: "seeded-A",
       lowerBinId: 4900,
       upperBinId: 4910,
       depositedUsd: 1000,
       currentValueUsd: 1000,
+      entryPriceUsd: 150,
+      entryAmountXUsd: 400,
+      entryAmountYUsd: 400,
     });
-    const seededB = makePos({ positionId: "seeded-B" });
+    const seededB = makePos({
+      positionId: "seeded-B",
+      entryPriceUsd: 150,
+      entryAmountXUsd: 100,
+      entryAmountYUsd: 900,
+    });
 
     const layer = makeProgramLayer({
-      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 75 }) }),
       datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
       configOverrides: {
         watchlistPools: [POOL],
@@ -1618,17 +1634,26 @@ describe("program — multiple positions per pool", () => {
   }, 15_000);
 
   it("exits only after the trailing-stop breach persists across cycles (#153)", async () => {
+    // Same seeds as the single-cycle test: A breaches 40%, B stays at −5%.
     const seededA = makePos({
       positionId: "seeded-A",
       lowerBinId: 4900,
       upperBinId: 4910,
       depositedUsd: 1000,
       currentValueUsd: 1000,
+      entryPriceUsd: 150,
+      entryAmountXUsd: 400,
+      entryAmountYUsd: 400,
     });
-    const seededB = makePos({ positionId: "seeded-B" });
+    const seededB = makePos({
+      positionId: "seeded-B",
+      entryPriceUsd: 150,
+      entryAmountXUsd: 100,
+      entryAmountYUsd: 900,
+    });
 
     const layer = makeProgramLayer({
-      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 75 }) }),
       datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
       configOverrides: {
         watchlistPools: [POOL],
@@ -1664,6 +1689,74 @@ describe("program — multiple positions per pool", () => {
     expect(active.map((p) => p.positionId)).toContain("seeded-B");
     expect(active.map((p) => p.positionId)).not.toContain("seeded-A");
     expect(closed.map((p) => p.positionId)).toEqual(["seeded-A"]);
+  }, 15_000);
+
+  it("closes dust positions below DUST_EXIT_USD with a [dust-cleanup] EXIT", async () => {
+    // The $0.26 residual entries older builds created by clamping entry size
+    // to leftover per-pool headroom: no entry legs, mark = cost basis (0.26)
+    // < dust threshold (5) → deterministic cleanup EXIT at confidence 1,
+    // reclaiming the per-pool slot.
+    // The $0.26 residual entries older builds created by clamping entry size
+    // to leftover per-pool headroom: real 50/50 legs, so the HODL mark is
+    // 0.13 + 0.13 = 0.26 at the unchanged pool price — below the dust
+    // threshold.
+    const dustPos = makePos({
+      positionId: "seeded-dust",
+      depositedUsd: 0.26,
+      currentValueUsd: 0.26,
+      entryPriceUsd: 150,
+      entryAmountXUsd: 0.13,
+      entryAmountYUsd: 0.13,
+    });
+    const healthyPos = makePos({
+      positionId: "seeded-healthy",
+      depositedUsd: 1000,
+      currentValueUsd: 1000,
+      entryPriceUsd: 150,
+      entryAmountXUsd: 500,
+      entryAmountYUsd: 500,
+    });
+
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL }) }),
+      datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
+      configOverrides: {
+        watchlistPools: [POOL],
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+        scanIntervalMs: 600_000,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(dustPos);
+      yield* db.savePosition(healthyPos);
+      yield* Effect.raceFirst(program, Effect.sleep(1_500));
+      const active = yield* db.getAllPositions();
+      const closed = yield* db.getClosedPositions();
+      const audit = yield* AuditService;
+      const decisions = yield* audit.getRecentDecisions(200);
+      return { active, closed, decisions };
+    });
+    const { active, closed, decisions } = await Effect.runPromise(
+      Effect.provide(test, layer) as Effect.Effect<
+        {
+          active: ReadonlyArray<PositionRecord>;
+          closed: ReadonlyArray<PositionRecord>;
+          decisions: ReadonlyArray<{ action: string; reasoning: string | null }>;
+        },
+        unknown,
+        never
+      >,
+    );
+
+    expect(active.map((p) => p.positionId)).toEqual(["seeded-healthy"]);
+    expect(closed.map((p) => p.positionId)).toEqual(["seeded-dust"]);
+    const dustExits = decisions.filter(
+      (d) => d.action === "EXIT" && (d.reasoning ?? "").includes("[dust-cleanup]"),
+    );
+    expect(dustExits.length).toBeGreaterThanOrEqual(1);
   }, 15_000);
 });
 

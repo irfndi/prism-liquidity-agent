@@ -1029,6 +1029,11 @@ export const AdapterLive = Layer.effect(
     const tokenBalanceCache = new Map<string, { value: bigint; expiresAt: number }>();
     let nativeSolBalanceCache: { value: bigint; expiresAt: number } | undefined;
 
+    // Real position mark cache (getPositionValueUsd): short TTL so the
+    // per-cycle value loop and the claim path share one position read.
+    const POSITION_VALUE_CACHE_TTL_MS = 60_000;
+    const positionValueCache = new Map<string, { value: number; fetchedAt: number }>();
+
     function readTokenBalance(mintAddress: string): Effect.Effect<bigint, unknown> {
       return Effect.gen(function* () {
         const activeWallet = wallet;
@@ -2043,6 +2048,50 @@ export const AdapterLive = Layer.effect(
             };
           });
         }),
+
+      // Real on-chain position mark (trailing-stop / PnL source of truth).
+      // Reads the position account's actual X/Y holdings and prices them at
+      // the pool's token mints. This is what replaced the bin-drift heuristic
+      // (`deposited × (1 − 0.5 × driftPct)`) whose phantom drawdowns — a
+      // 5-bin drift is a 10% "loss" on a binStep-10 pool, i.e. a 0.5% price
+      // move — fired the trailing stop every cycle and churned positions.
+      // Deliberately fail-open: null on any read/pricing problem so the
+      // decision loop falls back to the HODL-anchored mark and never fails
+      // the cycle. Cached ~60s so the per-cycle value loop and the claim
+      // path share one read.
+      getPositionValueUsd: (poolAddress, positionPubKey) => {
+        const cacheKey = `posval:${poolAddress}:${positionPubKey}`;
+        const cached = positionValueCache.get(cacheKey);
+        if (cached !== undefined && Date.now() - cached.fetchedAt < POSITION_VALUE_CACHE_TTL_MS) {
+          return Effect.succeed(cached.value);
+        }
+        return Effect.gen(function* () {
+          const dlmm = yield* getDlmm(poolAddress);
+          const position = yield* Effect.tryPromise(() =>
+            dlmm.getPosition(new PublicKey(positionPubKey)),
+          );
+          const positionData = position.positionData;
+          const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
+          const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
+          const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint]);
+          const decimalsX = dlmm.tokenX.mint.decimals;
+          const decimalsY = dlmm.tokenY.mint.decimals;
+          const xUsd =
+            (Number(positionData.totalXAmount.toString()) / 10 ** decimalsX) *
+            (prices[tokenXMint] ?? 0);
+          const yUsd =
+            (Number(positionData.totalYAmount.toString()) / 10 ** decimalsY) *
+            (prices[tokenYMint] ?? 0);
+          const valueUsd = xUsd + yUsd;
+          if (!Number.isFinite(valueUsd) || valueUsd <= 0) return null;
+          positionValueCache.set(cacheKey, { fetchedAt: Date.now(), value: valueUsd });
+          return valueUsd;
+        }).pipe(
+          Effect.catchAll(() => {
+            return Effect.succeed(null);
+          }),
+        );
+      },
 
       getAllWalletPositions: (walletAddress) =>
         Effect.gen(function* () {

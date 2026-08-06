@@ -122,6 +122,41 @@ describe("RiskEngine", () => {
       expect(result.adjustedSizeUsd).toBe(2500);
       expect(result.reason).toContain("25%");
     });
+
+    it("rejects ENTER below the minimum entry size outright", () => {
+      const decision = makeDecision({ action: "ENTER", confidence: 0.8, positionSizeUsd: 2 });
+      const result = evaluateRisk(riskConfig, decision, makeContext({ portfolioValueUsd: 10_000 }));
+      expect(result.approved).toBe(false);
+      expect(result.reason).toContain("minimum entry size");
+    });
+
+    it("rejects a headroom clamp below the minimum entry size (no dust entries)", () => {
+      // Existing pool exposure fills the cap so tightly that the remaining
+      // headroom is $5 — the old code approved a $5 deposit here; the floor
+      // must reject it instead.
+      const position: Position = {
+        id: "pos-1",
+        poolAddress: "TestPool111111111111111111111111111111111111",
+        poolName: "Test",
+        lowerBinId: 4990,
+        upperBinId: 5010,
+        liquidityShares: 1000n,
+        depositedUsd: 2995,
+        currentValueUsd: 2995,
+        unrealizedPnlUsd: 0,
+        feesEarnedUsd: 0,
+        openedAt: Date.now(),
+      };
+      const decision = makeDecision({ action: "ENTER", confidence: 0.85, positionSizeUsd: 29 });
+      const result = evaluateRisk(
+        riskConfig,
+        decision,
+        makeContext({ portfolioValueUsd: 10_000, openPositions: [position] }),
+      );
+      expect(result.approved).toBe(false);
+      expect(result.reason).toContain("below the");
+      expect(result.reason).toContain("minimum entry size");
+    });
   });
 
   describe("stop-loss", () => {

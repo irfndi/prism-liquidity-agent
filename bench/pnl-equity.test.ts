@@ -19,8 +19,8 @@ describe("computePortfolioEquity (issue #149)", () => {
     expect(result.totalEquityUsd).toBeCloseTo(154.18, 2);
   });
 
-  it("computes equity-based unrealized P&L against total deposits", () => {
-    // wallet 54.18 + positions 36.82 = 91.00 equity; deposits 41.89 → up.
+  it("computes positions-only unrealized P&L; the wallet stays in equity", () => {
+    // wallet 54.18 + positions 36.82 = 91.00 equity; deposits 41.89.
     const result = computePortfolioEquity({
       walletBalanceUsd: 54.18,
       positions: [
@@ -33,12 +33,14 @@ describe("computePortfolioEquity (issue #149)", () => {
       ],
     });
     expect(result.totalEquityUsd).toBeCloseTo(91.0, 2);
-    // The issue's real numbers: wallet ≈ $91 vs $41.89 deposited → POSITIVE.
-    expect(result.unrealizedPnlUsd).toBeGreaterThan(0);
+    // The idle wallet balance is NOT unrealized gain (the "+127% on a $54
+    // wallet" artifact): unrealized = 36.82 − 41.89 = −5.07.
+    expect(result.unrealizedPnlUsd).toBeCloseTo(-5.07, 2);
+    expect(result.unrealizedPnlPct).toBeCloseTo(-12.1, 1);
     expect(result.walletKnown).toBe(true);
   });
 
-  it("includes claimed fees and rewards in unrealized P&L", () => {
+  it("includes claimed fees and rewards in unrealized P&L (wallet excluded)", () => {
     const result = computePortfolioEquity({
       walletBalanceUsd: 10,
       positions: [
@@ -50,9 +52,11 @@ describe("computePortfolioEquity (issue #149)", () => {
         },
       ],
     });
-    // equity 110 + fees 4 + rewards 2 − deposits 100 = 16
-    expect(result.unrealizedPnlUsd).toBeCloseTo(16, 6);
-    expect(result.unrealizedPnlPct).toBeCloseTo(16, 6);
+    // positions 100 + fees 4 + rewards 2 − deposits 100 = 6 (wallet 10 is
+    // equity, not P&L).
+    expect(result.unrealizedPnlUsd).toBeCloseTo(6, 6);
+    expect(result.unrealizedPnlPct).toBeCloseTo(6, 6);
+    expect(result.totalEquityUsd).toBeCloseTo(110, 6);
   });
 
   it("falls back to positions-only equity when the wallet is unknown (no fabrication)", () => {
@@ -100,7 +104,8 @@ describe("computePortfolioEquity (issue #149)", () => {
     const result = computePortfolioEquity({ walletBalanceUsd: 100, positions: [] });
     expect(result.totalEquityUsd).toBe(100);
     expect(result.positionsValueUsd).toBe(0);
-    expect(result.unrealizedPnlUsd).toBe(100); // 100 + 0 − 0
+    // No positions → no unrealized P&L; the wallet is equity, not gain.
+    expect(result.unrealizedPnlUsd).toBe(0);
     expect(result.unrealizedPnlPct).toBe(0);
     expect(result.walletKnown).toBe(true);
   });

@@ -151,6 +151,15 @@ describe("ConfigService freeze screening + IL protection flags", () => {
     const clamped = await loadConfig();
     expect(clamped.ilDominanceMinUsd).toBe(0);
   });
+
+  it("defaults DUST_EXIT_USD to 5 and clamps below the minimum of 0 (0 disables)", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.dustExitUsd).toBe(5);
+
+    vi.stubEnv("DUST_EXIT_USD", "-1");
+    const clamped = await loadConfig();
+    expect(clamped.dustExitUsd).toBe(0);
+  });
 });
 
 describe("ConfigService fee-density cooldown floor guards", () => {

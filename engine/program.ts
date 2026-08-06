@@ -435,15 +435,41 @@ export function hasSyncProposalTransport(status: { readonly transport: string | 
   return status.transport !== null && status.transport !== "alert-only";
 }
 
-// ─── Position value estimation (rough heuristic) ───────────────
+// ─── Position value estimation (fallback mark) ─────────────────
+//
+// The PRIMARY live mark is the real on-chain position value from the
+// adapter (`getPositionValueUsd`: actual X/Y bin holdings priced at the
+// token mints — captures genuine IL). This function is the FAIL-OPEN
+// fallback used when the position account cannot be read, a leg is
+// unpriceable, or the position is paper (no on-chain account). It is
+// deliberately price-anchored (the HODL revaluation of the recorded entry
+// legs) and NEVER the old bin-drift heuristic (`deposited ×
+// (1 − 0.5 × driftPct)`), which fabricated 10-40% "drawdowns" from
+// sub-1% price moves and fired the trailing stop every cycle. A fallback
+// that cannot price simply returns the cost basis — a flat mark never
+// invents a loss.
 
 export function estimatePositionValue(pos: PositionRecord, pool: PoolState): number {
-  const centerBinId = (pos.lowerBinId + pos.upperBinId) / 2;
-  const maxDrift = Math.max(pos.upperBinId - centerBinId, 1);
-  const drift = Math.abs(pool.activeBinId - centerBinId);
-  const driftPct = Math.min(drift / maxDrift, 1);
-  const ilFactor = 1 - driftPct * 0.5;
-  return pos.depositedUsd * ilFactor;
+  const entryPriceUsd = pos.entryPriceUsd;
+  if (
+    entryPriceUsd != null &&
+    entryPriceUsd > 0 &&
+    pos.entryAmountXUsd != null &&
+    pos.entryAmountYUsd != null &&
+    Number.isFinite(pos.entryAmountXUsd) &&
+    Number.isFinite(pos.entryAmountYUsd) &&
+    Number.isFinite(pool.currentPrice) &&
+    pool.currentPrice > 0
+  ) {
+    const hodl = computeHodlValueUsd(
+      pos.entryAmountXUsd,
+      pos.entryAmountYUsd,
+      entryPriceUsd,
+      pool.currentPrice,
+    );
+    if (hodl !== null && Number.isFinite(hodl) && hodl > 0) return hodl;
+  }
+  return pos.depositedUsd;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -4605,8 +4631,25 @@ export const program = Effect.gen(function* () {
 
       // Value estimation per position (feeds the trailing stop and the
       // REBALANCE gas gate); OOR counters above are persisted by the same save.
+      //
+      // PRIMARY mark: the real on-chain position value (adapter reads the
+      // position's actual X/Y bin holdings and prices them — captures genuine
+      // IL). FALLBACK: the HODL-anchored mark (price revaluation of the
+      // recorded entry legs) or, when entry legs are unknown, the cost basis.
+      // The old bin-drift heuristic is gone: it fabricated 10-40% drawdowns
+      // from sub-1% price moves, so the trailing stop fired every cycle and
+      // churned positions open/closed with ~zero realized P&L (live
+      // deployments saw 340+ positions in 2.5 weeks and −$218 of churn).
+      // getPositionValueUsd is optional in the service contract (test mocks)
+      // and never fails — null falls through to the price-anchored mark.
       for (const pos of poolPositions) {
-        const estimatedValue = estimatePositionValue(pos, pool);
+        const realMark =
+          pos.positionPubKey != null && adapter.getPositionValueUsd != null
+            ? yield* adapter
+                .getPositionValueUsd(poolAddress, pos.positionPubKey)
+                .pipe(Effect.catchAll(() => Effect.succeed(null)))
+            : null;
+        const estimatedValue = realMark ?? estimatePositionValue(pos, pool);
         pos.currentValueUsd = estimatedValue;
         const highest = pos.highestValueUsd ?? pos.depositedUsd;
         if (estimatedValue > highest) {
@@ -4794,6 +4837,31 @@ export const program = Effect.gen(function* () {
             confidence: 1,
             reasoning: `IL dominance: $${ilDominance.ilUsd.toFixed(2)} IL exceeds ${config.ilDominanceExitFactor ?? 2}× cumulative fees ($${ilDominance.feesClaimedUsd.toFixed(2)}) while out of range`,
           };
+        } else if (
+          (config.dustExitUsd ?? 0) > 0 &&
+          pos.currentValueUsd < (config.dustExitUsd ?? 0)
+        ) {
+          // Dust cleanup: a position whose REAL mark fell below the dust
+          // threshold is dead capital — it still occupies a per-pool position
+          // slot and a risk/allocation budget, but can never pay its way
+          // (fees scale with deposited value). Deterministic, position-
+          // targeted, confidence 1: reclaim the slot for a real position.
+          // Also auto-clears legacy dust positions (e.g. the $0.26 residual
+          // entries older builds created by clamping entry size to leftover
+          // per-pool headroom). Shadow mode records it; live mode closes it.
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            positionId: pos.positionId,
+            confidence: 1,
+            reasoning: `[dust-cleanup] Position value $${pos.currentValueUsd.toFixed(2)} below $${(config.dustExitUsd ?? 0).toFixed(2)} dust threshold — reclaiming slot`,
+          };
+          yield* sendAgentAlert(
+            "warning",
+            "risk_rejected",
+            `Dust position closed on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: value $${pos.currentValueUsd.toFixed(2)} below $${(config.dustExitUsd ?? 0).toFixed(2)}`,
+            { pool, metrics, position: pos },
+          );
         } else if (tvlVelocity < -config.tvlDropExitPct) {
           decision = {
             action: "EXIT",
