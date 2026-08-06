@@ -36,6 +36,7 @@ import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
+import { gateAndRankMarketPools, type MarketPoolRank } from "./market-gate.js";
 import { transitionCandidate } from "./candidate-policy.js";
 import { getPrismUserConfigDir } from "./paths.js";
 
@@ -2560,15 +2561,37 @@ export const program = Effect.gen(function* () {
   // TRAILING_STOP_CONFIRM_CYCLES cycles, so a single noisy snapshot read
   // (unstable tracked-peak / value) cannot trigger EXIT churn. Session-local.
   const trailingStopBreachCount = new Map<string, number>();
-  const refreshPoolsToScan = (reconcileResult: PositionReconcileResult) => {
-    unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
+
+  // ─── Market-scan state (universe-driven trading, no manual watchlist) ────
+  // The ranked universe snapshot from the last gate refresh, the addresses of
+  // the top-K pools actively scanned this cycle, and the last refresh time.
+  // When MARKET_SCAN_ENABLED, the watchlist is an OPTIONAL overlay: the
+  // active set is rebuilt each cycle from these + eligible candidates + held
+  // positions (exits must never stall).
+  let marketRankedPools: ReadonlyArray<MarketPoolRank> = [];
+  let lastMarketRefreshAt = 0;
+  const marketScanPools = new Set<string>();
+
+  // Rebuild the active scan set: the approved (watchlist) snapshot, the
+  // market-scan top-K (ranked by the freshest gate), eligible autonomous
+  // candidates and fallen-angel candidates. Called after every reconcile AND
+  // right after the market universe refresh so a fresh gate is never blocked
+  // by a stale set.
+  const rebuildPoolsToScan = (): void => {
     poolsToScan = [...approvedPoolAddresses];
+    for (const poolAddress of marketScanPools) {
+      if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
+    }
     for (const poolAddress of autonomousCandidatePools) {
       if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
     }
     for (const poolAddress of fallenAngelCandidatePools) {
       if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
     }
+  };
+  const refreshPoolsToScan = (reconcileResult: PositionReconcileResult) => {
+    unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
+    rebuildPoolsToScan();
     if (!reconcileResult.succeeded) {
       return;
     }
@@ -2584,12 +2607,35 @@ export const program = Effect.gen(function* () {
   const refreshAutonomousCandidates = (scanOrdinal: number): Effect.Effect<void, never> =>
     Effect.gen(function* () {
       if (config.autonomousTokenMode === "off") return;
-      const screened = yield* screener.screenPools(scanOrdinal).pipe(
-        Effect.catchAll((error) => {
-          logger.warn("Autonomous candidate discovery failed", { error: String(error) });
-          return Effect.succeed([] as ReadonlyArray<ScreenedPool>);
-        }),
-      );
+      // Market-scan mode replaces the rotating single-page discovery with the
+      // ranked universe snapshot (refreshed on MARKET_SCAN_REFRESH_INTERVAL_MS),
+      // so candidates always mirror the freshest gate — no manual whitelist.
+      const screened: ReadonlyArray<ScreenedPool> =
+        config.marketScanEnabled === true && marketRankedPools.length > 0
+          ? marketRankedPools.slice(0, config.candidateScanLimit).map((rank) => ({
+              address: rank.pool.address,
+              tvlUsd: rank.pool.tvlUsd,
+              volume24hUsd: rank.pool.volume24hUsd,
+              fees24hUsd: rank.pool.fees24hUsd,
+              apr: rank.pool.apr,
+              // Same convention as the screener: annualized fee/TVL.
+              feeIlRatio: rank.feeAprPct / 100,
+              volumeAuth: 1,
+              binUtilization: 0,
+              tokenX: rank.pool.tokenX,
+              tokenY: rank.pool.tokenY,
+              ...(rank.pool.createdAtMs === undefined
+                ? {}
+                : { createdAtMs: rank.pool.createdAtMs }),
+            }))
+          : yield* screener.screenPools(scanOrdinal).pipe(
+              Effect.catchAll((error) => {
+                logger.warn("Autonomous candidate discovery failed", {
+                  error: String(error),
+                });
+                return Effect.succeed([] as ReadonlyArray<ScreenedPool>);
+              }),
+            );
       const now = Date.now();
       for (const candidate of autonomousCandidates.values()) {
         if (candidate.state === "cooling_down" && candidate.cooldownUntil !== null) {
@@ -2804,7 +2850,7 @@ export const program = Effect.gen(function* () {
     });
 
   const initialReconcileResult = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
-    ...new Set([...approvedPoolAddresses, ...autonomousCandidatePools]),
+    ...new Set([...approvedPoolAddresses, ...marketScanPools, ...autonomousCandidatePools]),
   ]);
   refreshPoolsToScan(initialReconcileResult);
 
@@ -3700,6 +3746,62 @@ export const program = Effect.gen(function* () {
       }
     });
 
+  // ─── Market-scan universe refresh ─────────────────────────────────────────
+  // Re-runs the market gate on MARKET_SCAN_REFRESH_INTERVAL_MS: fetch the
+  // top-N pages of the TVL-ranked Meteora universe, gate by TVL / fee APR /
+  // volume turnover / token safety / bin step, and rebuild the active
+  // top-K set. Pools that stop qualifying drop out of the active set next
+  // cycle (held positions stay scanned via refreshPoolsToScan). Every
+  // failure path fails open: the last ranked set keeps serving.
+  const refreshMarketUniverse = (now: number): Effect.Effect<void, never> =>
+    Effect.gen(function* () {
+      if (config.marketScanEnabled !== true) return;
+      if (adapter.discoverPoolsTopPages === undefined) {
+        logger.warn("Market scan: adapter does not expose discoverPoolsTopPages — disabled");
+        return;
+      }
+      if (now - lastMarketRefreshAt < (config.marketScanRefreshIntervalMs ?? 1_800_000)) return;
+      lastMarketRefreshAt = now;
+      const discovered = yield* adapter
+        .discoverPoolsTopPages(config.marketScanUniversePages ?? 3)
+        .pipe(Effect.catchAll(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)));
+      if (discovered.length === 0) {
+        logger.warn("Market scan: universe fetch returned nothing — keeping last ranked set");
+        return;
+      }
+      const marketCfg = {
+        minTvlUsd: config.marketScanMinTvlUsd ?? 250_000,
+        minFeeApr: config.marketScanMinFeeApr ?? 25,
+        minHolders: config.marketScanMinHolders ?? 1000,
+        minBinStep: config.marketScanMinBinStep ?? 2,
+        maxBinStep: config.marketScanMaxBinStep ?? 200,
+        stablecoinMints: config.stablecoinMints ?? new Set<string>(),
+      };
+      const { ranked } = gateAndRankMarketPools(discovered, {
+        ...marketCfg,
+        minVolumeTurnover: 0.02,
+        maxVolumeTurnover: 50,
+      });
+      marketRankedPools = ranked;
+      const activeCount = Math.min(config.marketScanTopK ?? 30, config.marketScanMaxPools ?? 60);
+      marketScanPools.clear();
+      for (const rank of ranked.slice(0, activeCount)) {
+        marketScanPools.add(rank.pool.address);
+      }
+      logger.info("Market scan: universe gate refreshed", {
+        universe: discovered.length,
+        passed: ranked.length,
+        active: marketScanPools.size,
+        top: ranked
+          .slice(0, 5)
+          .map(
+            (r) =>
+              `${r.pool.tokenXSymbol ?? "?"}/${r.pool.tokenYSymbol ?? "?"} ${r.feeAprPct.toFixed(1)}%APR`,
+          )
+          .join(", "),
+      });
+    });
+
   // ─── Scan cycle ────────────────────────────────────────────────────────────
 
   const runScanCycle = (): Effect.Effect<void, never, EntryPrepService> =>
@@ -3722,6 +3824,10 @@ export const program = Effect.gen(function* () {
       let oldestSettlementAgeMs = 0;
       yield* refreshAutonomousCandidates(scanCount);
       yield* refreshFallenAngelCandidates(scanCount);
+      yield* refreshMarketUniverse(Date.now());
+      // The universe refresh may have rebuilt the market top-K — make the
+      // fresh active set visible to the "no pools" check and the scan loop.
+      rebuildPoolsToScan();
       if (autonomousExecution) {
         const settlementJobs = yield* db
           .listSettlementJobs(
@@ -5424,7 +5530,8 @@ export const program = Effect.gen(function* () {
           enterGateRejected = true;
         } else if (
           !approvedPoolAddresses.includes(poolAddress) &&
-          !autonomousCandidatePools.has(poolAddress)
+          !autonomousCandidatePools.has(poolAddress) &&
+          !marketScanPools.has(poolAddress)
         ) {
           logger.info("Skipping ENTER for unmanaged pool", { pool: poolAddress });
           enterGateRejected = true;
@@ -5888,7 +5995,7 @@ export const program = Effect.gen(function* () {
         !poolExitFired &&
         poolPositions.length >= config.maxPositionsPerPool &&
         !unresolvedPoolAddresses.has(poolAddress) &&
-        approvedPoolAddresses.includes(poolAddress)
+        (approvedPoolAddresses.includes(poolAddress) || marketScanPools.has(poolAddress))
       ) {
         const redeployCandidate = evaluateIdleRedeployCandidate();
         if (redeployCandidate) idleRedeployCandidates.push(redeployCandidate);
@@ -7155,7 +7262,11 @@ export const program = Effect.gen(function* () {
       });
     }
     const reconcileResult = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
-      ...new Set([...approvedPoolAddresses, ...autonomousCandidatePoolAddresses]),
+      ...new Set([
+        ...approvedPoolAddresses,
+        ...marketScanPools,
+        ...autonomousCandidatePoolAddresses,
+      ]),
     ]);
     reconcileRequestedPools.clear();
     refreshPoolsToScan(reconcileResult);

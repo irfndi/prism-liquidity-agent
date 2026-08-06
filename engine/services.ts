@@ -64,6 +64,19 @@ export interface DiscoveredPool {
   readonly tokenX: string;
   readonly tokenY: string;
   readonly createdAtMs?: number;
+  // Token-safety metadata straight from the Data API list payload. Optional
+  // so legacy mappers/tests compile unchanged; the market gate uses it to
+  // pre-filter risky legs (unverified, freeze-enabled, dust holder counts)
+  // BEFORE they burn scan cycles. Absent fields fail open — the per-pool
+  // safety screen (blacklist/freeze/token-risk overlay) still runs on ENTER.
+  readonly tokenXSymbol?: string;
+  readonly tokenYSymbol?: string;
+  readonly tokenXVerified?: boolean;
+  readonly tokenYVerified?: boolean;
+  readonly tokenXFreezeDisabled?: boolean;
+  readonly tokenYFreezeDisabled?: boolean;
+  readonly tokenXHolders?: number;
+  readonly tokenYHolders?: number;
 }
 
 export interface SwapRequest {
@@ -132,6 +145,19 @@ export interface AdapterApi {
   readonly getNativeSolBalance: () => Effect.Effect<bigint, unknown>;
   readonly getPoolState: (poolAddress: string) => Effect.Effect<PoolState, unknown>;
   readonly getBinArray: (poolAddress: string) => Effect.Effect<BinArray, unknown>;
+  /**
+   * Fetch the top-N pages (1000 pools each) of the TVL-ranked Meteora
+   * universe in ONE call — the market-scan universe refresh. Unlike the
+   * rotating single-page `discoverPools`, this returns every pool from
+   * pages 1..N (no 50-row slice) with the Data API's token-safety metadata
+   * attached, so the market gate can rank the whole liquid universe. Never
+   * fails: any page/network/parse error logs a warning and returns [] —
+   * the market scan falls back to its last ranked set. Optional so test
+   * mocks compile unchanged.
+   */
+  readonly discoverPoolsTopPages?: (
+    pages: number,
+  ) => Effect.Effect<ReadonlyArray<DiscoveredPool>, never>;
   readonly getPositions: (
     poolAddress: string,
     walletAddress: string,

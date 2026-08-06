@@ -30,6 +30,7 @@ import { Context, Effect, Layer } from "effect";
 import {
   AdapterService,
   type AdapterApi,
+  type DiscoveredPool,
   type PreparedSwap,
   type SwapQuote,
   type SwapRequest,
@@ -323,6 +324,40 @@ function isValidPoolShape(v: unknown): v is MeteoraPool {
   const fees = v["fees"] as Record<string, unknown>;
   if (typeof fees["24h"] !== "number") return false;
   return true;
+}
+
+/**
+ * Shared row→DiscoveredPool mapper used by both discovery paths (rotating
+ * single-page discovery and the market-scan universe refresh). Attaches the
+ * Data API's token-safety metadata (verified / freeze-disabled / holders /
+ * symbol) so the market gate can pre-filter risky legs before they burn
+ * scan cycles; the fields are optional so legacy consumers compile unchanged.
+ */
+function toDiscoveredPool(p: MeteoraPool): DiscoveredPool {
+  const { token_x: tokenX, token_y: tokenY } = p;
+  return {
+    address: p.address,
+    tvlUsd: p.tvl,
+    volume24hUsd: p.volume["24h"],
+    fees24hUsd: p.fees["24h"],
+    apr: p.apr,
+    binStep: p.pool_config.bin_step,
+    tokenX: tokenX.address,
+    tokenY: tokenY.address,
+    ...(typeof p.created_at === "number" && Number.isFinite(p.created_at) && p.created_at > 0
+      ? {
+          createdAtMs: p.created_at > 1_000_000_000_000 ? p.created_at : p.created_at * 1000,
+        }
+      : {}),
+    tokenXSymbol: tokenX.symbol,
+    tokenYSymbol: tokenY.symbol,
+    tokenXVerified: tokenX.is_verified,
+    tokenYVerified: tokenY.is_verified,
+    tokenXFreezeDisabled: tokenX.freeze_authority_disabled,
+    tokenYFreezeDisabled: tokenY.freeze_authority_disabled,
+    tokenXHolders: tokenX.holders,
+    tokenYHolders: tokenY.holders,
+  };
 }
 
 function describe(v: unknown): string {
@@ -3364,25 +3399,64 @@ export const AdapterLive = Layer.effect(
           }
           return valid
             .filter((p) => p.tvl >= config.discoveryMinTvlUsd && !p.launchpad)
-            .map((p) => ({
-              address: p.address,
-              tvlUsd: p.tvl,
-              volume24hUsd: p.volume["24h"],
-              fees24hUsd: p.fees["24h"],
-              apr: p.apr,
-              binStep: p.pool_config.bin_step,
-              tokenX: p.token_x.address,
-              tokenY: p.token_y.address,
-              ...(typeof p.created_at === "number" &&
-              Number.isFinite(p.created_at) &&
-              p.created_at > 0
-                ? {
-                    createdAtMs:
-                      p.created_at > 1_000_000_000_000 ? p.created_at : p.created_at * 1000,
-                  }
-                : {}),
-            }))
+            .map(toDiscoveredPool)
             .slice(0, 50);
+        }),
+
+      // Market-scan universe refresh: the top-N pages of the TVL-ranked
+      // universe in one call (no rotating-page semantics, no 50-row slice),
+      // with the Data API's token-safety metadata attached for the market
+      // gate. Never fails: any page/network/parse problem logs a warning and
+      // yields [] so the scan falls back to its last ranked set.
+      discoverPoolsTopPages: (pages) =>
+        Effect.gen(function* () {
+          const baseUrl =
+            config.meteoraPoolsUrl ||
+            "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc";
+          const pageCount = Math.min(Math.max(Math.floor(pages), 1), 10);
+          const fetchPage = (page: number): Effect.Effect<ReadonlyArray<DiscoveredPool>, unknown> =>
+            Effect.gen(function* () {
+              const url = new URL(baseUrl);
+              url.searchParams.set("page", String(page));
+              url.searchParams.set("page_size", "1000");
+              const res = yield* Effect.tryPromise({
+                try: () => fetch(url.toString(), { signal: AbortSignal.timeout(15_000) }),
+                catch: (cause) => cause,
+              });
+              if (!res.ok) {
+                logger.warn("Market scan: page fetch non-OK", { page, status: res.status });
+                return [];
+              }
+              const parsed: unknown = yield* Effect.tryPromise({
+                try: () => res.json(),
+                catch: (cause) => cause,
+              });
+              if (!isPoolsEnvelope(parsed)) return [];
+              const valid = parsed.data.filter(isValidPoolShape);
+              return valid.filter((p) => !p.launchpad).map(toDiscoveredPool);
+            });
+          const pagesResult = yield* Effect.all(
+            Array.from({ length: pageCount }, (_, i) => fetchPage(i + 1)),
+            { concurrency: 3 },
+          ).pipe(
+            Effect.catchAll(() =>
+              Effect.succeed([] as ReadonlyArray<ReadonlyArray<DiscoveredPool>>),
+            ),
+          );
+          const byAddress = new Map<string, DiscoveredPool>();
+          for (const page of pagesResult) {
+            for (const pool of page) {
+              if (!byAddress.has(pool.address)) byAddress.set(pool.address, pool);
+            }
+          }
+          const merged = [...byAddress.values()];
+          if (merged.length > 0) {
+            logger.info("Market scan: universe refresh complete", {
+              pages: pageCount,
+              pools: merged.length,
+            });
+          }
+          return merged;
         }),
 
       quoteSwapUSDCForToken: (outputMint: string, amountAtomic: bigint) =>
