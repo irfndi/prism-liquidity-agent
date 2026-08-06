@@ -195,7 +195,9 @@ export const setupCommand = new Command("setup")
     const existingEnv = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf-8") : null;
     if (existingEnv !== null) {
       const backupPath = `${envPath}.backup.${Date.now()}`;
-      fs.copyFileSync(envPath, backupPath);
+      // Backup may contain WALLET_PRIVATE_KEY: write with 0o600 and never
+      // clobber an existing destination (exclusive create).
+      fs.writeFileSync(backupPath, existingEnv, { mode: 0o600, flag: "wx" });
       console.warn(`⚠ Existing .env found. Backup created at: ${backupPath}`);
     }
     // MERGE, never replace: unknown user keys (WATCHLIST_POOLS, MARKET_SCAN_*,

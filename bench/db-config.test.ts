@@ -77,7 +77,12 @@ describe("db-config registry", () => {
       "ENTRY_RANGE_HALF_WIDTH_BINS",
       "MAX_REBALANCE_RANGE_BINS",
       "OOR_COOLDOWN_MS",
+      "OOR_GRACE_PERIOD_CYCLES",
+      "FEE_CLAIM_INTERVAL_MS",
+      "MIN_REBALANCE_INTERVAL_MS",
       "IDLE_REDEPLOY_ENABLED",
+      "IDLE_REDEPLOY_THRESHOLD_USD",
+      "IDLE_REDEPLOY_MAX_SIZE_USD",
     ]) {
       expect(findDbConfigSpec(envKey), `${envKey} must be DB-overridable`).toBeDefined();
     }
@@ -97,6 +102,10 @@ describe("db-config registry", () => {
     expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_REFRESH_INTERVAL_MS")!, "1000")).toBe(
       60_000,
     );
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_MIN_BIN_STEP")!, "500")).toBe(100);
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_MIN_BIN_STEP")!, "-5")).toBe(0);
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_MAX_BIN_STEP")!, "9999")).toBe(2000);
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_MAX_BIN_STEP")!, "0")).toBe(1);
   });
 
   it("rejects edits to non-allowlisted values (secrets cannot be stored)", () => {

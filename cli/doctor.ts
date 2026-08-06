@@ -17,6 +17,7 @@ import {
   ConfigService,
   ConfigLive,
 } from "../engine/config-service.js";
+import { findDbConfigSpec, parseDbConfigValue } from "../engine/db-config.js";
 import { loadKeystoreSecretKeyBase58 } from "../engine/wallet-keystore.js";
 import { getApiBaseUrl, prismApiPost, readCredentials } from "./api.js";
 import { readTelemetryPreference } from "../engine/telemetry-preference.js";
@@ -335,8 +336,19 @@ async function checkConfig(): Promise<DoctorCheck> {
         ConfigLive,
       ),
     );
+    // MARKET_SCAN_* is forward-declared config that lands on AppConfig with
+    // the market-scan feature branch; this base does not declare it. Report
+    // the effective toggle with the engine's env > DB > default precedence:
+    // the env var (dotenv already loaded at CLI start) first, then the
+    // DB-sidecar override ConfigLive applied onto the loaded config.
+    const spec = findDbConfigSpec("MARKET_SCAN_ENABLED");
+    const envRaw = process.env.MARKET_SCAN_ENABLED;
     const marketScan =
-      (config as unknown as { marketScanEnabled?: boolean }).marketScanEnabled === true;
+      spec === undefined
+        ? false
+        : envRaw !== undefined
+          ? parseDbConfigValue(spec, envRaw) === true
+          : (config as unknown as Record<string, unknown>)[spec.field] === true;
     return check(
       "config",
       "pass",
