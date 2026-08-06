@@ -123,6 +123,7 @@ const setCommand = new Command("set")
         yield* db.setMetadata(dbConfigKey(key), stored);
         const shadowed = process.env[key] !== undefined;
         console.log(`Set ${key}=${stored} in DB.`);
+        console.log("Note: the running engine loads config at startup — restart it to apply.");
         if (shadowed) {
           console.warn(
             `Note: env var ${key}=${process.env[key]} is set and will win over this DB value.`,

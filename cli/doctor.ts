@@ -11,10 +11,17 @@ import {
 } from "../engine/paths.js";
 import { isSourceInstall } from "../engine/install-method.js";
 import { probeVecAvailability, vecRemediationHint, type VecProbeResult } from "../engine/db.js";
-import { normalizeHeliusUrl, maskHeliusUrl } from "../engine/config-service.js";
+import {
+  normalizeHeliusUrl,
+  maskHeliusUrl,
+  ConfigService,
+  ConfigLive,
+} from "../engine/config-service.js";
+import { findDbConfigSpec, parseDbConfigValue } from "../engine/db-config.js";
 import { loadKeystoreSecretKeyBase58 } from "../engine/wallet-keystore.js";
 import { getApiBaseUrl, prismApiPost, readCredentials } from "./api.js";
 import { readTelemetryPreference } from "../engine/telemetry-preference.js";
+import { Effect } from "effect";
 
 type DoctorStatus = "pass" | "warn" | "fail";
 
@@ -313,7 +320,46 @@ function checkPriceProviders(): DoctorCheck {
   );
 }
 
-export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
+export /**
+ * Validate that the FULL config actually loads (env + .env + DB sidecar
+ * overrides, with every numeric clamp and structured warning), not just that
+ * the .env file exists. This catches broken values that would otherwise only
+ * surface at engine startup.
+ */
+async function checkConfig(): Promise<DoctorCheck> {
+  try {
+    const config = await Effect.runPromise(
+      Effect.provide(
+        Effect.gen(function* () {
+          return yield* ConfigService;
+        }),
+        ConfigLive,
+      ),
+    );
+    // MARKET_SCAN_* is forward-declared config that lands on AppConfig with
+    // the market-scan feature branch; this base does not declare it. Report
+    // the effective toggle with the engine's env > DB > default precedence:
+    // the env var (dotenv already loaded at CLI start) first, then the
+    // DB-sidecar override ConfigLive applied onto the loaded config.
+    const spec = findDbConfigSpec("MARKET_SCAN_ENABLED");
+    const envRaw = process.env.MARKET_SCAN_ENABLED;
+    const marketScan =
+      spec === undefined
+        ? false
+        : envRaw !== undefined
+          ? parseDbConfigValue(spec, envRaw) === true
+          : (config as unknown as Record<string, unknown>)[spec.field] === true;
+    return check(
+      "config",
+      "pass",
+      `Config loaded (scan=${config.scanIntervalMs}ms, maxPositions=${config.maxOpenPositions}, marketScan=${marketScan})`,
+    );
+  } catch (error) {
+    return check("config", "fail", `Config failed to load: ${String(error)}`);
+  }
+}
+
+async function runDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
   const fix = options.fix === true;
   const sourceInstall = isSourceInstall(getPrismConfigDir());
   const checks: DoctorCheck[] = [checkRuntime()];
@@ -343,6 +389,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
   checks.push(heliusApiKey);
   checks.push(checkPriceProviders());
   checks.push(checkWallet());
+  checks.push(await checkConfig());
   checks.push(await checkRegistration());
   const telemetryEnabled =
     process.env.PRISM_ERROR_REPORTING !== "false" && readTelemetryPreference().enabled;

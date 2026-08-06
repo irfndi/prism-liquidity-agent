@@ -8,10 +8,11 @@ import {
   parseDbConfigValue,
   readDbConfigOverrides,
   applyDbConfigOverrides,
+  isKnownConfigField,
 } from "../engine/db-config.js";
 import type { AppConfig } from "../engine/config-service.js";
 
-/** Minimal AppConfig-shaped base for override tests. */
+/** AppConfig-shaped base carrying every DB-tunable declared field (so the typo guard sees a realistic resolved config). */
 function baseConfig(): AppConfig {
   return {
     minPoolTvlUsd: 50_000,
@@ -31,6 +32,28 @@ function baseConfig(): AppConfig {
     fallenAngelMaxTop10HolderPct: 0.5,
     fallenAngelInvalidationStopPct: 0.25,
     fallenAngelMaxPositions: 2,
+    minBinUtilization: 0.05,
+    confidenceThreshold: 0.65,
+    stopLossPct: 0.15,
+    trailingStopPct: 0.1,
+    paperPortfolioUsd: 10_000,
+    maxPositionsPerPool: 2,
+    scanIntervalMs: 600_000,
+    alertsEnabled: true,
+    alertCooldownMinutes: 120,
+    alertFeeMilestoneUsd: 10,
+    dustExitUsd: 5,
+    trailingStopConfirmCycles: 2,
+    volatilityExitStddev: 0.05,
+    entryRangeHalfWidthBins: 0,
+    maxRebalanceRangeBins: 50,
+    oorCooldownMs: 14_400_000,
+    oorGracePeriodCycles: 3,
+    feeClaimIntervalMs: 3_600_000,
+    minRebalanceIntervalMs: 3_600_000,
+    idleRedeployEnabled: false,
+    idleRedeployThresholdUsd: 500,
+    idleRedeployMaxSizeUsd: 2_000,
   } as unknown as AppConfig;
 }
 
@@ -57,6 +80,85 @@ describe("db-config registry", () => {
     const spec = findDbConfigSpec("MIN_POOL_TVL_USD");
     expect(spec?.field).toBe("minPoolTvlUsd");
     expect(findDbConfigSpec("WALLET_PRIVATE_KEY")).toBeUndefined();
+  });
+
+  it("covers the market-scan and post-#157 tuning knobs (runtime-tunable)", () => {
+    for (const envKey of [
+      "MARKET_SCAN_ENABLED",
+      "MARKET_SCAN_REFRESH_INTERVAL_MS",
+      "MARKET_SCAN_UNIVERSE_PAGES",
+      "MARKET_SCAN_MIN_TVL_USD",
+      "MARKET_SCAN_MIN_FEE_APR",
+      "MARKET_SCAN_TOP_K",
+      "MARKET_SCAN_MAX_POOLS",
+      "MARKET_SCAN_MIN_HOLDERS",
+      "MARKET_SCAN_MIN_BIN_STEP",
+      "MARKET_SCAN_MAX_BIN_STEP",
+      "DUST_EXIT_USD",
+      "TRAILING_STOP_CONFIRM_CYCLES",
+      "VOLATILITY_EXIT_STDDEV",
+      "ENTRY_RANGE_HALF_WIDTH_BINS",
+      "MAX_REBALANCE_RANGE_BINS",
+      "OOR_COOLDOWN_MS",
+      "OOR_GRACE_PERIOD_CYCLES",
+      "FEE_CLAIM_INTERVAL_MS",
+      "MIN_REBALANCE_INTERVAL_MS",
+      "IDLE_REDEPLOY_ENABLED",
+      "IDLE_REDEPLOY_THRESHOLD_USD",
+      "IDLE_REDEPLOY_MAX_SIZE_USD",
+    ]) {
+      expect(findDbConfigSpec(envKey), `${envKey} must be DB-overridable`).toBeDefined();
+    }
+  });
+
+  it("applies a market-scan override onto the config (env unset)", () => {
+    const base = baseConfig();
+    const overridden = applyDbConfigOverrides(
+      base,
+      new Map([[dbConfigKey("MARKET_SCAN_ENABLED"), "true"]]),
+    );
+    expect((overridden as unknown as Record<string, unknown>).marketScanEnabled).toBe(true);
+  });
+
+  it("clamps market-scan values to their bounds", () => {
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_TOP_K")!, "999")).toBe(200);
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_REFRESH_INTERVAL_MS")!, "1000")).toBe(
+      60_000,
+    );
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_MIN_BIN_STEP")!, "500")).toBe(100);
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_MIN_BIN_STEP")!, "-5")).toBe(0);
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_MAX_BIN_STEP")!, "9999")).toBe(2000);
+    expect(parseDbConfigValue(findDbConfigSpec("MARKET_SCAN_MAX_BIN_STEP")!, "0")).toBe(1);
+  });
+
+  it("guards spec fields against typos (declared, forward-ref, unknown)", () => {
+    const base = baseConfig();
+    expect(isKnownConfigField("minPoolTvlUsd", base)).toBe(true);
+    expect(isKnownConfigField("marketScanEnabled", base)).toBe(true);
+    expect(isKnownConfigField("marketScanMinBinStep", base)).toBe(true);
+    expect(isKnownConfigField("minPoolTvlUsdX", base)).toBe(false);
+  });
+
+  it("normalizes an inverted bin-step range from DB rows", () => {
+    const overridden = applyDbConfigOverrides(
+      baseConfig(),
+      new Map([
+        [dbConfigKey("MARKET_SCAN_MIN_BIN_STEP"), "100"],
+        [dbConfigKey("MARKET_SCAN_MAX_BIN_STEP"), "1"],
+      ]),
+    );
+    const cfg = overridden as unknown as Record<string, unknown>;
+    expect(cfg.marketScanMinBinStep).toBe(100);
+    expect(cfg.marketScanMaxBinStep).toBe(100);
+  });
+
+  it("normalizes an inverted bin-step range from env vars (env wins)", () => {
+    vi.stubEnv("MARKET_SCAN_MIN_BIN_STEP", "100");
+    vi.stubEnv("MARKET_SCAN_MAX_BIN_STEP", "1");
+    const overridden = applyDbConfigOverrides(baseConfig(), new Map());
+    const cfg = overridden as unknown as Record<string, unknown>;
+    expect(cfg.marketScanMinBinStep).toBe(100);
+    expect(cfg.marketScanMaxBinStep).toBe(100);
   });
 
   it("rejects edits to non-allowlisted values (secrets cannot be stored)", () => {
