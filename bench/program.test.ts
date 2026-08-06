@@ -555,18 +555,25 @@ describe("executePaper paper/live parity", () => {
 });
 
 describe("estimatePositionValue", () => {
-  function makePos(lowerBinId: number, upperBinId: number, depositedUsd: number) {
+  function makePos(
+    overrides: Partial<{
+      depositedUsd: number;
+      entryPriceUsd: number | null;
+      entryAmountXUsd: number | null;
+      entryAmountYUsd: number | null;
+    }> = {},
+  ) {
     return {
       positionId: "paper-pool1",
       poolAddress: "pool1",
       positionPubKey: null,
-      depositedUsd,
-      currentValueUsd: depositedUsd,
+      depositedUsd: overrides.depositedUsd ?? 1000,
+      currentValueUsd: overrides.depositedUsd ?? 1000,
       tokenXSymbol: "SOL",
       tokenYSymbol: "USDC",
       activeBinId: 5000,
-      lowerBinId,
-      upperBinId,
+      lowerBinId: 4980,
+      upperBinId: 5020,
       timestamp: Date.now(),
       outOfRangeSince: null,
       oorCycleCount: 0,
@@ -577,9 +584,9 @@ describe("estimatePositionValue", () => {
       paperExitedAt: null,
       entrySignalTimestamp: null,
       entrySignalSnapshotId: null,
-      entryPriceUsd: null,
-      entryAmountXUsd: null,
-      entryAmountYUsd: null,
+      entryPriceUsd: overrides.entryPriceUsd === undefined ? 150 : overrides.entryPriceUsd,
+      entryAmountXUsd: overrides.entryAmountXUsd === undefined ? 500 : overrides.entryAmountXUsd,
+      entryAmountYUsd: overrides.entryAmountYUsd === undefined ? 500 : overrides.entryAmountYUsd,
       cumulativeFeesClaimedUsd: 0,
       cumulativeRewardsClaimedUsd: 0,
       closedAt: null,
@@ -587,7 +594,7 @@ describe("estimatePositionValue", () => {
     };
   }
 
-  function makePool(activeBinId: number) {
+  function makePool(currentPrice: number) {
     return {
       address: "pool1",
       tokenX: "SOL",
@@ -598,38 +605,41 @@ describe("estimatePositionValue", () => {
       volume24hUsd: 30_000,
       fees24hUsd: 300,
       apr: 60,
-      activeBinId,
+      activeBinId: 5000,
       binStep: 10,
-      currentPrice: 150,
+      currentPrice,
       timestamp: Date.now(),
     };
   }
 
-  it("returns deposited value when active bin is at center", () => {
-    const pos = makePos(4980, 5020, 1000);
-    const pool = makePool(5000);
-    expect(estimatePositionValue(pos, pool)).toBe(1000);
+  it("revalues the entry legs at the current price (HODL mark)", () => {
+    // 500 X-leg at entry price 150; price unchanged → 500 + 500 = 1000.
+    expect(estimatePositionValue(makePos(), makePool(150))).toBe(1000);
+    // Price +10% → X leg 550 + Y leg 500 = 1050.
+    expect(estimatePositionValue(makePos(), makePool(165))).toBe(1050);
+    // Price −10% → X leg 450 + Y leg 500 = 950.
+    expect(estimatePositionValue(makePos(), makePool(135))).toBe(950);
   });
 
-  it("decreases value as active bin drifts toward edge", () => {
-    const pos = makePos(4980, 5020, 1000);
-    const poolCenter = makePool(5000);
-    const poolEdge = makePool(5020);
-    const centerValue = estimatePositionValue(pos, poolCenter);
-    const edgeValue = estimatePositionValue(pos, poolEdge);
-    expect(edgeValue).toBeLessThan(centerValue);
+  it("falls back to the cost basis when entry legs are unknown", () => {
+    // Pre-v16 rows have NULL entry legs: never fabricate a drawdown.
+    const pos = makePos({ entryPriceUsd: null, entryAmountXUsd: null, entryAmountYUsd: null });
+    expect(estimatePositionValue(pos, makePool(120))).toBe(1000);
   });
 
-  it("reaches minimum value at far edge", () => {
-    const pos = makePos(4980, 5020, 1000);
-    const pool = makePool(5040);
-    expect(estimatePositionValue(pos, pool)).toBe(500);
+  it("falls back to the cost basis when the price is not positive", () => {
+    expect(estimatePositionValue(makePos(), makePool(0))).toBe(1000);
+    expect(estimatePositionValue(makePos(), makePool(Number.NaN))).toBe(1000);
   });
 
-  it("handles narrow ranges", () => {
-    const pos = makePos(4995, 5005, 1000);
-    const pool = makePool(5005);
-    expect(estimatePositionValue(pos, pool)).toBe(500);
+  it("never drops below the cost basis via bin drift (no phantom drawdown)", () => {
+    // The old drift heuristic returned 500 here ("value halved") even though
+    // the pool price barely moved; the HODL mark only moves with price.
+    const pos = makePos({ depositedUsd: 41.63, entryAmountXUsd: 20.82, entryAmountYUsd: 20.82 });
+    expect(estimatePositionValue(pos, makePool(149.5))).toBeCloseTo(41.57, 2);
+    // Unchanged price → the HODL mark equals the entry legs (20.82 + 20.82).
+    expect(estimatePositionValue(pos, makePool(150))).toBeCloseTo(41.64, 2);
+    expect(estimatePositionValue(pos, makePool(150.5))).toBeCloseTo(41.71, 2);
   });
 });
 

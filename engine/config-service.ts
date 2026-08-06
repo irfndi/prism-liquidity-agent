@@ -194,6 +194,10 @@ export interface AppConfig {
   readonly ilDominanceExitFactor?: number;
   /** Minimum IL (USD) before the IL-dominance fast EXIT may fire. Default 5. */
   readonly ilDominanceMinUsd?: number;
+  /** A position whose real mark falls below this USD value is closed as dust
+   *  (`[dust-cleanup]` EXIT, confidence 1) — it occupies a per-pool slot and
+   *  risk budget but can never pay its way. Default 5; 0 disables the rule. */
+  readonly dustExitUsd?: number;
 
   // ─── Token-risk overlay (Wave 18) ───────────────────────────────────────────
   // Optional so standalone test fixtures that omit new fields keep compiling;
@@ -738,6 +742,7 @@ const loadConfig = Effect.gen(function* () {
   );
   const ilDominanceExitFactor = yield* validatedNumber("IL_DOMINANCE_EXIT_FACTOR", 1, 2);
   const ilDominanceMinUsd = yield* validatedNumber("IL_DOMINANCE_MIN_USD", 0, 5);
+  const dustExitUsd = yield* validatedNumber("DUST_EXIT_USD", 0, 5);
 
   const jupiterTokenRiskEnabled = yield* Config.boolean("JUPITER_TOKEN_RISK_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
@@ -1412,6 +1417,7 @@ const loadConfig = Effect.gen(function* () {
     ilProtectionEnabled,
     ilDominanceExitFactor,
     ilDominanceMinUsd,
+    dustExitUsd,
     jupiterTokenRiskEnabled,
     jupiterTokenRiskCacheTtlMin,
     geckoTerminalEnabled,

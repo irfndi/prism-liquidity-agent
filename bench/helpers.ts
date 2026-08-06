@@ -161,6 +161,7 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     ilProtectionEnabled: false,
     ilDominanceExitFactor: 2,
     ilDominanceMinUsd: 5,
+    dustExitUsd: 5,
     // Pinned false (production default is true) so the token-risk overlay never
     // fires for the existing ~80 test files; feature tests enable it explicitly.
     jupiterTokenRiskEnabled: false,

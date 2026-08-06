@@ -146,6 +146,23 @@ export interface AdapterApi {
     unknown
   >;
   /**
+   * Real USD value of a live on-chain position (principal only — pending
+   * swap fees and LM rewards are accounted by the claim paths, never by the
+   * mark). Computed from the position's ACTUAL bin holdings
+   * (`totalXAmount`/`totalYAmount`) priced at the pool's token mints, so it
+   * captures genuine impermanent loss (an out-of-range position holds mostly
+   * one side) instead of the old bin-drift heuristic that fabricated ±20-40%
+   * "drawdowns" from sub-1% price moves — the root cause of the trailing-stop
+   * exit churn seen on live deployments. Never fails the caller: a
+   * position/price read problem logs nothing and returns null (fail-open),
+   * and the caller falls back to the HODL-anchored mark. Optional so loop
+   * test mocks that do not care about marks compile unchanged.
+   */
+  readonly getPositionValueUsd?: (
+    poolAddress: string,
+    positionPubKey: string,
+  ) => Effect.Effect<number | null, never>;
+  /**
    * Estimate the benefit of rebalancing `positionPubKey` into a new range.
    * Live mode runs the Meteora SDK's atomic-rebalance simulation against the
    * real on-chain position: `estimatedFeesUsd` is the position's real

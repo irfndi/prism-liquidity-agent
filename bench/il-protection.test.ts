@@ -296,21 +296,23 @@ describe("IL protection — ENTER fee/IL floor gate (Task 3a)", () => {
 });
 
 describe("IL protection — IL-dominance fast EXIT (Task 3b)", () => {
-  // Pool price doubled since entry (100 → 200); the OOR position's heuristic
-  // value collapses while the HODL benchmark climbs, so IL dominates fees.
+  // Pool price doubled since entry (100 → 200); the OOR position's REAL
+  // on-chain mark (mock getPositionValueUsd → 500, the collapsed single-sided
+  // holdings of an out-of-range position) sits far below the HODL benchmark,
+  // so IL dominates fees.
   function ilPool() {
     return makePool({ address: POOL, currentPrice: 200, activeBinId: 5000 });
   }
 
-  // makePosition hardcodes lowerBinId/upperBinId/outOfRangeSince (it does not
-  // read them from overrides), so the OOR shape is applied via spread AFTER the
-  // helper. Active bin 5000 sits far outside [4900, 4950]: heuristic value →
-  // 1000*(1-1*0.5) = 500; HODL → 500*(200/100)+500 = 1500; IL = 1000, which is
-  // > 10 fees × 2 and > $5 floor → IL-dominance EXIT.
+  // A LIVE position (positionPubKey set) so the value loop takes the real
+  // on-chain mark: 500 (mocked) vs HODL 500*(200/100)+500 = 1500; IL = 1000,
+  // which is > 10 fees × 2 and > $5 floor → IL-dominance EXIT.
   function ilDominantPosition() {
     return {
       ...makePosition({
         poolAddress: POOL,
+        positionId: "il-pos-live",
+        positionPubKey: "il-pos-live",
         depositedUsd: 1000,
         currentValueUsd: 1000,
         entryPriceUsd: 100,
@@ -327,7 +329,10 @@ describe("IL protection — IL-dominance fast EXIT (Task 3b)", () => {
   it("exits an IL-dominant out-of-range position with positionId and IL reasoning", async () => {
     const position = ilDominantPosition();
     const layer = makeTestLayer({
-      adapter: makeAdapter({ [POOL]: ilPool() }),
+      adapter: makeAdapter(
+        { [POOL]: ilPool() },
+        { getPositionValueUsd: () => Effect.succeed(500) },
+      ),
       configOverrides: { watchlistPools: [POOL], ilProtectionEnabled: true },
     });
 
@@ -406,7 +411,10 @@ describe("IL protection — IL-dominance fast EXIT (Task 3b)", () => {
     const position = ilDominantPosition();
     const capturedAlerts: EngineAlert[] = [];
     const layer = makeTestLayer({
-      adapter: makeAdapter({ [POOL]: ilPool() }),
+      adapter: makeAdapter(
+        { [POOL]: ilPool() },
+        { getPositionValueUsd: () => Effect.succeed(500) },
+      ),
       configOverrides: { watchlistPools: [POOL], ilProtectionEnabled: true },
       alertCapture: capturedAlerts,
     });

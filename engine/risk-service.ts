@@ -9,6 +9,7 @@ import type {
   RebalanceParams,
 } from "./types.js";
 import { shouldHoldForRecovery } from "./strategy-service.js";
+import { ENTRY_SIZE_FLOOR_USD } from "./entry-sizing.js";
 
 export interface RiskConfig {
   readonly confidenceThreshold: number;
@@ -108,6 +109,17 @@ export function evaluateRisk(
   // allocation (single source of truth: MAX_PER_POOL_ALLOCATION_PCT) minus
   // the pool's existing aggregate exposure across all its positions.
   if (decision.action === "ENTER" && decision.positionSizeUsd !== undefined) {
+    // Absolute floor first: any ENTER below the minimum entry size is dust
+    // (covers agent proposals and any future sizing path, not just the
+    // headroom clamp below).
+    if (decision.positionSizeUsd < ENTRY_SIZE_FLOOR_USD) {
+      return {
+        approved: false,
+        reason:
+          `Entry size $${decision.positionSizeUsd.toFixed(2)} is below the ` +
+          `$${ENTRY_SIZE_FLOOR_USD.toFixed(0)} minimum entry size`,
+      };
+    }
     const capPct = riskConfig.maxPerPoolAllocationPct;
     const existingPoolExposureUsd = ctx.openPositions
       .filter((p) => p.poolAddress === decision.poolAddress)
@@ -133,6 +145,19 @@ export function evaluateRisk(
         };
       }
       const adjustedSizeUsd = maxSize;
+      // A clamped-to-headroom size below the entry floor is dust, not an
+      // entry: approving it creates a position that can never pay its way
+      // (and previously produced $0.26 residual positions that churned the
+      // trailing stop and occupied per-pool slots). Reject instead of
+      // approving a sub-floor clamp.
+      if (adjustedSizeUsd < ENTRY_SIZE_FLOOR_USD) {
+        return {
+          approved: false,
+          reason:
+            `Remaining per-pool headroom $${adjustedSizeUsd.toFixed(2)} is below the ` +
+            `$${ENTRY_SIZE_FLOOR_USD.toFixed(0)} minimum entry size — skipping dust entry`,
+        };
+      }
       return {
         approved: true,
         reason: `Size capped to ${(capPct * 100).toFixed(0)}% of portfolio ($${adjustedSizeUsd.toFixed(0)})`,

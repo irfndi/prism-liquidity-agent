@@ -278,8 +278,13 @@ export function computePortfolioEquity(input: PortfolioEquityInput): PortfolioEq
       : 0;
   const walletKnown = input.walletBalanceUsd !== null && Number.isFinite(input.walletBalanceUsd);
   const totalEquityUsd = positionsValueUsd + walletBalanceUsd;
+  // Unrealized P&L is POSITIONS-ONLY: equity minus deposits would count the
+  // idle wallet balance (e.g. residual SOL/USDC that was never deposited) as
+  // "gain", which produced the misleading "+127%" status on live wallets
+  // (issue #151 follow-up). The wallet is its own line (totalEquityUsd /
+  // walletBalanceUsd); it is not P&L.
   const unrealizedPnlUsd =
-    totalEquityUsd + totalFeesClaimedUsd + totalRewardsClaimedUsd - totalDepositedUsd;
+    positionsValueUsd + totalFeesClaimedUsd + totalRewardsClaimedUsd - totalDepositedUsd;
   const unrealizedPnlPct = totalDepositedUsd > 0 ? (unrealizedPnlUsd / totalDepositedUsd) * 100 : 0;
 
   return {
