@@ -551,7 +551,7 @@ export function sweepOrphanSettlements(
     const holdings = yield* input.adapter
       .getWalletHoldings()
       .pipe(
-        Effect.catchAll(() =>
+        Effect.catch(() =>
           Effect.succeed(new Map<string, { amountAtomic: bigint; decimals: number }>()),
         ),
       );
@@ -561,7 +561,7 @@ export function sweepOrphanSettlements(
     if (candidates.length === 0) return [];
     const existingJobs = yield* input.db
       .listSettlementJobs(input.walletAddress, input.agentInstanceId)
-      .pipe(Effect.catchAll(() => Effect.succeed([])));
+      .pipe(Effect.catch(() => Effect.succeed([])));
     const backedMints = new Set<string>(
       existingJobs
         .filter((job) => job.status !== "terminal" && job.status !== "confirmed")
@@ -575,7 +575,7 @@ export function sweepOrphanSettlements(
     // the current wallet.
     const openPositions = yield* input.db
       .getAllPositions()
-      .pipe(Effect.catchAll(() => Effect.succeed([])));
+      .pipe(Effect.catch(() => Effect.succeed([])));
     for (const poolAddress of new Set(
       openPositions
         .filter((position) => !position.positionId.startsWith("paper-"))
@@ -583,7 +583,7 @@ export function sweepOrphanSettlements(
     )) {
       const state = yield* input.adapter
         .getPoolState(poolAddress)
-        .pipe(Effect.catchAll(() => Effect.succeed(null)));
+        .pipe(Effect.catch(() => Effect.succeed(null)));
       if (state) {
         backedMints.add(state.tokenX);
         backedMints.add(state.tokenY);
@@ -591,7 +591,7 @@ export function sweepOrphanSettlements(
     }
     const prices = yield* input.adapter
       .getTokenPrices(candidates.map(([mint]) => mint))
-      .pipe(Effect.catchAll(() => Effect.succeed<Record<string, number>>({})));
+      .pipe(Effect.catch(() => Effect.succeed<Record<string, number>>({})));
     const jobs: SettlementJobRecord[] = [];
     for (const [mint, holding] of holdings) {
       if (mint === SOL_MINT || holding.amountAtomic <= 0n) continue;
