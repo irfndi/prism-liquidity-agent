@@ -33,7 +33,6 @@ import {
   type DbApi,
   type MeteoraDatapiApi,
 } from "../engine/services.js";
-import type {} from "../engine/types.js";
 import type { PositionRecord } from "../engine/db-service.js";
 import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
 import { stringifySafe } from "../engine/bigint-json.js";

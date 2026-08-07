@@ -5,7 +5,6 @@ import { DbService, AuditService, AdapterService } from "../engine/services.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { ConfigLive, ConfigService } from "../engine/config-service.js";
 import { AdapterLive } from "../engine/adapter-service.js";
-import type {} from "../engine/db-service.js";
 import {
   computeSummaryWithEquity,
   readCliWalletBalance,
