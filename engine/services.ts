@@ -1375,6 +1375,10 @@ export interface AgentApi {
     decision: AgentDecision,
     context: AgentRuntimeContext,
   ) => Effect.Effect<AgentDecision | null, unknown>;
+  /** True when the rolling proposal-latency window says sync prompts should
+   *  be skipped this cycle (fail-open: the caller skips WITHOUT arming
+   *  backoff or circuit failure). */
+  readonly shouldSkipSyncProposal: () => Effect.Effect<boolean, never>;
   readonly getPolicy: () => Effect.Effect<AgentPolicySnapshot, unknown>;
   readonly sendCheckin: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, unknown>;
   readonly sendAlert: (alert: AgentRuntimeAlert) => Effect.Effect<void, unknown>;

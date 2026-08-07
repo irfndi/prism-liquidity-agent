@@ -7,6 +7,7 @@ import {
   buildProposalPrompt,
   selectTransport,
   connectReviewTransport,
+  LatencyWindow,
 } from "../engine/agent-service.js";
 import { AcpTransport } from "../engine/acp-transport.js";
 import { GatewayTransport } from "../engine/gateway-transport.js";
@@ -249,6 +250,62 @@ describe("AgentNoOp", () => {
     const status = await Effect.runPromise(AgentNoOp.getStatus());
     expect(status.connected).toBe(false);
     expect(status.transport).toBeNull();
+  });
+
+  it("shouldSkipSyncProposal returns false (no-op never skips)", async () => {
+    expect(await Effect.runPromise(AgentNoOp.shouldSkipSyncProposal())).toBe(false);
+  });
+});
+
+describe("LatencyWindow", () => {
+  // Budget 1000ms → skip threshold 950ms; skip needs ≥3 fresh samples of
+  // which ≥2 are individually slow.
+  const makeWindow = (): LatencyWindow =>
+    new LatencyWindow({
+      budgetMs: 1000,
+      windowSize: 20,
+      minSamples: 3,
+      minSlowSamples: 2,
+      sampleMaxAgeMs: 60_000,
+    });
+
+  it("does not skip before enough fresh samples exist", () => {
+    const w = makeWindow();
+    w.record(990, 1_000);
+    expect(w.shouldSkip(1_000).skip).toBe(false);
+    w.record(990, 2_000);
+    expect(w.shouldSkip(2_000).skip).toBe(false);
+  });
+
+  it("engages the skip when the fresh-window p95 exceeds 95% of the budget", () => {
+    const w = makeWindow();
+    for (let i = 1; i <= 3; i++) w.record(990, i * 1_000);
+    const result = w.shouldSkip(3_000);
+    expect(result.skip).toBe(true);
+    expect(result.p95Ms).toBe(990);
+    expect(result.slowCount).toBe(3);
+  });
+
+  it("never engages when samples are fast", () => {
+    const w = makeWindow();
+    for (let i = 1; i <= 5; i++) w.record(100, i * 1_000);
+    expect(w.shouldSkip(5_000).skip).toBe(false);
+  });
+
+  it("requires multiple slow samples — a single outlier cannot latch the skip", () => {
+    const w = makeWindow();
+    for (let i = 1; i <= 3; i++) w.record(100, i * 1_000);
+    w.record(990, 4_000);
+    expect(w.shouldSkip(4_000).skip).toBe(false);
+  });
+
+  it("drains and disengages once slow samples age out", () => {
+    const w = makeWindow();
+    for (let i = 1; i <= 3; i++) w.record(990, i * 1_000);
+    expect(w.shouldSkip(3_000).skip).toBe(true);
+    // All samples are older than sampleMaxAgeMs now; the window is empty.
+    expect(w.shouldSkip(3_000 + 60_001).skip).toBe(false);
+    expect(w.shouldSkip(3_000 + 60_001).windowSize).toBe(0);
   });
 });
 

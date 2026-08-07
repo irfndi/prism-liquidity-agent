@@ -3248,10 +3248,12 @@ export const program = Effect.gen(function* () {
                   }),
                 ),
               );
+              const latencySkipped = yield* agent.shouldSkipSyncProposal();
               if (
                 hasSyncProposalTransport(agentStatus) &&
                 getPoolCircuitBreaker(overlayPoolAddress).canTry(now) &&
-                !isProposalBackoffActive(proposalBackoff.get(overlayPoolAddress), now)
+                !isProposalBackoffActive(proposalBackoff.get(overlayPoolAddress), now) &&
+                !latencySkipped
               ) {
                 const syncProposal = yield* agent
                   .enhanceDecision(decision, {
@@ -3262,7 +3264,19 @@ export const program = Effect.gen(function* () {
                     recentDecisions: overlayRecentDecisions,
                     hasOpenPosition: overlayHasOpenPosition,
                   })
-                  .pipe(Effect.catchAll(() => Effect.succeed(null)));
+                  .pipe(
+                    // Outer deadline mirrors the tail: a stalled reconnect
+                    // must not stall the redeploy pass past the proposal
+                    // budget.
+                    Effect.timeoutFail({
+                      duration: `${config.agentProposalTimeoutMs} millis`,
+                      onTimeout: () =>
+                        new Error(
+                          `Agent proposal sync timed out after ${config.agentProposalTimeoutMs}ms`,
+                        ),
+                    }),
+                    Effect.catchAll(() => Effect.succeed(null)),
+                  );
                 if (syncProposal && isAgentProposal(syncProposal)) {
                   agentProposal = syncProposal;
                   proposalSource = "sync";
@@ -6184,33 +6198,56 @@ export const program = Effect.gen(function* () {
                   pool: poolAddress,
                 });
               } else {
-                const syncProposal = yield* agent
-                  .enhanceDecision(decision, {
-                    decision,
-                    pool,
-                    metrics,
-                    warnings,
-                    recentDecisions: yield* audit
-                      .getRecentDecisions(10)
-                      .pipe(Effect.catchAll(() => Effect.succeed([]))),
-                    hasOpenPosition,
-                  })
-                  .pipe(
-                    Effect.catchAll((err) => {
-                      syncFetchFailed = true;
-                      logger.warn("Agent proposal fetch failed", {
-                        pool: poolAddress,
-                        error: String(err),
-                      });
-                      return Effect.succeed(null);
-                    }),
+                // Latency skip mirrors the veto path: when the rolling p95 of
+                // proposal latencies exceeds the proposal budget, skip the
+                // round trip fail-open WITHOUT arming backoff/circuit failure
+                // (a slow model is not a bad advisor).
+                const latencySkipped = yield* agent.shouldSkipSyncProposal();
+                if (latencySkipped) {
+                  logger.info(
+                    "Agent proposal sync skipped — rolling p95 latency exceeds proposal budget",
+                    { pool: poolAddress },
                   );
-                if (syncProposal && isAgentProposal(syncProposal)) {
-                  agentProposal = syncProposal;
-                  proposalSource = "sync";
-                } else if (syncProposal === null) {
-                  // Real transport attempt returned null (parse/timeout/etc.).
-                  syncFetchFailed = true;
+                } else {
+                  const syncProposal = yield* agent
+                    .enhanceDecision(decision, {
+                      decision,
+                      pool,
+                      metrics,
+                      warnings,
+                      recentDecisions: yield* audit
+                        .getRecentDecisions(10)
+                        .pipe(Effect.catchAll(() => Effect.succeed([]))),
+                      hasOpenPosition,
+                    })
+                    .pipe(
+                      // Outer deadline mirrors the veto path: sendPrompt's own
+                      // timer starts only AFTER transport (re)connect, so a
+                      // stalled reconnect must not hold the decision loop past
+                      // the proposal budget.
+                      Effect.timeoutFail({
+                        duration: `${config.agentProposalTimeoutMs} millis`,
+                        onTimeout: () =>
+                          new Error(
+                            `Agent proposal sync timed out after ${config.agentProposalTimeoutMs}ms`,
+                          ),
+                      }),
+                      Effect.catchAll((err) => {
+                        syncFetchFailed = true;
+                        logger.warn("Agent proposal fetch failed", {
+                          pool: poolAddress,
+                          error: String(err),
+                        });
+                        return Effect.succeed(null);
+                      }),
+                    );
+                  if (syncProposal && isAgentProposal(syncProposal)) {
+                    agentProposal = syncProposal;
+                    proposalSource = "sync";
+                  } else if (syncProposal === null) {
+                    // Real transport attempt returned null (parse/timeout/etc.).
+                    syncFetchFailed = true;
+                  }
                 }
               }
             }
