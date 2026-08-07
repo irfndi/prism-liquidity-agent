@@ -4,6 +4,7 @@ import {
   parseResponse,
   validateOverride,
   AgentNoOp,
+  buildPrompt,
   buildProposalPrompt,
   selectTransport,
   connectReviewTransport,
@@ -14,6 +15,7 @@ import { GatewayTransport } from "../engine/gateway-transport.js";
 import type { AgentDecision } from "../engine/types.js";
 import { AUTONOMOUS_TOKEN_CONFIG_DEFAULTS, type AppConfig } from "../engine/config-service.js";
 import type {
+  AgentPositionState,
   AgentRuntimeContext,
   AgentRuntimeDetection,
   AgentRuntimeTransport,
@@ -309,34 +311,54 @@ describe("LatencyWindow", () => {
   });
 });
 
-describe("buildProposalPrompt", () => {
-  const makeCtx = (decision: AgentDecision): AgentRuntimeContext =>
-    ({
-      decision,
-      pool: {
-        address: decision.poolAddress,
-        tokenXSymbol: "SOL",
-        tokenYSymbol: "USDC",
-        tvlUsd: 100_000,
-        volume24hUsd: 50_000,
-        fees24hUsd: 500,
-        apr: 12,
-      },
-      metrics: {
-        feeIlRatio: 1.5,
-        volumeAuthenticity: 0.9,
-        binUtilization: 0.5,
-        tvlVelocity: 0.01,
-      },
-      warnings: [],
-      recentDecisions: [],
-      hasOpenPosition: decision.action === "REBALANCE" || decision.action === "EXIT",
-    }) as unknown as AgentRuntimeContext;
+const makePromptCtx = (decision: AgentDecision): AgentRuntimeContext =>
+  ({
+    decision,
+    pool: {
+      address: decision.poolAddress,
+      tokenXSymbol: "SOL",
+      tokenYSymbol: "USDC",
+      tvlUsd: 100_000,
+      volume24hUsd: 50_000,
+      fees24hUsd: 500,
+      apr: 12,
+    },
+    metrics: {
+      feeIlRatio: 1.5,
+      volumeAuthenticity: 0.9,
+      binUtilization: 0.5,
+      tvlVelocity: 0.01,
+    },
+    warnings: [],
+    recentDecisions: [],
+    hasOpenPosition: decision.action === "REBALANCE" || decision.action === "EXIT",
+  }) as unknown as AgentRuntimeContext;
 
+const makePositionState = (overrides: Partial<AgentPositionState> = {}): AgentPositionState => ({
+  positionId: "pos-1",
+  valueUsd: 1200,
+  depositedUsd: 1000,
+  unrealizedPnlUsd: 250,
+  feesClaimedUsd: 50,
+  rewardsClaimedUsd: 0,
+  outOfRangeSinceMs: null,
+  oorCycleCount: 0,
+  hoursOutOfRange: null,
+  hoursHeld: 3.5,
+  activeBinId: 100,
+  lowerBinId: 95,
+  upperBinId: 110,
+  entryPriceUsd: 1.2,
+  highestValueUsd: 1300,
+  lastRebalanceAtMs: 0,
+  ...overrides,
+});
+
+describe("buildProposalPrompt", () => {
   it("embeds the current ENTER size in the decision block and response template", () => {
     const prompt = buildProposalPrompt(
       makeDecision({ action: "ENTER", positionSizeUsd: 2_500 }),
-      makeCtx(makeDecision({ action: "ENTER", positionSizeUsd: 2_500 })),
+      makePromptCtx(makeDecision({ action: "ENTER", positionSizeUsd: 2_500 })),
     );
     expect(prompt).toContain("Position Size: $2500");
     expect(prompt).toContain('"positionSizeUsd": 2500');
@@ -348,7 +370,7 @@ describe("buildProposalPrompt", () => {
       action: "REBALANCE",
       rebalanceParams: { newLowerBinId: 500, newUpperBinId: 520, slippageBps: 50 },
     });
-    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    const prompt = buildProposalPrompt(decision, makePromptCtx(decision));
     expect(prompt).toContain("Bin Range: 500 to 520");
     expect(prompt).toContain('"lowerBinId": 500, "upperBinId": 520');
     expect(prompt).not.toContain('"lowerBinId": 100, "upperBinId": 110');
@@ -356,7 +378,7 @@ describe("buildProposalPrompt", () => {
 
   it("falls back to placeholder values when the decision has no executable params", () => {
     const decision = makeDecision({ action: "HOLD" });
-    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    const prompt = buildProposalPrompt(decision, makePromptCtx(decision));
     expect(prompt).not.toContain("Position Size:");
     expect(prompt).not.toContain("Bin Range:");
     expect(prompt).toContain('"positionSizeUsd": 100');
@@ -365,7 +387,7 @@ describe("buildProposalPrompt", () => {
 
   it("limits allowed actions for a deterministic HOLD decision with an open position", () => {
     const decision = makeDecision({ action: "HOLD" });
-    const ctx = { ...makeCtx(decision), hasOpenPosition: true };
+    const ctx = { ...makePromptCtx(decision), hasOpenPosition: true };
     const prompt = buildProposalPrompt(decision, ctx);
     expect(prompt).toContain("You may propose only: HOLD, REBALANCE, EXIT.");
     expect(prompt).toContain("allowed actions: HOLD, REBALANCE, EXIT");
@@ -374,7 +396,7 @@ describe("buildProposalPrompt", () => {
 
   it("limits allowed actions for a deterministic HOLD decision without an open position", () => {
     const decision = makeDecision({ action: "HOLD" });
-    const ctx = { ...makeCtx(decision), hasOpenPosition: false };
+    const ctx = { ...makePromptCtx(decision), hasOpenPosition: false };
     const prompt = buildProposalPrompt(decision, ctx);
     expect(prompt).toContain("You may propose only: HOLD.");
     expect(prompt).toContain("allowed actions: HOLD");
@@ -384,7 +406,7 @@ describe("buildProposalPrompt", () => {
 
   it("limits allowed actions for a deterministic EXIT decision", () => {
     const decision = makeDecision({ action: "EXIT" });
-    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    const prompt = buildProposalPrompt(decision, makePromptCtx(decision));
     expect(prompt).toContain("You may propose only: EXIT.");
     expect(prompt).toContain("allowed actions: EXIT");
     expect(prompt).toContain('"action": "EXIT"');
@@ -393,11 +415,96 @@ describe("buildProposalPrompt", () => {
 
   it("allows only executable actions for a deterministic ENTER decision", () => {
     const decision = makeDecision({ action: "ENTER", positionSizeUsd: 1_000 });
-    const prompt = buildProposalPrompt(decision, makeCtx(decision));
+    const prompt = buildProposalPrompt(decision, makePromptCtx(decision));
     expect(prompt).toContain("You may propose only: HOLD, ENTER.");
     expect(prompt).toContain("allowed actions: HOLD, ENTER");
     expect(prompt).toContain('"action": "ENTER"');
     expect(prompt).not.toContain("allowed actions: HOLD, REBALANCE, EXIT, ENTER");
+  });
+
+  it("embeds the POSITION block when the decision targets an open position", () => {
+    const decision = makeDecision({ action: "REBALANCE" });
+    const ctx = {
+      ...makePromptCtx(decision),
+      hasOpenPosition: true,
+      position: makePositionState(),
+    };
+    const prompt = buildProposalPrompt(decision, ctx);
+    expect(prompt).toContain("POSITION:");
+    expect(prompt).toContain("Value: $1200.00 (deposited $1000.00)");
+    expect(prompt).toContain("Unrealized PnL: +$250.00");
+    expect(prompt).toContain("fees claimed $50.00, rewards $0.00");
+    expect(prompt).toContain("In range: yes");
+    expect(prompt).toContain("Age: 3.5h | range: bins 95..110 (active 100)");
+    expect(prompt).toContain("Base EXIT/REBALANCE proposals on the POSITION state below.");
+  });
+
+  it("shows out-of-range and negative-PnL state in the POSITION block", () => {
+    const decision = makeDecision({ action: "EXIT" });
+    const ctx = {
+      ...makePromptCtx(decision),
+      hasOpenPosition: true,
+      position: makePositionState({
+        valueUsd: 800,
+        unrealizedPnlUsd: -150,
+        outOfRangeSinceMs: Date.now() - 7_200_000,
+        hoursOutOfRange: 2,
+        oorCycleCount: 2,
+      }),
+    };
+    const prompt = buildProposalPrompt(decision, ctx);
+    expect(prompt).toContain("Unrealized PnL: −$150.00");
+    expect(prompt).toContain("In range: NO — out of range 2.0h (2 OOR cycle(s))");
+  });
+
+  it("omits the POSITION block for positionless decisions", () => {
+    const decision = makeDecision({ action: "ENTER", positionSizeUsd: 1_000 });
+    const prompt = buildProposalPrompt(decision, makePromptCtx(decision));
+    expect(prompt).not.toContain("POSITION:");
+  });
+});
+
+describe("buildPrompt (veto overlay)", () => {
+  it("embeds the POSITION block for position-targeted decisions", () => {
+    const decision = makeDecision({ action: "EXIT" });
+    const ctx = {
+      ...makePromptCtx(decision),
+      hasOpenPosition: true,
+      position: makePositionState(),
+    };
+    const prompt = buildPrompt(decision, ctx);
+    expect(prompt).toContain("POSITION:");
+    expect(prompt).toContain("Unrealized PnL: +$250.00");
+    expect(prompt).toContain(
+      "Base EXIT reviews on the position's PnL and out-of-range state below.",
+    );
+  });
+
+  it("omits the POSITION block for positionless decisions", () => {
+    const decision = makeDecision({ action: "HOLD" });
+    const prompt = buildPrompt(decision, makePromptCtx(decision));
+    expect(prompt).not.toContain("POSITION:");
+  });
+
+  it("shows out-of-range and negative-PnL state on the safety-critical EXIT review", () => {
+    const decision = makeDecision({ action: "EXIT" });
+    const ctx = {
+      ...makePromptCtx(decision),
+      hasOpenPosition: true,
+      position: makePositionState({
+        valueUsd: 800,
+        unrealizedPnlUsd: -150,
+        outOfRangeSinceMs: Date.now() - 7_200_000,
+        hoursOutOfRange: 2,
+        oorCycleCount: 2,
+      }),
+    };
+    const prompt = buildPrompt(decision, ctx);
+    expect(prompt).toContain("Unrealized PnL: −$150.00");
+    expect(prompt).toContain("In range: NO — out of range 2.0h (2 OOR cycle(s))");
+    expect(prompt).toContain(
+      "Base EXIT reviews on the position's PnL and out-of-range state below.",
+    );
   });
 });
 
