@@ -3795,7 +3795,7 @@ export const program = Effect.gen(function* () {
           if (solFundedEntryMode) {
             entrySolBudgetLamports = yield* adapter.getNativeSolBalance().pipe(
               Effect.map((lamports) => freeEntrySolLamports(lamports)),
-              Effect.catchAll(() => Effect.succeed(0n)),
+              Effect.catch(() => Effect.succeed(0n)),
             );
             entrySolBudgetKnown = true;
           }
@@ -4094,11 +4094,11 @@ export const program = Effect.gen(function* () {
       if (adapter.hasWallet() && !config.paperTrading && solFundedEntryMode) {
         const nativeSol = yield* adapter.getNativeSolBalance().pipe(
           Effect.map((lamports) => ({ ok: true as const, lamports })),
-          Effect.catchAll(() => Effect.succeed({ ok: false as const, lamports: 0n })),
+          Effect.catch(() => Effect.succeed({ ok: false as const, lamports: 0n })),
         );
         const liveSolPrice = yield* adapter.getTokenPrices([SOL_MINT], { useFallback: false }).pipe(
           Effect.map((prices) => prices[SOL_MINT]),
-          Effect.catchAll(() => Effect.succeed(undefined)),
+          Effect.catch(() => Effect.succeed(undefined)),
         );
         const priceOk =
           typeof liveSolPrice === "number" && Number.isFinite(liveSolPrice) && liveSolPrice > 0;
@@ -6942,14 +6942,14 @@ export const program = Effect.gen(function* () {
                   executed: false,
                   paperTrading: config.paperTrading,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
               yield* memory
                 .upsert({
                   category: "warning",
                   content: `Entry skipped for ${poolAddress}: free SOL ${budgetHuman} < needed ${neededHuman} — wallet cannot fund the batch; skipped without retry backoff.`,
                   poolAddress,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
               // An applied queued proposal follows the failed-execution
               // contract: retained (executed=false) for retry next cycle —
               // capacity may free up (EXIT, fee accrual, top-up).
@@ -7119,7 +7119,7 @@ export const program = Effect.gen(function* () {
         if (!config.paperTrading && solFundedEntryMode && movedLiveFunds) {
           entrySolBudgetLamports = yield* adapter.getNativeSolBalance().pipe(
             Effect.map((lamports) => freeEntrySolLamports(lamports)),
-            Effect.catchAll(() => Effect.succeed(0n)),
+            Effect.catch(() => Effect.succeed(0n)),
           );
           entrySolBudgetKnown = true;
         }
