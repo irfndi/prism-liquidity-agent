@@ -24,6 +24,89 @@ const logger = createLogger("AgentService");
 
 const VALID_ACTIONS: ReadonlySet<string> = new Set(["HOLD", "REBALANCE", "EXIT", "ENTER"]);
 
+/** Rolling p95 latency gate for budget-constrained advisor prompts (veto
+ *  reviews and sync proposals). Samples are timestamped and age out, so a
+ *  transient slow period cannot latch the skip on permanently: once the model
+ *  recovers, the window drains and the skip disengages without a restart.
+ *  The skip engages only when BOTH the fresh-window p95 reaches 95% of the
+ *  prompt budget AND enough individual samples are slow — a single timeout
+ *  among quick reviews must not silence the advisor. */
+export class LatencyWindow {
+  private readonly samples: Array<{ readonly latencyMs: number; readonly at: number }> = [];
+
+  constructor(
+    private readonly opts: {
+      /** Prompt budget; the skip engages when p95 >= 95% of it. */
+      readonly budgetMs: number;
+      readonly windowSize?: number;
+      readonly minSamples?: number;
+      readonly minSlowSamples?: number;
+      readonly sampleMaxAgeMs?: number;
+    },
+  ) {}
+
+  private get windowSize(): number {
+    return this.opts.windowSize ?? 20;
+  }
+
+  private get minSamples(): number {
+    return this.opts.minSamples ?? 5;
+  }
+
+  private get minSlowSamples(): number {
+    return this.opts.minSlowSamples ?? 3;
+  }
+
+  private get sampleMaxAgeMs(): number {
+    return this.opts.sampleMaxAgeMs ?? 30 * 60 * 1000;
+  }
+
+  record(latencyMs: number, now: number): void {
+    this.samples.push({ latencyMs, at: now });
+    this.evict(now);
+  }
+
+  private evict(now: number): void {
+    const cutoff = now - this.sampleMaxAgeMs;
+    while (this.samples.length > 0) {
+      const oldest = this.samples[0]!;
+      if (oldest.at < cutoff || this.samples.length > this.windowSize) {
+        this.samples.shift();
+      } else {
+        break;
+      }
+    }
+  }
+
+  /** Whether a prompt should be skipped right now (fail-open), with the
+   *  stats the caller logs when it is. */
+  shouldSkip(now: number): {
+    readonly skip: boolean;
+    readonly p95Ms: number | null;
+    readonly slowCount: number;
+    readonly windowSize: number;
+  } {
+    this.evict(now);
+    const sorted = this.samples.map((s) => s.latencyMs).sort((a, b) => a - b);
+    const p95 =
+      sorted.length === 0
+        ? null
+        : sorted[Math.max(0, Math.min(Math.ceil(sorted.length * 0.95) - 1, sorted.length - 1))]!;
+    const threshold = this.opts.budgetMs * 0.95;
+    const slowCount = this.samples.filter((s) => s.latencyMs >= threshold).length;
+    return {
+      skip:
+        this.samples.length >= this.minSamples &&
+        slowCount >= this.minSlowSamples &&
+        p95 !== null &&
+        p95 >= threshold,
+      p95Ms: p95,
+      slowCount,
+      windowSize: this.samples.length,
+    };
+  }
+}
+
 interface ParsedAgentResponse {
   action?: string;
   confidence?: number;
@@ -32,6 +115,7 @@ interface ParsedAgentResponse {
 
 export const AgentNoOp: AgentApi = {
   enhanceDecision: () => Effect.succeed(null),
+  shouldSkipSyncProposal: () => Effect.succeed(false),
   getPolicy: () =>
     Effect.succeed({
       mode: "veto" as const,
@@ -476,59 +560,17 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
       let lastPromptAt: number | null = null;
       let errorCount = 0;
 
-      // ── Rolling p95 latency tracker for adaptive veto skip ─────────────
-      // Maintains a sliding window of recent prompt latencies, each timestamped
-      // so stale samples age out. When the p95 of the fresh window exceeds the
-      // configured veto timeout AND the window holds enough samples, the veto is
-      // skipped (fail-open with WARN) because the model cannot answer quickly
-      // enough for a budget-constrained yes/no review.
-      //
-      // Liveness: the skip is gated on VETO_SKIP_MIN_SAMPLES fresh samples, so a
-      // single timeout can never disable review permanently. Samples older than
-      // VETO_SAMPLE_MAX_AGE_MS are evicted, so once the model recovers the window
-      // drains, p95 falls back below the threshold, and veto review resumes on
-      // its own without a process restart.
-      const VETO_WINDOW_SIZE = 20;
-      // Do not act on latency history until this many fresh samples have been
-      // collected — prevents one slow veto from latching the skip on.
-      const VETO_SKIP_MIN_SAMPLES = 5;
-      // Require at least this many samples to individually exceed 95% of the
-      // veto budget before the skip can engage. With a nearest-rank p95 and a
-      // partially-filled window the p95 equals the window maximum, so a single
-      // timeout among otherwise quick reviews would otherwise latch the skip on
-      // until that one outlier ages out (up to 30 min). Because skipped calls
-      // record no samples, this count is the only thing that can turn the skip
-      // back off once it has engaged — the slow outliers must all age out
-      // together before the count drops below this threshold again.
-      const VETO_SKIP_MIN_SLOW_SAMPLES = 3;
-      // Fresh samples older than this are evicted, bounding the skip's blind
-      // spot and guaranteeing the window drains after a transient slow period.
-      const VETO_SAMPLE_MAX_AGE_MS = 30 * 60 * 1000;
-      const vetoLatencies: Array<{ latencyMs: number; at: number }> = [];
-
-      function evictStaleVetoSamples(now: number): void {
-        const cutoff = now - VETO_SAMPLE_MAX_AGE_MS;
-        while (vetoLatencies.length > 0) {
-          const oldest = vetoLatencies[0]!;
-          if (oldest.at < cutoff || vetoLatencies.length > VETO_WINDOW_SIZE) {
-            vetoLatencies.shift();
-          } else {
-            break;
-          }
-        }
-      }
-
-      function recordVetoLatency(latencyMs: number): void {
-        vetoLatencies.push({ latencyMs, at: Date.now() });
-        evictStaleVetoSamples(Date.now());
-      }
-
-      function computeP95(values: Array<{ latencyMs: number }>): number | null {
-        if (values.length === 0) return null;
-        const sorted = values.map((v) => v.latencyMs).sort((a, b) => a - b);
-        const idx = Math.ceil(sorted.length * 0.95) - 1;
-        return sorted[Math.max(0, Math.min(idx, sorted.length - 1))]!;
-      }
+      // ── Rolling p95 latency gates for budget-constrained advisor prompts ──
+      // One window per mode (veto budget vs proposal timeout). When the p95 of
+      // fresh samples exceeds 95% of the mode's budget, the prompt is skipped
+      // fail-open (WARN): a slow model must not stall scan cycles. The window
+      // drains automatically once latency recovers, so review resumes without
+      // a restart. Skipped calls record no samples, so the slow samples aging
+      // out together is what turns the skip back off.
+      const vetoLatencyWindow = new LatencyWindow({ budgetMs: config.agentVetoTimeoutMs });
+      const proposalLatencyWindow = new LatencyWindow({
+        budgetMs: config.agentProposalTimeoutMs,
+      });
 
       if (transport) {
         connected = yield* connectReviewTransport(transport);
@@ -549,25 +591,13 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           const proposalMode = config.agentProposalMode;
           if (proposalMode === "veto") {
             const vetoBudgetMs = config.agentVetoTimeoutMs;
-            const vetoSlowThreshold = vetoBudgetMs * 0.95;
-            // Drop stale samples first so a transient slow period ages out and
-            // the skip cannot latch on a polluted window.
-            evictStaleVetoSamples(Date.now());
-            const p95 = computeP95(vetoLatencies);
-            // Count individuals above the slow threshold — see the constant
-            // comment above for why p95 alone is insufficient as a gate.
-            const slowCount = vetoLatencies.filter((v) => v.latencyMs >= vetoSlowThreshold).length;
-            if (
-              vetoLatencies.length >= VETO_SKIP_MIN_SAMPLES &&
-              slowCount >= VETO_SKIP_MIN_SLOW_SAMPLES &&
-              p95 !== null &&
-              p95 >= vetoSlowThreshold
-            ) {
+            const vetoSkip = vetoLatencyWindow.shouldSkip(Date.now());
+            if (vetoSkip.skip) {
               logger.warn("Skipping veto review — rolling p95 latency exceeds 95% of veto budget", {
                 pool: decision.poolAddress,
-                p95Ms: Math.round(p95),
+                p95Ms: Math.round(vetoSkip.p95Ms ?? 0),
                 budgetMs: vetoBudgetMs,
-                windowSize: vetoLatencies.length,
+                windowSize: vetoSkip.windowSize,
               });
               return Effect.succeed(null);
             }
@@ -577,7 +607,10 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             const recordAttemptLatency = () => {
               if (!vetoLatencyRecorded) {
                 vetoLatencyRecorded = true;
-                recordVetoLatency(Math.min(Date.now() - attemptStart, vetoBudgetMs));
+                vetoLatencyWindow.record(
+                  Math.min(Date.now() - attemptStart, vetoBudgetMs),
+                  Date.now(),
+                );
               }
             };
             return transport.sendPrompt(prompt, context, vetoBudgetMs).pipe(
@@ -618,10 +651,23 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             );
           }
 
+          const proposalBudgetMs = config.agentProposalTimeoutMs;
           const prompt = buildProposalPrompt(decision, context);
-          return transport.sendPrompt(prompt, context, config.agentProposalTimeoutMs).pipe(
+          const attemptStart = Date.now();
+          let proposalLatencyRecorded = false;
+          const recordAttemptLatency = () => {
+            if (!proposalLatencyRecorded) {
+              proposalLatencyRecorded = true;
+              proposalLatencyWindow.record(
+                Math.min(Date.now() - attemptStart, proposalBudgetMs),
+                Date.now(),
+              );
+            }
+          };
+          return transport.sendPrompt(prompt, context, proposalBudgetMs).pipe(
             Effect.flatMap((response: AgentRuntimeResponse) => {
               lastPromptAt = Date.now();
+              recordAttemptLatency();
               return parseProposalResponse(
                 response.raw,
                 decision.action,
@@ -640,14 +686,30 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
             }),
             Effect.catchAll((err) => {
               errorCount += 1;
+              recordAttemptLatency();
               logger.warn("Agent proposal failed", {
                 pool: decision.poolAddress,
                 error: underlyingErrorMessage(err),
               });
               return Effect.succeed(null);
             }),
+            Effect.catchAllCause((cause) => {
+              // Interruption (the outer AGENT_PROPOSAL_TIMEOUT_MS deadline in
+              // program.ts) bypasses catchAll — record the elapsed sample so
+              // the latency window learns the model could not answer, and
+              // fail open (null) exactly like a typed failure.
+              recordAttemptLatency();
+              return Effect.succeed(null);
+            }),
           );
         },
+
+        // Callers check this BEFORE a sync advisor prompt so a slow model
+        // skips the round trip entirely (fail-open, no backoff penalty) —
+        // mirroring the inline veto skip that already lives inside
+        // enhanceDecision for the veto branch.
+        shouldSkipSyncProposal: () =>
+          Effect.succeed(proposalLatencyWindow.shouldSkip(Date.now()).skip),
 
         getPolicy: () =>
           Effect.succeed({
