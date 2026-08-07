@@ -1482,6 +1482,38 @@ describe("program — multiple positions per pool", () => {
     expect(enters).toHaveLength(1);
   }, 15_000);
 
+  it("honors MAX_ENTRY_SIZE_USD on the normal ENTER path (raised cap reaches execution)", async () => {
+    // Default $500 cap would bind (wallet half 5000, tvl fraction 5000);
+    // with the cap raised to $2000 the executed paper position must be $2000.
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 1_000_000 }) }),
+      datapi: {
+        getPoolData: () => Effect.succeed(makeDatapiStats({ tvlUsd: 1_000_000 })),
+      },
+      configOverrides: {
+        watchlistPools: [POOL],
+        maxEntrySizeUsd: 2_000,
+        paperPortfolioUsd: 10_000,
+        scanIntervalMs: 600_000,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const db = yield* DbService;
+      const positions = yield* db.getAllPositions();
+      return positions;
+    });
+    const positions = await Effect.runPromise(
+      Effect.provide(test, layer) as Effect.Effect<ReadonlyArray<PositionRecord>, unknown, never>,
+    );
+
+    expect(positions).toHaveLength(1);
+    expect(positions[0]!.depositedUsd).toBe(2_000);
+    expect(positions[0]!.entryAmountXUsd).toBe(1_000);
+    expect(positions[0]!.entryAmountYUsd).toBe(1_000);
+  }, 15_000);
+
   it("runs an independent lifecycle per position: OOR + trailing-stop EXIT on A leaves B intact", async () => {
     // Pool price halves to $75: with the price-anchored HODL mark (the old
     // bin-drift heuristic is gone), A's value genuinely collapses (400 X-leg

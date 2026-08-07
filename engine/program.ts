@@ -5851,6 +5851,7 @@ export const program = Effect.gen(function* () {
               const proposedSizeUsd = computeEntrySizeUsd({
                 walletBalanceUsd,
                 tvlUsd: pool.tvlUsd,
+                maxSizeUsd: config.maxEntrySizeUsd,
               });
 
               // F5: per-pool allocation cap — aggregate across the pool's
