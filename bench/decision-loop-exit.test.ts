@@ -33,6 +33,7 @@ import {
   type MeteoraPoolStats,
 } from "../engine/services.js";
 import type { PoolSnapshot } from "../engine/types.js";
+import type { AgentRuntimeContext } from "../engine/agent-transport.js";
 import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
 import { stringifySafe } from "../engine/bigint-json.js";
 
@@ -568,5 +569,66 @@ describe("veto deadline bounds the entire transport operation (P1)", () => {
     expect(wallMs, "cycle cost is the veto budget (~300ms), not the 60s stall").toBeLessThan(
       10_000,
     );
+  }, 15_000);
+});
+
+// ─── Wave 20: agent position context wiring ──────────────────────────────────
+
+describe("agent position context wiring", () => {
+  const POOL = "PoolAgentPosCtx11111111111111111111111111111";
+
+  it("passes the targeted position state to the sync-proposal advisor", async () => {
+    let capturedContext: AgentRuntimeContext | undefined;
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 60_000 }) }),
+      configOverrides: {
+        watchlistPools: [POOL],
+        tvlDropExitPct: 0.3,
+        agentiveMode: true,
+        agentProposalMode: "full",
+        agentProposalTimeoutMs: 300,
+      },
+      agent: {
+        ...AgentNoOp,
+        getStatus: () =>
+          Effect.succeed({ connected: true, transport: "acp", lastPromptAt: null, errorCount: 0 }),
+        enhanceDecision: (decision, context) => {
+          capturedContext = context;
+          return Effect.succeed(null);
+        },
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(
+        makePosition({ poolAddress: POOL, depositedUsd: 1_000, currentValueUsd: 1_000 }),
+      );
+      yield* db.saveSnapshot({
+        poolAddress: POOL,
+        timestamp: Date.now() - 600_000,
+        activeBinId: 5000,
+        tvlUsd: 100_000, // → -40% vs current 60k (threshold 30%)
+        volume24hUsd: 30_000,
+        fees24hUsd: 300,
+        apr: 60,
+        currentPrice: 150,
+        binStep: 10,
+        tokenXSymbol: "SOL",
+        tokenYSymbol: "USDC",
+        binArray: makeBinArray(),
+      });
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+    });
+    await Effect.runPromise(Effect.provide(test, layer) as Effect.Effect<unknown, unknown, never>);
+
+    expect(capturedContext, "sync advisor must be consulted for the EXIT").toBeDefined();
+    expect(capturedContext?.position, "position state must reach the advisor").toBeDefined();
+    expect(capturedContext?.position?.positionId).toBeDefined();
+    expect(capturedContext?.position?.depositedUsd).toBe(1_000);
+    expect(capturedContext?.position?.valueUsd).toBe(1_000);
+    // value + fees + rewards − deposited = 0
+    expect(capturedContext?.position?.unrealizedPnlUsd).toBe(0);
+    expect(capturedContext?.position?.hoursHeld).toBeGreaterThanOrEqual(0);
   }, 15_000);
 });

@@ -303,7 +303,11 @@ export function toAgentPositionState(pos: PositionRecord, now: number): AgentPos
     rewardsClaimedUsd: pos.cumulativeRewardsClaimedUsd,
     outOfRangeSinceMs: pos.outOfRangeSince,
     oorCycleCount: pos.oorCycleCount,
-    hoursHeld: (now - pos.timestamp) / 3_600_000,
+    hoursOutOfRange:
+      pos.outOfRangeSince === null ? null : Math.max(0, now - pos.outOfRangeSince) / 3_600_000,
+    // Clamp against future timestamps (clock skew) — mirrors pnl.ts's
+    // Math.max(0, nowMs - openedAtMs).
+    hoursHeld: Math.max(0, now - pos.timestamp) / 3_600_000,
     activeBinId: pos.activeBinId,
     lowerBinId: pos.lowerBinId,
     upperBinId: pos.upperBinId,
@@ -6226,6 +6230,9 @@ export const program = Effect.gen(function* () {
                       .getRecentDecisions(10)
                       .pipe(Effect.catchAll(() => Effect.succeed([]))),
                     hasOpenPosition,
+                    ...(pos !== undefined
+                      ? { position: toAgentPositionState(pos, Date.now()) }
+                      : {}),
                   })
                   .pipe(
                     Effect.catchAll((err) => {

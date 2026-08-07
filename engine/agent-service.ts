@@ -89,7 +89,7 @@ function formatRuntimeContext(ctx: AgentRuntimeContext): {
           `  Unrealized PnL: ${position.unrealizedPnlUsd >= 0 ? "+" : "−"}$${Math.abs(position.unrealizedPnlUsd).toFixed(2)} (fees claimed $${position.feesClaimedUsd.toFixed(2)}, rewards $${position.rewardsClaimedUsd.toFixed(2)})`,
           position.outOfRangeSinceMs === null
             ? "  In range: yes"
-            : `  In range: NO — out of range ${((Date.now() - position.outOfRangeSinceMs) / 3_600_000).toFixed(1)}h (${position.oorCycleCount} OOR cycle(s))`,
+            : `  In range: NO — out of range ${position.hoursOutOfRange === null ? "?" : position.hoursOutOfRange.toFixed(1)}h (${position.oorCycleCount} OOR cycle(s))`,
           `  Age: ${position.hoursHeld.toFixed(1)}h | range: bins ${position.lowerBinId}..${position.upperBinId} (active ${position.activeBinId})`,
           `  Entry price: ${position.entryPriceUsd === null ? "n/a" : `$${position.entryPriceUsd.toFixed(6)}`} | peak value: ${position.highestValueUsd === null ? "n/a" : `$${position.highestValueUsd.toFixed(2)}`}`,
           `  Last rebalance: ${position.lastRebalanceAtMs === 0 ? "never" : new Date(position.lastRebalanceAtMs).toISOString()}`,

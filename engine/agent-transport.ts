@@ -34,6 +34,8 @@ export interface AgentPositionState {
   readonly rewardsClaimedUsd: number;
   readonly outOfRangeSinceMs: number | null;
   readonly oorCycleCount: number;
+  /** Hours out of range at context-construction time (null when in range). */
+  readonly hoursOutOfRange: number | null;
   readonly hoursHeld: number;
   readonly activeBinId: number;
   readonly lowerBinId: number;

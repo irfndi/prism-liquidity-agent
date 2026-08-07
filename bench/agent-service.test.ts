@@ -286,6 +286,7 @@ const makePositionState = (overrides: Partial<AgentPositionState> = {}): AgentPo
   rewardsClaimedUsd: 0,
   outOfRangeSinceMs: null,
   oorCycleCount: 0,
+  hoursOutOfRange: null,
   hoursHeld: 3.5,
   activeBinId: 100,
   lowerBinId: 95,
@@ -390,6 +391,7 @@ describe("buildProposalPrompt", () => {
         valueUsd: 800,
         unrealizedPnlUsd: -150,
         outOfRangeSinceMs: Date.now() - 7_200_000,
+        hoursOutOfRange: 2,
         oorCycleCount: 2,
       }),
     };
@@ -425,6 +427,27 @@ describe("buildPrompt (veto overlay)", () => {
     const decision = makeDecision({ action: "HOLD" });
     const prompt = buildPrompt(decision, makePromptCtx(decision));
     expect(prompt).not.toContain("POSITION:");
+  });
+
+  it("shows out-of-range and negative-PnL state on the safety-critical EXIT review", () => {
+    const decision = makeDecision({ action: "EXIT" });
+    const ctx = {
+      ...makePromptCtx(decision),
+      hasOpenPosition: true,
+      position: makePositionState({
+        valueUsd: 800,
+        unrealizedPnlUsd: -150,
+        outOfRangeSinceMs: Date.now() - 7_200_000,
+        hoursOutOfRange: 2,
+        oorCycleCount: 2,
+      }),
+    };
+    const prompt = buildPrompt(decision, ctx);
+    expect(prompt).toContain("Unrealized PnL: −$150.00");
+    expect(prompt).toContain("In range: NO — out of range 2.0h (2 OOR cycle(s))");
+    expect(prompt).toContain(
+      "Base EXIT reviews on the position's PnL and out-of-range state below.",
+    );
   });
 });
 
