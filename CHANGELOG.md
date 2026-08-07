@@ -2,6 +2,23 @@
 
 All notable changes to Prism are documented here.
 
+## [0.1.8] — 2026-08-07
+
+### Added
+
+- Agent decision context now carries the targeted position state: EXIT/REBALANCE/targeted-HOLD decisions render a `POSITION:` block (current value vs basis, range, hours held, out-of-range duration) into both the veto overlay and sync-proposal prompts, so the advisor reviews are grounded in the position being acted on — not just pool metrics (#163)
+- Sync advisor proposals get a latency skip mirroring the veto path: when the rolling p95 of proposal latencies exceeds the proposal budget, the round trip is skipped fail-open WITHOUT arming backoff or the circuit breaker (a slow model is not a bad advisor), plus an outer deadline that bounds the entire proposal op including transport reconnect (#164)
+- High-frequency rotation profile: `MAX_ENTRY_SIZE_USD` cap threaded through the normal ENTER path (and idle-redeploy), session-level rotation metrics, and a fast-churn config profile for sub-minute scan cadences (#165)
+
+### Fixed
+
+- Sync-proposal path receives the same conditional position state as the veto path (position context was only wired into the veto request) (#163)
+- `hoursHeld`/OOR duration rendered in agent prompts are precomputed at context construction and clamped against clock skew — no render-time `Date.now()` divergence, no negative ages (#163)
+
+### Changed
+
+- Bumped version to 0.1.8.
+
 ## [0.1.7] — 2026-08-07
 
 ### Added
