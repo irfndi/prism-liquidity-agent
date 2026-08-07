@@ -146,6 +146,40 @@ export interface AppConfig {
   readonly enablePoolDiscovery: boolean;
   readonly discoveryMinTvlUsd: number;
   readonly discoveryMinFeeRatio: number;
+
+  // ─── Market-scan mode (universe-driven trading) ─────────────────────────
+  // When enabled, the watchlist is OPTIONAL: the engine continuously scans
+  // the top pages of the Meteora universe (by TVL), re-runs the market gate
+  // (TVL / fee APR / volume / token-safety / bin-step) on a refresh cadence,
+  // and trades the top-ranked pools through the normal per-pool gates —
+  // safety screening, metrics, pre-filter, ENTER/HOLD/EXIT, risk. Pools that
+  // stop qualifying fall out of the active set; open positions are always
+  // kept in the scan set so exits never stall. Optional (like the Wave-17
+  // fields) so standalone fixtures that omit them keep compiling; loadConfig
+  // always sets all of them.
+  readonly marketScanEnabled?: boolean;
+  /** How often the universe gate re-runs and the ranked set is rebuilt.
+   *  Default 30 min; minimum 60 s. */
+  readonly marketScanRefreshIntervalMs?: number;
+  /** Top-N pages (1000 pools each) of the TVL-ranked universe fetched per
+   *  refresh. Default 3 (covers every pool above ~$50-100K TVL). */
+  readonly marketScanUniversePages?: number;
+  /** Minimum TVL for a pool to pass the market gate. Default $250K. */
+  readonly marketScanMinTvlUsd?: number;
+  /** Minimum annualized fee/TVL percent for the market gate (fees24h × 365 /
+   *  tvl × 100). Default 25 (a 25%+ fee APR beats the ~5-10% LP average). */
+  readonly marketScanMinFeeApr?: number;
+  /** How many top-ranked market pools are actively scanned each cycle. */
+  readonly marketScanTopK?: number;
+  /** Hard cap on market-scan pools in the active scan set. */
+  readonly marketScanMaxPools?: number;
+  /** Minimum holders for a non-stable, non-SOL leg to pass the market gate
+   *  (rug/IL-safety pre-filter; the per-pool token-risk overlay still runs). */
+  readonly marketScanMinHolders?: number;
+  /** Skip pools with bin step below this (ultra-fine bins churn). Default 2. */
+  readonly marketScanMinBinStep?: number;
+  /** Skip pools with bin step above this. Default 200. */
+  readonly marketScanMaxBinStep?: number;
   readonly deployerBlacklistPath: string;
   readonly tokenBlacklistPath: string;
   readonly sqliteDbPath: string;
@@ -1238,6 +1272,22 @@ const loadConfig = Effect.gen(function* () {
   );
   const discoveryMinTvlUsd = yield* validatedNumber("DISCOVERY_MIN_TVL_USD", 0, 1_000_000);
   const discoveryMinFeeRatio = yield* validatedNumber("DISCOVERY_MIN_FEE_RATIO", 0, 1.5);
+  const marketScanEnabled = yield* Config.boolean("MARKET_SCAN_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const marketScanRefreshIntervalMs = yield* validatedNumber(
+    "MARKET_SCAN_REFRESH_INTERVAL_MS",
+    60_000,
+    30 * 60_000,
+  );
+  const marketScanUniversePages = yield* validatedNumber("MARKET_SCAN_UNIVERSE_PAGES", 1, 3, 10);
+  const marketScanMinTvlUsd = yield* validatedNumber("MARKET_SCAN_MIN_TVL_USD", 0, 250_000);
+  const marketScanMinFeeApr = yield* validatedNumber("MARKET_SCAN_MIN_FEE_APR", 0, 25);
+  const marketScanTopK = yield* validatedNumber("MARKET_SCAN_TOP_K", 1, 30, 200);
+  const marketScanMaxPools = yield* validatedNumber("MARKET_SCAN_MAX_POOLS", 1, 60, 500);
+  const marketScanMinHolders = yield* validatedNumber("MARKET_SCAN_MIN_HOLDERS", 0, 1000);
+  const marketScanMinBinStep = yield* validatedNumber("MARKET_SCAN_MIN_BIN_STEP", 0, 2, 100);
+  const marketScanMaxBinStep = yield* validatedNumber("MARKET_SCAN_MAX_BIN_STEP", 1, 200, 2000);
   const deployerBlacklistPath = yield* Config.string("DEPLOYER_BLACKLIST_PATH").pipe(
     Effect.orElseSucceed(() => "./engine/data/deployer-blacklist.json"),
   );
@@ -1389,6 +1439,16 @@ const loadConfig = Effect.gen(function* () {
     enablePoolDiscovery,
     discoveryMinTvlUsd,
     discoveryMinFeeRatio,
+    marketScanEnabled,
+    marketScanRefreshIntervalMs,
+    marketScanUniversePages,
+    marketScanMinTvlUsd,
+    marketScanMinFeeApr,
+    marketScanTopK,
+    marketScanMaxPools,
+    marketScanMinHolders,
+    marketScanMinBinStep,
+    marketScanMaxBinStep,
     deployerBlacklistPath,
     tokenBlacklistPath,
     sqliteDbPath,

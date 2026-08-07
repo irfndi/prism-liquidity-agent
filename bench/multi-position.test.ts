@@ -1823,6 +1823,109 @@ describe("program — multiple positions per pool", () => {
     // The dust EXIT reasoned from the REAL 0 mark ($0.00), not a fallback.
     expect(dustExits[0]?.reasoning).toContain("$0.00");
   }, 15_000);
+
+  it("market-scan mode trades with an EMPTY watchlist (universe-driven)", async () => {
+    // No manual whitelist: the adapter feeds the top pages of the universe,
+    // the market gate admits the fee-dense verified pool, and the engine
+    // scans + ENTERs it through the normal gates. The unqualified pool is
+    // gated out of the active set and never traded.
+    const goodPool = makePool({ address: POOL });
+    const badPool = makePool({
+      address: "MarketBad11111111111111111111111111111111111",
+      fees24hUsd: 1, // 0.365% APR — below the market gate floor
+    });
+    const adapter = {
+      ...makeProgramAdapter({
+        [goodPool.address]: goodPool,
+        [badPool.address]: badPool,
+      }),
+      discoverPoolsTopPages: () =>
+        Effect.succeed([
+          {
+            address: goodPool.address,
+            tvlUsd: goodPool.tvlUsd,
+            volume24hUsd: goodPool.volume24hUsd,
+            fees24hUsd: goodPool.fees24hUsd,
+            apr: goodPool.apr,
+            binStep: goodPool.binStep,
+            tokenX: goodPool.tokenX,
+            tokenY: goodPool.tokenY,
+            tokenXSymbol: "SOL",
+            tokenYSymbol: "USDC",
+            tokenXVerified: true,
+            tokenYVerified: true,
+            tokenXFreezeDisabled: true,
+            tokenYFreezeDisabled: true,
+            tokenXHolders: 3_000_000,
+            tokenYHolders: 2_000_000,
+          },
+          {
+            address: badPool.address,
+            tvlUsd: badPool.tvlUsd,
+            volume24hUsd: badPool.volume24hUsd,
+            fees24hUsd: badPool.fees24hUsd,
+            apr: badPool.apr,
+            binStep: badPool.binStep,
+            tokenX: badPool.tokenX,
+            tokenY: badPool.tokenY,
+            tokenXSymbol: "SOL",
+            tokenYSymbol: "USDC",
+            tokenXVerified: true,
+            tokenYVerified: true,
+            tokenXFreezeDisabled: true,
+            tokenYFreezeDisabled: true,
+            tokenXHolders: 3_000_000,
+            tokenYHolders: 2_000_000,
+          },
+        ]),
+    };
+
+    const layer = makeProgramLayer({
+      adapter,
+      datapi: {
+        getPoolData: (addr: string) => Effect.succeed({ ...makeDatapiStats(), address: addr }),
+      },
+      configOverrides: {
+        watchlistPools: [],
+        marketScanEnabled: true,
+        marketScanRefreshIntervalMs: 1_000,
+        marketScanTopK: 10,
+        marketScanMaxPools: 10,
+        marketScanMinTvlUsd: 0,
+        marketScanMinFeeApr: 50,
+        maxPositionsPerPool: 2,
+        maxOpenPositions: 5,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      yield* Effect.raceFirst(program, Effect.sleep(2_500));
+      const audit = yield* AuditService;
+      const decisions = yield* audit.getRecentDecisions(200);
+      return decisions;
+    });
+    const decisions = await Effect.runPromise(
+      Effect.provide(test, layer) as Effect.Effect<
+        ReadonlyArray<{ action: string; executed: boolean; poolAddress: string }>,
+        unknown,
+        never
+      >,
+    );
+
+    const goodEnters = decisions.filter(
+      (d) => d.action === "ENTER" && d.executed && d.poolAddress === POOL,
+    );
+    expect(
+      goodEnters,
+      `expected an executed ENTER on the market pool, got: ${JSON.stringify(
+        decisions.map((d) => `${d.action}:${d.executed}:${d.poolAddress.slice(0, 8)}`),
+      )}`,
+    ).not.toHaveLength(0);
+    const badTrades = decisions.filter(
+      (d) => d.poolAddress === badPool.address && (d.action === "ENTER" || d.action === "EXIT"),
+    );
+    expect(badTrades, "gated-out pool must never be traded").toHaveLength(0);
+  }, 15_000);
 });
 
 describe("A4 paper fee accrual requires datapi-MEASURED fees", () => {

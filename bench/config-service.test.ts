@@ -160,6 +160,30 @@ describe("ConfigService freeze screening + IL protection flags", () => {
     const clamped = await loadConfig();
     expect(clamped.dustExitUsd).toBe(0);
   });
+
+  it("parses the market-scan block with sane defaults and clamps", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.marketScanEnabled).toBe(false);
+    expect(cfg.marketScanRefreshIntervalMs).toBe(1_800_000);
+    expect(cfg.marketScanUniversePages).toBe(3);
+    expect(cfg.marketScanMinTvlUsd).toBe(250_000);
+    expect(cfg.marketScanMinFeeApr).toBe(25);
+    expect(cfg.marketScanTopK).toBe(30);
+    expect(cfg.marketScanMaxPools).toBe(60);
+    expect(cfg.marketScanMinHolders).toBe(1000);
+    expect(cfg.marketScanMinBinStep).toBe(2);
+    expect(cfg.marketScanMaxBinStep).toBe(200);
+
+    vi.stubEnv("MARKET_SCAN_ENABLED", "true");
+    vi.stubEnv("MARKET_SCAN_TOP_K", "5");
+    vi.stubEnv("MARKET_SCAN_MIN_BIN_STEP", "10");
+    vi.stubEnv("MARKET_SCAN_REFRESH_INTERVAL_MS", "30000"); // below min 60s -> clamp
+    const overridden = await loadConfig();
+    expect(overridden.marketScanEnabled).toBe(true);
+    expect(overridden.marketScanTopK).toBe(5);
+    expect(overridden.marketScanMinBinStep).toBe(10);
+    expect(overridden.marketScanRefreshIntervalMs).toBe(60_000);
+  });
 });
 
 describe("ConfigService fee-density cooldown floor guards", () => {
