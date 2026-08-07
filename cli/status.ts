@@ -308,7 +308,7 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
             const now = Date.now();
             const offenders = autonomous.settlements
               .filter((job) => job.status !== "confirmed" && job.status !== "terminal")
-              .sort((a, b) => b.createdAt - a.createdAt)
+              .sort((a, b) => a.createdAt - b.createdAt)
               .slice(0, 3);
             if (offenders.length === 0) return null;
             return `  Latched by: ${offenders

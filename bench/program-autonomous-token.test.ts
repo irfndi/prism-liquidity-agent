@@ -259,6 +259,15 @@ describe("autonomous token runtime policy", () => {
 
     // Then no active job remains — the pause must not re-arm on their age.
     expect(oldestActiveSettlementAgeMs([terminal, confirmed], 100_000)).toBe(0);
+    expect(
+      oldestActiveSettlementAgeMs([settlementJob({ status: "prepared", createdAt: 1 })], 100_000),
+    ).toBe(99_999);
+    expect(
+      oldestActiveSettlementAgeMs(
+        [settlementJob({ status: "submitted", createdAt: 50_000 })],
+        100_000,
+      ),
+    ).toBe(50_000);
 
     // Active jobs still count, oldest first, regardless of the terminal rows.
     const pending = settlementJob({ id: "settlement-3", status: "pending", createdAt: 1 });
