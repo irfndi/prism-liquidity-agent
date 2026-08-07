@@ -6,7 +6,6 @@ import {
   loadDailyEquityBaseline,
   nextSettlementRetryAt,
   oldestActiveSettlementAgeMs,
-  orphanSettlementJobs,
   persistDailyEquityBaseline,
   processSettlementJobs,
   safetyPauseBlockReason,
@@ -891,7 +890,7 @@ describe("issue #166 settlement recovery", () => {
     expect(processed).toMatchObject({ status: "retryable", nextRetryAt: 11_000 });
   });
 
-  it("creates sell jobs only for unbacked, non-dust wallet holdings", () => {
+  it("creates sell jobs only for unbacked, non-dust wallet holdings", async () => {
     // Given holdings where one mint is backed, one is below dust, one is
     // unpriceable, and the settlement asset itself.
     const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
@@ -902,18 +901,32 @@ describe("issue #166 settlement recovery", () => {
       [SOL_MINT, { amountAtomic: 1_000_000_000n, decimals: 9 }], // settlement asset → skip
       ["zero-1", { amountAtomic: 0n, decimals: 6 }], // nothing held → skip
     ]);
+    const adapter = {
+      hasWallet: () => true,
+      getWalletHoldings: () => Effect.succeed(holdings),
+      getPoolState: () => Effect.succeed({ tokenX: "backed-1", tokenY: "backed-y" }),
+      getTokenPrices: (mints: string[]) =>
+        Effect.succeed(
+          Object.fromEntries(mints.map((mint) => [mint, mint === "unpriceable-1" ? 0 : 1])),
+        ),
+    } as unknown as AdapterApi;
+    const db = {
+      listSettlementJobs: () => Effect.succeed([]),
+      getAllPositions: () => Effect.succeed([{ positionId: "live-pos-1", poolAddress: "pool-1" }]),
+    } as unknown as DbApi;
 
     // When
-    const jobs = orphanSettlementJobs({
-      walletAddress: "wallet-1",
-      agentInstanceId: "primary",
-      settlementMaxPendingMs: 3_600_000,
-      settlementDustUsd: 0.1,
-      now: 10_000,
-      holdings,
-      backedMints: new Set(["backed-1"]),
-      pricesUsd: { "stranded-1": 1, "dust-1": 1, "backed-1": 1 },
-    });
+    const jobs = await Effect.runPromise(
+      sweepOrphanSettlements({
+        adapter,
+        db,
+        walletAddress: "wallet-1",
+        agentInstanceId: "primary",
+        settlementMaxPendingMs: 3_600_000,
+        settlementDustUsd: 0.1,
+        now: 10_000,
+      }),
+    );
 
     // Then
     expect(jobs).toHaveLength(2);

@@ -521,80 +521,6 @@ export function processSettlementJobs(
 }
 
 export interface OrphanSettlementSweepInput {
-  readonly walletAddress: string;
-  readonly agentInstanceId: string;
-  readonly settlementMaxPendingMs: number;
-  readonly settlementDustUsd: number;
-  readonly now: number;
-  /** Wallet SPL holdings (mint → amount/decimals); native SOL not included. */
-  readonly holdings: ReadonlyMap<
-    string,
-    { readonly amountAtomic: bigint; readonly decimals: number }
-  >;
-  /**
-   * Mints already accounted for: legs of open positions plus mints with an
-   * active (non-terminal, non-confirmed) settlement job. Terminal jobs
-   * deliberately do NOT back a mint — a dead job is exactly the stranded-token
-   * case this sweep re-enqueues.
-   */
-  readonly backedMints: ReadonlySet<string>;
-  /** USD prices for candidate mints (missing = unpriceable, enqueued anyway). */
-  readonly pricesUsd: Readonly<Record<string, number>>;
-}
-
-/**
- * Issue #166: a SOL-funded entry that fails after the swap leaves the bought
- * token stranded in the wallet with no position and no recovery path once its
- * rollback settlement died. Each cycle this compares wallet holdings against
- * the mints that are actually accounted for (position legs, active settlement
- * jobs) and re-enqueues a fresh sell-settlement job for everything else.
- * Dust below `settlementDustUsd` stays put; the settlement processor's own
- * dust skip re-applies at execution time.
- */
-export function orphanSettlementJobs(
-  input: OrphanSettlementSweepInput,
-): ReadonlyArray<SettlementJobRecord> {
-  const jobs: SettlementJobRecord[] = [];
-  for (const [mint, holding] of input.holdings) {
-    if (mint === SOL_MINT || holding.amountAtomic <= 0n) continue;
-    if (input.backedMints.has(mint)) continue;
-    const priceUsd = input.pricesUsd[mint] ?? 0;
-    if (
-      input.settlementDustUsd > 0 &&
-      priceUsd > 0 &&
-      atomicUsd(holding.amountAtomic, holding.decimals, priceUsd) < input.settlementDustUsd
-    ) {
-      continue;
-    }
-    const id = randomUUID();
-    jobs.push({
-      id,
-      walletAddress: input.walletAddress,
-      agentInstanceId: input.agentInstanceId,
-      positionId: `orphan:${id}`,
-      poolAddress: "",
-      tokenMint: mint,
-      amountAtomic: holding.amountAtomic.toString(),
-      destinationAsset: "SOL",
-      status: "pending",
-      attempts: 0,
-      nextRetryAt: input.now,
-      txSignature: null,
-      confirmedOutputAtomic: null,
-      outputUsd: null,
-      executionCostUsd: null,
-      finalizedAt: null,
-      realizedPnlUsd: null,
-      expiresAt: input.now + input.settlementMaxPendingMs,
-      error: null,
-      createdAt: input.now,
-      updatedAt: input.now,
-    });
-  }
-  return jobs;
-}
-
-export interface OrphanSettlementSweepDeps {
   readonly adapter: AdapterApi;
   readonly db: DbApi;
   readonly walletAddress: string;
@@ -605,15 +531,20 @@ export interface OrphanSettlementSweepDeps {
 }
 
 /**
- * Issue #166: detects wallet tokens with no backing position/order and returns
- * fresh sell-settlement jobs for them. Fail-open end to end: a holdings read,
- * pool-state fetch, or price fetch failure skips only its own contribution and
- * never blocks the cycle. RPC cost is gated — position legs are only fetched
- * when candidate mints actually exist, and holdings come from the wallet
- * balance's existing 30s cached snapshot.
+ * Issue #166: a SOL-funded entry that fails after the swap leaves the bought
+ * token stranded in the wallet with no position and no recovery path once its
+ * rollback settlement died. Each cycle this compares wallet holdings against
+ * the mints that are actually accounted for (position legs, active settlement
+ * jobs) and re-enqueues a fresh sell-settlement job for everything else.
+ * Dust below `settlementDustUsd` stays put (unpriceable tokens are enqueued —
+ * the processor's dust skip re-applies at execution time). Fail-open end to
+ * end: a holdings read, pool-state fetch, or price fetch failure skips only
+ * its own contribution and never blocks the cycle. RPC cost is gated —
+ * position legs are only fetched when candidate mints actually exist, and
+ * holdings come from the wallet balance's existing 30s cached snapshot.
  */
 export function sweepOrphanSettlements(
-  input: OrphanSettlementSweepDeps,
+  input: OrphanSettlementSweepInput,
 ): Effect.Effect<ReadonlyArray<SettlementJobRecord>, never> {
   return Effect.gen(function* () {
     if (!input.adapter.hasWallet()) return [];
@@ -660,16 +591,44 @@ export function sweepOrphanSettlements(
     }
     const prices = yield* input.adapter
       .getTokenPrices(candidates.map(([mint]) => mint))
-      .pipe(Effect.catchAll(() => Effect.succeed({})));
-    return orphanSettlementJobs({
-      walletAddress: input.walletAddress,
-      agentInstanceId: input.agentInstanceId,
-      settlementMaxPendingMs: input.settlementMaxPendingMs,
-      settlementDustUsd: input.settlementDustUsd,
-      now: input.now,
-      holdings,
-      backedMints,
-      pricesUsd: prices,
-    });
+      .pipe(Effect.catchAll(() => Effect.succeed<Record<string, number>>({})));
+    const jobs: SettlementJobRecord[] = [];
+    for (const [mint, holding] of holdings) {
+      if (mint === SOL_MINT || holding.amountAtomic <= 0n) continue;
+      if (backedMints.has(mint)) continue;
+      const priceUsd = prices[mint] ?? 0;
+      if (
+        input.settlementDustUsd > 0 &&
+        priceUsd > 0 &&
+        atomicUsd(holding.amountAtomic, holding.decimals, priceUsd) < input.settlementDustUsd
+      ) {
+        continue;
+      }
+      const id = randomUUID();
+      jobs.push({
+        id,
+        walletAddress: input.walletAddress,
+        agentInstanceId: input.agentInstanceId,
+        positionId: `orphan:${id}`,
+        poolAddress: "",
+        tokenMint: mint,
+        amountAtomic: holding.amountAtomic.toString(),
+        destinationAsset: "SOL",
+        status: "pending",
+        attempts: 0,
+        nextRetryAt: input.now,
+        txSignature: null,
+        confirmedOutputAtomic: null,
+        outputUsd: null,
+        executionCostUsd: null,
+        finalizedAt: null,
+        realizedPnlUsd: null,
+        expiresAt: input.now + input.settlementMaxPendingMs,
+        error: null,
+        createdAt: input.now,
+        updatedAt: input.now,
+      });
+    }
+    return jobs;
   });
 }
