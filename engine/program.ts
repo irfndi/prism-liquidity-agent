@@ -157,6 +157,7 @@ import {
   safetyPauseBlockReason,
   shouldAutoResolveDailyDrawdownPause,
   shouldTriggerSafetyPause,
+  sweepOrphanSettlements,
 } from "./autonomous-runtime.js";
 import { routeProbeAmountAtomic } from "./route-probe.js";
 import {
@@ -3966,18 +3967,40 @@ export const program = Effect.gen(function* () {
       // fresh active set visible to the "no pools" check and the scan loop.
       rebuildPoolsToScan();
       if (autonomousExecution) {
-        const settlementJobs = yield* db
-          .listSettlementJobs(
-            autonomousExecution.walletAddress,
-            autonomousExecution.agentInstanceId,
-          )
-          .pipe(Effect.catchAll(() => Effect.succeed([])));
+        const settlementNow = Date.now();
+        const settlementJobs: SettlementJobRecord[] = [
+          ...(yield* db
+            .listSettlementJobs(
+              autonomousExecution.walletAddress,
+              autonomousExecution.agentInstanceId,
+            )
+            .pipe(Effect.catchAll(() => Effect.succeed([])))),
+        ];
+        // Issue #166: sweep wallet tokens with no backing position or active
+        // settlement job (dead rollback settlements, failed swap-funded
+        // entries) into fresh sell jobs, so a token stranded by a terminal
+        // settlement gets re-queued automatically. New jobs process this cycle.
+        if (autonomousExecution.mode !== "shadow") {
+          const orphanJobs = yield* sweepOrphanSettlements({
+            adapter,
+            db,
+            walletAddress: autonomousExecution.walletAddress,
+            agentInstanceId: autonomousExecution.agentInstanceId,
+            settlementMaxPendingMs: autonomousExecution.settlementMaxPendingMs,
+            settlementDustUsd: autonomousExecution.settlementDustUsd,
+            now: settlementNow,
+          });
+          for (const job of orphanJobs) {
+            yield* db.saveSettlementJob(job).pipe(Effect.catchAll(() => Effect.void));
+          }
+          settlementJobs.push(...orphanJobs);
+        }
         const processedJobs = yield* processSettlementJobs({
           adapter,
           db,
           jobs: settlementJobs,
           mode: autonomousExecution.mode,
-          now: Date.now(),
+          now: settlementNow,
           maxSwapSlippageBps: config.maxSwapSlippageBps,
           settlementDustUsd: autonomousExecution.settlementDustUsd,
         });
@@ -3990,9 +4013,20 @@ export const program = Effect.gen(function* () {
             walletAddress: autonomousExecution.walletAddress,
             agentInstanceId: autonomousExecution.agentInstanceId,
             reason: "settlement_overdue",
-            triggeredAt: Date.now(),
+            triggeredAt: settlementNow,
             resolvedAt: null,
           };
+          yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+        } else if (
+          activeSafetyPause?.resolvedAt === null &&
+          activeSafetyPause.reason === "settlement_overdue" &&
+          processedJobs.every((job) => job.status === "confirmed" || job.status === "terminal")
+        ) {
+          // Issue #166: a settlement_overdue pause must not outlive the
+          // settlements that raised it — once nothing is in flight (429
+          // retries finally sold the token, or the orphan sweep recovered
+          // it), auto-resolve instead of latching until `prism resume`.
+          activeSafetyPause = { ...activeSafetyPause, resolvedAt: settlementNow };
           yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
         }
         activeSafetyPause = yield* db

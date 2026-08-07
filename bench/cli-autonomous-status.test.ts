@@ -58,6 +58,7 @@ async function seedAutonomousState(
   dbPath: string,
   walletAddress: string,
   agentInstanceId: string,
+  options: { readonly recovered?: boolean } = {},
 ): Promise<void> {
   await Effect.runPromise(
     Effect.gen(function* () {
@@ -118,6 +119,58 @@ async function seedAutonomousState(
         createdAt: 3_000,
         updatedAt: 3_000,
       });
+      // Issue #166: a terminal settlement with no recovered output is the
+      // stranded-token case the sweep re-queues; status must surface it.
+      yield* db.saveSettlementJob({
+        id: "settlement-2",
+        walletAddress,
+        agentInstanceId,
+        positionId: "position-2",
+        poolAddress: "",
+        tokenMint: "mint-2",
+        amountAtomic: "15413",
+        destinationAsset: "SOL",
+        status: "terminal",
+        attempts: 6,
+        nextRetryAt: null,
+        txSignature: null,
+        confirmedOutputAtomic: null,
+        outputUsd: null,
+        executionCostUsd: null,
+        finalizedAt: null,
+        realizedPnlUsd: null,
+        expiresAt: 5_000,
+        error: "Jupiter quote failed: 429",
+        createdAt: 3_000,
+        updatedAt: 3_000,
+      });
+      if (options.recovered) {
+        // The orphan sweep sold the stranded mint — the terminal record above
+        // is now historical and must not be reported as stranded.
+        yield* db.saveSettlementJob({
+          id: "settlement-3",
+          walletAddress,
+          agentInstanceId,
+          positionId: "orphan:recovered",
+          poolAddress: "",
+          tokenMint: "mint-2",
+          amountAtomic: "15413",
+          destinationAsset: "SOL",
+          status: "confirmed",
+          attempts: 1,
+          nextRetryAt: null,
+          txSignature: "recovered-sig",
+          confirmedOutputAtomic: "1000000",
+          outputUsd: 10,
+          executionCostUsd: 0.1,
+          finalizedAt: null,
+          realizedPnlUsd: null,
+          expiresAt: 5_000,
+          error: null,
+          createdAt: 4_000,
+          updatedAt: 4_000,
+        });
+      }
       yield* db.saveSafetyPause({
         walletAddress,
         agentInstanceId,
@@ -154,9 +207,65 @@ describe("autonomous CLI operator surface", () => {
       agentInstanceId,
       candidates: [{ id: "candidate-1", state: "eligible" }],
       operations: [{ id: "operation-1", status: "prepared" }],
-      settlements: [{ id: "settlement-1", status: "retryable" }],
+      settlements: [
+        { id: "settlement-1", status: "retryable" },
+        {
+          id: "settlement-2",
+          status: "terminal",
+          tokenMint: "mint-2",
+          amountAtomic: "15413",
+          confirmedOutputAtomic: null,
+          error: "Jupiter quote failed: 429",
+        },
+      ],
       safetyPause: { active: true, reason: "settlement_overdue" },
     });
+  });
+
+  it("flags terminal settlements with unspent balance in text output", async () => {
+    // Given
+    testDirectory = mkdtempSync(join(tmpdir(), "prism-cli-autonomous-stranded-"));
+    const dbPath = join(testDirectory, "prism.db");
+    const walletKeypair = Keypair.generate();
+    const wallet = walletKeypair.publicKey.toBase58();
+    const agentInstanceId = "operator-test";
+    await seedAutonomousState(dbPath, wallet, agentInstanceId);
+
+    // When
+    const result = runCli(["status"], {
+      SQLITE_DB_PATH: dbPath,
+      AGENT_INSTANCE_ID: agentInstanceId,
+      WALLET_PRIVATE_KEY: bs58.encode(walletKeypair.secretKey),
+    });
+
+    // Then
+    expect(result.exitCode).toBe(0);
+    const text = decode(result.stdout);
+    expect(text).toContain("Stranded:    1 terminal settlement(s) with unspent balance");
+    expect(text).toContain("?/mint-2");
+  });
+
+  it("hides terminal settlements whose mint was later recovered by a confirmed settlement", async () => {
+    // Given a terminal job for mint-2 plus a confirmed orphan-sweep sale of
+    // the same mint (the recovery path from issue #166).
+    testDirectory = mkdtempSync(join(tmpdir(), "prism-cli-autonomous-recovered-"));
+    const dbPath = join(testDirectory, "prism.db");
+    const walletKeypair = Keypair.generate();
+    const wallet = walletKeypair.publicKey.toBase58();
+    const agentInstanceId = "operator-test";
+    await seedAutonomousState(dbPath, wallet, agentInstanceId, { recovered: true });
+
+    // When
+    const result = runCli(["status"], {
+      SQLITE_DB_PATH: dbPath,
+      AGENT_INSTANCE_ID: agentInstanceId,
+      WALLET_PRIVATE_KEY: bs58.encode(walletKeypair.secretKey),
+    });
+
+    // Then the historical terminal record is not reported as stranded.
+    expect(result.exitCode).toBe(0);
+    const text = decode(result.stdout);
+    expect(text).not.toContain("Stranded:");
   });
 
   it("marks the current wallet's active safety pause resolved without live execution", async () => {
