@@ -820,12 +820,8 @@ describe("issue #166 settlement recovery", () => {
     expect(isTransientSettlementError(new Error("need 500 lamports"))).toBe(false);
     expect(isTransientSettlementError(new Error("amount 429 below minimum"))).toBe(false);
     // Real HTTP-status formats without the `failed:` prefix stay transient.
-    expect(isTransientSettlementError(new Error("HTTP/1.1 500 Internal Server Error"))).toBe(
-      true,
-    );
-    expect(isTransientSettlementError(new Error("request failed with status code 429"))).toBe(
-      true,
-    );
+    expect(isTransientSettlementError(new Error("HTTP/1.1 500 Internal Server Error"))).toBe(true);
+    expect(isTransientSettlementError(new Error("request failed with status code 429"))).toBe(true);
     expect(isTransientSettlementError(new Error("HTTP Error: Too Many Requests"))).toBe(true);
     expect(isTransientSettlementError(null)).toBe(false);
   });

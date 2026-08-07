@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -15,7 +16,7 @@ import {
   writeFileSync,
 } from "fs";
 import { pipeline } from "stream/promises";
-import { dirname, join } from "path";
+import { basename, dirname, join } from "path";
 import { tmpdir, homedir } from "os";
 import { createHash } from "crypto";
 import { getCurrentVersion } from "../engine/version.js";
@@ -233,6 +234,31 @@ function atomicReplaceInstall(installDir: string, newDir: string): string {
     throw err;
   }
   return backupDir;
+}
+
+/**
+ * Issue #179: the success path deleted the previous install immediately, so a
+ * `--skip-smoke-test` update (or a smoke false-pass) installed a broken bundle
+ * with no way back. Keep ONE persistent backup of the previous version next
+ * to the install dir — it survives the update and is replaced by the next
+ * update's backup, so the previous version is always recoverable by renaming
+ * it back into place.
+ */
+function persistPreviousInstall(backupDir: string, installDir: string, version: string): void {
+  const parent = dirname(installDir);
+  const base = basename(installDir);
+  const staleBackups = readdirSync(parent)
+    .filter((name) => name.startsWith(`${base}.bak-`))
+    .map((name) => join(parent, name));
+  for (const stale of staleBackups) {
+    rmSync(stale, { recursive: true, force: true });
+  }
+  if (!existsSync(backupDir)) return;
+  const persistent = join(parent, `${base}.bak-${version}`);
+  renameSync(backupDir, persistent);
+  console.log(
+    `Previous version preserved at ${persistent} — recoverable by renaming it to ${installDir}`,
+  );
 }
 
 function smokeTest(wrapperBin: string, skipSmokeTest: boolean): void {
@@ -517,9 +543,7 @@ async function updateFromSource(
     );
   }
 
-  if (existsSync(backupDir)) {
-    rmSync(backupDir, { recursive: true, force: true });
-  }
+  persistPreviousInstall(backupDir, currentDir, release.version);
 }
 
 async function updateFromBundle(
@@ -592,9 +616,7 @@ async function updateFromBundle(
     );
   }
 
-  if (existsSync(backupDir)) {
-    rmSync(backupDir, { recursive: true, force: true });
-  }
+  persistPreviousInstall(backupDir, installDir, release.version);
 }
 
 export const updateCommand = new Command("update")
