@@ -295,6 +295,30 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
             ? `agent overlay: ${config.agentRuntime}`
             : "agent overlay: off";
 
+          // Acceptance for issue #167: an active settlement_overdue pause
+          // names the non-terminal jobs keeping it latched (oldest first).
+          const latchedBySettlements = (() => {
+            if (
+              autonomous.safetyPause === null ||
+              autonomous.safetyPause.resolvedAt !== null ||
+              autonomous.safetyPause.reason !== "settlement_overdue"
+            ) {
+              return null;
+            }
+            const now = Date.now();
+            const offenders = autonomous.settlements
+              .filter((job) => job.status !== "confirmed" && job.status !== "terminal")
+              .sort((a, b) => a.createdAt - b.createdAt)
+              .slice(0, 3);
+            if (offenders.length === 0) return null;
+            return `  Latched by: ${offenders
+              .map(
+                (job) =>
+                  `${job.id.slice(0, 8)}… ${job.status} ${((now - job.createdAt) / 3_600_000).toFixed(1)}h${job.error ? ` (${job.error})` : ""}`,
+              )
+              .join(", ")}`;
+          })();
+
           console.log(
             [
               "Prism Status",
@@ -325,6 +349,7 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
                     ? `ACTIVE (${autonomous.safetyPause.reason})`
                     : `resolved (${autonomous.safetyPause.reason})`
               }`,
+              ...(latchedBySettlements !== null ? [latchedBySettlements] : []),
               "",
               `  Recent decisions: ${recentAudit.length}`,
               ...recentAudit

@@ -4,6 +4,7 @@ import {
   isActionAllowedDuringSafetyPause,
   loadDailyEquityBaseline,
   nextSettlementRetryAt,
+  oldestActiveSettlementAgeMs,
   persistDailyEquityBaseline,
   processSettlementJobs,
   safetyPauseBlockReason,
@@ -248,6 +249,32 @@ describe("autonomous token runtime policy", () => {
         dayRolledOver: true,
       }),
     ).toBe(false);
+  });
+
+  it("excludes confirmed and terminal jobs from the overdue settlement age (issue #167)", () => {
+    // Given a dead-end terminal job (failed rollback) and a confirmed job,
+    // both older than any pending limit.
+    const terminal = settlementJob({ status: "terminal", createdAt: 1 });
+    const confirmed = settlementJob({ id: "settlement-2", status: "confirmed", createdAt: 1 });
+
+    // Then no active job remains — the pause must not re-arm on their age.
+    expect(oldestActiveSettlementAgeMs([terminal, confirmed], 100_000)).toBe(0);
+    expect(
+      oldestActiveSettlementAgeMs([settlementJob({ status: "prepared", createdAt: 1 })], 100_000),
+    ).toBe(99_999);
+    expect(
+      oldestActiveSettlementAgeMs(
+        [settlementJob({ status: "submitted", createdAt: 50_000 })],
+        100_000,
+      ),
+    ).toBe(50_000);
+
+    // Active jobs still count, oldest first, regardless of the terminal rows.
+    const pending = settlementJob({ id: "settlement-3", status: "pending", createdAt: 1 });
+    const retryable = settlementJob({ id: "settlement-4", status: "retryable", createdAt: 50_000 });
+    expect(oldestActiveSettlementAgeMs([terminal, confirmed, pending, retryable], 100_000)).toBe(
+      99_999,
+    );
   });
 
   it("caps deterministic settlement retry backoff", () => {
