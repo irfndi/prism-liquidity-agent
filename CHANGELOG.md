@@ -2,6 +2,25 @@
 
 All notable changes to Prism are documented here.
 
+## [0.1.7] — 2026-08-07
+
+### Added
+
+- Market-scan universe trading — the watchlist becomes an optional overlay: with `MARKET_SCAN_ENABLED=true` the engine continuously scans the TVL-ranked Meteora universe and trades the best pools through the full existing gate chain (safety screening, metrics, fee/IL, volume auth, risk gates). New `MARKET_SCAN_*` config block: universe pages, TVL/fee-APR/turnover/bin-step gates, top-K active set, token-safety pre-filter (#158)
+- DB-tunable config allowlist extended to the market-scan and tuning knobs (`MARKET_SCAN_*`, `DUST_EXIT_USD`, `TRAILING_STOP_CONFIRM_CYCLES`, `VOLATILITY_EXIT_STDDEV`, range-width and cooldown keys, `IDLE_REDEPLOY_*`) — changeable at runtime via `prism config set` without a restart (#159)
+- `prism doctor` gains a `config` check that fully loads the config (env + .env + DB sidecar, every numeric clamp) and FAILs on broken values before engine startup (#159)
+
+### Fixed
+
+- Real on-chain position mark replaces the bin-drift heuristic — kills the trailing-stop/OOR churn that opened 340+ positions in 2.5 weeks with ~zero P&L. Fallback chain (HODL revaluation of entry legs → cost basis) never fabricates a drawdown (#157)
+- Dust entries below the $10 `ENTRY_SIZE_FLOOR_USD` are rejected; new `DUST_EXIT_USD` (default 5) deterministically exits residual dust positions and reclaims their per-pool slot; portfolio equity no longer counts idle wallet balance as unrealized gain (#157)
+- `prism setup` now MERGES into an existing `.env` instead of replacing it — re-running no longer wipes user keys, custom comments, or unknown vars (backup-only before) (#159)
+- Market-gate token pre-filter fails open on absent token metadata (unknown holder count passes; known counts keep their threshold checks), and per-page universe fetch failures are isolated (#158)
+
+### Changed
+
+- Bumped version to 0.1.7.
+
 ## [0.1.6] — 2026-08-05
 
 ### Fixed
