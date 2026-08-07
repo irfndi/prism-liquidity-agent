@@ -579,6 +579,28 @@ describe("evaluatePerPoolAllocation — aggregate per-pool exposure", () => {
     expect(result.approved).toBe(false);
     expect(result.reason).toMatch(/Max open positions/);
   });
+
+  it("scales to high-frequency rotation: 20-position cap admits the 20th and rejects the 21st", () => {
+    const highCountBase = { ...base, maxOpenPositions: 20 };
+    const nineteenPositions = Array.from({ length: 19 }, (_, i) =>
+      makeRiskPosition(`Pool${i}`, `pos-${i}`, 100),
+    );
+    const twentieth = evaluatePerPoolAllocation({
+      ...highCountBase,
+      proposedDepositUsd: 500,
+      openPositions: nineteenPositions,
+    });
+    expect(twentieth.approved).toBe(true);
+    expect(twentieth.adjustedDepositUsd).toBe(500);
+
+    const twentyFirst = evaluatePerPoolAllocation({
+      ...highCountBase,
+      proposedDepositUsd: 500,
+      openPositions: [...nineteenPositions, makeRiskPosition("Pool19", "pos-19", 100)],
+    });
+    expect(twentyFirst.approved).toBe(false);
+    expect(twentyFirst.reason).toMatch(/Max open positions reached \(20\/20\)/);
+  });
 });
 
 describe("evaluateAgentProposal — multi-position", () => {

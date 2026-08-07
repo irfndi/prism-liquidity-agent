@@ -11,6 +11,7 @@ import type {
 import { PublicKey } from "@solana/web3.js";
 import { createLogger } from "./logger.js";
 import { applyDbConfigOverrides, readDbConfigOverrides } from "./db-config.js";
+import { ENTRY_SIZE_CAP_USD, ENTRY_SIZE_FLOOR_USD } from "./entry-sizing.js";
 
 const logger = createLogger("ConfigService");
 
@@ -319,6 +320,8 @@ export interface AppConfig {
    * behavior.
    */
   readonly maxPositionsPerPool: number;
+  /** Hard USD ceiling per conservative entry (default 500; see MAX_ENTRY_SIZE_USD). */
+  readonly maxEntrySizeUsd: number;
 
   // ─── F6: Paper-trading validation period ────────────────────────────────────
   /** Require N days of paper trading before allowing live ENTER. */
@@ -869,6 +872,14 @@ const loadConfig = Effect.gen(function* () {
   );
   const maxOpenPositions = yield* validatedNumber("MAX_OPEN_POSITIONS", 1, 3);
   const maxPositionsPerPool = yield* validatedNumber("MAX_POSITIONS_PER_POOL", 1, 2);
+  // Hard USD ceiling per conservative entry (the sizing formula's cap term).
+  // Raisable for high-frequency rotation profiles where the default $500
+  // constant would cap deployed capital per position.
+  const maxEntrySizeUsd = yield* validatedNumber(
+    "MAX_ENTRY_SIZE_USD",
+    ENTRY_SIZE_FLOOR_USD,
+    ENTRY_SIZE_CAP_USD,
+  );
 
   // ─── Idle-capital auto-redeploy (opt-in) ─────────────────────────────────
   const idleRedeployEnabled = yield* Config.boolean("IDLE_REDEPLOY_ENABLED").pipe(
@@ -1505,6 +1516,7 @@ const loadConfig = Effect.gen(function* () {
     maxPerPoolAllocationPct,
     maxOpenPositions,
     maxPositionsPerPool,
+    maxEntrySizeUsd,
     paperValidationMinDays,
     paperValidationEnforce,
     oorCooldownMs,

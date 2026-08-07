@@ -68,6 +68,17 @@ describe("computeEntrySizeUsd — legacy-identical conservative sizing", () => {
     expect(computeEntrySizeUsd({ walletBalanceUsd: 0, tvlUsd: 0 })).toBe(10);
   });
 
+  it("a caller-supplied maxSizeUsd replaces the $500 cap (high-frequency rotation)", () => {
+    expect(
+      computeEntrySizeUsd({ walletBalanceUsd: 10_000, tvlUsd: 1_000_000, maxSizeUsd: 2_000 }),
+    ).toBe(2_000);
+    expect(
+      computeEntrySizeUsd({ walletBalanceUsd: 10_000, tvlUsd: 1_000_000, maxSizeUsd: 100 }),
+    ).toBe(100);
+    // The floor still binds under a tiny override.
+    expect(computeEntrySizeUsd({ walletBalanceUsd: 0, tvlUsd: 0, maxSizeUsd: 100 })).toBe(10);
+  });
+
   it("matches the legacy inline formula max(min(w*0.5, tvl*0.005, 500), 10) over a grid", () => {
     for (const walletBalanceUsd of [0, 10, 100, 999, 1000, 10_000, 123_456]) {
       for (const tvlUsd of [0, 1000, 50_000, 100_000, 1_000_000, 12_345_678]) {
