@@ -309,15 +309,15 @@ export function fetchLatestRelease(
   token?: string,
 ): Effect.Effect<ReleaseInfo | null, Error> {
   return Effect.gen(function* () {
-    const r2Result = yield* Effect.either(fetchR2Manifest(channel, r2PublicUrl));
+    const r2Result = yield* Effect.result(fetchR2Manifest(channel, r2PublicUrl));
 
-    if (r2Result._tag === "Right" && r2Result.right) {
-      const manifest = r2Result.right;
+    if (r2Result._tag === "Success" && r2Result.success) {
+      const manifest = r2Result.success;
       if (isValidVersion(manifest.version)) {
         return r2ManifestToInfo(manifest);
       }
     }
-    const r2Error = r2Result._tag === "Left" ? r2Result.left : null;
+    const r2Error = r2Result._tag === "Failure" ? r2Result.failure : null;
 
     // Canary builds are R2-only: they have no GitHub Releases representation,
     // so falling through to the "newest release" GitHub semantics would install
@@ -333,15 +333,15 @@ export function fetchLatestRelease(
       );
     }
 
-    const ghResult = yield* Effect.either(fetchGitHubRelease(repo, channel, token));
-    if (ghResult._tag === "Right") {
-      if (ghResult.right) {
-        return githubReleaseToInfo(ghResult.right, channel);
+    const ghResult = yield* Effect.result(fetchGitHubRelease(repo, channel, token));
+    if (ghResult._tag === "Success") {
+      if (ghResult.success) {
+        return githubReleaseToInfo(ghResult.success, channel);
       }
       return null;
     }
 
-    const ghError = ghResult.left;
+    const ghError = ghResult.failure;
     if (r2Error) {
       return yield* Effect.fail(
         new Error(`Update check failed. R2: ${r2Error.message}; GitHub: ${ghError.message}`),

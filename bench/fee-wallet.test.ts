@@ -133,12 +133,12 @@ describe("fetchConfigFromApi", () => {
     const fetchMock = vi.fn().mockResolvedValue(okResponse(VALID_CONFIG_BODY));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const result = await Effect.runPromise(Effect.either(fetchConfigFromApi("test-api-key")));
+    const result = await Effect.runPromise(Effect.result(fetchConfigFromApi("test-api-key")));
 
-    expect(result._tag).toBe("Right");
-    if (result._tag === "Right") {
-      expect(result.right.feeWalletAddress).toBe(FEE_WALLET);
-      expect(result.right.tier).toBe("pro");
+    expect(result._tag).toBe("Success");
+    if (result._tag === "Success") {
+      expect(result.success.feeWalletAddress).toBe(FEE_WALLET);
+      expect(result.success.tier).toBe("pro");
     }
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, { headers: Record<string, string> }];
@@ -151,12 +151,12 @@ describe("fetchConfigFromApi", () => {
       .fn()
       .mockResolvedValue({ ok: false, status: 503 }) as unknown as typeof fetch;
 
-    const result = await Effect.runPromise(Effect.either(fetchConfigFromApi("test-api-key")));
+    const result = await Effect.runPromise(Effect.result(fetchConfigFromApi("test-api-key")));
 
-    expect(result._tag).toBe("Left");
-    if (result._tag === "Left") {
-      expect(result.left).toBeInstanceOf(Error);
-      expect((result.left as Error).message).toBe("API returned 503");
+    expect(result._tag).toBe("Failure");
+    if (result._tag === "Failure") {
+      expect(result.failure).toBeInstanceOf(Error);
+      expect((result.failure as Error).message).toBe("API returned 503");
     }
   });
 
@@ -166,11 +166,11 @@ describe("fetchConfigFromApi", () => {
       json: () => Promise.reject(new SyntaxError("Unexpected token '<'")),
     }) as unknown as typeof fetch;
 
-    const result = await Effect.runPromise(Effect.either(fetchConfigFromApi("test-api-key")));
+    const result = await Effect.runPromise(Effect.result(fetchConfigFromApi("test-api-key")));
 
-    expect(result._tag).toBe("Left");
-    if (result._tag === "Left") {
-      expect(result.left).toBeInstanceOf(Error);
+    expect(result._tag).toBe("Failure");
+    if (result._tag === "Failure") {
+      expect(result.failure).toBeInstanceOf(Error);
     }
   });
 
@@ -179,11 +179,11 @@ describe("fetchConfigFromApi", () => {
       .fn()
       .mockResolvedValue(okResponse("not-an-object")) as unknown as typeof fetch;
 
-    const result = await Effect.runPromise(Effect.either(fetchConfigFromApi("test-api-key")));
+    const result = await Effect.runPromise(Effect.result(fetchConfigFromApi("test-api-key")));
 
-    expect(result._tag).toBe("Left");
-    if (result._tag === "Left") {
-      expect((result.left as Error).message).toBe("Invalid API response");
+    expect(result._tag).toBe("Failure");
+    if (result._tag === "Failure") {
+      expect((result.failure as Error).message).toBe("Invalid API response");
     }
   });
 });

@@ -22,6 +22,7 @@ async function loadConfig() {
         return yield* ConfigService;
       }),
       ConfigLive,
+      { local: true },
     ),
   );
 }

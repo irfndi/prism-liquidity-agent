@@ -1417,7 +1417,7 @@ describe("program — multiple positions per pool", () => {
       return { positions, decisions, events };
     });
     const { positions, decisions, events } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         {
           positions: ReadonlyArray<PositionRecord>;
           decisions: ReadonlyArray<{ action: string; executed: boolean }>;
@@ -1466,7 +1466,7 @@ describe("program — multiple positions per pool", () => {
       return { positions, decisions };
     });
     const { positions, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         {
           positions: ReadonlyArray<PositionRecord>;
           decisions: ReadonlyArray<{ action: string; executed: boolean }>;
@@ -1568,7 +1568,7 @@ describe("program — multiple positions per pool", () => {
       return { active, closed, events, decisions };
     });
     const { active, closed, events, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         {
           active: ReadonlyArray<PositionRecord>;
           closed: ReadonlyArray<PositionRecord>;
@@ -1669,7 +1669,7 @@ describe("program — multiple positions per pool", () => {
       return { active, closed, decisions };
     });
     const { active, closed, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         {
           active: ReadonlyArray<PositionRecord>;
           closed: ReadonlyArray<PositionRecord>;
@@ -1794,7 +1794,7 @@ describe("program — multiple positions per pool", () => {
       return { active, closed, decisions };
     });
     const { active, closed, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         {
           active: ReadonlyArray<PositionRecord>;
           closed: ReadonlyArray<PositionRecord>;
@@ -1851,7 +1851,7 @@ describe("program — multiple positions per pool", () => {
       return { persisted, decisions };
     });
     const { persisted, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         {
           persisted: PositionRecord | null;
           decisions: ReadonlyArray<{ action: string; reasoning: string | null }>;
@@ -1958,7 +1958,7 @@ describe("program — multiple positions per pool", () => {
       return decisions;
     });
     const decisions = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         ReadonlyArray<{ action: string; executed: boolean; poolAddress: string }>,
         unknown,
         never
@@ -2025,7 +2025,7 @@ describe("A4 paper fee accrual requires datapi-MEASURED fees", () => {
       return { accruals, accruedUsd: pos?.cumulativeFeesClaimedUsd ?? 0 };
     });
     return Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         { accruals: ReadonlyArray<{ feesUsd: number | null }>; accruedUsd: number },
         unknown,
         never

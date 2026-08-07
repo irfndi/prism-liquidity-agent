@@ -70,7 +70,7 @@ function makeTestAdapterLayer() {
             ? Effect.void
             : Effect.sync(() => console.warn("Revenue report failed:", res.status)),
         ),
-        Effect.catchAll((err) =>
+        Effect.catch((err) =>
           Effect.sync(() => console.warn("Revenue report failed:", String(err))),
         ),
         Effect.asVoid,

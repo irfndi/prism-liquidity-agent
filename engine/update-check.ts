@@ -108,7 +108,7 @@ export function checkForAutoUpdate(config: AppConfig, db: DbApi): Effect.Effect<
 
     yield* db.setMetadata("lastUpdateCheckAt", String(now));
   }).pipe(
-    Effect.catchAll((err) => {
+    Effect.catch((err) => {
       log.warn("Auto-update check failed (non-fatal)", { error: String(err) });
       return Effect.void;
     }),

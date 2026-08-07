@@ -1,4 +1,4 @@
-import { Data, Effect, ParseResult, Schema } from "effect";
+import { Data, Effect, Schema } from "effect";
 import { randomUUID } from "crypto";
 import type { ActionType, AgentProposal } from "./types.js";
 
@@ -9,22 +9,26 @@ export class ProposalParseError extends Data.TaggedError("ProposalParseError")<{
 
 const PROPOSAL_TTL_MS = 5 * 60 * 1000;
 
-const ActionTypeSchema = Schema.Literal("HOLD", "REBALANCE", "EXIT", "ENTER");
+const ActionTypeSchema = Schema.Literals(["HOLD", "REBALANCE", "EXIT", "ENTER"]);
 
 const RebalanceParamsSchema = Schema.Struct({
   lowerBinId: Schema.Int,
   upperBinId: Schema.Int,
 }).pipe(
-  Schema.filter((params) => params.lowerBinId < params.upperBinId, {
-    message: () => "lowerBinId must be less than upperBinId",
-  }),
+  Schema.check(
+    Schema.makeFilter((params) => params.lowerBinId < params.upperBinId, {
+      message: "lowerBinId must be less than upperBinId",
+    }),
+  ),
 );
 
 const ProposalJsonSchema = Schema.Struct({
   action: ActionTypeSchema,
   poolAddress: Schema.NonEmptyString,
-  confidence: Schema.Number.pipe(Schema.between(0, 1)),
-  positionSizeUsd: Schema.optional(Schema.Number.pipe(Schema.nonNegative())),
+  confidence: Schema.Number.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 1 }))),
+  positionSizeUsd: Schema.optional(
+    Schema.Number.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
+  ),
   rebalanceParams: Schema.optional(RebalanceParamsSchema),
   reasoning: Schema.optional(Schema.String),
 });
@@ -87,11 +91,10 @@ function decodeProposalJson(raw: string): Effect.Effect<DecodedProposalJson, Pro
         }),
     });
 
-    return yield* Schema.decodeUnknown(ProposalJsonSchema)(parsed).pipe(
+    return yield* Schema.decodeUnknownEffect(ProposalJsonSchema)(parsed).pipe(
       Effect.mapError((err) => {
-        const formatted = ParseResult.TreeFormatter.formatErrorSync(err);
         return new ProposalParseError({
-          message: `Schema validation failed: ${formatted}`,
+          message: `Schema validation failed: ${err.message}`,
           cause: err,
         });
       }),

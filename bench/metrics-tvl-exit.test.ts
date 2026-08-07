@@ -219,7 +219,7 @@ describe("evaluatePool TVL-drop EXIT (integration)", () => {
     });
 
     const decisions = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         ReadonlyArray<{ action: string; reasoning: string }>,
         unknown,
         never

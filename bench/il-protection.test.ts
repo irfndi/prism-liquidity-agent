@@ -214,7 +214,11 @@ function runWithSeed(
     return yield* audit.getRecentDecisions(200);
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as Effect.Effect<ReadonlyArray<DecisionRow>, unknown, never>,
+    Effect.provide(test, layer) as unknown as Effect.Effect<
+      ReadonlyArray<DecisionRow>,
+      unknown,
+      never
+    >,
   );
 }
 

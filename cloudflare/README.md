@@ -17,28 +17,24 @@ cloudflare/
 │       └── telegram-bot.test.ts     # Bot tests (vitest-pool-workers)
 ├── infra/                           # Bun workspace package — Alchemy IaC (Effect 4 runtime)
 │   ├── alchemy.run.ts               # Alchemy composition root: both workers + D1/KV/R2/Vectorize
-│   ├── package.json                 # @prism-liquidity-agent/infra: alchemy (pinned) + effect@4
+│   ├── package.json                 # @prism-liquidity-agent/infra: alchemy (pinned) + effect@4 beta
 │   └── tsconfig.json                # Strict config for the composition root
 ├── migrations/
 │   └── NNNN_*.sql                   # D1 schema migrations (users, api_keys, telegram_link_codes, …)
 ├── wrangler.telegram.test.toml      # Test-only config (vitest-pool-workers), never deployed
 ├── vitest.config.ts                 # Vitest config with @cloudflare/vitest-pool-workers
 ├── tsconfig.json                    # TypeScript strict config (workers)
-└── package.json                     # Workspace root; workers on effect@3 (hono); dev: wrangler, vitest
+└── package.json                     # Workspace root; workers + infra on effect@4 beta; dev: wrangler, vitest
 ```
 
-> **Two Effect runtimes, one workspace.** The Worker runtime code (`workers/`,
-> `hono`) is pinned to `effect@^3.22.0`. Alchemy v2 (`alchemy@2.0.0-beta.64`)
-> requires the Effect 4 runtime (`peerDependencies effect
-> ">=4.0.0-beta.100 || >=4.0.0"`), which cannot share a dependency tree with the
-> workers. The Alchemy program is therefore isolated in its own Bun workspace
-> package, `infra/`, which carries `effect@4.0.0-beta.102` plus the
-> `@effect/platform-bun` / `@effect/platform-node` peers the Cloudflare provider
-> imports. A single `bun install` at `cloudflare/` installs both, nesting
-> `effect@4` under `infra/node_modules` while the workers resolve `effect@3` from
-> the workspace root. The worker `main` entries (`../workers/...`) are bundled by
-> Alchemy with a resolver rooted at the entry file, so they keep resolving
-> `effect@3` exactly as before.
+> **One Effect runtime, one workspace.** All of `cloudflare/` (workers,
+> `hono`, and the Alchemy composition root) runs on `effect@4.0.0-beta.105`.
+> Alchemy v2 (`alchemy@2.0.0-beta.64`) requires the Effect 4 runtime
+> (`peerDependencies effect ">=4.0.0-beta.100 || >=4.0.0"`). The workers and
+> `infra/` are pinned to the same `4.0.0-beta.105` line, so a single `bun
+> install` at `cloudflare/` resolves one Effect tree for the whole
+> subproject. The worker `main` entries (`../workers/...`) are bundled by
+> Alchemy with a resolver rooted at the entry file.
 
 ## Live Deployment (Production)
 
@@ -118,7 +114,7 @@ Alchemy applies `cloudflare/migrations/*.sql` on every deploy, using the wrangle
 ```bash
 git clone https://github.com/irfndi/prism-liquidity-agent.git
 cd prism-liquidity-agent/cloudflare
-bun install                        # workspace install: workers (effect@3) + infra (effect@4)
+bun install                        # workspace install: workers + infra (effect@4 beta)
 
 # Secrets resolve from env at deploy time (see above):
 export TELEGRAM_BOT_TOKEN=...

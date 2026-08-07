@@ -253,6 +253,7 @@ describe("ConfigService Wave 9 env vars", () => {
           return yield* ConfigService;
         }),
         ConfigLive,
+        { local: true },
       ),
     );
   }

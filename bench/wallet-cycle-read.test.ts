@@ -369,7 +369,7 @@ describe("mid-cycle position close excludes the row from the portfolio sum", () 
     });
 
     const { decisions, snapshot } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         {
           decisions: ReadonlyArray<{ action: string; reasoning: string }>;
           snapshot: PrismStateSnapshot;

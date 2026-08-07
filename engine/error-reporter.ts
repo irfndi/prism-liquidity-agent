@@ -82,7 +82,7 @@ function readPrismApiKey(): Effect.Effect<string | null, never> {
       return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
     },
     catch: (cause) => cause,
-  }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+  }).pipe(Effect.catch(() => Effect.succeed(null)));
 }
 
 // ─── Sanitization patterns ───────────────────────────────────────────────────
@@ -255,7 +255,7 @@ export class ErrorReporter {
     const batch = this.pending.splice(0, this.pending.length);
     const endpoint = this.endpoint;
 
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const apiKey = yield* readPrismApiKey();
       if (!apiKey && endpoint === DEFAULT_ERROR_ENDPOINT) {
         // Credential-bounded: never send without an API key. Re-queue the
@@ -297,7 +297,7 @@ export class ErrorReporter {
         );
       }
     }).pipe(
-      Effect.catchAll((err) =>
+      Effect.catch((err) =>
         Effect.sync(() => {
           this.requeueBatch(batch);
           console.error("[ErrorReporter] Failed to send error report batch, re-queued:", err);
@@ -329,7 +329,7 @@ export class ErrorReporter {
   }
 
   disposeEffect(): Effect.Effect<void, never> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       if (this.timerId !== null) {
         clearInterval(this.timerId);
         this.timerId = null;

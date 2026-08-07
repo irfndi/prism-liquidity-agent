@@ -36,8 +36,6 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.7.0",
-    "@effect/platform": "^0.97.1",
-    "@effect/platform-node": "^0.108.1",
     "@meteora-ag/dlmm": "^1.9.14",
     "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.98.4",
@@ -45,7 +43,7 @@
     "chalk": "^6.0.0",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
-    "effect": "^3.22.1",
+    "effect": "4.0.0-beta.105",
     "semver": "^7.8.5",
     "sqlite-vec": "^0.1.9"
   },

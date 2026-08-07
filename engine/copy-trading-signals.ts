@@ -158,7 +158,7 @@ export const CopySignalLive = Layer.effect(
             ignored: parseCopySignalPayload(raw).length - valid.length,
           };
         }),
-        Effect.catchAll((error) =>
+        Effect.catch((error) =>
           Effect.sync(() => {
             logger.warn("Copy-signal fetch failed; continuing without boost", {
               error: String(error),

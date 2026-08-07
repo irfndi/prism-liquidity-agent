@@ -718,7 +718,7 @@ function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
   } as AdapterApi;
 }
 
-type ExitResult = Effect.Effect.Success<ReturnType<AdapterApi["exitPosition"]>>;
+type ExitResult = Effect.Success<ReturnType<AdapterApi["exitPosition"]>>;
 
 /**
  * Full-contract `exitPosition` result with neutral defaults. Absent amounts

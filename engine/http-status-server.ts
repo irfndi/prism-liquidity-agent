@@ -101,7 +101,7 @@ export class HttpStatusServer {
       });
     }
 
-    const effect = Effect.gen(this, function* () {
+    const effect = Effect.gen({ self: this }, function* () {
       const proposals: AgentProposal[] = [];
       for (const [index, item] of items.entries()) {
         if (item === null || typeof item !== "object") {
@@ -310,7 +310,7 @@ export class HttpStatusServer {
   }
 
   start(): Effect.Effect<void, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       if (this.server) return;
       const port = this.config.agentHttpPort;
       if (port === 0) return;
@@ -423,14 +423,14 @@ export function HttpStatusServerLive(
       return {
         start: () =>
           server.start().pipe(
-            Effect.catchAll((err) => {
+            Effect.catch((err) => {
               logger.error("HTTP status server failed", { error: String(err) });
               return Effect.void;
             }),
           ),
         stop: () =>
           server.stop().pipe(
-            Effect.catchAll((err) => {
+            Effect.catch((err) => {
               logger.error("HTTP status server stop failed", { error: String(err) });
               return Effect.void;
             }),

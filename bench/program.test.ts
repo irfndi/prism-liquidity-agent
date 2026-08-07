@@ -37,14 +37,15 @@ import {
   type RevenueConfigApi,
 } from "../engine/services.js";
 
-function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
-  return Effect.runSync((Effect.provide as any)(effect, layer));
+async function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): Promise<T> {
+  // v4 layer building is async (memoized provides) — runSync is no longer valid.
+  return Effect.runPromise((Effect.provide as any)(effect, layer, { local: true }));
 }
 
 describe("Program integration", () => {
-  it("buildLayer provides all services", () => {
+  it("buildLayer provides all services", async () => {
     const layer = buildLayer();
-    const result = run(
+    const result = await run(
       Effect.gen(function* () {
         yield* ConfigService;
         yield* AdapterService;

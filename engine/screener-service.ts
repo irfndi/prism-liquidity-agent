@@ -36,7 +36,7 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
             const pools: ReadonlyArray<DiscoveredPool> = yield* adapter
               .discoverPools(scanOrdinal)
               .pipe(
-                Effect.catchAll((err) => {
+                Effect.catch((err) => {
                   if (
                     err instanceof DiscoverPoolsError ||
                     (err as { _tag?: string })?._tag === "DiscoverPoolsError"
@@ -102,7 +102,7 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
                   };
                 },
                 catch: (error) => error,
-              }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+              }).pipe(Effect.catch(() => Effect.succeed(null)));
 
               if (candidate) screened.push(candidate);
             }
@@ -114,7 +114,7 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
             const enriched: ScreenedPool[] = [];
             for (const candidate of sorted.slice(0, MAX_BIN_UTILIZATION_CHECKS)) {
               const binArray = yield* adapter.getBinArray(candidate.address).pipe(
-                Effect.catchAll((err) => {
+                Effect.catch((err) => {
                   logger.warn("Bin data unavailable for candidate — skipping utilization gate", {
                     pool: candidate.address,
                     error: String(err),

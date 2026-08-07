@@ -456,7 +456,7 @@ function transportSupportsCheckin(
 
 function connectTransport(transport: AgentRuntimeTransport): Effect.Effect<void, unknown> {
   return transport.connect().pipe(
-    Effect.catchAll((err) => {
+    Effect.catch((err) => {
       logger.warn("Failed to connect transport", {
         transport: transport.name,
         error: underlyingErrorMessage(err),
@@ -469,13 +469,13 @@ function connectTransport(transport: AgentRuntimeTransport): Effect.Effect<void,
 // Connect the review transport and report whether it actually connected. A failed
 // connect is logged and swallowed so a dead runtime never blocks engine startup; the
 // returned boolean is the truthful `connected` value getStatus() surfaces (the prior
-// Effect.tap set connected=true regardless of the catchAll-swallowed failure).
+// Effect.tap set connected=true regardless of the catch-swallowed failure).
 export function connectReviewTransport(
   transport: AgentRuntimeTransport,
 ): Effect.Effect<boolean, never> {
   return transport.connect().pipe(
     Effect.map(() => true),
-    Effect.catchAll((err) => {
+    Effect.catch((err) => {
       logger.warn("Failed to connect transport", {
         transport: transport.name,
         error: underlyingErrorMessage(err),
@@ -491,7 +491,7 @@ function sendToAlertTransports(
 ): Effect.Effect<void, unknown> {
   const effects = transports.filter(transportSupportsAlert).map((transport) =>
     transport.sendAlert(alert).pipe(
-      Effect.catchAll((err) => {
+      Effect.catch((err) => {
         logger.warn("Failed to send alert", {
           transport: transport.name,
           error: underlyingErrorMessage(err),
@@ -516,7 +516,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
         agentGatewayUrl: config.agentGatewayUrl,
         agentGatewayToken: config.agentGatewayToken,
       }).pipe(
-        Effect.catchAll(() =>
+        Effect.catch(() =>
           Effect.succeed({
             hermes: { available: false, path: null },
             openclaw: { available: false, path: null, gatewayRunning: false },
@@ -636,14 +636,14 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
                 }
                 return override;
               }),
-              Effect.catchAllCause((cause) => {
+              Effect.catchCause((cause) => {
                 errorCount += 1;
                 // Record actual elapsed duration for ALL failure modes:
-                // typed failures (disconnect, handshake) via catchAll above,
+                // typed failures (disconnect, handshake) via catch above,
                 // and outer timeouts (AGENT_VETO_TIMEOUT_MS from program.ts
                 // timeoutFail) which interrupt this fiber without reaching
-                // catchAll. Interruption is the only cause type that
-                // catchAll would not see. Record min(elapsed, budget) to
+                // catch. Interruption is the only cause type that
+                // catch would not see. Record min(elapsed, budget) to
                 // avoid a single hard timeout from dominating the window.
                 recordAttemptLatency();
                 return Effect.failCause(cause);
@@ -684,7 +684,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
                 }),
               );
             }),
-            Effect.catchAll((err) => {
+            Effect.catch((err) => {
               errorCount += 1;
               recordAttemptLatency();
               logger.warn("Agent proposal failed", {
@@ -693,9 +693,9 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
               });
               return Effect.succeed(null);
             }),
-            Effect.catchAllCause((cause) => {
+            Effect.catchCause((cause) => {
               // Interruption (the outer AGENT_PROPOSAL_TIMEOUT_MS deadline in
-              // program.ts) bypasses catchAll — record the elapsed sample so
+              // program.ts) bypasses catch — record the elapsed sample so
               // the latency window learns the model could not answer, and
               // fail open (null) exactly like a typed failure.
               recordAttemptLatency();
@@ -733,7 +733,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           // suppress the others.
           const effects = allTransports.filter(transportSupportsCheckin).map((t) =>
             t.sendCheckin(checkin).pipe(
-              Effect.catchAll((err) => {
+              Effect.catch((err) => {
                 errorCount += 1;
                 logger.warn("Agent check-in failed", {
                   transport: t.name,
@@ -762,7 +762,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           Effect.all(
             allTransports.map((t) =>
               t.disconnect().pipe(
-                Effect.catchAll((err) => {
+                Effect.catch((err) => {
                   logger.warn("Failed to disconnect transport", {
                     transport: t.name,
                     error: underlyingErrorMessage(err),
@@ -775,7 +775,7 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           ),
       };
     }).pipe(
-      Effect.catchAll((err) => {
+      Effect.catch((err) => {
         logger.error("Agent service initialization failed; falling back to no-op", {
           error: underlyingErrorMessage(err),
         });

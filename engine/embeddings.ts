@@ -69,7 +69,7 @@ export function getEmbedding(text: string): Effect.Effect<number[], never> {
   }
   return loadOnnx().pipe(
     Effect.flatMap((embed) => embed(text)),
-    Effect.catchAll((err) =>
+    Effect.catch((err) =>
       Effect.sync(() => {
         logger.warn(
           "ONNX embedding model unavailable; falling back to deterministic hash vectors. Memory similarity will be reduced.",

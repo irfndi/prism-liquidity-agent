@@ -1,4 +1,4 @@
-import { Config, Context, Effect, Layer } from "effect";
+import { Config, ConfigProvider, Context, Effect, Layer } from "effect";
 import { ConfigError } from "./errors.js";
 import { getPrismDbPath } from "./paths.js";
 import { loadKeystoreSecretKeyBase58 } from "./wallet-keystore.js";
@@ -550,7 +550,7 @@ export interface AppConfig {
   readonly fallenAngelMaxPositions?: number;
 }
 
-export class ConfigService extends Context.Tag("ConfigService")<ConfigService, AppConfig>() {}
+export class ConfigService extends Context.Service<ConfigService, AppConfig>()("ConfigService") {}
 
 function validatedNumber(name: string, min: number, fallback: number, max?: number) {
   return Config.number(name).pipe(
@@ -1615,4 +1615,24 @@ const loadConfig = Effect.gen(function* () {
   return cfg;
 });
 
-export const ConfigLive = Layer.effect(ConfigService, loadConfig);
+// v4's default ConfigProvider snapshots process.env ONCE at first use, so
+// env changes after startup (vitest stubs, CLI-set vars) are invisible to
+// later reads. Snapshot the CURRENT env at each build — `fromEnv()` must be
+// called lazily inside the effect, not at module load, or the snapshot is
+// taken before any env changes exist. In production the snapshot equals the
+// env dotenv loaded at startup; under tests each loadConfig sees the current
+// process.env (vi.stubEnv included).
+export const ConfigLive = Layer.effect(
+  ConfigService,
+  Effect.gen(function* () {
+    return yield* loadConfig.pipe(
+      Effect.provideService(
+        ConfigProvider.ConfigProvider,
+        // v4 treats literal "" as a missing env value by default; the engine
+        // contract says empty strings are meaningful (STABLECOIN_MINTS=""
+        // disables the allowlist, AGENT_GATEWAY_TOKEN="" disables a runtime).
+        ConfigProvider.fromEnv({ preserveEmptyStrings: true }),
+      ),
+    );
+  }),
+);

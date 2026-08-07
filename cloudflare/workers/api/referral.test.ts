@@ -130,7 +130,7 @@ describe("Referral API", () => {
 
     it("returns 500 for an unknown API key", async () => {
       // Handler behavior: the loginHandler failure leaks into the generic
-      // catchAll, so an invalid key yields 500 here while /v1/login, /v1/whoami
+      // catch, so an invalid key yields 500 here while /v1/login, /v1/whoami
       // and /v1/config return 401. Asserting the REAL behavior; see the test
       // report — this should be a 401.
       const response = await worker.fetch(

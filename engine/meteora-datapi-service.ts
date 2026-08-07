@@ -138,7 +138,7 @@ export const MeteoraDatapiLive = Layer.effect(
             ? Effect.fail(new Error(`Meteora Data API returned an invalid pool payload for ${url}`))
             : Effect.succeed(parsed);
         }),
-        Effect.catchAll((err) =>
+        Effect.catch((err) =>
           Effect.sync(() => {
             logger.warn("Meteora Data API unavailable — falling back to heuristic pool stats", {
               pool: poolAddress,

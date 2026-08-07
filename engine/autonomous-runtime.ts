@@ -162,10 +162,10 @@ export function loadDailyEquityBaseline(
 ): Effect.Effect<DailyEquityBaseline, never> {
   return Effect.gen(function* () {
     const keys = dailyBaselineKeys(scope);
-    const day = yield* db.getMetadata(keys.day).pipe(Effect.catchAll(() => Effect.succeed(null)));
+    const day = yield* db.getMetadata(keys.day).pipe(Effect.catch(() => Effect.succeed(null)));
     const equity = yield* db
       .getMetadata(keys.equity)
-      .pipe(Effect.catchAll(() => Effect.succeed(null)));
+      .pipe(Effect.catch(() => Effect.succeed(null)));
     const equityUsd = equity === null ? 0 : Number(equity);
     return {
       day: day ?? "",
@@ -185,7 +185,7 @@ export function persistDailyEquityBaseline(
       { key: keys.day, value: baseline.day },
       { key: keys.equity, value: String(baseline.equityUsd) },
     ])
-    .pipe(Effect.catchAll(() => Effect.void));
+    .pipe(Effect.catch(() => Effect.void));
 }
 
 function atomicUsd(amountAtomic: bigint, decimals: number, priceUsd: number): number {
@@ -459,7 +459,7 @@ export function processSettlementJobs(
           updatedAt: input.now,
         };
       }).pipe(
-        Effect.catchAll((error) =>
+        Effect.catch((error) =>
           Effect.succeed(
             submitted
               ? reconciliationJob(
@@ -477,7 +477,7 @@ export function processSettlementJobs(
       );
       const persisted = yield* input.db.saveSettlementJob(result).pipe(
         Effect.as(true),
-        Effect.catchAll(() => Effect.succeed(false)),
+        Effect.catch(() => Effect.succeed(false)),
       );
       if (persisted) processed.push(result);
     }
@@ -494,7 +494,7 @@ export function processSettlementJobs(
       if (completeJobs.length !== jobs.length) continue;
       const position = yield* input.db
         .getPosition(positionId)
-        .pipe(Effect.catchAll(() => Effect.succeed(null)));
+        .pipe(Effect.catch(() => Effect.succeed(null)));
       if (!position) continue;
       const outputUsd = completeJobs.reduce((sum, job) => sum + job.outputUsd, 0);
       const executionCostUsd = completeJobs.reduce((sum, job) => sum + job.executionCostUsd, 0);
@@ -514,7 +514,7 @@ export function processSettlementJobs(
           finalizedAt: input.now,
           signalSnapshotId: position.entrySignalSnapshotId,
         })
-        .pipe(Effect.catchAll(() => Effect.void));
+        .pipe(Effect.catch(() => Effect.void));
     }
     return processed;
   });

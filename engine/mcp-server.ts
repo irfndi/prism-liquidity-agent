@@ -396,14 +396,14 @@ export function McpServerLive(
       return {
         start: () =>
           server.start().pipe(
-            Effect.catchAll((err) => {
+            Effect.catch((err) => {
               logger.error("MCP server failed", { error: String(err) });
               return Effect.void;
             }),
           ),
         stop: () =>
           server.stop().pipe(
-            Effect.catchAll((err) => {
+            Effect.catch((err) => {
               logger.error("MCP server stop failed", { error: String(err) });
               return Effect.void;
             }),

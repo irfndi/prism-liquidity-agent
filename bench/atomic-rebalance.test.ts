@@ -585,7 +585,7 @@ describe("rebalance gate consumes the SDK simulation (live loop)", () => {
           return { decisions, positions, events };
         }),
         layer,
-      ) as Effect.Effect<
+      ) as unknown as Effect.Effect<
         {
           decisions: ReadonlyArray<DecisionRow>;
           positions: ReadonlyArray<PositionRecord>;
@@ -666,7 +666,7 @@ describe("rebalance gate consumes the SDK simulation (live loop)", () => {
           return yield* audit.getRecentDecisions(50);
         }),
         layer,
-      ) as Effect.Effect<ReadonlyArray<DecisionRow>, unknown, never>,
+      ) as unknown as Effect.Effect<ReadonlyArray<DecisionRow>, unknown, never>,
     );
 
     // The simulation ran and fed the gate...

@@ -215,7 +215,7 @@ export function retryEffectWithBackoff<T>(
 
   const attempt = (attemptNumber: number): Effect.Effect<T, unknown> =>
     effect.pipe(
-      Effect.catchAll((err) => {
+      Effect.catch((err) => {
         if (attemptNumber >= maxRetries || !isRetriableError(err)) {
           return Effect.fail(err);
         }
@@ -229,8 +229,8 @@ export function retryEffectWithBackoff<T>(
             `Retriable RPC error (attempt ${attemptNumber + 1}/${maxRetries}), retrying in ${delay}ms`,
           ),
         ).pipe(
-          Effect.zipRight(Effect.sleep(delay)),
-          Effect.zipRight(Effect.suspend(() => attempt(attemptNumber + 1))),
+          Effect.andThen(Effect.sleep(delay)),
+          Effect.andThen(Effect.suspend(() => attempt(attemptNumber + 1))),
         );
       }),
     );
@@ -281,7 +281,7 @@ export class CircuitBreaker {
     effect: Effect.Effect<T, unknown>,
     isRetriable?: (err: unknown) => boolean,
   ): Effect.Effect<T, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const current = this.getState();
       if (current === "OPEN") {
         return yield* Effect.fail(

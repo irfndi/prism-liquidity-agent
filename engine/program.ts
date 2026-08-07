@@ -180,7 +180,7 @@ function persist<T>(
   label: string,
   effect: Effect.Effect<T, unknown, never>,
 ): Effect.Effect<void, never, never> {
-  return Effect.catchAll(effect, (err) =>
+  return Effect.catch(effect, (err) =>
     Effect.sync(() =>
       logger.warn(
         `DB persistence failed for ${label}: ${err instanceof Error ? err.message : String(err)}`,
@@ -246,7 +246,7 @@ function postEngineStatus(
       statusLogger.warn("Engine status report rejected", { status: response.status });
     }
   }).pipe(
-    Effect.catchAllCause((cause) =>
+    Effect.catchCause((cause) =>
       Effect.sync(() => statusLogger.warn("Engine status report failed", { cause: String(cause) })),
     ),
   );
@@ -327,9 +327,7 @@ export const finalizeAppliedProposal = (
   action: ActionType,
 ): Effect.Effect<void> =>
   appliedQueuedProposalId !== undefined && (executed || action === "HOLD")
-    ? agentState
-        .dequeueProposals([appliedQueuedProposalId])
-        .pipe(Effect.catchAll(() => Effect.void))
+    ? agentState.dequeueProposals([appliedQueuedProposalId]).pipe(Effect.catch(() => Effect.void))
     : Effect.void;
 
 /**
@@ -462,7 +460,7 @@ export const recordAppliedProposalRiskDenial = (
   }
   return agentState
     .rejectProposal(args.appliedQueuedProposalId)
-    .pipe(Effect.catchAll(() => Effect.void));
+    .pipe(Effect.catch(() => Effect.void));
 };
 
 /** True when the agent runtime can actually send a sync proposal prompt. */
@@ -718,7 +716,7 @@ export function reconcilePositions(
     }
 
     const onChainPositions = yield* adapter.getAllWalletPositions(walletAddress).pipe(
-      Effect.catchAll((err) => {
+      Effect.catch((err) => {
         console.error("Reconcile: failed to fetch on-chain positions — skipping", {
           err: String(err),
         });
@@ -752,7 +750,7 @@ export function reconcilePositions(
             content: `Position ${positionId} on ${pos.poolAddress} was closed externally (e.g. via Solscan/Meteora UI). Removed from tracking.`,
             poolAddress: pos.poolAddress,
           })
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(Effect.catch(() => Effect.void));
       }
     }
 
@@ -783,7 +781,7 @@ export function reconcilePositions(
               content: `Position ${onChainPos.positionPubKey} on ${onChainPos.poolAddress} range synced to on-chain state (${onChainPos.lowerBinId}-${onChainPos.upperBinId}).`,
               poolAddress: onChainPos.poolAddress,
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
         }
         continue;
       }
@@ -792,7 +790,7 @@ export function reconcilePositions(
           `Reconciling: discovered external position ${onChainPos.positionPubKey} in ${onChainPos.poolAddress} — adding to tracking`,
         );
         const pool = yield* adapter.getPoolState(onChainPos.poolAddress).pipe(
-          Effect.catchAll((err) => {
+          Effect.catch((err) => {
             console.error("Reconcile: failed to fetch pool state for external position", {
               pool: onChainPos.poolAddress,
               err: String(err),
@@ -839,7 +837,7 @@ export function reconcilePositions(
               content: `External position ${onChainPos.positionPubKey} detected in ${onChainPos.poolAddress} and added to tracking.`,
               poolAddress: onChainPos.poolAddress,
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
         }
       }
     }
@@ -1049,7 +1047,7 @@ export function executePaper(
           },
           createdAt: Date.now(),
         })
-        .pipe(Effect.catchAll(() => Effect.void));
+        .pipe(Effect.catch(() => Effect.void));
     } else if (decision.action === "EXIT") {
       const pos = resolveTargetPosition(trackedPositions, decision);
       if (pos?.positionPubKey) {
@@ -1084,7 +1082,7 @@ export function executePaper(
             metadata: { realizedPnlUsd },
             createdAt: Date.now(),
           })
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(Effect.catch(() => Effect.void));
         yield* persist(
           `closePosition ${pos.positionId}`,
           db.closePosition(pos.positionId, realizedPnlUsd),
@@ -1092,7 +1090,7 @@ export function executePaper(
         if (pos.entrySignalSnapshotId != null) {
           yield* db
             .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
         }
         yield* persist(`markPaperExited ${pos.positionId}`, db.markPaperExited(pos.positionId));
         trackedPositions.delete(pos.positionId);
@@ -1124,7 +1122,7 @@ export function executePaper(
             },
             createdAt: Date.now(),
           })
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(Effect.catch(() => Effect.void));
       }
     }
     return { executed: true, error: undefined };
@@ -1285,7 +1283,7 @@ export function executeLive(
       });
       const persisted = yield* db.saveExecutionOperation(entryOperation).pipe(
         Effect.as(true),
-        Effect.catchAll(() => Effect.succeed(false)),
+        Effect.catch(() => Effect.succeed(false)),
       );
       if (!persisted) {
         return { executed: false, error: "Unable to persist entry operation before execution" };
@@ -1305,7 +1303,7 @@ export function executeLive(
       const entryReserveSol = Number(SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS) / 1e9;
       const preSwapSol = yield* adapter.getNativeSolBalance().pipe(
         Effect.map((lamports) => Number(lamports) / 1e9),
-        Effect.catchAll(() => Effect.succeed(null)),
+        Effect.catch(() => Effect.succeed(null)),
       );
       if (preSwapSol !== null && preSwapSol < entryReserveSol) {
         const deficitSol = entryReserveSol - preSwapSol;
@@ -1316,7 +1314,7 @@ export function executeLive(
         // ENTER. A failed price lookup falls back to the config value.
         const liveSolPrice = yield* adapter.getTokenPrices([SOL_MINT], { useFallback: false }).pipe(
           Effect.map((prices) => prices[SOL_MINT]),
-          Effect.catchAll(() => Effect.succeed(undefined)),
+          Effect.catch(() => Effect.succeed(undefined)),
         );
         const effectiveSolPrice =
           typeof liveSolPrice === "number" && liveSolPrice > 0 ? liveSolPrice : solPriceUsd;
@@ -1326,12 +1324,12 @@ export function executeLive(
             : GAS_TOP_UP_USDC;
         yield* adapter
           .swapUSDCForSOL(entryReserveSol, topUpUsdc)
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(Effect.catch(() => Effect.void));
       }
 
       const nativeBalance = yield* adapter.getNativeSolBalance().pipe(
         Effect.map((lamports) => ({ value: lamports, error: undefined as string | undefined })),
-        Effect.catchAll((err) =>
+        Effect.catch((err) =>
           Effect.succeed({
             value: null,
             error: `Unable to read native SOL balance: ${err instanceof Error ? err.message : String(err)}`,
@@ -1349,7 +1347,7 @@ export function executeLive(
             error,
             updatedAt: Date.now(),
           })
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(Effect.catch(() => Effect.void));
       if (nativeBalance.value === null) {
         const error = nativeBalance.error ?? "Unable to read native SOL balance";
         if (autonomous && entryOperation) {
@@ -1415,7 +1413,7 @@ export function executeLive(
             now,
           })) {
             yield* db.saveSettlementJob(job).pipe(
-              Effect.catchAll(() =>
+              Effect.catch(() =>
                 Effect.sync(() => {
                   settlementPersisted = false;
                 }),
@@ -1431,7 +1429,7 @@ export function executeLive(
                   triggeredAt: now,
                   resolvedAt: null,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
               break;
             }
           }
@@ -1445,7 +1443,7 @@ export function executeLive(
                 updatedAt: now,
               })
               .pipe(
-                Effect.catchAll(() =>
+                Effect.catch(() =>
                   Effect.sync(() => {
                     settlementPersisted = false;
                   }),
@@ -1462,7 +1460,7 @@ export function executeLive(
                 triggeredAt: now,
                 resolvedAt: null,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
           }
         }
         console.warn(prepResult.error, { pool: decision.poolAddress });
@@ -1471,7 +1469,7 @@ export function executeLive(
       preparation = prepResult.outcome;
       if (entryOperation) {
         entryOperation = { ...entryOperation, status: "prepared", updatedAt: Date.now() };
-        yield* db.saveExecutionOperation(entryOperation).pipe(Effect.catchAll(() => Effect.void));
+        yield* db.saveExecutionOperation(entryOperation).pipe(Effect.catch(() => Effect.void));
       }
     }
 
@@ -1491,14 +1489,16 @@ export function executeLive(
         )
         .pipe(
           Effect.tap((r) =>
-            console.info("Live position entered", {
-              pool: decision.poolAddress,
-              position: r.positionPubKey,
-              tx: r.txSignature,
-            }),
+            Effect.sync(() =>
+              console.info("Live position entered", {
+                pool: decision.poolAddress,
+                position: r.positionPubKey,
+                tx: r.txSignature,
+              }),
+            ),
           ),
           Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
-          Effect.catchAll((err) => {
+          Effect.catch((err) => {
             const msg = (err as { message?: string }).message ?? String(err);
             console.error("Live ENTER failed", {
               pool: decision.poolAddress,
@@ -1564,7 +1564,7 @@ export function executeLive(
             },
             createdAt: Date.now(),
           })
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(Effect.catch(() => Effect.void));
         if (entryOperation) {
           yield* db
             .saveExecutionOperation({
@@ -1574,7 +1574,7 @@ export function executeLive(
               txSignature: enterResult.result.txSignature,
               updatedAt: Date.now(),
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
         }
         return { executed: true, error: undefined };
       }
@@ -1589,7 +1589,7 @@ export function executeLive(
           now,
         })) {
           yield* db.saveSettlementJob(job).pipe(
-            Effect.catchAll(() =>
+            Effect.catch(() =>
               Effect.sync(() => {
                 settlementPersisted = false;
               }),
@@ -1605,7 +1605,7 @@ export function executeLive(
                 triggeredAt: now,
                 resolvedAt: null,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
             break;
           }
         }
@@ -1619,7 +1619,7 @@ export function executeLive(
               updatedAt: now,
             })
             .pipe(
-              Effect.catchAll(() =>
+              Effect.catch(() =>
                 Effect.sync(() => {
                   settlementPersisted = false;
                 }),
@@ -1636,7 +1636,7 @@ export function executeLive(
               triggeredAt: now,
               resolvedAt: null,
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
         }
       }
       return { executed: false, error: enterResult.error };
@@ -1664,7 +1664,7 @@ export function executeLive(
         });
         const persisted = yield* db.saveExecutionOperation(exitOperation).pipe(
           Effect.as(true),
-          Effect.catchAll(() => Effect.succeed(false)),
+          Effect.catch(() => Effect.succeed(false)),
         );
         if (!persisted) {
           return { executed: false, error: "Unable to persist exit operation before execution" };
@@ -1672,20 +1672,21 @@ export function executeLive(
       }
       let exited = false;
       let exitError: string | undefined = undefined;
-      let exitResultData: Effect.Effect.Success<ReturnType<AdapterApi["exitPosition"]>> | null =
-        null;
+      let exitResultData: Effect.Success<ReturnType<AdapterApi["exitPosition"]>> | null = null;
       if (pos?.positionPubKey) {
         const exitResult = yield* adapter
           .exitPosition(decision.poolAddress, pos.positionPubKey)
           .pipe(
             Effect.tap(() =>
-              console.info("Live position exited", {
-                pool: decision.poolAddress,
-                position: pos.positionPubKey,
-              }),
+              Effect.sync(() =>
+                console.info("Live position exited", {
+                  pool: decision.poolAddress,
+                  position: pos.positionPubKey,
+                }),
+              ),
             ),
             Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
-            Effect.catchAll((err) => {
+            Effect.catch((err) => {
               const msg = (err as { message?: string }).message ?? String(err);
               console.error("Live EXIT failed", {
                 pool: decision.poolAddress,
@@ -1704,7 +1705,7 @@ export function executeLive(
             txSignature: exitResult.result.txSignature,
             updatedAt: Date.now(),
           };
-          yield* db.saveExecutionOperation(exitOperation).pipe(Effect.catchAll(() => Effect.void));
+          yield* db.saveExecutionOperation(exitOperation).pipe(Effect.catch(() => Effect.void));
         }
         if (!exited) {
           // A failed close may have left the position half-closed on-chain
@@ -1774,7 +1775,7 @@ export function executeLive(
               updatedAt: now,
             };
             yield* db.saveSettlementJob(job).pipe(
-              Effect.catchAll(() =>
+              Effect.catch(() =>
                 Effect.sync(() => {
                   settlementPersisted = false;
                 }),
@@ -1790,7 +1791,7 @@ export function executeLive(
                   triggeredAt: now,
                   resolvedAt: null,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
               break;
             }
           }
@@ -1815,7 +1816,7 @@ export function executeLive(
                 metadata: { kind: "exit_sweep" },
                 createdAt: now,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
           }
           if ((exitResultData.sweptRewards ?? []).length > 0) {
             yield* db
@@ -1835,7 +1836,7 @@ export function executeLive(
                 metadata: { kind: "exit_sweep_reward" },
                 createdAt: now,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
           }
           const withdrawnUsd = exitResultData.withdrawnUsd ?? null;
           const pricingUnresolved = withdrawnUsd === null;
@@ -1870,7 +1871,7 @@ export function executeLive(
               },
               createdAt: now,
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
           return { executed: true, error: undefined };
         }
         if (pos) {
@@ -1933,7 +1934,7 @@ export function executeLive(
                   reportedToApi: false,
                   createdAt: Date.now(),
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
               // CLAIM event mirrors every other fee booking (a CLAIM row beside
               // the fee_claims record), tagged kind exit_sweep so the swept-fee
               // leg is distinguishable from periodic claims in the event log.
@@ -1950,7 +1951,7 @@ export function executeLive(
                   metadata: { kind: "exit_sweep", txSignature: sweepTxSignature },
                   createdAt: Date.now(),
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
             }
           }
           let sweptRewardUsd = 0;
@@ -1990,7 +1991,7 @@ export function executeLive(
                 },
                 createdAt: Date.now(),
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
           }
           // Persist the credited cumulatives onto the (still-open) row, THEN
           // close — closePosition runs last so the savePosition upsert (which
@@ -2004,7 +2005,7 @@ export function executeLive(
           if (pos.entrySignalSnapshotId != null && realizedPnlUsd != null) {
             yield* db
               .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
           }
           // 5. EXIT event: withdrawn USD (or null) + post-credit lifetime fees.
           const exitMetadata: Record<string, unknown> = { realizedPnlUsd };
@@ -2031,7 +2032,7 @@ export function executeLive(
               metadata: exitMetadata,
               createdAt: Date.now(),
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
           if (
             pricingUnresolved &&
             !(deps.unpricedExitWarnedPools?.has(decision.poolAddress) ?? false)
@@ -2048,7 +2049,7 @@ export function executeLive(
                     content: `EXIT on ${decision.poolAddress} closed without USD pricing (price feeds unresolved) — realized PnL recorded as n/a; raw amounts in event metadata`,
                     poolAddress: decision.poolAddress,
                   })
-                  .pipe(Effect.catchAll(() => Effect.void))
+                  .pipe(Effect.catch(() => Effect.void))
               : Effect.void;
           }
           trackedPositions.delete(pos.positionId);
@@ -2075,7 +2076,7 @@ export function executeLive(
             revenueShareOperatorPct,
             revenueConfigResult.feeWalletAddress,
           )
-          .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          .pipe(Effect.catch(() => Effect.succeed(null)));
 
         if (claimResult && (claimResult.feeX > 0 || claimResult.feeY > 0)) {
           yield* db
@@ -2096,7 +2097,7 @@ export function executeLive(
               reportedToApi: false,
               createdAt: Date.now(),
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
 
           // Mint-based net-fee USD priced inside the adapter (mirrors
           // simulateRebalance). Null → 0 fails closed so an unpriceable claim
@@ -2116,7 +2117,7 @@ export function executeLive(
               metadata: { txSignature: claimResult.txSignature },
               createdAt: Date.now(),
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
 
           if (
             claimResult.platformFeeX > 0 ||
@@ -2124,7 +2125,7 @@ export function executeLive(
             (claimResult.operatorFeeX ?? 0) > 0 ||
             (claimResult.operatorFeeY ?? 0) > 0
           ) {
-            yield* Effect.fork(
+            yield* Effect.forkChild(
               adapter
                 .reportFeeCollection({
                   poolAddress: decision.poolAddress,
@@ -2146,7 +2147,7 @@ export function executeLive(
                   }),
                 })
                 .pipe(
-                  Effect.catchAllCause((cause) =>
+                  Effect.catchCause((cause) =>
                     Effect.sync(() =>
                       console.error("reportFeeCollection failed", { cause: String(cause) }),
                     ),
@@ -2165,14 +2166,16 @@ export function executeLive(
           )
           .pipe(
             Effect.tap((r) =>
-              console.info("Live position rebalanced atomically", {
-                pool: decision.poolAddress,
-                position: r.positionPubKey,
-                txSignatures: r.txSignatures.length,
-              }),
+              Effect.sync(() =>
+                console.info("Live position rebalanced atomically", {
+                  pool: decision.poolAddress,
+                  position: r.positionPubKey,
+                  txSignatures: r.txSignatures.length,
+                }),
+              ),
             ),
             Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
-            Effect.catchAll((err) => {
+            Effect.catch((err) => {
               const msg = (err as { message?: string }).message ?? String(err);
               console.error("Live atomic REBALANCE failed", {
                 pool: decision.poolAddress,
@@ -2220,7 +2223,7 @@ export function executeLive(
               },
               createdAt: Date.now(),
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
           return { executed: true, error: undefined };
         }
         // Atomic failure leaves the on-chain position untouched — unless the
@@ -2297,7 +2300,7 @@ export const program = Effect.gen(function* () {
 
   // Load persisted positions at startup (keyed by position identity — a pool
   // may hold several positions).
-  const allPositions = yield* db.getAllPositions().pipe(Effect.catchAll(() => Effect.succeed([])));
+  const allPositions = yield* db.getAllPositions().pipe(Effect.catch(() => Effect.succeed([])));
   const trackedPositions = new Map<string, PositionRecord>();
   for (const pos of allPositions) {
     trackedPositions.set(pos.positionId, pos);
@@ -2308,7 +2311,7 @@ export const program = Effect.gen(function* () {
       ? null
       : yield* db
           .getSafetyPause(autonomousExecution.walletAddress, autonomousExecution.agentInstanceId)
-          .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          .pipe(Effect.catch(() => Effect.succeed(null)));
   let consecutiveCoreDataFailures = 0;
   let consecutiveExecutionFailures = 0;
   let coreDataFailuresThisCycle = 0;
@@ -2384,12 +2387,12 @@ export const program = Effect.gen(function* () {
     if (!config.paperTrading) return 0;
     const lastDay = yield* db
       .getMetadata(PAPER_DAYS_LAST_KEY)
-      .pipe(Effect.catchAll(() => Effect.succeed(null)));
+      .pipe(Effect.catch(() => Effect.succeed(null)));
     const today = todayIso();
     if (lastDay === today) return 0;
     const stored = yield* db
       .getMetadata(PAPER_DAYS_KEY)
-      .pipe(Effect.catchAll(() => Effect.succeed("0")));
+      .pipe(Effect.catch(() => Effect.succeed("0")));
     const current = Number(stored) || 0;
     const next = current + 1;
     yield* db
@@ -2397,7 +2400,7 @@ export const program = Effect.gen(function* () {
         { key: PAPER_DAYS_KEY, value: String(next) },
         { key: PAPER_DAYS_LAST_KEY, value: today },
       ])
-      .pipe(Effect.catchAll(() => Effect.void));
+      .pipe(Effect.catch(() => Effect.void));
     if (next % 7 === 0) {
       console.info(`[paper-validation] ${next} paper days accumulated`);
     }
@@ -2407,7 +2410,7 @@ export const program = Effect.gen(function* () {
   const readPaperDays = Effect.gen(function* () {
     const stored = yield* db
       .getMetadata(PAPER_DAYS_KEY)
-      .pipe(Effect.catchAll(() => Effect.succeed("0")));
+      .pipe(Effect.catch(() => Effect.succeed("0")));
     return Number(stored) || 0;
   });
 
@@ -2420,9 +2423,7 @@ export const program = Effect.gen(function* () {
   };
 
   const loadEvolvedThresholds = Effect.gen(function* () {
-    const stored = yield* db
-      .getEvolvedThresholds()
-      .pipe(Effect.catchAll(() => Effect.succeed(null)));
+    const stored = yield* db.getEvolvedThresholds().pipe(Effect.catch(() => Effect.succeed(null)));
     if (stored) {
       evolvedThresholds = stored;
     }
@@ -2433,14 +2434,14 @@ export const program = Effect.gen(function* () {
   const tryEvolveThresholds = Effect.gen(function* () {
     const countStr = yield* db
       .getMetadata(EVOLUTION_COUNT_KEY)
-      .pipe(Effect.catchAll(() => Effect.succeed("0")));
+      .pipe(Effect.catch(() => Effect.succeed("0")));
     const count = Number(countStr) || 0;
 
     if (count < config.evolutionInterval) return;
 
     const outcomes = yield* db
       .getClosedPositionOutcomes(1000)
-      .pipe(Effect.catchAll(() => Effect.succeed([])));
+      .pipe(Effect.catch(() => Effect.succeed([])));
 
     const result = evolveThresholds(outcomes, evolvedThresholds, {
       maxChangePct: config.evolutionMaxChangePct,
@@ -2449,7 +2450,7 @@ export const program = Effect.gen(function* () {
 
     if (result.changed) {
       evolvedThresholds = result.thresholds;
-      yield* db.saveEvolvedThresholds(result.thresholds).pipe(Effect.catchAll(() => Effect.void));
+      yield* db.saveEvolvedThresholds(result.thresholds).pipe(Effect.catch(() => Effect.void));
       console.info("[threshold-evolution] Evolved thresholds", {
         minFeeIlRatio: result.thresholds.minFeeIlRatio.toFixed(3),
         volumeAuthThreshold: result.thresholds.volumeAuthThreshold.toFixed(3),
@@ -2466,7 +2467,7 @@ export const program = Effect.gen(function* () {
       });
       if (newWeights.updatedAt !== signalWeights.updatedAt) {
         signalWeights = newWeights;
-        yield* db.saveSignalWeights(newWeights).pipe(Effect.catchAll(() => Effect.void));
+        yield* db.saveSignalWeights(newWeights).pipe(Effect.catch(() => Effect.void));
         console.info("[signal-weights] Recomputed weights", {
           feeIlRatio: newWeights.feeIlRatio.toFixed(3),
           volumeAuthenticity: newWeights.volumeAuthenticity.toFixed(3),
@@ -2476,17 +2477,17 @@ export const program = Effect.gen(function* () {
         });
       }
     }
-    yield* db.setMetadata(EVOLUTION_COUNT_KEY, "0").pipe(Effect.catchAll(() => Effect.void));
+    yield* db.setMetadata(EVOLUTION_COUNT_KEY, "0").pipe(Effect.catch(() => Effect.void));
   });
 
   const incrementEvolutionCount = Effect.gen(function* () {
     const countStr = yield* db
       .getMetadata(EVOLUTION_COUNT_KEY)
-      .pipe(Effect.catchAll(() => Effect.succeed("0")));
+      .pipe(Effect.catch(() => Effect.succeed("0")));
     const count = Number(countStr) || 0;
     yield* db
       .setMetadata(EVOLUTION_COUNT_KEY, String(count + 1))
-      .pipe(Effect.catchAll(() => Effect.void));
+      .pipe(Effect.catch(() => Effect.void));
   });
 
   // ─── Signal weights state ─────────────────────────────────────────────
@@ -2501,7 +2502,7 @@ export const program = Effect.gen(function* () {
   let signalWeights: SignalWeights = DEFAULT_SIGNAL_WEIGHTS;
 
   const loadSignalWeights = Effect.gen(function* () {
-    const stored = yield* db.getSignalWeights().pipe(Effect.catchAll(() => Effect.succeed(null)));
+    const stored = yield* db.getSignalWeights().pipe(Effect.catch(() => Effect.succeed(null)));
     if (stored) {
       signalWeights = stored;
     }
@@ -2512,7 +2513,7 @@ export const program = Effect.gen(function* () {
   if (!config.paperTrading) {
     const paperExited = yield* db
       .getPaperExitedPositions()
-      .pipe(Effect.catchAll(() => Effect.succeed([])));
+      .pipe(Effect.catch(() => Effect.succeed([])));
     if (paperExited.length > 0) {
       console.warn(
         `Found ${paperExited.length} paper-exited position(s) from a previous paper-trading run. ` +
@@ -2561,7 +2562,7 @@ export const program = Effect.gen(function* () {
   if (config.autonomousTokenMode !== "off") {
     const persistedCandidates = yield* db
       .listTokenCandidates(autonomousCandidateWallet, config.agentInstanceId)
-      .pipe(Effect.catchAll(() => Effect.succeed([])));
+      .pipe(Effect.catch(() => Effect.succeed([])));
     for (const candidate of persistedCandidates) {
       autonomousCandidates.set(candidate.id, candidate);
       autonomousCandidatePools.add(candidate.poolAddress);
@@ -2577,7 +2578,7 @@ export const program = Effect.gen(function* () {
 
   if (shouldDiscoverPools(config) && config.autonomousTokenMode === "off") {
     const screened = yield* screener.screenPools().pipe(
-      Effect.catchAll((err) => {
+      Effect.catch((err) => {
         if (
           err instanceof DiscoverPoolsError ||
           (err as { _tag?: string })?._tag === "DiscoverPoolsError"
@@ -2690,7 +2691,7 @@ export const program = Effect.gen(function* () {
                 : { createdAtMs: rank.pool.createdAtMs }),
             }))
           : yield* screener.screenPools(scanOrdinal).pipe(
-              Effect.catchAll((error) => {
+              Effect.catch((error) => {
                 logger.warn("Autonomous candidate discovery failed", {
                   error: String(error),
                 });
@@ -2710,9 +2711,7 @@ export const program = Effect.gen(function* () {
           );
           if (advancedCandidate !== candidate) {
             autonomousCandidates.set(advancedCandidate.id, advancedCandidate);
-            yield* db
-              .saveTokenCandidate(advancedCandidate)
-              .pipe(Effect.catchAll(() => Effect.void));
+            yield* db.saveTokenCandidate(advancedCandidate).pipe(Effect.catch(() => Effect.void));
           }
         }
       }
@@ -2730,14 +2729,14 @@ export const program = Effect.gen(function* () {
           ? []
           : yield* adapter
               .getTokenPriceEvidence(mints)
-              .pipe(Effect.catchAll(() => Effect.succeed([])));
+              .pipe(Effect.catch(() => Effect.succeed([])));
       const routeAvailableMints = new Set<string>();
       if (adapter.quoteSwap !== undefined) {
         const quoteSwap = adapter.quoteSwap;
         const nonSolMints = mints.filter((mint) => mint !== SOL_MINT);
         const prices = yield* adapter
           .getTokenPrices([SOL_MINT], { useFallback: false })
-          .pipe(Effect.catchAll(() => Effect.succeed<Record<string, number>>({})));
+          .pipe(Effect.catch(() => Effect.succeed<Record<string, number>>({})));
         const solPrice = prices[SOL_MINT] ?? 0;
         const tokenPrices = new Map(
           priceEvidence.map((evidence) => [evidence.mint, evidence.priceUsd]),
@@ -2746,7 +2745,7 @@ export const program = Effect.gen(function* () {
         for (const mint of nonSolMints) {
           const decimals = yield* adapter
             .getTokenDecimals(mint)
-            .pipe(Effect.catchAll(() => Effect.succeed(null)));
+            .pipe(Effect.catch(() => Effect.succeed(null)));
           if (decimals !== null) decimalsByMint.set(mint, decimals);
         }
         const routeProbes = nonSolMints.map((mint) => {
@@ -2765,7 +2764,7 @@ export const program = Effect.gen(function* () {
                 slippageBps: config.maxSwapSlippageBps,
               }).pipe(
                 Effect.as(true),
-                Effect.catchAll(() => Effect.succeed(false)),
+                Effect.catch(() => Effect.succeed(false)),
               ),
               quoteSwap({
                 inputMint: mint,
@@ -2774,7 +2773,7 @@ export const program = Effect.gen(function* () {
                 slippageBps: config.maxSwapSlippageBps,
               }).pipe(
                 Effect.as(true),
-                Effect.catchAll(() => Effect.succeed(false)),
+                Effect.catch(() => Effect.succeed(false)),
               ),
             ],
             { concurrency: 4 },
@@ -2808,7 +2807,7 @@ export const program = Effect.gen(function* () {
               autonomousCandidates.set(candidate.id, candidate);
             }),
           ),
-          Effect.catchAll((error) =>
+          Effect.catch((error) =>
             Effect.sync(() => {
               logger.warn("Autonomous candidate persistence failed", {
                 candidate: candidate.id,
@@ -2836,7 +2835,7 @@ export const program = Effect.gen(function* () {
       if (config.fallenAngelEnabled !== true || !shouldDiscoverPools(config)) return;
       const discovered = yield* adapter
         .discoverPools(scanOrdinal)
-        .pipe(Effect.catchAll(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)));
+        .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)));
       if (discovered.length === 0) return;
 
       const rugcheckCache = new Map<string, RugCheckReport | null>();
@@ -2920,11 +2919,11 @@ export const program = Effect.gen(function* () {
   // immediately after startup (not just after the first scan cycle).
   yield* agentState
     .updateSnapshot({ positions: buildPositionSnapshots(trackedPositions.values()) })
-    .pipe(Effect.catchAll(() => Effect.void));
+    .pipe(Effect.catch(() => Effect.void));
 
   // Start agent-facing servers (MCP and HTTP fallback)
-  yield* mcpServer.start().pipe(Effect.catchAll(() => Effect.void));
-  yield* httpStatusServer.start().pipe(Effect.catchAll(() => Effect.void));
+  yield* mcpServer.start().pipe(Effect.catch(() => Effect.void));
+  yield* httpStatusServer.start().pipe(Effect.catch(() => Effect.void));
 
   if (
     config.agentiveMode &&
@@ -2942,7 +2941,7 @@ export const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const snapshot = yield* agentState
         .getSnapshot()
-        .pipe(Effect.catchAll(() => Effect.succeed(initialSnapshot)));
+        .pipe(Effect.catch(() => Effect.succeed(initialSnapshot)));
       const positions = buildPositionSnapshots(trackedPositions.values());
       const positionsValueUsd = positions.reduce((sum, p) => sum + p.currentValueUsd, 0);
       const unrealizedPnlUsd = positions.reduce(
@@ -2951,7 +2950,7 @@ export const program = Effect.gen(function* () {
       );
       const recentDecisions = yield* audit
         .getRecentDecisions(20)
-        .pipe(Effect.catchAll(() => Effect.succeed([])));
+        .pipe(Effect.catch(() => Effect.succeed([])));
 
       const now = Date.now();
       let badProposalBackoffUntil: number | null = null;
@@ -3039,7 +3038,7 @@ export const program = Effect.gen(function* () {
         idleCapitalUsd = Math.max(config.paperPortfolioUsd - deployedUsd, 0);
       } else {
         const holdings = yield* adapter.getWalletHoldings().pipe(
-          Effect.catchAll((err) => {
+          Effect.catch((err) => {
             idleRedeployLogger.warn(
               "Wallet holdings read failed — idle redeploy skipped this cycle",
               { error: String(err) },
@@ -3115,7 +3114,7 @@ export const program = Effect.gen(function* () {
               executed: false,
               paperTrading: config.paperTrading,
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
           continue;
         }
 
@@ -3133,7 +3132,7 @@ export const program = Effect.gen(function* () {
               executed: false,
               paperTrading: config.paperTrading,
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
 
         // P2 (3654054425, entry backoff): if this pool's normal ENTER failed with
         // an insufficient-token-balance error earlier THIS cycle (or earlier),
@@ -3249,10 +3248,10 @@ export const program = Effect.gen(function* () {
             positionsForPool(trackedPositions, overlayPoolAddress).length > 0;
           const overlayWarnings = yield* memory
             .getRelevantContext(`warnings for pool ${overlayPoolAddress}`, 3, overlayPoolAddress)
-            .pipe(Effect.catchAll(() => Effect.succeed([])));
+            .pipe(Effect.catch(() => Effect.succeed([])));
           const overlayRecentDecisions = yield* audit
             .getRecentDecisions(10)
-            .pipe(Effect.catchAll(() => Effect.succeed([])));
+            .pipe(Effect.catch(() => Effect.succeed([])));
           let overlaySkip = false;
 
           if (proposalMode === "veto") {
@@ -3268,7 +3267,7 @@ export const program = Effect.gen(function* () {
                 recentDecisions: overlayRecentDecisions,
                 hasOpenPosition: overlayHasOpenPosition,
               })
-              .pipe(Effect.catchAll(() => Effect.succeed(null)));
+              .pipe(Effect.catch(() => Effect.succeed(null)));
             if (enhanced) {
               idleRedeployLogger.info("Agent veto override on idle-redeploy", {
                 pool: overlayPoolAddress,
@@ -3300,7 +3299,7 @@ export const program = Effect.gen(function* () {
 
             if (!agentProposal && proposalMode !== "supervised") {
               const agentStatus = yield* agent.getStatus().pipe(
-                Effect.catchAll(() =>
+                Effect.catch(() =>
                   Effect.succeed({
                     connected: false,
                     transport: null,
@@ -3329,14 +3328,16 @@ export const program = Effect.gen(function* () {
                     // Outer deadline mirrors the tail: a stalled reconnect
                     // must not stall the redeploy pass past the proposal
                     // budget.
-                    Effect.timeoutFail({
+                    Effect.timeoutOrElse({
                       duration: `${config.agentProposalTimeoutMs} millis`,
-                      onTimeout: () =>
-                        new Error(
-                          `Agent proposal sync timed out after ${config.agentProposalTimeoutMs}ms`,
+                      orElse: () =>
+                        Effect.fail(
+                          new Error(
+                            `Agent proposal sync timed out after ${config.agentProposalTimeoutMs}ms`,
+                          ),
                         ),
                     }),
-                    Effect.catchAll(() => Effect.succeed(null)),
+                    Effect.catch(() => Effect.succeed(null)),
                   );
                 if (syncProposal && isAgentProposal(syncProposal)) {
                   agentProposal = syncProposal;
@@ -3431,7 +3432,7 @@ export const program = Effect.gen(function* () {
                 if (proposalSource === "queue" && agentProposal.proposalId) {
                   yield* agentState
                     .rejectProposal(agentProposal.proposalId)
-                    .pipe(Effect.catchAll(() => Effect.void));
+                    .pipe(Effect.catch(() => Effect.void));
                 }
               }
             }
@@ -3561,7 +3562,7 @@ export const program = Effect.gen(function* () {
               executed: false,
               paperTrading: config.paperTrading,
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
           // Follow-up 3655404920: mirror the in-slot tail — a deterministic risk
           // denial after an applied full/supervised proposal rejects the queued
           // proposal and arms backoff / circuit breaker, so the same approved
@@ -3638,7 +3639,7 @@ export const program = Effect.gen(function* () {
             action: decision.action,
             confidence: decision.confidence,
           })
-          .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          .pipe(Effect.catch(() => Effect.succeed(null)));
 
         // Same entry-shape / range-width resolution the in-slot tail uses.
         const entryStrategyShape: EntryStrategyShape =
@@ -3777,7 +3778,7 @@ export const program = Effect.gen(function* () {
           // exactly as after a normal live ENTER.
           if (executed) {
             lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
-              Effect.catchAll(() => {
+              Effect.catch(() => {
                 liveEntriesBlockedRestOfCycle = true;
                 idleRedeployLogger.warn(
                   "Wallet balance refresh failed after live idle-redeploy entry — blocking further entries this cycle",
@@ -3819,9 +3820,7 @@ export const program = Effect.gen(function* () {
                 },
               );
               autonomousCandidates.set(enteredCandidate.id, enteredCandidate);
-              yield* db
-                .saveTokenCandidate(enteredCandidate)
-                .pipe(Effect.catchAll(() => Effect.void));
+              yield* db.saveTokenCandidate(enteredCandidate).pipe(Effect.catch(() => Effect.void));
             }
           }
         }
@@ -3868,7 +3867,7 @@ export const program = Effect.gen(function* () {
             error: executionError,
             paperTrading: config.paperTrading,
           })
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(Effect.catch(() => Effect.void));
         cycle.decisions.push(decision);
         // This candidate survived every fresh gate and was dispatched (whether or
         // not the tx landed) — the walk stops here. At most one redeploy ENTER per
@@ -3895,7 +3894,7 @@ export const program = Effect.gen(function* () {
       lastMarketRefreshAt = now;
       const discovered = yield* adapter
         .discoverPoolsTopPages(config.marketScanUniversePages ?? 3)
-        .pipe(Effect.catchAll(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)));
+        .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)));
       if (discovered.length === 0) {
         logger.warn("Market scan: universe fetch returned nothing — keeping last ranked set");
         return;
@@ -3974,7 +3973,7 @@ export const program = Effect.gen(function* () {
               autonomousExecution.walletAddress,
               autonomousExecution.agentInstanceId,
             )
-            .pipe(Effect.catchAll(() => Effect.succeed([])))),
+            .pipe(Effect.catch(() => Effect.succeed([])))),
         ];
         // Issue #166: sweep wallet tokens with no backing position or active
         // settlement job (dead rollback settlements, failed swap-funded
@@ -3991,7 +3990,7 @@ export const program = Effect.gen(function* () {
             now: settlementNow,
           });
           for (const job of orphanJobs) {
-            yield* db.saveSettlementJob(job).pipe(Effect.catchAll(() => Effect.void));
+            yield* db.saveSettlementJob(job).pipe(Effect.catch(() => Effect.void));
           }
           settlementJobs.push(...orphanJobs);
         }
@@ -4016,7 +4015,7 @@ export const program = Effect.gen(function* () {
             triggeredAt: settlementNow,
             resolvedAt: null,
           };
-          yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+          yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
         } else if (
           activeSafetyPause?.resolvedAt === null &&
           activeSafetyPause.reason === "settlement_overdue" &&
@@ -4027,11 +4026,11 @@ export const program = Effect.gen(function* () {
           // retries finally sold the token, or the orphan sweep recovered
           // it), auto-resolve instead of latching until `prism resume`.
           activeSafetyPause = { ...activeSafetyPause, resolvedAt: settlementNow };
-          yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+          yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
         }
         activeSafetyPause = yield* db
           .getSafetyPause(autonomousExecution.walletAddress, autonomousExecution.agentInstanceId)
-          .pipe(Effect.catchAll(() => Effect.succeed(activeSafetyPause)));
+          .pipe(Effect.catch(() => Effect.succeed(activeSafetyPause)));
       }
 
       if (poolsToScan.length === 0) {
@@ -4056,14 +4055,14 @@ export const program = Effect.gen(function* () {
       if (adapter.hasWallet() && !config.paperTrading) {
         lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
           // Runs only on the success channel: a failed read skips this and the
-          // catchAll below reuses the (possibly fictional) stale value, so the
+          // catch below reuses the (possibly fictional) stale value, so the
           // ENTER gate stays fail-closed until a real balance is observed.
           Effect.tap(() =>
             Effect.sync(() => {
               walletEverReadSuccessfully = true;
             }),
           ),
-          Effect.catchAll((err) => {
+          Effect.catch((err) => {
             // Live degradation only: a transient wallet read must never fail a
             // pool or blank a cycle's screening. Reuse the last known value
             // (stale) and warn once for this cycle, then keep evaluating.
@@ -4127,11 +4126,11 @@ export const program = Effect.gen(function* () {
       // (including SOL-only wallets, which previously produced no snapshot at
       // all) are fully explained by the drift log.
       if (adapter.hasWallet() && !config.paperTrading && scanCount % 10 === 0) {
-        yield* Effect.fork(
+        yield* Effect.forkChild(
           Effect.gen(function* () {
             const raw = yield* Effect.all([
-              adapter.getWalletHoldings().pipe(Effect.catchAll(() => Effect.succeed(null))),
-              adapter.getNativeSolBalance().pipe(Effect.catchAll(() => Effect.succeed(null))),
+              adapter.getWalletHoldings().pipe(Effect.catch(() => Effect.succeed(null))),
+              adapter.getNativeSolBalance().pipe(Effect.catch(() => Effect.succeed(null))),
             ]);
             const [holdings, nativeSolLamports] = raw;
             if (holdings === null || nativeSolLamports === null) {
@@ -4159,7 +4158,7 @@ export const program = Effect.gen(function* () {
                 scanCount,
               });
             }
-          }).pipe(Effect.catchAll(() => Effect.void)),
+          }).pipe(Effect.catch(() => Effect.void)),
         );
       }
 
@@ -4180,7 +4179,7 @@ export const program = Effect.gen(function* () {
           idleRedeployCandidates,
           executedExitPools,
         ).pipe(
-          Effect.catchAll((err) => {
+          Effect.catch((err) => {
             cycle.poolsFailed++;
             coreDataFailuresThisCycle++;
             console.error("Error processing pool", { poolAddress, err: String(err) });
@@ -4243,7 +4242,7 @@ export const program = Effect.gen(function* () {
             triggeredAt: Date.now(),
             resolvedAt: null,
           };
-          yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+          yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
         }
       }
 
@@ -4266,7 +4265,7 @@ export const program = Effect.gen(function* () {
       });
 
       // Prune expired memories after each cycle
-      yield* memory.pruneExpired().pipe(Effect.catchAll(() => Effect.void));
+      yield* memory.pruneExpired().pipe(Effect.catch(() => Effect.void));
 
       // Prune pool_snapshots past the retention window (they grow every
       // cycle). Runs at most once per day; the first cycle prunes immediately.
@@ -4274,9 +4273,7 @@ export const program = Effect.gen(function* () {
       if (nowForPrune - lastSnapshotPruneAt > SNAPSHOT_PRUNE_INTERVAL_MS) {
         lastSnapshotPruneAt = nowForPrune;
         const cutoff = nowForPrune - config.snapshotRetentionDays * 86_400_000;
-        const pruned = yield* db
-          .pruneSnapshots(cutoff)
-          .pipe(Effect.catchAll(() => Effect.succeed(0)));
+        const pruned = yield* db.pruneSnapshots(cutoff).pipe(Effect.catch(() => Effect.succeed(0)));
         if (pruned > 0) {
           console.info("[snapshot-retention] Pruned old pool snapshots", {
             pruned,
@@ -4300,13 +4297,13 @@ export const program = Effect.gen(function* () {
             p.cumulativeRewardsClaimedUsd -
             p.depositedUsd;
         }
-        yield* Effect.fork(postEngineStatus("running", trackedPositions.size, pnl)).pipe(
+        yield* Effect.forkChild(postEngineStatus("running", trackedPositions.size, pnl)).pipe(
           Effect.asVoid,
         );
       }
 
       scanCount += 1;
-      yield* maybeSendAgentCheckin("periodic").pipe(Effect.catchAll(() => Effect.void));
+      yield* maybeSendAgentCheckin("periodic").pipe(Effect.catch(() => Effect.void));
       yield* refreshAgentState();
     });
 
@@ -4318,11 +4315,11 @@ export const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const recentDecisions = yield* audit
         .getRecentDecisions(20)
-        .pipe(Effect.catchAll(() => Effect.succeed([])));
+        .pipe(Effect.catch(() => Effect.succeed([])));
       const warnings = config.agentCheckinIncludeHistory
         ? yield* memory
             .getRelevantContext("recent warnings", 10)
-            .pipe(Effect.catchAll(() => Effect.succeed([])))
+            .pipe(Effect.catch(() => Effect.succeed([])))
         : [];
       const positions = Array.from(trackedPositions.values())
         .sort((a, b) => b.currentValueUsd - a.currentValueUsd)
@@ -4391,7 +4388,7 @@ export const program = Effect.gen(function* () {
         return;
       }
       const checkin = yield* buildAgentCheckin(trigger);
-      yield* agent.sendCheckin(checkin).pipe(Effect.catchAll(() => Effect.void));
+      yield* agent.sendCheckin(checkin).pipe(Effect.catch(() => Effect.void));
       lastAgentCheckinAt = Date.now();
     });
 
@@ -4430,7 +4427,7 @@ export const program = Effect.gen(function* () {
         },
         ...(position ? { position } : {}),
       };
-      yield* agent.sendAlert(alert).pipe(Effect.catchAll(() => Effect.void));
+      yield* agent.sendAlert(alert).pipe(Effect.catch(() => Effect.void));
     });
 
   const proposalBackoff = new Map<string, ProposalBackoff>();
@@ -4510,7 +4507,7 @@ export const program = Effect.gen(function* () {
       // previous snapshot must be read BEFORE persisting the current one.
       const previousSnapshots = yield* db
         .getSnapshots(poolAddress, pool.timestamp - PREVIOUS_SNAPSHOT_WINDOW_MS, pool.timestamp)
-        .pipe(Effect.catchAll(() => Effect.succeed([] as ReadonlyArray<PoolSnapshot>)));
+        .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<PoolSnapshot>)));
       const previousSnapshot =
         previousSnapshots.length > 0 ? previousSnapshots[previousSnapshots.length - 1] : undefined;
       const w15Signals = detectDepegAndLiquidityDrain(pool, previousSnapshots, config);
@@ -4546,7 +4543,7 @@ export const program = Effect.gen(function* () {
                 },
         })
         .pipe(
-          Effect.catchAll((err) => {
+          Effect.catch((err) => {
             console.warn("Snapshot save failed", { pool: poolAddress, err });
             return Effect.void;
           }),
@@ -4566,7 +4563,7 @@ export const program = Effect.gen(function* () {
       const recordSafetyWarning = (content: string) =>
         memory
           .upsert({ category: "warning", content, poolAddress })
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(Effect.catch(() => Effect.void));
 
       const rejectForSafety = (reason: string): Effect.Effect<ReadonlyArray<AgentDecision>> =>
         Effect.gen(function* () {
@@ -4583,7 +4580,7 @@ export const program = Effect.gen(function* () {
               executed: false,
               paperTrading: config.paperTrading,
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
           yield* recordSafetyWarning(`Safety screening rejected ${poolAddress}: ${reason}`);
           return [];
         });
@@ -4594,7 +4591,7 @@ export const program = Effect.gen(function* () {
 
       const fetchAuthorities = (mint: string) =>
         adapter.getMintAuthorities(mint).pipe(
-          Effect.catchAll((err) => {
+          Effect.catch((err) => {
             logger.warn(
               "Mint authority fetch failed — skipping on-chain authority screening (fail-open)",
               { pool: poolAddress, mint, err: String(err) },
@@ -4624,7 +4621,7 @@ export const program = Effect.gen(function* () {
             (err): err is BlacklistError => err instanceof BlacklistError,
             (err) => Effect.succeed(err.message),
           ),
-          Effect.catchAll((err) => {
+          Effect.catch((err) => {
             logger.warn("Blacklist check failed — proceeding (fail-open)", {
               pool: poolAddress,
               err: String(err),
@@ -4814,7 +4811,7 @@ export const program = Effect.gen(function* () {
       // Check memory for warnings
       const warnings = yield* memory
         .getRelevantContext(`warnings for pool ${poolAddress}`, 3, poolAddress)
-        .pipe(Effect.catchAll(() => Effect.succeed([])));
+        .pipe(Effect.catch(() => Effect.succeed([])));
       const hasRecentWarning = warnings.some(
         (w) => w.category === "warning" && w.createdAt > Date.now() - 7 * 24 * 60 * 60 * 1000,
       );
@@ -4893,7 +4890,7 @@ export const program = Effect.gen(function* () {
         const walletAddress = adapter.getWalletAddress();
         if (walletAddress) {
           const onChainPositions = yield* adapter.getPositions(poolAddress, walletAddress).pipe(
-            Effect.catchAll((err) => {
+            Effect.catch((err) => {
               console.error("Per-cycle reconcile: failed to fetch positions — skipping", {
                 pool: poolAddress,
                 err: String(err),
@@ -4922,7 +4919,7 @@ export const program = Effect.gen(function* () {
                     content: `Position ${pos.positionId} on ${poolAddress} was closed externally during this cycle. Removed from tracking.`,
                     poolAddress,
                   })
-                  .pipe(Effect.catchAll(() => Effect.void));
+                  .pipe(Effect.catch(() => Effect.void));
               } else {
                 survivors.push(pos);
               }
@@ -4970,7 +4967,7 @@ export const program = Effect.gen(function* () {
           pos.positionPubKey != null && adapter.getPositionValueUsd != null
             ? yield* adapter
                 .getPositionValueUsd(poolAddress, pos.positionPubKey)
-                .pipe(Effect.catchAll(() => Effect.succeed(null)))
+                .pipe(Effect.catch(() => Effect.succeed(null)))
             : null;
         // Explicit null check (not `??`): the adapter contract returns null
         // when the mark is unavailable, never 0 — a genuine 0-valued position
@@ -5022,7 +5019,7 @@ export const program = Effect.gen(function* () {
                 metadata: { kind: "paper_accrual" },
                 createdAt: now,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
           }
         }
         yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
@@ -5204,7 +5201,7 @@ export const program = Effect.gen(function* () {
                 content: `Pool ${poolAddress} TVL dropped sharply. Exit triggered.`,
                 poolAddress,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
           }
           yield* sendAgentAlert(
             "critical",
@@ -5313,7 +5310,7 @@ export const program = Effect.gen(function* () {
 
           const existingCooldown = yield* db
             .getPoolCooldown(poolAddress)
-            .pipe(Effect.catchAll(() => Effect.succeed(null)));
+            .pipe(Effect.catch(() => Effect.succeed(null)));
           const existingOorCount = existingCooldown?.consecutiveOorExits ?? 0;
           const isOorExit =
             exitDecision.reasoning.includes("volatility") ||
@@ -5397,7 +5394,7 @@ export const program = Effect.gen(function* () {
       const dayKey = new Date(dayStart).toISOString().slice(0, 10);
       const closedToday = yield* db
         .getClosedPositions()
-        .pipe(Effect.catchAll(() => Effect.succeed([])));
+        .pipe(Effect.catch(() => Effect.succeed([])));
       const realizedTodayUsd = closedToday.reduce(
         (sum, position) =>
           position.closedAt !== null &&
@@ -5440,7 +5437,7 @@ export const program = Effect.gen(function* () {
         })
       ) {
         activeSafetyPause = { ...activeSafetyPause, resolvedAt: Date.now() };
-        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
       }
       if (
         autonomousExecution &&
@@ -5455,7 +5452,7 @@ export const program = Effect.gen(function* () {
           triggeredAt: Date.now(),
           resolvedAt: null,
         };
-        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catchAll(() => Effect.void));
+        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
       }
       const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
 
@@ -5506,7 +5503,7 @@ export const program = Effect.gen(function* () {
                 content: `Volatility-gate EXIT for ${poolAddress}: stddev=${volatilityStddev.toFixed(2)} over ${volatilityBins.length} snapshots`,
                 poolAddress,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
           }
           yield* sendAgentAlert(
             "warning",
@@ -5549,7 +5546,7 @@ export const program = Effect.gen(function* () {
                     recommended.upperBinId,
                   )
                   .pipe(
-                    Effect.catchAll((err) =>
+                    Effect.catch((err) =>
                       Effect.sync(() => {
                         logger.warn(
                           "Rebalance simulation failed — holding position (fail-closed)",
@@ -5571,7 +5568,7 @@ export const program = Effect.gen(function* () {
                 content: `Rebalance simulation unavailable for ${poolAddress} — rebalance skipped this cycle`,
                 poolAddress,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
           } else {
             console.info(
               `[rebalance-sim] ${poolAddress} source=${sim.source} fees=$${sim.estimatedFeesUsd.toFixed(2)} cost=$${sim.estimatedCostUsd.toFixed(2)} net=$${sim.netBenefitUsd.toFixed(2)}`,
@@ -5602,7 +5599,7 @@ export const program = Effect.gen(function* () {
                   content: `Gas-aware rebalance gate held ${poolAddress}: ${gasGate.reason}`,
                   poolAddress,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
               yield* audit
                 .recordDecision({
                   timestamp: Date.now(),
@@ -5616,7 +5613,7 @@ export const program = Effect.gen(function* () {
                   executed: false,
                   paperTrading: config.paperTrading,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
             } else {
               // F4: OOR recovery probability — if the recent bin path is
               // mean-reverting enough to plausibly recover, hold rather than
@@ -5639,7 +5636,7 @@ export const program = Effect.gen(function* () {
                     content: `OOR recovery prediction held ${poolAddress}: probability ${recoveryProb.toFixed(2)}`,
                     poolAddress,
                   })
-                  .pipe(Effect.catchAll(() => Effect.void));
+                  .pipe(Effect.catch(() => Effect.void));
                 yield* audit
                   .recordDecision({
                     timestamp: Date.now(),
@@ -5656,7 +5653,7 @@ export const program = Effect.gen(function* () {
                     executed: false,
                     paperTrading: config.paperTrading,
                   })
-                  .pipe(Effect.catchAll(() => Effect.void));
+                  .pipe(Effect.catch(() => Effect.void));
               } else if (
                 sim.netBenefitUsd > config.minRebalanceNetBenefitUsd ||
                 recoveryProb <= config.oorRecoveryForceRebalanceThreshold
@@ -5780,7 +5777,7 @@ export const program = Effect.gen(function* () {
                 executed: false,
                 paperTrading: config.paperTrading,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
             enterGateRejected = true;
           }
 
@@ -5810,7 +5807,7 @@ export const program = Effect.gen(function* () {
                 executed: false,
                 paperTrading: config.paperTrading,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
             enterGateRejected = true;
           }
 
@@ -5834,14 +5831,14 @@ export const program = Effect.gen(function* () {
                 executed: false,
                 paperTrading: config.paperTrading,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
             yield* memory
               .upsert({
                 category: "warning",
                 content: `Entry suppressed for ${poolAddress} after insufficient token balance; retry in ${Math.ceil(retryAfterMs / 60_000)} minutes.`,
                 poolAddress,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
             enterGateRejected = true;
           }
 
@@ -5849,7 +5846,7 @@ export const program = Effect.gen(function* () {
           if (!enterGateRejected) {
             const cooldown = yield* db
               .getPoolCooldown(poolAddress)
-              .pipe(Effect.catchAll(() => Effect.succeed(null)));
+              .pipe(Effect.catch(() => Effect.succeed(null)));
             if (cooldown && Date.now() < cooldown.cooldownUntil) {
               const remainingH = ((cooldown.cooldownUntil - Date.now()) / 3_600_000).toFixed(1);
               console.info(
@@ -5861,7 +5858,7 @@ export const program = Effect.gen(function* () {
                   content: `Pool cooldown blocked ENTER on ${poolAddress}: ${cooldown.reason} (cooldown for ${remainingH}h more)`,
                   poolAddress,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
               yield* audit
                 .recordDecision({
                   timestamp: Date.now(),
@@ -5875,7 +5872,7 @@ export const program = Effect.gen(function* () {
                   executed: false,
                   paperTrading: config.paperTrading,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
               enterGateRejected = true;
             }
           }
@@ -5936,7 +5933,7 @@ export const program = Effect.gen(function* () {
                   executed: false,
                   paperTrading: config.paperTrading,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
               enterGateRejected = true;
             } else if (faLadder !== null) {
               rawDecisions.push({
@@ -5994,7 +5991,7 @@ export const program = Effect.gen(function* () {
                 executed: false,
                 paperTrading: config.paperTrading,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
             enterGateRejected = true;
           }
 
@@ -6036,7 +6033,7 @@ export const program = Effect.gen(function* () {
                   executed: false,
                   paperTrading: config.paperTrading,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
               enterGateRejected = true;
             } else {
               const proposedSizeUsd = computeEntrySizeUsd({
@@ -6064,7 +6061,7 @@ export const program = Effect.gen(function* () {
                     content: `Allocation gate skipped ENTER on ${poolAddress}: ${allocation.reason}`,
                     poolAddress,
                   })
-                  .pipe(Effect.catchAll(() => Effect.void));
+                  .pipe(Effect.catch(() => Effect.void));
                 yield* audit
                   .recordDecision({
                     timestamp: Date.now(),
@@ -6078,7 +6075,7 @@ export const program = Effect.gen(function* () {
                     executed: false,
                     paperTrading: config.paperTrading,
                   })
-                  .pipe(Effect.catchAll(() => Effect.void));
+                  .pipe(Effect.catch(() => Effect.void));
                 // Idle-redeploy capture: candidate conditions + score passed
                 // but allocation has no headroom (typically MAX_OPEN_POSITIONS
                 // reached — a slot can free mid-cycle when a LATER pool exits).
@@ -6170,7 +6167,7 @@ export const program = Effect.gen(function* () {
                         executed: false,
                         paperTrading: config.paperTrading,
                       })
-                      .pipe(Effect.catchAll(() => Effect.void));
+                      .pipe(Effect.catch(() => Effect.void));
                     enterGateRejected = true;
                   }
                 }
@@ -6294,7 +6291,7 @@ export const program = Effect.gen(function* () {
                 warnings,
                 recentDecisions: yield* audit
                   .getRecentDecisions(10)
-                  .pipe(Effect.catchAll(() => Effect.succeed([]))),
+                  .pipe(Effect.catch(() => Effect.succeed([]))),
                 hasOpenPosition,
                 ...(pos !== undefined ? { position: toAgentPositionState(pos, Date.now()) } : {}),
               })
@@ -6304,19 +6301,21 @@ export const program = Effect.gen(function* () {
                 // (re)connects (Gateway ~10s handshake; ACP ensureSession on the
                 // general AGENT_PROMPT_TIMEOUT_MS), so an outer deadline is the only
                 // thing keeping a stalled reconnect from delaying a capital-protecting
-                // EXIT past AGENT_VETO_TIMEOUT_MS. Fails open via the catchAll below.
-                Effect.timeoutFail({
+                // EXIT past AGENT_VETO_TIMEOUT_MS. Fails open via the catch below.
+                Effect.timeoutOrElse({
                   duration: `${config.agentVetoTimeoutMs} millis`,
-                  onTimeout: () =>
-                    new Error(
-                      `Agent veto review timed out after ${config.agentVetoTimeoutMs}ms (transport connect/session establishment + prompt exceeded the veto budget)`,
+                  orElse: () =>
+                    Effect.fail(
+                      new Error(
+                        `Agent veto review timed out after ${config.agentVetoTimeoutMs}ms (transport connect/session establishment + prompt exceeded the veto budget)`,
+                      ),
                     ),
                 }),
-                Effect.catchAll((err) => {
+                Effect.catch((err) => {
                   vetoFetchFailed = true;
                   const elapsedMs = Date.now() - vetoStartedAt;
                   const message = underlyingErrorMessage(err);
-                  // Compute throttle eligibility ONCE: the catchAll owns the single
+                  // Compute throttle eligibility ONCE: the catch owns the single
                   // throttle read+set so the warn log and the memory warning below
                   // fire together exactly once per veto-warning window
                   // (agentProposalStaleMs, per pool). The memory block reuses
@@ -6355,7 +6354,7 @@ export const program = Effect.gen(function* () {
               });
               decision = enhanced;
             } else if (vetoFetchFailed && vetoWarnEligible) {
-              // Throttle already consumed in the catchAll above: this fires
+              // Throttle already consumed in the catch above: this fires
               // together with the warn log, exactly once per window.
               yield* memory
                 .upsert({
@@ -6363,7 +6362,7 @@ export const program = Effect.gen(function* () {
                   content: `Agent veto fetch failed for ${poolAddress}`,
                   poolAddress,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
             }
           } else {
             // suggest | supervised | full
@@ -6388,7 +6387,7 @@ export const program = Effect.gen(function* () {
 
             if (!agentProposal && proposalMode !== "supervised") {
               const agentStatus = yield* agent.getStatus().pipe(
-                Effect.catchAll(() =>
+                Effect.catch(() =>
                   Effect.succeed({
                     connected: false,
                     transport: null,
@@ -6427,7 +6426,7 @@ export const program = Effect.gen(function* () {
                       warnings,
                       recentDecisions: yield* audit
                         .getRecentDecisions(10)
-                        .pipe(Effect.catchAll(() => Effect.succeed([]))),
+                        .pipe(Effect.catch(() => Effect.succeed([]))),
                       hasOpenPosition,
                       ...(pos !== undefined
                         ? { position: toAgentPositionState(pos, Date.now()) }
@@ -6438,14 +6437,16 @@ export const program = Effect.gen(function* () {
                       // timer starts only AFTER transport (re)connect, so a
                       // stalled reconnect must not hold the decision loop past
                       // the proposal budget.
-                      Effect.timeoutFail({
+                      Effect.timeoutOrElse({
                         duration: `${config.agentProposalTimeoutMs} millis`,
-                        onTimeout: () =>
-                          new Error(
-                            `Agent proposal sync timed out after ${config.agentProposalTimeoutMs}ms`,
+                        orElse: () =>
+                          Effect.fail(
+                            new Error(
+                              `Agent proposal sync timed out after ${config.agentProposalTimeoutMs}ms`,
+                            ),
                           ),
                       }),
-                      Effect.catchAll((err) => {
+                      Effect.catch((err) => {
                         syncFetchFailed = true;
                         logger.warn("Agent proposal fetch failed", {
                           pool: poolAddress,
@@ -6544,7 +6545,7 @@ export const program = Effect.gen(function* () {
                       content: `Advisory suggestion for ${poolAddress}: ${validation.adjustedDecision.action} (confidence ${validation.adjustedDecision.confidence.toFixed(2)})`,
                       poolAddress,
                     })
-                    .pipe(Effect.catchAll(() => Effect.void));
+                    .pipe(Effect.catch(() => Effect.void));
 
                   proposalBackoff.delete(poolAddress);
                   poolCircuitBreaker.recordSuccess();
@@ -6552,7 +6553,7 @@ export const program = Effect.gen(function* () {
                   if (proposalSource === "queue" && agentProposal.proposalId) {
                     yield* agentState
                       .dequeueProposals([agentProposal.proposalId])
-                      .pipe(Effect.catchAll(() => Effect.void));
+                      .pipe(Effect.catch(() => Effect.void));
                   }
                 } else {
                   logger.info("Agent proposal applied", {
@@ -6599,7 +6600,7 @@ export const program = Effect.gen(function* () {
                 }
                 yield* agentState
                   .setAgentPolicy({ lastProposalAt: now })
-                  .pipe(Effect.catchAll(() => Effect.void));
+                  .pipe(Effect.catch(() => Effect.void));
               } else {
                 logger.warn("Agent proposal rejected", {
                   source: proposalSource,
@@ -6620,16 +6621,16 @@ export const program = Effect.gen(function* () {
                     content: `Agent proposal rejected for ${poolAddress}: ${validation.reason}`,
                     poolAddress,
                   })
-                  .pipe(Effect.catchAll(() => Effect.void));
+                  .pipe(Effect.catch(() => Effect.void));
 
                 if (proposalSource === "queue" && agentProposal.proposalId) {
                   yield* agentState
                     .rejectProposal(agentProposal.proposalId)
-                    .pipe(Effect.catchAll(() => Effect.void));
+                    .pipe(Effect.catch(() => Effect.void));
                 }
                 yield* agentState
                   .setAgentPolicy({ lastProposalAt: now })
-                  .pipe(Effect.catchAll(() => Effect.void));
+                  .pipe(Effect.catch(() => Effect.void));
               }
             } else if (syncFetchFailed) {
               logger.warn("Agent proposal fetch failed — recording backoff", {
@@ -6649,7 +6650,7 @@ export const program = Effect.gen(function* () {
                   content: `Agent proposal fetch failed for ${poolAddress}`,
                   poolAddress,
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
             }
           }
         }
@@ -6760,14 +6761,14 @@ export const program = Effect.gen(function* () {
               executed: false,
               paperTrading: config.paperTrading,
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
           yield* memory
             .upsert({
               category: "warning",
               content: `Decision rejected: ${riskResult.reason}. Action: ${decision.action}`,
               poolAddress,
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
 
           // Deterministic risk denials are sticky (drawdown pause, stop-loss, etc.).
           // Arm backoff / circuit breaker for applied sync or queue proposals so
@@ -6813,7 +6814,7 @@ export const program = Effect.gen(function* () {
         if (decision.action === "EXIT") {
           const pendingCooldown = yield* resolveExitCooldown(decision, pos);
           if (pendingCooldown) {
-            yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catchAll(() => Effect.void));
+            yield* db.setPoolCooldown(pendingCooldown).pipe(Effect.catch(() => Effect.void));
           }
         }
 
@@ -6832,7 +6833,7 @@ export const program = Effect.gen(function* () {
             action: decision.action,
             confidence: decision.confidence,
           })
-          .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          .pipe(Effect.catch(() => Effect.succeed(null)));
 
         // Execute
         let executed = false;
@@ -6861,7 +6862,7 @@ export const program = Effect.gen(function* () {
                 content: `Paper validation gate blocked live ENTER on ${poolAddress}: ${validation.reason}`,
                 poolAddress,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
             yield* audit
               .recordDecision({
                 timestamp: Date.now(),
@@ -6875,7 +6876,7 @@ export const program = Effect.gen(function* () {
                 executed: false,
                 paperTrading: false,
               })
-              .pipe(Effect.catchAll(() => Effect.void));
+              .pipe(Effect.catch(() => Effect.void));
             finalDecisions.push(decision);
             continue;
           }
@@ -7086,7 +7087,7 @@ export const program = Effect.gen(function* () {
           (decision.action === "ENTER" || decision.action === "EXIT")
         ) {
           lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
-            Effect.catchAll(() => {
+            Effect.catch(() => {
               if (movedLiveFundsFromEnter) {
                 // Fail closed: the new position is already in trackedPositions
                 // while the stale balance still counts its deployed capital, so
@@ -7137,7 +7138,7 @@ export const program = Effect.gen(function* () {
               },
             );
             autonomousCandidates.set(enteredCandidate.id, enteredCandidate);
-            yield* db.saveTokenCandidate(enteredCandidate).pipe(Effect.catchAll(() => Effect.void));
+            yield* db.saveTokenCandidate(enteredCandidate).pipe(Effect.catch(() => Effect.void));
           }
         }
 
@@ -7188,7 +7189,7 @@ export const program = Effect.gen(function* () {
               },
             );
             autonomousCandidates.set(coolingCandidate.id, coolingCandidate);
-            yield* db.saveTokenCandidate(coolingCandidate).pipe(Effect.catchAll(() => Effect.void));
+            yield* db.saveTokenCandidate(coolingCandidate).pipe(Effect.catch(() => Effect.void));
           }
           // Follow-up 3655404926: record every executed EXIT (deterministic or
           // agent-adjusted) so the redeploy pass cannot re-enter this pool the
@@ -7251,12 +7252,12 @@ export const program = Effect.gen(function* () {
             error: executionError,
             paperTrading: config.paperTrading,
           })
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(Effect.catch(() => Effect.void));
 
         // Threshold evolution: increment counter on EXIT, try evolve at interval
         if (decision.action === "EXIT" && executed) {
-          yield* incrementEvolutionCount.pipe(Effect.catchAll(() => Effect.void));
-          yield* tryEvolveThresholds.pipe(Effect.catchAll(() => Effect.void));
+          yield* incrementEvolutionCount.pipe(Effect.catch(() => Effect.void));
+          yield* tryEvolveThresholds.pipe(Effect.catch(() => Effect.void));
         }
 
         if (
@@ -7266,7 +7267,7 @@ export const program = Effect.gen(function* () {
             decision.action === "REBALANCE")
         ) {
           const trigger = decision.action.toLowerCase() as AgentRuntimeCheckin["trigger"];
-          yield* maybeSendAgentCheckin(trigger).pipe(Effect.catchAll(() => Effect.void));
+          yield* maybeSendAgentCheckin(trigger).pipe(Effect.catch(() => Effect.void));
         }
 
         finalDecisions.push(decision);
@@ -7297,7 +7298,7 @@ export const program = Effect.gen(function* () {
           if (config.farmRewardsEnabled) {
             const rewardResult = yield* adapter
               .claimRewards(poolAddress, pos.positionPubKey)
-              .pipe(Effect.catchAll(() => Effect.succeed(null)));
+              .pipe(Effect.catch(() => Effect.succeed(null)));
             if (rewardResult && !rewardResult.skipped && rewardResult.rewards.length > 0) {
               const rewardSummary = summarizeRewardClaim(rewardResult.rewards);
               console.info("Farm rewards claimed", {
@@ -7331,7 +7332,7 @@ export const program = Effect.gen(function* () {
                   }),
                   createdAt: Date.now(),
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
               if (rewardSummary.unpricedCount > 0) {
                 yield* memory
                   .upsert({
@@ -7339,7 +7340,7 @@ export const program = Effect.gen(function* () {
                     content: `Claimed ${rewardSummary.unpricedCount} farm reward(s) for ${poolAddress} without USD pricing — raw amounts recorded in position_events.`,
                     poolAddress,
                   })
-                  .pipe(Effect.catchAll(() => Effect.void));
+                  .pipe(Effect.catch(() => Effect.void));
               }
             }
           }
@@ -7355,19 +7356,21 @@ export const program = Effect.gen(function* () {
             )
             .pipe(
               Effect.tap((r) =>
-                console.info("Fees claimed", {
-                  pool: poolAddress,
-                  tier,
-                  feeX: r.feeX,
-                  feeY: r.feeY,
-                  platformFeeX: r.platformFeeX,
-                  platformFeeY: r.platformFeeY,
-                  netFeeX: r.netFeeX,
-                  netFeeY: r.netFeeY,
-                  tx: r.txSignature,
-                }),
+                Effect.sync(() =>
+                  console.info("Fees claimed", {
+                    pool: poolAddress,
+                    tier,
+                    feeX: r.feeX,
+                    feeY: r.feeY,
+                    platformFeeX: r.platformFeeX,
+                    platformFeeY: r.platformFeeY,
+                    netFeeX: r.netFeeX,
+                    netFeeY: r.netFeeY,
+                    tx: r.txSignature,
+                  }),
+                ),
               ),
-              Effect.catchAll(() => Effect.succeed(null)),
+              Effect.catch(() => Effect.succeed(null)),
             );
           if (!result || (result.feeX === 0 && result.feeY === 0)) {
             continue;
@@ -7395,7 +7398,7 @@ export const program = Effect.gen(function* () {
               reportedToApi: false,
               createdAt: Date.now(),
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
 
           if (
             result.platformFeeX > 0 ||
@@ -7403,7 +7406,7 @@ export const program = Effect.gen(function* () {
             (result.operatorFeeX ?? 0) > 0 ||
             (result.operatorFeeY ?? 0) > 0
           ) {
-            yield* Effect.fork(
+            yield* Effect.forkChild(
               adapter
                 .reportFeeCollection({
                   poolAddress,
@@ -7425,7 +7428,7 @@ export const program = Effect.gen(function* () {
                   }),
                 })
                 .pipe(
-                  Effect.catchAllCause((cause) =>
+                  Effect.catchCause((cause) =>
                     Effect.sync(() =>
                       console.error("reportFeeCollection failed", { cause: String(cause) }),
                     ),
@@ -7451,7 +7454,7 @@ export const program = Effect.gen(function* () {
               metadata: { txSignature: result.txSignature },
               createdAt: Date.now(),
             })
-            .pipe(Effect.catchAll(() => Effect.void));
+            .pipe(Effect.catch(() => Effect.void));
 
           yield* alertSvc.recordFeeClaim(poolAddress, netFeesUsd);
 
@@ -7460,7 +7463,7 @@ export const program = Effect.gen(function* () {
             const liveConversion = adapter.convertClaimedFees
               ? adapter
                   .convertClaimedFees(poolAddress, feeDestination, result.netFeeX, result.netFeeY)
-                  .pipe(Effect.catchAll(() => Effect.succeed(null)))
+                  .pipe(Effect.catch(() => Effect.succeed(null)))
               : Effect.succeed(null);
             const conversion = config.paperTrading
               ? Effect.succeed({
@@ -7490,7 +7493,7 @@ export const program = Effect.gen(function* () {
                   },
                   createdAt: Date.now(),
                 })
-                .pipe(Effect.catchAll(() => Effect.void));
+                .pipe(Effect.catch(() => Effect.void));
             }
             continue;
           }
@@ -7529,12 +7532,14 @@ export const program = Effect.gen(function* () {
                       )
                       .pipe(
                         Effect.tap((r) =>
-                          console.info("Compound rebalance succeeded", {
-                            pool: poolAddress,
-                            position: r.positionPubKey,
-                          }),
+                          Effect.sync(() =>
+                            console.info("Compound rebalance succeeded", {
+                              pool: poolAddress,
+                              position: r.positionPubKey,
+                            }),
+                          ),
                         ),
-                        Effect.catchAll((err) => {
+                        Effect.catch((err) => {
                           console.warn("Compound rebalance failed", {
                             pool: poolAddress,
                             err: (err as { message?: string }).message ?? String(err),
@@ -7582,14 +7587,14 @@ export const program = Effect.gen(function* () {
                     metadata: { savingsUsd: compoundGate.savingsUsd },
                     createdAt: Date.now(),
                   })
-                  .pipe(Effect.catchAll(() => Effect.void));
+                  .pipe(Effect.catch(() => Effect.void));
                 yield* memory
                   .upsert({
                     category: "pattern",
                     content: `Auto-compounded $${netFeesUsd.toFixed(2)} fees into ${poolAddress} (savings $${compoundGate.savingsUsd.toFixed(2)})`,
                     poolAddress,
                   })
-                  .pipe(Effect.catchAll(() => Effect.void));
+                  .pipe(Effect.catch(() => Effect.void));
               }
             }
           }
@@ -7599,7 +7604,7 @@ export const program = Effect.gen(function* () {
 
   // ─── Run initial cycle and schedule ────────────────────────────────────────
 
-  yield* memory.initialize().pipe(Effect.catchAll(() => Effect.void));
+  yield* memory.initialize().pipe(Effect.catch(() => Effect.void));
 
   // Run first cycle
   yield* runScanCycle();
@@ -7625,15 +7630,15 @@ export const program = Effect.gen(function* () {
     yield* checkForAutoUpdate(config, db);
     yield* runScanCycle();
   }).pipe(
-    Effect.catchAll((err) =>
+    Effect.catch((err) =>
       Effect.sync(() => {
         console.error("Cycle error:", err);
       }),
     ),
   );
 
-  const schedulerFiber = yield* Effect.fork(
-    Effect.forever(Effect.sleep(config.scanIntervalMs).pipe(Effect.zipRight(runScheduledCycle))),
+  const schedulerFiber = yield* Effect.forkChild(
+    Effect.forever(Effect.sleep(config.scanIntervalMs).pipe(Effect.andThen(runScheduledCycle))),
   );
 
   const gracefulShutdown = (signal: string) => {
@@ -7654,11 +7659,11 @@ export const program = Effect.gen(function* () {
     }
     Effect.runFork(
       Fiber.interrupt(schedulerFiber).pipe(
-        Effect.zipRight(agent.disconnect()),
-        Effect.zipRight(
+        Effect.andThen(agent.disconnect()),
+        Effect.andThen(
           postEngineStatus("stopped", trackedPositions.size, pnl).pipe(
             Effect.timeout("4 seconds"),
-            Effect.catchAll(() => Effect.void),
+            Effect.catch(() => Effect.void),
           ),
         ),
         Effect.ensuring(Effect.sync(() => process.exit(0))),

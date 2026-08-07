@@ -42,7 +42,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
   }
 
   isAvailable(): Effect.Effect<boolean, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const response = yield* Effect.tryPromise(async () => {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
@@ -55,7 +55,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
         } finally {
           clearTimeout(timer);
         }
-      }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+      }).pipe(Effect.catch(() => Effect.succeed(null)));
 
       return response != null && (response.status < 400 || response.status === 404);
     });
@@ -76,7 +76,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
       const startedAt = Date.now();
 
@@ -100,8 +100,8 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
 
   sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, unknown> {
     return this.post({ ...checkin, source: "prism" }).pipe(
-      Effect.tap(() => logger.debug("Check-in delivered")),
-      Effect.catchAll((err) => {
+      Effect.tap(() => Effect.sync(() => logger.debug("Check-in delivered"))),
+      Effect.catch((err) => {
         logger.warn("Failed to deliver check-in", { error: String(err) });
         return Effect.void;
       }),
@@ -110,8 +110,8 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
 
   sendAlert(alert: AgentRuntimeAlert): Effect.Effect<void, unknown> {
     return this.post({ ...alert, source: "prism" }).pipe(
-      Effect.tap(() => logger.debug("Alert delivered")),
-      Effect.catchAll((err) => {
+      Effect.tap(() => Effect.sync(() => logger.debug("Alert delivered"))),
+      Effect.catch((err) => {
         logger.warn("Failed to deliver alert", { error: String(err) });
         return Effect.void;
       }),

@@ -265,7 +265,7 @@ async function runOneCycle(layer: ReturnType<typeof makeTestLayer>) {
     return yield* audit.getRecentDecisions(50);
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as Effect.Effect<
+    Effect.provide(test, layer) as unknown as Effect.Effect<
       ReadonlyArray<{
         poolAddress: string;
         action: string;
