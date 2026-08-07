@@ -325,8 +325,8 @@ describe("DbService — setMetadataBatch (Gemini review)", () => {
             { key: Symbol("bad") as unknown as string, value: "triggers_failure" },
             { key: "third", value: "never_reached" },
           ])
-          .pipe(Effect.either);
-        expect(result._tag).toBe("Left");
+          .pipe(Effect.result);
+        expect(result._tag).toBe("Failure");
         const first = yield* db.getMetadata("first");
         const third = yield* db.getMetadata("third");
         const preexisting = yield* db.getMetadata("preexisting");

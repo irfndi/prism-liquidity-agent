@@ -6,7 +6,7 @@ import type { AgentRuntimeDetection, AgentRuntimeKind } from "./agent-transport.
 const logger = createLogger("AgentDetection");
 
 function which(binary: string): Effect.Effect<string | null, unknown> {
-  return Effect.async((resume) => {
+  return Effect.callback((resume) => {
     const isWindows = process.platform === "win32";
     const cmd = isWindows ? "where" : "which";
     let child: ChildProcess | null = null;
@@ -58,7 +58,7 @@ function which(binary: string): Effect.Effect<string | null, unknown> {
 }
 
 function isGatewayRunning(url: string, token: string): Effect.Effect<boolean, unknown> {
-  return Effect.async((resume) => {
+  return Effect.callback((resume) => {
     let ws: WebSocket | null = null;
     let settled = false;
 
@@ -129,10 +129,10 @@ export function detectAgents(config: {
 
     const [hermesPath, openclawPath, gatewayRunning] = yield* Effect.all(
       [
-        which(config.agentAcpCommand).pipe(Effect.catchAll(() => Effect.succeed(null))),
-        which("openclaw").pipe(Effect.catchAll(() => Effect.succeed(null))),
+        which(config.agentAcpCommand).pipe(Effect.catch(() => Effect.succeed(null))),
+        which("openclaw").pipe(Effect.catch(() => Effect.succeed(null))),
         isGatewayRunning(config.agentGatewayUrl, config.agentGatewayToken).pipe(
-          Effect.catchAll(() => Effect.succeed(false)),
+          Effect.catch(() => Effect.succeed(false)),
         ),
       ],
       { concurrency: 3 },

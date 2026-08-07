@@ -36,7 +36,7 @@ function escapeHtml(text: string): string {
 }
 
 // Services
-class DbService extends Context.Tag("DbService")<DbService, { readonly db: D1Database }>() {}
+class DbService extends Context.Service<DbService, { readonly db: D1Database }>()("DbService") {}
 
 const DbLive = (db: D1Database) => Layer.succeed(DbService, { db });
 
@@ -72,7 +72,7 @@ interface TelegramUpdate {
 function readJsonBody<T>(request: { json: () => Promise<unknown> }): Effect.Effect<T, never> {
   return Effect.tryPromise(() => request.json()).pipe(
     Effect.map((body) => body as T),
-    Effect.catchAll(() => Effect.succeed({} as T)),
+    Effect.catch(() => Effect.succeed({} as T)),
   );
 }
 
@@ -122,7 +122,7 @@ function sendMessage(
       );
     }
   }).pipe(
-    Effect.catchAll((error) =>
+    Effect.catch((error) =>
       Effect.sync(() => console.error("Telegram sendMessage failed", error)),
     ),
     Effect.asVoid,
@@ -180,7 +180,7 @@ function callPrismApi(
     );
     return { ok: true, data };
   }).pipe(
-    Effect.catchAll((error) =>
+    Effect.catch((error) =>
       Effect.succeed({
         ok: false,
         error: error instanceof Error ? error.message : "Unknown error",
@@ -549,7 +549,7 @@ app.post("/webhook", async (c) => {
     Effect.gen(function* () {
       const update = yield* readJsonBody<TelegramUpdate>(c.req);
       yield* processUpdate(c.env.DB, c.env, update).pipe(
-        Effect.catchAllCause((cause) =>
+        Effect.catchCause((cause) =>
           Effect.sync(() => console.error("processUpdate failed", cause)),
         ),
       );
@@ -636,13 +636,13 @@ function deliverTelegramMessage(
         Effect.flatMap((errorBody) =>
           Effect.sync(() => console.error(`Alert delivery failed: ${response.status}`, errorBody)),
         ),
-        Effect.catchAll(() => Effect.void),
+        Effect.catch(() => Effect.void),
       );
       return false;
     }
     return true;
   }).pipe(
-    Effect.catchAll((error) =>
+    Effect.catch((error) =>
       Effect.sync(() => console.error("Alert delivery failed", error)).pipe(Effect.as(false)),
     ),
   );
@@ -692,7 +692,7 @@ app.post("/internal/deliver-alert", async (c) => {
 // fixed cadence. Same BOT_API_SECRET gate as /internal/deliver-alert (fail
 // closed). A row at FLUSH_ABANDON_ATTEMPTS is dropped from future flushes so a
 // permanently undeliverable alert is never retried forever. One bad row must
-// not abort the batch: every row runs under Effect.catchAll and is counted.
+// not abort the batch: every row runs under Effect.catch and is counted.
 
 const FLUSH_BATCH_LIMIT = 10;
 const FLUSH_ABANDON_ATTEMPTS = 5;
@@ -812,7 +812,7 @@ app.post("/internal/flush-alerts", async (c) => {
               .run(),
           );
           return "failed" as const;
-        }).pipe(Effect.catchAll(() => Effect.succeed("failed" as const)));
+        }).pipe(Effect.catch(() => Effect.succeed("failed" as const)));
 
         if (outcome === "delivered") {
           delivered += 1;
@@ -838,7 +838,7 @@ app.post("/internal/flush-alerts", async (c) => {
 
       return { ok: true, checked, delivered, failed, abandoned };
     }).pipe(
-      Effect.catchAll((error) =>
+      Effect.catch((error) =>
         Effect.sync(() => console.error("Alert flush failed", error)).pipe(
           Effect.as({ ok: false, checked: 0, delivered: 0, failed: 0, abandoned: 0 }),
         ),

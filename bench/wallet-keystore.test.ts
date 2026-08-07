@@ -10,7 +10,7 @@ import { ConfigService, ConfigLive } from "../engine/config-service.js";
 import type { AppConfig } from "../engine/config-service.js";
 
 async function loadConfig(): Promise<AppConfig> {
-  return Effect.runPromise(ConfigService.pipe(Effect.provide(ConfigLive)));
+  return Effect.runPromise(Effect.provide(ConfigService, ConfigLive, { local: true }));
 }
 
 function writeKeystore(keypair: Keypair): void {

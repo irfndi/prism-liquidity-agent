@@ -201,7 +201,11 @@ function buildScreenerLayer(
         reportRevenue: () => Effect.never,
       } as never);
     }
-    return Layer.provide(AdapterLive, configLayer);
+    return Layer.provide(AdapterLive, configLayer) as unknown as Layer.Layer<
+      AdapterService,
+      never,
+      never
+    >;
   })();
   const allDeps = Layer.merge(configLayer, Layer.merge(adapterLayer, strategyLayer));
   return Layer.provide(

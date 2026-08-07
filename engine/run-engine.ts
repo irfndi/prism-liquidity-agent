@@ -106,7 +106,7 @@ export function runEngine(): Promise<void> {
   return Effect.runPromise(
     program.pipe(
       Effect.provide(buildLayer(config)),
-      Effect.catchAll((err) =>
+      Effect.catch((err) =>
         Effect.sync(() => {
           errorReporter.report(ensureError(err), { severity: "critical" });
           console.error("Fatal error:", err);

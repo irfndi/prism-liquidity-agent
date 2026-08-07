@@ -211,9 +211,7 @@ describe("CircuitBreaker", () => {
     };
 
     for (let i = 0; i < 3; i++) {
-      await Effect.runPromise(
-        cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)),
-      );
+      await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catch(() => Effect.void)));
     }
 
     expect(cb.getState()).toBe("OPEN");
@@ -234,8 +232,8 @@ describe("CircuitBreaker", () => {
     };
 
     // Open the breaker
-    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
-    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catch(() => Effect.void)));
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catch(() => Effect.void)));
     expect(cb.getState()).toBe("OPEN");
 
     // Advance time past resetTimeout
@@ -250,8 +248,8 @@ describe("CircuitBreaker", () => {
       throw new Error("fail");
     };
 
-    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
-    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catch(() => Effect.void)));
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catch(() => Effect.void)));
     vi.advanceTimersByTime(1100);
     expect(cb.getState()).toBe("HALF_OPEN");
 
@@ -280,12 +278,12 @@ describe("CircuitBreaker", () => {
       throw new Error("fail");
     };
 
-    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
-    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catch(() => Effect.void)));
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catch(() => Effect.void)));
     vi.advanceTimersByTime(1100);
     expect(cb.getState()).toBe("HALF_OPEN");
 
-    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catchAll(() => Effect.void)));
+    await Effect.runPromise(cb.execute(fromPromise(fail)).pipe(Effect.catch(() => Effect.void)));
     expect(cb.getState()).toBe("OPEN");
   });
 
@@ -302,7 +300,7 @@ describe("CircuitBreaker", () => {
             }),
             () => false,
           )
-          .pipe(Effect.catchAll(() => Effect.void)),
+          .pipe(Effect.catch(() => Effect.void)),
       );
     }
 
@@ -325,7 +323,7 @@ describe("CircuitBreaker", () => {
             }),
             () => true,
           )
-          .pipe(Effect.catchAll(() => Effect.void)),
+          .pipe(Effect.catch(() => Effect.void)),
       );
     }
 
@@ -343,7 +341,7 @@ describe("CircuitBreaker", () => {
               throw new Error("any error");
             }),
           )
-          .pipe(Effect.catchAll(() => Effect.void)),
+          .pipe(Effect.catch(() => Effect.void)),
       );
     }
 
@@ -362,7 +360,7 @@ describe("CircuitBreaker", () => {
           }),
           () => true,
         )
-        .pipe(Effect.catchAll(() => Effect.void)),
+        .pipe(Effect.catch(() => Effect.void)),
     );
     await Effect.runPromise(
       cb
@@ -372,7 +370,7 @@ describe("CircuitBreaker", () => {
           }),
           () => true,
         )
-        .pipe(Effect.catchAll(() => Effect.void)),
+        .pipe(Effect.catch(() => Effect.void)),
     );
 
     expect(cb["consecutiveFailures"]).toBe(2);

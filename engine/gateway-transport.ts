@@ -2,6 +2,13 @@ import { Effect } from "effect";
 import { createLogger } from "./logger.js";
 import { stringifySafe } from "./bigint-json.js";
 import { getCurrentVersion } from "./version.js";
+import { underlyingErrorMessage } from "./errors.js";
+
+/** v4 wraps tryPromise rejections in a generic UnknownError whose message hides
+ * the real failure (e.g. "Gateway 1008: ...") — unwrap the cause chain so
+ * operators keep seeing the actionable reason. */
+const surfaceGatewayError = (error: unknown): Error =>
+  new Error(underlyingErrorMessage(error), { cause: error });
 import type {
   AgentRuntimeContext,
   AgentRuntimeResponse,
@@ -106,7 +113,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
   }
 
   isAvailable(): Effect.Effect<boolean, unknown> {
-    return Effect.async((resume) => {
+    return Effect.callback((resume) => {
       let ws: WebSocket | null = null;
       let settled = false;
 
@@ -171,15 +178,21 @@ export class GatewayTransport implements AgentRuntimeTransport {
   }
 
   connect(): Effect.Effect<void, unknown> {
-    return Effect.tryPromise(async () => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
-      if (this.connectPromise) return this.connectPromise;
-      this.connectPromise = this.openAndHandshake();
-      try {
-        await this.connectPromise;
-      } finally {
-        this.connectPromise = null;
-      }
+    return Effect.tryPromise({
+      try: async () => {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+        if (this.connectPromise) return this.connectPromise;
+        this.connectPromise = this.openAndHandshake();
+        try {
+          await this.connectPromise;
+        } finally {
+          this.connectPromise = null;
+        }
+      },
+      // v4 wraps tryPromise rejections in a generic UnknownError whose message
+      // hides the real failure (e.g. "Gateway 1008: ...") — unwrap the cause
+      // chain so operators keep seeing the actionable reason.
+      catch: surfaceGatewayError,
     });
   }
 
@@ -201,13 +214,16 @@ export class GatewayTransport implements AgentRuntimeTransport {
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* this.connect();
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
 
       const startedAt = Date.now();
       const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
-      const text = yield* Effect.tryPromise(() => this.sendChat(prompt, effectiveTimeout));
+      const text = yield* Effect.tryPromise({
+        try: () => this.sendChat(prompt, effectiveTimeout),
+        catch: surfaceGatewayError,
+      });
 
       const latencyMs = Date.now() - startedAt;
       this.emit({ type: "response_received", transport: this.name, latencyMs });
@@ -216,10 +232,13 @@ export class GatewayTransport implements AgentRuntimeTransport {
   }
 
   sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* this.connect();
       const text = `Prism check-in (${checkin.trigger}) @ ${new Date(checkin.timestamp).toISOString()}\n${stringifySafe(checkin, 2)}`;
-      yield* Effect.tryPromise(() => this.request("system-event", { text }));
+      yield* Effect.tryPromise({
+        try: () => this.request("system-event", { text }),
+        catch: surfaceGatewayError,
+      });
     });
   }
 

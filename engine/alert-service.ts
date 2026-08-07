@@ -89,7 +89,7 @@ function postAlert(
             }),
           ),
     ),
-    Effect.catchAll((error) =>
+    Effect.catch((error) =>
       // Fail-open is the core contract: an alert delivery failure must never
       // block or fail a scan cycle.
       Effect.sync(() =>
@@ -115,9 +115,7 @@ export const AlertLive: Layer.Layer<AlertService, never, DbService | ConfigServi
         if (!config.alertsEnabled) return;
         const key = cooldownKey(alert);
         const now = Date.now();
-        const lastRaw = yield* db
-          .getMetadata(key)
-          .pipe(Effect.catchAll(() => Effect.succeed(null)));
+        const lastRaw = yield* db.getMetadata(key).pipe(Effect.catch(() => Effect.succeed(null)));
         const lastSent = parseNumber(lastRaw);
         if (lastSent !== null && now - lastSent < cooldownMs) return;
 
@@ -130,7 +128,7 @@ export const AlertLive: Layer.Layer<AlertService, never, DbService | ConfigServi
 
         // Mark the attempt before POSTing: a flaky API must not retrigger the
         // same alert on every scan cycle (throttle beats delivery here).
-        yield* db.setMetadata(key, String(now)).pipe(Effect.catchAll(() => Effect.void));
+        yield* db.setMetadata(key, String(now)).pipe(Effect.catch(() => Effect.void));
 
         yield* postAlert(apiKey, readInstallId(), alert);
       });
@@ -142,15 +140,13 @@ export const AlertLive: Layer.Layer<AlertService, never, DbService | ConfigServi
 
         const totalRaw = yield* db
           .getMetadata(FEE_TOTAL_KEY)
-          .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          .pipe(Effect.catch(() => Effect.succeed(null)));
         const total = (parseNumber(totalRaw) ?? 0) + feeUsd;
-        yield* db
-          .setMetadata(FEE_TOTAL_KEY, String(total))
-          .pipe(Effect.catchAll(() => Effect.void));
+        yield* db.setMetadata(FEE_TOTAL_KEY, String(total)).pipe(Effect.catch(() => Effect.void));
 
         const nextRaw = yield* db
           .getMetadata(FEE_NEXT_MILESTONE_KEY)
-          .pipe(Effect.catchAll(() => Effect.succeed(null)));
+          .pipe(Effect.catch(() => Effect.succeed(null)));
         const nextMilestone = parseNumber(nextRaw) ?? config.alertFeeMilestoneUsd;
         if (total < nextMilestone) return;
 
@@ -162,7 +158,7 @@ export const AlertLive: Layer.Layer<AlertService, never, DbService | ConfigServi
         const crossedCount = (following - nextMilestone) / config.alertFeeMilestoneUsd;
         yield* db
           .setMetadata(FEE_NEXT_MILESTONE_KEY, String(following))
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(Effect.catch(() => Effect.void));
 
         yield* sendAlert({
           type: "fee_milestone",

@@ -72,7 +72,7 @@ export class AcpTransport implements AgentRuntimeTransport {
   }
 
   isAvailable(): Effect.Effect<boolean, unknown> {
-    return Effect.async((resume) => {
+    return Effect.callback((resume) => {
       let probe: ChildProcess | null = null;
       let settled = false;
 
@@ -114,7 +114,7 @@ export class AcpTransport implements AgentRuntimeTransport {
   }
 
   connect(): Effect.Effect<void, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       if (this.process) return;
 
       this.emit({ type: "connecting", transport: this.name });
@@ -183,7 +183,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const startedAt = Date.now();
       yield* this.ensureSession();
 
@@ -212,7 +212,7 @@ export class AcpTransport implements AgentRuntimeTransport {
   }
 
   sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* this.ensureSession();
       const prompt = `Prism check-in (${checkin.trigger}):\n\n${JSON.stringify(checkin, null, 2)}`;
       // Completion is the session/prompt response (stopReason); a check-in does
@@ -226,7 +226,7 @@ export class AcpTransport implements AgentRuntimeTransport {
   }
 
   private ensureSession(): Effect.Effect<void, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       if (!this.process) {
         yield* this.connect();
       }
@@ -346,7 +346,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     params: Record<string, unknown>,
     timeoutMs?: number,
   ): Effect.Effect<unknown, unknown> {
-    return Effect.async((resume) => {
+    return Effect.callback((resume) => {
       if (!this.process?.stdin) {
         resume(Effect.fail(new Error("ACP transport not connected")));
         return;

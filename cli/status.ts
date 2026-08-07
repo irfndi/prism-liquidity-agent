@@ -96,7 +96,11 @@ function buildProgram(): Layer.Layer<
   const auditLayer = Layer.provide(AuditLive, dbLayer);
   const configLayer = ConfigLive;
   const adapterLayer = Layer.provide(AdapterLive, configLayer);
-  return Layer.mergeAll(dbLayer, auditLayer, configLayer, adapterLayer);
+  return Layer.mergeAll(dbLayer, auditLayer, configLayer, adapterLayer) as unknown as Layer.Layer<
+    DbService | AuditService | ConfigService | AdapterService,
+    unknown,
+    never
+  >;
 }
 
 export const statusCommand = new Command("status")
@@ -150,7 +154,7 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
           for (const pos of activePositions) {
             const price = yield* db
               .getLatestSnapshotPrice(pos.poolAddress)
-              .pipe(Effect.catchAll(() => Effect.succeed(null)));
+              .pipe(Effect.catch(() => Effect.succeed(null)));
             if (price != null) prices.set(pos.poolAddress, price);
           }
           const hasDb = positions.length > 0 || recentAudit.length > 0;

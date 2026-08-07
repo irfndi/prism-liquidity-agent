@@ -46,7 +46,7 @@ function readApiKey(): Effect.Effect<string | null, never> {
       return typeof key === "string" && key.length > 0 ? key : null;
     },
     catch: (cause) => cause,
-  }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+  }).pipe(Effect.catch(() => Effect.succeed(null)));
 }
 
 export function parseRevenueConfig(data: unknown): RevenueConfig | null {
@@ -92,7 +92,7 @@ function loadFromDb(db: DbApi): Effect.Effect<RevenueConfig | null, unknown> {
     const parsed = yield* Effect.try({
       try: () => JSON.parse(raw) as unknown,
       catch: (cause) => cause,
-    }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+    }).pipe(Effect.catch(() => Effect.succeed(null)));
     return parseRevenueConfig(parsed);
   });
 }
@@ -105,11 +105,11 @@ function fetchWithRetry(apiKey: string): Effect.Effect<RevenueConfig, unknown> {
   return Effect.gen(function* () {
     let lastError: unknown = null;
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      const result = yield* Effect.either(fetchConfigFromApi(apiKey));
-      if (result._tag === "Right") {
-        return result.right;
+      const result = yield* Effect.result(fetchConfigFromApi(apiKey));
+      if (result._tag === "Success") {
+        return result.success;
       }
-      lastError = result.left;
+      lastError = result.failure;
       if (attempt < MAX_RETRIES - 1) {
         yield* Effect.sleep(RETRY_DELAY_MS);
       }
@@ -130,18 +130,18 @@ function resolveConfig(db: DbApi, paperTrading: boolean): Effect.Effect<RevenueC
       return DEFAULT_CONFIG;
     }
 
-    const result = yield* Effect.either(fetchWithRetry(apiKey));
-    if (result._tag === "Right") {
-      cached = { config: result.right, expiresAt: Date.now() + CACHE_TTL_MS };
-      yield* Effect.ignoreLogged(saveToDb(db, result.right));
-      return result.right;
+    const result = yield* Effect.result(fetchWithRetry(apiKey));
+    if (result._tag === "Success") {
+      cached = { config: result.success, expiresAt: Date.now() + CACHE_TTL_MS };
+      yield* Effect.ignore(saveToDb(db, result.success), { log: true });
+      return result.success;
     }
 
     log.warn("Failed to fetch revenue config from API, trying DB cache");
-    const fromDb = yield* Effect.either(loadFromDb(db));
-    if (fromDb._tag === "Right" && fromDb.right !== null) {
-      cached = { config: fromDb.right, expiresAt: Date.now() + CACHE_TTL_MS };
-      return fromDb.right;
+    const fromDb = yield* Effect.result(loadFromDb(db));
+    if (fromDb._tag === "Success" && fromDb.success !== null) {
+      cached = { config: fromDb.success, expiresAt: Date.now() + CACHE_TTL_MS };
+      return fromDb.success;
     }
 
     if (paperTrading) {
@@ -163,17 +163,17 @@ function forceRefresh(db: DbApi, paperTrading: boolean): Effect.Effect<RevenueCo
       return DEFAULT_CONFIG;
     }
 
-    const result = yield* Effect.either(fetchWithRetry(apiKey));
-    if (result._tag === "Right") {
-      cached = { config: result.right, expiresAt: Date.now() + CACHE_TTL_MS };
-      yield* Effect.ignoreLogged(saveToDb(db, result.right));
-      return result.right;
+    const result = yield* Effect.result(fetchWithRetry(apiKey));
+    if (result._tag === "Success") {
+      cached = { config: result.success, expiresAt: Date.now() + CACHE_TTL_MS };
+      yield* Effect.ignore(saveToDb(db, result.success), { log: true });
+      return result.success;
     }
 
-    const fromDb = yield* Effect.either(loadFromDb(db));
-    if (fromDb._tag === "Right" && fromDb.right !== null) {
-      cached = { config: fromDb.right, expiresAt: Date.now() + CACHE_TTL_MS };
-      return fromDb.right;
+    const fromDb = yield* Effect.result(loadFromDb(db));
+    if (fromDb._tag === "Success" && fromDb.success !== null) {
+      cached = { config: fromDb.success, expiresAt: Date.now() + CACHE_TTL_MS };
+      return fromDb.success;
     }
 
     if (paperTrading) {

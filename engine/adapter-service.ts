@@ -372,7 +372,7 @@ function getOrCreateInstallId(): Effect.Effect<string, never> {
         return value.length >= 8 && value.length <= 128 ? value : null;
       },
       catch: (cause) => cause,
-    }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+    }).pipe(Effect.catch(() => Effect.succeed(null)));
     if (existing) {
       cachedInstallId = existing;
       return existing;
@@ -389,7 +389,7 @@ function getOrCreateInstallId(): Effect.Effect<string, never> {
         fs.chmodSync(INSTALL_ID_FILE, 0o600);
       },
       catch: (cause) => cause,
-    }).pipe(Effect.catchAll(() => Effect.void));
+    }).pipe(Effect.catch(() => Effect.void));
     cachedInstallId = id;
     return id;
   });
@@ -478,7 +478,7 @@ export const AdapterLive = Layer.effect(
           try: () => Keypair.fromSecretKey(bs58.decode(config.walletPrivateKey)),
           catch: (cause) => cause,
         }).pipe(
-          Effect.catchAll((err) => {
+          Effect.catch((err) => {
             logger.error("Failed to load wallet", err);
             return Effect.succeed(null);
           }),
@@ -517,9 +517,9 @@ export const AdapterLive = Layer.effect(
 
     function withRpcTimeout<T>(effect: Effect.Effect<T, unknown>): Effect.Effect<T, unknown> {
       return effect.pipe(
-        Effect.timeoutFail({
+        Effect.timeoutOrElse({
           duration: RPC_REQUEST_TIMEOUT_MS,
-          onTimeout: () => new Error("RPC request timeout after 15s"),
+          orElse: () => Effect.fail(new Error("RPC request timeout after 15s")),
         }),
       );
     }
@@ -530,7 +530,7 @@ export const AdapterLive = Layer.effect(
     ): Effect.Effect<T, unknown> {
       const run = (conn: Connection, breaker: CircuitBreaker): Effect.Effect<T, unknown> =>
         paceRpc(conn).pipe(
-          Effect.zipRight(
+          Effect.andThen(
             breaker.execute(
               retryEffectWithBackoff(
                 withRpcTimeout(
@@ -547,7 +547,7 @@ export const AdapterLive = Layer.effect(
         );
 
       return run(primaryConn, primaryRpcCircuitBreaker).pipe(
-        Effect.catchAll((err) => {
+        Effect.catch((err) => {
           if (
             fallbackConnection &&
             fallbackRpcCircuitBreaker &&
@@ -558,15 +558,23 @@ export const AdapterLive = Layer.effect(
               logger.warn("Primary RPC failed, trying fallback RPC", {
                 error: err instanceof Error ? err.message : String(err),
               }),
-            ).pipe(Effect.zipRight(run(fallbackConnection, fallbackRpcCircuitBreaker)));
+            ).pipe(Effect.andThen(run(fallbackConnection, fallbackRpcCircuitBreaker)));
           }
           return Effect.fail(err);
         }),
       );
     }
 
-    const getDlmmCached = yield* Effect.cachedFunction((poolAddress: string) => {
-      return Effect.try({
+    const dlmmCacheEntries = new Map<
+      string,
+      Effect.Effect<[Effect.Effect<DLMM, unknown>, Effect.Effect<void>], unknown>
+    >();
+    function getDlmmCached(
+      poolAddress: string,
+    ): Effect.Effect<[Effect.Effect<DLMM, unknown>, Effect.Effect<void>], unknown> {
+      const existing = dlmmCacheEntries.get(poolAddress);
+      if (existing) return existing;
+      const entry = Effect.try({
         try: () => new PublicKey(poolAddress),
         catch: (cause) => cause,
       }).pipe(
@@ -577,7 +585,9 @@ export const AdapterLive = Layer.effect(
           ),
         ),
       );
-    });
+      dlmmCacheEntries.set(poolAddress, entry);
+      return entry;
+    }
 
     function getDlmm(poolAddress: string): Effect.Effect<DLMM, unknown> {
       return Effect.gen(function* () {
@@ -666,7 +676,15 @@ export const AdapterLive = Layer.effect(
       return price;
     }
 
-    const fetchHeliusAssetCached = yield* Effect.cachedFunction((mint: string) => {
+    const heliusAssetCacheEntries = new Map<
+      string,
+      Effect.Effect<[Effect.Effect<HeliusAssetResponse, unknown>, Effect.Effect<void>]>
+    >();
+    function fetchHeliusAssetCached(
+      mint: string,
+    ): Effect.Effect<[Effect.Effect<HeliusAssetResponse, unknown>, Effect.Effect<void>]> {
+      const existing = heliusAssetCacheEntries.get(mint);
+      if (existing) return existing;
       const url = `https://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
       const assetRequest = Effect.gen(function* () {
         const res = yield* Effect.tryPromise({
@@ -702,13 +720,15 @@ export const AdapterLive = Layer.effect(
         }
         return json;
       });
-      return Effect.cachedInvalidateWithTTL(
+      const entry = Effect.cachedInvalidateWithTTL(
         paceHeliusRequest().pipe(
-          Effect.zipRight(retryEffectWithBackoff(withRpcTimeout(assetRequest), RPC_RETRY_OPTIONS)),
+          Effect.andThen(retryEffectWithBackoff(withRpcTimeout(assetRequest), RPC_RETRY_OPTIONS)),
         ),
         HELIUS_ASSET_CACHE_TTL_MS,
       );
-    });
+      heliusAssetCacheEntries.set(mint, entry);
+      return entry;
+    }
 
     function fetchHeliusAsset(mint: string): Effect.Effect<HeliusAssetResponse | null, unknown> {
       if (!config.heliusApiKey) return Effect.succeed(null);
@@ -748,9 +768,7 @@ export const AdapterLive = Layer.effect(
         // Helius path: DAS getAsset returns token_info.decimals for any
         // mint Helius has indexed. Only available when heliusApiKey is set.
         if (config.heliusApiKey) {
-          const json = yield* fetchHeliusAsset(mint).pipe(
-            Effect.catchAll(() => Effect.succeed(null)),
-          );
+          const json = yield* fetchHeliusAsset(mint).pipe(Effect.catch(() => Effect.succeed(null)));
           const d = json?.result?.token_info?.decimals;
           if (typeof d === "number") {
             const priceUsd = json ? readHeliusPrice(json) : undefined;
@@ -832,7 +850,7 @@ export const AdapterLive = Layer.effect(
           missing,
           (mint) =>
             fetchHeliusAsset(mint).pipe(
-              Effect.catchAll((err) => {
+              Effect.catch((err) => {
                 logger.debug("Helius asset price unavailable", {
                   mint,
                   error: String(err),
@@ -883,7 +901,7 @@ export const AdapterLive = Layer.effect(
           }
         }
         return result;
-      }).pipe(Effect.catchAll(() => Effect.succeed({})));
+      }).pipe(Effect.catch(() => Effect.succeed({})));
     }
 
     function fetchCoinGeckoPrices(
@@ -927,7 +945,7 @@ export const AdapterLive = Layer.effect(
           }
         }
         return result;
-      }).pipe(Effect.catchAll(() => Effect.succeed({})));
+      }).pipe(Effect.catch(() => Effect.succeed({})));
     }
 
     function fetchTokenPrices(
@@ -1230,7 +1248,7 @@ export const AdapterLive = Layer.effect(
       // the next valuation would serve a pre-mutation mark (up to 60s) into
       // trailing-stop / IL / dust decisions.
       positionValueCache.clear();
-    }).pipe(Effect.zipRight(invalidateWalletSnapshot));
+    }).pipe(Effect.andThen(invalidateWalletSnapshot));
 
     const quotedByRawPayload = new WeakMap<Record<string, unknown>, SwapQuote>();
     const preparedTransactions = new Map<string, number>();
@@ -1722,7 +1740,7 @@ export const AdapterLive = Layer.effect(
         if (outputAtomic <= 0n) return null;
 
         return { outputAtomic, feeAtomic };
-      }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+      }).pipe(Effect.catch(() => Effect.succeed(null)));
     }
 
     function quoteSwapUSDCForToken(
@@ -1891,9 +1909,7 @@ export const AdapterLive = Layer.effect(
 
         return { tvlUsd, volume24hUsd: estimatedVolume24h, fees24hUsd, apr };
       }).pipe(
-        Effect.catchAll(() =>
-          Effect.succeed({ tvlUsd: 0, volume24hUsd: 0, fees24hUsd: 0, apr: 0 }),
-        ),
+        Effect.catch(() => Effect.succeed({ tvlUsd: 0, volume24hUsd: 0, fees24hUsd: 0, apr: 0 })),
       );
     }
 
@@ -1974,7 +1990,7 @@ export const AdapterLive = Layer.effect(
             statsSource: "heuristic" as const,
           };
         }).pipe(
-          Effect.catchAll((err) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to get pool state: ${String(err)}`,
@@ -2000,7 +2016,7 @@ export const AdapterLive = Layer.effect(
           const realBins = yield* Effect.tryPromise(() =>
             dlmm.getBinsAroundActiveBin(halfRange, halfRange),
           ).pipe(
-            Effect.catchAll((err) => {
+            Effect.catch((err) => {
               logger.warn(
                 "Real bin reserves unavailable — bin-derived metrics will be marked unknown",
                 { pool: poolAddress, error: String(err) },
@@ -2120,7 +2136,7 @@ export const AdapterLive = Layer.effect(
           positionValueCache.set(cacheKey, { fetchedAt: Date.now(), value: valueUsd });
           return valueUsd;
         }).pipe(
-          Effect.catchAll(() => {
+          Effect.catch(() => {
             return Effect.succeed(null);
           }),
         );
@@ -2226,7 +2242,7 @@ export const AdapterLive = Layer.effect(
             source: "sdk-simulation" as const,
           };
         }).pipe(
-          Effect.catchAll((err: unknown) =>
+          Effect.catch((err: unknown) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to simulate rebalance: ${underlyingErrorMessage(err)}`,
@@ -2443,7 +2459,7 @@ export const AdapterLive = Layer.effect(
             amountYUsd,
           };
         }).pipe(
-          Effect.catchAll((err: unknown) =>
+          Effect.catch((err: unknown) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to enter position: ${String(err)}`,
@@ -2552,7 +2568,7 @@ export const AdapterLive = Layer.effect(
             // pending-fee legs AND the swept-reward mints, so the opt-out covers
             // every ledger-booking input at once (mirrors the wallet path).
             const prices = yield* fetchTokenPrices(priceMints, { useFallback: false }).pipe(
-              Effect.catchAll(() => Effect.succeed({} as Record<string, number>)),
+              Effect.catch(() => Effect.succeed({} as Record<string, number>)),
             );
 
             // All-or-nothing on the withdrawn/pending legs: ANY unresolved leg
@@ -2581,7 +2597,7 @@ export const AdapterLive = Layer.effect(
                 if (price != null && price > 0) {
                   const decimals = yield* getTokenMeta(slot.mint).pipe(
                     Effect.map((m) => m.decimals),
-                    Effect.catchAll(() => Effect.succeed(null)),
+                    Effect.catch(() => Effect.succeed(null)),
                   );
                   if (decimals != null) {
                     amountUsd = atomicToUnits(BigInt(slot.amountAtomic), decimals) * price;
@@ -2597,7 +2613,7 @@ export const AdapterLive = Layer.effect(
 
             return { withdrawnUsd, pendingFeeUsd, sweptRewards };
           }).pipe(
-            Effect.catchAll(() =>
+            Effect.catch(() =>
               Effect.succeed({
                 withdrawnUsd: null as number | null,
                 pendingFeeUsd: null as number | null,
@@ -2617,7 +2633,7 @@ export const AdapterLive = Layer.effect(
             sweptRewards: accounting.sweptRewards,
           };
         }).pipe(
-          Effect.catchAll((err: unknown) =>
+          Effect.catch((err: unknown) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to exit position: ${String(err)}`,
@@ -2679,7 +2695,7 @@ export const AdapterLive = Layer.effect(
           yield* rpcCall((conn) => conn.confirmTransaction(txSignature, "confirmed"));
           return { orderPubKey: limitOrder.publicKey.toBase58(), txSignature };
         }).pipe(
-          Effect.catchAll((err: unknown) =>
+          Effect.catch((err: unknown) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to place limit order: ${underlyingErrorMessage(err)}`,
@@ -2720,7 +2736,7 @@ export const AdapterLive = Layer.effect(
           yield* rpcCall((conn) => conn.confirmTransaction(txSignature, "confirmed"));
           return { txSignature };
         }).pipe(
-          Effect.catchAll((err: unknown) =>
+          Effect.catch((err: unknown) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to cancel limit order: ${underlyingErrorMessage(err)}`,
@@ -2799,7 +2815,7 @@ export const AdapterLive = Layer.effect(
 
           return { positionPubKey, txSignatures };
         }).pipe(
-          Effect.catchAll((err: unknown) =>
+          Effect.catch((err: unknown) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to atomically rebalance position: ${underlyingErrorMessage(err)}`,
@@ -2995,7 +3011,7 @@ export const AdapterLive = Layer.effect(
             // `?? 0` → the compound gate fails closed instead of booking fiction.
             const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint], {
               useFallback: false,
-            }).pipe(Effect.catchAll(() => Effect.succeed({} as Record<string, number>)));
+            }).pipe(Effect.catch(() => Effect.succeed({} as Record<string, number>)));
             const priceX = prices[tokenXMint];
             const priceY = prices[tokenYMint];
             if (priceX == null || priceX <= 0 || priceY == null || priceY <= 0) return null;
@@ -3003,7 +3019,7 @@ export const AdapterLive = Layer.effect(
               (netFeeX / 10 ** dlmm.tokenX.mint.decimals) * priceX +
               (netFeeY / 10 ** dlmm.tokenY.mint.decimals) * priceY
             );
-          }).pipe(Effect.catchAll(() => Effect.succeed(null as number | null)));
+          }).pipe(Effect.catch(() => Effect.succeed(null as number | null)));
 
           return {
             txSignature: signature,
@@ -3020,7 +3036,7 @@ export const AdapterLive = Layer.effect(
               : {}),
           };
         }).pipe(
-          Effect.catchAll((err: unknown) =>
+          Effect.catch((err: unknown) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to claim fees: ${String(err)}`,
@@ -3165,7 +3181,7 @@ export const AdapterLive = Layer.effect(
           const prices =
             pricedMints.length > 0
               ? yield* fetchTokenPrices(pricedMints).pipe(
-                  Effect.catchAll(() => Effect.succeed({} as Record<string, number>)),
+                  Effect.catch(() => Effect.succeed({} as Record<string, number>)),
                 )
               : {};
 
@@ -3177,7 +3193,7 @@ export const AdapterLive = Layer.effect(
             if (price != null && price > 0) {
               const decimals = yield* getTokenMeta(mint).pipe(
                 Effect.map((m) => m.decimals),
-                Effect.catchAll(() => Effect.succeed(null)),
+                Effect.catch(() => Effect.succeed(null)),
               );
               if (decimals != null) {
                 amountUsd = (slot.amountAtomic / Math.pow(10, decimals)) * price;
@@ -3205,7 +3221,7 @@ export const AdapterLive = Layer.effect(
 
           return { skipped: false, skipReason: null, txSignatures, rewards };
         }).pipe(
-          Effect.catchAll((err: unknown) =>
+          Effect.catch((err: unknown) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to claim rewards: ${String(err)}`,
@@ -3248,7 +3264,7 @@ export const AdapterLive = Layer.effect(
             logger.warn("Revenue report failed:", res.status);
           }
         }).pipe(
-          Effect.catchAll((err) =>
+          Effect.catch((err) =>
             Effect.sync(() => logger.warn("Revenue report failed:", String(err))),
           ),
         );
@@ -3424,7 +3440,7 @@ export const AdapterLive = Layer.effect(
               // Per-page failure isolation: a network error, timeout, or parse
               // failure on ONE page must not discard the pages that succeeded —
               // log a warning and yield [] for that page only.
-              Effect.catchAll((cause) => {
+              Effect.catch((cause) => {
                 logger.warn("Market scan: page fetch failed", {
                   page,
                   error: underlyingErrorMessage(cause),
@@ -3436,9 +3452,7 @@ export const AdapterLive = Layer.effect(
             Array.from({ length: pageCount }, (_, i) => fetchPage(i + 1)),
             { concurrency: 3 },
           ).pipe(
-            Effect.catchAll(() =>
-              Effect.succeed([] as ReadonlyArray<ReadonlyArray<DiscoveredPool>>),
-            ),
+            Effect.catch(() => Effect.succeed([] as ReadonlyArray<ReadonlyArray<DiscoveredPool>>)),
           );
           const byAddress = new Map<string, DiscoveredPool>();
           for (const page of pagesResult) {
@@ -3458,7 +3472,7 @@ export const AdapterLive = Layer.effect(
 
       quoteSwapUSDCForToken: (outputMint: string, amountAtomic: bigint) =>
         quoteSwapUSDCForToken(outputMint, amountAtomic).pipe(
-          Effect.catchAll((err) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `quoteSwapUSDCForToken failed: ${String(err)}`,
@@ -3475,7 +3489,7 @@ export const AdapterLive = Layer.effect(
       getSwapStatus,
       getConfirmedSwapOutput: (signature) =>
         getConfirmedSwapOutput(signature).pipe(
-          Effect.catchAll((err) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `getConfirmedSwapOutput failed: ${String(err)}`,
@@ -3491,7 +3505,7 @@ export const AdapterLive = Layer.effect(
         quoteData?: Record<string, unknown>,
       ) =>
         swapUSDCForToken(outputMint, amountAtomic, quoteData).pipe(
-          Effect.catchAll((err) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `swapUSDCForToken failed: ${String(err)}`,
@@ -3508,7 +3522,7 @@ export const AdapterLive = Layer.effect(
         quoteData?: Record<string, unknown>,
       ) =>
         swapToken(inputMint, outputMint, amountAtomic, quoteData).pipe(
-          Effect.catchAll((err) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `swapToken failed: ${String(err)}`,
@@ -3535,16 +3549,21 @@ export const AdapterLive = Layer.effect(
           });
 
           yield* swapUSDCForToken(SOL_MINT, BigInt(Math.round(swapAmountUSDC * 1e6))).pipe(
-            Effect.tap((sig) => {
-              if (sig) {
-                logger.info("Swapped USDC → SOL for gas", { tx: sig, amountUSDC: swapAmountUSDC });
-              }
-            }),
-            Effect.catchAll((err) =>
+            Effect.tap((sig) =>
+              Effect.sync(() => {
+                if (sig) {
+                  logger.info("Swapped USDC → SOL for gas", {
+                    tx: sig,
+                    amountUSDC: swapAmountUSDC,
+                  });
+                }
+              }),
+            ),
+            Effect.catch((err) =>
               Effect.sync(() => logger.warn("USDC → SOL swap failed (non-fatal):", String(err))),
             ),
           );
-        }).pipe(Effect.catchAll(() => Effect.void)),
+        }).pipe(Effect.catch(() => Effect.void)),
     };
 
     return api;

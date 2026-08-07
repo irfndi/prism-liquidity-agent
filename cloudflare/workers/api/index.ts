@@ -57,12 +57,12 @@ function causeMessage(cause: unknown): string {
 }
 
 // Services
-class DbService extends Context.Tag("DbService")<DbService, { readonly db: D1Database }>() {}
+class DbService extends Context.Service<DbService, { readonly db: D1Database }>()("DbService") {}
 
-class CacheService extends Context.Tag("CacheService")<
+class CacheService extends Context.Service<
   CacheService,
   { readonly cache: KVNamespace }
->() {}
+>()("CacheService") {}
 
 // Service implementations
 const DbLive = (db: D1Database) => Layer.succeed(DbService, { db });
@@ -94,7 +94,7 @@ function readJsonBody<T>(request: { json: () => Promise<unknown> }): Effect.Effe
     catch: (cause) => cause,
   }).pipe(
     Effect.map((body) => body as T),
-    Effect.catchAll(() => Effect.succeed({} as T)),
+    Effect.catch(() => Effect.succeed({} as T)),
   );
 }
 
@@ -261,7 +261,7 @@ function archiveErrorReports(
         catch: (cause) => cause,
       }).pipe(
         Effect.map(() => 1),
-        Effect.catchAll((cause) => {
+        Effect.catch((cause) => {
           console.error("[Telemetry] Failed to archive error summary", {
             key,
             error: causeMessage(cause),
@@ -269,13 +269,13 @@ function archiveErrorReports(
           return Effect.succeed(0);
         }),
         Effect.timeout("5 seconds"),
-        Effect.catchAll(() => Effect.succeed(0)),
+        Effect.catch(() => Effect.succeed(0)),
       );
     },
     { concurrency: 4 },
   ).pipe(
     Effect.map((results) => results.reduce((sum, count) => sum + count, 0)),
-    Effect.catchAll(() => Effect.succeed(0)),
+    Effect.catch(() => Effect.succeed(0)),
   );
 }
 function upsertErrorReports(
@@ -420,14 +420,14 @@ function logAudit(
         .bind(userId, action, eventKey, detailsJson)
         .run(),
     ).pipe(
-      Effect.catchAll((summaryError: unknown) =>
+      Effect.catch((summaryError: unknown) =>
         Effect.tryPromise(() =>
           db
             .prepare("INSERT INTO audit_log (user_id, action, details) VALUES (?, ?, ?)")
             .bind(userId, action, detailsJson)
             .run(),
         ).pipe(
-          Effect.catchAll((fallbackError: unknown) =>
+          Effect.catch((fallbackError: unknown) =>
             Effect.sync(() =>
               console.error("[Audit] Failed to log audit entry:", summaryError, fallbackError),
             ),
@@ -438,7 +438,7 @@ function logAudit(
       Effect.asVoid,
     );
     yield* summaryWrite;
-  }).pipe(Effect.catchAll(() => Effect.void));
+  }).pipe(Effect.catch(() => Effect.void));
 }
 
 // Helper to create a free subscription (used by both registration paths)
@@ -457,7 +457,7 @@ function createFreeSubscription(db: D1Database, userId: string): Effect.Effect<v
       )
       .run(),
   ).pipe(
-    Effect.catchAll((err) =>
+    Effect.catch((err) =>
       Effect.sync(() =>
         console.error("[Subscription] Failed to create free subscription for user:", userId, err),
       ),
@@ -545,7 +545,7 @@ function authenticateUser(
       if (typeof row.id !== "string") return null;
       return { id: row.id, tier: typeof row.tier === "string" ? row.tier : "free" };
     }),
-    Effect.catchAll(() => Effect.succeed(null)),
+    Effect.catch(() => Effect.succeed(null)),
   );
 }
 
@@ -668,7 +668,7 @@ const agentStatusHandler = (db: D1Database, cache: KVNamespace, telegramId: stri
 
     // Try KV first for the latest engine heartbeat.
     const cached = yield* Effect.tryPromise(() => cache.get(`agent_status:${userId}`)).pipe(
-      Effect.catchAll(() => Effect.succeed(null)),
+      Effect.catch(() => Effect.succeed(null)),
     );
 
     if (cached) {
@@ -709,7 +709,7 @@ const agentStatusReportHandler = (db: D1Database, cache: KVNamespace, apiKey: st
             { expirationTtl: AGENT_STATUS_CACHE_TTL_SEC },
           ),
         ).pipe(
-          Effect.catchAll((err) =>
+          Effect.catch((err) =>
             Effect.sync(() =>
               console.error("agent-status KV write failed", {
                 userId,
@@ -749,7 +749,7 @@ app.post("/v1/register", async (c) => {
     const body = (yield* Effect.tryPromise({
       try: () => c.req.json(),
       catch: (cause) => cause,
-    }).pipe(Effect.catchAll(() => Effect.succeed({})))) as { telegram_id?: string };
+    }).pipe(Effect.catch(() => Effect.succeed({})))) as { telegram_id?: string };
     const rateKey = `rate_limit:register:${clientIp}`;
     const withinLimit = yield* rateLimitHit(DB, rateKey, 5);
     if (!withinLimit) {
@@ -785,7 +785,7 @@ app.post("/v1/register", async (c) => {
 
   return Effect.runPromise(
     registration.pipe(
-      Effect.catchAll(() => Effect.succeed(c.json({ error: "Registration failed" }, 500))),
+      Effect.catch(() => Effect.succeed(c.json({ error: "Registration failed" }, 500))),
     ),
   );
 });
@@ -940,7 +940,7 @@ app.post("/v1/link-telegram/confirm", async (c) => {
   });
 
   return Effect.runPromise(
-    linking.pipe(Effect.catchAll(() => Effect.succeed(c.json({ error: "Linking failed" }, 500)))),
+    linking.pipe(Effect.catch(() => Effect.succeed(c.json({ error: "Linking failed" }, 500)))),
   );
 });
 
@@ -1091,7 +1091,7 @@ app.post("/v1/agent-status/report", async (c) => {
   return Effect.runPromise(
     Effect.gen(function* () {
       const handler = yield* agentStatusReportHandler(DB, CACHE, apiKey).pipe(
-        Effect.catchAll(() => Effect.fail(new Error("Authentication failed"))),
+        Effect.catch(() => Effect.fail(new Error("Authentication failed"))),
       );
       yield* handler.storeStatus(body.status!, positions, pnl);
       return c.json({ ok: true });
@@ -1226,7 +1226,7 @@ app.post("/v1/issue", async (c) => {
 
   return Effect.runPromise(
     issue.pipe(
-      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to store issue" }, 500))),
+      Effect.catch(() => Effect.succeed(c.json({ error: "Failed to store issue" }, 500))),
     ),
   );
 });
@@ -1308,7 +1308,7 @@ app.post("/v1/feedback", async (c) => {
 
   return Effect.runPromise(
     feedback.pipe(
-      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to store feedback" }, 500))),
+      Effect.catch(() => Effect.succeed(c.json({ error: "Failed to store feedback" }, 500))),
     ),
   );
 });
@@ -1356,7 +1356,7 @@ app.get("/v1/feedback", async (c) => {
 
   return Effect.runPromise(
     query.pipe(
-      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to fetch feedback" }, 500))),
+      Effect.catch(() => Effect.succeed(c.json({ error: "Failed to fetch feedback" }, 500))),
     ),
   );
 });
@@ -1400,7 +1400,7 @@ app.get("/v1/audit", async (c) => {
 
   return Effect.runPromise(
     query.pipe(
-      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to fetch audit events" }, 500))),
+      Effect.catch(() => Effect.succeed(c.json({ error: "Failed to fetch audit events" }, 500))),
     ),
   );
 });
@@ -1453,7 +1453,7 @@ app.post("/v1/errors/report", async (c) => {
 
   return Effect.runPromise(
     report.pipe(
-      Effect.catchAll((cause) => {
+      Effect.catch((cause) => {
         console.error("[Telemetry] Failed to store error report", causeMessage(cause));
         return Effect.succeed(
           cause instanceof TelemetryValidationError
@@ -1513,7 +1513,7 @@ app.post("/v1/errors/batch", async (c) => {
     const validReports: NormalizedErrorReport[] = [];
     const rejected: Array<{ id: string; error: string }> = [];
     for (const report of reports) {
-      const outcome = yield* Effect.either(
+      const outcome = yield* Effect.result(
         normalizeErrorReport(report, body.version).pipe(
           Effect.mapError(
             (error) =>
@@ -1521,11 +1521,11 @@ app.post("/v1/errors/batch", async (c) => {
           ),
         ),
       );
-      if (outcome._tag === "Left") {
-        rejected.push({ id: report.id ?? "missing id", error: outcome.left.message });
+      if (outcome._tag === "Failure") {
+        rejected.push({ id: report.id ?? "missing id", error: outcome.failure.message });
         continue;
       }
-      validReports.push(outcome.right);
+      validReports.push(outcome.success);
     }
     if (validReports.length === 0 && rejected.length > 0) {
       return c.json({ error: "No valid reports", rejected }, 400);
@@ -1536,7 +1536,7 @@ app.post("/v1/errors/batch", async (c) => {
 
   return Effect.runPromise(
     batch.pipe(
-      Effect.catchAll((cause) => {
+      Effect.catch((cause) => {
         console.error("[Telemetry] Failed to store error batch", causeMessage(cause));
         return Effect.succeed(
           cause instanceof TelemetryValidationError
@@ -1571,7 +1571,7 @@ app.get("/v1/errors/stats", async (c) => {
     ).all(),
   ).pipe(
     Effect.map((result) => c.json({ stats: result.results ?? [] })),
-    Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to fetch stats" }, 500))),
+    Effect.catch(() => Effect.succeed(c.json({ error: "Failed to fetch stats" }, 500))),
   );
 
   return Effect.runPromise(stats);
@@ -1687,7 +1687,7 @@ app.post("/v1/alerts", async (c) => {
 
   return Effect.runPromise(
     storeAlert.pipe(
-      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to store alert" }, 500))),
+      Effect.catch(() => Effect.succeed(c.json({ error: "Failed to store alert" }, 500))),
     ),
   );
 });
@@ -1804,7 +1804,7 @@ app.get("/v1/config", async (c) => {
   });
 
   return Effect.runPromise(
-    config.pipe(Effect.catchAll(() => Effect.succeed(c.json({ error: "Unauthorized" }, 401)))),
+    config.pipe(Effect.catch(() => Effect.succeed(c.json({ error: "Unauthorized" }, 401)))),
   );
 });
 
@@ -1883,7 +1883,7 @@ app.post("/v1/installs/ping", async (c) => {
       .run(),
   ).pipe(
     Effect.map(() => c.json({ id })),
-    Effect.catchAll(() => Effect.succeed(c.json({ error: "Internal server error" }, 500))),
+    Effect.catch(() => Effect.succeed(c.json({ error: "Internal server error" }, 500))),
   );
 
   return Effect.runPromise(ping);
@@ -1926,7 +1926,7 @@ app.get("/v1/referral/code", async (c) => {
 
   return Effect.runPromise(
     referral.pipe(
-      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to get referral code" }, 500))),
+      Effect.catch(() => Effect.succeed(c.json({ error: "Failed to get referral code" }, 500))),
     ),
   );
 });
@@ -1997,7 +1997,7 @@ app.post("/v1/referral/apply", async (c) => {
 
   return Effect.runPromise(
     referral.pipe(
-      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to apply referral" }, 500))),
+      Effect.catch(() => Effect.succeed(c.json({ error: "Failed to apply referral" }, 500))),
     ),
   );
 });
@@ -2040,7 +2040,7 @@ app.get("/v1/referral/stats", async (c) => {
 
   return Effect.runPromise(
     stats.pipe(
-      Effect.catchAll(() => Effect.succeed(c.json({ error: "Failed to get referral stats" }, 500))),
+      Effect.catch(() => Effect.succeed(c.json({ error: "Failed to get referral stats" }, 500))),
     ),
   );
 });
@@ -2105,7 +2105,7 @@ app.get("/v1/subscription/status", async (c) => {
 
   return Effect.runPromise(
     subscription.pipe(
-      Effect.catchAll(() =>
+      Effect.catch(() =>
         Effect.succeed(c.json({ error: "Failed to get subscription status" }, 500)),
       ),
     ),
@@ -2123,11 +2123,11 @@ app.post("/v1/revenue/log", async (c) => {
     return c.json({ error: "API key required" }, 401);
   }
 
-  const authentication = await Effect.runPromise(loginHandler(DB, apiKey).pipe(Effect.either));
-  if (authentication._tag === "Left") {
+  const authentication = await Effect.runPromise(loginHandler(DB, apiKey).pipe(Effect.result));
+  if (authentication._tag === "Failure") {
     return c.json({ error: "Unauthorized" }, 401);
   }
-  const authenticatedUser = authentication.right as { id: string; tier?: string };
+  const authenticatedUser = authentication.success as { id: string; tier?: string };
   const userId = authenticatedUser.id;
   const tier = authenticatedUser.tier ?? "free";
 
@@ -2259,7 +2259,7 @@ app.get("/v1/revenue", async (c) => {
 
   return Effect.runPromise(
     revenue.pipe(
-      Effect.catchAll(() =>
+      Effect.catch(() =>
         Effect.succeed(c.json({ error: "Failed to fetch revenue stats" }, 500)),
       ),
     ),

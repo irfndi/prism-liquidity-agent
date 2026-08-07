@@ -49,7 +49,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
   }
 
   isAvailable(): Effect.Effect<boolean, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const response = yield* Effect.tryPromise(async () => {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
@@ -62,7 +62,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
         } finally {
           clearTimeout(timer);
         }
-      }).pipe(Effect.catchAll(() => Effect.succeed(null)));
+      }).pipe(Effect.catch(() => Effect.succeed(null)));
 
       return response != null && response.status < 500;
     });
@@ -83,7 +83,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
   ): Effect.Effect<AgentRuntimeResponse, unknown> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
       const startedAt = Date.now();
 
@@ -98,8 +98,8 @@ export class HermesApiTransport implements AgentRuntimeTransport {
   sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, unknown> {
     const content = `Prism check-in (${checkin.trigger}):\n\n${stringifySafe(checkin, 2)}`;
     return this.chatCompletion(content).pipe(
-      Effect.tap(() => logger.debug("Check-in delivered")),
-      Effect.catchAll((err) => {
+      Effect.tap(() => Effect.sync(() => logger.debug("Check-in delivered"))),
+      Effect.catch((err) => {
         logger.warn("Failed to deliver check-in", { error: String(err) });
         return Effect.void;
       }),
@@ -109,8 +109,8 @@ export class HermesApiTransport implements AgentRuntimeTransport {
   sendAlert(alert: AgentRuntimeAlert): Effect.Effect<void, unknown> {
     const content = `Prism alert [${alert.severity}/${alert.category}] ${alert.tokenPair} (${alert.pool}): ${alert.message}`;
     return this.chatCompletion(content).pipe(
-      Effect.tap(() => logger.debug("Alert delivered")),
-      Effect.catchAll((err) => {
+      Effect.tap(() => Effect.sync(() => logger.debug("Alert delivered"))),
+      Effect.catch((err) => {
         logger.warn("Failed to deliver alert", { error: String(err) });
         return Effect.void;
       }),

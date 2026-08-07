@@ -14,10 +14,10 @@ function runSyncOrFail<A, E>(effect: Effect.Effect<A, E>): A {
 }
 
 function expectError(effect: Effect.Effect<unknown, ProposalParseError>): void {
-  const result = Effect.runSync(Effect.either(effect));
-  expect(result._tag).toBe("Left");
-  if (result._tag === "Left") {
-    expect(result.left).toBeInstanceOf(ProposalParseError);
+  const result = Effect.runSync(Effect.result(effect));
+  expect(result._tag).toBe("Failure");
+  if (result._tag === "Failure") {
+    expect(result.failure).toBeInstanceOf(ProposalParseError);
   }
 }
 

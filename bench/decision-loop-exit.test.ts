@@ -259,7 +259,11 @@ async function runCycles(
     return yield* audit.getRecentDecisions(200);
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as Effect.Effect<ReadonlyArray<DecisionRow>, unknown, never>,
+    Effect.provide(test, layer) as unknown as Effect.Effect<
+      ReadonlyArray<DecisionRow>,
+      unknown,
+      never
+    >,
   );
 }
 
@@ -297,11 +301,11 @@ describe("phantom EXIT gating (Wave 2)", () => {
       const decisions = yield* audit.getRecentDecisions(50);
       const evolutionCount = yield* db
         .getMetadata("threshold_evolution_count")
-        .pipe(Effect.catchAll(() => Effect.succeed(null)));
+        .pipe(Effect.catch(() => Effect.succeed(null)));
       return { decisions, evolutionCount };
     });
     const { decisions, evolutionCount } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         { decisions: ReadonlyArray<DecisionRow>; evolutionCount: string | null },
         unknown,
         never
@@ -333,7 +337,11 @@ describe("phantom EXIT gating (Wave 2)", () => {
       return yield* audit.getRecentDecisions(50);
     });
     const decisions = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<ReadonlyArray<DecisionRow>, unknown, never>,
+      Effect.provide(test, layer) as unknown as Effect.Effect<
+        ReadonlyArray<DecisionRow>,
+        unknown,
+        never
+      >,
     );
 
     const tvlExit = decisions.find(
@@ -358,11 +366,11 @@ describe("phantom EXIT gating (Wave 2)", () => {
       const db = yield* DbService;
       const cooldown = yield* db
         .getPoolCooldown(POOL)
-        .pipe(Effect.catchAll(() => Effect.succeed(null)));
+        .pipe(Effect.catch(() => Effect.succeed(null)));
       return { decisions, cooldown };
     });
     const { decisions, cooldown } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         { decisions: ReadonlyArray<DecisionRow>; cooldown: unknown },
         unknown,
         never
@@ -420,7 +428,11 @@ describe("portfolio value math (Wave 2)", () => {
       return yield* audit.getRecentDecisions(50);
     });
     const decisions = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<ReadonlyArray<DecisionRow>, unknown, never>,
+      Effect.provide(test, layer) as unknown as Effect.Effect<
+        ReadonlyArray<DecisionRow>,
+        unknown,
+        never
+      >,
     );
 
     const enter = decisions.find((d) => d.poolAddress === POOL_NEW && d.action === "ENTER");

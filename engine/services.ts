@@ -238,7 +238,7 @@ export interface AdapterApi {
    * - `sweptRewards`: LM rewards the close batch claims, priced per
    *   `claimRewards` semantics (unpriceable slot → `amountUsd: null`).
    *
-   * Pricing runs under `catchAll → null` and must NEVER abort or delay the
+   * Pricing runs under `catch → null` and must NEVER abort or delay the
    * removeLiquidity transactions — closing bleeding liquidity outranks the
    * ledger. Atomic amounts are always returned even when USD pricing fails.
    */
@@ -426,7 +426,9 @@ export interface AdapterApi {
   ) => Effect.Effect<{ outputAtomic: bigint; feeAtomic: bigint } | null, unknown>;
 }
 
-export class AdapterService extends Context.Tag("AdapterService")<AdapterService, AdapterApi>() {}
+export class AdapterService extends Context.Service<AdapterService, AdapterApi>()(
+  "AdapterService",
+) {}
 
 // ─── Entry Prep Service ───────────────────────────────────────────────────────
 
@@ -450,10 +452,9 @@ export interface EntryPreparationOutcome {
   readonly receipts: ReadonlyArray<EntryPreparationReceipt>;
 }
 
-export class EntryPrepService extends Context.Tag("EntryPrepService")<
-  EntryPrepService,
-  EntryPrepApi
->() {}
+export class EntryPrepService extends Context.Service<EntryPrepService, EntryPrepApi>()(
+  "EntryPrepService",
+) {}
 
 // ─── Strategy Service ────────────────────────────────────────────────────────
 
@@ -494,10 +495,9 @@ export interface StrategyApi {
   ) => boolean;
 }
 
-export class StrategyService extends Context.Tag("StrategyService")<
-  StrategyService,
-  StrategyApi
->() {}
+export class StrategyService extends Context.Service<StrategyService, StrategyApi>()(
+  "StrategyService",
+) {}
 
 // ─── Meteora Data API Service ────────────────────────────────────────────────
 
@@ -549,10 +549,9 @@ export interface MeteoraDatapiApi {
   readonly getPoolData: (poolAddress: string) => Effect.Effect<MeteoraPoolStats | null, never>;
 }
 
-export class MeteoraDatapiService extends Context.Tag("MeteoraDatapiService")<
-  MeteoraDatapiService,
-  MeteoraDatapiApi
->() {}
+export class MeteoraDatapiService extends Context.Service<MeteoraDatapiService, MeteoraDatapiApi>()(
+  "MeteoraDatapiService",
+) {}
 
 // ─── GeckoTerminal Service ───────────────────────────────────────────────────
 
@@ -573,10 +572,9 @@ export interface GeckoTerminalApi {
   ) => Effect.Effect<GeckoPoolStats | null, never>;
 }
 
-export class GeckoTerminalService extends Context.Tag("GeckoTerminalService")<
-  GeckoTerminalService,
-  GeckoTerminalApi
->() {}
+export class GeckoTerminalService extends Context.Service<GeckoTerminalService, GeckoTerminalApi>()(
+  "GeckoTerminalService",
+) {}
 
 // ─── Pyth Price Service ──────────────────────────────────────────────────────
 
@@ -601,10 +599,9 @@ export interface PythPriceApi {
   readonly getSolPriceUsd: () => Effect.Effect<number | null, never>;
 }
 
-export class PythPriceService extends Context.Tag("PythPriceService")<
-  PythPriceService,
-  PythPriceApi
->() {}
+export class PythPriceService extends Context.Service<PythPriceService, PythPriceApi>()(
+  "PythPriceService",
+) {}
 
 // ─── Memory Service ──────────────────────────────────────────────────────────
 
@@ -627,7 +624,7 @@ export interface MemoryApi {
   ) => Effect.Effect<void, unknown>;
 }
 
-export class MemoryService extends Context.Tag("MemoryService")<MemoryService, MemoryApi>() {}
+export class MemoryService extends Context.Service<MemoryService, MemoryApi>()("MemoryService") {}
 
 // ─── Risk Service ────────────────────────────────────────────────────────────
 
@@ -658,7 +655,7 @@ export interface RiskApi {
   readonly evaluate: (decision: AgentDecision, ctx: RiskContext) => RiskResult;
 }
 
-export class RiskService extends Context.Tag("RiskService")<RiskService, RiskApi>() {}
+export class RiskService extends Context.Service<RiskService, RiskApi>()("RiskService") {}
 
 // ─── Blacklist Service ───────────────────────────────────────────────────────
 
@@ -674,10 +671,9 @@ export interface BlacklistApi {
   ) => Effect.Effect<void, unknown>;
 }
 
-export class BlacklistService extends Context.Tag("BlacklistService")<
-  BlacklistService,
-  BlacklistApi
->() {}
+export class BlacklistService extends Context.Service<BlacklistService, BlacklistApi>()(
+  "BlacklistService",
+) {}
 
 // ─── Audit Service ───────────────────────────────────────────────────────────
 
@@ -703,7 +699,7 @@ export interface AuditApi {
   ) => Effect.Effect<ReadonlyArray<DecisionRecord>, unknown>;
 }
 
-export class AuditService extends Context.Tag("AuditService")<AuditService, AuditApi>() {}
+export class AuditService extends Context.Service<AuditService, AuditApi>()("AuditService") {}
 
 // ─── Screener Service ────────────────────────────────────────────────────────
 
@@ -727,10 +723,9 @@ export interface ScreenerApi {
   ) => Effect.Effect<ReadonlyArray<ScreenedPool>, unknown>;
 }
 
-export class ScreenerService extends Context.Tag("ScreenerService")<
-  ScreenerService,
-  ScreenerApi
->() {}
+export class ScreenerService extends Context.Service<ScreenerService, ScreenerApi>()(
+  "ScreenerService",
+) {}
 
 // ─── Database Service ────────────────────────────────────────────────────────
 
@@ -1239,7 +1234,7 @@ export interface DbApi {
   ) => Effect.Effect<SafetyPauseRecord | null, unknown>;
 }
 
-export class DbService extends Context.Tag("DbService")<DbService, DbApi>() {}
+export class DbService extends Context.Service<DbService, DbApi>()("DbService") {}
 
 // ─── Feedback Service ───────────────────────────────────────────────────────
 
@@ -1294,10 +1289,9 @@ export interface FeedbackApi {
   readonly getOptOut: () => Effect.Effect<boolean, unknown>;
 }
 
-export class FeedbackService extends Context.Tag("FeedbackService")<
-  FeedbackService,
-  FeedbackApi
->() {}
+export class FeedbackService extends Context.Service<FeedbackService, FeedbackApi>()(
+  "FeedbackService",
+) {}
 
 // ─── Referral Service ───────────────────────────────────────────────────────
 
@@ -1310,10 +1304,9 @@ export interface ReferralApi {
   readonly getReferralCount: (userId: string) => Effect.Effect<number, Error>;
 }
 
-export class ReferralService extends Context.Tag("ReferralService")<
-  ReferralService,
-  ReferralApi
->() {}
+export class ReferralService extends Context.Service<ReferralService, ReferralApi>()(
+  "ReferralService",
+) {}
 
 // ─── Revenue Service ────────────────────────────────────────────────────────
 
@@ -1328,7 +1321,9 @@ export interface RevenueApi {
   readonly calculateCreditDiscount: (credits: number, feeUsd: number) => number;
 }
 
-export class RevenueService extends Context.Tag("RevenueService")<RevenueService, RevenueApi>() {}
+export class RevenueService extends Context.Service<RevenueService, RevenueApi>()(
+  "RevenueService",
+) {}
 
 // ─── Revenue Config Service ─────────────────────────────────────────────────
 
@@ -1345,10 +1340,9 @@ export interface RevenueConfigApi {
   readonly refreshConfig: () => Effect.Effect<RevenueConfig, never>;
 }
 
-export class RevenueConfigService extends Context.Tag("RevenueConfigService")<
-  RevenueConfigService,
-  RevenueConfigApi
->() {}
+export class RevenueConfigService extends Context.Service<RevenueConfigService, RevenueConfigApi>()(
+  "RevenueConfigService",
+) {}
 
 // ─── Agent Service (agentic-mode overlay) ──────────────────────────────────
 
@@ -1376,7 +1370,7 @@ export interface AgentApi {
   readonly disconnect: () => Effect.Effect<void, unknown>;
 }
 
-export class AgentService extends Context.Tag("AgentService")<AgentService, AgentApi>() {}
+export class AgentService extends Context.Service<AgentService, AgentApi>()("AgentService") {}
 
 // ─── Agent State Service (shared mutable state for MCP/HTTP servers) ─────────
 
@@ -1401,10 +1395,9 @@ export interface AgentStateApi {
   readonly rejectProposal: (proposalId: string) => Effect.Effect<void, never>;
 }
 
-export class AgentStateService extends Context.Tag("AgentStateService")<
-  AgentStateService,
-  AgentStateApi
->() {}
+export class AgentStateService extends Context.Service<AgentStateService, AgentStateApi>()(
+  "AgentStateService",
+) {}
 
 // ─── Alert Service (proactive Telegram push alerts) ─────────────────────────
 
@@ -1448,12 +1441,11 @@ export interface AlertApi {
   readonly recordFeeClaim: (poolAddress: string, feeUsd: number) => Effect.Effect<void, never>;
 }
 
-export class AlertService extends Context.Tag("AlertService")<AlertService, AlertApi>() {}
+export class AlertService extends Context.Service<AlertService, AlertApi>()("AlertService") {}
 
-export class CopySignalService extends Context.Tag("CopySignalService")<
-  CopySignalService,
-  CopySignalApi
->() {}
+export class CopySignalService extends Context.Service<CopySignalService, CopySignalApi>()(
+  "CopySignalService",
+) {}
 
 // ─── MCP Server Service ──────────────────────────────────────────────────────
 
@@ -1462,10 +1454,9 @@ export interface McpServerApi {
   readonly stop: () => Effect.Effect<void, unknown>;
 }
 
-export class McpServerService extends Context.Tag("McpServerService")<
-  McpServerService,
-  McpServerApi
->() {}
+export class McpServerService extends Context.Service<McpServerService, McpServerApi>()(
+  "McpServerService",
+) {}
 
 // ─── HTTP Status Server Service ──────────────────────────────────────────────
 
@@ -1474,7 +1465,7 @@ export interface HttpStatusServerApi {
   readonly stop: () => Effect.Effect<void, unknown>;
 }
 
-export class HttpStatusServerService extends Context.Tag("HttpStatusServerService")<
+export class HttpStatusServerService extends Context.Service<
   HttpStatusServerService,
   HttpStatusServerApi
->() {}
+>()("HttpStatusServerService") {}

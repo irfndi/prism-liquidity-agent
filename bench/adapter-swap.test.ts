@@ -130,7 +130,7 @@ function genericSwapAndReadBalanceEffect(
     });
     const prepared = yield* adapter.prepareSwap(quote);
     yield* adapter.simulateSwap(prepared);
-    const outcome = yield* adapter.submitSwap(prepared).pipe(Effect.either);
+    const outcome = yield* adapter.submitSwap(prepared).pipe(Effect.result);
     const after = yield* adapter.getNativeSolBalance();
     return { before, cached, after, outcome };
   }).pipe(Effect.provide(layer));
@@ -181,12 +181,12 @@ async function expectSwapFailure(
   prefetchedQuote?: Record<string, unknown>,
 ): Promise<void> {
   const result = await Effect.runPromise(
-    swapEffect(layer, outputMint, amountAtomic, prefetchedQuote).pipe(Effect.either),
+    swapEffect(layer, outputMint, amountAtomic, prefetchedQuote).pipe(Effect.result),
   );
-  if (result._tag !== "Left") {
+  if (result._tag !== "Failure") {
     expect.fail("expected swap to fail, but it succeeded");
   }
-  const err = result.left;
+  const err = result.failure;
   if (typeof err !== "object" || err === null || !("message" in err)) {
     expect.fail("expected error object with message");
   }
@@ -401,11 +401,11 @@ describe("AdapterService.swapUSDCForToken", () => {
 
   it("fails quote for non-positive amounts", async () => {
     const result = await Effect.runPromise(
-      quoteEffect(buildLayer(), SOL_MINT, 0n).pipe(Effect.either),
+      quoteEffect(buildLayer(), SOL_MINT, 0n).pipe(Effect.result),
     );
-    expect(result._tag).toBe("Left");
-    if (result._tag !== "Left") return;
-    const err = result.left;
+    expect(result._tag).toBe("Failure");
+    if (result._tag !== "Failure") return;
+    const err = result.failure;
     expect(typeof err === "object" && err !== null && "message" in err).toBe(true);
     expect((err as { message: string }).message).toContain(
       "quoteSwapUSDCForToken failed: SwapQuoteError: Cannot quote swap for non-positive amount: 0",
@@ -602,9 +602,9 @@ describe("AdapterService generic Jupiter swaps", () => {
           });
           vi.setSystemTime(Date.now() + scenario.advanceMs);
           return yield* adapter.prepareSwap(quote);
-        }).pipe(Effect.provide(buildLayer()), Effect.either),
+        }).pipe(Effect.provide(buildLayer()), Effect.result),
       );
-      expect(result._tag).toBe("Left");
+      expect(result._tag).toBe("Failure");
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(sendSpy).not.toHaveBeenCalled();
     } finally {
@@ -626,9 +626,9 @@ describe("AdapterService generic Jupiter swaps", () => {
 
     try {
       const result = await Effect.runPromise(
-        genericSwapEffect(buildLayer(), SOL_MINT, outputMint, amountAtomic).pipe(Effect.either),
+        genericSwapEffect(buildLayer(), SOL_MINT, outputMint, amountAtomic).pipe(Effect.result),
       );
-      expect(result._tag).toBe("Left");
+      expect(result._tag).toBe("Failure");
       expect(simulateSpy).not.toHaveBeenCalled();
       expect(sendSpy).not.toHaveBeenCalled();
     } finally {
@@ -771,7 +771,7 @@ describe("AdapterService generic Jupiter swaps", () => {
       expect(result.before).toBe(1_000_000_000n);
       expect(result.cached).toBe(result.before);
       expect(result.after).toBe(result.before);
-      expect(result.outcome._tag).toBe("Left");
+      expect(result.outcome._tag).toBe("Failure");
       expect(getBalanceSpy).toHaveBeenCalledTimes(2);
     } finally {
       restore();
@@ -814,7 +814,7 @@ describe("AdapterService generic Jupiter swaps", () => {
 
     try {
       const result = Effect.runPromise(
-        genericSwapEffect(buildLayer(), SOL_MINT, outputMint, amountAtomic).pipe(Effect.either),
+        genericSwapEffect(buildLayer(), SOL_MINT, outputMint, amountAtomic).pipe(Effect.result),
       ).then((outcome) => {
         settled = true;
         return outcome;
@@ -824,9 +824,9 @@ describe("AdapterService generic Jupiter swaps", () => {
       releaseConfirmation?.();
       const outcome = await result;
       expect(settled).toBe(true);
-      expect(outcome._tag).toBe("Left");
-      if (outcome._tag !== "Left") return;
-      expect((outcome.left as { message?: string }).message).toContain("confirmation failed");
+      expect(outcome._tag).toBe("Failure");
+      if (outcome._tag !== "Failure") return;
+      expect((outcome.failure as { message?: string }).message).toContain("confirmation failed");
     } finally {
       releaseConfirmation?.();
       restore();

@@ -459,7 +459,7 @@ export const DbLive = (dbPath?: string) =>
 
         insertMemory: (entry) =>
           hasVecMemoryTable(db)
-            ? Effect.catchAll(
+            ? Effect.catch(
                 Effect.gen(function* () {
                   const id = randomUUID();
                   const now = Date.now();
@@ -502,7 +502,7 @@ export const DbLive = (dbPath?: string) =>
 
         queryMemory: (queryText, topK, poolAddress) =>
           hasVecMemoryTable(db)
-            ? Effect.catchAll(
+            ? Effect.catch(
                 Effect.gen(function* () {
                   const now = Date.now();
                   const embedding = yield* getEmbedding(queryText);
@@ -602,7 +602,7 @@ export const DbLive = (dbPath?: string) =>
 
         pruneMemory: () =>
           hasVecMemoryTable(db)
-            ? Effect.catchAll(
+            ? Effect.catch(
                 Effect.sync(() => {
                   const now = Date.now();
                   // sqlite-vec doesn't support DELETE with WHERE on virtual tables directly in all versions,

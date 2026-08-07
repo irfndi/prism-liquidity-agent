@@ -101,9 +101,9 @@ describe("BlacklistService", () => {
         ),
       );
       const result = Effect.runSync(
-        Effect.either(api.checkPool("pool1", "good_token", "also_good")),
+        Effect.result(api.checkPool("pool1", "good_token", "also_good")),
       );
-      expect(result._tag).toBe("Right");
+      expect(result._tag).toBe("Success");
     });
 
     it("fails when token X is blacklisted", () => {
@@ -116,9 +116,9 @@ describe("BlacklistService", () => {
         ),
       );
       const result = Effect.runSync(
-        Effect.either(api.checkPool("pool1", "bad_token_1", "good_token")),
+        Effect.result(api.checkPool("pool1", "bad_token_1", "good_token")),
       );
-      expect(result._tag).toBe("Left");
+      expect(result._tag).toBe("Failure");
     });
 
     it("fails when token Y is blacklisted", () => {
@@ -131,9 +131,9 @@ describe("BlacklistService", () => {
         ),
       );
       const result = Effect.runSync(
-        Effect.either(api.checkPool("pool1", "good_token", "bad_token_2")),
+        Effect.result(api.checkPool("pool1", "good_token", "bad_token_2")),
       );
-      expect(result._tag).toBe("Left");
+      expect(result._tag).toBe("Failure");
     });
   });
 });
