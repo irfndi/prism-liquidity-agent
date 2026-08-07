@@ -4101,7 +4101,13 @@ export const program = Effect.gen(function* () {
           Effect.catch(() => Effect.succeed(undefined)),
         );
         const priceOk =
-          typeof liveSolPrice === "number" && Number.isFinite(liveSolPrice) && liveSolPrice > 0;
+          typeof liveSolPrice === "number" &&
+          Number.isFinite(liveSolPrice) &&
+          liveSolPrice > 0 &&
+          // config.solPriceUsd is validated with min 0 (0 = unset); a zero
+          // config price would zero the USD→lamports reservation below and
+          // let entries past the gate that consume the full position size.
+          config.solPriceUsd > 0;
         if (nativeSol.ok && priceOk) {
           entrySolBudgetLamports = freeEntrySolLamports(nativeSol.lamports);
           // min(config, live) is the conservative direction: a lower price
@@ -4113,7 +4119,7 @@ export const program = Effect.gen(function* () {
           logger.warn(
             !nativeSol.ok
               ? "Native SOL balance unavailable — SOL-funded entries skipped this cycle (fail closed)"
-              : "Live SOL price unavailable — SOL-funded entries skipped this cycle (fail closed)",
+              : "SOL price unavailable or unset — SOL-funded entries skipped this cycle (fail closed)",
           );
         }
       } else {
