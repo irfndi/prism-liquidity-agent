@@ -61,8 +61,9 @@ export const AgentNoOp: AgentApi = {
 function formatRuntimeContext(ctx: AgentRuntimeContext): {
   warningsBlock: string;
   decisionsBlock: string;
+  positionBlock: string;
 } {
-  const { warnings, recentDecisions } = ctx;
+  const { warnings, recentDecisions, position } = ctx;
   const warningsBlock =
     warnings.length > 0
       ? warnings.map((w) => `  - [${w.category}] ${w.content}`).join("\n")
@@ -79,12 +80,27 @@ function formatRuntimeContext(ctx: AgentRuntimeContext): {
           .join("\n")
       : "  (none)";
 
-  return { warningsBlock, decisionsBlock };
+  const positionBlock =
+    position === undefined
+      ? ""
+      : [
+          "POSITION:",
+          `  Value: $${position.valueUsd.toFixed(2)} (deposited $${position.depositedUsd.toFixed(2)})`,
+          `  Unrealized PnL: ${position.unrealizedPnlUsd >= 0 ? "+" : "−"}$${Math.abs(position.unrealizedPnlUsd).toFixed(2)} (fees claimed $${position.feesClaimedUsd.toFixed(2)}, rewards $${position.rewardsClaimedUsd.toFixed(2)})`,
+          position.outOfRangeSinceMs === null
+            ? "  In range: yes"
+            : `  In range: NO — out of range ${((Date.now() - position.outOfRangeSinceMs) / 3_600_000).toFixed(1)}h (${position.oorCycleCount} OOR cycle(s))`,
+          `  Age: ${position.hoursHeld.toFixed(1)}h | range: bins ${position.lowerBinId}..${position.upperBinId} (active ${position.activeBinId})`,
+          `  Entry price: ${position.entryPriceUsd === null ? "n/a" : `$${position.entryPriceUsd.toFixed(6)}`} | peak value: ${position.highestValueUsd === null ? "n/a" : `$${position.highestValueUsd.toFixed(2)}`}`,
+          `  Last rebalance: ${position.lastRebalanceAtMs === 0 ? "never" : new Date(position.lastRebalanceAtMs).toISOString()}`,
+        ].join("\n");
+
+  return { warningsBlock, decisionsBlock, positionBlock };
 }
 
-function buildPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
+export function buildPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
   const { pool, metrics } = ctx;
-  const { warningsBlock, decisionsBlock } = formatRuntimeContext(ctx);
+  const { warningsBlock, decisionsBlock, positionBlock } = formatRuntimeContext(ctx);
 
   return `You are a liquidity pool risk overlay. Review the deterministic agent's decision and optionally override it.
 
@@ -95,7 +111,7 @@ RULES (strict — you must follow them):
 - You may NEVER change HOLD/ENTER/REBALANCE into EXIT.
 - You may NEVER change EXIT into HOLD or any other action.
 - If the decision looks reasonable, return the same action and confidence.
-
+${positionBlock === "" ? "" : "- Base EXIT reviews on the position's PnL and out-of-range state below.\n"}
 DECISION TO REVIEW:
 Action: ${decision.action}
 Confidence: ${decision.confidence.toFixed(2)}
@@ -105,7 +121,7 @@ TVL: $${pool.tvlUsd.toFixed(0)}
 24h Volume: $${pool.volume24hUsd.toFixed(0)}
 24h Fees: $${pool.fees24hUsd.toFixed(0)}
 APR: ${pool.apr.toFixed(2)}%
-
+${positionBlock === "" ? "" : `\n${positionBlock}`}
 METRICS:
 - Fee/IL Ratio: ${metrics.feeIlRatio.toFixed(2)}
 - Volume Authenticity: ${metrics.volumeAuthenticity.toFixed(2)}
@@ -125,7 +141,7 @@ Respond with JSON only:
 
 export function buildProposalPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
   const { pool, metrics } = ctx;
-  const { warningsBlock, decisionsBlock } = formatRuntimeContext(ctx);
+  const { warningsBlock, decisionsBlock, positionBlock } = formatRuntimeContext(ctx);
   const currentParamsBlock = [
     decision.positionSizeUsd !== undefined
       ? `Position Size: $${decision.positionSizeUsd.toFixed(0)}`
@@ -160,7 +176,7 @@ RULES (strict — you must follow them):
 - When echoing the engine's action, reuse the current executable values shown below — do not invent new ones.
 - Do not propose actions for pools outside the current context.
 - If the engine's decision is already optimal, return the same action and confidence.
-
+${positionBlock === "" ? "" : "- Base EXIT/REBALANCE proposals on the POSITION state below.\n"}
 DECISION TO REVIEW:
 Action: ${decision.action}
 Confidence: ${decision.confidence.toFixed(2)}
@@ -170,7 +186,7 @@ TVL: $${pool.tvlUsd.toFixed(0)}
 24h Volume: $${pool.volume24hUsd.toFixed(0)}
 24h Fees: $${pool.fees24hUsd.toFixed(0)}
 APR: ${pool.apr.toFixed(2)}%
-
+${positionBlock === "" ? "" : `\n${positionBlock}`}
 METRICS:
 - Fee/IL Ratio: ${metrics.feeIlRatio.toFixed(2)}
 - Volume Authenticity: ${metrics.volumeAuthenticity.toFixed(2)}
