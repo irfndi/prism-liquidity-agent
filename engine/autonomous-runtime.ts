@@ -203,14 +203,17 @@ function atomicUsd(amountAtomic: bigint, decimals: number, priceUsd: number): nu
  * (insufficient funds, invalid params, malformed payloads) will not fix
  * itself by retrying.
  */
+const TRANSIENT_HTTP_STATUS =
+  /(?:failed|HTTP):?\s*(408|425|429|5\d{2})\b|HTTP\/\d(?:\.\d)?\s+(408|425|429|5\d{2})\b|status code (408|425|429|5\d{2})\b/i;
+const TRANSIENT_NETWORK =
+  /fetch failed|timeout|timed out|timedout|aborted|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket hang up|connection refused|connection reset|network error|too many requests/i;
+
 export function isTransientSettlementError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return (
-    /\b(408|425|429|5\d{2})\b/.test(message) ||
-    /fetch failed|timeout|timed out|timedout|aborted|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket hang up|connection refused|connection reset|network error/i.test(
-      message,
-    )
-  );
+  // Anchored to HTTP-status context — a bare \b\d{3}\b would classify
+  // deterministic messages like "need 500 lamports" as transient and retry
+  // them forever instead of terminalizing.
+  return TRANSIENT_HTTP_STATUS.test(message) || TRANSIENT_NETWORK.test(message);
 }
 
 function retryableJob(job: SettlementJobRecord, now: number, error: unknown): SettlementJobRecord {
@@ -592,6 +595,24 @@ export function sweepOrphanSettlements(
     const prices = yield* input.adapter
       .getTokenPrices(candidates.map(([mint]) => mint))
       .pipe(Effect.catch(() => Effect.succeed<Record<string, number>>({})));
+    // A terminal job for the mint is revived in place (upsert on id) rather
+    // than replaced by a fresh row: attempts carry over so backoff escalates
+    // across generations, and the settlements table stays one row per mint
+    // instead of growing ~1 row per max-pending window for a doomed token.
+    // Terminal rows carrying a txSignature are the operator-reconciliation
+    // bucket (swap signature never became visible) — reviving them would
+    // re-poll a dead signature forever, so only signature-less terminal rows
+    // are auto-revived; a signature terminal spawns a fresh job instead.
+    const terminalByMint = new Map<string, SettlementJobRecord>(
+      existingJobs
+        .filter(
+          (job) =>
+            job.status === "terminal" &&
+            job.confirmedOutputAtomic === null &&
+            job.txSignature === null,
+        )
+        .map((job) => [job.tokenMint, job]),
+    );
     const jobs: SettlementJobRecord[] = [];
     for (const [mint, holding] of holdings) {
       if (mint === SOL_MINT || holding.amountAtomic <= 0n) continue;
@@ -602,6 +623,21 @@ export function sweepOrphanSettlements(
         priceUsd > 0 &&
         atomicUsd(holding.amountAtomic, holding.decimals, priceUsd) < input.settlementDustUsd
       ) {
+        continue;
+      }
+      const terminal = terminalByMint.get(mint);
+      if (terminal) {
+        jobs.push({
+          ...terminal,
+          status: "pending",
+          attempts: terminal.attempts + 1,
+          // Sell what the wallet actually holds now, not the stale row amount.
+          amountAtomic: holding.amountAtomic.toString(),
+          nextRetryAt: input.now,
+          expiresAt: input.now + input.settlementMaxPendingMs,
+          error: null,
+          updatedAt: input.now,
+        });
         continue;
       }
       const id = randomUUID();

@@ -815,6 +815,18 @@ describe("issue #166 settlement recovery", () => {
     expect(isTransientSettlementError(new Error("ECONNRESET"))).toBe(true);
     expect(isTransientSettlementError(new Error("INSUFFICIENT_FUNDS"))).toBe(false);
     expect(isTransientSettlementError(new Error("invalid slippage param"))).toBe(false);
+    // A bare 3-digit number is NOT an HTTP status — deterministic failures
+    // must not be classified transient (endless retry).
+    expect(isTransientSettlementError(new Error("need 500 lamports"))).toBe(false);
+    expect(isTransientSettlementError(new Error("amount 429 below minimum"))).toBe(false);
+    // Real HTTP-status formats without the `failed:` prefix stay transient.
+    expect(isTransientSettlementError(new Error("HTTP/1.1 500 Internal Server Error"))).toBe(
+      true,
+    );
+    expect(isTransientSettlementError(new Error("request failed with status code 429"))).toBe(
+      true,
+    );
+    expect(isTransientSettlementError(new Error("HTTP Error: Too Many Requests"))).toBe(true);
     expect(isTransientSettlementError(null)).toBe(false);
   });
 
@@ -988,14 +1000,20 @@ describe("issue #166 settlement recovery", () => {
       }),
     );
 
-    // Then only the stranded token gets a fresh job; the terminal job does not
-    // count as backing.
+    // Then only the stranded token gets a job: the terminal row is REVIVED in
+    // place (same id, attempts carried forward so backoff escalates across
+    // generations and the table stays one row per mint) — terminal jobs still
+    // do not count as backing.
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({
+      id: "dead",
       tokenMint: "stranded-1",
       amountAtomic: "15413",
       status: "pending",
-      attempts: 0,
+      attempts: 1,
+      nextRetryAt: 10_000,
+      expiresAt: 3_610_000,
+      error: null,
     });
   });
 
@@ -1073,6 +1091,59 @@ describe("issue #166 settlement recovery", () => {
     // Then the paper-backed mint is still swept.
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.tokenMint).toBe("paper-leg-token");
+  });
+
+  it("does not revive terminal rows carrying a txSignature — spawns a fresh job instead", async () => {
+    // Given a terminal job terminalized via the not_found path (signature kept
+    // — the operator-reconciliation bucket). Reviving it would re-poll a dead
+    // signature forever, so the sweep must NOT revive it.
+    const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
+      ["stranded-1", { amountAtomic: 15_413n, decimals: 6 }],
+    ]);
+    const adapter = {
+      hasWallet: () => true,
+      getWalletHoldings: () => Effect.succeed(holdings),
+      getPoolState: () => Effect.succeed(null),
+      getTokenPrices: (mints: string[]) =>
+        Effect.succeed(Object.fromEntries(mints.map((mint) => [mint, 1000]))),
+    } as unknown as AdapterApi;
+    const db = {
+      listSettlementJobs: () =>
+        Effect.succeed([
+          settlementJob({
+            id: "signed-terminal",
+            tokenMint: "stranded-1",
+            status: "terminal",
+            txSignature: "dead-sig",
+            error: "Swap signature not found until expiry — requires operator reconciliation",
+          }),
+        ]),
+      getAllPositions: () => Effect.succeed([]),
+    } as unknown as DbApi;
+
+    // When
+    const jobs = await Effect.runPromise(
+      sweepOrphanSettlements({
+        adapter,
+        db,
+        walletAddress: "wallet-1",
+        agentInstanceId: "primary",
+        settlementMaxPendingMs: 3_600_000,
+        settlementDustUsd: 0.1,
+        now: 10_000,
+      }),
+    );
+
+    // Then a FRESH signature-less job is created (not a revival of the row).
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({
+      id: expect.not.stringMatching(/^signed-terminal$/),
+      tokenMint: "stranded-1",
+      status: "pending",
+      attempts: 0,
+      txSignature: null,
+      positionId: expect.stringMatching(/^orphan:/),
+    });
   });
 
   it("fails open when the holdings read errors", async () => {
