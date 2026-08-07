@@ -1615,13 +1615,9 @@ const loadConfig = Effect.gen(function* () {
   return cfg;
 });
 
-// v4's default ConfigProvider snapshots process.env ONCE at first use, so
-// env changes after startup (vitest stubs, CLI-set vars) are invisible to
-// later reads. Snapshot the CURRENT env at each build — `fromEnv()` must be
-// called lazily inside the effect, not at module load, or the snapshot is
-// taken before any env changes exist. In production the snapshot equals the
-// env dotenv loaded at startup; under tests each loadConfig sees the current
-// process.env (vi.stubEnv included).
+// v4's default ConfigProvider snapshots process.env once per process; snapshot
+// lazily at each build (preserveEmptyStrings keeps STABLECOIN_MINTS="" semantics)
+// so vitest stubs / CLI-set env are honored.
 export const ConfigLive = Layer.effect(
   ConfigService,
   Effect.gen(function* () {
