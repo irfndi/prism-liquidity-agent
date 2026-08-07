@@ -2352,6 +2352,9 @@ export const program = Effect.gen(function* () {
   // fail-closed — never commit SOL the engine cannot confirm exists.
   let entrySolBudgetLamports = 0n;
   let entrySolBudgetKnown = false;
+  // Live SOL price the estimate keys off (0 = unknown → budget unknown →
+  // entries skipped fail-closed). Set together with the budget at cycle start.
+  let entrySolPriceUsd = 0;
   // SOL-funded entries (autonomous canary/live) buy pool-token deficits with
   // SOL swaps; plain live entries are USDC-funded and only need SOL for gas,
   // which the top-up mechanism handles per entry. The batch reserve gate
@@ -3718,7 +3721,7 @@ export const program = Effect.gen(function* () {
             if (redeploySizeUsd !== undefined) {
               const neededLamports = estimateEntrySolLamports({
                 positionSizeUsd: redeploySizeUsd,
-                solPriceUsd: config.solPriceUsd,
+                solPriceUsd: entrySolPriceUsd,
                 poolHasSolLeg: hasNativeSolLeg(candidate.pool),
                 solFunded: true,
               });
@@ -3738,6 +3741,12 @@ export const program = Effect.gen(function* () {
                 yield* recordRedeploySkip(
                   `[idle-redeploy] skipped — free SOL ${budgetHuman} < needed ${neededHuman} (wallet-reserve gate, capacity-limited)`,
                   "[idle-redeploy] wallet SOL reserve insufficient",
+                );
+                yield* finalizeAppliedProposal(
+                  agentState,
+                  overlayAppliedProposalId,
+                  false,
+                  decision.action,
                 );
                 continue;
               }
@@ -3843,9 +3852,10 @@ export const program = Effect.gen(function* () {
             idleCapitalUsd,
             paperTrading: config.paperTrading,
           });
-        } else if (!isInsufficientTokenBalanceError(executionError)) {
-          // Issue #170: a redeploy failing on a funding condition is a
-          // wallet-capacity outcome — never arms the execution_failures pause.
+        } else if (!(solFundedEntryMode && isInsufficientTokenBalanceError(executionError))) {
+          // Issue #170: in SOL-funded mode a redeploy failing on a funding
+          // condition is a wallet-capacity outcome — never arms the
+          // execution_failures pause (plain live keeps its pause-breaker teeth).
           cycle.poolsFailed++;
           recordExecutionOutcome(false);
         }
@@ -4049,19 +4059,37 @@ export const program = Effect.gen(function* () {
       // SOL budget for SOL-funded entries. One read, reused by every ENTER
       // gate this cycle; a failed read leaves the budget UNKNOWN and the gate
       // skips entries fail-closed (never commit SOL the engine cannot confirm).
+      // The USD→lamports estimate keys off the LIVE SOL price (conservatively
+      // floored at config.solPriceUsd): entry-prep sizes swaps at live prices,
+      // so a stale-high SOL_PRICE_USD would under-reserve and let entries past
+      // the gate fail in prep instead of being skipped. A failed live price
+      // read fails closed with the balance read (price-cache hit when the
+      // cycle-top wallet snapshot already priced SOL).
       entrySolBudgetLamports = 0n;
+      entrySolPriceUsd = 0;
       if (adapter.hasWallet() && !config.paperTrading && solFundedEntryMode) {
         const nativeSol = yield* adapter.getNativeSolBalance().pipe(
           Effect.map((lamports) => ({ ok: true as const, lamports })),
           Effect.catchAll(() => Effect.succeed({ ok: false as const, lamports: 0n })),
         );
-        if (nativeSol.ok) {
+        const liveSolPrice = yield* adapter.getTokenPrices([SOL_MINT], { useFallback: false }).pipe(
+          Effect.map((prices) => prices[SOL_MINT]),
+          Effect.catchAll(() => Effect.succeed(undefined)),
+        );
+        const priceOk =
+          typeof liveSolPrice === "number" && Number.isFinite(liveSolPrice) && liveSolPrice > 0;
+        if (nativeSol.ok && priceOk) {
           entrySolBudgetLamports = freeEntrySolLamports(nativeSol.lamports);
+          // min(config, live) is the conservative direction: a lower price
+          // prices the same USD entry at MORE lamports (over-estimate is safe).
+          entrySolPriceUsd = Math.min(config.solPriceUsd, liveSolPrice);
           entrySolBudgetKnown = true;
         } else {
           entrySolBudgetKnown = false;
           logger.warn(
-            "Native SOL balance unavailable — SOL-funded entries skipped this cycle (fail closed)",
+            !nativeSol.ok
+              ? "Native SOL balance unavailable — SOL-funded entries skipped this cycle (fail closed)"
+              : "Live SOL price unavailable — SOL-funded entries skipped this cycle (fail closed)",
           );
         }
       } else {
@@ -6865,7 +6893,7 @@ export const program = Effect.gen(function* () {
           if (entrySizeUsd !== undefined) {
             const neededLamports = estimateEntrySolLamports({
               positionSizeUsd: entrySizeUsd,
-              solPriceUsd: config.solPriceUsd,
+              solPriceUsd: entrySolPriceUsd,
               poolHasSolLeg: hasNativeSolLeg(pool),
               solFunded: true,
             });
@@ -6896,6 +6924,15 @@ export const program = Effect.gen(function* () {
                   poolAddress,
                 })
                 .pipe(Effect.catchAll(() => Effect.void));
+              // An applied queued proposal follows the failed-execution
+              // contract: retained (executed=false) for retry next cycle —
+              // capacity may free up (EXIT, fee accrual, top-up).
+              yield* finalizeAppliedProposal(
+                agentState,
+                appliedQueuedProposalId,
+                false,
+                decision.action,
+              );
               finalDecisions.push(decision);
               continue;
             }
@@ -7086,16 +7123,23 @@ export const program = Effect.gen(function* () {
             if (decision.action === "ENTER") sessionEntriesExecuted++;
             else if (decision.action === "EXIT") sessionExitsExecuted++;
           } else if (
-            // Issue #170: an ENTER failing on a funding condition (insufficient
-            // token balance after swap / insufficient SOL / insufficient USDC)
-            // is a wallet-capacity outcome, not an execution error — the
-            // batch wallet-reserve gate prevents the over-commitment that used
-            // to cause it, and what remains is a race or a small-wallet
-            // reality. It must NOT arm the execution_failures safety pause
-            // (which paused the whole agent for hours on a $54 wallet) and is
-            // not counted as a pool failure. The entry-failure backoff still
-            // arms below, so the pool is not retried for 30min-6h.
-            !(decision.action === "ENTER" && isInsufficientTokenBalanceError(executionError))
+            // Issue #170: in SOL-funded mode, an ENTER failing on a funding
+            // condition (insufficient token balance after swap / insufficient
+            // SOL / insufficient USDC) is a wallet-capacity outcome, not an
+            // execution error — the batch wallet-reserve gate prevents the
+            // over-commitment that used to cause it, and what remains is a
+            // race or a small-wallet reality. It must NOT arm the
+            // execution_failures safety pause (which paused the whole agent
+            // for hours on a $54 wallet) and is not counted as a pool failure.
+            // The entry-failure backoff still arms below, so the pool is not
+            // retried for 30min-6h. Scoped to solFundedEntryMode: in plain
+            // live (USDC-funded) mode the batch gate does not run, so funding
+            // failures there keep their pause-breaker teeth.
+            !(
+              decision.action === "ENTER" &&
+              solFundedEntryMode &&
+              isInsufficientTokenBalanceError(executionError)
+            )
           ) {
             cycle.poolsFailed++;
             recordExecutionOutcome(false);
