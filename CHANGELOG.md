@@ -2,6 +2,12 @@
 
 All notable changes to Prism are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- Batch wallet-reserve gate for SOL-funded entries: per-cycle free-SOL budget (wallet SOL minus gas reserve, refreshed after every live mutation) gates each live ENTER in autonomous canary/live mode, skipping capacity-limited entries as audited `[wallet-reserve]` decisions instead of submitting doomed swaps. The `execution_failures` safety pause can no longer be armed by batch over-commitment — funding-condition ENTER failures (insufficient token balance / SOL / USDC) are treated as capacity-limited and excluded from the pause breaker and pool-failure counts (the entry-failure backoff still arms). Pools are funded in scan order, which is fee-APR rank order in market-scan mode (#170)
+
 ## [0.1.8] — 2026-08-07
 
 ### Added
