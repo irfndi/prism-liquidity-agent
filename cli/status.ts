@@ -216,6 +216,8 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
                   status: settlement.status,
                   poolAddress: settlement.poolAddress,
                   tokenMint: settlement.tokenMint,
+                  amountAtomic: settlement.amountAtomic,
+                  confirmedOutputAtomic: settlement.confirmedOutputAtomic,
                   attempts: settlement.attempts,
                   nextRetryAt:
                     settlement.nextRetryAt === null
@@ -293,6 +295,10 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
           const agentStatus = config.agentiveMode
             ? `agent overlay: ${config.agentRuntime}`
             : "agent overlay: off";
+          const strandedSettlements = autonomous.settlements.filter(
+            (settlement) =>
+              settlement.status === "terminal" && settlement.confirmedOutputAtomic === null,
+          );
 
           // Acceptance for issue #167: an active settlement_overdue pause
           // names the non-terminal jobs keeping it latched (oldest first).
@@ -341,6 +347,19 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
               `  Candidates:  ${autonomous.candidates.length}`,
               `  Operations:  ${autonomous.operations.length}`,
               `  Settlements: ${autonomous.settlements.length}`,
+              // Issue #166: surface terminal settlements whose swap never
+              // recovered the token so stranded capital stays visible until
+              // the orphan sweep re-queues it.
+              ...(strandedSettlements.length > 0
+                ? [
+                    `  Stranded:    ${strandedSettlements.length} terminal settlement(s) with unspent balance (${strandedSettlements
+                      .map(
+                        (settlement) =>
+                          `${(settlement.poolAddress || "?").slice(0, 8)}/${settlement.tokenMint.slice(0, 8)}`,
+                      )
+                      .join(", ")}) — see --json for details`,
+                  ]
+                : []),
               `  Safety pause: ${
                 autonomous.safetyPause === null
                   ? "none"

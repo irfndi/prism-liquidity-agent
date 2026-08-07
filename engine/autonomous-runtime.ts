@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { Effect } from "effect";
 import { SOL_MINT } from "./constants.js";
 import { computeNetRealizedPnlUsd } from "./pnl.js";
@@ -194,13 +195,37 @@ function atomicUsd(amountAtomic: bigint, decimals: number, priceUsd: number): nu
   return (Number(whole) + Number(remainder) / Number(scale)) * priceUsd;
 }
 
+/**
+ * Issue #166: classifies a settlement failure as transient (retryable) vs
+ * definitively terminal. HTTP 408/425/429/5xx from the quote/swap API and
+ * network-level failures (timeouts, resets, DNS, aborts) are transient by
+ * definition — a rate limit clears, a connection recovers. Anything else
+ * (insufficient funds, invalid params, malformed payloads) will not fix
+ * itself by retrying.
+ */
+export function isTransientSettlementError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /\b(408|425|429|5\d{2})\b/.test(message) ||
+    /fetch failed|timeout|timed out|timedout|aborted|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket hang up|connection refused|connection reset|network error/i.test(
+      message,
+    )
+  );
+}
+
 function retryableJob(job: SettlementJobRecord, now: number, error: unknown): SettlementJobRecord {
   const attempts = job.attempts + 1;
+  // Transient failures (rate limits, network blips) never terminalize — the
+  // failure mode is time, not logic, so the retry budget stays unbounded and
+  // the job resumes as soon as the outage clears. Only non-transient failures
+  // expire into terminal once the max-pending window passes.
+  const transient = isTransientSettlementError(error);
+  const expired = !transient && now >= job.expiresAt;
   return {
     ...job,
-    status: now >= job.expiresAt ? "terminal" : "retryable",
+    status: expired ? "terminal" : "retryable",
     attempts,
-    nextRetryAt: now >= job.expiresAt ? null : nextSettlementRetryAt(now, attempts),
+    nextRetryAt: expired ? null : nextSettlementRetryAt(now, attempts),
     error: error instanceof Error ? error.message : String(error),
     updatedAt: now,
   };
@@ -492,5 +517,149 @@ export function processSettlementJobs(
         .pipe(Effect.catchAll(() => Effect.void));
     }
     return processed;
+  });
+}
+
+export interface OrphanSettlementSweepInput {
+  readonly walletAddress: string;
+  readonly agentInstanceId: string;
+  readonly settlementMaxPendingMs: number;
+  readonly settlementDustUsd: number;
+  readonly now: number;
+  /** Wallet SPL holdings (mint → amount/decimals); native SOL not included. */
+  readonly holdings: ReadonlyMap<
+    string,
+    { readonly amountAtomic: bigint; readonly decimals: number }
+  >;
+  /**
+   * Mints already accounted for: legs of open positions plus mints with an
+   * active (non-terminal, non-confirmed) settlement job. Terminal jobs
+   * deliberately do NOT back a mint — a dead job is exactly the stranded-token
+   * case this sweep re-enqueues.
+   */
+  readonly backedMints: ReadonlySet<string>;
+  /** USD prices for candidate mints (missing = unpriceable, enqueued anyway). */
+  readonly pricesUsd: Readonly<Record<string, number>>;
+}
+
+/**
+ * Issue #166: a SOL-funded entry that fails after the swap leaves the bought
+ * token stranded in the wallet with no position and no recovery path once its
+ * rollback settlement died. Each cycle this compares wallet holdings against
+ * the mints that are actually accounted for (position legs, active settlement
+ * jobs) and re-enqueues a fresh sell-settlement job for everything else.
+ * Dust below `settlementDustUsd` stays put; the settlement processor's own
+ * dust skip re-applies at execution time.
+ */
+export function orphanSettlementJobs(
+  input: OrphanSettlementSweepInput,
+): ReadonlyArray<SettlementJobRecord> {
+  const jobs: SettlementJobRecord[] = [];
+  for (const [mint, holding] of input.holdings) {
+    if (mint === SOL_MINT || holding.amountAtomic <= 0n) continue;
+    if (input.backedMints.has(mint)) continue;
+    const priceUsd = input.pricesUsd[mint] ?? 0;
+    if (
+      input.settlementDustUsd > 0 &&
+      priceUsd > 0 &&
+      atomicUsd(holding.amountAtomic, holding.decimals, priceUsd) < input.settlementDustUsd
+    ) {
+      continue;
+    }
+    const id = randomUUID();
+    jobs.push({
+      id,
+      walletAddress: input.walletAddress,
+      agentInstanceId: input.agentInstanceId,
+      positionId: `orphan:${id}`,
+      poolAddress: "",
+      tokenMint: mint,
+      amountAtomic: holding.amountAtomic.toString(),
+      destinationAsset: "SOL",
+      status: "pending",
+      attempts: 0,
+      nextRetryAt: input.now,
+      txSignature: null,
+      confirmedOutputAtomic: null,
+      outputUsd: null,
+      executionCostUsd: null,
+      finalizedAt: null,
+      realizedPnlUsd: null,
+      expiresAt: input.now + input.settlementMaxPendingMs,
+      error: null,
+      createdAt: input.now,
+      updatedAt: input.now,
+    });
+  }
+  return jobs;
+}
+
+export interface OrphanSettlementSweepDeps {
+  readonly adapter: AdapterApi;
+  readonly db: DbApi;
+  readonly walletAddress: string;
+  readonly agentInstanceId: string;
+  readonly settlementMaxPendingMs: number;
+  readonly settlementDustUsd: number;
+  readonly now: number;
+}
+
+/**
+ * Issue #166: detects wallet tokens with no backing position/order and returns
+ * fresh sell-settlement jobs for them. Fail-open end to end: a holdings read,
+ * pool-state fetch, or price fetch failure skips only its own contribution and
+ * never blocks the cycle. RPC cost is gated — position legs are only fetched
+ * when candidate mints actually exist, and holdings come from the wallet
+ * balance's existing 30s cached snapshot.
+ */
+export function sweepOrphanSettlements(
+  input: OrphanSettlementSweepDeps,
+): Effect.Effect<ReadonlyArray<SettlementJobRecord>, never> {
+  return Effect.gen(function* () {
+    if (!input.adapter.hasWallet()) return [];
+    const holdings = yield* input.adapter
+      .getWalletHoldings()
+      .pipe(
+        Effect.catchAll(() =>
+          Effect.succeed(new Map<string, { amountAtomic: bigint; decimals: number }>()),
+        ),
+      );
+    const candidates = [...holdings.entries()].filter(
+      ([mint, holding]) => mint !== SOL_MINT && holding.amountAtomic > 0n,
+    );
+    if (candidates.length === 0) return [];
+    const existingJobs = yield* input.db
+      .listSettlementJobs(input.walletAddress, input.agentInstanceId)
+      .pipe(Effect.catchAll(() => Effect.succeed([])));
+    const backedMints = new Set<string>(
+      existingJobs
+        .filter((job) => job.status !== "terminal" && job.status !== "confirmed")
+        .map((job) => job.tokenMint),
+    );
+    const openPositions = yield* input.db
+      .getAllPositions()
+      .pipe(Effect.catchAll(() => Effect.succeed([])));
+    for (const poolAddress of new Set(openPositions.map((position) => position.poolAddress))) {
+      const state = yield* input.adapter
+        .getPoolState(poolAddress)
+        .pipe(Effect.catchAll(() => Effect.succeed(null)));
+      if (state) {
+        backedMints.add(state.tokenX);
+        backedMints.add(state.tokenY);
+      }
+    }
+    const prices = yield* input.adapter
+      .getTokenPrices(candidates.map(([mint]) => mint))
+      .pipe(Effect.catchAll(() => Effect.succeed({})));
+    return orphanSettlementJobs({
+      walletAddress: input.walletAddress,
+      agentInstanceId: input.agentInstanceId,
+      settlementMaxPendingMs: input.settlementMaxPendingMs,
+      settlementDustUsd: input.settlementDustUsd,
+      now: input.now,
+      holdings,
+      backedMints,
+      pricesUsd: prices,
+    });
   });
 }

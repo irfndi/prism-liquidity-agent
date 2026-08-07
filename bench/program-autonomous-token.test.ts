@@ -2,14 +2,17 @@ import { describe, expect, it } from "vitest";
 import { Effect } from "effect";
 import {
   isActionAllowedDuringSafetyPause,
+  isTransientSettlementError,
   loadDailyEquityBaseline,
   nextSettlementRetryAt,
   oldestActiveSettlementAgeMs,
+  orphanSettlementJobs,
   persistDailyEquityBaseline,
   processSettlementJobs,
   safetyPauseBlockReason,
   shouldAutoResolveDailyDrawdownPause,
   shouldTriggerSafetyPause,
+  sweepOrphanSettlements,
 } from "../engine/autonomous-runtime.js";
 import { SOL_MINT } from "../engine/constants.js";
 import { computeNetRealizedPnlUsd } from "../engine/pnl.js";
@@ -797,5 +800,251 @@ describe("settlement job processing", () => {
     expect(loaded).toEqual({ day: "2026-08-01", equityUsd: 50_000 });
     expect(metadata.get("dailyBaseline:wallet-1:primary:day")).toBe("2026-08-02");
     expect(metadata.get("dailyBaseline:wallet-1:primary:equityUsd")).toBe("49500");
+  });
+});
+
+describe("issue #166 settlement recovery", () => {
+  it("classifies rate-limit and network failures as transient", () => {
+    // Given / When / Then
+    expect(isTransientSettlementError(new Error("Jupiter quote failed: 429"))).toBe(true);
+    expect(isTransientSettlementError(new Error("Jupiter swap build failed: 502"))).toBe(true);
+    expect(isTransientSettlementError(new Error("Jupiter quote failed: 500"))).toBe(true);
+    expect(isTransientSettlementError(new Error("Jupiter quote failed: 408"))).toBe(true);
+    expect(isTransientSettlementError(new Error("fetch failed"))).toBe(true);
+    expect(isTransientSettlementError(new Error("request timed out after 10000ms"))).toBe(true);
+    expect(isTransientSettlementError(new Error("connection reset by peer"))).toBe(true);
+    expect(isTransientSettlementError(new Error("ECONNRESET"))).toBe(true);
+    expect(isTransientSettlementError(new Error("INSUFFICIENT_FUNDS"))).toBe(false);
+    expect(isTransientSettlementError(new Error("invalid slippage param"))).toBe(false);
+    expect(isTransientSettlementError(null)).toBe(false);
+  });
+
+  it("never terminalizes a rate-limited settlement past expiry — it stays retryable", async () => {
+    // Given a pending job whose max-pending window already passed, and a
+    // Jupiter rate limit on every quote.
+    const job = settlementJob({ expiresAt: 9_000 });
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 429")),
+      prepareSwap: () => Effect.fail(new Error("unused")),
+      simulateSwap: () => Effect.fail(new Error("unused")),
+      submitSwap: () => Effect.fail(new Error("unused")),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs, "live");
+
+    // Then the job resumes with backoff instead of going terminal — a 429
+    // clears, so the token still gets sold on a later attempt.
+    expect(processed).toMatchObject({
+      status: "retryable",
+      attempts: 1,
+      nextRetryAt: 11_000,
+      error: "Jupiter quote failed: 429",
+    });
+  });
+
+  it("terminalizes a non-transient settlement failure once the max-pending window passes", async () => {
+    // Given
+    const job = settlementJob({ expiresAt: 9_000 });
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      quoteSwap: () => Effect.fail(new Error("insufficient funds for swap")),
+      prepareSwap: () => Effect.fail(new Error("unused")),
+      simulateSwap: () => Effect.fail(new Error("unused")),
+      submitSwap: () => Effect.fail(new Error("unused")),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs, "live");
+
+    // Then
+    expect(processed).toMatchObject({
+      status: "terminal",
+      attempts: 1,
+      nextRetryAt: null,
+      error: "insufficient funds for swap",
+    });
+  });
+
+  it("keeps retrying a non-transient failure before expiry", async () => {
+    // Given
+    const job = settlementJob({ expiresAt: 100_000 });
+    const savedJobs: SettlementJobRecord[] = [];
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      quoteSwap: () => Effect.fail(new Error("insufficient funds for swap")),
+      prepareSwap: () => Effect.fail(new Error("unused")),
+      simulateSwap: () => Effect.fail(new Error("unused")),
+      submitSwap: () => Effect.fail(new Error("unused")),
+    } as unknown as AdapterApi;
+
+    // When
+    const [processed] = await runSettlementProcessor([job], adapter, savedJobs, "live");
+
+    // Then
+    expect(processed).toMatchObject({ status: "retryable", nextRetryAt: 11_000 });
+  });
+
+  it("creates sell jobs only for unbacked, non-dust wallet holdings", () => {
+    // Given holdings where one mint is backed, one is below dust, one is
+    // unpriceable, and the settlement asset itself.
+    const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
+      ["stranded-1", { amountAtomic: 1_000_000n, decimals: 6 }], // $1.00 → sweep
+      ["dust-1", { amountAtomic: 50_000n, decimals: 6 }], // $0.05 → skip
+      ["unpriceable-1", { amountAtomic: 5_000_000n, decimals: 6 }], // no price → sweep (cannot prove dust)
+      ["backed-1", { amountAtomic: 1_000_000n, decimals: 6 }], // position leg → skip
+      [SOL_MINT, { amountAtomic: 1_000_000_000n, decimals: 9 }], // settlement asset → skip
+      ["zero-1", { amountAtomic: 0n, decimals: 6 }], // nothing held → skip
+    ]);
+
+    // When
+    const jobs = orphanSettlementJobs({
+      walletAddress: "wallet-1",
+      agentInstanceId: "primary",
+      settlementMaxPendingMs: 3_600_000,
+      settlementDustUsd: 0.1,
+      now: 10_000,
+      holdings,
+      backedMints: new Set(["backed-1"]),
+      pricesUsd: { "stranded-1": 1, "dust-1": 1, "backed-1": 1 },
+    });
+
+    // Then
+    expect(jobs).toHaveLength(2);
+    expect(jobs.map((job) => job.tokenMint).sort()).toEqual(["stranded-1", "unpriceable-1"]);
+    expect(jobs[0]).toMatchObject({
+      walletAddress: "wallet-1",
+      agentInstanceId: "primary",
+      poolAddress: "",
+      destinationAsset: "SOL",
+      status: "pending",
+      attempts: 0,
+      nextRetryAt: 10_000,
+      expiresAt: 3_610_000,
+      error: null,
+      positionId: expect.stringMatching(/^orphan:/),
+    });
+  });
+
+  it("sweeps wallet holdings against position legs and active jobs, re-enqueuing terminal-mint tokens", async () => {
+    // Given a wallet holding three tokens: one backed by an open position's
+    // pool, one already covered by an active settlement job, and one whose
+    // settlement DIED terminal (the issue #166 stranded-token case).
+    const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
+      ["stranded-1", { amountAtomic: 15_413n, decimals: 6 }],
+      ["pool-leg-x", { amountAtomic: 1_000_000n, decimals: 6 }],
+      ["active-job-token", { amountAtomic: 1_000_000n, decimals: 6 }],
+    ]);
+    const adapter = {
+      hasWallet: () => true,
+      getWalletHoldings: () => Effect.succeed(holdings),
+      getPoolState: (poolAddress: string) =>
+        Effect.succeed(
+          poolAddress === "pool-1" ? { tokenX: "pool-leg-x", tokenY: "pool-leg-y" } : null,
+        ),
+      getTokenPrices: (mints: string[]) =>
+        Effect.succeed(
+          Object.fromEntries(mints.map((mint) => [mint, mint === "stranded-1" ? 1000 : 1])),
+        ),
+    } as unknown as AdapterApi;
+    const db = {
+      listSettlementJobs: () =>
+        Effect.succeed([
+          settlementJob({ id: "active", tokenMint: "active-job-token", status: "retryable" }),
+          settlementJob({ id: "dead", tokenMint: "stranded-1", status: "terminal" }),
+        ]),
+      getAllPositions: () => Effect.succeed([{ poolAddress: "pool-1" }]),
+    } as unknown as DbApi;
+
+    // When
+    const jobs = await Effect.runPromise(
+      sweepOrphanSettlements({
+        adapter,
+        db,
+        walletAddress: "wallet-1",
+        agentInstanceId: "primary",
+        settlementMaxPendingMs: 3_600_000,
+        settlementDustUsd: 0.1,
+        now: 10_000,
+      }),
+    );
+
+    // Then only the stranded token gets a fresh job; the terminal job does not
+    // count as backing.
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({
+      tokenMint: "stranded-1",
+      amountAtomic: "15413",
+      status: "pending",
+      attempts: 0,
+    });
+  });
+
+  it("skips the sweep entirely without a wallet or without candidate holdings", async () => {
+    // Given
+    const walletless = {
+      hasWallet: () => false,
+    } as unknown as AdapterApi;
+    const emptyHoldings = {
+      hasWallet: () => true,
+      getWalletHoldings: () => Effect.succeed(new Map()),
+    } as unknown as AdapterApi;
+
+    // When / Then
+    await expect(
+      Effect.runPromise(
+        sweepOrphanSettlements({
+          adapter: walletless,
+          db: {} as DbApi,
+          walletAddress: "wallet-1",
+          agentInstanceId: "primary",
+          settlementMaxPendingMs: 3_600_000,
+          settlementDustUsd: 0.1,
+          now: 10_000,
+        }),
+      ),
+    ).resolves.toEqual([]);
+    await expect(
+      Effect.runPromise(
+        sweepOrphanSettlements({
+          adapter: emptyHoldings,
+          db: {} as DbApi,
+          walletAddress: "wallet-1",
+          agentInstanceId: "primary",
+          settlementMaxPendingMs: 3_600_000,
+          settlementDustUsd: 0.1,
+          now: 10_000,
+        }),
+      ),
+    ).resolves.toEqual([]);
+  });
+
+  it("fails open when the holdings read errors", async () => {
+    // Given
+    const adapter = {
+      hasWallet: () => true,
+      getWalletHoldings: () => Effect.fail(new Error("rpc down")),
+    } as unknown as AdapterApi;
+
+    // When / Then
+    await expect(
+      Effect.runPromise(
+        sweepOrphanSettlements({
+          adapter,
+          db: {} as DbApi,
+          walletAddress: "wallet-1",
+          agentInstanceId: "primary",
+          settlementMaxPendingMs: 3_600_000,
+          settlementDustUsd: 0.1,
+          now: 10_000,
+        }),
+      ),
+    ).resolves.toEqual([]);
   });
 });
