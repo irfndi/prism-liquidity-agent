@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { McpServer } from "../engine/mcp-server.js";
-import { AgentStateService, type AgentStateApi } from "../engine/services.js";
+import { type AgentStateApi } from "../engine/services.js";
 import { AgentStateMutable } from "../engine/state-service.js";
 import { AUTONOMOUS_TOKEN_CONFIG_DEFAULTS, type AppConfig } from "../engine/config-service.js";
 

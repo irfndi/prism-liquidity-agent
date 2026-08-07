@@ -5,12 +5,7 @@ import {
   ConfigService,
   type AppConfig,
 } from "../engine/config-service.js";
-import {
-  AdapterService,
-  AuditService,
-  ScreenerService,
-  StrategyService,
-} from "../engine/services.js";
+import { AdapterService, ScreenerService } from "../engine/services.js";
 import { AdapterLive } from "../engine/adapter-service.js";
 import { StrategyLive } from "../engine/strategy-service.js";
 import { AuditLive } from "../engine/audit-service.js";

@@ -75,9 +75,7 @@ import {
   AuditService,
   ScreenerService,
   DbService,
-  RevenueService,
   RevenueConfigService,
-  ReferralService,
   AgentService,
   AgentStateService,
   McpServerService,
@@ -109,13 +107,7 @@ import { consultTokenRisks, type TokenRiskSignal } from "./token-risk-service.js
 import { CopySignalLive, applyCopySignalBoost } from "./copy-trading-signals.js";
 import { evaluateFallenAngelDiscovery } from "./fallen-angel-discovery.js";
 import { identifyAssetMint } from "./fallen-angel-service.js";
-import {
-  buildTpLadder,
-  evaluateTpLadder,
-  parseTpLadder,
-  serializeTpLadder,
-  type TpLadder,
-} from "./tp-ladder.js";
+import { buildTpLadder, evaluateTpLadder, parseTpLadder, serializeTpLadder } from "./tp-ladder.js";
 import { getGeckoPoolOhlcv, type GeckoOhlcvSignals } from "./gecko-ohlcv-service.js";
 import { getRugCheckReport, type RugCheckReport } from "./rugcheck-service.js";
 import type {
@@ -136,7 +128,7 @@ import type {
   SettlementJobRecord,
   TokenCandidateRecord,
 } from "./types.js";
-import { isMeasuredStatsSource } from "./types.js";
+
 import type {
   AgentPositionState,
   AgentRuntimeAlert,

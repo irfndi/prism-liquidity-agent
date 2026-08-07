@@ -1,7 +1,6 @@
-import { Context, Effect, Layer } from "effect";
+import { Effect, Layer } from "effect";
 import { MemoryService, type MemoryApi } from "./services.js";
 import { DbService } from "./services.js";
-import type { MemoryCategory, MemoryEntry } from "./types.js";
 
 export const MemoryLive = Layer.effect(
   MemoryService,

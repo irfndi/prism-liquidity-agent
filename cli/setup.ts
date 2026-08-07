@@ -1,8 +1,6 @@
 import { Command } from "commander";
 import * as p from "@clack/prompts";
 import fs from "fs";
-import path from "path";
-import os from "os";
 import { pingInstall, requireRegistered, type PrismCredentials } from "./api.js";
 import { ensurePrismConfigDir, getPrismEnvPath, getPrismDbPath } from "../engine/paths.js";
 import { mergeEnvContent } from "./env-merge.js";

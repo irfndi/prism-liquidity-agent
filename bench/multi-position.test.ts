@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
@@ -28,7 +28,6 @@ import {
   AuditService,
   ScreenerService,
   DbService,
-  MemoryService,
   RevenueService,
   RevenueConfigService,
   ReferralService,

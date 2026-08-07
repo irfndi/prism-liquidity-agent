@@ -1,4 +1,4 @@
-import { Context, Effect, Layer } from "effect";
+import { Effect, Layer } from "effect";
 import { ScreenerService, type ScreenerApi, type ScreenedPool } from "./services.js";
 import { AdapterService, type DiscoveredPool } from "./services.js";
 import { StrategyService } from "./services.js";

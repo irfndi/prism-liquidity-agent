@@ -1,12 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
-import {
-  Connection,
-  Keypair,
-  PublicKey,
-  Transaction,
-  TransactionInstruction,
-} from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, TransactionInstruction } from "@solana/web3.js";
 import { BN } from "@coral-xyz/anchor";
 import bs58 from "bs58";
 import { AdapterService, type AdapterApi } from "../engine/services.js";

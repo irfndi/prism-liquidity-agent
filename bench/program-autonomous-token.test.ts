@@ -73,17 +73,16 @@ function runSettlementProcessor(
   savedJobs: SettlementJobRecord[],
   mode: AutonomousTokenMode = "live",
 ): Promise<ReadonlyArray<SettlementJobRecord>> {
-  const db = {
-    saveSettlementJob: (job: SettlementJobRecord) =>
-      Effect.sync(() => {
-        savedJobs.push(job);
-      }),
-    getPosition: () => Effect.succeed(null),
-  } as unknown as DbApi;
   return Effect.runPromise(
     processSettlementJobs({
       adapter,
-      db,
+      db: {
+        saveSettlementJob: (job: SettlementJobRecord) =>
+          Effect.sync(() => {
+            savedJobs.push(job);
+          }),
+        getPosition: () => Effect.succeed(null),
+      } as unknown as DbApi,
       jobs,
       mode,
       now: 10_000,
@@ -658,15 +657,6 @@ describe("settlement job processing", () => {
     });
     const savedJobs: SettlementJobRecord[] = [];
     let finalizedCount = 0;
-    const db = {
-      saveSettlementJob: (j: SettlementJobRecord) =>
-        Effect.sync(() => {
-          savedJobs.push(j);
-          if (j.finalizedAt !== null) finalizedCount++;
-        }),
-      getPosition: () => Effect.succeed(null),
-      finalizeSettlementGroup: () => Effect.void,
-    } as unknown as DbApi;
 
     // When
     await runSettlementProcessor([job], {} as AdapterApi, savedJobs);

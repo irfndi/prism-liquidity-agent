@@ -1,5 +1,5 @@
 import type { TokenPriceEvidence } from "./services.js";
-import type { TokenCandidateRecord, TokenCandidateState } from "./types.js";
+import type { TokenCandidateRecord } from "./types.js";
 
 export interface CandidatePolicy {
   readonly minHealthyScans: number;

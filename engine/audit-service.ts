@@ -1,6 +1,6 @@
-import { Context, Effect, Layer } from "effect";
+import { Effect, Layer } from "effect";
 import { randomUUID } from "crypto";
-import { AuditService, type AuditApi, type DecisionRecord } from "./services.js";
+import { AuditService, type AuditApi } from "./services.js";
 import { DbService } from "./services.js";
 import type { PoolMetrics } from "./types.js";
 import { stringifySafe, parseBigIntSafe } from "./bigint-json.js";

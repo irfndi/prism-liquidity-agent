@@ -17,7 +17,6 @@ import {
   BlacklistService,
   AuditService,
   ScreenerService,
-  DbService,
   RevenueService,
   RevenueConfigService,
   ReferralService,

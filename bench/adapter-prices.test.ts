@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
 import { Connection, Keypair } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
+import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 import bs58 from "bs58";
 import { AdapterService } from "../engine/services.js";
 import { AdapterLive } from "../engine/adapter-service.js";
