@@ -1,4 +1,4 @@
-import { Context, Layer } from "effect";
+import { Layer } from "effect";
 import { StrategyService, type StrategyApi } from "./services.js";
 import type {
   BinArray,

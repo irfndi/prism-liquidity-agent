@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { Effect, Layer } from "effect";
-import { AdapterService, DbService } from "../engine/services.js";
+import { Effect } from "effect";
+import { DbService } from "../engine/services.js";
 import { DbLive } from "../engine/db-service.js";
 import { reconcilePositions } from "../engine/program.js";
-import type { AdapterApi, DbApi, MemoryApi } from "../engine/services.js";
+import type { AdapterApi, MemoryApi } from "../engine/services.js";
 import type { PositionRecord } from "../engine/db-service.js";
 
 function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {

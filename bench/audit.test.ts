@@ -15,10 +15,6 @@ describe("AuditService", () => {
     fs.mkdirSync(tmpDir, { recursive: true });
   });
 
-  function auditPath() {
-    return path.join(tmpDir, `audit-${testId}.jsonl`);
-  }
-
   function makeLayer() {
     return Layer.provide(AuditLive, DbLive(":memory:"));
   }

@@ -7,7 +7,6 @@ import {
   retryAfterMs,
   safeErrorMessage,
   CircuitBreaker,
-  CircuitBreakerOpenError,
 } from "../engine/adapter-retry.js";
 
 const fromPromise = <T>(fn: () => Promise<T>): Effect.Effect<T, unknown> => Effect.tryPromise(fn);

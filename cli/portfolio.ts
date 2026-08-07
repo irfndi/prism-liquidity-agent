@@ -5,11 +5,7 @@ import { DbService, type DbApi, AdapterService } from "../engine/services.js";
 import { AdapterLive } from "../engine/adapter-service.js";
 import { ConfigLive } from "../engine/config-service.js";
 import type { PositionRecord } from "../engine/db-service.js";
-import {
-  computePositionAnalytics,
-  computePortfolioEquity,
-  type PortfolioEquity,
-} from "../engine/pnl.js";
+import { computePositionAnalytics, computePortfolioEquity } from "../engine/pnl.js";
 import { createLogger } from "../engine/logger.js";
 import { getPrismDbPath } from "../engine/paths.js";
 

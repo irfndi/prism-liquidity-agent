@@ -1,7 +1,7 @@
 import { Effect, Layer } from "effect";
 import type { AppConfig } from "./config-service.js";
-import type { AgentDecision, ActionType, PoolMetrics, PoolState, MemoryEntry } from "./types.js";
-import type { AgentApi, DecisionRecord } from "./services.js";
+import type { AgentDecision, ActionType } from "./types.js";
+import type { AgentApi } from "./services.js";
 import { AgentService } from "./services.js";
 import { underlyingErrorMessage } from "./errors.js";
 import { createLogger } from "./logger.js";

@@ -1,5 +1,5 @@
 import fs from "fs";
-import { Context, Effect, Layer } from "effect";
+import { Effect, Layer } from "effect";
 import { BlacklistService, type BlacklistApi } from "./services.js";
 import { BlacklistError } from "./errors.js";
 import defaultDeployerBlacklist from "./data/deployer-blacklist.json" with { type: "json" };

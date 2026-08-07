@@ -26,7 +26,7 @@ import DLMM, {
   type StrategyParameters,
 } from "@meteora-ag/dlmm";
 import { BN } from "@coral-xyz/anchor";
-import { Context, Effect, Layer } from "effect";
+import { Effect, Layer } from "effect";
 import {
   AdapterService,
   type AdapterApi,
@@ -43,24 +43,11 @@ import { DiscoverPoolsError } from "./errors.js";
 import { SwapQuoteError, SwapValidationError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import { getPrismUserConfigDir } from "./paths.js";
-import type {
-  BinArray,
-  BinData,
-  EntryDepositMode,
-  EntryStrategyShape,
-  PoolState,
-  Position,
-} from "./types.js";
-import {
-  CircuitBreaker,
-  isRpcNetworkError,
-  retryEffectWithBackoff,
-  retryWithBackoff,
-} from "./adapter-retry.js";
+import type { BinData, EntryDepositMode, EntryStrategyShape } from "./types.js";
+import { CircuitBreaker, isRpcNetworkError, retryEffectWithBackoff } from "./adapter-retry.js";
 import bs58 from "bs58";
 import fs from "fs";
 import path from "path";
-import os from "os";
 import { randomUUID } from "crypto";
 import { getWalletSystemLamportsRequired } from "./live-entry-budget.js";
 import { SOL_MINT, USDC_MINT, GAS_RESERVE_LAMPORTS } from "./constants.js";
@@ -1871,7 +1858,6 @@ export const AdapterLive = Layer.effect(
       return Effect.gen(function* () {
         const dlmm = yield* getDlmm(poolAddress);
         const lbPair = dlmm.lbPair;
-        const pubkey = new PublicKey(poolAddress);
 
         const tokenXMint = lbPair.tokenXMint.toBase58();
         const tokenYMint = lbPair.tokenYMint.toBase58();

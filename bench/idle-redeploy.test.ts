@@ -14,7 +14,7 @@ import { StrategyLive } from "../engine/strategy-service.js";
 import { MemoryLive } from "../engine/memory-service.js";
 import { RiskLive } from "../engine/risk-service.js";
 import { AuditLive } from "../engine/audit-service.js";
-import { AlertLive } from "../engine/alert-service.js";
+
 import { AgentNoOp } from "../engine/agent-service.js";
 import { AgentStateMutable } from "../engine/state-service.js";
 import { ConfigService, type AppConfig } from "../engine/config-service.js";
@@ -42,7 +42,7 @@ import {
   type MeteoraDatapiApi,
   type MeteoraPoolStats,
 } from "../engine/services.js";
-import type { AgentDecision, PoolState } from "../engine/types.js";
+import type { PoolState } from "../engine/types.js";
 import { USDC_MINT } from "../engine/constants.js";
 import { defaultAppConfig, makePool, makeBinArray } from "./helpers.js";
 

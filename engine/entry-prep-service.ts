@@ -7,7 +7,7 @@ import {
   type EntryPrepApi,
 } from "./services.js";
 import { ConfigService } from "./config-service.js";
-import { EntryPrepError, SwapQuoteError } from "./errors.js";
+import { EntryPrepError } from "./errors.js";
 import { createLogger } from "./logger.js";
 import {
   SOL_MINT,
@@ -300,7 +300,6 @@ export const EntryPrepLive = Layer.effect(
                 ),
               );
 
-          const poolNeedsSol = pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT;
           const nativeSolLamports = yield* readNativeSolBalance();
 
           const balanceX =

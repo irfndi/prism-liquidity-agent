@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { DbLive } from "../engine/db-service.js";
 import { AlertLive } from "../engine/alert-service.js";
-import { AlertService, DbService } from "../engine/services.js";
+import { AlertService } from "../engine/services.js";
 import { ConfigService } from "../engine/config-service.js";
 import { defaultAppConfig, mockFetch } from "./helpers.js";
 import type { AppConfig } from "../engine/config-service.js";

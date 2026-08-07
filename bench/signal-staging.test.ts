@@ -182,7 +182,7 @@ describe("Signal staging", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         const idA = yield* db.saveSignalSnapshot(makeSnapshot({ timestamp, feeIlRatio: 1.5 }));
-        const idB = yield* db.saveSignalSnapshot(makeSnapshot({ timestamp, feeIlRatio: 2.0 }));
+        yield* db.saveSignalSnapshot(makeSnapshot({ timestamp, feeIlRatio: 2.0 }));
         yield* db.recordSignalOutcome(idA, 100);
         const all = yield* db.getSignalSnapshots(
           "Pool111111111111111111111111111111111111111",

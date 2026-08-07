@@ -1,4 +1,4 @@
-import { Context, Effect, Layer } from "effect";
+import { Effect, Layer } from "effect";
 import type { Database } from "bun:sqlite";
 import { createDatabase, hasVecMemoryTable } from "./db.js";
 import { getEmbedding } from "./embeddings.js";
@@ -6,8 +6,6 @@ import type {
   MemoryEntry,
   MemoryCategory,
   PoolSnapshot,
-  PoolCooldown,
-  Position,
   BinArray,
   SignalSnapshot,
   SignalWeights,
@@ -21,7 +19,6 @@ import type {
   TokenCandidateRecord,
   TokenCandidateState,
 } from "./types.js";
-import type { EvolvableThresholds, OutcomeRecord } from "./strategy-service.js";
 import { DbService, type DbApi } from "./services.js";
 import { bigintReplacer } from "./bigint-json.js";
 import { randomUUID } from "crypto";

@@ -1,11 +1,8 @@
 import { Context, Effect } from "effect";
-import type { AppConfig } from "./config-service.js";
 import type {
   AgentDecision,
   AgentPolicySnapshot,
   AgentProposal,
-  AgentCycle,
-  BacktestResult,
   BinArray,
   EntryDepositMode,
   EntryStrategyShape,
@@ -28,28 +25,13 @@ import type {
   AgentRuntimeContext,
   AgentRuntimeCheckin,
   AgentRuntimeAlert,
-  AgentRuntimeTransport,
 } from "./agent-transport.js";
-import type {
-  PositionSnapshot,
-  DecisionSnapshot,
-  PortfolioSnapshot,
-  PrismStateSnapshot,
-} from "./state-service.js";
+import type { PrismStateSnapshot } from "./state-service.js";
 import type { GeckoPoolStats } from "./gecko-terminal-service.js";
 import type { EvolvableThresholds, OutcomeRecord } from "./strategy-service.js";
 import type { ClaimedReward } from "./rewards.js";
 import type { LimitOrderRequest } from "./limit-orders.js";
-import type {
-  AdapterError,
-  AuditError,
-  BlacklistError,
-  DiscoverPoolsError,
-  EntryPrepError,
-  MemoryError,
-  RiskError,
-  ScreenerError,
-} from "./errors.js";
+import type { DiscoverPoolsError, EntryPrepError } from "./errors.js";
 import type { CopySignalApi } from "./copy-trading-signals.js";
 
 // ─── Adapter Service ─────────────────────────────────────────────────────────

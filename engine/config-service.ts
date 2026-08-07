@@ -1,4 +1,4 @@
-import { Config, Context, Effect, Layer, Option, pipe } from "effect";
+import { Config, Context, Effect, Layer } from "effect";
 import { ConfigError } from "./errors.js";
 import { getPrismDbPath } from "./paths.js";
 import { loadKeystoreSecretKeyBase58 } from "./wallet-keystore.js";
