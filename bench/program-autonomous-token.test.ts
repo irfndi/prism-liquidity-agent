@@ -959,7 +959,7 @@ describe("issue #166 settlement recovery", () => {
           settlementJob({ id: "active", tokenMint: "active-job-token", status: "retryable" }),
           settlementJob({ id: "dead", tokenMint: "stranded-1", status: "terminal" }),
         ]),
-      getAllPositions: () => Effect.succeed([{ poolAddress: "pool-1" }]),
+      getAllPositions: () => Effect.succeed([{ positionId: "live-pos-1", poolAddress: "pool-1" }]),
     } as unknown as DbApi;
 
     // When
@@ -1023,6 +1023,43 @@ describe("issue #166 settlement recovery", () => {
         }),
       ),
     ).resolves.toEqual([]);
+  });
+
+  it("does not let paper-position pool legs back live wallet tokens", async () => {
+    // Given a live wallet token that is a leg of a PAPER position's pool
+    // (paper rows share the positions table) — the sweep must still sell it.
+    const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
+      ["paper-leg-token", { amountAtomic: 1_000_000n, decimals: 6 }],
+    ]);
+    const adapter = {
+      hasWallet: () => true,
+      getWalletHoldings: () => Effect.succeed(holdings),
+      getPoolState: () => Effect.succeed({ tokenX: "paper-leg-token", tokenY: "paper-leg-y" }),
+      getTokenPrices: (mints: string[]) =>
+        Effect.succeed(Object.fromEntries(mints.map((mint) => [mint, 1]))),
+    } as unknown as AdapterApi;
+    const db = {
+      listSettlementJobs: () => Effect.succeed([]),
+      getAllPositions: () =>
+        Effect.succeed([{ positionId: "paper-pool-1-abc", poolAddress: "pool-paper" }]),
+    } as unknown as DbApi;
+
+    // When
+    const jobs = await Effect.runPromise(
+      sweepOrphanSettlements({
+        adapter,
+        db,
+        walletAddress: "wallet-1",
+        agentInstanceId: "primary",
+        settlementMaxPendingMs: 3_600_000,
+        settlementDustUsd: 0.1,
+        now: 10_000,
+      }),
+    );
+
+    // Then the paper-backed mint is still swept.
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.tokenMint).toBe("paper-leg-token");
   });
 
   it("fails open when the holdings read errors", async () => {

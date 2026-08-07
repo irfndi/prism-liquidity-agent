@@ -636,10 +636,20 @@ export function sweepOrphanSettlements(
         .filter((job) => job.status !== "terminal" && job.status !== "confirmed")
         .map((job) => job.tokenMint),
     );
+    // Backing positions are the CURRENT wallet's live on-chain positions.
+    // getAllPositions has no wallet filter and paper rows share the table, so
+    // exclude `paper-*` rows — a paper position's pool legs must not exempt a
+    // live wallet's stranded tokens. The engine's model is one wallet per DB
+    // (portfolio/equity math already assumes it), so remaining rows belong to
+    // the current wallet.
     const openPositions = yield* input.db
       .getAllPositions()
       .pipe(Effect.catchAll(() => Effect.succeed([])));
-    for (const poolAddress of new Set(openPositions.map((position) => position.poolAddress))) {
+    for (const poolAddress of new Set(
+      openPositions
+        .filter((position) => !position.positionId.startsWith("paper-"))
+        .map((position) => position.poolAddress),
+    )) {
       const state = yield* input.adapter
         .getPoolState(poolAddress)
         .pipe(Effect.catchAll(() => Effect.succeed(null)));

@@ -295,9 +295,20 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
           const agentStatus = config.agentiveMode
             ? `agent overlay: ${config.agentRuntime}`
             : "agent overlay: off";
+          // Issue #166: surface terminal settlements whose swap never
+          // recovered the token so stranded capital stays visible until
+          // the orphan sweep re-queues it. A terminal record whose mint has
+          // since confirmed (sweep sold it) is historical, not stranded.
+          const confirmedMints = new Set(
+            autonomous.settlements
+              .filter((settlement) => settlement.status === "confirmed")
+              .map((settlement) => settlement.tokenMint),
+          );
           const strandedSettlements = autonomous.settlements.filter(
             (settlement) =>
-              settlement.status === "terminal" && settlement.confirmedOutputAtomic === null,
+              settlement.status === "terminal" &&
+              settlement.confirmedOutputAtomic === null &&
+              !confirmedMints.has(settlement.tokenMint),
           );
 
           // Acceptance for issue #167: an active settlement_overdue pause
@@ -347,9 +358,6 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
               `  Candidates:  ${autonomous.candidates.length}`,
               `  Operations:  ${autonomous.operations.length}`,
               `  Settlements: ${autonomous.settlements.length}`,
-              // Issue #166: surface terminal settlements whose swap never
-              // recovered the token so stranded capital stays visible until
-              // the orphan sweep re-queues it.
               ...(strandedSettlements.length > 0
                 ? [
                     `  Stranded:    ${strandedSettlements.length} terminal settlement(s) with unspent balance (${strandedSettlements
