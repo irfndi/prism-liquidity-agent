@@ -17,6 +17,32 @@ export interface AgentRuntimeContext {
   readonly recentDecisions: ReadonlyArray<DecisionRecord>;
   /** Whether the pool currently has an open position; used to restrict proposal actions. */
   readonly hasOpenPosition: boolean;
+  /** The targeted open position's state, when the decision acts on one. */
+  readonly position?: AgentPositionState;
+}
+
+/** Position state shown to the advisor for decisions that target an open
+ *  position (EXIT/REBALANCE/HOLD). Undefined for positionless decisions
+ *  (ENTER, default HOLD). Mirrors the checkin's per-position vocabulary so
+ *  transports need no second schema. */
+export interface AgentPositionState {
+  readonly positionId: string;
+  readonly valueUsd: number;
+  readonly depositedUsd: number;
+  readonly unrealizedPnlUsd: number;
+  readonly feesClaimedUsd: number;
+  readonly rewardsClaimedUsd: number;
+  readonly outOfRangeSinceMs: number | null;
+  readonly oorCycleCount: number;
+  /** Hours out of range at context-construction time (null when in range). */
+  readonly hoursOutOfRange: number | null;
+  readonly hoursHeld: number;
+  readonly activeBinId: number;
+  readonly lowerBinId: number;
+  readonly upperBinId: number;
+  readonly entryPriceUsd: number | null;
+  readonly highestValueUsd: number | null;
+  readonly lastRebalanceAtMs: number;
 }
 
 export interface AgentRuntimeResponse {

@@ -137,7 +137,11 @@ import type {
   TokenCandidateRecord,
 } from "./types.js";
 import { isMeasuredStatsSource } from "./types.js";
-import type { AgentRuntimeAlert, AgentRuntimeCheckin } from "./agent-transport.js";
+import type {
+  AgentPositionState,
+  AgentRuntimeAlert,
+  AgentRuntimeCheckin,
+} from "./agent-transport.js";
 import { randomUUID } from "crypto";
 import { AgentLive, AgentNoOp } from "./agent-service.js";
 import { createLogger } from "./logger.js";
@@ -280,6 +284,37 @@ export function shouldHoldForSupervisedApproval(
     !approvedProposalApplied &&
     (action === "ENTER" || action === "REBALANCE")
   );
+}
+
+/** Derive the advisor-facing position snapshot for a decision that targets an
+ *  open position. Unrealized PnL mirrors pnl.ts:
+ *  value + fees claimed + rewards claimed − deposited (cost basis). */
+export function toAgentPositionState(pos: PositionRecord, now: number): AgentPositionState {
+  return {
+    positionId: pos.positionId,
+    valueUsd: pos.currentValueUsd,
+    depositedUsd: pos.depositedUsd,
+    unrealizedPnlUsd:
+      pos.currentValueUsd +
+      pos.cumulativeFeesClaimedUsd +
+      pos.cumulativeRewardsClaimedUsd -
+      pos.depositedUsd,
+    feesClaimedUsd: pos.cumulativeFeesClaimedUsd,
+    rewardsClaimedUsd: pos.cumulativeRewardsClaimedUsd,
+    outOfRangeSinceMs: pos.outOfRangeSince,
+    oorCycleCount: pos.oorCycleCount,
+    hoursOutOfRange:
+      pos.outOfRangeSince === null ? null : Math.max(0, now - pos.outOfRangeSince) / 3_600_000,
+    // Clamp against future timestamps (clock skew) — mirrors pnl.ts's
+    // Math.max(0, nowMs - openedAtMs).
+    hoursHeld: Math.max(0, now - pos.timestamp) / 3_600_000,
+    activeBinId: pos.activeBinId,
+    lowerBinId: pos.lowerBinId,
+    upperBinId: pos.upperBinId,
+    entryPriceUsd: pos.entryPriceUsd,
+    highestValueUsd: pos.highestValueUsd,
+    lastRebalanceAtMs: pos.lastRebalanceAt,
+  };
 }
 
 // Consume an applied queued proposal only once its outcome is final: after
@@ -6073,6 +6108,7 @@ export const program = Effect.gen(function* () {
                   .getRecentDecisions(10)
                   .pipe(Effect.catchAll(() => Effect.succeed([]))),
                 hasOpenPosition,
+                ...(pos !== undefined ? { position: toAgentPositionState(pos, Date.now()) } : {}),
               })
               .pipe(
                 // Bound the ENTIRE veto op by the veto deadline, CONNECT included.
@@ -6194,6 +6230,9 @@ export const program = Effect.gen(function* () {
                       .getRecentDecisions(10)
                       .pipe(Effect.catchAll(() => Effect.succeed([]))),
                     hasOpenPosition,
+                    ...(pos !== undefined
+                      ? { position: toAgentPositionState(pos, Date.now()) }
+                      : {}),
                   })
                   .pipe(
                     Effect.catchAll((err) => {
