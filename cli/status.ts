@@ -228,6 +228,7 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
                       ? null
                       : new Date(settlement.nextRetryAt).toISOString(),
                   expiresAt: new Date(settlement.expiresAt).toISOString(),
+                  createdAt: new Date(settlement.createdAt).toISOString(),
                   txSignature: settlement.txSignature,
                   error: settlement.error,
                 })),
@@ -301,18 +302,23 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
             : "agent overlay: off";
           // Issue #166: surface terminal settlements whose swap never
           // recovered the token so stranded capital stays visible until
-          // the orphan sweep re-queues it. A terminal record whose mint has
-          // since confirmed (sweep sold it) is historical, not stranded.
-          const confirmedMints = new Set(
-            autonomous.settlements
-              .filter((settlement) => settlement.status === "confirmed")
-              .map((settlement) => settlement.tokenMint),
-          );
+          // the orphan sweep re-queues it. A terminal record is historical
+          // only when a CONFIRMED settlement for the same mint is newer than
+          // it (the sweep sold the token) — a terminal record NEWER than any
+          // confirmed one is a recurring stranding and must stay visible.
+          const newestConfirmedAt = new Map<string, number>();
+          for (const settlement of autonomous.settlements) {
+            if (settlement.status !== "confirmed") continue;
+            const previous = newestConfirmedAt.get(settlement.tokenMint);
+            if (previous === undefined || settlement.createdAt > previous) {
+              newestConfirmedAt.set(settlement.tokenMint, settlement.createdAt);
+            }
+          }
           const strandedSettlements = autonomous.settlements.filter(
             (settlement) =>
               settlement.status === "terminal" &&
               settlement.confirmedOutputAtomic === null &&
-              !confirmedMints.has(settlement.tokenMint),
+              (newestConfirmedAt.get(settlement.tokenMint) ?? -1) < settlement.createdAt,
           );
 
           // Acceptance for issue #167: an active settlement_overdue pause

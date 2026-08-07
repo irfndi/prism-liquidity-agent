@@ -58,7 +58,7 @@ async function seedAutonomousState(
   dbPath: string,
   walletAddress: string,
   agentInstanceId: string,
-  options: { readonly recovered?: boolean } = {},
+  options: { readonly recovered?: boolean; readonly recurring?: boolean } = {},
 ): Promise<void> {
   await Effect.runPromise(
     Effect.gen(function* () {
@@ -171,6 +171,33 @@ async function seedAutonomousState(
           updatedAt: 4_000,
         });
       }
+      if (options.recurring) {
+        // A PREVIOUS recovery (confirmed, older than the terminal row) — the
+        // terminal record is a NEW stranding and must stay visible.
+        yield* db.saveSettlementJob({
+          id: "settlement-4",
+          walletAddress,
+          agentInstanceId,
+          positionId: "orphan:previous",
+          poolAddress: "",
+          tokenMint: "mint-2",
+          amountAtomic: "15413",
+          destinationAsset: "SOL",
+          status: "confirmed",
+          attempts: 1,
+          nextRetryAt: null,
+          txSignature: "previous-sig",
+          confirmedOutputAtomic: "1000000",
+          outputUsd: 10,
+          executionCostUsd: 0.1,
+          finalizedAt: null,
+          realizedPnlUsd: null,
+          expiresAt: 5_000,
+          error: null,
+          createdAt: 2_000,
+          updatedAt: 2_000,
+        });
+      }
       yield* db.saveSafetyPause({
         walletAddress,
         agentInstanceId,
@@ -266,6 +293,29 @@ describe("autonomous CLI operator surface", () => {
     expect(result.exitCode).toBe(0);
     const text = decode(result.stdout);
     expect(text).not.toContain("Stranded:");
+  });
+
+  it("still reports a terminal settlement newer than any confirmed recovery", async () => {
+    // Given a confirmed sale of mint-2 that PREDATES the terminal row — a
+    // recurring stranding (sold once, then stranded again) must stay visible.
+    testDirectory = mkdtempSync(join(tmpdir(), "prism-cli-autonomous-recurring-"));
+    const dbPath = join(testDirectory, "prism.db");
+    const walletKeypair = Keypair.generate();
+    const wallet = walletKeypair.publicKey.toBase58();
+    const agentInstanceId = "operator-test";
+    await seedAutonomousState(dbPath, wallet, agentInstanceId, { recurring: true });
+
+    // When
+    const result = runCli(["status"], {
+      SQLITE_DB_PATH: dbPath,
+      AGENT_INSTANCE_ID: agentInstanceId,
+      WALLET_PRIVATE_KEY: bs58.encode(walletKeypair.secretKey),
+    });
+
+    // Then the newer terminal record is reported as stranded.
+    expect(result.exitCode).toBe(0);
+    const text = decode(result.stdout);
+    expect(text).toContain("Stranded:    1 terminal settlement(s) with unspent balance");
   });
 
   it("marks the current wallet's active safety pause resolved without live execution", async () => {

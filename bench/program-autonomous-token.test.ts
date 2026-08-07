@@ -815,6 +815,10 @@ describe("issue #166 settlement recovery", () => {
     expect(isTransientSettlementError(new Error("ECONNRESET"))).toBe(true);
     expect(isTransientSettlementError(new Error("INSUFFICIENT_FUNDS"))).toBe(false);
     expect(isTransientSettlementError(new Error("invalid slippage param"))).toBe(false);
+    // A bare 3-digit number is NOT an HTTP status — deterministic failures
+    // must not be classified transient (endless retry).
+    expect(isTransientSettlementError(new Error("need 500 lamports"))).toBe(false);
+    expect(isTransientSettlementError(new Error("amount 429 below minimum"))).toBe(false);
     expect(isTransientSettlementError(null)).toBe(false);
   });
 
@@ -988,14 +992,20 @@ describe("issue #166 settlement recovery", () => {
       }),
     );
 
-    // Then only the stranded token gets a fresh job; the terminal job does not
-    // count as backing.
+    // Then only the stranded token gets a job: the terminal row is REVIVED in
+    // place (same id, attempts carried forward so backoff escalates across
+    // generations and the table stays one row per mint) — terminal jobs still
+    // do not count as backing.
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({
+      id: "dead",
       tokenMint: "stranded-1",
       amountAtomic: "15413",
       status: "pending",
-      attempts: 0,
+      attempts: 1,
+      nextRetryAt: 10_000,
+      expiresAt: 3_610_000,
+      error: null,
     });
   });
 
