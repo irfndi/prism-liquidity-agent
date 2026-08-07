@@ -16,22 +16,25 @@ export const ENTRY_SIZE_FLOOR_USD = 10;
 export interface EntrySizeInput {
   readonly walletBalanceUsd: number;
   readonly tvlUsd: number;
+  /** Hard dollar ceiling on the entry; defaults to ENTRY_SIZE_CAP_USD. */
+  readonly maxSizeUsd?: number;
 }
 
 /**
  * Conservative base entry size: the tightest of half the wallet balance,
- * 0.5% of pool TVL, and the $500 ceiling, with a $10 floor. Byte-identical
- * to the formula the ENTER slot always used
- * (`max(min(walletBalanceUsd * 0.5, tvlUsd * 0.005, 500), 10)`) — this path
- * is UNCHANGED by the idle-redeploy feature; the wider redeploy size is
- * computed separately by the redeploy pass (see computeIdleRedeploySizeUsd)
- * and still re-capped by every risk gate downstream.
+ * 0.5% of pool TVL, and the ceiling (ENTRY_SIZE_CAP_USD by default, or the
+ * caller's `maxSizeUsd`), with a $10 floor. Byte-identical to the legacy
+ * inline formula (`max(min(walletBalanceUsd * 0.5, tvlUsd * 0.005, 500), 10)`)
+ * when no override is supplied — this path is UNCHANGED by the idle-redeploy
+ * feature; the wider redeploy size is computed separately by the redeploy
+ * pass (see computeIdleRedeploySizeUsd) and still re-capped by every risk
+ * gate downstream.
  */
 export function computeEntrySizeUsd(input: EntrySizeInput): number {
   const maxPositionSize = Math.min(
     input.walletBalanceUsd * ENTRY_SIZE_WALLET_FRACTION,
     input.tvlUsd * ENTRY_SIZE_TVL_FRACTION,
-    ENTRY_SIZE_CAP_USD,
+    input.maxSizeUsd ?? ENTRY_SIZE_CAP_USD,
   );
   return Math.max(maxPositionSize, ENTRY_SIZE_FLOOR_USD);
 }

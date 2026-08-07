@@ -83,6 +83,7 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
   { envKey: "PAPER_PORTFOLIO_USD", kind: "number", field: "paperPortfolioUsd", min: 1 },
   { envKey: "MAX_OPEN_POSITIONS", kind: "number", field: "maxOpenPositions", min: 1 },
   { envKey: "MAX_POSITIONS_PER_POOL", kind: "number", field: "maxPositionsPerPool", min: 1 },
+  { envKey: "MAX_ENTRY_SIZE_USD", kind: "number", field: "maxEntrySizeUsd", min: 10 },
   {
     envKey: "MAX_PER_POOL_ALLOCATION_PCT",
     kind: "number",

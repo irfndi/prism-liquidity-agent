@@ -80,6 +80,7 @@ function buildLayer(
     maxPerPoolAllocationPct: 0.4,
     maxOpenPositions: 3,
     maxPositionsPerPool: 2,
+    maxEntrySizeUsd: 500,
     paperValidationMinDays: 7,
     paperValidationEnforce: false,
     agentiveMode: false,

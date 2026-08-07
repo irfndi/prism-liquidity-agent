@@ -579,6 +579,28 @@ describe("evaluatePerPoolAllocation — aggregate per-pool exposure", () => {
     expect(result.approved).toBe(false);
     expect(result.reason).toMatch(/Max open positions/);
   });
+
+  it("scales to high-frequency rotation: 20-position cap admits the 20th and rejects the 21st", () => {
+    const highCountBase = { ...base, maxOpenPositions: 20 };
+    const nineteenPositions = Array.from({ length: 19 }, (_, i) =>
+      makeRiskPosition(`Pool${i}`, `pos-${i}`, 100),
+    );
+    const twentieth = evaluatePerPoolAllocation({
+      ...highCountBase,
+      proposedDepositUsd: 500,
+      openPositions: nineteenPositions,
+    });
+    expect(twentieth.approved).toBe(true);
+    expect(twentieth.adjustedDepositUsd).toBe(500);
+
+    const twentyFirst = evaluatePerPoolAllocation({
+      ...highCountBase,
+      proposedDepositUsd: 500,
+      openPositions: [...nineteenPositions, makeRiskPosition("Pool19", "pos-19", 100)],
+    });
+    expect(twentyFirst.approved).toBe(false);
+    expect(twentyFirst.reason).toMatch(/Max open positions reached \(20\/20\)/);
+  });
 });
 
 describe("evaluateAgentProposal — multi-position", () => {
@@ -1458,6 +1480,38 @@ describe("program — multiple positions per pool", () => {
     expect(positions).toHaveLength(1);
     const enters = decisions.filter((d) => d.action === "ENTER" && d.executed);
     expect(enters).toHaveLength(1);
+  }, 15_000);
+
+  it("honors MAX_ENTRY_SIZE_USD on the normal ENTER path (raised cap reaches execution)", async () => {
+    // Default $500 cap would bind (wallet half 5000, tvl fraction 5000);
+    // with the cap raised to $2000 the executed paper position must be $2000.
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 1_000_000 }) }),
+      datapi: {
+        getPoolData: () => Effect.succeed(makeDatapiStats({ tvlUsd: 1_000_000 })),
+      },
+      configOverrides: {
+        watchlistPools: [POOL],
+        maxEntrySizeUsd: 2_000,
+        paperPortfolioUsd: 10_000,
+        scanIntervalMs: 600_000,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const db = yield* DbService;
+      const positions = yield* db.getAllPositions();
+      return positions;
+    });
+    const positions = await Effect.runPromise(
+      Effect.provide(test, layer) as Effect.Effect<ReadonlyArray<PositionRecord>, unknown, never>,
+    );
+
+    expect(positions).toHaveLength(1);
+    expect(positions[0]!.depositedUsd).toBe(2_000);
+    expect(positions[0]!.entryAmountXUsd).toBe(1_000);
+    expect(positions[0]!.entryAmountYUsd).toBe(1_000);
   }, 15_000);
 
   it("runs an independent lifecycle per position: OOR + trailing-stop EXIT on A leaves B intact", async () => {

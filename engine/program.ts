@@ -607,6 +607,17 @@ export function positionsForPool(
   return out;
 }
 
+/** Mean age of tracked positions in minutes (0 when none open). */
+export function avgTrackedPositionAgeMin(
+  trackedPositions: Map<string, PositionRecord>,
+  now: number,
+): number {
+  if (trackedPositions.size === 0) return 0;
+  let totalMs = 0;
+  for (const pos of trackedPositions.values()) totalMs += now - pos.timestamp;
+  return totalMs / trackedPositions.size / 60_000;
+}
+
 /**
  * Idle-redeploy confidence (P2 3654054423 + follow-up 3655288403): repo
  * doctrine (AGENTS.md §decision-loop) gives a modeled/fabricated fee/IL ratio
@@ -3761,6 +3772,7 @@ export const program = Effect.gen(function* () {
         if (executed) {
           cycle.poolsExecuted++;
           recordExecutionOutcome(true);
+          sessionEntriesExecuted++;
           idleRedeployLogger.info("Idle capital redeployed", {
             pool: candidate.poolAddress,
             sizeUsd: decision.positionSizeUsd,
@@ -3851,7 +3863,14 @@ export const program = Effect.gen(function* () {
       });
     });
 
-  // ─── Scan cycle ────────────────────────────────────────────────────────────
+  // ─── Rotation metrics (session-scoped) ─────────────────────────────────
+  // Counters since process start for the high-frequency-rotation profile:
+  // ENTER/EXIT executions and the average age of tracked positions. Logged
+  // at the end of every cycle so throughput is measurable, not guessed.
+  let sessionEntriesExecuted = 0;
+  let sessionExitsExecuted = 0;
+
+  // ─── Scan cycle ────────────────────────────────────────────────────────
 
   const runScanCycle = (): Effect.Effect<void, never, EntryPrepService> =>
     Effect.gen(function* () {
@@ -4095,6 +4114,13 @@ export const program = Effect.gen(function* () {
         executed: cycle.poolsExecuted,
         failed: cycle.poolsFailed,
         durationSec: (durationMs / 1000).toFixed(1),
+        rotation: {
+          entriesExecuted: sessionEntriesExecuted,
+          exitsExecuted: sessionExitsExecuted,
+          avgPositionAgeMin: Number(
+            avgTrackedPositionAgeMin(trackedPositions, Date.now()).toFixed(1),
+          ),
+        },
       });
 
       // Prune expired memories after each cycle
@@ -5559,7 +5585,11 @@ export const program = Effect.gen(function* () {
               metrics,
               entryScore,
               feeIlRatio,
-              normalEntrySizeUsd: computeEntrySizeUsd({ walletBalanceUsd, tvlUsd: pool.tvlUsd }),
+              normalEntrySizeUsd: computeEntrySizeUsd({
+                walletBalanceUsd,
+                tvlUsd: pool.tvlUsd,
+                maxSizeUsd: config.maxEntrySizeUsd,
+              }),
               volatilityStddev,
               netDriftBins,
             };
@@ -5736,6 +5766,7 @@ export const program = Effect.gen(function* () {
             const faProposedSizeUsd = computeEntrySizeUsd({
               walletBalanceUsd,
               tvlUsd: pool.tvlUsd,
+              maxSizeUsd: config.maxEntrySizeUsd,
             });
             const faAllocation = evaluatePerPoolAllocation({
               proposedDepositUsd: faProposedSizeUsd,
@@ -5869,6 +5900,7 @@ export const program = Effect.gen(function* () {
               const proposedSizeUsd = computeEntrySizeUsd({
                 walletBalanceUsd,
                 tvlUsd: pool.tvlUsd,
+                maxSizeUsd: config.maxEntrySizeUsd,
               });
 
               // F5: per-pool allocation cap — aggregate across the pool's
@@ -6890,6 +6922,8 @@ export const program = Effect.gen(function* () {
           if (executed) {
             cycle.poolsExecuted++;
             recordExecutionOutcome(true);
+            if (decision.action === "ENTER") sessionEntriesExecuted++;
+            else if (decision.action === "EXIT") sessionExitsExecuted++;
           } else {
             cycle.poolsFailed++;
             recordExecutionOutcome(false);

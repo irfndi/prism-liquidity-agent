@@ -187,6 +187,25 @@ When `MARKET_SCAN_ENABLED=true`, `WATCHLIST_POOLS` becomes an OPTIONAL manual ov
 - **Candidates**: when `autonomousTokenMode != off`, the ranked market pools also feed the existing `token_candidates` lifecycle (health scans → eligible) for observability.
 - **Cadence**: `SCAN_INTERVAL_MS` bounds decision frequency; a 60 s interval with `MAX_OPEN_POSITIONS` raised enables high-frequency in/out (hundreds of round-trips/day) once capital supports it. Cycle duration grows with the active set — keep `MARKET_SCAN_TOP_K` in the tens for sub-minute cycles.
 
+### High-frequency rotation (200-300 positions/day)
+
+The engine is not position-count-limited by code: `MAX_OPEN_POSITIONS` has a default of 3 but **no upper clamp** (`validatedNumber` clamps upward only when a max is passed), so 10-30 concurrent positions are configurable today; the risk/allocation gates are config-driven. What throttles rotation is a set of conservative defaults plus RPC cost — the fast-churn profile:
+
+| Setting | Default (slow) | Fast-churn value |
+|---|---|---|
+| `SCAN_INTERVAL_MS` | `600000` (10 min) | `10000`-`60000` (min 10 s) |
+| `MAX_OPEN_POSITIONS` | `3` | `10`-`30` (no upper clamp) |
+| `MAX_ENTRY_SIZE_USD` | `500` | `2000`+ (per-position cap) |
+| `OOR_COOLDOWN_MS` | `14400000` (4 h) | `0` |
+| `REPEAT_OOR_COOLDOWN_MS` | `43200000` (12 h) | `0` |
+| `FEE_DENSITY_COOLDOWNS` | `true` | `false` (or keep — floor is configurable to 0) |
+| `MIN_REBALANCE_INTERVAL_MS` | `86400000` (24 h) | `0` |
+| `TRAILING_STOP_CONFIRM_CYCLES` | `2` | `1` |
+| `MARKET_SCAN_TOP_K` / `MAX_POOLS` | `30` / `60` | `100`-`200` / `200`-`500` |
+| `MARKET_SCAN_MIN_FEE_APR` | `25` | `25`-`50` (hot pools only) |
+
+Systemic constraints, not config: (1) **RPC budget** — ~4-8 calls per pool per cycle (pool state, bins, positions, value marks, wallet, prices); 60 pools @ 60 s ≈ 4-8 RPS is fine on Helius paid tiers, 500 pools @ 10 s ≈ 100-200 RPS breaks standard tiers — active set × interval is the real scale equation; (2) **exit-and-re-enter on the same pool is blocked in one pass** (re-entry next cycle, 1 ENTER per pool per cycle); (3) the ENTER quality gates (volume auth > 0.8, fee/IL ≥ 1.2, bin utilization, token-risk) reject most pools most cycles — throughput = pools passing gates × cycles/day, so a high `MARKET_SCAN_MIN_FEE_APR` matters more than raising caps; (4) sync advisor mode serializes the cycle (see Agent runtime overlay — use the async `/propose` queue for high throughput). The `Scan cycle complete` log reports session rotation metrics (`rotation.entriesExecuted`, `rotation.exitsExecuted`, `rotation.avgPositionAgeMin`) so throughput is measurable.
+
 ### Wallet balance (walletBalanceUsd)
 
 `walletBalanceUsd` is a **per-cycle chain reconciliation**, not an incremental ledger. It is read **once at the top of `runScanCycle`** (before the per-pool loop) in `program.ts` and reused for every pool's risk/sizing context in that cycle — a transient read never fails an individual pool, and one cycle shares one consistent figure for `portfolioValueUsd = walletBalanceUsd + Σ openPositions.currentValueUsd` and the `min(walletBalanceUsd * 0.5, …)` size cap.
@@ -420,6 +439,7 @@ The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copi
 | `FEE_DENSITY_LOW_PCT`         | `0.0005`                                                           | Fee density (fees/TVL per day) at/below which the low-yield cooldown stays at the static `OOR_COOLDOWN_MS`; between the thresholds the duration is linearly interpolated. |
 | `MAX_OPEN_POSITIONS`          | `3`                                                                | Concurrent positions cap (total, portfolio-wide).                                                                    |
 | `MAX_POSITIONS_PER_POOL`      | `2`                                                                | Max simultaneous positions on one pool (Wave 10). Aggregate per-pool exposure stays bounded by `MAX_PER_POOL_ALLOCATION_PCT`. Set `1` for legacy single-position behavior. |
+| `MAX_ENTRY_SIZE_USD`          | `500`                                                              | Hard USD ceiling per conservative entry (the sizing formula's cap term). Raise for high-frequency rotation profiles. |
 | `MAX_PER_POOL_ALLOCATION_PCT` | `0.4`                                                              | Max portfolio share for one pool (aggregate across all of that pool's positions).                                     |
 | `SQLITE_DB_PATH`              | `~/.local/share/prism/prism.db` (bundled) or `./prism.db` (source) | SQLite database path.                                                                                              |
 | `ENABLE_SNAPSHOT_CAPTURE`     | `false`                                                            | Store full bin-array detail in per-cycle snapshots (paper only). Lightweight per-cycle snapshot rows are always persisted — TVL velocity and IL drift need the history. |
@@ -495,6 +515,7 @@ In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaul
 - Deploying Cloudflare: `cloudflare/README.md`.
 
 # AGENTS.md
+
 - Do not preserve backward compatibility. Remove obsolete paths instead of adding compatibility layers, fallbacks, or migrations.
 - Choose the simplest implementation that fully meets the current requirements. Avoid speculative abstractions, configuration, and indirection.
 - Grow the system in layers. Start from the smallest version that works end to end, and add each new capability on top of a product that already works. Never trade a working product for unfinished complexity.
