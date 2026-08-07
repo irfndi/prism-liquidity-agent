@@ -2,11 +2,26 @@
 
 All notable changes to Prism are documented here.
 
-## [Unreleased]
+## [0.1.9] — 2026-08-07
+
+### Added
+
+- **Effect 4.0.0-beta.105 migration**: engine, CLI, bench suite, and the Cloudflare workers move to one unified Effect tree (`Context.Service` tags, `catch`/`catchCause`, `Result`, `callback`, `timeoutOrElse`, `forkChild`, Schema v4, per-build env snapshot in `ConfigLive` so vitest stubs and CLI-set env are honored) (#172)
+- **Settlement 429 recovery (#166, #169, #175)**: transient settlement failures (HTTP 408/425/429/5xx and network errors) retry with bounded backoff and never terminalize — a rate-limited rollback resumes once the outage clears. An orphan-token sweep re-queues wallet tokens with no backing position or active settlement: terminal rows are revived in place (attempts carried so backoff escalates across generations, sells the current wallet amount) while signature-carrying terminal rows spawn fresh jobs; the `settlement_overdue` safety pause auto-resolves once nothing is in flight; `prism status` reports terminal settlements with unspent balance (order-aware — a recurring stranding stays visible)
+- Batch wallet-reserve gate for SOL-funded entries: per-cycle free-SOL budget (wallet SOL minus gas reserve, refreshed after every live mutation) gates each live ENTER in autonomous canary/live mode, skipping capacity-limited entries as audited `[wallet-reserve]` decisions instead of submitting doomed swaps. The `execution_failures` safety pause can no longer be armed by batch over-commitment — funding-condition ENTER failures (insufficient token balance / SOL / USDC) are treated as capacity-limited and excluded from the pause breaker and pool-failure counts (the entry-failure backoff still arms). Pools are funded in scan order, which is fee-APR rank order in market-scan mode (#170)
+- Stable dependency bump: effect 3.22.1, @meteora-ag/dlmm 1.9.14, hono 4.13.1, oxlint/oxfmt/tsdown latest (#173)
 
 ### Fixed
 
-- Batch wallet-reserve gate for SOL-funded entries: per-cycle free-SOL budget (wallet SOL minus gas reserve, refreshed after every live mutation) gates each live ENTER in autonomous canary/live mode, skipping capacity-limited entries as audited `[wallet-reserve]` decisions instead of submitting doomed swaps. The `execution_failures` safety pause can no longer be armed by batch over-commitment — funding-condition ENTER failures (insufficient token balance / SOL / USDC) are treated as capacity-limited and excluded from the pause breaker and pool-failure counts (the entry-failure backoff still arms). Pools are funded in scan order, which is fee-APR rank order in market-scan mode (#170)
+- **Cloudflare deploy**: alchemy requires `Schema.TaggedErrorClass`, removed from effect in beta.105 — `infra/` pinned to the effect 4.0.0-beta.102 line it needs (workers stay on beta.105); deploys green again (#176, #177)
+- `SOL_PRICE_USD=0` (validated with min 0) no longer zeroes the wallet-reserve USD→lamports reservation — SOL-funded entries skip fail-closed instead of approving full-size entries (#172)
+- The `settlement_overdue` safety pause excludes terminal settlement jobs from its age computation (#168)
+- Transient-error classification is anchored to HTTP-status context — deterministic messages like "need 500 lamports" no longer retry forever (#175)
+
+### Changed
+
+- Removed 48 unused imports and dead locals across engine, CLI, and tests — `tsc --noUnusedLocals` clean repo-wide (#174)
+- Bumped version to 0.1.9.
 
 ## [0.1.8] — 2026-08-07
 
