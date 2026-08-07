@@ -69,10 +69,20 @@ export function marketLegPasses(
 ): boolean {
   if (leg.isStableOrSol) return true;
   if (leg.verified === true) {
-    return leg.freezeDisabled === false ? (leg.holders ?? 0) >= minHolders : true;
+    // Verified: freeze-disabled always passes. A KNOWN freeze-enabled token
+    // still needs a real holder base (operator trust decision); an ABSENT
+    // holder count is unknown, not 0 — fail open (the per-pool screen still
+    // gates ENTER).
+    return leg.freezeDisabled === false
+      ? leg.holders === undefined || leg.holders >= minHolders
+      : true;
   }
-  // Unverified leg: need freeze disabled and a real holder base.
-  return leg.freezeDisabled !== false && (leg.holders ?? 0) >= minHolders;
+  // Unverified leg: reject only a KNOWN freeze-enabled token; otherwise the
+  // holder base must be real. Absent metadata (undefined) is fail-open —
+  // `(holders ?? 0)` would fabricate a rejection for legacy metadata-less
+  // mappings.
+  if (leg.freezeDisabled === false) return false;
+  return leg.holders === undefined || leg.holders >= minHolders;
 }
 
 /** Gates and ranks one universe snapshot. Pure; callers feed it the adapter's

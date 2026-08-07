@@ -140,10 +140,44 @@ describe("gateAndRankMarketPools", () => {
   });
 
   it("fails open when token metadata is absent (per-pool screen still gates)", () => {
-    // Metadata-less pool (legacy mapping): no pre-filter veto, ranked on
-    // economics alone.
-    const bare: DiscoveredPool = { ...makePool({ address: "bare" }) };
+    // Metadata-less pool (legacy mapping) with NON-stable legs so the
+    // holder/freeze checks are actually exercised: absent verified /
+    // freezeDisabled / holders must be treated as unknown and pass, never
+    // coerced to holders=0 and rejected — the per-pool screen still gates
+    // ENTER.
+    const bare: DiscoveredPool = {
+      address: "bare",
+      tvlUsd: 1_000_000,
+      volume24hUsd: 500_000,
+      fees24hUsd: 1_500,
+      apr: 0.55,
+      binStep: 20,
+      tokenX: "BareTokenX1111111111111111111111111111111111",
+      tokenY: "BareTokenY1111111111111111111111111111111111",
+    };
     const result = gateAndRankMarketPools([bare], config);
     expect(result.ranked).toHaveLength(1);
+  });
+
+  it("fails open on an absent holder count (undefined is unknown, not 0)", () => {
+    expect(
+      marketLegPasses(
+        { isStableOrSol: false, verified: false, freezeDisabled: true, holders: undefined },
+        config.minHolders,
+      ),
+    ).toBe(true);
+    expect(
+      marketLegPasses(
+        { isStableOrSol: false, verified: true, freezeDisabled: false, holders: undefined },
+        config.minHolders,
+      ),
+    ).toBe(true);
+    // A KNOWN low holder count still fails closed.
+    expect(
+      marketLegPasses(
+        { isStableOrSol: false, verified: false, freezeDisabled: true, holders: 50 },
+        config.minHolders,
+      ),
+    ).toBe(false);
   });
 });

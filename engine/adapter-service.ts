@@ -3434,7 +3434,18 @@ export const AdapterLive = Layer.effect(
               if (!isPoolsEnvelope(parsed)) return [];
               const valid = parsed.data.filter(isValidPoolShape);
               return valid.filter((p) => !p.launchpad).map(toDiscoveredPool);
-            });
+            }).pipe(
+              // Per-page failure isolation: a network error, timeout, or parse
+              // failure on ONE page must not discard the pages that succeeded —
+              // log a warning and yield [] for that page only.
+              Effect.catchAll((cause) => {
+                logger.warn("Market scan: page fetch failed", {
+                  page,
+                  error: underlyingErrorMessage(cause),
+                });
+                return Effect.succeed([] as ReadonlyArray<DiscoveredPool>);
+              }),
+            );
           const pagesResult = yield* Effect.all(
             Array.from({ length: pageCount }, (_, i) => fetchPage(i + 1)),
             { concurrency: 3 },
