@@ -204,9 +204,9 @@ function atomicUsd(amountAtomic: bigint, decimals: number, priceUsd: number): nu
  * itself by retrying.
  */
 const TRANSIENT_HTTP_STATUS =
-  /(?:failed|HTTP):?\s*(408|425|429|5\d{2})\b|HTTP\s+(408|425|429|5\d{2})\b/i;
+  /(?:failed|HTTP):?\s*(408|425|429|5\d{2})\b|HTTP\/\d(?:\.\d)?\s+(408|425|429|5\d{2})\b|status code (408|425|429|5\d{2})\b/i;
 const TRANSIENT_NETWORK =
-  /fetch failed|timeout|timed out|timedout|aborted|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket hang up|connection refused|connection reset|network error/i;
+  /fetch failed|timeout|timed out|timedout|aborted|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket hang up|connection refused|connection reset|network error|too many requests/i;
 
 export function isTransientSettlementError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
