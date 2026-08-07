@@ -112,6 +112,21 @@ export function nextSettlementRetryAt(now: number, attempts: number): number {
   return now + Math.min(2 ** exponent * 1_000, 300_000);
 }
 
+/**
+ * Age in ms of the oldest ACTIVE settlement job. `confirmed` and `terminal`
+ * are final states: a dead-end terminal job (e.g. a failed rollback) must not
+ * keep the `settlement_overdue` safety pause latched forever after
+ * `prism resume` (issue #167). Returns 0 when no active jobs remain.
+ */
+export function oldestActiveSettlementAgeMs(
+  jobs: ReadonlyArray<SettlementJobRecord>,
+  now: number,
+): number {
+  return jobs
+    .filter((job) => job.status !== "confirmed" && job.status !== "terminal")
+    .reduce((oldest, job) => Math.max(oldest, now - job.createdAt), 0);
+}
+
 export interface SettlementProcessorInput {
   readonly adapter: AdapterApi;
   readonly db: DbApi;

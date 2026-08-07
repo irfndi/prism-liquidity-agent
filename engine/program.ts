@@ -159,6 +159,7 @@ import {
 import { computeCooldownForExit } from "./cooldown.js";
 import {
   loadDailyEquityBaseline,
+  oldestActiveSettlementAgeMs,
   persistDailyEquityBaseline,
   processSettlementJobs,
   safetyPauseBlockReason,
@@ -3912,9 +3913,7 @@ export const program = Effect.gen(function* () {
           maxSwapSlippageBps: config.maxSwapSlippageBps,
           settlementDustUsd: autonomousExecution.settlementDustUsd,
         });
-        oldestSettlementAgeMs = processedJobs
-          .filter((job) => job.status !== "confirmed")
-          .reduce((oldest, job) => Math.max(oldest, Date.now() - job.createdAt), 0);
+        oldestSettlementAgeMs = oldestActiveSettlementAgeMs(processedJobs, Date.now());
         if (
           oldestSettlementAgeMs > config.settlementMaxPendingMs &&
           activeSafetyPause?.resolvedAt !== null
