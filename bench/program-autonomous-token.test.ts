@@ -10,6 +10,7 @@ import {
   processSettlementJobs,
   safetyPauseBlockReason,
   shouldAutoResolveDailyDrawdownPause,
+  shouldAutoResolveExecutionFailuresPause,
   shouldTriggerSafetyPause,
   sweepOrphanSettlements,
 } from "../engine/autonomous-runtime.js";
@@ -248,6 +249,67 @@ describe("autonomous token runtime policy", () => {
         dailyDrawdownPct: 6,
         maxDailyDrawdownPct: 5,
         dayRolledOver: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("auto-resolves a latched execution_failures pause per the mode table (issue #182)", () => {
+    // Given a disabled threshold (breaker off) — a leftover pause never latches.
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "live",
+        consecutiveExecutionFailures: 99,
+        maxConsecutiveExecutionFailures: 0,
+      }),
+    ).toBe(true);
+
+    // Shadow is informational only — always auto-resolve, never latch.
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "shadow",
+        consecutiveExecutionFailures: 99,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(true);
+
+    // A fresh process starts the counter at 0 — a restart alone clears the latch.
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "live",
+        consecutiveExecutionFailures: 0,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(true);
+
+    // Recovery below the threshold clears the latch mid-run.
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "canary",
+        consecutiveExecutionFailures: 2,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "live",
+        consecutiveExecutionFailures: 2,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(true);
+
+    // The pause stays latched while the counter genuinely breaches again.
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "live",
+        consecutiveExecutionFailures: 3,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "canary",
+        consecutiveExecutionFailures: 4,
+        maxConsecutiveExecutionFailures: 3,
       }),
     ).toBe(false);
   });

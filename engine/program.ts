@@ -156,6 +156,7 @@ import {
   processSettlementJobs,
   safetyPauseBlockReason,
   shouldAutoResolveDailyDrawdownPause,
+  shouldAutoResolveExecutionFailuresPause,
   shouldTriggerSafetyPause,
   sweepOrphanSettlements,
 } from "./autonomous-runtime.js";
@@ -4230,6 +4231,27 @@ export const program = Effect.gen(function* () {
         cycle.poolsScanned > 0 && coreDataFailuresThisCycle >= cycle.poolsScanned
           ? consecutiveCoreDataFailures + 1
           : 0;
+      // Issue #182: an armed execution_failures pause must not outlive the
+      // failure spike that raised it — the trigger counter is session-local
+      // (resets on restart and on every successful execution), so once the
+      // current cycle's counter is below the threshold the pause is stale.
+      // Auto-resolve it mode-aware; the arm block below re-arms only when
+      // the counter genuinely breaches again. `prism resume` remains an
+      // operator override.
+      if (
+        autonomousExecution &&
+        activeSafetyPause !== null &&
+        activeSafetyPause.resolvedAt === null &&
+        activeSafetyPause.reason === "execution_failures" &&
+        shouldAutoResolveExecutionFailuresPause({
+          mode: autonomousExecution.mode,
+          consecutiveExecutionFailures,
+          maxConsecutiveExecutionFailures: config.maxConsecutiveExecutionFailures,
+        })
+      ) {
+        activeSafetyPause = { ...activeSafetyPause, resolvedAt: Date.now() };
+        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
+      }
       if (autonomousExecution && activeSafetyPause?.resolvedAt !== null) {
         const pauseReason = shouldTriggerSafetyPause({
           dailyDrawdownPct,

@@ -72,6 +72,50 @@ export interface DailyDrawdownAutoResolveInput {
   readonly dayRolledOver: boolean;
 }
 
+export interface ExecutionFailuresAutoResolveInput {
+  readonly mode: AutonomousTokenMode;
+  readonly consecutiveExecutionFailures: number;
+  readonly maxConsecutiveExecutionFailures: number;
+}
+
+/**
+ * Auto-resolution for a latched `execution_failures` safety pause
+ * (issue #182). The trigger is a session-local counter that resets on
+ * restart and on every successful execution — but an armed pause was a
+ * permanent one-way latch that only `prism resume` could clear, so a single
+ * transient failure spike (rate limits, RPC blips, a pre-fix batch of doomed
+ * entries) halted the agent forever, surviving restarts (fresh counter) and
+ * fixed releases. Mirrors the issue #148 daily_drawdown autonomy contract:
+ *
+ * - `shadow` — informational only: the pause never blocks and never requires
+ *   a manual resume, so always auto-resolve.
+ * - `canary` / `live` — re-evaluate fresh every cycle: auto-resolve as soon
+ *   as the current failure counter is below the configured threshold (a
+ *   fresh process starts at 0, so a restart alone clears the latch). The
+ *   trigger block re-arms the pause only when the counter genuinely
+ *   breaches again.
+ *
+ * A non-positive threshold means the breaker is off, so a leftover pause from
+ * when it was enabled should not latch either.
+ *
+ * Returns true when the caller should clear the active pause (`resolvedAt`).
+ */
+export function shouldAutoResolveExecutionFailuresPause(
+  input: ExecutionFailuresAutoResolveInput,
+): boolean {
+  if (input.maxConsecutiveExecutionFailures <= 0) return true;
+  switch (input.mode) {
+    case "shadow":
+      return true;
+    case "canary":
+    case "live":
+    case "off":
+      return input.consecutiveExecutionFailures < input.maxConsecutiveExecutionFailures;
+    default:
+      throw new Error(`Unhandled autonomous token mode: ${input.mode}`);
+  }
+}
+
 /**
  * Mode-aware auto-resolution for a latched `daily_drawdown` safety pause
  * (issue #148). The daily equity baseline re-seeds every day, but nothing
