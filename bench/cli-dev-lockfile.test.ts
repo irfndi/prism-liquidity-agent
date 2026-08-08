@@ -164,6 +164,20 @@ describe("cli/lockfile", () => {
     expect(findRunningEngineProcess(spawner)).toBeNull();
   });
 
+  it("findRunningEngineProcess ignores cli-suffixed directories that are not Prism (issue #184 follow-up)", () => {
+    // Given paths whose directory segment merely ENDS in `cli` — the bare
+    // substring `cli/index.mjs` would match these; the path-anchored
+    // pattern must not.
+    const spawner = () => ({
+      stdout: [
+        "PID ARGS",
+        `${process.pid + 1} bun /opt/foo-cli/index.mjs dev`,
+        `${process.pid + 2} bun /home/user/mycli/index.ts dev`,
+      ].join("\n"),
+    });
+    expect(findRunningEngineProcess(spawner)).toBeNull();
+  });
+
   it("findRunningEngineProcess detects a source-tree CLI dev process", () => {
     const spawner = () => ({
       stdout: [
