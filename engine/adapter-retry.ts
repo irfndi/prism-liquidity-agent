@@ -198,7 +198,34 @@ export function retryWithBackoff<T>(
   return retryEffectWithBackoff(
     Effect.tryPromise({
       try: () => fn(),
-      catch: (cause) => cause as Error,
+      // The channel promises Error — normalize non-Error rejections (plain
+      // rate-limit objects, primitives) into a real Error, preserving the
+      // original value as `cause` so retry metadata stays reachable.
+      catch: (cause) => {
+        if (cause instanceof Error) return cause;
+        const message =
+          typeof cause === "object" &&
+          cause !== null &&
+          "message" in cause &&
+          typeof (cause as { message?: unknown }).message === "string"
+            ? ((cause as { message: string }).message)
+            : String(cause);
+        const normalized = new Error(message, { cause });
+        // The retry loop reads rate-limit metadata (headers/response/status)
+        // off the rejected value — carry plain-object fields onto the Error.
+        if (typeof cause === "object" && cause !== null) {
+          for (const key of Object.keys(cause)) {
+            try {
+              (normalized as unknown as Record<string, unknown>)[key] = (
+                cause as Record<string, unknown>
+              )[key];
+            } catch {
+              // ignore non-writable keys
+            }
+          }
+        }
+        return normalized;
+      },
     }),
     opts,
   );
