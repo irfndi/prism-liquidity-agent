@@ -49,10 +49,16 @@ export function decimalsFailureState(err: unknown): StrandedLookupState {
  * Issue #183: pure classification of a stranded terminal settlement against
  * the sweep's dust policy. Priceable value at/above `dustUsd` is real
  * stranded capital; below the cutoff it is dust (intentionally never
- * re-queued, excluded from the report); an unavailable lookup (provider/RPC
- * outage) stays distinct from a genuinely unpriceable token (no price,
- * defect, or unresolvable amount). Exported for direct unit coverage of the
- * channel split (the CLI harness cannot inject adapter failures).
+ * re-queued, excluded from the report); an unavailable lookup stays distinct
+ * from a genuinely unpriceable token. Channel reality (adapter API): the
+ * PRICE channel can never reach "unavailable" — fetchTokenPrices never fails
+ * and unresolved mints are 0 — so a price-provider outage and a genuinely
+ * unquotable mint both classify as Unpriceable (a truthful point-in-time
+ * statement: no USD price resolved at query time; the next run re-checks).
+ * The "unavailable" state is driven by the decimals/RPC lookup, which does
+ * fail typed on outage (distinguished from the adapter's unresolvable-mint
+ * error by message). Exported for direct unit coverage of the channel split
+ * (the CLI harness cannot inject adapter failures).
  */
 export function classifyStrandedSettlement(input: {
   readonly priceState: StrandedLookupState;
@@ -73,9 +79,7 @@ export function classifyStrandedSettlement(input: {
     return { kind: "unpriceable" };
   }
   const valueUsd = (amountNum / 10 ** input.decimals) * input.priceUsd;
-  return valueUsd >= input.dustUsd
-    ? { kind: "stranded", valueUsd }
-    : { kind: "dust", valueUsd };
+  return valueUsd >= input.dustUsd ? { kind: "stranded", valueUsd } : { kind: "dust", valueUsd };
 }
 
 export interface StatusJsonOutput {
@@ -434,25 +438,28 @@ network; with no stranded settlements it is fully offline.`,
           const priceLookup = yield* adapter
             .getTokenPrices(candidateMints, { useFallback: false })
             .pipe(
-            Effect.map((prices) => {
-              const entries = candidateMints.map((mint) => {
-                const price = prices[mint] ?? 0;
-                return [
-                  mint,
-                  { state: (price > 0 ? "ok" : "unpriceable") as StrandedLookupState, value: price },
-                ] as const;
-              });
-              return new Map(entries);
-            }),
-            // Batch defect: one malformed mint must not label every candidate
-            // Unpriceable — fall back to per-mint fetches, deduplicated (one
-            // fetch per unique mint, not per settlement).
-            Effect.catchCause(() =>
-              Effect.all(candidateMints.map(resolvePriceForMint), { concurrency: 4 }).pipe(
-                Effect.map((results) => new Map(results.map((r) => [r.mint, r]))),
+              Effect.map((prices) => {
+                const entries = candidateMints.map((mint) => {
+                  const price = prices[mint] ?? 0;
+                  return [
+                    mint,
+                    {
+                      state: (price > 0 ? "ok" : "unpriceable") as StrandedLookupState,
+                      value: price,
+                    },
+                  ] as const;
+                });
+                return new Map(entries);
+              }),
+              // Batch defect: one malformed mint must not label every candidate
+              // Unpriceable — fall back to per-mint fetches, deduplicated (one
+              // fetch per unique mint, not per settlement).
+              Effect.catchCause(() =>
+                Effect.all(candidateMints.map(resolvePriceForMint), { concurrency: 4 }).pipe(
+                  Effect.map((results) => new Map(results.map((r) => [r.mint, r]))),
+                ),
               ),
-            ),
-          );
+            );
           // Decimals channel: getTokenDecimals DOES fail typed, and the error
           // message distinguishes an RPC outage (→ Unavailable) from the
           // adapter's "Cannot resolve decimals for mint X" unresolvable case
@@ -576,7 +583,7 @@ network; with no stranded settlements it is fully offline.`,
                 : []),
               ...(unpriceableStranded.length > 0
                 ? [
-                    `  Unpriceable: ${unpriceableStranded.length} terminal settlement(s) with no USD price — cannot value, left in wallet (${unpriceableStranded
+                    `  Unpriceable: ${unpriceableStranded.length} terminal settlement(s) with no USD price resolved at query time — cannot value, left in wallet (${unpriceableStranded
                       .map(
                         (entry) =>
                           `${(entry.settlement.poolAddress || "?").slice(0, 8)}/${entry.settlement.tokenMint.slice(0, 8)}`,

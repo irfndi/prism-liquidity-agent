@@ -323,3 +323,37 @@ describe("AdapterService wallet holdings seam (getWalletHoldings)", () => {
     expect(holdings.size).toBe(0);
   });
 });
+
+describe("AdapterService getTokenPrices fallback behavior", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function readTokenPrices(
+    mints: readonly string[],
+    useFallback: boolean,
+  ): Promise<Record<string, number>> {
+    const layer = buildAdapterLayerWithWallet();
+    const program = Effect.gen(function* () {
+      const adapter = yield* AdapterService;
+      return yield* adapter.getTokenPrices([...mints], { useFallback });
+    }).pipe(Effect.provide(layer));
+    return Effect.runPromise(program);
+  }
+
+  it("resolves unresolved mints to 0 with useFallback: false instead of fabricated fallback prices", async () => {
+    // All price sources fail (mockFetch 500s): fetchTokenPrices never fails —
+    // every source catches its own errors and returns {} — so an unresolved
+    // mint resolves to 0 with useFallback: false, and to the hardcoded
+    // fallback price with the default. The stranded-status classification
+    // passes useFallback: false precisely so a price-provider outage can
+    // never report stranded capital at a fabricated value.
+    const restore = mockFetch((async () => new Response("down", { status: 500 })) as unknown as typeof fetch);
+    try {
+      expect(await readTokenPrices([SOL_MINT], false)).toEqual({ [SOL_MINT]: 0 });
+      expect(await readTokenPrices([SOL_MINT], true)).toEqual({ [SOL_MINT]: 165 });
+    } finally {
+      restore();
+    }
+  });
+});
