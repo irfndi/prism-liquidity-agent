@@ -306,6 +306,11 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
           // only when a CONFIRMED settlement for the same mint is newer than
           // it (the sweep sold the token) — a terminal record NEWER than any
           // confirmed one is a recurring stranding and must stay visible.
+          // Issue #183: classify against the sweep's dust policy — a
+          // sub-dust terminal is intentionally never re-queued (not stranded
+          // capital, so it is excluded), an unpriceable terminal cannot be
+          // valued (stays visible, labeled unpriceable), and only priceable
+          // value at/above the dust cutoff is real stranded capital.
           const newestConfirmedAt = new Map<string, number>();
           for (const settlement of autonomous.settlements) {
             if (settlement.status !== "confirmed") continue;
@@ -314,11 +319,39 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
               newestConfirmedAt.set(settlement.tokenMint, settlement.createdAt);
             }
           }
-          const strandedSettlements = autonomous.settlements.filter(
+          const strandedCandidates = autonomous.settlements.filter(
             (settlement) =>
               settlement.status === "terminal" &&
               settlement.confirmedOutputAtomic === null &&
               (newestConfirmedAt.get(settlement.tokenMint) ?? -1) < settlement.createdAt,
+          );
+          const strandedClassification = yield* Effect.all(
+            strandedCandidates.map((settlement) =>
+              Effect.gen(function* () {
+                const adapter = yield* AdapterService;
+                const price = yield* adapter
+                  .getTokenPrices([settlement.tokenMint])
+                  .pipe(
+                    Effect.map((p) => p[settlement.tokenMint] ?? 0),
+                    Effect.catch(() => Effect.succeed(0)),
+                  );
+                const decimals = yield* adapter
+                  .getTokenDecimals(settlement.tokenMint)
+                  .pipe(Effect.catch(() => Effect.succeed(0)));
+                const valueUsd =
+                  price > 0 && decimals > 0
+                    ? (Number(settlement.amountAtomic) / 10 ** decimals) * price
+                    : null;
+                return { settlement, valueUsd };
+              }),
+            ),
+            { concurrency: "unbounded" },
+          );
+          const strandedSettlements = strandedClassification.filter(
+            (entry) => entry.valueUsd !== null && entry.valueUsd >= config.settlementDustUsd,
+          );
+          const unpriceableStranded = strandedClassification.filter(
+            (entry) => entry.valueUsd === null,
           );
 
           // Acceptance for issue #167: an active settlement_overdue pause
@@ -372,10 +405,20 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
                 ? [
                     `  Stranded:    ${strandedSettlements.length} terminal settlement(s) with unspent balance (${strandedSettlements
                       .map(
-                        (settlement) =>
-                          `${(settlement.poolAddress || "?").slice(0, 8)}/${settlement.tokenMint.slice(0, 8)}`,
+                        (entry) =>
+                          `${(entry.settlement.poolAddress || "?").slice(0, 8)}/${entry.settlement.tokenMint.slice(0, 8)} ($${entry.valueUsd!.toFixed(2)})`,
                       )
                       .join(", ")}) — see --json for details`,
+                  ]
+                : []),
+              ...(unpriceableStranded.length > 0
+                ? [
+                    `  Unpriceable: ${unpriceableStranded.length} terminal settlement(s) with no USD price — cannot value, left in wallet (${unpriceableStranded
+                      .map(
+                        (entry) =>
+                          `${(entry.settlement.poolAddress || "?").slice(0, 8)}/${entry.settlement.tokenMint.slice(0, 8)}`,
+                      )
+                      .join(", ")})`,
                   ]
                 : []),
               `  Safety pause: ${

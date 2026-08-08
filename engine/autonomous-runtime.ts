@@ -453,7 +453,12 @@ export function processSettlementJobs(
         const inputPriceUsd = prices[job.tokenMint] ?? 0;
         const inputUsd = atomicUsd(amountAtomic, inputDecimals, inputPriceUsd);
         const settlementDustUsd = input.settlementDustUsd ?? 0;
-        if (settlementDustUsd > 0 && inputPriceUsd > 0 && inputUsd < settlementDustUsd) {
+        // Issue #183: the dust skip covers unpriceable tokens too (value
+        // unknown ⇒ $0). Quoting an unquotable mint returns a definitive 400
+        // (no route) and previously re-queued the job forever; terminalizing
+        // it as dust stops the loop — the orphan sweep re-evaluates prices
+        // every cycle, so the token re-qualifies if a price ever resolves.
+        if (settlementDustUsd > 0 && (inputPriceUsd <= 0 || inputUsd < settlementDustUsd)) {
           return {
             ...job,
             status: "confirmed" as const,
@@ -462,7 +467,8 @@ export function processSettlementJobs(
             confirmedOutputAtomic: amountAtomic.toString(),
             outputUsd: inputUsd,
             executionCostUsd: 0,
-            error: "settlement dust skipped",
+            error:
+              inputPriceUsd > 0 ? "settlement dust skipped" : "settlement dust skipped (no USD price)",
             updatedAt: input.now,
           };
         }
@@ -605,8 +611,10 @@ export interface OrphanSettlementSweepInput {
  * rollback settlement died. Each cycle this compares wallet holdings against
  * the mints that are actually accounted for (position legs, active settlement
  * jobs) and re-enqueues a fresh sell-settlement job for everything else.
- * Dust below `settlementDustUsd` stays put (unpriceable tokens are enqueued —
- * the processor's dust skip re-applies at execution time). Fail-open end to
+ * Dust below `settlementDustUsd` stays put; unpriceable tokens are treated as
+ * dust too (value unknown ⇒ $0 for sweep purposes — issue #183: quoting an
+ * unquotable mint 400s forever, so enqueuing them was an infinite retry loop)
+ * and re-qualify automatically once a price resolves. Fail-open end to
  * end: a holdings read, pool-state fetch, or price fetch failure skips only
  * its own contribution and never blocks the cycle. RPC cost is gated —
  * position legs are only fetched when candidate mints actually exist, and
@@ -686,8 +694,8 @@ export function sweepOrphanSettlements(
       const priceUsd = prices[mint] ?? 0;
       if (
         input.settlementDustUsd > 0 &&
-        priceUsd > 0 &&
-        atomicUsd(holding.amountAtomic, holding.decimals, priceUsd) < input.settlementDustUsd
+        (priceUsd <= 0 ||
+          atomicUsd(holding.amountAtomic, holding.decimals, priceUsd) < input.settlementDustUsd)
       ) {
         continue;
       }
