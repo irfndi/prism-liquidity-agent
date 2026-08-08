@@ -329,15 +329,19 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
             strandedCandidates.map((settlement) =>
               Effect.gen(function* () {
                 const adapter = yield* AdapterService;
+                // catchAllCause, not catch: a malformed mint can throw
+                // synchronously (PublicKey construction defect) inside the
+                // adapter, and a display path must degrade to "unpriceable"
+                // rather than fail the whole status command.
                 const price = yield* adapter
                   .getTokenPrices([settlement.tokenMint])
                   .pipe(
                     Effect.map((p) => p[settlement.tokenMint] ?? 0),
-                    Effect.catch(() => Effect.succeed(0)),
+                    Effect.catchCause(() => Effect.succeed(0)),
                   );
                 const decimals = yield* adapter
                   .getTokenDecimals(settlement.tokenMint)
-                  .pipe(Effect.catch(() => Effect.succeed(0)));
+                  .pipe(Effect.catchCause(() => Effect.succeed(0)));
                 const valueUsd =
                   price > 0 && decimals > 0
                     ? (Number(settlement.amountAtomic) / 10 ** decimals) * price
