@@ -79,29 +79,42 @@ export interface ExecutionFailuresAutoResolveInput {
   readonly mode: AutonomousTokenMode;
   readonly consecutiveExecutionFailures: number;
   readonly maxConsecutiveExecutionFailures: number;
-  /** Execution failures recorded in the CURRENT scan cycle (0 = quiet cycle). */
-  readonly executionFailuresThisCycle: number;
+}
+
+/**
+ * Issue #182: a cycle with no execution failures is a QUIET cycle — the
+ * consecutive-failure counter decays to 0 (true consecutive semantics,
+ * mirroring `consecutiveCoreDataFailures`). Without the decay the counter
+ * only reset on a successful execution, so after a failure spike the stale
+ * breach re-armed the pause in the same pass the resolver cleared it
+ * (resolve → re-arm toggle every cycle, latch never stayed cleared).
+ * Runs at the end of every cycle (including skipped/empty cycles) BEFORE
+ * the arm block evaluates.
+ */
+export function decayExecutionFailureCounter(
+  consecutiveExecutionFailures: number,
+  executionFailuresThisCycle: number,
+): number {
+  return executionFailuresThisCycle === 0 ? 0 : consecutiveExecutionFailures;
 }
 
 /**
  * Auto-resolution for a latched `execution_failures` safety pause
  * (issue #182). The trigger is a session-local counter that resets on
- * restart and on every successful execution — but an armed pause was a
- * permanent one-way latch that only `prism resume` could clear, so a single
- * transient failure spike (rate limits, RPC blips, a pre-fix batch of doomed
- * entries) halted the agent forever, surviving restarts (fresh counter) and
- * fixed releases. Mirrors the issue #148 daily_drawdown autonomy contract:
+ * restart, on every successful execution, and (via
+ * decayExecutionFailureCounter) after every quiet cycle — but an armed
+ * pause was a permanent one-way latch that only `prism resume` could
+ * clear, so a single transient failure spike (rate limits, RPC blips, a
+ * pre-fix batch of doomed entries) halted the agent forever, surviving
+ * restarts (fresh counter) and fixed releases. Mirrors the issue #148
+ * daily_drawdown autonomy contract:
  *
  * - `shadow` — informational only: the pause never blocks and never requires
  *   a manual resume, so always auto-resolve.
- * - `canary` / `live` — re-evaluate fresh every cycle: auto-resolve when the
- *   current failure counter is below the configured threshold (a fresh
- *   process starts at 0, so a restart alone clears the latch) OR when the
- *   current cycle recorded no execution failures at all (the spike passed).
- *   The latter is required for mid-run recovery: while the pause is active,
- *   ENTER/REBALANCE are blocked, so the counter cannot drop back below the
- *   threshold on its own — without the quiet-cycle clause only a restart or
- *   an allowed EXIT could clear the latch. The trigger block re-arms the
+ * - `canary` / `live` — re-evaluate fresh every cycle: auto-resolve as soon
+ *   as the current failure counter is below the configured threshold (a
+ *   fresh process starts at 0, so a restart alone clears the latch; the
+ *   quiet-cycle decay clears it mid-run). The trigger block re-arms the
  *   pause only when a cycle genuinely breaches again.
  *
  * A non-positive threshold means the breaker is off, so a leftover pause from
@@ -119,10 +132,7 @@ export function shouldAutoResolveExecutionFailuresPause(
     case "canary":
     case "live":
     case "off":
-      return (
-        input.consecutiveExecutionFailures < input.maxConsecutiveExecutionFailures ||
-        input.executionFailuresThisCycle === 0
-      );
+      return input.consecutiveExecutionFailures < input.maxConsecutiveExecutionFailures;
     default:
       throw new Error(`Unhandled autonomous token mode: ${String(input.mode)}`);
   }

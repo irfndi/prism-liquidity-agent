@@ -6,7 +6,7 @@ All notable changes to Prism are documented here.
 
 ### Fixed
 
-- The `execution_failures` safety pause is no longer a permanent one-way latch: each cycle re-evaluates the current failure counter and auto-resolves when it is below `MAX_CONSECUTIVE_EXECUTION_FAILURES` (a fresh process starts at 0, so a restart alone clears a stale latch); the pause re-arms only when the counter genuinely breaches again, and `prism resume` stays an operator override (#182)
+- The `execution_failures` safety pause is no longer a permanent one-way latch: each cycle auto-resolves when the failure counter is below `MAX_CONSECUTIVE_EXECUTION_FAILURES` (a fresh process starts at 0, so a restart alone clears a stale latch), and the counter decays to 0 after every quiet cycle (no execution failures) so a transient spike clears itself mid-run; the pause re-arms only when a cycle genuinely breaches again, and `prism resume` stays an operator override (#182)
 
 ## [0.1.10] — 2026-08-08
 

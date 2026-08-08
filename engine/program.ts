@@ -157,6 +157,7 @@ import {
   safetyPauseBlockReason,
   shouldAutoResolveDailyDrawdownPause,
   shouldAutoResolveExecutionFailuresPause,
+  decayExecutionFailureCounter,
   shouldTriggerSafetyPause,
   sweepOrphanSettlements,
 } from "./autonomous-runtime.js";
@@ -4045,13 +4046,11 @@ export const program = Effect.gen(function* () {
       // failure spike that raised it. Runs at the TOP of the cycle, before
       // any pool is decided — a resolved latch must not block the very cycle
       // that clears it (the daily_drawdown analog resolves per-pool before
-      // that pool's decisions for the same reason). Recovery signals: the
-      // session-local counter dropped below the threshold (fresh process, or
-      // a successful execution reset it) OR the PREVIOUS cycle recorded no
-      // execution failures (the spike passed — while the pause blocks
-      // ENTER/REBALANCE the consecutive counter cannot decay on its own).
-      // The end-of-cycle arm block re-arms only when a cycle genuinely
-      // breaches again. `prism resume` remains an operator override.
+      // that pool's decisions for the same reason). The counter is decayed
+      // to 0 after every quiet cycle (see the end-of-cycle decay below), so
+      // "below the threshold" is the recovery signal for restarts AND
+      // mid-run spikes; the end-of-cycle arm block re-arms only when a cycle
+      // genuinely breaches again. `prism resume` remains an operator override.
       if (
         autonomousExecution &&
         activeSafetyPause !== null &&
@@ -4061,7 +4060,6 @@ export const program = Effect.gen(function* () {
           mode: autonomousExecution.mode,
           consecutiveExecutionFailures,
           maxConsecutiveExecutionFailures: config.maxConsecutiveExecutionFailures,
-          executionFailuresThisCycle,
         })
       ) {
         activeSafetyPause = { ...activeSafetyPause, resolvedAt: Date.now() };
@@ -4070,6 +4068,14 @@ export const program = Effect.gen(function* () {
 
       if (poolsToScan.length === 0) {
         console.info("No pools configured — skipping cycle");
+        // Issue #182: a skipped cycle is a quiet cycle — no execution failure
+        // was possible, so the consecutive counter decays like any other
+        // quiet cycle (otherwise recovery lags behind skipped cycles).
+        executionFailuresThisCycle = 0;
+        consecutiveExecutionFailures = decayExecutionFailureCounter(
+          consecutiveExecutionFailures,
+          executionFailuresThisCycle,
+        );
         cycle.completedAt = Date.now();
         return;
       }
@@ -4269,6 +4275,15 @@ export const program = Effect.gen(function* () {
         cycle.poolsScanned > 0 && coreDataFailuresThisCycle >= cycle.poolsScanned
           ? consecutiveCoreDataFailures + 1
           : 0;
+      // Issue #182: quiet-cycle decay BEFORE the arm evaluates — a cycle with
+      // no execution failures resets the consecutive counter, so a stale
+      // breach from a previous spike can never re-arm the pause in the same
+      // pass the cycle-top resolver cleared it (which would toggle the latch
+      // every cycle instead of letting it stay resolved).
+      consecutiveExecutionFailures = decayExecutionFailureCounter(
+        consecutiveExecutionFailures,
+        executionFailuresThisCycle,
+      );
       if (autonomousExecution && activeSafetyPause?.resolvedAt !== null) {
         const pauseReason = shouldTriggerSafetyPause({
           dailyDrawdownPct,
