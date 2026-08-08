@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { Effect } from "effect";
 import { SOL_MINT } from "./constants.js";
+import { createLogger } from "./logger.js";
 import { computeNetRealizedPnlUsd } from "./pnl.js";
 import type { AdapterApi, DbApi } from "./services.js";
 import type {
@@ -9,6 +10,8 @@ import type {
   SafetyPauseRecord,
   SettlementJobRecord,
 } from "./types.js";
+
+const logger = createLogger("autonomous-runtime");
 
 /** Returns whether an action remains permitted while the wallet safety pause is active. */
 export function isActionAllowedDuringSafetyPause(action: ActionType): boolean {
@@ -453,12 +456,9 @@ export function processSettlementJobs(
         const inputPriceUsd = prices[job.tokenMint] ?? 0;
         const inputUsd = atomicUsd(amountAtomic, inputDecimals, inputPriceUsd);
         const settlementDustUsd = input.settlementDustUsd ?? 0;
-        // Issue #183: the dust skip covers unpriceable tokens too (value
-        // unknown ⇒ $0). Quoting an unquotable mint returns a definitive 400
-        // (no route) and previously re-queued the job forever; terminalizing
-        // it as dust stops the loop — the orphan sweep re-evaluates prices
-        // every cycle, so the token re-qualifies if a price ever resolves.
-        if (settlementDustUsd > 0 && (inputPriceUsd <= 0 || inputUsd < settlementDustUsd)) {
+        // Priceable sub-dust stays put (pre-existing policy): the value is
+        // known and below the sweep cutoff, so it is recorded as recovered.
+        if (settlementDustUsd > 0 && inputPriceUsd > 0 && inputUsd < settlementDustUsd) {
           return {
             ...job,
             status: "confirmed" as const,
@@ -467,8 +467,32 @@ export function processSettlementJobs(
             confirmedOutputAtomic: amountAtomic.toString(),
             outputUsd: inputUsd,
             executionCostUsd: 0,
-            error:
-              inputPriceUsd > 0 ? "settlement dust skipped" : "settlement dust skipped (no USD price)",
+            error: "settlement dust skipped",
+            updatedAt: input.now,
+          };
+        }
+        // Issue #183: the dust skip covers unpriceable tokens too (value
+        // unknown ⇒ $0) — quoting an unquotable mint returns a definitive 400
+        // (no route) and previously re-queued the job forever. Confirmed ONLY
+        // for synthetic settlement groups (orphan:/rollback: — no position row
+        // to finalize): a real position's sweep job (EXIT residues/rewards)
+        // must not be dust-confirmed, because finalizing its group would book
+        // a full PnL loss while the tokens still sit in the wallet. Real
+        // positions fall through to the quote path (bounded retries, then
+        // terminal on expiry — operator-visible via prism status), and the
+        // orphan sweep skips unpriceable holdings, so the 400 loop stays dead.
+        const syntheticSettlementGroup =
+          job.positionId.startsWith("orphan:") || job.positionId.startsWith("rollback:");
+        if (syntheticSettlementGroup && settlementDustUsd > 0 && inputPriceUsd <= 0) {
+          return {
+            ...job,
+            status: "confirmed" as const,
+            attempts: job.attempts + 1,
+            nextRetryAt: null,
+            confirmedOutputAtomic: amountAtomic.toString(),
+            outputUsd: inputUsd,
+            executionCostUsd: 0,
+            error: "settlement dust skipped (no USD price)",
             updatedAt: input.now,
           };
         }
@@ -668,7 +692,22 @@ export function sweepOrphanSettlements(
     }
     const prices = yield* input.adapter
       .getTokenPrices(candidates.map(([mint]) => mint))
-      .pipe(Effect.catch(() => Effect.succeed<Record<string, number>>({})));
+      .pipe(
+        // Issue #183: a price-fetch failure must not be silent — every
+        // holding would read price 0 and be skipped as dust for the cycle
+        // (a quiet multi-cycle sweep stall is otherwise unobservable; the
+        // processor path treats the same failure as retryable).
+        Effect.catch((err) => {
+          logger.warn(
+            "Orphan sweep price fetch failed — unpriceable holdings treated as dust this cycle",
+            {
+              candidateCount: candidates.length,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          );
+          return Effect.succeed<Record<string, number>>({});
+        }),
+      );
     // A terminal job for the mint is revived in place (upsert on id) rather
     // than replaced by a fresh row: attempts carry over so backoff escalates
     // across generations, and the settlements table stays one row per mint

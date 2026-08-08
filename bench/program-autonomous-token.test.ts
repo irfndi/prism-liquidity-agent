@@ -1011,7 +1011,10 @@ describe("issue #166 settlement recovery", () => {
   it("dust-confirms an unpriceable settlement instead of quoting it (issue #183)", async () => {
     // Given a job for a mint with no resolvable USD price — quoting it would
     // 400 forever (no route), so the dust gate must terminalize it as dust.
-    const job = settlementJob({ tokenMint: "no-price-1" });
+    // Only SYNTHETIC settlement groups (orphan/rollback) qualify: they have
+    // no position row to finalize, so no PnL can be booked against the
+    // still-in-wallet tokens.
+    const job = settlementJob({ tokenMint: "no-price-1", positionId: "orphan:test" });
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
       getTokenDecimals: () => Effect.succeed(6),
@@ -1048,6 +1051,47 @@ describe("issue #166 settlement recovery", () => {
       error: "settlement dust skipped (no USD price)",
     });
     expect(processed?.outputUsd).toBe(0);
+  });
+
+  it("does NOT dust-confirm an unpriceable settlement tied to a real position (issue #183)", async () => {
+    // Given an unpriceable job whose positionId is a REAL position (EXIT
+    // residue/reward sweep) — dust-confirming it would finalize the group
+    // with outputUsd 0 and book a full PnL loss while the tokens still sit
+    // in the wallet. It must fall through to the quote path instead
+    // (bounded retries, then terminal on expiry — operator-visible).
+    const job = settlementJob({ tokenMint: "no-price-1" }); // default real positionId
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 400")),
+      prepareSwap: () => Effect.fail(new Error("unused")),
+      simulateSwap: () => Effect.fail(new Error("unused")),
+      submitSwap: () => Effect.fail(new Error("unused")),
+    } as unknown as AdapterApi;
+    const db = {
+      saveSettlementJob: () => Effect.void,
+      getPosition: () => Effect.succeed(null),
+    } as unknown as DbApi;
+
+    // When
+    const [processed] = await Effect.runPromise(
+      processSettlementJobs({
+        adapter,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+        settlementDustUsd: 0.1,
+      }),
+    );
+
+    // Then the quote path ran (400 → retryable with backoff), no dust-confirm.
+    expect(processed).toMatchObject({
+      status: "retryable",
+      error: "Jupiter quote failed: 400",
+      nextRetryAt: 11_000,
+    });
   });
 
   it("dust-confirms a priceable sub-dust settlement with the plain dust error", async () => {

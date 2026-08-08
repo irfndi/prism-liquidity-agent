@@ -115,7 +115,10 @@ export const statusCommand = new Command("status")
   $ prism status --message       # Markdown summary for Telegram/Discord/Slack/WhatsApp
 
 The status command reads from the local SQLite database and is safe to call
-from agent skills or cron jobs. It does not require the engine to be running.`,
+from agent skills or cron jobs. It does not require the engine to be running.
+When terminal settlements with unspent balance exist, classifying them
+(Stranded vs dust vs unpriceable) performs price/decimals lookups against the
+network; with no stranded settlements it is fully offline.`,
   )
   .action(async (opts: { json?: boolean; message?: boolean }) => {
     try {
@@ -325,37 +328,73 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
               settlement.confirmedOutputAtomic === null &&
               (newestConfirmedAt.get(settlement.tokenMint) ?? -1) < settlement.createdAt,
           );
+          // Issue #183: classify against the sweep's dust policy. Prices are
+          // batched into ONE call (all candidates known upfront); decimals
+          // run with bounded concurrency so a stranded-token burst cannot
+          // fire unbounded parallel RPC. Classification is three-way:
+          // - stranded — priceable value at/above SETTLEMENT_DUST_USD (the
+          //   sweep deliberately re-queues nothing here; real capital).
+          // - dust — priceable value below the cutoff (intentionally never
+          //   re-queued; excluded from the report).
+          // - unpriceable — no resolvable price (genuinely unquotable mint,
+          //   or a malformed/defective lookup): cannot be valued, surfaced on
+          //   its own line.
+          // - unavailable — the price fetch itself failed (provider/RPC
+          //   outage): distinct from unpriceable so an outage never mislabels
+          //   real stranded capital as worthless dust.
+          const adapter = yield* AdapterService;
+          const candidateMints = [...new Set(strandedCandidates.map((s) => s.tokenMint))];
+          const priceFetch = yield* adapter
+            .getTokenPrices(candidateMints)
+            .pipe(
+              Effect.map((p) => ({ ok: true as const, prices: p })),
+              Effect.catch(() => Effect.succeed({ ok: false as const, prices: {} })),
+              // A malformed mint can throw synchronously (PublicKey
+              // construction defect) inside the adapter; a display path must
+              // degrade to "unpriceable" rather than fail the whole command.
+              Effect.catchCause(() => Effect.succeed({ ok: false as const, prices: {} })),
+            );
           const strandedClassification = yield* Effect.all(
             strandedCandidates.map((settlement) =>
               Effect.gen(function* () {
-                const adapter = yield* AdapterService;
-                // catchAllCause, not catch: a malformed mint can throw
-                // synchronously (PublicKey construction defect) inside the
-                // adapter, and a display path must degrade to "unpriceable"
-                // rather than fail the whole status command.
-                const price = yield* adapter
-                  .getTokenPrices([settlement.tokenMint])
-                  .pipe(
-                    Effect.map((p) => p[settlement.tokenMint] ?? 0),
-                    Effect.catchCause(() => Effect.succeed(0)),
-                  );
-                const decimals = yield* adapter
+                if (!priceFetch.ok) {
+                  return { settlement, kind: "unavailable" as const };
+                }
+                const price = priceFetch.prices[settlement.tokenMint] ?? 0;
+                const decimalsResult = yield* adapter
                   .getTokenDecimals(settlement.tokenMint)
-                  .pipe(Effect.catchCause(() => Effect.succeed(0)));
-                const valueUsd =
-                  price > 0 && decimals > 0
-                    ? (Number(settlement.amountAtomic) / 10 ** decimals) * price
-                    : null;
-                return { settlement, valueUsd };
+                  .pipe(
+                    Effect.map((decimals) => ({ ok: true as const, decimals })),
+                    Effect.catch(() => Effect.succeed({ ok: false as const, decimals: 0 })),
+                    Effect.catchCause(() =>
+                      Effect.succeed({ ok: false as const, decimals: 0 }),
+                    ),
+                  );
+                if (price <= 0 || !decimalsResult.ok || decimalsResult.decimals <= 0) {
+                  return { settlement, kind: "unpriceable" as const };
+                }
+                const amountNum = Number(settlement.amountAtomic);
+                if (!Number.isFinite(amountNum)) {
+                  return { settlement, kind: "unpriceable" as const };
+                }
+                const valueUsd = (amountNum / 10 ** decimalsResult.decimals) * price;
+                return {
+                  settlement,
+                  kind: valueUsd >= config.settlementDustUsd ? ("stranded" as const) : ("dust" as const),
+                  valueUsd,
+                };
               }),
             ),
-            { concurrency: "unbounded" },
+            { concurrency: 4 },
           );
           const strandedSettlements = strandedClassification.filter(
-            (entry) => entry.valueUsd !== null && entry.valueUsd >= config.settlementDustUsd,
+            (entry): entry is (typeof entry & { valueUsd: number }) => entry.kind === "stranded",
           );
           const unpriceableStranded = strandedClassification.filter(
-            (entry) => entry.valueUsd === null,
+            (entry) => entry.kind === "unpriceable",
+          );
+          const unavailableStranded = strandedClassification.filter(
+            (entry) => entry.kind === "unavailable",
           );
 
           // Acceptance for issue #167: an active settlement_overdue pause
@@ -410,7 +449,7 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
                     `  Stranded:    ${strandedSettlements.length} terminal settlement(s) with unspent balance (${strandedSettlements
                       .map(
                         (entry) =>
-                          `${(entry.settlement.poolAddress || "?").slice(0, 8)}/${entry.settlement.tokenMint.slice(0, 8)} ($${entry.valueUsd!.toFixed(2)})`,
+                          `${(entry.settlement.poolAddress || "?").slice(0, 8)}/${entry.settlement.tokenMint.slice(0, 8)} ($${entry.valueUsd.toFixed(2)})`,
                       )
                       .join(", ")}) — see --json for details`,
                   ]
@@ -423,6 +462,16 @@ from agent skills or cron jobs. It does not require the engine to be running.`,
                           `${(entry.settlement.poolAddress || "?").slice(0, 8)}/${entry.settlement.tokenMint.slice(0, 8)}`,
                       )
                       .join(", ")})`,
+                  ]
+                : []),
+              ...(unavailableStranded.length > 0
+                ? [
+                    `  Unavailable: ${unavailableStranded.length} terminal settlement(s) — price source unreachable, value unknown (${unavailableStranded
+                      .map(
+                        (entry) =>
+                          `${(entry.settlement.poolAddress || "?").slice(0, 8)}/${entry.settlement.tokenMint.slice(0, 8)}`,
+                      )
+                      .join(", ")}) — retry later`,
                   ]
                 : []),
               `  Safety pause: ${
