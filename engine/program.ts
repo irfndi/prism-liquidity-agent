@@ -156,6 +156,8 @@ import {
   processSettlementJobs,
   safetyPauseBlockReason,
   shouldAutoResolveDailyDrawdownPause,
+  shouldAutoResolveExecutionFailuresPause,
+  decayExecutionFailureCounter,
   shouldTriggerSafetyPause,
   sweepOrphanSettlements,
 } from "./autonomous-runtime.js";
@@ -2314,6 +2316,12 @@ export const program = Effect.gen(function* () {
           .pipe(Effect.catch(() => Effect.succeed(null)));
   let consecutiveCoreDataFailures = 0;
   let consecutiveExecutionFailures = 0;
+  // Execution failures recorded in the CURRENT scan cycle (reset at cycle
+  // start) — the recovery signal for the issue #182 execution_failures
+  // pause auto-resolution: while the pause blocks ENTER/REBALANCE the
+  // consecutive counter cannot decay on its own, so a quiet cycle is what
+  // proves the spike passed.
+  let executionFailuresThisCycle = 0;
   let coreDataFailuresThisCycle = 0;
   const dailyBaselineScope = {
     walletAddress: executionWalletAddress ?? "paper",
@@ -2360,6 +2368,7 @@ export const program = Effect.gen(function* () {
     config.autonomousTokenMode === "canary" || config.autonomousTokenMode === "live";
   const recordExecutionOutcome = (executed: boolean): void => {
     consecutiveExecutionFailures = executed ? 0 : consecutiveExecutionFailures + 1;
+    if (!executed) executionFailuresThisCycle++;
   };
   let lastSnapshotPruneAt = 0;
 
@@ -4033,8 +4042,40 @@ export const program = Effect.gen(function* () {
           .pipe(Effect.catch(() => Effect.succeed(activeSafetyPause)));
       }
 
+      // Issue #182: an armed execution_failures pause must not outlive the
+      // failure spike that raised it. Runs at the TOP of the cycle, before
+      // any pool is decided — a resolved latch must not block the very cycle
+      // that clears it (the daily_drawdown analog resolves per-pool before
+      // that pool's decisions for the same reason). The counter is decayed
+      // to 0 after every quiet cycle (see the end-of-cycle decay below), so
+      // "below the threshold" is the recovery signal for restarts AND
+      // mid-run spikes; the end-of-cycle arm block re-arms only when a cycle
+      // genuinely breaches again. `prism resume` remains an operator override.
+      if (
+        autonomousExecution &&
+        activeSafetyPause !== null &&
+        activeSafetyPause.resolvedAt === null &&
+        activeSafetyPause.reason === "execution_failures" &&
+        shouldAutoResolveExecutionFailuresPause({
+          mode: autonomousExecution.mode,
+          consecutiveExecutionFailures,
+          maxConsecutiveExecutionFailures: config.maxConsecutiveExecutionFailures,
+        })
+      ) {
+        activeSafetyPause = { ...activeSafetyPause, resolvedAt: Date.now() };
+        yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
+      }
+
       if (poolsToScan.length === 0) {
         console.info("No pools configured — skipping cycle");
+        // Issue #182: a skipped cycle is a quiet cycle — no execution failure
+        // was possible, so the consecutive counter decays like any other
+        // quiet cycle (otherwise recovery lags behind skipped cycles).
+        executionFailuresThisCycle = 0;
+        consecutiveExecutionFailures = decayExecutionFailureCounter(
+          consecutiveExecutionFailures,
+          executionFailuresThisCycle,
+        );
         cycle.completedAt = Date.now();
         return;
       }
@@ -4176,6 +4217,10 @@ export const program = Effect.gen(function* () {
       // excludes these so an exit can never be followed by a same-cycle re-entry
       // — the no-exit-and-reenter invariant (AGENTS.md §multiple-positions).
       const executedExitPools = new Set<string>();
+      // Reset AFTER the issue #182 resolve block above: the resolver reads the
+      // PREVIOUS cycle's failure count, and this cycle's failures start counting
+      // from here (recordExecutionOutcome increments it during the pool loop).
+      executionFailuresThisCycle = 0;
 
       for (const poolAddress of poolsToScan) {
         // A pool yields one decision per held position plus at most one ENTER.
@@ -4230,6 +4275,15 @@ export const program = Effect.gen(function* () {
         cycle.poolsScanned > 0 && coreDataFailuresThisCycle >= cycle.poolsScanned
           ? consecutiveCoreDataFailures + 1
           : 0;
+      // Issue #182: quiet-cycle decay BEFORE the arm evaluates — a cycle with
+      // no execution failures resets the consecutive counter, so a stale
+      // breach from a previous spike can never re-arm the pause in the same
+      // pass the cycle-top resolver cleared it (which would toggle the latch
+      // every cycle instead of letting it stay resolved).
+      consecutiveExecutionFailures = decayExecutionFailureCounter(
+        consecutiveExecutionFailures,
+        executionFailuresThisCycle,
+      );
       if (autonomousExecution && activeSafetyPause?.resolvedAt !== null) {
         const pauseReason = shouldTriggerSafetyPause({
           dailyDrawdownPct,

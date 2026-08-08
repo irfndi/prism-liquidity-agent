@@ -56,7 +56,10 @@ export function shouldTriggerSafetyPause(
     return "daily_drawdown";
   }
   if (input.consecutiveCoreDataFailures >= 2) return "core_data_unavailable";
-  if (input.consecutiveExecutionFailures >= input.maxConsecutiveExecutionFailures) {
+  if (
+    input.maxConsecutiveExecutionFailures > 0 &&
+    input.consecutiveExecutionFailures >= input.maxConsecutiveExecutionFailures
+  ) {
     return "execution_failures";
   }
   if (input.oldestSettlementAgeMs > input.settlementMaxPendingMs) {
@@ -70,6 +73,69 @@ export interface DailyDrawdownAutoResolveInput {
   readonly dailyDrawdownPct: number;
   readonly maxDailyDrawdownPct: number;
   readonly dayRolledOver: boolean;
+}
+
+export interface ExecutionFailuresAutoResolveInput {
+  readonly mode: AutonomousTokenMode;
+  readonly consecutiveExecutionFailures: number;
+  readonly maxConsecutiveExecutionFailures: number;
+}
+
+/**
+ * Issue #182: a cycle with no execution failures is a QUIET cycle — the
+ * consecutive-failure counter decays to 0 (true consecutive semantics,
+ * mirroring `consecutiveCoreDataFailures`). Without the decay the counter
+ * only reset on a successful execution, so after a failure spike the stale
+ * breach re-armed the pause in the same pass the resolver cleared it
+ * (resolve → re-arm toggle every cycle, latch never stayed cleared).
+ * Runs at the end of every cycle (including skipped/empty cycles) BEFORE
+ * the arm block evaluates.
+ */
+export function decayExecutionFailureCounter(
+  consecutiveExecutionFailures: number,
+  executionFailuresThisCycle: number,
+): number {
+  return executionFailuresThisCycle === 0 ? 0 : consecutiveExecutionFailures;
+}
+
+/**
+ * Auto-resolution for a latched `execution_failures` safety pause
+ * (issue #182). The trigger is a session-local counter that resets on
+ * restart, on every successful execution, and (via
+ * decayExecutionFailureCounter) after every quiet cycle — but an armed
+ * pause was a permanent one-way latch that only `prism resume` could
+ * clear, so a single transient failure spike (rate limits, RPC blips, a
+ * pre-fix batch of doomed entries) halted the agent forever, surviving
+ * restarts (fresh counter) and fixed releases. Mirrors the issue #148
+ * daily_drawdown autonomy contract:
+ *
+ * - `shadow` — informational only: the pause never blocks and never requires
+ *   a manual resume, so always auto-resolve.
+ * - `canary` / `live` — re-evaluate fresh every cycle: auto-resolve as soon
+ *   as the current failure counter is below the configured threshold (a
+ *   fresh process starts at 0, so a restart alone clears the latch; the
+ *   quiet-cycle decay clears it mid-run). The trigger block re-arms the
+ *   pause only when a cycle genuinely breaches again.
+ *
+ * A non-positive threshold means the breaker is off, so a leftover pause from
+ * when it was enabled should not latch either.
+ *
+ * Returns true when the caller should clear the active pause (`resolvedAt`).
+ */
+export function shouldAutoResolveExecutionFailuresPause(
+  input: ExecutionFailuresAutoResolveInput,
+): boolean {
+  if (input.maxConsecutiveExecutionFailures <= 0) return true;
+  switch (input.mode) {
+    case "shadow":
+      return true;
+    case "canary":
+    case "live":
+    case "off":
+      return input.consecutiveExecutionFailures < input.maxConsecutiveExecutionFailures;
+    default:
+      throw new Error(`Unhandled autonomous token mode: ${String(input.mode)}`);
+  }
 }
 
 /**

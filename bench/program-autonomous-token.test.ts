@@ -9,7 +9,9 @@ import {
   persistDailyEquityBaseline,
   processSettlementJobs,
   safetyPauseBlockReason,
+  decayExecutionFailureCounter,
   shouldAutoResolveDailyDrawdownPause,
+  shouldAutoResolveExecutionFailuresPause,
   shouldTriggerSafetyPause,
   sweepOrphanSettlements,
 } from "../engine/autonomous-runtime.js";
@@ -250,6 +252,114 @@ describe("autonomous token runtime policy", () => {
         dayRolledOver: true,
       }),
     ).toBe(false);
+  });
+
+  it("auto-resolves a latched execution_failures pause per the mode table (issue #182)", () => {
+    // Given a disabled threshold (breaker off) — a leftover pause never latches.
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "live",
+        consecutiveExecutionFailures: 99,
+        maxConsecutiveExecutionFailures: 0,
+      }),
+    ).toBe(true);
+
+    // Shadow is informational only — always auto-resolve, never latch.
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "shadow",
+        consecutiveExecutionFailures: 99,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(true);
+
+    // A fresh process starts the counter at 0 — a restart alone clears the latch.
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "live",
+        consecutiveExecutionFailures: 0,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(true);
+
+    // Recovery below the threshold clears the latch mid-run.
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "canary",
+        consecutiveExecutionFailures: 2,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "live",
+        consecutiveExecutionFailures: 2,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(true);
+
+    // The pause stays latched while the counter genuinely breaches again.
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "live",
+        consecutiveExecutionFailures: 3,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "canary",
+        consecutiveExecutionFailures: 4,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(false);
+  });
+
+  it("a quiet cycle decays the failure counter so a stale breach cannot re-arm (issue #182 review)", () => {
+    // Cycle N: a spike of 3 execution failures arms the pause.
+    let counter = decayExecutionFailureCounter(3, 3);
+    expect(
+      shouldTriggerSafetyPause({
+        dailyDrawdownPct: 0,
+        maxDailyDrawdownPct: 5,
+        consecutiveCoreDataFailures: 0,
+        consecutiveExecutionFailures: counter,
+        maxConsecutiveExecutionFailures: 3,
+        oldestSettlementAgeMs: 0,
+        settlementMaxPendingMs: 3_600_000,
+      }),
+    ).toBe("execution_failures");
+
+    // Cycle N+1: quiet (0 failures). The end-of-cycle decay zeroes the
+    // counter BEFORE the arm block evaluates, so the stale breach cannot
+    // re-arm the pause in the same pass the resolver cleared it.
+    counter = decayExecutionFailureCounter(counter, 0);
+    expect(counter).toBe(0);
+    expect(
+      shouldTriggerSafetyPause({
+        dailyDrawdownPct: 0,
+        maxDailyDrawdownPct: 5,
+        consecutiveCoreDataFailures: 0,
+        consecutiveExecutionFailures: counter,
+        maxConsecutiveExecutionFailures: 3,
+        oldestSettlementAgeMs: 0,
+        settlementMaxPendingMs: 3_600_000,
+      }),
+    ).toBeNull();
+
+    // Cycle N+2: the resolver sees the decayed counter and clears the latch.
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "live",
+        consecutiveExecutionFailures: counter,
+        maxConsecutiveExecutionFailures: 3,
+      }),
+    ).toBe(true);
+  });
+
+  it("a breaching cycle keeps its counter so the pause stays armed", () => {
+    expect(decayExecutionFailureCounter(4, 1)).toBe(4);
+    expect(decayExecutionFailureCounter(4, 3)).toBe(4);
   });
 
   it("excludes confirmed and terminal jobs from the overdue settlement age (issue #167)", () => {
