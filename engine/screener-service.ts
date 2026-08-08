@@ -101,7 +101,7 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
                     ...(pool.createdAtMs === undefined ? {} : { createdAtMs: pool.createdAtMs }),
                   };
                 },
-                catch: (error) => error,
+                catch: (error) => (error instanceof Error ? error : new Error(String(error))),
               }).pipe(Effect.catch(() => Effect.succeed(null)));
 
               if (candidate) screened.push(candidate);

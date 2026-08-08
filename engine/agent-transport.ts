@@ -142,16 +142,16 @@ export type AgentRuntimeEvent =
 
 export interface AgentRuntimeTransport {
   readonly name: string;
-  readonly isAvailable: () => Effect.Effect<boolean, unknown>;
-  readonly connect: () => Effect.Effect<void, unknown>;
-  readonly disconnect: () => Effect.Effect<void, unknown>;
+  readonly isAvailable: () => Effect.Effect<boolean, Error>;
+  readonly connect: () => Effect.Effect<void, Error>;
+  readonly disconnect: () => Effect.Effect<void, Error>;
   readonly sendPrompt: (
     prompt: string,
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
-  ) => Effect.Effect<AgentRuntimeResponse, unknown>;
-  readonly sendCheckin?: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, unknown>;
-  readonly sendAlert?: (alert: AgentRuntimeAlert) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<AgentRuntimeResponse, Error>;
+  readonly sendCheckin?: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, Error>;
+  readonly sendAlert?: (alert: AgentRuntimeAlert) => Effect.Effect<void, Error>;
   readonly onEvent: (handler: (event: AgentRuntimeEvent) => void) => void;
 }
 

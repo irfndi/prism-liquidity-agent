@@ -375,8 +375,8 @@ describe("migration v16 — pnl_accounting", () => {
 
 // ─── DB record keeping ───────────────────────────────────────────────────────
 
-async function runDb<T>(
-  effect: Effect.Effect<T, unknown, DbService>,
+async function runDb<T, E>(
+  effect: Effect.Effect<T, E, DbService>,
   layer: Layer.Layer<DbService, never, never>,
 ): Promise<T> {
   return Effect.runPromise(Effect.provide(effect, layer));

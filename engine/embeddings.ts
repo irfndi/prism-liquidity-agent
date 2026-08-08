@@ -6,30 +6,34 @@ import { createLogger } from "./logger.js";
 const logger = createLogger("embeddings");
 const VECTOR_DIM = 384;
 
-type Embedder = (text: string) => Effect.Effect<number[], unknown>;
+type Embedder = (text: string) => Effect.Effect<number[], Error>;
 
-let onnxCache: Effect.Effect<
-  [Effect.Effect<Embedder, unknown>, Effect.Effect<void>],
-  never
-> | null = null;
+let onnxCache: Effect.Effect<[Effect.Effect<Embedder, Error>, Effect.Effect<void>], never> | null =
+  null;
 
-function loadOnnxUncached(): Effect.Effect<Embedder, unknown> {
+function loadOnnxUncached(): Effect.Effect<Embedder, Error> {
   return Effect.gen(function* () {
-    const mod = yield* Effect.tryPromise(() => import("@xenova/transformers"));
-    const extractor = yield* Effect.tryPromise(() =>
-      mod.pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2"),
-    );
+    const mod = yield* Effect.tryPromise({
+      try: () => import("@xenova/transformers"),
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+    });
+    const extractor = yield* Effect.tryPromise({
+      try: () => mod.pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2"),
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+    });
     return (text: string) =>
-      Effect.tryPromise(() =>
-        extractor(text, {
-          pooling: "mean",
-          normalize: true,
-        }),
-      ).pipe(Effect.map((output) => Array.from(output.data as Float32Array)));
+      Effect.tryPromise({
+        try: () =>
+          extractor(text, {
+            pooling: "mean",
+            normalize: true,
+          }),
+        catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+      }).pipe(Effect.map((output) => Array.from(output.data as Float32Array)));
   });
 }
 
-function loadOnnx(): Effect.Effect<Embedder, unknown> {
+function loadOnnx(): Effect.Effect<Embedder, Error> {
   if (onnxCache === null) {
     onnxCache = Effect.cachedInvalidateWithTTL(loadOnnxUncached(), "1 day");
   }

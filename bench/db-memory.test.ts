@@ -8,12 +8,12 @@ import { createDatabase, hasVecMemoryTable, probeVecAvailability } from "../engi
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 
-async function run<T, R>(
-  effect: Effect.Effect<T, unknown, R>,
-  layer: Layer.Layer<R, unknown, unknown>,
+async function run<T, E, R, E2, R2>(
+  effect: Effect.Effect<T, E, R>,
+  layer: Layer.Layer<R, E2, R2>,
 ): Promise<T> {
   return Effect.runPromise(
-    (Effect.provide as any)(effect, layer) as Effect.Effect<T, unknown, never>,
+    (Effect.provide as any)(effect, layer) as Effect.Effect<T, Error, never>,
   );
 }
 

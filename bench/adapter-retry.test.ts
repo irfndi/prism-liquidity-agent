@@ -9,7 +9,8 @@ import {
   CircuitBreaker,
 } from "../engine/adapter-retry.js";
 
-const fromPromise = <T>(fn: () => Promise<T>): Effect.Effect<T, unknown> => Effect.tryPromise(fn);
+const fromPromise = <T>(fn: () => Promise<T>): Effect.Effect<T, Error> =>
+  Effect.tryPromise({ try: fn, catch: (cause) => cause as Error });
 
 afterEach(() => {
   vi.useRealTimers();

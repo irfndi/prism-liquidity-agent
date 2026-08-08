@@ -10,11 +10,11 @@
   "rules": {
     "no-unused-vars": "off",
     "require-yield": "off",
-    "effecttsgo/any-unknown-in-error-context": "warn",
-    "typescript/no-base-to-string": "warn",
-    "typescript/no-floating-promises": "warn",
-    "typescript/unbound-method": "warn",
-    "typescript/restrict-template-expressions": "warn"
+    "effecttsgo/any-unknown-in-error-context": "error",
+    "typescript/no-base-to-string": "error",
+    "typescript/no-floating-promises": "error",
+    "typescript/unbound-method": "error",
+    "typescript/restrict-template-expressions": "error"
   },
   "env": {
     "builtin": true

@@ -71,7 +71,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     this.eventHandler?.(event);
   }
 
-  isAvailable(): Effect.Effect<boolean, unknown> {
+  isAvailable(): Effect.Effect<boolean, Error> {
     return Effect.callback((resume) => {
       let probe: ChildProcess | null = null;
       let settled = false;
@@ -113,7 +113,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     });
   }
 
-  connect(): Effect.Effect<void, unknown> {
+  connect(): Effect.Effect<void, Error> {
     return Effect.gen({ self: this }, function* () {
       if (this.process) return;
 
@@ -165,7 +165,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     });
   }
 
-  disconnect(): Effect.Effect<void, unknown> {
+  disconnect(): Effect.Effect<void, Error> {
     return Effect.sync(() => {
       if (!this.process) return;
       this.pending.forEach((p) => {
@@ -182,7 +182,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     prompt: string,
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
-  ): Effect.Effect<AgentRuntimeResponse, unknown> {
+  ): Effect.Effect<AgentRuntimeResponse, Error> {
     return Effect.gen({ self: this }, function* () {
       const startedAt = Date.now();
       yield* this.ensureSession();
@@ -211,7 +211,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     });
   }
 
-  sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, unknown> {
+  sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, Error> {
     return Effect.gen({ self: this }, function* () {
       yield* this.ensureSession();
       const prompt = `Prism check-in (${checkin.trigger}):\n\n${JSON.stringify(checkin, null, 2)}`;
@@ -225,7 +225,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     });
   }
 
-  private ensureSession(): Effect.Effect<void, unknown> {
+  private ensureSession(): Effect.Effect<void, Error> {
     return Effect.gen({ self: this }, function* () {
       if (!this.process) {
         yield* this.connect();
@@ -345,7 +345,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     method: string,
     params: Record<string, unknown>,
     timeoutMs?: number,
-  ): Effect.Effect<unknown, unknown> {
+  ): Effect.Effect<unknown, Error> {
     return Effect.callback((resume) => {
       if (!this.process?.stdin) {
         resume(Effect.fail(new Error("ACP transport not connected")));
@@ -379,7 +379,7 @@ export class AcpTransport implements AgentRuntimeTransport {
       } catch (err) {
         this.pending.delete(id);
         clearTimeout(timer);
-        resume(Effect.fail(err));
+        resume(Effect.fail(err instanceof Error ? err : new Error(String(err))));
       }
 
       return Effect.sync(() => {

@@ -3,8 +3,8 @@ import { Effect, Layer } from "effect";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 
-async function runAsync<T>(
-  effect: Effect.Effect<T, unknown, DbService>,
+async function runAsync<T, E>(
+  effect: Effect.Effect<T, E, DbService>,
   layer: Layer.Layer<DbService, never, never>,
 ): Promise<T> {
   return Effect.runPromise(Effect.provide(effect, layer));

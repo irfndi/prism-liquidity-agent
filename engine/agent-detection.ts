@@ -5,7 +5,7 @@ import type { AgentRuntimeDetection, AgentRuntimeKind } from "./agent-transport.
 
 const logger = createLogger("AgentDetection");
 
-function which(binary: string): Effect.Effect<string | null, unknown> {
+function which(binary: string): Effect.Effect<string | null, Error> {
   return Effect.callback((resume) => {
     const isWindows = process.platform === "win32";
     const cmd = isWindows ? "where" : "which";
@@ -57,7 +57,7 @@ function which(binary: string): Effect.Effect<string | null, unknown> {
   });
 }
 
-function isGatewayRunning(url: string, token: string): Effect.Effect<boolean, unknown> {
+function isGatewayRunning(url: string, token: string): Effect.Effect<boolean, Error> {
   return Effect.callback((resume) => {
     let ws: WebSocket | null = null;
     let settled = false;
@@ -123,7 +123,7 @@ export function detectAgents(config: {
   readonly agentAcpCommand: string;
   readonly agentGatewayUrl: string;
   readonly agentGatewayToken: string;
-}): Effect.Effect<AgentRuntimeDetection, unknown> {
+}): Effect.Effect<AgentRuntimeDetection, Error> {
   return Effect.gen(function* () {
     logger.info("Detecting agent runtimes...");
 

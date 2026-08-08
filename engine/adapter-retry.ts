@@ -56,7 +56,7 @@ function errorMessage(err: unknown): string {
     try {
       return JSON.stringify(err);
     } catch {
-      return String(err);
+      return String(err as unknown);
     }
   }
   return String(err);
@@ -194,26 +194,53 @@ const DEFAULT_RETRY_OPTIONS: Required<Omit<RetryOptions, "rateLimitBaseDelayMs">
 export function retryWithBackoff<T>(
   fn: () => Promise<T>,
   opts?: RetryOptions,
-): Effect.Effect<T, unknown> {
+): Effect.Effect<T, Error> {
   return retryEffectWithBackoff(
     Effect.tryPromise({
       try: () => fn(),
-      catch: (cause) => cause,
+      // The channel promises Error — normalize non-Error rejections (plain
+      // rate-limit objects, primitives) into a real Error, preserving the
+      // original value as `cause` so retry metadata stays reachable.
+      catch: (cause) => {
+        if (cause instanceof Error) return cause;
+        const message =
+          typeof cause === "object" &&
+          cause !== null &&
+          "message" in cause &&
+          typeof (cause as { message?: unknown }).message === "string"
+            ? ((cause as { message: string }).message)
+            : String(cause);
+        const normalized = new Error(message, { cause });
+        // The retry loop reads rate-limit metadata (headers/response/status)
+        // off the rejected value — carry plain-object fields onto the Error.
+        if (typeof cause === "object" && cause !== null) {
+          for (const key of Object.keys(cause)) {
+            try {
+              (normalized as unknown as Record<string, unknown>)[key] = (
+                cause as Record<string, unknown>
+              )[key];
+            } catch {
+              // ignore non-writable keys
+            }
+          }
+        }
+        return normalized;
+      },
     }),
     opts,
   );
 }
 
-export function retryEffectWithBackoff<T>(
-  effect: Effect.Effect<T, unknown>,
+export function retryEffectWithBackoff<T, E>(
+  effect: Effect.Effect<T, E>,
   opts?: RetryOptions,
-): Effect.Effect<T, unknown> {
+): Effect.Effect<T, E> {
   const { maxRetries, baseDelayMs, maxDelayMs, rateLimitBaseDelayMs } = {
     ...DEFAULT_RETRY_OPTIONS,
     ...opts,
   };
 
-  const attempt = (attemptNumber: number): Effect.Effect<T, unknown> =>
+  const attempt = (attemptNumber: number): Effect.Effect<T, E> =>
     effect.pipe(
       Effect.catch((err) => {
         if (attemptNumber >= maxRetries || !isRetriableError(err)) {
@@ -277,10 +304,10 @@ export class CircuitBreaker {
     return this.state;
   }
 
-  execute<T>(
-    effect: Effect.Effect<T, unknown>,
+  execute<T, E>(
+    effect: Effect.Effect<T, E>,
     isRetriable?: (err: unknown) => boolean,
-  ): Effect.Effect<T, unknown> {
+  ): Effect.Effect<T, CircuitBreakerOpenError | E> {
     return Effect.gen({ self: this }, function* () {
       const current = this.getState();
       if (current === "OPEN") {

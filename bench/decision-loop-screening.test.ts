@@ -272,7 +272,7 @@ async function runOneCycle(layer: ReturnType<typeof makeTestLayer>) {
         reasoning: string;
         riskResult: { approved: boolean; reason: string };
       }>,
-      unknown,
+      Error,
       never
     >,
   );
@@ -723,7 +723,7 @@ describe("token-risk overlay + freeze screening (Wave 18)", () => {
   it("(13) a pool rejected by a local ENTER gate performs zero Jupiter fetches (token-risk consult deferred until local eligibility)", async () => {
     let jupiterCalls = 0;
     const restore = mockFetch(async (url: string | URL | Request) => {
-      if (String(url).includes("api.jup.ag")) jupiterCalls += 1;
+      if (String(url as unknown).includes("api.jup.ag")) jupiterCalls += 1;
       // Served ONLY if the gate consults early (pre-fix behavior): this flag
       // would have stolen the audit reason from the local fee/IL gate.
       return new Response(JSON.stringify([{ address: TOKEN_Y, audit: { isSus: true } }]), {
@@ -795,7 +795,7 @@ describe("token-risk overlay + freeze screening (Wave 18)", () => {
   it("(14) an allocation-dead pool performs zero Jupiter fetches (token-risk is the final ENTER gate, after allocation)", async () => {
     let jupiterCalls = 0;
     const restore = mockFetch(async (url: string | URL | Request) => {
-      if (String(url).includes("api.jup.ag")) jupiterCalls += 1;
+      if (String(url as unknown).includes("api.jup.ag")) jupiterCalls += 1;
       // Served ONLY if the allocation-dead pool consults early (pre-fix order):
       // this isSus flag would have stolen the audit reason from the allocation
       // gate. With allocation first, it is never observed.
@@ -842,7 +842,7 @@ describe("token-risk overlay + freeze screening (Wave 18)", () => {
     writeBlacklistFiles([], [TOKEN_Y]);
     let jupiterCalls = 0;
     const restore = mockFetch(async (url: string | URL | Request) => {
-      if (String(url).includes("api.jup.ag")) jupiterCalls += 1;
+      if (String(url as unknown).includes("api.jup.ag")) jupiterCalls += 1;
       // Served ONLY if the overlay is consulted before the blacklist gate
       // (pre-fix order): this isSus flag would have stolen the audit reason
       // from the deterministic blacklist rejection.
@@ -884,7 +884,7 @@ describe("token-risk overlay + freeze screening (Wave 18)", () => {
     writeBlacklistFiles([], [TOKEN_Y]);
     let jupiterCalls = 0;
     const restore = mockFetch(async (url: string | URL | Request) => {
-      if (String(url).includes("api.jup.ag")) jupiterCalls += 1;
+      if (String(url as unknown).includes("api.jup.ag")) jupiterCalls += 1;
       return new Response("[]", { status: 200 });
     });
     try {

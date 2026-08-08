@@ -178,7 +178,7 @@ const statusLogger = createLogger("engine-status");
  */
 function persist<T>(
   label: string,
-  effect: Effect.Effect<T, unknown, never>,
+  effect: Effect.Effect<T, Error, never>,
 ): Effect.Effect<void, never, never> {
   return Effect.catch(effect, (err) =>
     Effect.sync(() =>
@@ -4317,7 +4317,7 @@ export const program = Effect.gen(function* () {
 
   const buildAgentCheckin = (
     trigger: AgentRuntimeCheckin["trigger"],
-  ): Effect.Effect<AgentRuntimeCheckin, unknown> =>
+  ): Effect.Effect<AgentRuntimeCheckin, Error> =>
     Effect.gen(function* () {
       const recentDecisions = yield* audit
         .getRecentDecisions(20)
@@ -4384,7 +4384,7 @@ export const program = Effect.gen(function* () {
 
   const maybeSendAgentCheckin = (
     trigger: AgentRuntimeCheckin["trigger"],
-  ): Effect.Effect<void, unknown> =>
+  ): Effect.Effect<void, Error> =>
     Effect.gen(function* () {
       if (!config.agentiveMode) return;
       if (trigger === "periodic") {
@@ -4403,7 +4403,7 @@ export const program = Effect.gen(function* () {
     category: AgentRuntimeAlert["category"],
     message: string,
     ctx: { pool: PoolState; metrics: PoolMetrics; position: PositionRecord | undefined },
-  ): Effect.Effect<void, unknown> =>
+  ): Effect.Effect<void, Error> =>
     Effect.gen(function* () {
       if (!config.agentiveMode) return;
       const position = ctx.position
@@ -4482,7 +4482,7 @@ export const program = Effect.gen(function* () {
     cycle: AgentCycle,
     idleRedeployCandidates: IdleRedeployCandidate[],
     executedExitPools: Set<string>,
-  ): Effect.Effect<ReadonlyArray<AgentDecision>, unknown, EntryPrepService> =>
+  ): Effect.Effect<ReadonlyArray<AgentDecision>, Error, EntryPrepService> =>
     Effect.gen(function* () {
       const cycleId = cycle.cycleId;
       const rawPool = yield* adapter.getPoolState(poolAddress);
@@ -5309,7 +5309,7 @@ export const program = Effect.gen(function* () {
           reason: string;
           consecutiveOorExits: number;
         } | null,
-        unknown
+        Error
       > =>
         Effect.gen(function* () {
           if (exitDecision.action !== "EXIT") return null;

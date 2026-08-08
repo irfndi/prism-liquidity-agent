@@ -51,7 +51,7 @@ let lastUrl: string | undefined;
 
 function fetchCapturing(body: unknown, status = 200): FetchLike {
   return (url, init) => {
-    lastUrl = typeof url === "string" ? url : url.toString();
+    lastUrl = String(url as unknown);
     lastInit = init;
     return Promise.resolve(new Response(JSON.stringify(body), { status }));
   };

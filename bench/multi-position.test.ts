@@ -100,7 +100,7 @@ function makeRiskPosition(poolAddress: string, id: string, currentValueUsd: numb
 }
 
 function runEffect<T>(
-  effect: Effect.Effect<T, unknown, DbService>,
+  effect: Effect.Effect<T, Error, DbService>,
   layer: Layer.Layer<DbService>,
 ): T {
   return run(effect, layer);
@@ -1423,7 +1423,7 @@ describe("program — multiple positions per pool", () => {
           decisions: ReadonlyArray<{ action: string; executed: boolean }>;
           events: ReadonlyArray<{ event: string; positionId: string | null }>;
         },
-        unknown,
+        Error,
         never
       >,
     );
@@ -1471,7 +1471,7 @@ describe("program — multiple positions per pool", () => {
           positions: ReadonlyArray<PositionRecord>;
           decisions: ReadonlyArray<{ action: string; executed: boolean }>;
         },
-        unknown,
+        Error,
         never
       >,
     );
@@ -1504,7 +1504,7 @@ describe("program — multiple positions per pool", () => {
       return positions;
     });
     const positions = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<ReadonlyArray<PositionRecord>, unknown, never>,
+      Effect.provide(test, layer) as Effect.Effect<ReadonlyArray<PositionRecord>, Error, never>,
     );
 
     expect(positions).toHaveLength(1);
@@ -1579,7 +1579,7 @@ describe("program — multiple positions per pool", () => {
           }>;
           decisions: ReadonlyArray<{ action: string; executed: boolean }>;
         },
-        unknown,
+        Error,
         never
       >,
     );
@@ -1675,7 +1675,7 @@ describe("program — multiple positions per pool", () => {
           closed: ReadonlyArray<PositionRecord>;
           decisions: ReadonlyArray<{ action: string }>;
         },
-        unknown,
+        Error,
         never
       >,
     );
@@ -1733,7 +1733,7 @@ describe("program — multiple positions per pool", () => {
           active: ReadonlyArray<PositionRecord>;
           closed: ReadonlyArray<PositionRecord>;
         },
-        unknown,
+        Error,
         never
       >,
     );
@@ -1800,7 +1800,7 @@ describe("program — multiple positions per pool", () => {
           closed: ReadonlyArray<PositionRecord>;
           decisions: ReadonlyArray<{ action: string; reasoning: string | null }>;
         },
-        unknown,
+        Error,
         never
       >,
     );
@@ -1856,7 +1856,7 @@ describe("program — multiple positions per pool", () => {
           persisted: PositionRecord | null;
           decisions: ReadonlyArray<{ action: string; reasoning: string | null }>;
         },
-        unknown,
+        Error,
         never
       >,
     );
@@ -1960,7 +1960,7 @@ describe("program — multiple positions per pool", () => {
     const decisions = await Effect.runPromise(
       Effect.provide(test, layer) as unknown as Effect.Effect<
         ReadonlyArray<{ action: string; executed: boolean; poolAddress: string }>,
-        unknown,
+        Error,
         never
       >,
     );
@@ -2027,7 +2027,7 @@ describe("A4 paper fee accrual requires datapi-MEASURED fees", () => {
     return Effect.runPromise(
       Effect.provide(test, layer) as unknown as Effect.Effect<
         { accruals: ReadonlyArray<{ feesUsd: number | null }>; accruedUsd: number },
-        unknown,
+        Error,
         never
       >,
     );

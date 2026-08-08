@@ -493,7 +493,7 @@ export const DbLive = (dbPath?: string) =>
                         expiresAt,
                       );
                     },
-                    catch: (error) => error,
+                    catch: (error) => error as Error,
                   });
                 }),
                 (e) => (isVecMemoryMissingError(e) ? Effect.void : Effect.fail(e)),
@@ -546,12 +546,14 @@ export const DbLive = (dbPath?: string) =>
                           JSON.stringify(embedding),
                           k,
                         ),
-                      catch: (error) => error,
+                      catch: (error) => error as Error,
                     });
                     candidates = rows
                       .filter((row) => Number(row.expiresAt ?? 0) > now)
                       .filter((row) =>
-                        poolAddress ? String(row.pool_address ?? "") === poolAddress : true,
+                        poolAddress
+                          ? String((row.pool_address ?? "") as unknown) === poolAddress
+                          : true,
                       );
                     if (candidates.length >= topK || k >= maxK) break;
                     k = Math.min(k * 2, maxK);
@@ -579,10 +581,10 @@ export const DbLive = (dbPath?: string) =>
                   return ranked.map(({ row }) => ({
                     id: String(row.id),
                     category: String(row.category) as MemoryCategory,
-                    content: String(row.content ?? ""),
-                    poolAddress: row.pool_address ? String(row.pool_address) : undefined,
+                    content: String((row.content ?? "") as unknown),
+                    poolAddress: row.pool_address ? String(row.pool_address as unknown) : undefined,
                     outcome: row.outcome
-                      ? (String(row.outcome) as MemoryEntry["outcome"])
+                      ? (String(row.outcome as unknown) as MemoryEntry["outcome"])
                       : undefined,
                     pnlUsd:
                       row.pnlUsd !== undefined && row.pnlUsd !== null
@@ -1150,7 +1152,7 @@ export const DbLive = (dbPath?: string) =>
               );
               return row === null ? null : rowToTokenCandidate(row);
             },
-            catch: (error) => error,
+            catch: (error) => error as Error,
           }),
 
         listTokenCandidates: (walletAddress, agentInstanceId) =>
@@ -1164,7 +1166,7 @@ export const DbLive = (dbPath?: string) =>
                 walletAddress,
                 agentInstanceId,
               ).map(rowToTokenCandidate),
-            catch: (error) => error,
+            catch: (error) => error as Error,
           }),
 
         saveExecutionOperation: (operation) =>
@@ -1216,7 +1218,7 @@ export const DbLive = (dbPath?: string) =>
               );
               return row === null ? null : rowToExecutionOperation(row);
             },
-            catch: (error) => error,
+            catch: (error) => error as Error,
           }),
 
         listExecutionOperations: (walletAddress, agentInstanceId) =>
@@ -1230,7 +1232,7 @@ export const DbLive = (dbPath?: string) =>
                 walletAddress,
                 agentInstanceId,
               ).map(rowToExecutionOperation),
-            catch: (error) => error,
+            catch: (error) => error as Error,
           }),
 
         saveSettlementJob: (job) =>
@@ -1298,7 +1300,7 @@ export const DbLive = (dbPath?: string) =>
               );
               return row === null ? null : rowToSettlementJob(row);
             },
-            catch: (error) => error,
+            catch: (error) => error as Error,
           }),
 
         listSettlementJobs: (walletAddress, agentInstanceId) =>
@@ -1312,7 +1314,7 @@ export const DbLive = (dbPath?: string) =>
                 walletAddress,
                 agentInstanceId,
               ).map(rowToSettlementJob),
-            catch: (error) => error,
+            catch: (error) => error as Error,
           }),
 
         saveSafetyPause: (pause) =>
@@ -1346,7 +1348,7 @@ export const DbLive = (dbPath?: string) =>
               );
               return row === null ? null : rowToSafetyPause(row);
             },
-            catch: (error) => error,
+            catch: (error) => error as Error,
           }),
       };
 
@@ -1447,7 +1449,7 @@ function rowToTokenCandidate(row: Record<string, unknown>): TokenCandidateRecord
     eligibleAt: row.eligible_at === null ? null : Number(row.eligible_at),
     enteredAt: row.entered_at === null ? null : Number(row.entered_at),
     cooldownUntil: row.cooldown_until === null ? null : Number(row.cooldown_until),
-    rejectionReason: row.rejection_reason === null ? null : String(row.rejection_reason),
+    rejectionReason: row.rejection_reason === null ? null : String(row.rejection_reason as unknown),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
@@ -1458,15 +1460,15 @@ function rowToExecutionOperation(row: Record<string, unknown>): ExecutionOperati
     id: String(row.id),
     walletAddress: String(row.wallet_address),
     agentInstanceId: String(row.agent_instance_id),
-    candidateId: row.candidate_id === null ? null : String(row.candidate_id),
-    positionId: row.position_id === null ? null : String(row.position_id),
+    candidateId: row.candidate_id === null ? null : String(row.candidate_id as unknown),
+    positionId: row.position_id === null ? null : String(row.position_id as unknown),
     poolAddress: String(row.pool_address),
     tokenMint: String(row.token_mint),
     operationType: parseExecutionOperationType(row.operation_type),
     status: parseExecutionOperationStatus(row.status),
-    amountAtomic: row.amount_atomic === null ? null : String(row.amount_atomic),
-    txSignature: row.tx_signature === null ? null : String(row.tx_signature),
-    error: row.error === null ? null : String(row.error),
+    amountAtomic: row.amount_atomic === null ? null : String(row.amount_atomic as unknown),
+    txSignature: row.tx_signature === null ? null : String(row.tx_signature as unknown),
+    error: row.error === null ? null : String(row.error as unknown),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
@@ -1485,15 +1487,15 @@ function rowToSettlementJob(row: Record<string, unknown>): SettlementJobRecord {
     status: parseSettlementJobStatus(row.status),
     attempts: Number(row.attempts),
     nextRetryAt: row.next_retry_at === null ? null : Number(row.next_retry_at),
-    txSignature: row.tx_signature === null ? null : String(row.tx_signature),
+    txSignature: row.tx_signature === null ? null : String(row.tx_signature as unknown),
     confirmedOutputAtomic:
-      row.confirmed_output_atomic == null ? null : String(row.confirmed_output_atomic),
+      row.confirmed_output_atomic == null ? null : String(row.confirmed_output_atomic as unknown),
     outputUsd: row.output_usd == null ? null : Number(row.output_usd),
     executionCostUsd: row.execution_cost_usd == null ? null : Number(row.execution_cost_usd),
     finalizedAt: row.finalized_at == null ? null : Number(row.finalized_at),
     realizedPnlUsd: row.realized_pnl_usd == null ? null : Number(row.realized_pnl_usd),
     expiresAt: Number(row.expires_at),
-    error: row.error === null ? null : String(row.error),
+    error: row.error === null ? null : String(row.error as unknown),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
@@ -1513,11 +1515,11 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
   return {
     positionId: String(row.position_id),
     poolAddress: String(row.pool_address),
-    positionPubKey: row.position_pubkey ? String(row.position_pubkey) : null,
+    positionPubKey: row.position_pubkey ? String(row.position_pubkey as unknown) : null,
     depositedUsd: Number(row.deposited_usd ?? 0),
     currentValueUsd: Number(row.current_value_usd ?? 0),
-    tokenXSymbol: String(row.token_x_symbol ?? ""),
-    tokenYSymbol: String(row.token_y_symbol ?? ""),
+    tokenXSymbol: String((row.token_x_symbol ?? "") as unknown),
+    tokenYSymbol: String((row.token_y_symbol ?? "") as unknown),
     activeBinId: Number(row.active_bin_id ?? 0),
     lowerBinId: Number(row.lower_bin_id ?? 0),
     upperBinId: Number(row.upper_bin_id ?? 0),
@@ -1541,8 +1543,8 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     cumulativeRewardsClaimedUsd: Number(row.cumulative_rewards_claimed_usd ?? 0),
     closedAt: row.closed_at != null ? Number(row.closed_at) : null,
     realizedPnlUsd: row.realized_pnl_usd != null ? Number(row.realized_pnl_usd) : null,
-    positionMode: row.position_mode != null ? String(row.position_mode) : null,
-    tpLadderJson: row.tp_ladder_json != null ? String(row.tp_ladder_json) : null,
+    positionMode: row.position_mode != null ? String(row.position_mode as unknown) : null,
+    tpLadderJson: row.tp_ladder_json != null ? String(row.tp_ladder_json as unknown) : null,
     invalidationStopPrice:
       row.invalidation_stop_price != null ? Number(row.invalidation_stop_price) : null,
   };
@@ -1552,13 +1554,13 @@ function rowToPositionEvent(row: Record<string, unknown>): PositionEventRecord {
   return {
     id: String(row.id),
     poolAddress: String(row.pool_address),
-    positionPubKey: row.position_pubkey ? String(row.position_pubkey) : null,
-    positionId: row.position_id ? String(row.position_id) : null,
+    positionPubKey: row.position_pubkey ? String(row.position_pubkey as unknown) : null,
+    positionId: row.position_id ? String(row.position_id as unknown) : null,
     event: String(row.event) as PositionEventType,
     valueUsd: row.value_usd != null ? Number(row.value_usd) : null,
     feesUsd: row.fees_usd != null ? Number(row.fees_usd) : null,
     price: row.price != null ? Number(row.price) : null,
-    metadata: row.metadata != null ? String(row.metadata) : null,
+    metadata: row.metadata != null ? String(row.metadata as unknown) : null,
     createdAt: Number(row.created_at ?? 0),
   };
 }
@@ -1583,8 +1585,8 @@ function rowToSnapshot(row: Record<string, unknown>): PoolSnapshot {
     apr: Number(row.apr),
     currentPrice: Number(row.current_price),
     binStep: Number(row.bin_step),
-    tokenXSymbol: String(row.token_x_symbol ?? ""),
-    tokenYSymbol: String(row.token_y_symbol ?? ""),
+    tokenXSymbol: String((row.token_x_symbol ?? "") as unknown),
+    tokenYSymbol: String((row.token_y_symbol ?? "") as unknown),
     binArray: deserializeBinArray(String(row.bin_array_json)),
     statsSource: parseStatsSource(row.stats_source),
   };
@@ -1594,17 +1596,17 @@ function rowToAudit(row: Record<string, unknown>): AuditRecord {
   return {
     id: String(row.id),
     timestamp: Number(row.timestamp ?? 0),
-    cycleId: String(row.cycle_id ?? ""),
-    poolAddress: String(row.pool_address ?? ""),
-    action: String(row.action ?? ""),
+    cycleId: String((row.cycle_id ?? "") as unknown),
+    poolAddress: String((row.pool_address ?? "") as unknown),
+    action: String((row.action ?? "") as unknown),
     confidence: Number(row.confidence ?? 0),
-    reasoning: String(row.reasoning ?? ""),
-    metricsJson: row.metrics_json ? String(row.metrics_json) : null,
-    riskResultJson: row.risk_result_json ? String(row.risk_result_json) : null,
+    reasoning: String((row.reasoning ?? "") as unknown),
+    metricsJson: row.metrics_json ? String(row.metrics_json as unknown) : null,
+    riskResultJson: row.risk_result_json ? String(row.risk_result_json as unknown) : null,
     executed: Boolean(row.executed),
     paperTrading: Boolean(row.paper_trading),
-    txSignature: row.tx_signature ? String(row.tx_signature) : null,
-    error: row.error ? String(row.error) : null,
+    txSignature: row.tx_signature ? String(row.tx_signature as unknown) : null,
+    error: row.error ? String(row.error as unknown) : null,
   };
 }
 
@@ -1622,7 +1624,7 @@ function rowToFeedback(row: Record<string, unknown>): {
   reportedAt: number;
   hash: string;
 } {
-  const relatedRaw = row.related_files ? String(row.related_files) : null;
+  const relatedRaw = row.related_files ? String(row.related_files as unknown) : null;
   let relatedFiles: ReadonlyArray<string> = [];
   if (relatedRaw) {
     try {
@@ -1640,11 +1642,11 @@ function rowToFeedback(row: Record<string, unknown>): {
     category: String(row.category),
     severity: String(row.severity),
     summary: String(row.summary),
-    details: row.details != null ? String(row.details) : null,
+    details: row.details != null ? String(row.details as unknown) : null,
     relatedFiles,
-    contextJson: String(row.context_json ?? "{}"),
+    contextJson: String((row.context_json ?? "{}") as unknown),
     githubIssueNumber: row.github_issue_number != null ? Number(row.github_issue_number) : null,
-    githubIssueUrl: row.github_issue_url ? String(row.github_issue_url) : null,
+    githubIssueUrl: row.github_issue_url ? String(row.github_issue_url as unknown) : null,
     reportedAt: Number(row.reported_at ?? 0),
     hash: String(row.hash),
   };

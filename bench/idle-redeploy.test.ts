@@ -365,9 +365,9 @@ interface CycleResult {
 }
 
 /** Run exactly one scan cycle (long scanInterval → no second cycle in window). */
-function runOneCycle(
-  layer: Layer.Layer<unknown, never, never>,
-  seed: (db: DbApi) => Effect.Effect<void, unknown> = () => Effect.void,
+function runOneCycle<E>(
+  layer: Layer.Layer<never, never, never>,
+  seed: (db: DbApi) => Effect.Effect<void, E> = () => Effect.void,
 ): Promise<CycleResult> {
   const test = Effect.gen(function* () {
     const db = yield* DbService;
@@ -379,7 +379,7 @@ function runOneCycle(
     return { positions, decisions };
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as Effect.Effect<CycleResult, unknown, never>,
+    Effect.provide(test, layer) as unknown as Effect.Effect<CycleResult, Error, never>,
   );
 }
 

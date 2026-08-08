@@ -216,7 +216,7 @@ function runWithSeed(
   return Effect.runPromise(
     Effect.provide(test, layer) as unknown as Effect.Effect<
       ReadonlyArray<DecisionRow>,
-      unknown,
+      Error,
       never
     >,
   );

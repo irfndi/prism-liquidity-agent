@@ -6,7 +6,7 @@ import type { BinArray, PoolSnapshot, PoolState } from "../engine/types.js";
 import { DLMMStrategy } from "../engine/strategy-service.js";
 import type { BacktestResult } from "../engine/types.js";
 
-function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
+function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): T {
   return Effect.runSync((Effect.provide as any)(effect, layer));
 }
 

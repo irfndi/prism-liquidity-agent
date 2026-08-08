@@ -41,7 +41,7 @@ import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helper
 
 const NO_AUTHORITIES = { mintAuthority: null, freezeAuthority: null } as const;
 
-function makeAdapter(walletBalanceUsd: () => Effect.Effect<number, unknown>): AdapterApi {
+function makeAdapter(walletBalanceUsd: () => Effect.Effect<number, Error>): AdapterApi {
   return {
     hasWallet: () => true,
     getWalletAddress: () => "WalletAddress1111111111111111111111111111111",
@@ -217,7 +217,7 @@ interface CycleResult {
   readonly snapshot: PrismStateSnapshot;
 }
 
-function runOneCycle(layer: Layer.Layer<unknown, never, never>): Promise<CycleResult> {
+function runOneCycle<R>(layer: Layer.Layer<R, never, never>): Promise<CycleResult> {
   const test = Effect.gen(function* () {
     yield* Effect.raceFirst(program, Effect.sleep(2_000));
     const audit = yield* AuditService;
@@ -227,7 +227,7 @@ function runOneCycle(layer: Layer.Layer<unknown, never, never>): Promise<CycleRe
     return { decisions, snapshot };
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as Effect.Effect<CycleResult, unknown, never>,
+    Effect.provide(test, layer) as unknown as Effect.Effect<CycleResult, Error, never>,
   );
 }
 
@@ -374,7 +374,7 @@ describe("mid-cycle position close excludes the row from the portfolio sum", () 
           decisions: ReadonlyArray<{ action: string; reasoning: string }>;
           snapshot: PrismStateSnapshot;
         },
-        unknown,
+        Error,
         never
       >,
     );
@@ -404,7 +404,7 @@ describe("live wallet-read entry gate", () => {
     readonly executed: boolean;
   }
 
-  function runCycleFull(layer: Layer.Layer<unknown, never, never>): Promise<{
+  function runCycleFull<R>(layer: Layer.Layer<R, never, never>): Promise<{
     readonly decisions: ReadonlyArray<FullDecision>;
   }> {
     const test = Effect.gen(function* () {
@@ -414,11 +414,11 @@ describe("live wallet-read entry gate", () => {
       return { decisions: decisions as unknown as FullDecision[] };
     });
     return Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, unknown, never>,
+      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
     );
   }
 
-  function enterCandidateAdapter(balance: Effect.Effect<number, unknown>): AdapterApi {
+  function enterCandidateAdapter(balance: Effect.Effect<number, Error>): AdapterApi {
     // A high-quality positionless pool that reaches the ENTER slot.
     return {
       ...makeAdapter(() => balance),
@@ -536,7 +536,7 @@ describe("live wallet-read entry gate", () => {
     });
 
     const { decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, unknown, never>,
+      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
     );
 
     const exit = decisions.find((d) => d.poolAddress === EXIT_POOL && d.action === "EXIT");
@@ -571,8 +571,8 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
   }
 
   function seedExitingPosition(db: {
-    savePosition: (p: ReturnType<typeof makePosition>) => Effect.Effect<void, unknown>;
-    saveSnapshot: (s: PoolSnapshot) => Effect.Effect<void, unknown>;
+    savePosition: (p: ReturnType<typeof makePosition>) => Effect.Effect<void, Error>;
+    saveSnapshot: (s: PoolSnapshot) => Effect.Effect<void, Error>;
   }) {
     return Effect.gen(function* () {
       yield* db.savePosition(
@@ -603,7 +603,7 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
     });
   }
 
-  function exitingAdapter(balance: Effect.Effect<number, unknown>): AdapterApi {
+  function exitingAdapter(balance: Effect.Effect<number, Error>): AdapterApi {
     return {
       ...makeAdapter(() => balance),
       getPoolState: () =>
@@ -616,7 +616,7 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
     } as AdapterApi;
   }
 
-  function runRecaptureCycle(layer: Layer.Layer<unknown, never, never>) {
+  function runRecaptureCycle<R>(layer: Layer.Layer<R, never, never>) {
     const test = Effect.gen(function* () {
       const db = yield* DbService;
       yield* seedExitingPosition(db as never);
@@ -630,7 +630,7 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
     return Effect.runPromise(
       Effect.provide(test, layer) as Effect.Effect<
         { decisions: FullDecision[]; snapshot: PrismStateSnapshot },
-        unknown,
+        Error,
         never
       >,
     );
@@ -720,7 +720,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
 
   // Live ENTER requires a native SOL balance above MIN_SOL_FOR_GAS_LAMPORTS
   // (30_000_000n); give the mock wallet ample SOL so the enter can execute.
-  function enterAdapter(walletBalance: Effect.Effect<number, unknown>): AdapterApi {
+  function enterAdapter(walletBalance: Effect.Effect<number, Error>): AdapterApi {
     return {
       ...makeAdapter(() => walletBalance),
       getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
@@ -735,7 +735,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
     getPoolData: () => Effect.succeed(enterableDatapi()),
   };
 
-  function runCycle(layer: Layer.Layer<unknown, never, never>) {
+  function runCycle<R>(layer: Layer.Layer<R, never, never>) {
     const test = Effect.gen(function* () {
       yield* Effect.raceFirst(program, Effect.sleep(2_000));
       const audit = yield* AuditService;
@@ -743,7 +743,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
       return { decisions: decisions as unknown as FullDecision[] };
     });
     return Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, unknown, never>,
+      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
     );
   }
 
@@ -889,7 +889,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
       return { decisions: decisions as unknown as FullDecision[] };
     });
     const { decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, unknown, never>,
+      Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
     );
 
     expect(
@@ -997,7 +997,7 @@ describe("hybrid live EXIT keeps paper sizing paper-pure", () => {
     const { decisions, snapshot } = await Effect.runPromise(
       Effect.provide(test, layer) as Effect.Effect<
         { decisions: FullDecision[]; snapshot: PrismStateSnapshot },
-        unknown,
+        Error,
         never
       >,
     );

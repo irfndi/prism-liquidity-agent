@@ -133,7 +133,7 @@ async function runEnter(
         );
       }),
       makeAdapterLayer(configOverrides),
-    ) as Effect.Effect<
+    ) as unknown as Effect.Effect<
       {
         positionPubKey: string;
         txSignature: string;
@@ -141,7 +141,7 @@ async function runEnter(
         amountXUsd: number;
         amountYUsd: number;
       },
-      unknown,
+      Error,
       never
     >,
   );
@@ -195,7 +195,7 @@ function mockRpcAndBalances() {
 
 function mockTokenPrices(): () => void {
   return mockFetch((async (url: string | URL | Request) => {
-    const u = url.toString();
+    const u = String(url as unknown);
     if (u.includes("api.jup.ag/price/v3")) {
       return new Response(
         JSON.stringify({
@@ -396,7 +396,7 @@ describe("adapter.enterPosition (strategy shapes + single-sided)", () => {
               .pipe(Effect.flip);
           }),
           makeAdapterLayer(),
-        ) as Effect.Effect<{ message: string }, never, never>,
+        ) as unknown as Effect.Effect<{ message: string }, Error, never>,
       );
 
       expect(err.message).toContain("Failed to enter position");
@@ -426,7 +426,7 @@ describe("adapter.enterPosition (strategy shapes + single-sided)", () => {
               .pipe(Effect.flip);
           }),
           makeAdapterLayer(),
-        ) as Effect.Effect<{ message: string }, never, never>,
+        ) as unknown as Effect.Effect<{ message: string }, Error, never>,
       );
 
       expect(err.message).toContain("Failed to enter position");

@@ -109,7 +109,7 @@ export interface TokenPriceEvidence {
 export interface AdapterApi {
   readonly hasWallet: () => boolean;
   readonly getWalletAddress: () => string | null;
-  readonly getWalletBalanceUsd: () => Effect.Effect<number, unknown>;
+  readonly getWalletBalanceUsd: () => Effect.Effect<number, Error>;
   /**
    * Per-mint SPL holdings the wallet-balance read already scans (Token
    * Program + Token-2022, zero-amount ATAs skipped). Served from the SAME
@@ -122,11 +122,11 @@ export interface AdapterApi {
    */
   readonly getWalletHoldings: () => Effect.Effect<
     ReadonlyMap<string, { readonly amountAtomic: bigint; readonly decimals: number }>,
-    unknown
+    Error
   >;
-  readonly getNativeSolBalance: () => Effect.Effect<bigint, unknown>;
-  readonly getPoolState: (poolAddress: string) => Effect.Effect<PoolState, unknown>;
-  readonly getBinArray: (poolAddress: string) => Effect.Effect<BinArray, unknown>;
+  readonly getNativeSolBalance: () => Effect.Effect<bigint, Error>;
+  readonly getPoolState: (poolAddress: string) => Effect.Effect<PoolState, Error>;
+  readonly getBinArray: (poolAddress: string) => Effect.Effect<BinArray, Error>;
   /**
    * Fetch the top-N pages (1000 pools each) of the TVL-ranked Meteora
    * universe in ONE call — the market-scan universe refresh. Unlike the
@@ -143,7 +143,7 @@ export interface AdapterApi {
   readonly getPositions: (
     poolAddress: string,
     walletAddress: string,
-  ) => Effect.Effect<ReadonlyArray<Position>, unknown>;
+  ) => Effect.Effect<ReadonlyArray<Position>, Error>;
   readonly getAllWalletPositions: (walletAddress: string) => Effect.Effect<
     ReadonlyArray<{
       poolAddress: string;
@@ -151,7 +151,7 @@ export interface AdapterApi {
       lowerBinId: number;
       upperBinId: number;
     }>,
-    unknown
+    Error
   >;
   /**
    * Real USD value of a live on-chain position (principal only — pending
@@ -191,7 +191,7 @@ export interface AdapterApi {
       netBenefitUsd: number;
       source: "sdk-simulation" | "pool-heuristic";
     },
-    unknown
+    Error
   >;
   /**
    * Open a live position and deposit liquidity by strategy. The deposit
@@ -218,7 +218,7 @@ export interface AdapterApi {
       amountXUsd: number;
       amountYUsd: number;
     },
-    unknown
+    Error
   >;
   /**
    * Close a live position via the SDK's `removeLiquidity` (full-withdraw +
@@ -256,17 +256,17 @@ export interface AdapterApi {
       pendingFeeUsd?: number | null | undefined;
       sweptRewards?: ReadonlyArray<ClaimedReward> | undefined;
     },
-    unknown
+    Error
   >;
   readonly placeLimitOrder?: (
     poolAddress: string,
     request: LimitOrderRequest,
-  ) => Effect.Effect<{ orderPubKey: string; txSignature: string }, unknown>;
+  ) => Effect.Effect<{ orderPubKey: string; txSignature: string }, Error>;
   readonly cancelLimitOrder?: (
     poolAddress: string,
     orderPubKey: string,
     binIds: ReadonlyArray<number>,
-  ) => Effect.Effect<{ txSignature: string }, unknown>;
+  ) => Effect.Effect<{ txSignature: string }, Error>;
   /**
    * Atomically rebalance a position into a new range via the Meteora SDK's
    * `rebalancePosition` instruction. The position account — and therefore its
@@ -287,7 +287,7 @@ export interface AdapterApi {
       positionPubKey: string;
       txSignatures: ReadonlyArray<string>;
     },
-    unknown
+    Error
   >;
   readonly claimFees: (
     poolAddress: string,
@@ -319,7 +319,7 @@ export interface AdapterApi {
        */
       netFeesUsd?: number | null;
     },
-    unknown
+    Error
   >;
   readonly convertClaimedFees?: (
     poolAddress: string,
@@ -333,7 +333,7 @@ export interface AdapterApi {
       outputUsd: number | null;
       txSignatures: ReadonlyArray<string>;
     },
-    unknown
+    Error
   >;
   /**
    * Claim LM farm rewards for a position via the SDK's claimAllLMRewards
@@ -357,7 +357,7 @@ export interface AdapterApi {
       txSignatures: ReadonlyArray<string>;
       rewards: ReadonlyArray<ClaimedReward>;
     },
-    unknown
+    Error
   >;
   readonly discoverPools: (
     scanOrdinal?: number,
@@ -379,15 +379,15 @@ export interface AdapterApi {
     minSolThreshold?: number,
     swapAmountUSDC?: number,
   ) => Effect.Effect<void, never>;
-  readonly getTokenBalance: (mintAddress: string) => Effect.Effect<bigint, unknown>;
+  readonly getTokenBalance: (mintAddress: string) => Effect.Effect<bigint, Error>;
   readonly getTokenPrices: (
     mints: ReadonlyArray<string>,
     opts?: { readonly useFallback?: boolean },
-  ) => Effect.Effect<Record<string, number>, unknown>;
+  ) => Effect.Effect<Record<string, number>, Error>;
   readonly getTokenPriceEvidence?: (
     mints: ReadonlyArray<string>,
-  ) => Effect.Effect<ReadonlyArray<TokenPriceEvidence>, unknown>;
-  readonly getTokenDecimals: (mintAddress: string) => Effect.Effect<number, unknown>;
+  ) => Effect.Effect<ReadonlyArray<TokenPriceEvidence>, Error>;
+  readonly getTokenDecimals: (mintAddress: string) => Effect.Effect<number, Error>;
   /**
    * On-chain mint/freeze authority for a token mint, from the parsed mint
    * account. The mint authority doubles as the documented deployer fallback
@@ -397,33 +397,33 @@ export interface AdapterApi {
    */
   readonly getMintAuthorities: (
     mintAddress: string,
-  ) => Effect.Effect<{ mintAuthority: string | null; freezeAuthority: string | null }, unknown>;
+  ) => Effect.Effect<{ mintAuthority: string | null; freezeAuthority: string | null }, Error>;
   readonly quoteSwapUSDCForToken: (
     outputMint: string,
     amountAtomic: bigint,
-  ) => Effect.Effect<Record<string, unknown>, unknown>;
+  ) => Effect.Effect<Record<string, unknown>, Error>;
   readonly swapUSDCForToken: (
     outputMint: string,
     amountAtomic: bigint,
     quoteData?: Record<string, unknown>,
-  ) => Effect.Effect<string, unknown>;
+  ) => Effect.Effect<string, Error>;
   readonly swapToken?: (
     inputMint: string,
     outputMint: string,
     amountAtomic: bigint,
     quoteData?: Record<string, unknown>,
-  ) => Effect.Effect<string, unknown>;
-  readonly quoteSwap?: (request: SwapRequest) => Effect.Effect<SwapQuote, unknown>;
-  readonly prepareSwap?: (quote: SwapQuote) => Effect.Effect<PreparedSwap, unknown>;
-  readonly simulateSwap?: (prepared: PreparedSwap) => Effect.Effect<SwapSimulation, unknown>;
+  ) => Effect.Effect<string, Error>;
+  readonly quoteSwap?: (request: SwapRequest) => Effect.Effect<SwapQuote, Error>;
+  readonly prepareSwap?: (quote: SwapQuote) => Effect.Effect<PreparedSwap, Error>;
+  readonly simulateSwap?: (prepared: PreparedSwap) => Effect.Effect<SwapSimulation, Error>;
   readonly submitSwap?: (
     prepared: PreparedSwap,
-    onBroadcast?: (signature: string) => Effect.Effect<void, unknown>,
-  ) => Effect.Effect<string, unknown>;
-  readonly getSwapStatus?: (signature: string) => Effect.Effect<SwapStatus, unknown>;
+    onBroadcast?: (signature: string) => Effect.Effect<void, Error>,
+  ) => Effect.Effect<string, Error>;
+  readonly getSwapStatus?: (signature: string) => Effect.Effect<SwapStatus, Error>;
   readonly getConfirmedSwapOutput?: (
     signature: string,
-  ) => Effect.Effect<{ outputAtomic: bigint; feeAtomic: bigint } | null, unknown>;
+  ) => Effect.Effect<{ outputAtomic: bigint; feeAtomic: bigint } | null, Error>;
 }
 
 export class AdapterService extends Context.Service<AdapterService, AdapterApi>()(
@@ -606,22 +606,22 @@ export class PythPriceService extends Context.Service<PythPriceService, PythPric
 // ─── Memory Service ──────────────────────────────────────────────────────────
 
 export interface MemoryApi {
-  readonly initialize: () => Effect.Effect<void, unknown>;
+  readonly initialize: () => Effect.Effect<void, Error>;
   readonly upsert: (
     entry: Omit<MemoryEntry, "id" | "createdAt" | "expiresAt">,
-  ) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<void, Error>;
   readonly getRelevantContext: (
     query: string,
     topK?: number,
     poolAddress?: string,
-  ) => Effect.Effect<ReadonlyArray<MemoryEntry>, unknown>;
-  readonly pruneExpired: () => Effect.Effect<number, unknown>;
+  ) => Effect.Effect<ReadonlyArray<MemoryEntry>, Error>;
+  readonly pruneExpired: () => Effect.Effect<number, Error>;
   readonly recordOutcome: (
     poolAddress: string,
     action: string,
     pnlUsd: number,
     context: string,
-  ) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<void, Error>;
 }
 
 export class MemoryService extends Context.Service<MemoryService, MemoryApi>()("MemoryService") {}
@@ -668,7 +668,7 @@ export interface BlacklistApi {
     tokenYMint: string,
     tokenXDeployer?: string,
     tokenYDeployer?: string,
-  ) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<void, Error>;
 }
 
 export class BlacklistService extends Context.Service<BlacklistService, BlacklistApi>()(
@@ -693,10 +693,10 @@ export interface DecisionRecord {
 }
 
 export interface AuditApi {
-  readonly recordDecision: (record: DecisionRecord) => Effect.Effect<void, unknown>;
+  readonly recordDecision: (record: DecisionRecord) => Effect.Effect<void, Error>;
   readonly getRecentDecisions: (
     limit?: number,
-  ) => Effect.Effect<ReadonlyArray<DecisionRecord>, unknown>;
+  ) => Effect.Effect<ReadonlyArray<DecisionRecord>, Error>;
 }
 
 export class AuditService extends Context.Service<AuditService, AuditApi>()("AuditService") {}
@@ -718,9 +718,7 @@ export interface ScreenedPool {
 }
 
 export interface ScreenerApi {
-  readonly screenPools: (
-    scanOrdinal?: number,
-  ) => Effect.Effect<ReadonlyArray<ScreenedPool>, unknown>;
+  readonly screenPools: (scanOrdinal?: number) => Effect.Effect<ReadonlyArray<ScreenedPool>, Error>;
 }
 
 export class ScreenerService extends Context.Service<ScreenerService, ScreenerApi>()(
@@ -769,7 +767,7 @@ export interface DbApi {
     positionMode?: string | null;
     tpLadderJson?: string | null;
     invalidationStopPrice?: number | null;
-  }) => Effect.Effect<void, unknown>;
+  }) => Effect.Effect<void, Error>;
   readonly getPosition: (positionId: string) => Effect.Effect<
     {
       positionId: string;
@@ -803,7 +801,7 @@ export interface DbApi {
       tpLadderJson?: string | null;
       invalidationStopPrice?: number | null;
     } | null,
-    unknown
+    Error
   >;
   readonly getAllPositions: () => Effect.Effect<
     ReadonlyArray<{
@@ -838,7 +836,7 @@ export interface DbApi {
       tpLadderJson?: string | null;
       invalidationStopPrice?: number | null;
     }>,
-    unknown
+    Error
   >;
   readonly getPaperExitedPositions: () => Effect.Effect<
     ReadonlyArray<{
@@ -873,21 +871,21 @@ export interface DbApi {
       tpLadderJson?: string | null;
       invalidationStopPrice?: number | null;
     }>,
-    unknown
+    Error
   >;
-  readonly deletePosition: (positionId: string) => Effect.Effect<void, unknown>;
-  readonly markPaperExited: (positionId: string) => Effect.Effect<void, unknown>;
+  readonly deletePosition: (positionId: string) => Effect.Effect<void, Error>;
+  readonly markPaperExited: (positionId: string) => Effect.Effect<void, Error>;
   readonly closePosition: (
     positionId: string,
     realizedPnlUsd: number | null,
-  ) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<void, Error>;
   readonly finalizeSettlementGroup: (input: {
     readonly positionId: string;
     readonly realizedPnlUsd: number | null;
     readonly jobIds: ReadonlyArray<string>;
     readonly finalizedAt: number;
     readonly signalSnapshotId: number | null;
-  }) => Effect.Effect<void, unknown>;
+  }) => Effect.Effect<void, Error>;
   readonly getClosedPositions: () => Effect.Effect<
     ReadonlyArray<{
       positionId: string;
@@ -921,7 +919,7 @@ export interface DbApi {
       tpLadderJson?: string | null;
       invalidationStopPrice?: number | null;
     }>,
-    unknown
+    Error
   >;
   readonly savePositionEvent: (event: {
     id: string;
@@ -934,7 +932,7 @@ export interface DbApi {
     price: number | null;
     metadata?: Record<string, unknown> | null;
     createdAt: number;
-  }) => Effect.Effect<void, unknown>;
+  }) => Effect.Effect<void, Error>;
   readonly getPositionEvents: (
     poolAddress: string,
     limit?: number,
@@ -951,14 +949,14 @@ export interface DbApi {
       metadata: string | null;
       createdAt: number;
     }>,
-    unknown
+    Error
   >;
-  readonly getLatestSnapshotPrice: (poolAddress: string) => Effect.Effect<number | null, unknown>;
+  readonly getLatestSnapshotPrice: (poolAddress: string) => Effect.Effect<number | null, Error>;
   readonly updatePositionValue: (
     positionId: string,
     currentValueUsd: number,
     highestValueUsd?: number,
-  ) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<void, Error>;
   readonly saveAudit: (record: {
     id: string;
     timestamp: number;
@@ -973,7 +971,7 @@ export interface DbApi {
     paperTrading: boolean;
     txSignature: string | null;
     error: string | null;
-  }) => Effect.Effect<void, unknown>;
+  }) => Effect.Effect<void, Error>;
   readonly getRecentAudit: (limit: number) => Effect.Effect<
     ReadonlyArray<{
       id: string;
@@ -990,16 +988,16 @@ export interface DbApi {
       txSignature: string | null;
       error: string | null;
     }>,
-    unknown
+    Error
   >;
   readonly cacheBlacklist: (
     type: "deployer" | "token",
     values: ReadonlyArray<string>,
-  ) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<void, Error>;
   readonly isBlacklisted: (
     type: "deployer" | "token",
     value: string,
-  ) => Effect.Effect<boolean, unknown>;
+  ) => Effect.Effect<boolean, Error>;
   readonly insertMemory: (entry: {
     content: string;
     category: MemoryCategory;
@@ -1007,22 +1005,22 @@ export interface DbApi {
     outcome?: MemoryEntry["outcome"];
     pnlUsd?: number | undefined;
     confidence?: number | undefined;
-  }) => Effect.Effect<void, unknown>;
+  }) => Effect.Effect<void, Error>;
   readonly queryMemory: (
     queryText: string,
     topK: number,
     poolAddress?: string,
-  ) => Effect.Effect<ReadonlyArray<MemoryEntry>, unknown>;
-  readonly pruneMemory: () => Effect.Effect<number, unknown>;
-  readonly saveSnapshot: (snapshot: PoolSnapshot) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<ReadonlyArray<MemoryEntry>, Error>;
+  readonly pruneMemory: () => Effect.Effect<number, Error>;
+  readonly saveSnapshot: (snapshot: PoolSnapshot) => Effect.Effect<void, Error>;
   readonly getSnapshots: (
     poolAddress: string,
     startMs: number,
     endMs: number,
-  ) => Effect.Effect<ReadonlyArray<PoolSnapshot>, unknown>;
-  readonly getSnapshotPools: () => Effect.Effect<ReadonlyArray<string>, unknown>;
-  readonly getSnapshotCount: (poolAddress: string) => Effect.Effect<number, unknown>;
-  readonly pruneSnapshots: (olderThanMs: number) => Effect.Effect<number, unknown>;
+  ) => Effect.Effect<ReadonlyArray<PoolSnapshot>, Error>;
+  readonly getSnapshotPools: () => Effect.Effect<ReadonlyArray<string>, Error>;
+  readonly getSnapshotCount: (poolAddress: string) => Effect.Effect<number, Error>;
+  readonly pruneSnapshots: (olderThanMs: number) => Effect.Effect<number, Error>;
   readonly saveFeedback: (entry: {
     id: string;
     agentId: string;
@@ -1036,7 +1034,7 @@ export interface DbApi {
     githubIssueUrl: string | null;
     reportedAt: number;
     hash: string;
-  }) => Effect.Effect<void, unknown>;
+  }) => Effect.Effect<void, Error>;
   readonly getFeedbackByHash: (
     hash: string,
     agentId: string,
@@ -1055,7 +1053,7 @@ export interface DbApi {
       reportedAt: number;
       hash: string;
     } | null,
-    unknown
+    Error
   >;
   readonly getRecentFeedbackForAgent: (
     agentId: string,
@@ -1075,7 +1073,7 @@ export interface DbApi {
       reportedAt: number;
       hash: string;
     }>,
-    unknown
+    Error
   >;
   readonly getLastFeedbackForAgent: (agentId: string) => Effect.Effect<
     {
@@ -1092,7 +1090,7 @@ export interface DbApi {
       reportedAt: number;
       hash: string;
     } | null,
-    unknown
+    Error
   >;
   readonly listFeedbackForAgent: (agentId: string) => Effect.Effect<
     ReadonlyArray<{
@@ -1109,15 +1107,15 @@ export interface DbApi {
       reportedAt: number;
       hash: string;
     }>,
-    unknown
+    Error
   >;
-  readonly getMetadata: (key: string) => Effect.Effect<string | null, unknown>;
-  readonly setMetadata: (key: string, value: string) => Effect.Effect<void, unknown>;
+  readonly getMetadata: (key: string) => Effect.Effect<string | null, Error>;
+  readonly setMetadata: (key: string, value: string) => Effect.Effect<void, Error>;
   /** Delete a metadata row if present (used by `prism config unset`). */
-  readonly deleteMetadata: (key: string) => Effect.Effect<void, unknown>;
+  readonly deleteMetadata: (key: string) => Effect.Effect<void, Error>;
   readonly setMetadataBatch: (
     entries: ReadonlyArray<{ key: string; value: string }>,
-  ) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<void, Error>;
 
   readonly saveFeeClaim: (claim: {
     id: string;
@@ -1135,7 +1133,7 @@ export interface DbApi {
     feeTransferTxSignature: string | null;
     reportedToApi: boolean;
     createdAt: number;
-  }) => Effect.Effect<void, unknown>;
+  }) => Effect.Effect<void, Error>;
 
   readonly getUnreportedFeeClaims: () => Effect.Effect<
     ReadonlyArray<{
@@ -1150,12 +1148,12 @@ export interface DbApi {
       feeTransferTxSignature: string | null;
       createdAt: number;
     }>,
-    unknown
+    Error
   >;
 
-  readonly markFeeClaimReported: (id: string) => Effect.Effect<void, unknown>;
+  readonly markFeeClaimReported: (id: string) => Effect.Effect<void, Error>;
 
-  readonly saveSignalSnapshot: (snapshot: SignalSnapshot) => Effect.Effect<number, unknown>;
+  readonly saveSignalSnapshot: (snapshot: SignalSnapshot) => Effect.Effect<number, Error>;
   readonly getSignalSnapshots: (
     poolAddress: string,
     startMs: number,
@@ -1164,12 +1162,9 @@ export interface DbApi {
     ReadonlyArray<
       SignalSnapshot & { outcomePnlUsd: number | null; outcomeRecordedAt: number | null }
     >,
-    unknown
+    Error
   >;
-  readonly recordSignalOutcome: (
-    snapshotId: number,
-    pnlUsd: number,
-  ) => Effect.Effect<void, unknown>;
+  readonly recordSignalOutcome: (snapshotId: number, pnlUsd: number) => Effect.Effect<void, Error>;
   readonly getRecentOutcomes: (limit: number) => Effect.Effect<
     ReadonlyArray<{
       poolAddress: string;
@@ -1186,52 +1181,52 @@ export interface DbApi {
       outcomePnlUsd: number | null;
       outcomeRecordedAt: number | null;
     }>,
-    unknown
+    Error
   >;
 
-  readonly getEvolvedThresholds: () => Effect.Effect<EvolvableThresholds | null, unknown>;
-  readonly saveEvolvedThresholds: (thresholds: EvolvableThresholds) => Effect.Effect<void, unknown>;
+  readonly getEvolvedThresholds: () => Effect.Effect<EvolvableThresholds | null, Error>;
+  readonly saveEvolvedThresholds: (thresholds: EvolvableThresholds) => Effect.Effect<void, Error>;
   readonly getClosedPositionOutcomes: (
     limit: number,
-  ) => Effect.Effect<ReadonlyArray<OutcomeRecord>, unknown>;
+  ) => Effect.Effect<ReadonlyArray<OutcomeRecord>, Error>;
 
-  readonly getSignalWeights: () => Effect.Effect<SignalWeights | null, unknown>;
-  readonly saveSignalWeights: (weights: SignalWeights) => Effect.Effect<void, unknown>;
+  readonly getSignalWeights: () => Effect.Effect<SignalWeights | null, Error>;
+  readonly saveSignalWeights: (weights: SignalWeights) => Effect.Effect<void, Error>;
 
-  readonly getPoolCooldown: (poolAddress: string) => Effect.Effect<PoolCooldown | null, unknown>;
-  readonly setPoolCooldown: (cooldown: PoolCooldown) => Effect.Effect<void, unknown>;
-  readonly clearPoolCooldown: (poolAddress: string) => Effect.Effect<void, unknown>;
+  readonly getPoolCooldown: (poolAddress: string) => Effect.Effect<PoolCooldown | null, Error>;
+  readonly setPoolCooldown: (cooldown: PoolCooldown) => Effect.Effect<void, Error>;
+  readonly clearPoolCooldown: (poolAddress: string) => Effect.Effect<void, Error>;
 
-  readonly saveTokenCandidate: (candidate: TokenCandidateRecord) => Effect.Effect<void, unknown>;
-  readonly getTokenCandidate: (id: string) => Effect.Effect<TokenCandidateRecord | null, unknown>;
+  readonly saveTokenCandidate: (candidate: TokenCandidateRecord) => Effect.Effect<void, Error>;
+  readonly getTokenCandidate: (id: string) => Effect.Effect<TokenCandidateRecord | null, Error>;
   readonly listTokenCandidates: (
     walletAddress: string,
     agentInstanceId: string,
-  ) => Effect.Effect<ReadonlyArray<TokenCandidateRecord>, unknown>;
+  ) => Effect.Effect<ReadonlyArray<TokenCandidateRecord>, Error>;
 
   readonly saveExecutionOperation: (
     operation: ExecutionOperationRecord,
-  ) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<void, Error>;
   readonly getExecutionOperation: (
     id: string,
-  ) => Effect.Effect<ExecutionOperationRecord | null, unknown>;
+  ) => Effect.Effect<ExecutionOperationRecord | null, Error>;
   readonly listExecutionOperations: (
     walletAddress: string,
     agentInstanceId: string,
-  ) => Effect.Effect<ReadonlyArray<ExecutionOperationRecord>, unknown>;
+  ) => Effect.Effect<ReadonlyArray<ExecutionOperationRecord>, Error>;
 
-  readonly saveSettlementJob: (job: SettlementJobRecord) => Effect.Effect<void, unknown>;
-  readonly getSettlementJob: (id: string) => Effect.Effect<SettlementJobRecord | null, unknown>;
+  readonly saveSettlementJob: (job: SettlementJobRecord) => Effect.Effect<void, Error>;
+  readonly getSettlementJob: (id: string) => Effect.Effect<SettlementJobRecord | null, Error>;
   readonly listSettlementJobs: (
     walletAddress: string,
     agentInstanceId: string,
-  ) => Effect.Effect<ReadonlyArray<SettlementJobRecord>, unknown>;
+  ) => Effect.Effect<ReadonlyArray<SettlementJobRecord>, Error>;
 
-  readonly saveSafetyPause: (pause: SafetyPauseRecord) => Effect.Effect<void, unknown>;
+  readonly saveSafetyPause: (pause: SafetyPauseRecord) => Effect.Effect<void, Error>;
   readonly getSafetyPause: (
     walletAddress: string,
     agentInstanceId: string,
-  ) => Effect.Effect<SafetyPauseRecord | null, unknown>;
+  ) => Effect.Effect<SafetyPauseRecord | null, Error>;
 }
 
 export class DbService extends Context.Service<DbService, DbApi>()("DbService") {}
@@ -1281,12 +1276,12 @@ export interface FeedbackEntry {
 }
 
 export interface FeedbackApi {
-  readonly submit: (feedback: AgentFeedback) => Effect.Effect<FeedbackResult, unknown>;
-  readonly list: () => Effect.Effect<ReadonlyArray<FeedbackEntry>, unknown>;
-  readonly listForAgent: (agentId: string) => Effect.Effect<ReadonlyArray<FeedbackEntry>, unknown>;
-  readonly getByHash: (hash: string) => Effect.Effect<FeedbackEntry | null, unknown>;
-  readonly setOptOut: (optOut: boolean) => Effect.Effect<void, unknown>;
-  readonly getOptOut: () => Effect.Effect<boolean, unknown>;
+  readonly submit: (feedback: AgentFeedback) => Effect.Effect<FeedbackResult, Error>;
+  readonly list: () => Effect.Effect<ReadonlyArray<FeedbackEntry>, Error>;
+  readonly listForAgent: (agentId: string) => Effect.Effect<ReadonlyArray<FeedbackEntry>, Error>;
+  readonly getByHash: (hash: string) => Effect.Effect<FeedbackEntry | null, Error>;
+  readonly setOptOut: (optOut: boolean) => Effect.Effect<void, Error>;
+  readonly getOptOut: () => Effect.Effect<boolean, Error>;
 }
 
 export class FeedbackService extends Context.Service<FeedbackService, FeedbackApi>()(
@@ -1350,14 +1345,14 @@ export interface AgentApi {
   readonly enhanceDecision: (
     decision: AgentDecision,
     context: AgentRuntimeContext,
-  ) => Effect.Effect<AgentDecision | null, unknown>;
+  ) => Effect.Effect<AgentDecision | null, Error>;
   /** True when the rolling proposal-latency window says sync prompts should
    *  be skipped this cycle (fail-open: the caller skips WITHOUT arming
    *  backoff or circuit failure). */
   readonly shouldSkipSyncProposal: () => Effect.Effect<boolean, never>;
-  readonly getPolicy: () => Effect.Effect<AgentPolicySnapshot, unknown>;
-  readonly sendCheckin: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, unknown>;
-  readonly sendAlert: (alert: AgentRuntimeAlert) => Effect.Effect<void, unknown>;
+  readonly getPolicy: () => Effect.Effect<AgentPolicySnapshot, Error>;
+  readonly sendCheckin: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, Error>;
+  readonly sendAlert: (alert: AgentRuntimeAlert) => Effect.Effect<void, Error>;
   readonly getStatus: () => Effect.Effect<
     {
       readonly connected: boolean;
@@ -1365,9 +1360,9 @@ export interface AgentApi {
       readonly lastPromptAt: number | null;
       readonly errorCount: number;
     },
-    unknown
+    Error
   >;
-  readonly disconnect: () => Effect.Effect<void, unknown>;
+  readonly disconnect: () => Effect.Effect<void, Error>;
 }
 
 export class AgentService extends Context.Service<AgentService, AgentApi>()("AgentService") {}
@@ -1450,8 +1445,8 @@ export class CopySignalService extends Context.Service<CopySignalService, CopySi
 // ─── MCP Server Service ──────────────────────────────────────────────────────
 
 export interface McpServerApi {
-  readonly start: () => Effect.Effect<void, unknown>;
-  readonly stop: () => Effect.Effect<void, unknown>;
+  readonly start: () => Effect.Effect<void, Error>;
+  readonly stop: () => Effect.Effect<void, Error>;
 }
 
 export class McpServerService extends Context.Service<McpServerService, McpServerApi>()(
@@ -1461,8 +1456,8 @@ export class McpServerService extends Context.Service<McpServerService, McpServe
 // ─── HTTP Status Server Service ──────────────────────────────────────────────
 
 export interface HttpStatusServerApi {
-  readonly start: () => Effect.Effect<void, unknown>;
-  readonly stop: () => Effect.Effect<void, unknown>;
+  readonly start: () => Effect.Effect<void, Error>;
+  readonly stop: () => Effect.Effect<void, Error>;
 }
 
 export class HttpStatusServerService extends Context.Service<

@@ -102,7 +102,7 @@ const fetchSignals = (config: CopySignalConfig) =>
           if (!response.ok) throw new Error(`copy-signal HTTP ${response.status}`);
           return response.json() as Promise<unknown>;
         }),
-      catch: (cause) => cause,
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
     }),
     { maxRetries: 2 },
   );
@@ -125,7 +125,7 @@ export const CopySignalLive = Layer.effect(
       if (!settings.enabled || settings.endpoint.length === 0 || settings.wallets.length === 0) {
         return Effect.succeed({ boost: 0, wallets: [], ignored: 0 });
       }
-      const fetchFeed = (): Effect.Effect<unknown, unknown> =>
+      const fetchFeed = (): Effect.Effect<unknown, Error> =>
         fetchSignals(settings).pipe(
           Effect.map((raw) => {
             cachedFeed = { fetchedAt: now, raw };

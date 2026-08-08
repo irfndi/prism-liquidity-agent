@@ -8,14 +8,12 @@ function makeLayer() {
   return DbLive(":memory:");
 }
 
-function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
+function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): T {
   return Effect.runSync(
-    (
-      Effect.provide as (
-        e: Effect.Effect<T, unknown, unknown>,
-        l: unknown,
-      ) => Effect.Effect<T, unknown, never>
-    )(effect, layer),
+    (Effect.provide as (e: Effect.Effect<T, E, R>, l: unknown) => Effect.Effect<T, E, never>)(
+      effect,
+      layer,
+    ),
   );
 }
 

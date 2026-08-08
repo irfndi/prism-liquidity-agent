@@ -232,7 +232,7 @@ function runWithSeed(
   return Effect.runPromise(
     Effect.provide(test, layer) as unknown as Effect.Effect<
       ReadonlyArray<DecisionRow>,
-      unknown,
+      Error,
       never
     >,
   );
@@ -526,7 +526,9 @@ describe("paper notional-fee accrual respects the stats source", () => {
       const pos = positions.find((p) => p.positionId === SEEDED_POSITION_ID);
       return pos?.cumulativeFeesClaimedUsd ?? -1;
     });
-    return Effect.runPromise(Effect.provide(test, layer) as Effect.Effect<number, unknown, never>);
+    return Effect.runPromise(
+      Effect.provide(test, layer) as unknown as Effect.Effect<number, Error, never>,
+    );
   }
 
   it("accrues under datapi stats (measured fees)", async () => {

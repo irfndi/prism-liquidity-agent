@@ -6,7 +6,7 @@ import { reconcilePositions } from "../engine/program.js";
 import type { AdapterApi, MemoryApi } from "../engine/services.js";
 import type { PositionRecord } from "../engine/db-service.js";
 
-function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
+function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): T {
   return Effect.runSync((Effect.provide as any)(effect, layer));
 }
 
@@ -22,17 +22,17 @@ function makeMockAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
     getTokenPrices: () => Effect.succeed({}),
     getTokenDecimals: () => Effect.succeed(6),
     getMintAuthorities: () => Effect.succeed({ mintAuthority: null, freezeAuthority: null }),
-    quoteSwapUSDCForToken: () => Effect.fail("not implemented"),
-    swapUSDCForToken: () => Effect.fail("not implemented"),
-    getPoolState: () => Effect.fail("not implemented"),
-    getBinArray: () => Effect.fail("not implemented"),
+    quoteSwapUSDCForToken: () => Effect.fail(new Error("not implemented")),
+    swapUSDCForToken: () => Effect.fail(new Error("not implemented")),
+    getPoolState: () => Effect.fail(new Error("not implemented")),
+    getBinArray: () => Effect.fail(new Error("not implemented")),
     getPositions: () => Effect.succeed([]),
     getAllWalletPositions: () => Effect.succeed([]),
-    simulateRebalance: () => Effect.fail("not implemented"),
-    enterPosition: () => Effect.fail("not implemented"),
-    exitPosition: () => Effect.fail("not implemented"),
-    rebalancePosition: () => Effect.fail("not implemented"),
-    claimFees: () => Effect.fail("not implemented"),
+    simulateRebalance: () => Effect.fail(new Error("not implemented")),
+    enterPosition: () => Effect.fail(new Error("not implemented")),
+    exitPosition: () => Effect.fail(new Error("not implemented")),
+    rebalancePosition: () => Effect.fail(new Error("not implemented")),
+    claimFees: () => Effect.fail(new Error("not implemented")),
     claimRewards: () =>
       Effect.succeed({
         skipped: true,
@@ -130,7 +130,7 @@ describe("reconcilePositions — integration", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         const adapter = makeMockAdapter({
-          getAllWalletPositions: () => Effect.fail("RPC timeout"),
+          getAllWalletPositions: () => Effect.fail(new Error("RPC timeout")),
         });
         const memory = makeMockMemory();
         const trackedPositions = new Map<string, PositionRecord>();
@@ -357,7 +357,7 @@ describe("reconcilePositions — integration", () => {
                 upperBinId: 5020,
               },
             ]),
-          getPoolState: () => Effect.fail("pool unavailable"),
+          getPoolState: () => Effect.fail(new Error("pool unavailable")),
         });
         const memory = makeMockMemory();
         const trackedPositions = new Map<string, PositionRecord>();

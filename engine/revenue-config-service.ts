@@ -45,7 +45,7 @@ function readApiKey(): Effect.Effect<string | null, never> {
       const key = (parsed as { apiKey: unknown }).apiKey;
       return typeof key === "string" && key.length > 0 ? key : null;
     },
-    catch: (cause) => cause,
+    catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
   }).pipe(Effect.catch(() => Effect.succeed(null)));
 }
 
@@ -63,7 +63,7 @@ export function parseRevenueConfig(data: unknown): RevenueConfig | null {
   };
 }
 
-export function fetchConfigFromApi(apiKey: string): Effect.Effect<RevenueConfig, unknown> {
+export function fetchConfigFromApi(apiKey: string): Effect.Effect<RevenueConfig, Error> {
   return Effect.gen(function* () {
     const res = yield* Effect.tryPromise(() =>
       fetch(`${API_BASE_URL}/v1/config`, {
@@ -85,25 +85,25 @@ export function fetchConfigFromApi(apiKey: string): Effect.Effect<RevenueConfig,
   });
 }
 
-function loadFromDb(db: DbApi): Effect.Effect<RevenueConfig | null, unknown> {
+function loadFromDb(db: DbApi): Effect.Effect<RevenueConfig | null, Error> {
   return Effect.gen(function* () {
     const raw = yield* db.getMetadata(METADATA_KEY);
     if (raw === null) return null;
     const parsed = yield* Effect.try({
       try: () => JSON.parse(raw) as unknown,
-      catch: (cause) => cause,
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
     }).pipe(Effect.catch(() => Effect.succeed(null)));
     return parseRevenueConfig(parsed);
   });
 }
 
-function saveToDb(db: DbApi, config: RevenueConfig): Effect.Effect<void, unknown> {
+function saveToDb(db: DbApi, config: RevenueConfig): Effect.Effect<void, Error> {
   return db.setMetadata(METADATA_KEY, JSON.stringify(config));
 }
 
-function fetchWithRetry(apiKey: string): Effect.Effect<RevenueConfig, unknown> {
+function fetchWithRetry(apiKey: string): Effect.Effect<RevenueConfig, Error> {
   return Effect.gen(function* () {
-    let lastError: unknown = null;
+    let lastError: Error | null = null;
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       const result = yield* Effect.result(fetchConfigFromApi(apiKey));
       if (result._tag === "Success") {
@@ -114,7 +114,7 @@ function fetchWithRetry(apiKey: string): Effect.Effect<RevenueConfig, unknown> {
         yield* Effect.sleep(RETRY_DELAY_MS);
       }
     }
-    return yield* Effect.fail(lastError);
+    return yield* Effect.fail(lastError as Error);
   });
 }
 

@@ -162,7 +162,7 @@ function sendRequest(
         return yield* Effect.tryPromise<Record<string, unknown>>(
           () =>
             new Promise((resolve, reject) => {
-              const originalWrite = process.stdout.write;
+              const originalWrite = process.stdout.write.bind(process.stdout);
               let buffer = "";
               process.stdout.write = ((chunk: string | Uint8Array, ..._args: unknown[]) => {
                 buffer += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");

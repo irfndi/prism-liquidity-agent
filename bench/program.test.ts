@@ -37,7 +37,7 @@ import {
   type RevenueConfigApi,
 } from "../engine/services.js";
 
-async function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): Promise<T> {
+async function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): Promise<T> {
   // v4 layer building is async (memoized provides) — runSync is no longer valid.
   return Effect.runPromise((Effect.provide as any)(effect, layer, { local: true }));
 }
@@ -149,7 +149,10 @@ describe("executeLive", () => {
       getTokenDecimals: () => Effect.succeed(9),
       getMintAuthorities: () => Effect.succeed({ mintAuthority: null, freezeAuthority: null }),
       quoteSwapUSDCForToken: () =>
-        Effect.succeed({ routePlan: [{ swapInfo: {} }], outAmount: "10000000000000" }),
+        Effect.succeed({
+          routePlan: [{ swapInfo: {} }],
+          outAmount: "10000000000000",
+        } as unknown as Record<string, Error>),
       swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
     };
   }

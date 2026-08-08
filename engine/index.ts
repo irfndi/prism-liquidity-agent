@@ -15,4 +15,4 @@ if (isDirectExecution && process.env.PRISM_ALLOW_DIRECT !== "true") {
   process.exit(1);
 }
 
-runEngine();
+void runEngine();

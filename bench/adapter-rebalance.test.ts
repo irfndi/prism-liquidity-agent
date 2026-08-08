@@ -215,7 +215,7 @@ function mockRpcSendPipeline(): Transaction[] {
 
 function mockTokenPrices(): () => void {
   return mockFetch((async (url: string | URL | Request) => {
-    const u = url.toString();
+    const u = String(url as unknown);
     if (u.includes("api.jup.ag/price/v3")) {
       return new Response(
         JSON.stringify({

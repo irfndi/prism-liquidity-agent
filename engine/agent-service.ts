@@ -441,7 +441,7 @@ function createAlertTransports(config: AppConfig): ReadonlyArray<AgentRuntimeTra
 function transportSupportsAlert(
   transport: AgentRuntimeTransport,
 ): transport is AgentRuntimeTransport & {
-  sendAlert: (alert: AgentRuntimeAlert) => Effect.Effect<void, unknown>;
+  sendAlert: (alert: AgentRuntimeAlert) => Effect.Effect<void, Error>;
 } {
   return typeof transport.sendAlert === "function";
 }
@@ -449,12 +449,12 @@ function transportSupportsAlert(
 function transportSupportsCheckin(
   transport: AgentRuntimeTransport,
 ): transport is AgentRuntimeTransport & {
-  sendCheckin: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, unknown>;
+  sendCheckin: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, Error>;
 } {
   return typeof transport.sendCheckin === "function";
 }
 
-function connectTransport(transport: AgentRuntimeTransport): Effect.Effect<void, unknown> {
+function connectTransport(transport: AgentRuntimeTransport): Effect.Effect<void, Error> {
   return transport.connect().pipe(
     Effect.catch((err) => {
       logger.warn("Failed to connect transport", {
@@ -488,7 +488,7 @@ export function connectReviewTransport(
 function sendToAlertTransports(
   transports: ReadonlyArray<AgentRuntimeTransport>,
   alert: AgentRuntimeAlert,
-): Effect.Effect<void, unknown> {
+): Effect.Effect<void, Error> {
   const effects = transports.filter(transportSupportsAlert).map((transport) =>
     transport.sendAlert(alert).pipe(
       Effect.catch((err) => {

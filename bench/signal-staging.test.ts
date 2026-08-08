@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 import type { SignalSnapshot } from "../engine/types.js";
@@ -8,15 +8,8 @@ function makeLayer() {
   return DbLive(":memory:");
 }
 
-function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
-  return Effect.runSync(
-    (
-      Effect.provide as (
-        e: Effect.Effect<T, unknown, unknown>,
-        l: unknown,
-      ) => Effect.Effect<T, unknown, never>
-    )(effect, layer),
-  );
+function run<T, R>(effect: Effect.Effect<T, Error, R>, layer: Layer.Layer<R, never, never>): T {
+  return Effect.runSync(Effect.provide(effect, layer));
 }
 
 function makeSnapshot(overrides: Partial<SignalSnapshot> = {}): SignalSnapshot {

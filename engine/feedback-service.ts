@@ -79,7 +79,7 @@ const OPT_OUT_FILE = join(homedir(), ".config", "prism", "feedback-opt-out");
 function readOptOut(): Effect.Effect<boolean, never> {
   return Effect.try({
     try: () => existsSync(OPT_OUT_FILE) && readFileSync(OPT_OUT_FILE, "utf-8").trim() === "true",
-    catch: (cause) => cause,
+    catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
   }).pipe(Effect.catch(() => Effect.succeed(false)));
 }
 
@@ -89,7 +89,7 @@ function writeOptOut(value: boolean): Effect.Effect<void, never> {
       mkdirSync(join(homedir(), ".config", "prism"), { recursive: true });
       writeFileSync(OPT_OUT_FILE, value ? "true" : "false");
     },
-    catch: (cause) => cause,
+    catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
   }).pipe(
     Effect.catch(() => Effect.void),
     Effect.asVoid,
@@ -120,7 +120,7 @@ function detectAgentId(): Effect.Effect<string, never> {
   return Effect.gen(function* () {
     const existing = yield* Effect.try({
       try: () => (existsSync(walletPath) ? readFileSync(walletPath, "utf-8").trim() : null),
-      catch: (cause) => cause,
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
     }).pipe(Effect.catch(() => Effect.succeed(null)));
     if (existing) return existing;
 
@@ -132,7 +132,7 @@ function detectAgentId(): Effect.Effect<string, never> {
         mkdirSync(dir, { recursive: true });
         writeFileSync(walletPath, id, { mode: 0o600 });
       },
-      catch: (cause) => cause,
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
     }).pipe(Effect.catch(() => Effect.void));
     return id;
   });
@@ -149,7 +149,7 @@ function readPrismApiKey(): Effect.Effect<string | null, never> {
       };
       return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
     },
-    catch: (cause) => cause,
+    catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
   }).pipe(Effect.catch(() => Effect.succeed(null)));
 }
 
