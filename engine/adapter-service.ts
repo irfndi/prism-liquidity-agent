@@ -1673,7 +1673,19 @@ export const AdapterLive = Layer.effect(
           conn.confirmTransaction(signature, "confirmed"),
         ).pipe(Effect.ensuring(invalidateBalanceCaches));
         if (confirmation.value.err !== null) {
-          return yield* Effect.fail(confirmation.value.err as unknown as Error);
+          const txError = confirmation.value.err;
+          // Solana confirmations report string / structured TransactionError
+          // values, not Errors — the channel promises Error, so normalize.
+          return yield* Effect.fail(
+            new Error(
+              typeof txError === "string"
+                ? txError
+                : typeof txError === "object" && txError !== null && "message" in txError
+                  ? String((txError as { message: unknown }).message)
+                  : String(txError),
+              { cause: txError },
+            ),
+          );
         }
         return signature;
       });
