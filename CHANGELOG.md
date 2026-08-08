@@ -2,6 +2,17 @@
 
 All notable changes to Prism are documented here.
 
+## [0.1.10] — 2026-08-08
+
+### Fixed
+
+- **Broken v0.1.9 bundles (#179)**: the release bundles externalized `effect` and shipped without node_modules, so the installed CLI resolved the runtime from bun's global cache — which held effect 3.x — and crashed at startup (`Context.Service is not a function`). All runtime dependencies (effect, @solana/web3.js, @meteora-ag/dlmm, commander, chalk, dotenv, @clack/prompts, semver, bs58, @solana/spl-token, sqlite-vec) are now bundled into the engine and CLI artifacts, making release tarballs self-contained and version-consistent. Verified in a node_modules-less directory: `--version`, `--help`, and `prism status` all boot. `@xenova/transformers` stays external (optional ONNX backend; import failure falls back to hash vectors).
+- **Update never leaves the agent unrecoverable (#179)**: `prism update` keeps ONE persistent backup of the previous install (`<installDir>.bak-<previousVersion>`) instead of deleting it after the smoke test — including the `--skip-smoke-test` path that previously installed a broken bundle with no way back. The backup is failure-safe (stale backups are only removed after the new one is in place), named after the version it contains, and persistence runs inside the rollback-protected path so a failure restores the previous install.
+
+### Changed
+
+- Bumped version to 0.1.10.
+
 ## [0.1.9] — 2026-08-07
 
 ### Added
