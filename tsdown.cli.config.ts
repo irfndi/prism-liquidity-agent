@@ -23,9 +23,24 @@ export default defineConfig({
   deps: {
     neverBundle: ["bun:sqlite"],
   },
-  // Release bundles ship without node_modules. sqlite-vec's JS must be inlined
-  // so its npm load() fails gracefully inside the load chain (caught, then
-  // PRISM_VEC0_PATH / embedded fallbacks run) instead of crashing the CLI on
-  // an unresolvable bare import.
-  noExternal: ["sqlite-vec"],
+  // Release bundles ship without node_modules and the runtime resolves bare
+  // imports from bun's global cache — which can hold the WRONG effect major
+  // (issue #179: v0.1.9 bundle called Context.Service against cached effect 3).
+  // Bundle every runtime dependency so the artifact is version-consistent and
+  // self-contained. @xenova/transformers stays external: it is only loaded for
+  // the optional ONNX embeddings backend and its import failure is already
+  // caught with a fallback to hash vectors.
+  noExternal: [
+    "sqlite-vec",
+    "effect",
+    "commander",
+    "chalk",
+    "dotenv",
+    "@clack/prompts",
+    "semver",
+    "bs58",
+    "@solana/web3.js",
+    "@solana/spl-token",
+    "@meteora-ag/dlmm",
+  ],
 });
