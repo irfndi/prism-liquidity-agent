@@ -49,7 +49,7 @@ function mockTokenAccountsByProgram(
 
 function mockJupiterPrices(prices: Record<string, number>): () => void {
   return mockFetch((async (url: string | URL | Request) => {
-    if (url.toString().includes("api.jup.ag/price/v3")) {
+    if (String(url as unknown).includes("api.jup.ag/price/v3")) {
       const body: Record<string, { usdPrice: number }> = {};
       for (const [mint, price] of Object.entries(prices)) body[mint] = { usdPrice: price };
       return new Response(JSON.stringify(body), {

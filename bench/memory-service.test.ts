@@ -56,14 +56,14 @@ const vecAvailable = (() => {
 
 /** Type-safe Effect runner: provide a self-contained layer and await the value. */
 function run<A, R>(
-  effect: Effect.Effect<A, unknown, R>,
-  layer: Layer.Layer<R, unknown, never>,
+  effect: Effect.Effect<A, Error, R>,
+  layer: Layer.Layer<R, never, never>,
 ): Promise<A> {
   return Effect.runPromise(Effect.provide(effect, layer));
 }
 
 /** Layer providing just the MemoryService over a private in-memory DB. */
-function memoryLayer(): Layer.Layer<MemoryService, unknown, never> {
+function memoryLayer(): Layer.Layer<MemoryService, never, never> {
   return Layer.provide(MemoryLive, DbLive(":memory:"));
 }
 
@@ -72,7 +72,7 @@ function memoryLayer(): Layer.Layer<MemoryService, unknown, never> {
  * once — the MemoryService and the exposed DbService back the same Database
  * (the same pattern bench/metrics-tvl-exit.test.ts relies on). Tests need the
  * raw DbService handle to backdate rows directly for the expiry cases. */
-function memoryWithDbLayer(): Layer.Layer<MemoryService | DbService, unknown, never> {
+function memoryWithDbLayer(): Layer.Layer<MemoryService | DbService, never, never> {
   const dbLayer = DbLive(":memory:");
   return Layer.merge(Layer.provide(MemoryLive, dbLayer), dbLayer);
 }

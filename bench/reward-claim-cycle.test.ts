@@ -213,7 +213,7 @@ describe("periodic reward claim cycle", () => {
           return { positions, events };
         }),
         layer,
-      ) as Effect.Effect<never, unknown, never>,
+      ) as Effect.Effect<never, Error, never>,
     );
 
     const { positions, events } = outcome as unknown as {
@@ -274,7 +274,7 @@ describe("periodic reward claim cycle", () => {
           return { positions, events };
         }),
         layer,
-      ) as Effect.Effect<never, unknown, never>,
+      ) as Effect.Effect<never, Error, never>,
     );
 
     const { positions, events } = outcome as unknown as {
@@ -319,7 +319,7 @@ describe("periodic reward claim cycle", () => {
           yield* Effect.raceFirst(program, Effect.sleep(400));
         }),
         layer,
-      ) as Effect.Effect<never, unknown, never>,
+      ) as Effect.Effect<never, Error, never>,
     );
 
     expect(claimRewards).not.toHaveBeenCalled();

@@ -309,7 +309,7 @@ export class HttpStatusServer {
     return Response.json({ approved: ids.length }, { status: 200 });
   }
 
-  start(): Effect.Effect<void, unknown> {
+  start(): Effect.Effect<void, Error> {
     return Effect.gen({ self: this }, function* () {
       if (this.server) return;
       const port = this.config.agentHttpPort;
@@ -400,11 +400,11 @@ export class HttpStatusServer {
     });
   }
 
-  stop(): Effect.Effect<void, unknown> {
+  stop(): Effect.Effect<void, Error> {
     return Effect.sync(() => {
       if (this.server) {
         // closeActiveConnections avoids TIME_WAIT races when tests rebind ports.
-        this.server.stop(true);
+        void this.server.stop(true);
         this.server = null;
         logger.info("HTTP status server stopped");
       }

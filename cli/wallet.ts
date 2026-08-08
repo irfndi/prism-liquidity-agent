@@ -101,15 +101,17 @@ export const walletCommand = new Command("wallet")
 
         const creds = readCredentials();
         if (creds) {
-          prismApiPost("/v1/wallet", { pubkey: walletData.pubkey }, { apiKey: creds.apiKey }).then(
-            (result) => {
-              if (!result.ok) {
-                console.warn(
-                  "Warning: Could not sync wallet to cloud. Run 'prism wallet generate' again if needed.",
-                );
-              }
-            },
-          );
+          void prismApiPost(
+            "/v1/wallet",
+            { pubkey: walletData.pubkey },
+            { apiKey: creds.apiKey },
+          ).then((result) => {
+            if (!result.ok) {
+              console.warn(
+                "Warning: Could not sync wallet to cloud. Run 'prism wallet generate' again if needed.",
+              );
+            }
+          });
         }
       }),
   )
@@ -239,15 +241,17 @@ Examples:
 
         const creds = readCredentials();
         if (creds) {
-          prismApiPost("/v1/wallet", { pubkey: walletData.pubkey }, { apiKey: creds.apiKey }).then(
-            (result) => {
-              if (!result.ok) {
-                console.warn(
-                  "Warning: Could not sync wallet to cloud. Run 'prism wallet import' again if needed.",
-                );
-              }
-            },
-          );
+          void prismApiPost(
+            "/v1/wallet",
+            { pubkey: walletData.pubkey },
+            { apiKey: creds.apiKey },
+          ).then((result) => {
+            if (!result.ok) {
+              console.warn(
+                "Warning: Could not sync wallet to cloud. Run 'prism wallet import' again if needed.",
+              );
+            }
+          });
         }
       }),
   );

@@ -28,13 +28,13 @@ function sanitizeSymbol(value: string): string {
   return value.replace(ANSI_ESCAPE_RE, "").replace(CONTROL_CHAR_RE, "");
 }
 
-function buildProgram(): Layer.Layer<DbService | AdapterService, unknown, never> {
+function buildProgram(): Layer.Layer<DbService | AdapterService, Error, never> {
   const dbPath = process.env.SQLITE_DB_PATH ?? getPrismDbPath();
   const dbLayer = DbLive(dbPath);
   const adapterLayer = Layer.provide(AdapterLive, ConfigLive);
   return Layer.mergeAll(dbLayer, adapterLayer) as unknown as Layer.Layer<
     DbService | AdapterService,
-    unknown,
+    Error,
     never
   >;
 }

@@ -155,7 +155,7 @@ describe("getRugCheckReport", () => {
   it("hits the /tokens/{mint}/report endpoint", async () => {
     let calledUrl = "";
     const fetchImpl = async (input: string | URL | Request) => {
-      calledUrl = String(input);
+      calledUrl = String(input as unknown);
       return new Response(JSON.stringify(LIVE_RISKY), { status: 200 });
     };
     await getRugCheckReport("abc123", { fetchImpl, baseUrl: "https://x.example/v1" });

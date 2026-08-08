@@ -332,49 +332,52 @@ export class McpServer {
     }
   }
 
-  start(): Effect.Effect<void, unknown> {
-    return Effect.tryPromise(async () => {
-      if (this.running) return;
-      this.running = true;
-      logger.info("MCP server started on stdio");
+  start(): Effect.Effect<void, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        if (this.running) return;
+        this.running = true;
+        logger.info("MCP server started on stdio");
 
-      const buffer: string[] = [];
-      process.stdin.setEncoding("utf8");
-      this.dataHandler = async (chunk) => {
-        const text = chunk.toString();
-        for (const char of text) {
-          if (char === "\n") {
-            const line = buffer.join("").trim();
-            buffer.length = 0;
-            if (!line) continue;
-            try {
-              const request = JSON.parse(line) as McpRequest;
-              const response = await this.handleRequest(request);
-              if (response !== undefined) {
-                this.send(response);
-              }
-            } catch (err) {
-              logger.error("Failed to parse MCP request", { error: String(err) });
-              this.send({
-                jsonrpc: "2.0",
-                id: 0,
-                error: { code: -32700, message: "Parse error" },
-              });
-            }
-          } else {
-            if (buffer.length >= MAX_STDIN_BUFFER_LENGTH) {
-              logger.error("MCP stdin buffer exceeded max length; discarding");
+        const buffer: string[] = [];
+        process.stdin.setEncoding("utf8");
+        this.dataHandler = async (chunk) => {
+          const text = chunk.toString();
+          for (const char of text) {
+            if (char === "\n") {
+              const line = buffer.join("").trim();
               buffer.length = 0;
+              if (!line) continue;
+              try {
+                const request = JSON.parse(line) as McpRequest;
+                const response = await this.handleRequest(request);
+                if (response !== undefined) {
+                  this.send(response);
+                }
+              } catch (err) {
+                logger.error("Failed to parse MCP request", { error: String(err) });
+                this.send({
+                  jsonrpc: "2.0",
+                  id: 0,
+                  error: { code: -32700, message: "Parse error" },
+                });
+              }
+            } else {
+              if (buffer.length >= MAX_STDIN_BUFFER_LENGTH) {
+                logger.error("MCP stdin buffer exceeded max length; discarding");
+                buffer.length = 0;
+              }
+              buffer.push(char);
             }
-            buffer.push(char);
           }
-        }
-      };
-      process.stdin.on("data", this.dataHandler);
+        };
+        process.stdin.on("data", this.dataHandler);
+      },
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
     });
   }
 
-  stop(): Effect.Effect<void, unknown> {
+  stop(): Effect.Effect<void, Error> {
     return Effect.sync(() => {
       this.running = false;
       if (this.dataHandler) {

@@ -235,7 +235,7 @@ describe("feedback service — cloud fallback", () => {
     enableCredentials();
     mockFetch(
       vi.fn(async (url: string | URL | Request) => {
-        const u = url.toString();
+        const u = String(url as string | URL);
         if (u.includes("/v1/feedback")) {
           return new Response(JSON.stringify({ id: "cloud-test-id" }), { status: 200 });
         }
@@ -314,7 +314,7 @@ describe("feedback service — D1 cloud submissions", () => {
     enableCredentials();
     mockFetch(
       vi.fn(async (url: string | URL | Request) =>
-        url.toString().includes("/v1/feedback")
+        String(url as string | URL).includes("/v1/feedback")
           ? new Response(JSON.stringify({ id: "cloud-new" }), { status: 200 })
           : new Response("unexpected", { status: 500 }),
       ) as unknown as typeof fetch,

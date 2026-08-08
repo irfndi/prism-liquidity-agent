@@ -157,7 +157,7 @@ function readPositionValueUsd(
 
 function mockTokenPrices(prices: Record<string, number>): () => void {
   return mockFetch((async (url: string | URL | Request) => {
-    const u = url.toString();
+    const u = String(url as unknown);
     if (u.includes("api.jup.ag/price/v3")) {
       const body: Record<string, { usdPrice: number }> = {};
       for (const [mint, price] of Object.entries(prices)) body[mint] = { usdPrice: price };

@@ -103,7 +103,7 @@ export function shouldAutoResolveDailyDrawdownPause(input: DailyDrawdownAutoReso
     case "off":
       return input.dailyDrawdownPct < input.maxDailyDrawdownPct;
     default:
-      throw new Error(`Unhandled autonomous token mode: ${input.mode}`);
+      throw new Error(`Unhandled autonomous token mode: ${String(input.mode)}`);
   }
 }
 

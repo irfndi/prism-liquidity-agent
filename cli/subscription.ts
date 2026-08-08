@@ -177,7 +177,7 @@ export const subscriptionCommand = new Command("subscription")
         const tierName = options.tier;
 
         // Import revenue service
-        import("../engine/revenue-service.js").then(({ TIERS }) => {
+        void import("../engine/revenue-service.js").then(({ TIERS }) => {
           const tier = TIERS[tierName];
           if (!tier) {
             console.error(`Error: Unknown tier '${tierName}'`);

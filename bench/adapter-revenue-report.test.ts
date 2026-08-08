@@ -103,6 +103,6 @@ describe("AdapterService.reportFeeCollection opt-out", () => {
     );
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain("/v1/revenue/log");
+    expect(String(fetchSpy.mock.calls[0]?.[0] as unknown)).toContain("/v1/revenue/log");
   });
 });

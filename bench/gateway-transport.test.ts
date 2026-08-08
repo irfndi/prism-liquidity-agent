@@ -132,7 +132,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
 
       await Effect.runPromise(transport.disconnect());
     } finally {
-      server.stop(true);
+      void server.stop(true);
     }
   });
 
@@ -192,7 +192,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
 
       await Effect.runPromise(transport.disconnect());
     } finally {
-      server.stop(true);
+      void server.stop(true);
     }
   });
 
@@ -233,7 +233,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
       expect(error).not.toBeNull();
       expect(String(error)).toContain("1008");
     } finally {
-      server.stop(true);
+      void server.stop(true);
     }
   });
 
@@ -264,7 +264,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
       const available = await Effect.runPromise(transport.isAvailable());
       expect(available).toBe(true);
     } finally {
-      server.stop(true);
+      void server.stop(true);
     }
   });
 
@@ -300,7 +300,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
       await Effect.runPromise(transport.connect());
       await Effect.runPromise(transport.disconnect());
     } finally {
-      server.stop(true);
+      void server.stop(true);
     }
   });
 
@@ -357,7 +357,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
       expect(unhandled).toEqual([]);
     } finally {
       process.off("unhandledRejection", onUnhandled);
-      server.stop(true);
+      void server.stop(true);
     }
   });
 
@@ -402,7 +402,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
       expect(error).not.toBeNull();
       expect(String(error)).toContain("Gateway 1008: operator scopes dropped");
     } finally {
-      server.stop(true);
+      void server.stop(true);
     }
   });
 
@@ -455,7 +455,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
       expect(message).toMatch(/timed out after \d+ms \(elapsed \d+ms\)/);
       expect(message).toContain("timed out after 250ms");
     } finally {
-      server.stop(true);
+      void server.stop(true);
     }
   });
 
@@ -500,7 +500,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
       expect(error).not.toBeNull();
       expect(String(error)).toContain("below required 4");
     } finally {
-      server.stop(true);
+      void server.stop(true);
     }
   });
 });

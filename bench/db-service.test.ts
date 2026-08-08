@@ -4,11 +4,8 @@ import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 import type { SettlementJobRecord } from "../engine/types.js";
 
-function run<T, R>(
-  effect: Effect.Effect<T, unknown, R>,
-  layer: Layer.Layer<R, unknown, unknown>,
-): T {
-  return Effect.runSync(Effect.provide(effect, layer) as Effect.Effect<T, unknown, never>);
+function run<T, R>(effect: Effect.Effect<T, Error, R>, layer: Layer.Layer<R, never, never>): T {
+  return Effect.runSync(Effect.provide(effect, layer) as Effect.Effect<T, Error, never>);
 }
 
 function makePosition(

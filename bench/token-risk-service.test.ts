@@ -132,7 +132,7 @@ describe("token-risk-service", () => {
   it("(6) chunks 150 mints into two requests (100 + 50)", async () => {
     const urls: string[] = [];
     const capturingFetch: FetchLike = async (url) => {
-      urls.push(typeof url === "string" ? url : url.toString());
+      urls.push(String(url as unknown));
       return new Response("[]", { status: 200 });
     };
     const mints = Array.from({ length: 150 }, (_, i) => `Mint${i}`);

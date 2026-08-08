@@ -84,7 +84,7 @@ describe("OpenClawWebhookTransport", () => {
       expect((capturedBody as Record<string, unknown>).decision).toBeDefined();
       expect((capturedBody as Record<string, unknown>).pool).toBeDefined();
     } finally {
-      server.stop();
+      void server.stop();
     }
   });
 });

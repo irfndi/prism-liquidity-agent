@@ -263,14 +263,14 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
 
 // ─── Effect runners ──────────────────────────────────────────────────────────
 
-export function run<T, R>(
-  effect: Effect.Effect<T, unknown, R>,
+export function run<T, E, R>(
+  effect: Effect.Effect<T, E, R>,
   layer: Layer.Layer<R, never, never>,
 ): T {
   return Effect.runSync(Effect.provide(effect, layer));
 }
 
-export async function runAsync<T>(effect: Effect.Effect<T, unknown, never>): Promise<T> {
+export async function runAsync<T, E>(effect: Effect.Effect<T, E, never>): Promise<T> {
   return Effect.runPromise(effect);
 }
 

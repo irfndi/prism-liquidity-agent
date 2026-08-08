@@ -117,13 +117,13 @@ export const MeteoraDatapiLive = Layer.effect(
       const fetchJson = retryEffectWithBackoff(
         Effect.tryPromise({
           try: () => fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }),
-          catch: (cause) => cause,
+          catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
         }).pipe(
           Effect.flatMap((res) =>
             res.ok
               ? Effect.tryPromise({
                   try: () => res.json() as Promise<unknown>,
-                  catch: (cause) => cause,
+                  catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
                 })
               : Effect.fail(new Error(`Meteora Data API HTTP ${res.status} for ${url}`)),
           ),

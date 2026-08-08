@@ -27,7 +27,7 @@ async function loadConfig() {
   );
 }
 
-async function useDb<T>(dbPath: string, effect: Effect.Effect<T, unknown, DbService>): Promise<T> {
+async function useDb<T, E>(dbPath: string, effect: Effect.Effect<T, E, DbService>): Promise<T> {
   return Effect.runPromise(Effect.provide(effect, DbLive(dbPath)));
 }
 

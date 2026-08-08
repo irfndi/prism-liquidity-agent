@@ -8,7 +8,7 @@ import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 import { checkForAutoUpdate } from "../engine/update-check.js";
 
-function runAsync<T>(effect: Effect.Effect<T, unknown, never>): Promise<T> {
+function runAsync<T, E>(effect: Effect.Effect<T, E, never>): Promise<T> {
   return Effect.runPromise(effect);
 }
 

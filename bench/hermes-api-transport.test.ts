@@ -57,7 +57,7 @@ describe("HermesApiTransport (OpenAI-compatible API)", () => {
       expect(capturedAuth).toBe("Bearer api-key-123");
       expect(response.raw).toBe('{"action":"HOLD","confidence":0.5}');
     } finally {
-      server.stop(true);
+      void server.stop(true);
     }
   });
 
@@ -82,7 +82,7 @@ describe("HermesApiTransport (OpenAI-compatible API)", () => {
       expect(available).toBe(true);
       expect(capturedPath).toBe("/health");
     } finally {
-      server.stop(true);
+      void server.stop(true);
     }
   });
 });

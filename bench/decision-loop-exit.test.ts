@@ -261,7 +261,7 @@ async function runCycles(
   return Effect.runPromise(
     Effect.provide(test, layer) as unknown as Effect.Effect<
       ReadonlyArray<DecisionRow>,
-      unknown,
+      Error,
       never
     >,
   );
@@ -307,7 +307,7 @@ describe("phantom EXIT gating (Wave 2)", () => {
     const { decisions, evolutionCount } = await Effect.runPromise(
       Effect.provide(test, layer) as unknown as Effect.Effect<
         { decisions: ReadonlyArray<DecisionRow>; evolutionCount: string | null },
-        unknown,
+        Error,
         never
       >,
     );
@@ -339,7 +339,7 @@ describe("phantom EXIT gating (Wave 2)", () => {
     const decisions = await Effect.runPromise(
       Effect.provide(test, layer) as unknown as Effect.Effect<
         ReadonlyArray<DecisionRow>,
-        unknown,
+        Error,
         never
       >,
     );
@@ -372,7 +372,7 @@ describe("phantom EXIT gating (Wave 2)", () => {
     const { decisions, cooldown } = await Effect.runPromise(
       Effect.provide(test, layer) as unknown as Effect.Effect<
         { decisions: ReadonlyArray<DecisionRow>; cooldown: unknown },
-        unknown,
+        Error,
         never
       >,
     );
@@ -430,7 +430,7 @@ describe("portfolio value math (Wave 2)", () => {
     const decisions = await Effect.runPromise(
       Effect.provide(test, layer) as unknown as Effect.Effect<
         ReadonlyArray<DecisionRow>,
-        unknown,
+        Error,
         never
       >,
     );
@@ -513,9 +513,9 @@ describe("pool snapshot retention (Wave 2)", () => {
       return { oldRows, recentRows };
     });
     const { oldRows, recentRows } = await Effect.runPromise(
-      Effect.provide(test, layer) as Effect.Effect<
+      Effect.provide(test, layer) as unknown as Effect.Effect<
         { oldRows: ReadonlyArray<PoolSnapshot>; recentRows: ReadonlyArray<PoolSnapshot> },
-        unknown,
+        Error,
         never
       >,
     );
@@ -632,7 +632,9 @@ describe("agent position context wiring", () => {
       });
       yield* Effect.raceFirst(program, Effect.sleep(2_000));
     });
-    await Effect.runPromise(Effect.provide(test, layer) as Effect.Effect<unknown, unknown, never>);
+    await Effect.runPromise(
+      Effect.provide(test, layer) as unknown as Effect.Effect<unknown, Error, never>,
+    );
 
     expect(capturedContext, "sync advisor must be consulted for the EXIT").toBeDefined();
     expect(capturedContext?.position, "position state must reach the advisor").toBeDefined();

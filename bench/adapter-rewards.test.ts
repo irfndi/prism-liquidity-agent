@@ -207,7 +207,7 @@ function mockRewardMintDecimals(decimals = 6): void {
 
 function mockPrices(prices: Record<string, number>): () => void {
   return mockFetch((async (url: string | URL | Request) => {
-    const u = url.toString();
+    const u = String(url as unknown);
     if (u.includes("api.jup.ag/price/v3")) {
       const body: Record<string, { usdPrice: number }> = {};
       for (const [mint, usdPrice] of Object.entries(prices)) {

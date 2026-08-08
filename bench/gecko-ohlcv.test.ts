@@ -162,7 +162,7 @@ describe("getGeckoPoolOhlcv", () => {
   it("hits the day?limit endpoint", async () => {
     let calledUrl = "";
     const fetchImpl = async (input: string | URL | Request) => {
-      calledUrl = String(input);
+      calledUrl = String(input as unknown);
       return new Response(
         JSON.stringify({ data: { attributes: { ohlcv_list: [[1, 1, 2, 0.5, 1.5, 10]] } } }),
         { status: 200 },

@@ -575,7 +575,7 @@ describe("selectTransport", () => {
 });
 
 describe("connectReviewTransport", () => {
-  const makeTransport = (connect: () => Effect.Effect<void, unknown>): AgentRuntimeTransport => ({
+  const makeTransport = (connect: () => Effect.Effect<void, Error>): AgentRuntimeTransport => ({
     name: "gateway",
     isAvailable: () => Effect.succeed(true),
     connect,

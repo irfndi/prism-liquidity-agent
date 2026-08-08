@@ -6,7 +6,7 @@ import { DbService } from "../engine/services.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function run<T, R>(effect: Effect.Effect<T, unknown, R>, layer: Layer.Layer<R, never, never>): T {
+function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: Layer.Layer<R, never, never>): T {
   return Effect.runSync(Effect.provide(effect, layer));
 }
 

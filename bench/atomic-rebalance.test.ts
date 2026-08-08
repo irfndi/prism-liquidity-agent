@@ -167,7 +167,7 @@ const livePool = {
   currentPrice: 100,
 };
 
-function runDb<T>(effect: Effect.Effect<T, unknown, DbService>): Promise<T> {
+function runDb<T, E>(effect: Effect.Effect<T, E, DbService>): Promise<T> {
   return Effect.runPromise(Effect.provide(effect, DbLive(":memory:")));
 }
 
@@ -591,7 +591,7 @@ describe("rebalance gate consumes the SDK simulation (live loop)", () => {
           positions: ReadonlyArray<PositionRecord>;
           events: ReadonlyArray<{ event: string; positionPubKey: string | null }>;
         },
-        unknown,
+        Error,
         never
       >,
     );
@@ -666,7 +666,7 @@ describe("rebalance gate consumes the SDK simulation (live loop)", () => {
           return yield* audit.getRecentDecisions(50);
         }),
         layer,
-      ) as unknown as Effect.Effect<ReadonlyArray<DecisionRow>, unknown, never>,
+      ) as unknown as Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>,
     );
 
     // The simulation ran and fed the gate...

@@ -14,7 +14,7 @@ import {
 // accumulates USD-valued reward claims while cumulativeFeesClaimedUsd stays
 // fee-pure (fee APR must never include farm rewards). Total PnL includes both.
 
-function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): T {
+function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): T {
   return Effect.runSync((Effect.provide as any)(effect, layer));
 }
 

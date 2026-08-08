@@ -68,7 +68,7 @@ describe("sanitization", () => {
     const pending = r.getPending();
     expect(pending[0]?.message).not.toContain(longBase58);
     expect(pending[0]?.message).toContain("[REDACTED]");
-    r.dispose();
+    void r.dispose();
   });
 
   it("redacts hex private keys (0x-prefixed 64+ hex)", () => {
@@ -79,7 +79,7 @@ describe("sanitization", () => {
     const pending = r.getPending();
     expect(pending[0]?.message).not.toContain(hexKey);
     expect(pending[0]?.message).toContain("[REDACTED]");
-    r.dispose();
+    void r.dispose();
   });
 
   it("redacts raw hex strings 64+ chars", () => {
@@ -90,7 +90,7 @@ describe("sanitization", () => {
     const pending = r.getPending();
     expect(pending[0]?.message).not.toContain(rawHex);
     expect(pending[0]?.message).toContain("[REDACTED]");
-    r.dispose();
+    void r.dispose();
   });
 
   it("redacts secret_key= / private-key= patterns", () => {
@@ -100,7 +100,7 @@ describe("sanitization", () => {
     const pending = r.getPending();
     expect(pending[0]?.message).toContain("[REDACTED]");
     expect(pending[0]?.message).not.toContain("deadbeef1234567890abc");
-    r.dispose();
+    void r.dispose();
   });
 
   it("redacts password= patterns", () => {
@@ -110,7 +110,7 @@ describe("sanitization", () => {
     const pending = r.getPending();
     expect(pending[0]?.message).toContain("[REDACTED]");
     expect(pending[0]?.message).not.toContain("PLACEHOLDER_VALUE");
-    r.dispose();
+    void r.dispose();
   });
 
   it("does NOT redact short base58 strings (e.g. pool addresses, 32-44 chars)", () => {
@@ -122,7 +122,7 @@ describe("sanitization", () => {
     r.report(err);
     const pending = r.getPending();
     expect(pending[0]?.message).toContain(poolAddr);
-    r.dispose();
+    void r.dispose();
   });
 
   it("sanitizes stack traces too", () => {
@@ -135,7 +135,7 @@ describe("sanitization", () => {
     const pending = r.getPending();
     expect(pending[0]?.stack).toContain("[REDACTED]");
     expect(pending[0]?.stack).not.toContain(longBase58);
-    r.dispose();
+    void r.dispose();
   });
 });
 
@@ -146,42 +146,42 @@ describe("classification", () => {
     const r = makeReporter();
     r.report(new Error("Failed to serialize BigInt value in ONNX pipeline"));
     expect(r.getPending()[0]?.category).toBe("ONNX_BigInt");
-    r.dispose();
+    void r.dispose();
   });
 
   it("classifies sqlite-vec errors as SQLite_Vec", () => {
     const r = makeReporter();
     r.report(new Error("sqlite-vec error: table vec0 not found"));
     expect(r.getPending()[0]?.category).toBe("SQLite_Vec");
-    r.dispose();
+    void r.dispose();
   });
 
   it("classifies rate limit errors as RPC_RateLimit", () => {
     const r = makeReporter();
     r.report(new Error("Rate limit exceeded: 429 Too Many Requests"));
     expect(r.getPending()[0]?.category).toBe("RPC_RateLimit");
-    r.dispose();
+    void r.dispose();
   });
 
   it("classifies Helius errors", () => {
     const r = makeReporter();
     r.report(new Error("Helius API key invalid"));
     expect(r.getPending()[0]?.category).toBe("Helius_Error");
-    r.dispose();
+    void r.dispose();
   });
 
   it("classifies update/tarball errors as UpdateFailure", () => {
     const r = makeReporter();
     r.report(new Error("Failed to download tarball: connection reset"));
     expect(r.getPending()[0]?.category).toBe("UpdateFailure");
-    r.dispose();
+    void r.dispose();
   });
 
   it("classifies unknown patterns as Unknown", () => {
     const r = makeReporter();
     r.report(new Error("Something completely unexpected happened"));
     expect(r.getPending()[0]?.category).toBe("Unknown");
-    r.dispose();
+    void r.dispose();
   });
 
   it("classifies unknown patterns as Unknown even when stack contains 'update'", () => {
@@ -191,7 +191,7 @@ describe("classification", () => {
       "Error: Something completely unexpected happened\n    at updateSnapshot (file.ts:1:1)";
     r.report(err);
     expect(r.getPending()[0]?.category).toBe("Unknown");
-    r.dispose();
+    void r.dispose();
   });
 });
 
@@ -203,7 +203,7 @@ describe("buffering", () => {
     r.report(new Error("err1"));
     r.report(new Error("err2"));
     expect(r.getPending()).toHaveLength(2);
-    r.dispose();
+    void r.dispose();
   });
 
   it("flushes when batch size threshold is reached", async () => {
@@ -220,7 +220,7 @@ describe("buffering", () => {
     await new Promise((res) => setTimeout(res, 10));
     expect(r.getPending()).toHaveLength(0);
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
-    r.dispose();
+    void r.dispose();
   });
 
   it("flushAsync waits for the in-flight flush to complete", async () => {
@@ -232,7 +232,7 @@ describe("buffering", () => {
     await r.flushAsync();
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalled();
     expect(r.getPending()).toHaveLength(0);
-    r.dispose();
+    void r.dispose();
   });
 
   it("getPending returns a copy of pending reports", () => {
@@ -244,7 +244,7 @@ describe("buffering", () => {
     // Mutating the copy should not affect internal state
     (copy as unknown[]).push({} as never);
     expect(r.getPending()).toHaveLength(1);
-    r.dispose();
+    void r.dispose();
   });
 });
 
@@ -255,9 +255,9 @@ describe("no-op mode", () => {
     const r = makeReporter({ enabled: false });
     r.report(new Error("should be ignored"));
     expect(r.getPending()).toHaveLength(0);
-    r.flushAsync();
+    void r.flushAsync();
     expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
-    r.dispose();
+    void r.dispose();
   });
 
   it("does nothing when PRISM_ERROR_REPORTING env is 'false'", () => {
@@ -271,7 +271,7 @@ describe("no-op mode", () => {
     r.report(new Error("should be ignored"));
     expect(r.getPending()).toHaveLength(0);
     expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
-    r.dispose();
+    void r.dispose();
   });
 });
 
@@ -311,7 +311,7 @@ describe("batch payload", () => {
     expect(first).toHaveProperty("stack");
     expect(first).toHaveProperty("category");
     expect(first).toHaveProperty("severity");
-    r.dispose();
+    void r.dispose();
   });
 });
 
@@ -330,7 +330,7 @@ describe("failure resilience", () => {
 
     await new Promise((res) => setTimeout(res, 10));
     expect(r.getPending()).toHaveLength(1);
-    r.dispose();
+    void r.dispose();
   });
 
   it("re-queues reports when fetch returns non-OK status", async () => {
@@ -345,7 +345,7 @@ describe("failure resilience", () => {
 
     await new Promise((res) => setTimeout(res, 10));
     expect(r.getPending()).toHaveLength(1);
-    r.dispose();
+    void r.dispose();
   });
 
   it("buffers reports with explicit endpoint", () => {
@@ -358,7 +358,7 @@ describe("failure resilience", () => {
       r.report(new Error("should be buffered with explicit endpoint"));
     }).not.toThrow();
     expect(r.getPending()).toHaveLength(1);
-    r.dispose();
+    void r.dispose();
   });
 
   it("uses the default endpoint when explicitly enabled", () => {
@@ -368,7 +368,7 @@ describe("failure resilience", () => {
       r.report(new Error("should use the default endpoint"));
     }).not.toThrow();
     expect(r.getPending()).toHaveLength(1);
-    r.dispose();
+    void r.dispose();
   });
 });
 
@@ -382,6 +382,6 @@ describe("createErrorReporter factory", () => {
     expect(typeof r.flushAsync).toBe("function");
     expect(typeof r.getPending).toBe("function");
     expect(typeof r.dispose).toBe("function");
-    r.dispose();
+    void r.dispose();
   });
 });

@@ -13,7 +13,7 @@ class ResumeCommandError extends Error {
   }
 }
 
-function buildProgram(): Layer.Layer<DbService | ConfigService, unknown, never> {
+function buildProgram(): Layer.Layer<DbService | ConfigService, Error, never> {
   const dbLayer = DbLive(process.env.SQLITE_DB_PATH ?? getPrismDbPath());
   return Layer.merge(dbLayer, ConfigLive);
 }

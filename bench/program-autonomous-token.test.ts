@@ -457,7 +457,7 @@ describe("settlement job processing", () => {
       getNativeSolBalance: () => Effect.succeed(100n),
       submitSwap: (
         _prepared: PreparedSwap,
-        onBroadcast: ((signature: string) => Effect.Effect<void, unknown>) | undefined,
+        onBroadcast: ((signature: string) => Effect.Effect<void, Error>) | undefined,
       ) =>
         Effect.gen(function* () {
           if (onBroadcast) yield* onBroadcast("broadcast-signature");

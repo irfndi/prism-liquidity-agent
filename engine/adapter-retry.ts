@@ -56,7 +56,7 @@ function errorMessage(err: unknown): string {
     try {
       return JSON.stringify(err);
     } catch {
-      return String(err);
+      return String(err as unknown);
     }
   }
   return String(err);
@@ -194,26 +194,26 @@ const DEFAULT_RETRY_OPTIONS: Required<Omit<RetryOptions, "rateLimitBaseDelayMs">
 export function retryWithBackoff<T>(
   fn: () => Promise<T>,
   opts?: RetryOptions,
-): Effect.Effect<T, unknown> {
+): Effect.Effect<T, Error> {
   return retryEffectWithBackoff(
     Effect.tryPromise({
       try: () => fn(),
-      catch: (cause) => cause,
+      catch: (cause) => cause as Error,
     }),
     opts,
   );
 }
 
-export function retryEffectWithBackoff<T>(
-  effect: Effect.Effect<T, unknown>,
+export function retryEffectWithBackoff<T, E>(
+  effect: Effect.Effect<T, E>,
   opts?: RetryOptions,
-): Effect.Effect<T, unknown> {
+): Effect.Effect<T, E> {
   const { maxRetries, baseDelayMs, maxDelayMs, rateLimitBaseDelayMs } = {
     ...DEFAULT_RETRY_OPTIONS,
     ...opts,
   };
 
-  const attempt = (attemptNumber: number): Effect.Effect<T, unknown> =>
+  const attempt = (attemptNumber: number): Effect.Effect<T, E> =>
     effect.pipe(
       Effect.catch((err) => {
         if (attemptNumber >= maxRetries || !isRetriableError(err)) {
@@ -277,10 +277,10 @@ export class CircuitBreaker {
     return this.state;
   }
 
-  execute<T>(
-    effect: Effect.Effect<T, unknown>,
+  execute<T, E>(
+    effect: Effect.Effect<T, E>,
     isRetriable?: (err: unknown) => boolean,
-  ): Effect.Effect<T, unknown> {
+  ): Effect.Effect<T, CircuitBreakerOpenError | E> {
     return Effect.gen({ self: this }, function* () {
       const current = this.getState();
       if (current === "OPEN") {

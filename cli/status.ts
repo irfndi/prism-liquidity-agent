@@ -88,7 +88,7 @@ export interface StatusJsonOutput {
 
 function buildProgram(): Layer.Layer<
   DbService | AuditService | ConfigService | AdapterService,
-  unknown,
+  Error,
   never
 > {
   const dbPath = process.env.SQLITE_DB_PATH ?? getPrismDbPath();
@@ -98,7 +98,7 @@ function buildProgram(): Layer.Layer<
   const adapterLayer = Layer.provide(AdapterLive, configLayer);
   return Layer.mergeAll(dbLayer, auditLayer, configLayer, adapterLayer) as unknown as Layer.Layer<
     DbService | AuditService | ConfigService | AdapterService,
-    unknown,
+    Error,
     never
   >;
 }

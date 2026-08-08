@@ -5,7 +5,7 @@ import type { AdapterApi } from "../engine/services.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function run<T>(effect: Effect.Effect<T, unknown, unknown>, layer: unknown): Promise<T> {
+function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): Promise<T> {
   return Effect.runPromise((Effect.provide as any)(effect, layer));
 }
 
@@ -43,18 +43,18 @@ function makeTestAdapterLayer() {
     getTokenPrices: () => Effect.succeed({}),
     getTokenDecimals: () => Effect.succeed(6),
     getMintAuthorities: () => Effect.succeed({ mintAuthority: null, freezeAuthority: null }),
-    quoteSwapUSDCForToken: () => Effect.fail("not implemented"),
-    swapUSDCForToken: () => Effect.fail("not implemented"),
-    getPoolState: () => Effect.fail("not implemented"),
-    getBinArray: () => Effect.fail("not implemented"),
+    quoteSwapUSDCForToken: () => Effect.fail(new Error("not implemented")),
+    swapUSDCForToken: () => Effect.fail(new Error("not implemented")),
+    getPoolState: () => Effect.fail(new Error("not implemented")),
+    getBinArray: () => Effect.fail(new Error("not implemented")),
     getPositions: () => Effect.succeed([]),
     getAllWalletPositions: () => Effect.succeed([]),
-    simulateRebalance: () => Effect.fail("not implemented"),
-    enterPosition: () => Effect.fail("not implemented"),
-    exitPosition: () => Effect.fail("not implemented"),
-    rebalancePosition: () => Effect.fail("not implemented"),
-    claimFees: () => Effect.fail("not implemented"),
-    claimRewards: () => Effect.fail("not implemented"),
+    simulateRebalance: () => Effect.fail(new Error("not implemented")),
+    enterPosition: () => Effect.fail(new Error("not implemented")),
+    exitPosition: () => Effect.fail(new Error("not implemented")),
+    rebalancePosition: () => Effect.fail(new Error("not implemented")),
+    claimFees: () => Effect.fail(new Error("not implemented")),
+    claimRewards: () => Effect.fail(new Error("not implemented")),
     discoverPools: () => Effect.succeed([]),
 
     reportFeeCollection(event: FeeCollectionEvent) {

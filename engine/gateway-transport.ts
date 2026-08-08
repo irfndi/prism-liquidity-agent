@@ -112,7 +112,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
     this.eventHandler?.(event);
   }
 
-  isAvailable(): Effect.Effect<boolean, unknown> {
+  isAvailable(): Effect.Effect<boolean, Error> {
     return Effect.callback((resume) => {
       let ws: WebSocket | null = null;
       let settled = false;
@@ -177,7 +177,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
     });
   }
 
-  connect(): Effect.Effect<void, unknown> {
+  connect(): Effect.Effect<void, Error> {
     return Effect.tryPromise({
       try: async () => {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
@@ -196,7 +196,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
     });
   }
 
-  disconnect(): Effect.Effect<void, unknown> {
+  disconnect(): Effect.Effect<void, Error> {
     return Effect.sync(() => {
       this.rejectAll(new Error("Gateway disconnected"));
       if (!this.ws) return;
@@ -213,7 +213,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
     prompt: string,
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
-  ): Effect.Effect<AgentRuntimeResponse, unknown> {
+  ): Effect.Effect<AgentRuntimeResponse, Error> {
     return Effect.gen({ self: this }, function* () {
       yield* this.connect();
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
@@ -231,7 +231,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
     });
   }
 
-  sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, unknown> {
+  sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, Error> {
     return Effect.gen({ self: this }, function* () {
       yield* this.connect();
       const text = `Prism check-in (${checkin.trigger}) @ ${new Date(checkin.timestamp).toISOString()}\n${stringifySafe(checkin, 2)}`;

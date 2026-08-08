@@ -41,7 +41,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
     this.eventHandler?.(event);
   }
 
-  isAvailable(): Effect.Effect<boolean, unknown> {
+  isAvailable(): Effect.Effect<boolean, Error> {
     return Effect.gen({ self: this }, function* () {
       const response = yield* Effect.tryPromise(async () => {
         const controller = new AbortController();
@@ -61,12 +61,12 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
     });
   }
 
-  connect(): Effect.Effect<void, unknown> {
+  connect(): Effect.Effect<void, Error> {
     this.emit({ type: "connected", transport: this.name });
     return Effect.void;
   }
 
-  disconnect(): Effect.Effect<void, unknown> {
+  disconnect(): Effect.Effect<void, Error> {
     this.emit({ type: "disconnected", transport: this.name });
     return Effect.void;
   }
@@ -75,7 +75,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
     prompt: string,
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
-  ): Effect.Effect<AgentRuntimeResponse, unknown> {
+  ): Effect.Effect<AgentRuntimeResponse, Error> {
     return Effect.gen({ self: this }, function* () {
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
       const startedAt = Date.now();
@@ -98,7 +98,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
     });
   }
 
-  sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, unknown> {
+  sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, Error> {
     return this.post({ ...checkin, source: "prism" }).pipe(
       Effect.tap(() => Effect.sync(() => logger.debug("Check-in delivered"))),
       Effect.catch((err) => {
@@ -108,7 +108,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
     );
   }
 
-  sendAlert(alert: AgentRuntimeAlert): Effect.Effect<void, unknown> {
+  sendAlert(alert: AgentRuntimeAlert): Effect.Effect<void, Error> {
     return this.post({ ...alert, source: "prism" }).pipe(
       Effect.tap(() => Effect.sync(() => logger.debug("Alert delivered"))),
       Effect.catch((err) => {
@@ -129,26 +129,29 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
     return headers;
   }
 
-  private post(body: unknown, timeoutMs?: number): Effect.Effect<string, unknown> {
-    return Effect.tryPromise(async () => {
-      const controller = new AbortController();
-      const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
-      const timer = setTimeout(() => controller.abort(), effectiveTimeout);
-      try {
-        const response = await fetch(this.options.url, {
-          method: "POST",
-          headers: this.authHeaders(),
-          body: stringifySafe(body),
-          signal: controller.signal,
-        });
-        const text = await response.text();
-        if (!response.ok) {
-          throw new Error(`Webhook returned ${response.status}: ${text}`);
+  private post(body: unknown, timeoutMs?: number): Effect.Effect<string, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const controller = new AbortController();
+        const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
+        const timer = setTimeout(() => controller.abort(), effectiveTimeout);
+        try {
+          const response = await fetch(this.options.url, {
+            method: "POST",
+            headers: this.authHeaders(),
+            body: stringifySafe(body),
+            signal: controller.signal,
+          });
+          const text = await response.text();
+          if (!response.ok) {
+            throw new Error(`Webhook returned ${response.status}: ${text}`);
+          }
+          return text;
+        } finally {
+          clearTimeout(timer);
         }
-        return text;
-      } finally {
-        clearTimeout(timer);
-      }
+      },
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
     });
   }
 }

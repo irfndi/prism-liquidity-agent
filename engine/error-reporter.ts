@@ -81,7 +81,7 @@ function readPrismApiKey(): Effect.Effect<string | null, never> {
       };
       return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
     },
-    catch: (cause) => cause,
+    catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
   }).pipe(Effect.catch(() => Effect.succeed(null)));
 }
 
@@ -288,7 +288,7 @@ export class ErrorReporter {
             body: JSON.stringify(payload),
             signal: AbortSignal.timeout(timeoutMs),
           }),
-        catch: (cause) => cause,
+        catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
       });
       if (!response.ok) {
         this.requeueBatch(batch);

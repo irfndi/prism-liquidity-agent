@@ -58,7 +58,7 @@ function swapEffect(
   outputMint: string,
   amountAtomic: bigint,
   prefetchedQuote?: Record<string, unknown>,
-): Effect.Effect<string, unknown, never> {
+): Effect.Effect<string, Error, never> {
   return Effect.gen(function* () {
     const adapter = yield* AdapterService;
     return yield* adapter.swapUSDCForToken(outputMint, amountAtomic, prefetchedQuote);
@@ -69,7 +69,7 @@ function quoteEffect(
   layer: Layer.Layer<AdapterService, never, never>,
   outputMint: string,
   amountAtomic: bigint,
-): Effect.Effect<Record<string, unknown>, unknown, never> {
+): Effect.Effect<Record<string, unknown>, Error, never> {
   return Effect.gen(function* () {
     const adapter = yield* AdapterService;
     return yield* adapter.quoteSwapUSDCForToken(outputMint, amountAtomic);
@@ -229,7 +229,7 @@ describe("AdapterService.swapUSDCForToken", () => {
     } = { quoteUrl: "", swapBody: {} };
 
     const restore = mockFetch((async (url: string | URL | Request, init?: RequestInit) => {
-      const u = url.toString();
+      const u = String(url as unknown);
       if (u.includes("/swap/v1/quote")) {
         captured.quoteUrl = u;
         return new Response(
@@ -301,7 +301,7 @@ describe("AdapterService.swapUSDCForToken", () => {
 
   it("fails when Jupiter quote request returns non-OK", async () => {
     const restore = mockFetch((async (url: string | URL | Request) => {
-      const u = url.toString();
+      const u = String(url as unknown);
       if (u.includes("/swap/v1/quote")) {
         return new Response("quote error", { status: 502 });
       }
@@ -317,7 +317,7 @@ describe("AdapterService.swapUSDCForToken", () => {
 
   it("fails when Jupiter swap build request returns non-OK", async () => {
     const restore = mockFetch((async (url: string | URL | Request) => {
-      const u = url.toString();
+      const u = String(url as unknown);
       if (u.includes("/swap/v1/quote")) {
         return new Response(
           JSON.stringify(
@@ -341,7 +341,7 @@ describe("AdapterService.swapUSDCForToken", () => {
 
   it("fails when swap response is missing swapTransaction", async () => {
     const restore = mockFetch((async (url: string | URL | Request) => {
-      const u = url.toString();
+      const u = String(url as unknown);
       if (u.includes("/swap/v1/quote")) {
         return new Response(
           JSON.stringify(
@@ -370,7 +370,7 @@ describe("AdapterService.swapUSDCForToken", () => {
 
   it("fails when Jupiter quote returns an empty route without building a swap", async () => {
     const fetchImpl = vi.fn((async (url: string | URL | Request) => {
-      const u = url.toString();
+      const u = String(url as unknown);
       if (u.includes("/swap/v1/quote")) {
         return new Response(
           JSON.stringify(
@@ -393,7 +393,7 @@ describe("AdapterService.swapUSDCForToken", () => {
         "Jupiter quote returned no usable route",
       );
       expect(fetchImpl).toHaveBeenCalledTimes(1);
-      expect(fetchImpl.mock.calls[0]?.[0]?.toString()).toContain("/swap/v1/quote");
+      expect(String(fetchImpl.mock.calls[0]?.[0] as unknown)).toContain("/swap/v1/quote");
     } finally {
       restore();
     }
@@ -485,7 +485,7 @@ describe("AdapterService generic Jupiter swaps", () => {
       swapBody: {},
     };
     const restore = mockFetch(async (url: string | URL | Request, init?: RequestInit) => {
-      const requestUrl = url.toString();
+      const requestUrl = String(url as unknown);
       if (requestUrl.includes("/swap/v1/quote")) {
         captured.quoteUrl = requestUrl;
         return new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)));
@@ -528,7 +528,7 @@ describe("AdapterService generic Jupiter swaps", () => {
       "base64",
     );
     const restore = mockFetch(async (url: string | URL | Request) =>
-      url.toString().includes("/swap/v1/quote")
+      String(url as unknown).includes("/swap/v1/quote")
         ? new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)))
         : new Response(JSON.stringify({ swapTransaction: transactionBase64 })),
     );
@@ -577,7 +577,7 @@ describe("AdapterService generic Jupiter swaps", () => {
     const outputMint = Keypair.generate().publicKey.toBase58();
     const amountAtomic = 1_000_000n;
     const fetchSpy = vi.fn(async (url: string | URL | Request) => {
-      if (url.toString().includes("/swap/v1/quote")) {
+      if (String(url as unknown).includes("/swap/v1/quote")) {
         return new Response(
           JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic, scenario.quoteOverrides)),
         );
@@ -616,7 +616,7 @@ describe("AdapterService generic Jupiter swaps", () => {
     const outputMint = Keypair.generate().publicKey.toBase58();
     const amountAtomic = 1_000_000n;
     const restore = mockFetch(async (url: string | URL | Request) => {
-      if (url.toString().includes("/swap/v1/quote")) {
+      if (String(url as unknown).includes("/swap/v1/quote")) {
         return new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)));
       }
       return new Response(JSON.stringify({ swapTransaction: "not-base64!!" }));
@@ -747,7 +747,7 @@ describe("AdapterService generic Jupiter swaps", () => {
       "base64",
     );
     const restore = mockFetch(async (url: string | URL | Request) =>
-      url.toString().includes("/swap/v1/quote")
+      String(url as unknown).includes("/swap/v1/quote")
         ? new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)))
         : new Response(JSON.stringify({ swapTransaction: transactionBase64 })),
     );
@@ -790,7 +790,7 @@ describe("AdapterService generic Jupiter swaps", () => {
       "base64",
     );
     const restore = mockFetch(async (url: string | URL | Request) =>
-      url.toString().includes("/swap/v1/quote")
+      String(url as unknown).includes("/swap/v1/quote")
         ? new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)))
         : new Response(JSON.stringify({ swapTransaction: transactionBase64 })),
     );
@@ -837,7 +837,7 @@ describe("AdapterService generic Jupiter swaps", () => {
     const outputMint = Keypair.generate().publicKey.toBase58();
     const amountAtomic = 1_000_000n;
     const fetchImpl = vi.fn(async (url: string | URL | Request) =>
-      url.toString().includes("/swap/v1/quote")
+      String(url as unknown).includes("/swap/v1/quote")
         ? new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)))
         : new Response("unexpected", { status: 500 }),
     );
@@ -863,7 +863,7 @@ describe("AdapterService generic Jupiter swaps", () => {
                 outputMint: string,
                 amountAtomic: bigint,
                 quoteData?: Record<string, unknown>,
-              ) => Effect.Effect<string, unknown>;
+              ) => Effect.Effect<string, Error>;
             }
           ).swapToken;
           if (!swapToken) return yield* Effect.fail(new Error("swapToken unavailable"));
@@ -889,7 +889,7 @@ describe("AdapterService generic Jupiter swaps", () => {
     const outputMint = Keypair.generate().publicKey.toBase58();
     const amountAtomic = 1_000_000n;
     const fetchImpl = vi.fn(async (url: string | URL | Request) =>
-      url.toString().includes("/swap/v1/quote")
+      String(url as unknown).includes("/swap/v1/quote")
         ? new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)))
         : new Response("unexpected", { status: 500 }),
     );
@@ -915,7 +915,7 @@ describe("AdapterService generic Jupiter swaps", () => {
                 outputMint: string,
                 amountAtomic: bigint,
                 quoteData?: Record<string, unknown>,
-              ) => Effect.Effect<string, unknown>;
+              ) => Effect.Effect<string, Error>;
             }
           ).swapToken;
           if (!swapToken) return yield* Effect.fail(new Error("swapToken unavailable"));
@@ -941,7 +941,7 @@ describe("AdapterService generic Jupiter swaps", () => {
     const outputMint = Keypair.generate().publicKey.toBase58();
     const amountAtomic = 1_000_000n;
     const fetchImpl = vi.fn(async (url: string | URL | Request) =>
-      url.toString().includes("/swap/v1/quote")
+      String(url as unknown).includes("/swap/v1/quote")
         ? new Response(JSON.stringify(jupiterQuote(SOL_MINT, outputMint, amountAtomic)))
         : new Response("unexpected", { status: 500 }),
     );
@@ -967,7 +967,7 @@ describe("AdapterService generic Jupiter swaps", () => {
                 outputMint: string,
                 amountAtomic: bigint,
                 quoteData?: Record<string, unknown>,
-              ) => Effect.Effect<string, unknown>;
+              ) => Effect.Effect<string, Error>;
             }
           ).swapToken;
           if (!swapToken) return yield* Effect.fail(new Error("swapToken unavailable"));

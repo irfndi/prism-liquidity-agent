@@ -48,7 +48,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
     this.eventHandler?.(event);
   }
 
-  isAvailable(): Effect.Effect<boolean, unknown> {
+  isAvailable(): Effect.Effect<boolean, Error> {
     return Effect.gen({ self: this }, function* () {
       const response = yield* Effect.tryPromise(async () => {
         const controller = new AbortController();
@@ -68,12 +68,12 @@ export class HermesApiTransport implements AgentRuntimeTransport {
     });
   }
 
-  connect(): Effect.Effect<void, unknown> {
+  connect(): Effect.Effect<void, Error> {
     this.emit({ type: "connected", transport: this.name });
     return Effect.void;
   }
 
-  disconnect(): Effect.Effect<void, unknown> {
+  disconnect(): Effect.Effect<void, Error> {
     this.emit({ type: "disconnected", transport: this.name });
     return Effect.void;
   }
@@ -82,7 +82,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
     prompt: string,
     ctx: AgentRuntimeContext,
     timeoutMs?: number,
-  ): Effect.Effect<AgentRuntimeResponse, unknown> {
+  ): Effect.Effect<AgentRuntimeResponse, Error> {
     return Effect.gen({ self: this }, function* () {
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
       const startedAt = Date.now();
@@ -95,7 +95,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
     });
   }
 
-  sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, unknown> {
+  sendCheckin(checkin: AgentRuntimeCheckin): Effect.Effect<void, Error> {
     const content = `Prism check-in (${checkin.trigger}):\n\n${stringifySafe(checkin, 2)}`;
     return this.chatCompletion(content).pipe(
       Effect.tap(() => Effect.sync(() => logger.debug("Check-in delivered"))),
@@ -106,7 +106,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
     );
   }
 
-  sendAlert(alert: AgentRuntimeAlert): Effect.Effect<void, unknown> {
+  sendAlert(alert: AgentRuntimeAlert): Effect.Effect<void, Error> {
     const content = `Prism alert [${alert.severity}/${alert.category}] ${alert.tokenPair} (${alert.pool}): ${alert.message}`;
     return this.chatCompletion(content).pipe(
       Effect.tap(() => Effect.sync(() => logger.debug("Alert delivered"))),
@@ -131,30 +131,33 @@ export class HermesApiTransport implements AgentRuntimeTransport {
     return headers;
   }
 
-  private chatCompletion(content: string, timeoutMs?: number): Effect.Effect<string, unknown> {
-    return Effect.tryPromise(async () => {
-      const controller = new AbortController();
-      const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
-      const timer = setTimeout(() => controller.abort(), effectiveTimeout);
-      try {
-        const response = await fetch(this.apiUrl("v1/chat/completions"), {
-          method: "POST",
-          headers: this.authHeaders(),
-          body: stringifySafe({
-            model: HERMES_MODEL,
-            messages: [{ role: "user", content }],
-            stream: false,
-          }),
-          signal: controller.signal,
-        });
-        const text = await response.text();
-        if (!response.ok) {
-          throw new Error(`Hermes API returned ${response.status}: ${text}`);
+  private chatCompletion(content: string, timeoutMs?: number): Effect.Effect<string, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const controller = new AbortController();
+        const effectiveTimeout = timeoutMs ?? this.options.timeoutMs;
+        const timer = setTimeout(() => controller.abort(), effectiveTimeout);
+        try {
+          const response = await fetch(this.apiUrl("v1/chat/completions"), {
+            method: "POST",
+            headers: this.authHeaders(),
+            body: stringifySafe({
+              model: HERMES_MODEL,
+              messages: [{ role: "user", content }],
+              stream: false,
+            }),
+            signal: controller.signal,
+          });
+          const text = await response.text();
+          if (!response.ok) {
+            throw new Error(`Hermes API returned ${response.status}: ${text}`);
+          }
+          return parseChatContent(text);
+        } finally {
+          clearTimeout(timer);
         }
-        return parseChatContent(text);
-      } finally {
-        clearTimeout(timer);
-      }
+      },
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
     });
   }
 }
