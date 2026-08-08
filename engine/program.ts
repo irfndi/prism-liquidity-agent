@@ -7680,5 +7680,5 @@ export const program = Effect.gen(function* () {
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
   process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
-  yield* Fiber.join(schedulerFiber);
+  return yield* Fiber.join(schedulerFiber);
 });
