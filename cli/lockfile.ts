@@ -104,14 +104,15 @@ export function findRunningEngineProcess(
         args.includes("run dev") ||
         args.includes("cli/dev.ts") ||
         // Bundled/source CLI dev process (e.g. `bun /root/.prism/dist/cli/
-        // index.mjs dev` under systemd): the source-path patterns above do
-        // not match the bundle. Scoped to Prism's CLI layout — the `cli/`
-        // segment must be path-anchored (preceded by a slash or line start)
-        // so an unrelated `*-cli/` or `mycli/` directory cannot match — with
-        // a STANDALONE `dev` argument: a bare substring `dev` (dev-server,
-        // development, /devtools/) or an unrelated project's index.mjs must
-        // never false-positive the RESTART REQUIRED notice and its kill hint.
-        (/(^|\/)cli\/index\.(mjs|ts)(\s|$)/.test(args) && /(^|\s)dev($|\s)/.test(args))
+        // index.mjs dev` under systemd, or a relative `bun cli/index.ts dev`
+        // from the repo root): the source-path patterns above do not match
+        // the bundle. Scoped to Prism's CLI layout — the `cli/` segment must
+        // be preceded by a whitespace, slash, or line start (so an unrelated
+        // `*-cli/` or `mycli/` directory cannot match) — with a STANDALONE
+        // `dev` argument: a bare substring `dev` (dev-server, development,
+        // /devtools/) or an unrelated project's index.mjs must never
+        // false-positive the RESTART REQUIRED notice and its kill hint.
+        (/(^|[\s/])cli\/index\.(mjs|ts)(\s|$)/.test(args) && /(^|\s)dev($|\s)/.test(args))
       ) {
         return { pid, command: args };
       }

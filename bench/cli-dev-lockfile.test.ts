@@ -189,4 +189,19 @@ describe("cli/lockfile", () => {
     const found = findRunningEngineProcess(spawner);
     expect(found?.pid).toBe(process.pid + 1);
   });
+
+  it("findRunningEngineProcess detects a RELATIVE source-tree CLI dev run (issue #184 follow-up)", () => {
+    // ps separates the executable from its arguments with spaces: a dev run
+    // from the repo root renders as `bun cli/index.ts dev` — the cli/ segment
+    // is preceded by whitespace, not a slash, and must still match.
+    const spawner = () => ({
+      stdout: [
+        "PID ARGS",
+        `${process.pid + 1} bun cli/index.ts dev`,
+        `${process.pid + 2} bun cli/index.ts status`,
+      ].join("\n"),
+    });
+    const found = findRunningEngineProcess(spawner);
+    expect(found?.pid).toBe(process.pid + 1);
+  });
 });
