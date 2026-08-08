@@ -91,7 +91,7 @@ export function checkForAutoUpdate(config: AppConfig, db: DbApi): Effect.Effect<
           `is ${daysSinceInstall} days old (threshold: ${config.forceUpdateAfterDays} days). ` +
           `Shutting down to enforce update. Run "prism update" to apply.`,
       );
-      yield* Effect.sync(() => {
+      return yield* Effect.sync(() => {
         process.exit(1);
       });
     } else if (config.forceUpdateEnabled && daysUntilForce <= 1) {
