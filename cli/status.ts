@@ -344,34 +344,65 @@ network; with no stranded settlements it is fully offline.`,
           //   real stranded capital as worthless dust.
           const adapter = yield* AdapterService;
           const candidateMints = [...new Set(strandedCandidates.map((s) => s.tokenMint))];
-          const priceFetch = yield* adapter
-            .getTokenPrices(candidateMints)
-            .pipe(
-              Effect.map((p) => ({ ok: true as const, prices: p })),
-              Effect.catch(() => Effect.succeed({ ok: false as const, prices: {} })),
-              // A malformed mint can throw synchronously (PublicKey
-              // construction defect) inside the adapter; a display path must
-              // degrade to "unpriceable" rather than fail the whole command.
-              Effect.catchCause(() => Effect.succeed({ ok: false as const, prices: {} })),
-            );
+          // Three channels, per kilo review: a TYPED failure is a provider/RPC
+          // outage (→ Unavailable); a DEFECT is a malformed mint (→ per-mint
+          // fallback, degraded to Unpriceable); success with price 0 is a
+          // genuinely unquotable mint (→ Unpriceable). Collapsing the first
+          // two would mislabel real stranded capital during the exact outage
+          // window an operator checks status.
+          const priceFetch = yield* adapter.getTokenPrices(candidateMints).pipe(
+            Effect.map((p) => ({ tag: "ok" as const, prices: p })),
+            Effect.catch(() => Effect.succeed({ tag: "unavailable" as const })),
+            Effect.catchCause(() => Effect.succeed({ tag: "defect" as const })),
+          );
           const strandedClassification = yield* Effect.all(
             strandedCandidates.map((settlement) =>
               Effect.gen(function* () {
-                if (!priceFetch.ok) {
-                  return { settlement, kind: "unavailable" as const };
+                // Resolve the mint's price: from the batch, or per-mint
+                // fallback when the batch died on a defect — one malformed
+                // mint must not label every other candidate Unavailable.
+                let price: number;
+                let priceState: "ok" | "unavailable" | "unpriceable";
+                if (priceFetch.tag === "ok") {
+                  price = priceFetch.prices[settlement.tokenMint] ?? 0;
+                  priceState = price > 0 ? "ok" : "unpriceable";
+                } else if (priceFetch.tag === "unavailable") {
+                  price = 0;
+                  priceState = "unavailable";
+                } else {
+                  const perMint = yield* adapter.getTokenPrices([settlement.tokenMint]).pipe(
+                    Effect.map((p) => ({ tag: "ok" as const, price: p[settlement.tokenMint] ?? 0 })),
+                    Effect.catch(() => Effect.succeed({ tag: "unavailable" as const, price: 0 })),
+                    Effect.catchCause(() => Effect.succeed({ tag: "defect" as const, price: 0 })),
+                  );
+                  price = perMint.price;
+                  priceState =
+                    perMint.tag === "ok"
+                      ? perMint.price > 0
+                        ? "ok"
+                        : "unpriceable"
+                      : perMint.tag === "unavailable"
+                        ? "unavailable"
+                        : "unpriceable";
                 }
-                const price = priceFetch.prices[settlement.tokenMint] ?? 0;
+                if (priceState !== "ok") {
+                  return { settlement, kind: priceState };
+                }
+                // Same channel split for decimals: an RPC outage (typed
+                // failure) is Unavailable; a malformed-mint defect or an
+                // unresolvable decimals value is Unpriceable.
                 const decimalsResult = yield* adapter
                   .getTokenDecimals(settlement.tokenMint)
                   .pipe(
-                    Effect.map((decimals) => ({ ok: true as const, decimals })),
-                    Effect.catch(() => Effect.succeed({ ok: false as const, decimals: 0 })),
-                    Effect.catchCause(() =>
-                      Effect.succeed({ ok: false as const, decimals: 0 }),
-                    ),
+                    Effect.map((decimals) => ({ tag: "ok" as const, decimals })),
+                    Effect.catch(() => Effect.succeed({ tag: "unavailable" as const, decimals: 0 })),
+                    Effect.catchCause(() => Effect.succeed({ tag: "defect" as const, decimals: 0 })),
                   );
-                if (price <= 0 || !decimalsResult.ok || decimalsResult.decimals <= 0) {
-                  return { settlement, kind: "unpriceable" as const };
+                if (decimalsResult.tag !== "ok" || decimalsResult.decimals <= 0) {
+                  return {
+                    settlement,
+                    kind: decimalsResult.tag === "unavailable" ? "unavailable" : "unpriceable",
+                  };
                 }
                 const amountNum = Number(settlement.amountAtomic);
                 if (!Number.isFinite(amountNum)) {
