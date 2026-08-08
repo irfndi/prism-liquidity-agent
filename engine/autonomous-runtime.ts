@@ -212,6 +212,49 @@ export function oldestActiveSettlementAgeMs(
     .reduce((oldest, job) => Math.max(oldest, now - job.createdAt), 0);
 }
 
+export type SettlementOverduePauseAction =
+  | { readonly kind: "arm" }
+  | { readonly kind: "resolve" }
+  | { readonly kind: "none" };
+
+export interface SettlementOverduePauseInput {
+  /** Oldest STUCK settlement age (oldestActiveSettlementAgeMs). */
+  readonly oldestStuckAgeMs: number;
+  readonly settlementMaxPendingMs: number;
+  /** Reason of the current pause row (SafetyPauseRecord.reason), or null when no pause exists. */
+  readonly activePauseReason: string | null;
+  /** True when no pause row exists or the existing one is resolved. */
+  readonly activePauseResolved: boolean;
+}
+
+/**
+ * Issue #166/#196: the cycle-level arm/resolve decision for the
+ * `settlement_overdue` safety pause, extracted pure for unit coverage.
+ *
+ * - ARM when a genuinely stuck job (no scheduled retry) is older than the
+ *   max-pending window and no ACTIVE pause exists.
+ * - RESOLVE when the active `settlement_overdue` pause's trigger condition is
+ *   gone (no stuck job remains) — mid-run recovery, not just restart.
+ * - NONE otherwise; in particular a still-latched settlement_overdue pause
+ *   with a stuck job stays latched, and other pause reasons are handled by
+ *   their own paths.
+ */
+export function settlementOverduePauseAction(
+  input: SettlementOverduePauseInput,
+): SettlementOverduePauseAction {
+  if (input.oldestStuckAgeMs > input.settlementMaxPendingMs && input.activePauseResolved) {
+    return { kind: "arm" };
+  }
+  if (
+    input.activePauseReason === "settlement_overdue" &&
+    !input.activePauseResolved &&
+    input.oldestStuckAgeMs <= input.settlementMaxPendingMs
+  ) {
+    return { kind: "resolve" };
+  }
+  return { kind: "none" };
+}
+
 export interface SettlementProcessorInput {
   readonly adapter: AdapterApi;
   readonly db: DbApi;

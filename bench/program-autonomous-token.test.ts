@@ -6,6 +6,7 @@ import {
   loadDailyEquityBaseline,
   nextSettlementRetryAt,
   oldestActiveSettlementAgeMs,
+  settlementOverduePauseAction,
   persistDailyEquityBaseline,
   processSettlementJobs,
   safetyPauseBlockReason,
@@ -396,6 +397,77 @@ describe("autonomous token runtime policy", () => {
     // added quote pressure.
     expect(nextSettlementRetryAt(1_000, 20)).toBe(1_801_000);
     expect(nextSettlementRetryAt(1_000, 40)).toBe(1_801_000);
+  });
+
+  it("arm/resolves settlement_overdue per the cycle decision table (issue #166/#196)", () => {
+    const maxPending = 3_600_000;
+    // ARM: a genuinely stuck job (no scheduled retry) older than the window,
+    // with no active pause.
+    expect(
+      settlementOverduePauseAction({
+        oldestStuckAgeMs: maxPending + 1,
+        settlementMaxPendingMs: maxPending,
+        activePauseReason: null,
+        activePauseResolved: true,
+      }),
+    ).toEqual({ kind: "arm" });
+    // ARM: a resolved prior pause is re-armable on a fresh breach.
+    expect(
+      settlementOverduePauseAction({
+        oldestStuckAgeMs: maxPending + 1,
+        settlementMaxPendingMs: maxPending,
+        activePauseReason: "settlement_overdue",
+        activePauseResolved: true,
+      }),
+    ).toEqual({ kind: "arm" });
+    // No arm while the pause is ALREADY active (latched — stays latched).
+    expect(
+      settlementOverduePauseAction({
+        oldestStuckAgeMs: maxPending + 1,
+        settlementMaxPendingMs: maxPending,
+        activePauseReason: "settlement_overdue",
+        activePauseResolved: false,
+      }),
+    ).toEqual({ kind: "none" });
+
+    // RESOLVE mid-run: the active settlement_overdue pause's trigger is gone
+    // (e.g. the 429 job moved to a future nextRetryAt) — the #196 regression
+    // this pins: a rate-limited job must not halt trading while it waits.
+    expect(
+      settlementOverduePauseAction({
+        oldestStuckAgeMs: 0,
+        settlementMaxPendingMs: maxPending,
+        activePauseReason: "settlement_overdue",
+        activePauseResolved: false,
+      }),
+    ).toEqual({ kind: "resolve" });
+    // No resolve for other pause reasons (their own paths handle them).
+    expect(
+      settlementOverduePauseAction({
+        oldestStuckAgeMs: 0,
+        settlementMaxPendingMs: maxPending,
+        activePauseReason: "execution_failures",
+        activePauseResolved: false,
+      }),
+    ).toEqual({ kind: "none" });
+    // STAYS LATCHED while a stuck job remains (null/past nextRetryAt).
+    expect(
+      settlementOverduePauseAction({
+        oldestStuckAgeMs: maxPending + 1,
+        settlementMaxPendingMs: maxPending,
+        activePauseReason: "settlement_overdue",
+        activePauseResolved: false,
+      }),
+    ).toEqual({ kind: "none" });
+    // NONE with no pause and nothing stuck.
+    expect(
+      settlementOverduePauseAction({
+        oldestStuckAgeMs: 0,
+        settlementMaxPendingMs: maxPending,
+        activePauseReason: null,
+        activePauseResolved: true,
+      }),
+    ).toEqual({ kind: "none" });
   });
 
   it("excludes retryable jobs with a future nextRetryAt from the overdue age (issue #196)", () => {

@@ -155,6 +155,7 @@ import {
   persistDailyEquityBaseline,
   processSettlementJobs,
   safetyPauseBlockReason,
+  settlementOverduePauseAction,
   shouldAutoResolveDailyDrawdownPause,
   shouldAutoResolveExecutionFailuresPause,
   decayExecutionFailureCounter,
@@ -4012,11 +4013,19 @@ export const program = Effect.gen(function* () {
           maxSwapSlippageBps: config.maxSwapSlippageBps,
           settlementDustUsd: autonomousExecution.settlementDustUsd,
         });
-        oldestSettlementAgeMs = oldestActiveSettlementAgeMs(processedJobs, Date.now());
-        if (
-          oldestSettlementAgeMs > config.settlementMaxPendingMs &&
-          activeSafetyPause?.resolvedAt !== null
-        ) {
+        // Issue #196 (clock skew): evaluate the overdue age against the SAME
+        // clock the retry scheduling used (settlementNow, captured before the
+        // sweep/processing pass) — a retry stamped this cycle (1s/2s/4s
+        // backoff for early attempts) must never read as already-past against
+        // a fresher Date.now() and classify a freshly backed-off job as stuck.
+        oldestSettlementAgeMs = oldestActiveSettlementAgeMs(processedJobs, settlementNow);
+        const pauseAction = settlementOverduePauseAction({
+          oldestStuckAgeMs: oldestSettlementAgeMs,
+          settlementMaxPendingMs: config.settlementMaxPendingMs,
+          activePauseReason: activeSafetyPause?.reason ?? null,
+          activePauseResolved: activeSafetyPause === null || activeSafetyPause.resolvedAt !== null,
+        });
+        if (pauseAction.kind === "arm") {
           activeSafetyPause = {
             walletAddress: autonomousExecution.walletAddress,
             agentInstanceId: autonomousExecution.agentInstanceId,
@@ -4025,11 +4034,7 @@ export const program = Effect.gen(function* () {
             resolvedAt: null,
           };
           yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
-        } else if (
-          activeSafetyPause?.resolvedAt === null &&
-          activeSafetyPause.reason === "settlement_overdue" &&
-          oldestSettlementAgeMs <= config.settlementMaxPendingMs
-        ) {
+        } else if (pauseAction.kind === "resolve" && activeSafetyPause !== null) {
           // Issue #166/#196: a settlement_overdue pause must not outlive the
           // settlements that raised it. #166: once nothing is in flight (429
           // retries finally sold the token, or the orphan sweep recovered
