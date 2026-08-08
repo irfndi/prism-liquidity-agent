@@ -56,7 +56,10 @@ export function shouldTriggerSafetyPause(
     return "daily_drawdown";
   }
   if (input.consecutiveCoreDataFailures >= 2) return "core_data_unavailable";
-  if (input.consecutiveExecutionFailures >= input.maxConsecutiveExecutionFailures) {
+  if (
+    input.maxConsecutiveExecutionFailures > 0 &&
+    input.consecutiveExecutionFailures >= input.maxConsecutiveExecutionFailures
+  ) {
     return "execution_failures";
   }
   if (input.oldestSettlementAgeMs > input.settlementMaxPendingMs) {
@@ -76,6 +79,8 @@ export interface ExecutionFailuresAutoResolveInput {
   readonly mode: AutonomousTokenMode;
   readonly consecutiveExecutionFailures: number;
   readonly maxConsecutiveExecutionFailures: number;
+  /** Execution failures recorded in the CURRENT scan cycle (0 = quiet cycle). */
+  readonly executionFailuresThisCycle: number;
 }
 
 /**
@@ -89,11 +94,15 @@ export interface ExecutionFailuresAutoResolveInput {
  *
  * - `shadow` — informational only: the pause never blocks and never requires
  *   a manual resume, so always auto-resolve.
- * - `canary` / `live` — re-evaluate fresh every cycle: auto-resolve as soon
- *   as the current failure counter is below the configured threshold (a
- *   fresh process starts at 0, so a restart alone clears the latch). The
- *   trigger block re-arms the pause only when the counter genuinely
- *   breaches again.
+ * - `canary` / `live` — re-evaluate fresh every cycle: auto-resolve when the
+ *   current failure counter is below the configured threshold (a fresh
+ *   process starts at 0, so a restart alone clears the latch) OR when the
+ *   current cycle recorded no execution failures at all (the spike passed).
+ *   The latter is required for mid-run recovery: while the pause is active,
+ *   ENTER/REBALANCE are blocked, so the counter cannot drop back below the
+ *   threshold on its own — without the quiet-cycle clause only a restart or
+ *   an allowed EXIT could clear the latch. The trigger block re-arms the
+ *   pause only when a cycle genuinely breaches again.
  *
  * A non-positive threshold means the breaker is off, so a leftover pause from
  * when it was enabled should not latch either.
@@ -110,9 +119,12 @@ export function shouldAutoResolveExecutionFailuresPause(
     case "canary":
     case "live":
     case "off":
-      return input.consecutiveExecutionFailures < input.maxConsecutiveExecutionFailures;
+      return (
+        input.consecutiveExecutionFailures < input.maxConsecutiveExecutionFailures ||
+        input.executionFailuresThisCycle === 0
+      );
     default:
-      throw new Error(`Unhandled autonomous token mode: ${input.mode}`);
+      throw new Error(`Unhandled autonomous token mode: ${String(input.mode)}`);
   }
 }
 

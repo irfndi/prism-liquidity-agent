@@ -260,6 +260,7 @@ describe("autonomous token runtime policy", () => {
         mode: "live",
         consecutiveExecutionFailures: 99,
         maxConsecutiveExecutionFailures: 0,
+        executionFailuresThisCycle: 99,
       }),
     ).toBe(true);
 
@@ -269,6 +270,7 @@ describe("autonomous token runtime policy", () => {
         mode: "shadow",
         consecutiveExecutionFailures: 99,
         maxConsecutiveExecutionFailures: 3,
+        executionFailuresThisCycle: 99,
       }),
     ).toBe(true);
 
@@ -278,6 +280,7 @@ describe("autonomous token runtime policy", () => {
         mode: "live",
         consecutiveExecutionFailures: 0,
         maxConsecutiveExecutionFailures: 3,
+        executionFailuresThisCycle: 0,
       }),
     ).toBe(true);
 
@@ -287,6 +290,7 @@ describe("autonomous token runtime policy", () => {
         mode: "canary",
         consecutiveExecutionFailures: 2,
         maxConsecutiveExecutionFailures: 3,
+        executionFailuresThisCycle: 0,
       }),
     ).toBe(true);
     expect(
@@ -294,6 +298,20 @@ describe("autonomous token runtime policy", () => {
         mode: "live",
         consecutiveExecutionFailures: 2,
         maxConsecutiveExecutionFailures: 3,
+        executionFailuresThisCycle: 0,
+      }),
+    ).toBe(true);
+
+    // A QUIET cycle clears the latch even while the counter still sits at the
+    // breach level — during the pause ENTER/REBALANCE are blocked, so the
+    // counter cannot decay on its own; the absence of NEW failures is the
+    // mid-run recovery signal (issue #182 follow-up).
+    expect(
+      shouldAutoResolveExecutionFailuresPause({
+        mode: "live",
+        consecutiveExecutionFailures: 3,
+        maxConsecutiveExecutionFailures: 3,
+        executionFailuresThisCycle: 0,
       }),
     ).toBe(true);
 
@@ -303,6 +321,7 @@ describe("autonomous token runtime policy", () => {
         mode: "live",
         consecutiveExecutionFailures: 3,
         maxConsecutiveExecutionFailures: 3,
+        executionFailuresThisCycle: 3,
       }),
     ).toBe(false);
     expect(
@@ -310,6 +329,7 @@ describe("autonomous token runtime policy", () => {
         mode: "canary",
         consecutiveExecutionFailures: 4,
         maxConsecutiveExecutionFailures: 3,
+        executionFailuresThisCycle: 4,
       }),
     ).toBe(false);
   });
