@@ -31,6 +31,7 @@ import {
 } from "../engine/update-utils.js";
 import { Effect } from "effect";
 import { createLogger } from "../engine/logger.js";
+import { findRunningEngineProcess, isProcessAlive, readLockfile } from "./lockfile.js";
 
 if (typeof Bun === "undefined") {
   console.error("The prism update command requires the Bun runtime.");
@@ -718,6 +719,33 @@ export const updateCommand = new Command("update")
 
       logger.info(`Updated to ${latest} from ${release.source}`);
       console.log(`✓ Updated to ${latest}`);
+
+      // Issue #184: `prism update` replaces the bundle on disk, but the
+      // running agent keeps executing the OLD build in memory — there is no
+      // restart logic, and the success output used to give no hint that the
+      // fix is not live yet (an operator watching a broken release believed
+      // the update fixed it while the old code kept running for hours).
+      // Detect the running agent (dev lockfile or process scan) and surface
+      // a prominent restart-required notice; exit non-zero (2, distinct from
+      // update-failure's 1) so scripts/cron can tell "updated, restart
+      // needed" apart from "update failed".
+      const lock = readLockfile();
+      const runningEngine = findRunningEngineProcess();
+      const runningPid =
+        (lock !== null && isProcessAlive(lock.pid) ? lock.pid : null) ??
+        runningEngine?.pid ??
+        null;
+      if (runningPid !== null) {
+        console.log("");
+        console.log(
+          `RESTART REQUIRED — the running Prism agent (PID ${runningPid}) is still executing the OLD build.`,
+        );
+        console.log("  The new version is installed, verified, and will go live on the next restart.");
+        console.log("  Restart it with:");
+        console.log("    systemctl --user restart prism-agent.service   (systemd user service)");
+        console.log(`    kill ${runningPid} && prism dev                 (manual/foreground run)`);
+        process.exitCode = 2;
+      }
 
       // Reset version install timestamp for force-update tracking
       try {

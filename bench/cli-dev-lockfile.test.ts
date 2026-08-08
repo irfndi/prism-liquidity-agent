@@ -2,7 +2,13 @@ import { describe, it, expect, afterEach } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { acquireLock, releaseLock, isProcessAlive, readLockfile } from "../cli/lockfile.js";
+import {
+  acquireLock,
+  releaseLock,
+  isProcessAlive,
+  readLockfile,
+  findRunningEngineProcess,
+} from "../cli/lockfile.js";
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "prism-lockfile-"));
@@ -111,5 +117,32 @@ describe("cli/lockfile", () => {
 
   it("isProcessAlive returns false for impossible PID", () => {
     expect(isProcessAlive(99999999)).toBe(false);
+  });
+
+  it("findRunningEngineProcess detects the bundled CLI dev process (issue #184)", () => {
+    // Given a ps snapshot where the agent runs from the release bundle
+    // (`bun /root/.prism/dist/cli/index.mjs dev` — the systemd pattern), the
+    // source-path matchers alone miss it.
+    const spawner = () => ({
+      stdout: [
+        `${process.pid} some-unrelated-command`,
+        `${process.pid + 1} bun /root/.prism/dist/cli/index.mjs dev`,
+        `${process.pid + 2} bun install`,
+      ].join("\n"),
+    });
+    const found = findRunningEngineProcess(spawner);
+    expect(found).toEqual({ pid: process.pid + 1, command: `bun /root/.prism/dist/cli/index.mjs dev` });
+  });
+
+  it("findRunningEngineProcess ignores index.mjs runs without a dev argument", () => {
+    // Given a ps snapshot with a plain bundled entry (e.g. the Docker image
+    // runs `bun dist/index.mjs`) and an unrelated script.
+    const spawner = () => ({
+      stdout: [
+        `${process.pid + 1} bun /root/.prism/dist/index.mjs`,
+        `${process.pid + 2} bun tools/index.mjs build`,
+      ].join("\n"),
+    });
+    expect(findRunningEngineProcess(spawner)).toBeNull();
   });
 });

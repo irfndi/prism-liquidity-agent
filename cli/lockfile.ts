@@ -102,7 +102,11 @@ export function findRunningEngineProcess(
       if (
         args.includes("engine/index.ts") ||
         args.includes("run dev") ||
-        args.includes("cli/dev.ts")
+        args.includes("cli/dev.ts") ||
+        // Bundled CLI dev process (e.g. `bun /root/.prism/dist/cli/index.mjs
+        // dev` under systemd): the source-path patterns above do not match
+        // the bundle, so match any `index.mjs` run with a `dev` argument.
+        (args.includes("index.mjs") && args.includes("dev"))
       ) {
         return { pid, command: args };
       }
