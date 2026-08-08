@@ -1132,6 +1132,135 @@ describe("issue #166 settlement recovery", () => {
     expect(processed?.outputUsd).toBe(0.001);
   });
 
+  it("does not revive an unpriceable terminal settlement (issue #191)", async () => {
+    // Given a wallet holding an unpriceable token with a signature-less
+    // TERMINAL job — the pre-#191 shape: the sweep used to revive it (the
+    // dust gate required a known price), the Jupiter 400/429 retry loop
+    // restarted, and the retryable job latched settlement_overdue forever
+    // (oldestActiveSettlementAgeMs counts non-terminal jobs; #168's
+    // auto-resolve only fires once everything is confirmed/terminal).
+    const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
+      ["unpriceable-1", { amountAtomic: 1_000_000n, decimals: 6 }],
+    ]);
+    const terminalJob = settlementJob({
+      id: "terminal-1",
+      positionId: "orphan:old",
+      tokenMint: "unpriceable-1",
+      amountAtomic: "1000000",
+      status: "terminal",
+      attempts: 27,
+      nextRetryAt: null,
+      txSignature: null,
+      confirmedOutputAtomic: null,
+      expiresAt: 1_000,
+      error: "Jupiter quote failed: 400",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const adapter = {
+      hasWallet: () => true,
+      getWalletHoldings: () => Effect.succeed(holdings),
+      getPoolState: () => Effect.succeed(null),
+      getTokenPrices: () => Effect.succeed({ "unpriceable-1": 0 }),
+    } as unknown as AdapterApi;
+    const db = {
+      listSettlementJobs: () => Effect.succeed([terminalJob]),
+      getAllPositions: () => Effect.succeed([]),
+    } as unknown as DbApi;
+
+    // When
+    const jobs = await Effect.runPromise(
+      sweepOrphanSettlements({
+        adapter,
+        db,
+        walletAddress: "wallet-1",
+        agentInstanceId: "primary",
+        settlementMaxPendingMs: 3_600_000,
+        settlementDustUsd: 0.1,
+        now: 10_000,
+      }),
+    );
+
+    // Then the terminal row is NOT revived and no fresh sell job is created —
+    // the unpriceable holding is dust (value unknown ⇒ $0), so no retry loop
+    // can restart and nothing can latch settlement_overdue.
+    expect(jobs).toHaveLength(0);
+  });
+
+  it("unpriceable retryable jobs dust-confirm and cannot latch settlement_overdue (issue #191)", async () => {
+    // Given a retryable job for an unpriceable mint (the post-revival shape)
+    // that has been failing for 27h: without the dust path it would retry
+    // forever and — being non-terminal — keep settlement_overdue latched.
+    // The quote mock fails with a TRANSIENT 429 and expiresAt is far in the
+    // future on purpose: if the dust path regresses, the job stays retryable
+    // (per issue #175 a rate-limited settlement never terminalizes, even past
+    // expiry) and is older than settlementMaxPendingMs — so the latch
+    // assertions below would FAIL on the regression instead of passing
+    // vacuously via a terminalized job.
+    const job = settlementJob({
+      positionId: "rollback:entry-1",
+      tokenMint: "no-price-1",
+      status: "retryable",
+      attempts: 27,
+      nextRetryAt: 9_000,
+      expiresAt: 20_000_000,
+      createdAt: 1,
+      error: "Jupiter quote failed: 429",
+    });
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 429")),
+      prepareSwap: () => Effect.fail(new Error("unused")),
+      simulateSwap: () => Effect.fail(new Error("unused")),
+      submitSwap: () => Effect.fail(new Error("unused")),
+    } as unknown as AdapterApi;
+    const db = {
+      saveSettlementJob: () => Effect.void,
+      getPosition: () => Effect.succeed(null),
+    } as unknown as DbApi;
+
+    // When
+    const [processed] = await Effect.runPromise(
+      processSettlementJobs({
+        adapter,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+        settlementDustUsd: 0.1,
+      }),
+    );
+
+    // Then the job is dust-confirmed — no more retries...
+    expect(processed).toMatchObject({
+      status: "confirmed",
+      nextRetryAt: null,
+      error: "settlement dust skipped (no USD price)",
+    });
+    // ...and, mirroring issue #167, a confirmed job contributes nothing to the
+    // overdue age, so settlement_overdue can neither arm nor stay latched on
+    // it (and #168's all-confirmed/terminal auto-resolve can fire). The age is
+    // measured at 10_000_000 — past settlementMaxPendingMs — so a hypothetical
+    // still-retryable job (age ~9,999,999 ms) WOULD trip the pause while the
+    // dust-confirmed job still yields 0 (the assertion is discriminating).
+    const settledJobs = processed ? [processed] : [];
+    const latchNow = 10_000_000;
+    expect(oldestActiveSettlementAgeMs(settledJobs, latchNow)).toBe(0);
+    expect(
+      shouldTriggerSafetyPause({
+        dailyDrawdownPct: 0,
+        maxDailyDrawdownPct: 5,
+        consecutiveCoreDataFailures: 0,
+        consecutiveExecutionFailures: 0,
+        maxConsecutiveExecutionFailures: 3,
+        oldestSettlementAgeMs: oldestActiveSettlementAgeMs(settledJobs, latchNow),
+        settlementMaxPendingMs: 3_600_000,
+      }),
+    ).toBeNull();
+  });
+
   it("creates sell jobs only for unbacked, non-dust wallet holdings", async () => {
     // Given holdings where one mint is backed, one is below dust, one is
     // unpriceable (issue #183: treated as dust — value unknown ⇒ $0), and
