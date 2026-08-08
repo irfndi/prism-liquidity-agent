@@ -124,7 +124,9 @@ describe("cli/lockfile", () => {
     // (`bun /root/.prism/dist/cli/index.mjs dev` — the systemd pattern), the
     // source-path matchers alone miss it.
     const spawner = () => ({
+      // ps -eo pid,args prints a header line, which the matcher skips.
       stdout: [
+        "PID ARGS",
         `${process.pid} some-unrelated-command`,
         `${process.pid + 1} bun /root/.prism/dist/cli/index.mjs dev`,
         `${process.pid + 2} bun install`,
@@ -139,10 +141,38 @@ describe("cli/lockfile", () => {
     // runs `bun dist/index.mjs`) and an unrelated script.
     const spawner = () => ({
       stdout: [
+        "PID ARGS",
         `${process.pid + 1} bun /root/.prism/dist/index.mjs`,
         `${process.pid + 2} bun tools/index.mjs build`,
       ].join("\n"),
     });
     expect(findRunningEngineProcess(spawner)).toBeNull();
+  });
+
+  it("findRunningEngineProcess does not false-positive unrelated index.mjs dev runs (issue #184 review)", () => {
+    // Given an unrelated project's entry and a `dev` substring that is not a
+    // standalone argument — neither may be reported as the Prism agent.
+    const spawner = () => ({
+      stdout: [
+        "PID ARGS",
+        `${process.pid + 1} bun /home/user/other-app/dist/index.mjs dev`,
+        `${process.pid + 2} bun /srv/app/index.mjs dev-server`,
+        `${process.pid + 3} bun /opt/x/index.mjs development`,
+        `${process.pid + 4} bun /home/user/devtools/index.mjs dev`,
+      ].join("\n"),
+    });
+    expect(findRunningEngineProcess(spawner)).toBeNull();
+  });
+
+  it("findRunningEngineProcess detects a source-tree CLI dev process", () => {
+    const spawner = () => ({
+      stdout: [
+        "PID ARGS",
+        `${process.pid + 1} bun /repo/prism-liquidity-agent/cli/index.ts dev`,
+        `${process.pid + 2} bun /repo/prism-liquidity-agent/cli/index.ts status`,
+      ].join("\n"),
+    });
+    const found = findRunningEngineProcess(spawner);
+    expect(found?.pid).toBe(process.pid + 1);
   });
 });

@@ -103,10 +103,15 @@ export function findRunningEngineProcess(
         args.includes("engine/index.ts") ||
         args.includes("run dev") ||
         args.includes("cli/dev.ts") ||
-        // Bundled CLI dev process (e.g. `bun /root/.prism/dist/cli/index.mjs
-        // dev` under systemd): the source-path patterns above do not match
-        // the bundle, so match any `index.mjs` run with a `dev` argument.
-        (args.includes("index.mjs") && args.includes("dev"))
+        // Bundled/source CLI dev process (e.g. `bun /root/.prism/dist/cli/
+        // index.mjs dev` under systemd): the source-path patterns above do
+        // not match the bundle. Scoped to Prism's CLI layout (`cli/index.mjs`
+        // or `cli/index.ts`) with a STANDALONE `dev` argument — a bare
+        // substring `dev` (dev-server, development, /devtools/) or an
+        // unrelated project's index.mjs must never false-positive the
+        // RESTART REQUIRED notice and its kill hint.
+        ((args.includes("cli/index.mjs") || args.includes("cli/index.ts")) &&
+          /(^|\s)dev($|\s)/.test(args))
       ) {
         return { pid, command: args };
       }

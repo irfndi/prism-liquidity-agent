@@ -731,9 +731,13 @@ export const updateCommand = new Command("update")
       // needed" apart from "update failed".
       const lock = readLockfile();
       const runningEngine = findRunningEngineProcess();
+      // Prefer the process-scan result: it verifies the command line, so it
+      // can never name a stale-lock PID that the OS reused for an unrelated
+      // process (the lockfile is only liveness-checked). The lockfile is the
+      // fallback for `prism dev` runs the scan misses.
       const runningPid =
-        (lock !== null && isProcessAlive(lock.pid) ? lock.pid : null) ??
         runningEngine?.pid ??
+        (lock !== null && isProcessAlive(lock.pid) ? lock.pid : null) ??
         null;
       if (runningPid !== null) {
         console.log("");
