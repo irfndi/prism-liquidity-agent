@@ -524,6 +524,24 @@ network; with no stranded settlements it is fully offline.`,
             (entry) => entry.kind === "unavailable",
           );
 
+          // Issue #196: settlements progressing per policy (retryable with a
+          // scheduled nextRetryAt) no longer latch settlement_overdue — but a
+          // job past the max-pending window that is not final still deserves
+          // operator visibility, so surface it on its own line (monitor, not
+          // halt). No nextRetryAt freshness requirement: with the deliberately
+          // fast early backoff, a retry stamped at cycle start can already be
+          // in the past when status samples mid-cycle — the line must show
+          // the storm, not hide it. Oldest first so the longest-running
+          // stalls are the ones identified.
+          const staleRetryingSettlements = autonomous.settlements
+            .filter(
+              (settlement) =>
+                settlement.status !== "confirmed" &&
+                settlement.status !== "terminal" &&
+                Date.now() - settlement.createdAt > config.settlementMaxPendingMs,
+            )
+            .sort((a, b) => a.createdAt - b.createdAt);
+
           // Acceptance for issue #167: an active settlement_overdue pause
           // names the non-terminal jobs keeping it latched (oldest first).
           const latchedBySettlements = (() => {
@@ -571,6 +589,17 @@ network; with no stranded settlements it is fully offline.`,
               `  Candidates:  ${autonomous.candidates.length}`,
               `  Operations:  ${autonomous.operations.length}`,
               `  Settlements: ${autonomous.settlements.length}`,
+              ...(staleRetryingSettlements.length > 0
+                ? [
+                    `  Overdue:     ${staleRetryingSettlements.length} settlement(s) past the max-pending window and not final (${staleRetryingSettlements
+                      .slice(0, 3)
+                      .map(
+                        (settlement) =>
+                          `${settlement.id.slice(0, 8)} ${((Date.now() - settlement.createdAt) / 3_600_000).toFixed(1)}h`,
+                      )
+                      .join(", ")}) — monitor for recovery`,
+                  ]
+                : []),
               ...(strandedSettlements.length > 0
                 ? [
                     `  Stranded:    ${strandedSettlements.length} terminal settlement(s) with unspent balance (${strandedSettlements

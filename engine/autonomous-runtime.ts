@@ -179,22 +179,80 @@ export function shouldAutoResolveDailyDrawdownPause(input: DailyDrawdownAutoReso
 /** Computes the bounded retry timestamp for a settlement attempt. */
 export function nextSettlementRetryAt(now: number, attempts: number): number {
   const exponent = Math.max(0, Math.min(attempts - 1, 30));
-  return now + Math.min(2 ** exponent * 1_000, 300_000);
+  // Cap at 30 minutes (issue #196): a sustained Jupiter rate-limit ban can
+  // outlast the old 5-minute cap, so capped retries re-429ed forever AND
+  // added quote pressure to the ban. The exponential ramp still retries
+  // normal blips quickly (1s, 2s, 4s, ...); only long-running failures space
+  // out to the cap.
+  return now + Math.min(2 ** exponent * 1_000, 1_800_000);
 }
 
 /**
- * Age in ms of the oldest ACTIVE settlement job. `confirmed` and `terminal`
+ * Age in ms of the oldest STUCK settlement job. `confirmed` and `terminal`
  * are final states: a dead-end terminal job (e.g. a failed rollback) must not
  * keep the `settlement_overdue` safety pause latched forever after
- * `prism resume` (issue #167). Returns 0 when no active jobs remain.
+ * `prism resume` (issue #167). A job with a FUTURE `nextRetryAt` is also
+ * excluded (issue #196): it is progressing per policy — the engine has
+ * scheduled its retry (e.g. a rate-limited 429 backing off) — so it is not
+ * "overdue" and must not halt trading while the retry waits. Only jobs with
+ * NO scheduled retry (null or past `nextRetryAt`) are genuinely stuck.
+ * Returns 0 when no stuck jobs remain.
  */
 export function oldestActiveSettlementAgeMs(
   jobs: ReadonlyArray<SettlementJobRecord>,
   now: number,
 ): number {
   return jobs
-    .filter((job) => job.status !== "confirmed" && job.status !== "terminal")
+    .filter(
+      (job) =>
+        job.status !== "confirmed" &&
+        job.status !== "terminal" &&
+        (job.nextRetryAt === null || job.nextRetryAt <= now),
+    )
     .reduce((oldest, job) => Math.max(oldest, now - job.createdAt), 0);
+}
+
+export type SettlementOverduePauseAction =
+  | { readonly kind: "arm" }
+  | { readonly kind: "resolve" }
+  | { readonly kind: "none" };
+
+export interface SettlementOverduePauseInput {
+  /** Oldest STUCK settlement age (oldestActiveSettlementAgeMs). */
+  readonly oldestStuckAgeMs: number;
+  readonly settlementMaxPendingMs: number;
+  /** Reason of the current pause row (SafetyPauseRecord.reason), or null when no pause exists. */
+  readonly activePauseReason: string | null;
+  /** True when no pause row exists or the existing one is resolved. */
+  readonly activePauseResolved: boolean;
+}
+
+/**
+ * Issue #166/#196: the cycle-level arm/resolve decision for the
+ * `settlement_overdue` safety pause, extracted pure for unit coverage.
+ *
+ * - ARM when a genuinely stuck job (no scheduled retry) is older than the
+ *   max-pending window and no ACTIVE pause exists.
+ * - RESOLVE when the active `settlement_overdue` pause's trigger condition is
+ *   gone (no stuck job remains) — mid-run recovery, not just restart.
+ * - NONE otherwise; in particular a still-latched settlement_overdue pause
+ *   with a stuck job stays latched, and other pause reasons are handled by
+ *   their own paths.
+ */
+export function settlementOverduePauseAction(
+  input: SettlementOverduePauseInput,
+): SettlementOverduePauseAction {
+  if (input.oldestStuckAgeMs > input.settlementMaxPendingMs && input.activePauseResolved) {
+    return { kind: "arm" };
+  }
+  if (
+    input.activePauseReason === "settlement_overdue" &&
+    !input.activePauseResolved &&
+    input.oldestStuckAgeMs <= input.settlementMaxPendingMs
+  ) {
+    return { kind: "resolve" };
+  }
+  return { kind: "none" };
 }
 
 export interface SettlementProcessorInput {
@@ -690,24 +748,22 @@ export function sweepOrphanSettlements(
         backedMints.add(state.tokenY);
       }
     }
-    const prices = yield* input.adapter
-      .getTokenPrices(candidates.map(([mint]) => mint))
-      .pipe(
-        // Issue #183: a price-fetch failure must not be silent — every
-        // holding would read price 0 and be skipped as dust for the cycle
-        // (a quiet multi-cycle sweep stall is otherwise unobservable; the
-        // processor path treats the same failure as retryable).
-        Effect.catch((err) => {
-          logger.warn(
-            "Orphan sweep price fetch failed — unpriceable holdings treated as dust this cycle",
-            {
-              candidateCount: candidates.length,
-              error: err instanceof Error ? err.message : String(err),
-            },
-          );
-          return Effect.succeed<Record<string, number>>({});
-        }),
-      );
+    const prices = yield* input.adapter.getTokenPrices(candidates.map(([mint]) => mint)).pipe(
+      // Issue #183: a price-fetch failure must not be silent — every
+      // holding would read price 0 and be skipped as dust for the cycle
+      // (a quiet multi-cycle sweep stall is otherwise unobservable; the
+      // processor path treats the same failure as retryable).
+      Effect.catch((err) => {
+        logger.warn(
+          "Orphan sweep price fetch failed — unpriceable holdings treated as dust this cycle",
+          {
+            candidateCount: candidates.length,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+        return Effect.succeed<Record<string, number>>({});
+      }),
+    );
     // A terminal job for the mint is revived in place (upsert on id) rather
     // than replaced by a fresh row: attempts carry over so backoff escalates
     // across generations, and the settlements table stays one row per mint

@@ -2,6 +2,14 @@
 
 All notable changes to Prism are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- The `settlement_overdue` safety pause no longer latches on jobs that are progressing per policy: a settlement with a FUTURE `nextRetryAt` (e.g. a rate-limited 429 backing off) is excluded from the overdue-age computation, and the pause auto-resolves as soon as no genuinely stuck job remains (a job with NO scheduled retry, like the operator-reconciliation state, still latches). A sustained Jupiter rate limit can no longer halt the whole agent while the scheduled retry waits. `prism status` gains an `Overdue:` line listing settlements past the max-pending window that are not final, so prolonged rate-limit stalls stay operator-visible without halting trading (#196)
+- Settlement retry backoff caps at 30 minutes instead of 5: a sustained rate-limit ban outlasted the old cap, so capped retries re-429ed forever and added quote pressure to the ban; the exponential ramp still retries normal blips quickly (#196)
+
+
 ## [0.1.11] — 2026-08-08
 
 ### Added

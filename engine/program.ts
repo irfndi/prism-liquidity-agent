@@ -155,6 +155,7 @@ import {
   persistDailyEquityBaseline,
   processSettlementJobs,
   safetyPauseBlockReason,
+  settlementOverduePauseAction,
   shouldAutoResolveDailyDrawdownPause,
   shouldAutoResolveExecutionFailuresPause,
   decayExecutionFailureCounter,
@@ -4012,11 +4013,19 @@ export const program = Effect.gen(function* () {
           maxSwapSlippageBps: config.maxSwapSlippageBps,
           settlementDustUsd: autonomousExecution.settlementDustUsd,
         });
-        oldestSettlementAgeMs = oldestActiveSettlementAgeMs(processedJobs, Date.now());
-        if (
-          oldestSettlementAgeMs > config.settlementMaxPendingMs &&
-          activeSafetyPause?.resolvedAt !== null
-        ) {
+        // Issue #196 (clock skew): evaluate the overdue age against the SAME
+        // clock the retry scheduling used (settlementNow, captured before the
+        // sweep/processing pass) — a retry stamped this cycle (1s/2s/4s
+        // backoff for early attempts) must never read as already-past against
+        // a fresher Date.now() and classify a freshly backed-off job as stuck.
+        oldestSettlementAgeMs = oldestActiveSettlementAgeMs(processedJobs, settlementNow);
+        const pauseAction = settlementOverduePauseAction({
+          oldestStuckAgeMs: oldestSettlementAgeMs,
+          settlementMaxPendingMs: config.settlementMaxPendingMs,
+          activePauseReason: activeSafetyPause?.reason ?? null,
+          activePauseResolved: activeSafetyPause === null || activeSafetyPause.resolvedAt !== null,
+        });
+        if (pauseAction.kind === "arm") {
           activeSafetyPause = {
             walletAddress: autonomousExecution.walletAddress,
             agentInstanceId: autonomousExecution.agentInstanceId,
@@ -4025,15 +4034,17 @@ export const program = Effect.gen(function* () {
             resolvedAt: null,
           };
           yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
-        } else if (
-          activeSafetyPause?.resolvedAt === null &&
-          activeSafetyPause.reason === "settlement_overdue" &&
-          processedJobs.every((job) => job.status === "confirmed" || job.status === "terminal")
-        ) {
-          // Issue #166: a settlement_overdue pause must not outlive the
-          // settlements that raised it — once nothing is in flight (429
+        } else if (pauseAction.kind === "resolve" && activeSafetyPause !== null) {
+          // Issue #166/#196: a settlement_overdue pause must not outlive the
+          // settlements that raised it. #166: once nothing is in flight (429
           // retries finally sold the token, or the orphan sweep recovered
           // it), auto-resolve instead of latching until `prism resume`.
+          // #196: a job still PROGRESSING per policy — retryable with a
+          // future nextRetryAt, which oldestActiveSettlementAgeMs now
+          // excludes — is not overdue either: a sustained rate limit must
+          // not halt trading while the scheduled retry waits. The pause
+          // stays latched only while a job with NO scheduled retry is
+          // genuinely stuck past the max-pending window.
           activeSafetyPause = { ...activeSafetyPause, resolvedAt: settlementNow };
           yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
         }
