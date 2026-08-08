@@ -18,6 +18,52 @@ import { resolveEffectivePubkey } from "./wallet.js";
 
 const logger = createLogger("status-cli");
 
+/** Outcome of a per-mint lookup (price or decimals), three channels:
+ *  ok (resolved), unavailable (typed transport/provider failure), unpriceable
+ *  (defect or no resolvable value). Collapsing the first two would mislabel
+ *  real stranded capital as worthless dust during the exact outage window an
+ *  operator checks status. */
+export type StrandedLookupState = "ok" | "unavailable" | "unpriceable";
+
+export type StrandedSettlementClassification =
+  | { readonly kind: "stranded"; readonly valueUsd: number }
+  | { readonly kind: "dust"; readonly valueUsd: number }
+  | { readonly kind: "unavailable" }
+  | { readonly kind: "unpriceable" };
+
+/**
+ * Issue #183: pure classification of a stranded terminal settlement against
+ * the sweep's dust policy. Priceable value at/above `dustUsd` is real
+ * stranded capital; below the cutoff it is dust (intentionally never
+ * re-queued, excluded from the report); an unavailable lookup (provider/RPC
+ * outage) stays distinct from a genuinely unpriceable token (no price,
+ * defect, or unresolvable amount). Exported for direct unit coverage of the
+ * channel split (the CLI harness cannot inject adapter failures).
+ */
+export function classifyStrandedSettlement(input: {
+  readonly priceState: StrandedLookupState;
+  readonly priceUsd: number;
+  readonly decimalsState: StrandedLookupState;
+  readonly decimals: number;
+  readonly amountAtomic: string;
+  readonly dustUsd: number;
+}): StrandedSettlementClassification {
+  if (input.priceState === "unavailable" || input.decimalsState === "unavailable") {
+    return { kind: "unavailable" };
+  }
+  if (input.priceState === "unpriceable" || input.decimalsState === "unpriceable") {
+    return { kind: "unpriceable" };
+  }
+  const amountNum = Number(input.amountAtomic);
+  if (!Number.isFinite(amountNum)) {
+    return { kind: "unpriceable" };
+  }
+  const valueUsd = (amountNum / 10 ** input.decimals) * input.priceUsd;
+  return valueUsd >= input.dustUsd
+    ? { kind: "stranded", valueUsd }
+    : { kind: "dust", valueUsd };
+}
+
 export interface StatusJsonOutput {
   running: boolean;
   dbPath: string;
@@ -350,76 +396,98 @@ network; with no stranded settlements it is fully offline.`,
           // genuinely unquotable mint (→ Unpriceable). Collapsing the first
           // two would mislabel real stranded capital during the exact outage
           // window an operator checks status.
-          const priceFetch = yield* adapter.getTokenPrices(candidateMints).pipe(
-            Effect.map((p) => ({ tag: "ok" as const, prices: p })),
-            Effect.catch(() => Effect.succeed({ tag: "unavailable" as const })),
-            Effect.catchCause(() => Effect.succeed({ tag: "defect" as const })),
-          );
-          const strandedClassification = yield* Effect.all(
-            strandedCandidates.map((settlement) =>
-              Effect.gen(function* () {
-                // Resolve the mint's price: from the batch, or per-mint
-                // fallback when the batch died on a defect — one malformed
-                // mint must not label every other candidate Unavailable.
-                let price: number;
-                let priceState: "ok" | "unavailable" | "unpriceable";
-                if (priceFetch.tag === "ok") {
-                  price = priceFetch.prices[settlement.tokenMint] ?? 0;
-                  priceState = price > 0 ? "ok" : "unpriceable";
-                } else if (priceFetch.tag === "unavailable") {
-                  price = 0;
-                  priceState = "unavailable";
-                } else {
-                  const perMint = yield* adapter.getTokenPrices([settlement.tokenMint]).pipe(
-                    Effect.map((p) => ({ tag: "ok" as const, price: p[settlement.tokenMint] ?? 0 })),
-                    Effect.catch(() => Effect.succeed({ tag: "unavailable" as const, price: 0 })),
-                    Effect.catchCause(() => Effect.succeed({ tag: "defect" as const, price: 0 })),
-                  );
-                  price = perMint.price;
-                  priceState =
-                    perMint.tag === "ok"
-                      ? perMint.price > 0
-                        ? "ok"
-                        : "unpriceable"
-                      : perMint.tag === "unavailable"
-                        ? "unavailable"
-                        : "unpriceable";
-                }
-                if (priceState !== "ok") {
-                  return { settlement, kind: priceState };
-                }
-                // Same channel split for decimals: an RPC outage (typed
-                // failure) is Unavailable; a malformed-mint defect or an
-                // unresolvable decimals value is Unpriceable.
-                const decimalsResult = yield* adapter
-                  .getTokenDecimals(settlement.tokenMint)
-                  .pipe(
-                    Effect.map((decimals) => ({ tag: "ok" as const, decimals })),
-                    Effect.catch(() => Effect.succeed({ tag: "unavailable" as const, decimals: 0 })),
-                    Effect.catchCause(() => Effect.succeed({ tag: "defect" as const, decimals: 0 })),
-                  );
-                if (decimalsResult.tag !== "ok" || decimalsResult.decimals <= 0) {
-                  return {
-                    settlement,
-                    kind: decimalsResult.tag === "unavailable" ? "unavailable" : "unpriceable",
-                  };
-                }
-                const amountNum = Number(settlement.amountAtomic);
-                if (!Number.isFinite(amountNum)) {
-                  return { settlement, kind: "unpriceable" as const };
-                }
-                const valueUsd = (amountNum / 10 ** decimalsResult.decimals) * price;
+          const resolvePriceForMint = (mint: string) =>
+            adapter.getTokenPrices([mint]).pipe(
+              Effect.map((p) => {
+                const price = p[mint] ?? 0;
                 return {
-                  settlement,
-                  kind: valueUsd >= config.settlementDustUsd ? ("stranded" as const) : ("dust" as const),
-                  valueUsd,
+                  mint,
+                  state: (price > 0 ? "ok" : "unpriceable") as StrandedLookupState,
+                  value: price,
                 };
               }),
+              Effect.catch(() =>
+                Effect.succeed({ mint, state: "unavailable" as const, value: 0 }),
+              ),
+              Effect.catchCause(() =>
+                Effect.succeed({ mint, state: "unpriceable" as const, value: 0 }),
+              ),
+            );
+          const priceLookup = yield* adapter.getTokenPrices(candidateMints).pipe(
+            Effect.map((prices) => {
+              const entries = candidateMints.map((mint) => {
+                const price = prices[mint] ?? 0;
+                return [
+                  mint,
+                  { state: (price > 0 ? "ok" : "unpriceable") as StrandedLookupState, value: price },
+                ] as const;
+              });
+              return new Map(entries);
+            }),
+            Effect.catch(() =>
+              Effect.succeed(
+                new Map(candidateMints.map((mint) => [mint, { state: "unavailable" as const, value: 0 }])),
+              ),
             ),
-            { concurrency: 4 },
+            // Batch defect: one malformed mint must not label every candidate
+            // Unavailable — fall back to per-mint fetches, deduplicated (one
+            // fetch per unique mint, not per settlement).
+            Effect.catchCause(() =>
+              Effect.all(candidateMints.map(resolvePriceForMint), { concurrency: 4 }).pipe(
+                Effect.map((results) => new Map(results.map((r) => [r.mint, r]))),
+              ),
+            ),
           );
+          // Decimals need only resolve for mints whose price resolved: same
+          // channel split (RPC outage → Unavailable; defect/unresolvable →
+          // Unpriceable), deduplicated per unique mint.
+          const decimalsLookup = new Map<string, { state: StrandedLookupState; value: number }>();
+          yield* Effect.all(
+            candidateMints
+              .filter((mint) => priceLookup.get(mint)?.state === "ok")
+              .map((mint) =>
+                adapter.getTokenDecimals(mint).pipe(
+                  Effect.map((decimals) => {
+                    const state: StrandedLookupState = decimals > 0 ? "ok" : "unpriceable";
+                    return { mint, state, value: decimals };
+                  }),
+                  Effect.catch(() =>
+                    Effect.succeed({ mint, state: "unavailable" as const, value: 0 }),
+                  ),
+                  Effect.catchCause(() =>
+                    Effect.succeed({ mint, state: "unpriceable" as const, value: 0 }),
+                  ),
+                ),
+              ),
+            { concurrency: 4 },
+          ).pipe(
+            Effect.map((results) => {
+              for (const r of results) decimalsLookup.set(r.mint, r);
+            }),
+          );
+          const strandedClassification = strandedCandidates.map((settlement) => {
+            const price = priceLookup.get(settlement.tokenMint) ?? {
+              state: "unpriceable" as const,
+              value: 0,
+            };
+            const decimals = decimalsLookup.get(settlement.tokenMint) ?? {
+              state: "unpriceable" as const,
+              value: 0,
+            };
+            return {
+              settlement,
+              ...classifyStrandedSettlement({
+                priceState: price.state,
+                priceUsd: price.value,
+                decimalsState: decimals.state,
+                decimals: decimals.value,
+                amountAtomic: settlement.amountAtomic,
+                dustUsd: config.settlementDustUsd,
+              }),
+            };
+          });
           const strandedSettlements = strandedClassification.filter(
-            (entry): entry is (typeof entry & { valueUsd: number }) => entry.kind === "stranded",
+            (entry): entry is typeof entry & { valueUsd: number } => entry.kind === "stranded",
           );
           const unpriceableStranded = strandedClassification.filter(
             (entry) => entry.kind === "unpriceable",
@@ -497,7 +565,7 @@ network; with no stranded settlements it is fully offline.`,
                 : []),
               ...(unavailableStranded.length > 0
                 ? [
-                    `  Unavailable: ${unavailableStranded.length} terminal settlement(s) — price source unreachable, value unknown (${unavailableStranded
+                    `  Unavailable: ${unavailableStranded.length} terminal settlement(s) — price/decimals lookup unreachable, value unknown (${unavailableStranded
                       .map(
                         (entry) =>
                           `${(entry.settlement.poolAddress || "?").slice(0, 8)}/${entry.settlement.tokenMint.slice(0, 8)}`,
