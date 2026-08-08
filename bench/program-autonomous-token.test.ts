@@ -1191,20 +1191,26 @@ describe("issue #166 settlement recovery", () => {
     // Given a retryable job for an unpriceable mint (the post-revival shape)
     // that has been failing for 27h: without the dust path it would retry
     // forever and — being non-terminal — keep settlement_overdue latched.
+    // The quote mock fails with a TRANSIENT 429 and expiresAt is far in the
+    // future on purpose: if the dust path regresses, the job stays retryable
+    // (per issue #175 a rate-limited settlement never terminalizes, even past
+    // expiry) and is older than settlementMaxPendingMs — so the latch
+    // assertions below would FAIL on the regression instead of passing
+    // vacuously via a terminalized job.
     const job = settlementJob({
       positionId: "rollback:entry-1",
       tokenMint: "no-price-1",
       status: "retryable",
       attempts: 27,
       nextRetryAt: 9_000,
-      expiresAt: 5_000,
+      expiresAt: 20_000_000,
       createdAt: 1,
       error: "Jupiter quote failed: 429",
     });
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
       getTokenDecimals: () => Effect.succeed(6),
-      quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
+      quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 429")),
       prepareSwap: () => Effect.fail(new Error("unused")),
       simulateSwap: () => Effect.fail(new Error("unused")),
       submitSwap: () => Effect.fail(new Error("unused")),
@@ -1235,9 +1241,13 @@ describe("issue #166 settlement recovery", () => {
     });
     // ...and, mirroring issue #167, a confirmed job contributes nothing to the
     // overdue age, so settlement_overdue can neither arm nor stay latched on
-    // it (and #168's all-confirmed/terminal auto-resolve can fire).
+    // it (and #168's all-confirmed/terminal auto-resolve can fire). The age is
+    // measured at 10_000_000 — past settlementMaxPendingMs — so a hypothetical
+    // still-retryable job (age ~9,999,999 ms) WOULD trip the pause while the
+    // dust-confirmed job still yields 0 (the assertion is discriminating).
     const settledJobs = processed ? [processed] : [];
-    expect(oldestActiveSettlementAgeMs(settledJobs, 100_000)).toBe(0);
+    const latchNow = 10_000_000;
+    expect(oldestActiveSettlementAgeMs(settledJobs, latchNow)).toBe(0);
     expect(
       shouldTriggerSafetyPause({
         dailyDrawdownPct: 0,
@@ -1245,7 +1255,7 @@ describe("issue #166 settlement recovery", () => {
         consecutiveCoreDataFailures: 0,
         consecutiveExecutionFailures: 0,
         maxConsecutiveExecutionFailures: 3,
-        oldestSettlementAgeMs: oldestActiveSettlementAgeMs(settledJobs, 100_000),
+        oldestSettlementAgeMs: oldestActiveSettlementAgeMs(settledJobs, latchNow),
         settlementMaxPendingMs: 3_600_000,
       }),
     ).toBeNull();
