@@ -1682,7 +1682,7 @@ export const AdapterLive = Layer.effect(
                 ? txError
                 : typeof txError === "object" && txError !== null && "message" in txError
                   ? String((txError as { message: unknown }).message)
-                  : String(txError),
+                  : String(txError as unknown),
               { cause: txError },
             ),
           );
