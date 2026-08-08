@@ -391,7 +391,40 @@ describe("autonomous token runtime policy", () => {
   it("caps deterministic settlement retry backoff", () => {
     // Given / When / Then
     expect(nextSettlementRetryAt(1_000, 1)).toBe(2_000);
-    expect(nextSettlementRetryAt(1_000, 20)).toBe(301_000);
+    // Issue #196: the cap is 30 minutes — a sustained Jupiter rate-limit ban
+    // outlasted the old 5-minute cap, so short retries re-429ed forever and
+    // added quote pressure.
+    expect(nextSettlementRetryAt(1_000, 20)).toBe(1_801_000);
+    expect(nextSettlementRetryAt(1_000, 40)).toBe(1_801_000);
+  });
+
+  it("excludes retryable jobs with a future nextRetryAt from the overdue age (issue #196)", () => {
+    // Given a rate-limited job backing off per policy: it HAS a scheduled
+    // retry, so it is progressing — not overdue. Only jobs with NO scheduled
+    // retry (null or past nextRetryAt) count as genuinely stuck.
+    const backingOff = settlementJob({
+      id: "settlement-429",
+      status: "retryable",
+      createdAt: 1,
+      nextRetryAt: 200_000, // future
+    });
+    const pendingScheduled = settlementJob({
+      id: "settlement-pending",
+      status: "pending",
+      createdAt: 1,
+      nextRetryAt: 150_000, // future
+    });
+    expect(oldestActiveSettlementAgeMs([backingOff, pendingScheduled], 100_000)).toBe(0);
+
+    // A retryable job whose scheduled retry has PASSED (or is absent) is
+    // genuinely stuck — it counts.
+    const pastRetry = settlementJob({
+      id: "settlement-stuck",
+      status: "retryable",
+      createdAt: 1,
+      nextRetryAt: 50_000, // past
+    });
+    expect(oldestActiveSettlementAgeMs([backingOff, pastRetry], 100_000)).toBe(99_999);
   });
 
   it("subtracts settlement and execution costs from realized PnL", () => {
