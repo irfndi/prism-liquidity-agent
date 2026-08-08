@@ -412,8 +412,13 @@ network; with no stranded settlements it is fully offline.`,
           // label is factual: no USD price resolved at query time). Only a
           // DEFECT (sync throw from a malformed mint) is caught here, with a
           // per-mint fallback so one bad mint cannot label every candidate.
+          // useFallback: false — the default serves the hardcoded fallback
+          // prices (SOL at $165, USDC/USDT/... at $1) as if measured during
+          // a total outage, which would report stranded capital at
+          // FABRICATED values (the wallet-reconciliation path avoids them
+          // for the same reason).
           const resolvePriceForMint = (mint: string) =>
-            adapter.getTokenPrices([mint]).pipe(
+            adapter.getTokenPrices([mint], { useFallback: false }).pipe(
               Effect.map((p) => {
                 const price = p[mint] ?? 0;
                 return {
@@ -426,7 +431,9 @@ network; with no stranded settlements it is fully offline.`,
                 Effect.succeed({ mint, state: "unpriceable" as const, value: 0 }),
               ),
             );
-          const priceLookup = yield* adapter.getTokenPrices(candidateMints).pipe(
+          const priceLookup = yield* adapter
+            .getTokenPrices(candidateMints, { useFallback: false })
+            .pipe(
             Effect.map((prices) => {
               const entries = candidateMints.map((mint) => {
                 const price = prices[mint] ?? 0;
