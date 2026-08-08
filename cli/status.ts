@@ -32,6 +32,20 @@ export type StrandedSettlementClassification =
   | { readonly kind: "unpriceable" };
 
 /**
+ * Issue #183: classifies a typed `getTokenDecimals` failure. The adapter
+ * raises the SAME typed error for an RPC outage and for a genuinely
+ * unresolvable mint ("Cannot resolve decimals for mint X via Helius or
+ * standard RPC" — adapter-service.ts) — only the message distinguishes the
+ * two. Outage → Unavailable (retry later); unresolvable → Unpriceable
+ * (permanent; a retry can never succeed). Exported for unit coverage.
+ */
+export function decimalsFailureState(err: unknown): StrandedLookupState {
+  return err instanceof Error && err.message.includes("Cannot resolve decimals")
+    ? "unpriceable"
+    : "unavailable";
+}
+
+/**
  * Issue #183: pure classification of a stranded terminal settlement against
  * the sweep's dust policy. Priceable value at/above `dustUsd` is real
  * stranded capital; below the cutoff it is dust (intentionally never
@@ -382,20 +396,22 @@ network; with no stranded settlements it is fully offline.`,
           //   sweep deliberately re-queues nothing here; real capital).
           // - dust — priceable value below the cutoff (intentionally never
           //   re-queued; excluded from the report).
-          // - unpriceable — no resolvable price (genuinely unquotable mint,
-          //   or a malformed/defective lookup): cannot be valued, surfaced on
-          //   its own line.
-          // - unavailable — the price fetch itself failed (provider/RPC
-          //   outage): distinct from unpriceable so an outage never mislabels
+          // - unpriceable — no resolvable price/decimals (genuinely
+          //   unquotable mint, or a malformed/defective lookup): cannot be
+          //   valued, surfaced on its own line.
+          // - unavailable — the decimals/RPC lookup failed with an outage
+          //   error: distinct from unpriceable so an outage never mislabels
           //   real stranded capital as worthless dust.
           const adapter = yield* AdapterService;
           const candidateMints = [...new Set(strandedCandidates.map((s) => s.tokenMint))];
-          // Three channels, per kilo review: a TYPED failure is a provider/RPC
-          // outage (→ Unavailable); a DEFECT is a malformed mint (→ per-mint
-          // fallback, degraded to Unpriceable); success with price 0 is a
-          // genuinely unquotable mint (→ Unpriceable). Collapsing the first
-          // two would mislabel real stranded capital during the exact outage
-          // window an operator checks status.
+          // Price channel: fetchTokenPrices NEVER fails — every source
+          // (Helius/Jupiter/CoinGecko) catches its own errors and returns {},
+          // and unresolved mints come back as price 0 — so a total
+          // price-provider outage is INDISTINGUISHABLE from a genuinely
+          // unquotable mint at this API and classifies as Unpriceable (the
+          // label is factual: no USD price resolved at query time). Only a
+          // DEFECT (sync throw from a malformed mint) is caught here, with a
+          // per-mint fallback so one bad mint cannot label every candidate.
           const resolvePriceForMint = (mint: string) =>
             adapter.getTokenPrices([mint]).pipe(
               Effect.map((p) => {
@@ -406,9 +422,6 @@ network; with no stranded settlements it is fully offline.`,
                   value: price,
                 };
               }),
-              Effect.catch(() =>
-                Effect.succeed({ mint, state: "unavailable" as const, value: 0 }),
-              ),
               Effect.catchCause(() =>
                 Effect.succeed({ mint, state: "unpriceable" as const, value: 0 }),
               ),
@@ -424,13 +437,8 @@ network; with no stranded settlements it is fully offline.`,
               });
               return new Map(entries);
             }),
-            Effect.catch(() =>
-              Effect.succeed(
-                new Map(candidateMints.map((mint) => [mint, { state: "unavailable" as const, value: 0 }])),
-              ),
-            ),
             // Batch defect: one malformed mint must not label every candidate
-            // Unavailable — fall back to per-mint fetches, deduplicated (one
+            // Unpriceable — fall back to per-mint fetches, deduplicated (one
             // fetch per unique mint, not per settlement).
             Effect.catchCause(() =>
               Effect.all(candidateMints.map(resolvePriceForMint), { concurrency: 4 }).pipe(
@@ -438,9 +446,11 @@ network; with no stranded settlements it is fully offline.`,
               ),
             ),
           );
-          // Decimals need only resolve for mints whose price resolved: same
-          // channel split (RPC outage → Unavailable; defect/unresolvable →
-          // Unpriceable), deduplicated per unique mint.
+          // Decimals channel: getTokenDecimals DOES fail typed, and the error
+          // message distinguishes an RPC outage (→ Unavailable) from the
+          // adapter's "Cannot resolve decimals for mint X" unresolvable case
+          // (→ Unpriceable — a retry can never succeed). Deduplicated per
+          // unique mint, bounded concurrency.
           const decimalsLookup = new Map<string, { state: StrandedLookupState; value: number }>();
           yield* Effect.all(
             candidateMints
@@ -451,8 +461,12 @@ network; with no stranded settlements it is fully offline.`,
                     const state: StrandedLookupState = decimals > 0 ? "ok" : "unpriceable";
                     return { mint, state, value: decimals };
                   }),
-                  Effect.catch(() =>
-                    Effect.succeed({ mint, state: "unavailable" as const, value: 0 }),
+                  Effect.catch((err) =>
+                    Effect.succeed({
+                      mint,
+                      state: decimalsFailureState(err),
+                      value: 0,
+                    }),
                   ),
                   Effect.catchCause(() =>
                     Effect.succeed({ mint, state: "unpriceable" as const, value: 0 }),

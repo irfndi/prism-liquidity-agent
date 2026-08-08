@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyStrandedSettlement } from "../cli/status.js";
+import { classifyStrandedSettlement, decimalsFailureState } from "../cli/status.js";
 
 const base = {
   priceState: "ok" as const,
@@ -69,5 +69,26 @@ describe("classifyStrandedSettlement (issue #183 three-channel split)", () => {
         decimals: 0,
       }),
     ).toEqual({ kind: "unavailable" });
+  });
+});
+
+describe("decimalsFailureState (issue #183 adapter error surface)", () => {
+  it("maps the adapter's unresolvable-mint error to unpriceable, not unavailable", () => {
+    // getTokenDecimals raises the SAME typed error for an RPC outage and for
+    // a genuinely unresolvable mint; only the message distinguishes them. A
+    // permanent unresolvable result must never say "retry later".
+    expect(
+      decimalsFailureState(
+        new Error("Cannot resolve decimals for mint 8NR8R2dJ... via Helius or standard RPC"),
+      ),
+    ).toBe("unpriceable");
+  });
+
+  it("maps other typed failures (RPC outage) to unavailable", () => {
+    expect(decimalsFailureState(new Error("fetch failed"))).toBe("unavailable");
+    expect(decimalsFailureState(new Error("request timed out after 10000ms"))).toBe(
+      "unavailable",
+    );
+    expect(decimalsFailureState(null)).toBe("unavailable");
   });
 });
