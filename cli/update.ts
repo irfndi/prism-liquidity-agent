@@ -239,25 +239,48 @@ function atomicReplaceInstall(installDir: string, newDir: string): string {
 /**
  * Issue #179: the success path deleted the previous install immediately, so a
  * `--skip-smoke-test` update (or a smoke false-pass) installed a broken bundle
- * with no way back. Keep ONE persistent backup of the previous version next
- * to the install dir — it survives the update and is replaced by the next
- * update's backup, so the previous version is always recoverable by renaming
- * it back into place.
+ * with no way back. Keep ONE persistent backup of the previous version next to
+ * the install dir — it survives the update and is replaced by the next update's
+ * backup, so the previous version is always recoverable by renaming it back
+ * into place. The backup is named after the version it CONTAINS (the previous
+ * install), not the version being installed.
+ *
+ * Failure-safe replacement: stale backups are only removed AFTER the new backup
+ * is in place — never destroy the only recoverable previous install when there
+ * is nothing to replace it with. A rename failure throws and the caller's
+ * rollback restores the previous install.
  */
-function persistPreviousInstall(backupDir: string, installDir: string, version: string): void {
+function persistPreviousInstall(
+  backupDir: string,
+  installDir: string,
+  previousVersion: string,
+): void {
   const parent = dirname(installDir);
   const base = basename(installDir);
+  if (!existsSync(backupDir)) {
+    console.warn(
+      `No previous install backup found at ${backupDir} — leaving stale backups untouched`,
+    );
+    return;
+  }
+  const persistent = join(parent, `${base}.bak-${previousVersion}`);
+  // Idempotent re-run: replace a stale backup of the same version.
+  if (existsSync(persistent) && persistent !== backupDir) {
+    rmSync(persistent, { recursive: true, force: true });
+  }
+  renameSync(backupDir, persistent);
   const staleBackups = readdirSync(parent)
-    .filter((name) => name.startsWith(`${base}.bak-`))
+    .filter((name) => {
+      const full = join(parent, name);
+      if (full === persistent) return false;
+      return name.startsWith(`${base}.bak-`) || name.startsWith(".prism-update-backup-");
+    })
     .map((name) => join(parent, name));
   for (const stale of staleBackups) {
     rmSync(stale, { recursive: true, force: true });
   }
-  if (!existsSync(backupDir)) return;
-  const persistent = join(parent, `${base}.bak-${version}`);
-  renameSync(backupDir, persistent);
   console.log(
-    `Previous version preserved at ${persistent} — recoverable by renaming it to ${installDir}`,
+    `Previous version (${previousVersion}) preserved at ${persistent} — recoverable by renaming it to ${installDir}`,
   );
 }
 
@@ -521,11 +544,13 @@ async function updateFromSource(
 
   const wrapperBin = resolveWrapperBin();
   const isSymlink = isWrapperSymlink(wrapperBin);
+  const previousVersion = getCurrentVersion();
   const backupDir = atomicReplaceInstall(currentDir, sourceRoot);
 
   try {
     rewriteWrapperSymlink(wrapperBin, currentDir);
     smokeTest(wrapperBin, skipSmokeTest);
+    persistPreviousInstall(backupDir, currentDir, previousVersion);
   } catch (smokeErr) {
     console.error("Smoke test failed — rolling back");
     if (existsSync(currentDir)) {
@@ -542,8 +567,6 @@ async function updateFromSource(
         `Error: ${smokeErr instanceof Error ? smokeErr.message : String(smokeErr)}`,
     );
   }
-
-  persistPreviousInstall(backupDir, currentDir, release.version);
 }
 
 async function updateFromBundle(
@@ -574,6 +597,7 @@ async function updateFromBundle(
   preserveUserData(installDir, bundleRoot);
 
   console.log("Installing bundle...");
+  const previousVersion = getCurrentVersion();
   const backupDir = atomicReplaceInstall(installDir, bundleRoot);
 
   const wrapperBin = resolveWrapperBin();
@@ -582,6 +606,8 @@ async function updateFromBundle(
     rewriteBundleWrapper(wrapperBin, installDir);
     failedOperation = "smoke test";
     smokeTest(wrapperBin, skipSmokeTest);
+    failedOperation = "backup persistence";
+    persistPreviousInstall(backupDir, installDir, previousVersion);
   } catch (smokeErr) {
     console.error(`${failedOperation} failed — rolling back`);
     if (existsSync(installDir)) {
@@ -615,8 +641,6 @@ async function updateFromBundle(
         `Error: ${smokeErr instanceof Error ? smokeErr.message : String(smokeErr)}`,
     );
   }
-
-  persistPreviousInstall(backupDir, installDir, release.version);
 }
 
 export const updateCommand = new Command("update")
