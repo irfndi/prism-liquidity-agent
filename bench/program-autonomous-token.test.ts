@@ -1008,13 +1008,138 @@ describe("issue #166 settlement recovery", () => {
     expect(processed).toMatchObject({ status: "retryable", nextRetryAt: 11_000 });
   });
 
+  it("dust-confirms an unpriceable settlement instead of quoting it (issue #183)", async () => {
+    // Given a job for a mint with no resolvable USD price — quoting it would
+    // 400 forever (no route), so the dust gate must terminalize it as dust.
+    // Only SYNTHETIC settlement groups (orphan/rollback) qualify: they have
+    // no position row to finalize, so no PnL can be booked against the
+    // still-in-wallet tokens.
+    const job = settlementJob({ tokenMint: "no-price-1", positionId: "orphan:test" });
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
+      prepareSwap: () => Effect.fail(new Error("unused")),
+      simulateSwap: () => Effect.fail(new Error("unused")),
+      submitSwap: () => Effect.fail(new Error("unused")),
+    } as unknown as AdapterApi;
+    const db = {
+      saveSettlementJob: () => Effect.void,
+      getPosition: () => Effect.succeed(null),
+    } as unknown as DbApi;
+
+    // When
+    const [processed] = await Effect.runPromise(
+      processSettlementJobs({
+        adapter,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+        settlementDustUsd: 0.1,
+      }),
+    );
+
+    // Then the job is dust-confirmed (value unknown ⇒ $0) and the quote
+    // path is never touched.
+    expect(processed).toMatchObject({
+      status: "confirmed",
+      attempts: 1,
+      nextRetryAt: null,
+      confirmedOutputAtomic: job.amountAtomic,
+      error: "settlement dust skipped (no USD price)",
+    });
+    expect(processed?.outputUsd).toBe(0);
+  });
+
+  it("does NOT dust-confirm an unpriceable settlement tied to a real position (issue #183)", async () => {
+    // Given an unpriceable job whose positionId is a REAL position (EXIT
+    // residue/reward sweep) — dust-confirming it would finalize the group
+    // with outputUsd 0 and book a full PnL loss while the tokens still sit
+    // in the wallet. It must fall through to the quote path instead
+    // (bounded retries, then terminal on expiry — operator-visible).
+    const job = settlementJob({ tokenMint: "no-price-1" }); // default real positionId
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 400")),
+      prepareSwap: () => Effect.fail(new Error("unused")),
+      simulateSwap: () => Effect.fail(new Error("unused")),
+      submitSwap: () => Effect.fail(new Error("unused")),
+    } as unknown as AdapterApi;
+    const db = {
+      saveSettlementJob: () => Effect.void,
+      getPosition: () => Effect.succeed(null),
+    } as unknown as DbApi;
+
+    // When
+    const [processed] = await Effect.runPromise(
+      processSettlementJobs({
+        adapter,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+        settlementDustUsd: 0.1,
+      }),
+    );
+
+    // Then the quote path ran (400 → retryable with backoff), no dust-confirm.
+    expect(processed).toMatchObject({
+      status: "retryable",
+      error: "Jupiter quote failed: 400",
+      nextRetryAt: 11_000,
+    });
+  });
+
+  it("dust-confirms a priceable sub-dust settlement with the plain dust error", async () => {
+    // Given a tiny priceable amount below the dust cutoff.
+    const job = settlementJob({ amountAtomic: "1000" }); // 0.001 token at $1
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
+      prepareSwap: () => Effect.fail(new Error("unused")),
+      simulateSwap: () => Effect.fail(new Error("unused")),
+      submitSwap: () => Effect.fail(new Error("unused")),
+    } as unknown as AdapterApi;
+    const db = {
+      saveSettlementJob: () => Effect.void,
+      getPosition: () => Effect.succeed(null),
+    } as unknown as DbApi;
+
+    // When
+    const [processed] = await Effect.runPromise(
+      processSettlementJobs({
+        adapter,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+        settlementDustUsd: 0.1,
+      }),
+    );
+
+    // Then
+    expect(processed).toMatchObject({
+      status: "confirmed",
+      nextRetryAt: null,
+      error: "settlement dust skipped",
+    });
+    expect(processed?.outputUsd).toBe(0.001);
+  });
+
   it("creates sell jobs only for unbacked, non-dust wallet holdings", async () => {
     // Given holdings where one mint is backed, one is below dust, one is
-    // unpriceable, and the settlement asset itself.
+    // unpriceable (issue #183: treated as dust — value unknown ⇒ $0), and
+    // the settlement asset itself.
     const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
       ["stranded-1", { amountAtomic: 1_000_000n, decimals: 6 }], // $1.00 → sweep
       ["dust-1", { amountAtomic: 50_000n, decimals: 6 }], // $0.05 → skip
-      ["unpriceable-1", { amountAtomic: 5_000_000n, decimals: 6 }], // no price → sweep (cannot prove dust)
+      ["unpriceable-1", { amountAtomic: 5_000_000n, decimals: 6 }], // no price → skip (dust; re-qualifies when priced)
       ["backed-1", { amountAtomic: 1_000_000n, decimals: 6 }], // position leg → skip
       [SOL_MINT, { amountAtomic: 1_000_000_000n, decimals: 9 }], // settlement asset → skip
       ["zero-1", { amountAtomic: 0n, decimals: 6 }], // nothing held → skip
@@ -1047,8 +1172,8 @@ describe("issue #166 settlement recovery", () => {
     );
 
     // Then
-    expect(jobs).toHaveLength(2);
-    expect(jobs.map((job) => job.tokenMint).sort()).toEqual(["stranded-1", "unpriceable-1"]);
+    expect(jobs).toHaveLength(1);
+    expect(jobs.map((job) => job.tokenMint).sort()).toEqual(["stranded-1"]);
     expect(jobs[0]).toMatchObject({
       walletAddress: "wallet-1",
       agentInstanceId: "primary",
@@ -1061,6 +1186,55 @@ describe("issue #166 settlement recovery", () => {
       error: null,
       positionId: expect.stringMatching(/^orphan:/),
     });
+  });
+
+  it("dust-skips an unpriceable holding when the dust gate is enabled, sweeps it when disabled", async () => {
+    // Given a wallet holding only an unpriceable token.
+    const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
+      ["unpriceable-1", { amountAtomic: 5_000_000n, decimals: 6 }],
+    ]);
+    const adapter = {
+      hasWallet: () => true,
+      getWalletHoldings: () => Effect.succeed(holdings),
+      getPoolState: () => Effect.succeed(null),
+      getTokenPrices: (mints: string[]) =>
+        Effect.succeed(Object.fromEntries(mints.map((mint) => [mint, 0]))),
+    } as unknown as AdapterApi;
+    const db = {
+      listSettlementJobs: () => Effect.succeed([]),
+      getAllPositions: () => Effect.succeed([]),
+    } as unknown as DbApi;
+
+    // When the dust gate is on (default), an unpriceable token is dust: no
+    // sell job — otherwise it would be quoted (Jupiter 400) and retried
+    // forever (issue #183).
+    const withDust = await Effect.runPromise(
+      sweepOrphanSettlements({
+        adapter,
+        db,
+        walletAddress: "wallet-1",
+        agentInstanceId: "primary",
+        settlementMaxPendingMs: 3_600_000,
+        settlementDustUsd: 0.1,
+        now: 10_000,
+      }),
+    );
+    expect(withDust).toHaveLength(0);
+
+    // When the dust gate is disabled, the sweep still enqueues it (best
+    // effort — the operator opted out of dust classification).
+    const noDustGate = await Effect.runPromise(
+      sweepOrphanSettlements({
+        adapter,
+        db,
+        walletAddress: "wallet-1",
+        agentInstanceId: "primary",
+        settlementMaxPendingMs: 3_600_000,
+        settlementDustUsd: 0,
+        now: 10_000,
+      }),
+    );
+    expect(noDustGate.map((job) => job.tokenMint)).toEqual(["unpriceable-1"]);
   });
 
   it("sweeps wallet holdings against position legs and active jobs, re-enqueuing terminal-mint tokens", async () => {

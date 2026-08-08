@@ -265,11 +265,14 @@ describe("autonomous CLI operator surface", () => {
       WALLET_PRIVATE_KEY: bs58.encode(walletKeypair.secretKey),
     });
 
-    // Then
+    // Then (issue #183): the unpriceable terminal is surfaced on the
+    // Unpriceable line — it cannot be valued, so it is not counted as
+    // Stranded capital and the sweep never re-queues it.
     expect(result.exitCode).toBe(0);
     const text = decode(result.stdout);
-    expect(text).toContain("Stranded:    1 terminal settlement(s) with unspent balance");
+    expect(text).toContain("Unpriceable: 1 terminal settlement(s) with no USD price");
     expect(text).toContain("?/mint-2");
+    expect(text).not.toContain("Stranded:");
   });
 
   it("hides terminal settlements whose mint was later recovered by a confirmed settlement", async () => {
@@ -312,10 +315,13 @@ describe("autonomous CLI operator surface", () => {
       WALLET_PRIVATE_KEY: bs58.encode(walletKeypair.secretKey),
     });
 
-    // Then the newer terminal record is reported as stranded.
+    // Then the newer terminal record stays visible (issue #183): unpriceable
+    // in the test env, so it is surfaced on the Unpriceable line rather than
+    // counted as valued Stranded capital.
     expect(result.exitCode).toBe(0);
     const text = decode(result.stdout);
-    expect(text).toContain("Stranded:    1 terminal settlement(s) with unspent balance");
+    expect(text).toContain("Unpriceable: 1 terminal settlement(s) with no USD price");
+    expect(text).not.toContain("Stranded:");
   });
 
   it("marks the current wallet's active safety pause resolved without live execution", async () => {
