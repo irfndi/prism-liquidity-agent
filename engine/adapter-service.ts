@@ -229,9 +229,10 @@ export function excludeSameMintRewards(
   }
   // Preserve an exactly-zero leg (an empty position leg whose measured delta
   // was entirely a same-mint swept reward — the reward books separately, so
-  // the leg itself has no value). Fall back only for a genuinely invalid
-  // NEGATIVE result (measurement inconsistency: reward exceeds the delta).
-  return result >= 0n ? result.toString() : measured.amountAtomic;
+  // the leg itself has no value). A NEGATIVE result (reward exceeds the
+  // delta: measurement inconsistency) likewise resolves to 0 — returning the
+  // reward-inclusive delta would re-introduce the same-mint double count.
+  return result >= 0n ? result.toString() : "0";
 }
 const logger = createLogger("adapter-service");
 

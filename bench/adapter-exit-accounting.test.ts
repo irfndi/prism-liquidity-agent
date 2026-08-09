@@ -53,7 +53,7 @@ describe("measureWithdrawalDelta", () => {
     expect(result).toEqual({ amountAtomic: "24377718", measured: false });
   });
 
-  it("falls back when the leg was not held before (new ATA, no measurable delta)", () => {
+  it("measures a new-ATA credit via the SPL delta (before = 0n)", () => {
     const before = held([]);
     const after = held([[USDC, 41_910_000n]]);
     const result = measureWithdrawalDelta({
@@ -137,12 +137,16 @@ describe("excludeSameMintRewards", () => {
     expect(result).toBe("0");
   });
 
-  it("falls back only for a genuinely negative result (reward exceeds the delta)", () => {
+  it("returns zero when the same-mint reward exceeds the measured delta (no double count)", () => {
+    // Measurement inconsistency: the reward snapshot (500k) exceeds the
+    // measured delta (400k). Returning the reward-inclusive delta would
+    // double-count the reward (sweptRewards books it separately) — the leg's
+    // provable value is 0.
     const result = excludeSameMintRewards(
       { amountAtomic: "400000", measured: true },
       "REWARD1",
       slots,
     );
-    expect(result).toBe("400000");
+    expect(result).toBe("0");
   });
 });
