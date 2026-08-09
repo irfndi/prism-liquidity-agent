@@ -493,15 +493,54 @@ export function processSettlementJobs(
             new Error("Prepared settlement requires operator reconciliation"),
           );
         }
-        const amountAtomic = BigInt(job.amountAtomic);
+        let amountAtomic = BigInt(job.amountAtomic);
         const prices = yield* input.adapter.getTokenPrices([job.tokenMint, SOL_MINT]);
         const solPriceUsd = prices[SOL_MINT] ?? 0;
         if (!(solPriceUsd > 0)) return yield* Effect.fail(new Error("SOL price unavailable"));
+        // Issue #201: reconcile the sell amount with the LIVE wallet balance.
+        // The job amount is fixed at creation, but a concurrent entry can
+        // consume part of the wallet (field evidence: an exit settlement
+        // expecting 41.91 USDC while the wallet held 24.35 — quoting the
+        // stale amount made the swap simulation fail with insufficient
+        // balance 130 times, then terminal). Clamp to what the wallet
+        // actually holds; a failed balance read fails open (keeps the job
+        // amount — the simulation still catches genuine insufficiency).
+        // When the wallet holds nothing of the mint, the funds were consumed
+        // elsewhere — terminalize with a clear error instead of looping.
+        const readWalletBalance = (): Effect.Effect<bigint | null, never> => {
+          const reader =
+            job.tokenMint === SOL_MINT
+              ? input.adapter.getNativeSolBalance
+              : input.adapter.getTokenBalance;
+          // Guard for partial adapters (mirrors the sweep's optional-method
+          // checks): a missing balance reader fails open — keep the job
+          // amount; the simulation still catches genuine insufficiency.
+          return typeof reader === "function"
+            ? reader
+                .call(input.adapter, job.tokenMint)
+                .pipe(Effect.catch(() => Effect.succeed(null)))
+            : Effect.succeed(null);
+        };
+        const walletBalance = yield* readWalletBalance();
+        if (walletBalance !== null && walletBalance < amountAtomic) {
+          amountAtomic = walletBalance;
+        }
+        if (amountAtomic <= 0n) {
+          return {
+            ...job,
+            status: "terminal" as const,
+            attempts: job.attempts + 1,
+            nextRetryAt: null,
+            error:
+              "Settlement amount exhausted — wallet holds no balance of the mint (concurrent activity consumed it)",
+            updatedAt: input.now,
+          };
+        }
         if (job.tokenMint === SOL_MINT) {
           return {
             ...job,
             status: "confirmed" as const,
-            confirmedOutputAtomic: job.amountAtomic,
+            confirmedOutputAtomic: amountAtomic.toString(),
             outputUsd: atomicUsd(amountAtomic, 9, solPriceUsd),
             executionCostUsd: 0,
             attempts: job.attempts + 1,
@@ -721,7 +760,15 @@ export function sweepOrphanSettlements(
     const existingJobs = yield* input.db
       .listSettlementJobs(input.walletAddress, input.agentInstanceId)
       .pipe(Effect.catch(() => Effect.succeed([])));
-    const backedMints = new Set<string>(
+    // Two distinct backing sources (issue #201): ACTIVE settlement jobs own
+    // their mint outright (an in-flight job is handling it — never double
+    // sell). POSITION legs do NOT reserve wallet-held balances of the same
+    // mint — position liquidity lives in the position account, not the
+    // wallet — so they only suppress the sweep when no stranded-terminal
+    // evidence exists for the mint (a terminal job with unspent balance is
+    // proof the wallet-held excess was never sold; it wins over position
+    // backing so the sweep revives it with the live wallet amount).
+    const activeJobMints = new Set<string>(
       existingJobs
         .filter((job) => job.status !== "terminal" && job.status !== "confirmed")
         .map((job) => job.tokenMint),
@@ -732,6 +779,7 @@ export function sweepOrphanSettlements(
     // live wallet's stranded tokens. The engine's model is one wallet per DB
     // (portfolio/equity math already assumes it), so remaining rows belong to
     // the current wallet.
+    const positionBackedMints = new Set<string>();
     const openPositions = yield* input.db
       .getAllPositions()
       .pipe(Effect.catch(() => Effect.succeed([])));
@@ -744,8 +792,8 @@ export function sweepOrphanSettlements(
         .getPoolState(poolAddress)
         .pipe(Effect.catch(() => Effect.succeed(null)));
       if (state) {
-        backedMints.add(state.tokenX);
-        backedMints.add(state.tokenY);
+        positionBackedMints.add(state.tokenX);
+        positionBackedMints.add(state.tokenY);
       }
     }
     const prices = yield* input.adapter.getTokenPrices(candidates.map(([mint]) => mint)).pipe(
@@ -785,7 +833,11 @@ export function sweepOrphanSettlements(
     const jobs: SettlementJobRecord[] = [];
     for (const [mint, holding] of holdings) {
       if (mint === SOL_MINT || holding.amountAtomic <= 0n) continue;
-      if (backedMints.has(mint)) continue;
+      if (activeJobMints.has(mint)) continue;
+      // A position-backed mint is still swept when a stranded-terminal job
+      // exists for it (issue #201): the terminal job's unspent balance is
+      // wallet-held excess the sweep must recover.
+      if (positionBackedMints.has(mint) && !terminalByMint.has(mint)) continue;
       const priceUsd = prices[mint] ?? 0;
       if (
         input.settlementDustUsd > 0 &&

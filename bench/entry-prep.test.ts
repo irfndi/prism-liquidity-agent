@@ -11,10 +11,11 @@ import {
   computeRequiredAtomic,
   computeUsdcInputAtomic,
 } from "../engine/entry-prep-service.js";
-import { AdapterService, type AdapterApi } from "../engine/services.js";
+import { AdapterService, DbService, type AdapterApi, type DbApi } from "../engine/services.js";
 import { ConfigService } from "../engine/config-service.js";
 import { defaultAppConfig } from "./helpers.js";
 import { SOL_MINT, USDC_MINT, SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS } from "../engine/constants.js";
+import type { SettlementJobRecord } from "../engine/types.js";
 import { SwapQuoteError } from "../engine/errors.js";
 
 const TOKEN_X = SOL_MINT;
@@ -106,6 +107,7 @@ function buildLayer(
   adapterMock: Partial<AdapterApi> = {},
   autoSwapEntry = false,
   autonomousTokenMode: "off" | "shadow" | "canary" | "live" = "off",
+  dbOverrides: Partial<DbApi> = {},
 ) {
   const adapter = makeAdapter(adapterMock);
   const adapterLayer = Layer.succeed(AdapterService, adapter);
@@ -113,7 +115,11 @@ function buildLayer(
     ConfigService,
     defaultAppConfig({ autoSwapEntry, autonomousTokenMode }),
   );
-  return Layer.provide(EntryPrepLive, Layer.merge(adapterLayer, configLayer));
+  const dbLayer = Layer.succeed(DbService, {
+    listSettlementJobs: () => Effect.succeed([]),
+    ...dbOverrides,
+  } as unknown as DbApi);
+  return Layer.provide(EntryPrepLive, Layer.merge(Layer.merge(adapterLayer, configLayer), dbLayer));
 }
 
 function makeQuote(request: SwapRequest): SwapQuote {
@@ -902,6 +908,149 @@ describe("EntryPrepService", () => {
     ).rejects.toThrow(/INSUFFICIENT_USDC_BALANCE/);
 
     expect(swapSpy).not.toHaveBeenCalled();
+  });
+
+  it("reserves pending settlement claims from the spendable balance (issue #201)", async () => {
+    // Given a USDC pool leg and a wallet whose USDC is partially claimed by a
+    // pending settlement job (an exit settlement about to sell it): the entry
+    // must not spend the claimed funds — the field bug was an entry consuming
+    // the exit settlement's USDC and stranding the exit ($41.91 expected,
+    // $24.35 in wallet).
+    const baseAdapter = {
+      getPoolState: () =>
+        Effect.succeed({
+          address: POOL_ADDRESS,
+          tokenX: TOKEN_Y,
+          tokenY: USDC_MINT,
+          tokenXSymbol: "FAKE",
+          tokenYSymbol: "USDC",
+          tvlUsd: 100_000,
+          volume24hUsd: 30_000,
+          fees24hUsd: 300,
+          apr: 60,
+          activeBinId: 5000,
+          binStep: 10,
+          currentPrice: 1,
+          timestamp: Date.now(),
+        }),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+      getTokenBalance: (mint: string) =>
+        Effect.succeed(mint === USDC_MINT ? 600_000_000n : mint === TOKEN_Y ? 600_000_000n : 0n),
+      getTokenPrices: () => Effect.succeed({ [TOKEN_Y]: 1, [USDC_MINT]: 1 }),
+      getTokenDecimals: () => Effect.succeed(6),
+    };
+
+    // Without a pending claim the $1,000 entry (half in each leg) is fully
+    // fundable from the $600 USDC + $600 token balances.
+    const noClaim = await Effect.runPromise(
+      Effect.gen(function* () {
+        const prep = yield* EntryPrepService;
+        return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+      }).pipe(Effect.provide(buildLayer(baseAdapter, true))),
+    );
+    expect(noClaim).toBeUndefined();
+
+    // With a pending USDC claim of $200, the spendable USDC drops below the
+    // $500 leg requirement → INSUFFICIENT_USDC_BALANCE instead of silently
+    // spending the exit settlement's funds.
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(
+          Effect.provide(
+            buildLayer(baseAdapter, true, "off", {
+              listSettlementJobs: () =>
+                Effect.succeed([
+                  {
+                    tokenMint: USDC_MINT,
+                    amountAtomic: "200000000",
+                    status: "retryable",
+                  } as unknown as SettlementJobRecord,
+                ]),
+            }),
+          ),
+        ),
+      ),
+    ).rejects.toThrow(/INSUFFICIENT_USDC_BALANCE/);
+  });
+
+  it("reserves pending USDC claims when funding a token/token pool entry (issue #201)", async () => {
+    // Neither pool leg is USDC — the funding swaps buy the missing leg with
+    // wallet USDC. A pending USDC settlement claim must still be reserved,
+    // or the entry would consume the exit settlement's funds (the P1 gap:
+    // leg-only claims missed this path).
+    const TOKEN_Z = "FakeToken2222222222222222222222222222222222";
+    const tokenBalances: Record<string, bigint> = { [TOKEN_Y]: 600_000_000n };
+    const swapSpy = vi.fn((mint: string) => {
+      // Simulate the swap landing so the post-swap balance reconciliation
+      // passes in the no-claim scenario.
+      tokenBalances[mint] = 10_000_000_000n;
+      return Effect.succeed("mock-swap-tx");
+    });
+    const poolAdapter = {
+      getPoolState: () =>
+        Effect.succeed({
+          address: POOL_ADDRESS,
+          tokenX: TOKEN_Y,
+          tokenY: TOKEN_Z,
+          tokenXSymbol: "FAKE1",
+          tokenYSymbol: "FAKE2",
+          tvlUsd: 100_000,
+          volume24hUsd: 30_000,
+          fees24hUsd: 300,
+          apr: 60,
+          activeBinId: 5000,
+          binStep: 10,
+          currentPrice: 1,
+          timestamp: Date.now(),
+        }),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+      getTokenBalance: (mint: string) =>
+        Effect.succeed(mint === USDC_MINT ? 800_000_000n : (tokenBalances[mint] ?? 0n)),
+      getTokenPrices: () => Effect.succeed({ [TOKEN_Y]: 1, [TOKEN_Z]: 1, [USDC_MINT]: 1 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      swapUSDCForToken: swapSpy,
+    };
+
+    // Without a claim the missing FAKE2 leg is bought with wallet USDC.
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const prep = yield* EntryPrepService;
+        return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+      }).pipe(Effect.provide(buildLayer(poolAdapter, true))),
+    );
+    expect(swapSpy).toHaveBeenCalledWith(TOKEN_Z, expect.any(BigInt), expect.anything());
+
+    // With a pending USDC claim the entry cannot spend the exit's funds.
+    // Fresh adapter: the no-claim scenario's swap mutated the token balances.
+    const claimAdapter = {
+      ...poolAdapter,
+      getTokenBalance: (mint: string) =>
+        Effect.succeed(mint === USDC_MINT ? 800_000_000n : mint === TOKEN_Y ? 600_000_000n : 0n),
+    };
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const prep = yield* EntryPrepService;
+          return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000);
+        }).pipe(
+          Effect.provide(
+            buildLayer(claimAdapter, true, "off", {
+              listSettlementJobs: () =>
+                Effect.succeed([
+                  {
+                    tokenMint: USDC_MINT,
+                    amountAtomic: "400000000",
+                    status: "retryable",
+                  } as unknown as SettlementJobRecord,
+                ]),
+            }),
+          ),
+        ),
+      ),
+    ).rejects.toThrow(/INSUFFICIENT_USDC_BALANCE/);
   });
 
   it("computes USDC input without precision loss for large amounts", () => {
