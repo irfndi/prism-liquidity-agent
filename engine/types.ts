@@ -299,6 +299,12 @@ export interface RebalanceParams {
   newLowerBinId: number;
   newUpperBinId: number;
   slippageBps: number;
+  /** Atomic top-up redeposited with the rebalance (runner scale-in adds fresh
+   *  quote capital; the compound path tops up just-claimed fees). */
+  topUp?: { amountXAtomic: bigint; amountYAtomic: bigint };
+  /** USD value of the top-up (cost-basis bookkeeping — the executor must not
+   *  re-derive sizing). */
+  topUpUsd?: number;
 }
 
 export interface AgentDecision {
