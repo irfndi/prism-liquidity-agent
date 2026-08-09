@@ -317,10 +317,10 @@ export interface AgentDecision {
    * pool holds multiple positions.
    */
   positionId?: string | undefined;
-  /** Fallen-angel ENTER lifecycle (Wave 19): "fallen-angel" position mode.
-   *  Carried on the decision so execution stamps the row; undefined for
-   *  standard positions. */
-  positionMode?: "fallen-angel" | undefined;
+  /** Position lifecycle mode carried on the decision so execution stamps the
+   *  row. "fallen-angel" (Wave 19) and "launch" (Launch Mode v2) enter with
+   *  lane-specific exits; undefined for standard positions. */
+  positionMode?: "fallen-angel" | "launch" | undefined;
   /** Serialized TP-ladder JSON (see engine/tp-ladder.ts) for FA positions. */
   tpLadderJson?: string | undefined;
   /** Invalidation stop price for FA positions. */

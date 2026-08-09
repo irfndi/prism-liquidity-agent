@@ -209,6 +209,28 @@ export interface AppConfig {
   readonly launchScanMinBinStep?: number;
   /** Skip pools with bin step above this. Default 200. */
   readonly launchScanMaxBinStep?: number;
+
+  // ─── Launch Mode v2: execution lane ──────────────────────────────────────
+  // Launch-gated pools flow through a separate time-boxed lane with
+  // launch-specific exits. OFF by default — only effective when
+  // launchScanEnabled is also on.
+  /** Master switch for launch EXECUTION (radar-only v1 stays OFF here).
+   *  Default false; only effective when launchScanEnabled is true. */
+  readonly launchExecutionEnabled?: boolean;
+  /** Max simultaneous launch positions portfolio-wide (separate counter
+   *  from MAX_OPEN_POSITIONS). Default 3 (1..30). */
+  readonly launchMaxOpenPositions?: number;
+  /** Hard USD cap per launch entry (the sizing formula's cap term).
+   *  Default $100 (min 10). */
+  readonly launchPositionMaxSizeUsd?: number;
+  /** Launch position time-box: exit when held this many hours regardless of
+   *  P&L. Default 6 (1..72). */
+  readonly launchTimeboxHours?: number;
+  /** Volume-decay exit: exit when current 1h fees fall below this fraction
+   *  of the position's observed peak. Default 0.1 (10%). */
+  readonly launchVolumeDecayExitPct?: number;
+  /** Hard drawdown stop from the position's peak value. Default 0.25. */
+  readonly launchExitDrawdownPct?: number;
   readonly deployerBlacklistPath: string;
   readonly tokenBlacklistPath: string;
   readonly sqliteDbPath: string;
@@ -1336,12 +1358,7 @@ const loadConfig = Effect.gen(function* () {
     120_000,
   );
   const launchScanTopK = yield* validatedNumber("LAUNCH_SCAN_TOP_K", 1, 30, 200);
-  const launchScanUniverseSize = yield* validatedNumber(
-    "LAUNCH_SCAN_UNIVERSE_SIZE",
-    1,
-    500,
-    1000,
-  );
+  const launchScanUniverseSize = yield* validatedNumber("LAUNCH_SCAN_UNIVERSE_SIZE", 1, 500, 1000);
   const launchScanMinTvlUsd = yield* validatedNumber("LAUNCH_SCAN_MIN_TVL_USD", 0, 5_000);
   const launchScanMaxTvlUsd = yield* validatedNumber("LAUNCH_SCAN_MAX_TVL_USD", 0, 1_000_000);
   const launchScanMaxAgeHours = yield* validatedNumber("LAUNCH_SCAN_MAX_AGE_HOURS", 1, 6, 72);
@@ -1353,6 +1370,24 @@ const loadConfig = Effect.gen(function* () {
   const launchScanMinBaseFeePct = yield* validatedNumber("LAUNCH_SCAN_MIN_BASE_FEE_PCT", 0, 1);
   const launchScanMinBinStep = yield* validatedNumber("LAUNCH_SCAN_MIN_BIN_STEP", 0, 50);
   const launchScanMaxBinStep = yield* validatedNumber("LAUNCH_SCAN_MAX_BIN_STEP", 1, 200);
+
+  // ─── Launch Mode v2: execution lane ───────────────────────────────────────
+  // Launch EXECUTION is opt-in on top of the launch radar; both switches must
+  // be on for the lane to exist (Slice B wiring).
+  const launchExecutionEnabled = yield* Config.boolean("LAUNCH_EXECUTION_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const launchMaxOpenPositions = yield* validatedNumber("LAUNCH_MAX_OPEN_POSITIONS", 1, 3, 30);
+  const launchPositionMaxSizeUsd = yield* validatedNumber("LAUNCH_POSITION_MAX_SIZE_USD", 10, 100);
+  const launchTimeboxHours = yield* validatedNumber("LAUNCH_TIMEBOX_HOURS", 1, 6, 72);
+  const launchVolumeDecayExitPct = yield* validatedNumber(
+    "LAUNCH_VOLUME_DECAY_EXIT_PCT",
+    0,
+    0.1,
+    1,
+  );
+  const launchExitDrawdownPct = yield* validatedNumber("LAUNCH_EXIT_DRAWDOWN_PCT", 0, 0.25, 1);
+
   const deployerBlacklistPath = yield* Config.string("DEPLOYER_BLACKLIST_PATH").pipe(
     Effect.orElseSucceed(() => "./engine/data/deployer-blacklist.json"),
   );
@@ -1525,6 +1560,12 @@ const loadConfig = Effect.gen(function* () {
     launchScanMinBaseFeePct,
     launchScanMinBinStep,
     launchScanMaxBinStep,
+    launchExecutionEnabled,
+    launchMaxOpenPositions,
+    launchPositionMaxSizeUsd,
+    launchTimeboxHours,
+    launchVolumeDecayExitPct,
+    launchExitDrawdownPct,
     deployerBlacklistPath,
     tokenBlacklistPath,
     sqliteDbPath,
