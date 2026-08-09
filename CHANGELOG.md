@@ -2,6 +2,17 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.2] — 2026-08-09
+
+### Fixed
+
+- Exit withdrawal accounting now measures each leg's actual withdrawal from the on-chain wallet balance delta around the close batch instead of trusting the SDK position snapshot (which under-read a live position by ~40%: a $41.91 all-USDC position reported $24.38, so the exit settlement sold only $24.38 and `finalizeSettlementGroup` recomputed the correct +$0.78 realized into -$16.78). The delta includes swept fees/rewards (`shouldClaimAndClose`); same-mint LM rewards are excluded because the exit books them separately. Falls back to the SDK snapshot only when the delta is unmeasurable (2s deadline under degraded RPC — the close is never delayed for accounting) or negative, with an audit-trail warn distinguishing measured from snapshot-derived withdrawals (#205)
+- `finalizeSettlementGroup` no longer clobbers a resolved exit realized PnL with a settlement-output-derived recomputation (which was wrong when the settlement recovered only part of the withdrawal) — it only fills the NULL (unresolved pricing) case (#205)
+
+### Changed
+
+- Bumped version to 0.2.2.
+
 ## [0.2.1] — 2026-08-09
 
 ### Added
