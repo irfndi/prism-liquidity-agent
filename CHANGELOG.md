@@ -2,11 +2,19 @@
 
 All notable changes to Prism are documented here.
 
-## [Unreleased]
+## [0.2.1] — 2026-08-09
+
+### Added
+
+- **Launch Mode v2 — execution lane**: launch-gated pools now flow into a separate time-boxed execution lane. `launchPositionExit` (pure policy: 6h time-box, 1h-fee volume decay vs in-process peak, drawdown from peak seeded at deposit, fee/IL < 0.5) and `launchEntrySizeUsd` (min size cap, 0.5% TVL, 50% wallet); launch ENTERs run the FULL existing gate chain with a separate `LAUNCH_MAX_OPEN_POSITIONS` counter; per-position lifecycle exits via the normal EXIT path; measured Data-API fees only (gecko/heuristic never fire volume-decay). Position mode survives applied agent proposals; exits stay armed if the lane is disabled mid-position; executable set bounded to top-K (#202)
 
 ### Fixed
 
-- Exit settlement amounts are reconciled with the live wallet balance at execution time: the sell amount is clamped to `min(job amount, wallet balance)` before quoting (a concurrent entry consuming the exit proceeds previously made the swap simulation fail forever — 130 attempts in the field), a fully-consumed balance terminalizes with a clear error instead of looping, and the orphan sweep now revives a terminal job's wallet-held excess even when the mint is position-backed (position liquidity lives in the position account, not the wallet). Entry preparation reserves pending settlement claims from the spendable balance, so a new entry can no longer consume funds an exit settlement is about to sell (#201)
+- Exit settlement amounts are reconciled with the live wallet balance at execution time: the sell amount is clamped to `min(job amount, wallet balance)` before quoting (a concurrent entry consuming the exit proceeds previously made the swap simulation fail forever — 130 attempts in the field), a fully-consumed balance terminalizes with a clear error instead of looping, and the orphan sweep now revives a terminal job's wallet-held excess even when the mint is position-backed (position liquidity lives in the position account, not the wallet). Entry preparation reserves pending settlement claims from the spendable balance, so a new entry can no longer consume funds an exit settlement is about to sell (#203)
+
+### Changed
+
+- Bumped version to 0.2.1.
 
 ## [0.2.0] — 2026-08-09
 
