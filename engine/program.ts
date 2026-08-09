@@ -4221,14 +4221,18 @@ export const program = Effect.gen(function* () {
         // top-K, or a refresh whose fetch failed (null), drops its entry —
         // otherwise an old suspicious flag would gate ENTER forever.
         washEvidenceByPool.clear();
-        const topK = gateResult.ranked.slice(0, config.launchScanTopK ?? 30);
+        // Bound both the fetch WIDTH (top-30 by fee yield — the pools most
+        // likely to reach ENTER; evidence for the rest fails open) and the
+        // CONCURRENCY (5): 200 pools at unbounded concurrency would burst
+        // the Helius rate tier and 429 everything to null.
+        const topK = gateResult.ranked.slice(0, Math.min(config.launchScanTopK ?? 30, 30));
         const evidences = yield* Effect.forEach(
           topK,
           (r) =>
             adapter.getPoolWashEvidence!(r.pool.address).pipe(
               Effect.catch(() => Effect.succeed(null)),
             ),
-          { concurrency: "unbounded" },
+          { concurrency: 5 },
         );
         for (let i = 0; i < topK.length; i++) {
           const evidence = evidences[i];

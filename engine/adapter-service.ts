@@ -2138,6 +2138,15 @@ export const AdapterLive = Layer.effect(
           const rows: WashTradeRow[] = [];
           for (const tx of parsed) {
             if (!isObject(tx)) continue;
+            // Only successful METEORA instructions count as volume: failed
+            // txs (err set) and system transfers are not swap activity, and a
+            // single active LP's maintenance txs must not satisfy the
+            // concentration thresholds. DLMM swaps and LP ops are both
+            // type UNKNOWN — the residual noise is bounded by the
+            // extreme-tail thresholds.
+            if (tx["err"] != null) continue;
+            if (tx["type"] === "TRANSFER") continue;
+            if (tx["source"] !== "METEORA") continue;
             const payer = tx["feePayer"];
             const timestamp = tx["timestamp"];
             const fee = tx["fee"];
