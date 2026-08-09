@@ -336,7 +336,7 @@ export function evaluateAgentProposal(
         portfolioValueUsd: ctx.portfolioValueUsd,
         openPositions: ctx.openPositions,
         maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
-        maxOpenPositions: config.maxOpenPositions,
+        maxOpenPositions: ctx.maxOpenPositions ?? config.maxOpenPositions,
         poolAddress: proposal.poolAddress,
         maxPositionsPerPool: config.maxPositionsPerPool,
       });
