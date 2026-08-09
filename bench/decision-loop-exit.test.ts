@@ -31,6 +31,7 @@ import {
   type MemoryApi,
   type MeteoraDatapiApi,
   type MeteoraPoolStats,
+  type DiscoveredPool,
 } from "../engine/services.js";
 import type { PoolSnapshot } from "../engine/types.js";
 import type { PositionRecord } from "../engine/db-service.js";
@@ -739,5 +740,124 @@ describe("runner scale-in wiring (Heart Attack step 2)", () => {
     expect(saved?.launchRunnerAnchorPrice).toBe(93);
     const scaleIn = decisions.find((d) => d.reasoning.includes("[launch-scale-in]"));
     expect(scaleIn, "scale-in must be audited").toBeDefined();
+  }, 15_000);
+
+  it("launch pools are excluded from the idle-redeploy queue (regression: no standard-lane fall-through)", async () => {
+    const POOL = "LaunchRedeployPool111111111111111111111111111111";
+    const now = Date.now();
+    // A gate-passing launch candidate: young, hot, safe legs, binStep 100.
+    const discoveredPool: DiscoveredPool = {
+      address: POOL,
+      tvlUsd: 300_000,
+      volume24hUsd: 900_000,
+      fees24hUsd: 2_400,
+      apr: 60,
+      binStep: 100,
+      volume1hUsd: 100_000,
+      feeYield1hPct: 5,
+      baseFeePct: 2,
+      createdAtMs: now - 3_600_000,
+      tokenX: "So11111111111111111111111111111111111111112",
+      tokenY: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      tokenXSymbol: "SOL",
+      tokenYSymbol: "USDC",
+      tokenXVerified: true,
+      tokenYVerified: true,
+      tokenXFreezeDisabled: true,
+      tokenYFreezeDisabled: true,
+    };
+    const enterSpy = vi.fn((_pool: string, _lower: number, _upper: number, size: number) =>
+      Effect.succeed({
+        positionPubKey: "mock-pos",
+        txSignature: "mock-tx",
+        depositMode: "two-sided" as const,
+        amountXUsd: size / 2,
+        amountYUsd: size / 2,
+      }),
+    );
+    const adapter = makeAdapter(
+      { [POOL]: makePool({ address: POOL, binStep: 100, tvlUsd: 300_000 }) },
+      {
+        hasWallet: () => true,
+        // A live ENTER must clear the SOL floor (MIN_SOL_FOR_ENTRY_LAMPORTS).
+        getNativeSolBalance: () => Effect.succeed(2n ** 40n),
+        // The idle-redeploy pass measures idle capital as LIVE USDC holdings —
+        // $5k idle arms the pass (threshold 0), so the regression actually
+        // exercises the redeploy queue.
+        getWalletHoldings: () =>
+          Effect.succeed(
+            new Map<string, { readonly amountAtomic: bigint; readonly decimals: number }>([
+              [
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                { amountAtomic: 5_000_000_000n, decimals: 6 },
+              ],
+            ]),
+          ),
+        discoverHotPools: () => Effect.succeed([discoveredPool]),
+        enterPosition: enterSpy,
+      },
+    );
+    // Measured stats (datapi) so the ENTER candidate gate's
+    // volumeAuthenticityKnown requirement passes — a heuristic pool can
+    // never enter by design.
+    const datapi: MeteoraDatapiApi = {
+      getPoolData: (addr: string) =>
+        Effect.succeed(
+          addr === POOL
+            ? makeDatapiStats({
+                address: POOL,
+                tvlUsd: 300_000,
+                volume24hUsd: 900_000,
+                fees24hUsd: 2_400,
+                apr: 60,
+                feeTvlRatio1h: 0.05,
+              })
+            : null,
+        ),
+    };
+    const layer = makeTestLayer({
+      adapter,
+      datapi,
+      configOverrides: {
+        watchlistPools: [POOL],
+        paperTrading: false,
+        idleRedeployEnabled: true,
+        idleRedeployThresholdUsd: 0,
+        idleRedeployMaxSizeUsd: 500,
+        launchScanEnabled: true,
+        launchExecutionEnabled: true,
+        solPriceUsd: 150,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const db = yield* DbService;
+      const positions = yield* db.getAllPositions();
+      const audit = yield* AuditService;
+      const decisions = yield* audit.getRecentDecisions(50);
+      return { positions, decisions };
+    });
+    const { positions, decisions } = await Effect.runPromise(
+      Effect.provide(test, layer) as unknown as Effect.Effect<
+        { positions: PositionRecord[]; decisions: ReadonlyArray<DecisionRow> },
+        Error,
+        never
+      >,
+    );
+
+    // The LAUNCH lane owns the entry: exactly ONE position, stamped launch.
+    const poolPositions = positions.filter((p) => p.poolAddress === POOL);
+    expect(poolPositions.length).toBe(1);
+    expect(poolPositions[0]!.positionMode).toBe("launch");
+    // The idle-redeploy pass must never enter the pool as a STANDARD
+    // position (the regression: a redeploy decision carries no
+    // positionMode, so the entry would lose the launch timebox/decay/
+    // drawdown protection).
+    const redeployDecisions = decisions.filter((d) => d.reasoning.includes("idle-redeploy"));
+    expect(redeployDecisions.length).toBe(0);
+    // enterPosition ran exactly once — the launch entry. A second call would
+    // mean the redeploy pass entered the pool.
+    expect(enterSpy).toHaveBeenCalledTimes(1);
   }, 15_000);
 });

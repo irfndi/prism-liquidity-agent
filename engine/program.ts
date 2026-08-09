@@ -6959,7 +6959,13 @@ export const program = Effect.gen(function* () {
                       }
                     }
                   }
-                  if (redeployTokenRiskClean) {
+                  if (redeployTokenRiskClean && !isLaunchPool) {
+                    // Launch pools are EXCLUDED from the idle-redeploy queue:
+                    // the redeploy pass emits a STANDARD decision (no
+                    // positionMode: "launch"), so a redeploy entry would get
+                    // neither the launch timebox/decay/drawdown protection
+                    // nor the runner dip shape. The launch lane's own ENTER
+                    // branch owns launch entries.
                     idleRedeployCandidates.push({
                       poolAddress,
                       pool,
@@ -7044,7 +7050,9 @@ export const program = Effect.gen(function* () {
                   // fully-vetted candidate whether or not this ENTER executes
                   // — a second position on the same pool (Wave 10) or a
                   // risk-tail rejection both leave idle capital deployable.
-                  if (config.idleRedeployEnabled) {
+                  if (config.idleRedeployEnabled && !isLaunchPool) {
+                    // Same exclusion as the launch-branch capture: a launch
+                    // pool must never enter through the standard redeploy lane.
                     idleRedeployCandidates.push({
                       poolAddress,
                       pool,
@@ -7075,8 +7083,16 @@ export const program = Effect.gen(function* () {
         !unresolvedPoolAddresses.has(poolAddress) &&
         (approvedPoolAddresses.includes(poolAddress) || marketScanPools.has(poolAddress))
       ) {
+        // isLaunchPool is scoped to the ENTER branch above — recompute the
+        // launch-lane membership for this capture site.
+        const redeployPoolIsLaunch =
+          config.launchScanEnabled === true &&
+          config.launchExecutionEnabled === true &&
+          launchScanPools.has(poolAddress);
         const redeployCandidate = evaluateIdleRedeployCandidate();
-        if (redeployCandidate) idleRedeployCandidates.push(redeployCandidate);
+        if (redeployCandidate && !redeployPoolIsLaunch) {
+          idleRedeployCandidates.push(redeployCandidate);
+        }
       }
 
       if (rawDecisions.length === 0 && !enterGateRejected) {
@@ -7561,6 +7577,16 @@ export const program = Effect.gen(function* () {
           });
         }
 
+        if (decision.action === "ENTER" && decision.positionMode === "launch") {
+          console.info("[enter-debug] executor reached", {
+            action: decision.action,
+            mode: decision.positionMode,
+            size: decision.positionSizeUsd,
+            agentive: config.agentiveMode,
+            paper: config.paperTrading,
+            shadow: config.autonomousTokenMode,
+          });
+        }
         // Risk evaluation. HOLD executes nothing, so risk gates are skipped for
         // it — every rejection used to write a 60-day warning memory, and those
         // warnings then suppressed the good-HOLD branch (hasRecentWarning),
