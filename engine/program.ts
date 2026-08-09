@@ -37,7 +37,7 @@ import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
 import { gateAndRankMarketPools, type MarketPoolRank } from "./market-gate.js";
-import { gateAndRankLaunchPools } from "./launch-gate.js";
+import { gateAndRankLaunchPools, summarizeLaunchRejections } from "./launch-gate.js";
 import { transitionCandidate } from "./candidate-policy.js";
 import { getPrismUserConfigDir } from "./paths.js";
 
@@ -4052,7 +4052,7 @@ export const program = Effect.gen(function* () {
         }
         return;
       }
-      const { ranked } = gateAndRankLaunchPools(discovered, {
+      const gateResult = gateAndRankLaunchPools(discovered, {
         minTvlUsd: config.launchScanMinTvlUsd ?? 5_000,
         maxTvlUsd: config.launchScanMaxTvlUsd ?? 1_000_000,
         maxAgeHours: config.launchScanMaxAgeHours ?? 6,
@@ -4065,6 +4065,17 @@ export const program = Effect.gen(function* () {
         stablecoinMints: config.stablecoinMints ?? new Set<string>(),
         now,
       });
+      // The radar's observable answer to "why nothing admitted": top
+      // rejection reasons with counts. A 100%-rejection universe is
+      // diagnosable (age cap vs TVL cap vs token-safety floor) instead of a
+      // black box.
+      const rejections = summarizeLaunchRejections(gateResult.rejected);
+      if (gateResult.ranked.length === 0) {
+        logger.info("Launch radar: nothing admitted", {
+          universe: discovered.length,
+          rejections,
+        });
+      }
       // v2 execution lane: the admitted radar set becomes the executable
       // launch pool set, bounded to the top-K by fee yield so the per-cycle
       // RPC/decision cost stays proportional to LAUNCH_SCAN_TOP_K, not the
@@ -4072,18 +4083,21 @@ export const program = Effect.gen(function* () {
       // radar-only path leaves launchScanPools empty and behavior-identical.
       if (config.launchExecutionEnabled === true) {
         launchScanPools.clear();
-        for (const r of ranked.slice(0, config.launchScanTopK ?? 30)) {
+        for (const r of gateResult.ranked.slice(0, config.launchScanTopK ?? 30)) {
           launchScanPools.add(r.pool.address);
         }
       }
       logger.info("Launch radar", {
         universe: discovered.length,
-        admitted: ranked.length,
-        rejected: discovered.length - ranked.length,
-        top: ranked.slice(0, config.launchScanTopK ?? 30).map((r) => ({
+        admitted: gateResult.ranked.length,
+        rejected: discovered.length - gateResult.ranked.length,
+        rejections,
+        top: gateResult.ranked.slice(0, config.launchScanTopK ?? 30).map((r) => ({
           address: r.pool.address,
           pool: `${r.pool.tokenXSymbol ?? "?"}/${r.pool.tokenYSymbol ?? "?"}`,
           feeYield1hPct: r.feeYield1hPct,
+          feeYieldWindows: r.pool.feeYieldWindows,
+          volumeWindows: r.pool.volumeWindows,
           volume1hUsd: r.volume1hUsd,
           ageHours:
             r.pool.createdAtMs === undefined
@@ -5383,11 +5397,24 @@ export const program = Effect.gen(function* () {
               ? (datapiStats.feeTvlRatio1h / 100) * pool.tvlUsd
               : null;
           if (currentFees1hUsd === null) {
-            logger.debug("Launch position: 1h fees unmeasured — volume-decay gate skipped", {
-              pool: pos.poolAddress,
-              position: pos.positionId,
-              statsSource: pool.statsSource,
-            });
+            // Data-starved decay guard: the volume-decay rule needs MEASURED
+            // datapi 1h fees. A non-datapi stats source (gecko/heuristic —
+            // the Data API is down) is a protection-reducing outage for an
+            // open launch position: warn per position (bounded: ≤ launch
+            // slot count). Datapi-up-but-window-missing (a young zero-fee
+            // pool or tvl <= 0) is routine — debug only.
+            if (pool.statsSource !== "datapi") {
+              logger.warn("Launch position: 1h fees unmeasured — volume-decay gate degraded", {
+                pool: pos.poolAddress,
+                position: pos.positionId,
+                statsSource: pool.statsSource,
+              });
+            } else {
+              logger.debug("Launch position: 1h fees unmeasured — volume-decay gate skipped", {
+                pool: pos.poolAddress,
+                position: pos.positionId,
+              });
+            }
           }
           const prevPeak = launchPeakFees1h.get(pos.positionId);
           if (
