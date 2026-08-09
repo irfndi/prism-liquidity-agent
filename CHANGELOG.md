@@ -2,6 +2,16 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.4] — 2026-08-09
+
+### Added
+
+- **Runner mode (Heart Attack)** — the launch lane's optional dip-capture posture, validated on the live TOAD runner (at-market entry + 15% stop lost ~15% on the run while a -12% below-market bid ladder made +50% the same hour): `LAUNCH_RUNNER_MODE_ENABLED` anchors launch ENTERs below the active bin (`LAUNCH_RUNNER_DIP_PCT`, bin math `ln(1-dip)/ln(1+binStep/1e4)`) in a tight band (`LAUNCH_RUNNER_HALF_WIDTH_BINS`, clamped to the range cap and strictly below-market), funds them single-sided-X (full size in the quote leg — the X that converts when the dip fills; the Y half is never swapped), and uses a shakeout-tolerant stop (`LAUNCH_RUNNER_DRAWDOWN_PCT`) pinned to how each position was ENTERED (persisted `launch_runner` on the row, restart-safe). Pre-fill runner positions are excluded from the generic OOR/rebalance machinery — the launch timebox/decay/drawdown owns their exits. Paper models the same single-sided exposure. OFF by default (#207)
+
+### Changed
+
+- Bumped version to 0.2.4.
+
 ## [0.2.3] — 2026-08-09
 
 ### Added
