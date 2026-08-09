@@ -4217,11 +4217,24 @@ export const program = Effect.gen(function* () {
         }
       }
       if (config.launchWashForensicsEnabled === true && adapter.getPoolWashEvidence) {
-        for (const r of gateResult.ranked.slice(0, config.launchScanTopK ?? 30)) {
-          const evidence = yield* adapter
-            .getPoolWashEvidence(r.pool.address)
-            .pipe(Effect.catch(() => Effect.succeed(null)));
-          if (evidence !== null) washEvidenceByPool.set(r.pool.address, evidence);
+        // Stale evidence must not outlive its pool: a pool that left the
+        // top-K, or a refresh whose fetch failed (null), drops its entry —
+        // otherwise an old suspicious flag would gate ENTER forever.
+        washEvidenceByPool.clear();
+        const topK = gateResult.ranked.slice(0, config.launchScanTopK ?? 30);
+        const evidences = yield* Effect.forEach(
+          topK,
+          (r) =>
+            adapter.getPoolWashEvidence!(r.pool.address).pipe(
+              Effect.catch(() => Effect.succeed(null)),
+            ),
+          { concurrency: "unbounded" },
+        );
+        for (let i = 0; i < topK.length; i++) {
+          const evidence = evidences[i];
+          if (evidence !== null && evidence !== undefined) {
+            washEvidenceByPool.set(topK[i]!.pool.address, evidence);
+          }
         }
       }
       logger.info("Launch radar", {
@@ -4249,6 +4262,9 @@ export const program = Effect.gen(function* () {
                     reason: evidence.reason,
                     distinctPayers: evidence.distinctPayers,
                     tradeCount: evidence.tradeCount,
+                    uniquePayerRate: evidence.uniquePayerRate,
+                    txsPerSecond: evidence.txsPerSecond,
+                    feeCv: evidence.feeCv,
                   },
                 }
               : {}),

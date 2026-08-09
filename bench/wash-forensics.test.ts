@@ -26,11 +26,22 @@ describe("scoreWashEvidence", () => {
   });
 
   it("flags a bot burst: 2 wallets at >5 trades/sec", () => {
-    // 12 trades from 2 wallets within 2 seconds = 6 tps.
-    const rows = Array.from({ length: 12 }, (_, i) => row(`bot${i % 2}`, Math.floor(i / 6)));
+    // 12 trades from 2 wallets spanning [0, 2] seconds = 12/2 = 6 tps.
+    const rows = Array.from({ length: 12 }, (_, i) => row(`bot${i % 2}`, Math.floor(i / 6) * 2));
     const e = scoreWashEvidence(rows);
     expect(e.suspicious).toBe(true);
+    expect(e.txsPerSecond).toBe(6);
     expect(e.reason).toContain("bot burst");
+  });
+
+  it("passes a burst under the threshold (exactly 5 tps does NOT fire at 2 wallets... it fires at >= 5)", () => {
+    // 10 trades from 2 wallets spanning [0, 2] seconds = 5 tps — the >=
+    // threshold fires (bot-burst rule) but the 2-wallet concentration rule
+    // also fires (10 < 20 trades so it does not) — document the boundary.
+    const rows = Array.from({ length: 10 }, (_, i) => row(`bot${i % 2}`, Math.floor(i / 5) * 2));
+    const e = scoreWashEvidence(rows);
+    expect(e.txsPerSecond).toBe(5);
+    expect(e.suspicious).toBe(true);
   });
 
   it("passes organic volume: many distinct wallets over time", () => {

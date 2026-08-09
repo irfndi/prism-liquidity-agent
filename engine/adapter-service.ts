@@ -2120,13 +2120,15 @@ export const AdapterLive = Layer.effect(
           } catch {
             return null;
           }
-          if (!host.includes("helius")) return null;
+          if (host !== "helius-rpc.com" && !host.endsWith(".helius-rpc.com")) {
+            return null;
+          }
           const url =
             `https://${host}/v0/addresses/${poolAddress}/transactions` +
             `?limit=40&api-key=${encodeURIComponent(config.heliusApiKey)}`;
           const parsed: unknown = yield* Effect.tryPromise({
             try: async () => {
-              const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+              const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
               if (!res.ok) throw new Error(`heluis wash fetch ${res.status}`);
               return (await res.json()) as unknown;
             },
