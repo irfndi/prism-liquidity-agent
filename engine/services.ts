@@ -36,6 +36,9 @@ import type { CopySignalApi } from "./copy-trading-signals.js";
 
 // ─── Adapter Service ─────────────────────────────────────────────────────────
 
+/** Data API fee/volume window labels (rolling windows over the last N). */
+export type DiscoveredWindow = "30m" | "1h" | "2h" | "4h" | "12h" | "24h";
+
 export interface DiscoveredPool {
   readonly address: string;
   readonly tvlUsd: number;
@@ -48,6 +51,12 @@ export interface DiscoveredPool {
   readonly volume1hUsd?: number;
   readonly fees1hUsd?: number;
   readonly feeYield1hPct?: number;
+  /** Rolling-window fee-yield curves (fee_tvl_ratio per window), for the
+   *  radar's multi-timeframe probes (30m/1h/2h/4h/12h/24h). Optional;
+   *  absent when the payload carries no windows. */
+  readonly feeYieldWindows?: Readonly<Partial<Record<DiscoveredWindow, number>>>;
+  /** Rolling-window volume curves, same labels. Optional. */
+  readonly volumeWindows?: Readonly<Partial<Record<DiscoveredWindow, number>>>;
   readonly baseFeePct?: number;
   readonly tokenX: string;
   readonly tokenY: string;

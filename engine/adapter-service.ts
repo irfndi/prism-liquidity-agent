@@ -389,6 +389,21 @@ function isValidPoolShape(v: unknown): v is MeteoraPool {
 }
 
 /**
+ * Extract the finite numeric values of a Data API rolling-window object
+ * (e.g. `fee_tvl_ratio` / `volume` with 30m/1h/2h/4h/12h/24h labels). Empty
+ * when the object is missing or carries no finite windows.
+ */
+function readWindowMap(raw: unknown): Map<string, number> {
+  if (!isObject(raw)) return new Map();
+  const out = new Map<string, number>();
+  for (const window of ["30m", "1h", "2h", "4h", "12h", "24h"] as const) {
+    const value = raw[window];
+    if (typeof value === "number" && Number.isFinite(value)) out.set(window, value);
+  }
+  return out;
+}
+
+/**
  * Shared row→DiscoveredPool mapper used by both discovery paths (rotating
  * single-page discovery and the market-scan universe refresh). Attaches the
  * Data API's token-safety metadata (verified / freeze-disabled / holders /
@@ -397,6 +412,12 @@ function isValidPoolShape(v: unknown): v is MeteoraPool {
  */
 function toDiscoveredPool(p: MeteoraPool): DiscoveredPool {
   const { token_x: tokenX, token_y: tokenY } = p;
+  // Rolling-window curves (30m/1h/2h/4h/12h/24h) for the radar's
+  // multi-timeframe probes: the list payload carries fee-yield AND volume
+  // windows per pool, so wash patterns (a burst confined to one window) and
+  // hotness cross-checks surface with no extra API call.
+  const feeYieldWindows = readWindowMap(p.fee_tvl_ratio);
+  const volumeWindows = readWindowMap(p.volume);
   return {
     address: p.address,
     tvlUsd: p.tvl,
@@ -423,6 +444,12 @@ function toDiscoveredPool(p: MeteoraPool): DiscoveredPool {
     ...(typeof p.fee_tvl_ratio?.["1h"] === "number" && Number.isFinite(p.fee_tvl_ratio["1h"])
       ? { feeYield1hPct: p.fee_tvl_ratio["1h"] }
       : {}),
+    // Rolling-window curves for the radar's multi-timeframe probes: the same
+    // payload carries 30m/1h/2h/4h/12h/24h fee-yield and volume windows, so
+    // the radar can surface wash patterns (a burst confined to one window)
+    // and cross-check hotness without any extra API call.
+    ...(feeYieldWindows.size > 0 ? { feeYieldWindows: Object.fromEntries(feeYieldWindows) } : {}),
+    ...(volumeWindows.size > 0 ? { volumeWindows: Object.fromEntries(volumeWindows) } : {}),
     ...(typeof p.pool_config?.base_fee_pct === "number" &&
     Number.isFinite(p.pool_config.base_fee_pct)
       ? { baseFeePct: p.pool_config.base_fee_pct }
@@ -2645,11 +2672,10 @@ export const AdapterLive = Layer.effect(
               ),
             },
             { concurrency: "unbounded" },
-          )
-            .pipe(
-              Effect.timeout(Duration.millis(2000)),
-              Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
-            );
+          ).pipe(
+            Effect.timeout(Duration.millis(2000)),
+            Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
+          );
           const beforeHeld = preClose.held;
           const beforeNativeSol = preClose.nativeSol;
 
@@ -2698,11 +2724,10 @@ export const AdapterLive = Layer.effect(
               nativeSol: readNativeSolBalance().pipe(Effect.catch(() => Effect.succeed(null))),
             },
             { concurrency: "unbounded" },
-          )
-            .pipe(
-              Effect.timeout(Duration.millis(2000)),
-              Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
-            );
+          ).pipe(
+            Effect.timeout(Duration.millis(2000)),
+            Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
+          );
           const measuredX = measureWithdrawalDelta({
             beforeHeld,
             afterHeld: afterSnapshot.held,

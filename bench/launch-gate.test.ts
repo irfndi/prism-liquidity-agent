@@ -3,6 +3,7 @@
 import { describe, it, expect } from "vitest";
 import {
   gateAndRankLaunchPools,
+  summarizeLaunchRejections,
   type LaunchGateConfig,
   type LaunchGateResult,
   type LaunchPoolRank,
@@ -178,5 +179,29 @@ describe("gateAndRankLaunchPools", () => {
     const rankedAddresses = result.ranked.map((r: LaunchPoolRank) => r.pool.address);
     expect(rankedAddresses).toEqual(["hot", "mid", "low"]);
     expect(result.rejected).toHaveLength(0);
+  });
+});
+
+describe("summarizeLaunchRejections", () => {
+  it("counts reasons and returns the top-N, highest count first", () => {
+    const summary = summarizeLaunchRejections([
+      { reason: "age 5.0h > 6h" },
+      { reason: "age 5.0h > 6h" },
+      { reason: "tvl 200000 > 1000000 (established, not a launch)" },
+      { reason: "age 5.0h > 6h" },
+    ]);
+    expect(summary[0]!.reason).toContain("age");
+    expect(summary[0]!.count).toBe(3);
+    expect(summary[1]!.reason).toContain("tvl");
+    expect(summary).toHaveLength(2);
+  });
+
+  it("returns empty for an empty rejection list", () => {
+    expect(summarizeLaunchRejections([])).toEqual([]);
+  });
+
+  it("clamps topN to at least one", () => {
+    const summary = summarizeLaunchRejections([{ reason: "a" }, { reason: "b" }], 0);
+    expect(summary).toHaveLength(1);
   });
 });

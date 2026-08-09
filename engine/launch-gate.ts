@@ -54,6 +54,25 @@ export interface LaunchGateResult {
   readonly rejected: ReadonlyArray<{ readonly address: string; readonly reason: string }>;
 }
 
+/**
+ * Top-N rejection reasons with counts — the radar's observable answer to
+ * "why did the universe admit nothing". A pure one-liner over the gate
+ * result, extracted for testability.
+ */
+export function summarizeLaunchRejections(
+  rejected: ReadonlyArray<{ readonly reason: string }>,
+  topN = 6,
+): ReadonlyArray<{ readonly reason: string; readonly count: number }> {
+  const counts = new Map<string, number>();
+  for (const r of rejected) {
+    counts.set(r.reason, (counts.get(r.reason) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, Math.max(topN, 1))
+    .map(([reason, count]) => ({ reason, count }));
+}
+
 /** Gates and ranks one launch-radar snapshot. Pure; callers feed it the
  *  adapter's `discoverHotPools` output. */
 export function gateAndRankLaunchPools(
