@@ -172,11 +172,14 @@ export function atomicToUnits(amountAtomic: bigint, decimals: number): number {
  * reporting $24.38 — $17.53 vanished from the ledger and the exit settlement
  * sold only the snapshot amount). The wallet's balance DELTA around the close
  * batch is the on-chain truth. Prefer it per leg; fall back to the SDK
- * snapshot when the delta is unmeasurable (reads failed) or non-positive (a
- * SOL leg whose tx fees ate the credit). `measured: true` marks a delta-based
- * result — a measured amount may include swept LM rewards (shouldClaimAndClose)
- * that the exit books separately, so the caller can exclude same-mint rewards;
- * the snapshot amount never includes them.
+ * snapshot when the delta is genuinely unmeasurable (reads timed out /
+ * failed) or negative (a SOL leg whose tx fees ate the credit, or a leg whose
+ * balance moved DOWN during the window). An observed ZERO delta is a measured
+ * zero — the empty leg of a single-sided position is routine, not a fallback.
+ * `measured: true` marks a delta-based result — a measured amount may include
+ * swept LM rewards (shouldClaimAndClose) that the exit books separately, so
+ * the caller can exclude same-mint rewards; the snapshot amount never
+ * includes them.
  */
 export function measureWithdrawalDelta(input: {
   readonly beforeHeld: ReadonlyMap<
@@ -201,13 +204,15 @@ export function measureWithdrawalDelta(input: {
   if (input.mint === SOL_MINT) {
     if (input.beforeNativeSol === null || input.afterNativeSol === null) return fallback();
     const delta = input.afterNativeSol - input.beforeNativeSol;
-    return delta > 0n ? { amountAtomic: delta.toString(), measured: true } : fallback();
+    if (delta < 0n) return fallback();
+    return { amountAtomic: delta.toString(), measured: true };
   }
   if (input.beforeHeld === null || input.afterHeld === null) return fallback();
   const before = input.beforeHeld.get(input.mint)?.amountAtomic ?? 0n;
   const after = input.afterHeld.get(input.mint)?.amountAtomic ?? 0n;
   const delta = after - before;
-  return delta > 0n ? { amountAtomic: delta.toString(), measured: true } : fallback();
+  if (delta < 0n) return fallback();
+  return { amountAtomic: delta.toString(), measured: true };
 }
 
 /**

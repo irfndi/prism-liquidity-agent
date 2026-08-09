@@ -27,9 +27,37 @@ describe("measureWithdrawalDelta", () => {
     expect(result).toEqual({ amountAtomic: "41913604", measured: true });
   });
 
-  it("falls back to the snapshot when the SPL delta is not positive", () => {
+  it("measures a zero SPL delta as zero when the leg was observed unchanged", () => {
     const before = held([[USDC, 44_352_396n]]);
     const after = held([[USDC, 44_352_396n]]);
+    const result = measureWithdrawalDelta({
+      beforeHeld: before,
+      afterHeld: after,
+      beforeNativeSol: 1n,
+      afterNativeSol: 1n,
+      mint: USDC,
+      snapshotAmount: "24377718",
+    });
+    expect(result).toEqual({ amountAtomic: "0", measured: true });
+  });
+
+  it("measures a zero delta for the empty leg of a single-sided exit (routine, not a fallback)", () => {
+    // The empty leg: not held before, not held after — a correctly observed
+    // zero withdrawal. measured: true keeps the audit warn quiet.
+    const result = measureWithdrawalDelta({
+      beforeHeld: held([]),
+      afterHeld: held([]),
+      beforeNativeSol: 1n,
+      afterNativeSol: 1n,
+      mint: USDC,
+      snapshotAmount: "0",
+    });
+    expect(result).toEqual({ amountAtomic: "0", measured: true });
+  });
+
+  it("falls back when a leg's balance moved DOWN during the close window", () => {
+    const before = held([[USDC, 44_352_396n]]);
+    const after = held([[USDC, 40_000_000n]]);
     const result = measureWithdrawalDelta({
       beforeHeld: before,
       afterHeld: after,
