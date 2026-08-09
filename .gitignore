@@ -79,3 +79,4 @@ mcp-server/package-lock.json
 
 # Agent preference/learning artifacts (regenerated per session)
 .commandcode/
+.cgcignore

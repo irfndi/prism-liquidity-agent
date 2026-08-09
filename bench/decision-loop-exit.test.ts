@@ -31,6 +31,7 @@ import {
   type MemoryApi,
   type MeteoraDatapiApi,
   type MeteoraPoolStats,
+  type DiscoveredPool,
 } from "../engine/services.js";
 import type { PoolSnapshot } from "../engine/types.js";
 import type { PositionRecord } from "../engine/db-service.js";
@@ -739,5 +740,182 @@ describe("runner scale-in wiring (Heart Attack step 2)", () => {
     expect(saved?.launchRunnerAnchorPrice).toBe(93);
     const scaleIn = decisions.find((d) => d.reasoning.includes("[launch-scale-in]"));
     expect(scaleIn, "scale-in must be audited").toBeDefined();
+  }, 15_000);
+
+  it("launch pools never enter through the idle-redeploy pass even after a portfolio slot frees (regression)", async () => {
+    const LAUNCH_POOL = "LaunchRedeployPool2222222222222222222222222222";
+    const EXIT_POOL = "ExitFreesSlotPool11111111111111111111111111111";
+    const FILLER_POOL = "FillerStaysPool1111111111111111111111111111111";
+    const now = Date.now();
+    // A gate-passing launch candidate: young, hot, safe legs, binStep 100.
+    const discoveredPool: DiscoveredPool = {
+      address: LAUNCH_POOL,
+      tvlUsd: 300_000,
+      volume24hUsd: 900_000,
+      fees24hUsd: 2_400,
+      apr: 60,
+      binStep: 100,
+      volume1hUsd: 100_000,
+      feeYield1hPct: 5,
+      baseFeePct: 2,
+      createdAtMs: now - 3_600_000,
+      tokenX: "So11111111111111111111111111111111111111112",
+      tokenY: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      tokenXSymbol: "SOL",
+      tokenYSymbol: "USDC",
+      tokenXVerified: true,
+      tokenYVerified: true,
+      tokenXFreezeDisabled: true,
+      tokenYFreezeDisabled: true,
+    };
+    const enterSpy = vi.fn((_pool: string, _lower: number, _upper: number, size: number) =>
+      Effect.succeed({
+        positionPubKey: "mock-pos",
+        txSignature: "mock-tx",
+        depositMode: "two-sided" as const,
+        amountXUsd: size / 2,
+        amountYUsd: size / 2,
+      }),
+    );
+    const adapter = makeAdapter(
+      {
+        [LAUNCH_POOL]: makePool({ address: LAUNCH_POOL, binStep: 100, tvlUsd: 300_000 }),
+        [EXIT_POOL]: makePool({ address: EXIT_POOL, tvlUsd: 60_000 }),
+        [FILLER_POOL]: makePool({ address: FILLER_POOL, tvlUsd: 100_000 }),
+      },
+      {
+        hasWallet: () => true,
+        // A live ENTER must clear the SOL floor (MIN_SOL_FOR_ENTRY_LAMPORTS).
+        getNativeSolBalance: () => Effect.succeed(2n ** 40n),
+        // The idle-redeploy pass measures idle capital as LIVE USDC holdings —
+        // $5k idle arms the pass (threshold 0), so the regression actually
+        // exercises the redeploy queue.
+        getWalletHoldings: () =>
+          Effect.succeed(
+            new Map<string, { readonly amountAtomic: bigint; readonly decimals: number }>([
+              [
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                { amountAtomic: 5_000_000_000n, decimals: 6 },
+              ],
+            ]),
+          ),
+        getAllWalletPositions: () =>
+          Effect.succeed([
+            {
+              positionPubKey: "exit-pos",
+              poolAddress: EXIT_POOL,
+              lowerBinId: 4980,
+              upperBinId: 5020,
+            },
+            {
+              positionPubKey: "filler-pos",
+              poolAddress: FILLER_POOL,
+              lowerBinId: 4980,
+              upperBinId: 5020,
+            },
+          ]),
+        discoverHotPools: () => Effect.succeed([discoveredPool]),
+        enterPosition: enterSpy,
+      },
+    );
+    // Measured stats (datapi) so the ENTER candidate gate's
+    // volumeAuthenticityKnown requirement passes — a heuristic pool can
+    // never enter by design.
+    const datapi: MeteoraDatapiApi = {
+      getPoolData: (addr: string) =>
+        Effect.succeed(
+          addr === LAUNCH_POOL
+            ? makeDatapiStats({
+                address: LAUNCH_POOL,
+                tvlUsd: 300_000,
+                volume24hUsd: 900_000,
+                fees24hUsd: 2_400,
+                apr: 60,
+                feeTvlRatio1h: 0.05,
+              })
+            : null,
+        ),
+    };
+    const layer = makeTestLayer({
+      adapter,
+      datapi,
+      configOverrides: {
+        // LAUNCH_POOL scans FIRST (portfolio full at 2/2 -> the launch
+        // allocation rejects); EXIT_POOL is scanned later via the held-pool
+        // merge, so its TVL-drop EXIT frees a slot AFTER the capture.
+        watchlistPools: [LAUNCH_POOL, FILLER_POOL],
+        paperTrading: false,
+        idleRedeployEnabled: true,
+        idleRedeployThresholdUsd: 0,
+        idleRedeployMaxSizeUsd: 500,
+        launchScanEnabled: true,
+        launchExecutionEnabled: true,
+        // Portfolio full at 2/2 (EXIT_POOL + FILLER_POOL): the LAUNCH_POOL
+        // entry is rejected at the allocation gate, then EXIT_POOL's TVL-drop
+        // EXIT frees a slot before the redeploy pass runs — the exact window
+        // where an unguarded capture would dispatch a standard entry.
+        maxOpenPositions: 2,
+        dustExitUsd: 2000,
+        // Normal entries cap at $100 so the redeploy's widened size ($500)
+        // exceeds the captured normalEntrySizeUsd and the pass proceeds.
+        maxEntrySizeUsd: 100,
+        solPriceUsd: 150,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      // Portfolio full: one position on EXIT_POOL (will exit on the TVL
+      // drop) + one on FILLER_POOL (stays). LAUNCH_POOL has none.
+      yield* db.savePosition(
+        makePosition({
+          poolAddress: EXIT_POOL,
+          positionPubKey: "exit-pos",
+          depositedUsd: 1_000,
+          currentValueUsd: 1_000,
+          lowerBinId: 4980,
+          upperBinId: 5020,
+        }),
+      );
+      yield* db.savePosition(
+        makePosition({
+          poolAddress: FILLER_POOL,
+          positionPubKey: "filler-pos",
+          depositedUsd: 1_000,
+          currentValueUsd: 1_000,
+          lowerBinId: 4980,
+          upperBinId: 5020,
+        }),
+      );
+      // EXIT_POOL's position ($1k) is below the dust threshold ($2k): the
+      // deterministic dust-cleanup EXIT fires, freeing a portfolio slot.
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const positions = yield* db.getAllPositions();
+      const audit = yield* AuditService;
+      const decisions = yield* audit.getRecentDecisions(50);
+      return { positions, decisions };
+    });
+    const { positions, decisions } = await Effect.runPromise(
+      Effect.provide(test, layer) as unknown as Effect.Effect<
+        { positions: PositionRecord[]; decisions: ReadonlyArray<DecisionRow> },
+        Error,
+        never
+      >,
+    );
+
+    // The launch lane REJECTED the entry at the allocation gate (portfolio
+    // was full) — that is correct. The regression: the pool must not then
+    // be entered by the redeploy pass after EXIT_POOL's exit freed a slot,
+    // because a redeploy decision carries no positionMode (no launch
+    // timebox/decay/drawdown protection).
+    const launchEntryRejected = decisions.some((d) => d.reasoning.includes("[launch-alloc-gate]"));
+    expect(launchEntryRejected, "the launch entry must have been allocation-rejected").toBe(true);
+    const launchEnterCalls = enterSpy.mock.calls.filter((c) => c[0] === LAUNCH_POOL);
+    expect(launchEnterCalls.length, "the redeploy must never enter the launch pool").toBe(0);
+    const launchPositions = positions.filter((p) => p.poolAddress === LAUNCH_POOL);
+    expect(
+      launchPositions.every((p) => p.positionMode === "launch"),
+      "any LAUNCH_POOL position must carry the launch lifecycle",
+    ).toBe(true);
   }, 15_000);
 });
