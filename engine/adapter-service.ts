@@ -45,6 +45,7 @@ import { createLogger } from "./logger.js";
 import { getPrismUserConfigDir } from "./paths.js";
 import type { BinData, EntryDepositMode, EntryStrategyShape } from "./types.js";
 import { CircuitBreaker, isRpcNetworkError, retryEffectWithBackoff } from "./adapter-retry.js";
+import { jupiterFetch } from "./jupiter-client.js";
 import bs58 from "bs58";
 import fs from "fs";
 import path from "path";
@@ -883,7 +884,7 @@ export const AdapterLive = Layer.effect(
         const requestInit: RequestInit = { signal: AbortSignal.timeout(10_000) };
         if (jupiterApiKey) requestInit.headers = { "x-api-key": jupiterApiKey };
         const res = yield* Effect.tryPromise(() =>
-          fetch(`https://api.jup.ag/price/v3?ids=${ids}`, requestInit),
+          jupiterFetch(`https://api.jup.ag/price/v3?ids=${ids}`, requestInit),
         );
         if (!res.ok) return {};
         const json = (yield* Effect.tryPromise(() => res.json())) as Record<
@@ -1469,7 +1470,7 @@ export const AdapterLive = Layer.effect(
           );
         }
         const response = yield* Effect.tryPromise(() =>
-          fetch(
+          jupiterFetch(
             `https://api.jup.ag/swap/v1/quote?inputMint=${encodeURIComponent(request.inputMint)}&outputMint=${encodeURIComponent(request.outputMint)}&amount=${request.amountAtomic.toString()}&slippageBps=${request.slippageBps}&asLegacyTransaction=false`,
             { headers: jupiterHeaders(), signal: AbortSignal.timeout(10_000) },
           ),
@@ -1546,7 +1547,7 @@ export const AdapterLive = Layer.effect(
         yield* ensureFreshQuote(quote, "prepare");
         yield* validateQuotePayload(quote.request, quote.rawQuote, quote.quotedAt);
         const response = yield* Effect.tryPromise(() =>
-          fetch("https://api.jup.ag/swap/v1/swap", {
+          jupiterFetch("https://api.jup.ag/swap/v1/swap", {
             method: "POST",
             headers: jupiterHeaders(),
             body: JSON.stringify({

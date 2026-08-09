@@ -1,4 +1,5 @@
 import { createLogger } from "./logger.js";
+import { jupiterFetch } from "./jupiter-client.js";
 
 /**
  * Token-risk overlay (Wave 18): smart freeze-authority / scam detection that
@@ -103,7 +104,13 @@ export async function fetchTokenRisks(
     readonly fetchImpl?: FetchLike;
   } = {},
 ): Promise<Map<string, TokenRiskSignal>> {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  // The default fetch routes through the process-wide Jupiter traffic gate
+  // (pacing + 429 breaker — the tokens API shares the same keyless
+  // rate-limit bucket as quote/swap/price). Injected fakes (tests) bypass
+  // the gate.
+  const fetchImpl =
+    options.fetchImpl ??
+    ((url: string | URL | Request, init?: RequestInit) => jupiterFetch(url, init));
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const headers: Record<string, string> = {};
   // ONLY send the key when a non-empty value is configured — an empty
