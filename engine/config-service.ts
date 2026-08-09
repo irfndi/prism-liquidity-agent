@@ -231,6 +231,12 @@ export interface AppConfig {
   readonly launchVolumeDecayExitPct?: number;
   /** Hard drawdown stop from the position's peak value. Default 0.25. */
   readonly launchExitDrawdownPct?: number;
+  /** Runner mode (Heart Attack) knobs — launch entries anchored below market
+   *  with shakeout-tolerant stops. OFF by default. */
+  readonly launchRunnerModeEnabled?: boolean;
+  readonly launchRunnerDipPct?: number;
+  readonly launchRunnerDrawdownPct?: number;
+  readonly launchRunnerHalfWidthBins?: number;
   readonly deployerBlacklistPath: string;
   readonly tokenBlacklistPath: string;
   readonly sqliteDbPath: string;
@@ -1387,6 +1393,29 @@ const loadConfig = Effect.gen(function* () {
     1,
   );
   const launchExitDrawdownPct = yield* validatedNumber("LAUNCH_EXIT_DRAWDOWN_PCT", 0, 0.25, 1);
+  // Runner mode (Heart Attack): dip-anchored launch entries + shakeout-
+  // tolerant stops. OFF by default — the conservative launch lane is
+  // unchanged. When on, launch entries anchor their range DIP_PCT below the
+  // active bin (a below-market bid ladder that fills on shakeouts instead of
+  // getting stopped by them) with a tight HALF_WIDTH band, and launch exits
+  // use the wider runner DRAWDOWN (shakeout tolerance) instead of the crash
+  // calibration. The timebox and volume-decay exits are unchanged.
+  const launchRunnerModeEnabled = yield* Config.boolean("LAUNCH_RUNNER_MODE_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const launchRunnerDipPct = yield* validatedNumber("LAUNCH_RUNNER_DIP_PCT", 0, 0.12, 0.5);
+  const launchRunnerDrawdownPct = yield* validatedNumber(
+    "LAUNCH_RUNNER_DRAWDOWN_PCT",
+    0.05,
+    0.25,
+    0.5,
+  );
+  const launchRunnerHalfWidthBins = yield* validatedNumber(
+    "LAUNCH_RUNNER_HALF_WIDTH_BINS",
+    1,
+    5,
+    100,
+  );
 
   const deployerBlacklistPath = yield* Config.string("DEPLOYER_BLACKLIST_PATH").pipe(
     Effect.orElseSucceed(() => "./engine/data/deployer-blacklist.json"),
@@ -1566,6 +1595,10 @@ const loadConfig = Effect.gen(function* () {
     launchTimeboxHours,
     launchVolumeDecayExitPct,
     launchExitDrawdownPct,
+    launchRunnerModeEnabled,
+    launchRunnerDipPct,
+    launchRunnerDrawdownPct,
+    launchRunnerHalfWidthBins,
     deployerBlacklistPath,
     tokenBlacklistPath,
     sqliteDbPath,

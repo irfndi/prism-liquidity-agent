@@ -106,6 +106,20 @@ export function estimateDailyIlUsd(
   return pool.tvlUsd * ilDailyFraction;
 }
 
+/**
+ * Bin offset for a below-market entry anchor: how many bins DOWN from the
+ * active bin a dipPct target sits. DLMM bins are geometric steps of
+ * (1 + binStep/1e4) per bin, so offset = ln(1 - dipPct) / ln(1 + binStep/1e4)
+ * — negative (below market). Rounding keeps the anchor within one bin of the
+ * target: e.g. binStep 100, dip 12% -> -13 bins (~-12.2%). Zero when the
+ * dip is 0 or the bin step is degenerate.
+ */
+export function dipOffsetBinsForPct(binStep: number, dipPct: number): number {
+  if (dipPct <= 0 || !Number.isFinite(binStep) || binStep <= 0) return 0;
+  const step = 1 + binStep / 10_000;
+  return Math.round(Math.log(1 - dipPct) / Math.log(step));
+}
+
 export const DLMMStrategy: StrategyApi = {
   computeMetrics(
     pool: PoolState,
@@ -239,11 +253,15 @@ export const DLMMStrategy: StrategyApi = {
     activeBinId: number,
     binStep: number,
     halfWidthOverride?: number,
+    dipOffsetBins = 0,
   ): { lowerBinId: number; upperBinId: number } {
     const halfWidth = halfWidthOverride ?? baselineHalfWidthForBinStep(binStep);
+    // dipOffsetBins shifts the WHOLE range below the active bin (negative =
+    // below market): the Heart Attack bid ladder. The deposit fills on a
+    // shakeout instead of chasing the active price.
     return {
-      lowerBinId: activeBinId - halfWidth,
-      upperBinId: activeBinId + halfWidth,
+      lowerBinId: activeBinId - halfWidth + dipOffsetBins,
+      upperBinId: activeBinId + halfWidth + dipOffsetBins,
     };
   },
 

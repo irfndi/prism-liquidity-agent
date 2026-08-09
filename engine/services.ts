@@ -507,6 +507,7 @@ export interface StrategyApi {
     activeBinId: number,
     binStep: number,
     halfWidthOverride?: number,
+    dipOffsetBins?: number,
   ) => { lowerBinId: number; upperBinId: number };
   readonly passesPreFilter: (
     pool: PoolState,

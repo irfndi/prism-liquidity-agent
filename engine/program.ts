@@ -16,6 +16,7 @@ import {
   computeBinVolatilityStddev,
   isHighVolatility,
   recommendBinRangeForVolatility,
+  dipOffsetBinsForPct,
   recommendStrategyShape,
   resolveRangeHalfWidth,
   estimateRecoveryProbability,
@@ -971,6 +972,7 @@ export function executePaper(
     strategy: StrategyApi;
     entryStrategyShape: EntryStrategyShape;
     entryRangeHalfWidth?: number;
+    entryDipOffsetBins?: number;
   },
   decision: AgentDecision,
   pool: {
@@ -984,7 +986,14 @@ export function executePaper(
   signalSnapshotId?: number,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never> {
   return Effect.gen(function* () {
-    const { db, trackedPositions, strategy, entryStrategyShape, entryRangeHalfWidth } = deps;
+    const {
+      db,
+      trackedPositions,
+      strategy,
+      entryStrategyShape,
+      entryRangeHalfWidth,
+      entryDipOffsetBins,
+    } = deps;
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
       // Legacy parity: re-entering a pool whose live position was paper-exited
       // keeps the live identity so the rows merge instead of duplicating.
@@ -997,6 +1006,7 @@ export function executePaper(
         pool.activeBinId,
         pool.binStep,
         entryRangeHalfWidth,
+        entryDipOffsetBins,
       );
       const positionId = liveExited
         ? liveExited.positionPubKey!
@@ -1225,6 +1235,7 @@ export function executeLive(
     solPriceUsd: number;
     entryStrategyShape: EntryStrategyShape;
     entryRangeHalfWidth?: number;
+    entryDipOffsetBins?: number;
     reconcileRequestedPools?: Set<string>;
     memory?: MemoryApi;
     unpricedExitWarnedPools?: Set<string>;
@@ -1255,6 +1266,7 @@ export function executeLive(
       solPriceUsd,
       entryStrategyShape,
       entryRangeHalfWidth,
+      entryDipOffsetBins,
     } = deps;
     const autonomous = deps.autonomous;
 
@@ -1483,6 +1495,7 @@ export function executeLive(
         pool.activeBinId,
         pool.binStep,
         entryRangeHalfWidth,
+        entryDipOffsetBins,
       );
       const enterResult = yield* adapter
         .enterPosition(
@@ -3746,11 +3759,31 @@ export const program = Effect.gen(function* () {
           maxFullRangeBins: config.maxRebalanceRangeBins,
         });
 
+        // Runner mode (Heart Attack): launch-pool entries anchor the range
+        // below the active bin (a below-market bid ladder that fills on
+        // shakeouts) with a tight half-width band. Zero offset when off or
+        // the pool is not a launch pool — the conservative lane is unchanged.
+        const isRunnerLaunchEntry =
+          config.launchRunnerModeEnabled === true && launchScanPools.has(candidate.pool.address);
+        const entryDipOffsetBins = isRunnerLaunchEntry
+          ? dipOffsetBinsForPct(candidate.pool.binStep, config.launchRunnerDipPct ?? 0.12)
+          : 0;
+        const effectiveEntryHalfWidth = isRunnerLaunchEntry
+          ? (config.launchRunnerHalfWidthBins ?? 5)
+          : entryRangeHalfWidth;
+
         let executed = false;
         let executionError: string | undefined = undefined;
         if (config.paperTrading) {
           const paperResult = yield* executePaper(
-            { db, trackedPositions, strategy, entryStrategyShape, entryRangeHalfWidth },
+            {
+              db,
+              trackedPositions,
+              strategy,
+              entryStrategyShape,
+              entryRangeHalfWidth: effectiveEntryHalfWidth,
+              entryDipOffsetBins,
+            },
             decision,
             candidate.pool,
             signalTimestamp,
@@ -3847,7 +3880,8 @@ export const program = Effect.gen(function* () {
               entryPrep,
               solPriceUsd: config.solPriceUsd,
               entryStrategyShape,
-              entryRangeHalfWidth,
+              entryRangeHalfWidth: effectiveEntryHalfWidth,
+              entryDipOffsetBins,
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
@@ -5429,7 +5463,13 @@ export const program = Effect.gen(function* () {
             now,
             timeboxHours: config.launchTimeboxHours ?? 6,
             volumeDecayExitPct: config.launchVolumeDecayExitPct ?? 0.1,
-            drawdownPct: config.launchExitDrawdownPct ?? 0.25,
+            // Runner mode uses the shakeout-tolerant drawdown (a -15% intra-
+            // hour shakeout is the fill, not the crash); otherwise the crash
+            // calibration applies.
+            drawdownPct:
+              config.launchRunnerModeEnabled === true
+                ? (config.launchRunnerDrawdownPct ?? 0.25)
+                : (config.launchExitDrawdownPct ?? 0.25),
             currentFees1hUsd,
             peakFees1hUsd,
             currentValueUsd: pos.currentValueUsd,
@@ -7510,6 +7550,19 @@ export const program = Effect.gen(function* () {
             )?.id
           : undefined;
 
+        // Runner mode (Heart Attack): launch-pool ENTERs anchor the range
+        // below the active bin (a below-market bid ladder that fills on
+        // shakeouts) with a tight half-width band. Zero offset when off or
+        // the pool is not a launch pool — the conservative lane is unchanged.
+        const isRunnerLaunchEntry =
+          config.launchRunnerModeEnabled === true && launchScanPools.has(poolAddress);
+        const entryDipOffsetBins = isRunnerLaunchEntry
+          ? dipOffsetBinsForPct(pool.binStep, config.launchRunnerDipPct ?? 0.12)
+          : 0;
+        const effectiveEntryHalfWidth = isRunnerLaunchEntry
+          ? (config.launchRunnerHalfWidthBins ?? 5)
+          : rangeHalfWidth;
+
         if (paperExitShouldGoLive) {
           console.warn(
             `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${poolAddress}`,
@@ -7524,7 +7577,8 @@ export const program = Effect.gen(function* () {
               entryPrep,
               solPriceUsd: config.solPriceUsd,
               entryStrategyShape,
-              entryRangeHalfWidth: rangeHalfWidth,
+              entryRangeHalfWidth: effectiveEntryHalfWidth,
+              entryDipOffsetBins,
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
@@ -7552,7 +7606,8 @@ export const program = Effect.gen(function* () {
               trackedPositions,
               strategy,
               entryStrategyShape,
-              entryRangeHalfWidth: rangeHalfWidth,
+              entryRangeHalfWidth: effectiveEntryHalfWidth,
+              entryDipOffsetBins,
             },
             decision,
             pool,
@@ -7574,7 +7629,8 @@ export const program = Effect.gen(function* () {
               entryPrep,
               solPriceUsd: config.solPriceUsd,
               entryStrategyShape,
-              entryRangeHalfWidth: rangeHalfWidth,
+              entryRangeHalfWidth: effectiveEntryHalfWidth,
+              entryDipOffsetBins,
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
