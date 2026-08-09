@@ -26,7 +26,7 @@ import DLMM, {
   type StrategyParameters,
 } from "@meteora-ag/dlmm";
 import { BN } from "@coral-xyz/anchor";
-import { Effect, Layer } from "effect";
+import { Duration, Effect, Layer } from "effect";
 import {
   AdapterService,
   type AdapterApi,
@@ -2629,12 +2629,24 @@ export const AdapterLive = Layer.effect(
           // Pre-close wallet holdings WITHOUT pricing (a price lookup must not
           // delay broadcasting an exit) and a FORCED native-SOL read (bypasses
           // the 30s cache so the measured delta covers only the close window).
-          const beforeHeld = yield* readWalletHoldingsRaw().pipe(
-            Effect.catch(() => Effect.succeed(null)),
-          );
-          const beforeNativeSol = yield* readNativeSolBalance({ force: true }).pipe(
-            Effect.catch(() => Effect.succeed(null)),
-          );
+          // Both are best-effort with a short deadline: a degraded primary RPC
+          // must not postpone a risk-driven EXIT through the full retry chain
+          // (2 × 15s attempts per rpcCall, repeatable on the fallback).
+          const preClose = yield* Effect.all(
+            {
+              held: readWalletHoldingsRaw().pipe(Effect.catch(() => Effect.succeed(null))),
+              nativeSol: readNativeSolBalance({ force: true }).pipe(
+                Effect.catch(() => Effect.succeed(null)),
+              ),
+            },
+            { concurrency: "unbounded" },
+          )
+            .pipe(
+              Effect.timeout(Duration.millis(2000)),
+              Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
+            );
+          const beforeHeld = preClose.held;
+          const beforeNativeSol = preClose.nativeSol;
 
           const txs = yield* Effect.tryPromise(() =>
             dlmm.removeLiquidity({
@@ -2675,25 +2687,30 @@ export const AdapterLive = Layer.effect(
           // which is exactly what the settlement must sell — same-mint rewards
           // are excluded because the exit books them separately. Falls back to
           // the SDK snapshot when the delta is unmeasurable or non-positive.
-          const afterHeld = yield* readWalletHoldingsRaw().pipe(
-            Effect.catch(() => Effect.succeed(null)),
-          );
-          const afterNativeSol = yield* readNativeSolBalance().pipe(
-            Effect.catch(() => Effect.succeed(null)),
-          );
+          const afterSnapshot = yield* Effect.all(
+            {
+              held: readWalletHoldingsRaw().pipe(Effect.catch(() => Effect.succeed(null))),
+              nativeSol: readNativeSolBalance().pipe(Effect.catch(() => Effect.succeed(null))),
+            },
+            { concurrency: "unbounded" },
+          )
+            .pipe(
+              Effect.timeout(Duration.millis(2000)),
+              Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
+            );
           const measuredX = measureWithdrawalDelta({
             beforeHeld,
-            afterHeld,
+            afterHeld: afterSnapshot.held,
             beforeNativeSol,
-            afterNativeSol,
+            afterNativeSol: afterSnapshot.nativeSol,
             mint: tokenXMint,
             snapshotAmount: snapshotWithdrawnXAtomic,
           });
           const measuredY = measureWithdrawalDelta({
             beforeHeld,
-            afterHeld,
+            afterHeld: afterSnapshot.held,
             beforeNativeSol,
-            afterNativeSol,
+            afterNativeSol: afterSnapshot.nativeSol,
             mint: tokenYMint,
             snapshotAmount: snapshotWithdrawnYAtomic,
           });
