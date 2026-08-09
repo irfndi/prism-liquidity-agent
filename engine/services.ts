@@ -808,6 +808,9 @@ export interface DbApi {
     invalidationStopPrice?: number | null;
     /** Runner-mode entry (Heart Attack); optional so legacy callers compile. */
     launchRunner?: boolean | null;
+    /** Runner scale-in state; optional so legacy callers compile. */
+    launchRunnerSteps?: number | null;
+    launchRunnerAnchorPrice?: number | null;
   }) => Effect.Effect<void, Error>;
   readonly getPosition: (positionId: string) => Effect.Effect<
     {

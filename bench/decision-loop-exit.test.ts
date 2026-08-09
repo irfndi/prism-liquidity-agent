@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Effect, Layer } from "effect";
 import { StrategyLive } from "../engine/strategy-service.js";
 import { program } from "../engine/program.js";
@@ -33,6 +33,7 @@ import {
   type MeteoraPoolStats,
 } from "../engine/services.js";
 import type { PoolSnapshot } from "../engine/types.js";
+import type { PositionRecord } from "../engine/db-service.js";
 import type { AgentRuntimeContext } from "../engine/agent-transport.js";
 import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
 import { stringifySafe } from "../engine/bigint-json.js";
@@ -644,5 +645,99 @@ describe("agent position context wiring", () => {
     // value + fees + rewards − deposited = 0
     expect(capturedContext?.position?.unrealizedPnlUsd).toBe(0);
     expect(capturedContext?.position?.hoursHeld).toBeGreaterThanOrEqual(0);
+  }, 15_000);
+});
+
+describe("runner scale-in wiring (Heart Attack step 2)", () => {
+  const POOL = "ScaleInPool111111111111111111111111111111111111";
+
+  it("re-anchors the band and top-ups via the atomic rebalance when the price falls a step", async () => {
+    const rebalanceSpy = vi.fn(() =>
+      Effect.succeed({ positionPubKey: "mock-pos", txSignatures: ["mock-tx"] }),
+    );
+    const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    const adapter = makeAdapter(
+      {
+        [POOL]: makePool({
+          address: POOL,
+          tokenX: USDC_MINT,
+          tokenXSymbol: "USDC",
+          currentPrice: 93,
+          tvlUsd: 500_000,
+        }),
+      },
+      {
+        rebalancePosition: rebalanceSpy,
+        hasWallet: () => true,
+        // USDC-quoted pool: the top-up spends USDC (no SOL-leg budget
+        // interaction — the SOL batch gate only applies to SOL legs).
+        getTokenPrices: () => Effect.succeed({ [USDC_MINT]: 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+      },
+    );
+    const layer = makeTestLayer({
+      adapter,
+      configOverrides: {
+        watchlistPools: [POOL],
+        paperTrading: false,
+        launchRunnerModeEnabled: true,
+        launchRunnerScaleInEnabled: true,
+        launchRunnerScaleInStepPct: 0.05,
+        launchRunnerScaleInSizePct: 0.25,
+        launchPositionMaxSizeUsd: 100,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      const position = makePosition({
+        poolAddress: POOL,
+        positionMode: "launch",
+        launchRunner: true,
+        launchRunnerAnchorPrice: 100,
+        launchRunnerSteps: 0,
+        positionPubKey: "mock-pos",
+        depositedUsd: 1_000,
+        currentValueUsd: 1_000,
+      });
+      yield* db.savePosition(position);
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const saved = yield* db.getPosition(position.positionId);
+      const audit = yield* AuditService;
+      const decisions = yield* audit.getRecentDecisions(50);
+      return { saved, decisions };
+    });
+    const { saved, decisions } = await Effect.runPromise(
+      Effect.provide(test, layer) as unknown as Effect.Effect<
+        { saved: PositionRecord | null; decisions: ReadonlyArray<DecisionRow> },
+        Error,
+        never
+      >,
+    );
+
+    // The rebalance fired with the dip-anchored range + a quote-only top-up:
+    // dip 12% @ binStep 10 -> offset -128 bins; width min(5, 127, 25) = 5.
+    expect(rebalanceSpy).toHaveBeenCalledTimes(1);
+    const [pool, pubkey, lower, upper, topUp] = rebalanceSpy.mock.calls[0] as unknown as [
+      string,
+      string,
+      number,
+      number,
+      { amountXAtomic: bigint; amountYAtomic: bigint },
+    ];
+    expect(pool).toBe(POOL);
+    expect(pubkey).toBe("mock-pos");
+    expect(lower).toBe(5000 - 5 - 128);
+    expect(upper).toBe(5000 + 5 - 128);
+    expect(topUp.amountYAtomic).toBe(0n);
+    expect(topUp.amountXAtomic).toBeGreaterThan(0n);
+    // topUp = min(0.25 x $10k wallet, pool headroom, $100 ceiling) = $100 ->
+    // 100 USDC x 1e6 micro-units.
+    expect(topUp.amountXAtomic).toBe(100_000_000n);
+    // The step is persisted: a restart cannot re-scale the position.
+    expect(saved?.launchRunnerSteps).toBe(1);
+    expect(saved?.launchRunnerAnchorPrice).toBe(93);
+    const scaleIn = decisions.find((d) => d.reasoning.includes("[launch-scale-in]"));
+    expect(scaleIn, "scale-in must be audited").toBeDefined();
   }, 15_000);
 });

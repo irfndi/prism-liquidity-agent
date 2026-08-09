@@ -112,7 +112,12 @@ import { identifyAssetMint } from "./fallen-angel-service.js";
 import { buildTpLadder, evaluateTpLadder, parseTpLadder, serializeTpLadder } from "./tp-ladder.js";
 import { getGeckoPoolOhlcv, type GeckoOhlcvSignals } from "./gecko-ohlcv-service.js";
 import { getRugCheckReport, type RugCheckReport } from "./rugcheck-service.js";
-import { launchEntrySizeUsd, launchPositionExit } from "./launch-position.js";
+import {
+  launchEntrySizeUsd,
+  launchPositionExit,
+  scaleInTopUpUsd,
+  shouldScaleInRunner,
+} from "./launch-position.js";
 import type {
   AgentDecision,
   AgentProposal,
@@ -1047,6 +1052,8 @@ export function executePaper(
         tpLadderJson: decision.tpLadderJson ?? null,
         invalidationStopPrice: decision.invalidationStopPrice ?? null,
         launchRunner: (entryDipOffsetBins ?? 0) !== 0 ? true : null,
+        launchRunnerSteps: (entryDipOffsetBins ?? 0) !== 0 ? 0 : null,
+        launchRunnerAnchorPrice: (entryDipOffsetBins ?? 0) !== 0 ? pool.currentPrice : null,
       };
       trackedPositions.set(pos.positionId, pos);
       yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
@@ -1575,6 +1582,8 @@ export function executeLive(
           tpLadderJson: decision.tpLadderJson ?? null,
           invalidationStopPrice: decision.invalidationStopPrice ?? null,
           launchRunner: (entryDipOffsetBins ?? 0) !== 0 ? true : null,
+          launchRunnerSteps: (entryDipOffsetBins ?? 0) !== 0 ? 0 : null,
+          launchRunnerAnchorPrice: (entryDipOffsetBins ?? 0) !== 0 ? pool.currentPrice : null,
         };
         trackedPositions.set(pos.positionId, pos);
         yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
@@ -5534,6 +5543,141 @@ export const program = Effect.gen(function* () {
               detail = `fee/IL ${metrics.feeIlRatio.toFixed(2)} < 0.5`;
             }
             launchLifecycle = { reasoning: `[launch-${launchReason}] ${detail}` };
+          } else if (
+            // ── Runner scale-in (Heart Attack step 2) ────────────────────────
+            // The dip band TRACKS the falling price: when the price falls a
+            // full step below the band's anchor, re-anchor at dip% below the
+            // NEW price and top up with fresh quote capital via the atomic
+            // rebalance (redeposits the mixed basket + top-up in one tx,
+            // preserving the position pubkey). Runs only when the exit did NOT
+            // fire this cycle — never scale into a dying position. Attached to
+            // the INNER exit-if (this position's launch lifecycle), not the
+            // outer launch-mode gate — otherwise it would run for non-launch
+            // positions, which never carry launchRunner.
+            pos.launchRunner === true &&
+            config.launchRunnerScaleInEnabled !== false &&
+            // Paper mode must never touch the live adapter (mirrors the
+            // compound path's paperTrading === false gate) — paper records
+            // would-be scale-ins via the audit decision below.
+            config.paperTrading === false
+          ) {
+            const scaleInDecision = shouldScaleInRunner({
+              anchorPrice: pos.launchRunnerAnchorPrice ?? 0,
+              currentPrice: pool.currentPrice,
+              stepPct: config.launchRunnerScaleInStepPct ?? 0.05,
+              steps: pos.launchRunnerSteps ?? 0,
+              maxSteps: config.launchRunnerScaleInMaxSteps ?? 3,
+            });
+            if (scaleInDecision.scale && pos.positionPubKey !== null) {
+              // Per-pool allocation headroom: a scale-in ADDS new capital to
+              // the pool's aggregate exposure — the same cap the risk tail
+              // applies to entries.
+              const poolExposureUsd = Array.from(trackedPositions.values())
+                .filter((p) => p.poolAddress === poolAddress)
+                .reduce((sum, p) => sum + p.currentValueUsd, 0);
+              const portfolioValueUsd =
+                lastWalletBalanceUsd +
+                Array.from(trackedPositions.values()).reduce(
+                  (sum, p) => sum + p.currentValueUsd,
+                  0,
+                );
+              const poolCapUsd = Math.max(
+                0,
+                (config.maxPerPoolAllocationPct ?? 0.4) * portfolioValueUsd - poolExposureUsd,
+              );
+              const topUpUsd = scaleInTopUpUsd({
+                walletUsd: lastWalletBalanceUsd,
+                sizePct: config.launchRunnerScaleInSizePct ?? 0.25,
+                poolCapUsd,
+                maxTopUpUsd: config.launchPositionMaxSizeUsd ?? 100,
+              });
+              const tokenXDecimals = yield* adapter
+                .getTokenDecimals(pool.tokenX)
+                .pipe(Effect.catch(() => Effect.succeed(null)));
+              const priceX = (yield* adapter
+                .getTokenPrices([pool.tokenX])
+                .pipe(Effect.catch(() => Effect.succeed({} as Record<string, number>))))[
+                pool.tokenX
+              ];
+              if (topUpUsd >= 5 && tokenXDecimals !== null && priceX != null && priceX > 0) {
+                const topUpAtomicX = BigInt(Math.floor((topUpUsd / priceX) * 10 ** tokenXDecimals));
+                // The batch SOL budget (SOL-funded wallets) applies to scale-in
+                // top-ups the same way it applies to entries — a top-up that
+                // does not fit is skipped, never forced.
+                const solLamports = pool.tokenX === SOL_MINT ? topUpAtomicX : 0n;
+                if (solLamports > 0n && entrySolBudgetLamports < solLamports) {
+                  logger.info("Runner scale-in skipped — SOL budget insufficient", {
+                    pool: poolAddress,
+                    position: pos.positionId,
+                  });
+                } else if (topUpAtomicX > 0n) {
+                  if (solLamports > 0n) entrySolBudgetLamports -= solLamports;
+                  const dipOffset = dipOffsetBinsForPct(
+                    pool.binStep,
+                    config.launchRunnerDipPct ?? 0.12,
+                  );
+                  const runnerWidth = Math.max(
+                    1,
+                    Math.min(
+                      config.launchRunnerHalfWidthBins ?? 5,
+                      Math.abs(dipOffset) - 1,
+                      Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
+                    ),
+                  );
+                  const newLowerBinId = pool.activeBinId - runnerWidth + dipOffset;
+                  const newUpperBinId = pool.activeBinId + runnerWidth + dipOffset;
+                  const scaleInResult = yield* adapter
+                    .rebalancePosition(
+                      poolAddress,
+                      pos.positionPubKey,
+                      newLowerBinId,
+                      newUpperBinId,
+                      { amountXAtomic: topUpAtomicX, amountYAtomic: 0n },
+                    )
+                    .pipe(
+                      Effect.tap((r) =>
+                        Effect.sync(() =>
+                          logger.info("Runner scale-in executed", {
+                            pool: poolAddress,
+                            position: pos.positionId,
+                            topUpUsd,
+                            step: (pos.launchRunnerSteps ?? 0) + 1,
+                            range: [newLowerBinId, newUpperBinId],
+                            pubkey: r.positionPubKey,
+                          }),
+                        ),
+                      ),
+                      Effect.catch((err) => {
+                        logger.warn("Runner scale-in failed", {
+                          pool: poolAddress,
+                          position: pos.positionId,
+                          error: err instanceof Error ? err.message : String(err),
+                        });
+                        return Effect.succeed(null);
+                      }),
+                    );
+                  if (scaleInResult !== null) {
+                    pos.launchRunnerAnchorPrice = pool.currentPrice;
+                    pos.launchRunnerSteps = (pos.launchRunnerSteps ?? 0) + 1;
+                    yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
+                    yield* audit
+                      .recordDecision({
+                        timestamp: Date.now(),
+                        cycleId,
+                        poolAddress,
+                        action: "REBALANCE",
+                        confidence: 1,
+                        reasoning: `[launch-scale-in] ${scaleInDecision.reason}`,
+                        metrics,
+                        riskResult: { approved: true, reason: "[launch-scale-in]" },
+                        executed: true,
+                        paperTrading: config.paperTrading,
+                      })
+                      .pipe(Effect.catch(() => Effect.void));
+                  }
+                }
+              }
+            }
           }
         }
 

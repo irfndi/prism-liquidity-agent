@@ -946,6 +946,23 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       }
     },
   },
+  {
+    version: 24,
+    name: "launch_runner_scale_in",
+    up(db) {
+      // Runner scale-in state (Heart Attack step 2): how many top-up steps a
+      // runner position has taken and the price its band is currently anchored
+      // at. Persisted so a restart cannot re-scale an already-filled position
+      // or re-anchor a stale band. Legacy rows stay NULL (0 steps / unknown
+      // anchor — scale-in simply never fires without an anchor).
+      if (hasTable(db, "positions") && !hasColumn(db, "positions", "launch_runner_steps")) {
+        db.exec("ALTER TABLE positions ADD COLUMN launch_runner_steps INTEGER");
+      }
+      if (hasTable(db, "positions") && !hasColumn(db, "positions", "launch_runner_anchor_price")) {
+        db.exec("ALTER TABLE positions ADD COLUMN launch_runner_anchor_price REAL");
+      }
+    },
+  },
 ];
 
 function runMigrations(db: Database) {
