@@ -1410,11 +1410,8 @@ const loadConfig = Effect.gen(function* () {
     0.25,
     0.5,
   );
-  const launchRunnerHalfWidthBins = yield* validatedNumber(
-    "LAUNCH_RUNNER_HALF_WIDTH_BINS",
-    1,
-    5,
-    100,
+  const launchRunnerHalfWidthBins = Math.floor(
+    yield* validatedNumber("LAUNCH_RUNNER_HALF_WIDTH_BINS", 1, 5, 100),
   );
 
   const deployerBlacklistPath = yield* Config.string("DEPLOYER_BLACKLIST_PATH").pipe(

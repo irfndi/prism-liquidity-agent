@@ -317,7 +317,7 @@ describe("executeLive", () => {
     expect(result.executed).toBe(true);
     expect(result.error).toBeUndefined();
     expect(prepareSpy).toHaveBeenCalledTimes(1);
-    expect(prepareSpy).toHaveBeenCalledWith(poolAddress, positionSizeUsd);
+    expect(prepareSpy).toHaveBeenCalledWith(poolAddress, positionSizeUsd, undefined);
   });
 
   it("skips enterPosition when prepareEntryTokens fails", () => {

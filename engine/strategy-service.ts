@@ -115,7 +115,15 @@ export function estimateDailyIlUsd(
  * dip is 0 or the bin step is degenerate.
  */
 export function dipOffsetBinsForPct(binStep: number, dipPct: number): number {
-  if (dipPct <= 0 || !Number.isFinite(binStep) || binStep <= 0) return 0;
+  if (
+    dipPct <= 0 ||
+    dipPct >= 1 || // ln(1 - 1) = -Infinity; > 1 = NaN
+    !Number.isFinite(dipPct) ||
+    !Number.isFinite(binStep) ||
+    binStep <= 0
+  ) {
+    return 0;
+  }
   const step = 1 + binStep / 10_000;
   return Math.round(Math.log(1 - dipPct) / Math.log(step));
 }

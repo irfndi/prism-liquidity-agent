@@ -1236,6 +1236,7 @@ export function executeLive(
     entryStrategyShape: EntryStrategyShape;
     entryRangeHalfWidth?: number;
     entryDipOffsetBins?: number;
+    runnerSingleSidedX?: boolean;
     reconcileRequestedPools?: Set<string>;
     memory?: MemoryApi;
     unpricedExitWarnedPools?: Set<string>;
@@ -1267,6 +1268,7 @@ export function executeLive(
       entryStrategyShape,
       entryRangeHalfWidth,
       entryDipOffsetBins,
+      runnerSingleSidedX,
     } = deps;
     const autonomous = deps.autonomous;
 
@@ -1398,7 +1400,11 @@ export function executeLive(
     let preparation: EntryPreparationOutcome | null = null;
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
       const prepResult = yield* entryPrep
-        .prepareEntryTokens(decision.poolAddress, decision.positionSizeUsd)
+        .prepareEntryTokens(
+          decision.poolAddress,
+          decision.positionSizeUsd,
+          runnerSingleSidedX === true ? { xOnly: true } : undefined,
+        )
         .pipe(
           Effect.matchEffect({
             onSuccess: (outcome) =>
@@ -1503,7 +1509,10 @@ export function executeLive(
           recommended.lowerBinId,
           recommended.upperBinId,
           decision.positionSizeUsd,
-          { strategyShape: entryStrategyShape },
+          {
+            strategyShape: entryStrategyShape,
+            ...(runnerSingleSidedX === true ? { forceSingleSidedX: true } : {}),
+          },
         )
         .pipe(
           Effect.tap((r) =>
@@ -3882,6 +3891,7 @@ export const program = Effect.gen(function* () {
               entryStrategyShape,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
+              runnerSingleSidedX: entryDipOffsetBins !== 0,
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
@@ -5494,7 +5504,7 @@ export const program = Effect.gen(function* () {
             } else if (launchReason === "volume-decay") {
               detail = `1h fees $${(currentFees1hUsd ?? 0).toFixed(2)} < ${(config.launchVolumeDecayExitPct ?? 0.1) * 100}% of peak $${(peakFees1hUsd ?? 0).toFixed(2)}`;
             } else if (launchReason === "drawdown") {
-              detail = `value $${pos.currentValueUsd.toFixed(2)} <= ${(1 - (config.launchExitDrawdownPct ?? 0.25)) * 100}% of peak $${(pos.highestValueUsd ?? 0).toFixed(2)}`;
+              detail = `value $${pos.currentValueUsd.toFixed(2)} <= ${(1 - (config.launchRunnerModeEnabled === true ? (config.launchRunnerDrawdownPct ?? 0.25) : (config.launchExitDrawdownPct ?? 0.25))) * 100}% of peak $${(pos.highestValueUsd ?? 0).toFixed(2)}`;
             } else if (launchReason === "fee-il") {
               detail = `fee/IL ${metrics.feeIlRatio.toFixed(2)} < 0.5`;
             }
@@ -7579,6 +7589,7 @@ export const program = Effect.gen(function* () {
               entryStrategyShape,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
+              runnerSingleSidedX: entryDipOffsetBins !== 0,
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
@@ -7631,6 +7642,7 @@ export const program = Effect.gen(function* () {
               entryStrategyShape,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
+              runnerSingleSidedX: entryDipOffsetBins !== 0,
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,

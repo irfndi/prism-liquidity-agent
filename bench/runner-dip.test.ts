@@ -26,6 +26,13 @@ describe("dipOffsetBinsForPct (runner-mode dip anchor)", () => {
     expect(dipOffsetBinsForPct(NaN, 0.12)).toBe(0);
   });
 
+  it("returns 0 for dip >= 1 (ln(0) = -Infinity) and non-finite dips", () => {
+    expect(dipOffsetBinsForPct(100, 1)).toBe(0);
+    expect(dipOffsetBinsForPct(100, 1.5)).toBe(0);
+    expect(dipOffsetBinsForPct(100, NaN)).toBe(0);
+    expect(dipOffsetBinsForPct(100, Infinity)).toBe(0);
+  });
+
   it("shifts the whole range below the active bin via recommendBinRange", () => {
     // Exercises the strategy surface directly: a ±5 bin band anchored -13
     // bins below active bin 5000 lands entirely below market.

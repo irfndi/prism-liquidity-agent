@@ -2485,16 +2485,41 @@ export const AdapterLive = Layer.effect(
           let amountXUsd = halfUsd;
           let amountYUsd = halfUsd;
 
-          if (xShort && yShort) {
+          // Runner mode (Heart Attack) forces the single-sided-X path by
+          // DESIGN, not shortfall: a dip-anchored range (wholly below the
+          // active bin) deploys QUOTE-leg liquidity — the X that converts to
+          // the base token when the dip fills. Depositing half-Y into a
+          // below-market band misstates the entry split; the full size goes
+          // in X.
+          if (options?.forceSingleSidedX === true) {
+            const fullSizeXAtomic = computeRequiredAtomic(positionSizeUsd, priceX, tokenXDecimals);
+            if (fullSizeXAtomic === 0n || fullSizeXAtomic > maxX) {
+              return yield* Effect.fail(
+                new AdapterError({
+                  message: `Runner single-sided-X entry impossible: available ${formatTokenAmount(maxX, tokenXDecimals)} is below the full-size requirement ${formatTokenAmount(fullSizeXAtomic, tokenXDecimals)} for a $${positionSizeUsd} deposit in ${pool.tokenX}. Fund the quote leg up to the full position size.`,
+                  poolAddress,
+                }),
+              );
+            }
+            depositXAtomic = fullSizeXAtomic;
+            depositYAtomic = 0n;
+            singleSidedX = true;
+            depositMode = "single-sided-x";
+            amountXUsd = positionSizeUsd;
+            amountYUsd = 0;
+            logger.info("Runner single-sided entry: full size in the quote leg", {
+              pool: poolAddress,
+              mint: pool.tokenX,
+              amountAtomic: fullSizeXAtomic.toString(),
+            });
+          } else if (xShort && yShort) {
             return yield* Effect.fail(
               new AdapterError({
                 message: `Insufficient token balance: ${shortageX}; ${shortageY}. Neither pool token can fund the entry — fund one pool token up to the full position size for a single-sided deposit, or enable AUTO_SWAP_ENTRY with a USDC balance.`,
                 poolAddress,
               }),
             );
-          }
-
-          if (xShort || yShort) {
+          } else if (xShort || yShort) {
             const heldIsX = yShort;
             const heldMint = heldIsX ? pool.tokenX : pool.tokenY;
             const heldDecimals = heldIsX ? tokenXDecimals : tokenYDecimals;

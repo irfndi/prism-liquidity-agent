@@ -234,7 +234,12 @@ export interface AdapterApi {
     lowerBinId: number,
     upperBinId: number,
     positionSizeUsd: number,
-    options?: { strategyShape?: EntryStrategyShape },
+    options?: {
+      strategyShape?: EntryStrategyShape;
+      /** Runner mode: force the single-sided-X deposit (full size in the
+       *  quote leg) for dip-anchored ranges wholly below the active bin. */
+      forceSingleSidedX?: boolean;
+    },
   ) => Effect.Effect<
     {
       positionPubKey: string;
@@ -461,6 +466,7 @@ export interface EntryPrepApi {
   readonly prepareEntryTokens: (
     poolAddress: string,
     positionSizeUsd: number,
+    opts?: { readonly xOnly?: boolean },
   ) => Effect.Effect<EntryPreparationOutcome | undefined, EntryPrepError>;
 }
 

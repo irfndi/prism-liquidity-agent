@@ -157,10 +157,13 @@ export const EntryPrepLive = Layer.effect(
     const db = yield* DbService;
 
     const api: EntryPrepApi = {
-      prepareEntryTokens: (poolAddress, positionSizeUsd) =>
+      prepareEntryTokens: (poolAddress, positionSizeUsd, opts) =>
         Effect.gen(function* () {
           const autonomousMode = config.autonomousTokenMode ?? "off";
           const solFunded = autonomousMode === "canary" || autonomousMode === "live";
+          // Runner mode: only the quote (X) leg is funded — the dip-anchored
+          // deposit is single-sided X, so acquiring the Y half is a wasted swap.
+          const xOnly = opts?.xOnly === true;
           if (!config.autoSwapEntry && !solFunded) {
             return;
           }
@@ -255,16 +258,17 @@ export const EntryPrepLive = Layer.effect(
             );
           }
 
-          const halfUsd = positionSizeUsd / 2;
+          const halfUsd = xOnly ? positionSizeUsd : positionSizeUsd / 2;
 
           const requiredX =
             computeRequiredAtomic(halfUsd, priceX, tokenXDecimals) +
             (pool.tokenX === SOL_MINT ? SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS : 0n);
-          const requiredY =
-            computeRequiredAtomic(halfUsd, priceY, tokenYDecimals) +
-            (pool.tokenY === SOL_MINT ? SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS : 0n);
+          const requiredY = xOnly
+            ? 0n
+            : computeRequiredAtomic(halfUsd, priceY, tokenYDecimals) +
+              (pool.tokenY === SOL_MINT ? SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS : 0n);
 
-          if (requiredX === 0n || requiredY === 0n) {
+          if (!xOnly && (requiredX === 0n || requiredY === 0n)) {
             return yield* Effect.fail(
               makePrepError(
                 "PRICE_UNAVAILABLE",
@@ -364,7 +368,10 @@ export const EntryPrepLive = Layer.effect(
           // other deficit shape.
           const xLegShort = requiredX > availableX;
           const yLegShort = requiredY > availableY;
-          if (xLegShort !== yLegShort) {
+          // Under xOnly the adapter's forceSingleSidedX owns the balance
+          // check — the precedence skip would otherwise swallow an X
+          // shortfall and return unprepared.
+          if (!xOnly && xLegShort !== yLegShort) {
             const heldIsX = yLegShort;
             const heldMint = heldIsX ? pool.tokenX : pool.tokenY;
             const heldDecimals = heldIsX ? tokenXDecimals : tokenYDecimals;
