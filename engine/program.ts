@@ -2380,6 +2380,29 @@ export const program = Effect.gen(function* () {
     2,
   );
   const binHistory = new Map<string, number[]>();
+  // Issue #196 follow-up: route-probe results cache. The autonomous-candidate
+  // refresh probes every non-SOL candidate mint in both directions (SOL→token
+  // and token→SOL) with FIXED probe amounts — identical requests repeated
+  // every cycle, up to ~80 quote calls per cycle (the dominant Jupiter
+  // traffic term, ~70% of the self-inflicted keyless rate-limit pressure).
+  // Successful probes are cached for one scan interval (min 10 min): route
+  // availability is stable, and a miss only re-probes. Failures are NOT
+  // cached — during a Jupiter 429 cooldown the gate fails them fast with
+  // zero network, so a transient ban can never poison route availability.
+  const routeProbeResults = new Map<string, { available: boolean; expiresAt: number }>();
+  const routeProbeCacheTtlMs = Math.max(config.scanIntervalMs, 10 * 60_000);
+  const readRouteProbeCache = (key: string): boolean | null => {
+    const entry = routeProbeResults.get(key);
+    if (entry === undefined) return null;
+    if (entry.expiresAt > Date.now()) return entry.available;
+    routeProbeResults.delete(key);
+    return null;
+  };
+  const writeRouteProbeCache = (key: string, available: boolean): void => {
+    if (available) {
+      routeProbeResults.set(key, { available, expiresAt: Date.now() + routeProbeCacheTtlMs });
+    }
+  };
   const pushBinHistory = (poolAddress: string, activeBinId: number): void => {
     const arr = binHistory.get(poolAddress) ?? [];
     arr.push(activeBinId);
@@ -2765,25 +2788,38 @@ export const program = Effect.gen(function* () {
           const tokenAtomic =
             decimals === undefined ? 0n : routeProbeAmountAtomic(tokenPrice, decimals);
           if (solAtomic === 0n || tokenAtomic === 0n) return Effect.succeed(false);
+          const probeRoute = (
+            direction: "sol-to-token" | "token-to-sol",
+            quote: Effect.Effect<unknown, Error>,
+          ): Effect.Effect<boolean, never> => {
+            const key = `${direction}:${mint}`;
+            const cached = readRouteProbeCache(key);
+            if (cached !== null) return Effect.succeed(cached);
+            return quote.pipe(
+              Effect.as(true),
+              Effect.catch(() => Effect.succeed(false)),
+              Effect.tap((available) => Effect.sync(() => writeRouteProbeCache(key, available))),
+            );
+          };
           return Effect.all(
             [
-              quoteSwap({
-                inputMint: SOL_MINT,
-                outputMint: mint,
-                amountAtomic: solAtomic,
-                slippageBps: config.maxSwapSlippageBps,
-              }).pipe(
-                Effect.as(true),
-                Effect.catch(() => Effect.succeed(false)),
+              probeRoute(
+                "sol-to-token",
+                quoteSwap({
+                  inputMint: SOL_MINT,
+                  outputMint: mint,
+                  amountAtomic: solAtomic,
+                  slippageBps: config.maxSwapSlippageBps,
+                }),
               ),
-              quoteSwap({
-                inputMint: mint,
-                outputMint: SOL_MINT,
-                amountAtomic: tokenAtomic,
-                slippageBps: config.maxSwapSlippageBps,
-              }).pipe(
-                Effect.as(true),
-                Effect.catch(() => Effect.succeed(false)),
+              probeRoute(
+                "token-to-sol",
+                quoteSwap({
+                  inputMint: mint,
+                  outputMint: SOL_MINT,
+                  amountAtomic: tokenAtomic,
+                  slippageBps: config.maxSwapSlippageBps,
+                }),
               ),
             ],
             { concurrency: 4 },
