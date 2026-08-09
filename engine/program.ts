@@ -3596,11 +3596,12 @@ export const program = Effect.gen(function* () {
           recentPnlUsd,
           poolAddress: candidate.poolAddress,
           activeBinId: candidate.pool.activeBinId,
-          // Launch ENTERs are governed by their own launchMaxOpenPositions
-          // counter — the normal global cap must not block them nor consume
-          // normal slots (risk gate 2 uses this override).
+          // Issue #201 review (P1): launch entries stay subject to the
+          // portfolio-wide MAX_OPEN_POSITIONS — the launch lane adds its own
+          // launchMaxOpenPositions sub-cap on top; it must not let the total
+          // exceed the configured global cap.
           ...(decision.action === "ENTER" && decision.positionMode === "launch"
-            ? { maxOpenPositions: Number.POSITIVE_INFINITY }
+            ? { maxOpenPositions: config.maxOpenPositions }
             : {}),
         };
         // Issue #148: the wallet safety pause is informational in shadow mode
@@ -4041,6 +4042,14 @@ export const program = Effect.gen(function* () {
       const discovered = yield* adapter.discoverHotPools(config.launchScanUniverseSize ?? 500);
       if (discovered.length === 0) {
         logger.warn("Launch radar: hot-pool fetch returned nothing");
+        // Fail closed for new launch entries (issue #201 review P2): the
+        // executable snapshot could not be refreshed — a stale set must not
+        // keep pools executable past their launch age or after they lose the
+        // launch gate's base-fee/volume/token-safety qualifications (those
+        // predicates are not rechecked by the per-pool decision chain).
+        if (config.launchExecutionEnabled === true) {
+          launchScanPools.clear();
+        }
         return;
       }
       const { ranked } = gateAndRankLaunchPools(discovered, {
@@ -6358,10 +6367,11 @@ export const program = Effect.gen(function* () {
               // screen, [fee-il-gate] floor, measured candidate conditions +
               // weighted score) enters with launch-specific sizing and the
               // time-boxed launch lane. launchMaxOpenPositions is a SEPARATE
-              // counter from MAX_OPEN_POSITIONS: launch entries never consume
-              // normal slots, so the allocation gate's total-open check is
-              // unbounded here — the per-pool count and per-pool exposure caps
-              // (the risk tail) still run verbatim.
+              // counter from MAX_OPEN_POSITIONS, but launch entries stay
+              // subject to the portfolio-wide cap (issue #201 review P1) —
+              // the total of normal + launch positions must never exceed
+              // MAX_OPEN_POSITIONS; the per-pool count and per-pool exposure
+              // caps (the risk tail) still run verbatim.
               const openLaunchPositions = Array.from(trackedPositions.values()).filter(
                 (p) => p.positionMode === "launch",
               ).length;
@@ -6427,7 +6437,7 @@ export const program = Effect.gen(function* () {
                       portfolioValueUsd,
                       openPositions,
                       maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
-                      maxOpenPositions: Number.POSITIVE_INFINITY,
+                      maxOpenPositions: config.maxOpenPositions,
                       poolAddress,
                       maxPositionsPerPool: config.maxPositionsPerPool,
                     });
