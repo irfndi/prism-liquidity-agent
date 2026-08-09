@@ -4057,11 +4057,15 @@ export const program = Effect.gen(function* () {
         now,
       });
       // v2 execution lane: the admitted radar set becomes the executable
-      // launch pool set. Only when BOTH flags are on — the v1 radar-only
-      // path leaves launchScanPools empty and behavior-identical.
+      // launch pool set, bounded to the top-K by fee yield so the per-cycle
+      // RPC/decision cost stays proportional to LAUNCH_SCAN_TOP_K, not the
+      // full admitted universe. Only when BOTH flags are on — the v1
+      // radar-only path leaves launchScanPools empty and behavior-identical.
       if (config.launchExecutionEnabled === true) {
         launchScanPools.clear();
-        for (const r of ranked) launchScanPools.add(r.pool.address);
+        for (const r of ranked.slice(0, config.launchScanTopK ?? 30)) {
+          launchScanPools.add(r.pool.address);
+        }
       }
       logger.info("Launch radar", {
         universe: discovered.length,
@@ -5354,8 +5358,10 @@ export const program = Effect.gen(function* () {
         // deterministic exit with the same precedence as the FA lifecycle.
         let launchLifecycle: { reasoning: string } | null = null;
         if (
-          config.launchScanEnabled === true &&
-          config.launchExecutionEnabled === true &&
+          // Launch exits run whenever a stored position is a launch position —
+          // INDEPENDENT of the entry flags: an operator disabling the lane
+          // must not silently remove the time-box/decay/drawdown protection
+          // from positions that are already open.
           pos.positionMode === "launch"
         ) {
           const now = Date.now();
@@ -5391,7 +5397,10 @@ export const program = Effect.gen(function* () {
             currentFees1hUsd,
             peakFees1hUsd,
             currentValueUsd: pos.currentValueUsd,
-            peakValueUsd: pos.highestValueUsd,
+            // Seed the drawdown peak from the deposit: highestValueUsd stays
+            // null until the position appreciates, so an initial 25% loss
+            // would otherwise never trip the drawdown gate.
+            peakValueUsd: pos.highestValueUsd ?? pos.depositedUsd,
             // Fee-purity: a modeled ratio (gecko/heuristic, feeIlRatioKnown
             // false) must never fire the launch fee-il exit — null skips the
             // rule, mirroring the normal chain's feeIlRatioKnown guard.
@@ -7039,6 +7048,12 @@ export const program = Effect.gen(function* () {
                   const originalAction = decision.action;
                   const deterministicReasoning = decision.reasoning;
                   decision = validation.adjustedDecision;
+                  // Preserve the launch lane marker: an advisor that echoes or
+                  // resizes a launch ENTER must not silently drop positionMode
+                  // — the launch timebox/decay/drawdown exits key off it.
+                  if (preApplyDecision.positionMode !== undefined && decision.action === "ENTER") {
+                    decision = { ...decision, positionMode: preApplyDecision.positionMode };
+                  }
                   if (
                     originalAction === "EXIT" &&
                     decision.action === "EXIT" &&

@@ -109,6 +109,11 @@ describe("launchPositionExit — drawdown", () => {
     const r = launchPositionExit(baseInput({ currentValueUsd: 10, peakValueUsd: null }));
     expect(r.exit).toBe(false);
   });
+
+  it("is disabled when drawdownPct is 0 (0 = off convention)", () => {
+    const r = launchPositionExit(baseInput({ currentValueUsd: 10, drawdownPct: 0 }));
+    expect(r.exit).toBe(false);
+  });
 });
 
 describe("launchPositionExit — fee/IL floor", () => {

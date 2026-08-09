@@ -67,6 +67,7 @@ export function launchPositionExit(input: LaunchPositionExitInput): LaunchPositi
   }
 
   if (
+    input.drawdownPct > 0 &&
     input.peakValueUsd !== null &&
     input.currentValueUsd <= input.peakValueUsd * (1 - input.drawdownPct)
   ) {
