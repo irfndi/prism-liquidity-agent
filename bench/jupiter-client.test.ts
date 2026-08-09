@@ -161,6 +161,75 @@ describe("jupiterFetch traffic gate (issue #196 follow-up)", () => {
     expect(fetchCount).toBe(1);
   });
 
+  it("claims pacing slots synchronously — concurrent callers cannot burst (P1)", async () => {
+    setJupiterGateForTest({ intervalMs: 30 });
+    let fetchCount = 0;
+    mockFetchOnce(() => {
+      fetchCount += 1;
+      return okResponse();
+    });
+
+    // Three concurrent callers: each claims a distinct slot synchronously
+    // (0ms, 30ms, 60ms), so fetches are spaced by the interval instead of
+    // waking together and bursting.
+    const calls = [
+      jupiterFetch("https://api.jup.ag/swap/v1/quote?i=1"),
+      jupiterFetch("https://api.jup.ag/swap/v1/quote?i=2"),
+      jupiterFetch("https://api.jup.ag/swap/v1/quote?i=3"),
+    ];
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(30);
+    expect(fetchCount).toBe(2);
+    await vi.advanceTimersByTimeAsync(30);
+    await Promise.all(calls);
+    expect(fetchCount).toBe(3);
+  });
+
+  it("aborts the pacing wait with the caller's signal — no request past its timeout", async () => {
+    setJupiterGateForTest({ intervalMs: 10_000 });
+    let fetchCount = 0;
+    mockFetchOnce(() => {
+      fetchCount += 1;
+      return okResponse();
+    });
+    const controller = new AbortController();
+
+    // First call claims the free slot and completes immediately.
+    await jupiterFetch("https://api.jup.ag/swap/v1/quote");
+    expect(fetchCount).toBe(1);
+
+    // Second call waits for the next slot (10s out) — its abort signal must
+    // cut the pacing wait short and no request may hit the network.
+    const call = jupiterFetch("https://api.jup.ag/swap/v1/quote", {
+      signal: controller.signal,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort(new Error("timed out"));
+    await expect(call).rejects.toThrow("timed out");
+    expect(fetchCount).toBe(1);
+  });
+
+  it("clamps a far-future x-ratelimit-reset so the breaker can self-heal", async () => {
+    setJupiterGateForTest({ intervalMs: 0, baseCooldownMs: 10 });
+    // A malformed/far-future stamp (millisecond timestamp ≈ year 57k) must
+    // not wedge the breaker beyond the 60-minute cap.
+    const farFutureReset = Math.floor(Date.now() / 1000) + 10 * 365 * 24 * 3_600;
+    let fetchCount = 0;
+    mockFetchOnce(() => {
+      fetchCount += 1;
+      return fetchCount === 1 ? rateLimitedResponse(farFutureReset) : okResponse();
+    });
+
+    await jupiterFetch("https://api.jup.ag/swap/v1/quote");
+    // Past the 60-minute clamp (and the 10ms base cooldown): the gate allows
+    // a probe again, and the success clears the breaker.
+    await vi.advanceTimersByTimeAsync(3_600_000 + 1);
+    const recovered = await jupiterFetch("https://api.jup.ag/swap/v1/quote");
+    expect(recovered.status).toBe(200);
+    expect(fetchCount).toBe(2);
+  });
+
   it("returns the synthetic 429 with the gateway shape for existing error handling", async () => {
     setJupiterGateForTest({ intervalMs: 0, baseCooldownMs: 60_000 });
     mockFetchOnce(() => rateLimitedResponse());

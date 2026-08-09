@@ -67,12 +67,6 @@ function baseCooldownMs(): number {
   return testBaseCooldownMs !== undefined ? testBaseCooldownMs : BREAKER_BASE_COOLDOWN_MS;
 }
 
-function sleep(ms: number): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, ms);
-  return promise;
-}
-
 function syntheticRateLimitedResponse(): Response {
   return new Response(JSON.stringify({ code: 429, message: "[API Gateway] Too many requests" }), {
     status: 429,
@@ -96,32 +90,46 @@ export async function jupiterFetch(
   if (now < breakerCooldownUntil) {
     return syntheticRateLimitedResponse();
   }
-  // Pace to the sustained keyless rate: slot reservation (gecko pattern).
+  // Pace to the sustained keyless rate. The slot is claimed SYNCHRONOUSLY
+  // (single-threaded read-modify-write, the gecko pattern) BEFORE any await:
+  // N concurrent callers each reserve a distinct slot (k × interval apart),
+  // so they cannot all compute the same wait, wake together, and burst.
+  const slotStart = Date.now();
+  const reservedAt = Math.max(slotStart, nextJupiterSlotAt);
+  nextJupiterSlotAt = reservedAt + intervalMs();
+  let waitMs = Math.max(0, reservedAt - slotStart);
   // A slot more than 5 minutes out is a clock anomaly (NTP jump back, or
   // stale state across test isolation) — never sleep that long for pacing;
   // a queue that deep is pathological and the 429 breaker should have opened
   // long before it forms.
-  const waitMs = Math.max(0, nextJupiterSlotAt - now);
   if (waitMs > MAX_JUPITER_SLOT_WAIT_MS) {
-    nextJupiterSlotAt = now;
+    nextJupiterSlotAt = slotStart + intervalMs();
+    waitMs = 0;
   }
-  const effectiveWaitMs = Math.max(0, nextJupiterSlotAt - now);
-  if (effectiveWaitMs > 0) {
-    await sleep(effectiveWaitMs);
+  if (waitMs > 0) {
+    const signal = init?.signal ?? undefined;
+    await sleepWithAbort(waitMs, signal);
   }
   // A request can wait for its pacing slot while an EARLIER request receives
-  // a 429 and opens the breaker — re-check before reserving the next slot or
-  // calling fetch, so the waiting request fails fast instead of refreshing
-  // the ban.
+  // a 429 and opens the breaker — re-check after the wait, before calling
+  // fetch, so the waiting request fails fast instead of refreshing the ban.
   if (Date.now() < breakerCooldownUntil) {
     return syntheticRateLimitedResponse();
   }
-  const slotStart = Date.now();
-  nextJupiterSlotAt = Math.max(slotStart, nextJupiterSlotAt) + intervalMs();
+  // The caller's abort signal (e.g. AbortSignal.timeout) applies to the whole
+  // round trip, pacing included: if it fired while waiting, behave like fetch
+  // would — throw instead of sending a request that was already abandoned.
+  const signal = init?.signal ?? undefined;
+  if (signal !== undefined && signal.aborted) {
+    throw signal.reason ?? new Error("The operation was aborted");
+  }
   const response = await fetch(input, init);
   if (response.status === 429) {
     // Escalate the cooldown; x-ratelimit-reset (Unix seconds) is the
     // documented backoff target when the oldest in-window request ages out.
+    // Clamped: the escalated cooldown is bounded at 60 min, and the header
+    // override must be too — a malformed or far-future stamp would otherwise
+    // wedge the breaker (no self-heal) for hours or days.
     breakerFailures += 1;
     const cooldownMs = Math.min(
       baseCooldownMs() * 2 ** (breakerFailures - 1),
@@ -129,14 +137,39 @@ export async function jupiterFetch(
     );
     const resetHeader = response.headers.get("x-ratelimit-reset");
     const resetAtMs = resetHeader === null ? 0 : Number(resetHeader) * 1000;
-    breakerCooldownUntil = Math.max(
-      Date.now() + cooldownMs,
-      Number.isFinite(resetAtMs) && resetAtMs > 0 ? resetAtMs : 0,
-    );
+    const clampedResetAtMs =
+      Number.isFinite(resetAtMs) && resetAtMs > 0
+        ? Math.min(resetAtMs, Date.now() + BREAKER_MAX_COOLDOWN_MS)
+        : 0;
+    breakerCooldownUntil = Math.max(Date.now() + cooldownMs, clampedResetAtMs);
   } else if (response.ok && breakerFailures > 0) {
     // Half-open recovery: a success after the cooldown clears the breaker.
     breakerFailures = 0;
     breakerCooldownUntil = 0;
   }
   return response;
+}
+
+/** Sleeps for `ms` but resolves early (and re-checks) when `signal` aborts. */
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const onAbort = (): void => {
+    clearTimeout(timer);
+    resolve();
+  };
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", onAbort);
+    resolve();
+  }, ms);
+  if (signal !== undefined) {
+    if (signal.aborted) {
+      clearTimeout(timer);
+      return Promise.resolve();
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  }
+  return promise.finally(() => {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  });
 }
