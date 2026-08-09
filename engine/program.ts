@@ -39,6 +39,7 @@ import { shouldDiscoverPools } from "./pool-policy.js";
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
 import { gateAndRankMarketPools, type MarketPoolRank } from "./market-gate.js";
 import { gateAndRankLaunchPools, summarizeLaunchRejections } from "./launch-gate.js";
+import type { WashEvidence } from "./wash-forensics.js";
 import { transitionCandidate } from "./candidate-policy.js";
 import { getPrismUserConfigDir } from "./paths.js";
 
@@ -2768,6 +2769,10 @@ export const program = Effect.gen(function* () {
   // blacklist/freeze/token-risk, metrics, pre-filter, risk tail — plus the
   // launch-specific ENTER criteria.
   const launchScanPools = new Set<string>();
+  // Wash forensics: per-pool evidence fetched during the radar refresh
+  // (one Helius call per admitted pool) and consumed by the launch ENTER
+  // gate. Stale-by-one-refresh is fine — the evidence is a trend signal.
+  const washEvidenceByPool = new Map<string, WashEvidence>();
   // In-memory per-position peak 1h fees (USD) for the volume-decay exit.
   // Session-local by design: a restart resets it and the time-box exit
   // backstops the gap (contract: no persistence for the peak tracker).
@@ -4211,23 +4216,64 @@ export const program = Effect.gen(function* () {
           launchScanPools.add(r.pool.address);
         }
       }
+      if (config.launchWashForensicsEnabled === true && adapter.getPoolWashEvidence) {
+        // Stale evidence must not outlive its pool: a pool that left the
+        // top-K, or a refresh whose fetch failed (null), drops its entry —
+        // otherwise an old suspicious flag would gate ENTER forever.
+        washEvidenceByPool.clear();
+        // Bound both the fetch WIDTH (top-30 by fee yield — the pools most
+        // likely to reach ENTER; evidence for the rest fails open) and the
+        // CONCURRENCY (5): 200 pools at unbounded concurrency would burst
+        // the Helius rate tier and 429 everything to null.
+        const topK = gateResult.ranked.slice(0, Math.min(config.launchScanTopK ?? 30, 30));
+        const evidences = yield* Effect.forEach(
+          topK,
+          (r) =>
+            adapter.getPoolWashEvidence!(r.pool.address).pipe(
+              Effect.catch(() => Effect.succeed(null)),
+            ),
+          { concurrency: 5 },
+        );
+        for (let i = 0; i < topK.length; i++) {
+          const evidence = evidences[i];
+          if (evidence !== null && evidence !== undefined) {
+            washEvidenceByPool.set(topK[i]!.pool.address, evidence);
+          }
+        }
+      }
       logger.info("Launch radar", {
         universe: discovered.length,
         admitted: gateResult.ranked.length,
         rejected: discovered.length - gateResult.ranked.length,
         rejections,
-        top: gateResult.ranked.slice(0, config.launchScanTopK ?? 30).map((r) => ({
-          address: r.pool.address,
-          pool: `${r.pool.tokenXSymbol ?? "?"}/${r.pool.tokenYSymbol ?? "?"}`,
-          feeYield1hPct: r.feeYield1hPct,
-          feeYieldWindows: r.pool.feeYieldWindows,
-          volumeWindows: r.pool.volumeWindows,
-          volume1hUsd: r.volume1hUsd,
-          ageHours:
-            r.pool.createdAtMs === undefined
-              ? null
-              : Math.max(0, (now - r.pool.createdAtMs) / 3_600_000),
-        })),
+        top: gateResult.ranked.slice(0, config.launchScanTopK ?? 30).map((r) => {
+          const evidence = washEvidenceByPool.get(r.pool.address);
+          return {
+            address: r.pool.address,
+            pool: `${r.pool.tokenXSymbol ?? "?"}/${r.pool.tokenYSymbol ?? "?"}`,
+            feeYield1hPct: r.feeYield1hPct,
+            feeYieldWindows: r.pool.feeYieldWindows,
+            volumeWindows: r.pool.volumeWindows,
+            volume1hUsd: r.volume1hUsd,
+            ageHours:
+              r.pool.createdAtMs === undefined
+                ? null
+                : Math.max(0, (now - r.pool.createdAtMs) / 3_600_000),
+            ...(evidence !== undefined
+              ? {
+                  wash: {
+                    suspicious: evidence.suspicious,
+                    reason: evidence.reason,
+                    distinctPayers: evidence.distinctPayers,
+                    tradeCount: evidence.tradeCount,
+                    uniquePayerRate: evidence.uniquePayerRate,
+                    txsPerSecond: evidence.txsPerSecond,
+                    feeCv: evidence.feeCv,
+                  },
+                }
+              : {}),
+          };
+        }),
       });
     });
 
@@ -6492,6 +6538,46 @@ export const program = Effect.gen(function* () {
           // token-risk and the risk tail still run verbatim. The decision
           // carries the FA lifecycle (ladder + invalidation) so execution
           // stamps the position row.
+          // [wash-forensics] launch ENTER gate — egregious wash evidence
+          // (few wallets producing the whole recent sample at bot speed)
+          // rejects before capital enters a honeypot's volume. Advisory by
+          // default (switch off); the evidence comes from the radar refresh's
+          // one Helius call per admitted pool — null (fetch failed, switch
+          // off, no sample) fails open and never blocks. Runs BEFORE every
+          // specialized ENTER branch (fallen-angel included) so no lane can
+          // route around it, and only for actual launch-execution pools —
+          // a watchlist/market pool that also appears in the launch top-K is
+          // not wash-gated when entering through its own lane.
+          const washEvidence = washEvidenceByPool.get(poolAddress);
+          if (
+            !enterGateRejected &&
+            config.launchWashForensicsEnabled === true &&
+            config.launchScanEnabled === true &&
+            config.launchExecutionEnabled === true &&
+            launchScanPools.has(poolAddress) &&
+            washEvidence !== undefined &&
+            washEvidence.suspicious
+          ) {
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "ENTER",
+                confidence: 0,
+                reasoning: `[wash-forensics] ${washEvidence.reason}`,
+                metrics,
+                riskResult: {
+                  approved: false,
+                  reason: `[wash-forensics] ${washEvidence.reason}`,
+                },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catch(() => Effect.void));
+            enterGateRejected = true;
+          }
+
           const faSignal = fallenAngelSignals.get(poolAddress);
           const openFaPositions = Array.from(trackedPositions.values()).filter(
             (p) => p.positionMode === "fallen-angel",
