@@ -242,6 +242,8 @@ export interface AppConfig {
   readonly launchRunnerScaleInStepPct?: number;
   readonly launchRunnerScaleInSizePct?: number;
   readonly launchRunnerScaleInMaxSteps?: number;
+  /** Wash forensics master switch. */
+  readonly launchWashForensicsEnabled?: boolean;
   readonly deployerBlacklistPath: string;
   readonly tokenBlacklistPath: string;
   readonly sqliteDbPath: string;
@@ -1441,6 +1443,13 @@ const loadConfig = Effect.gen(function* () {
   const launchRunnerScaleInMaxSteps = Math.floor(
     yield* validatedNumber("LAUNCH_RUNNER_SCALE_IN_MAX_STEPS", 1, 3, 10),
   );
+  // Wash forensics: one Helius enhanced-API call per admitted launch pool —
+  // wallet-concentration / burst-density evidence that flags wash volume
+  // before ENTER. OFF by default (RPC cost + heuristic noise); advisory in
+  // the radar log, hard-rejecting only at egregious thresholds.
+  const launchWashForensicsEnabled = yield* Config.boolean("LAUNCH_WASH_FORENSICS_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
 
   const deployerBlacklistPath = yield* Config.string("DEPLOYER_BLACKLIST_PATH").pipe(
     Effect.orElseSucceed(() => "./engine/data/deployer-blacklist.json"),
@@ -1628,6 +1637,7 @@ const loadConfig = Effect.gen(function* () {
     launchRunnerScaleInStepPct,
     launchRunnerScaleInSizePct,
     launchRunnerScaleInMaxSteps,
+    launchWashForensicsEnabled,
     deployerBlacklistPath,
     tokenBlacklistPath,
     sqliteDbPath,

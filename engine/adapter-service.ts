@@ -56,6 +56,7 @@ import { computeRequiredAtomic } from "./entry-prep-service.js";
 import type { ClaimedReward } from "./rewards.js";
 import { validateLimitOrderRequest, type LimitOrderRequest } from "./limit-orders.js";
 import { buildMeteoraDiscoveryPageUrl, selectRecurringDiscoveryPage } from "./discovery-policy.js";
+import { scoreWashEvidence, type WashTradeRow } from "./wash-forensics.js";
 
 const DEFAULT_PUBLIC_KEY = "11111111111111111111111111111111";
 
@@ -2103,6 +2104,52 @@ export const AdapterLive = Layer.effect(
         getTokenMeta(mintAddress).pipe(Effect.map((m) => m.decimals)),
 
       getMintAuthorities: (mintAddress: string) => getMintAuthorities(mintAddress),
+
+      // Wash forensics: one Helius enhanced-API call on the pool's recent
+      // transactions. DLMM swaps are not in Helius's parsed models, but the
+      // feePayer per tx survives — the wallet-concentration/burst-density
+      // signals only need who paid + when. Fail-open: any fetch/parse error,
+      // a non-Helius RPC host, or the switch being off returns null.
+      getPoolWashEvidence: (poolAddress) =>
+        Effect.gen(function* () {
+          if (config.launchWashForensicsEnabled !== true) return null;
+          if (!config.heliusApiKey) return null;
+          let host: string;
+          try {
+            host = new URL(config.solanaRpcUrl).host;
+          } catch {
+            return null;
+          }
+          if (!host.includes("helius")) return null;
+          const url =
+            `https://${host}/v0/addresses/${poolAddress}/transactions` +
+            `?limit=40&api-key=${encodeURIComponent(config.heliusApiKey)}`;
+          const parsed: unknown = yield* Effect.tryPromise({
+            try: async () => {
+              const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+              if (!res.ok) throw new Error(`heluis wash fetch ${res.status}`);
+              return (await res.json()) as unknown;
+            },
+            catch: () => null,
+          }).pipe(Effect.catch(() => Effect.succeed(null)));
+          if (!Array.isArray(parsed) || parsed.length === 0) return null;
+          const rows: WashTradeRow[] = [];
+          for (const tx of parsed) {
+            if (!isObject(tx)) continue;
+            const payer = tx["feePayer"];
+            const timestamp = tx["timestamp"];
+            const fee = tx["fee"];
+            if (
+              typeof payer !== "string" ||
+              typeof timestamp !== "number" ||
+              typeof fee !== "number"
+            ) {
+              continue;
+            }
+            rows.push({ payer, timestamp, feeLamports: fee });
+          }
+          return rows.length > 0 ? scoreWashEvidence(rows) : null;
+        }).pipe(Effect.catch(() => Effect.succeed(null))),
 
       getPoolState: (poolAddress) =>
         Effect.gen(function* () {

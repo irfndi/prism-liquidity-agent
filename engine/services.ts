@@ -33,6 +33,7 @@ import type { ClaimedReward } from "./rewards.js";
 import type { LimitOrderRequest } from "./limit-orders.js";
 import type { DiscoverPoolsError, EntryPrepError } from "./errors.js";
 import type { CopySignalApi } from "./copy-trading-signals.js";
+import type { WashEvidence } from "./wash-forensics.js";
 
 // ─── Adapter Service ─────────────────────────────────────────────────────────
 
@@ -428,6 +429,12 @@ export interface AdapterApi {
   readonly getMintAuthorities: (
     mintAddress: string,
   ) => Effect.Effect<{ mintAuthority: string | null; freezeAuthority: string | null }, Error>;
+  /** Wash forensics: one Helius enhanced-API call on the pool's recent txs →
+   *  a wash evidence score (wallet concentration / burst density). Null on
+   *  any fetch/parse failure or when the RPC host is not Helius (fail-open).
+   *  Optional so legacy mocks compile unchanged; only called when
+   *  config.launchWashForensicsEnabled is true. */
+  readonly getPoolWashEvidence?: (poolAddress: string) => Effect.Effect<WashEvidence | null, never>;
   readonly quoteSwapUSDCForToken: (
     outputMint: string,
     amountAtomic: bigint,
