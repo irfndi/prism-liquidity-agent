@@ -336,6 +336,22 @@ function toDiscoveredPool(p: MeteoraPool): DiscoveredPool {
           createdAtMs: p.created_at > 1_000_000_000_000 ? p.created_at : p.created_at * 1000,
         }
       : {}),
+    // 1h fee-yield radar fields (launch mode): optional so pools where the
+    // Data API reports no 1h window (brand-new, zero-activity) stay admitted
+    // to the discovery feed and the launch gate rejects them fail-closed.
+    ...(typeof p.volume?.["1h"] === "number" && Number.isFinite(p.volume["1h"])
+      ? { volume1hUsd: p.volume["1h"] }
+      : {}),
+    ...(typeof p.fees?.["1h"] === "number" && Number.isFinite(p.fees["1h"])
+      ? { fees1hUsd: p.fees["1h"] }
+      : {}),
+    ...(typeof p.fee_tvl_ratio?.["1h"] === "number" && Number.isFinite(p.fee_tvl_ratio["1h"])
+      ? { feeYield1hPct: p.fee_tvl_ratio["1h"] }
+      : {}),
+    ...(typeof p.pool_config?.base_fee_pct === "number" &&
+    Number.isFinite(p.pool_config.base_fee_pct)
+      ? { baseFeePct: p.pool_config.base_fee_pct }
+      : {}),
     tokenXSymbol: tokenX.symbol,
     tokenYSymbol: tokenY.symbol,
     tokenXVerified: tokenX.is_verified,
@@ -3481,6 +3497,44 @@ export const AdapterLive = Layer.effect(
           }
           return merged;
         }),
+
+      // Launch-mode radar: the top fee-yield pools (24h fee/TVL ratio desc)
+      // in ONE page, with the Data API's token-safety metadata attached for
+      // the launch gate. Never fails: any network/parse problem logs a
+      // warning and yields [] — the radar keeps its last ranked snapshot.
+      discoverHotPools: (limit) =>
+        Effect.gen(function* () {
+          const baseUrl =
+            config.meteoraPoolsUrl ||
+            "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=fee_tvl_ratio_24h:desc";
+          const url = new URL(baseUrl);
+          url.searchParams.set("page", "1");
+          url.searchParams.set("page_size", String(Math.min(Math.max(Math.floor(limit), 1), 1000)));
+          url.searchParams.set("filter_by", "is_blacklisted=false");
+          url.searchParams.set("sort_by", "fee_tvl_ratio_24h:desc");
+          const res = yield* Effect.tryPromise({
+            try: () => fetch(url.toString(), { signal: AbortSignal.timeout(15_000) }),
+            catch: (cause) => cause as Error,
+          });
+          if (!res.ok) {
+            logger.warn("Launch radar: hot-pool fetch non-OK", { status: res.status });
+            return [];
+          }
+          const parsed: unknown = yield* Effect.tryPromise({
+            try: () => res.json(),
+            catch: (cause) => cause as Error,
+          });
+          if (!isPoolsEnvelope(parsed)) return [];
+          const valid = parsed.data.filter(isValidPoolShape);
+          return valid.filter((p) => !p.launchpad).map(toDiscoveredPool);
+        }).pipe(
+          Effect.catch((cause) => {
+            logger.warn("Launch radar: hot-pool fetch failed", {
+              error: underlyingErrorMessage(cause),
+            });
+            return Effect.succeed([] as ReadonlyArray<DiscoveredPool>);
+          }),
+        ),
 
       quoteSwapUSDCForToken: (outputMint: string, amountAtomic: bigint) =>
         quoteSwapUSDCForToken(outputMint, amountAtomic).pipe(

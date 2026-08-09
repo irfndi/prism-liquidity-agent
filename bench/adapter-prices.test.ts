@@ -348,7 +348,9 @@ describe("AdapterService getTokenPrices fallback behavior", () => {
     // fallback price with the default. The stranded-status classification
     // passes useFallback: false precisely so a price-provider outage can
     // never report stranded capital at a fabricated value.
-    const restore = mockFetch((async () => new Response("down", { status: 500 })) as unknown as typeof fetch);
+    const restore = mockFetch(
+      (async () => new Response("down", { status: 500 })) as unknown as typeof fetch,
+    );
     try {
       expect(await readTokenPrices([SOL_MINT], false)).toEqual({ [SOL_MINT]: 0 });
       expect(await readTokenPrices([SOL_MINT], true)).toEqual({ [SOL_MINT]: 165 });

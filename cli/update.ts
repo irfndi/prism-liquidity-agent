@@ -736,15 +736,15 @@ export const updateCommand = new Command("update")
       // process (the lockfile is only liveness-checked). The lockfile is the
       // fallback for `prism dev` runs the scan misses.
       const runningPid =
-        runningEngine?.pid ??
-        (lock !== null && isProcessAlive(lock.pid) ? lock.pid : null) ??
-        null;
+        runningEngine?.pid ?? (lock !== null && isProcessAlive(lock.pid) ? lock.pid : null) ?? null;
       if (runningPid !== null) {
         console.log("");
         console.log(
           `RESTART REQUIRED — the running Prism agent (PID ${runningPid}) is still executing the OLD build.`,
         );
-        console.log("  The new version is installed, verified, and will go live on the next restart.");
+        console.log(
+          "  The new version is installed, verified, and will go live on the next restart.",
+        );
         console.log("  Restart it with:");
         console.log("    systemctl --user restart prism-agent.service   (systemd user service)");
         console.log(`    kill ${runningPid} && prism dev                 (manual/foreground run)`);

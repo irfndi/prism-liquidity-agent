@@ -208,7 +208,7 @@ export function retryWithBackoff<T>(
           cause !== null &&
           "message" in cause &&
           typeof (cause as { message?: unknown }).message === "string"
-            ? ((cause as { message: string }).message)
+            ? (cause as { message: string }).message
             : String(cause);
         const normalized = new Error(message, { cause });
         // The retry loop reads rate-limit metadata (headers/response/status)

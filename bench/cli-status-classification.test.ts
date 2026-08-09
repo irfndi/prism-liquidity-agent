@@ -28,9 +28,9 @@ describe("classifyStrandedSettlement (issue #183 three-channel split)", () => {
   });
 
   it("classifies a PRICE typed failure (provider outage) as unavailable", () => {
-    expect(
-      classifyStrandedSettlement({ ...base, priceState: "unavailable", priceUsd: 0 }),
-    ).toEqual({ kind: "unavailable" });
+    expect(classifyStrandedSettlement({ ...base, priceState: "unavailable", priceUsd: 0 })).toEqual(
+      { kind: "unavailable" },
+    );
   });
 
   it("classifies a DECIMALS typed failure (RPC outage) as unavailable, not unpriceable", () => {
@@ -40,9 +40,9 @@ describe("classifyStrandedSettlement (issue #183 three-channel split)", () => {
   });
 
   it("classifies a genuinely unpriceable token (no price) as unpriceable", () => {
-    expect(
-      classifyStrandedSettlement({ ...base, priceState: "unpriceable", priceUsd: 0 }),
-    ).toEqual({ kind: "unpriceable" });
+    expect(classifyStrandedSettlement({ ...base, priceState: "unpriceable", priceUsd: 0 })).toEqual(
+      { kind: "unpriceable" },
+    );
   });
 
   it("classifies a decimals defect (malformed mint) as unpriceable", () => {
@@ -86,9 +86,7 @@ describe("decimalsFailureState (issue #183 adapter error surface)", () => {
 
   it("maps other typed failures (RPC outage) to unavailable", () => {
     expect(decimalsFailureState(new Error("fetch failed"))).toBe("unavailable");
-    expect(decimalsFailureState(new Error("request timed out after 10000ms"))).toBe(
-      "unavailable",
-    );
+    expect(decimalsFailureState(new Error("request timed out after 10000ms"))).toBe("unavailable");
     expect(decimalsFailureState(null)).toBe("unavailable");
   });
 });

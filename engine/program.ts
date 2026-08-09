@@ -37,6 +37,7 @@ import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
 import { gateAndRankMarketPools, type MarketPoolRank } from "./market-gate.js";
+import { gateAndRankLaunchPools } from "./launch-gate.js";
 import { transitionCandidate } from "./candidate-policy.js";
 import { getPrismUserConfigDir } from "./paths.js";
 
@@ -3942,6 +3943,59 @@ export const program = Effect.gen(function* () {
       });
     });
 
+  // ─── Launch-mode radar refresh ─────────────────────────────────────────
+  // When LAUNCH_SCAN_ENABLED, re-runs the launch gate on
+  // LAUNCH_SCAN_REFRESH_INTERVAL_MS (clamped to >= 10s): fetch the hot-pool
+  // shortlist (sorted by 24h fee/TVL ratio desc), gate it by age / TVL band /
+  // 1h volume / base fee / bin step / token safety, and log the top-K radar
+  // (fee yield, 1h volume, age). Discovery + screening ONLY — v1 wires no
+  // execution lane. Every failure path fails open and the default
+  // (launchScanEnabled=false) path is behavior-identical.
+  let lastLaunchScanAt = 0;
+  const refreshLaunchScan = (now: number): Effect.Effect<void, never> =>
+    Effect.gen(function* () {
+      if (config.launchScanEnabled !== true) return;
+      if (adapter.discoverHotPools === undefined) {
+        logger.warn("Launch radar: adapter does not expose discoverHotPools — disabled");
+        return;
+      }
+      const intervalMs = Math.max(config.launchScanRefreshIntervalMs ?? 120_000, 10_000);
+      if (now - lastLaunchScanAt < intervalMs) return;
+      lastLaunchScanAt = now;
+      const discovered = yield* adapter.discoverHotPools(config.launchScanTopK ?? 30);
+      if (discovered.length === 0) {
+        logger.warn("Launch radar: hot-pool fetch returned nothing");
+        return;
+      }
+      const { ranked } = gateAndRankLaunchPools(discovered, {
+        minTvlUsd: config.launchScanMinTvlUsd ?? 5_000,
+        maxTvlUsd: config.launchScanMaxTvlUsd ?? 1_000_000,
+        maxAgeHours: config.launchScanMaxAgeHours ?? 6,
+        minVolume1hUsd: config.launchScanMinVolume1hUsd ?? 50_000,
+        minBaseFeePct: config.launchScanMinBaseFeePct ?? 1,
+        minBinStep: config.launchScanMinBinStep ?? 50,
+        maxBinStep: config.launchScanMaxBinStep ?? 200,
+        maxVolumeTurnover: 50,
+        minHolders: 1000,
+        stablecoinMints: config.stablecoinMints ?? new Set<string>(),
+        now,
+      });
+      logger.info("Launch radar", {
+        universe: discovered.length,
+        admitted: ranked.length,
+        rejected: discovered.length - ranked.length,
+        top: ranked.slice(0, config.launchScanTopK ?? 30).map((r) => ({
+          pool: `${r.pool.tokenXSymbol ?? "?"}/${r.pool.tokenYSymbol ?? "?"}`,
+          feeYield1hPct: r.feeYield1hPct,
+          volume1hUsd: r.volume1hUsd,
+          ageHours:
+            r.pool.createdAtMs === undefined
+              ? null
+              : Math.max(0, (now - r.pool.createdAtMs) / 3_600_000),
+        })),
+      });
+    });
+
   // ─── Rotation metrics (session-scoped) ─────────────────────────────────
   // Counters since process start for the high-frequency-rotation profile:
   // ENTER/EXIT executions and the average age of tracked positions. Logged
@@ -3972,6 +4026,7 @@ export const program = Effect.gen(function* () {
       yield* refreshAutonomousCandidates(scanCount);
       yield* refreshFallenAngelCandidates(scanCount);
       yield* refreshMarketUniverse(Date.now());
+      yield* refreshLaunchScan(Date.now());
       // The universe refresh may have rebuilt the market top-K — make the
       // fresh active set visible to the "no pools" check and the scan loop.
       rebuildPoolsToScan();
