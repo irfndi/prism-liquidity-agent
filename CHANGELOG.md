@@ -6,8 +6,8 @@ All notable changes to Prism are documented here.
 
 ### Fixed
 
-- Jupiter API traffic gate: every api.jup.ag request (swap quote/build, price, token search — one shared keyless rate-limit bucket at 0.5 RPS with a ~5-request burst cap) now routes through a process-wide gate that paces requests to a safe sustained rate and opens an escalating cooldown (1 min → 60 min) on 429, honoring the documented `x-ratelimit-reset` backoff target — a self-inflicted rate-limit ban can no longer be refreshed by retry loops and capital-lock the wallet (#196 follow-up)
-- Route-probe quote cache: the autonomous-candidate refresh's per-cycle fan-out (up to ~80 identical probe quotes — the dominant Jupiter traffic term) now caches successful probes for one scan interval, cutting steady-state probe traffic to ~zero (#196 follow-up)
+- Jupiter API traffic gate: every api.jup.ag request (swap quote/build, price, token search — one shared keyless rate-limit bucket at 0.5 RPS sustained with a ~5-request burst cap) now routes through a process-wide gate that paces requests to 0.4 RPS and opens an escalating cooldown (1 min → 60 min) on 429, honoring the documented `x-ratelimit-reset` backoff target — a self-inflicted rate-limit ban can no longer be refreshed by retry loops and capital-lock the wallet (#196 follow-up)
+- Route-probe quote cache: the autonomous-candidate refresh's per-cycle fan-out (up to ~80 identical probe quotes — the dominant Jupiter traffic term) now caches successful probes for at least one scan interval (10-minute minimum), cutting steady-state probe traffic to ~zero (#196 follow-up)
 
 ## [0.1.12] — 2026-08-08
 

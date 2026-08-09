@@ -31,8 +31,9 @@ let breakerFailures = 0;
 // config-service) the interval defaults to 0: the suite mocks global fetch
 // and must not pay the pacing wait per call. The jupiter-client tests raise
 // it explicitly via setJupiterGateForTest.
-let testIntervalMs: number | undefined =
-  process.env.NODE_ENV === "test" || process.env.VITEST === "true" ? 0 : undefined;
+const TEST_ENV = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+const DEFAULT_TEST_INTERVAL_MS = TEST_ENV ? 0 : undefined;
+let testIntervalMs: number | undefined = DEFAULT_TEST_INTERVAL_MS;
 let testBaseCooldownMs: number | undefined;
 
 export interface JupiterGateTestOptions {
@@ -51,7 +52,10 @@ export function resetJupiterGateForTest(): void {
   nextJupiterSlotAt = 0;
   breakerCooldownUntil = 0;
   breakerFailures = 0;
-  testIntervalMs = undefined;
+  // Restore the environment-derived default (0 under the test env), not the
+  // production interval — a reset between tests must not re-serialize the
+  // mocked-fetch suite.
+  testIntervalMs = DEFAULT_TEST_INTERVAL_MS;
   testBaseCooldownMs = undefined;
 }
 
