@@ -5379,6 +5379,17 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      // Runner scale-in (Heart Attack step 2): the lifecycle block EVALUATES
+      // the trigger (band re-anchor + top-up sizing); the actual rebalance is
+      // deferred to the execution tail so it runs AFTER every exit gate has
+      // had its say and behind the safety-pause/mode guards. A position whose
+      // final decision is EXIT never scales in this cycle.
+      let launchScaleInPending: {
+        readonly positionId: string;
+        readonly topUpUsd: number;
+        readonly reason: string;
+      } | null = null;
+
       for (const pos of poolPositions) {
         let decision: AgentDecision | null = null;
 
@@ -5555,11 +5566,7 @@ export const program = Effect.gen(function* () {
             // outer launch-mode gate — otherwise it would run for non-launch
             // positions, which never carry launchRunner.
             pos.launchRunner === true &&
-            config.launchRunnerScaleInEnabled !== false &&
-            // Paper mode must never touch the live adapter (mirrors the
-            // compound path's paperTrading === false gate) — paper records
-            // would-be scale-ins via the audit decision below.
-            config.paperTrading === false
+            config.launchRunnerScaleInEnabled !== false
           ) {
             const scaleInDecision = shouldScaleInRunner({
               anchorPrice: pos.launchRunnerAnchorPrice ?? 0,
@@ -5594,87 +5601,49 @@ export const program = Effect.gen(function* () {
               const tokenXDecimals = yield* adapter
                 .getTokenDecimals(pool.tokenX)
                 .pipe(Effect.catch(() => Effect.succeed(null)));
+              // Live price only — a hardcoded fallback must never size a
+              // top-up (useFallback: false; an unavailable price tops out at
+              // 0 and the top-up is skipped).
               const priceX = (yield* adapter
-                .getTokenPrices([pool.tokenX])
+                .getTokenPrices([pool.tokenX], { useFallback: false })
                 .pipe(Effect.catch(() => Effect.succeed({} as Record<string, number>))))[
                 pool.tokenX
               ];
-              if (topUpUsd >= 5 && tokenXDecimals !== null && priceX != null && priceX > 0) {
-                const topUpAtomicX = BigInt(Math.floor((topUpUsd / priceX) * 10 ** tokenXDecimals));
-                // The batch SOL budget (SOL-funded wallets) applies to scale-in
-                // top-ups the same way it applies to entries — a top-up that
-                // does not fit is skipped, never forced.
-                const solLamports = pool.tokenX === SOL_MINT ? topUpAtomicX : 0n;
-                if (solLamports > 0n && entrySolBudgetLamports < solLamports) {
-                  logger.info("Runner scale-in skipped — SOL budget insufficient", {
-                    pool: poolAddress,
-                    position: pos.positionId,
-                  });
-                } else if (topUpAtomicX > 0n) {
-                  if (solLamports > 0n) entrySolBudgetLamports -= solLamports;
-                  const dipOffset = dipOffsetBinsForPct(
-                    pool.binStep,
-                    config.launchRunnerDipPct ?? 0.12,
-                  );
-                  const runnerWidth = Math.max(
-                    1,
-                    Math.min(
-                      config.launchRunnerHalfWidthBins ?? 5,
-                      Math.abs(dipOffset) - 1,
-                      Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
-                    ),
-                  );
-                  const newLowerBinId = pool.activeBinId - runnerWidth + dipOffset;
-                  const newUpperBinId = pool.activeBinId + runnerWidth + dipOffset;
-                  const scaleInResult = yield* adapter
-                    .rebalancePosition(
+              const topUpAtomicX =
+                tokenXDecimals !== null && priceX != null && priceX > 0
+                  ? BigInt(Math.floor((topUpUsd / priceX) * 10 ** tokenXDecimals))
+                  : 0n;
+              if (topUpUsd >= 5 && topUpAtomicX > 0n) {
+                // EVALUATION ONLY — the actual rebalance executes in the
+                // per-pool execution tail, AFTER every exit gate (W15,
+                // IL-dominance, TVL-drop, volume-auth, fee/IL, trailing
+                // stop) has had its say, and behind the same safety-pause /
+                // mode guards as every other action. Paper mode advances the
+                // trigger state + audits the would-be scale-in here so paper
+                // validates the band-tracking over cycles.
+                launchScaleInPending = {
+                  positionId: pos.positionId,
+                  topUpUsd,
+                  reason: scaleInDecision.reason ?? "price step reached",
+                };
+                if (config.paperTrading) {
+                  pos.launchRunnerAnchorPrice = pool.currentPrice;
+                  pos.launchRunnerSteps = (pos.launchRunnerSteps ?? 0) + 1;
+                  yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
+                  yield* audit
+                    .recordDecision({
+                      timestamp: Date.now(),
+                      cycleId,
                       poolAddress,
-                      pos.positionPubKey,
-                      newLowerBinId,
-                      newUpperBinId,
-                      { amountXAtomic: topUpAtomicX, amountYAtomic: 0n },
-                    )
-                    .pipe(
-                      Effect.tap((r) =>
-                        Effect.sync(() =>
-                          logger.info("Runner scale-in executed", {
-                            pool: poolAddress,
-                            position: pos.positionId,
-                            topUpUsd,
-                            step: (pos.launchRunnerSteps ?? 0) + 1,
-                            range: [newLowerBinId, newUpperBinId],
-                            pubkey: r.positionPubKey,
-                          }),
-                        ),
-                      ),
-                      Effect.catch((err) => {
-                        logger.warn("Runner scale-in failed", {
-                          pool: poolAddress,
-                          position: pos.positionId,
-                          error: err instanceof Error ? err.message : String(err),
-                        });
-                        return Effect.succeed(null);
-                      }),
-                    );
-                  if (scaleInResult !== null) {
-                    pos.launchRunnerAnchorPrice = pool.currentPrice;
-                    pos.launchRunnerSteps = (pos.launchRunnerSteps ?? 0) + 1;
-                    yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
-                    yield* audit
-                      .recordDecision({
-                        timestamp: Date.now(),
-                        cycleId,
-                        poolAddress,
-                        action: "REBALANCE",
-                        confidence: 1,
-                        reasoning: `[launch-scale-in] ${scaleInDecision.reason}`,
-                        metrics,
-                        riskResult: { approved: true, reason: "[launch-scale-in]" },
-                        executed: true,
-                        paperTrading: config.paperTrading,
-                      })
-                      .pipe(Effect.catch(() => Effect.void));
-                  }
+                      action: "REBALANCE",
+                      confidence: 1,
+                      reasoning: `[launch-scale-in] ${scaleInDecision.reason}`,
+                      metrics,
+                      riskResult: { approved: true, reason: "[launch-scale-in]" },
+                      executed: false,
+                      paperTrading: true,
+                    })
+                    .pipe(Effect.catch(() => Effect.void));
                 }
               }
             }
@@ -8054,6 +8023,179 @@ export const program = Effect.gen(function* () {
         }
 
         finalDecisions.push(decision);
+      }
+
+      // ── Runner scale-in execution (Heart Attack step 2) ──────────────────
+      // Deferred from the lifecycle block: runs only after the FULL exit
+      // chain (W15, IL-dominance, TVL-drop, volume-auth, fee/IL, trailing
+      // stop) found no EXIT for the position this cycle, and behind the same
+      // safety-pause / mode guards as every other live action (a pause or
+      // shadow mode can never be bypassed by an inline adapter call).
+      if (launchScaleInPending !== null) {
+        const pending = launchScaleInPending;
+        const targetPos = positionsForPool(trackedPositions, poolAddress).find(
+          (p) => p.positionId === pending.positionId,
+        );
+        const exitedThisCycle = finalDecisions.some(
+          (d) => d.positionId === pending.positionId && d.action === "EXIT",
+        );
+        if (
+          targetPos !== undefined &&
+          targetPos.positionPubKey !== null &&
+          !exitedThisCycle &&
+          !config.paperTrading
+        ) {
+          const pauseBlockReason = safetyPauseBlockReason(
+            autonomousExecution?.mode,
+            activeSafetyPause,
+            "REBALANCE",
+          );
+          const supervisedBlocksScaleIn = config.agentProposalMode === "supervised";
+          if (
+            pauseBlockReason === null &&
+            !supervisedBlocksScaleIn &&
+            config.autonomousTokenMode !== "shadow"
+          ) {
+            const tokenXDecimals = yield* adapter
+              .getTokenDecimals(pool.tokenX)
+              .pipe(Effect.catch(() => Effect.succeed(null)));
+            const priceX = (yield* adapter
+              .getTokenPrices([pool.tokenX], { useFallback: false })
+              .pipe(Effect.catch(() => Effect.succeed({} as Record<string, number>))))[pool.tokenX];
+            const topUpAtomicX =
+              tokenXDecimals !== null && priceX != null && priceX > 0
+                ? BigInt(Math.floor((pending.topUpUsd / priceX) * 10 ** tokenXDecimals))
+                : 0n;
+            const solLamports = pool.tokenX === SOL_MINT ? topUpAtomicX : 0n;
+            if (topUpAtomicX > 0n && !(solLamports > 0n && entrySolBudgetLamports < solLamports)) {
+              // Acquire the quote leg: autonomous SOL-funded wallets swap
+              // SOL -> quote via the xOnly prep (never the Y half).
+              const entryPrepSvc = yield* EntryPrepService;
+              const prepResult = yield* entryPrepSvc
+                .prepareEntryTokens(poolAddress, pending.topUpUsd, { xOnly: true })
+                .pipe(Effect.catch(() => Effect.succeed(null)));
+              if (prepResult === null) {
+                logger.warn("Runner scale-in skipped — quote prep failed", {
+                  pool: poolAddress,
+                  position: pending.positionId,
+                });
+              } else {
+                if (solLamports > 0n) entrySolBudgetLamports -= solLamports;
+                const dipOffset = dipOffsetBinsForPct(
+                  pool.binStep,
+                  config.launchRunnerDipPct ?? 0.12,
+                );
+                const runnerWidth = Math.max(
+                  1,
+                  Math.min(
+                    config.launchRunnerHalfWidthBins ?? 5,
+                    Math.abs(dipOffset) - 1,
+                    Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
+                  ),
+                );
+                const newLowerBinId = pool.activeBinId - runnerWidth + dipOffset;
+                const newUpperBinId = pool.activeBinId + runnerWidth + dipOffset;
+                const scaleInResult = yield* adapter
+                  .rebalancePosition(
+                    poolAddress,
+                    targetPos.positionPubKey,
+                    newLowerBinId,
+                    newUpperBinId,
+                    { amountXAtomic: topUpAtomicX, amountYAtomic: 0n },
+                  )
+                  .pipe(
+                    Effect.tap((r) =>
+                      Effect.sync(() =>
+                        logger.info("Runner scale-in executed", {
+                          pool: poolAddress,
+                          position: pending.positionId,
+                          topUpUsd: pending.topUpUsd,
+                          step: (targetPos.launchRunnerSteps ?? 0) + 1,
+                          range: [newLowerBinId, newUpperBinId],
+                          pubkey: r.positionPubKey,
+                        }),
+                      ),
+                    ),
+                    Effect.catch((err) => {
+                      logger.warn("Runner scale-in failed", {
+                        pool: poolAddress,
+                        position: pending.positionId,
+                        error: err instanceof Error ? err.message : String(err),
+                      });
+                      return Effect.succeed(null);
+                    }),
+                  );
+                if (scaleInResult !== null) {
+                  // The top-up is FRESH capital: it grows the cost basis and
+                  // the current mark (currentValue + topUp = post-rebalance
+                  // on-chain value) in lockstep — the same invariant the
+                  // compound path applies (applyCompoundToCostBasis).
+                  const basis = applyCompoundToCostBasis({
+                    depositedUsd: targetPos.depositedUsd,
+                    currentValueUsd: targetPos.currentValueUsd,
+                    highestValueUsd: targetPos.highestValueUsd,
+                    compoundedFeesUsd: pending.topUpUsd,
+                  });
+                  const updated: PositionRecord = {
+                    ...targetPos,
+                    ...basis,
+                    // The runner entry is single-sided X: the top-up adds to
+                    // the X basis (the HODL benchmark leg).
+                    entryAmountXUsd: (targetPos.entryAmountXUsd ?? 0) + pending.topUpUsd,
+                    lowerBinId: newLowerBinId,
+                    upperBinId: newUpperBinId,
+                    positionId: scaleInResult.positionPubKey,
+                    positionPubKey: scaleInResult.positionPubKey,
+                    launchRunnerAnchorPrice: pool.currentPrice,
+                    launchRunnerSteps: (targetPos.launchRunnerSteps ?? 0) + 1,
+                    lastRebalanceAt: Date.now(),
+                  };
+                  if (updated.positionId !== targetPos.positionId) {
+                    // Defensive re-key: the identity and its row move with the
+                    // pubkey (same contract as the atomic rebalance path).
+                    trackedPositions.delete(targetPos.positionId);
+                    yield* persist(
+                      `deletePosition ${targetPos.positionId}`,
+                      db.deletePosition(targetPos.positionId),
+                    );
+                  }
+                  trackedPositions.set(updated.positionId, updated);
+                  yield* persist(`savePosition ${updated.positionId}`, db.savePosition(updated));
+                  // The top-up spent wallet capital: refresh the balance so
+                  // the rest of the cycle sizes against the post-scale-in
+                  // wallet (mirrors the ENTER/EXIT tail).
+                  lastWalletBalanceUsd = yield* adapter
+                    .getWalletBalanceUsd()
+                    .pipe(Effect.catch(() => Effect.succeed(lastWalletBalanceUsd)));
+                  yield* audit
+                    .recordDecision({
+                      timestamp: Date.now(),
+                      cycleId,
+                      poolAddress,
+                      action: "REBALANCE",
+                      confidence: 1,
+                      reasoning: `[launch-scale-in] ${pending.reason}`,
+                      metrics,
+                      riskResult: { approved: true, reason: "[launch-scale-in]" },
+                      executed: true,
+                      paperTrading: false,
+                    })
+                    .pipe(Effect.catch(() => Effect.void));
+                }
+              }
+            }
+          } else {
+            logger.info("Runner scale-in skipped — guarded (pause/mode)", {
+              pool: poolAddress,
+              position: pending.positionId,
+              pauseReason: safetyPauseBlockReason(
+                autonomousExecution?.mode,
+                activeSafetyPause,
+                "REBALANCE",
+              ),
+            });
+          }
+        }
       }
 
       return finalDecisions;

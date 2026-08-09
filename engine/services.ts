@@ -844,6 +844,9 @@ export interface DbApi {
       positionMode?: string | null;
       tpLadderJson?: string | null;
       invalidationStopPrice?: number | null;
+      launchRunner?: boolean | null;
+      launchRunnerSteps?: number | null;
+      launchRunnerAnchorPrice?: number | null;
     } | null,
     Error
   >;
@@ -879,6 +882,9 @@ export interface DbApi {
       positionMode?: string | null;
       tpLadderJson?: string | null;
       invalidationStopPrice?: number | null;
+      launchRunner?: boolean | null;
+      launchRunnerSteps?: number | null;
+      launchRunnerAnchorPrice?: number | null;
     }>,
     Error
   >;
@@ -914,6 +920,9 @@ export interface DbApi {
       positionMode?: string | null;
       tpLadderJson?: string | null;
       invalidationStopPrice?: number | null;
+      launchRunner?: boolean | null;
+      launchRunnerSteps?: number | null;
+      launchRunnerAnchorPrice?: number | null;
     }>,
     Error
   >;
@@ -962,6 +971,9 @@ export interface DbApi {
       positionMode?: string | null;
       tpLadderJson?: string | null;
       invalidationStopPrice?: number | null;
+      launchRunner?: boolean | null;
+      launchRunnerSteps?: number | null;
+      launchRunnerAnchorPrice?: number | null;
     }>,
     Error
   >;
