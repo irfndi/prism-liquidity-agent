@@ -317,7 +317,7 @@ describe("executeLive", () => {
     expect(result.executed).toBe(true);
     expect(result.error).toBeUndefined();
     expect(prepareSpy).toHaveBeenCalledTimes(1);
-    expect(prepareSpy).toHaveBeenCalledWith(poolAddress, positionSizeUsd);
+    expect(prepareSpy).toHaveBeenCalledWith(poolAddress, positionSizeUsd, undefined);
   });
 
   it("skips enterPosition when prepareEntryTokens fails", () => {
@@ -547,7 +547,7 @@ describe("executePaper paper/live parity", () => {
     );
 
     expect(result.executed).toBe(true);
-    expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10, 34);
+    expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10, 34, undefined);
     // Paper positions are keyed by a generated synthetic id.
     const pos = [...trackedPositions.values()][0] as
       | { lowerBinId: number; upperBinId: number }
@@ -555,6 +555,73 @@ describe("executePaper paper/live parity", () => {
     // Parity: the paper range is exactly what live would use — not a hardcoded ±20.
     expect(pos?.lowerBinId).toBe(5000 - 34);
     expect(pos?.upperBinId).toBe(5000 + 34);
+  });
+
+  it("paper ENTER passes the runner dip offset into the range (reaches execution)", () => {
+    const poolAddress = "TestPool222222222222222222222222222222222222";
+    const recommendBinRangeSpy = vi.fn(
+      (activeBinId: number, _binStep: number, halfWidthOverride?: number, dip?: number) => ({
+        lowerBinId: activeBinId - (halfWidthOverride ?? 20) + (dip ?? 0),
+        upperBinId: activeBinId + (halfWidthOverride ?? 20) + (dip ?? 0),
+      }),
+    );
+    const strategy: StrategyApi = {
+      computeMetrics: () => {
+        throw new Error("not used");
+      },
+      checkVolumeAuthenticity: () => ({ score: 1, flags: [] }),
+      computeBinUtilization: () => 1,
+      computeFeeIlRatio: () => 1,
+      recommendBinRange: recommendBinRangeSpy,
+      passesPreFilter: () => true,
+    };
+    const db = {
+      savePosition: () => Effect.void,
+      savePositionEvent: () => Effect.void,
+    } as unknown as DbApi;
+    const trackedPositions = new Map();
+
+    const result = Effect.runSync(
+      executePaper(
+        {
+          db,
+          trackedPositions,
+          strategy,
+          entryStrategyShape: "spot",
+          entryRangeHalfWidth: 5,
+          entryDipOffsetBins: -13,
+        },
+        {
+          action: "ENTER",
+          poolAddress,
+          confidence: 0.8,
+          reasoning: "test",
+          positionSizeUsd: 1000,
+        } as AgentDecision,
+        {
+          activeBinId: 5000,
+          binStep: 10,
+          tokenXSymbol: "SOL",
+          tokenYSymbol: "USDC",
+          currentPrice: 150,
+        },
+        undefined,
+        undefined,
+      ),
+    );
+    // The dip anchor reaches the execution range: halfWidth 5, offset -13 →
+    // range [4982, 4992] — entirely below the active bin 5000.
+    expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10, 5, -13);
+    expect(result.executed).toBe(true);
+    const pos = [...trackedPositions.values()][0] as
+      | { lowerBinId: number; upperBinId: number; entryAmountXUsd: number; entryAmountYUsd: number }
+      | undefined;
+    expect(pos?.lowerBinId).toBe(5000 - 5 - 13);
+    expect(pos?.upperBinId).toBe(5000 + 5 - 13);
+    // Paper/live parity: the runner entry models the single-sided-X exposure —
+    // full size in X, zero in Y (live deposits the full size in the quote leg).
+    expect(pos?.entryAmountXUsd).toBe(1000);
+    expect(pos?.entryAmountYUsd).toBe(0);
   });
 });
 

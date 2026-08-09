@@ -347,7 +347,7 @@ describe("executePaper entry range threading (Wave 9)", () => {
     expect(result.executed).toBe(true);
     // The resolved adaptive width (e.g. 2× the ±20 baseline in a high-vol
     // regime) is threaded through, not recomputed inside the executor.
-    expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10, 40);
+    expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10, 40, undefined);
     const pos = [...trackedPositions.values()][0] as
       | { lowerBinId: number; upperBinId: number }
       | undefined;

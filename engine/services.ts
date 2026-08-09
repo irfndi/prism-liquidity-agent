@@ -234,7 +234,12 @@ export interface AdapterApi {
     lowerBinId: number,
     upperBinId: number,
     positionSizeUsd: number,
-    options?: { strategyShape?: EntryStrategyShape },
+    options?: {
+      strategyShape?: EntryStrategyShape;
+      /** Runner mode: force the single-sided-X deposit (full size in the
+       *  quote leg) for dip-anchored ranges wholly below the active bin. */
+      forceSingleSidedX?: boolean;
+    },
   ) => Effect.Effect<
     {
       positionPubKey: string;
@@ -461,6 +466,7 @@ export interface EntryPrepApi {
   readonly prepareEntryTokens: (
     poolAddress: string,
     positionSizeUsd: number,
+    opts?: { readonly xOnly?: boolean },
   ) => Effect.Effect<EntryPreparationOutcome | undefined, EntryPrepError>;
 }
 
@@ -507,6 +513,7 @@ export interface StrategyApi {
     activeBinId: number,
     binStep: number,
     halfWidthOverride?: number,
+    dipOffsetBins?: number,
   ) => { lowerBinId: number; upperBinId: number };
   readonly passesPreFilter: (
     pool: PoolState,
@@ -799,6 +806,8 @@ export interface DbApi {
     positionMode?: string | null;
     tpLadderJson?: string | null;
     invalidationStopPrice?: number | null;
+    /** Runner-mode entry (Heart Attack); optional so legacy callers compile. */
+    launchRunner?: boolean | null;
   }) => Effect.Effect<void, Error>;
   readonly getPosition: (positionId: string) => Effect.Effect<
     {

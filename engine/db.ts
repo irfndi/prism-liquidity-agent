@@ -933,6 +933,19 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       }
     },
   },
+  {
+    version: 23,
+    name: "launch_runner_flag",
+    up(db) {
+      // Runner-mode entry identity (Heart Attack): the exit drawdown selection
+      // is pinned to how the position was ENTERED, so a restart with a changed
+      // LAUNCH_RUNNER_MODE_ENABLED cannot re-classify open positions. Additive;
+      // legacy rows stay NULL (not runner).
+      if (hasTable(db, "positions") && !hasColumn(db, "positions", "launch_runner")) {
+        db.exec("ALTER TABLE positions ADD COLUMN launch_runner INTEGER");
+      }
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

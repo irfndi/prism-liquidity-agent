@@ -16,6 +16,7 @@ import {
   computeBinVolatilityStddev,
   isHighVolatility,
   recommendBinRangeForVolatility,
+  dipOffsetBinsForPct,
   recommendStrategyShape,
   resolveRangeHalfWidth,
   estimateRecoveryProbability,
@@ -971,6 +972,7 @@ export function executePaper(
     strategy: StrategyApi;
     entryStrategyShape: EntryStrategyShape;
     entryRangeHalfWidth?: number;
+    entryDipOffsetBins?: number;
   },
   decision: AgentDecision,
   pool: {
@@ -984,7 +986,14 @@ export function executePaper(
   signalSnapshotId?: number,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never> {
   return Effect.gen(function* () {
-    const { db, trackedPositions, strategy, entryStrategyShape, entryRangeHalfWidth } = deps;
+    const {
+      db,
+      trackedPositions,
+      strategy,
+      entryStrategyShape,
+      entryRangeHalfWidth,
+      entryDipOffsetBins,
+    } = deps;
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
       // Legacy parity: re-entering a pool whose live position was paper-exited
       // keeps the live identity so the rows merge instead of duplicating.
@@ -997,6 +1006,7 @@ export function executePaper(
         pool.activeBinId,
         pool.binStep,
         entryRangeHalfWidth,
+        entryDipOffsetBins,
       );
       const positionId = liveExited
         ? liveExited.positionPubKey!
@@ -1023,8 +1033,12 @@ export function executePaper(
         entrySignalTimestamp: signalTimestamp ?? null,
         entrySignalSnapshotId: signalSnapshotId ?? null,
         entryPriceUsd: pool.currentPrice,
-        entryAmountXUsd: decision.positionSizeUsd / 2,
-        entryAmountYUsd: decision.positionSizeUsd / 2,
+        // Paper/live parity for runner entries: live deposits the FULL size
+        // in X (single-sided) — the paper legs must model the same exposure
+        // or PnL/HODL validation drifts from real behavior.
+        entryAmountXUsd:
+          (entryDipOffsetBins ?? 0) !== 0 ? decision.positionSizeUsd : decision.positionSizeUsd / 2,
+        entryAmountYUsd: (entryDipOffsetBins ?? 0) !== 0 ? 0 : decision.positionSizeUsd / 2,
         cumulativeFeesClaimedUsd: 0,
         cumulativeRewardsClaimedUsd: 0,
         closedAt: null,
@@ -1032,6 +1046,7 @@ export function executePaper(
         positionMode: decision.positionMode ?? null,
         tpLadderJson: decision.tpLadderJson ?? null,
         invalidationStopPrice: decision.invalidationStopPrice ?? null,
+        launchRunner: (entryDipOffsetBins ?? 0) !== 0 ? true : null,
       };
       trackedPositions.set(pos.positionId, pos);
       yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
@@ -1225,6 +1240,8 @@ export function executeLive(
     solPriceUsd: number;
     entryStrategyShape: EntryStrategyShape;
     entryRangeHalfWidth?: number;
+    entryDipOffsetBins?: number;
+    runnerSingleSidedX?: boolean;
     reconcileRequestedPools?: Set<string>;
     memory?: MemoryApi;
     unpricedExitWarnedPools?: Set<string>;
@@ -1255,6 +1272,8 @@ export function executeLive(
       solPriceUsd,
       entryStrategyShape,
       entryRangeHalfWidth,
+      entryDipOffsetBins,
+      runnerSingleSidedX,
     } = deps;
     const autonomous = deps.autonomous;
 
@@ -1386,7 +1405,11 @@ export function executeLive(
     let preparation: EntryPreparationOutcome | null = null;
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
       const prepResult = yield* entryPrep
-        .prepareEntryTokens(decision.poolAddress, decision.positionSizeUsd)
+        .prepareEntryTokens(
+          decision.poolAddress,
+          decision.positionSizeUsd,
+          runnerSingleSidedX === true ? { xOnly: true } : undefined,
+        )
         .pipe(
           Effect.matchEffect({
             onSuccess: (outcome) =>
@@ -1483,6 +1506,7 @@ export function executeLive(
         pool.activeBinId,
         pool.binStep,
         entryRangeHalfWidth,
+        entryDipOffsetBins,
       );
       const enterResult = yield* adapter
         .enterPosition(
@@ -1490,7 +1514,10 @@ export function executeLive(
           recommended.lowerBinId,
           recommended.upperBinId,
           decision.positionSizeUsd,
-          { strategyShape: entryStrategyShape },
+          {
+            strategyShape: entryStrategyShape,
+            ...(runnerSingleSidedX === true ? { forceSingleSidedX: true } : {}),
+          },
         )
         .pipe(
           Effect.tap((r) =>
@@ -1547,6 +1574,7 @@ export function executeLive(
           positionMode: decision.positionMode ?? null,
           tpLadderJson: decision.tpLadderJson ?? null,
           invalidationStopPrice: decision.invalidationStopPrice ?? null,
+          launchRunner: (entryDipOffsetBins ?? 0) !== 0 ? true : null,
         };
         trackedPositions.set(pos.positionId, pos);
         yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
@@ -3746,11 +3774,50 @@ export const program = Effect.gen(function* () {
           maxFullRangeBins: config.maxRebalanceRangeBins,
         });
 
+        // Runner mode (Heart Attack): LAUNCH-lane entries anchor the range
+        // below the active bin (a below-market bid ladder that fills on
+        // shakeouts) with a tight half-width band. Gated on the decision's
+        // lifecycle mode — a standard redeploy ENTER on a radar pool must not
+        // inherit the dip shape (it would get neither the launch timebox nor
+        // launch exits). Zero offset otherwise.
+        const isRunnerLaunchEntry =
+          config.launchRunnerModeEnabled === true &&
+          decision.positionMode === "launch" &&
+          launchScanPools.has(candidate.pool.address);
+        const entryDipOffsetBins = isRunnerLaunchEntry
+          ? dipOffsetBinsForPct(candidate.pool.binStep, config.launchRunnerDipPct ?? 0.12)
+          : 0;
+        // Runner width is clamped to the same full-range cap resolveRangeHalfWidth
+        // enforces (floor(MAX_REBALANCE_RANGE_BINS / 2)) — the runner override
+        // must not bypass the operator's risk cap.
+        // The runner band must stay WHOLLY below the active bin: width is
+        // clamped to |dip offset| - 1 as well as the range cap — a width
+        // larger than the anchor would put the upper bin above market and
+        // the forced single-sided-X funding would leave the above-market
+        // part unfunded.
+        const effectiveEntryHalfWidth = isRunnerLaunchEntry
+          ? Math.max(
+              1,
+              Math.min(
+                config.launchRunnerHalfWidthBins ?? 5,
+                Math.abs(entryDipOffsetBins) - 1,
+                Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
+              ),
+            )
+          : entryRangeHalfWidth;
+
         let executed = false;
         let executionError: string | undefined = undefined;
         if (config.paperTrading) {
           const paperResult = yield* executePaper(
-            { db, trackedPositions, strategy, entryStrategyShape, entryRangeHalfWidth },
+            {
+              db,
+              trackedPositions,
+              strategy,
+              entryStrategyShape,
+              entryRangeHalfWidth: effectiveEntryHalfWidth,
+              entryDipOffsetBins,
+            },
             decision,
             candidate.pool,
             signalTimestamp,
@@ -3847,7 +3914,9 @@ export const program = Effect.gen(function* () {
               entryPrep,
               solPriceUsd: config.solPriceUsd,
               entryStrategyShape,
-              entryRangeHalfWidth,
+              entryRangeHalfWidth: effectiveEntryHalfWidth,
+              entryDipOffsetBins,
+              runnerSingleSidedX: entryDipOffsetBins !== 0,
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
@@ -5429,7 +5498,13 @@ export const program = Effect.gen(function* () {
             now,
             timeboxHours: config.launchTimeboxHours ?? 6,
             volumeDecayExitPct: config.launchVolumeDecayExitPct ?? 0.1,
-            drawdownPct: config.launchExitDrawdownPct ?? 0.25,
+            // Runner mode uses the shakeout-tolerant drawdown (a -15% intra-
+            // hour shakeout is the fill, not the crash); otherwise the crash
+            // calibration applies.
+            drawdownPct:
+              pos.launchRunner === true
+                ? (config.launchRunnerDrawdownPct ?? 0.25)
+                : (config.launchExitDrawdownPct ?? 0.25),
             currentFees1hUsd,
             peakFees1hUsd,
             currentValueUsd: pos.currentValueUsd,
@@ -5454,7 +5529,7 @@ export const program = Effect.gen(function* () {
             } else if (launchReason === "volume-decay") {
               detail = `1h fees $${(currentFees1hUsd ?? 0).toFixed(2)} < ${(config.launchVolumeDecayExitPct ?? 0.1) * 100}% of peak $${(peakFees1hUsd ?? 0).toFixed(2)}`;
             } else if (launchReason === "drawdown") {
-              detail = `value $${pos.currentValueUsd.toFixed(2)} <= ${(1 - (config.launchExitDrawdownPct ?? 0.25)) * 100}% of peak $${(pos.highestValueUsd ?? 0).toFixed(2)}`;
+              detail = `value $${pos.currentValueUsd.toFixed(2)} <= ${(1 - (pos.launchRunner === true ? (config.launchRunnerDrawdownPct ?? 0.25) : (config.launchExitDrawdownPct ?? 0.25))) * 100}% of peak $${(pos.highestValueUsd ?? 0).toFixed(2)}`;
             } else if (launchReason === "fee-il") {
               detail = `fee/IL ${metrics.feeIlRatio.toFixed(2)} < 0.5`;
             }
@@ -5831,7 +5906,17 @@ export const program = Effect.gen(function* () {
         const timeSinceRebal = Date.now() - pos.lastRebalanceAt;
         const oorGraceExpired = pos.oorCycleCount >= config.oorGracePeriodCycles;
 
+        // Runner (Heart Attack): the dip band is deliberately below market —
+        // the generic OOR/vol/rebalance machinery would see the position as
+        // out-of-range (the active bin sits far above the band) and rebalance
+        // it back around the active bin, defeating the ladder before it
+        // fills. The launch lifecycle (timebox/volume-decay/drawdown) owns
+        // pre-fill runner exits; the trailing stop below stays as a generic
+        // safety net.
+        const isRunnerPosition = pos.launchRunner === true && pos.positionMode === "launch";
+
         if (
+          !isRunnerPosition &&
           highVol &&
           driftPct > 0.6 &&
           (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
@@ -5862,6 +5947,7 @@ export const program = Effect.gen(function* () {
             { pool, metrics, position: pos },
           );
         } else if (
+          !isRunnerPosition &&
           (driftPct > 0.6 || oorGraceExpired) &&
           (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
         ) {
@@ -7510,6 +7596,29 @@ export const program = Effect.gen(function* () {
             )?.id
           : undefined;
 
+        // Runner mode (Heart Attack): LAUNCH-lane ENTERs anchor the range
+        // below the active bin (a below-market bid ladder that fills on
+        // shakeouts) with a tight half-width band, clamped to the same
+        // full-range cap as the normal entry. Zero offset when off or the
+        // decision is not a launch entry — the conservative lane is unchanged.
+        const isRunnerLaunchEntry =
+          config.launchRunnerModeEnabled === true &&
+          decision.positionMode === "launch" &&
+          launchScanPools.has(poolAddress);
+        const entryDipOffsetBins = isRunnerLaunchEntry
+          ? dipOffsetBinsForPct(pool.binStep, config.launchRunnerDipPct ?? 0.12)
+          : 0;
+        const effectiveEntryHalfWidth = isRunnerLaunchEntry
+          ? Math.max(
+              1,
+              Math.min(
+                config.launchRunnerHalfWidthBins ?? 5,
+                Math.abs(entryDipOffsetBins) - 1,
+                Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
+              ),
+            )
+          : rangeHalfWidth;
+
         if (paperExitShouldGoLive) {
           console.warn(
             `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${poolAddress}`,
@@ -7524,7 +7633,9 @@ export const program = Effect.gen(function* () {
               entryPrep,
               solPriceUsd: config.solPriceUsd,
               entryStrategyShape,
-              entryRangeHalfWidth: rangeHalfWidth,
+              entryRangeHalfWidth: effectiveEntryHalfWidth,
+              entryDipOffsetBins,
+              runnerSingleSidedX: entryDipOffsetBins !== 0,
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
@@ -7552,7 +7663,8 @@ export const program = Effect.gen(function* () {
               trackedPositions,
               strategy,
               entryStrategyShape,
-              entryRangeHalfWidth: rangeHalfWidth,
+              entryRangeHalfWidth: effectiveEntryHalfWidth,
+              entryDipOffsetBins,
             },
             decision,
             pool,
@@ -7574,7 +7686,9 @@ export const program = Effect.gen(function* () {
               entryPrep,
               solPriceUsd: config.solPriceUsd,
               entryStrategyShape,
-              entryRangeHalfWidth: rangeHalfWidth,
+              entryRangeHalfWidth: effectiveEntryHalfWidth,
+              entryDipOffsetBins,
+              runnerSingleSidedX: entryDipOffsetBins !== 0,
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,

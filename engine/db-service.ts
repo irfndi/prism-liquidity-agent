@@ -63,6 +63,10 @@ export interface PositionRecord {
   tpLadderJson?: string | null;
   /** Invalidation stop price; null for non-FA positions. */
   invalidationStopPrice?: number | null;
+  /** Runner-mode entry (Heart Attack): true when this launch position was
+   *  entered dip-anchored; the exit drawdown selection is pinned to the
+   *  ENTRY mode, not the current global flag (restart-safe). */
+  launchRunner?: boolean | null;
 }
 
 export type PositionEventType = "ENTER" | "EXIT" | "REBALANCE" | "CLAIM" | "COMPOUND";
@@ -161,8 +165,8 @@ export const DbLive = (dbPath?: string) =>
               entry_price_usd, entry_amount_x_usd, entry_amount_y_usd,
               cumulative_fees_claimed_usd, cumulative_rewards_claimed_usd,
               closed_at, realized_pnl_usd,
-              position_mode, tp_ladder_json, invalidation_stop_price
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              position_mode, tp_ladder_json, invalidation_stop_price, launch_runner
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(position_id) DO UPDATE SET
               pool_address = excluded.pool_address,
               position_pubkey = COALESCE(excluded.position_pubkey, positions.position_pubkey),
@@ -195,7 +199,8 @@ export const DbLive = (dbPath?: string) =>
               invalidation_stop_price = COALESCE(
                 excluded.invalidation_stop_price,
                 positions.invalidation_stop_price
-              )`,
+              ),
+              launch_runner = COALESCE(excluded.launch_runner, positions.launch_runner)`,
               pos.positionId,
               pos.poolAddress,
               pos.positionPubKey,
@@ -226,6 +231,7 @@ export const DbLive = (dbPath?: string) =>
               pos.positionMode ?? null,
               pos.tpLadderJson ?? null,
               pos.invalidationStopPrice ?? null,
+              pos.launchRunner == null ? null : pos.launchRunner ? 1 : 0,
             );
           }),
 
@@ -1544,6 +1550,7 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     closedAt: row.closed_at != null ? Number(row.closed_at) : null,
     realizedPnlUsd: row.realized_pnl_usd != null ? Number(row.realized_pnl_usd) : null,
     positionMode: row.position_mode != null ? String(row.position_mode as unknown) : null,
+    launchRunner: row.launch_runner != null ? row.launch_runner !== 0 : null,
     tpLadderJson: row.tp_ladder_json != null ? String(row.tp_ladder_json as unknown) : null,
     invalidationStopPrice:
       row.invalidation_stop_price != null ? Number(row.invalidation_stop_price) : null,

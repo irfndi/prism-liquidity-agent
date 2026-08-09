@@ -204,7 +204,10 @@ describe("summarizeLaunchRejections", () => {
 
   it("clamps topN to at least one", () => {
     const summary = summarizeLaunchRejections(
-      [{ category: "age", reason: "a" }, { category: "tvl", reason: "b" }],
+      [
+        { category: "age", reason: "a" },
+        { category: "tvl", reason: "b" },
+      ],
       0,
     );
     expect(summary).toHaveLength(1);

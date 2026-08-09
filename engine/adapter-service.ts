@@ -2412,11 +2412,13 @@ export const AdapterLive = Layer.effect(
           const dlmm = yield* getDlmm(poolAddress);
           const pool = yield* api.getPoolState(poolAddress);
 
-          const prices = yield* fetchTokenPrices([pool.tokenX, pool.tokenY]);
+          const prices = yield* fetchTokenPrices(
+            options?.forceSingleSidedX === true ? [pool.tokenX] : [pool.tokenX, pool.tokenY],
+          );
           const priceX = prices[pool.tokenX] ?? 0;
-          const priceY = prices[pool.tokenY] ?? 0;
+          const priceY = options?.forceSingleSidedX === true ? 0 : (prices[pool.tokenY] ?? 0);
 
-          if (!priceX || !priceY) {
+          if (!priceX || (options?.forceSingleSidedX !== true && !priceY)) {
             return yield* Effect.fail(
               new AdapterError({
                 message: `Could not fetch token prices for ${pool.tokenX} and ${pool.tokenY}`,
@@ -2429,14 +2431,18 @@ export const AdapterLive = Layer.effect(
           const tokenXDecimals = yield* getTokenMeta(pool.tokenX).pipe(
             Effect.map((m) => m.decimals),
           );
-          const tokenYDecimals = yield* getTokenMeta(pool.tokenY).pipe(
-            Effect.map((m) => m.decimals),
-          );
+          const tokenYDecimals =
+            options?.forceSingleSidedX === true
+              ? 0
+              : yield* getTokenMeta(pool.tokenY).pipe(Effect.map((m) => m.decimals));
 
           const requestedXAmount = computeRequiredAtomic(halfUsd, priceX, tokenXDecimals);
           const requestedYAmount = computeRequiredAtomic(halfUsd, priceY, tokenYDecimals);
 
-          if (requestedXAmount === 0n || requestedYAmount === 0n) {
+          if (
+            options?.forceSingleSidedX !== true &&
+            (requestedXAmount === 0n || requestedYAmount === 0n)
+          ) {
             return yield* Effect.fail(
               new AdapterError({
                 message: "Cannot enter a position with a zero-sized token leg",
@@ -2447,9 +2453,11 @@ export const AdapterLive = Layer.effect(
 
           // Check balances
           const balanceX = yield* readTokenBalance(pool.tokenX);
-          const balanceY = yield* readTokenBalance(pool.tokenY);
+          const balanceY =
+            options?.forceSingleSidedX === true ? 0n : yield* readTokenBalance(pool.tokenY);
           const nativeSolBalance =
-            pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT
+            pool.tokenX === SOL_MINT ||
+            (options?.forceSingleSidedX !== true && pool.tokenY === SOL_MINT)
               ? yield* readNativeSolBalance()
               : undefined;
 
@@ -2461,11 +2469,13 @@ export const AdapterLive = Layer.effect(
               : balanceX;
 
           const maxY =
-            pool.tokenY === SOL_MINT
-              ? nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
-                ? nativeSolBalance - GAS_RESERVE_LAMPORTS
-                : 0n
-              : balanceY;
+            options?.forceSingleSidedX === true
+              ? 0n
+              : pool.tokenY === SOL_MINT
+                ? nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
+                  ? nativeSolBalance - GAS_RESERVE_LAMPORTS
+                  : 0n
+                : balanceY;
 
           // Funding classification: two-sided when both legs cover their half
           // of the position; otherwise the SDK single-sided deposit path with
@@ -2485,16 +2495,41 @@ export const AdapterLive = Layer.effect(
           let amountXUsd = halfUsd;
           let amountYUsd = halfUsd;
 
-          if (xShort && yShort) {
+          // Runner mode (Heart Attack) forces the single-sided-X path by
+          // DESIGN, not shortfall: a dip-anchored range (wholly below the
+          // active bin) deploys QUOTE-leg liquidity — the X that converts to
+          // the base token when the dip fills. Depositing half-Y into a
+          // below-market band misstates the entry split; the full size goes
+          // in X.
+          if (options?.forceSingleSidedX === true) {
+            const fullSizeXAtomic = computeRequiredAtomic(positionSizeUsd, priceX, tokenXDecimals);
+            if (fullSizeXAtomic === 0n || fullSizeXAtomic > maxX) {
+              return yield* Effect.fail(
+                new AdapterError({
+                  message: `Runner single-sided-X entry impossible: available ${formatTokenAmount(maxX, tokenXDecimals)} is below the full-size requirement ${formatTokenAmount(fullSizeXAtomic, tokenXDecimals)} for a $${positionSizeUsd} deposit in ${pool.tokenX}. Fund the quote leg up to the full position size.`,
+                  poolAddress,
+                }),
+              );
+            }
+            depositXAtomic = fullSizeXAtomic;
+            depositYAtomic = 0n;
+            singleSidedX = true;
+            depositMode = "single-sided-x";
+            amountXUsd = positionSizeUsd;
+            amountYUsd = 0;
+            logger.info("Runner single-sided entry: full size in the quote leg", {
+              pool: poolAddress,
+              mint: pool.tokenX,
+              amountAtomic: fullSizeXAtomic.toString(),
+            });
+          } else if (xShort && yShort) {
             return yield* Effect.fail(
               new AdapterError({
                 message: `Insufficient token balance: ${shortageX}; ${shortageY}. Neither pool token can fund the entry — fund one pool token up to the full position size for a single-sided deposit, or enable AUTO_SWAP_ENTRY with a USDC balance.`,
                 poolAddress,
               }),
             );
-          }
-
-          if (xShort || yShort) {
+          } else if (xShort || yShort) {
             const heldIsX = yShort;
             const heldMint = heldIsX ? pool.tokenX : pool.tokenY;
             const heldDecimals = heldIsX ? tokenXDecimals : tokenYDecimals;
