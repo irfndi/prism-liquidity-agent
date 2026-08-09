@@ -125,7 +125,19 @@ describe("excludeSameMintRewards", () => {
     expect(result).toBe("41913604");
   });
 
-  it("never goes negative when the reward exceeds the delta", () => {
+  it("preserves an exactly-zero leg when the measured delta was entirely a same-mint reward", () => {
+    // An empty position leg whose measured delta consists only of the swept
+    // reward: subtracting the reward correctly yields 0 — the leg has no
+    // value of its own and the reward books separately.
+    const result = excludeSameMintRewards(
+      { amountAtomic: "500000", measured: true },
+      "REWARD1",
+      slots,
+    );
+    expect(result).toBe("0");
+  });
+
+  it("falls back only for a genuinely negative result (reward exceeds the delta)", () => {
     const result = excludeSameMintRewards(
       { amountAtomic: "400000", measured: true },
       "REWARD1",

@@ -227,7 +227,11 @@ export function excludeSameMintRewards(
   for (const slot of rewardSlots) {
     if (slot.mint === mint) result -= slot.amountAtomic;
   }
-  return result > 0n ? result.toString() : measured.amountAtomic;
+  // Preserve an exactly-zero leg (an empty position leg whose measured delta
+  // was entirely a same-mint swept reward — the reward books separately, so
+  // the leg itself has no value). Fall back only for a genuinely invalid
+  // NEGATIVE result (measurement inconsistency: reward exceeds the delta).
+  return result >= 0n ? result.toString() : measured.amountAtomic;
 }
 const logger = createLogger("adapter-service");
 
