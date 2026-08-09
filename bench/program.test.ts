@@ -614,10 +614,14 @@ describe("executePaper paper/live parity", () => {
     expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10, 5, -13);
     expect(result.executed).toBe(true);
     const pos = [...trackedPositions.values()][0] as
-      | { lowerBinId: number; upperBinId: number }
+      | { lowerBinId: number; upperBinId: number; entryAmountXUsd: number; entryAmountYUsd: number }
       | undefined;
     expect(pos?.lowerBinId).toBe(5000 - 5 - 13);
     expect(pos?.upperBinId).toBe(5000 + 5 - 13);
+    // Paper/live parity: the runner entry models the single-sided-X exposure —
+    // full size in X, zero in Y (live deposits the full size in the quote leg).
+    expect(pos?.entryAmountXUsd).toBe(1000);
+    expect(pos?.entryAmountYUsd).toBe(0);
   });
 });
 

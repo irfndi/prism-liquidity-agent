@@ -2412,11 +2412,13 @@ export const AdapterLive = Layer.effect(
           const dlmm = yield* getDlmm(poolAddress);
           const pool = yield* api.getPoolState(poolAddress);
 
-          const prices = yield* fetchTokenPrices([pool.tokenX, pool.tokenY]);
+          const prices = yield* fetchTokenPrices(
+            options?.forceSingleSidedX === true ? [pool.tokenX] : [pool.tokenX, pool.tokenY],
+          );
           const priceX = prices[pool.tokenX] ?? 0;
-          const priceY = prices[pool.tokenY] ?? 0;
+          const priceY = options?.forceSingleSidedX === true ? 0 : (prices[pool.tokenY] ?? 0);
 
-          if (!priceX || !priceY) {
+          if (!priceX || (options?.forceSingleSidedX !== true && !priceY)) {
             return yield* Effect.fail(
               new AdapterError({
                 message: `Could not fetch token prices for ${pool.tokenX} and ${pool.tokenY}`,
@@ -2429,14 +2431,18 @@ export const AdapterLive = Layer.effect(
           const tokenXDecimals = yield* getTokenMeta(pool.tokenX).pipe(
             Effect.map((m) => m.decimals),
           );
-          const tokenYDecimals = yield* getTokenMeta(pool.tokenY).pipe(
-            Effect.map((m) => m.decimals),
-          );
+          const tokenYDecimals =
+            options?.forceSingleSidedX === true
+              ? 0
+              : yield* getTokenMeta(pool.tokenY).pipe(Effect.map((m) => m.decimals));
 
           const requestedXAmount = computeRequiredAtomic(halfUsd, priceX, tokenXDecimals);
           const requestedYAmount = computeRequiredAtomic(halfUsd, priceY, tokenYDecimals);
 
-          if (requestedXAmount === 0n || requestedYAmount === 0n) {
+          if (
+            options?.forceSingleSidedX !== true &&
+            (requestedXAmount === 0n || requestedYAmount === 0n)
+          ) {
             return yield* Effect.fail(
               new AdapterError({
                 message: "Cannot enter a position with a zero-sized token leg",
@@ -2447,9 +2453,11 @@ export const AdapterLive = Layer.effect(
 
           // Check balances
           const balanceX = yield* readTokenBalance(pool.tokenX);
-          const balanceY = yield* readTokenBalance(pool.tokenY);
+          const balanceY =
+            options?.forceSingleSidedX === true ? 0n : yield* readTokenBalance(pool.tokenY);
           const nativeSolBalance =
-            pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT
+            pool.tokenX === SOL_MINT ||
+            (options?.forceSingleSidedX !== true && pool.tokenY === SOL_MINT)
               ? yield* readNativeSolBalance()
               : undefined;
 
@@ -2461,11 +2469,13 @@ export const AdapterLive = Layer.effect(
               : balanceX;
 
           const maxY =
-            pool.tokenY === SOL_MINT
-              ? nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
-                ? nativeSolBalance - GAS_RESERVE_LAMPORTS
-                : 0n
-              : balanceY;
+            options?.forceSingleSidedX === true
+              ? 0n
+              : pool.tokenY === SOL_MINT
+                ? nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
+                  ? nativeSolBalance - GAS_RESERVE_LAMPORTS
+                  : 0n
+                : balanceY;
 
           // Funding classification: two-sided when both legs cover their half
           // of the position; otherwise the SDK single-sided deposit path with

@@ -187,11 +187,15 @@ export const EntryPrepLive = Layer.effect(
               ),
             );
 
-          const [prices, tokenXDecimals, tokenYDecimals] = yield* Effect.all(
+          const [prices, tokenXDecimals, maybeTokenYDecimals] = yield* Effect.all(
             [
               adapter
                 .getTokenPrices(
-                  solFunded ? [pool.tokenX, pool.tokenY, SOL_MINT] : [pool.tokenX, pool.tokenY],
+                  xOnly
+                    ? [pool.tokenX, ...(solFunded ? [SOL_MINT] : [])]
+                    : solFunded
+                      ? [pool.tokenX, pool.tokenY, SOL_MINT]
+                      : [pool.tokenX, pool.tokenY],
                 )
                 .pipe(
                   Effect.mapError((err) =>
@@ -215,25 +219,31 @@ export const EntryPrepLive = Layer.effect(
                     ),
                   ),
                 ),
-              adapter
-                .getTokenDecimals(pool.tokenY)
-                .pipe(
-                  Effect.mapError((err) =>
-                    makePrepError(
-                      "PRICE_UNAVAILABLE",
-                      `Failed to fetch decimals for ${pool.tokenY}: ${String(err)}`,
-                      poolAddress,
-                      err,
-                    ),
-                  ),
-                ),
+              ...(xOnly
+                ? []
+                : [
+                    adapter
+                      .getTokenDecimals(pool.tokenY)
+                      .pipe(
+                        Effect.mapError((err) =>
+                          makePrepError(
+                            "PRICE_UNAVAILABLE",
+                            `Failed to fetch decimals for ${pool.tokenY}: ${String(err)}`,
+                            poolAddress,
+                            err,
+                          ),
+                        ),
+                      ),
+                  ]),
             ],
             { concurrency: "unbounded" },
           );
 
+          const tokenYDecimals = maybeTokenYDecimals ?? 0;
+
           for (const [mint, decimals] of [
             [pool.tokenX, tokenXDecimals],
-            [pool.tokenY, tokenYDecimals],
+            ...(xOnly ? [] : [[pool.tokenY, tokenYDecimals] as const]),
           ] as const) {
             if (!isValidDecimals(decimals)) {
               return yield* Effect.fail(
@@ -248,7 +258,11 @@ export const EntryPrepLive = Layer.effect(
 
           const priceX = prices[pool.tokenX] ?? 0;
           const priceY = prices[pool.tokenY] ?? 0;
-          if (!Number.isFinite(priceX) || priceX <= 0 || !Number.isFinite(priceY) || priceY <= 0) {
+          if (
+            !Number.isFinite(priceX) ||
+            priceX <= 0 ||
+            (!xOnly && (!Number.isFinite(priceY) || priceY <= 0))
+          ) {
             return yield* Effect.fail(
               makePrepError(
                 "PRICE_UNAVAILABLE",
@@ -337,8 +351,11 @@ export const EntryPrepLive = Layer.effect(
 
           const balanceX =
             pool.tokenX === SOL_MINT ? nativeSolLamports : yield* readTokenBalance(pool.tokenX);
-          const balanceY =
-            pool.tokenY === SOL_MINT ? nativeSolLamports : yield* readTokenBalance(pool.tokenY);
+          const balanceY = xOnly
+            ? 0n
+            : pool.tokenY === SOL_MINT
+              ? nativeSolLamports
+              : yield* readTokenBalance(pool.tokenY);
 
           const availableX = (() => {
             const free =

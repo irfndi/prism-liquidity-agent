@@ -1033,8 +1033,12 @@ export function executePaper(
         entrySignalTimestamp: signalTimestamp ?? null,
         entrySignalSnapshotId: signalSnapshotId ?? null,
         entryPriceUsd: pool.currentPrice,
-        entryAmountXUsd: decision.positionSizeUsd / 2,
-        entryAmountYUsd: decision.positionSizeUsd / 2,
+        // Paper/live parity for runner entries: live deposits the FULL size
+        // in X (single-sided) — the paper legs must model the same exposure
+        // or PnL/HODL validation drifts from real behavior.
+        entryAmountXUsd:
+          (entryDipOffsetBins ?? 0) !== 0 ? decision.positionSizeUsd : decision.positionSizeUsd / 2,
+        entryAmountYUsd: (entryDipOffsetBins ?? 0) !== 0 ? 0 : decision.positionSizeUsd / 2,
         cumulativeFeesClaimedUsd: 0,
         cumulativeRewardsClaimedUsd: 0,
         closedAt: null,
@@ -3786,10 +3790,19 @@ export const program = Effect.gen(function* () {
         // Runner width is clamped to the same full-range cap resolveRangeHalfWidth
         // enforces (floor(MAX_REBALANCE_RANGE_BINS / 2)) — the runner override
         // must not bypass the operator's risk cap.
+        // The runner band must stay WHOLLY below the active bin: width is
+        // clamped to |dip offset| - 1 as well as the range cap — a width
+        // larger than the anchor would put the upper bin above market and
+        // the forced single-sided-X funding would leave the above-market
+        // part unfunded.
         const effectiveEntryHalfWidth = isRunnerLaunchEntry
-          ? Math.min(
-              config.launchRunnerHalfWidthBins ?? 5,
-              Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
+          ? Math.max(
+              1,
+              Math.min(
+                config.launchRunnerHalfWidthBins ?? 5,
+                Math.abs(entryDipOffsetBins) - 1,
+                Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
+              ),
             )
           : entryRangeHalfWidth;
 
@@ -5893,7 +5906,17 @@ export const program = Effect.gen(function* () {
         const timeSinceRebal = Date.now() - pos.lastRebalanceAt;
         const oorGraceExpired = pos.oorCycleCount >= config.oorGracePeriodCycles;
 
+        // Runner (Heart Attack): the dip band is deliberately below market —
+        // the generic OOR/vol/rebalance machinery would see the position as
+        // out-of-range (the active bin sits far above the band) and rebalance
+        // it back around the active bin, defeating the ladder before it
+        // fills. The launch lifecycle (timebox/volume-decay/drawdown) owns
+        // pre-fill runner exits; the trailing stop below stays as a generic
+        // safety net.
+        const isRunnerPosition = pos.launchRunner === true && pos.positionMode === "launch";
+
         if (
+          !isRunnerPosition &&
           highVol &&
           driftPct > 0.6 &&
           (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
@@ -5924,6 +5947,7 @@ export const program = Effect.gen(function* () {
             { pool, metrics, position: pos },
           );
         } else if (
+          !isRunnerPosition &&
           (driftPct > 0.6 || oorGraceExpired) &&
           (timeSinceRebal >= config.minRebalanceIntervalMs || oorGraceExpired)
         ) {
@@ -7585,9 +7609,13 @@ export const program = Effect.gen(function* () {
           ? dipOffsetBinsForPct(pool.binStep, config.launchRunnerDipPct ?? 0.12)
           : 0;
         const effectiveEntryHalfWidth = isRunnerLaunchEntry
-          ? Math.min(
-              config.launchRunnerHalfWidthBins ?? 5,
-              Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
+          ? Math.max(
+              1,
+              Math.min(
+                config.launchRunnerHalfWidthBins ?? 5,
+                Math.abs(entryDipOffsetBins) - 1,
+                Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
+              ),
             )
           : rangeHalfWidth;
 
