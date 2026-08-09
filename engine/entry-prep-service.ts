@@ -673,6 +673,12 @@ export const EntryPrepLive = Layer.effect(
           }
 
           const usdcBalance = yield* readTokenBalance(USDC_MINT);
+          // Issue #201: even when neither pool leg is USDC, the funding swaps
+          // spend wallet USDC — subtract pending USDC settlement claims so a
+          // token/token entry cannot consume USDC an exit settlement is about
+          // to sell.
+          const usdcClaimed = pendingClaims.get(USDC_MINT) ?? 0n;
+          const spendableUsdc = usdcBalance > usdcClaimed ? usdcBalance - usdcClaimed : 0n;
           const totalUsdcInputAtomic = deficits.reduce(
             (sum, deficit) =>
               sum + computeUsdcInputAtomic(deficit.amount, deficit.decimals, deficit.price),
@@ -688,12 +694,12 @@ export const EntryPrepLive = Layer.effect(
             : 0n;
           const totalUsdcRequired = totalUsdcInputAtomic + requiredUsdcPoolLeg + gasTopUpAtomic;
 
-          if (usdcBalance < totalUsdcRequired) {
+          if (spendableUsdc < totalUsdcRequired) {
             const gasNote = needsGasTopUp ? " + gas top-up" : "";
             return yield* Effect.fail(
               makePrepError(
                 "INSUFFICIENT_USDC_BALANCE",
-                `Wallet USDC balance ${formatAtomic(usdcBalance, USDC_DECIMALS)} is less than required ${formatAtomic(totalUsdcRequired, USDC_DECIMALS)} for auto-swap entry (swaps + USDC pool leg${gasNote})`,
+                `Wallet USDC balance ${formatAtomic(spendableUsdc, USDC_DECIMALS)} (after ${formatAtomic(usdcClaimed, USDC_DECIMALS)} pending settlement claims) is less than required ${formatAtomic(totalUsdcRequired, USDC_DECIMALS)} for auto-swap entry (swaps + USDC pool leg${gasNote})`,
                 poolAddress,
               ),
             );
