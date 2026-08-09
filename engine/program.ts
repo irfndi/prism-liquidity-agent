@@ -1042,6 +1042,7 @@ export function executePaper(
         positionMode: decision.positionMode ?? null,
         tpLadderJson: decision.tpLadderJson ?? null,
         invalidationStopPrice: decision.invalidationStopPrice ?? null,
+        launchRunner: (entryDipOffsetBins ?? 0) !== 0 ? true : null,
       };
       trackedPositions.set(pos.positionId, pos);
       yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
@@ -1569,6 +1570,7 @@ export function executeLive(
           positionMode: decision.positionMode ?? null,
           tpLadderJson: decision.tpLadderJson ?? null,
           invalidationStopPrice: decision.invalidationStopPrice ?? null,
+          launchRunner: (entryDipOffsetBins ?? 0) !== 0 ? true : null,
         };
         trackedPositions.set(pos.positionId, pos);
         yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
@@ -3768,17 +3770,27 @@ export const program = Effect.gen(function* () {
           maxFullRangeBins: config.maxRebalanceRangeBins,
         });
 
-        // Runner mode (Heart Attack): launch-pool entries anchor the range
+        // Runner mode (Heart Attack): LAUNCH-lane entries anchor the range
         // below the active bin (a below-market bid ladder that fills on
-        // shakeouts) with a tight half-width band. Zero offset when off or
-        // the pool is not a launch pool — the conservative lane is unchanged.
+        // shakeouts) with a tight half-width band. Gated on the decision's
+        // lifecycle mode — a standard redeploy ENTER on a radar pool must not
+        // inherit the dip shape (it would get neither the launch timebox nor
+        // launch exits). Zero offset otherwise.
         const isRunnerLaunchEntry =
-          config.launchRunnerModeEnabled === true && launchScanPools.has(candidate.pool.address);
+          config.launchRunnerModeEnabled === true &&
+          decision.positionMode === "launch" &&
+          launchScanPools.has(candidate.pool.address);
         const entryDipOffsetBins = isRunnerLaunchEntry
           ? dipOffsetBinsForPct(candidate.pool.binStep, config.launchRunnerDipPct ?? 0.12)
           : 0;
+        // Runner width is clamped to the same full-range cap resolveRangeHalfWidth
+        // enforces (floor(MAX_REBALANCE_RANGE_BINS / 2)) — the runner override
+        // must not bypass the operator's risk cap.
         const effectiveEntryHalfWidth = isRunnerLaunchEntry
-          ? (config.launchRunnerHalfWidthBins ?? 5)
+          ? Math.min(
+              config.launchRunnerHalfWidthBins ?? 5,
+              Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
+            )
           : entryRangeHalfWidth;
 
         let executed = false;
@@ -5477,7 +5489,7 @@ export const program = Effect.gen(function* () {
             // hour shakeout is the fill, not the crash); otherwise the crash
             // calibration applies.
             drawdownPct:
-              config.launchRunnerModeEnabled === true
+              pos.launchRunner === true
                 ? (config.launchRunnerDrawdownPct ?? 0.25)
                 : (config.launchExitDrawdownPct ?? 0.25),
             currentFees1hUsd,
@@ -5504,7 +5516,7 @@ export const program = Effect.gen(function* () {
             } else if (launchReason === "volume-decay") {
               detail = `1h fees $${(currentFees1hUsd ?? 0).toFixed(2)} < ${(config.launchVolumeDecayExitPct ?? 0.1) * 100}% of peak $${(peakFees1hUsd ?? 0).toFixed(2)}`;
             } else if (launchReason === "drawdown") {
-              detail = `value $${pos.currentValueUsd.toFixed(2)} <= ${(1 - (config.launchRunnerModeEnabled === true ? (config.launchRunnerDrawdownPct ?? 0.25) : (config.launchExitDrawdownPct ?? 0.25))) * 100}% of peak $${(pos.highestValueUsd ?? 0).toFixed(2)}`;
+              detail = `value $${pos.currentValueUsd.toFixed(2)} <= ${(1 - (pos.launchRunner === true ? (config.launchRunnerDrawdownPct ?? 0.25) : (config.launchExitDrawdownPct ?? 0.25))) * 100}% of peak $${(pos.highestValueUsd ?? 0).toFixed(2)}`;
             } else if (launchReason === "fee-il") {
               detail = `fee/IL ${metrics.feeIlRatio.toFixed(2)} < 0.5`;
             }
@@ -7560,17 +7572,23 @@ export const program = Effect.gen(function* () {
             )?.id
           : undefined;
 
-        // Runner mode (Heart Attack): launch-pool ENTERs anchor the range
+        // Runner mode (Heart Attack): LAUNCH-lane ENTERs anchor the range
         // below the active bin (a below-market bid ladder that fills on
-        // shakeouts) with a tight half-width band. Zero offset when off or
-        // the pool is not a launch pool — the conservative lane is unchanged.
+        // shakeouts) with a tight half-width band, clamped to the same
+        // full-range cap as the normal entry. Zero offset when off or the
+        // decision is not a launch entry — the conservative lane is unchanged.
         const isRunnerLaunchEntry =
-          config.launchRunnerModeEnabled === true && launchScanPools.has(poolAddress);
+          config.launchRunnerModeEnabled === true &&
+          decision.positionMode === "launch" &&
+          launchScanPools.has(poolAddress);
         const entryDipOffsetBins = isRunnerLaunchEntry
           ? dipOffsetBinsForPct(pool.binStep, config.launchRunnerDipPct ?? 0.12)
           : 0;
         const effectiveEntryHalfWidth = isRunnerLaunchEntry
-          ? (config.launchRunnerHalfWidthBins ?? 5)
+          ? Math.min(
+              config.launchRunnerHalfWidthBins ?? 5,
+              Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
+            )
           : rangeHalfWidth;
 
         if (paperExitShouldGoLive) {

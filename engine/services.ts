@@ -806,6 +806,8 @@ export interface DbApi {
     positionMode?: string | null;
     tpLadderJson?: string | null;
     invalidationStopPrice?: number | null;
+    /** Runner-mode entry (Heart Attack); optional so legacy callers compile. */
+    launchRunner?: boolean | null;
   }) => Effect.Effect<void, Error>;
   readonly getPosition: (positionId: string) => Effect.Effect<
     {
