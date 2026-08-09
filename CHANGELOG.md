@@ -2,6 +2,16 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.7] — 2026-08-09
+
+### Fixed
+
+- **Launch pools excluded from the idle-redeploy queue** (found by the architecture audit): the three idle-redeploy capture sites were not guarded for launch pools, and the redeploy pass emits a STANDARD decision that never carries `positionMode: "launch"` — a redeploy entry on a launch-gated pool would have gotten neither the launch timebox/volume-decay/drawdown protection nor the runner dip shape. All three captures are now gated on the launch-lane predicate; the launch lane's own ENTER branch owns launch entries. Regression test drives a launch pool through the full scan with the portfolio full, a mid-cycle slot-freeing exit, and the redeploy's widened size passing — proven to fail without the guard (the pass enters the pool as a standard position) and pass with it (#210)
+
+### Changed
+
+- Bumped version to 0.2.7.
+
 ## [0.2.6] — 2026-08-09
 
 ### Added
