@@ -2,6 +2,16 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.5] — 2026-08-09
+
+### Added
+
+- **Runner scale-in (Heart Attack step 2)** — when a runner position's price falls a full step below its band anchor (`LAUNCH_RUNNER_SCALE_IN_STEP_PCT`, default 5%), the engine re-anchors the band at dip% below the NEW price and tops up the position with fresh quote capital (`LAUNCH_RUNNER_SCALE_IN_SIZE_PCT` × wallet, capped by the per-pool allocation headroom and `LAUNCH_POSITION_MAX_SIZE_USD`, up to `LAUNCH_RUNNER_SCALE_IN_MAX_STEPS` steps). The scale-in is a position-targeted REBALANCE decision routed through the normal executor — risk gates (safety pause), the agent overlay (veto/supervised/full), and the paper/live dispatch; a topUp-carrying range is exempt from the contains-active-bin check because the below-market band is the point. The top-up is booked as capital (cost basis grows in lockstep, X basis credited), its SOL cost is reserved from the batch budget (`estimateEntrySolLamports`, skip-never-force), the quote leg is acquired via the xOnly prep, and the step count + anchor are persisted (migration v24) so a restart cannot re-scale a filled position. Paper mode evaluates the trigger and advances the state so paper validates the band-tracking (#208)
+
+### Changed
+
+- Bumped version to 0.2.5.
+
 ## [0.2.4] — 2026-08-09
 
 ### Added
