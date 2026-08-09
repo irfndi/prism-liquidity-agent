@@ -2123,8 +2123,17 @@ export const AdapterLive = Layer.effect(
           if (host !== "helius-rpc.com" && !host.endsWith(".helius-rpc.com")) {
             return null;
           }
+          // Helius serves the enhanced address-history API from the
+          // api- prefixed host (api-mainnet.helius-rpc.com), NOT the RPC
+          // host — reusing the RPC host would silently null every response
+          // under the standard setup. map per network; the bare host keeps.
+          const enhancedHost = host.startsWith("mainnet.")
+            ? `api-mainnet.${host.slice("mainnet.".length)}`
+            : host.startsWith("devnet.")
+              ? `api-devnet.${host.slice("devnet.".length)}`
+              : host;
           const url =
-            `https://${host}/v0/addresses/${poolAddress}/transactions` +
+            `https://${enhancedHost}/v0/addresses/${poolAddress}/transactions` +
             `?limit=40&api-key=${encodeURIComponent(config.heliusApiKey)}`;
           const parsed: unknown = yield* Effect.tryPromise({
             try: async () => {
