@@ -702,10 +702,16 @@ export function processSettlementJobs(
         settlementCostUsd: executionCostUsd,
         executionCostUsd: 0,
       });
+      // Issue #205: the exit's withdrawal-based realized PnL is authoritative
+      // once resolved — never clobber it with a settlement-output-derived
+      // figure. The settlement can be PARTIAL (observed: $24.38 sold of a
+      // $41.91 withdrawal recomputed a correct +$0.78 exit into -$16.78).
+      // Only fill the NULL case (exit pricing was unresolved).
+      const effectiveRealizedPnlUsd = position.realizedPnlUsd ?? realizedPnlUsd;
       yield* input.db
         .finalizeSettlementGroup({
           positionId,
-          realizedPnlUsd,
+          realizedPnlUsd: effectiveRealizedPnlUsd,
           jobIds: jobs.map((job) => job.id),
           finalizedAt: input.now,
           signalSnapshotId: position.entrySignalSnapshotId,

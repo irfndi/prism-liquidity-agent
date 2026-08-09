@@ -771,6 +771,92 @@ describe("settlement job processing", () => {
     expect(outcome).toEqual({ snapshotId: 42, pnl: 10 });
   });
 
+  it("does not clobber a resolved exit realized PnL with a settlement-derived figure (issue #205)", async () => {
+    // Given a position whose EXIT already booked a resolved realized (+0.78)
+    // and a confirmed settlement that recovered only PART of the withdrawal.
+    // The settlement-derived recompute would be -16.78 — it must NOT overwrite.
+    const job = settlementJob({
+      status: "confirmed",
+      outputUsd: 24.35,
+      executionCostUsd: 0.028,
+      confirmedOutputAtomic: "1",
+    });
+    const position = {
+      cumulativeFeesClaimedUsd: 0.51,
+      cumulativeRewardsClaimedUsd: 0,
+      depositedUsd: 41.63,
+      realizedPnlUsd: 0.78,
+      entrySignalSnapshotId: null,
+    };
+    let finalizedPnl: number | null = null;
+    const db = {
+      saveSettlementJob: () => Effect.void,
+      getPosition: () => Effect.succeed(position),
+      finalizeSettlementGroup: (input: { readonly realizedPnlUsd: number | null }) =>
+        Effect.sync(() => {
+          finalizedPnl = input.realizedPnlUsd;
+        }),
+    } as unknown as DbApi;
+
+    // When
+    await Effect.runPromise(
+      processSettlementJobs({
+        adapter: {} as AdapterApi,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+      }),
+    );
+
+    // Then the exit's resolved realized survives; the settlement only fills
+    // the NULL (unresolved) case.
+    expect(finalizedPnl).toBe(0.78);
+  });
+
+  it("fills the settlement-derived realized when the exit left it unresolved (null)", async () => {
+    // Given an exit whose pricing was unresolved (realized NULL) — the
+    // settlement finalize must fill it from the recovered outputs.
+    const job = settlementJob({
+      status: "confirmed",
+      outputUsd: 41.91,
+      executionCostUsd: 0,
+      confirmedOutputAtomic: "1",
+    });
+    const position = {
+      cumulativeFeesClaimedUsd: 0.51,
+      cumulativeRewardsClaimedUsd: 0,
+      depositedUsd: 41.63,
+      realizedPnlUsd: null,
+      entrySignalSnapshotId: null,
+    };
+    let finalizedPnl: number | null = null;
+    const db = {
+      saveSettlementJob: () => Effect.void,
+      getPosition: () => Effect.succeed(position),
+      finalizeSettlementGroup: (input: { readonly realizedPnlUsd: number | null }) =>
+        Effect.sync(() => {
+          finalizedPnl = input.realizedPnlUsd;
+        }),
+    } as unknown as DbApi;
+
+    // When
+    await Effect.runPromise(
+      processSettlementJobs({
+        adapter: {} as AdapterApi,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+      }),
+    );
+
+    // Then the settlement-derived figure fills the gap: 41.91 + 0.51 - 41.63.
+    expect(finalizedPnl).toBeCloseTo(0.79, 2);
+  });
+
   it("reconciles confirmed swap output from transaction evidence when fields are missing", async () => {
     // Given
     const job = settlementJob({

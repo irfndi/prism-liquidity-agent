@@ -165,6 +165,43 @@ export function atomicToUnits(amountAtomic: bigint, decimals: number): number {
   const frac = amountAtomic % base;
   return Number(whole) + Number(frac) / Number(base);
 }
+
+/**
+ * Issue #205: the SDK's position snapshot can understate the actual
+ * withdrawal (observed: a $41.91 all-USDC position closed with the snapshot
+ * reporting $24.38 — $17.53 vanished from the ledger and the exit settlement
+ * sold only the snapshot amount). The wallet's balance DELTA around the close
+ * batch is the on-chain truth. Prefer it per leg; fall back to the SDK
+ * snapshot when the delta is unmeasurable (reads failed) or non-positive (a
+ * SOL leg whose tx fees ate the credit).
+ */
+export function measureWithdrawalDelta(input: {
+  readonly beforeHeld: ReadonlyMap<
+    string,
+    { readonly amountAtomic: bigint; readonly decimals?: number }
+  > | null;
+  readonly afterHeld: ReadonlyMap<
+    string,
+    { readonly amountAtomic: bigint; readonly decimals?: number }
+  > | null;
+  readonly beforeNativeSol: bigint | null;
+  readonly afterNativeSol: bigint | null;
+  readonly mint: string;
+  readonly snapshotAmount: string;
+}): string {
+  if (input.beforeHeld === null || input.afterHeld === null) return input.snapshotAmount;
+  if (input.mint === SOL_MINT) {
+    if (input.beforeNativeSol === null || input.afterNativeSol === null) {
+      return input.snapshotAmount;
+    }
+    const delta = input.afterNativeSol - input.beforeNativeSol;
+    return delta > 0n ? delta.toString() : input.snapshotAmount;
+  }
+  const before = input.beforeHeld.get(input.mint)?.amountAtomic ?? 0n;
+  const after = input.afterHeld.get(input.mint)?.amountAtomic ?? 0n;
+  const delta = after - before;
+  return delta > 0n ? delta.toString() : input.snapshotAmount;
+}
 const logger = createLogger("adapter-service");
 
 // Mints we have already warned about for being unpriceable during wallet
@@ -2522,16 +2559,23 @@ export const AdapterLive = Layer.effect(
           // accrued swap fees AND LM rewards on-chain, so withdrawn =
           // principal + pending fees. The *ExcludeTransferFee variants equal
           // gross for plain SPL and are correct (net-of-fee) for token-2022.
-          const withdrawnXAtomic = positionData.totalXAmountExcludeTransferFee
-            .add(positionData.feeXExcludeTransferFee)
-            .toString();
-          const withdrawnYAtomic = positionData.totalYAmountExcludeTransferFee
-            .add(positionData.feeYExcludeTransferFee)
-            .toString();
-          const pendingFeeXAtomic = positionData.feeXExcludeTransferFee.toString();
-          const pendingFeeYAtomic = positionData.feeYExcludeTransferFee.toString();
-          const rewardOneAtomic = positionData.rewardOneExcludeTransferFee;
-          const rewardTwoAtomic = positionData.rewardTwoExcludeTransferFee;
+          //
+          // Issue #205: the SDK snapshot can understate the actual withdrawal
+          // (observed: position worth $41.91 closed as all-USDC, snapshot
+          // reported 24.38 — 17.53 USDC vanished from the ledger and the
+          // settlement sold only the snapshot amount). The wallet's balance
+          // DELTA around the close batch is the on-chain truth: measure it
+          // per leg and prefer it, falling back to the SDK snapshot when the
+          // delta is unavailable (read failure) or not positive (a SOL leg
+          // whose fees ate the credit).
+          const beforeHeld = yield* readWalletSnapshot().pipe(
+            Effect.catch(() => Effect.succeed(null)),
+          );
+          const beforeNativeSol = yield* readNativeSolBalance().pipe(
+            Effect.catch(() => Effect.succeed(null)),
+          );
+          const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
+          const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
 
           const txs = yield* Effect.tryPromise(() =>
             dlmm.removeLiquidity({
@@ -2560,13 +2604,49 @@ export const AdapterLive = Layer.effect(
           }
           yield* invalidateBalanceCaches;
 
+          const snapshotWithdrawnXAtomic = positionData.totalXAmountExcludeTransferFee
+            .add(positionData.feeXExcludeTransferFee)
+            .toString();
+          const snapshotWithdrawnYAtomic = positionData.totalYAmountExcludeTransferFee
+            .add(positionData.feeYExcludeTransferFee)
+            .toString();
+
+          // Prefer the measured wallet delta (post-close minus pre-close) per
+          // leg. The delta includes swept fees/rewards (shouldClaimAndClose),
+          // which is exactly what the settlement must sell. Falls back to the
+          // SDK snapshot when the delta is unmeasurable or non-positive.
+          const afterHeld = yield* readWalletSnapshot().pipe(
+            Effect.catch(() => Effect.succeed(null)),
+          );
+          const afterNativeSol = yield* readNativeSolBalance().pipe(
+            Effect.catch(() => Effect.succeed(null)),
+          );
+          const withdrawnXAtomic = measureWithdrawalDelta({
+            beforeHeld: beforeHeld?.held ?? null,
+            afterHeld: afterHeld?.held ?? null,
+            beforeNativeSol,
+            afterNativeSol,
+            mint: tokenXMint,
+            snapshotAmount: snapshotWithdrawnXAtomic,
+          });
+          const withdrawnYAtomic = measureWithdrawalDelta({
+            beforeHeld: beforeHeld?.held ?? null,
+            afterHeld: afterHeld?.held ?? null,
+            beforeNativeSol,
+            afterNativeSol,
+            mint: tokenYMint,
+            snapshotAmount: snapshotWithdrawnYAtomic,
+          });
+          const pendingFeeXAtomic = positionData.feeXExcludeTransferFee.toString();
+          const pendingFeeYAtomic = positionData.feeYExcludeTransferFee.toString();
+          const rewardOneAtomic = positionData.rewardOneExcludeTransferFee;
+          const rewardTwoAtomic = positionData.rewardTwoExcludeTransferFee;
+
           // USD pricing is best-effort and runs ONLY after the close txs land —
           // it must never abort or delay removing bleeding liquidity. Any
           // failure resolves the USD legs to null (never 0, never the mark) so
           // the caller books a NULL realized PnL; atomics are always returned.
           const accounting = yield* Effect.gen(function* () {
-            const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
-            const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
             const decimalsX = dlmm.tokenX.mint.decimals;
             const decimalsY = dlmm.tokenY.mint.decimals;
 
