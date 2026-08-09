@@ -192,6 +192,9 @@ export interface AppConfig {
   readonly launchScanRefreshIntervalMs?: number;
   /** Top-N launch pools logged per refresh. Default 30 (1..200). */
   readonly launchScanTopK?: number;
+  /** Candidate universe fetched per refresh BEFORE gating (the gate rejects
+   *  most candidates, so fetch wide then slice top-K). Default 500 (1..1000). */
+  readonly launchScanUniverseSize?: number;
   /** Minimum TVL for a launch pool. Default $5K. */
   readonly launchScanMinTvlUsd?: number;
   /** Maximum TVL — above this the pool is established, not a launch. Default $1M. */
@@ -1333,6 +1336,12 @@ const loadConfig = Effect.gen(function* () {
     120_000,
   );
   const launchScanTopK = yield* validatedNumber("LAUNCH_SCAN_TOP_K", 1, 30, 200);
+  const launchScanUniverseSize = yield* validatedNumber(
+    "LAUNCH_SCAN_UNIVERSE_SIZE",
+    1,
+    500,
+    1000,
+  );
   const launchScanMinTvlUsd = yield* validatedNumber("LAUNCH_SCAN_MIN_TVL_USD", 0, 5_000);
   const launchScanMaxTvlUsd = yield* validatedNumber("LAUNCH_SCAN_MAX_TVL_USD", 0, 1_000_000);
   const launchScanMaxAgeHours = yield* validatedNumber("LAUNCH_SCAN_MAX_AGE_HOURS", 1, 6, 72);
@@ -1508,6 +1517,7 @@ const loadConfig = Effect.gen(function* () {
     launchScanEnabled,
     launchScanRefreshIntervalMs,
     launchScanTopK,
+    launchScanUniverseSize,
     launchScanMinTvlUsd,
     launchScanMaxTvlUsd,
     launchScanMaxAgeHours,

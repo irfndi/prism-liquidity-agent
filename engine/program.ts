@@ -3962,7 +3962,9 @@ export const program = Effect.gen(function* () {
       const intervalMs = Math.max(config.launchScanRefreshIntervalMs ?? 120_000, 10_000);
       if (now - lastLaunchScanAt < intervalMs) return;
       lastLaunchScanAt = now;
-      const discovered = yield* adapter.discoverHotPools(config.launchScanTopK ?? 30);
+      const discovered = yield* adapter.discoverHotPools(
+        config.launchScanUniverseSize ?? 500,
+      );
       if (discovered.length === 0) {
         logger.warn("Launch radar: hot-pool fetch returned nothing");
         return;

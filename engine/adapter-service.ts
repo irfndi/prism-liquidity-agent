@@ -3502,14 +3502,30 @@ export const AdapterLive = Layer.effect(
       // in ONE page, with the Data API's token-safety metadata attached for
       // the launch gate. Never fails: any network/parse problem logs a
       // warning and yields [] — the radar keeps its last ranked snapshot.
-      discoverHotPools: (limit) =>
+      discoverHotPools: (candidateLimit) =>
         Effect.gen(function* () {
           const baseUrl =
             config.meteoraPoolsUrl ||
             "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=fee_tvl_ratio_24h:desc";
-          const url = new URL(baseUrl);
+          let url: URL;
+          try {
+            url = new URL(baseUrl);
+          } catch (cause) {
+            // A malformed METEORA_POOLS_URL must fail open, not become a
+            // sync defect that escapes the fail-open catch below.
+            logger.warn("Launch radar: malformed pools URL", {
+              error: underlyingErrorMessage(cause),
+            });
+            return [];
+          }
           url.searchParams.set("page", "1");
-          url.searchParams.set("page_size", String(Math.min(Math.max(Math.floor(limit), 1), 1000)));
+          // candidateLimit is the UNIVERSE to gate, not the logged top-K —
+          // the launch gate rejects most candidates (age/TVL/safety), so the
+          // radar fetches a wide candidate set and slices top-K after gating.
+          url.searchParams.set(
+            "page_size",
+            String(Math.min(Math.max(Math.floor(candidateLimit), 1), 1000)),
+          );
           url.searchParams.set("filter_by", "is_blacklisted=false");
           url.searchParams.set("sort_by", "fee_tvl_ratio_24h:desc");
           const res = yield* Effect.tryPromise({

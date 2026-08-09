@@ -15,6 +15,10 @@ import type { DiscoveredPool } from "./services.js";
 import { isStableOrSol, marketLegPasses } from "./market-gate.js";
 
 const HOUR_MS = 3_600_000;
+// The pool's createdAt comes from the Meteora API clock, config.now from the
+// engine host — allow a small skew so a pool created moments ago on the API
+// clock is not rejected as "in the future" when the host clock lags.
+const CLOCK_SKEW_MS = 60_000;
 
 export interface LaunchGateConfig {
   readonly minTvlUsd: number;
@@ -73,11 +77,11 @@ export function gateAndRankLaunchPools(
       reject("missing createdAt");
       continue;
     }
-    if (!Number.isFinite(pool.createdAtMs) || pool.createdAtMs > config.now) {
+    if (!Number.isFinite(pool.createdAtMs) || pool.createdAtMs > config.now + CLOCK_SKEW_MS) {
       reject(`createdAt ${pool.createdAtMs} in the future`);
       continue;
     }
-    const ageHours = (config.now - pool.createdAtMs) / HOUR_MS;
+    const ageHours = Math.max(0, config.now - pool.createdAtMs) / HOUR_MS;
     if (ageHours > config.maxAgeHours) {
       reject(`age ${ageHours.toFixed(1)}h > ${config.maxAgeHours}h`);
       continue;

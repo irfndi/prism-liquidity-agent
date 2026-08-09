@@ -154,7 +154,7 @@ export interface AdapterApi {
    * last ranked set. Optional so test mocks compile unchanged.
    */
   readonly discoverHotPools?: (
-    limit: number,
+    candidateLimit: number,
   ) => Effect.Effect<ReadonlyArray<DiscoveredPool>, never>;
   readonly getPositions: (
     poolAddress: string,
