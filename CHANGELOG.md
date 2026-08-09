@@ -2,6 +2,21 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.3] — 2026-08-09
+
+### Added
+
+- **Launch radar multi-timeframe probes**: the radar now logs rolling-window fee-yield AND volume curves (30m/1h/2h/4h/12h/24h) per admitted pool from the same Data API payload — no extra calls — so wash patterns (a burst confined to one window) and hotness cross-checks are visible (#206)
+- **Rejection histogram**: when nothing admits, the radar logs the top-6 rejection categories with counts and an example reason (`age: 121 — age 5.9h > 6h`) — the 0-admitted universe becomes diagnosable instead of a black box. Rejections are bucketed by a stable category, not the value-embedded reason string (#206)
+
+### Fixed
+
+- Launch volume-decay degradation is now visible: when the Data API is down (gecko/heuristic stats), an open launch position's 1h-fee decay rule cannot fire — escalated to a per-position warn (timebox + drawdown remain the backstop). The datapi-up-but-window-missing case (young zero-fee pool) stays at debug (#206)
+
+### Changed
+
+- Bumped version to 0.2.3.
+
 ## [0.2.2] — 2026-08-09
 
 ### Fixed
