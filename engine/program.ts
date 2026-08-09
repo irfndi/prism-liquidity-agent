@@ -7577,16 +7577,6 @@ export const program = Effect.gen(function* () {
           });
         }
 
-        if (decision.action === "ENTER" && decision.positionMode === "launch") {
-          console.info("[enter-debug] executor reached", {
-            action: decision.action,
-            mode: decision.positionMode,
-            size: decision.positionSizeUsd,
-            agentive: config.agentiveMode,
-            paper: config.paperTrading,
-            shadow: config.autonomousTokenMode,
-          });
-        }
         // Risk evaluation. HOLD executes nothing, so risk gates are skipped for
         // it — every rejection used to write a 60-day warning memory, and those
         // warnings then suppressed the good-HOLD branch (hasRecentWarning),
