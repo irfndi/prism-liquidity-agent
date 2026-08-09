@@ -3596,6 +3596,12 @@ export const program = Effect.gen(function* () {
           recentPnlUsd,
           poolAddress: candidate.poolAddress,
           activeBinId: candidate.pool.activeBinId,
+          // Launch ENTERs are governed by their own launchMaxOpenPositions
+          // counter — the normal global cap must not block them nor consume
+          // normal slots (risk gate 2 uses this override).
+          ...(decision.action === "ENTER" && decision.positionMode === "launch"
+            ? { maxOpenPositions: Number.POSITIVE_INFINITY }
+            : {}),
         };
         // Issue #148: the wallet safety pause is informational in shadow mode
         // (no-send by design) — it must never block a decision there.
@@ -5361,6 +5367,13 @@ export const program = Effect.gen(function* () {
             pool.tvlUsd > 0
               ? (datapiStats.feeTvlRatio1h / 100) * pool.tvlUsd
               : null;
+          if (currentFees1hUsd === null) {
+            logger.debug("Launch position: 1h fees unmeasured — volume-decay gate skipped", {
+              pool: pos.poolAddress,
+              position: pos.positionId,
+              statsSource: pool.statsSource,
+            });
+          }
           const prevPeak = launchPeakFees1h.get(pos.positionId);
           if (
             currentFees1hUsd !== null &&
@@ -5385,7 +5398,10 @@ export const program = Effect.gen(function* () {
             feeIlRatio: metrics.feeIlRatioKnown ? metrics.feeIlRatio : null,
           });
           if (launchExitEval.exit) {
-            launchPeakFees1h.delete(pos.positionId);
+            // The peak is NOT deleted here: the exit decision may still be
+            // blocked downstream (approval gate, risk gate, execution) — the
+            // peak stays until the position actually closes (see the
+            // launchPeakFees1h prune in the close path).
             const launchReason = launchExitEval.reason ?? "exit";
             let detail = "";
             if (launchReason === "timebox") {
@@ -6341,30 +6357,15 @@ export const program = Effect.gen(function* () {
                 (p) => p.positionMode === "launch",
               ).length;
               const launchMaxOpenPositions = config.launchMaxOpenPositions ?? 3;
-              if (
+              const isLaunchPool =
                 config.launchScanEnabled === true &&
                 config.launchExecutionEnabled === true &&
-                launchScanPools.has(poolAddress) &&
-                openLaunchPositions < launchMaxOpenPositions
-              ) {
-                const launchSizeUsd = launchEntrySizeUsd({
-                  walletUsd: walletBalanceUsd,
-                  poolTvlUsd: pool.tvlUsd,
-                  maxSizeUsd: config.launchPositionMaxSizeUsd ?? 100,
-                });
-                const launchAllocation = evaluatePerPoolAllocation({
-                  proposedDepositUsd: launchSizeUsd,
-                  portfolioValueUsd,
-                  openPositions,
-                  maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
-                  maxOpenPositions: Number.POSITIVE_INFINITY,
-                  poolAddress,
-                  maxPositionsPerPool: config.maxPositionsPerPool,
-                });
-                if (!launchAllocation.approved) {
-                  console.info(
-                    `[launch-alloc-gate] Skipping launch ENTER ${poolAddress} — ${launchAllocation.reason}`,
-                  );
+                launchScanPools.has(poolAddress);
+              if (isLaunchPool) {
+                if (openLaunchPositions >= launchMaxOpenPositions) {
+                  // Launch cap full: reject the ENTER for this pool — it must
+                  // NOT fall through to the normal lane, which would size it
+                  // with the uncapped normal entry sizing.
                   yield* audit
                     .recordDecision({
                       timestamp: Date.now(),
@@ -6372,33 +6373,11 @@ export const program = Effect.gen(function* () {
                       poolAddress,
                       action: "ENTER",
                       confidence: 0,
-                      reasoning: `[launch-alloc-gate] ${launchAllocation.reason}`,
+                      reasoning: `[launch-cap] ${openLaunchPositions} launch positions >= ${launchMaxOpenPositions}`,
                       metrics,
                       riskResult: {
                         approved: false,
-                        reason: `[launch-alloc-gate] ${launchAllocation.reason}`,
-                      },
-                      executed: false,
-                      paperTrading: config.paperTrading,
-                    })
-                    .pipe(Effect.catch(() => Effect.void));
-                  enterGateRejected = true;
-                } else if (launchSizeUsd <= 0) {
-                  // Degenerate sizing (zero TVL or wallet) — no entry. Consume
-                  // the slot so the normal lane below cannot substitute its own
-                  // (uncapped) sizing for a launch-gated pool.
-                  yield* audit
-                    .recordDecision({
-                      timestamp: Date.now(),
-                      cycleId,
-                      poolAddress,
-                      action: "ENTER",
-                      confidence: 0,
-                      reasoning: "[launch-size] Launch entry size rounds to zero",
-                      metrics,
-                      riskResult: {
-                        approved: false,
-                        reason: "[launch-size] Launch entry size rounds to zero",
+                        reason: `[launch-cap] ${openLaunchPositions} >= ${launchMaxOpenPositions}`,
                       },
                       executed: false,
                       paperTrading: config.paperTrading,
@@ -6406,29 +6385,47 @@ export const program = Effect.gen(function* () {
                     .pipe(Effect.catch(() => Effect.void));
                   enterGateRejected = true;
                 } else {
-                  // [token-risk] launch ENTER gate — the same advisory overlay
-                  // as the normal lane: blocks when either leg carries a hard
-                  // risk signal; unknown/disabled/failed signals never block.
-                  if (config.jupiterTokenRiskEnabled !== false) {
-                    const launchRisk = yield* Effect.promise(() =>
-                      consultTokenRisks([pool.tokenX, pool.tokenY], config),
-                    );
-                    const launchLegRiskReason = (mint: string, symbol: string): string | null => {
-                      const signal = launchRisk.get(mint);
-                      if (signal === undefined) return null;
-                      if (signal.isSus) {
-                        return `${symbol} (${mint}): Jupiter audit flags suspicious (isSus)`;
-                      }
-                      if (signal.organicScoreLabel === "low") {
-                        return `${symbol} (${mint}): Jupiter organic score is low`;
-                      }
-                      return null;
-                    };
-                    const launchRiskReasons = [
-                      launchLegRiskReason(pool.tokenX, pool.tokenXSymbol),
-                      launchLegRiskReason(pool.tokenY, pool.tokenYSymbol),
-                    ].filter((reason): reason is string => reason !== null);
-                    if (launchRiskReasons.length > 0) {
+                  const launchSizeUsd = launchEntrySizeUsd({
+                    walletUsd: walletBalanceUsd,
+                    poolTvlUsd: pool.tvlUsd,
+                    maxSizeUsd: config.launchPositionMaxSizeUsd ?? 100,
+                  });
+                  if (launchSizeUsd <= 0) {
+                    // Degenerate sizing (zero TVL or wallet) — no entry.
+                    // Consume the slot so the normal lane cannot substitute
+                    // its own sizing for a launch-gated pool.
+                    yield* audit
+                      .recordDecision({
+                        timestamp: Date.now(),
+                        cycleId,
+                        poolAddress,
+                        action: "ENTER",
+                        confidence: 0,
+                        reasoning: "[launch-size] Launch entry size rounds to zero",
+                        metrics,
+                        riskResult: {
+                          approved: false,
+                          reason: "[launch-size] Launch entry size rounds to zero",
+                        },
+                        executed: false,
+                        paperTrading: config.paperTrading,
+                      })
+                      .pipe(Effect.catch(() => Effect.void));
+                    enterGateRejected = true;
+                  } else {
+                    const launchAllocation = evaluatePerPoolAllocation({
+                      proposedDepositUsd: launchSizeUsd,
+                      portfolioValueUsd,
+                      openPositions,
+                      maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+                      maxOpenPositions: Number.POSITIVE_INFINITY,
+                      poolAddress,
+                      maxPositionsPerPool: config.maxPositionsPerPool,
+                    });
+                    if (!launchAllocation.approved) {
+                      console.info(
+                        `[launch-alloc-gate] Skipping launch ENTER ${poolAddress} — ${launchAllocation.reason}`,
+                      );
                       yield* audit
                         .recordDecision({
                           timestamp: Date.now(),
@@ -6436,31 +6433,78 @@ export const program = Effect.gen(function* () {
                           poolAddress,
                           action: "ENTER",
                           confidence: 0,
-                          reasoning: `[token-risk] ${launchRiskReasons.join("; ")} — launch ENTER blocked`,
+                          reasoning: `[launch-alloc-gate] ${launchAllocation.reason}`,
                           metrics,
                           riskResult: {
                             approved: false,
-                            reason: `[token-risk] ${launchRiskReasons.join("; ")}`,
+                            reason: `[launch-alloc-gate] ${launchAllocation.reason}`,
                           },
                           executed: false,
                           paperTrading: config.paperTrading,
                         })
                         .pipe(Effect.catch(() => Effect.void));
                       enterGateRejected = true;
+                    } else if (!enterGateRejected) {
+                      // [token-risk] launch ENTER gate — the same advisory overlay
+                      // as the normal lane: blocks when either leg carries a hard
+                      // risk signal; unknown/disabled/failed signals never block.
+                      if (config.jupiterTokenRiskEnabled !== false) {
+                        const launchRisk = yield* Effect.promise(() =>
+                          consultTokenRisks([pool.tokenX, pool.tokenY], config),
+                        );
+                        const launchLegRiskReason = (
+                          mint: string,
+                          symbol: string,
+                        ): string | null => {
+                          const signal = launchRisk.get(mint);
+                          if (signal === undefined) return null;
+                          if (signal.isSus) {
+                            return `${symbol} (${mint}): Jupiter audit flags suspicious (isSus)`;
+                          }
+                          if (signal.organicScoreLabel === "low") {
+                            return `${symbol} (${mint}): Jupiter organic score is low`;
+                          }
+                          return null;
+                        };
+                        const launchRiskReasons = [
+                          launchLegRiskReason(pool.tokenX, pool.tokenXSymbol),
+                          launchLegRiskReason(pool.tokenY, pool.tokenYSymbol),
+                        ].filter((reason): reason is string => reason !== null);
+                        if (launchRiskReasons.length > 0) {
+                          yield* audit
+                            .recordDecision({
+                              timestamp: Date.now(),
+                              cycleId,
+                              poolAddress,
+                              action: "ENTER",
+                              confidence: 0,
+                              reasoning: `[token-risk] ${launchRiskReasons.join("; ")} — launch ENTER blocked`,
+                              metrics,
+                              riskResult: {
+                                approved: false,
+                                reason: `[token-risk] ${launchRiskReasons.join("; ")}`,
+                              },
+                              executed: false,
+                              paperTrading: config.paperTrading,
+                            })
+                            .pipe(Effect.catch(() => Effect.void));
+                          enterGateRejected = true;
+                        }
+                      }
+                      if (!enterGateRejected) {
+                        rawDecisions.push({
+                          action: "ENTER",
+                          poolAddress,
+                          confidence: Math.min(0.5 + feeIlRatio * 0.05, 0.85),
+                          reasoning: `Launch: launch-gated hot pool — time-boxed entry, $${launchAllocation.adjustedDepositUsd.toFixed(0)}`,
+                          positionSizeUsd: launchAllocation.adjustedDepositUsd,
+                          positionMode: "launch",
+                        });
+                        // Consume the ENTER slot: the launch branch pushed the
+                        // decision, so the normal ENTER below must not duplicate.
+                        enterGateRejected = true;
+                      }
                     }
-                  }
-                  if (!enterGateRejected) {
-                    rawDecisions.push({
-                      action: "ENTER",
-                      poolAddress,
-                      confidence: Math.min(0.5 + feeIlRatio * 0.05, 0.85),
-                      reasoning: `Launch: launch-gated hot pool — time-boxed entry, $${launchAllocation.adjustedDepositUsd.toFixed(0)}`,
-                      positionSizeUsd: launchAllocation.adjustedDepositUsd,
-                      positionMode: "launch",
-                    });
-                    // Consume the ENTER slot: the launch branch pushed the
-                    // decision, so the normal ENTER below must not duplicate.
-                    enterGateRejected = true;
                   }
                 }
               }

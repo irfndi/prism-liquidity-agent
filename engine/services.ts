@@ -659,6 +659,13 @@ export interface RiskContext {
    * positions.
    */
   readonly positionId?: string | undefined;
+  /**
+   * Per-call override for the global MAX_OPEN_POSITIONS cap. The launch lane
+   * (Launch Mode v2) passes Infinity — its own launchMaxOpenPositions counter
+   * governs, and launch entries must not consume normal slots or be blocked
+   * by the normal cap. Normal decisions omit it (config default applies).
+   */
+  readonly maxOpenPositions?: number | undefined;
 }
 
 export interface RiskResult {
