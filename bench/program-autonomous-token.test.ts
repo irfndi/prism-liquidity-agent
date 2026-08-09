@@ -552,6 +552,11 @@ describe("settlement job processing", () => {
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
       getTokenDecimals: () => Effect.succeed(6),
+      // Issue #201: the processor clamps the sell amount to the live
+      // wallet balance — these mocks hand back a generous balance so
+      // the clamp is a no-op for the tested scenarios.
+      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
     } as unknown as AdapterApi;
 
     // When
@@ -593,6 +598,11 @@ describe("settlement job processing", () => {
       getSwapStatus: () => Effect.succeed({ state: "not_found", error: null }),
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
       getTokenDecimals: () => Effect.succeed(6),
+      // Issue #201: the processor clamps the sell amount to the live
+      // wallet balance — these mocks hand back a generous balance so
+      // the clamp is a no-op for the tested scenarios.
+      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
       quoteSwap: () =>
         Effect.sync(() => {
           quoteCalls++;
@@ -666,10 +676,14 @@ describe("settlement job processing", () => {
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
       getTokenDecimals: () => Effect.succeed(6),
+      // Issue #201: the processor clamps the sell amount to the live
+      // wallet balance — these mocks hand back a generous balance so
+      // the clamp is a no-op for the tested scenarios.
+      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
       quoteSwap: () => Effect.succeed(quote),
       prepareSwap: () => Effect.succeed(prepared),
       simulateSwap: () => Effect.succeed(simulation),
-      getNativeSolBalance: () => Effect.succeed(100n),
       submitSwap: (
         _prepared: PreparedSwap,
         onBroadcast: ((signature: string) => Effect.Effect<void, Error>) | undefined,
@@ -699,6 +713,7 @@ describe("settlement job processing", () => {
     const savedJobs: SettlementJobRecord[] = [];
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1 }),
+      getNativeSolBalance: () => Effect.succeed(10_000_000_000_000_000_000n),
     } as unknown as AdapterApi;
 
     // When
@@ -1049,6 +1064,11 @@ describe("issue #166 settlement recovery", () => {
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
       getTokenDecimals: () => Effect.succeed(6),
+      // Issue #201: the processor clamps the sell amount to the live
+      // wallet balance — these mocks hand back a generous balance so
+      // the clamp is a no-op for the tested scenarios.
+      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
       quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 429")),
       prepareSwap: () => Effect.fail(new Error("unused")),
       simulateSwap: () => Effect.fail(new Error("unused")),
@@ -1075,6 +1095,11 @@ describe("issue #166 settlement recovery", () => {
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
       getTokenDecimals: () => Effect.succeed(6),
+      // Issue #201: the processor clamps the sell amount to the live
+      // wallet balance — these mocks hand back a generous balance so
+      // the clamp is a no-op for the tested scenarios.
+      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
       quoteSwap: () => Effect.fail(new Error("insufficient funds for swap")),
       prepareSwap: () => Effect.fail(new Error("unused")),
       simulateSwap: () => Effect.fail(new Error("unused")),
@@ -1093,6 +1118,100 @@ describe("issue #166 settlement recovery", () => {
     });
   });
 
+  it("clamps the sell amount to the live wallet balance before quoting (issue #201)", async () => {
+    // Given a settlement expecting 41.91 USDC (the exit proceeds) while the
+    // wallet now holds 24.35 — a concurrent entry consumed the rest. The
+    // stale amount made the swap simulation fail with insufficient balance
+    // 130 times in the field. The clamp must quote only what exists.
+    const job = settlementJob({
+      tokenMint: "usdc-mint",
+      amountAtomic: "41913604",
+      status: "retryable",
+      nextRetryAt: 9_000,
+    });
+    let quotedAmount: bigint | null = null;
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "usdc-mint": 1 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      getTokenBalance: (mint: string) => Effect.succeed(mint === "usdc-mint" ? 24_350_000n : 0n),
+      quoteSwap: (request: { amountAtomic: bigint }) => {
+        quotedAmount = request.amountAtomic;
+        return Effect.fail(new Error("Jupiter quote failed: 429"));
+      },
+      prepareSwap: () => Effect.fail(new Error("unused")),
+      simulateSwap: () => Effect.fail(new Error("unused")),
+      submitSwap: () => Effect.fail(new Error("unused")),
+    } as unknown as AdapterApi;
+    const db = {
+      saveSettlementJob: () => Effect.void,
+      getPosition: () => Effect.succeed(null),
+    } as unknown as DbApi;
+
+    // When
+    const [processed] = await Effect.runPromise(
+      processSettlementJobs({
+        adapter,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+        settlementDustUsd: 0.1,
+      }),
+    );
+
+    // Then the quote was requested for the WALLET balance, not the stale
+    // job amount — a simulation of 41.91 USDC can never succeed now.
+    expect(quotedAmount).toBe(24_350_000n);
+    expect(processed).toMatchObject({ status: "retryable", error: "Jupiter quote failed: 429" });
+  });
+
+  it("terminalizes a settlement whose wallet balance was fully consumed (issue #201)", async () => {
+    // Given a settlement for a mint the wallet no longer holds any balance
+    // of — the funds were consumed by concurrent activity; there are no
+    // proceeds to sell, so the job must stop retrying with a clear error
+    // instead of looping forever.
+    const job = settlementJob({
+      tokenMint: "usdc-mint",
+      amountAtomic: "41913604",
+      status: "retryable",
+      nextRetryAt: 9_000,
+    });
+    const adapter = {
+      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "usdc-mint": 1 }),
+      getTokenDecimals: () => Effect.succeed(6),
+      getTokenBalance: () => Effect.succeed(0n),
+      quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
+      prepareSwap: () => Effect.fail(new Error("unused")),
+      simulateSwap: () => Effect.fail(new Error("unused")),
+      submitSwap: () => Effect.fail(new Error("unused")),
+    } as unknown as AdapterApi;
+    const db = {
+      saveSettlementJob: () => Effect.void,
+      getPosition: () => Effect.succeed(null),
+    } as unknown as DbApi;
+
+    // When
+    const [processed] = await Effect.runPromise(
+      processSettlementJobs({
+        adapter,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+        settlementDustUsd: 0.1,
+      }),
+    );
+
+    // Then the job is terminal with the exhaustion error and no quote ran.
+    expect(processed).toMatchObject({
+      status: "terminal",
+      nextRetryAt: null,
+      error: expect.stringContaining("wallet holds no balance"),
+    });
+  });
+
   it("keeps retrying a non-transient failure before expiry", async () => {
     // Given
     const job = settlementJob({ expiresAt: 100_000 });
@@ -1100,6 +1219,11 @@ describe("issue #166 settlement recovery", () => {
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
       getTokenDecimals: () => Effect.succeed(6),
+      // Issue #201: the processor clamps the sell amount to the live
+      // wallet balance — these mocks hand back a generous balance so
+      // the clamp is a no-op for the tested scenarios.
+      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
       quoteSwap: () => Effect.fail(new Error("insufficient funds for swap")),
       prepareSwap: () => Effect.fail(new Error("unused")),
       simulateSwap: () => Effect.fail(new Error("unused")),
@@ -1123,6 +1247,11 @@ describe("issue #166 settlement recovery", () => {
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
       getTokenDecimals: () => Effect.succeed(6),
+      // Issue #201: the processor clamps the sell amount to the live
+      // wallet balance — these mocks hand back a generous balance so
+      // the clamp is a no-op for the tested scenarios.
+      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
       quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
       prepareSwap: () => Effect.fail(new Error("unused")),
       simulateSwap: () => Effect.fail(new Error("unused")),
@@ -1168,6 +1297,11 @@ describe("issue #166 settlement recovery", () => {
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
       getTokenDecimals: () => Effect.succeed(6),
+      // Issue #201: the processor clamps the sell amount to the live
+      // wallet balance — these mocks hand back a generous balance so
+      // the clamp is a no-op for the tested scenarios.
+      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
       quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 400")),
       prepareSwap: () => Effect.fail(new Error("unused")),
       simulateSwap: () => Effect.fail(new Error("unused")),
@@ -1205,6 +1339,11 @@ describe("issue #166 settlement recovery", () => {
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
       getTokenDecimals: () => Effect.succeed(6),
+      // Issue #201: the processor clamps the sell amount to the live
+      // wallet balance — these mocks hand back a generous balance so
+      // the clamp is a no-op for the tested scenarios.
+      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
       quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
       prepareSwap: () => Effect.fail(new Error("unused")),
       simulateSwap: () => Effect.fail(new Error("unused")),
@@ -1315,6 +1454,11 @@ describe("issue #166 settlement recovery", () => {
     const adapter = {
       getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
       getTokenDecimals: () => Effect.succeed(6),
+      // Issue #201: the processor clamps the sell amount to the live
+      // wallet balance — these mocks hand back a generous balance so
+      // the clamp is a no-op for the tested scenarios.
+      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
       quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 429")),
       prepareSwap: () => Effect.fail(new Error("unused")),
       simulateSwap: () => Effect.fail(new Error("unused")),
@@ -1419,6 +1563,69 @@ describe("issue #166 settlement recovery", () => {
       expiresAt: 3_610_000,
       error: null,
       positionId: expect.stringMatching(/^orphan:/),
+    });
+  });
+
+  it("revives a terminal job despite position backing — wallet-held excess wins (issue #201)", async () => {
+    // Given a wallet holding USDC, an open HYPE/USDC position (so USDC is
+    // position-backed), and a TERMINAL job with unspent balance for USDC
+    // (the exit settlement that died after 130 attempts). Position liquidity
+    // lives in the position account, NOT the wallet — the wallet-held USDC
+    // is excess the terminal job proves was never sold, so the sweep must
+    // revive it with the LIVE wallet amount instead of skipping the mint.
+    const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
+      ["usdc-mint", { amountAtomic: 24_350_000n, decimals: 6 }], // $24.35
+    ]);
+    const terminalJob = settlementJob({
+      id: "terminal-usdc",
+      positionId: "position-exit",
+      tokenMint: "usdc-mint",
+      amountAtomic: "41913604", // stale 41.91
+      status: "terminal",
+      attempts: 130,
+      nextRetryAt: null,
+      txSignature: null,
+      confirmedOutputAtomic: null,
+      expiresAt: 1_000,
+      error: "Swap simulation failed",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const adapter = {
+      hasWallet: () => true,
+      getWalletHoldings: () => Effect.succeed(holdings),
+      getPoolState: () => Effect.succeed({ tokenX: "hype-mint", tokenY: "usdc-mint" }),
+      getTokenPrices: () => Effect.succeed({ "usdc-mint": 1 }),
+    } as unknown as AdapterApi;
+    const db = {
+      listSettlementJobs: () => Effect.succeed([terminalJob]),
+      getAllPositions: () => Effect.succeed([{ positionId: "live-pos", poolAddress: "pool-1" }]),
+    } as unknown as DbApi;
+
+    // When
+    const jobs = await Effect.runPromise(
+      sweepOrphanSettlements({
+        adapter,
+        db,
+        walletAddress: "wallet-1",
+        agentInstanceId: "primary",
+        settlementMaxPendingMs: 3_600_000,
+        settlementDustUsd: 0.1,
+        now: 10_000,
+      }),
+    );
+
+    // Then the terminal job is revived in place with the LIVE wallet amount
+    // (24.35), not the stale 41.91 — the processor clamp then sells exactly
+    // what exists.
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({
+      id: "terminal-usdc",
+      tokenMint: "usdc-mint",
+      status: "pending",
+      amountAtomic: "24350000",
+      attempts: 131,
+      error: null,
     });
   });
 

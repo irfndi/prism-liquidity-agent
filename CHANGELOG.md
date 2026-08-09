@@ -2,6 +2,12 @@
 
 All notable changes to Prism are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- Exit settlement amounts are reconciled with the live wallet balance at execution time: the sell amount is clamped to `min(job amount, wallet balance)` before quoting (a concurrent entry consuming the exit proceeds previously made the swap simulation fail forever — 130 attempts in the field), a fully-consumed balance terminalizes with a clear error instead of looping, and the orphan sweep now revives a terminal job's wallet-held excess even when the mint is position-backed (position liquidity lives in the position account, not the wallet). Entry preparation reserves pending settlement claims from the spendable balance, so a new entry can no longer consume funds an exit settlement is about to sell (#201)
+
 ## [0.2.0] — 2026-08-09
 
 ### Added

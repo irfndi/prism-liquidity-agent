@@ -1,6 +1,7 @@
 import { Effect, Layer } from "effect";
 import {
   AdapterService,
+  DbService,
   EntryPrepService,
   type EntryPreparationOutcome,
   type EntryPreparationReceipt,
@@ -153,6 +154,7 @@ export const EntryPrepLive = Layer.effect(
   Effect.gen(function* () {
     const adapter = yield* AdapterService;
     const config = yield* ConfigService;
+    const db = yield* DbService;
 
     const api: EntryPrepApi = {
       prepareEntryTokens: (poolAddress, positionSizeUsd) =>
@@ -302,23 +304,56 @@ export const EntryPrepLive = Layer.effect(
 
           const nativeSolLamports = yield* readNativeSolBalance();
 
+          // Issue #201: a pending settlement job claims wallet funds that
+          // this entry must not spend — a concurrent entry consuming the
+          // exit settlement's USDC was the root cause of the field stranding
+          // ($41.91 expected, $24.35 in wallet). Reserve the sum of
+          // non-final job amounts per mint by subtracting it from the
+          // spendable balance (floor 0). A claim read failure fails open.
+          const pendingClaims = new Map<string, bigint>();
+          const executionWallet = adapter.getWalletAddress();
+          if (executionWallet !== null) {
+            const activeJobs = yield* db
+              .listSettlementJobs(executionWallet, config.agentInstanceId)
+              .pipe(Effect.catch(() => Effect.succeed([])));
+            for (const job of activeJobs) {
+              if (job.status === "confirmed" || job.status === "terminal") continue;
+              let claim: bigint;
+              try {
+                claim = BigInt(job.amountAtomic);
+              } catch {
+                continue;
+              }
+              if (claim <= 0n) continue;
+              pendingClaims.set(job.tokenMint, (pendingClaims.get(job.tokenMint) ?? 0n) + claim);
+            }
+          }
+          const claimedX = pendingClaims.get(pool.tokenX) ?? 0n;
+          const claimedY = pendingClaims.get(pool.tokenY) ?? 0n;
+
           const balanceX =
             pool.tokenX === SOL_MINT ? nativeSolLamports : yield* readTokenBalance(pool.tokenX);
           const balanceY =
             pool.tokenY === SOL_MINT ? nativeSolLamports : yield* readTokenBalance(pool.tokenY);
 
-          const availableX =
-            pool.tokenX === SOL_MINT
-              ? balanceX > GAS_RESERVE_LAMPORTS
-                ? balanceX - GAS_RESERVE_LAMPORTS
-                : 0n
-              : balanceX;
-          const availableY =
-            pool.tokenY === SOL_MINT
-              ? balanceY > GAS_RESERVE_LAMPORTS
-                ? balanceY - GAS_RESERVE_LAMPORTS
-                : 0n
-              : balanceY;
+          const availableX = (() => {
+            const free =
+              pool.tokenX === SOL_MINT
+                ? balanceX > GAS_RESERVE_LAMPORTS
+                  ? balanceX - GAS_RESERVE_LAMPORTS
+                  : 0n
+                : balanceX;
+            return free > claimedX ? free - claimedX : 0n;
+          })();
+          const availableY = (() => {
+            const free =
+              pool.tokenY === SOL_MINT
+                ? balanceY > GAS_RESERVE_LAMPORTS
+                  ? balanceY - GAS_RESERVE_LAMPORTS
+                  : 0n
+                : balanceY;
+            return free > claimedY ? free - claimedY : 0n;
+          })();
 
           // Single-sided precedence (Wave 7): when exactly one leg cannot fund
           // its half and the other leg alone covers a full-size single-sided

@@ -912,7 +912,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const revenueConfigDeps = Layer.merge(dbLayer, configLayer);
   const revenueConfig = Layer.provide(RevenueConfigServiceLive, revenueConfigDeps);
 
-  const entryPrepDeps = Layer.merge(adapter, configLayer);
+  const entryPrepDeps = Layer.merge(Layer.merge(adapter, configLayer), dbLayer);
   const entryPrep = Layer.provide(EntryPrepLive, entryPrepDeps);
 
   const merged = Layer.merge(adapter, StrategyLive);
