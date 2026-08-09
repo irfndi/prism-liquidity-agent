@@ -50,27 +50,46 @@ export interface LaunchPoolRank {
 
 export interface LaunchGateResult {
   readonly ranked: ReadonlyArray<LaunchPoolRank>;
-  /** Pools that failed the gate, with the first rejection reason each. */
-  readonly rejected: ReadonlyArray<{ readonly address: string; readonly reason: string }>;
+  /** Pools that failed the gate: the first rejection reason each, bucketed
+   *  by a STABLE category (reason strings embed per-pool values like ages
+   *  and TVLs, so histograms must group by category, not full string). */
+  readonly rejected: ReadonlyArray<{
+    readonly address: string;
+    readonly reason: string;
+    readonly category: LaunchRejectCategory;
+  }>;
 }
 
+/** Stable rejection categories — the histogram keys. */
+export type LaunchRejectCategory =
+  | "missing-data"
+  | "created-at"
+  | "age"
+  | "tvl"
+  | "volume-1h"
+  | "base-fee"
+  | "bin-step"
+  | "turnover"
+  | "token-safety";
+
 /**
- * Top-N rejection reasons with counts — the radar's observable answer to
- * "why did the universe admit nothing". A pure one-liner over the gate
- * result, extracted for testability.
+ * Top-N rejection categories with counts — the radar's observable answer to
+ * "why did the universe admit nothing". Groups by the stable category, not
+ * the value-embedded reason string (which would fragment one cause into a
+ * thousand buckets). Pure, extracted for testability.
  */
 export function summarizeLaunchRejections(
-  rejected: ReadonlyArray<{ readonly reason: string }>,
+  rejected: ReadonlyArray<{ readonly category: LaunchRejectCategory }>,
   topN = 6,
-): ReadonlyArray<{ readonly reason: string; readonly count: number }> {
-  const counts = new Map<string, number>();
+): ReadonlyArray<{ readonly category: LaunchRejectCategory; readonly count: number }> {
+  const counts = new Map<LaunchRejectCategory, number>();
   for (const r of rejected) {
-    counts.set(r.reason, (counts.get(r.reason) ?? 0) + 1);
+    counts.set(r.category, (counts.get(r.category) ?? 0) + 1);
   }
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, Math.max(topN, 1))
-    .map(([reason, count]) => ({ reason, count }));
+    .map(([category, count]) => ({ category, count }));
 }
 
 /** Gates and ranks one launch-radar snapshot. Pure; callers feed it the
@@ -80,37 +99,41 @@ export function gateAndRankLaunchPools(
   config: LaunchGateConfig,
 ): LaunchGateResult {
   const ranked: LaunchPoolRank[] = [];
-  const rejected: Array<{ readonly address: string; readonly reason: string }> = [];
+  const rejected: Array<{
+    readonly address: string;
+    readonly reason: string;
+    readonly category: LaunchRejectCategory;
+  }> = [];
 
   for (const pool of pools) {
-    const reject = (reason: string): void => {
-      rejected.push({ address: pool.address, reason });
+    const reject = (reason: string, category: LaunchRejectCategory): void => {
+      rejected.push({ address: pool.address, reason, category });
     };
 
     // Fail closed on missing data — hotness is the point.
     if (pool.feeYield1hPct === undefined || !Number.isFinite(pool.feeYield1hPct)) {
-      reject("missing 1h fee yield");
+      reject("missing 1h fee yield", "missing-data");
       continue;
     }
     if (pool.createdAtMs === undefined) {
-      reject("missing createdAt");
+      reject("missing createdAt", "missing-data");
       continue;
     }
     if (!Number.isFinite(pool.createdAtMs) || pool.createdAtMs > config.now + CLOCK_SKEW_MS) {
-      reject(`createdAt ${pool.createdAtMs} in the future`);
+      reject(`createdAt ${pool.createdAtMs} in the future`, "created-at");
       continue;
     }
     const ageHours = Math.max(0, config.now - pool.createdAtMs) / HOUR_MS;
     if (ageHours > config.maxAgeHours) {
-      reject(`age ${ageHours.toFixed(1)}h > ${config.maxAgeHours}h`);
+      reject(`age ${ageHours.toFixed(1)}h > ${config.maxAgeHours}h`, "age");
       continue;
     }
     if (!Number.isFinite(pool.tvlUsd) || pool.tvlUsd < config.minTvlUsd) {
-      reject(`tvl ${pool.tvlUsd} < ${config.minTvlUsd}`);
+      reject(`tvl ${pool.tvlUsd} < ${config.minTvlUsd}`, "tvl");
       continue;
     }
     if (pool.tvlUsd > config.maxTvlUsd) {
-      reject(`tvl ${pool.tvlUsd} > ${config.maxTvlUsd} (established, not a launch)`);
+      reject(`tvl ${pool.tvlUsd} > ${config.maxTvlUsd} (established, not a launch)`, "tvl");
       continue;
     }
     if (
@@ -118,7 +141,7 @@ export function gateAndRankLaunchPools(
       !Number.isFinite(pool.volume1hUsd) ||
       pool.volume1hUsd < config.minVolume1hUsd
     ) {
-      reject(`1h volume ${pool.volume1hUsd} < ${config.minVolume1hUsd}`);
+      reject(`1h volume ${pool.volume1hUsd} < ${config.minVolume1hUsd}`, "volume-1h");
       continue;
     }
     if (
@@ -126,7 +149,7 @@ export function gateAndRankLaunchPools(
       !Number.isFinite(pool.baseFeePct) ||
       pool.baseFeePct < config.minBaseFeePct
     ) {
-      reject(`base fee ${pool.baseFeePct} < ${config.minBaseFeePct}%`);
+      reject(`base fee ${pool.baseFeePct} < ${config.minBaseFeePct}%`, "base-fee");
       continue;
     }
     if (
@@ -134,17 +157,23 @@ export function gateAndRankLaunchPools(
       pool.binStep < config.minBinStep ||
       pool.binStep > config.maxBinStep
     ) {
-      reject(`binStep ${pool.binStep} outside [${config.minBinStep}, ${config.maxBinStep}]`);
+      reject(
+        `binStep ${pool.binStep} outside [${config.minBinStep}, ${config.maxBinStep}]`,
+        "bin-step",
+      );
       continue;
     }
     // Wash-turnover guard: 24h volume/TVL must land in (0, max].
     if (!Number.isFinite(pool.volume24hUsd) || pool.volume24hUsd <= 0) {
-      reject("no 24h volume (cannot compute turnover)");
+      reject("no 24h volume (cannot compute turnover)", "turnover");
       continue;
     }
     const volumeTurnover = pool.volume24hUsd / pool.tvlUsd;
     if (volumeTurnover > config.maxVolumeTurnover) {
-      reject(`volume turnover ${volumeTurnover.toFixed(1)} > ${config.maxVolumeTurnover} (wash)`);
+      reject(
+        `volume turnover ${volumeTurnover.toFixed(1)} > ${config.maxVolumeTurnover} (wash)`,
+        "turnover",
+      );
       continue;
     }
     // Token-leg safety, same policy as the market gate.
@@ -177,7 +206,7 @@ export function gateAndRankLaunchPools(
           config.minHolders,
         )
       ) {
-        reject(`leg ${leg.symbol ?? leg.mint} fails token safety`);
+        reject(`leg ${leg.symbol ?? leg.mint} fails token safety`, "token-safety");
         legRejected = true;
         break;
       }

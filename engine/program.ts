@@ -4096,7 +4096,7 @@ export const program = Effect.gen(function* () {
           address: r.pool.address,
           pool: `${r.pool.tokenXSymbol ?? "?"}/${r.pool.tokenYSymbol ?? "?"}`,
           feeYield1hPct: r.feeYield1hPct,
-          feeYield: r.pool.feeYieldWindows,
+          feeYieldWindows: r.pool.feeYieldWindows,
           volumeWindows: r.pool.volumeWindows,
           volume1hUsd: r.volume1hUsd,
           ageHours:
@@ -5397,16 +5397,24 @@ export const program = Effect.gen(function* () {
               ? (datapiStats.feeTvlRatio1h / 100) * pool.tvlUsd
               : null;
           if (currentFees1hUsd === null) {
-            // Data-starved decay guard: with the Data API down (gecko or
-            // heuristic stats), the volume-decay rule cannot fire and the
-            // launch protection degrades to timebox + drawdown. That is an
-            // exceptional, protection-reducing state for an open launch
-            // position — warn per position (bounded: ≤ launch slot count).
-            logger.warn("Launch position: 1h fees unmeasured — volume-decay gate degraded", {
-              pool: pos.poolAddress,
-              position: pos.positionId,
-              statsSource: pool.statsSource,
-            });
+            // Data-starved decay guard: the volume-decay rule needs MEASURED
+            // datapi 1h fees. A non-datapi stats source (gecko/heuristic —
+            // the Data API is down) is a protection-reducing outage for an
+            // open launch position: warn per position (bounded: ≤ launch
+            // slot count). Datapi-up-but-window-missing (a young zero-fee
+            // pool or tvl <= 0) is routine — debug only.
+            if (pool.statsSource !== "datapi") {
+              logger.warn("Launch position: 1h fees unmeasured — volume-decay gate degraded", {
+                pool: pos.poolAddress,
+                position: pos.positionId,
+                statsSource: pool.statsSource,
+              });
+            } else {
+              logger.debug("Launch position: 1h fees unmeasured — volume-decay gate skipped", {
+                pool: pos.poolAddress,
+                position: pos.positionId,
+              });
+            }
           }
           const prevPeak = launchPeakFees1h.get(pos.positionId);
           if (

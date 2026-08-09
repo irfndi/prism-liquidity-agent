@@ -183,16 +183,15 @@ describe("gateAndRankLaunchPools", () => {
 });
 
 describe("summarizeLaunchRejections", () => {
-  it("counts reasons and returns the top-N, highest count first", () => {
+  it("groups by stable category — value-embedded reasons do not fragment the histogram", () => {
     const summary = summarizeLaunchRejections([
-      { reason: "age 5.0h > 6h" },
-      { reason: "age 5.0h > 6h" },
-      { reason: "tvl 200000 > 1000000 (established, not a launch)" },
-      { reason: "age 5.0h > 6h" },
+      { category: "age" },
+      { category: "age" },
+      { category: "tvl" },
+      { category: "age" },
     ]);
-    expect(summary[0]!.reason).toContain("age");
-    expect(summary[0]!.count).toBe(3);
-    expect(summary[1]!.reason).toContain("tvl");
+    expect(summary[0]).toEqual({ category: "age", count: 3 });
+    expect(summary[1]).toEqual({ category: "tvl", count: 1 });
     expect(summary).toHaveLength(2);
   });
 
@@ -201,7 +200,7 @@ describe("summarizeLaunchRejections", () => {
   });
 
   it("clamps topN to at least one", () => {
-    const summary = summarizeLaunchRejections([{ reason: "a" }, { reason: "b" }], 0);
+    const summary = summarizeLaunchRejections([{ category: "age" }, { category: "tvl" }], 0);
     expect(summary).toHaveLength(1);
   });
 });
