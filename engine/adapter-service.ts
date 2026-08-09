@@ -2716,6 +2716,15 @@ export const AdapterLive = Layer.effect(
           });
           const withdrawnXAtomic = excludeSameMintRewards(measuredX, tokenXMint, rewardSlots);
           const withdrawnYAtomic = excludeSameMintRewards(measuredY, tokenYMint, rewardSlots);
+          if (!measuredX.measured || !measuredY.measured) {
+            // The measured flag distinguishes on-chain-delta withdrawals from
+            // the known-understating SDK snapshot in the audit trail — a
+            // silent fallback would defeat the point of #205. Exits are rare,
+            // so an unbounded warn per exit is fine.
+            logger.warn(
+              `[exit] withdrawal delta unmeasured for ${positionPubkey.toBase58()} — booking SDK snapshot amounts (X: ${measuredX.measured ? "measured" : "snapshot"}, Y: ${measuredY.measured ? "measured" : "snapshot"})`,
+            );
+          }
           const pendingFeeXAtomic = positionData.feeXExcludeTransferFee.toString();
           const pendingFeeYAtomic = positionData.feeYExcludeTransferFee.toString();
 
