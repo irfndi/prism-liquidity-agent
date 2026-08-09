@@ -1,0 +1,180 @@
+import { describe, expect, it } from "vitest";
+import { excludeSameMintRewards, measureWithdrawalDelta } from "../engine/adapter-service.js";
+import { SOL_MINT } from "../engine/constants.js";
+
+const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+function held(
+  entries: ReadonlyArray<[string, bigint]>,
+): ReadonlyMap<string, { readonly amountAtomic: bigint; readonly decimals: number }> {
+  return new Map(entries.map(([mint, amountAtomic]) => [mint, { amountAtomic, decimals: 6 }]));
+}
+
+describe("measureWithdrawalDelta", () => {
+  it("uses the measured SPL delta when the close credited more than the SDK snapshot (issue #205)", () => {
+    // The live case: position closed all-USDC, on-chain credited $41.91 USDC
+    // (2,438,792 -> 44,352,396 micro), SDK snapshot 24.38.
+    const before = held([[USDC, 2_438_792n]]);
+    const after = held([[USDC, 44_352_396n]]);
+    const result = measureWithdrawalDelta({
+      beforeHeld: before,
+      afterHeld: after,
+      beforeNativeSol: 1n,
+      afterNativeSol: 1n,
+      mint: USDC,
+      snapshotAmount: "24377718",
+    });
+    expect(result).toEqual({ amountAtomic: "41913604", measured: true });
+  });
+
+  it("measures a zero SPL delta as zero when the leg was observed unchanged", () => {
+    const before = held([[USDC, 44_352_396n]]);
+    const after = held([[USDC, 44_352_396n]]);
+    const result = measureWithdrawalDelta({
+      beforeHeld: before,
+      afterHeld: after,
+      beforeNativeSol: 1n,
+      afterNativeSol: 1n,
+      mint: USDC,
+      snapshotAmount: "24377718",
+    });
+    expect(result).toEqual({ amountAtomic: "0", measured: true });
+  });
+
+  it("measures a zero delta for the empty leg of a single-sided exit (routine, not a fallback)", () => {
+    // The empty leg: not held before, not held after — a correctly observed
+    // zero withdrawal. measured: true keeps the audit warn quiet.
+    const result = measureWithdrawalDelta({
+      beforeHeld: held([]),
+      afterHeld: held([]),
+      beforeNativeSol: 1n,
+      afterNativeSol: 1n,
+      mint: USDC,
+      snapshotAmount: "0",
+    });
+    expect(result).toEqual({ amountAtomic: "0", measured: true });
+  });
+
+  it("falls back when a leg's balance moved DOWN during the close window", () => {
+    const before = held([[USDC, 44_352_396n]]);
+    const after = held([[USDC, 40_000_000n]]);
+    const result = measureWithdrawalDelta({
+      beforeHeld: before,
+      afterHeld: after,
+      beforeNativeSol: 1n,
+      afterNativeSol: 1n,
+      mint: USDC,
+      snapshotAmount: "24377718",
+    });
+    expect(result).toEqual({ amountAtomic: "24377718", measured: false });
+  });
+
+  it("falls back to the snapshot when the wallet reads failed", () => {
+    const result = measureWithdrawalDelta({
+      beforeHeld: null,
+      afterHeld: null,
+      beforeNativeSol: null,
+      afterNativeSol: null,
+      mint: USDC,
+      snapshotAmount: "24377718",
+    });
+    expect(result).toEqual({ amountAtomic: "24377718", measured: false });
+  });
+
+  it("measures a new-ATA credit via the SPL delta (before = 0n)", () => {
+    const before = held([]);
+    const after = held([[USDC, 41_910_000n]]);
+    const result = measureWithdrawalDelta({
+      beforeHeld: before,
+      afterHeld: after,
+      beforeNativeSol: 1n,
+      afterNativeSol: 1n,
+      mint: USDC,
+      snapshotAmount: "24377718",
+    });
+    expect(result).toEqual({ amountAtomic: "41910000", measured: true });
+  });
+
+  it("measures the native SOL leg from the balance delta even when SPL reads failed", () => {
+    const result = measureWithdrawalDelta({
+      beforeHeld: null,
+      afterHeld: null,
+      beforeNativeSol: 1_000_000_000n,
+      afterNativeSol: 1_500_000_000n,
+      mint: SOL_MINT,
+      snapshotAmount: "100000000",
+    });
+    expect(result).toEqual({ amountAtomic: "500000000", measured: true });
+  });
+
+  it("falls back for a native SOL leg whose credit is eaten by tx fees (delta not positive)", () => {
+    const result = measureWithdrawalDelta({
+      beforeHeld: held([]),
+      afterHeld: held([]),
+      beforeNativeSol: 1_500_000_000n,
+      afterNativeSol: 1_480_000_000n,
+      mint: SOL_MINT,
+      snapshotAmount: "100000000",
+    });
+    expect(result).toEqual({ amountAtomic: "100000000", measured: false });
+  });
+});
+
+describe("excludeSameMintRewards", () => {
+  const slots = [
+    { mint: "REWARD1", amountAtomic: 500_000n },
+    { mint: "REWARD2", amountAtomic: 250_000n },
+  ];
+
+  it("subtracts a same-mint swept reward from a measured delta (no double count)", () => {
+    const result = excludeSameMintRewards(
+      { amountAtomic: "41913604", measured: true },
+      "REWARD1",
+      slots,
+    );
+    expect(result).toBe("41413604");
+  });
+
+  it("leaves a snapshot-based (unmeasured) amount unchanged — snapshots never include rewards", () => {
+    const result = excludeSameMintRewards(
+      { amountAtomic: "24377718", measured: false },
+      "REWARD1",
+      slots,
+    );
+    expect(result).toBe("24377718");
+  });
+
+  it("does not touch a measured delta when the reward mints differ from the leg", () => {
+    const result = excludeSameMintRewards(
+      { amountAtomic: "41913604", measured: true },
+      USDC,
+      slots,
+    );
+    expect(result).toBe("41913604");
+  });
+
+  it("preserves an exactly-zero leg when the measured delta was entirely a same-mint reward", () => {
+    // An empty position leg whose measured delta consists only of the swept
+    // reward: subtracting the reward correctly yields 0 — the leg has no
+    // value of its own and the reward books separately.
+    const result = excludeSameMintRewards(
+      { amountAtomic: "500000", measured: true },
+      "REWARD1",
+      slots,
+    );
+    expect(result).toBe("0");
+  });
+
+  it("returns zero when the same-mint reward exceeds the measured delta (no double count)", () => {
+    // Measurement inconsistency: the reward snapshot (500k) exceeds the
+    // measured delta (400k). Returning the reward-inclusive delta would
+    // double-count the reward (sweptRewards books it separately) — the leg's
+    // provable value is 0.
+    const result = excludeSameMintRewards(
+      { amountAtomic: "400000", measured: true },
+      "REWARD1",
+      slots,
+    );
+    expect(result).toBe("0");
+  });
+});

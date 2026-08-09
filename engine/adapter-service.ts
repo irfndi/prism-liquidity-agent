@@ -26,7 +26,7 @@ import DLMM, {
   type StrategyParameters,
 } from "@meteora-ag/dlmm";
 import { BN } from "@coral-xyz/anchor";
-import { Effect, Layer } from "effect";
+import { Duration, Effect, Layer } from "effect";
 import {
   AdapterService,
   type AdapterApi,
@@ -164,6 +164,80 @@ export function atomicToUnits(amountAtomic: bigint, decimals: number): number {
   const whole = amountAtomic / base;
   const frac = amountAtomic % base;
   return Number(whole) + Number(frac) / Number(base);
+}
+
+/**
+ * Issue #205: the SDK's position snapshot can understate the actual
+ * withdrawal (observed: a $41.91 all-USDC position closed with the snapshot
+ * reporting $24.38 — $17.53 vanished from the ledger and the exit settlement
+ * sold only the snapshot amount). The wallet's balance DELTA around the close
+ * batch is the on-chain truth. Prefer it per leg; fall back to the SDK
+ * snapshot when the delta is genuinely unmeasurable (reads timed out /
+ * failed) or negative (a SOL leg whose tx fees ate the credit, or a leg whose
+ * balance moved DOWN during the window). An observed ZERO delta is a measured
+ * zero — the empty leg of a single-sided position is routine, not a fallback.
+ * `measured: true` marks a delta-based result — a measured amount may include
+ * swept LM rewards (shouldClaimAndClose) that the exit books separately, so
+ * the caller can exclude same-mint rewards; the snapshot amount never
+ * includes them.
+ */
+export function measureWithdrawalDelta(input: {
+  readonly beforeHeld: ReadonlyMap<
+    string,
+    { readonly amountAtomic: bigint; readonly decimals?: number }
+  > | null;
+  readonly afterHeld: ReadonlyMap<
+    string,
+    { readonly amountAtomic: bigint; readonly decimals?: number }
+  > | null;
+  readonly beforeNativeSol: bigint | null;
+  readonly afterNativeSol: bigint | null;
+  readonly mint: string;
+  readonly snapshotAmount: string;
+}): { readonly amountAtomic: string; readonly measured: boolean } {
+  const fallback = (): { readonly amountAtomic: string; readonly measured: false } => ({
+    amountAtomic: input.snapshotAmount,
+    measured: false,
+  });
+  // Native SOL is measured from the balance delta alone — an SPL holdings
+  // read failing must not block a measurable SOL leg.
+  if (input.mint === SOL_MINT) {
+    if (input.beforeNativeSol === null || input.afterNativeSol === null) return fallback();
+    const delta = input.afterNativeSol - input.beforeNativeSol;
+    if (delta < 0n) return fallback();
+    return { amountAtomic: delta.toString(), measured: true };
+  }
+  if (input.beforeHeld === null || input.afterHeld === null) return fallback();
+  const before = input.beforeHeld.get(input.mint)?.amountAtomic ?? 0n;
+  const after = input.afterHeld.get(input.mint)?.amountAtomic ?? 0n;
+  const delta = after - before;
+  if (delta < 0n) return fallback();
+  return { amountAtomic: delta.toString(), measured: true };
+}
+
+/**
+ * Exclude a same-mint swept LM reward from a MEASURED withdrawal delta: the
+ * whole-wallet delta includes the reward (shouldClaimAndClose sweeps it into
+ * the same ATA), and the exit books it separately via sweptRewards — without
+ * this subtraction it would be double-counted. Snapshot-based (unmeasured)
+ * amounts never include rewards and are returned unchanged.
+ */
+export function excludeSameMintRewards(
+  measured: { readonly amountAtomic: string; readonly measured: boolean },
+  mint: string,
+  rewardSlots: ReadonlyArray<{ readonly mint: string | null; readonly amountAtomic: bigint }>,
+): string {
+  if (!measured.measured) return measured.amountAtomic;
+  let result = BigInt(measured.amountAtomic);
+  for (const slot of rewardSlots) {
+    if (slot.mint === mint) result -= slot.amountAtomic;
+  }
+  // Preserve an exactly-zero leg (an empty position leg whose measured delta
+  // was entirely a same-mint swept reward — the reward books separately, so
+  // the leg itself has no value). A NEGATIVE result (reward exceeds the
+  // delta: measurement inconsistency) likewise resolves to 0 — returning the
+  // reward-inclusive delta would re-introduce the same-mint double count.
+  return result >= 0n ? result.toString() : "0";
 }
 const logger = createLogger("adapter-service");
 
@@ -1140,6 +1214,51 @@ export const AdapterLive = Layer.effect(
     }
 
     /**
+     * Raw per-mint SPL holdings across Token Program + Token-2022, WITHOUT
+     * USD pricing. Two unfiltered reads capture all ATAs (pool residues,
+     * reward mints, wSOL); amounts accumulate per mint. Used by
+     * readWalletSnapshot (which adds pricing) and by the exit path's
+     * before/after withdrawal-delta measurement (issue #205 — the delta only
+     * needs amounts, and pricing must not delay broadcasting an exit).
+     */
+    function readWalletHoldingsRaw(): Effect.Effect<
+      ReadonlyMap<string, { readonly amountAtomic: bigint; readonly decimals: number }>,
+      Error
+    > {
+      return Effect.gen(function* () {
+        const held = new Map<string, { amountAtomic: bigint; decimals: number }>();
+        if (!wallet) return held;
+        for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+          const accounts = yield* rpcCall((conn) =>
+            conn.getParsedTokenAccountsByOwner(wallet.publicKey, { programId }),
+          );
+          for (const account of accounts.value) {
+            const data = account.account.data;
+            if (!isObject(data)) continue;
+            const parsed = data["parsed"];
+            if (!isObject(parsed)) continue;
+            const info = parsed["info"];
+            if (!isObject(info)) continue;
+            const mint = info["mint"];
+            if (typeof mint !== "string") continue;
+            const tokenAmount = info["tokenAmount"];
+            if (!isObject(tokenAmount)) continue;
+            const amountRaw = tokenAmount["amount"];
+            const decimals = tokenAmount["decimals"];
+            if (typeof amountRaw !== "string" || typeof decimals !== "number") continue;
+            if (!/^\d+$/.test(amountRaw)) continue;
+            const amountAtomic = BigInt(amountRaw);
+            if (amountAtomic <= 0n) continue; // skip empty / rent-only ATAs
+            const existing = held.get(mint);
+            if (existing) existing.amountAtomic += amountAtomic;
+            else held.set(mint, { amountAtomic, decimals });
+          }
+        }
+        return held;
+      });
+    }
+
+    /**
      * One chain reconciliation of the wallet: the aggregate USD balance AND
      * the per-mint SPL holdings it is computed from. Both are served from the
      * SAME cached snapshot (same TTL, same invalidation after every mutating
@@ -1170,37 +1289,8 @@ export const AdapterLive = Layer.effect(
         const lamports = Number(yield* readNativeSolBalance());
 
         // Reconcile EVERY SPL token account the wallet holds, across both the
-        // legacy Token Program and Token-2022. Two unfiltered reads (no mint
-        // filter) capture all ATAs — pool-token residues, single-sided-entry
-        // leftovers, reward mints and wSOL ATAs — which the old SOL+USDC-only
-        // read left invisible. Amounts accumulate per mint.
-        const held = new Map<string, { amountAtomic: bigint; decimals: number }>();
-        for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
-          const accounts = yield* rpcCall((conn) =>
-            conn.getParsedTokenAccountsByOwner(wallet.publicKey, { programId }),
-          );
-          for (const account of accounts.value) {
-            const data = account.account.data;
-            if (!isObject(data)) continue;
-            const parsed = data["parsed"];
-            if (!isObject(parsed)) continue;
-            const info = parsed["info"];
-            if (!isObject(info)) continue;
-            const mint = info["mint"];
-            if (typeof mint !== "string") continue;
-            const tokenAmount = info["tokenAmount"];
-            if (!isObject(tokenAmount)) continue;
-            const amountRaw = tokenAmount["amount"];
-            const decimals = tokenAmount["decimals"];
-            if (typeof amountRaw !== "string" || typeof decimals !== "number") continue;
-            if (!/^\d+$/.test(amountRaw)) continue;
-            const amountAtomic = BigInt(amountRaw);
-            if (amountAtomic <= 0n) continue; // skip empty / rent-only ATAs
-            const existing = held.get(mint);
-            if (existing) existing.amountAtomic += amountAtomic;
-            else held.set(mint, { amountAtomic, decimals });
-          }
-        }
+        // legacy Token Program and Token-2022 (see readWalletHoldingsRaw).
+        const held = yield* readWalletHoldingsRaw();
 
         // Price every discovered mint plus native SOL in ONE batched call.
         // useFallback: false — an unresolvable price becomes 0 below (never a
@@ -2522,16 +2612,46 @@ export const AdapterLive = Layer.effect(
           // accrued swap fees AND LM rewards on-chain, so withdrawn =
           // principal + pending fees. The *ExcludeTransferFee variants equal
           // gross for plain SPL and are correct (net-of-fee) for token-2022.
-          const withdrawnXAtomic = positionData.totalXAmountExcludeTransferFee
-            .add(positionData.feeXExcludeTransferFee)
-            .toString();
-          const withdrawnYAtomic = positionData.totalYAmountExcludeTransferFee
-            .add(positionData.feeYExcludeTransferFee)
-            .toString();
-          const pendingFeeXAtomic = positionData.feeXExcludeTransferFee.toString();
-          const pendingFeeYAtomic = positionData.feeYExcludeTransferFee.toString();
+          //
+          // Issue #205: the SDK snapshot can understate the actual withdrawal
+          const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
+          const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
           const rewardOneAtomic = positionData.rewardOneExcludeTransferFee;
           const rewardTwoAtomic = positionData.rewardTwoExcludeTransferFee;
+          // Reward slots (mint + pending atomic), resolved once and shared by
+          // the same-mint reward exclusion on the measured withdrawal delta
+          // and the sweptRewards ledger below.
+          const rewardInfos = dlmm.lbPair.rewardInfos;
+          const mintOf = (mint: PublicKey | undefined): string | null => {
+            const base58 = mint?.toBase58();
+            return base58 != null && base58 !== DEFAULT_PUBLIC_KEY ? base58 : null;
+          };
+          const rewardSlots = [
+            { mint: mintOf(rewardInfos[0]?.mint), amountAtomic: rewardOneAtomic },
+            { mint: mintOf(rewardInfos[1]?.mint), amountAtomic: rewardTwoAtomic },
+          ].filter((s) => s.amountAtomic > 0n);
+
+          // Pre-close wallet holdings WITHOUT pricing (a price lookup must not
+          // delay broadcasting an exit) and a FORCED native-SOL read (bypasses
+          // the 30s cache so the measured delta covers only the close window).
+          // Both are best-effort with a short deadline: a degraded primary RPC
+          // must not postpone a risk-driven EXIT through the full retry chain
+          // (2 × 15s attempts per rpcCall, repeatable on the fallback).
+          const preClose = yield* Effect.all(
+            {
+              held: readWalletHoldingsRaw().pipe(Effect.catch(() => Effect.succeed(null))),
+              nativeSol: readNativeSolBalance({ force: true }).pipe(
+                Effect.catch(() => Effect.succeed(null)),
+              ),
+            },
+            { concurrency: "unbounded" },
+          )
+            .pipe(
+              Effect.timeout(Duration.millis(2000)),
+              Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
+            );
+          const beforeHeld = preClose.held;
+          const beforeNativeSol = preClose.nativeSol;
 
           const txs = yield* Effect.tryPromise(() =>
             dlmm.removeLiquidity({
@@ -2560,31 +2680,66 @@ export const AdapterLive = Layer.effect(
           }
           yield* invalidateBalanceCaches;
 
+          const snapshotWithdrawnXAtomic = positionData.totalXAmountExcludeTransferFee
+            .add(positionData.feeXExcludeTransferFee)
+            .toString();
+          const snapshotWithdrawnYAtomic = positionData.totalYAmountExcludeTransferFee
+            .add(positionData.feeYExcludeTransferFee)
+            .toString();
+
+          // Prefer the measured wallet delta (post-close minus pre-close) per
+          // leg. The delta includes swept fees/rewards (shouldClaimAndClose),
+          // which is exactly what the settlement must sell — same-mint rewards
+          // are excluded because the exit books them separately. Falls back to
+          // the SDK snapshot when the delta is unmeasurable or non-positive.
+          const afterSnapshot = yield* Effect.all(
+            {
+              held: readWalletHoldingsRaw().pipe(Effect.catch(() => Effect.succeed(null))),
+              nativeSol: readNativeSolBalance().pipe(Effect.catch(() => Effect.succeed(null))),
+            },
+            { concurrency: "unbounded" },
+          )
+            .pipe(
+              Effect.timeout(Duration.millis(2000)),
+              Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
+            );
+          const measuredX = measureWithdrawalDelta({
+            beforeHeld,
+            afterHeld: afterSnapshot.held,
+            beforeNativeSol,
+            afterNativeSol: afterSnapshot.nativeSol,
+            mint: tokenXMint,
+            snapshotAmount: snapshotWithdrawnXAtomic,
+          });
+          const measuredY = measureWithdrawalDelta({
+            beforeHeld,
+            afterHeld: afterSnapshot.held,
+            beforeNativeSol,
+            afterNativeSol: afterSnapshot.nativeSol,
+            mint: tokenYMint,
+            snapshotAmount: snapshotWithdrawnYAtomic,
+          });
+          const withdrawnXAtomic = excludeSameMintRewards(measuredX, tokenXMint, rewardSlots);
+          const withdrawnYAtomic = excludeSameMintRewards(measuredY, tokenYMint, rewardSlots);
+          if (!measuredX.measured || !measuredY.measured) {
+            // The measured flag distinguishes on-chain-delta withdrawals from
+            // the known-understating SDK snapshot in the audit trail — a
+            // silent fallback would defeat the point of #205. Exits are rare,
+            // so an unbounded warn per exit is fine.
+            logger.warn(
+              `[exit] withdrawal delta unmeasured for ${positionPubkey.toBase58()} — booking SDK snapshot amounts (X: ${measuredX.measured ? "measured" : "snapshot"}, Y: ${measuredY.measured ? "measured" : "snapshot"})`,
+            );
+          }
+          const pendingFeeXAtomic = positionData.feeXExcludeTransferFee.toString();
+          const pendingFeeYAtomic = positionData.feeYExcludeTransferFee.toString();
+
           // USD pricing is best-effort and runs ONLY after the close txs land —
           // it must never abort or delay removing bleeding liquidity. Any
           // failure resolves the USD legs to null (never 0, never the mark) so
           // the caller books a NULL realized PnL; atomics are always returned.
           const accounting = yield* Effect.gen(function* () {
-            const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
-            const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
             const decimalsX = dlmm.tokenX.mint.decimals;
             const decimalsY = dlmm.tokenY.mint.decimals;
-
-            const rewardInfos = dlmm.lbPair.rewardInfos;
-            const mintOf = (mint: PublicKey | undefined): string | null => {
-              const base58 = mint?.toBase58();
-              return base58 != null && base58 !== DEFAULT_PUBLIC_KEY ? base58 : null;
-            };
-            const rewardSlots = [
-              {
-                mint: mintOf(rewardInfos[0]?.mint),
-                amountAtomic: Number(rewardOneAtomic.toString()),
-              },
-              {
-                mint: mintOf(rewardInfos[1]?.mint),
-                amountAtomic: Number(rewardTwoAtomic.toString()),
-              },
-            ].filter((s) => Number.isFinite(s.amountAtomic) && s.amountAtomic > 0);
 
             const priceMints = [
               tokenXMint,
@@ -2635,7 +2790,7 @@ export const AdapterLive = Layer.effect(
               }
               sweptRewards.push({
                 mint: slot.mint ?? "unknown",
-                amountAtomic: slot.amountAtomic,
+                amountAtomic: Number(slot.amountAtomic.toString()),
                 amountUsd,
               });
             }
