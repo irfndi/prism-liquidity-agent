@@ -44,7 +44,7 @@ export interface MarketGateResult {
   readonly rejected: ReadonlyArray<{ readonly address: string; readonly reason: string }>;
 }
 
-function isStableOrSol(mint: string, stablecoinMints: ReadonlySet<string>): boolean {
+export function isStableOrSol(mint: string, stablecoinMints: ReadonlySet<string>): boolean {
   return mint === SOL_MINT || stablecoinMints.has(mint);
 }
 

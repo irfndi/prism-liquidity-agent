@@ -43,6 +43,12 @@ export interface DiscoveredPool {
   readonly fees24hUsd: number;
   readonly apr: number;
   readonly binStep: number;
+  /** 1h fee/volume/ratio from the Data API list payload. Optional so legacy
+   *  mappers/tests compile unchanged; the launch radar gate needs them. */
+  readonly volume1hUsd?: number;
+  readonly fees1hUsd?: number;
+  readonly feeYield1hPct?: number;
+  readonly baseFeePct?: number;
   readonly tokenX: string;
   readonly tokenY: string;
   readonly createdAtMs?: number;
@@ -139,6 +145,16 @@ export interface AdapterApi {
    */
   readonly discoverPoolsTopPages?: (
     pages: number,
+  ) => Effect.Effect<ReadonlyArray<DiscoveredPool>, never>;
+  /**
+   * Discover the hottest DLMM pools for the launch radar — the top of the
+   * fee-yield-ranked universe (1h fee/TVL ratio). Never fails: any
+   * page/network/parse error logs a warning and returns [] (fail-open,
+   * exactly like discoverPoolsTopPages) so the radar falls back to its
+   * last ranked set. Optional so test mocks compile unchanged.
+   */
+  readonly discoverHotPools?: (
+    candidateLimit: number,
   ) => Effect.Effect<ReadonlyArray<DiscoveredPool>, never>;
   readonly getPositions: (
     poolAddress: string,

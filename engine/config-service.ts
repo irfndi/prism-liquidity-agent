@@ -181,6 +181,34 @@ export interface AppConfig {
   readonly marketScanMinBinStep?: number;
   /** Skip pools with bin step above this. Default 200. */
   readonly marketScanMaxBinStep?: number;
+
+  // ─── Launch-scan mode (hot-DLMM-pool launch radar) ─────────────────────
+  // When enabled, the engine refreshes a discovery snapshot of the hottest
+  // YOUNG DLMM pools (fee-yield-ranked) and runs them through the pure
+  // launch gate. Radar/screening only in v1 — no execution wiring.
+  readonly launchScanEnabled?: boolean;
+  /** How often the launch radar re-discovers and re-gates. Default 2 min;
+   *  minimum 10 s. */
+  readonly launchScanRefreshIntervalMs?: number;
+  /** Top-N launch pools logged per refresh. Default 30 (1..200). */
+  readonly launchScanTopK?: number;
+  /** Candidate universe fetched per refresh BEFORE gating (the gate rejects
+   *  most candidates, so fetch wide then slice top-K). Default 500 (1..1000). */
+  readonly launchScanUniverseSize?: number;
+  /** Minimum TVL for a launch pool. Default $5K. */
+  readonly launchScanMinTvlUsd?: number;
+  /** Maximum TVL — above this the pool is established, not a launch. Default $1M. */
+  readonly launchScanMaxTvlUsd?: number;
+  /** Maximum pool age in hours (from pool creation). Default 6 (1..72). */
+  readonly launchScanMaxAgeHours?: number;
+  /** Minimum 1h volume (USD) for a launch pool. Default $50K. */
+  readonly launchScanMinVolume1hUsd?: number;
+  /** Minimum base fee percent (pool_config.base_fee_pct). Default 1%. */
+  readonly launchScanMinBaseFeePct?: number;
+  /** Skip pools with bin step below this. Default 50. */
+  readonly launchScanMinBinStep?: number;
+  /** Skip pools with bin step above this. Default 200. */
+  readonly launchScanMaxBinStep?: number;
   readonly deployerBlacklistPath: string;
   readonly tokenBlacklistPath: string;
   readonly sqliteDbPath: string;
@@ -1299,6 +1327,32 @@ const loadConfig = Effect.gen(function* () {
   const marketScanMinHolders = yield* validatedNumber("MARKET_SCAN_MIN_HOLDERS", 0, 1000);
   const marketScanMinBinStep = yield* validatedNumber("MARKET_SCAN_MIN_BIN_STEP", 0, 2, 100);
   const marketScanMaxBinStep = yield* validatedNumber("MARKET_SCAN_MAX_BIN_STEP", 1, 200, 2000);
+  const launchScanEnabled = yield* Config.boolean("LAUNCH_SCAN_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const launchScanRefreshIntervalMs = yield* validatedNumber(
+    "LAUNCH_SCAN_REFRESH_INTERVAL_MS",
+    10_000,
+    120_000,
+  );
+  const launchScanTopK = yield* validatedNumber("LAUNCH_SCAN_TOP_K", 1, 30, 200);
+  const launchScanUniverseSize = yield* validatedNumber(
+    "LAUNCH_SCAN_UNIVERSE_SIZE",
+    1,
+    500,
+    1000,
+  );
+  const launchScanMinTvlUsd = yield* validatedNumber("LAUNCH_SCAN_MIN_TVL_USD", 0, 5_000);
+  const launchScanMaxTvlUsd = yield* validatedNumber("LAUNCH_SCAN_MAX_TVL_USD", 0, 1_000_000);
+  const launchScanMaxAgeHours = yield* validatedNumber("LAUNCH_SCAN_MAX_AGE_HOURS", 1, 6, 72);
+  const launchScanMinVolume1hUsd = yield* validatedNumber(
+    "LAUNCH_SCAN_MIN_VOLUME_1H_USD",
+    0,
+    50_000,
+  );
+  const launchScanMinBaseFeePct = yield* validatedNumber("LAUNCH_SCAN_MIN_BASE_FEE_PCT", 0, 1);
+  const launchScanMinBinStep = yield* validatedNumber("LAUNCH_SCAN_MIN_BIN_STEP", 0, 50);
+  const launchScanMaxBinStep = yield* validatedNumber("LAUNCH_SCAN_MAX_BIN_STEP", 1, 200);
   const deployerBlacklistPath = yield* Config.string("DEPLOYER_BLACKLIST_PATH").pipe(
     Effect.orElseSucceed(() => "./engine/data/deployer-blacklist.json"),
   );
@@ -1460,6 +1514,17 @@ const loadConfig = Effect.gen(function* () {
     marketScanMinHolders,
     marketScanMinBinStep,
     marketScanMaxBinStep,
+    launchScanEnabled,
+    launchScanRefreshIntervalMs,
+    launchScanTopK,
+    launchScanUniverseSize,
+    launchScanMinTvlUsd,
+    launchScanMaxTvlUsd,
+    launchScanMaxAgeHours,
+    launchScanMinVolume1hUsd,
+    launchScanMinBaseFeePct,
+    launchScanMinBinStep,
+    launchScanMaxBinStep,
     deployerBlacklistPath,
     tokenBlacklistPath,
     sqliteDbPath,

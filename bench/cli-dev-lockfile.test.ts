@@ -133,7 +133,10 @@ describe("cli/lockfile", () => {
       ].join("\n"),
     });
     const found = findRunningEngineProcess(spawner);
-    expect(found).toEqual({ pid: process.pid + 1, command: `bun /root/.prism/dist/cli/index.mjs dev` });
+    expect(found).toEqual({
+      pid: process.pid + 1,
+      command: `bun /root/.prism/dist/cli/index.mjs dev`,
+    });
   });
 
   it("findRunningEngineProcess ignores index.mjs runs without a dev argument", () => {
