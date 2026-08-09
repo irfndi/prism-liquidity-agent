@@ -2,12 +2,20 @@
 
 All notable changes to Prism are documented here.
 
-## [Unreleased]
+## [0.2.0] — 2026-08-09
+
+### Added
+
+- **Launch Mode v1 — hot-pool radar**: a sub-minute discovery feed for the highest fee-yield DLMM pools (the data path for high-cadence launch capture). `discoverHotPools` fetches `/pools?sort_by=fee_tvl_ratio_24h:desc` (curl-verified payload paths), a pure `launch-gate` admits only young pools (age ≤ 6h, TVL $5k–$1M, ≥$50k 1h volume, base fee ≥1%, binStep 50–200, wash-turnover cap, token-safety legs) ranked by 1h fee yield, and the per-cycle radar logs the top-K with address, fee yield, volume, and age. Off by default (`LAUNCH_SCAN_ENABLED`); screening only — the execution lane is the next milestone (#199)
 
 ### Fixed
 
-- Jupiter API traffic gate: every api.jup.ag request (swap quote/build, price, token search — one shared keyless rate-limit bucket at 0.5 RPS sustained with a ~5-request burst cap) now routes through a process-wide gate that paces requests to 0.4 RPS and opens an escalating cooldown (1 min → 60 min) on 429, honoring the documented `x-ratelimit-reset` backoff target — a self-inflicted rate-limit ban can no longer be refreshed by retry loops and capital-lock the wallet (#196 follow-up)
-- Route-probe quote cache: the autonomous-candidate refresh's per-cycle fan-out (up to ~80 identical probe quotes — the dominant Jupiter traffic term) now caches successful probes for at least one scan interval (10-minute minimum), cutting steady-state probe traffic to ~zero (#196 follow-up)
+- Jupiter API traffic gate: every api.jup.ag request (swap quote/build, price, token search — one shared keyless rate-limit bucket at 0.5 RPS sustained with a ~5-request burst cap) now routes through a process-wide gate that paces requests to 0.4 RPS and opens an escalating cooldown (1 min → 60 min) on 429, honoring the documented `x-ratelimit-reset` backoff target — a self-inflicted rate-limit ban can no longer be refreshed by retry loops and capital-lock the wallet (#198)
+- Route-probe quote cache: the autonomous-candidate refresh's per-cycle fan-out (up to ~80 identical probe quotes — the dominant Jupiter traffic term) now caches successful probes for at least one scan interval (10-minute minimum), cutting steady-state probe traffic to ~zero (#198)
+
+### Changed
+
+- Bumped version to 0.2.0.
 
 ## [0.1.12] — 2026-08-08
 
