@@ -6534,6 +6534,46 @@ export const program = Effect.gen(function* () {
           // token-risk and the risk tail still run verbatim. The decision
           // carries the FA lifecycle (ladder + invalidation) so execution
           // stamps the position row.
+          // [wash-forensics] launch ENTER gate — egregious wash evidence
+          // (few wallets producing the whole recent sample at bot speed)
+          // rejects before capital enters a honeypot's volume. Advisory by
+          // default (switch off); the evidence comes from the radar refresh's
+          // one Helius call per admitted pool — null (fetch failed, switch
+          // off, no sample) fails open and never blocks. Runs BEFORE every
+          // specialized ENTER branch (fallen-angel included) so no lane can
+          // route around it, and only for actual launch-execution pools —
+          // a watchlist/market pool that also appears in the launch top-K is
+          // not wash-gated when entering through its own lane.
+          const washEvidence = washEvidenceByPool.get(poolAddress);
+          if (
+            !enterGateRejected &&
+            config.launchWashForensicsEnabled === true &&
+            config.launchScanEnabled === true &&
+            config.launchExecutionEnabled === true &&
+            launchScanPools.has(poolAddress) &&
+            washEvidence !== undefined &&
+            washEvidence.suspicious
+          ) {
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "ENTER",
+                confidence: 0,
+                reasoning: `[wash-forensics] ${washEvidence.reason}`,
+                metrics,
+                riskResult: {
+                  approved: false,
+                  reason: `[wash-forensics] ${washEvidence.reason}`,
+                },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catch(() => Effect.void));
+            enterGateRejected = true;
+          }
+
           const faSignal = fallenAngelSignals.get(poolAddress);
           const openFaPositions = Array.from(trackedPositions.values()).filter(
             (p) => p.positionMode === "fallen-angel",
@@ -6599,41 +6639,6 @@ export const program = Effect.gen(function* () {
               // duplicate ENTER for the same pool this cycle.
               enterGateRejected = true;
             }
-          }
-
-          // [wash-forensics] launch ENTER gate — egregious wash evidence
-          // (few wallets producing the whole recent sample at bot speed)
-          // rejects before capital enters a honeypot's volume. Advisory by
-          // default (switch off); the evidence comes from the radar refresh's
-          // one Helius call per admitted pool — null (fetch failed, switch
-          // off, no sample) fails open and never blocks. The score is
-          // deliberately hard-only at the extreme tail: a real launch's early
-          // volume is naturally concentrated.
-          const washEvidence = washEvidenceByPool.get(poolAddress);
-          if (
-            !enterGateRejected &&
-            config.launchWashForensicsEnabled === true &&
-            washEvidence !== undefined &&
-            washEvidence.suspicious
-          ) {
-            yield* audit
-              .recordDecision({
-                timestamp: Date.now(),
-                cycleId,
-                poolAddress,
-                action: "ENTER",
-                confidence: 0,
-                reasoning: `[wash-forensics] ${washEvidence.reason}`,
-                metrics,
-                riskResult: {
-                  approved: false,
-                  reason: `[wash-forensics] ${washEvidence.reason}`,
-                },
-                executed: false,
-                paperTrading: config.paperTrading,
-              })
-              .pipe(Effect.catch(() => Effect.void));
-            enterGateRejected = true;
           }
 
           // [fee-il-gate] hard ENTER floor — expected fees must beat IL. Active
