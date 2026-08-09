@@ -76,20 +76,28 @@ export type LaunchRejectCategory =
  * Top-N rejection categories with counts — the radar's observable answer to
  * "why did the universe admit nothing". Groups by the stable category, not
  * the value-embedded reason string (which would fragment one cause into a
- * thousand buckets). Pure, extracted for testability.
+ * thousand buckets). Each bucket keeps ONE representative reason so the
+ * near-miss margin survives ('age 5.9h > 6h' vs 'age 40h > 6h' — same
+ * bucket, distinguishable example). Pure, extracted for testability.
  */
 export function summarizeLaunchRejections(
-  rejected: ReadonlyArray<{ readonly category: LaunchRejectCategory }>,
+  rejected: ReadonlyArray<{ readonly category: LaunchRejectCategory; readonly reason: string }>,
   topN = 6,
-): ReadonlyArray<{ readonly category: LaunchRejectCategory; readonly count: number }> {
-  const counts = new Map<LaunchRejectCategory, number>();
+): ReadonlyArray<{
+  readonly category: LaunchRejectCategory;
+  readonly count: number;
+  readonly example: string;
+}> {
+  const counts = new Map<LaunchRejectCategory, { count: number; example: string }>();
   for (const r of rejected) {
-    counts.set(r.category, (counts.get(r.category) ?? 0) + 1);
+    const entry = counts.get(r.category);
+    if (entry === undefined) counts.set(r.category, { count: 1, example: r.reason });
+    else entry.count += 1;
   }
   return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1])
+    .sort((a, b) => b[1].count - a[1].count)
     .slice(0, Math.max(topN, 1))
-    .map(([category, count]) => ({ category, count }));
+    .map(([category, { count, example }]) => ({ category, count, example }));
 }
 
 /** Gates and ranks one launch-radar snapshot. Pure; callers feed it the

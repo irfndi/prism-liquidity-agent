@@ -183,15 +183,18 @@ describe("gateAndRankLaunchPools", () => {
 });
 
 describe("summarizeLaunchRejections", () => {
-  it("groups by stable category — value-embedded reasons do not fragment the histogram", () => {
+  it("groups by stable category and keeps one example reason per bucket", () => {
     const summary = summarizeLaunchRejections([
-      { category: "age" },
-      { category: "age" },
-      { category: "tvl" },
-      { category: "age" },
+      { category: "age", reason: "age 5.9h > 6h" },
+      { category: "age", reason: "age 40h > 6h" },
+      { category: "tvl", reason: "tvl 200000 > 1000000 (established, not a launch)" },
+      { category: "age", reason: "age 7.2h > 6h" },
     ]);
-    expect(summary[0]).toEqual({ category: "age", count: 3 });
-    expect(summary[1]).toEqual({ category: "tvl", count: 1 });
+    expect(summary[0]!.category).toBe("age");
+    expect(summary[0]!.count).toBe(3);
+    expect(summary[0]!.example).toBe("age 5.9h > 6h");
+    expect(summary[1]!.category).toBe("tvl");
+    expect(summary[1]!.count).toBe(1);
     expect(summary).toHaveLength(2);
   });
 
@@ -200,7 +203,10 @@ describe("summarizeLaunchRejections", () => {
   });
 
   it("clamps topN to at least one", () => {
-    const summary = summarizeLaunchRejections([{ category: "age" }, { category: "tvl" }], 0);
+    const summary = summarizeLaunchRejections(
+      [{ category: "age", reason: "a" }, { category: "tvl", reason: "b" }],
+      0,
+    );
     expect(summary).toHaveLength(1);
   });
 });
