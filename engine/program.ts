@@ -3987,6 +3987,7 @@ export const program = Effect.gen(function* () {
         admitted: ranked.length,
         rejected: discovered.length - ranked.length,
         top: ranked.slice(0, config.launchScanTopK ?? 30).map((r) => ({
+          address: r.pool.address,
           pool: `${r.pool.tokenXSymbol ?? "?"}/${r.pool.tokenYSymbol ?? "?"}`,
           feeYield1hPct: r.feeYield1hPct,
           volume1hUsd: r.volume1hUsd,
