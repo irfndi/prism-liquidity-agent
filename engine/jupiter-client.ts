@@ -84,45 +84,44 @@ export async function jupiterFetch(
   input: string | URL | Request,
   init?: RequestInit,
 ): Promise<Response> {
-  const now = Date.now();
+  const signal = init?.signal ?? undefined;
   // Fail fast while the 429 cooldown is open — no network traffic, so a ban
   // cannot be refreshed by retry loops.
-  if (now < breakerCooldownUntil) {
-    return syntheticRateLimitedResponse();
-  }
-  // Pace to the sustained keyless rate. The slot is claimed SYNCHRONOUSLY
-  // (single-threaded read-modify-write, the gecko pattern) BEFORE any await:
-  // N concurrent callers each reserve a distinct slot (k × interval apart),
-  // so they cannot all compute the same wait, wake together, and burst.
-  const slotStart = Date.now();
-  const reservedAt = Math.max(slotStart, nextJupiterSlotAt);
-  nextJupiterSlotAt = reservedAt + intervalMs();
-  let waitMs = Math.max(0, reservedAt - slotStart);
-  // A slot more than 5 minutes out is a clock anomaly (NTP jump back, or
-  // stale state across test isolation) — never sleep that long for pacing;
-  // a queue that deep is pathological and the 429 breaker should have opened
-  // long before it forms.
-  if (waitMs > MAX_JUPITER_SLOT_WAIT_MS) {
-    nextJupiterSlotAt = slotStart + intervalMs();
-    waitMs = 0;
-  }
-  if (waitMs > 0) {
-    const signal = init?.signal ?? undefined;
-    await sleepWithAbort(waitMs, signal);
-  }
-  // A request can wait for its pacing slot while an EARLIER request receives
-  // a 429 and opens the breaker — re-check after the wait, before calling
-  // fetch, so the waiting request fails fast instead of refreshing the ban.
   if (Date.now() < breakerCooldownUntil) {
     return syntheticRateLimitedResponse();
   }
-  // The caller's abort signal (e.g. AbortSignal.timeout) applies to the whole
-  // round trip, pacing included: if it fired while waiting, behave like fetch
-  // would — throw instead of sending a request that was already abandoned.
-  const signal = init?.signal ?? undefined;
-  if (signal !== undefined && signal.aborted) {
-    throw signal.reason ?? new Error("The operation was aborted");
+  // Pace to the sustained keyless rate. Waiting callers hold NO reservation:
+  // the loop sleeps in ≤interval chunks until the slot is free, then claims
+  // and sends atomically (single-threaded). Concurrent callers still end up
+  // interval-spaced — the first to wake claims and sends, the rest see the
+  // advanced counter and wait again — but an aborted waiter leaves nothing
+  // behind, so no abandoned slot can queue later callers behind dead
+  // reservations.
+  while (true) {
+    const now = Date.now();
+    let waitMs = nextJupiterSlotAt - now;
+    // A slot more than 5 minutes out is a clock anomaly (NTP jump back, or
+    // stale state across test isolation) — never sleep that long for pacing;
+    // a queue that deep is pathological and the 429 breaker should have
+    // opened long before it forms.
+    if (waitMs > MAX_JUPITER_SLOT_WAIT_MS) {
+      nextJupiterSlotAt = now + intervalMs();
+      waitMs = 0;
+    }
+    if (waitMs <= 0) break;
+    await sleepWithAbort(Math.min(waitMs, intervalMs()), signal);
+    // Re-check after every wake: an EARLIER request may have received a 429
+    // and opened the breaker mid-wait (the waiting request must fail fast
+    // instead of refreshing the ban), or the caller's signal may have fired.
+    if (Date.now() < breakerCooldownUntil) {
+      return syntheticRateLimitedResponse();
+    }
+    if (signal !== undefined && signal.aborted) {
+      throw signal.reason ?? new Error("The operation was aborted");
+    }
   }
+  const slotStart = Date.now();
+  nextJupiterSlotAt = slotStart + intervalMs();
   const response = await fetch(input, init);
   if (response.status === 429) {
     // Escalate the cooldown; x-ratelimit-reset (Unix seconds) is the

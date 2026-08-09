@@ -139,24 +139,29 @@ describe("jupiterFetch traffic gate (issue #196 follow-up)", () => {
   it("re-checks the breaker after the pacing wait — a queued request behind a 429 fails fast", async () => {
     setJupiterGateForTest({ intervalMs: 30, baseCooldownMs: 60_000 });
     let fetchCount = 0;
+    // The first request's 429 lands on a timer, so the second request is
+    // already IN the pacing wait when the breaker opens mid-wait — only the
+    // post-wait re-check can stop it from hitting the network (the entry
+    // guard cannot, because the breaker is still closed when it starts).
     mockFetchOnce(() => {
       fetchCount += 1;
-      return rateLimitedResponse();
+      return new Promise((resolve) => setTimeout(() => resolve(rateLimitedResponse()), 10));
     });
 
-    // First request takes the slot and gets a 429 → breaker opens.
     const first = jupiterFetch("https://api.jup.ag/swap/v1/quote");
-    await vi.advanceTimersByTimeAsync(0);
-    await first;
-    expect(fetchCount).toBe(1);
-
-    // Second request starts while the breaker is open and waits for the slot
-    // reserved by the first. After the wait it must re-check the breaker and
-    // fail fast — the network must NOT see the request (a retry loop must not
-    // refresh the ban).
     const second = jupiterFetch("https://api.jup.ag/swap/v1/quote");
-    await vi.advanceTimersByTimeAsync(30);
+    // t0: first claims the free slot and sends (429 lands at t0+10); second
+    // sees the slot t0+30 and waits.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchCount).toBe(1);
+    // t0+10: the first 429 opens the breaker while the second is still
+    // waiting for its slot.
+    await vi.advanceTimersByTimeAsync(10);
+    // t0+30: the second wakes — the post-wait re-check returns the synthetic
+    // 429 instead of fetching (fetchCount stays 1).
+    await vi.advanceTimersByTimeAsync(20);
     const result = await second;
+    await first;
     expect(result.status).toBe(429);
     expect(fetchCount).toBe(1);
   });
@@ -227,6 +232,36 @@ describe("jupiterFetch traffic gate (issue #196 follow-up)", () => {
     await vi.advanceTimersByTimeAsync(3_600_000 + 1);
     const recovered = await jupiterFetch("https://api.jup.ag/swap/v1/quote");
     expect(recovered.status).toBe(200);
+    expect(fetchCount).toBe(2);
+  });
+
+  it("an aborted waiter leaves no reservation — later callers are not queued behind it (P1)", async () => {
+    setJupiterGateForTest({ intervalMs: 30 });
+    let fetchCount = 0;
+    mockFetchOnce(() => {
+      fetchCount += 1;
+      return new Promise((resolve) => setTimeout(() => resolve(okResponse()), 10));
+    });
+    const controller = new AbortController();
+
+    // c1 claims the free slot and sends (resolves at t0+10).
+    const c1 = jupiterFetch("https://api.jup.ag/swap/v1/quote");
+    // c2 waits for the next slot (t0+30) but aborts mid-wait.
+    const c2 = jupiterFetch("https://api.jup.ag/swap/v1/quote", {
+      signal: controller.signal,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    await c1;
+    controller.abort();
+    await expect(c2).rejects.toThrow();
+    expect(fetchCount).toBe(1);
+
+    // c3 starts after c2 aborted: it must wait only ONE interval (30ms) —
+    // the aborted waiter held no reservation, so there is no abandoned slot
+    // to queue behind.
+    const c3 = jupiterFetch("https://api.jup.ag/swap/v1/quote");
+    await vi.advanceTimersByTimeAsync(30);
+    await c3;
     expect(fetchCount).toBe(2);
   });
 
