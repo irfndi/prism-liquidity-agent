@@ -136,6 +136,31 @@ describe("jupiterFetch traffic gate (issue #196 follow-up)", () => {
     expect(fetchCount).toBe(5);
   });
 
+  it("re-checks the breaker after the pacing wait — a queued request behind a 429 fails fast", async () => {
+    setJupiterGateForTest({ intervalMs: 30, baseCooldownMs: 60_000 });
+    let fetchCount = 0;
+    mockFetchOnce(() => {
+      fetchCount += 1;
+      return rateLimitedResponse();
+    });
+
+    // First request takes the slot and gets a 429 → breaker opens.
+    const first = jupiterFetch("https://api.jup.ag/swap/v1/quote");
+    await vi.advanceTimersByTimeAsync(0);
+    await first;
+    expect(fetchCount).toBe(1);
+
+    // Second request starts while the breaker is open and waits for the slot
+    // reserved by the first. After the wait it must re-check the breaker and
+    // fail fast — the network must NOT see the request (a retry loop must not
+    // refresh the ban).
+    const second = jupiterFetch("https://api.jup.ag/swap/v1/quote");
+    await vi.advanceTimersByTimeAsync(30);
+    const result = await second;
+    expect(result.status).toBe(429);
+    expect(fetchCount).toBe(1);
+  });
+
   it("returns the synthetic 429 with the gateway shape for existing error handling", async () => {
     setJupiterGateForTest({ intervalMs: 0, baseCooldownMs: 60_000 });
     mockFetchOnce(() => rateLimitedResponse());

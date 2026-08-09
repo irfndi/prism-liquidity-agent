@@ -2398,6 +2398,14 @@ export const program = Effect.gen(function* () {
     routeProbeResults.delete(key);
     return null;
   };
+  const pruneRouteProbeCache = (): void => {
+    // Discovery keeps finding new mints; without a sweep, expired entries for
+    // old mints would accumulate for the process lifetime.
+    const now = Date.now();
+    for (const [key, entry] of routeProbeResults) {
+      if (entry.expiresAt <= now) routeProbeResults.delete(key);
+    }
+  };
   const writeRouteProbeCache = (key: string, available: boolean): void => {
     if (available) {
       routeProbeResults.set(key, { available, expiresAt: Date.now() + routeProbeCacheTtlMs });
@@ -2781,6 +2789,10 @@ export const program = Effect.gen(function* () {
             .pipe(Effect.catch(() => Effect.succeed(null)));
           if (decimals !== null) decimalsByMint.set(mint, decimals);
         }
+        // Sweep expired route-probe cache entries once per refresh: discovery
+        // keeps finding new mints, so without pruning expired keys would
+        // accumulate for the process lifetime.
+        pruneRouteProbeCache();
         const routeProbes = nonSolMints.map((mint) => {
           const tokenPrice = tokenPrices.get(mint) ?? 0;
           const decimals = decimalsByMint.get(mint);
@@ -2795,9 +2807,12 @@ export const program = Effect.gen(function* () {
             const key = `${direction}:${mint}`;
             const cached = readRouteProbeCache(key);
             if (cached !== null) return Effect.succeed(cached);
+            // catchCause, not catch: a defect (e.g. a sync throw from a
+            // malformed mint in the quote path) must degrade to "route
+            // unavailable" for this probe, never fail the whole refresh.
             return quote.pipe(
               Effect.as(true),
-              Effect.catch(() => Effect.succeed(false)),
+              Effect.catchCause(() => Effect.succeed(false)),
               Effect.tap((available) => Effect.sync(() => writeRouteProbeCache(key, available))),
             );
           };

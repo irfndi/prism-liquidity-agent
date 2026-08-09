@@ -109,6 +109,13 @@ export async function jupiterFetch(
   if (effectiveWaitMs > 0) {
     await sleep(effectiveWaitMs);
   }
+  // A request can wait for its pacing slot while an EARLIER request receives
+  // a 429 and opens the breaker — re-check before reserving the next slot or
+  // calling fetch, so the waiting request fails fast instead of refreshing
+  // the ban.
+  if (Date.now() < breakerCooldownUntil) {
+    return syntheticRateLimitedResponse();
+  }
   const slotStart = Date.now();
   nextJupiterSlotAt = Math.max(slotStart, nextJupiterSlotAt) + intervalMs();
   const response = await fetch(input, init);
