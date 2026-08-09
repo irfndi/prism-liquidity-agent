@@ -182,7 +182,11 @@ export function evaluateRisk(
         reason: `Rebalance range ${rangeWidth} bins exceeds max ${riskConfig.maxRebalanceRangeBins}`,
       };
     }
+    // A runner scale-in (topUp present) re-anchors the band BELOW the active
+    // bin by design — the below-market dip ladder is the point. The
+    // containment check applies only to ordinary rebalances.
     if (
+      decision.rebalanceParams.topUp === undefined &&
       ctx.activeBinId !== undefined &&
       Number.isFinite(ctx.activeBinId) &&
       (ctx.activeBinId < newLowerBinId || ctx.activeBinId > newUpperBinId)

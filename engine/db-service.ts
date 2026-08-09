@@ -67,6 +67,10 @@ export interface PositionRecord {
    *  entered dip-anchored; the exit drawdown selection is pinned to the
    *  ENTRY mode, not the current global flag (restart-safe). */
   launchRunner?: boolean | null;
+  /** Runner scale-in state (Heart Attack step 2): steps taken + the band's
+   *  anchor price. Persisted so a restart cannot re-scale a filled position. */
+  launchRunnerSteps?: number | null;
+  launchRunnerAnchorPrice?: number | null;
 }
 
 export type PositionEventType = "ENTER" | "EXIT" | "REBALANCE" | "CLAIM" | "COMPOUND";
@@ -165,8 +169,9 @@ export const DbLive = (dbPath?: string) =>
               entry_price_usd, entry_amount_x_usd, entry_amount_y_usd,
               cumulative_fees_claimed_usd, cumulative_rewards_claimed_usd,
               closed_at, realized_pnl_usd,
-              position_mode, tp_ladder_json, invalidation_stop_price, launch_runner
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              position_mode, tp_ladder_json, invalidation_stop_price, launch_runner,
+              launch_runner_steps, launch_runner_anchor_price
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(position_id) DO UPDATE SET
               pool_address = excluded.pool_address,
               position_pubkey = COALESCE(excluded.position_pubkey, positions.position_pubkey),
@@ -200,7 +205,12 @@ export const DbLive = (dbPath?: string) =>
                 excluded.invalidation_stop_price,
                 positions.invalidation_stop_price
               ),
-              launch_runner = COALESCE(excluded.launch_runner, positions.launch_runner)`,
+              launch_runner = COALESCE(excluded.launch_runner, positions.launch_runner),
+              launch_runner_steps = COALESCE(excluded.launch_runner_steps, positions.launch_runner_steps),
+              launch_runner_anchor_price = COALESCE(
+                excluded.launch_runner_anchor_price,
+                positions.launch_runner_anchor_price
+              )`,
               pos.positionId,
               pos.poolAddress,
               pos.positionPubKey,
@@ -232,6 +242,8 @@ export const DbLive = (dbPath?: string) =>
               pos.tpLadderJson ?? null,
               pos.invalidationStopPrice ?? null,
               pos.launchRunner == null ? null : pos.launchRunner ? 1 : 0,
+              pos.launchRunnerSteps ?? null,
+              pos.launchRunnerAnchorPrice ?? null,
             );
           }),
 
@@ -1551,6 +1563,9 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     realizedPnlUsd: row.realized_pnl_usd != null ? Number(row.realized_pnl_usd) : null,
     positionMode: row.position_mode != null ? String(row.position_mode as unknown) : null,
     launchRunner: row.launch_runner != null ? row.launch_runner !== 0 : null,
+    launchRunnerSteps: row.launch_runner_steps != null ? Number(row.launch_runner_steps) : null,
+    launchRunnerAnchorPrice:
+      row.launch_runner_anchor_price != null ? Number(row.launch_runner_anchor_price) : null,
     tpLadderJson: row.tp_ladder_json != null ? String(row.tp_ladder_json as unknown) : null,
     invalidationStopPrice:
       row.invalidation_stop_price != null ? Number(row.invalidation_stop_price) : null,

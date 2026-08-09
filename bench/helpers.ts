@@ -86,6 +86,12 @@ export function makePosition(overrides: Partial<PositionRecord> = {}): PositionR
     cumulativeRewardsClaimedUsd: overrides.cumulativeRewardsClaimedUsd ?? 0,
     closedAt: overrides.closedAt ?? null,
     realizedPnlUsd: overrides.realizedPnlUsd ?? null,
+    positionMode: overrides.positionMode ?? null,
+    tpLadderJson: overrides.tpLadderJson ?? null,
+    invalidationStopPrice: overrides.invalidationStopPrice ?? null,
+    launchRunner: overrides.launchRunner ?? null,
+    launchRunnerSteps: overrides.launchRunnerSteps ?? null,
+    launchRunnerAnchorPrice: overrides.launchRunnerAnchorPrice ?? null,
   };
 }
 

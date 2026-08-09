@@ -112,7 +112,12 @@ import { identifyAssetMint } from "./fallen-angel-service.js";
 import { buildTpLadder, evaluateTpLadder, parseTpLadder, serializeTpLadder } from "./tp-ladder.js";
 import { getGeckoPoolOhlcv, type GeckoOhlcvSignals } from "./gecko-ohlcv-service.js";
 import { getRugCheckReport, type RugCheckReport } from "./rugcheck-service.js";
-import { launchEntrySizeUsd, launchPositionExit } from "./launch-position.js";
+import {
+  launchEntrySizeUsd,
+  launchPositionExit,
+  scaleInTopUpUsd,
+  shouldScaleInRunner,
+} from "./launch-position.js";
 import type {
   AgentDecision,
   AgentProposal,
@@ -1047,6 +1052,8 @@ export function executePaper(
         tpLadderJson: decision.tpLadderJson ?? null,
         invalidationStopPrice: decision.invalidationStopPrice ?? null,
         launchRunner: (entryDipOffsetBins ?? 0) !== 0 ? true : null,
+        launchRunnerSteps: (entryDipOffsetBins ?? 0) !== 0 ? 0 : null,
+        launchRunnerAnchorPrice: (entryDipOffsetBins ?? 0) !== 0 ? pool.currentPrice : null,
       };
       trackedPositions.set(pos.positionId, pos);
       yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
@@ -1118,10 +1125,31 @@ export function executePaper(
     } else if (decision.action === "REBALANCE" && decision.rebalanceParams) {
       const current = resolveTargetPosition(trackedPositions, decision);
       if (current) {
+        // Runner scale-in: the top-up is FRESH capital — grow the cost basis
+        // and the mark in lockstep (same invariant the live executor applies)
+        // and advance the band anchor + step count.
+        const topUpUsd = decision.rebalanceParams.topUpUsd ?? 0;
+        const scaled = applyCompoundToCostBasis({
+          depositedUsd: current.depositedUsd,
+          currentValueUsd: current.currentValueUsd,
+          highestValueUsd: current.highestValueUsd,
+          compoundedFeesUsd: topUpUsd,
+        });
         const updated: PositionRecord = {
           ...current,
+          ...scaled,
+          entryAmountXUsd:
+            current.launchRunner === true
+              ? (current.entryAmountXUsd ?? 0) + topUpUsd
+              : current.entryAmountXUsd,
           lowerBinId: decision.rebalanceParams.newLowerBinId,
           upperBinId: decision.rebalanceParams.newUpperBinId,
+          ...(current.launchRunner === true && decision.rebalanceParams.topUp !== undefined
+            ? {
+                launchRunnerAnchorPrice: pool.currentPrice,
+                launchRunnerSteps: (current.launchRunnerSteps ?? 0) + 1,
+              }
+            : {}),
           lastRebalanceAt: Date.now(),
         };
         trackedPositions.set(updated.positionId, updated);
@@ -1139,6 +1167,7 @@ export function executePaper(
             metadata: {
               newLowerBinId: decision.rebalanceParams.newLowerBinId,
               newUpperBinId: decision.rebalanceParams.newUpperBinId,
+              ...(decision.rebalanceParams.topUp !== undefined ? { scaleIn: true, topUpUsd } : {}),
             },
             createdAt: Date.now(),
           })
@@ -1575,6 +1604,8 @@ export function executeLive(
           tpLadderJson: decision.tpLadderJson ?? null,
           invalidationStopPrice: decision.invalidationStopPrice ?? null,
           launchRunner: (entryDipOffsetBins ?? 0) !== 0 ? true : null,
+          launchRunnerSteps: (entryDipOffsetBins ?? 0) !== 0 ? 0 : null,
+          launchRunnerAnchorPrice: (entryDipOffsetBins ?? 0) !== 0 ? pool.currentPrice : null,
         };
         trackedPositions.set(pos.positionId, pos);
         yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
@@ -2196,6 +2227,7 @@ export function executeLive(
             pos.positionPubKey,
             decision.rebalanceParams.newLowerBinId,
             decision.rebalanceParams.newUpperBinId,
+            decision.rebalanceParams.topUp,
           )
           .pipe(
             Effect.tap((r) =>
@@ -2219,14 +2251,37 @@ export function executeLive(
           );
 
         if (rebalanceResult.result) {
+          // Runner scale-in: the top-up is FRESH capital — grow the cost
+          // basis and the mark in lockstep (currentValue + topUp = the
+          // post-rebalance on-chain value; depositedUsd tracks the added
+          // capital so PnL never treats it as profit), credit the X basis and
+          // advance the band anchor + step count.
+          const topUpUsd = decision.rebalanceParams.topUpUsd ?? 0;
+          const scaled = applyCompoundToCostBasis({
+            depositedUsd: pos.depositedUsd,
+            currentValueUsd: pos.currentValueUsd,
+            highestValueUsd: pos.highestValueUsd,
+            compoundedFeesUsd: topUpUsd,
+          });
           const updated: PositionRecord = {
             ...pos,
+            ...scaled,
+            entryAmountXUsd:
+              decision.rebalanceParams.topUp !== undefined
+                ? (pos.entryAmountXUsd ?? 0) + topUpUsd
+                : pos.entryAmountXUsd,
             // Atomic rebalance preserves the position account: the pubkey,
             // entry basis and cumulative fee accounting all survive.
             positionId: rebalanceResult.result.positionPubKey,
             positionPubKey: rebalanceResult.result.positionPubKey,
             lowerBinId: decision.rebalanceParams.newLowerBinId,
             upperBinId: decision.rebalanceParams.newUpperBinId,
+            ...(decision.rebalanceParams.topUp !== undefined
+              ? {
+                  launchRunnerAnchorPrice: pool.currentPrice,
+                  launchRunnerSteps: (pos.launchRunnerSteps ?? 0) + 1,
+                }
+              : {}),
             lastFeeClaimAt: Date.now(),
             lastRebalanceAt: Date.now(),
           };
@@ -5534,6 +5589,118 @@ export const program = Effect.gen(function* () {
               detail = `fee/IL ${metrics.feeIlRatio.toFixed(2)} < 0.5`;
             }
             launchLifecycle = { reasoning: `[launch-${launchReason}] ${detail}` };
+          } else if (
+            // ── Runner scale-in (Heart Attack step 2) ────────────────────────
+            // The dip band TRACKS the falling price: when the price falls a
+            // full step below the band's anchor, re-anchor at dip% below the
+            // NEW price and top up with fresh quote capital via the atomic
+            // rebalance (redeposits the mixed basket + top-up in one tx,
+            // preserving the position pubkey). Runs only when the exit did NOT
+            // fire this cycle — never scale into a dying position. Attached to
+            // the INNER exit-if (this position's launch lifecycle), not the
+            // outer launch-mode gate — otherwise it would run for non-launch
+            // positions, which never carry launchRunner.
+            pos.launchRunner === true &&
+            config.launchRunnerScaleInEnabled !== false
+          ) {
+            const scaleInDecision = shouldScaleInRunner({
+              anchorPrice: pos.launchRunnerAnchorPrice ?? 0,
+              currentPrice: pool.currentPrice,
+              stepPct: config.launchRunnerScaleInStepPct ?? 0.05,
+              steps: pos.launchRunnerSteps ?? 0,
+              maxSteps: config.launchRunnerScaleInMaxSteps ?? 3,
+            });
+            if (scaleInDecision.scale && pos.positionPubKey !== null) {
+              // Per-pool allocation headroom: a scale-in ADDS new capital to
+              // the pool's aggregate exposure — the same cap the risk tail
+              // applies to entries.
+              const poolExposureUsd = Array.from(trackedPositions.values())
+                .filter((p) => p.poolAddress === poolAddress)
+                .reduce((sum, p) => sum + p.currentValueUsd, 0);
+              const portfolioValueUsd =
+                lastWalletBalanceUsd +
+                Array.from(trackedPositions.values()).reduce(
+                  (sum, p) => sum + p.currentValueUsd,
+                  0,
+                );
+              const poolCapUsd = Math.max(
+                0,
+                (config.maxPerPoolAllocationPct ?? 0.4) * portfolioValueUsd - poolExposureUsd,
+              );
+              const topUpUsd = scaleInTopUpUsd({
+                walletUsd: lastWalletBalanceUsd,
+                sizePct: config.launchRunnerScaleInSizePct ?? 0.25,
+                poolCapUsd,
+                maxTopUpUsd: config.launchPositionMaxSizeUsd ?? 100,
+              });
+              const tokenXDecimals = yield* adapter
+                .getTokenDecimals(pool.tokenX)
+                .pipe(Effect.catch(() => Effect.succeed(null)));
+              // Live price only — a hardcoded fallback must never size a
+              // top-up (useFallback: false; an unavailable price tops out at
+              // 0 and the top-up is skipped).
+              const priceX = (yield* adapter
+                .getTokenPrices([pool.tokenX], { useFallback: false })
+                .pipe(Effect.catch(() => Effect.succeed({} as Record<string, number>))))[
+                pool.tokenX
+              ];
+              const topUpAtomicX =
+                tokenXDecimals !== null && priceX != null && priceX > 0
+                  ? BigInt(Math.floor((topUpUsd / priceX) * 10 ** tokenXDecimals))
+                  : 0n;
+              if (topUpUsd >= 5 && topUpAtomicX > 0n) {
+                // Reserve the SOL the top-up costs (autonomous canary/live
+                // swaps SOL for a non-SOL quote leg): skip — never force —
+                // when the batch budget cannot cover it, exactly like ENTER.
+                const solCostLamports = solFundedEntryMode
+                  ? estimateEntrySolLamports({
+                      positionSizeUsd: topUpUsd,
+                      solPriceUsd: config.solPriceUsd,
+                      poolHasSolLeg: pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT,
+                      solFunded: true,
+                    })
+                  : 0n;
+                if (solCostLamports > 0n && entrySolBudgetLamports < solCostLamports) {
+                  logger.info("Runner scale-in skipped — SOL budget insufficient", {
+                    pool: poolAddress,
+                    position: pos.positionId,
+                  });
+                } else {
+                  if (solCostLamports > 0n) entrySolBudgetLamports -= solCostLamports;
+                  const dipOffset = dipOffsetBinsForPct(
+                    pool.binStep,
+                    config.launchRunnerDipPct ?? 0.12,
+                  );
+                  const runnerWidth = Math.max(
+                    1,
+                    Math.min(
+                      config.launchRunnerHalfWidthBins ?? 5,
+                      Math.abs(dipOffset) - 1,
+                      Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
+                    ),
+                  );
+                  // EMIT a position-targeted REBALANCE decision: the normal
+                  // executor runs it through risk.evaluate (safety pause),
+                  // the agent overlay (veto can HOLD it, supervised requires
+                  // approval, full validates) and the paper/live dispatch —
+                  // after every exit gate has had its say this cycle.
+                  decision = {
+                    action: "REBALANCE",
+                    poolAddress,
+                    positionId: pos.positionId,
+                    confidence: 1,
+                    reasoning: `[launch-scale-in] ${scaleInDecision.reason ?? "price step reached"}`,
+                    rebalanceParams: {
+                      newLowerBinId: pool.activeBinId - runnerWidth + dipOffset,
+                      newUpperBinId: pool.activeBinId + runnerWidth + dipOffset,
+                      slippageBps: config.maxSwapSlippageBps ?? 50,
+                      topUp: { amountXAtomic: topUpAtomicX, amountYAtomic: 0n },
+                      topUpUsd,
+                    },
+                  };
+                }
+              }
+            }
           }
         }
 

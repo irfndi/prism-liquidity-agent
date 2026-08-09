@@ -5,6 +5,8 @@ import { describe, it, expect } from "vitest";
 import {
   launchPositionExit,
   launchEntrySizeUsd,
+  scaleInTopUpUsd,
+  shouldScaleInRunner,
   type LaunchPositionExitInput,
 } from "../engine/launch-position.js";
 
@@ -212,5 +214,65 @@ describe("launchEntrySizeUsd", () => {
 
   it("floors at 0 for a negative TVL", () => {
     expect(launchEntrySizeUsd({ walletUsd: 1_000, poolTvlUsd: -1, maxSizeUsd: 100 })).toBe(0);
+  });
+});
+
+describe("shouldScaleInRunner (Heart Attack step 2)", () => {
+  const base = { anchorPrice: 100, currentPrice: 100, stepPct: 0.05, steps: 0, maxSteps: 3 };
+
+  it("scales when the price fell a full step below the anchor", () => {
+    const d = shouldScaleInRunner({ ...base, currentPrice: 94 }); // -6% >= 5%
+    expect(d.scale).toBe(true);
+    expect(d.reason).toContain("step 1/3");
+  });
+
+  it("does not scale before the step threshold", () => {
+    const d = shouldScaleInRunner({ ...base, currentPrice: 97 }); // -3% < 5%
+    expect(d.scale).toBe(false);
+  });
+
+  it("stops at max steps", () => {
+    const d = shouldScaleInRunner({ ...base, currentPrice: 90, steps: 3, maxSteps: 3 });
+    expect(d.scale).toBe(false);
+    expect(d.reason).toContain("max steps");
+  });
+
+  it("never scales without a known anchor or price", () => {
+    expect(shouldScaleInRunner({ ...base, anchorPrice: 0 }).scale).toBe(false);
+    expect(shouldScaleInRunner({ ...base, currentPrice: 0 }).scale).toBe(false);
+  });
+
+  it("re-anchors at the new price on the next step (band tracks the dip)", () => {
+    // Step 1 fired at 94 -> anchor becomes 94; step 2 fires at <= 89.3.
+    expect(shouldScaleInRunner({ ...base, currentPrice: 94 }).scale).toBe(true);
+    expect(
+      shouldScaleInRunner({ ...base, anchorPrice: 94, currentPrice: 89, steps: 1 }).scale,
+    ).toBe(true);
+    expect(
+      shouldScaleInRunner({ ...base, anchorPrice: 94, currentPrice: 92, steps: 1 }).scale,
+    ).toBe(false);
+  });
+});
+
+describe("scaleInTopUpUsd", () => {
+  it("sizes min(sizePct x wallet, pool headroom, hard ceiling)", () => {
+    expect(
+      scaleInTopUpUsd({ walletUsd: 100, sizePct: 0.25, poolCapUsd: 50, maxTopUpUsd: 100 }),
+    ).toBe(25);
+    expect(
+      scaleInTopUpUsd({ walletUsd: 100, sizePct: 0.25, poolCapUsd: 10, maxTopUpUsd: 100 }),
+    ).toBe(10);
+    expect(
+      scaleInTopUpUsd({ walletUsd: 1000, sizePct: 0.25, poolCapUsd: 1000, maxTopUpUsd: 100 }),
+    ).toBe(100);
+  });
+
+  it("floors at 0 — no headroom means no top-up", () => {
+    expect(
+      scaleInTopUpUsd({ walletUsd: 100, sizePct: 0.25, poolCapUsd: 0, maxTopUpUsd: 100 }),
+    ).toBe(0);
+    expect(
+      scaleInTopUpUsd({ walletUsd: -50, sizePct: 0.25, poolCapUsd: 100, maxTopUpUsd: 100 }),
+    ).toBe(0);
   });
 });

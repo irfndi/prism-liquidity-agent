@@ -237,6 +237,11 @@ export interface AppConfig {
   readonly launchRunnerDipPct?: number;
   readonly launchRunnerDrawdownPct?: number;
   readonly launchRunnerHalfWidthBins?: number;
+  /** Runner scale-in knobs (Heart Attack step 2). */
+  readonly launchRunnerScaleInEnabled?: boolean;
+  readonly launchRunnerScaleInStepPct?: number;
+  readonly launchRunnerScaleInSizePct?: number;
+  readonly launchRunnerScaleInMaxSteps?: number;
   readonly deployerBlacklistPath: string;
   readonly tokenBlacklistPath: string;
   readonly sqliteDbPath: string;
@@ -1413,6 +1418,29 @@ const loadConfig = Effect.gen(function* () {
   const launchRunnerHalfWidthBins = Math.floor(
     yield* validatedNumber("LAUNCH_RUNNER_HALF_WIDTH_BINS", 1, 5, 100),
   );
+  // Runner scale-in (Heart Attack step 2): when the price falls a full step
+  // below the band's anchor, re-anchor the band at dip% below the NEW price
+  // and top up the position with fresh quote capital (atomic rebalance
+  // redeposits the mixed basket + top-up). Persisted per position
+  // (launch_runner_steps / launch_runner_anchor_price), restart-safe.
+  const launchRunnerScaleInEnabled = yield* Config.boolean("LAUNCH_RUNNER_SCALE_IN_ENABLED").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const launchRunnerScaleInStepPct = yield* validatedNumber(
+    "LAUNCH_RUNNER_SCALE_IN_STEP_PCT",
+    0.01,
+    0.05,
+    0.5,
+  );
+  const launchRunnerScaleInSizePct = yield* validatedNumber(
+    "LAUNCH_RUNNER_SCALE_IN_SIZE_PCT",
+    0.05,
+    0.25,
+    1,
+  );
+  const launchRunnerScaleInMaxSteps = Math.floor(
+    yield* validatedNumber("LAUNCH_RUNNER_SCALE_IN_MAX_STEPS", 1, 3, 10),
+  );
 
   const deployerBlacklistPath = yield* Config.string("DEPLOYER_BLACKLIST_PATH").pipe(
     Effect.orElseSucceed(() => "./engine/data/deployer-blacklist.json"),
@@ -1596,6 +1624,10 @@ const loadConfig = Effect.gen(function* () {
     launchRunnerDipPct,
     launchRunnerDrawdownPct,
     launchRunnerHalfWidthBins,
+    launchRunnerScaleInEnabled,
+    launchRunnerScaleInStepPct,
+    launchRunnerScaleInSizePct,
+    launchRunnerScaleInMaxSteps,
     deployerBlacklistPath,
     tokenBlacklistPath,
     sqliteDbPath,
