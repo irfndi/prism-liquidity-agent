@@ -2,6 +2,16 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.6] — 2026-08-09
+
+### Added
+
+- **Wash forensics** — the launch lane can now distinguish real volume from wash trading before capital enters: one Helius enhanced-API call per admitted pool per radar refresh scores wallet concentration (few payers across many trades), bot bursts (>5 trades/sec from ≤2 wallets) and fee uniformity, from the feePayer of each successful METEORA transaction (DLMM swaps are not in Helius's parsed models, but the payer survives). `LAUNCH_WASH_FORENSICS_ENABLED` (default off) logs the evidence in the radar payload and hard-rejects egregious evidence with an audited `[wash-forensics]` ENTER gate — before every specialized ENTER branch (fallen-angel included), launch-lane-only, fail-open on every fetch/parse failure, bounded in width (top-30) and concurrency (5), and served from the canonical api- enhanced API host. Validated against live data: the TOAD pool's recent txs came from 4 payers — 25 from one wallet — in a 4-second window (#209)
+
+### Changed
+
+- Bumped version to 0.2.6.
+
 ## [0.2.5] — 2026-08-09
 
 ### Added
