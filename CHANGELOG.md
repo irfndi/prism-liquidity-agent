@@ -2,7 +2,7 @@
 
 All notable changes to Prism are documented here.
 
-## [Unreleased]
+## [0.2.10] — 2026-08-10
 
 ### Added
 
