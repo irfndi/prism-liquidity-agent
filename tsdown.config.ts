@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "tsdown";
@@ -11,6 +12,14 @@ const bigintBufferPureJs = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "node_modules/bigint-buffer/dist/browser.js",
 );
+
+// bigint-buffer is a transitive dep of @solana/web3.js; fail fast at config
+// load with a clear message instead of bundling a broken alias path.
+if (!existsSync(bigintBufferPureJs)) {
+  throw new Error(
+    "bigint-buffer (transitive dep of @solana/web3.js) is missing — run `bun install` first",
+  );
+}
 
 export default defineConfig({
   entry: ["engine/index.ts"],

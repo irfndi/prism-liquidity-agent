@@ -14,6 +14,18 @@ on:
 permissions:
   contents: read
 
+# Single source of truth for the Bun version and the R2 public bucket URL;
+# every setup-bun and manifest step below references these. Bun publishes
+# canary only as a rolling `canary` release — no per-version canary tags exist
+# (verified against oven-sh/bun git refs; `bun-v1.4.0-canary.1` 404s) and
+# stable bun (max 1.3.14) cannot parse this repo's bun.lock v2, so `canary`
+# is the only resolvable pin: it resolves to the same build CI always used
+# (local toolchain 1.4.0-canary.1+52bf09cb1, engines >=1.4.0-canary.1). Bump
+# this one value when bun tags a stable 1.4.0 or per-version canary.
+env:
+  BUN_VERSION: canary
+  R2_PUBLIC_URL: https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -34,7 +46,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: canary
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -94,7 +106,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: canary
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Install dependencies
         run: bun install
@@ -105,7 +117,7 @@ jobs:
         working-directory: cloudflare
 
       - name: Run worker tests (shard ${{ matrix.shard }}/${{ matrix.total }})
-        run: bunx vitest run --shard=${{ matrix.shard }}/${{ matrix.total }}
+        run: bun --bun vitest run --shard=${{ matrix.shard }}/${{ matrix.total }}
         working-directory: cloudflare
 
   # Canary release channel: build + publish a per-merge canary bundle to R2
@@ -135,7 +147,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: canary
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Install dependencies
         run: bun install
@@ -185,7 +197,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: canary
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -232,7 +244,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: canary
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -305,7 +317,7 @@ jobs:
           FULL_SHA: ${{ needs.canary-prepare.outputs.full_sha }}
         run: |
           cd canary-assets
-          VERSION="${VERSION}" CHANNEL=canary COMMIT="${FULL_SHA}" R2_BASE_URL="https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev" R2_KEY_PREFIX="${BUILD_DIR}" REQUIRE_ALL_BUNDLES=true bun run ../scripts/generate-release-manifest.ts
+          VERSION="${VERSION}" CHANNEL=canary COMMIT="${FULL_SHA}" R2_BASE_URL="${{ env.R2_PUBLIC_URL }}" R2_KEY_PREFIX="${BUILD_DIR}" REQUIRE_ALL_BUNDLES=true bun run ../scripts/generate-release-manifest.ts
           cd ..
           BUNDLE_COUNT=$(jq '.bundles | length' canary-assets/manifest.json)
           if [ "$BUNDLE_COUNT" -lt 4 ]; then
@@ -327,6 +339,20 @@ jobs:
             [ "$(basename "$f")" = "manifest.json" ] && continue
             npx wrangler r2 object put "prism-backups/${BUILD_DIR}/$(basename "$f")" --file "$f" --remote
           done
+
+      - name: Validate first canary bundle is reachable (HEAD)
+        # The pointer flip below publishes the manifest to every `prism update
+        # --canary` client, so the first embedded bundle URL must be confirmed
+        # reachable (HTTP 2xx) first — a dead upload must never be flipped live.
+        run: |
+          FIRST_URL=$(jq -r '.bundles | to_entries[0].value.url' canary-assets/manifest.json)
+          if [ -z "$FIRST_URL" ] || [ "$FIRST_URL" = "null" ]; then
+            echo "::error::could not extract first bundle URL from canary manifest"
+            exit 1
+          fi
+          echo "→ HEAD ${FIRST_URL}"
+          curl -fsSI --max-time 30 "$FIRST_URL" >/dev/null
+          echo "→ OK: first canary bundle is reachable"
 
       - name: Upload canary manifest pointer to R2 (atomic flip)
         env:

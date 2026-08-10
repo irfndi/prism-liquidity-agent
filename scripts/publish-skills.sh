@@ -52,11 +52,13 @@ publish_mcp() {
   log_info "Publishing MCP server to npm..."
   cd "$REPO_ROOT/mcp-server"
 
-  if [ ! -f "dist/index.js" ]; then
-    log_warn "MCP server not built. Running npm run build..."
-    if [ "$DRY_RUN" != "--dry-run" ]; then
-      npm run build
-    fi
+  # Rebuild unconditionally so a stale dist/ from an older tree can never be
+  # published. Dry-run keeps the fast path and only previews the command.
+  if [ "$DRY_RUN" = "--dry-run" ]; then
+    log_warn "Skipping npm run build in dry-run (dist may be stale/empty)."
+  else
+    rm -rf dist
+    npm run build
   fi
 
   if [ "$DRY_RUN" = "--dry-run" ]; then
@@ -79,18 +81,26 @@ publish_python_pkg() {
   log_info "Publishing $pkg_name to PyPI..."
   cd "$pkg_dir"
 
-  if [ ! -d "dist" ] || [ -z "$(ls -A dist 2>/dev/null)" ]; then
-    log_warn "$pkg_name not built. Running python3 -m build..."
-    if [ "$DRY_RUN" != "--dry-run" ]; then
-      python3 -m build
-    fi
+  # Rebuild unconditionally so a stale dist/ from an older tree can never be
+  # published. Dry-run keeps the fast path and only previews the command.
+  if [ "$DRY_RUN" = "--dry-run" ]; then
+    log_warn "Skipping python3 -m build in dry-run (dist may be stale/empty)."
+  else
+    rm -rf dist
+    python3 -m build
   fi
 
   # Fail fast on an empty dist instead of passing a literal glob to twine.
+  # In dry-run the build is skipped, so an empty dist is expected and must not
+  # abort a clean-checkout dry run.
   shopt -s nullglob
   local dist_files=(dist/*)
   shopt -u nullglob
   if [ "${#dist_files[@]}" -eq 0 ]; then
+    if [ "$DRY_RUN" = "--dry-run" ]; then
+      log_warn "$pkg_name dist is empty in dry-run; nothing to preview."
+      return 0
+    fi
     log_error "$pkg_name dist is empty after build; aborting."
     exit 1
   fi

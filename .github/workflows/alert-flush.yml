@@ -19,9 +19,16 @@ on:
 permissions:
   contents: read
 
+# Serialize cron flushes: a long-running or stuck flush must not stack with
+# the next 5-minute cron tick. Newer runs supersede stale in-flight ones.
+concurrency:
+  group: alert-flush
+  cancel-in-progress: true
+
 jobs:
   flush:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Flush undelivered alerts via the bot
         continue-on-error: true
@@ -29,7 +36,7 @@ jobs:
           BOT_API_SECRET: ${{ secrets.BOT_API_SECRET }}
         run: |
           set +e
-          body=$(curl -sS --max-time 60 -X POST \
+          body=$(curl -sS --connect-timeout 10 --max-time 60 -X POST \
             https://prism-telegram-bot.irfndi.workers.dev/internal/flush-alerts \
             -H "X-Bot-Api-Secret: $BOT_API_SECRET" \
             -w '\nHTTP_STATUS:%{http_code}')

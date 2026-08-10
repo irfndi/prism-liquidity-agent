@@ -58,6 +58,26 @@ if (Object.keys(bundles).length === 0) {
 
 const tarballUrl = `${r2Base}/${keyPrefix}/prism-v${version}.tar.gz`;
 const signatureUrl = `${tarballUrl}.asc`;
+const requireSignature = (process.env.REQUIRE_SIGNATURE ?? "false") === "true";
+
+// The manifest advertises these artifacts, so they must exist before we write
+// it — a manifest full of dead R2 URLs is worse than a failed job. Same
+// existsSync style as the per-bundle checksum gate above, but hard-failing:
+// the source tarball is not optional the way a per-platform bundle is. The
+// .asc is only asserted when a GPG signature is expected for this release
+// (REQUIRE_SIGNATURE=true); the release workflow signs after manifest
+// generation, so it must be wired in explicitly.
+const requiredArtifacts = [
+  `prism-v${version}.tar.gz`,
+  `prism-v${version}.tar.gz.sha256`,
+  ...(requireSignature ? [`prism-v${version}.tar.gz.asc`] : []),
+];
+for (const name of requiredArtifacts) {
+  if (!fs.existsSync(path.join(cwd, name))) {
+    console.error(`Missing ${name} in ${cwd}; refusing to write manifest`);
+    process.exit(1);
+  }
+}
 
 const manifest: Record<string, unknown> = {
   version,
