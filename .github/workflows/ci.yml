@@ -340,19 +340,22 @@ jobs:
             npx wrangler r2 object put "prism-backups/${BUILD_DIR}/$(basename "$f")" --file "$f" --remote
           done
 
-      - name: Validate first canary bundle is reachable (HEAD)
+      - name: Validate canary bundles are reachable (HEAD)
         # The pointer flip below publishes the manifest to every `prism update
-        # --canary` client, so the first embedded bundle URL must be confirmed
+        # --canary` client, so EVERY embedded bundle URL must be confirmed
         # reachable (HTTP 2xx) first — a dead upload must never be flipped live.
         run: |
-          FIRST_URL=$(jq -r '.bundles | to_entries[0].value.url' canary-assets/manifest.json)
-          if [ -z "$FIRST_URL" ] || [ "$FIRST_URL" = "null" ]; then
-            echo "::error::could not extract first bundle URL from canary manifest"
+          count=$(jq '.bundles | length' canary-assets/manifest.json)
+          if [ "$count" -eq 0 ]; then
+            echo "::error::canary manifest has no bundles"
             exit 1
           fi
-          echo "→ HEAD ${FIRST_URL}"
-          curl -fsSI --max-time 30 "$FIRST_URL" >/dev/null
-          echo "→ OK: first canary bundle is reachable"
+          while IFS= read -r URL; do
+            [ -z "$URL" ] && continue
+            echo "→ HEAD ${URL}"
+            curl -fsSI --max-time 30 "$URL" >/dev/null || { echo "::error::canary bundle unreachable: ${URL}"; exit 1; }
+          done < <(jq -r '.bundles[].url' canary-assets/manifest.json)
+          echo "→ OK: all ${count} canary bundles reachable"
 
       - name: Upload canary manifest pointer to R2 (atomic flip)
         env:

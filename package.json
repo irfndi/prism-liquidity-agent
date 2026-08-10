@@ -21,7 +21,7 @@
   "type": "module",
   "scripts": {
     "start": "bun run start:engine",
-    "dev": "bun run --watch start:engine",
+    "dev": "bun run --watch cli/index.ts dev",
     "start:engine": "bun cli/index.ts dev",
     "build": "bun tsdown",
     "setup": "bun cli/index.ts setup",

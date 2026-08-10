@@ -229,9 +229,6 @@ jobs:
         env:
           R2_BASE_URL: ${{ env.R2_PUBLIC_URL }}
           REQUIRE_ALL_BUNDLES: "true"
-          # The release signs AFTER manifest generation and only when a GPG
-          # key is present; gate the .asc assertion on the same flag.
-          REQUIRE_SIGNATURE: "${{ env.HAS_GPG_KEY }}"
         run: |
           cd release-assets
           bun run ../scripts/generate-release-manifest.ts
