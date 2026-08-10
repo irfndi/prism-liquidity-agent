@@ -70,6 +70,9 @@ fi
 normalize_version() {
   local base pre
   base="${1#v}"
+  # Strip build metadata FIRST — a '+' before the '-' split would let
+  # '1.4.0+build-a' masquerade as the prerelease 'a'.
+  base="${base%%+*}"
   pre=""
   if [[ "$base" == *-* ]]; then
     pre="${base#*-}"
@@ -84,25 +87,47 @@ version_gte() {
   installed="$(normalize_version "$1")"
   min="$(normalize_version "$2")"
   # Portable dotted-version comparison (awk, no GNU sort -V on macOS).
-  # Prerelease-aware: X.Y.Z compares numerically; when equal, a version with a
-  # prerelease is lower than one without, and prerelease labels compare
-  # lexicographically (canary.1 >= canary.0).
-  awk -v a="$installed" -v b="$min" 'BEGIN {
-    split(a, A, "."); split(b, B, ".");
-    for (i = 1; i <= 3; i++) {
-      na = (i in A) ? A[i] + 0 : 0;
-      nb = (i in B) ? B[i] + 0 : 0;
-      if (na < nb) exit 1;
-      if (na > nb) exit 0;
+  # Semver-aware: core X.Y.Z compares numerically; when equal, a release
+  # outranks a prerelease, and prerelease identifiers compare per semver —
+  # numeric identifiers numerically (so canary.10 > canary.2), alphanumeric
+  # identifiers lexicographically, numeric < alphanumeric, and a shorter
+  # identifier set has lower precedence. Build metadata (+) is ignored.
+  awk -v a="$installed" -v b="$min" '
+    function cmp_pre(pa, pb,    i, npa, npb, ia, ib, na, nb, PA, PB) {
+      npa = split(pa, PA, ".");
+      npb = split(pb, PB, ".");
+      for (i = 1; i <= npa || i <= npb; i++) {
+        ia = (i <= npa) ? PA[i] : "";
+        ib = (i <= npb) ? PB[i] : "";
+        if (ia == ib) continue;
+        if (ia == "") return 1;  # a exhausted first: a < b
+        if (ib == "") return 0;  # b exhausted first: a > b
+        na = (ia ~ /^[0-9][0-9]*$/) ? ia + 0 : -1;
+        nb = (ib ~ /^[0-9][0-9]*$/) ? ib + 0 : -1;
+        if (na == -1 && nb == -1) return (ia < ib) ? 1 : 0;
+        if (na == -1) return 0;  # alphanumeric outranks numeric
+        if (nb == -1) return 1;
+        return (na < nb) ? 1 : 0;
+      }
+      return 0;
     }
-    pa = (index(a, "-") > 0) ? substr(a, index(a, "-") + 1) : "";
-    pb = (index(b, "-") > 0) ? substr(b, index(b, "-") + 1) : "";
-    if (pa == "" && pb != "") exit 0;
-    if (pa != "" && pb == "") exit 1;
-    if (pa < pb) exit 1;
-    if (pa > pb) exit 0;
-    exit 0;
-  }'
+    BEGIN {
+      if (index(a, "+") > 0) a = substr(a, 1, index(a, "+") - 1);
+      if (index(b, "+") > 0) b = substr(b, 1, index(b, "+") - 1);
+      split(a, A, "."); split(b, B, ".");
+      for (i = 1; i <= 3; i++) {
+        na = (i in A) ? A[i] + 0 : 0;
+        nb = (i in B) ? B[i] + 0 : 0;
+        if (na < nb) exit 1;
+        if (na > nb) exit 0;
+      }
+      pa = (index(a, "-") > 0) ? substr(a, index(a, "-") + 1) : "";
+      pb = (index(b, "-") > 0) ? substr(b, index(b, "-") + 1) : "";
+      if (pa == "" && pb == "") exit 0;
+      if (pa == "") exit 0;      # release outranks prerelease
+      if (pb == "") exit 1;
+      exit cmp_pre(pa, pb);
+    }'
 }
 
 ensure_bun() {
@@ -125,7 +150,11 @@ ensure_bun() {
   fi
 
   local current
-  current="$("$BUN_BIN" --version 2>/dev/null || echo "unknown")"
+  # Split capture from fallback so partial stdout can never concatenate with
+  # the fallback text (a failing bun that still prints a version prefix).
+  if ! current="$("$BUN_BIN" --version 2>/dev/null)"; then
+    current="unknown"
+  fi
   if ! version_gte "$current" "1.4.0-canary.1"; then
     log_error "Bun $current is installed but >= 1.4.0-canary.1 is required."
     log_error "Upgrade with:  curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.0-canary.1"
@@ -191,7 +220,12 @@ ensure_sqlite_linux() {
     return 0
   fi
 
-  if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+  # Split capture from fallback: a partially-failing `id -u` (partial stdout,
+  # nonzero exit) must not concatenate with the fallback value.
+  if ! uid="$(id -u 2>/dev/null)"; then
+    uid=1
+  fi
+  if [ "$uid" = "0" ]; then
     log_step "No system libsqlite3 found; installing $pkgs for agent memory..."
     if [ "$install_cmd" = "apt-get install -y" ]; then
       apt-get update >/dev/null 2>&1 || true

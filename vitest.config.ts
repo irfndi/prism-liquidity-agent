@@ -16,6 +16,10 @@ export default defineConfig({
       provider: "istanbul",
       include: ["engine/**/*.ts"],
       exclude: [
+        // GUARD: this list is hand-maintained and silently weakens the coverage
+        // gate. Do NOT add new engine files here without an explicit review —
+        // ideally a tracked issue — and never as a way to make a failing gate
+        // pass. Prefer writing branch-level tests for the module instead.
         "engine/index.ts",
         "engine/types.ts",
         "engine/services.ts",
@@ -43,6 +47,12 @@ export default defineConfig({
       reporter: ["text", "json", "html"],
       thresholds: {
         statements: 75,
+        // Branches sits lower than the 75% statement/function/line bars
+        // deliberately: the excluded large modules (program.ts, adapter-service.ts)
+        // hold deep conditional logic mocks don't reach, and the ~4700-line
+        // Effect.gen loop structure produces many uncovered branch edges. The
+        // gate tolerates that here rather than diluting every other bar — revisit
+        // only with branch-level tests for those modules.
         branches: 60,
         functions: 75,
         lines: 75,

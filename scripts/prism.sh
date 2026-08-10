@@ -49,25 +49,47 @@ if [ -z "$BUN_VERSION_RAW" ]; then
   exit 1
 fi
 # Portable dotted-version comparison (awk, no GNU sort -V on macOS).
-# Prerelease-aware: X.Y.Z compares numerically; when equal, a version with a
-# prerelease is lower than one without, and prerelease labels compare
-# lexicographically (canary.1 >= canary.0).
-if ! awk -v a="$BUN_VERSION_RAW" -v b="$MIN_BUN_VERSION" 'BEGIN {
-  split(a, A, "."); split(b, B, ".");
-  for (i = 1; i <= 3; i++) {
-    na = (i in A) ? A[i] + 0 : 0;
-    nb = (i in B) ? B[i] + 0 : 0;
-    if (na < nb) exit 1;
-    if (na > nb) exit 0;
+# Semver-aware: core X.Y.Z compares numerically; when equal, a release
+# outranks a prerelease, and prerelease identifiers compare per semver —
+# numeric identifiers numerically (so canary.10 > canary.2), alphanumeric
+# identifiers lexicographically, numeric < alphanumeric, and a shorter
+# identifier set has lower precedence. Build metadata (+) is ignored.
+if ! awk -v a="$BUN_VERSION_RAW" -v b="$MIN_BUN_VERSION" '
+  function cmp_pre(pa, pb,    i, npa, npb, ia, ib, na, nb, PA, PB) {
+    npa = split(pa, PA, ".");
+    npb = split(pb, PB, ".");
+    for (i = 1; i <= npa || i <= npb; i++) {
+      ia = (i <= npa) ? PA[i] : "";
+      ib = (i <= npb) ? PB[i] : "";
+      if (ia == ib) continue;
+      if (ia == "") return 1;  # a exhausted first: a < b
+      if (ib == "") return 0;  # b exhausted first: a > b
+      na = (ia ~ /^[0-9][0-9]*$/) ? ia + 0 : -1;
+      nb = (ib ~ /^[0-9][0-9]*$/) ? ib + 0 : -1;
+      if (na == -1 && nb == -1) return (ia < ib) ? 1 : 0;
+      if (na == -1) return 0;  # alphanumeric outranks numeric
+      if (nb == -1) return 1;
+      return (na < nb) ? 1 : 0;
+    }
+    return 0;
   }
-  pa = (index(a, "-") > 0) ? substr(a, index(a, "-") + 1) : "";
-  pb = (index(b, "-") > 0) ? substr(b, index(b, "-") + 1) : "";
-  if (pa == "" && pb != "") exit 0;
-  if (pa != "" && pb == "") exit 1;
-  if (pa < pb) exit 1;
-  if (pa > pb) exit 0;
-  exit 0;
-}'; then
+  BEGIN {
+    if (index(a, "+") > 0) a = substr(a, 1, index(a, "+") - 1);
+    if (index(b, "+") > 0) b = substr(b, 1, index(b, "+") - 1);
+    split(a, A, "."); split(b, B, ".");
+    for (i = 1; i <= 3; i++) {
+      na = (i in A) ? A[i] + 0 : 0;
+      nb = (i in B) ? B[i] + 0 : 0;
+      if (na < nb) exit 1;
+      if (na > nb) exit 0;
+    }
+    pa = (index(a, "-") > 0) ? substr(a, index(a, "-") + 1) : "";
+    pb = (index(b, "-") > 0) ? substr(b, index(b, "-") + 1) : "";
+    if (pa == "" && pb == "") exit 0;
+    if (pa == "") exit 0;      # release outranks prerelease
+    if (pb == "") exit 1;
+    exit cmp_pre(pa, pb);
+  }'; then
   echo "ERROR: bun $BUN_VERSION_RAW is too old; prism requires bun >= $MIN_BUN_VERSION" >&2
   echo "Upgrade it with: curl -fsSL https://bun.sh/install | bash" >&2
   exit 1
