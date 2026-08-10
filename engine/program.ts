@@ -36,7 +36,14 @@ import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
-import { isMarketRunnerPool, lowestAprHeldPosition, shouldRotate } from "./market-runner.js";
+import {
+  DEFAULT_RUNNER_MIN_FEE_APR,
+  consecutiveAboveFloorObservations,
+  isMarketRunnerPool,
+  lowestAprHeldPosition,
+  shouldRotate,
+} from "./market-runner.js";
+import { runnerNetAprPct } from "./fee-capture.js";
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
 import { gateAndRankMarketPools, type MarketPoolRank } from "./market-gate.js";
 import { gateAndRankLaunchPools, summarizeLaunchRejections } from "./launch-gate.js";
@@ -584,6 +591,64 @@ export function estimatePaperRebalanceBenefit(args: {
   };
 }
 
+/**
+ * Economic harvest gate (Robinhood rule 10): never spend $0.80 to realize
+ * $1.00. Decides whether a pending fee claim clears the cost floor before any
+ * on-chain claim tx executes. A `netUsd` of null means the pending amount is
+ * genuinely unavailable (no adapter support, unpriceable legs, read failure)
+ * — the gate FAILS OPEN and the claim proceeds (fee capture is protective).
+ * Skip semantics mirror the zero-fee claim: the caller does NOT re-arm the
+ * claim interval, so a skipped claim retries next scan.
+ */
+/** Metadata writes from the executor paths: some test mocks omit
+ * setMetadata, so guard before calling — a metadata write must never fail an
+ * ENTER/EXIT. */
+export const persistMetadataIfSupported = (
+  db: DbApi,
+  key: string,
+  value: string,
+): Effect.Effect<void, never> =>
+  typeof db.setMetadata === "function"
+    ? db.setMetadata(key, value).pipe(Effect.catch(() => Effect.void))
+    : Effect.void;
+
+export interface HarvestGateConfig {
+  readonly harvestMinNetUsd?: number;
+  readonly harvestMaxCostPct?: number;
+  readonly harvestTxCostUsdEst?: number;
+}
+
+export function evaluateHarvestGate(
+  netUsd: number | null,
+  config: HarvestGateConfig,
+): { approved: boolean; reason: string } {
+  const minNetUsd = config.harvestMinNetUsd ?? 1;
+  const maxCostPct = config.harvestMaxCostPct ?? 0.15;
+  const costUsd = config.harvestTxCostUsdEst ?? 0.005;
+  if (netUsd == null) {
+    return {
+      approved: true,
+      reason: "[harvest-gate] pending USD unavailable — fail open (claim anyway)",
+    };
+  }
+  if (netUsd < minNetUsd) {
+    return {
+      approved: false,
+      reason: `[harvest-gate] net $${netUsd.toFixed(4)} below floor $${minNetUsd} — claim skipped (retries next scan)`,
+    };
+  }
+  if (costUsd > maxCostPct * netUsd) {
+    return {
+      approved: false,
+      reason: `[harvest-gate] est cost $${costUsd} > ${maxCostPct * 100}% of net $${netUsd.toFixed(4)} — claim skipped (retries next scan)`,
+    };
+  }
+  return {
+    approved: true,
+    reason: `[harvest-gate] net $${netUsd.toFixed(4)} clears floor $${minNetUsd} and est cost $${costUsd} ≤ ${maxCostPct * 100}% of net`,
+  };
+}
+
 type PositionReconcileResult = {
   succeeded: boolean;
   unresolvedPoolAddresses: ReadonlySet<string>;
@@ -980,6 +1045,15 @@ export function executePaper(
     entryStrategyShape: EntryStrategyShape;
     entryRangeHalfWidth?: number;
     entryDipOffsetBins?: number;
+    /** G2 rotation-arm + yield-baseline wiring (market-runner lane). */
+    rotationArmMs?: number;
+    runnerMinFeeApr?: number;
+    entryAprPct?: number;
+    poolAprByAddress?: ReadonlyMap<string, { feeAprPct: number; tvlUsd: number }>;
+    /** G4 economic harvest gate values (executors have no AppConfig). */
+    harvestMinNetUsd?: number;
+    harvestMaxCostPct?: number;
+    harvestTxCostUsdEst?: number;
   },
   decision: AgentDecision,
   pool: {
@@ -1059,6 +1133,15 @@ export function executePaper(
       };
       trackedPositions.set(pos.positionId, pos);
       yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
+      // G7 yield-regression baseline: the entry-time fee APR, recorded for
+      // non-launch positions (launch has its own lifecycle).
+      if (pos.positionMode !== "launch") {
+        yield* persistMetadataIfSupported(
+          db,
+          `yieldbase:${pos.positionId}`,
+          JSON.stringify({ entryAprPct: deps.entryAprPct ?? 0, at: Date.now() }),
+        );
+      }
       yield* db
         .savePositionEvent({
           id: randomUUID(),
@@ -1078,6 +1161,32 @@ export function executePaper(
         })
         .pipe(Effect.catch(() => Effect.void));
     } else if (decision.action === "EXIT") {
+      // G2 rotation-arm re-check: a Rotation EXIT executes only while its
+      // arm is fresh and the runner still qualifies — cancel-and-preserve
+      // when the challenger evaporated.
+      if (decision.reasoning.startsWith("Rotation:")) {
+        const armRaw = yield* db
+          .getMetadata(`rotarm:${decision.poolAddress}`)
+          .pipe(Effect.catch(() => Effect.succeed(null)));
+        let armValid = false;
+        if (armRaw) {
+          try {
+            const arm = JSON.parse(armRaw) as { runner: string; at: number };
+            const armFresh = Date.now() - arm.at < (deps.rotationArmMs ?? 1_800_000);
+            const runnerApr = deps.poolAprByAddress?.get(arm.runner)?.feeAprPct ?? 0;
+            armValid = armFresh && runnerApr >= (deps.runnerMinFeeApr ?? 500);
+          } catch {
+            armValid = false;
+          }
+        }
+        yield* persistMetadataIfSupported(db, `rotarm:${decision.poolAddress}`, "");
+        if (!armValid) {
+          console.warn(
+            `[rotation-canceled] EXIT skipped on ${decision.poolAddress} — runner no longer qualifies; incumbent preserved`,
+          );
+          return { executed: false, error: "rotation canceled — incumbent preserved" };
+        }
+      }
       const pos = resolveTargetPosition(trackedPositions, decision);
       if (pos?.positionPubKey) {
         // Live position — paper trading must not "exit" it without an on-chain tx.
@@ -1278,6 +1387,15 @@ export function executeLive(
     unpricedExitWarnedPools?: Set<string>;
     autonomous?: AutonomousExecutionContext;
     candidateId?: string;
+    /** G2 rotation-arm + yield-baseline wiring (market-runner lane). */
+    rotationArmMs?: number;
+    runnerMinFeeApr?: number;
+    entryAprPct?: number;
+    poolAprByAddress?: ReadonlyMap<string, { feeAprPct: number; tvlUsd: number }>;
+    /** G4 economic harvest gate values (executors have no AppConfig). */
+    harvestMinNetUsd?: number;
+    harvestMaxCostPct?: number;
+    harvestTxCostUsdEst?: number;
   },
   decision: AgentDecision,
   pool: {
@@ -1611,6 +1729,15 @@ export function executeLive(
         };
         trackedPositions.set(pos.positionId, pos);
         yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
+        // G7 yield-regression baseline: the entry-time fee APR, recorded for
+        // non-launch positions (launch has its own lifecycle).
+        if (pos.positionMode !== "launch") {
+          yield* persistMetadataIfSupported(
+            db,
+            `yieldbase:${pos.positionId}`,
+            JSON.stringify({ entryAprPct: deps.entryAprPct ?? 0, at: Date.now() }),
+          );
+        }
         yield* db
           .savePositionEvent({
             id: randomUUID(),
@@ -1709,6 +1836,32 @@ export function executeLive(
     } else if (decision.action === "ENTER") {
       return { executed: false, error: "ENTER decision missing position size" };
     } else if (decision.action === "EXIT") {
+      // G2 rotation-arm re-check: a Rotation EXIT executes only while its
+      // arm is fresh and the runner still qualifies — cancel-and-preserve
+      // when the challenger evaporated.
+      if (decision.reasoning.startsWith("Rotation:")) {
+        const armRaw = yield* db
+          .getMetadata(`rotarm:${decision.poolAddress}`)
+          .pipe(Effect.catch(() => Effect.succeed(null)));
+        let armValid = false;
+        if (armRaw) {
+          try {
+            const arm = JSON.parse(armRaw) as { runner: string; at: number };
+            const armFresh = Date.now() - arm.at < (deps.rotationArmMs ?? 1_800_000);
+            const runnerApr = deps.poolAprByAddress?.get(arm.runner)?.feeAprPct ?? 0;
+            armValid = armFresh && runnerApr >= (deps.runnerMinFeeApr ?? 500);
+          } catch {
+            armValid = false;
+          }
+        }
+        yield* persistMetadataIfSupported(db, `rotarm:${decision.poolAddress}`, "");
+        if (!armValid) {
+          console.warn(
+            `[rotation-canceled] EXIT skipped on ${decision.poolAddress} — runner no longer qualifies; incumbent preserved`,
+          );
+          return { executed: false, error: "rotation canceled — incumbent preserved" };
+        }
+      }
       const pos = resolveTargetPosition(trackedPositions, decision);
       let exitOperation: ExecutionOperationRecord | null = null;
       if (autonomous && pos && pool.tokenX) {
@@ -2132,17 +2285,51 @@ export function executeLive(
         const revenueShareOperatorPct = revenueConfigResult.revenueShareOperatorPct;
         const tier = revenueConfigResult.tier;
 
-        // Claim fees before rebalancing (with platform fee)
-        const claimResult = yield* adapter
-          .claimFees(
-            decision.poolAddress,
-            pos.positionPubKey,
-            platformFeeRate,
-            revenueShareEnabled,
-            revenueShareOperatorPct,
-            revenueConfigResult.feeWalletAddress,
-          )
-          .pipe(Effect.catch(() => Effect.succeed(null)));
+        // G4 economic harvest gate (rule: never spend $0.80 to realize
+        // $1.00): skip the pre-rebalance fee claim when the PENDING net
+        // fees don't clear the floor / cost gate. The rebalance itself
+        // always completes — only the fee claim is skipped (it rides the
+        // normal cadence path next scan). Fail open on unknown pending.
+        let claimResult: Effect.Success<ReturnType<AdapterApi["claimFees"]>> | null = null;
+        const rebalanceHarvestGate = adapter.getClaimableFeesUsd
+          ? yield* adapter.getClaimableFeesUsd(decision.poolAddress, pos.positionPubKey).pipe(
+              Effect.map((netUsd) =>
+                evaluateHarvestGate(netUsd, {
+                  ...(deps.harvestMinNetUsd !== undefined
+                    ? { harvestMinNetUsd: deps.harvestMinNetUsd }
+                    : {}),
+                  ...(deps.harvestMaxCostPct !== undefined
+                    ? { harvestMaxCostPct: deps.harvestMaxCostPct }
+                    : {}),
+                  ...(deps.harvestTxCostUsdEst !== undefined
+                    ? { harvestTxCostUsdEst: deps.harvestTxCostUsdEst }
+                    : {}),
+                }),
+              ),
+              Effect.catch(() =>
+                Effect.succeed({
+                  approved: true,
+                  reason: "[harvest-gate] pending read failed — fail open (claim anyway)",
+                }),
+              ),
+            )
+          : null;
+        if (rebalanceHarvestGate && !rebalanceHarvestGate.approved) {
+          console.warn(
+            `[harvest-gate] pre-rebalance claim skipped on ${decision.poolAddress} (${pos.positionId}): ${rebalanceHarvestGate.reason}`,
+          );
+        } else {
+          claimResult = yield* adapter
+            .claimFees(
+              decision.poolAddress,
+              pos.positionPubKey,
+              platformFeeRate,
+              revenueShareEnabled,
+              revenueShareOperatorPct,
+              revenueConfigResult.feeWalletAddress,
+            )
+            .pipe(Effect.catch(() => Effect.succeed(null)));
+        }
 
         if (claimResult && (claimResult.feeX > 0 || claimResult.feeY > 0)) {
           yield* db
@@ -2458,6 +2645,28 @@ export const program = Effect.gen(function* () {
     consecutiveExecutionFailures = executed ? 0 : consecutiveExecutionFailures + 1;
     if (!executed) executionFailuresThisCycle++;
   };
+
+  // Token-level execution-failure breaker (Robinhood rule 12): a genuine live
+  // EXIT failure on a pool arms a per-leg token block (`token_block:<mint>`).
+  // Every ENTER gate checks both legs against active blocks, so a failed exit
+  // route blocks new deployment into that TOKEN (any pool holding it), not
+  // just into the pool that failed. Reads fail open (null on error) — a
+  // broken read must never freeze entry; a set block fails closed.
+  const findBlockedToken = (pool: {
+    readonly tokenX: string;
+    readonly tokenY: string;
+  }): Effect.Effect<string | null, never> =>
+    Effect.gen(function* () {
+      const tokenBlockMs = config.tokenFailureBlockMs ?? 3_600_000;
+      const now = Date.now();
+      for (const mint of [pool.tokenX, pool.tokenY]) {
+        const raw = yield* db
+          .getMetadata(`token_block:${mint}`)
+          .pipe(Effect.catch(() => Effect.succeed(null)));
+        if (raw !== null && now - Number(raw) < tokenBlockMs) return mint;
+      }
+      return null;
+    });
   let lastSnapshotPruneAt = 0;
 
   // F2: per-pool recent active-bin history (in-memory ring buffer; resets on restart)
@@ -2764,7 +2973,32 @@ export const program = Effect.gen(function* () {
   // Per-cycle fee APR (fees24h × 365 / tvl) keyed by pool address, populated
   // during each pool's evaluation. The market-runner rotation compares a
   // candidate runner's APR against the LOWEST-APR held position's APR.
-  const poolFeeAprByAddress = new Map<string, number>();
+  const poolFeeAprByAddress = new Map<string, { feeAprPct: number; tvlUsd: number }>();
+  // Dispatch-deps builders shared by the in-slot tail and the idle-redeploy
+  // pass: the executor wiring (entry APR, rotation arm, runner floor, harvest
+  // values) must not drift between lanes. exactOptionalPropertyTypes-safe.
+  const runnerDispatchDeps = (poolAddress: string) => {
+    const entryAprPct = poolFeeAprByAddress.get(poolAddress)?.feeAprPct;
+    return {
+      ...(entryAprPct !== undefined ? { entryAprPct } : {}),
+      poolAprByAddress: poolFeeAprByAddress,
+      ...(config.marketScanRotationArmMs !== undefined
+        ? { rotationArmMs: config.marketScanRotationArmMs }
+        : {}),
+      ...(config.marketScanRunnerMinFeeApr !== undefined
+        ? { runnerMinFeeApr: config.marketScanRunnerMinFeeApr }
+        : {}),
+    };
+  };
+  const harvestDispatchDeps = () => ({
+    ...(config.harvestMinNetUsd !== undefined ? { harvestMinNetUsd: config.harvestMinNetUsd } : {}),
+    ...(config.harvestMaxCostPct !== undefined
+      ? { harvestMaxCostPct: config.harvestMaxCostPct }
+      : {}),
+    ...(config.harvestTxCostUsdEst !== undefined
+      ? { harvestTxCostUsdEst: config.harvestTxCostUsdEst }
+      : {}),
+  });
 
   // ─── Launch-mode execution state (Launch Mode v2) ────────────────────────
   // The launch radar's admitted pool set, populated by refreshLaunchScan ONLY
@@ -3822,6 +4056,23 @@ export const program = Effect.gen(function* () {
           })
           .pipe(Effect.catch(() => Effect.succeed(null)));
 
+        // Token-level execution-failure breaker (Robinhood rule 12): a
+        // redeploy is a live ENTER — the same per-leg block gate as the
+        // in-slot ENTER path, so a failed EXIT route on another pool holding
+        // a shared leg cannot slip idle capital back in this cycle.
+        const blockedToken = yield* findBlockedToken(candidate.pool);
+        if (blockedToken !== null) {
+          idleRedeployLogger.warn("Idle redeploy blocked by token execution-failure block", {
+            pool: candidate.poolAddress,
+            token: blockedToken,
+          });
+          yield* recordRedeploySkip(
+            `[idle-redeploy] [token-block] token ${blockedToken} under execution-failure block — redeploy ENTER rejected`,
+            `[token-block] token ${blockedToken} under execution-failure block`,
+          );
+          continue;
+        }
+
         // Same entry-shape / range-width resolution the in-slot tail uses.
         const entryStrategyShape: EntryStrategyShape =
           config.entryStrategyType === "auto"
@@ -3882,6 +4133,7 @@ export const program = Effect.gen(function* () {
               entryStrategyShape,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
+              ...runnerDispatchDeps(decision.poolAddress),
             },
             decision,
             candidate.pool,
@@ -3969,6 +4221,7 @@ export const program = Effect.gen(function* () {
             }
           }
           const entryPrep = yield* EntryPrepService;
+          const dispatchEntryAprPct = poolFeeAprByAddress.get(decision.poolAddress)?.feeAprPct;
           const liveResult = yield* executeLive(
             {
               adapter,
@@ -3985,6 +4238,8 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
+              ...runnerDispatchDeps(decision.poolAddress),
+              ...harvestDispatchDeps(),
               ...(autonomousExecution ? { autonomous: autonomousExecution } : {}),
             },
             decision,
@@ -4923,6 +5178,42 @@ export const program = Effect.gen(function* () {
       // heuristic fees never classify a pool as a runner (the same
       // measured-only exclusion as paper fee accrual).
       const poolFeeAprPct = pool.tvlUsd > 0 ? (pool.fees24hUsd * 365 * 100) / pool.tvlUsd : 0;
+      const runnerFloorApr = config.marketScanRunnerMinFeeApr ?? DEFAULT_RUNNER_MIN_FEE_APR;
+      const RUNNER_OBS_RING = 4;
+      // G1: runner admission + rotation superiority must PERSIST across
+      // consecutive above-floor observations — a single-cycle fee spike never
+      // qualifies (rule: require meaningful fee production across multiple
+      // consecutive observations). The per-pool observation ring lives in the
+      // metadata table (`aprob:<pool>`, newest-first, max 4). Fail-open: a
+      // metadata read error yields an empty history, so a cold-start pool
+      // builds observations before it can qualify.
+      const aprObsRaw = yield* db
+        .getMetadata(`aprob:${poolAddress}`)
+        .pipe(Effect.catch(() => Effect.succeed(null)));
+      let aprObs: Array<{ at: number; apr: number }> = [];
+      if (aprObsRaw) {
+        try {
+          const parsed = JSON.parse(aprObsRaw) as Array<{ at: number; apr: number }>;
+          if (Array.isArray(parsed)) aprObs = parsed;
+        } catch {
+          aprObs = [];
+        }
+      }
+      const obsNow = Date.now();
+      const aprObservations = [{ at: obsNow, apr: poolFeeAprPct }, ...aprObs].slice(
+        0,
+        RUNNER_OBS_RING,
+      );
+      yield* db
+        .setMetadata(`aprob:${poolAddress}`, JSON.stringify(aprObservations))
+        .pipe(Effect.catch(() => Effect.void));
+      const runnerMaxGapMs = (config.scanIntervalMs ?? 600_000) * 3;
+      const runnerConsecutiveCount = consecutiveAboveFloorObservations(
+        aprObservations,
+        runnerFloorApr,
+        obsNow,
+        runnerMaxGapMs,
+      );
       const isMarketRunner = (addr: string): boolean =>
         isMarketRunnerPool({
           enabled: config.marketScanRunnerEnabled === true,
@@ -4931,8 +5222,8 @@ export const program = Effect.gen(function* () {
           statsSource: pool.statsSource,
           feeAprPct: poolFeeAprPct,
           runnerMinFeeApr: config.marketScanRunnerMinFeeApr,
-        });
-      poolFeeAprByAddress.set(poolAddress, poolFeeAprPct);
+        }) && runnerConsecutiveCount >= (config.marketScanRunnerConfirmCycles ?? 2);
+      poolFeeAprByAddress.set(poolAddress, { feeAprPct: poolFeeAprPct, tvlUsd: pool.tvlUsd });
 
       // TVL velocity + IL price-drift need a previous reference point, so the
       // previous snapshot must be read BEFORE persisting the current one.
@@ -5034,6 +5325,27 @@ export const program = Effect.gen(function* () {
         fetchAuthorities(pool.tokenX),
         fetchAuthorities(pool.tokenY),
       ]);
+
+      // G5 transfer-tax screen (rule: abnormal transfer taxes are
+      // inadmissible — high fees never override a failed safety gate): a
+      // leg with an enabled Token-2022 transfer-fee extension is a material
+      // market-risk signal. Rejected unless explicitly allowed. Applies to
+      // every lane (launch, market runner, fallen-angel, normal) — the
+      // market gate separately pre-filters the universe admission.
+      if (config.allowTransferFeeTokens !== true) {
+        const feeLegs = [
+          { mint: pool.tokenX, symbol: pool.tokenXSymbol, auth: authX },
+          { mint: pool.tokenY, symbol: pool.tokenYSymbol, auth: authY },
+        ];
+        const feeChargingLegs = feeLegs.filter((leg) => leg.auth?.transferFeeEnabled === true);
+        if (feeChargingLegs.length > 0) {
+          return yield* rejectForSafety(
+            `leg ${feeChargingLegs
+              .map((leg) => leg.symbol)
+              .join(", ")} charges a transfer fee (ALLOW_TRANSFER_FEE_TOKENS not enabled)`,
+          );
+        }
+      }
 
       // Deterministic local rejection precedes any network lookup: a pool
       // whose token or deployer is already in the loaded blacklist rejects
@@ -5904,6 +6216,42 @@ export const program = Effect.gen(function* () {
             `Fee/IL ratio ${feeIlRatio.toFixed(2)} below 0.5 on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
             { pool, metrics, position: pos },
           );
+        } else if (
+          pos.positionMode !== "launch" &&
+          pool.statsSource === "datapi" &&
+          poolFeeAprPct > 0
+        ) {
+          // G7 yield-regression: a tracked position whose MEASURED fee APR
+          // fell below its entry-time APR × threshold is dead capital — the
+          // engine self-heals out of flat majors without waiting for a
+          // challenger. Measured (datapi) only; the entry baseline is
+          // recorded at ENTER execution (`yieldbase:<positionId>`). Launch
+          // positions have their own timebox lifecycle — excluded here.
+          const baselineRaw = yield* db
+            .getMetadata(`yieldbase:${pos.positionId}`)
+            .pipe(Effect.catch(() => Effect.succeed(null)));
+          let entryAprPct: number | null = null;
+          if (baselineRaw) {
+            try {
+              entryAprPct = (JSON.parse(baselineRaw) as { entryAprPct: number }).entryAprPct;
+            } catch {
+              entryAprPct = null;
+            }
+          }
+          const regressionPct = config.yieldRegressionExitPct ?? 0.5;
+          if (
+            entryAprPct !== null &&
+            entryAprPct > 0 &&
+            poolFeeAprPct < entryAprPct * regressionPct
+          ) {
+            decision = {
+              action: "EXIT",
+              poolAddress,
+              positionId: pos.positionId,
+              confidence: 1,
+              reasoning: `[yield-regression] APR ${poolFeeAprPct.toFixed(0)}% < ${(regressionPct * 100).toFixed(0)}% of entry ${entryAprPct.toFixed(0)}%`,
+            };
+          }
         }
 
         // Trailing exit (profit protection)
@@ -6553,6 +6901,42 @@ export const program = Effect.gen(function* () {
             }
           }
 
+          // Token-level execution-failure breaker (Robinhood rule 12): a
+          // genuine live EXIT failure on ANY pool armed `token_block:<mint>`
+          // for its legs — new deployment into a blocked token is rejected
+          // here, before every specialized ENTER branch (fallen-angel, launch,
+          // normal) so no lane can route around it. Fail-closed on a set
+          // block; fail-open on metadata read errors.
+          if (!enterGateRejected) {
+            const blockedToken = yield* findBlockedToken(pool);
+            if (blockedToken !== null) {
+              cycle.poolsDecided++;
+              const reason = `[token-block] token ${blockedToken} under execution-failure block — ENTER rejected (failed EXIT route on a pool holding this leg)`;
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: 0,
+                  reasoning: reason,
+                  metrics,
+                  riskResult: { approved: false, reason },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Entry blocked for ${poolAddress}: leg token ${blockedToken} is under an execution-failure block after a failed EXIT.`,
+                  poolAddress,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              enterGateRejected = true;
+            }
+          }
+
           // ── Fallen-angel ENTER (Wave 19) ───────────────────────────────
           // A pool that cleared the fallen-angel gate (RugCheck security +
           // GeckoTerminal drawdown/vol) enters on the MEAN-REVERSION thesis:
@@ -6793,16 +7177,73 @@ export const program = Effect.gen(function* () {
                       poolFeeAprByAddress,
                       poolAddress, // never rotate out of the candidate runner
                     );
-                    if (
-                      worst &&
-                      shouldRotate(poolFeeAprPct, worst, config.marketScanRotationAprMult)
-                    ) {
-                      rawDecisions.push({
-                        action: "EXIT",
-                        poolAddress: worst.poolAddress,
-                        confidence: 1,
-                        reasoning: `Rotation: runner ${poolFeeAprPct.toFixed(0)}% APR >= ${config.marketScanRotationAprMult ?? 5}x held ${worst.feeAprPct.toFixed(0)}%`,
+                    if (worst) {
+                      // G3 net-fee comparison (rule: measure practical
+                      // position output, not raw APR): both sides are
+                      // discounted by their capture share (position size vs
+                      // pool TVL — small entries on deep pools collect a
+                      // fraction of the headline APR), conversion cost and
+                      // harvest cost. Uniform share model on both sides (the
+                      // activeShareEstimate range/concentration model is
+                      // reserved for entry sizing); the comparison stays
+                      // size-aware and deliberately conservative.
+                      const incumbentPos = Array.from(trackedPositions.values()).find(
+                        (p) => p.poolAddress === worst.poolAddress,
+                      );
+                      const incumbentSizeUsd =
+                        incumbentPos?.currentValueUsd ?? incumbentPos?.depositedUsd ?? 100;
+                      const runnerSizeUsd = config.launchPositionMaxSizeUsd ?? 100;
+                      const shareFor = (sizeUsd: number, tvlUsd: number): number =>
+                        tvlUsd > 0 && sizeUsd > 0 ? Math.min(sizeUsd / tvlUsd, 1) : 0;
+                      const harvestCostUsd = config.feeCaptureHarvestCostUsd ?? 0.01;
+                      const conversionCostPct = config.feeCaptureConversionCostPct ?? 0.05;
+                      const runnerNetApr = runnerNetAprPct({
+                        grossAprPct: poolFeeAprPct,
+                        shareEstimate: shareFor(runnerSizeUsd, pool.tvlUsd),
+                        harvestCostUsd,
+                        conversionCostPct,
+                        positionSizeUsd: runnerSizeUsd,
+                        timeInRangePct: 1,
                       });
+                      const incumbentNetApr = runnerNetAprPct({
+                        grossAprPct: worst.feeAprPct,
+                        shareEstimate: shareFor(incumbentSizeUsd, worst.tvlUsd),
+                        harvestCostUsd,
+                        conversionCostPct,
+                        positionSizeUsd: incumbentSizeUsd,
+                        timeInRangePct: 1,
+                      });
+                      if (
+                        shouldRotate(
+                          runnerNetApr,
+                          {
+                            poolAddress: worst.poolAddress,
+                            feeAprPct: incumbentNetApr,
+                            tvlUsd: worst.tvlUsd,
+                          },
+                          config.marketScanRotationAprMult,
+                        )
+                      ) {
+                        rawDecisions.push({
+                          action: "EXIT",
+                          poolAddress: worst.poolAddress,
+                          confidence: 1,
+                          reasoning: `Rotation: runner net ${runnerNetApr.toFixed(0)}% APR >= ${config.marketScanRotationAprMult ?? 5}x held net ${incumbentNetApr.toFixed(0)}%`,
+                        });
+                        // G2 rotation arm (TTL): the EXIT executes only while
+                        // the arm is fresh and the runner still qualifies —
+                        // cancel-and-preserve when the challenger evaporates.
+                        yield* db
+                          .setMetadata(
+                            `rotarm:${worst.poolAddress}`,
+                            JSON.stringify({
+                              runner: poolAddress,
+                              at: Date.now(),
+                              apr: poolFeeAprPct,
+                            }),
+                          )
+                          .pipe(Effect.catch(() => Effect.void));
+                      }
                     }
                   }
                   // Launch cap full: reject the ENTER for this pool — it must
@@ -7949,6 +8390,7 @@ export const program = Effect.gen(function* () {
           console.warn(
             `[PAPER] PAPER_MODE_EXIT_LIVE is enabled — executing live EXIT for ${poolAddress}`,
           );
+          const dispatchEntryAprPct = poolFeeAprByAddress.get(decision.poolAddress)?.feeAprPct;
           const liveResult = yield* executeLive(
             {
               adapter,
@@ -7965,6 +8407,8 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
+              ...runnerDispatchDeps(decision.poolAddress),
+              ...harvestDispatchDeps(),
               ...(autonomousCandidateId !== undefined
                 ? { candidateId: autonomousCandidateId }
                 : {}),
@@ -7983,6 +8427,7 @@ export const program = Effect.gen(function* () {
             action: decision.action,
             pool: poolAddress,
           });
+          const dispatchEntryAprPct = poolFeeAprByAddress.get(decision.poolAddress)?.feeAprPct;
           const paperResult = yield* executePaper(
             {
               db,
@@ -7991,6 +8436,7 @@ export const program = Effect.gen(function* () {
               entryStrategyShape,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
+              ...runnerDispatchDeps(decision.poolAddress),
             },
             decision,
             pool,
@@ -8002,6 +8448,7 @@ export const program = Effect.gen(function* () {
         } else if (config.autonomousTokenMode === "shadow" && decision.action !== "HOLD") {
           executionSkipped = true;
         } else {
+          const dispatchEntryAprPct = poolFeeAprByAddress.get(decision.poolAddress)?.feeAprPct;
           const liveResult = yield* executeLive(
             {
               adapter,
@@ -8018,6 +8465,8 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
+              ...runnerDispatchDeps(decision.poolAddress),
+              ...harvestDispatchDeps(),
               ...(autonomousCandidateId !== undefined
                 ? { candidateId: autonomousCandidateId }
                 : {}),
@@ -8134,6 +8583,30 @@ export const program = Effect.gen(function* () {
           ) {
             cycle.poolsFailed++;
             recordExecutionOutcome(false);
+            // Token-level execution-failure breaker (Robinhood rule 12): a
+            // genuine live EXIT failure means the route OUT of this pool's
+            // legs is broken — block new deployment into ANY pool holding
+            // either leg for the configured window (see findBlockedToken on
+            // the ENTER gates). Paper skips and risk/capacity outcomes never
+            // reach this branch; only the same classification that arms the
+            // execution_failures pause. A metadata write failure fails open
+            // (warn) — it must never break the cycle.
+            if (decision.action === "EXIT" && !config.paperTrading) {
+              const blockedAt = Date.now();
+              for (const mint of [pool.tokenX, pool.tokenY]) {
+                yield* db.setMetadata(`token_block:${mint}`, String(blockedAt)).pipe(
+                  Effect.catch((err) =>
+                    Effect.sync(() =>
+                      logger.warn("Failed to record token execution-failure block", {
+                        pool: poolAddress,
+                        mint,
+                        error: String(err),
+                      }),
+                    ),
+                  ),
+                );
+              }
+            }
           }
         }
         if (executed && decision.action === "EXIT") {
@@ -8308,6 +8781,33 @@ export const program = Effect.gen(function* () {
                   .pipe(Effect.catch(() => Effect.void));
               }
             }
+          }
+
+          // G4 economic harvest gate (rule: never spend $0.80 to realize
+          // $1.00): skip the on-chain swap-fee claim when the PENDING net
+          // fees are below the floor or the estimated tx cost exceeds the
+          // allowed fraction of gross. Pending amount unavailable (adapter
+          // without getClaimableFeesUsd / unpriceable legs / read failure)
+          // -> FAIL OPEN, claim anyway (fee capture is protective). A
+          // skipped claim does NOT re-arm lastFeeClaimAt — it retries next
+          // scan, same semantics as the zero-fee claim path. Paper accrual
+          // never reaches here (no positionPubKey on paper positions).
+          const harvestGate = adapter.getClaimableFeesUsd
+            ? yield* adapter.getClaimableFeesUsd(poolAddress, pos.positionPubKey).pipe(
+                Effect.map((netUsd) => evaluateHarvestGate(netUsd, config)),
+                Effect.catch(() =>
+                  Effect.succeed({
+                    approved: true,
+                    reason: "[harvest-gate] pending read failed — fail open (claim anyway)",
+                  }),
+                ),
+              )
+            : null;
+          if (harvestGate && !harvestGate.approved) {
+            console.warn(
+              `[harvest-gate] claim skipped on ${poolAddress} (${pos.positionId}): ${harvestGate.reason}`,
+            );
+            continue;
           }
 
           const result = yield* adapter

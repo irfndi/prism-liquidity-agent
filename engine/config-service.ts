@@ -174,6 +174,16 @@ export interface AppConfig {
   readonly marketScanRunnerMinFeeApr?: number;
   readonly marketScanRotationEnabled?: boolean;
   readonly marketScanRotationAprMult?: number;
+  readonly marketScanRunnerConfirmCycles?: number;
+  readonly marketScanRotationArmMs?: number;
+  readonly yieldRegressionExitPct?: number;
+  readonly feeCaptureConversionCostPct?: number;
+  readonly feeCaptureHarvestCostUsd?: number;
+  readonly harvestMinNetUsd?: number;
+  readonly harvestMaxCostPct?: number;
+  readonly harvestTxCostUsdEst?: number;
+  readonly allowTransferFeeTokens?: boolean;
+  readonly tokenFailureBlockMs?: number;
   /** How many top-ranked market pools are actively scanned each cycle. */
   readonly marketScanTopK?: number;
   /** Hard cap on market-scan pools in the active scan set. */
@@ -1379,6 +1389,44 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => false),
   );
   const marketScanRotationAprMult = yield* validatedNumber("MARKET_SCAN_ROTATION_APR_MULT", 1, 5);
+  // Runner admission + rotation superiority must persist across this many
+  // consecutive above-floor APR observations (rule: no single-cycle spikes).
+  const marketScanRunnerConfirmCycles = yield* validatedNumber(
+    "MARKET_SCAN_RUNNER_CONFIRM_CYCLES",
+    1,
+    2,
+  );
+  // TTL for the rotation arm: the incumbent EXIT executes only while the
+  // runner's admission is still fresh (cancel-and-preserve semantics).
+  const marketScanRotationArmMs = yield* validatedNumber(
+    "MARKET_SCAN_ROTATION_ARM_MS",
+    60_000,
+    1_800_000,
+  );
+  // G7: deterministic EXIT when a tracked position's measured fee APR drops
+  // below its entry-time APR × this fraction (self-healing flat majors).
+  const yieldRegressionExitPct = yield* validatedNumber("YIELD_REGRESSION_EXIT_PCT", 0, 0.5);
+  // G3 net-fee capture model: conversion + harvest costs subtracted from
+  // expected fees before the runner comparison votes.
+  const feeCaptureConversionCostPct = yield* validatedNumber(
+    "FEE_CAPTURE_CONVERSION_COST_PCT",
+    0,
+    0.05,
+  );
+  const feeCaptureHarvestCostUsd = yield* validatedNumber("FEE_CAPTURE_HARVEST_COST_USD", 0, 0.01);
+  // G4 economic harvest gate: claim only when net proceeds clear the floor
+  // and estimated tx cost stays under the fraction of gross fees.
+  const harvestMinNetUsd = yield* validatedNumber("HARVEST_MIN_NET_USD", 0, 1);
+  const harvestMaxCostPct = yield* validatedNumber("HARVEST_MAX_COST_PCT", 0, 0.15);
+  const harvestTxCostUsdEst = yield* validatedNumber("HARVEST_TX_COST_USD_EST", 0, 0.005);
+  // G5 transfer-tax screen: reject legs with an enabled Token-2022
+  // transfer-fee extension unless explicitly allowed.
+  const allowTransferFeeTokens = yield* Config.boolean("ALLOW_TRANSFER_FEE_TOKENS").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  // G6 token-level failure breaker: a failed EXIT on a token blocks new
+  // entries into any pool holding that token for this window.
+  const tokenFailureBlockMs = yield* validatedNumber("TOKEN_FAILURE_BLOCK_MS", 60_000, 3_600_000);
   const marketScanTopK = yield* validatedNumber("MARKET_SCAN_TOP_K", 1, 30, 200);
   const marketScanMaxPools = yield* validatedNumber("MARKET_SCAN_MAX_POOLS", 1, 60, 500);
   const marketScanMinHolders = yield* validatedNumber("MARKET_SCAN_MIN_HOLDERS", 0, 1000);
@@ -1633,6 +1681,16 @@ const loadConfig = Effect.gen(function* () {
     marketScanRunnerMinFeeApr,
     marketScanRotationEnabled,
     marketScanRotationAprMult,
+    marketScanRunnerConfirmCycles,
+    marketScanRotationArmMs,
+    yieldRegressionExitPct,
+    feeCaptureConversionCostPct,
+    feeCaptureHarvestCostUsd,
+    harvestMinNetUsd,
+    harvestMaxCostPct,
+    harvestTxCostUsdEst,
+    allowTransferFeeTokens,
+    tokenFailureBlockMs,
     marketScanTopK,
     marketScanMaxPools,
     marketScanMinHolders,

@@ -353,6 +353,43 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/**
+ * Detect the Token-2022 transfer-fee extension on a parsed mint account (the
+ * `parsed.info` JSON from getParsedAccountInfo). The spl-token RPC parser
+ * lists extensions as `{ extension, state }` entries and nests the fee rates
+ * as `newerTransferFee`/`olderTransferFee`, each
+ * `{ transferFeeBasisPoints, maximumFee }`; the top level of `state` is also
+ * checked for older parsers that flatten the fields. A non-zero basis-point
+ * rate OR non-zero max fee means the mint taxes transfers (the Robinhood
+ * rule 4 tax screen). Pure and exported for direct testing.
+ */
+export function parsedMintHasTransferFee(parsedInfo: unknown): boolean {
+  if (!isObject(parsedInfo) || !Array.isArray(parsedInfo.extensions)) return false;
+  for (const ext of parsedInfo.extensions) {
+    if (!isObject(ext) || ext.extension !== "transferFeeConfig" || !isObject(ext.state)) {
+      continue;
+    }
+    const candidates: unknown[] = [
+      ext.state,
+      ext.state.newerTransferFee,
+      ext.state.olderTransferFee,
+    ];
+    for (const candidate of candidates) {
+      if (!isObject(candidate)) continue;
+      const bps = candidate.transferFeeBasisPoints;
+      const maxFee = candidate.maximumFee;
+      if (
+        (typeof bps === "number" && bps > 0) ||
+        (typeof maxFee === "string" && Number(maxFee) > 0) ||
+        (typeof maxFee === "number" && maxFee > 0)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function isPoolsEnvelope(v: unknown): v is MeteoraPoolsEnvelope {
   if (!isObject(v)) return false;
   if (typeof v["total"] !== "number") return false;
@@ -749,6 +786,7 @@ export const AdapterLive = Layer.effect(
     interface MintAuthoritiesEntry {
       readonly mintAuthority: string | null;
       readonly freezeAuthority: string | null;
+      readonly transferFeeEnabled: boolean;
       readonly fetchedAt: number;
     }
     const mintAuthoritiesCache = new Map<string, MintAuthoritiesEntry>();
@@ -842,13 +880,22 @@ export const AdapterLive = Layer.effect(
       });
     }
 
-    function getMintAuthorities(
-      mintAddress: string,
-    ): Effect.Effect<{ mintAuthority: string | null; freezeAuthority: string | null }, Error> {
+    function getMintAuthorities(mintAddress: string): Effect.Effect<
+      {
+        mintAuthority: string | null;
+        freezeAuthority: string | null;
+        transferFeeEnabled: boolean;
+      },
+      Error
+    > {
       return Effect.gen(function* () {
         const cached = mintAuthoritiesCache.get(mintAddress);
         if (cached && Date.now() - cached.fetchedAt < MINT_AUTHORITIES_CACHE_TTL_MS) {
-          return { mintAuthority: cached.mintAuthority, freezeAuthority: cached.freezeAuthority };
+          return {
+            mintAuthority: cached.mintAuthority,
+            freezeAuthority: cached.freezeAuthority,
+            transferFeeEnabled: cached.transferFeeEnabled,
+          };
         }
         const mintPubkey = new PublicKey(mintAddress);
         const info = yield* rpcCall((conn) => conn.getParsedAccountInfo(mintPubkey));
@@ -861,12 +908,17 @@ export const AdapterLive = Layer.effect(
           typeof parsed?.mintAuthority === "string" ? parsed.mintAuthority : null;
         const freezeAuthority =
           typeof parsed?.freezeAuthority === "string" ? parsed.freezeAuthority : null;
+        // Token-2022 transfer-fee extension (Robinhood rule 4): a non-zero
+        // transfer tax is surfaced so the market gate / launch branch can
+        // reject the leg unless allowTransferFeeTokens opts in.
+        const transferFeeEnabled = parsedMintHasTransferFee(parsed);
         mintAuthoritiesCache.set(mintAddress, {
           mintAuthority,
           freezeAuthority,
+          transferFeeEnabled,
           fetchedAt: Date.now(),
         });
-        return { mintAuthority, freezeAuthority };
+        return { mintAuthority, freezeAuthority, transferFeeEnabled };
       });
     }
 
@@ -3485,6 +3537,48 @@ export const AdapterLive = Layer.effect(
             Effect.fail(
               new AdapterError({
                 message: `Failed to claim fees: ${String(err)}`,
+                poolAddress,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
+
+      // Economic harvest gate input (Robinhood rule 10): the position's
+      // PENDING claimable swap fees priced in USD, read before any claim tx.
+      // Mirrors the claimFees pricing above but on the gross pending
+      // feeX/feeY (no platform split yet) — the gate compares against the
+      // whole claimable amount. Null when either leg is unpriceable so
+      // callers fail open (fee capture is protective). Fails on read errors;
+      // the gate also fails open on failure.
+      getClaimableFeesUsd: (poolAddress, positionPubKey) =>
+        Effect.gen(function* () {
+          const dlmm = yield* getDlmm(poolAddress);
+          const position = yield* Effect.tryPromise(() =>
+            dlmm.getPosition(new PublicKey(positionPubKey)),
+          );
+
+          const feeX = Number(position.positionData.feeX.toString());
+          const feeY = Number(position.positionData.feeY.toString());
+          if (feeX === 0 && feeY === 0) return 0;
+
+          const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
+          const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
+          const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint], {
+            useFallback: false,
+          }).pipe(Effect.catch(() => Effect.succeed({} as Record<string, number>)));
+          const priceX = prices[tokenXMint];
+          const priceY = prices[tokenYMint];
+          if (priceX == null || priceX <= 0 || priceY == null || priceY <= 0) return null;
+          return (
+            (feeX / 10 ** dlmm.tokenX.mint.decimals) * priceX +
+            (feeY / 10 ** dlmm.tokenY.mint.decimals) * priceY
+          );
+        }).pipe(
+          Effect.catch((err: unknown) =>
+            Effect.fail(
+              new AdapterError({
+                message: `Failed to read claimable fees: ${String(err)}`,
                 poolAddress,
                 cause: err,
               }),

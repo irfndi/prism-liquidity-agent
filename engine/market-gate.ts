@@ -9,6 +9,7 @@
  */
 
 import type { DiscoveredPool } from "./services.js";
+import { transferFeeRejectionReason } from "./transfer-fee.js";
 
 export interface MarketGateConfig {
   readonly minTvlUsd: number;
@@ -22,6 +23,13 @@ export interface MarketGateConfig {
   readonly minBinStep: number;
   readonly maxBinStep: number;
   readonly stablecoinMints: ReadonlySet<string>;
+  /**
+   * Transfer-tax (Robinhood rule 4) screen override: when absent or false,
+   * any leg whose mint carries a Token-2022 transfer fee is rejected.
+   * Optional so legacy configs/tests compile unchanged; absent is treated
+   * as false (`!== true`).
+   */
+  readonly allowTransferFeeTokens?: boolean;
 }
 
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -52,6 +60,9 @@ export function isStableOrSol(mint: string, stablecoinMints: ReadonlySet<string>
  * Token-safety pre-filter for one leg. Mirrors the engine's freeze/verification
  * policy at the DISCOVERY layer (fail-open when metadata is absent — the
  * per-pool screen still gates ENTER):
+ * - Transfer-fee tokens (Robinhood rule 4): reject unless allowTransferFeeTokens.
+ *   Checked first — a transfer tax on a "stablecoin" is exactly the screen's
+ *   target, so it overrides the stablecoin allowlist exemption below.
  * - Stablecoins and SOL: always pass (the stablecoin allowlist exemption).
  * - Verified + freeze-disabled: pass.
  * - Verified but freeze-enabled: pass only when the holder base is real
@@ -64,9 +75,17 @@ export function marketLegPasses(
     readonly verified: boolean | undefined;
     readonly freezeDisabled: boolean | undefined;
     readonly holders: number | undefined;
+    readonly transferFeeEnabled?: boolean;
   },
   minHolders: number,
+  opts?: { readonly allowTransferFeeTokens: boolean | undefined },
 ): boolean {
+  // Robinhood rule 4: a KNOWN transfer-fee mint is rejected up front. Absent
+  // metadata (undefined) is not a fee — only a KNOWN fee rejects. Delegates
+  // to the shared reason helper so the rule has one source of truth.
+  if (transferFeeRejectionReason(undefined, leg.transferFeeEnabled, opts?.allowTransferFeeTokens)) {
+    return false;
+  }
   if (leg.isStableOrSol) return true;
   if (leg.verified === true) {
     // Verified: freeze-disabled always passes. A KNOWN freeze-enabled token
@@ -133,6 +152,15 @@ export function gateAndRankMarketPools(
       reject(`binStep ${pool.binStep} > ${config.maxBinStep}`);
       continue;
     }
+    const xFeeReason = transferFeeRejectionReason(
+      pool.tokenXSymbol,
+      pool.tokenXTransferFeeEnabled,
+      config.allowTransferFeeTokens,
+    );
+    if (xFeeReason) {
+      reject(xFeeReason);
+      continue;
+    }
     const xPasses = marketLegPasses(
       {
         isStableOrSol: isStableOrSol(pool.tokenX, config.stablecoinMints),
@@ -141,11 +169,21 @@ export function gateAndRankMarketPools(
         holders: pool.tokenXHolders,
       },
       config.minHolders,
+      { allowTransferFeeTokens: config.allowTransferFeeTokens },
     );
     if (!xPasses) {
       reject(
         `leg ${pool.tokenXSymbol ?? pool.tokenX} fails token safety (verified=${pool.tokenXVerified}, freezeDisabled=${pool.tokenXFreezeDisabled}, holders=${pool.tokenXHolders})`,
       );
+      continue;
+    }
+    const yFeeReason = transferFeeRejectionReason(
+      pool.tokenYSymbol,
+      pool.tokenYTransferFeeEnabled,
+      config.allowTransferFeeTokens,
+    );
+    if (yFeeReason) {
+      reject(yFeeReason);
       continue;
     }
     const yPasses = marketLegPasses(
@@ -156,6 +194,7 @@ export function gateAndRankMarketPools(
         holders: pool.tokenYHolders,
       },
       config.minHolders,
+      { allowTransferFeeTokens: config.allowTransferFeeTokens },
     );
     if (!yPasses) {
       reject(

@@ -3,6 +3,36 @@ import { vi } from "vitest";
 import type { PoolState, BinArray, AgentDecision } from "../engine/types.js";
 import type { PositionRecord } from "../engine/db-service.js";
 import type { AppConfig } from "../engine/config-service.js";
+import { StrategyLive } from "../engine/strategy-service.js";
+import { DbLive } from "../engine/db-service.js";
+import { MemoryLive } from "../engine/memory-service.js";
+import { RiskLive } from "../engine/risk-service.js";
+import { AuditLive } from "../engine/audit-service.js";
+import { AgentNoOp } from "../engine/agent-service.js";
+import { AgentStateMutable } from "../engine/state-service.js";
+import { ConfigService } from "../engine/config-service.js";
+import {
+  AdapterService,
+  BlacklistService,
+  ScreenerService,
+  DbService,
+  MemoryService,
+  RevenueService,
+  RevenueConfigService,
+  ReferralService,
+  AgentService,
+  McpServerService,
+  HttpStatusServerService,
+  EntryPrepService,
+  MeteoraDatapiService,
+  GeckoTerminalService,
+  AlertService,
+  type AdapterApi,
+  type AgentApi,
+  type MemoryApi,
+  type MeteoraDatapiApi,
+  type MeteoraPoolStats,
+} from "../engine/services.js";
 
 // ─── Pool & Bin ──────────────────────────────────────────────────────────────
 
@@ -289,3 +319,217 @@ export function mockFetch(impl: unknown): () => void {
     globalThis.fetch = original;
   };
 }
+
+// ─── Shared test factories (imported by decision-loop + harvest-gate) ──────
+
+// ─── Wave 2: phantom EXITs, portfolio math, HOLD spam, snapshot retention ────
+
+type MintAuthorities = { mintAuthority: string | null; freezeAuthority: string | null };
+const NO_AUTHORITIES: MintAuthorities = { mintAuthority: null, freezeAuthority: null };
+
+export function makeDatapiStats(overrides: Partial<MeteoraPoolStats> = {}): MeteoraPoolStats {
+  return {
+    address: "unset",
+    name: "TEST",
+    tvlUsd: 200_000,
+    volume24hUsd: 40_000,
+    fees24hUsd: 400,
+    apr: 20,
+    apy: 20,
+    currentPrice: 150,
+    feeTvlRatio24h: null,
+    feeTvlRatio12h: null,
+    feeTvlRatio1h: null,
+    dynamicFeePct: null,
+    baseFeePct: null,
+    hasFarm: null,
+    farmApr: null,
+    farmApy: null,
+    isBlacklisted: null,
+    tokenXFreezeAuthorityDisabled: null,
+    tokenYFreezeAuthorityDisabled: null,
+    tokenXVerified: null,
+    tokenYVerified: null,
+    ...overrides,
+  };
+}
+
+export function makeAdapter(
+  pools: Record<string, ReturnType<typeof makePool>>,
+  overrides: Partial<AdapterApi> = {},
+): AdapterApi {
+  return {
+    hasWallet: () => false,
+    getWalletAddress: () => null,
+    getWalletBalanceUsd: () => Effect.succeed(10_000),
+    getNativeSolBalance: () => Effect.succeed(0n),
+    getPoolState: (addr: string) => {
+      const pool = pools[addr];
+      return pool ? Effect.succeed(pool) : Effect.fail(new Error(`unknown pool ${addr}`));
+    },
+    getBinArray: () => Effect.succeed(makeBinArray()),
+    getPositions: () => Effect.succeed([]),
+    getAllWalletPositions: () => Effect.succeed([]),
+    simulateRebalance: () =>
+      Effect.succeed({
+        estimatedFeesUsd: 0,
+        estimatedCostUsd: 0,
+        netBenefitUsd: 0,
+        source: "pool-heuristic" as const,
+      }),
+    enterPosition: (
+      _poolAddress: string,
+      _lowerBinId: number,
+      _upperBinId: number,
+      positionSizeUsd: number,
+    ) =>
+      Effect.succeed({
+        positionPubKey: "mock-pos",
+        txSignature: "mock-tx",
+        depositMode: "two-sided" as const,
+        amountXUsd: positionSizeUsd / 2,
+        amountYUsd: positionSizeUsd / 2,
+      }),
+    exitPosition: () => Effect.succeed({ txSignature: "mock-tx" }),
+    rebalancePosition: () =>
+      Effect.succeed({ positionPubKey: "mock-pos", txSignatures: ["mock-tx"] }),
+    claimFees: () =>
+      Effect.succeed({
+        txSignature: "mock-tx",
+        feeX: 0,
+        feeY: 0,
+        platformFeeX: 0,
+        platformFeeY: 0,
+        netFeeX: 0,
+        netFeeY: 0,
+      }),
+    claimRewards: () =>
+      Effect.succeed({
+        skipped: true,
+        skipReason: "no pending rewards",
+        txSignatures: [],
+        rewards: [],
+      }),
+    discoverPools: () => Effect.succeed([]),
+    reportFeeCollection: () => Effect.void,
+    swapUSDCForSOL: () => Effect.void,
+    getTokenBalance: () => Effect.succeed(0n),
+    getTokenPrices: () => Effect.succeed({}),
+    getTokenDecimals: () => Effect.succeed(9),
+    quoteSwapUSDCForToken: () => Effect.succeed({}),
+    swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
+    getMintAuthorities: () => Effect.succeed(NO_AUTHORITIES),
+    ...overrides,
+  } as AdapterApi;
+}
+
+export interface RecordedMemory {
+  category: string;
+  content: string;
+  poolAddress?: string | undefined;
+}
+
+function makeRecordingMemory(record: RecordedMemory[]): MemoryApi {
+  return {
+    initialize: () => Effect.void,
+    upsert: (entry) =>
+      Effect.sync(() => {
+        record.push({
+          category: entry.category,
+          content: entry.content,
+          poolAddress: entry.poolAddress,
+        });
+      }),
+    getRelevantContext: () => Effect.succeed([]),
+    pruneExpired: () => Effect.succeed(0),
+    recordOutcome: () => Effect.void,
+  };
+}
+
+export function makeTestLayer(opts: {
+  adapter: AdapterApi;
+  memoryRecorded?: RecordedMemory[];
+  datapi?: MeteoraDatapiApi;
+  configOverrides?: Partial<AppConfig>;
+  agent?: AgentApi;
+}) {
+  const config = defaultAppConfig({
+    scanIntervalMs: 3_600_000,
+    paperTrading: true,
+    agentMcpEnabled: false,
+    agentHttpPort: 0,
+    ...opts.configOverrides,
+  });
+  const dbLayer = DbLive(":memory:");
+  return Layer.mergeAll(
+    Layer.succeed(ConfigService, config),
+    Layer.succeed(AdapterService, opts.adapter),
+    StrategyLive,
+    opts.memoryRecorded
+      ? Layer.succeed(MemoryService, makeRecordingMemory(opts.memoryRecorded))
+      : Layer.provide(MemoryLive, dbLayer),
+    RiskLive({
+      confidenceThreshold: 0.65,
+      maxRebalanceRangeBins: 50,
+      stopLossPct: 0.15,
+      maxPerPoolAllocationPct: 0.4,
+      maxPositionsPerPool: 2,
+    }),
+    Layer.succeed(BlacklistService, {
+      isDeployerBlacklisted: () => false,
+      isTokenBlacklisted: () => false,
+      checkPool: () => Effect.void,
+    }),
+    Layer.provide(AuditLive, dbLayer),
+    Layer.succeed(ScreenerService, { screenPools: () => Effect.succeed([]) }),
+    dbLayer,
+    Layer.succeed(RevenueService, {
+      calculateTier: () => "free",
+      calculatePlatformFee: () => ({ platformFeeUsd: 0, netFeeX: 0, netFeeY: 0 }),
+      calculateCreditDiscount: () => 0,
+    }),
+    Layer.succeed(RevenueConfigService, {
+      getConfig: () =>
+        Effect.succeed({
+          tier: "free",
+          platformFeeRate: 0,
+          revenueShareEnabled: false,
+          revenueShareOperatorPct: 0,
+          feeWalletAddress: "",
+        }),
+      refreshConfig: () =>
+        Effect.succeed({
+          tier: "free",
+          platformFeeRate: 0,
+          revenueShareEnabled: false,
+          revenueShareOperatorPct: 0,
+          feeWalletAddress: "",
+        }),
+    }),
+    Layer.succeed(ReferralService, {
+      generateCode: () => Effect.succeed("code"),
+      validateCode: () => Effect.succeed({ valid: false }),
+      applyReferral: () => Effect.void,
+      getReferralCount: () => Effect.succeed(0),
+    }),
+    Layer.succeed(AgentService, opts.agent ?? AgentNoOp),
+    AgentStateMutable({ maxPendingProposals: 50 }).layer,
+    Layer.succeed(McpServerService, { start: () => Effect.void, stop: () => Effect.void }),
+    Layer.succeed(HttpStatusServerService, { start: () => Effect.void, stop: () => Effect.void }),
+    Layer.succeed(EntryPrepService, { prepareEntryTokens: () => Effect.succeed(undefined) }),
+    Layer.succeed(MeteoraDatapiService, opts.datapi ?? { getPoolData: () => Effect.succeed(null) }),
+    Layer.succeed(GeckoTerminalService, { getPoolStats: () => Effect.succeed(null) }),
+    Layer.succeed(AlertService, {
+      sendAlert: () => Effect.void,
+      recordFeeClaim: () => Effect.void,
+    }),
+  );
+}
+
+export type DecisionRow = {
+  poolAddress: string;
+  action: string;
+  reasoning: string;
+  executed: boolean;
+  riskResult: { approved: boolean; reason: string };
+};

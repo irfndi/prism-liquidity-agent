@@ -1,0 +1,367 @@
+import { describe, expect, it } from "vitest";
+import {
+  activeShareEstimate,
+  FEE_CAPTURE_REFERENCE_SPAN_PCT,
+  netFeeVelocityUsd,
+  runnerNetAprPct,
+} from "../engine/fee-capture.js";
+
+describe("activeShareEstimate", () => {
+  it("is deterministic across repeated calls with identical inputs", () => {
+    const params = {
+      positionSizeUsd: 1000,
+      poolTvlUsd: 1_000_000,
+      rangeHalfWidthBins: 5,
+      binStep: 40,
+    };
+    const first = activeShareEstimate(params);
+    expect(activeShareEstimate(params)).toBe(first);
+    expect(activeShareEstimate(params)).toBe(first);
+  });
+
+  it("fails closed on degenerate inputs (tvl / size / bins / binStep)", () => {
+    const base = {
+      positionSizeUsd: 1000,
+      poolTvlUsd: 1_000_000,
+      rangeHalfWidthBins: 5,
+      binStep: 40,
+    };
+    expect(activeShareEstimate({ ...base, poolTvlUsd: 0 })).toBe(0);
+    expect(activeShareEstimate({ ...base, poolTvlUsd: -1 })).toBe(0);
+    expect(activeShareEstimate({ ...base, positionSizeUsd: 0 })).toBe(0);
+    expect(activeShareEstimate({ ...base, positionSizeUsd: -1 })).toBe(0);
+    expect(activeShareEstimate({ ...base, rangeHalfWidthBins: 0 })).toBe(0);
+    expect(activeShareEstimate({ ...base, rangeHalfWidthBins: -5 })).toBe(0);
+    expect(activeShareEstimate({ ...base, binStep: 0 })).toBe(0);
+    expect(activeShareEstimate({ ...base, binStep: -40 })).toBe(0);
+    expect(activeShareEstimate({ ...base, poolTvlUsd: Number.NaN })).toBe(0);
+    expect(activeShareEstimate({ ...base, positionSizeUsd: Number.POSITIVE_INFINITY })).toBe(0);
+  });
+
+  it("computes the reference-span concentration model by hand", () => {
+    // spanPct = 2 * 5 * 40 * 0.0001 = 0.04 -> concentration = 2 / 0.04 = 50
+    // share = 1000 / (1_000_000 * 50) = 2e-5
+    expect(
+      activeShareEstimate({
+        positionSizeUsd: 1000,
+        poolTvlUsd: 1_000_000,
+        rangeHalfWidthBins: 5,
+        binStep: 40,
+      }),
+    ).toBeCloseTo(0.00002, 12);
+  });
+
+  it("uses the full-range reference span as concentration 1 (share = size / tvl)", () => {
+    // A range spanning exactly ±100%: bins * binStep = 1 / (2 * 0.0001) = 5000.
+    const share = activeShareEstimate({
+      positionSizeUsd: 1000,
+      poolTvlUsd: 100_000,
+      rangeHalfWidthBins: 5000,
+      binStep: 100,
+    });
+    expect(share).toBeCloseTo(1000 / 100_000, 12);
+    expect(share).toBeCloseTo(0.01, 12);
+  });
+
+  it("clamps at 1 when the position dominates the pool", () => {
+    expect(
+      activeShareEstimate({
+        positionSizeUsd: 10_000,
+        poolTvlUsd: 100,
+        rangeHalfWidthBins: 5,
+        binStep: 40,
+      }),
+    ).toBe(1);
+  });
+
+  it("never exceeds 1, even for a wide range with a huge position", () => {
+    const share = activeShareEstimate({
+      positionSizeUsd: 1_000_000,
+      poolTvlUsd: 10_000,
+      rangeHalfWidthBins: 1,
+      binStep: 100,
+    });
+    expect(share).toBeLessThanOrEqual(1);
+  });
+
+  it("wider ranges concentrate less (share strictly grows with rangeHalfWidthBins)", () => {
+    // Wider range -> larger spanPct -> lower concentration -> larger share of
+    // pool fees (time-in-range is the de-risker downstream).
+    const narrow = activeShareEstimate({
+      positionSizeUsd: 1000,
+      poolTvlUsd: 1_000_000,
+      rangeHalfWidthBins: 1,
+      binStep: 40,
+    });
+    const wide = activeShareEstimate({
+      positionSizeUsd: 1000,
+      poolTvlUsd: 1_000_000,
+      rangeHalfWidthBins: 100,
+      binStep: 40,
+    });
+    expect(narrow).toBeLessThan(wide);
+    expect(FEE_CAPTURE_REFERENCE_SPAN_PCT).toBe(2);
+  });
+});
+
+describe("netFeeVelocityUsd", () => {
+  it("is deterministic across repeated calls with identical inputs", () => {
+    const params = {
+      fees24hUsd: 1000,
+      shareEstimate: 0.01,
+      harvestCostUsd: 1.0,
+      conversionCostPct: 0.1,
+      positionSizeUsd: 1000,
+      timeInRangePct: 0.9,
+    };
+    const first = netFeeVelocityUsd(params);
+    expect(netFeeVelocityUsd(params)).toBe(first);
+    expect(netFeeVelocityUsd(params)).toBe(first);
+  });
+
+  it("fails closed on degenerate inputs (fees / size / timeInRange)", () => {
+    const base = {
+      fees24hUsd: 1000,
+      shareEstimate: 0.01,
+      harvestCostUsd: 1.0,
+      conversionCostPct: 0.1,
+      positionSizeUsd: 1000,
+      timeInRangePct: 0.9,
+    };
+    expect(netFeeVelocityUsd({ ...base, fees24hUsd: 0 })).toBe(0);
+    expect(netFeeVelocityUsd({ ...base, fees24hUsd: -1 })).toBe(0);
+    expect(netFeeVelocityUsd({ ...base, positionSizeUsd: 0 })).toBe(0);
+    expect(netFeeVelocityUsd({ ...base, positionSizeUsd: -1 })).toBe(0);
+    expect(netFeeVelocityUsd({ ...base, timeInRangePct: 0 })).toBe(0);
+    expect(netFeeVelocityUsd({ ...base, timeInRangePct: -0.5 })).toBe(0);
+    expect(netFeeVelocityUsd({ ...base, fees24hUsd: Number.NaN })).toBe(0);
+    expect(netFeeVelocityUsd({ ...base, shareEstimate: Number.NaN })).toBe(0);
+    expect(netFeeVelocityUsd({ ...base, conversionCostPct: Number.POSITIVE_INFINITY })).toBe(0);
+    expect(netFeeVelocityUsd({ ...base, harvestCostUsd: Number.NaN })).toBe(0);
+  });
+
+  it("applies the conversion haircut (1 - conversionCostPct)", () => {
+    const base = {
+      fees24hUsd: 1000,
+      shareEstimate: 0.01,
+      harvestCostUsd: 0,
+      conversionCostPct: 0.25,
+      positionSizeUsd: 1000,
+      timeInRangePct: 1,
+    };
+    const noCost = netFeeVelocityUsd({ ...base, conversionCostPct: 0 });
+    const withCost = netFeeVelocityUsd(base);
+    expect(noCost).toBeCloseTo((1000 * 0.01) / 1000, 12); // 0.01
+    expect(withCost).toBeCloseTo(noCost * 0.75, 12);
+  });
+
+  it("a harvest cost exceeding gross capture zeroes the result (never negative)", () => {
+    // gross = 1000 * 0.01 * 1 = 10; harvest 15 > 10 -> 0, not -0.005
+    expect(
+      netFeeVelocityUsd({
+        fees24hUsd: 1000,
+        shareEstimate: 0.01,
+        harvestCostUsd: 15,
+        conversionCostPct: 0,
+        positionSizeUsd: 1000,
+        timeInRangePct: 1,
+      }),
+    ).toBe(0);
+  });
+
+  it("share scales the result linearly", () => {
+    const base = {
+      fees24hUsd: 1000,
+      harvestCostUsd: 0,
+      conversionCostPct: 0,
+      positionSizeUsd: 1000,
+      timeInRangePct: 1,
+    };
+    const low = netFeeVelocityUsd({ ...base, shareEstimate: 0.1 });
+    const high = netFeeVelocityUsd({ ...base, shareEstimate: 0.2 });
+    expect(high).toBeCloseTo(low * 2, 12);
+  });
+
+  it("clamps out-of-range fractions defensively (share / timeInRange / conversion)", () => {
+    const base = {
+      fees24hUsd: 1000,
+      shareEstimate: 0.01,
+      harvestCostUsd: 0,
+      conversionCostPct: 0.1,
+      positionSizeUsd: 1000,
+      timeInRangePct: 0.9,
+    };
+    expect(netFeeVelocityUsd({ ...base, shareEstimate: 5 })).toBeCloseTo(
+      netFeeVelocityUsd({ ...base, shareEstimate: 1 }),
+      12,
+    );
+    expect(netFeeVelocityUsd({ ...base, shareEstimate: -5 })).toBe(0);
+    expect(netFeeVelocityUsd({ ...base, timeInRangePct: 2 })).toBeCloseTo(
+      netFeeVelocityUsd({ ...base, timeInRangePct: 1 }),
+      12,
+    );
+    expect(netFeeVelocityUsd({ ...base, conversionCostPct: 1.5 })).toBe(0);
+    expect(netFeeVelocityUsd({ ...base, conversionCostPct: -0.5 })).toBeCloseTo(
+      netFeeVelocityUsd({ ...base, conversionCostPct: 0 }),
+      12,
+    );
+  });
+
+  it("computes a hand-verified worked example", () => {
+    // gross = 1000 * 0.01 * 0.9 = 9
+    // net   = (9 - 1) * (1 - 0.1) = 7.2
+    // per $ = 7.2 / 1000 = 0.0072
+    expect(
+      netFeeVelocityUsd({
+        fees24hUsd: 1000,
+        shareEstimate: 0.01,
+        harvestCostUsd: 1.0,
+        conversionCostPct: 0.1,
+        positionSizeUsd: 1000,
+        timeInRangePct: 0.9,
+      }),
+    ).toBeCloseTo(0.0072, 10);
+  });
+});
+
+describe("runnerNetAprPct", () => {
+  it("is deterministic across repeated calls with identical inputs", () => {
+    const params = {
+      grossAprPct: 200,
+      shareEstimate: 0.02,
+      harvestCostUsd: 0.5,
+      conversionCostPct: 0.05,
+      positionSizeUsd: 10_000,
+      timeInRangePct: 1,
+    };
+    const first = runnerNetAprPct(params);
+    expect(runnerNetAprPct(params)).toBe(first);
+    expect(runnerNetAprPct(params)).toBe(first);
+  });
+
+  it("fails closed on degenerate inputs (grossAprPct / size / timeInRange)", () => {
+    const base = {
+      grossAprPct: 200,
+      shareEstimate: 0.02,
+      harvestCostUsd: 0.5,
+      conversionCostPct: 0.05,
+      positionSizeUsd: 10_000,
+      timeInRangePct: 1,
+    };
+    expect(runnerNetAprPct({ ...base, grossAprPct: 0 })).toBe(0);
+    expect(runnerNetAprPct({ ...base, grossAprPct: -50 })).toBe(0);
+    expect(runnerNetAprPct({ ...base, positionSizeUsd: 0 })).toBe(0);
+    expect(runnerNetAprPct({ ...base, timeInRangePct: 0 })).toBe(0);
+    expect(runnerNetAprPct({ ...base, grossAprPct: Number.NaN })).toBe(0);
+    expect(runnerNetAprPct({ ...base, shareEstimate: Number.NaN })).toBe(0);
+  });
+
+  it("matches netFeeVelocityUsd annualized (same floored math)", () => {
+    const params = {
+      grossAprPct: 200,
+      shareEstimate: 0.02,
+      harvestCostUsd: 0.5,
+      conversionCostPct: 0.05,
+      positionSizeUsd: 10_000,
+      timeInRangePct: 1,
+    };
+    const dailyPerDollar = netFeeVelocityUsd({
+      fees24hUsd: (10_000 * 200) / 100 / 365,
+      shareEstimate: params.shareEstimate,
+      harvestCostUsd: params.harvestCostUsd,
+      conversionCostPct: params.conversionCostPct,
+      positionSizeUsd: params.positionSizeUsd,
+      timeInRangePct: params.timeInRangePct,
+    });
+    expect(runnerNetAprPct(params)).toBeCloseTo(dailyPerDollar * 365 * 100, 10);
+  });
+
+  it("computes a hand-verified worked example", () => {
+    // daily gross = 10_000 * 200/100 / 365 = 20000/365
+    // gross share  = 20000/365 * 0.02 * 1.0 = 400/365
+    // net          = (400/365 - 0.5) * (1 - 0.05) = 0.5660958904109589
+    // per $        = net / 10_000
+    // APR          = per $ * 365 * 100 = 2.06625
+    expect(
+      runnerNetAprPct({
+        grossAprPct: 200,
+        shareEstimate: 0.02,
+        harvestCostUsd: 0.5,
+        conversionCostPct: 0.05,
+        positionSizeUsd: 10_000,
+        timeInRangePct: 1,
+      }),
+    ).toBeCloseTo(2.06625, 10);
+  });
+
+  it("keeps net APR below gross APR (the consistency sanity property)", () => {
+    const apr = runnerNetAprPct({
+      grossAprPct: 500,
+      shareEstimate: 0.5,
+      harvestCostUsd: 0.1,
+      conversionCostPct: 0.1,
+      positionSizeUsd: 10_000,
+      timeInRangePct: 0.8,
+    });
+    expect(apr).toBeGreaterThanOrEqual(0);
+    expect(apr).toBeLessThanOrEqual(500);
+  });
+
+  it("scales linearly with grossAprPct when costs are zero (anchor-only input)", () => {
+    const base = {
+      grossAprPct: 100,
+      shareEstimate: 1,
+      harvestCostUsd: 0,
+      conversionCostPct: 0,
+      positionSizeUsd: 10_000,
+      timeInRangePct: 1,
+    };
+    expect(runnerNetAprPct({ ...base, grossAprPct: 200 })).toBeCloseTo(
+      runnerNetAprPct(base) * 2,
+      10,
+    );
+  });
+});
+
+describe("pipeline", () => {
+  it("composes activeShareEstimate into netFeeVelocityUsd (a share from rank-time inputs)", () => {
+    // share = 5000 / (500_000 * 50) = 2e-4 (halfWidth 5 @ binStep 40)
+    const share = activeShareEstimate({
+      positionSizeUsd: 5000,
+      poolTvlUsd: 500_000,
+      rangeHalfWidthBins: 5,
+      binStep: 40,
+    });
+    expect(share).toBeCloseTo(2e-4, 12);
+    const velocity = netFeeVelocityUsd({
+      fees24hUsd: 1200,
+      shareEstimate: share,
+      harvestCostUsd: 0.05,
+      conversionCostPct: 0.05,
+      positionSizeUsd: 5000,
+      timeInRangePct: 0.95,
+    });
+    // gross = 1200 * 2e-4 * 0.95 = 0.228; net = (0.228 - 0.05) * 0.95 = 0.1691; /5000
+    expect(velocity).toBeCloseTo(0.1691 / 5000, 12);
+    expect(velocity).toBeGreaterThan(0);
+  });
+
+  it("ranks by NET velocity per dollar, not raw gross (harvest cost is the tie-breaker)", () => {
+    const base = {
+      fees24hUsd: 1000,
+      shareEstimate: 0.01,
+      conversionCostPct: 0,
+      positionSizeUsd: 5000,
+      timeInRangePct: 1,
+    };
+    // Same gross (10 USD/day attributed), but harvest costs differ.
+    const cheapHarvest = netFeeVelocityUsd({ ...base, harvestCostUsd: 1 });
+    const breakEven = netFeeVelocityUsd({ ...base, harvestCostUsd: 10 }); // harvest == gross -> 0
+    const costlyHarvest = netFeeVelocityUsd({ ...base, harvestCostUsd: 15 }); // harvest > gross -> 0
+
+    expect(cheapHarvest).toBeCloseTo((10 - 1) / 5000, 12);
+    expect(breakEven).toBe(0);
+    expect(costlyHarvest).toBe(0);
+    expect(cheapHarvest).toBeGreaterThan(costlyHarvest);
+  });
+});

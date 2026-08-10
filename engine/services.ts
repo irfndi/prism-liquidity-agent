@@ -75,6 +75,12 @@ export interface DiscoveredPool {
   readonly tokenYFreezeDisabled?: boolean;
   readonly tokenXHolders?: number;
   readonly tokenYHolders?: number;
+  /** True when the leg mint carries a Token-2022 transfer-fee extension with
+   *  a non-zero fee (Robinhood rule 4 tax screen). Optional so legacy
+   *  mappers/tests compile unchanged; absent fails open (no fee assumed) and
+   *  the per-pool screen still gates ENTER. */
+  readonly tokenXTransferFeeEnabled?: boolean;
+  readonly tokenYTransferFeeEnabled?: boolean;
 }
 
 export interface SwapRequest {
@@ -352,6 +358,20 @@ export interface AdapterApi {
     },
     Error
   >;
+  /**
+   * Economic harvest gate input (Robinhood rule 10 — never spend $0.80 to
+   * realize $1.00): the position's PENDING claimable swap fees priced in USD,
+   * read BEFORE any claim tx so the engine can skip uneconomic claims.
+   * `null` when either leg is unpriceable; the effect fails when the
+   * position read fails. Callers treat both as "pending amount genuinely
+   * unavailable" and FAIL OPEN (claim anyway — fee capture is protective).
+   * Optional so existing claimFees mocks compile unchanged; when absent the
+   * gate fails open.
+   */
+  readonly getClaimableFeesUsd?: (
+    poolAddress: string,
+    positionPubKey: string,
+  ) => Effect.Effect<number | null, Error>;
   readonly convertClaimedFees?: (
     poolAddress: string,
     destination: "accumulate-quote" | "accumulate-sol",
@@ -424,11 +444,19 @@ export interface AdapterApi {
    * account. The mint authority doubles as the documented deployer fallback
    * for the deployer blacklist; the freeze authority feeds the safety
    * screening (freeze-authority-enabled tokens are rejected). Callers treat
-   * RPC failures as fail-open.
+   * RPC failures as fail-open. `transferFeeEnabled` is true when the mint
+   * carries a Token-2022 transfer-fee extension with a non-zero fee (the
+   * Robinhood rule 4 tax screen). Optional so legacy mocks compile
+   * unchanged — absent means "not known", which the gate treats as no fee.
    */
-  readonly getMintAuthorities: (
-    mintAddress: string,
-  ) => Effect.Effect<{ mintAuthority: string | null; freezeAuthority: string | null }, Error>;
+  readonly getMintAuthorities: (mintAddress: string) => Effect.Effect<
+    {
+      mintAuthority: string | null;
+      freezeAuthority: string | null;
+      transferFeeEnabled?: boolean;
+    },
+    Error
+  >;
   /** Wash forensics: one Helius enhanced-API call on the pool's recent txs →
    *  a wash evidence score (wallet concentration / burst density). Null on
    *  any fetch/parse failure or when the RPC host is not Helius (fail-open).

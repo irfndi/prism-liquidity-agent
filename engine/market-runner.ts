@@ -34,6 +34,10 @@ export function isMarketRunnerPool(params: {
 export interface HeldPositionApr {
   readonly poolAddress: string;
   readonly feeAprPct: number;
+  /** Pool TVL at the last evaluation — the net-fee capture model needs it to
+   * estimate the position's share of fees (small entries on deep pools
+   * capture a fraction of the headline APR). */
+  readonly tvlUsd: number;
 }
 
 /** The lowest-APR held position, or null when every held position's APR is
@@ -44,16 +48,18 @@ export interface HeldPositionApr {
  * re-enters in the same cycle. */
 export function lowestAprHeldPosition(
   positions: Iterable<{ readonly poolAddress: string }>,
-  poolFeeAprByAddress: ReadonlyMap<string, number>,
+  poolAprByAddress: ReadonlyMap<string, { feeAprPct: number; tvlUsd: number }>,
   excludePoolAddress?: string,
 ): HeldPositionApr | null {
   let worst: HeldPositionApr | null = null;
   for (const pos of positions) {
     if (pos.poolAddress === excludePoolAddress) continue;
-    const apr = poolFeeAprByAddress.get(pos.poolAddress) ?? 0;
+    const entry = poolAprByAddress.get(pos.poolAddress);
+    if (!entry) continue;
+    const apr = entry.feeAprPct;
     if (apr <= 0) continue;
     if (!worst || apr < worst.feeAprPct) {
-      worst = { poolAddress: pos.poolAddress, feeAprPct: apr };
+      worst = { poolAddress: pos.poolAddress, feeAprPct: apr, tvlUsd: entry.tvlUsd };
     }
   }
   return worst;
@@ -69,4 +75,25 @@ export function shouldRotate(
 ): boolean {
   if (!worst) return false;
   return candidateAprPct >= worst.feeAprPct * (aprMult ?? DEFAULT_ROTATION_APR_MULT);
+}
+
+/** Trailing consecutive above-floor APR observations (newest-first). Breaks
+ * on the first below-floor OR stale (> maxGapMs old) observation — two
+ * cycles three days apart are not "consecutive". This is the persistence
+ * gate behind runner admission and rotation: a single-cycle fee spike must
+ * never qualify a pool (rule: require fee production across consecutive
+ * observations). */
+export function consecutiveAboveFloorObservations(
+  observations: ReadonlyArray<{ at: number; apr: number }>,
+  floorApr: number,
+  now: number,
+  maxGapMs: number,
+): number {
+  let count = 0;
+  for (const o of observations) {
+    if (now - o.at > maxGapMs) break;
+    if (o.apr < floorApr) break;
+    count += 1;
+  }
+  return count;
 }

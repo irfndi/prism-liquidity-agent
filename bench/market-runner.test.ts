@@ -2,6 +2,7 @@
  * the lowest-APR rotation exit. */
 import { describe, expect, it } from "vitest";
 import {
+  consecutiveAboveFloorObservations,
   isMarketRunnerPool,
   lowestAprHeldPosition,
   shouldRotate,
@@ -56,17 +57,18 @@ describe("isMarketRunnerPool (high-yield classification)", () => {
 describe("lowestAprHeldPosition (rotation target)", () => {
   it("picks the lowest-APR held position", () => {
     const aprs = new Map([
-      [RUNNER, 5_000],
-      [FLAT, 25],
+      [RUNNER, { feeAprPct: 5_000, tvlUsd: 200_000 }],
+      [FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }],
     ]);
     expect(lowestAprHeldPosition([{ poolAddress: RUNNER }, { poolAddress: FLAT }], aprs)).toEqual({
       poolAddress: FLAT,
       feeAprPct: 25,
+      tvlUsd: 1_000_000,
     });
   });
 
   it("never rotates out of an unmeasured/zero-APR position (fail-closed)", () => {
-    const aprs = new Map([[FLAT, 25]]);
+    const aprs = new Map([[FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }]]);
     expect(lowestAprHeldPosition([{ poolAddress: RUNNER }], aprs)).toBeNull();
   });
 
@@ -74,12 +76,12 @@ describe("lowestAprHeldPosition (rotation target)", () => {
     // A held position on the runner pool must not be exited while the same
     // pool re-enters in the same cycle.
     const aprs = new Map([
-      [RUNNER, 5_000],
-      [FLAT, 25],
+      [RUNNER, { feeAprPct: 5_000, tvlUsd: 200_000 }],
+      [FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }],
     ]);
     expect(
       lowestAprHeldPosition([{ poolAddress: RUNNER }, { poolAddress: FLAT }], aprs, RUNNER),
-    ).toEqual({ poolAddress: FLAT, feeAprPct: 25 });
+    ).toEqual({ poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 });
     // Runner is the ONLY held position -> nothing to rotate into it.
     expect(lowestAprHeldPosition([{ poolAddress: RUNNER }], aprs, RUNNER)).toBeNull();
   });
@@ -89,13 +91,49 @@ describe("lowestAprHeldPosition (rotation target)", () => {
   });
 });
 
+describe("consecutiveAboveFloorObservations (persistence gate)", () => {
+  const now = 1_800_000_000_000;
+  it("counts trailing consecutive above-floor observations (newest-first)", () => {
+    const obs = [
+      { at: now, apr: 6_000 },
+      { at: now - 600_000, apr: 5_500 },
+      { at: now - 1_200_000, apr: 300 },
+    ];
+    expect(consecutiveAboveFloorObservations(obs, 500, now, 3_600_000)).toBe(2);
+  });
+
+  it("breaks on the first below-floor observation", () => {
+    const obs = [
+      { at: now, apr: 6_000 },
+      { at: now - 600_000, apr: 100 },
+    ];
+    expect(consecutiveAboveFloorObservations(obs, 500, now, 3_600_000)).toBe(1);
+  });
+
+  it("stale observations break the streak (two cycles days apart are not consecutive)", () => {
+    const obs = [
+      { at: now, apr: 6_000 },
+      { at: now - 5 * 3_600_000, apr: 6_000 },
+    ];
+    expect(consecutiveAboveFloorObservations(obs, 500, now, 3_600_000)).toBe(1);
+  });
+
+  it("empty history -> 0", () => {
+    expect(consecutiveAboveFloorObservations([], 500, now, 3_600_000)).toBe(0);
+  });
+});
+
 describe("shouldRotate (APR multiplier gate)", () => {
   it("5000% runner vs 25% held with 5x mult -> rotate", () => {
-    expect(shouldRotate(5_000, { poolAddress: FLAT, feeAprPct: 25 }, 5)).toBe(true);
+    expect(shouldRotate(5_000, { poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 }, 5)).toBe(
+      true,
+    );
   });
 
   it("marginal 100% candidate vs 25% held -> no rotation", () => {
-    expect(shouldRotate(100, { poolAddress: FLAT, feeAprPct: 25 }, 5)).toBe(false);
+    expect(shouldRotate(100, { poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 }, 5)).toBe(
+      false,
+    );
   });
 
   it("no worst position -> no rotation", () => {
@@ -103,7 +141,11 @@ describe("shouldRotate (APR multiplier gate)", () => {
   });
 
   it("defaults to 5x when the multiplier is unset", () => {
-    expect(shouldRotate(126, { poolAddress: FLAT, feeAprPct: 25 }, undefined)).toBe(true);
-    expect(shouldRotate(124, { poolAddress: FLAT, feeAprPct: 25 }, undefined)).toBe(false);
+    expect(
+      shouldRotate(126, { poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 }, undefined),
+    ).toBe(true);
+    expect(
+      shouldRotate(124, { poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 }, undefined),
+    ).toBe(false);
   });
 });

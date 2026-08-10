@@ -2,6 +2,20 @@
 
 All notable changes to Prism are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **Robinhood-gap hardening (fee-truth, exit-executability, rotation discipline)**, all config-gated and paper-visible:
+  - **Persistence gate (G1)**: runner admission + rotation superiority require `MARKET_SCAN_RUNNER_CONFIRM_CYCLES` (2) consecutive above-floor APR observations via a per-pool metadata ring — single-cycle fee spikes never qualify a pool.
+  - **Rotation arm (G2)**: `MARKET_SCAN_ROTATION_ARM_MS` TTL — the incumbent EXIT executes only while the arm is fresh and the runner still qualifies (`[rotation-canceled]` cancel-and-preserve).
+  - **Net-fee rotation (G3)**: `engine/fee-capture.ts` — rotation compares NET fee APRs (capture share, conversion + harvest costs on both sides) instead of gross APR; `FEE_CAPTURE_CONVERSION_COST_PCT` / `FEE_CAPTURE_HARVEST_COST_USD`.
+  - **Economic harvest gate (G4)**: live fee claims skip below the `HARVEST_MIN_NET_USD` floor or when `HARVEST_TX_COST_USD_EST` exceeds `HARVEST_MAX_COST_PCT` of gross — never spend $0.80 to realize $1.00; skipped claims retry next scan; paper accrual unaffected.
+  - **Transfer-tax screen (G5)**: Token-2022 transfer-fee extension detection (`parsedMintHasTransferFee`) + `ALLOW_TRANSFER_FEE_TOKENS`-gated rejection in the market gate and the shared safety screen.
+  - **Token-level failure breaker (G6)**: a genuine live EXIT failure blocks new ENTERs into any pool holding that token for `TOKEN_FAILURE_BLOCK_MS` (`token_block:<mint>` metadata).
+  - **Yield-regression EXIT (G7)**: `YIELD_REGRESSION_EXIT_PCT` — a tracked position whose measured fee APR falls below its entry-time baseline exits deterministically (self-healing flat majors); baseline recorded at ENTER (`yieldbase:<positionId>`).
+- 67 new tests (1810 total). Delivered via parallel subagent slices (fee-capture, transfer-fee, token-breaker, harvest-gate) + the decision-loop core.
+
 ## [0.2.10] — 2026-08-10
 
 ### Added
