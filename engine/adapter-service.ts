@@ -802,9 +802,16 @@ export const AdapterLive = Layer.effect(
           return memo.binsAround;
         }
         const bins = yield* Effect.tryPromise(() => dlmm.getBinsAroundActiveBin(20, 20));
+        // The bins fetch carries its OWN active-bin snapshot (the SDK reads
+        // the active bin internally): align the memo with it so binId/price
+        // and binsAround always describe the SAME point in time — retaining
+        // the old binId while refreshing fetchedAt would serve a stale active
+        // bin for another TTL window, and mixing bins from a newer snapshot
+        // with the old id would be internally inconsistent.
+        const binsActivePrice = bins.bins.find((b) => b.binId === bins.activeBin)?.price;
         activeBinMemo.set(poolAddress, {
-          binId: memo?.binId ?? bins.activeBin,
-          price: memo?.price ?? "",
+          binId: bins.activeBin,
+          price: binsActivePrice ?? memo?.price ?? "",
           fetchedAt: Date.now(),
           binsAround: bins,
         });

@@ -988,6 +988,10 @@ describe("no exit-and-reenter in one pass (launch lane)", () => {
         { [POOL]: makePool({ address: POOL, binStep: 100, tvlUsd: 300_000 }) },
         { discoverHotPools: () => Effect.succeed([makeHotDiscoveredPool(POOL)]) },
       ),
+      // Measured datapi stats: without them the ENTER candidate gate blocks
+      // every entry by design, and the no-exit-and-reenter guard test would
+      // pass vacuously (the pool could never ENTER regardless of the guard).
+      datapi: makeHotDatapi(POOL),
       configOverrides: {
         watchlistPools: [POOL],
         launchScanEnabled: true,
