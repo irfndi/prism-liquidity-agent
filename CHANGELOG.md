@@ -2,6 +2,20 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.8] — 2026-08-09
+
+### Changed
+
+- **RPC dedup — active-bin memoization** (verified by the performance audit: getActiveBin was fetched TWICE per pool per cycle — once in getPoolState, once in getBinArray — and getBinsAroundActiveBin re-fetched the same bin array getActiveBin just loaded; ~3 of the ~7 RPC/pool/cycle were pure waste). A short-TTL (3s) memo shared by both calls makes the within-cycle pair cost ONE SDK fetch each, invalidated on every mutation and pruned of expired entries (paper mode never mutates). Hardened through six review rounds: the memo aligns binId/price/binsAround to one snapshot (the bins fetch carries its own active bin), bounds derive from the fetched snapshot (a pool moving mid-cycle cannot produce newer bins filtered by an older range), an empty stored price is a miss (no currentPrice 0), the TTL starts at pool-state assembly end and only for fresh fetches (caller cadence cannot extend it), and the memo is range-keyed. ~7 → ~4 RPC/pool/cycle, zero behavior change (#211)
+
+### Added
+
+- 46 test cases (1729 total): memo proofs (one fetch per pair, TTL expiry on both halves), 24 launch-gate boundaries, 7 wash-forensics + 9 runner-dip thresholds, 4 decision-loop edges (no exit-and-reenter, timebox beats scale-in, wash gate rejection, launch-cap boundary) (#211)
+
+### Changed
+
+- Bumped version to 0.2.8.
+
 ## [0.2.7] — 2026-08-09
 
 ### Fixed
