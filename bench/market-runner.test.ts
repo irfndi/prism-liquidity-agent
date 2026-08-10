@@ -70,6 +70,20 @@ describe("lowestAprHeldPosition (rotation target)", () => {
     expect(lowestAprHeldPosition([{ poolAddress: RUNNER }], aprs)).toBeNull();
   });
 
+  it("never rotates out of the candidate runner itself (no exit-and-reenter)", () => {
+    // A held position on the runner pool must not be exited while the same
+    // pool re-enters in the same cycle.
+    const aprs = new Map([
+      [RUNNER, 5_000],
+      [FLAT, 25],
+    ]);
+    expect(
+      lowestAprHeldPosition([{ poolAddress: RUNNER }, { poolAddress: FLAT }], aprs, RUNNER),
+    ).toEqual({ poolAddress: FLAT, feeAprPct: 25 });
+    // Runner is the ONLY held position -> nothing to rotate into it.
+    expect(lowestAprHeldPosition([{ poolAddress: RUNNER }], aprs, RUNNER)).toBeNull();
+  });
+
   it("empty positions -> null", () => {
     expect(lowestAprHeldPosition([], new Map())).toBeNull();
   });

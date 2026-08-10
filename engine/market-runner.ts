@@ -38,13 +38,18 @@ export interface HeldPositionApr {
 
 /** The lowest-APR held position, or null when every held position's APR is
  * unknown/zero (nothing to rotate out of). Unmeasured held pools never
- * rotate — fail-closed, a made-up-low APR must not sell a real position. */
+ * rotate — fail-closed, a made-up-low APR must not sell a real position.
+ * `excludePoolAddress` (the candidate runner) is never a rotation target —
+ * a held position on the runner pool must not be exited while the same pool
+ * re-enters in the same cycle. */
 export function lowestAprHeldPosition(
   positions: Iterable<{ readonly poolAddress: string }>,
   poolFeeAprByAddress: ReadonlyMap<string, number>,
+  excludePoolAddress?: string,
 ): HeldPositionApr | null {
   let worst: HeldPositionApr | null = null;
   for (const pos of positions) {
+    if (pos.poolAddress === excludePoolAddress) continue;
     const apr = poolFeeAprByAddress.get(pos.poolAddress) ?? 0;
     if (apr <= 0) continue;
     if (!worst || apr < worst.feeAprPct) {

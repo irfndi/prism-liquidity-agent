@@ -6791,6 +6791,7 @@ export const program = Effect.gen(function* () {
                     const worst = lowestAprHeldPosition(
                       trackedPositions.values(),
                       poolFeeAprByAddress,
+                      poolAddress, // never rotate out of the candidate runner
                     );
                     if (
                       worst &&
