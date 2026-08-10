@@ -908,7 +908,14 @@ describe("runner scale-in wiring (Heart Attack step 2)", () => {
     // be entered by the redeploy pass after EXIT_POOL's exit freed a slot,
     // because a redeploy decision carries no positionMode (no launch
     // timebox/decay/drawdown protection).
-    const launchEntryRejected = decisions.some((d) => d.reasoning.includes("[launch-alloc-gate]"));
+    const launchEntryRejected = decisions.some(
+      (d) =>
+        d.reasoning.includes("[launch-alloc-gate]") ||
+        // Portfolio-full launch-cap rejection (market-runner lane: the cap
+        // block now also fires when MAX_OPEN_POSITIONS is reached, before
+        // the allocation gate).
+        d.reasoning.includes("[launch-cap]"),
+    );
     expect(launchEntryRejected, "the launch entry must have been allocation-rejected").toBe(true);
     const launchEnterCalls = enterSpy.mock.calls.filter((c) => c[0] === LAUNCH_POOL);
     expect(launchEnterCalls.length, "the redeploy must never enter the launch pool").toBe(0);
