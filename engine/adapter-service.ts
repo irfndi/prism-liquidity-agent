@@ -806,6 +806,7 @@ export const AdapterLive = Layer.effect(
     function memoizedBinsAround(
       poolAddress: string,
       dlmm: DLMM,
+      halfRange: number,
     ): Effect.Effect<{ activeBin: number; bins: BinLiquidity[] }, Error> {
       return Effect.gen(function* () {
         pruneActiveBinMemo();
@@ -817,7 +818,9 @@ export const AdapterLive = Layer.effect(
         ) {
           return memo.binsAround;
         }
-        const bins = yield* Effect.tryPromise(() => dlmm.getBinsAroundActiveBin(20, 20));
+        const bins = yield* Effect.tryPromise(() =>
+          dlmm.getBinsAroundActiveBin(halfRange, halfRange),
+        );
         // The bins fetch carries its OWN active-bin snapshot (the SDK reads
         // the active bin internally): align the memo with it so binId/price
         // and binsAround always describe the SAME point in time — retaining
@@ -2311,7 +2314,7 @@ export const AdapterLive = Layer.effect(
           // uninitialized bins with zero-amount placeholders, which is the
           // truthful "empty bin" representation. Memoized with the active bin
           // so getPoolState + getBinArray share one fetch pair.
-          const realBins = yield* memoizedBinsAround(poolAddress, dlmm).pipe(
+          const realBins = yield* memoizedBinsAround(poolAddress, dlmm, halfRange).pipe(
             Effect.catch((err) => {
               logger.warn(
                 "Real bin reserves unavailable — bin-derived metrics will be marked unknown",

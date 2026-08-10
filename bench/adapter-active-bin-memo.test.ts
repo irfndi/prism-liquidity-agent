@@ -140,27 +140,22 @@ describe("active-bin memoization (RPC dedup)", () => {
     const layer = makeAdapterLayer();
     const dlmm = dlmmState.current!;
     const realNow = Date.now.bind(Date);
+    let fakeNow = realNow();
+    vi.spyOn(Date, "now").mockImplementation(() => fakeNow);
 
-    // First read within the TTL: the memo serves it.
+    // ONE adapter lifetime (one provide): the TTL expiry must be exercised
+    // against the same memo map, not a fresh layer per read.
     await Effect.runPromise(
       Effect.provide(
         Effect.gen(function* () {
           const adapter = yield* AdapterService;
+          // First reads within the TTL: the memo serves both.
           yield* adapter.getPoolState(POOL_ADDRESS);
           yield* adapter.getPoolState(POOL_ADDRESS);
-        }),
-        layer,
-      ),
-    );
-    expect(dlmm.getActiveBin).toHaveBeenCalledTimes(1);
+          expect(dlmm.getActiveBin).toHaveBeenCalledTimes(1);
 
-    // Advance the clock past the 3s TTL on the SAME layer: the memo expires
-    // and the next read must see fresh on-chain state.
-    vi.spyOn(Date, "now").mockImplementation(() => realNow() + 5_000);
-    await Effect.runPromise(
-      Effect.provide(
-        Effect.gen(function* () {
-          const adapter = yield* AdapterService;
+          // Advance the clock past the 3s TTL: the next read must refetch.
+          fakeNow += 5_000;
           yield* adapter.getPoolState(POOL_ADDRESS);
         }),
         layer,
@@ -168,5 +163,30 @@ describe("active-bin memoization (RPC dedup)", () => {
     );
     vi.restoreAllMocks();
     expect(dlmm.getActiveBin).toHaveBeenCalledTimes(2);
+  });
+
+  it("expires the bins memo half too (getBinArray refetches past the TTL)", async () => {
+    const layer = makeAdapterLayer();
+    const dlmm = dlmmState.current!;
+    const realNow = Date.now.bind(Date);
+    let fakeNow = realNow();
+    vi.spyOn(Date, "now").mockImplementation(() => fakeNow);
+
+    await Effect.runPromise(
+      Effect.provide(
+        Effect.gen(function* () {
+          const adapter = yield* AdapterService;
+          yield* adapter.getBinArray(POOL_ADDRESS);
+          yield* adapter.getBinArray(POOL_ADDRESS);
+          expect(dlmm.getBinsAroundActiveBin).toHaveBeenCalledTimes(1);
+
+          fakeNow += 5_000;
+          yield* adapter.getBinArray(POOL_ADDRESS);
+        }),
+        layer,
+      ),
+    );
+    vi.restoreAllMocks();
+    expect(dlmm.getBinsAroundActiveBin).toHaveBeenCalledTimes(2);
   });
 });
