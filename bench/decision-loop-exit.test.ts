@@ -44,7 +44,7 @@ import { stringifySafe } from "../engine/bigint-json.js";
 type MintAuthorities = { mintAuthority: string | null; freezeAuthority: string | null };
 const NO_AUTHORITIES: MintAuthorities = { mintAuthority: null, freezeAuthority: null };
 
-function makeDatapiStats(overrides: Partial<MeteoraPoolStats> = {}): MeteoraPoolStats {
+export function makeDatapiStats(overrides: Partial<MeteoraPoolStats> = {}): MeteoraPoolStats {
   return {
     address: "unset",
     name: "TEST",
@@ -71,7 +71,7 @@ function makeDatapiStats(overrides: Partial<MeteoraPoolStats> = {}): MeteoraPool
   };
 }
 
-function makeAdapter(
+export function makeAdapter(
   pools: Record<string, ReturnType<typeof makePool>>,
   overrides: Partial<AdapterApi> = {},
 ): AdapterApi {
@@ -163,7 +163,7 @@ function makeRecordingMemory(record: RecordedMemory[]): MemoryApi {
   };
 }
 
-function makeTestLayer(opts: {
+export function makeTestLayer(opts: {
   adapter: AdapterApi;
   memoryRecorded?: RecordedMemory[];
   datapi?: MeteoraDatapiApi;
