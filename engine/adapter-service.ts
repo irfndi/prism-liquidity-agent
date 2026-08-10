@@ -20,6 +20,7 @@ import DLMM, {
   ConcreteFunctionType,
   StrategyType,
   MAX_ACTIVE_BIN_SLIPPAGE,
+  type BinLiquidity,
   type PositionData,
   type RebalanceWithDeposit,
   type RebalanceWithWithdraw,
@@ -752,6 +753,65 @@ export const AdapterLive = Layer.effect(
     }
     const mintAuthoritiesCache = new Map<string, MintAuthoritiesEntry>();
 
+    // Active-bin memo (issue: the audit's RPC dedup — getActiveBin is fetched
+    // TWICE per pool per cycle: once in getPoolState, once in getBinArray, and
+    // getBinsAroundActiveBin re-fetches the same bin array getActiveBin just
+    // loaded). A SHORT TTL serves the within-cycle pair (ms apart) without
+    // going stale across cycles (the active bin moves with every swap). The
+    // DLMM instance itself is cached 5 min; this memo is strictly tighter.
+    const ACTIVE_BIN_MEMO_TTL_MS = 3_000;
+    interface ActiveBinMemo {
+      readonly binId: number;
+      readonly price: string;
+      readonly fetchedAt: number;
+      readonly binsAround: { activeBin: number; bins: BinLiquidity[] } | null;
+    }
+    const activeBinMemo = new Map<string, ActiveBinMemo>();
+
+    function memoizedActiveBin(
+      poolAddress: string,
+      dlmm: DLMM,
+    ): Effect.Effect<{ binId: number; price: string }, Error> {
+      return Effect.gen(function* () {
+        const memo = activeBinMemo.get(poolAddress);
+        if (memo && Date.now() - memo.fetchedAt < ACTIVE_BIN_MEMO_TTL_MS) {
+          return { binId: memo.binId, price: memo.price };
+        }
+        const activeBin = yield* Effect.tryPromise(() => dlmm.getActiveBin());
+        activeBinMemo.set(poolAddress, {
+          binId: activeBin.binId,
+          price: activeBin.price,
+          fetchedAt: Date.now(),
+          binsAround: null,
+        });
+        return { binId: activeBin.binId, price: activeBin.price };
+      });
+    }
+
+    function memoizedBinsAround(
+      poolAddress: string,
+      dlmm: DLMM,
+    ): Effect.Effect<{ activeBin: number; bins: BinLiquidity[] }, Error> {
+      return Effect.gen(function* () {
+        const memo = activeBinMemo.get(poolAddress);
+        if (
+          memo &&
+          memo.binsAround !== null &&
+          Date.now() - memo.fetchedAt < ACTIVE_BIN_MEMO_TTL_MS
+        ) {
+          return memo.binsAround;
+        }
+        const bins = yield* Effect.tryPromise(() => dlmm.getBinsAroundActiveBin(20, 20));
+        activeBinMemo.set(poolAddress, {
+          binId: memo?.binId ?? bins.activeBin,
+          price: memo?.price ?? "",
+          fetchedAt: Date.now(),
+          binsAround: bins,
+        });
+        return bins;
+      });
+    }
+
     function getMintAuthorities(
       mintAddress: string,
     ): Effect.Effect<{ mintAuthority: string | null; freezeAuthority: string | null }, Error> {
@@ -1376,6 +1436,7 @@ export const AdapterLive = Layer.effect(
     const cachedWalletHoldings = Effect.map(cachedWalletSnapshot, (snapshot) => snapshot.held);
 
     const invalidateBalanceCaches = Effect.sync(() => {
+      activeBinMemo.clear();
       tokenBalanceCache.clear();
       nativeSolBalanceCache = undefined;
       // Position marks read the same on-chain accounts a mutation rewrites:
@@ -2175,7 +2236,7 @@ export const AdapterLive = Layer.effect(
         Effect.gen(function* () {
           const dlmm = yield* getDlmm(poolAddress);
           const lbPair = dlmm.lbPair;
-          const activeBin = yield* Effect.tryPromise(() => dlmm.getActiveBin());
+          const activeBin = yield* memoizedActiveBin(poolAddress, dlmm);
 
           const [tokenXMeta, tokenYMeta, stats] = yield* Effect.all([
             getTokenMeta(lbPair.tokenXMint.toBase58()),
@@ -2217,7 +2278,7 @@ export const AdapterLive = Layer.effect(
       getBinArray: (poolAddress) =>
         Effect.gen(function* () {
           const dlmm = yield* getDlmm(poolAddress);
-          const activeBin = yield* Effect.tryPromise(() => dlmm.getActiveBin());
+          const activeBin = yield* memoizedActiveBin(poolAddress, dlmm);
           const halfRange = 20;
           const lowerBinId = activeBin.binId - halfRange;
           const upperBinId = activeBin.binId + halfRange;
@@ -2225,10 +2286,9 @@ export const AdapterLive = Layer.effect(
 
           // Real per-bin reserves from the on-chain bin arrays. The SDK fills
           // uninitialized bins with zero-amount placeholders, which is the
-          // truthful "empty bin" representation.
-          const realBins = yield* Effect.tryPromise(() =>
-            dlmm.getBinsAroundActiveBin(halfRange, halfRange),
-          ).pipe(
+          // truthful "empty bin" representation. Memoized with the active bin
+          // so getPoolState + getBinArray share one fetch pair.
+          const realBins = yield* memoizedBinsAround(poolAddress, dlmm).pipe(
             Effect.catch((err) => {
               logger.warn(
                 "Real bin reserves unavailable — bin-derived metrics will be marked unknown",

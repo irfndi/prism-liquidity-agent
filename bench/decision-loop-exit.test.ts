@@ -919,3 +919,319 @@ describe("runner scale-in wiring (Heart Attack step 2)", () => {
     ).toBe(true);
   }, 15_000);
 });
+
+// ─── Launch-lane edge cases: no exit-and-reenter, scale-in on exit, ─────────
+// ─── wash-forensics gate, launch-cap boundary ───────────────────────────────
+
+// A gate-passing launch candidate: young, hot, safe legs, binStep 100 (the
+// exact shape the radar admits — proven by the idle-redeploy regression test).
+function makeHotDiscoveredPool(address: string): DiscoveredPool {
+  const now = Date.now();
+  return {
+    address,
+    tvlUsd: 300_000,
+    volume24hUsd: 900_000,
+    fees24hUsd: 2_400,
+    apr: 60,
+    binStep: 100,
+    volume1hUsd: 100_000,
+    feeYield1hPct: 5,
+    baseFeePct: 2,
+    createdAtMs: now - 3_600_000,
+    tokenX: "So11111111111111111111111111111111111111112",
+    tokenY: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    tokenXSymbol: "SOL",
+    tokenYSymbol: "USDC",
+    tokenXVerified: true,
+    tokenYVerified: true,
+    tokenXFreezeDisabled: true,
+    tokenYFreezeDisabled: true,
+  };
+}
+
+// Measured datapi stats so the launch ENTER candidate chain's
+// volumeAuthenticityKnown requirement passes — a heuristic pool can never
+// enter by design.
+function makeHotDatapi(address: string): MeteoraDatapiApi {
+  return {
+    getPoolData: (addr: string) =>
+      Effect.succeed(
+        addr === address
+          ? makeDatapiStats({
+              address,
+              tvlUsd: 300_000,
+              volume24hUsd: 900_000,
+              fees24hUsd: 2_400,
+              apr: 60,
+              feeTvlRatio1h: 0.05,
+            })
+          : null,
+      ),
+  };
+}
+
+// makePosition hardcodes a fresh `timestamp`; the launch timebox exits on
+// position AGE, so extend the helper locally (helpers.ts stays untouched).
+function makeAgedPosition(
+  ageMs: number,
+  overrides: Parameters<typeof makePosition>[0] = {},
+): PositionRecord {
+  return { ...makePosition(overrides), timestamp: Date.now() - ageMs };
+}
+
+describe("no exit-and-reenter in one pass (launch lane)", () => {
+  const POOL = "NoExitReenterPool11111111111111111111111111111";
+
+  it("never emits an ENTER for a pool whose EXIT executed this cycle", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter(
+        { [POOL]: makePool({ address: POOL, binStep: 100, tvlUsd: 300_000 }) },
+        { discoverHotPools: () => Effect.succeed([makeHotDiscoveredPool(POOL)]) },
+      ),
+      configOverrides: {
+        watchlistPools: [POOL],
+        launchScanEnabled: true,
+        launchExecutionEnabled: true,
+        // The held $1k position is below the $2k dust threshold: the
+        // deterministic dust EXIT fires this cycle. The pool is ALSO a
+        // gate-passing launch candidate — with only this one position the
+        // exit frees the slot, so an unguarded ENTER slot would approve the
+        // re-entry; only the no-exit-and-reenter guard can stop it.
+        dustExitUsd: 2_000,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(
+        makePosition({ poolAddress: POOL, depositedUsd: 1_000, currentValueUsd: 1_000 }),
+      );
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const audit = yield* AuditService;
+      return yield* audit.getRecentDecisions(50);
+    });
+    const decisions = await Effect.runPromise(
+      Effect.provide(test, layer) as unknown as Effect.Effect<
+        ReadonlyArray<DecisionRow>,
+        Error,
+        never
+      >,
+    );
+
+    const exit = decisions.find(
+      (d) =>
+        d.poolAddress === POOL && d.action === "EXIT" && d.reasoning.includes("[dust-cleanup]"),
+    );
+    expect(exit, "the dust EXIT must fire for the held position").toBeDefined();
+    const enters = decisions.filter((d) => d.poolAddress === POOL && d.action === "ENTER");
+    expect(
+      enters,
+      `no exit-and-reenter: a pool that exited this cycle must not ENTER in the same pass, got ${stringifySafe(enters)}`,
+    ).toHaveLength(0);
+  }, 15_000);
+});
+
+describe("runner scale-in never fires on an exiting position", () => {
+  const POOL = "ScaleInExitPool1111111111111111111111111111111";
+
+  it("the timebox EXIT wins over a runner scale-in when both would fire", async () => {
+    const rebalanceSpy = vi.fn(() =>
+      Effect.succeed({ positionPubKey: "mock-pos", txSignatures: ["mock-tx"] }),
+    );
+    const exitSpy = vi.fn(() => Effect.succeed({ txSignature: "mock-tx" }));
+    const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    const adapter = makeAdapter(
+      {
+        [POOL]: makePool({
+          address: POOL,
+          tokenX: USDC_MINT,
+          tokenXSymbol: "USDC",
+          // -7% vs the $100 anchor: a full scale-in step (5%), so the
+          // scale-in branch WOULD fire — if the timebox exit did not preempt
+          // it ("never scale into a dying position").
+          currentPrice: 93,
+          tvlUsd: 500_000,
+        }),
+      },
+      {
+        rebalancePosition: rebalanceSpy,
+        exitPosition: exitSpy,
+        hasWallet: () => true,
+        // USDC-quoted pool: the top-up spends USDC (no SOL-leg budget
+        // interaction — the SOL batch gate only applies to SOL legs).
+        getTokenPrices: () => Effect.succeed({ [USDC_MINT]: 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+      },
+    );
+    const layer = makeTestLayer({
+      adapter,
+      configOverrides: {
+        watchlistPools: [POOL],
+        paperTrading: false,
+        launchRunnerModeEnabled: true,
+        launchRunnerScaleInEnabled: true,
+        launchRunnerScaleInStepPct: 0.05,
+        launchRunnerScaleInSizePct: 0.25,
+        launchPositionMaxSizeUsd: 100,
+        // 1h timebox (config minimum); the runner position is 2h old.
+        launchTimeboxHours: 1,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(
+        makeAgedPosition(2 * 3_600_000, {
+          poolAddress: POOL,
+          positionMode: "launch",
+          launchRunner: true,
+          launchRunnerAnchorPrice: 100,
+          launchRunnerSteps: 0,
+          positionPubKey: "mock-pos",
+          depositedUsd: 1_000,
+          currentValueUsd: 1_000,
+        }),
+      );
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const audit = yield* AuditService;
+      const decisions = yield* audit.getRecentDecisions(50);
+      return { decisions };
+    });
+    const { decisions } = await Effect.runPromise(
+      Effect.provide(test, layer) as unknown as Effect.Effect<
+        { decisions: ReadonlyArray<DecisionRow> },
+        Error,
+        never
+      >,
+    );
+
+    const timeboxExit = decisions.find(
+      (d) =>
+        d.poolAddress === POOL && d.action === "EXIT" && d.reasoning.includes("[launch-timebox]"),
+    );
+    expect(timeboxExit, "the timebox EXIT must fire for the aged runner position").toBeDefined();
+    const scaleIn = decisions.find(
+      (d) =>
+        d.poolAddress === POOL &&
+        d.action === "REBALANCE" &&
+        d.reasoning.includes("[launch-scale-in]"),
+    );
+    expect(scaleIn, "a runner position that exits this cycle must never scale in").toBeUndefined();
+    expect(
+      rebalanceSpy,
+      "no rebalance may be dispatched for an exiting position",
+    ).not.toHaveBeenCalled();
+    expect(exitSpy, "the timebox EXIT must execute").toHaveBeenCalledTimes(1);
+  }, 15_000);
+});
+
+describe("launch wash-forensics ENTER gate", () => {
+  const POOL = "WashForensicsPool11111111111111111111111111111";
+
+  it("rejects a launch ENTER with [wash-forensics] when the evidence is suspicious", async () => {
+    const washSpy = vi.fn((addr: string) =>
+      Effect.succeed(
+        addr === POOL
+          ? {
+              tradeCount: 200,
+              distinctPayers: 3,
+              txsPerSecond: 5,
+              uniquePayerRate: 0.015,
+              feeCv: null,
+              suspicious: true,
+              reason: "3 wallet(s) produced 200 recent trades — concentrated",
+            }
+          : null,
+      ),
+    );
+    const layer = makeTestLayer({
+      adapter: makeAdapter(
+        { [POOL]: makePool({ address: POOL, binStep: 100, tvlUsd: 300_000 }) },
+        {
+          discoverHotPools: () => Effect.succeed([makeHotDiscoveredPool(POOL)]),
+          getPoolWashEvidence: washSpy,
+        },
+      ),
+      configOverrides: {
+        watchlistPools: [POOL],
+        launchScanEnabled: true,
+        launchExecutionEnabled: true,
+        launchWashForensicsEnabled: true,
+      },
+    });
+
+    const decisions = await runCycles(layer, 2_000);
+    const forPool = decisions.filter((d) => d.poolAddress === POOL);
+    const washRejection = forPool.find(
+      (d) => d.action === "ENTER" && d.reasoning.includes("[wash-forensics]"),
+    );
+    expect(
+      washRejection,
+      `expected a [wash-forensics] ENTER rejection, got ${stringifySafe(forPool)}`,
+    ).toBeDefined();
+    expect(washRejection!.riskResult.approved).toBe(false);
+    expect(washRejection!.executed).toBe(false);
+    // The gate reads the radar-refreshed wash evidence, which is fetched
+    // exactly once per admitted top-K pool.
+    expect(washSpy).toHaveBeenCalledWith(POOL);
+  }, 15_000);
+});
+
+describe("launch-cap boundary", () => {
+  const CANDIDATE = "LaunchCapCandidate1111111111111111111111111";
+  const FILLER = "LaunchCapFiller111111111111111111111111111111";
+
+  it("rejects the next launch ENTER with [launch-cap] at launchMaxOpenPositions", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter(
+        {
+          [CANDIDATE]: makePool({ address: CANDIDATE, binStep: 100, tvlUsd: 300_000 }),
+          [FILLER]: makePool({ address: FILLER, tvlUsd: 100_000 }),
+        },
+        { discoverHotPools: () => Effect.succeed([makeHotDiscoveredPool(CANDIDATE)]) },
+      ),
+      datapi: makeHotDatapi(CANDIDATE),
+      configOverrides: {
+        watchlistPools: [CANDIDATE, FILLER],
+        launchScanEnabled: true,
+        launchExecutionEnabled: true,
+        // The single launch slot is already occupied by the FILLER position.
+        launchMaxOpenPositions: 1,
+        launchPositionMaxSizeUsd: 100,
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(
+        makePosition({
+          poolAddress: FILLER,
+          positionMode: "launch",
+          depositedUsd: 1_000,
+          currentValueUsd: 1_000,
+        }),
+      );
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const audit = yield* AuditService;
+      return yield* audit.getRecentDecisions(50);
+    });
+    const decisions = await Effect.runPromise(
+      Effect.provide(test, layer) as unknown as Effect.Effect<
+        ReadonlyArray<DecisionRow>,
+        Error,
+        never
+      >,
+    );
+
+    const forCandidate = decisions.filter((d) => d.poolAddress === CANDIDATE);
+    const capRejection = forCandidate.find(
+      (d) => d.action === "ENTER" && d.reasoning.includes("[launch-cap]"),
+    );
+    expect(
+      capRejection,
+      `expected a [launch-cap] ENTER rejection, got ${stringifySafe(forCandidate)}`,
+    ).toBeDefined();
+    expect(capRejection!.riskResult.approved).toBe(false);
+    expect(capRejection!.executed).toBe(false);
+  }, 15_000);
+});

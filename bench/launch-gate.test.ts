@@ -212,4 +212,283 @@ describe("summarizeLaunchRejections", () => {
     );
     expect(summary).toHaveLength(1);
   });
+
+  it("slices the summary at exactly topN", () => {
+    const summary = summarizeLaunchRejections(
+      [
+        { category: "age", reason: "age 7h > 6h" },
+        { category: "tvl", reason: "tvl 2000 < 5000" },
+        { category: "volume-1h", reason: "1h volume 100 < 50000" },
+        { category: "base-fee", reason: "base fee 0.5 < 1%" },
+        { category: "bin-step", reason: "binStep 10 outside [50, 200]" },
+        { category: "turnover", reason: "volume turnover 100 > 50 (wash)" },
+        { category: "token-safety", reason: "leg RUG fails token safety" },
+      ],
+      6,
+    );
+    expect(summary).toHaveLength(6);
+    expect(summary.map((s) => s.category)).not.toContain("token-safety");
+  });
+
+  it("keeps first-appearance order for categories with equal counts", () => {
+    const summary = summarizeLaunchRejections([
+      { category: "age", reason: "age 7h > 6h" },
+      { category: "tvl", reason: "tvl 2000 < 5000" },
+      { category: "age", reason: "age 40h > 6h" },
+      { category: "tvl", reason: "tvl 9999999999 > 1000000" },
+    ]);
+    expect(summary).toHaveLength(2);
+    expect(summary[0]!.category).toBe("age");
+    expect(summary[0]!.count).toBe(2);
+    expect(summary[1]!.category).toBe("tvl");
+    expect(summary[1]!.count).toBe(2);
+  });
+});
+
+describe("launch-gate age boundaries", () => {
+  it("admits a pool exactly at maxAgeHours", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "exactage", createdAtMs: NOW - 6 * 60 * 60_000 })],
+      config,
+    );
+    expect(result.ranked.map((r) => r.pool.address)).toContain("exactage");
+    expect(rejectedFor(result, "exactage")).toHaveLength(0);
+  });
+
+  it("rejects a pool one ms older than maxAgeHours", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "overage", createdAtMs: NOW - 6 * 60 * 60_000 - 1 })],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "overage")[0]).toContain("age");
+  });
+
+  it("admits a zero-age pool", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "fresh", createdAtMs: NOW })],
+      config,
+    );
+    expect(result.ranked.map((r) => r.pool.address)).toContain("fresh");
+    expect(rejectedFor(result, "fresh")).toHaveLength(0);
+  });
+
+  it("admits a pool created within the clock-skew future tolerance", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "skewok", createdAtMs: NOW + 30_000 })],
+      config,
+    );
+    expect(result.ranked.map((r) => r.pool.address)).toContain("skewok");
+    expect(rejectedFor(result, "skewok")).toHaveLength(0);
+  });
+
+  it("rejects a pool created beyond the clock-skew future tolerance", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "skewbad", createdAtMs: NOW + 90_000 })],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "skewbad")[0]).toContain("future");
+  });
+});
+
+describe("launch-gate TVL boundaries", () => {
+  it("admits a pool exactly at minTvlUsd", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "exactmin", tvlUsd: 5_000, volume24hUsd: 50_000 })],
+      config,
+    );
+    expect(result.ranked.map((r) => r.pool.address)).toContain("exactmin");
+    expect(rejectedFor(result, "exactmin")).toHaveLength(0);
+  });
+
+  it("rejects a pool one dollar under minTvlUsd", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "undermin", tvlUsd: 4_999 })],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "undermin")[0]).toContain("tvl");
+  });
+
+  it("admits a pool exactly at maxTvlUsd", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "exactmax", tvlUsd: 1_000_000 })],
+      config,
+    );
+    expect(result.ranked.map((r) => r.pool.address)).toContain("exactmax");
+    expect(rejectedFor(result, "exactmax")).toHaveLength(0);
+  });
+
+  it("rejects a pool one dollar over maxTvlUsd", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "overmax", tvlUsd: 1_000_001 })],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "overmax")[0]).toContain("tvl");
+  });
+});
+
+describe("launch-gate volume boundaries", () => {
+  it("admits a pool exactly at minVolume1hUsd", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "exactvol", volume1hUsd: 50_000 })],
+      config,
+    );
+    expect(result.ranked.map((r) => r.pool.address)).toContain("exactvol");
+    expect(rejectedFor(result, "exactvol")).toHaveLength(0);
+  });
+
+  it("rejects a pool just under minVolume1hUsd", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "undervol", volume1hUsd: 49_999 })],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "undervol")[0]).toContain("1h volume");
+  });
+
+  it("rejects a pool with missing volume1hUsd", () => {
+    const { volume1hUsd: _omit, ...noVolume } = makePool({ address: "novol" });
+    const result = gateAndRankLaunchPools([noVolume], config);
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "novol")[0]).toContain("1h volume");
+  });
+});
+
+describe("launch-gate binStep boundaries", () => {
+  it("admits pools exactly at minBinStep and maxBinStep", () => {
+    const result = gateAndRankLaunchPools(
+      [
+        makePool({ address: "minstep", binStep: 50 }),
+        makePool({ address: "maxstep", binStep: 200 }),
+      ],
+      config,
+    );
+    expect(result.ranked.map((r) => r.pool.address)).toEqual(["minstep", "maxstep"]);
+    expect(result.rejected).toHaveLength(0);
+  });
+
+  it("rejects a pool one binStep under or over the band", () => {
+    const result = gateAndRankLaunchPools(
+      [
+        makePool({ address: "understep", binStep: 49 }),
+        makePool({ address: "overstep", binStep: 201 }),
+      ],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "understep")[0]).toContain("binStep");
+    expect(rejectedFor(result, "overstep")[0]).toContain("binStep");
+  });
+
+  it("rejects a non-integer binStep", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "fractional", binStep: 100.5 })],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "fractional")[0]).toContain("binStep");
+  });
+});
+
+describe("launch-gate turnover boundary", () => {
+  it("admits a pool exactly at maxVolumeTurnover", () => {
+    // 5_000_000 / 100_000 = 50 — the gate rejects only > max.
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "exactturn", volume24hUsd: 5_000_000 })],
+      config,
+    );
+    expect(result.ranked.map((r) => r.pool.address)).toContain("exactturn");
+    expect(rejectedFor(result, "exactturn")).toHaveLength(0);
+  });
+
+  it("rejects a pool just over maxVolumeTurnover", () => {
+    // 5_010_000 / 100_000 = 50.1 > 50.
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "overturn", volume24hUsd: 5_010_000 })],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "overturn")[0]).toContain("wash");
+  });
+});
+
+describe("launch-gate token-leg failures", () => {
+  it("rejects an unverified non-stable leg with low holders", () => {
+    const result = gateAndRankLaunchPools(
+      [
+        makePool({
+          address: "lowholders",
+          tokenX: "Rug1111111111111111111111111111111111111111",
+          tokenXSymbol: "RUG",
+          tokenXVerified: false,
+          tokenXFreezeDisabled: true,
+          tokenXHolders: 10,
+        }),
+      ],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "lowholders")[0]).toContain("token safety");
+  });
+
+  it("admits a stable leg regardless of holders or verification", () => {
+    const result = gateAndRankLaunchPools(
+      [
+        makePool({
+          address: "stablesafe",
+          tokenY: USDC,
+          tokenYSymbol: "USDC",
+          tokenYVerified: false,
+          tokenYFreezeDisabled: false,
+          tokenYHolders: 0,
+        }),
+      ],
+      config,
+    );
+    expect(result.ranked.map((r) => r.pool.address)).toContain("stablesafe");
+    expect(rejectedFor(result, "stablesafe")).toHaveLength(0);
+  });
+
+  it("rejects a freeze-enabled unverified leg", () => {
+    const result = gateAndRankLaunchPools(
+      [
+        makePool({
+          address: "freezable",
+          tokenX: "Rug1111111111111111111111111111111111111111",
+          tokenXSymbol: "RUG",
+          tokenXVerified: false,
+          tokenXFreezeDisabled: false,
+          tokenXHolders: 3_000_000,
+        }),
+      ],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "freezable")[0]).toContain("token safety");
+  });
+});
+
+describe("launch-gate fee-yield edges", () => {
+  it("rejects a NaN fee yield as missing", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "nanyield", feeYield1hPct: NaN })],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(rejectedFor(result, "nanyield")[0]).toContain("fee yield");
+  });
+
+  it("admits a zero fee yield when everything else passes", () => {
+    const result = gateAndRankLaunchPools(
+      [makePool({ address: "zeroyield", feeYield1hPct: 0 })],
+      config,
+    );
+    expect(result.ranked).toHaveLength(1);
+    expect(result.ranked[0]!.feeYield1hPct).toBe(0);
+    expect(result.ranked[0]!.score).toBe(0);
+    expect(rejectedFor(result, "zeroyield")).toHaveLength(0);
+  });
 });
