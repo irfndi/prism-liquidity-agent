@@ -59,6 +59,10 @@ publish_mcp() {
   else
     rm -rf dist
     npm run build
+    if [ ! -s dist/index.js ]; then
+      log_error "npm run build exited 0 but dist/index.js is missing or empty — refusing to publish a broken package"
+      exit 1
+    fi
   fi
 
   if [ "$DRY_RUN" = "--dry-run" ]; then

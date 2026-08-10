@@ -70,6 +70,9 @@ fi
 normalize_version() {
   local base pre
   base="${1#v}"
+  # Strip build metadata FIRST — a '+' before the '-' split would let
+  # '1.4.0+build-a' masquerade as the prerelease 'a'.
+  base="${base%%+*}"
   pre=""
   if [[ "$base" == *-* ]]; then
     pre="${base#*-}"

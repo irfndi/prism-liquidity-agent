@@ -85,7 +85,9 @@ const manifest: Record<string, unknown> = {
   ...(commit ? { commit } : {}),
   tarball_url: tarballUrl,
   sha256_url: `${tarballUrl}.sha256`,
-  signature_url: signatureUrl,
+  // Only signed releases advertise a signature — an unsigned/canary manifest
+  // must not point clients at a dead .asc URL.
+  ...(requireSignature ? { signature_url: signatureUrl } : {}),
   published_at: new Date().toISOString(),
   min_cli_version: "1.0.0",
   bundles,

@@ -345,7 +345,10 @@ jobs:
         # --canary` client, so EVERY embedded bundle URL must be confirmed
         # reachable (HTTP 2xx) first — a dead upload must never be flipped live.
         run: |
-          count=$(jq '.bundles | length' canary-assets/manifest.json)
+          if ! count=$(jq -e '.bundles | length' canary-assets/manifest.json 2>/dev/null); then
+            echo "::error::could not read bundle count from canary manifest"
+            exit 1
+          fi
           if [ "$count" -eq 0 ]; then
             echo "::error::canary manifest has no bundles"
             exit 1
