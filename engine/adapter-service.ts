@@ -768,11 +768,26 @@ export const AdapterLive = Layer.effect(
     }
     const activeBinMemo = new Map<string, ActiveBinMemo>();
 
+    // Opportunistic eviction: pools rotate out of the active set, and in
+    // paper mode no mutation ever clears the memo — without pruning, dropped
+    // pools' bin arrays would accumulate unboundedly. Each read prunes the
+    // entries that have aged past the TTL, bounding the map by the pools
+    // touched within one TTL window (the active set).
+    function pruneActiveBinMemo(): void {
+      const now = Date.now();
+      for (const [addr, memo] of activeBinMemo) {
+        if (now - memo.fetchedAt >= ACTIVE_BIN_MEMO_TTL_MS) {
+          activeBinMemo.delete(addr);
+        }
+      }
+    }
+
     function memoizedActiveBin(
       poolAddress: string,
       dlmm: DLMM,
     ): Effect.Effect<{ binId: number; price: string }, Error> {
       return Effect.gen(function* () {
+        pruneActiveBinMemo();
         const memo = activeBinMemo.get(poolAddress);
         if (memo && Date.now() - memo.fetchedAt < ACTIVE_BIN_MEMO_TTL_MS) {
           return { binId: memo.binId, price: memo.price };
@@ -793,6 +808,7 @@ export const AdapterLive = Layer.effect(
       dlmm: DLMM,
     ): Effect.Effect<{ activeBin: number; bins: BinLiquidity[] }, Error> {
       return Effect.gen(function* () {
+        pruneActiveBinMemo();
         const memo = activeBinMemo.get(poolAddress);
         if (
           memo &&
