@@ -2,6 +2,20 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.9] — 2026-08-10
+
+### Fixed
+
+- **clawpatch audit findings** (101-finding full audit, triaged by parallel agents; 24+ already fixed by earlier workflow hardening):
+  - Build: tsconfig now typechecks `scripts/**/*` (release-critical scripts were oxlint-only); `start`/`dev` dedupe via `start:engine` (dev keeps direct `--watch` on the CLI process); the bigint-buffer bundle alias is guarded with an existsSync check at config load in both tsdown configs.
+  - CI/release: BUN_VERSION and R2_PUBLIC_URL are single per-workflow envs (bun canary only publishes as a rolling tag — verified — so the env is the deliberate-bump path); all canary bundle URLs are HEAD-validated before the pointer flip (fail-closed jq count guard); alert-flush gains a concurrency group, timeout-minutes, and --connect-timeout; the cloudflare-tests shard drops bunx; release manifests only advertise signatures when one will exist and gate the source-tarball/checksum existence before writing.
+  - Scripts: `version_gte` compares prerelease identifiers semver-aware (canary.10 > canary.2) with build metadata stripped before parsing; install.sh splits capture from fallback; publish-skills.sh rebuilds unconditionally, verifies the built entrypoint, and dry-runs clean checkouts.
+  - Coverage governance: vitest branches:60 rationale documented; the hand-maintained exclude array carries a guard comment (#212)
+
+### Changed
+
+- Bumped version to 0.2.9.
+
 ## [0.2.8] — 2026-08-09
 
 ### Changed
