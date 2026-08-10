@@ -2266,6 +2266,17 @@ export const AdapterLive = Layer.effect(
         Effect.gen(function* () {
           const dlmm = yield* getDlmm(poolAddress);
           const lbPair = dlmm.lbPair;
+          // Did this call HIT the memo? Only a FRESH fetch may re-stamp the
+          // TTL after assembly — re-stamping on hits would make freshness
+          // caller-cadence-dependent (a frequent caller keeps the memo alive
+          // forever) and could refresh a screener-populated entry whose bins
+          // are older than the TTL.
+          const memoHit = (() => {
+            const m = activeBinMemo.get(poolAddress);
+            return (
+              m !== undefined && m.price !== "" && Date.now() - m.fetchedAt < ACTIVE_BIN_MEMO_TTL_MS
+            );
+          })();
           const activeBin = yield* memoizedActiveBin(poolAddress, dlmm);
 
           const [tokenXMeta, tokenYMeta, stats] = yield* Effect.all([
@@ -2280,9 +2291,15 @@ export const AdapterLive = Layer.effect(
           // immediately following getBinArray call must still hit the memo
           // (otherwise the dedup is defeated exactly in the high-latency,
           // high-cardinality scenario it exists for).
-          const assembledMemo = activeBinMemo.get(poolAddress);
-          if (assembledMemo) {
-            activeBinMemo.set(poolAddress, { ...assembledMemo, fetchedAt: Date.now() });
+          if (!memoHit) {
+            const assembledMemo = activeBinMemo.get(poolAddress);
+            if (assembledMemo) {
+              // The active bin was fetched THIS call: extend the TTL across
+              // the assembly window so the immediately following getBinArray
+              // still hits the memo (the data is at most the assembly
+              // duration old). Hits are untouched.
+              activeBinMemo.set(poolAddress, { ...assembledMemo, fetchedAt: Date.now() });
+            }
           }
 
           return {
