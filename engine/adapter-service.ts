@@ -2307,7 +2307,8 @@ export const AdapterLive = Layer.effect(
 
           if (realBins === null) {
             // Explicit unknown state: metrics skip the auth/utilization gates
-            // with a warning instead of consuming fabricated 1.0 values.
+            // with a warning instead of consuming fabricated 1.0 values. The
+            // local memo value is the best available fallback.
             return {
               lowerBinId,
               upperBinId,
@@ -2318,9 +2319,24 @@ export const AdapterLive = Layer.effect(
             };
           }
 
-          const basePrice = Number(activeBin.price);
+          // Derive the bounds + active bin FROM THE FETCHED SNAPSHOT, not the
+          // local memo value: the pool can move between getPoolState and the
+          // bins fetch, and realBins.activeBin is that fetch's own snapshot.
+          // Filtering newer bins with an older ±20 range would distort the
+          // bin-utilization/concentration inputs while reporting
+          // reservesKnown: true.
+          const snapshotActiveBinId = realBins.activeBin;
+          const snapshotLower = snapshotActiveBinId - halfRange;
+          const snapshotUpper = snapshotActiveBinId + halfRange;
+          const snapshotActivePrice = realBins.bins.find(
+            (b) => b.binId === snapshotActiveBinId,
+          )?.price;
+          const basePrice =
+            snapshotActivePrice !== undefined
+              ? Number(snapshotActivePrice)
+              : Number(activeBin.price);
           const bins: BinData[] = realBins.bins
-            .filter((b) => b.binId >= lowerBinId && b.binId <= upperBinId)
+            .filter((b) => b.binId >= snapshotLower && b.binId <= snapshotUpper)
             .map((b) => {
               const parsedPrice = Number(b.price);
               return {
@@ -2328,7 +2344,7 @@ export const AdapterLive = Layer.effect(
                 price:
                   Number.isFinite(parsedPrice) && parsedPrice > 0
                     ? parsedPrice
-                    : basePrice * Math.pow(1 + binStep / 10000, b.binId - activeBin.binId),
+                    : basePrice * Math.pow(1 + binStep / 10000, b.binId - snapshotActiveBinId),
                 reserveX: BigInt(b.xAmount.toString()),
                 reserveY: BigInt(b.yAmount.toString()),
                 liquiditySupply: BigInt(b.supply.toString()),
@@ -2336,10 +2352,10 @@ export const AdapterLive = Layer.effect(
             });
 
           return {
-            lowerBinId,
-            upperBinId,
+            lowerBinId: snapshotLower,
+            upperBinId: snapshotUpper,
             bins,
-            activeBinId: activeBin.binId,
+            activeBinId: snapshotActiveBinId,
             binStep,
             reservesKnown: true,
           };
