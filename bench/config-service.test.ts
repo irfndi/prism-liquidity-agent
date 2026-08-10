@@ -167,23 +167,37 @@ describe("ConfigService freeze screening + IL protection flags", () => {
     expect(cfg.marketScanEnabled).toBe(false);
     expect(cfg.marketScanRefreshIntervalMs).toBe(1_800_000);
     expect(cfg.marketScanUniversePages).toBe(3);
-    expect(cfg.marketScanMinTvlUsd).toBe(250_000);
-    expect(cfg.marketScanMinFeeApr).toBe(25);
+    expect(cfg.marketScanMinTvlUsd).toBe(50_000);
+    expect(cfg.marketScanMinFeeApr).toBe(100);
     expect(cfg.marketScanTopK).toBe(30);
     expect(cfg.marketScanMaxPools).toBe(60);
     expect(cfg.marketScanMinHolders).toBe(1000);
     expect(cfg.marketScanMinBinStep).toBe(2);
     expect(cfg.marketScanMaxBinStep).toBe(200);
+    // Market-runner lane defaults: off (paper-first), 500% runner floor, 5x
+    // rotation multiplier.
+    expect(cfg.marketScanRunnerEnabled).toBe(false);
+    expect(cfg.marketScanRunnerMinFeeApr).toBe(500);
+    expect(cfg.marketScanRotationEnabled).toBe(false);
+    expect(cfg.marketScanRotationAprMult).toBe(5);
 
     vi.stubEnv("MARKET_SCAN_ENABLED", "true");
     vi.stubEnv("MARKET_SCAN_TOP_K", "5");
     vi.stubEnv("MARKET_SCAN_MIN_BIN_STEP", "10");
     vi.stubEnv("MARKET_SCAN_REFRESH_INTERVAL_MS", "30000"); // below min 60s -> clamp
+    vi.stubEnv("MARKET_SCAN_RUNNER_ENABLED", "true");
+    vi.stubEnv("MARKET_SCAN_RUNNER_MIN_FEE_APR", "1000");
+    vi.stubEnv("MARKET_SCAN_ROTATION_ENABLED", "true");
+    vi.stubEnv("MARKET_SCAN_ROTATION_APR_MULT", "10");
     const overridden = await loadConfig();
     expect(overridden.marketScanEnabled).toBe(true);
     expect(overridden.marketScanTopK).toBe(5);
     expect(overridden.marketScanMinBinStep).toBe(10);
     expect(overridden.marketScanRefreshIntervalMs).toBe(60_000);
+    expect(overridden.marketScanRunnerEnabled).toBe(true);
+    expect(overridden.marketScanRunnerMinFeeApr).toBe(1000);
+    expect(overridden.marketScanRotationEnabled).toBe(true);
+    expect(overridden.marketScanRotationAprMult).toBe(10);
   });
 });
 

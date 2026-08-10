@@ -36,6 +36,7 @@ import { McpServerLive } from "./mcp-server.js";
 import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
+import { isMarketRunnerPool, lowestAprHeldPosition, shouldRotate } from "./market-runner.js";
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
 import { gateAndRankMarketPools, type MarketPoolRank } from "./market-gate.js";
 import { gateAndRankLaunchPools, summarizeLaunchRejections } from "./launch-gate.js";
@@ -2760,6 +2761,10 @@ export const program = Effect.gen(function* () {
   let marketRankedPools: ReadonlyArray<MarketPoolRank> = [];
   let lastMarketRefreshAt = 0;
   const marketScanPools = new Set<string>();
+  // Per-cycle fee APR (fees24h × 365 / tvl) keyed by pool address, populated
+  // during each pool's evaluation. The market-runner rotation compares a
+  // candidate runner's APR against the LOWEST-APR held position's APR.
+  const poolFeeAprByAddress = new Map<string, number>();
 
   // ─── Launch-mode execution state (Launch Mode v2) ────────────────────────
   // The launch radar's admitted pool set, populated by refreshLaunchScan ONLY
@@ -4910,6 +4915,25 @@ export const program = Effect.gen(function* () {
             ? enrichPoolFromGecko(rawPool, geckoStats)
             : rawPool;
 
+      // ── Market-runner lane ──────────────────────────────────────────────
+      // A market-scan pool whose MEASURED (datapi) fee APR clears the runner
+      // floor enters with the LAUNCH posture (time-boxed, dip-anchored,
+      // scale-in) instead of the flat normal posture — rotating the existing
+      // exposure INTO high-yield pools, not adding positions. Modeled gecko /
+      // heuristic fees never classify a pool as a runner (the same
+      // measured-only exclusion as paper fee accrual).
+      const poolFeeAprPct = pool.tvlUsd > 0 ? (pool.fees24hUsd * 365 * 100) / pool.tvlUsd : 0;
+      const isMarketRunner = (addr: string): boolean =>
+        isMarketRunnerPool({
+          enabled: config.marketScanRunnerEnabled === true,
+          marketScanPools,
+          poolAddress: addr,
+          statsSource: pool.statsSource,
+          feeAprPct: poolFeeAprPct,
+          runnerMinFeeApr: config.marketScanRunnerMinFeeApr,
+        });
+      poolFeeAprByAddress.set(poolAddress, poolFeeAprPct);
+
       // TVL velocity + IL price-drift need a previous reference point, so the
       // previous snapshot must be read BEFORE persisting the current one.
       const previousSnapshots = yield* db
@@ -6743,11 +6767,44 @@ export const program = Effect.gen(function* () {
               ).length;
               const launchMaxOpenPositions = config.launchMaxOpenPositions ?? 3;
               const isLaunchPool =
-                config.launchScanEnabled === true &&
-                config.launchExecutionEnabled === true &&
-                launchScanPools.has(poolAddress);
+                (config.launchScanEnabled === true &&
+                  config.launchExecutionEnabled === true &&
+                  launchScanPools.has(poolAddress)) ||
+                isMarketRunner(poolAddress);
               if (isLaunchPool) {
-                if (openLaunchPositions >= launchMaxOpenPositions) {
+                const totalOpenPositions = trackedPositions.size;
+                const portfolioFull = totalOpenPositions >= (config.maxOpenPositions ?? 3);
+                if (openLaunchPositions >= launchMaxOpenPositions || portfolioFull) {
+                  // Rotation (market-runner lane only): the portfolio is full
+                  // and a much hotter runner is available — exit the LOWEST-
+                  // APR held position so the freed slot admits the runner next
+                  // cycle. This is the "hold high-yield INSTEAD of flat
+                  // majors" mechanism: rotating existing exposure, never
+                  // adding. The exit is deterministic (confidence 1) and the
+                  // ENTER is still consumed this cycle (no exit-and-reenter in
+                  // one pass).
+                  if (
+                    portfolioFull &&
+                    config.marketScanRotationEnabled === true &&
+                    isMarketRunner(poolAddress)
+                  ) {
+                    const worst = lowestAprHeldPosition(
+                      trackedPositions.values(),
+                      poolFeeAprByAddress,
+                      poolAddress, // never rotate out of the candidate runner
+                    );
+                    if (
+                      worst &&
+                      shouldRotate(poolFeeAprPct, worst, config.marketScanRotationAprMult)
+                    ) {
+                      rawDecisions.push({
+                        action: "EXIT",
+                        poolAddress: worst.poolAddress,
+                        confidence: 1,
+                        reasoning: `Rotation: runner ${poolFeeAprPct.toFixed(0)}% APR >= ${config.marketScanRotationAprMult ?? 5}x held ${worst.feeAprPct.toFixed(0)}%`,
+                      });
+                    }
+                  }
                   // Launch cap full: reject the ENTER for this pool — it must
                   // NOT fall through to the normal lane, which would size it
                   // with the uncapped normal entry sizing.
@@ -7873,7 +7930,7 @@ export const program = Effect.gen(function* () {
         const isRunnerLaunchEntry =
           config.launchRunnerModeEnabled === true &&
           decision.positionMode === "launch" &&
-          launchScanPools.has(poolAddress);
+          (launchScanPools.has(poolAddress) || isMarketRunner(poolAddress));
         const entryDipOffsetBins = isRunnerLaunchEntry
           ? dipOffsetBinsForPct(pool.binStep, config.launchRunnerDipPct ?? 0.12)
           : 0;

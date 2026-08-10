@@ -168,8 +168,12 @@ export interface AppConfig {
   /** Minimum TVL for a pool to pass the market gate. Default $250K. */
   readonly marketScanMinTvlUsd?: number;
   /** Minimum annualized fee/TVL percent for the market gate (fees24h × 365 /
-   *  tvl × 100). Default 25 (a 25%+ fee APR beats the ~5-10% LP average). */
+   *  tvl × 100). Default 100 (only real-yield pools enter the active set). */
   readonly marketScanMinFeeApr?: number;
+  readonly marketScanRunnerEnabled?: boolean;
+  readonly marketScanRunnerMinFeeApr?: number;
+  readonly marketScanRotationEnabled?: boolean;
+  readonly marketScanRotationAprMult?: number;
   /** How many top-ranked market pools are actively scanned each cycle. */
   readonly marketScanTopK?: number;
   /** Hard cap on market-scan pools in the active scan set. */
@@ -1355,8 +1359,26 @@ const loadConfig = Effect.gen(function* () {
     30 * 60_000,
   );
   const marketScanUniversePages = yield* validatedNumber("MARKET_SCAN_UNIVERSE_PAGES", 1, 3, 10);
-  const marketScanMinTvlUsd = yield* validatedNumber("MARKET_SCAN_MIN_TVL_USD", 0, 250_000);
-  const marketScanMinFeeApr = yield* validatedNumber("MARKET_SCAN_MIN_FEE_APR", 0, 25);
+  const marketScanMinTvlUsd = yield* validatedNumber("MARKET_SCAN_MIN_TVL_USD", 0, 50_000);
+  const marketScanMinFeeApr = yield* validatedNumber("MARKET_SCAN_MIN_FEE_APR", 0, 100);
+  // Market-runner lane: when enabled, market-scan pools whose fee APR clears
+  // the runner floor enter with the LAUNCH posture (time-boxed, dip-anchored,
+  // 0.25 drawdown, scale-in) instead of the flat normal posture — the engine
+  // holds HIGH-YIELD pools rather than flat majors. Rotation exits the lowest-
+  // APR held position when the portfolio is full and a much hotter runner is
+  // available. OFF by default; paper-first.
+  const marketScanRunnerEnabled = yield* Config.boolean("MARKET_SCAN_RUNNER_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const marketScanRunnerMinFeeApr = yield* validatedNumber(
+    "MARKET_SCAN_RUNNER_MIN_FEE_APR",
+    0,
+    500,
+  );
+  const marketScanRotationEnabled = yield* Config.boolean("MARKET_SCAN_ROTATION_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const marketScanRotationAprMult = yield* validatedNumber("MARKET_SCAN_ROTATION_APR_MULT", 1, 5);
   const marketScanTopK = yield* validatedNumber("MARKET_SCAN_TOP_K", 1, 30, 200);
   const marketScanMaxPools = yield* validatedNumber("MARKET_SCAN_MAX_POOLS", 1, 60, 500);
   const marketScanMinHolders = yield* validatedNumber("MARKET_SCAN_MIN_HOLDERS", 0, 1000);
@@ -1607,6 +1629,10 @@ const loadConfig = Effect.gen(function* () {
     marketScanUniversePages,
     marketScanMinTvlUsd,
     marketScanMinFeeApr,
+    marketScanRunnerEnabled,
+    marketScanRunnerMinFeeApr,
+    marketScanRotationEnabled,
+    marketScanRotationAprMult,
     marketScanTopK,
     marketScanMaxPools,
     marketScanMinHolders,

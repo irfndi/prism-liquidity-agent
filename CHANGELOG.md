@@ -2,6 +2,12 @@
 
 All notable changes to Prism are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **Market-runner lane (high-yield rotation, paper-first)**: market-scan pools whose MEASURED (datapi) fee APR clears `MARKET_SCAN_RUNNER_MIN_FEE_APR` (default 500%) enter with the LAUNCH posture (time-boxed, dip-anchored, 0.25 drawdown, scale-in) instead of the flat normal posture — the engine holds high-yield runners rather than flat majors. Classification is measured-only (modeled gecko/heuristic fees never classify). `MARKET_SCAN_ROTATION_ENABLED` exits the lowest-APR held position (confidence 1, 5× APR multiple) when the portfolio is full and a hotter runner is available, rotating existing exposure instead of adding positions. Pure gate logic extracted to `engine/market-runner.ts` with 16 new tests. Defaults: `MARKET_SCAN_MIN_TVL_USD` 250k→50k, `MARKET_SCAN_MIN_FEE_APR` 25→100 so the small-but-hot runners clear the gate. All new switches default OFF; the paper instance carries the lane.
+
 ## [0.2.9] — 2026-08-10
 
 ### Fixed
