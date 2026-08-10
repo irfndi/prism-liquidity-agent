@@ -764,6 +764,7 @@ export const AdapterLive = Layer.effect(
       readonly binId: number;
       readonly price: string;
       readonly fetchedAt: number;
+      readonly halfRange: number;
       readonly binsAround: { activeBin: number; bins: BinLiquidity[] } | null;
     }
     const activeBinMemo = new Map<string, ActiveBinMemo>();
@@ -797,6 +798,7 @@ export const AdapterLive = Layer.effect(
           binId: activeBin.binId,
           price: activeBin.price,
           fetchedAt: Date.now(),
+          halfRange: 0,
           binsAround: null,
         });
         return { binId: activeBin.binId, price: activeBin.price };
@@ -814,6 +816,7 @@ export const AdapterLive = Layer.effect(
         if (
           memo &&
           memo.binsAround !== null &&
+          memo.halfRange === halfRange &&
           Date.now() - memo.fetchedAt < ACTIVE_BIN_MEMO_TTL_MS
         ) {
           return memo.binsAround;
@@ -832,6 +835,7 @@ export const AdapterLive = Layer.effect(
           binId: bins.activeBin,
           price: binsActivePrice ?? memo?.price ?? "",
           fetchedAt: Date.now(),
+          halfRange,
           binsAround: bins,
         });
         return bins;
@@ -2269,6 +2273,17 @@ export const AdapterLive = Layer.effect(
             getTokenMeta(lbPair.tokenYMint.toBase58()),
             fetchPoolStats(poolAddress),
           ]);
+
+          // The TTL clock starts when the pool-state ASSEMBLY completes, not
+          // when the active bin was fetched: for a cold or rotating pool the
+          // metadata/reserves/pricing resolution can exceed 3s, and the
+          // immediately following getBinArray call must still hit the memo
+          // (otherwise the dedup is defeated exactly in the high-latency,
+          // high-cardinality scenario it exists for).
+          const assembledMemo = activeBinMemo.get(poolAddress);
+          if (assembledMemo) {
+            activeBinMemo.set(poolAddress, { ...assembledMemo, fetchedAt: Date.now() });
+          }
 
           return {
             address: poolAddress,
