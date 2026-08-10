@@ -612,9 +612,15 @@ export const persistMetadataIfSupported = (
     ? db.setMetadata(key, value).pipe(Effect.catch(() => Effect.void))
     : Effect.void;
 
+export interface HarvestGateConfig {
+  readonly harvestMinNetUsd?: number;
+  readonly harvestMaxCostPct?: number;
+  readonly harvestTxCostUsdEst?: number;
+}
+
 export function evaluateHarvestGate(
   netUsd: number | null,
-  config: AppConfig,
+  config: HarvestGateConfig,
 ): { approved: boolean; reason: string } {
   const minNetUsd = config.harvestMinNetUsd ?? 1;
   const maxCostPct = config.harvestMaxCostPct ?? 0.15;
@@ -2289,10 +2295,16 @@ export function executeLive(
           ? yield* adapter.getClaimableFeesUsd(decision.poolAddress, pos.positionPubKey).pipe(
               Effect.map((netUsd) =>
                 evaluateHarvestGate(netUsd, {
-                  harvestMinNetUsd: deps.harvestMinNetUsd,
-                  harvestMaxCostPct: deps.harvestMaxCostPct,
-                  harvestTxCostUsdEst: deps.harvestTxCostUsdEst,
-                } as AppConfig),
+                  ...(deps.harvestMinNetUsd !== undefined
+                    ? { harvestMinNetUsd: deps.harvestMinNetUsd }
+                    : {}),
+                  ...(deps.harvestMaxCostPct !== undefined
+                    ? { harvestMaxCostPct: deps.harvestMaxCostPct }
+                    : {}),
+                  ...(deps.harvestTxCostUsdEst !== undefined
+                    ? { harvestTxCostUsdEst: deps.harvestTxCostUsdEst }
+                    : {}),
+                }),
               ),
               Effect.catch(() =>
                 Effect.succeed({
@@ -2962,6 +2974,31 @@ export const program = Effect.gen(function* () {
   // during each pool's evaluation. The market-runner rotation compares a
   // candidate runner's APR against the LOWEST-APR held position's APR.
   const poolFeeAprByAddress = new Map<string, { feeAprPct: number; tvlUsd: number }>();
+  // Dispatch-deps builders shared by the in-slot tail and the idle-redeploy
+  // pass: the executor wiring (entry APR, rotation arm, runner floor, harvest
+  // values) must not drift between lanes. exactOptionalPropertyTypes-safe.
+  const runnerDispatchDeps = (poolAddress: string) => {
+    const entryAprPct = poolFeeAprByAddress.get(poolAddress)?.feeAprPct;
+    return {
+      ...(entryAprPct !== undefined ? { entryAprPct } : {}),
+      poolAprByAddress: poolFeeAprByAddress,
+      ...(config.marketScanRotationArmMs !== undefined
+        ? { rotationArmMs: config.marketScanRotationArmMs }
+        : {}),
+      ...(config.marketScanRunnerMinFeeApr !== undefined
+        ? { runnerMinFeeApr: config.marketScanRunnerMinFeeApr }
+        : {}),
+    };
+  };
+  const harvestDispatchDeps = () => ({
+    ...(config.harvestMinNetUsd !== undefined ? { harvestMinNetUsd: config.harvestMinNetUsd } : {}),
+    ...(config.harvestMaxCostPct !== undefined
+      ? { harvestMaxCostPct: config.harvestMaxCostPct }
+      : {}),
+    ...(config.harvestTxCostUsdEst !== undefined
+      ? { harvestTxCostUsdEst: config.harvestTxCostUsdEst }
+      : {}),
+  });
 
   // ─── Launch-mode execution state (Launch Mode v2) ────────────────────────
   // The launch radar's admitted pool set, populated by refreshLaunchScan ONLY
@@ -4088,7 +4125,6 @@ export const program = Effect.gen(function* () {
         let executed = false;
         let executionError: string | undefined = undefined;
         if (config.paperTrading) {
-          const dispatchEntryAprPct = poolFeeAprByAddress.get(decision.poolAddress)?.feeAprPct;
           const paperResult = yield* executePaper(
             {
               db,
@@ -4097,14 +4133,7 @@ export const program = Effect.gen(function* () {
               entryStrategyShape,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
-              ...(dispatchEntryAprPct !== undefined ? { entryAprPct: dispatchEntryAprPct } : {}),
-              poolAprByAddress: poolFeeAprByAddress,
-              ...(config.marketScanRotationArmMs !== undefined
-                ? { rotationArmMs: config.marketScanRotationArmMs }
-                : {}),
-              ...(config.marketScanRunnerMinFeeApr !== undefined
-                ? { runnerMinFeeApr: config.marketScanRunnerMinFeeApr }
-                : {}),
+              ...runnerDispatchDeps(decision.poolAddress),
             },
             decision,
             candidate.pool,
@@ -4209,23 +4238,8 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
-              ...(dispatchEntryAprPct !== undefined ? { entryAprPct: dispatchEntryAprPct } : {}),
-              poolAprByAddress: poolFeeAprByAddress,
-              ...(config.marketScanRotationArmMs !== undefined
-                ? { rotationArmMs: config.marketScanRotationArmMs }
-                : {}),
-              ...(config.marketScanRunnerMinFeeApr !== undefined
-                ? { runnerMinFeeApr: config.marketScanRunnerMinFeeApr }
-                : {}),
-              ...(config.harvestMinNetUsd !== undefined
-                ? { harvestMinNetUsd: config.harvestMinNetUsd }
-                : {}),
-              ...(config.harvestMaxCostPct !== undefined
-                ? { harvestMaxCostPct: config.harvestMaxCostPct }
-                : {}),
-              ...(config.harvestTxCostUsdEst !== undefined
-                ? { harvestTxCostUsdEst: config.harvestTxCostUsdEst }
-                : {}),
+              ...runnerDispatchDeps(decision.poolAddress),
+              ...harvestDispatchDeps(),
               ...(autonomousExecution ? { autonomous: autonomousExecution } : {}),
             },
             decision,
@@ -5319,19 +5333,15 @@ export const program = Effect.gen(function* () {
       // every lane (launch, market runner, fallen-angel, normal) — the
       // market gate separately pre-filters the universe admission.
       if (config.allowTransferFeeTokens !== true) {
-        const feeChargingLegs = (
-          [
-            [pool.tokenX, pool.tokenXSymbol, authX],
-            [pool.tokenY, pool.tokenYSymbol, authY],
-          ] as Array<[string, string, { transferFeeEnabled?: boolean } | null | string]>
-        ).filter(
-          ([, , auth]) =>
-            auth !== null && typeof auth === "object" && auth.transferFeeEnabled === true,
-        );
+        const feeLegs = [
+          { mint: pool.tokenX, symbol: pool.tokenXSymbol, auth: authX },
+          { mint: pool.tokenY, symbol: pool.tokenYSymbol, auth: authY },
+        ];
+        const feeChargingLegs = feeLegs.filter((leg) => leg.auth?.transferFeeEnabled === true);
         if (feeChargingLegs.length > 0) {
           return yield* rejectForSafety(
             `leg ${feeChargingLegs
-              .map(([, symbol]) => symbol)
+              .map((leg) => leg.symbol)
               .join(", ")} charges a transfer fee (ALLOW_TRANSFER_FEE_TOKENS not enabled)`,
           );
         }
@@ -8397,23 +8407,8 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
-              ...(dispatchEntryAprPct !== undefined ? { entryAprPct: dispatchEntryAprPct } : {}),
-              poolAprByAddress: poolFeeAprByAddress,
-              ...(config.marketScanRotationArmMs !== undefined
-                ? { rotationArmMs: config.marketScanRotationArmMs }
-                : {}),
-              ...(config.marketScanRunnerMinFeeApr !== undefined
-                ? { runnerMinFeeApr: config.marketScanRunnerMinFeeApr }
-                : {}),
-              ...(config.harvestMinNetUsd !== undefined
-                ? { harvestMinNetUsd: config.harvestMinNetUsd }
-                : {}),
-              ...(config.harvestMaxCostPct !== undefined
-                ? { harvestMaxCostPct: config.harvestMaxCostPct }
-                : {}),
-              ...(config.harvestTxCostUsdEst !== undefined
-                ? { harvestTxCostUsdEst: config.harvestTxCostUsdEst }
-                : {}),
+              ...runnerDispatchDeps(decision.poolAddress),
+              ...harvestDispatchDeps(),
               ...(autonomousCandidateId !== undefined
                 ? { candidateId: autonomousCandidateId }
                 : {}),
@@ -8441,14 +8436,7 @@ export const program = Effect.gen(function* () {
               entryStrategyShape,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
-              ...(dispatchEntryAprPct !== undefined ? { entryAprPct: dispatchEntryAprPct } : {}),
-              poolAprByAddress: poolFeeAprByAddress,
-              ...(config.marketScanRotationArmMs !== undefined
-                ? { rotationArmMs: config.marketScanRotationArmMs }
-                : {}),
-              ...(config.marketScanRunnerMinFeeApr !== undefined
-                ? { runnerMinFeeApr: config.marketScanRunnerMinFeeApr }
-                : {}),
+              ...runnerDispatchDeps(decision.poolAddress),
             },
             decision,
             pool,
@@ -8477,23 +8465,8 @@ export const program = Effect.gen(function* () {
               reconcileRequestedPools,
               memory,
               unpricedExitWarnedPools,
-              ...(dispatchEntryAprPct !== undefined ? { entryAprPct: dispatchEntryAprPct } : {}),
-              poolAprByAddress: poolFeeAprByAddress,
-              ...(config.marketScanRotationArmMs !== undefined
-                ? { rotationArmMs: config.marketScanRotationArmMs }
-                : {}),
-              ...(config.marketScanRunnerMinFeeApr !== undefined
-                ? { runnerMinFeeApr: config.marketScanRunnerMinFeeApr }
-                : {}),
-              ...(config.harvestMinNetUsd !== undefined
-                ? { harvestMinNetUsd: config.harvestMinNetUsd }
-                : {}),
-              ...(config.harvestMaxCostPct !== undefined
-                ? { harvestMaxCostPct: config.harvestMaxCostPct }
-                : {}),
-              ...(config.harvestTxCostUsdEst !== undefined
-                ? { harvestTxCostUsdEst: config.harvestTxCostUsdEst }
-                : {}),
+              ...runnerDispatchDeps(decision.poolAddress),
+              ...harvestDispatchDeps(),
               ...(autonomousCandidateId !== undefined
                 ? { candidateId: autonomousCandidateId }
                 : {}),

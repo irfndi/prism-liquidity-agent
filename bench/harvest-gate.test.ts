@@ -4,10 +4,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { Effect } from "effect";
 import { evaluateHarvestGate, program } from "../engine/program.js";
-import { makeTestLayer, makeAdapter } from "./decision-loop-exit.test.js";
-import { makePool, makePosition } from "./helpers.js";
-import { makeDatapiStats } from "./decision-loop-exit.test.js";
-import { AuditService, DbService } from "../engine/services.js";
+import { makePool, makePosition, makeTestLayer, makeAdapter, makeDatapiStats } from "./helpers.js";
+import { DbService } from "../engine/services.js";
 import type { PositionRecord } from "../engine/db-service.js";
 
 const POOL = "HarvestPool1111111111111111111111111111111111111";
@@ -67,7 +65,7 @@ describe("claim wiring (cadence-block gate)", () => {
   async function runClaimCycle(overrides: {
     pendingUsd: number;
     claimFeesImpl: () => Effect.Effect<Record<string, unknown>, never, never>;
-  }): Promise<PositionRecord | undefined> {
+  }): Promise<{ saved: PositionRecord | undefined; claimCalls: number }> {
     const claimSpy = vi.fn(overrides.claimFeesImpl);
     const layer = makeTestLayer({
       adapter: makeAdapter(
@@ -98,7 +96,9 @@ describe("claim wiring (cadence-block gate)", () => {
       configOverrides: {
         paperTrading: false,
         scanIntervalMs: 300, // scheduled cycle (with claimAllFees) fires in-window
-        feeClaimIntervalMs: 0, // claim pass eligible every scan
+        // Long interval: the FIRST cycle claims (lastFeeClaimAt=0), then the
+        // re-arm gates the rest — exactly one claim call proves the wiring.
+        feeClaimIntervalMs: 10_000_000,
         farmRewardsEnabled: false,
         watchlistPools: [POOL], // pool in the scan set so the cycle runs
       },
@@ -120,22 +120,20 @@ describe("claim wiring (cadence-block gate)", () => {
       );
       yield* Effect.raceFirst(program, Effect.sleep(2_500));
       const saved = yield* db.getPosition(POS_ID);
-      const audit = yield* AuditService;
-      const decisions = yield* audit.getRecentDecisions(50);
-      return { saved, decisions };
+      return saved;
     });
-    const { saved, decisions } = (await Effect.runPromise(
+    const saved = (await Effect.runPromise(
       Effect.provide(test, layer) as unknown as Effect.Effect<
-        { saved: PositionRecord | undefined; decisions: ReadonlyArray<unknown> },
+        PositionRecord | undefined,
         Error,
         never
       >,
-    )) as { saved: PositionRecord | undefined; decisions: ReadonlyArray<unknown> };
-    return saved;
+    )) as PositionRecord | undefined;
+    return { saved, claimCalls: claimSpy.mock.calls.length };
   }
 
   it("below the USD floor -> claim skipped, interval NOT re-armed", async () => {
-    const saved = await runClaimCycle({
+    const { saved, claimCalls } = await runClaimCycle({
       pendingUsd: 0.05,
       claimFeesImpl: () =>
         Effect.succeed({
@@ -148,11 +146,12 @@ describe("claim wiring (cadence-block gate)", () => {
           txSignature: "tx",
         }),
     });
+    expect(claimCalls).toBe(0); // the gate exists to skip the on-chain claim
     expect(saved?.lastFeeClaimAt).toBe(0); // skipped claim retries next scan
   });
 
   it("healthy pending -> claim executes, interval re-armed", async () => {
-    const saved = await runClaimCycle({
+    const { saved, claimCalls } = await runClaimCycle({
       pendingUsd: 10,
       claimFeesImpl: () =>
         Effect.succeed({
@@ -166,6 +165,7 @@ describe("claim wiring (cadence-block gate)", () => {
           netFeesUsd: 10,
         }),
     });
+    expect(claimCalls).toBe(1);
     expect(saved?.lastFeeClaimAt).toBeGreaterThan(0);
   });
 });

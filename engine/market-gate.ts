@@ -9,7 +9,7 @@
  */
 
 import type { DiscoveredPool } from "./services.js";
-import { legHasTransferFee } from "./transfer-fee.js";
+import { transferFeeRejectionReason } from "./transfer-fee.js";
 
 export interface MarketGateConfig {
   readonly minTvlUsd: number;
@@ -81,8 +81,9 @@ export function marketLegPasses(
   opts?: { readonly allowTransferFeeTokens: boolean | undefined },
 ): boolean {
   // Robinhood rule 4: a KNOWN transfer-fee mint is rejected up front. Absent
-  // metadata (undefined) is not a fee — only a KNOWN fee rejects.
-  if (leg.transferFeeEnabled === true && opts?.allowTransferFeeTokens !== true) {
+  // metadata (undefined) is not a fee — only a KNOWN fee rejects. Delegates
+  // to the shared reason helper so the rule has one source of truth.
+  if (transferFeeRejectionReason(undefined, leg.transferFeeEnabled, opts?.allowTransferFeeTokens)) {
     return false;
   }
   if (leg.isStableOrSol) return true;
@@ -151,13 +152,13 @@ export function gateAndRankMarketPools(
       reject(`binStep ${pool.binStep} > ${config.maxBinStep}`);
       continue;
     }
-    if (
-      legHasTransferFee(pool.tokenX, { transferFeeEnabled: pool.tokenXTransferFeeEnabled }) &&
-      config.allowTransferFeeTokens !== true
-    ) {
-      reject(
-        `leg ${pool.tokenXSymbol ?? pool.tokenX} charges a transfer fee (allowTransferFeeTokens not enabled)`,
-      );
+    const xFeeReason = transferFeeRejectionReason(
+      pool.tokenXSymbol,
+      pool.tokenXTransferFeeEnabled,
+      config.allowTransferFeeTokens,
+    );
+    if (xFeeReason) {
+      reject(xFeeReason);
       continue;
     }
     const xPasses = marketLegPasses(
@@ -176,13 +177,13 @@ export function gateAndRankMarketPools(
       );
       continue;
     }
-    if (
-      legHasTransferFee(pool.tokenY, { transferFeeEnabled: pool.tokenYTransferFeeEnabled }) &&
-      config.allowTransferFeeTokens !== true
-    ) {
-      reject(
-        `leg ${pool.tokenYSymbol ?? pool.tokenY} charges a transfer fee (allowTransferFeeTokens not enabled)`,
-      );
+    const yFeeReason = transferFeeRejectionReason(
+      pool.tokenYSymbol,
+      pool.tokenYTransferFeeEnabled,
+      config.allowTransferFeeTokens,
+    );
+    if (yFeeReason) {
+      reject(yFeeReason);
       continue;
     }
     const yPasses = marketLegPasses(

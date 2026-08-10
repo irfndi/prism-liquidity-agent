@@ -151,6 +151,26 @@ describe("gateAndRankMarketPools transfer-fee screen", () => {
     expect(result.ranked).toHaveLength(1);
     expect(result.rejected).toHaveLength(0);
   });
+
+  it("rejects a pool whose Y leg charges a transfer fee", () => {
+    // The token-Y screen is a separate block with its own field read and its
+    // own reject string — a wrong field reference would pass an X-only suite.
+    const result = gateAndRankMarketPools(
+      [makePool({ address: "feelegy", tokenYTransferFeeEnabled: true })],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(result.rejected[0]?.reason).toContain("transfer fee");
+  });
+
+  it("rejects a pool whose X leg charges a transfer fee via the shared reason helper", () => {
+    const result = gateAndRankMarketPools(
+      [makePool({ address: "feelegx", tokenXTransferFeeEnabled: true })],
+      config,
+    );
+    expect(result.ranked).toHaveLength(0);
+    expect(result.rejected[0]?.reason).toContain("charges a transfer fee");
+  });
 });
 
 describe("legHasTransferFee", () => {
@@ -234,6 +254,12 @@ describe("parsedMintHasTransferFee (adapter mint parse)", () => {
 
   it("returns false for a plain mint or unrelated extensions", () => {
     expect(parsedMintHasTransferFee(baseMint)).toBe(false);
+    // The guard branch: no parsed data / non-object input / non-array
+    // extensions all fail open — this is the fail-open path the screen
+    // depends on when getParsedAccountInfo returns nothing.
+    expect(parsedMintHasTransferFee(undefined)).toBe(false);
+    expect(parsedMintHasTransferFee(null)).toBe(false);
+    expect(parsedMintHasTransferFee({ ...baseMint, extensions: {} })).toBe(false);
     expect(
       parsedMintHasTransferFee({
         ...baseMint,

@@ -21,3 +21,19 @@ export interface TransferFeeMintInfo {
 export function legHasTransferFee(mint: string, mintInfo: TransferFeeMintInfo): boolean {
   return mintInfo.transferFeeEnabled === true;
 }
+
+/** Single source of truth for the transfer-fee rejection: returns the
+ *  rejection reason when the leg's mint charges a transfer fee and fees are
+ *  not explicitly allowed, else null. Used by BOTH the market gate loop (for
+ *  the specific reason string) and marketLegPasses (for the boolean gate) so
+ *  the rule cannot drift between the two. */
+export function transferFeeRejectionReason(
+  symbol: string | undefined,
+  transferFeeEnabled: boolean | undefined,
+  allowTransferFeeTokens: boolean | undefined,
+): string | null {
+  if (transferFeeEnabled === true && allowTransferFeeTokens !== true) {
+    return `leg ${symbol ?? "mint"} charges a transfer fee (allowTransferFeeTokens not enabled)`;
+  }
+  return null;
+}

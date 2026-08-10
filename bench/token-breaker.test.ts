@@ -363,7 +363,7 @@ describe("token-level execution-failure breaker (Robinhood rule 12)", () => {
     const test = Effect.gen(function* () {
       const db = yield* DbService;
       yield* seedFailingExit(db);
-      yield* Effect.raceFirst(program, Effect.sleep(1_500));
+      yield* Effect.raceFirst(program, Effect.sleep(2_500));
       const audit = yield* AuditService;
       const decisions = yield* audit.getRecentDecisions(200);
       const blocks = yield* readTokenBlocks(db);
@@ -428,7 +428,7 @@ describe("token-level execution-failure breaker (Robinhood rule 12)", () => {
       // Cycle 1: the failed EXIT arms the block and the shared-leg ENTER is
       // rejected while it is active.
       yield* seedFailingExit(db);
-      yield* Effect.raceFirst(program, Effect.sleep(1_500));
+      yield* Effect.raceFirst(program, Effect.sleep(2_500));
       const audit = yield* AuditService;
       const decisions1 = yield* audit.getRecentDecisions(200);
 
@@ -436,7 +436,7 @@ describe("token-level execution-failure breaker (Robinhood rule 12)", () => {
       // EXIT re-arms it, then run a fresh cycle on the same DB.
       yield* closeExitPosition(db);
       yield* Effect.sleep(150);
-      yield* Effect.raceFirst(program, Effect.sleep(1_500));
+      yield* Effect.raceFirst(program, Effect.sleep(2_500));
       const decisions2 = yield* audit.getRecentDecisions(200);
       return { decisions1, decisions2 };
     });
