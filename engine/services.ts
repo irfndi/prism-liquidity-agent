@@ -187,6 +187,30 @@ export interface AdapterApi {
     Error
   >;
   /**
+   * Keyless fallback for `getAllWalletPositions` via the Meteora Data API
+   * (`/portfolio/open`). Crawled, not chained — gives the reconcile path a
+   * source of truth when the aggregate on-chain position read 429s/times out
+   * under Helius rate-limits. Fails with an Error on network/parse failure so
+   * the caller can distinguish a real empty wallet from a transient outage.
+   *
+   * SAFETY CONTRACT: the Data API is a DELAYED, THIRD-PARTY view of the
+   * wallet's positions (it can lag on-chain state and omit a position on a
+   * stale/partial response). A reconcile driven by this feed must therefore be
+   * ADD-ONLY — it may discover and add new external positions, but it must
+   * NEVER remove or mutate an existing tracked position. The chain
+   * (`getAllWalletPositions`) remains the only source that can delete.
+   * Optional so loop test mocks that do not care compile unchanged.
+   */
+  readonly getWalletPositionsFromDatapi?: (walletAddress: string) => Effect.Effect<
+    ReadonlyArray<{
+      poolAddress: string;
+      positionPubKey: string;
+      lowerBinId: number;
+      upperBinId: number;
+    }>,
+    Error
+  >;
+  /**
    * Real USD value of a live on-chain position (principal only — pending
    * swap fees and LM rewards are accounted by the claim paths, never by the
    * mark). Computed from the position's ACTUAL bin holdings

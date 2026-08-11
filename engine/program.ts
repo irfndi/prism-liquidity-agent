@@ -804,14 +804,33 @@ export function reconcilePositions(
 
     const onChainPositions = yield* adapter.getAllWalletPositions(walletAddress).pipe(
       Effect.catch((err) => {
-        console.error("Reconcile: failed to fetch on-chain positions — skipping", {
+        console.error("Reconcile: failed to fetch on-chain positions — falling back to Data API", {
           err: String(err),
         });
         return Effect.succeed(null);
       }),
     );
 
-    if (onChainPositions === null) {
+    // Chain is authoritative. When the aggregate on-chain position read fails
+    // (e.g. Helius 429 under load), fall back to the keyless Meteora Data API
+    // crawl — but in ADD-ONLY mode: the Data API is a delayed third-party view
+    // that can lag/omit a position, so it may discover new external positions
+    // but must NEVER remove or range-sync an existing tracked position.
+    let reconcilablePositions = onChainPositions;
+    let source: "chain" | "datapi" = "chain";
+    if (onChainPositions === null && adapter.getWalletPositionsFromDatapi) {
+      reconcilablePositions = yield* adapter.getWalletPositionsFromDatapi(walletAddress).pipe(
+        Effect.catch((err) => {
+          console.error("Reconcile: Data API fallback also failed — skipping", {
+            err: String(err),
+          });
+          return Effect.succeed(null);
+        }),
+      );
+      if (reconcilablePositions !== null) source = "datapi";
+    }
+
+    if (reconcilablePositions === null) {
       return {
         succeeded: false,
         unresolvedPoolAddresses: new Set(poolsToScan),
@@ -820,37 +839,47 @@ export function reconcilePositions(
 
     // Match by position identity, not pool: a pool can hold several positions
     // (tight+wide pairs), so per-pool matching would conflate siblings.
-    const onChainByPubkey = new Map(onChainPositions.map((p) => [p.positionPubKey, p]));
+    const onChainByPubkey = new Map(reconcilablePositions.map((p) => [p.positionPubKey, p]));
     const watchedPoolSet = new Set(poolsToScan);
     const unresolvedPoolAddresses = new Set<string>();
 
-    for (const [positionId, pos] of trackedPositions) {
-      if (pos.positionPubKey && !onChainByPubkey.has(pos.positionPubKey)) {
-        console.warn(
-          `Reconciling: position ${positionId} on ${pos.poolAddress} no longer on-chain — removing from tracking`,
-        );
-        trackedPositions.delete(positionId);
-        yield* persist(`deletePosition ${positionId}`, db.deletePosition(positionId));
-        yield* memory
-          .upsert({
-            category: "warning",
-            content: `Position ${positionId} on ${pos.poolAddress} was closed externally (e.g. via Solscan/Meteora UI). Removed from tracking.`,
-            poolAddress: pos.poolAddress,
-          })
-          .pipe(Effect.catch(() => Effect.void));
+    // # Delete loop — chain-only. A Data API feed must never drive a removal:
+    // a stale/partial crawl would falsely mark a live position as externally
+    // closed and delete real capital. On the Data API path this loop is
+    // skipped entirely.
+    if (source === "chain") {
+      for (const [positionId, pos] of trackedPositions) {
+        if (pos.positionPubKey && !onChainByPubkey.has(pos.positionPubKey)) {
+          console.warn(
+            `Reconciling: position ${positionId} on ${pos.poolAddress} no longer on-chain — removing from tracking`,
+          );
+          trackedPositions.delete(positionId);
+          yield* persist(`deletePosition ${positionId}`, db.deletePosition(positionId));
+          yield* memory
+            .upsert({
+              category: "warning",
+              content: `Position ${positionId} on ${pos.poolAddress} was closed externally (e.g. via Solscan/Meteora UI). Removed from tracking.`,
+              poolAddress: pos.poolAddress,
+            })
+            .pipe(Effect.catch(() => Effect.void));
+        }
       }
     }
 
-    for (const onChainPos of onChainPositions) {
+    for (const onChainPos of reconcilablePositions) {
       const tracked = trackedPositions.get(onChainPos.positionPubKey);
       if (tracked) {
-        // A tracked position whose on-chain range moved under the same pubkey
-        // (e.g. an externally-executed rebalance, or an atomic rebalance whose
-        // confirmation errored after landing) — sync the record back to the
-        // real range instead of deciding on stale bins.
+        // # Range-sync loop — chain-only (source authority). A tracked position
+        // whose on-chain range moved under the same pubkey (e.g. an
+        // externally-executed rebalance, or an atomic rebalance whose
+        // confirmation errored after landing) is synced back to the real range
+        // instead of deciding on stale bins. On the Data API path we do NOT
+        // mutate a tracked position's range from a possibly-stale third-party
+        // view — the chain read is the only authority that adjusts it.
         if (
-          tracked.lowerBinId !== onChainPos.lowerBinId ||
-          tracked.upperBinId !== onChainPos.upperBinId
+          source === "chain" &&
+          (tracked.lowerBinId !== onChainPos.lowerBinId ||
+            tracked.upperBinId !== onChainPos.upperBinId)
         ) {
           console.warn(
             `Reconciling: position ${onChainPos.positionPubKey} on ${onChainPos.poolAddress} range drifted on-chain (${tracked.lowerBinId}-${tracked.upperBinId} → ${onChainPos.lowerBinId}-${onChainPos.upperBinId}) — syncing record`,

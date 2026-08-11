@@ -373,4 +373,205 @@ describe("reconcilePositions — integration", () => {
       dbLayer,
     );
   });
+
+  // ─── Data API add-only fallback ─────────────────────────────────────────────
+  // getWalletPositionsFromDatapi is consulted ONLY when the authoritative
+  // on-chain read fails. Its contract: it may discover and add NEW external
+  // positions, but it must NEVER delete or range-sync an existing tracked
+  // position (the Data API is a delayed third-party view that can lag/omit).
+
+  it("falls back to the Data API and discovers a new external position when the chain read fails", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () => Effect.fail(new Error("RPC 429")),
+          getWalletPositionsFromDatapi: () =>
+            Effect.succeed([
+              {
+                poolAddress: "external-pool",
+                positionPubKey: "external-pubkey",
+                lowerBinId: 4980,
+                upperBinId: 5020,
+              },
+            ]),
+          getPoolState: () =>
+            Effect.succeed({
+              address: "external-pool",
+              tokenX: "SOL",
+              tokenY: "USDC",
+              tokenXSymbol: "SOL",
+              tokenYSymbol: "USDC",
+              tvlUsd: 100_000,
+              volume24hUsd: 30_000,
+              fees24hUsd: 300,
+              apr: 60,
+              activeBinId: 5000,
+              binStep: 10,
+              currentPrice: 150,
+              timestamp: Date.now(),
+            }),
+        });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+
+        const result = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+          "external-pool",
+        ]);
+
+        // The Data API fallback succeeded, so the reconcile is not a failure.
+        expect(result.succeeded).toBe(true);
+        expect(trackedPositions.has("external-pubkey")).toBe(true);
+        const discovered = trackedPositions.get("external-pubkey")!;
+        expect(discovered.lowerBinId).toBe(4980);
+        expect(discovered.upperBinId).toBe(5020);
+      }),
+      dbLayer,
+    );
+  });
+
+  it("never removes a tracked position when the Data API omits it (add-only)", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        // Chain read fails; the Data API crawl returns a PARTIAL view that
+        // omits pubkey1 (stale/transient). The tracked position must survive —
+        // a Data API feed must never drive a deletion.
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () => Effect.fail(new Error("RPC 429")),
+          getWalletPositionsFromDatapi: () =>
+            Effect.succeed([
+              {
+                poolAddress: "pool2",
+                positionPubKey: "pubkey2",
+                lowerBinId: 4900,
+                upperBinId: 5100,
+              },
+            ]),
+        });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+        trackedPositions.set("pubkey1", makePosition("pool1", "pubkey1"));
+
+        yield* db.savePosition(makePosition("pool1", "pubkey1"));
+
+        const result = yield* reconcilePositions(adapter, db, memory, trackedPositions, [
+          "pool1",
+          "pool2",
+        ]);
+
+        expect(result.succeeded).toBe(true);
+        // pubkey1 is NOT deleted even though the Data API omitted it.
+        expect(trackedPositions.has("pubkey1")).toBe(true);
+        const all = yield* db.getAllPositions();
+        expect(all.some((p) => p.positionPubKey === "pubkey1")).toBe(true);
+      }),
+      dbLayer,
+    );
+  });
+
+  it("never range-syncs a tracked position from the Data API (chain-only sync)", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () => Effect.fail(new Error("RPC 429")),
+          // Data API reports a DIFFERENT (stale) range for the tracked
+          // position under the same pubkey. The tracked record must keep its
+          // authoritative range — the Data API path must not mutate it.
+          getWalletPositionsFromDatapi: () =>
+            Effect.succeed([
+              {
+                poolAddress: "pool1",
+                positionPubKey: "pubkey1",
+                lowerBinId: 9990,
+                upperBinId: 9999,
+              },
+            ]),
+        });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+        trackedPositions.set("pubkey1", makePosition("pool1", "pubkey1"));
+
+        yield* db.savePosition(makePosition("pool1", "pubkey1"));
+
+        const result = yield* reconcilePositions(adapter, db, memory, trackedPositions, ["pool1"]);
+
+        expect(result.succeeded).toBe(true);
+        const tracked = trackedPositions.get("pubkey1")!;
+        expect(tracked.lowerBinId).toBe(4980); // unchanged (authoritative)
+        expect(tracked.upperBinId).toBe(5020);
+        const all = yield* db.getAllPositions();
+        expect(all[0]!.lowerBinId).toBe(4980);
+        expect(all[0]!.upperBinId).toBe(5020);
+      }),
+      dbLayer,
+    );
+  });
+
+  it("keeps current behavior when the Data API fallback is unavailable", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        // No getWalletPositionsFromDatapi on the adapter (e.g. a mock that does
+        // not implement it) — the chain failure degrades exactly as before.
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () => Effect.fail(new Error("RPC timeout")),
+        });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+        trackedPositions.set("pubkey1", makePosition("pool1", "pubkey1"));
+
+        yield* db.savePosition(makePosition("pool1", "pubkey1"));
+
+        const result = yield* reconcilePositions(adapter, db, memory, trackedPositions, ["pool1"]);
+
+        expect(result.succeeded).toBe(false);
+        expect(trackedPositions.has("pubkey1")).toBe(true);
+        const all = yield* db.getAllPositions();
+        expect(all).toHaveLength(1);
+      }),
+      dbLayer,
+    );
+  });
+
+  it("does not consult the Data API when the chain read succeeds", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        let datapiConsulted = false;
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () => Effect.succeed([]),
+          getWalletPositionsFromDatapi: () => {
+            datapiConsulted = true;
+            return Effect.succeed([]);
+          },
+        });
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+        trackedPositions.set("pubkey1", makePosition("pool1", "pubkey1"));
+
+        yield* db.savePosition(makePosition("pool1", "pubkey1"));
+
+        const result = yield* reconcilePositions(adapter, db, memory, trackedPositions, ["pool1"]);
+
+        expect(result.succeeded).toBe(true);
+        // Chain-only path: the Data API is never consulted when chain is healthy.
+        expect(datapiConsulted).toBe(false);
+        // Chain reports empty → pubkey1 is genuinely gone → removed (authoritative).
+        expect(trackedPositions.has("pubkey1")).toBe(false);
+      }),
+      dbLayer,
+    );
+  });
 });

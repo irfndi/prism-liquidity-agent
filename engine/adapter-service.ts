@@ -46,6 +46,11 @@ import {
   savePersistedCache,
   type CacheEntry,
 } from "./token-metadata-cache.js";
+import {
+  effectGetOpenPositions,
+  PositionCrawlCache,
+  type OpenPosition,
+} from "./datapi-position-service.js";
 import { AdapterError, underlyingErrorMessage } from "./errors.js";
 import { DiscoverPoolsError } from "./errors.js";
 import { SwapQuoteError, SwapValidationError } from "./errors.js";
@@ -1391,6 +1396,7 @@ export const AdapterLive = Layer.effect(
     // per-cycle value loop and the claim path share one position read.
     const POSITION_VALUE_CACHE_TTL_MS = 60_000;
     const positionValueCache = new Map<string, { value: number; fetchedAt: number }>();
+    const datapiPositionCache = new PositionCrawlCache(90_000);
 
     function readTokenBalance(mintAddress: string): Effect.Effect<bigint, Error> {
       return Effect.gen(function* () {
@@ -2624,6 +2630,41 @@ export const AdapterLive = Layer.effect(
           }
           return result;
         }),
+
+      getWalletPositionsFromDatapi: (walletAddress) =>
+        Effect.gen(function* () {
+          const baseUrl = config.meteoraDatapiBaseUrl;
+          // 90s TTL caps duplicate /portfolio/open crawls within a scan cycle
+          // (the wallet is reconciled once per cycle) without serving data so
+          // stale that it outraces on-chain state on a fallback read.
+          const positions = yield* effectGetOpenPositions(
+            baseUrl,
+            walletAddress,
+            datapiPositionCache,
+          );
+          return positions
+            .filter(
+              (p) =>
+                p.poolAddress !== undefined && p.lowerBin !== undefined && p.upperBin !== undefined,
+            )
+            .map((p) => ({
+              // The Data API positionId is the on-chain position pubkey for
+              // open DLMM positions; the SDK reconcile matches on this.
+              poolAddress: (p as OpenPosition & { poolAddress: string }).poolAddress,
+              positionPubKey: p.positionId,
+              lowerBinId: p.lowerBin!,
+              upperBinId: p.upperBin!,
+            }));
+        }).pipe(
+          Effect.catch((err: unknown) =>
+            Effect.fail(
+              new AdapterError({
+                message: `Failed to crawl Data API positions: ${underlyingErrorMessage(err)}`,
+                cause: err,
+              }),
+            ),
+          ),
+        ),
 
       simulateRebalance: (poolAddress, positionPubKey, newLowerBinId, newUpperBinId) =>
         Effect.gen(function* () {
