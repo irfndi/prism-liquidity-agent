@@ -962,7 +962,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const dbLayer = DbLive(cfg?.sqliteDbPath);
   const configLayer = ConfigLive;
 
-  const adapter = Layer.provide(AdapterLive, configLayer);
+  const adapter = Layer.provide(AdapterLive, Layer.merge(configLayer, dbLayer));
   const memory = Layer.provide(MemoryLive, dbLayer);
   const audit = Layer.provide(AuditLive, dbLayer);
   const meteoraDatapi = Layer.provide(MeteoraDatapiLive, configLayer);

@@ -39,6 +39,13 @@ import {
   type SwapStatus,
 } from "./services.js";
 import { ConfigService } from "./config-service.js";
+import { DbService } from "./services.js";
+import {
+  deserializeCache,
+  loadPersistedCache,
+  savePersistedCache,
+  type CacheEntry,
+} from "./token-metadata-cache.js";
 import { AdapterError, underlyingErrorMessage } from "./errors.js";
 import { DiscoverPoolsError } from "./errors.js";
 import { SwapQuoteError, SwapValidationError } from "./errors.js";
@@ -623,6 +630,7 @@ export const AdapterLive = Layer.effect(
   AdapterService,
   Effect.gen(function* () {
     const config = yield* ConfigService;
+    const db = yield* DbService;
 
     const connection = new Connection(config.solanaRpcUrl, "confirmed");
     const fallbackConnection =
@@ -776,8 +784,26 @@ export const AdapterLive = Layer.effect(
       readonly error?: { readonly code?: number; readonly message?: string };
     }
 
-    const tokenMetaCache = new Map<string, TokenMeta>();
+    // Token metadata is resolved keyless-first (standard RPC, then Helius DAS
+    // last). The Helius path is the only keyed call and should be hit at most
+    // ~once per token per day. The value stores { meta, fetchedAt } so the
+    // cache can be persisted to the SQLite `metadata` table (surviving
+    // restarts) and written back on startup.
+    const tokenMetaCache = new Map<string, CacheEntry>();
     const HELIUS_ASSET_CACHE_TTL_MS = 5 * 60 * 1000;
+    const TOKEN_META_NAMESPACE = "adapter";
+
+    // Seed the in-memory token-metadata cache from the persisted SQLite copy
+    // so a restart does not re-burn keyed Helius lookups for already-known
+    // tokens. Fail-open: a missing/corrupt persisted value yields an empty
+    // cache and the first lookup repopulates it.
+    yield* loadPersistedCache(db, TOKEN_META_NAMESPACE).pipe(
+      Effect.andThen((map) => {
+        for (const [mint, entry] of map) tokenMetaCache.set(mint, entry);
+        return Effect.void;
+      }),
+      Effect.catch(() => Effect.void),
+    );
 
     // Mint authorities are quasi-static (revocation is one-way), so a long TTL
     // is safe and keeps the per-cycle safety screening to one RPC call per
@@ -1016,13 +1042,24 @@ export const AdapterLive = Layer.effect(
 
     function getTokenMeta(mint: string): Effect.Effect<TokenMeta, Error> {
       return Effect.gen(function* () {
-        const cached = tokenMetaCache.get(mint);
-        if (cached) return cached;
+        const cachedEntry = tokenMetaCache.get(mint);
+        if (cachedEntry) return cachedEntry.meta;
+
+        // Persist a resolved token metadata to the in-memory cache (and, best
+        // effort, to SQLite so the keyed Helius lookup is not repeated after a
+        // restart). Fail-open: a persistence error never fails the lookup.
+        const setMeta = (meta: TokenMeta): Effect.Effect<void, never> =>
+          Effect.gen(function* () {
+            tokenMetaCache.set(mint, { meta, fetchedAt: Date.now() });
+            yield* savePersistedCache(db, TOKEN_META_NAMESPACE, tokenMetaCache).pipe(
+              Effect.catch(() => Effect.void),
+            );
+          });
 
         // Fast path: known mints (SOL, USDC, USDT, etc.) — no network.
         const known = KNOWN_MINT_DECIMALS[mint];
         if (known) {
-          tokenMetaCache.set(mint, known);
+          yield* setMeta(known);
           return known;
         }
 
@@ -1040,7 +1077,7 @@ export const AdapterLive = Layer.effect(
         )?.parsed?.info;
         if (typeof parsed?.decimals === "number") {
           const meta = { symbol: mint.slice(0, 4), decimals: parsed.decimals };
-          tokenMetaCache.set(mint, meta);
+          yield* setMeta(meta);
           return meta;
         }
 
@@ -1058,7 +1095,7 @@ export const AdapterLive = Layer.effect(
               decimals: d,
               ...(priceUsd !== undefined ? { priceUsd, priceFetchedAt: Date.now() } : {}),
             };
-            tokenMetaCache.set(mint, meta);
+            yield* setMeta(meta);
             return meta;
           }
         }
@@ -1240,9 +1277,10 @@ export const AdapterLive = Layer.effect(
             prices[mint] = cached;
             continue;
           }
-          const metadataPrice = tokenMetaCache.get(mint)?.priceUsd;
+          const metaEntry = tokenMetaCache.get(mint);
+          const metadataPrice = metaEntry?.meta.priceUsd;
           if (metadataPrice !== undefined && Number.isFinite(metadataPrice) && metadataPrice > 0) {
-            const metadataFetchedAt = tokenMetaCache.get(mint)?.priceFetchedAt;
+            const metadataFetchedAt = metaEntry?.meta.priceFetchedAt;
             if (
               metadataFetchedAt === undefined ||
               Date.now() - metadataFetchedAt <= PRICE_CACHE_TTL_MS
@@ -2252,7 +2290,7 @@ export const AdapterLive = Layer.effect(
             return [...new Set(mints)].flatMap((mint) => {
               const priceUsd = prices[mint];
               const observedAt =
-                tokenMetaCache.get(mint)?.priceFetchedAt ??
+                tokenMetaCache.get(mint)?.meta.priceFetchedAt ??
                 priceCache.get(mint)?.fetchedAt ??
                 Date.now();
               return priceUsd !== undefined && Number.isFinite(priceUsd) && priceUsd > 0

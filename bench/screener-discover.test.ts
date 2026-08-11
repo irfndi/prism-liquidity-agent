@@ -201,7 +201,7 @@ function buildScreenerLayer(
         reportRevenue: () => Effect.never,
       } as never);
     }
-    return Layer.provide(AdapterLive, configLayer) as unknown as Layer.Layer<
+    return Layer.provide(AdapterLive, Layer.merge(configLayer, DbLive(":memory:"))) as unknown as Layer.Layer<
       AdapterService,
       never,
       never
