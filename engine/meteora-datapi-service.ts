@@ -112,7 +112,28 @@ export const MeteoraDatapiLive = Layer.effect(
     const config = yield* ConfigService;
     const baseUrl = config.meteoraDatapiBaseUrl.replace(/\/+$/, "");
 
+    // Response-level dedup: the same pool's detail is fetched once per cycle
+    // (and shared across the scan loop + screening + signal paths). The Data
+    // API is keyless and effectively unlimited, but the pool's TVL/volume/fees
+    // only move on swap cadence — a short TTL collapses the within-cycle
+    // duplicates without going stale across cycles. A failed fetch is NOT
+    // cached (fail-open retries next read), and the map is opportunistically
+    // pruned on insert so dropped pools don't accumulate.
+    const POOL_STATS_CACHE_TTL_MS = 30_000;
+    const poolStatsCache = new Map<string, { stats: MeteoraPoolStats; fetchedAt: number }>();
+    function prunePoolStatsCache(): void {
+      const now = Date.now();
+      for (const [addr, entry] of poolStatsCache) {
+        if (now - entry.fetchedAt >= POOL_STATS_CACHE_TTL_MS) poolStatsCache.delete(addr);
+      }
+    }
+
     const getPoolData = (poolAddress: string): Effect.Effect<MeteoraPoolStats | null, never> => {
+      prunePoolStatsCache();
+      const cached = poolStatsCache.get(poolAddress);
+      if (cached && Date.now() - cached.fetchedAt < POOL_STATS_CACHE_TTL_MS) {
+        return Effect.succeed(cached.stats);
+      }
       const url = `${baseUrl}/pools/${poolAddress}`;
       const fetchJson = retryEffectWithBackoff(
         Effect.tryPromise({
@@ -138,6 +159,11 @@ export const MeteoraDatapiLive = Layer.effect(
             ? Effect.fail(new Error(`Meteora Data API returned an invalid pool payload for ${url}`))
             : Effect.succeed(parsed);
         }),
+        Effect.tap((stats) =>
+          Effect.sync(() => {
+            poolStatsCache.set(poolAddress, { stats, fetchedAt: Date.now() });
+          }),
+        ),
         Effect.catch((err) =>
           Effect.sync(() => {
             logger.warn("Meteora Data API unavailable — falling back to heuristic pool stats", {
