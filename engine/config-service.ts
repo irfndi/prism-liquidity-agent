@@ -184,6 +184,14 @@ export interface AppConfig {
   readonly harvestTxCostUsdEst?: number;
   readonly allowTransferFeeTokens?: boolean;
   readonly tokenFailureBlockMs?: number;
+  readonly minYieldExitAgeMs?: number;
+  readonly marketScanMaxNegativeDriftBins?: number;
+  readonly entryMomentumConfBoost?: number;
+  readonly entryMomentumReferenceBins?: number;
+  readonly entryMomentumScoreWeight?: number;
+  readonly takeProfitEnabled?: boolean;
+  readonly takeProfitPct?: number;
+  readonly backtestTolerateEmptyBins?: boolean;
   /** How many top-ranked market pools are actively scanned each cycle. */
   readonly marketScanTopK?: number;
   /** Hard cap on market-scan pools in the active scan set. */
@@ -1427,6 +1435,37 @@ const loadConfig = Effect.gen(function* () {
   // G6 token-level failure breaker: a failed EXIT on a token blocks new
   // entries into any pool holding that token for this window.
   const tokenFailureBlockMs = yield* validatedNumber("TOKEN_FAILURE_BLOCK_MS", 60_000, 3_600_000);
+  // ── TA / filter-quality (forensics-driven, paper-first) ────────────────
+  // A: economic EXITs (fee/IL < 0.5, yield-regression, volume-auth) must NOT
+  // fire before fees can accrue — the 33-min median paper hold was the top
+  // winrate drag (locked in temporary IL that reversed, armed cooldowns that
+  // starved ENTERS). Capital-protection exits (trailing stop, TVL drop, W15,
+  // IL dominance, dust) stay age-free.
+  const minYieldExitAgeMs = yield* validatedNumber("MIN_YIELD_EXIT_AGE_MS", 0, 14_400_000);
+  // B: momentum/timing ENTER gate + confidence boost — the throughput fix.
+  // ENTER rejected when the recent active-bin drift is strongly negative
+  // (cascading price); positive drift boosts the confidence so a feeIl ~2
+  // pool with real upward momentum crosses the 0.65 floor without lowering
+  // the threshold for static pools.
+  const marketScanMaxNegativeDriftBins = yield* validatedNumber(
+    "MARKET_SCAN_MAX_NEGATIVE_DRIFT_BINS",
+    -100,
+    -8,
+  );
+  const entryMomentumConfBoost = yield* validatedNumber("ENTRY_MOMENTUM_CONF_BOOST", 0, 0.05);
+  const entryMomentumReferenceBins = yield* validatedNumber("ENTRY_MOMENTUM_REFERENCE_BINS", 1, 20);
+  const entryMomentumScoreWeight = yield* validatedNumber("ENTRY_MOMENTUM_SCORE_WEIGHT", 0, 0.15);
+  // C: take-profit for normal positions (winrate — lock profits instead of
+  // waiting for a loss-side exit). Single-rung full exit at the target.
+  const takeProfitEnabled = yield* Config.boolean("TAKE_PROFIT_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const takeProfitPct = yield* validatedNumber("TAKE_PROFIT_PCT", 0, 0.15);
+  // D: backtest replay fidelity — empty-bin snapshots must not reject every
+  // tick (paper DB stores bins:[] so the replay admitted nothing).
+  const backtestTolerateEmptyBins = yield* Config.boolean("BACKTEST_TOLERATE_EMPTY_BINS").pipe(
+    Effect.orElseSucceed(() => true),
+  );
   const marketScanTopK = yield* validatedNumber("MARKET_SCAN_TOP_K", 1, 30, 200);
   const marketScanMaxPools = yield* validatedNumber("MARKET_SCAN_MAX_POOLS", 1, 60, 500);
   const marketScanMinHolders = yield* validatedNumber("MARKET_SCAN_MIN_HOLDERS", 0, 1000);
@@ -1691,6 +1730,14 @@ const loadConfig = Effect.gen(function* () {
     harvestTxCostUsdEst,
     allowTransferFeeTokens,
     tokenFailureBlockMs,
+    minYieldExitAgeMs,
+    marketScanMaxNegativeDriftBins,
+    entryMomentumConfBoost,
+    entryMomentumReferenceBins,
+    entryMomentumScoreWeight,
+    takeProfitEnabled,
+    takeProfitPct,
+    backtestTolerateEmptyBins,
     marketScanTopK,
     marketScanMaxPools,
     marketScanMinHolders,

@@ -24,6 +24,13 @@ import {
   evolveThresholds,
   computeSignalWeights,
   weightedEntryScore,
+  entryMomentumBoost,
+  driftGateRejected,
+  normalEntryConfidence,
+  DEFAULT_MOMENTUM_REFERENCE_BINS,
+  DEFAULT_MOMENTUM_SCORE_WEIGHT,
+  DEFAULT_MOMENTUM_CONF_BOOST,
+  DEFAULT_MAX_NEGATIVE_DRIFT_BINS,
 } from "./strategy-service.js";
 import type { EvolvableThresholds } from "./strategy-service.js";
 import { BlacklistLive } from "./blacklist-service.js";
@@ -5876,6 +5883,38 @@ export const program = Effect.gen(function* () {
           }
         }
 
+        // ── Normal-lane take-profit (winrate fix) ────────────────────────
+        // A normal (non-FA) position that carries a single-rung TP ladder
+        // exits deterministically when price reaches its rung — profits lock
+        // BEFORE the loss-side exits below. Only the "tp" status acts here;
+        // the downside stays owned by the trailing stop / loss-side exits
+        // (the ladder's invalidation leg is the trailing-stop pct, but its
+        // "invalidation" status deliberately fires nothing here — the
+        // ordinary EXIT chain already covers it). Position-targeted,
+        // confidence 1, same precedence as the FA/launch lifecycles.
+        let tpTargetLifecycle: { reasoning: string } | null = null;
+        if (
+          pos.positionMode !== "fallen-angel" &&
+          pos.tpLadderJson != null &&
+          (config.takeProfitEnabled ?? false)
+        ) {
+          const tpLadderParsed = parseTpLadder(pos.tpLadderJson);
+          if (tpLadderParsed !== null) {
+            const tpEval = evaluateTpLadder(
+              pool.currentPrice,
+              tpLadderParsed,
+              // ponytail: no invalidation leg on the normal lane — the trailing
+              // stop / loss-side exits own the downside; 0 never invalidates.
+              pos.invalidationStopPrice ?? 0,
+            );
+            if (tpEval.status === "tp" && tpEval.rungReached) {
+              tpTargetLifecycle = {
+                reasoning: `[tp-target] Price ${pool.currentPrice.toFixed(6)} reached target ${tpEval.rungReached.targetPrice.toFixed(6)} — take profit`,
+              };
+            }
+          }
+        }
+
         // ── Launch lifecycle (Launch Mode v2) ─────────────────────────────
         // A launch position exits via launchPositionExit: time-box, 1h-fee
         // volume-decay, peak-value drawdown, fee/IL floor (pure policy in
@@ -6086,6 +6125,15 @@ export const program = Effect.gen(function* () {
           }
         }
 
+        // Economic-exit maturity (forensics-driven, A-slice): the fee/IL and
+        // yield-regression EXITs must NOT fire before fees can accrue — the
+        // paper forensics showed 33-minute median holds exiting at a loss on
+        // temporary IL that then reversed, arming cooldowns that starved the
+        // ENTER lane. Capital-protection exits (W15, IL dominance, dust, TVL
+        // drop, trailing stop, launch/FA lifecycles) stay age-free.
+        const yieldExitMature =
+          Date.now() - pos.timestamp >= (config.minYieldExitAgeMs ?? 14_400_000);
+
         if (faLifecycle) {
           decision = {
             action: "EXIT",
@@ -6101,6 +6149,14 @@ export const program = Effect.gen(function* () {
             positionId: pos.positionId,
             confidence: 1,
             reasoning: launchLifecycle.reasoning,
+          };
+        } else if (tpTargetLifecycle) {
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            positionId: pos.positionId,
+            confidence: 1,
+            reasoning: tpTargetLifecycle.reasoning,
           };
         } else if (w15Signals.depeg || w15Signals.liquidityDrain) {
           decision = {
@@ -6200,9 +6256,13 @@ export const program = Effect.gen(function* () {
             `Volume authenticity ${volumeAuth.toFixed(2)} below threshold on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
             { pool, metrics, position: pos },
           );
-        } else if (metrics.feeIlRatioKnown && feeIlRatio < 0.5) {
+        } else if (yieldExitMature && metrics.feeIlRatioKnown && feeIlRatio < 0.5) {
           // feeIlRatioUnknown (heuristic) → skip: a fabricated-low ratio must
           // not force an exit. The metric-unavailability warn above logs the skip.
+          // Immature positions (age < MIN_YIELD_EXIT_AGE_MS) are exempt: the
+          // ratio is near-zero before fees accrue — exiting locks in temporary
+          // IL that often reverses (forensics: median 33-min holds, pools that
+          // pumped +24-32% within 24h of the paper loss exit).
           decision = {
             action: "EXIT",
             poolAddress,
@@ -6217,6 +6277,7 @@ export const program = Effect.gen(function* () {
             { pool, metrics, position: pos },
           );
         } else if (
+          yieldExitMature &&
           pos.positionMode !== "launch" &&
           pool.statsSource === "datapi" &&
           poolFeeAprPct > 0
@@ -6721,6 +6782,10 @@ export const program = Effect.gen(function* () {
       // idle-redeploy capture (identical expression the shape path used inline).
       const netDriftBins =
         recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0;
+      // Momentum-aware metrics for the weighted score: the momentum term reads
+      // netDriftBins, which is only known after metrics construction, so it
+      // rides on a derived copy (audit rows keep the original metrics).
+      const momentumMetrics = { ...metrics, netDriftBins };
 
       // Idle-redeploy capture helper (opt-in): the candidate conditions +
       // weighted-score gate, evaluated for a pool whose ENTER slot was skipped
@@ -6737,7 +6802,10 @@ export const program = Effect.gen(function* () {
           binUtilization > 0.4 &&
           pool.tvlUsd > config.minPoolTvlUsd * 2
         ) {
-          const entryScore = weightedEntryScore(metrics, signalWeights);
+          const entryScore = weightedEntryScore(momentumMetrics, signalWeights, {
+            referenceBins: config.entryMomentumReferenceBins ?? DEFAULT_MOMENTUM_REFERENCE_BINS,
+            scoreWeight: config.entryMomentumScoreWeight ?? DEFAULT_MOMENTUM_SCORE_WEIGHT,
+          });
           if (entryScore > config.weightedEntryScoreThreshold) {
             return {
               poolAddress,
@@ -7053,6 +7121,47 @@ export const program = Effect.gen(function* () {
             }
           }
 
+          // [drift-gate] negative-drift ENTER rejection — a pool trending DOWN
+          // hard (net active-bin drift below MARKET_SCAN_MAX_NEGATIVE_DRIFT_BINS
+          // over the recent-bin window) is not a momentum entry; reject BEFORE
+          // the candidate conditions so a falling pool cannot clear the
+          // fee/IL quality gates on fees earned before the slide. EXEMPT:
+          // market-runner entries (the dip-ladder fills ON dips by design) and
+          // launch-lane entries (young pools have no bin history to drift);
+          // fallen-angel consumed the slot above — its thesis IS post-drawdown
+          // entry. Applies to the NORMAL/market lane only.
+          if (
+            !enterGateRejected &&
+            !isMarketRunner(poolAddress) &&
+            !launchScanPools.has(poolAddress) &&
+            driftGateRejected(
+              netDriftBins,
+              config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS,
+            )
+          ) {
+            console.info(
+              `[drift-gate] Rejecting ENTER ${poolAddress} — net drift ${netDriftBins} bins < ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS}`,
+            );
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "ENTER",
+                confidence: 0,
+                reasoning: `[drift-gate] net drift ${netDriftBins} bins below ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS} — falling price, no momentum entry`,
+                metrics,
+                riskResult: {
+                  approved: false,
+                  reason: `[drift-gate] drift ${netDriftBins} < ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS}`,
+                },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catch(() => Effect.void));
+            enterGateRejected = true;
+          }
+
           // [fee-il-gate] hard ENTER floor — expected fees must beat IL. Active
           // only when IL protection is enabled. feeIlRatio is never null
           // (0-20, strategy-service.ts) so the numeric compare is fail-closed
@@ -7082,7 +7191,7 @@ export const program = Effect.gen(function* () {
                 poolAddress,
                 action: "ENTER",
                 confidence: 0,
-                reasoning: `[fee-il-gate] Fee/IL ratio ${feeIlRatio.toFixed(2)} below minimum ${config.minFeeIlRatio} — expected fees cannot beat IL`,
+                reasoning: `[fee-il-gate] Fee/IL ratio ${feeIlRatio.toFixed(2)} below minimum ${config.minFeeIlRatio} — would-be conf ${Math.min(0.5 + feeIlRatio * 0.05, 0.85).toFixed(2)}`,
                 metrics,
                 riskResult: {
                   approved: false,
@@ -7115,7 +7224,10 @@ export const program = Effect.gen(function* () {
             binUtilization > 0.4 &&
             pool.tvlUsd > config.minPoolTvlUsd * 2
           ) {
-            const entryScore = weightedEntryScore(metrics, signalWeights);
+            const entryScore = weightedEntryScore(momentumMetrics, signalWeights, {
+              referenceBins: config.entryMomentumReferenceBins ?? DEFAULT_MOMENTUM_REFERENCE_BINS,
+              scoreWeight: config.entryMomentumScoreWeight ?? DEFAULT_MOMENTUM_SCORE_WEIGHT,
+            });
             if (entryScore <= config.weightedEntryScoreThreshold) {
               yield* audit
                 .recordDecision({
@@ -7124,7 +7236,7 @@ export const program = Effect.gen(function* () {
                   poolAddress,
                   action: "ENTER",
                   confidence: 0,
-                  reasoning: `[weighted-score] score ${entryScore.toFixed(3)} <= threshold ${config.weightedEntryScoreThreshold}`,
+                  reasoning: `[weighted-score] score ${entryScore.toFixed(3)} <= threshold ${config.weightedEntryScoreThreshold} (would-be conf ${Math.min(0.5 + feeIlRatio * 0.05, 0.85).toFixed(2)})`,
                   metrics,
                   riskResult: {
                     approved: false,
@@ -7536,12 +7648,38 @@ export const program = Effect.gen(function* () {
 
                 if (!enterGateRejected) {
                   const positionSizeUsd = allocation.adjustedDepositUsd;
+                  // Normal-lane take-profit (winrate fix): when enabled, every
+                  // normal ENTER carries a single-rung TP ladder at
+                  // TAKE_PROFIT_PCT above entry; the invalidation leg uses the
+                  // existing trailing-stop pct (the normal lane's downside rule).
+                  const tpLadder =
+                    (config.takeProfitEnabled ?? false) === true
+                      ? buildTpLadder(pool.currentPrice, {
+                          rungs: [config.takeProfitPct ?? 0.15],
+                          fractions: [1],
+                          invalidationStopPct: config.trailingStopPct ?? 0.1,
+                        })
+                      : null;
                   rawDecisions.push({
                     action: "ENTER",
                     poolAddress,
-                    confidence: Math.min(0.5 + feeIlRatio * 0.05, 0.85),
+                    // Momentum boost: positive drift earns up to
+                    // ENTRY_MOMENTUM_CONF_BOOST on the static base confidence
+                    // (negative → 0), still capped at 0.85. Runner/launch lanes
+                    // keep the static formula — this is the normal lane only.
+                    confidence: normalEntryConfidence(feeIlRatio, netDriftBins, {
+                      referenceBins:
+                        config.entryMomentumReferenceBins ?? DEFAULT_MOMENTUM_REFERENCE_BINS,
+                      confBoost: config.entryMomentumConfBoost ?? DEFAULT_MOMENTUM_CONF_BOOST,
+                    }),
                     reasoning: `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL $${pool.tvlUsd.toFixed(0)}`,
                     positionSizeUsd,
+                    ...(tpLadder !== null
+                      ? {
+                          tpLadderJson: serializeTpLadder(tpLadder.ladder) ?? undefined,
+                          invalidationStopPrice: tpLadder.invalidationPrice,
+                        }
+                      : {}),
                   });
                   // Idle-redeploy capture: the pool passed every in-slot gate
                   // (conditions, score, allocation, token-risk), so it is a

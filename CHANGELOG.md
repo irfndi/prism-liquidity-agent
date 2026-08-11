@@ -2,6 +2,19 @@
 
 All notable changes to Prism are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Filter/execution quality (forensics-driven)** — deep research (three parallel scouts) confirmed the user's thesis with a twist: paper forensics over 40h showed throughput at 0.23% admit (15,064 attempts → 35 ENTERs) and 50% winrate (profit factor 0.55), NOT because the quality gates were too strict (they fired 0 times) but because the **fee/IL < 0.5 EXIT fired at 33-minute median holds** — locking in temporary IL that reversed (two pools pumped +24-32% within 24h of the paper loss exit) and arming cooldowns that starved the ENTER lane (56% alloc-gate + 34% cooldown-gate = 90% of rejections):
+  - **Economic-exit maturity gate** (`MIN_YIELD_EXIT_AGE_MS`, 4h): the fee/IL < 0.5 and yield-regression EXITs skip immature positions — capital-protection exits stay age-free.
+  - **[drift-gate] momentum guard** (`MARKET_SCAN_MAX_NEGATIVE_DRIFT_BINS`): normal-lane ENTER rejected on cascading price (runner/launch exempt).
+  - **Momentum score term + confidence boost** (`ENTRY_MOMENTUM_*`): positive drift raises `weightedEntryScore` and the ENTER confidence — a feeIl ~2 pool with real upward momentum crosses 0.65 without lowering the threshold for static pools.
+  - **Normal-lane take-profit** (`TAKE_PROFIT_ENABLED`/`PCT`): single-rung TP ladder at ENTER, deterministic `[tp-target]` EXIT before the loss-side exits (reuses the fallen-angel ladder machinery).
+  - **Would-be-confidence instrumentation**: `[fee-il-gate]`/`[weighted-score]` rejections now record the confidence the pool WOULD have had — the threshold story is measurable.
+  - **Backtest replay fidelity** (`BACKTEST_TOLERATE_EMPTY_BINS`): empty-bin snapshots degrade utilization to UNKNOWN instead of rejecting every tick; the replay reports admit/reject census + winrate and avg-hold by exit reason with live-vocabulary tags.
+- 27 new tests (1825 total). Delivered via four parallel slices (momentum gate, take-profit lane, backtest fidelity) + the decision-loop core.
+
 ## [0.2.11] — 2026-08-10
 
 ### Added
