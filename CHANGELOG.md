@@ -2,6 +2,16 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.16] — 2026-08-11
+
+### Added
+
+- **Keyless Data API position fallback (add-only)** — the aggregate on-chain position read (`getAllWalletPositions`) 429s under shared-Helius rate-limits, degrading the wallet reconcile path. Added `getWalletPositionsFromDatapi` (new optional `AdapterApi` method) that crawls the wallet's open DLMM positions keylessly from the Meteora Data API `/portfolio/open`:
+  - **Chain read stays authoritative** and is consulted first; the Data API fallback is consulted only when the chain read fails.
+  - **ADD-ONLY safety contract**: the Data API is a delayed third-party view (it can lag/omit a position), so a Data API-driven reconcile may **discover and add** new external positions but is **excluded from the delete loop and the range-sync loop** — a stale/partial crawl can never remove or mutate an existing tracked position, and thus can never cause a false capital loss.
+  - **90s per-wallet crawl cache** collapses duplicate `/portfolio/open` reads within a scan cycle (success-only).
+- 6 new integration tests in `bench/reconcile-positions.test.ts`: stale/partial Data API never deletes a live position, never range-syncs, discovers new positions after a chain failure, is consulted only after a chain failure, and chain-only degradation is preserved when the fallback is unavailable.
+
 ## [0.2.15] — 2026-08-11
 
 ### Added
