@@ -31,7 +31,7 @@ function sanitizeSymbol(value: string): string {
 function buildProgram(): Layer.Layer<DbService | AdapterService, Error, never> {
   const dbPath = process.env.SQLITE_DB_PATH ?? getPrismDbPath();
   const dbLayer = DbLive(dbPath);
-  const adapterLayer = Layer.provide(AdapterLive, ConfigLive);
+  const adapterLayer = Layer.provide(AdapterLive, Layer.merge(ConfigLive, dbLayer));
   return Layer.mergeAll(dbLayer, adapterLayer) as unknown as Layer.Layer<
     DbService | AdapterService,
     Error,

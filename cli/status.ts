@@ -159,7 +159,7 @@ function buildProgram(): Layer.Layer<
   const dbLayer = DbLive(dbPath);
   const auditLayer = Layer.provide(AuditLive, dbLayer);
   const configLayer = ConfigLive;
-  const adapterLayer = Layer.provide(AdapterLive, configLayer);
+  const adapterLayer = Layer.provide(AdapterLive, Layer.merge(configLayer, dbLayer));
   return Layer.mergeAll(dbLayer, auditLayer, configLayer, adapterLayer) as unknown as Layer.Layer<
     DbService | AuditService | ConfigService | AdapterService,
     Error,
