@@ -2,6 +2,18 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.15] — 2026-08-11
+
+### Added
+
+- **Persistent token-metadata cache** (`token-metadata-cache.ts`, wired into the adapter) — token metadata (decimals, symbol, name, mint) now resolves through a 24h-TTL cache persisted to SQLite via the `metadata` table, surviving restarts. Combined with the keyless-first reorder, keyed Helius `getAsset` hits drop to ~once per token per day (the cache is seeded on startup and persisted on each resolve). Reduces the shared Helius key's rate-limit pressure to near zero on the hot path.
+- **Keyless Data-API position crawl** (`datapi-position-service.ts`, leaf module) — keyless crawl of the wallet's own Meteora positions from `/portfolio/open` with success-only caching, plus a `getUserPositions` shape mapper. Committed as a reusable module; not yet wired into the decision loop because the Data-API shape (`valueUsd`/`pnlUsd`) differs from the SDK position shape the decision loop depends on.
+- **`MARKET_SCAN_UNIVERSE_SORT`** — server-side universe sort for `discoverPoolsTopPages`. `fee` sorts by `fee_tvl_ratio_24h:desc` so the hot yield pools surface in the first pages, aligning the fetched universe with the market gate's fee-APR ranking and reducing the pages needed to reach the runnable set. Default `tvl` preserves existing behavior. Verified `fee_tvl_ratio_24h` is a valid Data API sort key against the live endpoint.
+
+### Updated
+
+- **Keyless-first pricing (Helius 429 fix)** carried forward from 0.2.14 — `Jupiter → CoinGecko → Helius` for prices, decimals via standard RPC before Helius. Re-verified live: Helius `getAsset` 429s dropped from 155+ to ~2-8 since restart.
+
 ## [0.2.14] — 2026-08-11
 
 ### Fixed
