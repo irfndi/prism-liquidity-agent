@@ -101,6 +101,7 @@ import {
   EntryPrepService,
   MeteoraDatapiService,
   GeckoTerminalService,
+  DexScreenerService,
   PythPriceService,
   AlertService,
   CopySignalService,
@@ -118,6 +119,7 @@ import {
 } from "./services.js";
 import { MeteoraDatapiLive, enrichPoolWithDatapi } from "./meteora-datapi-service.js";
 import { GeckoTerminalLive, enrichPoolFromGecko } from "./gecko-terminal-service.js";
+import { DexScreenerLive } from "./dexscreener-service.js";
 import { PythPriceLive } from "./pyth-price-service.js";
 import { AlertLive } from "./alert-service.js";
 import { detectDepegAndLiquidityDrain } from "./depeg-liquidity-detector.js";
@@ -951,6 +953,7 @@ type AllServices =
   | EntryPrepService
   | MeteoraDatapiService
   | GeckoTerminalService
+  | DexScreenerService
   | PythPriceService
   | AlertService
   | CopySignalService;
@@ -1008,7 +1011,8 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged11a = Layer.merge(merged11, entryPrep);
   const merged11b = Layer.merge(merged11a, meteoraDatapi);
   const merged11c = Layer.merge(merged11b, GeckoTerminalLive);
-  const merged11d = Layer.merge(merged11c, pythPrice);
+  const merged11d = Layer.merge(merged11c, DexScreenerLive);
+  const merged11e = Layer.merge(merged11d, pythPrice);
 
   const agentLayer = cfg?.agentiveMode ? AgentLive(cfg) : Layer.succeed(AgentService, AgentNoOp);
 
@@ -1028,7 +1032,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
           stop: () => Effect.void,
         });
 
-  const merged12 = Layer.merge(merged11d, agentLayer);
+  const merged12 = Layer.merge(merged11e, agentLayer);
   const merged13 = Layer.merge(merged12, agentStateLayer);
   const merged14 = Layer.merge(merged13, mcpLayer);
   const merged15 = Layer.merge(merged14, httpLayer);
@@ -2579,6 +2583,11 @@ export const program = Effect.gen(function* () {
   const httpStatusServer = yield* HttpStatusServerService;
   const meteoraDatapi = yield* MeteoraDatapiService;
   const gecko = yield* GeckoTerminalService;
+  // DexScreener is an optional resilience fallback (mirrors the optional
+  // CopySignalService): layers that don't provide it (e.g. older test fixtures)
+  // still scan normally — the service handle is only used when a pool actually
+  // needs the dexscreener fallback and the layer provided it.
+  const dexscreenerOption = yield* Effect.serviceOption(DexScreenerService);
   const alertSvc = yield* AlertService;
   const copySignalsOption = yield* Effect.serviceOption(CopySignalService);
 
@@ -5174,24 +5183,44 @@ export const program = Effect.gen(function* () {
       pushBinHistory(poolAddress, rawPool.activeBinId);
 
       // Real pool stats, resolved datapi (primary) > geckoterminal (secondary)
-      // > the adapter's fabricated heuristic (last-resort safety net). The
-      // chosen source is tagged onto the pool so the volume/fee gates skip
-      // heuristic fiction instead of acting on it. The gecko fee rate is the
-      // pool's binStep-derived base fee applied to REAL gecko volume (gecko's
-      // own pool_fee_percentage is null for every CL pool — see
-      // gecko-terminal-service.ts). Data-API-exclusive safety signals are never
-      // sourced from gecko: they stay null and the screener fails open on null.
+      // > dexscreener (secondary resilience) > the adapter's fabricated
+      // heuristic (last-resort safety net). The chosen source is tagged onto the
+      // pool so the volume/fee gates skip heuristic fiction instead of acting on
+      // it. The gecko* fee rate is the pool's binStep-derived base fee applied to
+      // REAL volume (gecko's own pool_fee_percentage is null for every CL pool,
+      // and DexScreener exposes no fee field at all — see
+      // gecko-terminal-service.ts / dexscreener-service.ts). DexScreener carries
+      // the SAME trust posture as gecko (measured volume/TVL, modeled fees, NO
+      // safety signals) and is enriched through the same `enrichPoolFromGecko`
+      // path, so no new `statsSource` value ripples through the trust model.
+      // Data-API-exclusive safety signals are never sourced from gecko or
+      // dexscreener: they stay null and the screener fails open on null.
       const datapiStats = yield* meteoraDatapi.getPoolData(poolAddress);
+      // Gecko remains the preferred secondary source (dexscreener is only tried
+      // when gecko itself is unavailable) so the two keyless reserves never
+      // compete for the same quota.
       const geckoStats =
         datapiStats === null && config.geckoTerminalEnabled !== false
           ? yield* gecko.getPoolStats(poolAddress, 0.0025 + rawPool.binStep / 10_000)
+          : null;
+      const dexscreenerStats =
+        datapiStats === null &&
+        geckoStats === null &&
+        config.dexscreenerEnabled !== false &&
+        dexscreenerOption._tag === "Some"
+          ? yield* dexscreenerOption.value.getPoolStats(
+              poolAddress,
+              0.0025 + rawPool.binStep / 10_000,
+            )
           : null;
       const pool =
         datapiStats !== null
           ? enrichPoolWithDatapi(rawPool, datapiStats)
           : geckoStats !== null
             ? enrichPoolFromGecko(rawPool, geckoStats)
-            : rawPool;
+            : dexscreenerStats !== null
+              ? enrichPoolFromGecko(rawPool, dexscreenerStats)
+              : rawPool;
 
       // ── Market-runner lane ──────────────────────────────────────────────
       // A market-scan pool whose MEASURED (datapi) fee APR clears the runner

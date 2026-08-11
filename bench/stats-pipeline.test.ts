@@ -28,6 +28,7 @@ import {
   EntryPrepService,
   MeteoraDatapiService,
   GeckoTerminalService,
+  DexScreenerService,
   AlertService,
   type AdapterApi,
   type MeteoraDatapiApi,
@@ -191,6 +192,9 @@ function makeTestLayer(opts: {
     Layer.succeed(MeteoraDatapiService, opts.datapi ?? { getPoolData: () => Effect.succeed(null) }),
     Layer.succeed(GeckoTerminalService, {
       getPoolStats: () => Effect.succeed(opts.gecko ?? null),
+    }),
+    Layer.succeed(DexScreenerService, {
+      getPoolStats: () => Effect.succeed(null),
     }),
     Layer.succeed(AlertService, {
       sendAlert: capture

@@ -28,6 +28,7 @@ import type {
 } from "./agent-transport.js";
 import type { PrismStateSnapshot } from "./state-service.js";
 import type { GeckoPoolStats } from "./gecko-terminal-service.js";
+import type { DexscreenerPoolStats } from "./dexscreener-service.js";
 import type { EvolvableThresholds, OutcomeRecord } from "./strategy-service.js";
 import type { ClaimedReward } from "./rewards.js";
 import type { LimitOrderRequest } from "./limit-orders.js";
@@ -641,6 +642,29 @@ export interface GeckoTerminalApi {
 
 export class GeckoTerminalService extends Context.Service<GeckoTerminalService, GeckoTerminalApi>()(
   "GeckoTerminalService",
+) {}
+
+// ─── DexScreener Service ─────────────────────────────────────────────────────
+
+export interface DexScreenerApi {
+  /**
+   * Fetch real stats for one pool from DexScreener. Never fails: on any
+   * network/HTTP/schema error the underlying client logs a warning and returns
+   * null so callers fall through to the heuristic without crashing the scan
+   * cycle. `baseFeeRate` is the pool's binStep-derived base-fee fraction (the
+   * consumer computes `0.0025 + binStep / 1e4`) used to price REAL volume into
+   * fees — DexScreener exposes NO fee field, so the modeled rate is always used.
+   * The ~120ms request pacing is an HTTP-client concern that correctly stays in
+   * the live layer, not here.
+   */
+  readonly getPoolStats: (
+    poolAddress: string,
+    baseFeeRate: number,
+  ) => Effect.Effect<DexscreenerPoolStats | null, never>;
+}
+
+export class DexScreenerService extends Context.Service<DexScreenerService, DexScreenerApi>()(
+  "DexScreenerService",
 ) {}
 
 // ─── Pyth Price Service ──────────────────────────────────────────────────────

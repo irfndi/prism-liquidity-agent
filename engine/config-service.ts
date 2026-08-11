@@ -336,6 +336,12 @@ export interface AppConfig {
    *  program tests never touch the network and stay byte-identical. */
   readonly geckoTerminalEnabled?: boolean;
 
+  /** Master switch for the DexScreener parallel pool-stats source (tried when
+   *  both the Data API and GeckoTerminal are unavailable). Default true; absent
+   *  = active. Same trust posture as gecko (measured volume/TVL, modeled fees,
+   *  no safety signals). */
+  readonly dexscreenerEnabled?: boolean;
+
   // ─── Pyth Hermes price feeds ─────────────────────────────────────────────────
   // Optional so standalone test fixtures that omit new fields keep compiling;
   // loadConfig always sets all four. SERVICE-ONLY: the poller layer is
@@ -879,8 +885,16 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => true),
   );
 
+  const dexscreenerEnabled = yield* Config.boolean("DEXSCREENER_ENABLED").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+
   // ─── Pyth Hermes price feeds ──────────────────────────────────────────────
-  const pythEnabled = yield* Config.boolean("PYTH_ENABLED").pipe(Effect.orElseSucceed(() => true));
+  // Default OFF: Pyth's public keyless Hermes access ends 2026-08-18 (a key is
+  // required after that). The service is not consumed by any decision path, so
+  // opting in only when a PYTH_API_KEY is present avoids a silently-dead
+  // keyless poller after the cutoff. Set PYTH_ENABLED=true (with a key) to use it.
+  const pythEnabled = yield* Config.boolean("PYTH_ENABLED").pipe(Effect.orElseSucceed(() => false));
   const pythApiKey = yield* Config.string("PYTH_API_KEY").pipe(Effect.orElseSucceed(() => ""));
   const pythMaxStalenessMs = yield* validatedNumber("PYTH_MAX_STALENESS_MS", 5_000, 60_000);
   const pythBaseUrl = yield* Config.string("PYTH_BASE_URL").pipe(
@@ -1802,6 +1816,7 @@ const loadConfig = Effect.gen(function* () {
     jupiterTokenRiskEnabled,
     jupiterTokenRiskCacheTtlMin,
     geckoTerminalEnabled,
+    dexscreenerEnabled,
 
     pythEnabled,
     pythApiKey,
