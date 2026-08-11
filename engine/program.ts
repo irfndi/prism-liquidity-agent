@@ -3633,6 +3633,22 @@ export const program = Effect.gen(function* () {
           }),
           reasoning: `[idle-redeploy] Deploying $${idleCapitalUsd.toFixed(0)} idle capital — Fee/IL ${candidate.feeIlRatio.toFixed(2)}, score ${candidate.entryScore.toFixed(3)}, TVL $${candidate.pool.tvlUsd.toFixed(0)}`,
           positionSizeUsd: allocation.adjustedDepositUsd,
+          // Mirror the in-slot normal ENTER: a redeployed position carries the
+          // same single-rung TP ladder when TAKE_PROFIT_ENABLED (CodeRabbit P2).
+          ...((config.takeProfitEnabled ?? false) === true
+            ? (() => {
+                const tpLadder = buildTpLadder(candidate.pool.currentPrice, {
+                  rungs: [config.takeProfitPct ?? 0.15],
+                  fractions: [1],
+                  invalidationStopPct: config.trailingStopPct ?? 0.1,
+                });
+                if (tpLadder === null) return {};
+                return {
+                  tpLadderJson: serializeTpLadder(tpLadder.ladder) ?? undefined,
+                  invalidationStopPrice: tpLadder.invalidationPrice,
+                };
+              })()
+            : {}),
         };
 
         // ── Agent overlay (P1 3654054419): the redeploy deploys capital exactly
@@ -5903,8 +5919,11 @@ export const program = Effect.gen(function* () {
             const tpEval = evaluateTpLadder(
               pool.currentPrice,
               tpLadderParsed,
-              // ponytail: no invalidation leg on the normal lane — the trailing
-              // stop / loss-side exits own the downside; 0 never invalidates.
+              // The normal lane stores an invalidation price (entry ×
+              // (1 − trailingStopPct)), so evaluateTpLadder can return
+              // "invalidation". This branch deliberately ignores that status:
+              // the trailing stop and the loss-side exits own the downside.
+              // 0 is only the fallback for a legacy row with no stored price.
               pos.invalidationStopPrice ?? 0,
             );
             if (tpEval.status === "tp" && tpEval.rungReached) {
@@ -7191,7 +7210,7 @@ export const program = Effect.gen(function* () {
                 poolAddress,
                 action: "ENTER",
                 confidence: 0,
-                reasoning: `[fee-il-gate] Fee/IL ratio ${feeIlRatio.toFixed(2)} below minimum ${config.minFeeIlRatio} — would-be conf ${Math.min(0.5 + feeIlRatio * 0.05, 0.85).toFixed(2)}`,
+                reasoning: `[fee-il-gate] Fee/IL ratio ${feeIlRatio.toFixed(2)} below minimum ${config.minFeeIlRatio} — would-be conf ${normalEntryConfidence(feeIlRatio, netDriftBins, { referenceBins: config.entryMomentumReferenceBins ?? 20, confBoost: config.entryMomentumConfBoost ?? 0.05 }).toFixed(2)}`,
                 metrics,
                 riskResult: {
                   approved: false,
@@ -7236,7 +7255,7 @@ export const program = Effect.gen(function* () {
                   poolAddress,
                   action: "ENTER",
                   confidence: 0,
-                  reasoning: `[weighted-score] score ${entryScore.toFixed(3)} <= threshold ${config.weightedEntryScoreThreshold} (would-be conf ${Math.min(0.5 + feeIlRatio * 0.05, 0.85).toFixed(2)})`,
+                  reasoning: `[weighted-score] score ${entryScore.toFixed(3)} <= threshold ${config.weightedEntryScoreThreshold} (would-be conf ${normalEntryConfidence(feeIlRatio, netDriftBins, { referenceBins: config.entryMomentumReferenceBins ?? 20, confBoost: config.entryMomentumConfBoost ?? 0.05 }).toFixed(2)})`,
                   metrics,
                   riskResult: {
                     approved: false,

@@ -77,17 +77,20 @@ describe("backtest replay fidelity", () => {
     expect(withTolerance.admitted ?? 0).toBe(without.admitted ?? 0);
   }, 15_000);
 
-  it("rejections carry live-vocabulary tags and the census is consistent", () => {
+  it("rejections carry live-vocabulary tags and the census is consistent (tolerate=true admits)", () => {
+    // With empty-bin tolerance ON, the replay ADMITS — exercising the
+    // admitted-counts-as-an-attempt invariant that the all-rejected case
+    // cannot prove.
     const result = runWithBins(
       { lowerBinId: 4980, upperBinId: 5020, bins: [], activeBinId: 5000 },
-      false,
+      true,
     );
     const rejectSum = Object.values(result.rejectionsByReason ?? {}).reduce((a, b) => a + b, 0);
-    // Every no-position tick is an attempt; each attempt is either admitted
-    // or rejected with a tag.
-    expect(result.enterAttempts).toBeGreaterThan(0);
-    expect(rejectSum).toBeGreaterThan(0);
+    expect(result.admitted ?? 0).toBeGreaterThan(0);
     expect(result.enterAttempts).toBe((result.admitted ?? 0) + rejectSum);
+    for (const tag of Object.keys(result.rejectionsByReason ?? {})) {
+      expect(tag).toMatch(/^\[.*\]$/); // live-vocabulary bracket tags
+    }
   }, 15_000);
 
   it("the result shape includes winrate + avg-hold by exit reason", () => {

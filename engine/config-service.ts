@@ -1451,6 +1451,7 @@ const loadConfig = Effect.gen(function* () {
     "MARKET_SCAN_MAX_NEGATIVE_DRIFT_BINS",
     -100,
     -8,
+    0, // clamp at 0: a positive floor would reject every normal ENTER (drift < +N)
   );
   const entryMomentumConfBoost = yield* validatedNumber("ENTRY_MOMENTUM_CONF_BOOST", 0, 0.05);
   const entryMomentumReferenceBins = yield* validatedNumber("ENTRY_MOMENTUM_REFERENCE_BINS", 1, 20);
@@ -1460,7 +1461,7 @@ const loadConfig = Effect.gen(function* () {
   const takeProfitEnabled = yield* Config.boolean("TAKE_PROFIT_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
-  const takeProfitPct = yield* validatedNumber("TAKE_PROFIT_PCT", 0, 0.15);
+  const takeProfitPct = yield* validatedNumber("TAKE_PROFIT_PCT", 0.01, 0.15); // 0 would build an at-entry rung -> instant zero-profit EXIT
   // D: backtest replay fidelity — empty-bin snapshots must not reject every
   // tick (paper DB stores bins:[] so the replay admitted nothing).
   const backtestTolerateEmptyBins = yield* Config.boolean("BACKTEST_TOLERATE_EMPTY_BINS").pipe(

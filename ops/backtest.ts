@@ -383,6 +383,7 @@ export function runBacktestFromTicks(
       positionSizeUsd = replay.adjustedSizeUsd;
       positionPeakUsd = positionSizeUsd;
       admitted++;
+      enterAttempts++;
       entryTimestamp = tick.pool.timestamp;
       entryDepositedUsd = positionSizeUsd;
       positionFeesUsd = 0;
@@ -435,13 +436,15 @@ export function runBacktestFromTicks(
         if (feesInNextWindow > totalCost) wins++;
       }
     } else if (binDrift > 0.9 && hasPosition) {
-      recordExit(
-        "drift",
-        i,
-        (replayPosition?.currentValueUsd ?? positionSizeUsd) + positionFeesUsd,
-      );
+      // The drift exit costs 0.2% (IL + exit) — apply it BEFORE classifying
+      // the win so an at-cost exit never records as a win (CodeRabbit).
+      const driftExitRealizedUsd =
+        (replayPosition?.currentValueUsd ?? positionSizeUsd) +
+        positionFeesUsd -
+        portfolioValue * 0.002;
       totalIl += portfolioValue * 0.002;
       portfolioValue *= 0.998;
+      recordExit("drift", i, driftExitRealizedUsd);
       hasPosition = false;
     } else if (!hasPosition && binDrift < 0.3) {
       hasPosition = true;

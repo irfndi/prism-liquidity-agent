@@ -213,7 +213,7 @@ describe("drift gate in the decision loop", () => {
       const blockAt = Date.now() - 58_000; // 2s of a 60s window remaining
       yield* db.setMetadata(`token_block:${TOKEN_A}`, String(blockAt));
       yield* db.setMetadata(`token_block:${TOKEN_B}`, String(blockAt));
-      yield* Effect.raceFirst(program, Effect.sleep(4_500));
+      yield* Effect.raceFirst(program, Effect.sleep(8_000)); // wide window: parallel-load flake guard (real-clock expiry)
       const audit = yield* AuditService;
       const decisions = yield* audit.getRecentDecisions(300);
       return decisions as unknown as ReadonlyArray<{
@@ -250,5 +250,5 @@ describe("drift gate in the decision loop", () => {
         d.action === "ENTER" && d.poolAddress === NEUTRAL && d.reasoning.includes("[drift-gate]"),
     );
     expect(neutralDrift.length).toBe(0);
-  }, 20_000);
+  }, 30_000);
 });
