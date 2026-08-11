@@ -2,6 +2,17 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.13] — 2026-08-11
+
+### Fixed
+
+- **Keyless 429 resilience** — the shared single Helius key rate-limits under load, which distorted pool stats and the paper census. Added keyless public fallbacks and removed the RPC-failover gap, with **no new API keys**:
+  - **DexScreener stats tier** — a third keyless source in the chain `datapi → gecko → dexscreener → heuristic`. DexScreener has no fees field, so fees are modeled as `volume × baseFeeRate` and tagged `statsSource: "geckoterminal"` (no new trust-model ripple). Wired via `Effect.serviceOption` so test layers work untouched. 18 new tests.
+  - **Meteora Data API dedup** — 30s response cache, set-on-success, pruned on insert, fail-open on error.
+  - **Pyth opt-in default** — `PYTH_ENABLED` now defaults to `false` (keyless Hermes ends 2026-08-18; the service is un-consumed by any decision path).
+  - **RPC fallback default** — when `SOLANA_RPC_FALLBACK_URL` is empty, default it to the keyless public Solana RPC so 429s/5xx on the primary actually fail over via the adapter circuit breaker instead of erroring. Pure `resolveRpcFallbackUrl()` (skips in test mode, avoids self-fallback). 4 new tests.
+- 22 new tests (1847 total).
+
 ## [0.2.12] — 2026-08-11
 
 ### Fixed
