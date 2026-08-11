@@ -69,6 +69,16 @@ function parseArgs(argv: ReadonlyArray<string>): CliArgs {
 
 // ─── Synthetic data (regression baseline) ────────────────────────────────────
 
+function summarizeCounts(
+  rec: Readonly<Record<string, number>> | undefined,
+  fmt: (v: number) => string = (v) => `${v}`,
+): string {
+  if (!rec) return "-";
+  const entries = Object.entries(rec);
+  if (entries.length === 0) return "-";
+  return entries.map(([k, v]) => `${k}:${fmt(v)}`).join(" ");
+}
+
 interface HistoryTick {
   pool: PoolState;
   binArray: BinArray;
@@ -170,13 +180,20 @@ async function loadSnapshots(
 
 // ─── Strategy params + run loop (shared by both sources) ─────────────────────
 
-interface BacktestConfig {
+export interface BacktestConfig {
   halfWidth: number;
   driftThreshold: number;
   minHoldTicks: number;
   minNetBenefitUsd: number;
   maxRebalances: number;
   maxPositionsPerPool: number;
+  /**
+   * When a snapshot's bin array is empty, bin utilization is UNKNOWN (not 0).
+   * Default true: the pre-filter skips the bin-util requirement so the replay
+   * admits (paper DB stores bins:[] for every row). False degrades the unknown
+   * to 0 and rejects exactly as before — parity with the pre-fix replay.
+   */
+  backtestTolerateEmptyBins?: boolean;
 }
 
 export function runBacktestFromTicks(
@@ -218,6 +235,33 @@ export function runBacktestFromTicks(
   let positionPeakUsd = 0;
   let lastRebalanceTick = -cfg.minHoldTicks;
 
+  // ── Admit/reject census + exit stats (backtest fidelity telemetry) ────────
+  // enterAttempts === admitted + sum(rejectionsByReason): every no-position
+  // tick is exactly one of {pre-filter reject, risk reject, admit}.
+  let enterAttempts = 0;
+  let admitted = 0;
+  const rejections: Record<string, number> = {};
+  const exitCounts: Record<string, number> = {};
+  const exitWins: Record<string, number> = {};
+  const exitHoldHours: Record<string, number[]> = {};
+  let entryTimestamp = 0;
+  let entryDepositedUsd = 0;
+  let positionFeesUsd = 0;
+  let emptyBinBypassNoted = false;
+
+  function recordExit(reason: string, atTick: number, realizedValueUsd: number): void {
+    exitCounts[reason] = (exitCounts[reason] ?? 0) + 1;
+    // A win = the hold realized (position value at exit + fees earned during
+    // the hold) at least the deposited amount.
+    if (realizedValueUsd >= entryDepositedUsd) exitWins[reason] = (exitWins[reason] ?? 0) + 1;
+    const holdHours =
+      entryTimestamp > 0 ? (ticks[atTick]!.pool.timestamp - entryTimestamp) / 3_600_000 : 0;
+    (exitHoldHours[reason] ??= []).push(Math.max(0, holdHours));
+    entryTimestamp = 0;
+    entryDepositedUsd = 0;
+    positionFeesUsd = 0;
+  }
+
   const strategyReturns: number[] = [0];
   let prevPortfolioValue = initialValue;
 
@@ -240,9 +284,47 @@ export function runBacktestFromTicks(
     // Match computeMetrics' wiring so this standalone auth score stays consistent
     // with metrics.volumeAuthenticity: fees are measured only under the Data API.
     const auth = strategy.checkVolumeAuthenticity(tick.pool, tick.pool.statsSource === "datapi");
-    if (
-      !strategy.passesPreFilter(tick.pool, auth.score, metrics.binUtilization, 50_000, 0.7, 0.3)
-    ) {
+
+    // Empty bin array => bin utilization is UNKNOWN, not 0. The paper DB stores
+    // bins:[] for every snapshot row, so treating it as 0 rejects every tick
+    // and the replay measures nothing. Tolerate by default (mirrors the live
+    // "unknown metrics skip their gate" rule); with tolerance OFF the unknown
+    // degrades to 0 and the gate rejects exactly as the pre-fix replay did.
+    const binsEmpty = tick.binArray.bins.length === 0;
+    const tolerateEmptyBins = cfg.backtestTolerateEmptyBins ?? true;
+    const binUtilKnown = binsEmpty ? !tolerateEmptyBins : metrics.binUtilizationKnown;
+    if (binsEmpty && tolerateEmptyBins && !emptyBinBypassNoted) {
+      emptyBinBypassNoted = true;
+      log.debug(
+        "Empty bin array — bin utilization UNKNOWN, skipping the bin-util pre-filter gate",
+        { pool: tick.pool.address, timestamp: tick.pool.timestamp },
+      );
+    }
+    const preFilterPass = strategy.passesPreFilter(
+      tick.pool,
+      auth.score,
+      metrics.binUtilization,
+      50_000,
+      0.7,
+      0.3,
+      // Mirror the live call: unknown metrics skip their gate instead of
+      // auto-failing on a fabricated 0 (metrics.volumeAuthenticityKnown).
+      metrics.volumeAuthenticityKnown,
+      binUtilKnown,
+    );
+    if (!preFilterPass) {
+      if (!hasPosition) {
+        enterAttempts++;
+        // Tag the rejection so the census can separate data-quality gates
+        // (branch order mirrors passesPreFilter's && chain).
+        const tag =
+          tick.pool.tvlUsd < 50_000
+            ? "[tvl-gate]"
+            : metrics.volumeAuthenticityKnown && auth.score < 0.7
+              ? "[auth-gate]"
+              : "[bin-util-gate]";
+        rejections[tag] = (rejections[tag] ?? 0) + 1;
+      }
       previousTvl = tick.pool.tvlUsd;
       strategyReturns.push(0);
       continue;
@@ -253,6 +335,7 @@ export function runBacktestFromTicks(
     const feesThisTick = hasPosition && inRange ? feesForTick(tick) : 0;
     totalFees += feesThisTick;
     portfolioValue += feesThisTick;
+    if (hasPosition) positionFeesUsd += feesThisTick;
 
     const replayPosition = hasPosition
       ? {
@@ -286,6 +369,11 @@ export function runBacktestFromTicks(
       proposedSizeUsd: Math.min(portfolioValue * 0.2, 2_000),
     });
     if (!replay.riskApproved) {
+      if (!hasPosition) {
+        enterAttempts++;
+        const tag = replay.rejectTag ?? "[risk-gate]";
+        rejections[tag] = (rejections[tag] ?? 0) + 1;
+      }
       previousTvl = tick.pool.tvlUsd;
       strategyReturns.push(0);
       continue;
@@ -294,7 +382,20 @@ export function runBacktestFromTicks(
       hasPosition = true;
       positionSizeUsd = replay.adjustedSizeUsd;
       positionPeakUsd = positionSizeUsd;
+      admitted++;
+      enterAttempts++;
+      entryTimestamp = tick.pool.timestamp;
+      entryDepositedUsd = positionSizeUsd;
+      positionFeesUsd = 0;
     } else if (replay.decision.action === "EXIT") {
+      // Realized value mirrors the replayPosition the EXIT was decided on
+      // (in-range = full size, out-of-range = the 20% penalty), plus fees
+      // accrued during the hold.
+      recordExit(
+        "trailing-stop",
+        i,
+        (replayPosition?.currentValueUsd ?? positionSizeUsd) + positionFeesUsd,
+      );
       hasPosition = false;
       positionSizeUsd = 0;
       positionPeakUsd = 0;
@@ -335,8 +436,15 @@ export function runBacktestFromTicks(
         if (feesInNextWindow > totalCost) wins++;
       }
     } else if (binDrift > 0.9 && hasPosition) {
+      // The drift exit costs 0.2% (IL + exit) — apply it BEFORE classifying
+      // the win so an at-cost exit never records as a win (CodeRabbit).
+      const driftExitRealizedUsd =
+        (replayPosition?.currentValueUsd ?? positionSizeUsd) +
+        positionFeesUsd -
+        portfolioValue * 0.002;
       totalIl += portfolioValue * 0.002;
       portfolioValue *= 0.998;
+      recordExit("drift", i, driftExitRealizedUsd);
       hasPosition = false;
     } else if (!hasPosition && binDrift < 0.3) {
       hasPosition = true;
@@ -347,6 +455,11 @@ export function runBacktestFromTicks(
       currentLowerBinId = tick.pool.activeBinId - cfg.halfWidth;
       currentUpperBinId = tick.pool.activeBinId + cfg.halfWidth;
       lastRebalanceTick = i;
+      // ponytail: unreachable while the replay ENTER admits every no-position
+      // tick, but keep the census hold-trackers correct if that ever changes.
+      entryTimestamp = tick.pool.timestamp;
+      entryDepositedUsd = positionSizeUsd;
+      positionFeesUsd = 0;
     }
 
     previousTvl = tick.pool.tvlUsd;
@@ -361,6 +474,15 @@ export function runBacktestFromTicks(
     strategyReturns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / strategyReturns.length;
   const sharpe = variance > 0 ? (mean / Math.sqrt(variance)) * Math.sqrt(ticksPerYear) : 0;
 
+  const winrateByExitReason: Record<string, number> = {};
+  const avgHoldHoursByExitReason: Record<string, number> = {};
+  for (const reason of Object.keys(exitCounts)) {
+    winrateByExitReason[reason] = (exitWins[reason] ?? 0) / exitCounts[reason]!;
+    const hours = exitHoldHours[reason] ?? [];
+    avgHoldHoursByExitReason[reason] =
+      hours.length > 0 ? hours.reduce((a, b) => a + b, 0) / hours.length : 0;
+  }
+
   return {
     poolAddress: ticks[0]!.pool.address,
     startDate: ticks[0]!.pool.timestamp,
@@ -373,10 +495,16 @@ export function runBacktestFromTicks(
     totalRebalances: rebalances,
     winRate: rebalances > 0 ? wins / rebalances : 0,
     sharpeRatio: sharpe,
+    enterAttempts,
+    admitted,
+    rejectionsByReason: rejections,
+    exitsByReason: exitCounts,
+    winrateByExitReason,
+    avgHoldHoursByExitReason,
   };
 }
 
-function snapshotsToTicks(snaps: ReadonlyArray<PoolSnapshot>): HistoryTick[] {
+export function snapshotsToTicks(snaps: ReadonlyArray<PoolSnapshot>): HistoryTick[] {
   return snaps.map((s) => {
     const pool: PoolState = {
       address: s.poolAddress,
@@ -427,6 +555,11 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
   log.warn("    returns. The reported PnL is a meaningful overestimate.");
   log.warn("═══════════════════════════════════════════════════════════════");
 
+  // Mirror the live config-service default (BACKTEST_TOLERATE_EMPTY_BINS,
+  // default true) so `bun run backtest` admits empty-bin snapshots exactly
+  // like the agent's replay does.
+  const tolerateEmptyBins = process.env.BACKTEST_TOLERATE_EMPTY_BINS !== "false";
+
   const configs: ReadonlyArray<{ name: string; cfg: BacktestConfig }> = [
     {
       name: "C1-conservative",
@@ -437,6 +570,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
         minNetBenefitUsd: 15,
         maxRebalances: 20,
         maxPositionsPerPool: 2,
+        backtestTolerateEmptyBins: tolerateEmptyBins,
       },
     },
     {
@@ -448,6 +582,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
         minNetBenefitUsd: 10,
         maxRebalances: 30,
         maxPositionsPerPool: 2,
+        backtestTolerateEmptyBins: tolerateEmptyBins,
       },
     },
     {
@@ -459,6 +594,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
         minNetBenefitUsd: 5,
         maxRebalances: 50,
         maxPositionsPerPool: 2,
+        backtestTolerateEmptyBins: tolerateEmptyBins,
       },
     },
     {
@@ -470,6 +606,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
         minNetBenefitUsd: 25,
         maxRebalances: 10,
         maxPositionsPerPool: 2,
+        backtestTolerateEmptyBins: tolerateEmptyBins,
       },
     },
   ];
@@ -507,6 +644,10 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
       Rebal: r.totalRebalances,
       "Win %": `${(r.winRate * 100).toFixed(0)}%`,
       Sharpe: r.sharpeRatio.toFixed(2),
+      Admits: `${r.admitted ?? 0}/${r.enterAttempts ?? 0}`,
+      Rejects: summarizeCounts(r.rejectionsByReason),
+      "Exit WR": summarizeCounts(r.winrateByExitReason, (v) => `${(v * 100).toFixed(0)}%`),
+      "Hold(h)": summarizeCounts(r.avgHoldHoursByExitReason, (v) => v.toFixed(1)),
     }));
     log.info(`Results table: ${JSON.stringify(table)}`);
 

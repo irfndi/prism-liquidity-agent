@@ -668,7 +668,67 @@ function clampWeight(value: number, floor: number, ceiling: number): number {
 export const FARM_APR_SCORE_REFERENCE_PCT = 100;
 export const FARM_SCORE_WEIGHT = 1;
 
-export function weightedEntryScore(metrics: PoolMetrics, weights: SignalWeights): number {
+/**
+ * Momentum defaults (mirror the config-service validators so the pure score
+ * and the program call sites agree without the config layer).
+ */
+export const DEFAULT_MOMENTUM_REFERENCE_BINS = 20;
+export const DEFAULT_MOMENTUM_SCORE_WEIGHT = 0.15;
+export const DEFAULT_MOMENTUM_CONF_BOOST = 0.05;
+export const DEFAULT_MAX_NEGATIVE_DRIFT_BINS = -8;
+
+/**
+ * Bounded momentum boost: clamp01(max(netDriftBins, 0) / referenceBins) *
+ * weight. Negative drift contributes 0 (no credit for falling prices); drift
+ * at or above the reference saturates at the full weight. Used by the
+ * weightedEntryScore momentum term (weight = entryMomentumScoreWeight) and
+ * the normal-ENTER confidence boost (weight = entryMomentumConfBoost).
+ */
+export function entryMomentumBoost(
+  netDriftBins: number,
+  referenceBins: number,
+  weight: number,
+): number {
+  if (!Number.isFinite(netDriftBins) || referenceBins <= 0) return 0;
+  const fraction = Math.min(Math.max(netDriftBins, 0) / referenceBins, 1);
+  return fraction * weight;
+}
+
+/**
+ * [drift-gate] predicate: a NORMAL/market-lane ENTER is rejected when the
+ * pool's net active-bin drift sits below the configured floor (strict <, so
+ * an exactly-at-floor pool still enters). Runner and launch-lane pools are
+ * exempt at the call site — the dip-ladder fills ON dips and young launch
+ * pools have no bin history to drift.
+ */
+export function driftGateRejected(netDriftBins: number, maxNegativeDriftBins: number): boolean {
+  return netDriftBins < maxNegativeDriftBins;
+}
+
+/**
+ * Normal/market-lane ENTER confidence: the static fee/IL base confidence
+ * (min(0.5 + feeIlRatio * 0.05, 0.85)) plus a bounded momentum boost for
+ * positive drift (negative → 0), still capped at 0.85. Runner/launch lanes
+ * keep the static formula inline and are NOT covered here.
+ */
+export function normalEntryConfidence(
+  feeIlRatio: number,
+  netDriftBins: number,
+  opts?: { readonly referenceBins: number; readonly confBoost: number },
+): number {
+  const boost = entryMomentumBoost(
+    netDriftBins,
+    opts?.referenceBins ?? DEFAULT_MOMENTUM_REFERENCE_BINS,
+    opts?.confBoost ?? DEFAULT_MOMENTUM_CONF_BOOST,
+  );
+  return Math.min(0.5 + feeIlRatio * 0.05 + boost, 0.85);
+}
+
+export function weightedEntryScore(
+  metrics: PoolMetrics,
+  weights: SignalWeights,
+  momentum?: { readonly referenceBins: number; readonly scoreWeight: number },
+): number {
   // Fee/IL is EXCLUDED from the score (not zeroed-toward-bad, not trusted in
   // either direction) when the ratio is modeled/fabricated (feeIlRatioKnown=false).
   // GeckoTerminal's pool_fee_percentage is null for every CL pool, so gecko fees
@@ -693,6 +753,16 @@ export function weightedEntryScore(metrics: PoolMetrics, weights: SignalWeights)
   const farmContrib =
     Math.min(Math.max(metrics.farmAprPct ?? 0, 0) / FARM_APR_SCORE_REFERENCE_PCT, 1) *
     FARM_SCORE_WEIGHT;
+  // Momentum: bounded credit for price rising across the recent-bin window
+  // (netDriftBins), saturating at the full weight once drift reaches the
+  // reference. Negative drift contributes 0 — falling prices get no credit.
+  const momentumContrib = entryMomentumBoost(
+    metrics.netDriftBins ?? 0,
+    momentum?.referenceBins ?? DEFAULT_MOMENTUM_REFERENCE_BINS,
+    momentum?.scoreWeight ?? DEFAULT_MOMENTUM_SCORE_WEIGHT,
+  );
 
-  return feeContrib + authContrib + binContrib + tvlContrib + velContrib + farmContrib;
+  return (
+    feeContrib + authContrib + binContrib + tvlContrib + velContrib + farmContrib + momentumContrib
+  );
 }

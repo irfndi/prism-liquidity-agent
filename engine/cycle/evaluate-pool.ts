@@ -32,6 +32,23 @@ export interface ReplayEvaluation {
   readonly riskApproved: boolean;
   readonly riskReason: string;
   readonly adjustedSizeUsd: number;
+  /**
+   * Audit tag for the admit/reject census, set only when riskApproved is false.
+   * Speaks the live chain's tag vocabulary where the gates overlap
+   * ([alloc-gate] for allocation/cap/dust), [risk-gate] otherwise.
+   */
+  readonly rejectTag?: string;
+}
+
+function tagRiskRejection(reason: string): string {
+  // Allocation, exposure-cap, position-cap, and dust rejections map to the live
+  // [alloc-gate] audit tag so the replay census groups identically to the live
+  // chain; the replay kernel's other rejections (confidence, drawdown,
+  // stop-loss, non-finite data) have no live ENTER-tag equivalent and get the
+  // generic [risk-gate].
+  return /allocat|exposure|position cap|open positions|entry size|headroom/i.test(reason)
+    ? "[alloc-gate]"
+    : "[risk-gate]";
 }
 
 const toRiskPosition = (position: ReplayPosition): Position => ({
@@ -85,5 +102,6 @@ export function evaluateReplayPool(input: ReplayEvaluationInput): ReplayEvaluati
     riskApproved: riskResult.approved,
     riskReason: riskResult.reason,
     adjustedSizeUsd: riskResult.adjustedSizeUsd ?? input.proposedSizeUsd,
+    ...(riskResult.approved ? {} : { rejectTag: tagRiskRejection(riskResult.reason) }),
   };
 }

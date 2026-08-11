@@ -99,7 +99,7 @@ export function makePosition(overrides: Partial<PositionRecord> = {}): PositionR
     activeBinId: 5000,
     lowerBinId: 4980,
     upperBinId: 5020,
-    timestamp: Date.now(),
+    timestamp: overrides.timestamp ?? Date.now(),
     outOfRangeSince: null,
     oorCycleCount: 0,
     lastFeeClaimAt: overrides.lastFeeClaimAt ?? Date.now(),

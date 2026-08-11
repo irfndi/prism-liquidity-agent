@@ -229,6 +229,14 @@ export interface PoolMetrics {
    * unknown APR reports 0 (known farm, no current reward rate).
    */
   readonly farmAprPct: number | null;
+  /**
+   * Net active-bin drift (bins) across the recent-bin history — positive when
+   * price has been rising. Optional: the weightedEntryScore momentum term and
+   * the ENTER confidence boost read it only when the caller computed it
+   * (program.ts computes it after metrics construction and derives a
+   * momentum-aware copy).
+   */
+  readonly netDriftBins?: number;
 }
 
 /** Recent price reference used to estimate impermanent loss from drift. */
@@ -420,6 +428,19 @@ export interface BacktestResult {
   totalRebalances: number;
   winRate: number;
   sharpeRatio: number;
+  /**
+   * ENTER attempts: every tick where the replay evaluated an entry (pre-filter
+   * rejections, risk rejections, and admits all count, so
+   * enterAttempts === admitted + sum(rejectionsByReason)).
+   * Optional so legacy/fixture constructors still typecheck;
+   * runBacktestFromTicks always populates the census fields.
+   */
+  readonly enterAttempts?: number;
+  readonly admitted?: number;
+  readonly rejectionsByReason?: Readonly<Record<string, number>>;
+  readonly exitsByReason?: Readonly<Record<string, number>>;
+  readonly winrateByExitReason?: Readonly<Record<string, number>>;
+  readonly avgHoldHoursByExitReason?: Readonly<Record<string, number>>;
 }
 
 // ─── Signal Weights (Darwinian weighting) ────────────────────────────────────
