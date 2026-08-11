@@ -155,7 +155,7 @@ function makeAdapterLayer(
     }),
   );
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
-  return Layer.provide(AdapterLive, Layer.merge(configLayer, auditLayer)) as Layer.Layer<
+  return Layer.provide(AdapterLive, Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:")))) as Layer.Layer<
     AdapterService,
     never,
     never

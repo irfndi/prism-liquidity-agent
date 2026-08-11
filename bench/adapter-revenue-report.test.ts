@@ -22,7 +22,7 @@ function buildAdapterLayer(
     }),
   );
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
-  const withDeps = Layer.provide(AdapterLive, Layer.merge(configLayer, auditLayer));
+  const withDeps = Layer.provide(AdapterLive, Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))));
   return withDeps as Layer.Layer<AdapterService, never, never>;
 }
 
