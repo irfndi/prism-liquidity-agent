@@ -1026,8 +1026,28 @@ export const AdapterLive = Layer.effect(
           return known;
         }
 
-        // Helius path: DAS getAsset returns token_info.decimals for any
-        // mint Helius has indexed. Only available when heliusApiKey is set.
+        // Standard Solana RPC path first (keyless): parsed account info exposes
+        // decimals for any SPL mint via the Token Program (works on mainnet-beta
+        // and every other standard RPC). Preferred over Helius DAS getAsset so
+        // the shared Helius key is NOT burned on the hot decimals path — the
+        // public RPC serves this for free. Does NOT call Helius DAS getAsset.
+        const mintPubkey = new PublicKey(mint);
+        const info = yield* rpcCall((conn) => conn.getParsedAccountInfo(mintPubkey)).pipe(
+          Effect.catch(() => Effect.succeed(null)),
+        );
+        const parsed = (
+          info?.value?.data as { parsed?: { info?: { decimals?: number } } } | undefined
+        )?.parsed?.info;
+        if (typeof parsed?.decimals === "number") {
+          const meta = { symbol: mint.slice(0, 4), decimals: parsed.decimals };
+          tokenMetaCache.set(mint, meta);
+          return meta;
+        }
+
+        // Helius path (last resort): DAS getAsset returns token_info.decimals
+        // for any mint Helius has indexed. Only available when heliusApiKey is
+        // set, and only reached when the keyless standard RPC could not resolve
+        // decimals. Also carries a price the standard RPC path cannot.
         if (config.heliusApiKey) {
           const json = yield* fetchHeliusAsset(mint).pipe(Effect.catch(() => Effect.succeed(null)));
           const d = json?.result?.token_info?.decimals;
@@ -1043,21 +1063,8 @@ export const AdapterLive = Layer.effect(
           }
         }
 
-        // Standard Solana RPC path: parsed account info exposes decimals
-        // for any SPL mint via the Token Program (works on mainnet-beta and
-        // every other standard RPC). Does NOT call Helius DAS getAsset.
-        const mintPubkey = new PublicKey(mint);
-        const info = yield* rpcCall((conn) => conn.getParsedAccountInfo(mintPubkey));
-        const parsed = (info.value?.data as { parsed?: { info?: { decimals?: number } } })?.parsed
-          ?.info;
-        if (typeof parsed?.decimals === "number") {
-          const meta = { symbol: mint.slice(0, 4), decimals: parsed.decimals };
-          tokenMetaCache.set(mint, meta);
-          return meta;
-        }
-
         return yield* Effect.fail(
-          new Error(`Cannot resolve decimals for mint ${mint} via Helius or standard RPC`),
+          new Error(`Cannot resolve decimals for mint ${mint} via standard RPC or Helius`),
         );
       });
     }
@@ -1264,29 +1271,17 @@ export const AdapterLive = Layer.effect(
 
         const sourcesAttempted: string[] = [];
 
-        const heliusPrices = yield* fetchHeliusPrices(missing);
-        if (config.heliusApiKey) sourcesAttempted.push("helius");
-        const stillMissing: string[] = [];
-        for (const mint of missing) {
-          const price = heliusPrices[mint];
-          if (price !== undefined) {
-            prices[mint] = price;
-            if (provenanceOut && !useFallback) {
-              provenanceOut.set(mint, sourcesAttempted.join(","));
-            }
-          } else {
-            stillMissing.push(mint);
-          }
-        }
-
-        if (stillMissing.length === 0) {
-          return prices;
-        }
-
+        // Keyless-first pricing: the shared Helius key 429s under
+        // load, so the HOT path must prefer the keyless providers (Jupiter,
+        // CoinGecko) and only fall to Helius DAS getAsset for mints the keyless
+        // sources miss. Previously Helius was tried FIRST, so every missing
+        // mint burned the key's rate limit and added retry backoff latency
+        // before the keyless crawl even ran. Reordering is safe: Jupiter/
+        // CoinGecko prices are what the keyless fallback already served.
         sourcesAttempted.push("jupiter");
-        const jupiterPrices = yield* fetchJupiterPrices(stillMissing);
+        const jupiterPrices = yield* fetchJupiterPrices(missing);
         const coinGeckoMissing: string[] = [];
-        for (const mint of stillMissing) {
+        for (const mint of missing) {
           const price = jupiterPrices[mint];
           if (price !== undefined) {
             prices[mint] = price;
@@ -1298,14 +1293,38 @@ export const AdapterLive = Layer.effect(
           }
         }
 
-        if (coinGeckoMissing.length > 0) sourcesAttempted.push("coingecko");
+        if (coinGeckoMissing.length === 0) {
+          return prices;
+        }
 
+        sourcesAttempted.push("coingecko");
         const cgPrices = yield* fetchCoinGeckoPrices(coinGeckoMissing);
-        const unresolved: string[] = [];
+        const heliusMissing: string[] = [];
         for (const mint of coinGeckoMissing) {
           const cgPrice = cgPrices[mint];
           if (cgPrice !== undefined) {
             prices[mint] = cgPrice;
+            if (provenanceOut && !useFallback) {
+              provenanceOut.set(mint, sourcesAttempted.join(","));
+            }
+          } else {
+            heliusMissing.push(mint);
+          }
+        }
+
+        if (heliusMissing.length === 0) {
+          return prices;
+        }
+
+        // Helius is the last-resort price source: only for mints neither
+        // keyless provider resolved. Never attempted when no key is configured.
+        if (config.heliusApiKey) sourcesAttempted.push("helius");
+        const heliusPrices = yield* fetchHeliusPrices(heliusMissing);
+        const unresolved: string[] = [];
+        for (const mint of heliusMissing) {
+          const price = heliusPrices[mint];
+          if (price !== undefined) {
+            prices[mint] = price;
             if (provenanceOut && !useFallback) {
               provenanceOut.set(mint, sourcesAttempted.join(","));
             }

@@ -208,6 +208,37 @@ describe("AdapterService wallet balance reconciliation", () => {
       restore();
     }
   });
+
+  it("prefers keyless Jupiter/CoinGecko over Helius getAsset (keyless-first ordering)", async () => {
+    // Regression: the hot price path must NOT burn the shared Helius key when
+    // a keyless provider (Jupiter) can resolve the mint. Helius is the last
+    // resort, so it must never be called when Jupiter succeeds.
+    let heliusCalls = 0;
+    const restore = mockFetch((async (url: string | URL | Request) => {
+      const u = String(url as unknown);
+      if (u.includes("api.jup.ag/price/v3")) {
+        return new Response(JSON.stringify({ [USDC_MINT]: { usdPrice: 1 } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (u.includes("helius") && u.includes("getAsset")) {
+        heliusCalls += 1;
+        return new Response("{}", { status: 429 });
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch);
+    vi.spyOn(Connection.prototype, "getBalance").mockResolvedValue(0);
+    mockTokenAccountsByProgram([{ mint: USDC_MINT, amount: "3000000", decimals: 6 }]);
+
+    try {
+      const balance = await readWalletBalance();
+      expect(balance).toBeCloseTo(3, 5);
+      expect(heliusCalls).toBe(0); // keyless-first: Helius never consulted
+    } finally {
+      restore();
+    }
+  });
 });
 
 describe("AdapterService wallet holdings seam (getWalletHoldings)", () => {

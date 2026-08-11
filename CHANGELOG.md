@@ -2,6 +2,15 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.14] — 2026-08-11
+
+### Fixed
+
+- **Keyless-first pricing (Helius 429 fix)** — the shared single Helius key 429s under load on the hot price/token-metadata path. Previously Helius DAS `getAsset` was tried FIRST for every missing mint, burning the key's rate limit and adding retry-backoff latency before the keyless crawl even ran. Reordered so the keyless providers serve the hot path and Helius is the last resort:
+  - **`fetchTokenPrices`** now resolves `Jupiter → CoinGecko → Helius` (Helius only for mints neither keyless provider resolves, never when no key is configured). Jupiter/CoinGecko prices are real and were already the prior fallback, so this is behavior-preserving for price correctness.
+  - **`getTokenMeta`** now prefers the standard Solana RPC `getParsedAccountInfo` for decimals (keyless, works on the public RPC) before Helius `getAsset` (last resort).
+- 1 new test asserting Helius is never called when Jupiter resolves (1848 total).
+
 ## [0.2.13] — 2026-08-11
 
 ### Fixed
