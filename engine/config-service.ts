@@ -38,6 +38,28 @@ export function maskHeliusUrl(u: string): string {
   return u.replace(/(api[-_]key=)[^&\s]*/g, "$1[REDACTED]");
 }
 
+/** Keyless public Solana RPC used as the default fallback tier. */
+export const PUBLIC_SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com";
+
+/**
+ * Resolve the RPC fallback URL. When the operator left `SOLANA_RPC_FALLBACK_URL`
+ * empty, default it to the keyless public Solana RPC so a (shared) primary key's
+ * 429s/5xx actually fail over instead of erroring. Pure and unit-testable.
+ * - empty configured fallback + primary already the public RPC → "" (no self-fallback)
+ * - empty configured fallback + test mode → "" (tests never touch the network)
+ * - empty configured fallback + production + non-public primary → public RPC
+ * - non-empty configured fallback → used as-is
+ */
+export function resolveRpcFallbackUrl(
+  configuredFallback: string,
+  primaryUrl: string,
+  isTest: boolean,
+): string {
+  if (configuredFallback.trim()) return configuredFallback;
+  if (isTest) return "";
+  return primaryUrl.trim() === PUBLIC_SOLANA_RPC_URL ? "" : PUBLIC_SOLANA_RPC_URL;
+}
+
 function isHeliusHost(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -693,7 +715,16 @@ const loadConfig = Effect.gen(function* () {
 
   const solanaRpcUrlNormalized = normalizeHeliusUrl(solanaRpcUrl, heliusApiKey);
   solanaRpcUrl = solanaRpcUrlNormalized.url;
-  const solanaRpcFallbackUrl = normalizeHeliusUrl(solanaRpcFallbackUrlRaw, heliusApiKey).url;
+
+  // Default the RPC fallback to the keyless public Solana RPC when the operator
+  // left it empty (see resolveRpcFallbackUrl). The operator's shared Helius key
+  // 429s under load, and an empty fallback meant the adapter's circuit-breaker
+  // failover had nothing to route to; public mainnet-beta is keyless and only
+  // used behind the fallback circuit breaker (after repeated primary failures).
+  const solanaRpcFallbackUrl = normalizeHeliusUrl(
+    resolveRpcFallbackUrl(solanaRpcFallbackUrlRaw, solanaRpcUrl, isTest),
+    heliusApiKey,
+  ).url;
   const paperTrading = yield* Config.boolean("PAPER_TRADING").pipe(
     Effect.orElseSucceed(() => true),
   );

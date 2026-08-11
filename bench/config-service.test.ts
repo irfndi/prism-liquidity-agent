@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Effect } from "effect";
-import { ConfigService, ConfigLive } from "../engine/config-service.js";
+import {
+  ConfigService,
+  ConfigLive,
+  resolveRpcFallbackUrl,
+  PUBLIC_SOLANA_RPC_URL,
+} from "../engine/config-service.js";
 
 async function loadConfig() {
   return Effect.runPromise(
@@ -303,5 +308,31 @@ describe("ConfigService agent runtime timeout", () => {
     vi.stubEnv("AGENT_PROMPT_TIMEOUT_MS", "10");
     const clamped = await loadConfig();
     expect(clamped.agentPromptTimeoutMs).toBe(1_000);
+  });
+});
+
+describe("resolveRpcFallbackUrl (public RPC fallback default)", () => {
+  it("defaults an empty fallback to the public RPC against a non-public primary", () => {
+    expect(resolveRpcFallbackUrl("", "https://mainnet.helius-rpc.com/?api-key=k", false)).toBe(
+      PUBLIC_SOLANA_RPC_URL,
+    );
+  });
+
+  it("does not self-fallback when the primary is already the public RPC", () => {
+    expect(resolveRpcFallbackUrl("", PUBLIC_SOLANA_RPC_URL, false)).toBe("");
+  });
+
+  it("keeps the fallback empty in test mode (tests never touch the network)", () => {
+    expect(resolveRpcFallbackUrl("", "https://mainnet.helius-rpc.com/?api-key=k", true)).toBe("");
+  });
+
+  it("uses a configured fallback as-is", () => {
+    expect(
+      resolveRpcFallbackUrl(
+        "https://custom-rpc.example.com",
+        "https://mainnet.helius-rpc.com/?api-key=k",
+        false,
+      ),
+    ).toBe("https://custom-rpc.example.com");
   });
 });
