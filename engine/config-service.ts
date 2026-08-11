@@ -187,6 +187,11 @@ export interface AppConfig {
   /** Top-N pages (1000 pools each) of the TVL-ranked universe fetched per
    *  refresh. Default 3 (covers every pool above ~$50-100K TVL). */
   readonly marketScanUniversePages?: number;
+  /** Universe sort for the market scan: `tvl` (TVL desc, default, large pools
+   *  first) or `fee` (24h fee/TVL ratio desc — surfaces the hot yield pools
+   *  in the first pages, aligning the fetch with the market gate's fee-APR
+   *  ranking and reducing the pages needed to reach the runnable set). */
+  readonly marketScanUniverseSort?: "tvl" | "fee";
   /** Minimum TVL for a pool to pass the market gate. Default $250K. */
   readonly marketScanMinTvlUsd?: number;
   /** Minimum annualized fee/TVL percent for the market gate (fees24h × 365 /
@@ -1422,6 +1427,10 @@ const loadConfig = Effect.gen(function* () {
     30 * 60_000,
   );
   const marketScanUniversePages = yield* validatedNumber("MARKET_SCAN_UNIVERSE_PAGES", 1, 3, 10);
+  const marketScanUniverseSortRaw = yield* Config.string("MARKET_SCAN_UNIVERSE_SORT").pipe(
+    Effect.orElseSucceed(() => "tvl"),
+  );
+  const marketScanUniverseSort: "tvl" | "fee" = marketScanUniverseSortRaw === "fee" ? "fee" : "tvl";
   const marketScanMinTvlUsd = yield* validatedNumber("MARKET_SCAN_MIN_TVL_USD", 0, 50_000);
   const marketScanMinFeeApr = yield* validatedNumber("MARKET_SCAN_MIN_FEE_APR", 0, 100);
   // Market-runner lane: when enabled, market-scan pools whose fee APR clears
@@ -1760,6 +1769,7 @@ const loadConfig = Effect.gen(function* () {
     marketScanEnabled,
     marketScanRefreshIntervalMs,
     marketScanUniversePages,
+    marketScanUniverseSort,
     marketScanMinTvlUsd,
     marketScanMinFeeApr,
     marketScanRunnerEnabled,

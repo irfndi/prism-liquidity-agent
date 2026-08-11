@@ -4017,6 +4017,14 @@ export const AdapterLive = Layer.effect(
               const url = new URL(baseUrl);
               url.searchParams.set("page", String(page));
               url.searchParams.set("page_size", "1000");
+              // Fee-ranked universe (MARKET_SCAN_UNIVERSE_SORT=fee) surfaces the
+              // hot yield pools in the first pages, aligning the fetch with the
+              // market gate's fee-APR ranking. TVL-ranked (default) keeps the
+              // large pools first. Honored here so the Data API's server-side
+              // sort matches the gate's rank — no local re-ranking needed.
+              if (config.marketScanUniverseSort === "fee") {
+                url.searchParams.set("sort_by", "fee_tvl_ratio_24h:desc");
+              }
               const res = yield* Effect.tryPromise({
                 try: () => fetch(url.toString(), { signal: AbortSignal.timeout(15_000) }),
                 catch: (cause) => cause as Error,

@@ -172,6 +172,7 @@ describe("ConfigService freeze screening + IL protection flags", () => {
     expect(cfg.marketScanEnabled).toBe(false);
     expect(cfg.marketScanRefreshIntervalMs).toBe(1_800_000);
     expect(cfg.marketScanUniversePages).toBe(3);
+    expect(cfg.marketScanUniverseSort).toBe("tvl");
     expect(cfg.marketScanMinTvlUsd).toBe(50_000);
     expect(cfg.marketScanMinFeeApr).toBe(100);
     expect(cfg.marketScanTopK).toBe(30);
@@ -179,6 +180,16 @@ describe("ConfigService freeze screening + IL protection flags", () => {
     expect(cfg.marketScanMinHolders).toBe(1000);
     expect(cfg.marketScanMinBinStep).toBe(2);
     expect(cfg.marketScanMaxBinStep).toBe(200);
+    // MARKET_SCAN_UNIVERSE_SORT accepts `fee` to surface the hot yield pools
+    // in the first universe pages (aligning the server-side sort with the
+    // market gate's fee-APR rank); any other value falls back to `tvl`.
+    vi.stubEnv("MARKET_SCAN_UNIVERSE_SORT", "fee");
+    const feeSorted = await loadConfig();
+    expect(feeSorted.marketScanUniverseSort).toBe("fee");
+    vi.unstubAllEnvs();
+    vi.stubEnv("MARKET_SCAN_UNIVERSE_SORT", "garbage");
+    const fallbackSorted = await loadConfig();
+    expect(fallbackSorted.marketScanUniverseSort).toBe("tvl");
     // Market-runner lane defaults: off (paper-first), 500% runner floor, 5x
     // rotation multiplier.
     expect(cfg.marketScanRunnerEnabled).toBe(false);
