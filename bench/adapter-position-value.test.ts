@@ -130,11 +130,10 @@ function makeAdapterLayer(
     }),
   );
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
-  return Layer.provide(AdapterLive, Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:")))) as Layer.Layer<
-    AdapterService,
-    never,
-    never
-  >;
+  return Layer.provide(
+    AdapterLive,
+    Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))),
+  ) as Layer.Layer<AdapterService, never, never>;
 }
 
 async function runWithAdapter<A, E>(effect: Effect.Effect<A, E, AdapterService>): Promise<A> {

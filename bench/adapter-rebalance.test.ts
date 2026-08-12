@@ -181,11 +181,10 @@ function makeAdapterLayer(
     }),
   );
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
-  return Layer.provide(AdapterLive, Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:")))) as Layer.Layer<
-    AdapterService,
-    never,
-    never
-  >;
+  return Layer.provide(
+    AdapterLive,
+    Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))),
+  ) as Layer.Layer<AdapterService, never, never>;
 }
 
 async function runWithAdapter<A, E>(effect: Effect.Effect<A, E, AdapterService>): Promise<A> {
@@ -427,11 +426,10 @@ describe("adapter.rebalancePosition (atomic via SDK rebalancePosition)", () => {
       }),
     );
     const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
-    const layer = Layer.provide(AdapterLive, Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:")))) as Layer.Layer<
-      AdapterService,
-      never,
-      never
-    >;
+    const layer = Layer.provide(
+      AdapterLive,
+      Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))),
+    ) as Layer.Layer<AdapterService, never, never>;
 
     const err = await Effect.runPromise(
       Effect.provide(

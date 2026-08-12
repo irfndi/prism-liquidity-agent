@@ -32,7 +32,10 @@ function buildAdapterLayer(
   // AuditLive requires DbService — use Layer.provide (not merge) so the dep
   // is wired transitively into the merged harness below.
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
-  const withDeps = Layer.provide(AdapterLive, Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))));
+  const withDeps = Layer.provide(
+    AdapterLive,
+    Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))),
+  );
   return withDeps as Layer.Layer<AdapterService, never, never>;
 }
 

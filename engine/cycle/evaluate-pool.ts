@@ -10,6 +10,16 @@ export interface ReplayPosition {
   readonly depositedUsd: number;
   readonly currentValueUsd: number;
   readonly highestValueUsd: number;
+  /**
+   * IL-dominance fast-EXIT inputs, mirroring the live engine's W15 seam. All
+   * optional so legacy replay callers (which don't mark a position with IL
+   * context) behave exactly as before — the exit simply never fires.
+   */
+  readonly outOfRange?: boolean;
+  /** HODL benchmark value at the current price (see engine/pnl.ts). */
+  readonly hodlValueUsd?: number;
+  /** Cumulative swap fees claimed over the position's lifecycle (USD). */
+  readonly cumulativeFeesClaimedUsd?: number;
 }
 
 export interface ReplayEvaluationInput {
@@ -25,6 +35,12 @@ export interface ReplayEvaluationInput {
   readonly trailingStopPct: number;
   readonly risk: RiskConfig;
   readonly proposedSizeUsd: number;
+  /** Master switch for the IL-dominance fast EXIT (default false = off). */
+  readonly ilProtectionEnabled?: boolean;
+  /** Multiply cumulative fees: exit when IL exceeds fees × factor. */
+  readonly ilDominanceExitFactor?: number;
+  /** Absolute USD floor before the IL-dominance exit may fire. */
+  readonly ilDominanceMinUsd?: number;
 }
 
 export interface ReplayEvaluation {
@@ -67,11 +83,42 @@ const toRiskPosition = (position: ReplayPosition): Position => ({
 
 export function evaluateReplayPool(input: ReplayEvaluationInput): ReplayEvaluation {
   const position = input.position;
+
+  // ── IL-dominance fast EXIT (W15 seam) ────────────────────────────────────
+  // Mirrors the live engine: fires only when IL protection is on, the position
+  // is actively out of range (fees stopped accruing → pure bleed), IL is real
+  // (HODL > LP value), and it exceeds both cumulative fees × factor and the USD
+  // floor. Skipped (fail-open) whenever any input is missing or off  — the
+  // default for legacy replay callers.
+  const ilEnabled = input.ilProtectionEnabled === true;
+  const factor = input.ilDominanceExitFactor ?? 2;
+  const minUsd = input.ilDominanceMinUsd ?? 5;
+  let ilDominanceReason: string | null = null;
+  if (
+    ilEnabled &&
+    position &&
+    position.outOfRange === true &&
+    position.hodlValueUsd !== undefined &&
+    position.currentValueUsd >= 0
+  ) {
+    const ilUsd = position.hodlValueUsd - position.currentValueUsd;
+    const feesUsd = position.cumulativeFeesClaimedUsd ?? 0;
+    if (ilUsd > 0 && ilUsd > feesUsd * factor && ilUsd > minUsd) {
+      ilDominanceReason = `IL dominance: $${ilUsd.toFixed(2)} IL exceeds ${factor}× cumulative fees ($${feesUsd.toFixed(2)}) while out of range`;
+    }
+  }
+
   const drawdown = position
     ? Math.max(0, (position.highestValueUsd - position.currentValueUsd) / position.highestValueUsd)
     : 0;
   const action: ActionType =
-    position && drawdown > input.trailingStopPct ? "EXIT" : position ? "HOLD" : "ENTER";
+    ilDominanceReason !== null
+      ? "EXIT"
+      : position && drawdown > input.trailingStopPct
+        ? "EXIT"
+        : position
+          ? "HOLD"
+          : "ENTER";
   const confidence = Math.max(
     0,
     Math.min(1, 0.75 - input.memoryWarningCount * 0.05 + (input.metrics.farmAprPct ?? 0) / 1000),
@@ -81,11 +128,13 @@ export function evaluateReplayPool(input: ReplayEvaluationInput): ReplayEvaluati
     poolAddress: input.poolAddress,
     confidence,
     reasoning:
-      action === "EXIT"
-        ? `Trailing stop: value dropped ${(drawdown * 100).toFixed(1)}% from peak`
-        : action === "ENTER"
-          ? "Replay entry passed strategy gates"
-          : "Replay position remains within trailing-stop limit",
+      ilDominanceReason !== null
+        ? ilDominanceReason
+        : action === "EXIT"
+          ? `Trailing stop: value dropped ${(drawdown * 100).toFixed(1)}% from peak`
+          : action === "ENTER"
+            ? "Replay entry passed strategy gates"
+            : "Replay position remains within trailing-stop limit",
     ...(action === "ENTER" && { positionSizeUsd: input.proposedSizeUsd }),
   };
   const openPositions = input.openPositions.map(toRiskPosition);

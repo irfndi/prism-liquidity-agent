@@ -6,6 +6,7 @@ import {
   resolveRangeHalfWidth,
   recommendBinRangeForVolatility,
   recommendStrategyShape,
+  halfWidthForPriceCoveragePct,
   ADAPTIVE_RANGE_REFERENCE_STDDEV,
   ADAPTIVE_RANGE_MIN_MULTIPLIER,
   ADAPTIVE_RANGE_MAX_MULTIPLIER,
@@ -32,6 +33,138 @@ describe("baselineHalfWidthForBinStep (Wave 9)", () => {
     expect(baselineHalfWidthForBinStep(25)).toBe(20);
     expect(baselineHalfWidthForBinStep(26)).toBe(15);
     expect(baselineHalfWidthForBinStep(100)).toBe(15);
+  });
+});
+
+describe("halfWidthForPriceCoveragePct (price-coverage floor)", () => {
+  it("computes the bin width for a target price span (geometric bins)", () => {
+    // binStep 4 → each bin is ×1.0004. To span +5% price needs
+    // ceil(ln(1.05)/ln(1.0004)) ≈ 122 bins.
+    expect(halfWidthForPriceCoveragePct(4, 5)).toBe(122);
+    // binStep 100 → each bin ×1.01; +5% ≈ ceil(ln(1.05)/ln(1.01)) = 5 bins.
+    expect(halfWidthForPriceCoveragePct(100, 5)).toBe(5);
+  });
+
+  it("coarse pools need far fewer bins than fine pools for the same coverage", () => {
+    // The whole point: fine-binStep pools (SOL/USDC @4) need ~hi-width bins,
+    // coarse pools (memecoin @50) need very few for the same ±5%.
+    const fine = halfWidthForPriceCoveragePct(4, 5);
+    const coarse = halfWidthForPriceCoveragePct(50, 5);
+    expect(fine).toBeGreaterThan(10 * coarse);
+    expect(coarse).toBe(10); // ceil(ln(1.05)/ln(1.005)) = 10
+  });
+
+  it("returns 0 when disabled (pct<=0) or the bin step is degenerate", () => {
+    expect(halfWidthForPriceCoveragePct(4, 0)).toBe(0);
+    expect(halfWidthForPriceCoveragePct(4, -3)).toBe(0);
+    expect(halfWidthForPriceCoveragePct(0, 5)).toBe(0);
+    expect(halfWidthForPriceCoveragePct(4, Number.NaN)).toBe(0);
+    expect(halfWidthForPriceCoveragePct(Number.NaN, 5)).toBe(0);
+  });
+
+  it("is monotonic in pct: more coverage → wider range", () => {
+    expect(halfWidthForPriceCoveragePct(4, 10)).toBeGreaterThan(halfWidthForPriceCoveragePct(4, 5));
+    expect(halfWidthForPriceCoveragePct(100, 20)).toBeGreaterThan(
+      halfWidthForPriceCoveragePct(100, 10),
+    );
+  });
+});
+
+describe("resolveRangeHalfWidth price-coverage floor", () => {
+  it("price floor off (pct=0) → unchanged fixed bin-count baseline", () => {
+    const w = resolveRangeHalfWidth({
+      binStep: 4,
+      configuredBaseHalfWidth: 0,
+      adaptiveEnabled: false,
+      volatilityStddev: 0,
+      maxFullRangeBins: 200,
+      minPriceCoveragePct: 0,
+    });
+    expect(w).toBe(25); // binStep≤10 tier
+  });
+
+  it("price floor lifts a fine-binStep pool out of the ±1% trap", () => {
+    // SOL/USDC binStep 4: the 25-bin baseline is only ~±1% price, so a 40% swing
+    // spends nearly the whole window out of range. A 5% price-coverage floor
+    // widens the range to ~122 bins so it can actually hold the price path.
+    const w = resolveRangeHalfWidth({
+      binStep: 4,
+      configuredBaseHalfWidth: 0,
+      adaptiveEnabled: false,
+      volatilityStddev: 0,
+      maxFullRangeBins: 300, // half-cap 150 ≫ floor, so 122 is observable
+      minPriceCoveragePct: 5,
+    });
+    expect(w).toBe(122);
+  });
+
+  it("coarse pools keep their bin-count baseline (floor is immaterial)", () => {
+    // binStep 100's 5% floor is 5 bins < the 15-bin tier baseline, so no change.
+    const w = resolveRangeHalfWidth({
+      binStep: 100,
+      configuredBaseHalfWidth: 0,
+      adaptiveEnabled: false,
+      volatilityStddev: 0,
+      maxFullRangeBins: 200,
+      minPriceCoveragePct: 5,
+    });
+    expect(w).toBe(15);
+  });
+
+  it("floor is bounded by the half-cap so it can never exceed the risk cap", () => {
+    const w = resolveRangeHalfWidth({
+      binStep: 4,
+      configuredBaseHalfWidth: 0,
+      adaptiveEnabled: false,
+      volatilityStddev: 0,
+      maxFullRangeBins: 100, // half-cap 50
+      minPriceCoveragePct: 5, // raw floor would be 122
+    });
+    expect(w).toBe(50);
+    expect(w * 2).toBeLessThanOrEqual(100);
+  });
+
+  it("at the default risk cap the floor still reaches the profitable width", () => {
+    // With the live MAX_REBALANCE_RANGE_BINS=200 (half-cap 100), a 5% floor on
+    // SOL/USDC caps at 100 bins = (1.0004)^100 ≈ ±4% price — exactly the width
+    // that turned the pool positive in the honest backtest sweep, up from the
+    // old ±2% (50-bin) ceiling the max multiplier would have held.
+    const w = resolveRangeHalfWidth({
+      binStep: 4,
+      configuredBaseHalfWidth: 0,
+      adaptiveEnabled: false,
+      volatilityStddev: 0,
+      maxFullRangeBins: 200,
+      minPriceCoveragePct: 5,
+    });
+    expect(w).toBe(100);
+  });
+
+  it("floor composes with σ-scaling for high-vol fine-bin pools", () => {
+    // Unbounded σ would take a 122-bin floor to ×2 = 244, but the half-cap
+    // (maxFullRangeBins/2 = 100) clamps it. The floor prevents the multiplier
+    // from silently keeping a fine pool at 50 bins (the old ±2% ceiling).
+    const w = resolveRangeHalfWidth({
+      binStep: 4,
+      configuredBaseHalfWidth: 0,
+      adaptiveEnabled: true,
+      volatilityStddev: 100 * ADAPTIVE_RANGE_REFERENCE_STDDEV,
+      maxFullRangeBins: 200,
+      minPriceCoveragePct: 5,
+    });
+    expect(w).toBe(100);
+  });
+
+  it("env override still wins as the base; floor only raises it", () => {
+    const w = resolveRangeHalfWidth({
+      binStep: 4,
+      configuredBaseHalfWidth: 60, // explicit env baseline
+      adaptiveEnabled: false,
+      volatilityStddev: 0,
+      maxFullRangeBins: 300, // half-cap 150 ≫ floor 122
+      minPriceCoveragePct: 5, // floor 122 > 60
+    });
+    expect(w).toBe(122);
   });
 });
 
@@ -258,14 +391,16 @@ describe("ConfigService Wave 9 env vars", () => {
     );
   }
 
-  it("defaults: 0 (binStep-tier baseline) and adaptive enabled", async () => {
+  it("defaults: 0 (binStep-tier baseline), adaptive enabled, 5% price-coverage floor", async () => {
     // Explicit removal so a dev/CI export of these vars can't silently bypass
     // the default assertions; the shared afterEach(unstubAllEnvs) restores them.
     vi.stubEnv("ENTRY_RANGE_HALF_WIDTH_BINS", undefined);
     vi.stubEnv("VOLATILITY_ADAPTIVE_RANGES", undefined);
+    vi.stubEnv("MIN_RANGE_HALF_WIDTH_PCT", undefined);
     const cfg = await loadConfig();
     expect(cfg.entryRangeHalfWidthBins).toBe(0);
     expect(cfg.volatilityAdaptiveRanges).toBe(true);
+    expect(cfg.minRangeHalfWidthPct).toBe(5);
   });
 
   it("parses VOLATILITY_ADAPTIVE_RANGES=false to opt out into static widths", async () => {
@@ -296,6 +431,24 @@ describe("ConfigService Wave 9 env vars", () => {
     vi.stubEnv("VOLATILITY_ADAPTIVE_RANGES", "true");
     const cfg = await loadConfig();
     expect(cfg.volatilityAdaptiveRanges).toBe(true);
+  });
+
+  it("parses MIN_RANGE_HALF_WIDTH_PCT", async () => {
+    vi.stubEnv("MIN_RANGE_HALF_WIDTH_PCT", "8");
+    const cfg = await loadConfig();
+    expect(cfg.minRangeHalfWidthPct).toBe(8);
+  });
+
+  it("clamps MIN_RANGE_HALF_WIDTH_PCT to the 0-50 bound", async () => {
+    vi.stubEnv("MIN_RANGE_HALF_WIDTH_PCT", "200");
+    const cfg = await loadConfig();
+    expect(cfg.minRangeHalfWidthPct).toBe(50);
+  });
+
+  it("falls back to 0 (floor off) for negative MIN_RANGE_HALF_WIDTH_PCT", async () => {
+    vi.stubEnv("MIN_RANGE_HALF_WIDTH_PCT", "-3");
+    const cfg = await loadConfig();
+    expect(cfg.minRangeHalfWidthPct).toBe(0);
   });
 });
 

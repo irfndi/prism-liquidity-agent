@@ -407,6 +407,8 @@ export interface AppConfig {
   readonly entryRangeHalfWidthBins: number;
   /** Scale entry/rebalance range width by measured realized volatility. Default true (opt-out). */
   readonly volatilityAdaptiveRanges: boolean;
+  /** Price-coverage floor for the range half-width (percent each side). 0 = off. */
+  readonly minRangeHalfWidthPct: number;
 
   // ─── F3: Fee compounding / auto-reinvest ─────────────────────────────────────
   /** Master switch for auto-reinvest of accrued fees. */
@@ -876,7 +878,7 @@ const loadConfig = Effect.gen(function* () {
   const confidenceThreshold = yield* validatedNumber("CONFIDENCE_THRESHOLD", 0, 0.65);
   const paperPortfolioUsd = yield* validatedNumber("PAPER_PORTFOLIO_USD", 1, 10_000);
   const minBinUtilization = yield* validatedNumber("MIN_BIN_UTILIZATION", 0, 0.3);
-  const maxRebalanceRangeBins = yield* validatedNumber("MAX_REBALANCE_RANGE_BINS", 1, 50);
+  const maxRebalanceRangeBins = yield* validatedNumber("MAX_REBALANCE_RANGE_BINS", 1, 200, 200);
   const watchlistPoolsRaw = yield* Config.string("WATCHLIST_POOLS").pipe(
     Effect.orElseSucceed(() => ""),
   );
@@ -968,6 +970,21 @@ const loadConfig = Effect.gen(function* () {
   const volatilityAdaptiveRanges = yield* Config.boolean("VOLATILITY_ADAPTIVE_RANGES").pipe(
     Effect.orElseSucceed(() => true),
   );
+  // Profitability floor for fine-binStep pools: the resolved range half-width is
+  // never narrower than the bins needed to span this percent of price each side
+  // (see strategy-service.ts halfWidthForPriceCoveragePct). The binStep-tier
+  // baseline (25/20/15) caps fine-bin pools (SOL/USDC binStep 4) at ~±1-2%
+  // price coverage, which cannot hold a 40%+ swing — the pool bleeds unbounded
+  // IL (the honest backtest measured SOL/USDC at −$1158 net on a fixed 25-bin
+  // range, IL ~$1157). A 5% price-coverage floor lifts those pools to a range
+  // that actually holds the price path: the measured IL collapses to ~$40 and
+  // the pool turns positive even under a concentration-aware fee model that
+  // dilutes a wide position's active-bin fee share by refWidth÷effectiveWidth
+  // (+$122 with dilution vs +$567 with the optimistic width-independent model).
+  // It leaves coarse pools untouched (their 25-bin baseline already spans 5-13%),
+  // is bounded by the MAX_REBALANCE_RANGE_BINS half-cap, and clamps to [0,50].
+  // 0 disables the floor (pre-Wave flat bin-count behavior).
+  const minRangeHalfWidthPct = yield* validatedNumber("MIN_RANGE_HALF_WIDTH_PCT", 0, 5, 50);
 
   // ─── F3: Fee compounding / auto-reinvest ─────────────────────────────────────
   const autoCompoundFees = yield* Config.boolean("AUTO_COMPOUND_FEES").pipe(
@@ -1872,6 +1889,7 @@ const loadConfig = Effect.gen(function* () {
     volatilityWideHalfWidthBins,
     entryRangeHalfWidthBins,
     volatilityAdaptiveRanges,
+    minRangeHalfWidthPct,
     autoCompoundFees,
     minCompoundFeesUsd,
     compoundGasBufferUsd,

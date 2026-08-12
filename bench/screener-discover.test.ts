@@ -69,6 +69,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     volatilityWideHalfWidthBins: 50,
     entryRangeHalfWidthBins: 0,
     volatilityAdaptiveRanges: false,
+    minRangeHalfWidthPct: 0,
     autoCompoundFees: false,
     minCompoundFeesUsd: 0.5,
     compoundGasBufferUsd: 0.05,
@@ -201,11 +202,10 @@ function buildScreenerLayer(
         reportRevenue: () => Effect.never,
       } as never);
     }
-    return Layer.provide(AdapterLive, Layer.merge(configLayer, DbLive(":memory:"))) as unknown as Layer.Layer<
-      AdapterService,
-      never,
-      never
-    >;
+    return Layer.provide(
+      AdapterLive,
+      Layer.merge(configLayer, DbLive(":memory:")),
+    ) as unknown as Layer.Layer<AdapterService, never, never>;
   })();
   const allDeps = Layer.merge(configLayer, Layer.merge(adapterLayer, strategyLayer));
   return Layer.provide(

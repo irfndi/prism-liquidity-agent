@@ -145,4 +145,90 @@ describe("evaluateReplayPool", () => {
     expect(result.riskApproved).toBe(false);
     expect(result.riskReason).toContain("Per-pool position cap reached");
   });
+
+  // ─── IL-dominance fast EXIT (W15 seam, replay kernel) ────────────────────
+
+  const ilPosition = {
+    poolAddress: "pool-a",
+    positionPubKey: "position-1",
+    lowerBinId: 90,
+    upperBinId: 110,
+    depositedUsd: 1_000,
+    currentValueUsd: 950, // in-range mark close to HODL → no IL dominance below
+    highestValueUsd: 1_000,
+    outOfRange: true, // active bin has left the range → fees stopped, pure bleed
+    hodlValueUsd: 1_000,
+    cumulativeFeesClaimedUsd: 10,
+  };
+
+  it("fires an IL-dominance EXIT when OOR IL exceeds fees × factor and the USD floor", () => {
+    const result = evaluateReplayPool({
+      ...base,
+      position: { ...ilPosition, currentValueUsd: 900 }, // IL = 100
+      openPositions: [],
+      ilProtectionEnabled: true,
+      ilDominanceExitFactor: 2,
+      ilDominanceMinUsd: 5,
+    });
+
+    expect(result.decision.action).toBe("EXIT");
+    expect(result.decision.reasoning).toContain("IL dominance");
+    expect(result.riskApproved).toBe(true);
+  });
+
+  it("does NOT fire the IL-dominance EXIT when IL protection is off", () => {
+    const result = evaluateReplayPool({
+      ...base,
+      position: { ...ilPosition, currentValueUsd: 900 }, // IL = 100
+      openPositions: [],
+      ilProtectionEnabled: false,
+    });
+
+    // IL dominance is off → the position falls through to HOLD (drawdown 5% < 10%)
+    expect(result.decision.action).toBe("HOLD");
+  });
+
+  it("does NOT fire the IL-dominance EXIT when the position is in range", () => {
+    const result = evaluateReplayPool({
+      ...base,
+      position: { ...ilPosition, currentValueUsd: 900, outOfRange: false },
+      openPositions: [],
+      ilProtectionEnabled: true,
+    });
+
+    expect(result.decision.action).toBe("HOLD");
+  });
+
+  it("does NOT fire the IL-dominance EXIT when IL is below the USD floor", () => {
+    const result = evaluateReplayPool({
+      ...base,
+      position: { ...ilPosition, currentValueUsd: 903 }, // IL = 97 > fees*2=20, < floor 100
+      openPositions: [],
+      ilProtectionEnabled: true,
+      ilDominanceExitFactor: 2,
+      ilDominanceMinUsd: 100,
+    });
+
+    expect(result.decision.action).toBe("HOLD");
+  });
+
+  it("keeps legacy replay callers behavior-identical when IL inputs are absent", () => {
+    const legacy = {
+      poolAddress: "pool-a",
+      positionPubKey: "position-1",
+      lowerBinId: 90,
+      upperBinId: 110,
+      depositedUsd: 1_000,
+      currentValueUsd: 900, // drawdown 10% == trail stop, but captured below
+      highestValueUsd: 1_000,
+    };
+    // No IL context and no trail breach (drawdown 10% not > 10%) → HOLD
+    const result = evaluateReplayPool({
+      ...base,
+      position: legacy,
+      openPositions: [legacy],
+    });
+
+    expect(result.decision.action).toBe("HOLD");
+  });
 });

@@ -84,11 +84,10 @@ function buildAdapterLayerWithWallet(): Layer.Layer<AdapterService, never, never
     }),
   );
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
-  return Layer.provide(AdapterLive, Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:")))) as Layer.Layer<
-    AdapterService,
-    never,
-    never
-  >;
+  return Layer.provide(
+    AdapterLive,
+    Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))),
+  ) as Layer.Layer<AdapterService, never, never>;
 }
 
 describe("AdapterService wallet balance reconciliation", () => {
@@ -339,11 +338,10 @@ describe("AdapterService wallet holdings seam (getWalletHoldings)", () => {
       }),
     );
     const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
-    const layer = Layer.provide(AdapterLive, Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:")))) as Layer.Layer<
-      AdapterService,
-      never,
-      never
-    >;
+    const layer = Layer.provide(
+      AdapterLive,
+      Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))),
+    ) as Layer.Layer<AdapterService, never, never>;
 
     const holdings = await Effect.runPromise(
       Effect.gen(function* () {

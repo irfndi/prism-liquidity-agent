@@ -361,6 +361,29 @@ export function baselineHalfWidthForBinStep(binStep: number): number {
 }
 
 /**
+ * Bin half-width needed for the range to span at least `pct` percent of price
+ * on each side of the active bin. DLMM bins are geometric steps of
+ * (1 + binStep/1e4), so the number of bins to move price by factor (1+pct/100)
+ * is ln(1+pct/100) / ln(1+binStep/1e4). Returns 0 when pct is non-positive or
+ * the bin step is degenerate.
+ *
+ * Why this exists: the binStep-tier baseline (25/20/15) is calibrated for
+ * coarse pools, but on fine-binStep pools (SOL/USDC at binStep 4, JitoSOL/SOL
+ * at binStep 1) 25 bins span only ~±1% of price. A pool whose realized swing is
+ * far larger then spends nearly all its time OUT of range, bleeding unbounded
+ * IL. A fixed price-coverage floor lifts those fine-bin pools to a range that
+ * actually holds the price path, without touching coarse pools (where 25 bins
+ * already span 5-13%).
+ */
+export function halfWidthForPriceCoveragePct(binStep: number, pct: number): number {
+  if (!(pct > 0) || !Number.isFinite(pct) || !Number.isFinite(binStep) || binStep <= 0) {
+    return 0;
+  }
+  const step = 1 + binStep / 10_000;
+  return Math.max(0, Math.ceil(Math.log(1 + pct / 100) / Math.log(step)));
+}
+
+/**
  * Resolve the range half-width (bins each side) for entries and rebalances.
  *
  * Base: `configuredBaseHalfWidth` (ENTRY_RANGE_HALF_WIDTH_BINS) when > 0, else
@@ -374,6 +397,14 @@ export function baselineHalfWidthForBinStep(binStep: number): number {
  * to [MIN_ADAPTIVE_HALF_WIDTH_BINS, floor(maxFullRangeBins / 2)] so the full
  * range never exceeds the MAX_REBALANCE_RANGE_BINS risk cap.
  *
+ * `minPriceCoveragePct` (MIN_RANGE_HALF_WIDTH_PCT): when > 0, the resolved
+ * half-width is never narrower than the bins needed to span that percent of
+ * price each side (see halfWidthForPriceCoveragePct). This is the profitability
+ * floor for fine-binStep pools — the σ-scaled model caps at base × 2, which on
+ * a binStep-4 pool is only ~±2% price, far too narrow to hold a 40%+ swing.
+ * The floor is still bounded by the halfCap, so it can never exceed the risk
+ * cap.
+ *
  * Warmup: σ <= 0 means fewer than 2 bin snapshots (cold start) or a perfectly
  * flat pool — both return the bounded baseline, never a fabricated jump.
  */
@@ -383,6 +414,7 @@ export function resolveRangeHalfWidth(args: {
   readonly adaptiveEnabled: boolean;
   readonly volatilityStddev: number;
   readonly maxFullRangeBins: number;
+  readonly minPriceCoveragePct?: number;
 }): number {
   const base =
     args.configuredBaseHalfWidth > 0
@@ -390,19 +422,25 @@ export function resolveRangeHalfWidth(args: {
       : baselineHalfWidthForBinStep(args.binStep);
   const halfCap = Math.max(1, Math.floor(args.maxFullRangeBins / 2));
   const effectiveMin = Math.min(MIN_ADAPTIVE_HALF_WIDTH_BINS, halfCap);
+  // Price-coverage floor: the bins needed to span `minPriceCoveragePct`
+  // percent each side, bounded by the half-cap. Never applies when the knob is
+  // off (pct <= 0) or the floor would exceed the risk cap.
+  const coverageWidth = halfWidthForPriceCoveragePct(args.binStep, args.minPriceCoveragePct ?? 0);
+  const coverageFloor = coverageWidth > 0 ? Math.min(halfCap, coverageWidth) : 0;
+  const effectiveBase = Math.max(base, coverageFloor);
   if (
     !args.adaptiveEnabled ||
     !Number.isFinite(args.volatilityStddev) ||
     args.volatilityStddev <= 0
   ) {
-    return Math.min(halfCap, Math.max(effectiveMin, base));
+    return Math.min(halfCap, Math.max(effectiveMin, effectiveBase));
   }
   const rawMultiplier = args.volatilityStddev / ADAPTIVE_RANGE_REFERENCE_STDDEV;
   const multiplier = Math.min(
     ADAPTIVE_RANGE_MAX_MULTIPLIER,
     Math.max(ADAPTIVE_RANGE_MIN_MULTIPLIER, rawMultiplier),
   );
-  const scaled = Math.round(base * multiplier);
+  const scaled = Math.round(effectiveBase * multiplier);
   return Math.min(halfCap, Math.max(effectiveMin, scaled));
 }
 

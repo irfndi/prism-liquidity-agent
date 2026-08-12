@@ -14,7 +14,7 @@
  */
 import { Effect } from "effect";
 import { createLogger } from "../engine/logger.js";
-import { DLMMStrategy } from "../engine/strategy-service.js";
+import { DLMMStrategy, halfWidthForPriceCoveragePct } from "../engine/strategy-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 import type { BacktestResult, BinArray, PoolSnapshot, PoolState } from "../engine/types.js";
@@ -22,6 +22,88 @@ import { evaluateReplayPool } from "../engine/cycle/evaluate-pool.js";
 
 const log = createLogger("Backtest");
 
+/** Range edges of a DLMM position expressed as bin prices. Bin i has price
+ * P_i = P_anchor·(1+s)^(i−anchorBin), so the position's [lower, upper] bin
+ * range maps to a CLMM price range [P_a, P_b]. */
+export function binRangePrices(args: {
+  anchorPrice: number;
+  anchorBinId: number;
+  lowerBinId: number;
+  upperBinId: number;
+  binStep: number;
+}): { pa: number; pb: number } {
+  const s = 1 + args.binStep / 10_000;
+  const pa = args.anchorPrice * Math.pow(s, args.lowerBinId - args.anchorBinId);
+  const pb = args.anchorPrice * Math.pow(s, args.upperBinId - args.anchorBinId);
+  return { pa: pa > 0 ? pa : 1, pb: pb > 0 ? pb : 1 };
+}
+
+/**
+ * Correct DLMM/CLMM position valuation (NOT the V2 full-range curve).
+ *
+ * A DLMM position spanning bins [lower, upper] behaves as a concentrated
+ * liquidity position over the price range [P_a, P_b]. Given the deposited USD
+ * value split 50/50 at the anchor price, this returns the position's
+ * mark-to-market value at P1 and the HODL benchmark value (the same capital
+ * never deposited), so IL = 1 − V_LP/V_HODL.
+ *
+ * Piecewise (a=√P_a, b=√P_b, s=√P1):
+ *   P1 ≤ P_a : x = L(1/a − 1/b),           y = 0
+ *   P_a<P1<P_b: x = L(1/s − 1/b),           y = L(s − a)
+ *   P1 ≥ P_b : x = 0,                       y = L(b − a)
+ *   V_LP = x·P1 + y
+ *   V_HODL = X0·P1 + Y0   (X0,Y0 = initial 50/50 amounts)
+ *
+ * Crucially this does NOT stop growing once price exits the range: when P1>P_b
+ * the position is fully in token1 (V_LP flat) while V_HODL keeps appreciating,
+ * so IL grows without bound — the exact behavior the V2 2√r/(1+r) curve
+ * wrongly asymptotes away.
+ */
+export function clmmPositionValue(args: {
+  sizeUsd: number;
+  anchorPrice: number;
+  anchorBinId: number;
+  currentPrice: number;
+  lowerBinId: number;
+  upperBinId: number;
+  binStep: number;
+}): { lpValueUsd: number; hodlValueUsd: number } {
+  const { pa, pb } = binRangePrices(args);
+  const p0 = args.anchorPrice;
+  const p1 = args.currentPrice;
+  if (!(p0 > 0) || !(p1 > 0) || !(pb > pa)) {
+    return { lpValueUsd: args.sizeUsd, hodlValueUsd: args.sizeUsd };
+  }
+  // 50/50 deposit at anchor: X tokens and Y tokens.
+  const x0 = args.sizeUsd / 2 / p0;
+  const y0 = args.sizeUsd / 2;
+  const a = Math.sqrt(pa);
+  const b = Math.sqrt(pb);
+  // Liquidity L is a CONSTANT of the position, fixed at deposit: it is
+  // recovered from the X leg at the ANCHOR price p0, never the live price.
+  // Deriving it from the live price while reusing the initial x0 is a bug — it
+  // inflates in-range LP value and overstates downside IL by an order of
+  // magnitude.
+  const s0 = Math.sqrt(p0);
+  const L = x0 / (1 / s0 - 1 / b) || 0;
+  if (!(L > 0)) return { lpValueUsd: args.sizeUsd, hodlValueUsd: x0 * p1 + y0 };
+  const sp = Math.sqrt(p1);
+  let x: number;
+  let y: number;
+  if (p1 <= pa) {
+    x = L * (1 / a - 1 / b);
+    y = 0;
+  } else if (p1 >= pb) {
+    x = 0;
+    y = L * (b - a);
+  } else {
+    x = L * (1 / sp - 1 / b);
+    y = L * (sp - a);
+  }
+  const lpValueUsd = x * p1 + y;
+  const hodlValueUsd = x0 * p1 + y0;
+  return { lpValueUsd, hodlValueUsd };
+}
 // ─── CLI parsing ─────────────────────────────────────────────────────────────
 
 interface CliArgs {
@@ -188,12 +270,42 @@ export interface BacktestConfig {
   maxRebalances: number;
   maxPositionsPerPool: number;
   /**
+   * Price-coverage floor for the entry range half-width (percent each side),
+   * mirroring the engine's MIN_RANGE_HALF_WIDTH_PCT. When > 0, the effective
+   * half-width is max(halfWidth, halfWidthForPriceCoveragePct(binStep, pct)) —
+   * so a fine-binStep pool (SOL/USDC binStep 4) is never stuck at ±1% price
+   * coverage no matter how the fixed bin-count halfWidth is set. 0 = off
+   * (fixed bin-count behavior). Lets the backtest prove out whether a
+   * price-coverage floor actually curbs the out-of-range IL bleed.
+   */
+  minPriceCoveragePct?: number;
+  /**
    * When a snapshot's bin array is empty, bin utilization is UNKNOWN (not 0).
    * Default true: the pre-filter skips the bin-util requirement so the replay
    * admits (paper DB stores bins:[] for every row). False degrades the unknown
    * to 0 and rejects exactly as before — parity with the pre-fix replay.
    */
   backtestTolerateEmptyBins?: boolean;
+  /**
+   * IL-dominance fast EXIT (W15 seam), mirroring the live engine's
+   * IL_PROTECTION_ENABLED=true default. When on, an out-of-range position exits
+   * as soon as its range-aware IL (HODL − LP value) exceeds cumulative fees ×
+   * factor and the USD floor — capping the unbounded out-of-range IL bleed.
+   */
+  ilProtectionEnabled?: boolean;
+  ilDominanceExitFactor?: number;
+  ilDominanceMinUsd?: number;
+  /**
+   * Concentration-aware fee share. The default fee model returns a
+   * width-independent share (position size ÷ pool TVL) whenever the range is
+   * in-range — a real DLMM position that spreads its liquidity over many bins
+   * captures a SMALLER fraction of active-bin fees per dollar. When this is set
+   * to the baseline (narrow) half-width, the per-tick share is scaled by
+   * min(1, refWidth ÷ effectiveWidth), so a range diluted k× captures ~1/k of
+   * the fee income the width-independent model assigns. Puts a conservative
+   * floor on the fee side of any range-widening profitability claim.
+   */
+  feeShareDilutionRefWidth?: number;
 }
 
 export function runBacktestFromTicks(
@@ -227,9 +339,22 @@ export function runBacktestFromTicks(
   const tickIntervalMs = inferredIntervalMs;
   const ticksPerYear = (365 * 24 * 60 * 60 * 1000) / tickIntervalMs;
 
+  // Price-coverage floor (MIN_RANGE_HALF_WIDTH_PCT): when set, the effective
+  // half-width is never narrower than the bins needed to span that percent of
+  // price each side on this pool's binStep. For a fine-binStep pool (SOL/USDC
+  // binStep 4) this lifts a fixed halfWidth of 25 (~±1%) up to a range that
+  // actually holds the price path, curbing out-of-range IL. 0 = fixed bin-count.
+  const effectiveHalfWidth =
+    cfg.minPriceCoveragePct && cfg.minPriceCoveragePct > 0
+      ? Math.max(
+          cfg.halfWidth,
+          halfWidthForPriceCoveragePct(ticks[0]!.pool.binStep, cfg.minPriceCoveragePct),
+        )
+      : cfg.halfWidth;
+
   let previousTvl = ticks[0]!.pool.tvlUsd;
-  let currentLowerBinId = ticks[0]!.pool.activeBinId - cfg.halfWidth;
-  let currentUpperBinId = ticks[0]!.pool.activeBinId + cfg.halfWidth;
+  let currentLowerBinId = ticks[0]!.pool.activeBinId - effectiveHalfWidth;
+  let currentUpperBinId = ticks[0]!.pool.activeBinId + effectiveHalfWidth;
   let hasPosition = false;
   let positionSizeUsd = 0;
   let positionPeakUsd = 0;
@@ -247,6 +372,8 @@ export function runBacktestFromTicks(
   let entryTimestamp = 0;
   let entryDepositedUsd = 0;
   let positionFeesUsd = 0;
+  let referencePrice = ticks[0]?.pool.currentPrice ?? 1;
+  let referenceBinId = ticks[0]?.pool.activeBinId ?? 0;
   let emptyBinBypassNoted = false;
 
   function recordExit(reason: string, atTick: number, realizedValueUsd: number): void {
@@ -275,7 +402,31 @@ export function runBacktestFromTicks(
     // back to the portfolio value when no position size is recorded yet.
     const size = positionSizeUsd > 0 ? positionSizeUsd : portfolioValue;
     const positionShare = Math.min(size / tvl, 1);
-    return (tick.pool.fees24hUsd / ticksPerYear) * 365 * positionShare;
+    // Concentration-aware dilution: a position spread over `effectiveHalfWidth`
+    // bins captures ~(refWidth ÷ effectiveWidth) of the fee income the
+    // width-independent model assigns, because the same capital is thinned
+    // across more bins and only bins near the active market earn fees. Only
+    // applies when the caller opts in with a (narrow) reference width.
+    const dilution =
+      cfg.feeShareDilutionRefWidth && cfg.feeShareDilutionRefWidth > 0 && effectiveHalfWidth > 0
+        ? Math.min(1, cfg.feeShareDilutionRefWidth / effectiveHalfWidth)
+        : 1;
+    return (tick.pool.fees24hUsd / ticksPerYear) * 365 * positionShare * dilution;
+  }
+
+  // Mark the open position to the current DLMM value (correct range-aware IL,
+  // includes token depreciation — NOT a flat floor). Falls back to full size
+  // when the anchor is unknown.
+  function markPositionValue(tick: HistoryTick): number {
+    return clmmPositionValue({
+      sizeUsd: positionSizeUsd,
+      anchorPrice: referencePrice,
+      anchorBinId: referenceBinId,
+      currentPrice: tick.pool.currentPrice,
+      lowerBinId: currentLowerBinId,
+      upperBinId: currentUpperBinId,
+      binStep: tick.pool.binStep,
+    }).lpValueUsd;
   }
 
   for (let i = 0; i < ticks.length; i++) {
@@ -338,15 +489,34 @@ export function runBacktestFromTicks(
     if (hasPosition) positionFeesUsd += feesThisTick;
 
     const replayPosition = hasPosition
-      ? {
-          poolAddress: tick.pool.address,
-          positionPubKey: `replay-${tick.pool.address}`,
-          lowerBinId: currentLowerBinId,
-          upperBinId: currentUpperBinId,
-          depositedUsd: positionSizeUsd,
-          currentValueUsd: inRange ? positionSizeUsd : positionSizeUsd * 0.8,
-          highestValueUsd: positionPeakUsd,
-        }
+      ? (() => {
+          // Range-aware CLMM valuation (LP value + the HODL benchmark buried in
+          // the same model) so the IL-dominance fast EXIT can mark real IL.
+          const val = clmmPositionValue({
+            sizeUsd: positionSizeUsd,
+            anchorPrice: referencePrice,
+            anchorBinId: referenceBinId,
+            currentPrice: tick.pool.currentPrice,
+            lowerBinId: currentLowerBinId,
+            upperBinId: currentUpperBinId,
+            binStep: tick.pool.binStep,
+          });
+          return {
+            poolAddress: tick.pool.address,
+            positionPubKey: `replay-${tick.pool.address}`,
+            lowerBinId: currentLowerBinId,
+            upperBinId: currentUpperBinId,
+            depositedUsd: positionSizeUsd,
+            currentValueUsd: val.lpValueUsd,
+            highestValueUsd: positionPeakUsd,
+            // IL-dominance inputs (the live engine's W15 seam): the position is
+            // OOR once the active bin leaves the range, HODL comes from the same
+            // CLMM model, and fees accrued reflect what fees would dominate.
+            outOfRange: !inRange,
+            hodlValueUsd: val.hodlValueUsd,
+            cumulativeFeesClaimedUsd: positionFeesUsd,
+          };
+        })()
       : undefined;
     const replay = evaluateReplayPool({
       poolAddress: tick.pool.address,
@@ -361,12 +531,15 @@ export function runBacktestFromTicks(
       trailingStopPct: 0.1,
       risk: {
         confidenceThreshold: 0.65,
-        maxRebalanceRangeBins: cfg.halfWidth * 2,
+        maxRebalanceRangeBins: effectiveHalfWidth * 2,
         stopLossPct: 0.15,
         maxPerPoolAllocationPct: 0.4,
         maxPositionsPerPool: cfg.maxPositionsPerPool,
       },
       proposedSizeUsd: Math.min(portfolioValue * 0.2, 2_000),
+      ilProtectionEnabled: cfg.ilProtectionEnabled ?? true,
+      ilDominanceExitFactor: cfg.ilDominanceExitFactor ?? 2,
+      ilDominanceMinUsd: cfg.ilDominanceMinUsd ?? 5,
     });
     if (!replay.riskApproved) {
       if (!hasPosition) {
@@ -387,12 +560,25 @@ export function runBacktestFromTicks(
       entryTimestamp = tick.pool.timestamp;
       entryDepositedUsd = positionSizeUsd;
       positionFeesUsd = 0;
+      referencePrice = tick.pool.currentPrice;
+      referenceBinId = tick.pool.activeBinId;
     } else if (replay.decision.action === "EXIT") {
-      // Realized value mirrors the replayPosition the EXIT was decided on
-      // (in-range = full size, out-of-range = the 20% penalty), plus fees
-      // accrued during the hold.
+      // The replay kernel may EXIT either via the trailing stop or the
+      // IL-dominance fast EXIT (W15 seam). Both realize the position at its
+      // current marked (range-aware) value, but the IL-dominance exit ALSO
+      // realizes the IL it capped — mirroring the live engine, where closing
+      // an out-of-range position converts its IL into a realized loss. The
+      // IL-dominance exit fires EARLIER than the trail stop, so it caps the
+      // unbounded OOR bleed instead of waiting for a drawn-down breach.
+      const isIlDominance = replay.decision.reasoning.startsWith("IL dominance");
+      const realizedLoss =
+        isIlDominance && replayPosition !== undefined
+          ? Math.max(0, replayPosition.hodlValueUsd - replayPosition.currentValueUsd)
+          : 0;
+      totalIl += realizedLoss;
+      portfolioValue -= realizedLoss;
       recordExit(
-        "trailing-stop",
+        isIlDominance ? "il-dominance" : "trailing-stop",
         i,
         (replayPosition?.currentValueUsd ?? positionSizeUsd) + positionFeesUsd,
       );
@@ -412,7 +598,19 @@ export function runBacktestFromTicks(
       hasPosition && rebalances < cfg.maxRebalances && ticksSinceRebalance >= cfg.minHoldTicks;
 
     if (canRebalance && binDrift > cfg.driftThreshold) {
-      const ilCost = portfolioValue * 0.001 * binDrift;
+      // Real IL vs the HODL benchmark. The position is a concentrated DLMM
+      // range: IL = V_HODL − V_LP, which grows UNBOUNDED once price exits the
+      // range (LP stuck in one token while HODL keeps appreciating).
+      const val = clmmPositionValue({
+        sizeUsd: positionSizeUsd,
+        anchorPrice: referencePrice,
+        anchorBinId: referenceBinId,
+        currentPrice: tick.pool.currentPrice,
+        lowerBinId: currentLowerBinId,
+        upperBinId: currentUpperBinId,
+        binStep: tick.pool.binStep,
+      });
+      const ilCost = Math.max(0, val.hodlValueUsd - val.lpValueUsd);
       const swapCost = portfolioValue * 0.0005;
       const totalCost = ilCost + swapCost;
       const expectedFeesAhead = feesThisTick * cfg.minHoldTicks * 0.7;
@@ -422,8 +620,10 @@ export function runBacktestFromTicks(
         rebalances++;
         totalIl += totalCost;
         portfolioValue -= totalCost;
-        currentLowerBinId = tick.pool.activeBinId - cfg.halfWidth;
-        currentUpperBinId = tick.pool.activeBinId + cfg.halfWidth;
+        currentLowerBinId = tick.pool.activeBinId - effectiveHalfWidth;
+        currentUpperBinId = tick.pool.activeBinId + effectiveHalfWidth;
+        referencePrice = tick.pool.currentPrice;
+        referenceBinId = tick.pool.activeBinId;
         lastRebalanceTick = i;
         let feesInNextWindow = 0;
         for (let j = i + 1; j < Math.min(i + cfg.minHoldTicks, ticks.length); j++) {
@@ -436,30 +636,46 @@ export function runBacktestFromTicks(
         if (feesInNextWindow > totalCost) wins++;
       }
     } else if (binDrift > 0.9 && hasPosition) {
-      // The drift exit costs 0.2% (IL + exit) — apply it BEFORE classifying
-      // the win so an at-cost exit never records as a win (CodeRabbit).
+      // Drift exit realizes the same range-aware IL vs HODL, plus a small exit
+      // cost — apply it BEFORE classifying the win so an at-cost exit never
+      // records as a win.
+      const val = clmmPositionValue({
+        sizeUsd: positionSizeUsd,
+        anchorPrice: referencePrice,
+        anchorBinId: referenceBinId,
+        currentPrice: tick.pool.currentPrice,
+        lowerBinId: currentLowerBinId,
+        upperBinId: currentUpperBinId,
+        binStep: tick.pool.binStep,
+      });
+      const driftIlUsd = Math.max(0, val.hodlValueUsd - val.lpValueUsd);
       const driftExitRealizedUsd =
         (replayPosition?.currentValueUsd ?? positionSizeUsd) +
         positionFeesUsd -
-        portfolioValue * 0.002;
-      totalIl += portfolioValue * 0.002;
-      portfolioValue *= 0.998;
+        driftIlUsd -
+        portfolioValue * 0.0005;
+      totalIl += driftIlUsd;
+      portfolioValue -= driftIlUsd + portfolioValue * 0.0005;
       recordExit("drift", i, driftExitRealizedUsd);
       hasPosition = false;
+      positionSizeUsd = 0;
+      positionPeakUsd = 0;
     } else if (!hasPosition && binDrift < 0.3) {
       hasPosition = true;
       // Same proposed size the replay ENTER path uses, so position value and
       // fee accrual stay consistent after an automatic re-entry.
       positionSizeUsd = Math.min(portfolioValue * 0.2, 2_000);
       positionPeakUsd = positionSizeUsd;
-      currentLowerBinId = tick.pool.activeBinId - cfg.halfWidth;
-      currentUpperBinId = tick.pool.activeBinId + cfg.halfWidth;
+      currentLowerBinId = tick.pool.activeBinId - effectiveHalfWidth;
+      currentUpperBinId = tick.pool.activeBinId + effectiveHalfWidth;
       lastRebalanceTick = i;
       // ponytail: unreachable while the replay ENTER admits every no-position
       // tick, but keep the census hold-trackers correct if that ever changes.
       entryTimestamp = tick.pool.timestamp;
       entryDepositedUsd = positionSizeUsd;
       positionFeesUsd = 0;
+      referencePrice = tick.pool.currentPrice;
+      referenceBinId = tick.pool.activeBinId;
     }
 
     previousTvl = tick.pool.tvlUsd;
@@ -564,7 +780,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
     {
       name: "C1-conservative",
       cfg: {
-        halfWidth: 25,
+        halfWidth: 100,
         driftThreshold: 0.75,
         minHoldTicks: 144,
         minNetBenefitUsd: 15,
@@ -576,7 +792,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
     {
       name: "C2-balanced",
       cfg: {
-        halfWidth: 20,
+        halfWidth: 80,
         driftThreshold: 0.65,
         minHoldTicks: 72,
         minNetBenefitUsd: 10,
@@ -588,7 +804,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
     {
       name: "C3-aggressive",
       cfg: {
-        halfWidth: 15,
+        halfWidth: 60,
         driftThreshold: 0.55,
         minHoldTicks: 36,
         minNetBenefitUsd: 5,
@@ -600,7 +816,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
     {
       name: "C4-wide-patient",
       cfg: {
-        halfWidth: 35,
+        halfWidth: 100,
         driftThreshold: 0.8,
         minHoldTicks: 288,
         minNetBenefitUsd: 25,

@@ -90,6 +90,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     volatilityWideHalfWidthBins: 20,
     entryRangeHalfWidthBins: 0,
     volatilityAdaptiveRanges: false,
+    minRangeHalfWidthPct: 0,
     autoCompoundFees: false,
     minCompoundFeesUsd: 1,
     compoundGasBufferUsd: 0.5,

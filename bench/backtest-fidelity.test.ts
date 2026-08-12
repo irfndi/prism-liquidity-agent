@@ -99,4 +99,60 @@ describe("backtest replay fidelity", () => {
     expect(typeof result.avgHoldHoursByExitReason).toBe("object");
     expect(result.avgHoldHoursByExitReason).toBeDefined();
   }, 15_000);
+
+  describe("concentration-aware fee share (feeShareDilutionRefWidth)", () => {
+    // Two ticks: admission on the first, then a stable in-range hold. The
+    // `fees24hUsd` is identical on both, so a wider range collects MORE total
+    // fees only through the dilution option — this isolates width-independent
+    // (default) vs concentration-penalized (opt-in) fee accounting.
+    const ticks = snapshotsToTicks([
+      makeSnapshot({ timestamp: 1_800_000_000_000 }),
+      makeSnapshot({ timestamp: 1_800_600_000, currentPrice: 150, tvlUsd: 100_000 }),
+      makeSnapshot({ timestamp: 1_801_200_000, currentPrice: 150, tvlUsd: 100_000 }),
+    ]);
+
+    it("default: width-independent fee share (higher fees for wider ranges)", () => {
+      const wide = runBacktestFromTicks(ticks, {
+        ...BASE_CONFIG,
+        halfWidth: 40,
+        minPriceCoveragePct: 0,
+      });
+      const narrow = runBacktestFromTicks(ticks, {
+        ...BASE_CONFIG,
+        halfWidth: 4,
+        minPriceCoveragePct: 0,
+      });
+      // Both ranges are in-range the whole time; the wider range accrues the
+      // same or more fees because the model ignores density.
+      expect(wide.totalFeesUsd).toBeGreaterThanOrEqual(narrow.totalFeesUsd);
+    }, 15_000);
+
+    it("opt-in dilution scales the in-range fee share by refWidth/effectiveWidth", () => {
+      const diluted = runBacktestFromTicks(ticks, {
+        ...BASE_CONFIG,
+        halfWidth: 40,
+        minPriceCoveragePct: 0,
+        feeShareDilutionRefWidth: 4, // 4/40 = 0.1 → ~10% of the undiluted share
+      });
+      const undiluted = runBacktestFromTicks(ticks, {
+        ...BASE_CONFIG,
+        halfWidth: 40,
+        minPriceCoveragePct: 0,
+      });
+      // The diluted position captures roughly a tenth of the fees.
+      expect(diluted.totalFeesUsd).toBeLessThan(0.25 * undiluted.totalFeesUsd);
+      expect(diluted.totalFeesUsd).toBeGreaterThan(0);
+    }, 15_000);
+
+    it("dilution is capped at 1 (never inflates beyond the width-independent model)", () => {
+      // ref > effective → dilution = 1 → identical to no dilution.
+      const capped = runBacktestFromTicks(ticks, {
+        ...BASE_CONFIG,
+        halfWidth: 4,
+        feeShareDilutionRefWidth: 100,
+      });
+      const plain = runBacktestFromTicks(ticks, { ...BASE_CONFIG, halfWidth: 4 });
+      expect(capped.totalFeesUsd).toBe(plain.totalFeesUsd);
+    }, 15_000);
+  });
 });

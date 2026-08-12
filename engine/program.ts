@@ -4149,6 +4149,7 @@ export const program = Effect.gen(function* () {
           adaptiveEnabled: config.volatilityAdaptiveRanges,
           volatilityStddev: candidate.volatilityStddev,
           maxFullRangeBins: config.maxRebalanceRangeBins,
+          minPriceCoveragePct: config.minRangeHalfWidthPct,
         });
 
         // Runner mode (Heart Attack): LAUNCH-lane entries anchor the range
@@ -5771,6 +5772,7 @@ export const program = Effect.gen(function* () {
         adaptiveEnabled: config.volatilityAdaptiveRanges,
         volatilityStddev,
         maxFullRangeBins: config.maxRebalanceRangeBins,
+        minPriceCoveragePct: config.minRangeHalfWidthPct,
       });
 
       // Value estimation per position (feeds the trailing stop and the
