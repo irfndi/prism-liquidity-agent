@@ -2,6 +2,19 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.17] — 2026-08-12
+
+### Added
+
+- **Price-coverage range floor (`MIN_RANGE_HALF_WIDTH_PCT`, default 5%)** — fixes the core profitability blocker on fine-binStep pools. The σ-adaptive range model caps widening at `base × 2`, which on a binStep-4 pool (SOL/USDC) is only ~±2% price — far too narrow to hold a 40%+ swing, so positions fall out of range and bleed unbounded impermanent loss (IL). The new floor lifts the resolved half-width to never-under `minPriceCoveragePct` percent of price coverage each side (same-live `resolveRangeHalfWidth` + a pure `halfWidthForPriceCoveragePct` mirrored into the backtest), bounded by the same `MAX_REBALANCE_RANGE_BINS` risk cap. Coarse pools are untouched; set `MIN_RANGE_HALF_WIDTH_PCT=0` to opt out.
+- **Honest IL model** — `clmmPositionValue` now derives liquidity `L` at the anchor price (the prior model overstated IL ~10×), and the IL-dominance fast EXIT seam is wired into the backtest replay kernel so the honest backtest reflects the live engine's IL protection.
+- **Concentration-aware fee option (`feeShareDilutionRefWidth`)** — the width-independent `size/tvl` fee model overstated fee upside ~5× on widened ranges; the opt-in dilution model bounds range-widening fee claims honestly.
+
+### Backtest result (honest claim)
+
+- **IL collapse is the robust win**: SOL/USDC IL ~$1157 → ~$0 on a 5% price-coverage floor.
+- **Fee upside is bounded, not overstated**: +$122 net under the concentration-aware model vs +$567 width-independent (the width-independent figure ignored dilution).
+
 ## [0.2.16] — 2026-08-11
 
 ### Added
