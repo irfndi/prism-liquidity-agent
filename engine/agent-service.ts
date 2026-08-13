@@ -1,6 +1,6 @@
 import { Effect, Layer } from "effect";
 import type { AppConfig } from "./config-service.js";
-import type { AgentDecision, ActionType } from "./types.js";
+import type { AgentDecision, ActionType, AgentProposal } from "./types.js";
 import type { AgentApi } from "./services.js";
 import { AgentService } from "./services.js";
 import { underlyingErrorMessage } from "./errors.js";
@@ -670,55 +670,72 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
 
           const proposalBudgetMs = config.agentProposalTimeoutMs;
           const prompt = buildProposalPrompt(decision, context);
-          const attemptStart = Date.now();
-          let proposalLatencyRecorded = false;
-          const recordAttemptLatency = () => {
-            if (!proposalLatencyRecorded) {
-              proposalLatencyRecorded = true;
+
+          // One proposal round trip with an optional single retry on PARSE
+          // failure only. The dominant flaky failure from the OpenClaw gateway
+          // is a malformed / non-JSON response ("No JSON object found"), and
+          // those round-trips are fast (seconds) so a retry fits inside the
+          // outer AGENT_PROPOSAL_TIMEOUT_MS deadline. Transport timeouts are
+          // budget-bound and deliberately NOT retried (the outer deadline would
+          // kill the second attempt anyway); they fail open exactly as before.
+          const attempt = (parseRetriesLeft: number): Effect.Effect<AgentProposal | null, never> => {
+            const attemptStart = Date.now();
+            const recordLatency = () =>
               proposalLatencyWindow.record(
                 Math.min(Date.now() - attemptStart, proposalBudgetMs),
                 Date.now(),
               );
-            }
+            return transport.sendPrompt(prompt, context, proposalBudgetMs).pipe(
+              Effect.flatMap((response: AgentRuntimeResponse) => {
+                lastPromptAt = Date.now();
+                recordLatency();
+                return parseProposalResponse(
+                  response.raw,
+                  decision.action,
+                  config.agentProposalStaleMs,
+                ).pipe(
+                  Effect.map((proposal): AgentProposal | null => {
+                    logger.info("Agent proposal", {
+                      pool: decision.poolAddress,
+                      originalAction: decision.action,
+                      proposedAction: proposal.action,
+                      confidence: proposal.confidence.toFixed(2),
+                    });
+                    return proposal;
+                  }),
+                  Effect.catch((parseErr) => {
+                    errorCount += 1;
+                    logger.warn("Agent proposal parse failed", {
+                      pool: decision.poolAddress,
+                      attempt: 2 - parseRetriesLeft,
+                      error: underlyingErrorMessage(parseErr),
+                    });
+                    if (parseRetriesLeft > 0) return attempt(parseRetriesLeft - 1);
+                    return Effect.succeed(null);
+                  }),
+                );
+              }),
+              Effect.catch((err) => {
+                errorCount += 1;
+                recordLatency();
+                logger.warn("Agent proposal failed", {
+                  pool: decision.poolAddress,
+                  error: underlyingErrorMessage(err),
+                });
+                return Effect.succeed(null);
+              }),
+              Effect.catchCause((cause) => {
+                // Interruption (the outer AGENT_PROPOSAL_TIMEOUT_MS deadline in
+                // program.ts) bypasses catch — record the elapsed sample so
+                // the latency window learns the model could not answer, and
+                // fail open (null) exactly like a typed failure.
+                recordLatency();
+                return Effect.succeed(null);
+              }),
+            );
           };
-          return transport.sendPrompt(prompt, context, proposalBudgetMs).pipe(
-            Effect.flatMap((response: AgentRuntimeResponse) => {
-              lastPromptAt = Date.now();
-              recordAttemptLatency();
-              return parseProposalResponse(
-                response.raw,
-                decision.action,
-                config.agentProposalStaleMs,
-              ).pipe(
-                Effect.map((proposal) => {
-                  logger.info("Agent proposal", {
-                    pool: decision.poolAddress,
-                    originalAction: decision.action,
-                    proposedAction: proposal.action,
-                    confidence: proposal.confidence.toFixed(2),
-                  });
-                  return proposal;
-                }),
-              );
-            }),
-            Effect.catch((err) => {
-              errorCount += 1;
-              recordAttemptLatency();
-              logger.warn("Agent proposal failed", {
-                pool: decision.poolAddress,
-                error: underlyingErrorMessage(err),
-              });
-              return Effect.succeed(null);
-            }),
-            Effect.catchCause((cause) => {
-              // Interruption (the outer AGENT_PROPOSAL_TIMEOUT_MS deadline in
-              // program.ts) bypasses catch — record the elapsed sample so
-              // the latency window learns the model could not answer, and
-              // fail open (null) exactly like a typed failure.
-              recordAttemptLatency();
-              return Effect.succeed(null);
-            }),
-          );
+
+          return attempt(1);
         },
 
         // Callers check this BEFORE a sync advisor prompt so a slow model

@@ -264,6 +264,7 @@ const logger = createLogger("adapter-service");
 // reconciliation. A perpetually-unpriceable token (e.g. a dust ATA with no
 // price feed) warns once per process instead of every scan cycle.
 const warnedUnpricedWalletMints = new Set<string>();
+let warnedSplEnumerationFailure = false;
 function warnUnpricedWalletMintOnce(
   mint: string,
   opts?: {
@@ -1634,7 +1635,29 @@ export const AdapterLive = Layer.effect(
 
         // Reconcile EVERY SPL token account the wallet holds, across both the
         // legacy Token Program and Token-2022 (see readWalletHoldingsRaw).
-        const held = yield* readWalletHoldingsRaw();
+        //
+        // Keyless/public RPC endpoints do not all serve
+        // getParsedTokenAccountsByOwner (some return "Method not found", others
+        // 403). When SPL enumeration fails, degrade the snapshot to NATIVE SOL
+        // ONLY — getBalance works on every endpoint — instead of failing the
+        // whole read. Native SOL is real capital and must not be dropped just
+        // because SPL enumeration is unavailable; a degraded (SOL-only)
+        // balance still under-reports SPL holdings, but never fails the cycle
+        // and never over-reports. Warn once per process.
+        const held = yield* readWalletHoldingsRaw().pipe(
+          Effect.catch((err) => {
+            if (!warnedSplEnumerationFailure) {
+              warnedSplEnumerationFailure = true;
+              logger.warn(
+                "SPL token-account enumeration failed — wallet balance degrades to native SOL only (fail-closed)",
+                { error: underlyingErrorMessage(err) },
+              );
+            }
+            return Effect.succeed(
+              new Map<string, { readonly amountAtomic: bigint; readonly decimals: number }>(),
+            );
+          }),
+        );
 
         // Price every discovered mint plus native SOL in ONE batched call.
         // useFallback: false — an unresolvable price becomes 0 below (never a
