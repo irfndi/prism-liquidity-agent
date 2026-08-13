@@ -91,6 +91,8 @@ bun alchemy cloudflare bootstrap
 
 Afterwards CI (`CI=true`, set automatically by GitHub Actions) resolves state-store credentials from the Cloudflare Secrets Store on every run; runners hold no local state.
 
+> **Billing note — "Durable Objects Compute Requests" comes from this state store.** The runtime workers (`prism-api`, `prism-telegram-bot`) are plain Workers and bill only as Workers requests. The single Durable Object in this stack is the Alchemy remote state store declared as `state: Cloudflare.state()` in `infra/alchemy.run.ts`. It is read/written only during `alchemy deploy` (a handful of requests per deploy), never per user request, so its cost is negligible. If you want zero Durable Objects and deploy manually from one machine, remove `state: Cloudflare.state()` from the stack and `alchemy destroy` the bootstrapped store — but this breaks the CI deploy workflow (`CI=true` requires the remote store; stateless runners hold no state).
+
 ### Worker bundling (prebuilt, uploaded as-is)
 
 Workers are built with **esbuild** before every deploy (`bun run build:workers` — the root `deploy` script chains it), producing one runtime-ready ESM module each under `cloudflare/dist/`. Alchemy uploads these with `bundle: false` (Wrangler's `no_bundle` contract: byte-for-byte, no rolldown, no transformation). This is deliberate: alchemy's beta rolldown pipeline produced successful-looking uploads whose bundles had the Hono route registrations stripped — deployed workers answered `404 Not Found` on every path. esbuild reproduces the wrangler-era bundling that served production.
