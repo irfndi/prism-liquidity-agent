@@ -46,8 +46,15 @@ export function retryAfterMs<T>(err: T): number | undefined {
     if (!isObject(value)) return null;
     const getter = value["get"];
     if (isGetter(getter)) {
-      const result = getter("retry-after");
-      if (isStringLike(result)) return result;
+      try {
+        // Native `Headers.get` throws "Can only call Headers.get on instances
+        // of Headers" when invoked detached (`getter("retry-after")`), so bind
+        // `this` back to the headers object. Method-call form is also covered.
+        const result = getter.call(value, "retry-after");
+        if (isStringLike(result)) return result;
+      } catch {
+        // Fall through to the direct property lookup on malformed header shapes.
+      }
     }
     const direct = value["retry-after"] ?? value["Retry-After"];
     if (isStringLike(direct)) return direct;

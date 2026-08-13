@@ -67,6 +67,14 @@ describe("retryAfterMs", () => {
     expect(retryAfterMs({ response: { headers: { "retry-after": "6" } } })).toBe(6000);
   });
 
+  it("parses Retry-After from a native Headers object without throwing", () => {
+    // Regression: the detached `getter("retry-after")` call used to crash on
+    // native Headers ("Can only call Headers.get on instances of Headers").
+    expect(retryAfterMs({ headers: new Headers({ "retry-after": "2" }) })).toBe(2000);
+    expect(retryAfterMs({ response: { headers: new Headers({ "retry-after": "5" }) } })).toBe(5000);
+    expect(retryAfterMs({ headers: new Headers({}) })).toBeUndefined();
+  });
+
   it("parses HTTP-date Retry-After header", () => {
     const retryAt = Date.now() + 5000;
     const date = new Date(retryAt).toUTCString();
