@@ -914,6 +914,8 @@ export const AdapterLive = Layer.effect(
     interface ActiveBinMemo {
       readonly binId: number;
       readonly price: string;
+      /** Real human price (tokenY per tokenX) — pricePerLamport × 10^(decX - decY). */
+      readonly pricePerToken: string;
       readonly fetchedAt: number;
       readonly halfRange: number;
       readonly binsAround: { activeBin: number; bins: BinLiquidity[] } | null;
@@ -937,22 +939,27 @@ export const AdapterLive = Layer.effect(
     function memoizedActiveBin(
       poolAddress: string,
       dlmm: DLMM,
-    ): Effect.Effect<{ binId: number; price: string }, Error> {
+    ): Effect.Effect<{ binId: number; price: string; pricePerToken: string }, Error> {
       return Effect.gen(function* () {
         pruneActiveBinMemo();
         const memo = activeBinMemo.get(poolAddress);
         if (memo && Date.now() - memo.fetchedAt < ACTIVE_BIN_MEMO_TTL_MS) {
-          return { binId: memo.binId, price: memo.price };
+          return { binId: memo.binId, price: memo.price, pricePerToken: memo.pricePerToken };
         }
         const activeBin = yield* Effect.tryPromise(() => dlmm.getActiveBin());
         activeBinMemo.set(poolAddress, {
           binId: activeBin.binId,
           price: activeBin.price,
+          pricePerToken: activeBin.pricePerToken,
           fetchedAt: Date.now(),
           halfRange: 0,
           binsAround: null,
         });
-        return { binId: activeBin.binId, price: activeBin.price };
+        return {
+          binId: activeBin.binId,
+          price: activeBin.price,
+          pricePerToken: activeBin.pricePerToken,
+        };
       });
     }
 
@@ -981,10 +988,11 @@ export const AdapterLive = Layer.effect(
         // the old binId while refreshing fetchedAt would serve a stale active
         // bin for another TTL window, and mixing bins from a newer snapshot
         // with the old id would be internally inconsistent.
-        const binsActivePrice = bins.bins.find((b) => b.binId === bins.activeBin)?.price;
+        const activeBinSnapshot = bins.bins.find((b) => b.binId === bins.activeBin);
         activeBinMemo.set(poolAddress, {
           binId: bins.activeBin,
-          price: binsActivePrice ?? memo?.price ?? "",
+          price: activeBinSnapshot?.price ?? memo?.price ?? "",
+          pricePerToken: activeBinSnapshot?.pricePerToken ?? memo?.pricePerToken ?? "",
           fetchedAt: Date.now(),
           halfRange,
           binsAround: bins,
@@ -2503,7 +2511,12 @@ export const AdapterLive = Layer.effect(
             apr: stats.apr,
             activeBinId: activeBin.binId,
             binStep: lbPair.binStep,
-            currentPrice: Number(activeBin.price),
+            // Real human price (tokenY per tokenX), not the raw geometric
+            // pricePerLamport. The SDK's BinLiquidity.pricePerToken already
+            // folds in the token-decimal scale (pricePerLamport ×
+            // 10^(decX - decY)); the raw price is scale-free and useless as a
+            // USD-like price (it made SOL/USDC report ~0.0758 instead of ~$76).
+            currentPrice: Number(activeBin.pricePerToken || activeBin.price),
             timestamp: Date.now(),
             // tvl comes from on-chain reserves × price, but volume/fees are
             // modeled — see fetchPoolStats. The Meteora Data API overlay in
@@ -2521,6 +2534,29 @@ export const AdapterLive = Layer.effect(
             ),
           ),
         ),
+
+      /**
+       * Legacy raw-price → real-price scale factor for a pool, from the token
+       * decimals already unpacked by DLMM.create: 10^(decX - decY), the exact
+       * per-pool constant pricePerToken / price equals. Used only by the
+       * one-time price-scale backfill. Reads NO extra RPC (getActiveBin is
+       * deliberately avoided — it is the slow/timeout-prone call and the factor
+       * depends only on decimals, which DLMM.create already fetched).
+       */
+      getPriceScale: (poolAddress) =>
+        Effect.gen(function* () {
+          const dlmm = yield* getDlmm(poolAddress);
+          const decX = dlmm.tokenX.mint.decimals;
+          const decY = dlmm.tokenY.mint.decimals;
+          if (!Number.isFinite(decX) || !Number.isFinite(decY)) {
+            return 1;
+          }
+          const factor = 10 ** (decX - decY);
+          if (!Number.isFinite(factor) || factor <= 0) {
+            return 1;
+          }
+          return factor;
+        }),
 
       getBinArray: (poolAddress) =>
         Effect.gen(function* () {

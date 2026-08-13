@@ -24,6 +24,13 @@ import { bigintReplacer } from "./bigint-json.js";
 import { randomUUID } from "crypto";
 import { PersistenceContractError } from "./errors.js";
 
+/**
+ * Metadata flag recording that the legacy raw-price → real-price backfill has
+ * been applied. Written in the SAME transaction as the row rescaling so a
+ * crash mid-apply rolls back and the next startup retries from scratch.
+ */
+export const PRICE_SCALE_MIGRATION_KEY = "price_scale_v2";
+
 export interface PositionRecord {
   /**
    * Position identity and primary key: the on-chain position pubkey for live
@@ -748,6 +755,44 @@ export const DbLive = (dbPath?: string) =>
             runOne(db, "DELETE FROM pool_snapshots WHERE timestamp < ?", olderThanMs);
             const row = queryOne<{ n: number }>(db, "SELECT changes() as n");
             return row?.n ?? 0;
+          }),
+
+        applyPriceScaleMigration: (updates) =>
+          Effect.try({
+            try: () => {
+              const now = Date.now();
+              return db.transaction(() => {
+                let positions = 0;
+                let snapshots = 0;
+                for (const { poolAddress, factor } of updates) {
+                  if (!Number.isFinite(factor) || factor <= 0) continue;
+                  const p = db
+                    .prepare(
+                      "UPDATE positions SET entry_price_usd = entry_price_usd * ? WHERE pool_address = ? AND entry_price_usd IS NOT NULL",
+                    )
+                    .run(factor, poolAddress);
+                  positions += p.changes;
+                  const s = db
+                    .prepare(
+                      "UPDATE pool_snapshots SET current_price = current_price * ? WHERE pool_address = ?",
+                    )
+                    .run(factor, poolAddress);
+                  snapshots += s.changes;
+                }
+                runOne(
+                  db,
+                  "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, ?)",
+                  PRICE_SCALE_MIGRATION_KEY,
+                  "applied",
+                  now,
+                );
+                return { positions, snapshots };
+              })();
+            },
+            catch: (e) =>
+              new Error(
+                `applyPriceScaleMigration failed: ${e instanceof Error ? e.message : String(e)}`,
+              ),
           }),
 
         saveFeedback: (entry) =>

@@ -36,7 +36,7 @@ import type { EvolvableThresholds } from "./strategy-service.js";
 import { BlacklistLive } from "./blacklist-service.js";
 import { AuditLive } from "./audit-service.js";
 import { ScreenerLive } from "./screener-service.js";
-import { DbLive } from "./db-service.js";
+import { DbLive, PRICE_SCALE_MIGRATION_KEY } from "./db-service.js";
 import { RevenueConfigServiceLive } from "./revenue-config-service.js";
 import { AgentStateMutable, initialSnapshot, type PositionSnapshot } from "./state-service.js";
 import { McpServerLive } from "./mcp-server.js";
@@ -2693,6 +2693,74 @@ export const buildPositionSnapshots = (
     hoursHeld: (Date.now() - p.timestamp) / 3_600_000,
   }));
 
+/**
+ * One-time legacy raw-price → real-price backfill. `getPoolState` now reports
+ * `pricePerToken` (real human price); legacy rows stored the raw geometric
+ * `pricePerLamport` (SOL/USDC showed ~0.0758 instead of ~$76). Each pool's
+ * stored prices are rescaled by its per-pool constant (pricePerToken / price)
+ * exactly once. FAIL-CLOSED: every factor must resolve (one RPC failure fails
+ * the program before the scan loop starts — the engine must never evaluate a
+ * position with raw `entry_price_usd` against real `currentPrice`, which would
+ * fabricate a ~1000x HODL/IL signal), then ONE transaction applies the rescale
+ * + flag so a crash mid-apply rolls back and the next startup retries.
+ */
+const PRICE_SCALE_FACTOR_PREFIX = "price_scale_factor:";
+
+function priceScaleFactorKey(poolAddress: string): string {
+  return `${PRICE_SCALE_FACTOR_PREFIX}${poolAddress}`;
+}
+
+function runPriceScaleBackfill(db: DbApi, adapter: AdapterApi): Effect.Effect<void, Error> {
+  return Effect.gen(function* () {
+    const applied = yield* db.getMetadata(PRICE_SCALE_MIGRATION_KEY);
+    if (applied === "applied") return;
+
+    const positions = yield* db.getAllPositions();
+    const snapshotPools = yield* db.getSnapshotPools();
+    const pools = new Set<string>();
+    for (const pos of positions) {
+      if (pos.entryPriceUsd != null) pools.add(pos.poolAddress);
+    }
+    for (const pool of snapshotPools) pools.add(pool);
+
+    // Resolve each pool's scale factor, reusing the persistent per-pool cache so
+    // a transient RPC failure on one pool never discards the factors already
+    // resolved for the rest (progress survives restarts). The factor is a
+    // per-pool constant (token decimals), so caching it is exact.
+    const updates: Array<{ poolAddress: string; factor: number }> = [];
+    for (const pool of pools) {
+      const key = priceScaleFactorKey(pool);
+      const cached = yield* db.getMetadata(key).pipe(Effect.catch(() => Effect.succeed(null)));
+      if (cached != null) {
+        const cachedFactor = Number(cached);
+        if (Number.isFinite(cachedFactor) && cachedFactor > 0) {
+          updates.push({ poolAddress: pool, factor: cachedFactor });
+          continue;
+        }
+      }
+      const factor = adapter.getPriceScale ? yield* adapter.getPriceScale(pool) : 1;
+      if (!Number.isFinite(factor) || factor <= 0) {
+        return yield* Effect.fail(
+          new Error(`Price-scale backfill: invalid factor ${factor} for ${pool}`),
+        );
+      }
+      yield* db.setMetadata(key, String(factor)).pipe(Effect.catch(() => Effect.void));
+      updates.push({ poolAddress: pool, factor });
+    }
+
+    const result = db.applyPriceScaleMigration
+      ? yield* db.applyPriceScaleMigration(updates)
+      : { positions: 0, snapshots: 0 };
+    if (result.positions > 0 || result.snapshots > 0) {
+      logger.warn("Price-scale backfill applied (legacy raw prices rescaled to real)", {
+        pools: pools.size,
+        positions: result.positions,
+        snapshots: result.snapshots,
+      });
+    }
+  });
+}
+
 export const program = Effect.gen(function* () {
   const config = yield* ConfigService;
   const adapter = yield* AdapterService;
@@ -2729,6 +2797,11 @@ export const program = Effect.gen(function* () {
   const alertSvc = yield* AlertService;
   const copySignalsOption = yield* Effect.serviceOption(CopySignalService);
 
+  // Rescale legacy raw prices to real units exactly once BEFORE positions are
+  // loaded into memory, so trackedPositions sees the same real prices the DB
+  // now holds (idempotent, all-or-nothing; see runPriceScaleBackfill).
+  yield* runPriceScaleBackfill(db, adapter);
+
   // Load persisted positions at startup (keyed by position identity — a pool
   // may hold several positions).
   const allPositions = yield* db.getAllPositions().pipe(Effect.catch(() => Effect.succeed([])));
@@ -2736,6 +2809,7 @@ export const program = Effect.gen(function* () {
   for (const pos of allPositions) {
     trackedPositions.set(pos.positionId, pos);
   }
+
   const entryFailureBackoff = new Map<string, EntryFailureBackoff>();
   let activeSafetyPause =
     autonomousExecution === null

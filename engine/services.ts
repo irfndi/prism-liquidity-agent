@@ -164,6 +164,15 @@ export interface AdapterApi {
   readonly getPoolState: (poolAddress: string) => Effect.Effect<PoolState, Error>;
   readonly getBinArray: (poolAddress: string) => Effect.Effect<BinArray, Error>;
   /**
+   * Legacy raw-price → real-price scale factor for a pool (pricePerToken /
+   * price = 10^(decX - decY)). Constant per pool; used only by the one-time
+   * price-scale backfill so existing raw `entry_price_usd` / `current_price`
+   * rows can be rescaled to the units `getPoolState` now reports. Optional so
+   * test mocks compile unchanged; the backfill treats its absence as a factor
+   * of 1 (no-op).
+   */
+  readonly getPriceScale?: (poolAddress: string) => Effect.Effect<number, Error>;
+  /**
    * Fetch the top-N pages (1000 pools each) of the TVL-ranked Meteora
    * universe in ONE call — the market-scan universe refresh. Unlike the
    * rotating single-page `discoverPools`, this returns every pool from
@@ -1173,6 +1182,18 @@ export interface DbApi {
   readonly getSnapshotPools: () => Effect.Effect<ReadonlyArray<string>, Error>;
   readonly getSnapshotCount: (poolAddress: string) => Effect.Effect<number, Error>;
   readonly pruneSnapshots: (olderThanMs: number) => Effect.Effect<number, Error>;
+  /**
+   * One-time price-scale backfill: rescale legacy raw (pricePerLamport)
+   * `entry_price_usd` and `current_price` rows to real (pricePerToken) units
+   * for the given pools, then mark the migration applied — ALL in a single
+   * SQLite transaction so a crash mid-apply rolls back atomically and the
+   * next startup retries from scratch (never double-scales). Returns the
+   * number of position and snapshot rows rescaled. Optional so test mocks
+   * compile unchanged.
+   */
+  readonly applyPriceScaleMigration?: (
+    updates: ReadonlyArray<{ readonly poolAddress: string; readonly factor: number }>,
+  ) => Effect.Effect<{ readonly positions: number; readonly snapshots: number }, Error>;
   readonly saveFeedback: (entry: {
     id: string;
     agentId: string;

@@ -36,10 +36,23 @@ function makeFakeDlmm() {
     },
     tokenX: { publicKey: TOKEN_X, mint: { decimals: 9 } },
     tokenY: { publicKey: TOKEN_Y, mint: { decimals: 6 } },
-    getActiveBin: vi.fn(async () => ({ binId: ACTIVE_BIN_ID, price: "150" })),
+    getActiveBin: vi.fn(async () => ({
+      binId: ACTIVE_BIN_ID,
+      price: "150",
+      pricePerToken: "150",
+    })),
     getBinsAroundActiveBin: vi.fn(async () => ({
       activeBin: ACTIVE_BIN_ID,
-      bins: [{ binId: ACTIVE_BIN_ID, price: "150", xAmount: 1n, yAmount: 1n, supply: 1n }],
+      bins: [
+        {
+          binId: ACTIVE_BIN_ID,
+          price: "150",
+          pricePerToken: "150",
+          xAmount: 1n,
+          yAmount: 1n,
+          supply: 1n,
+        },
+      ],
     })),
   };
 }
@@ -191,5 +204,23 @@ describe("active-bin memoization (RPC dedup)", () => {
     );
     vi.restoreAllMocks();
     expect(dlmm.getBinsAroundActiveBin).toHaveBeenCalledTimes(2);
+  });
+
+  it("getPriceScale returns 10^(decX - decY) without fetching the active bin", async () => {
+    const layer = makeAdapterLayer();
+    // Fake DLMM already carries tokenX.mint.decimals = 9, tokenY.mint.decimals = 6.
+
+    const factor = await Effect.runPromise(
+      Effect.provide(
+        Effect.gen(function* () {
+          const adapter = yield* AdapterService;
+          return yield* adapter.getPriceScale!(POOL_ADDRESS);
+        }),
+        layer,
+      ),
+    );
+
+    expect(factor).toBeCloseTo(1000, 6);
+    expect(dlmmState.current!.getActiveBin).not.toHaveBeenCalled();
   });
 });

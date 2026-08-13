@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { asOwner } from "./helpers.js";
 import { Effect, Layer } from "effect";
-import { DbLive } from "../engine/db-service.js";
+import { DbLive, PRICE_SCALE_MIGRATION_KEY, type PositionRecord } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 import type { SettlementJobRecord } from "../engine/types.js";
 
@@ -9,7 +9,7 @@ function run<T, R>(effect: Effect.Effect<T, Error, R>, layer: Layer.Layer<R, nev
   return Effect.runSync(Effect.provide(effect, layer) as Effect.Effect<T, Error, never>);
 }
 
-function makePosition(poolAddress: string, paperExitedAt: number | null = null) {
+function makePosition(poolAddress: string, paperExitedAt: number | null = null): PositionRecord {
   return {
     positionId: `paper-${poolAddress}`,
     poolAddress,
@@ -303,5 +303,81 @@ describe("DbService — setMetadataBatch (Gemini review)", () => {
       }),
       layer,
     );
+  });
+});
+
+describe("DbService — price-scale migration", () => {
+  it("rescales legacy raw entry_price_usd and current_price and marks applied", () => {
+    const layer = DbLive(":memory:");
+    const result = run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const pos = makePosition("PoolA", null);
+        pos.entryPriceUsd = 0.0758; // legacy raw pricePerLamport (SOL/USDC)
+        yield* db.savePosition(pos);
+        yield* db.saveSnapshot({
+          poolAddress: "PoolA",
+          timestamp: Date.now(),
+          activeBinId: 5000,
+          tvlUsd: 1000,
+          volume24hUsd: 100,
+          fees24hUsd: 10,
+          apr: 1,
+          currentPrice: 0.0737,
+          binStep: 10,
+          tokenXSymbol: "SOL",
+          tokenYSymbol: "USDC",
+          binArray: {
+            lowerBinId: 4980,
+            upperBinId: 5020,
+            bins: [{ binId: 5000, price: 0.0737, reserveX: 1n, reserveY: 1n, liquiditySupply: 1n }],
+            activeBinId: 5000,
+            binStep: 10,
+            reservesKnown: true,
+          },
+          statsSource: "heuristic",
+        });
+
+        const applied = yield* db.applyPriceScaleMigration!([
+          { poolAddress: "PoolA", factor: 1000 },
+        ]);
+        return {
+          applied,
+          position: yield* db.getPosition(pos.positionId),
+          latestPrice: yield* db.getLatestSnapshotPrice("PoolA"),
+          flag: yield* db.getMetadata(PRICE_SCALE_MIGRATION_KEY),
+        };
+      }),
+      layer,
+    );
+
+    expect(result.applied).toEqual({ positions: 1, snapshots: 1 });
+    expect(result.position?.entryPriceUsd).toBeCloseTo(75.8, 6);
+    expect(result.latestPrice).toBeCloseTo(73.7, 6);
+    expect(result.flag).toBe("applied");
+  });
+
+  it("factor 1 (equal-decimals pool) is a no-op but still marks applied", () => {
+    const layer = DbLive(":memory:");
+    const result = run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const pos = makePosition("PoolB", null);
+        pos.entryPriceUsd = 42.5; // already real (meme/USDC, 6/6 decimals)
+        yield* db.savePosition(pos);
+
+        const applied = yield* db.applyPriceScaleMigration!([{ poolAddress: "PoolB", factor: 1 }]);
+        return {
+          applied,
+          position: yield* db.getPosition(pos.positionId),
+          flag: yield* db.getMetadata(PRICE_SCALE_MIGRATION_KEY),
+        };
+      }),
+      layer,
+    );
+
+    expect(result.applied).toEqual({ positions: 1, snapshots: 0 });
+    expect(result.position?.entryPriceUsd).toBeCloseTo(42.5, 6);
+    expect(result.flag).toBe("applied");
   });
 });
