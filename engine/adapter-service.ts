@@ -3121,12 +3121,16 @@ export const AdapterLive = Layer.effect(
           // Pre-close wallet holdings WITHOUT pricing (a price lookup must not
           // delay broadcasting an exit) and a FORCED native-SOL read (bypasses
           // the 30s cache so the measured delta covers only the close window).
-          // Both are best-effort with a short deadline: a degraded primary RPC
-          // must not postpone a risk-driven EXIT through the full retry chain
-          // (2 × 15s attempts per rpcCall, repeatable on the fallback).
+          // The SPL holdings baseline comes from the 30s cache: the scan cycle
+          // populates it at the top of every pass, so it is already fresh and
+          // returns instantly — a live `getParsedTokenAccountsByOwner` here is
+          // exactly what times out on a degraded RPC and silently falls back
+          // to the known-understating SDK snapshot (the phantom-loss path).
+          // A cache miss still re-fetches and stays bounded by the short
+          // deadline, so the exit is never postponed.
           const preClose = yield* Effect.all(
             {
-              held: readWalletHoldingsRaw().pipe(Effect.catch(() => Effect.succeed(null))),
+              held: cachedWalletHoldings.pipe(Effect.catch(() => Effect.succeed(null))),
               nativeSol: readNativeSolBalance({ force: true }).pipe(
                 Effect.catch(() => Effect.succeed(null)),
               ),
@@ -3178,6 +3182,11 @@ export const AdapterLive = Layer.effect(
           // which is exactly what the settlement must sell — same-mint rewards
           // are excluded because the exit books them separately. Falls back to
           // the SDK snapshot when the delta is unmeasurable or non-positive.
+          //
+          // The post-close read runs AFTER the close txs have confirmed, so a
+          // slow read here only delays the accounting (never the exit) — give
+          // it a generous deadline so the measured delta survives a degraded
+          // RPC instead of silently booking the understating snapshot.
           const afterSnapshot = yield* Effect.all(
             {
               held: readWalletHoldingsRaw().pipe(Effect.catch(() => Effect.succeed(null))),
@@ -3185,7 +3194,7 @@ export const AdapterLive = Layer.effect(
             },
             { concurrency: "unbounded" },
           ).pipe(
-            Effect.timeout(Duration.millis(2000)),
+            Effect.timeout(Duration.millis(20000)),
             Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
           );
           const measuredX = measureWithdrawalDelta({
