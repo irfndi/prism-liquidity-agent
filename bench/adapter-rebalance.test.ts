@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { asOwner } from "./helpers.js";
+import type { PositionData, RebalanceWithDeposit, RebalanceWithWithdraw } from "@meteora-ag/dlmm";
 import { Effect, Layer } from "effect";
 import {
   Connection,
@@ -113,11 +115,11 @@ function makeFakeDlmm(opts: {
       ? vi.fn(
           async (
             _positionAddress: PublicKey,
-            _positionData: unknown,
+            _positionData: PositionData,
             _shouldClaimFee: boolean,
             _shouldClaimReward: boolean,
-            _deposits: unknown,
-            _withdraws: unknown,
+            _deposits: Array<RebalanceWithDeposit>,
+            _withdraws: Array<RebalanceWithWithdraw>,
           ) => {
             throw opts.simulateError;
           },
@@ -125,11 +127,11 @@ function makeFakeDlmm(opts: {
       : vi.fn(
           async (
             _positionAddress: PublicKey,
-            _positionData: unknown,
+            _positionData: PositionData,
             _shouldClaimFee: boolean,
             _shouldClaimReward: boolean,
-            _deposits: unknown,
-            _withdraws: unknown,
+            _deposits: Array<RebalanceWithDeposit>,
+            _withdraws: Array<RebalanceWithWithdraw>,
           ) => simulation,
         ),
     rebalancePosition: opts.rebalanceError
@@ -207,13 +209,13 @@ function mockRpcSendPipeline(): Transaction[] {
     return Promise.resolve(`mock-sig-${n}`);
   });
   vi.spyOn(Connection.prototype, "confirmTransaction").mockImplementation(() =>
-    Promise.resolve(undefined as unknown as never),
+    Promise.resolve(asOwner<never>(undefined)),
   );
   return sent;
 }
 
 function mockTokenPrices(): () => void {
-  return mockFetch((async (url: string | URL | Request) => {
+  return mockFetch(async (url: string | URL | Request) => {
     const u = String(url as unknown);
     if (u.includes("api.jup.ag/price/v3")) {
       return new Response(
@@ -225,7 +227,7 @@ function mockTokenPrices(): () => void {
       );
     }
     return new Response("unexpected", { status: 500 });
-  }) as unknown as typeof fetch);
+  });
 }
 
 afterEach(() => {

@@ -2,9 +2,29 @@
  * $1.00. Pure decision logic + the wiring proof: a below-floor pending claim
  * is skipped and the claim interval is NOT re-armed; a healthy claim runs. */
 import { describe, expect, it, vi } from "vitest";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonRecord = { [key: string]: JsonValue };
+type ClaimResult = {
+  feeX: number;
+  feeY: number;
+  platformFeeX: number;
+  platformFeeY: number;
+  netFeeX: bigint;
+  netFeeY: bigint;
+  txSignature: string;
+  netFeesUsd?: number;
+};
 import { Effect } from "effect";
 import { evaluateHarvestGate, program } from "../engine/program.js";
-import { makePool, makePosition, makeTestLayer, makeAdapter, makeDatapiStats } from "./helpers.js";
+import {
+  makePool,
+  makePosition,
+  makeTestLayer,
+  makeAdapter,
+  makeDatapiStats,
+  asOwner,
+} from "./helpers.js";
 import { DbService } from "../engine/services.js";
 import type { PositionRecord } from "../engine/db-service.js";
 
@@ -64,7 +84,7 @@ describe("evaluateHarvestGate (pure decision)", () => {
 describe("claim wiring (cadence-block gate)", () => {
   async function runClaimCycle(overrides: {
     pendingUsd: number;
-    claimFeesImpl: () => Effect.Effect<Record<string, unknown>, never, never>;
+    claimFeesImpl: () => Effect.Effect<ClaimResult, never, never>;
   }): Promise<{ saved: PositionRecord | undefined; claimCalls: number }> {
     const claimSpy = vi.fn(overrides.claimFeesImpl);
     const layer = makeTestLayer({
@@ -123,11 +143,7 @@ describe("claim wiring (cadence-block gate)", () => {
       return saved;
     });
     const saved = (await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        PositionRecord | undefined,
-        Error,
-        never
-      >,
+      asOwner<Effect.Effect<PositionRecord | undefined, Error, never>>(Effect.provide(test, layer)),
     )) as PositionRecord | undefined;
     return { saved, claimCalls: claimSpy.mock.calls.length };
   }

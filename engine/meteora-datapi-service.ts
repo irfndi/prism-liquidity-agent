@@ -12,24 +12,65 @@ const MAX_RETRIES = 2;
 
 // ─── Response validation ─────────────────────────────────────────────────────
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+interface RawWindowMap {
+  readonly "24h": unknown;
+  readonly "12h": unknown;
+  readonly "1h": unknown;
 }
 
-function readNumber(obj: Record<string, unknown>, key: string): number | null {
-  const value = obj[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+interface RawDatapiToken {
+  readonly freeze_authority_disabled: unknown;
+  readonly is_verified: unknown;
 }
 
-function readBoolean(obj: Record<string, unknown>, key: string): boolean | null {
-  const value = obj[key];
-  return typeof value === "boolean" ? value : null;
+interface RawDatapiPoolConfig {
+  readonly base_fee_pct: unknown;
 }
 
-function readWindow(obj: Record<string, unknown>, key: string, window: string): number | null {
-  const nested = obj[key];
-  if (!isObject(nested)) return null;
-  return readNumber(nested, window);
+interface RawDatapiPool {
+  readonly address: unknown;
+  readonly name: unknown;
+  readonly tvl: unknown;
+  readonly volume: RawWindowMap;
+  readonly fees: RawWindowMap;
+  readonly apr: unknown;
+  readonly apy: unknown;
+  readonly current_price: unknown;
+  readonly fee_tvl_ratio: RawWindowMap;
+  readonly dynamic_fee_pct: unknown;
+  readonly pool_config: unknown;
+  readonly has_farm: unknown;
+  readonly farm_apr: unknown;
+  readonly farm_apy: unknown;
+  readonly is_blacklisted: unknown;
+  readonly token_x: unknown;
+  readonly token_y: unknown;
+}
+
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
+}
+
+function readString<T>(value: T): string | null {
+  return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
+}
+
+function readNumber<T>(value: T): number | null {
+  return Object.prototype.toString.call(value) === "[object Number]" &&
+    Number.isFinite(value as number)
+    ? (value as number)
+    : null;
+}
+
+function readBoolean<T>(value: T): boolean | null {
+  return Object.prototype.toString.call(value) === "[object Boolean]" ? (value as boolean) : null;
+}
+
+function readWindow(
+  obj: RawWindowMap | null | undefined,
+  window: keyof RawWindowMap,
+): number | null {
+  return readNumber(obj?.[window]);
 }
 
 /**
@@ -37,42 +78,45 @@ function readWindow(obj: Record<string, unknown>, key: string, window: string): 
  * fields are missing (likely an upstream schema change) so the caller falls
  * back to heuristic metrics instead of consuming garbage.
  */
-export function parseMeteoraPoolStats(raw: unknown): MeteoraPoolStats | null {
-  if (!isObject(raw)) return null;
-  const address = raw["address"];
-  const tvl = readNumber(raw, "tvl");
-  const volume24h = readWindow(raw, "volume", "24h");
-  const fees24h = readWindow(raw, "fees", "24h");
-  const apr = readNumber(raw, "apr");
-  if (typeof address !== "string" || address.length === 0) return null;
+export function parseMeteoraPoolStats<T>(raw: T): MeteoraPoolStats | null {
+  if (!isNonNullObject(raw)) return null;
+  const report = raw as RawDatapiPool;
+  const address = readString(report.address);
+  if (address === null || address.length === 0) return null;
+  const tvl = readNumber(report.tvl);
+  const volume24h = readWindow(report.volume, "24h");
+  const fees24h = readWindow(report.fees, "24h");
+  const apr = readNumber(report.apr);
   if (tvl === null || volume24h === null || fees24h === null || apr === null) return null;
 
-  const tokenX = isObject(raw["token_x"]) ? raw["token_x"] : {};
-  const tokenY = isObject(raw["token_y"]) ? raw["token_y"] : {};
-  const poolConfig = isObject(raw["pool_config"]) ? raw["pool_config"] : {};
+  const tokenX = isNonNullObject(report.token_x) ? (report.token_x as RawDatapiToken) : null;
+  const tokenY = isNonNullObject(report.token_y) ? (report.token_y as RawDatapiToken) : null;
+  const poolConfig = isNonNullObject(report.pool_config)
+    ? (report.pool_config as RawDatapiPoolConfig)
+    : null;
 
   return {
     address,
-    name: typeof raw["name"] === "string" ? raw["name"] : "",
+    name: readString(report.name) ?? "",
     tvlUsd: tvl,
     volume24hUsd: volume24h,
     fees24hUsd: fees24h,
     apr,
-    apy: readNumber(raw, "apy") ?? 0,
-    currentPrice: readNumber(raw, "current_price") ?? 0,
-    feeTvlRatio24h: readWindow(raw, "fee_tvl_ratio", "24h"),
-    feeTvlRatio12h: readWindow(raw, "fee_tvl_ratio", "12h"),
-    feeTvlRatio1h: readWindow(raw, "fee_tvl_ratio", "1h"),
-    dynamicFeePct: readNumber(raw, "dynamic_fee_pct"),
-    baseFeePct: readNumber(poolConfig, "base_fee_pct"),
-    hasFarm: readBoolean(raw, "has_farm"),
-    farmApr: readNumber(raw, "farm_apr"),
-    farmApy: readNumber(raw, "farm_apy"),
-    isBlacklisted: readBoolean(raw, "is_blacklisted"),
-    tokenXFreezeAuthorityDisabled: readBoolean(tokenX, "freeze_authority_disabled"),
-    tokenYFreezeAuthorityDisabled: readBoolean(tokenY, "freeze_authority_disabled"),
-    tokenXVerified: readBoolean(tokenX, "is_verified"),
-    tokenYVerified: readBoolean(tokenY, "is_verified"),
+    apy: readNumber(report.apy) ?? 0,
+    currentPrice: readNumber(report.current_price) ?? 0,
+    feeTvlRatio24h: readWindow(report.fee_tvl_ratio, "24h"),
+    feeTvlRatio12h: readWindow(report.fee_tvl_ratio, "12h"),
+    feeTvlRatio1h: readWindow(report.fee_tvl_ratio, "1h"),
+    dynamicFeePct: readNumber(report.dynamic_fee_pct),
+    baseFeePct: readNumber(poolConfig?.base_fee_pct),
+    hasFarm: readBoolean(report.has_farm),
+    farmApr: readNumber(report.farm_apr),
+    farmApy: readNumber(report.farm_apy),
+    isBlacklisted: readBoolean(report.is_blacklisted),
+    tokenXFreezeAuthorityDisabled: readBoolean(tokenX?.freeze_authority_disabled),
+    tokenYFreezeAuthorityDisabled: readBoolean(tokenY?.freeze_authority_disabled),
+    tokenXVerified: readBoolean(tokenX?.is_verified),
+    tokenYVerified: readBoolean(tokenY?.is_verified),
   };
 }
 

@@ -354,7 +354,7 @@ export function applyDbConfigOverrides(
   base: AppConfig,
   overrides: ReadonlyMap<string, string>,
 ): AppConfig {
-  let next = base as AppConfig & Record<string, unknown>;
+  let next: AppConfig = base;
 
   for (const spec of DB_CONFIG_KEYS) {
     // Env wins over the DB, always.
@@ -383,8 +383,11 @@ export function applyDbConfigOverrides(
     // Narrowed writes: booleans and numbers spread cleanly onto both optional
     // (absent = safe off) and required AppConfig fields. A malformed row is
     // silently dropped above, never clamped into a fake value.
-    if (typeof value === "boolean" || typeof value === "number") {
-      next = { ...next, [spec.field]: value };
+    if (
+      Object.prototype.toString.call(value) === "[object Boolean]" ||
+      Object.prototype.toString.call(value) === "[object Number]"
+    ) {
+      next = { ...next, [spec.field]: value as boolean | number };
     }
   }
 
@@ -404,12 +407,16 @@ export function applyDbConfigOverrides(
       binMinRaw === undefined ? binMinSpec.default : parseDbConfigValue(binMinSpec, binMinRaw);
     const binMax =
       binMaxRaw === undefined ? binMaxSpec.default : parseDbConfigValue(binMaxSpec, binMaxRaw);
-    if (typeof binMin === "number" && typeof binMax === "number" && binMin > binMax) {
+    const binMinNum =
+      Object.prototype.toString.call(binMin) === "[object Number]" ? (binMin as number) : undefined;
+    const binMaxNum =
+      Object.prototype.toString.call(binMax) === "[object Number]" ? (binMax as number) : undefined;
+    if (binMinNum !== undefined && binMaxNum !== undefined && binMinNum > binMaxNum) {
       logger.warn("Inverted market-scan bin-step range; raising max to min", {
-        marketScanMinBinStep: binMin,
-        marketScanMaxBinStep: binMax,
+        marketScanMinBinStep: binMinNum,
+        marketScanMaxBinStep: binMaxNum,
       });
-      next = { ...next, [binMinSpec.field]: binMin, [binMaxSpec.field]: binMin };
+      next = { ...next, [binMinSpec.field]: binMinNum, [binMaxSpec.field]: binMinNum };
     }
   }
 

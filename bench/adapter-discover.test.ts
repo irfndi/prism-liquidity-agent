@@ -64,6 +64,10 @@ async function runDiscoverFlip(layer: Layer.Layer<AdapterService, never, never>)
   });
   return Effect.runPromise(Effect.flip(Effect.provide(program, layer)));
 }
+/** Normalize a fetch input to its string URL for assertions. */
+function asFetchUrl(input: string | URL | Request): string {
+  return input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+}
 
 describe("AdapterService.discoverPools", () => {
   afterEach(() => {
@@ -72,7 +76,7 @@ describe("AdapterService.discoverPools", () => {
 
   it("returns parsed pools when the API responds 200 with the official envelope shape", async () => {
     const restore = mockFetch(
-      (async () =>
+      async () =>
         new Response(
           JSON.stringify({
             total: 2,
@@ -117,7 +121,7 @@ describe("AdapterService.discoverPools", () => {
             ],
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
-        )) as unknown as typeof fetch,
+        ),
     );
     try {
       const layer = buildAdapterLayer({ discoveryMinTvlUsd: 100_000 });
@@ -142,7 +146,7 @@ describe("AdapterService.discoverPools", () => {
 
   it("rejects a flat array response (the legacy /pair/all shape) as a non-envelope", async () => {
     const restore = mockFetch(
-      (async () =>
+      async () =>
         new Response(
           JSON.stringify([
             {
@@ -157,7 +161,7 @@ describe("AdapterService.discoverPools", () => {
             },
           ]),
           { status: 200 },
-        )) as unknown as typeof fetch,
+        ),
     );
     try {
       const layer = buildAdapterLayer();
@@ -170,9 +174,7 @@ describe("AdapterService.discoverPools", () => {
   });
 
   it("surfaces an explicit failure when the API responds 404 (not silently empty)", async () => {
-    const restore = mockFetch(
-      (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch,
-    );
+    const restore = mockFetch(async () => new Response("not found", { status: 404 }));
     try {
       const layer = buildAdapterLayer();
       const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
@@ -184,9 +186,7 @@ describe("AdapterService.discoverPools", () => {
   });
 
   it("surfaces an explicit failure when the API responds 500 (not silently empty)", async () => {
-    const restore = mockFetch(
-      (async () => new Response("server error", { status: 500 })) as unknown as typeof fetch,
-    );
+    const restore = mockFetch(async () => new Response("server error", { status: 500 }));
     try {
       const layer = buildAdapterLayer();
       const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
@@ -199,11 +199,11 @@ describe("AdapterService.discoverPools", () => {
 
   it("surfaces an explicit failure when the response body is not valid JSON", async () => {
     const restore = mockFetch(
-      (async () =>
+      async () =>
         new Response("not json at all", {
           status: 200,
           headers: { "Content-Type": "text/html" },
-        })) as unknown as typeof fetch,
+        }),
     );
     try {
       const layer = buildAdapterLayer();
@@ -217,10 +217,10 @@ describe("AdapterService.discoverPools", () => {
 
   it("surfaces an explicit failure when the response body is JSON but not an array", async () => {
     const restore = mockFetch(
-      (async () =>
+      async () =>
         new Response(JSON.stringify({ error: "rate limited" }), {
           status: 200,
-        })) as unknown as typeof fetch,
+        }),
     );
     try {
       const layer = buildAdapterLayer();
@@ -233,9 +233,9 @@ describe("AdapterService.discoverPools", () => {
   });
 
   it("surfaces an explicit failure when fetch throws a network error", async () => {
-    const restore = mockFetch((async () => {
+    const restore = mockFetch(async () => {
       throw new Error("ENOTFOUND dlmm-api.meteora.ag");
-    }) as unknown as typeof fetch);
+    });
     try {
       const layer = buildAdapterLayer();
       const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
@@ -247,14 +247,12 @@ describe("AdapterService.discoverPools", () => {
   });
 
   it("the error carries a typed _tag field DiscoverPoolsError so callers can branch on it", async () => {
-    const restore = mockFetch(
-      (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch,
-    );
+    const restore = mockFetch(async () => new Response("not found", { status: 404 }));
     try {
       const layer = buildAdapterLayer();
       const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
       expect(err._tag).toBe("DiscoverPoolsError");
-      expect(typeof err.message).toBe("string");
+      expect(err.message).toBeTypeOf("string");
       expect((err.message ?? "").toLowerCase()).toContain("404");
     } finally {
       restore();
@@ -263,13 +261,13 @@ describe("AdapterService.discoverPools", () => {
 
   it("uses the URL from config.meteoraPoolsUrl (not a hardcoded process.env read)", async () => {
     let requestedUrl = "";
-    const restore = mockFetch((async (input: unknown) => {
-      requestedUrl = String(input);
+    const restore = mockFetch(async (input: string | URL | Request) => {
+      requestedUrl = asFetchUrl(input);
       return new Response(
         JSON.stringify({ total: 0, pages: 0, current_page: 1, page_size: 0, data: [] }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
-    }) as unknown as typeof fetch);
+    });
     try {
       const layer = buildAdapterLayer({
         meteoraPoolsUrl: "https://my-mock-api.example.com/pools",
@@ -283,13 +281,13 @@ describe("AdapterService.discoverPools", () => {
 
   it("falls back to the default URL when config.meteoraPoolsUrl is an empty string", async () => {
     let requestedUrl = "";
-    const restore = mockFetch((async (input: unknown) => {
-      requestedUrl = String(input);
+    const restore = mockFetch(async (input: string | URL | Request) => {
+      requestedUrl = asFetchUrl(input);
       return new Response(
         JSON.stringify({ total: 0, pages: 0, current_page: 1, page_size: 0, data: [] }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
-    }) as unknown as typeof fetch);
+    });
     try {
       const layer = buildAdapterLayer({ meteoraPoolsUrl: "" });
       await runDiscover(layer);
@@ -304,7 +302,7 @@ describe("AdapterService.discoverPools", () => {
   it("drops pool objects with invalid shape and returns the valid ones (with a logged warning)", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const restore = mockFetch(
-      (async () =>
+      async () =>
         new Response(
           JSON.stringify({
             total: 3,
@@ -338,7 +336,7 @@ describe("AdapterService.discoverPools", () => {
             ],
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
-        )) as unknown as typeof fetch,
+        ),
     );
     try {
       const layer = buildAdapterLayer();
@@ -346,9 +344,8 @@ describe("AdapterService.discoverPools", () => {
       expect(Array.isArray(result)).toBe(true);
       expect(result).toHaveLength(1);
       expect(result[0]?.address).toBe("PoolValid11111111111111111111111111111111111");
-      const shapeWarn = warnSpy.mock.calls.find(
-        (call) =>
-          typeof call[0] === "string" && call[0].includes("some pool objects had invalid shape"),
+      const shapeWarn = warnSpy.mock.calls.find((call) =>
+        String(call[0]).includes("some pool objects had invalid shape"),
       );
       expect(shapeWarn).toBeDefined();
       expect(shapeWarn?.[1]).toMatchObject({ dropped: 2, kept: 1, total: 3, pages: 1 });
@@ -361,7 +358,7 @@ describe("AdapterService.discoverPools", () => {
   it("fails with DiscoverPoolsError when the envelope is valid but ALL pool objects have invalid shape (P2 schema-error guard)", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const restore = mockFetch(
-      (async () =>
+      async () =>
         new Response(
           JSON.stringify({
             total: 2,
@@ -371,16 +368,15 @@ describe("AdapterService.discoverPools", () => {
             data: [{ address: "Bad1" }, { address: "Bad2" }],
           }),
           { status: 200 },
-        )) as unknown as typeof fetch,
+        ),
     );
     try {
       const layer = buildAdapterLayer();
       const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
       expect(err._tag).toBe("DiscoverPoolsError");
       expect(err.message?.toLowerCase()).toContain("none matched the expected shape");
-      const shapeWarn = warnSpy.mock.calls.find(
-        (call) =>
-          typeof call[0] === "string" && call[0].includes("ALL pool objects had invalid shape"),
+      const shapeWarn = warnSpy.mock.calls.find((call) =>
+        String(call[0]).includes("ALL pool objects had invalid shape"),
       );
       expect(shapeWarn).toBeDefined();
       expect(shapeWarn?.[1]).toMatchObject({ dropped: 2, kept: 0, total: 2, pages: 1 });
@@ -393,19 +389,18 @@ describe("AdapterService.discoverPools", () => {
   it("does NOT trigger the all-fail guard when the envelope has an empty data array (zero pools is fine)", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const restore = mockFetch(
-      (async () =>
+      async () =>
         new Response(
           JSON.stringify({ total: 0, pages: 0, current_page: 1, page_size: 0, data: [] }),
           { status: 200 },
-        )) as unknown as typeof fetch,
+        ),
     );
     try {
       const layer = buildAdapterLayer();
       const result = await runDiscover(layer);
       expect(result).toEqual([]);
-      const allFailWarn = warnSpy.mock.calls.find(
-        (call) =>
-          typeof call[0] === "string" && call[0].includes("ALL pool objects had invalid shape"),
+      const allFailWarn = warnSpy.mock.calls.find((call) =>
+        String(call[0]).includes("ALL pool objects had invalid shape"),
       );
       expect(allFailWarn).toBeUndefined();
     } finally {
@@ -417,7 +412,7 @@ describe("AdapterService.discoverPools", () => {
   it("drops pools where volume['24h'] is not a number (gap 1 regression)", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const restore = mockFetch(
-      (async () =>
+      async () =>
         new Response(
           JSON.stringify({
             total: 2,
@@ -448,7 +443,7 @@ describe("AdapterService.discoverPools", () => {
             ],
           }),
           { status: 200 },
-        )) as unknown as typeof fetch,
+        ),
     );
     try {
       const layer = buildAdapterLayer();
@@ -464,7 +459,7 @@ describe("AdapterService.discoverPools", () => {
   it("drops pools where fees['24h'] is not a number (gap 1 regression)", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const restore = mockFetch(
-      (async () =>
+      async () =>
         new Response(
           JSON.stringify({
             total: 2,
@@ -495,7 +490,7 @@ describe("AdapterService.discoverPools", () => {
             ],
           }),
           { status: 200 },
-        )) as unknown as typeof fetch,
+        ),
     );
     try {
       const layer = buildAdapterLayer();
@@ -509,11 +504,11 @@ describe("AdapterService.discoverPools", () => {
   });
 
   it("maps an AbortError from fetch to a DiscoverPoolsError (gap 2 fetch timeout)", async () => {
-    const restore = mockFetch((async () => {
+    const restore = mockFetch(async () => {
       const err = new Error("The operation was aborted");
       err.name = "AbortError";
       throw err;
-    }) as unknown as typeof fetch);
+    });
     try {
       const layer = buildAdapterLayer();
       const err = (await runDiscoverFlip(layer)) as { _tag?: string; message?: string };
@@ -529,9 +524,9 @@ describe("Meteora discovery pagination", () => {
   it("uses the API page count to rotate AdapterLive discovery requests", async () => {
     // Given
     const requestedUrls: string[] = [];
-    const restore = mockFetch((async (input: unknown) => {
-      requestedUrls.push(String(input));
-      const requested = new URL(String(input)).searchParams;
+    const restore = mockFetch(async (input: string | URL | Request) => {
+      requestedUrls.push(asFetchUrl(input));
+      const requested = new URL(asFetchUrl(input)).searchParams;
       return new Response(
         JSON.stringify({
           total: 3,
@@ -542,7 +537,7 @@ describe("Meteora discovery pagination", () => {
         }),
         { status: 200 },
       );
-    }) as unknown as typeof fetch);
+    });
 
     try {
       await runRecurringDiscover(

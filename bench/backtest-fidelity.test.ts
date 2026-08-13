@@ -95,8 +95,8 @@ describe("backtest replay fidelity", () => {
 
   it("the result shape includes winrate + avg-hold by exit reason", () => {
     const result = runWithBins(makeBinArray(5000), true);
-    expect(typeof result.winrateByExitReason).toBe("object");
-    expect(typeof result.avgHoldHoursByExitReason).toBe("object");
+    expect(result.winrateByExitReason).toBeTypeOf("object");
+    expect(result.avgHoldHoursByExitReason).toBeTypeOf("object");
     expect(result.avgHoldHoursByExitReason).toBeDefined();
   }, 15_000);
 

@@ -7,10 +7,16 @@ import { getPrismUserConfigDir } from "../engine/paths.js";
 const CREDENTIALS_FILE = path.join(getPrismUserConfigDir(), "credentials.json");
 
 // Tier display info
-const TIER_INFO: Record<
-  string,
-  { name: string; maxProfit: string; monthlyFee: string; features: string[] }
-> = {
+interface TierInfo {
+  readonly name: string;
+  readonly maxProfit: string;
+  readonly monthlyFee: string;
+  readonly features: readonly string[];
+}
+
+type TierName = keyof typeof TIER_INFO;
+
+const TIER_INFO = {
   free: {
     name: "Free",
     maxProfit: "1 SOL/month",
@@ -35,7 +41,7 @@ const TIER_INFO: Record<
       "Custom strategies",
     ],
   },
-};
+} satisfies Record<string, TierInfo>;
 
 function getCredentials() {
   if (!fs.existsSync(CREDENTIALS_FILE)) {
@@ -74,7 +80,7 @@ export const subscriptionCommand = new Command("subscription")
       }
 
       const { tier, walletSol, referralCount, credits, platformFeeRate } = result.data;
-      const info = (TIER_INFO[tier] ?? TIER_INFO.free)!;
+      const info = (TIER_INFO[tier as TierName] ?? TIER_INFO.free)!;
 
       console.log(`Tier: ${info.name}`);
       console.log(`Wallet: ${walletSol.toFixed(2)} SOL`);
@@ -99,12 +105,12 @@ export const subscriptionCommand = new Command("subscription")
           process.exit(1);
         }
 
-        if (!TIER_INFO[tier]) {
+        if (!TIER_INFO[tier as TierName]) {
           console.error(`Error: Unknown tier '${tier}'. Available: pro, fund`);
           process.exit(1);
         }
 
-        const info = TIER_INFO[tier];
+        const info = TIER_INFO[tier as TierName];
 
         console.log(`Upgrade to ${info.name}`);
         console.log(`Monthly fee: ${info.monthlyFee}`);
@@ -178,7 +184,7 @@ export const subscriptionCommand = new Command("subscription")
 
         // Import revenue service
         void import("../engine/revenue-service.js").then(({ TIERS }) => {
-          const tier = TIERS[tierName];
+          const tier = TIERS[tierName as keyof typeof TIERS];
           if (!tier) {
             console.error(`Error: Unknown tier '${tierName}'`);
             process.exit(1);

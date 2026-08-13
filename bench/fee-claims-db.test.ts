@@ -24,21 +24,7 @@ function makeFeeClaim(
     reportedToApi: boolean;
     createdAt: number;
   }> = {},
-): {
-  id: string;
-  poolAddress: string;
-  positionPubkey: string;
-  feeX: number;
-  feeY: number;
-  platformFeeX: number;
-  platformFeeY: number;
-  netFeeX: number;
-  netFeeY: number;
-  txSignature: string | null;
-  feeTransferTxSignature: string | null;
-  reportedToApi: boolean;
-  createdAt: number;
-} {
+) {
   return {
     id: overrides.id ?? randomUUID(),
     poolAddress: overrides.poolAddress ?? "PoolA111111111111111111111111111111111111111",

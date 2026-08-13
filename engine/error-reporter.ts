@@ -16,6 +16,7 @@ import { Effect } from "effect";
 import { join } from "path";
 import { getPrismUserConfigDir } from "./paths.js";
 import { readTelemetryPreference } from "./telemetry-preference.js";
+import type { JsonValue } from "./services.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -45,9 +46,9 @@ export interface ErrorReport {
   readonly stack: string;
   readonly category: ErrorCategory;
   readonly severity: ErrorSeverity;
-  readonly cycleId?: string;
-  readonly poolAddress?: string;
-  readonly metadata?: Record<string, unknown>;
+  cycleId?: string;
+  poolAddress?: string;
+  readonly metadata?: JsonValue;
 }
 
 export interface ErrorReporterConfig {
@@ -65,12 +66,28 @@ export interface BatchPayload {
   readonly reports: ReadonlyArray<ErrorReport>;
 }
 
+/** Request headers built without ever assigning `undefined`. */
+type ErrorBatchHeaders = Record<string, string>;
+
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
 const DEFAULT_ERROR_ENDPOINT = "https://prism-api.irfndi.workers.dev/v1/errors/batch";
 const DEFAULT_FLUSH_INTERVAL_MS = 60_000;
 const DEFAULT_BATCH_SIZE = 5;
 const MAX_PENDING_BUFFER = 1000;
+
+interface PrismEnv {
+  readonly PRISM_ERROR_ENDPOINT?: string;
+  readonly PRISM_ERROR_REPORTING?: string;
+  readonly PRISM_AGENT_ID?: string;
+}
+
+/** Reads Prism-specific env vars without touching `process` in non-Node runtimes. */
+function getPrismEnv(): PrismEnv {
+  const processEnv = (globalThis as { readonly process?: { readonly env?: Readonly<PrismEnv> } })
+    .process?.env;
+  return processEnv ?? {};
+}
 function readPrismApiKey(): Effect.Effect<string | null, never> {
   return Effect.try({
     try: () => {
@@ -79,7 +96,10 @@ function readPrismApiKey(): Effect.Effect<string | null, never> {
       const value = JSON.parse(readFileSync(credentialsFile, "utf-8")) as {
         apiKey?: unknown;
       };
-      return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
+      return Object.prototype.toString.call(value.apiKey) === "[object String]" &&
+        (value.apiKey as string).length > 0
+        ? (value.apiKey as string)
+        : null;
     },
     catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
   }).pipe(Effect.catch(() => Effect.succeed(null)));
@@ -183,11 +203,9 @@ export class ErrorReporter {
   private _missingCredentialWarned = false;
 
   constructor(config: ErrorReporterConfig = {}) {
-    const explicitEndpoint =
-      config.endpoint ??
-      (typeof process !== "undefined" ? process.env.PRISM_ERROR_ENDPOINT : undefined);
-    const reportingEnv =
-      typeof process !== "undefined" ? process.env.PRISM_ERROR_REPORTING : undefined;
+    const env = getPrismEnv();
+    const explicitEndpoint = config.endpoint ?? env.PRISM_ERROR_ENDPOINT;
+    const reportingEnv = env.PRISM_ERROR_REPORTING;
     const optOut = config.optOut ?? !readTelemetryPreference().enabled;
     const explicitEnabled = config.enabled ?? reportingEnv !== "false";
     const envDisabled = reportingEnv === "false";
@@ -195,7 +213,7 @@ export class ErrorReporter {
       explicitEndpoint ??
       (explicitEnabled && !envDisabled && !optOut ? DEFAULT_ERROR_ENDPOINT : undefined);
     this.enabled = explicitEnabled && !envDisabled && !optOut;
-    this.agentId = config.agentId ?? process.env.PRISM_AGENT_ID ?? "engine";
+    this.agentId = config.agentId ?? env.PRISM_AGENT_ID ?? "engine";
     this.batchSize = config.batchSize ?? DEFAULT_BATCH_SIZE;
     this.flushIntervalMs = config.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
 
@@ -203,8 +221,8 @@ export class ErrorReporter {
       this.timerId = setInterval(() => {
         Effect.runFork(this.flushEffect());
       }, this.flushIntervalMs);
-      // Allow the process to exit even if the timer is still active
-      if (typeof this.timerId === "object" && this.timerId !== null && "unref" in this.timerId) {
+      // Allow the process to exit even if the timer is still active (Bun/Node return a Timeout object)
+      if (this.timerId !== null && this.timerId instanceof Object && "unref" in this.timerId) {
         (this.timerId as NodeJS.Timeout).unref();
       }
     }
@@ -231,9 +249,9 @@ export class ErrorReporter {
       stack: sanitizedStack,
       category,
       severity: context?.severity ?? "medium",
-      ...(context?.cycleId !== undefined ? { cycleId: context.cycleId } : {}),
-      ...(context?.poolAddress !== undefined ? { poolAddress: context.poolAddress } : {}),
     };
+    if (context?.cycleId !== undefined) report.cycleId = context.cycleId;
+    if (context?.poolAddress !== undefined) report.poolAddress = context.poolAddress;
 
     if (this.pending.length >= MAX_PENDING_BUFFER) {
       this.pending.shift();
@@ -274,7 +292,7 @@ export class ErrorReporter {
         version: this.appVersion,
         reports: batch,
       };
-      const headers: Record<string, string> = {
+      const headers: ErrorBatchHeaders = {
         "Content-Type": "application/json",
       };
       if (apiKey) {

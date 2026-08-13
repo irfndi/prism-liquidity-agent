@@ -11,6 +11,10 @@ import { DbService } from "../engine/services.js";
 
 const CLI = join(fileURLToPath(new URL("..", import.meta.url)), "cli", "index.ts");
 
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonRecord = { [key: string]: JsonValue };
+
 let testDirectory: string | null = null;
 
 afterEach(() => {
@@ -20,9 +24,7 @@ afterEach(() => {
   }
 });
 
-function createChildEnvironment(
-  overrides: Readonly<Record<string, string>>,
-): Record<string, string> {
+function createChildEnvironment(overrides: Readonly<Record<string, string>>) {
   const environment: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined) environment[key] = value;
@@ -42,13 +44,13 @@ function decode(output: Uint8Array): string {
   return new TextDecoder().decode(output);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function isJsonRecord(value: JsonValue): value is JsonRecord {
+  return Object.prototype.toString.call(value) === "[object Object]";
 }
 
-function decodeJsonObject(output: Uint8Array): Record<string, unknown> {
-  const parsed: unknown = JSON.parse(decode(output));
-  if (!isRecord(parsed)) {
+function decodeJsonObject(output: Uint8Array): JsonRecord {
+  const parsed: JsonValue = JSON.parse(decode(output));
+  if (!isJsonRecord(parsed)) {
     throw new Error("CLI JSON output must be an object");
   }
   return parsed;

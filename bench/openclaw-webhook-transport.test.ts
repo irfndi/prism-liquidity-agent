@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonRecord = { [key: string]: JsonValue };
 import { Effect } from "effect";
 import { OpenClawWebhookTransport } from "../engine/openclaw-webhook-transport.js";
 import type { AgentRuntimeContext } from "../engine/agent-transport.js";
@@ -56,13 +59,13 @@ function makeContext(): AgentRuntimeContext {
 
 describe("OpenClawWebhookTransport", () => {
   it("includes the prompt in the webhook payload", async () => {
-    let capturedBody: unknown = null;
+    let capturedBody: JsonRecord | null = null;
 
     const server = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
       fetch: async (request) => {
-        capturedBody = await request.json();
+        capturedBody = (await request.json()) as JsonRecord;
         return Response.json({ action: "HOLD", confidence: 0.65, reasoning: "ok" });
       },
     });
@@ -81,8 +84,8 @@ describe("OpenClawWebhookTransport", () => {
         type: "prism_prompt",
         prompt,
       });
-      expect((capturedBody as Record<string, unknown>).decision).toBeDefined();
-      expect((capturedBody as Record<string, unknown>).pool).toBeDefined();
+      expect(capturedBody!.decision).toBeDefined();
+      expect(capturedBody!.pool).toBeDefined();
     } finally {
       void server.stop();
     }

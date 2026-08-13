@@ -77,14 +77,32 @@ export interface GeckoOhlcvSignals {
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+interface RawOhlcvAttrs {
+  readonly ohlcv_list: unknown;
 }
 
-function readFiniteNumber(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number(value);
+interface RawOhlcvData {
+  readonly attributes: RawOhlcvAttrs;
+}
+
+interface RawOhlcvResponse {
+  readonly data: RawOhlcvData;
+}
+
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
+}
+
+function readFiniteNumber<T>(value: T): number | null {
+  if (Object.prototype.toString.call(value) === "[object Number]") {
+    const num = value as number;
+    return Number.isFinite(num) ? num : null;
+  }
+  if (
+    Object.prototype.toString.call(value) === "[object String]" &&
+    (value as string).trim().length > 0
+  ) {
+    const parsed = Number(value as string);
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
@@ -96,13 +114,14 @@ function readFiniteNumber(value: unknown): number | null {
  * close are dropped (dead/corrupt candle — a positive close is required to
  * compute log returns and drawdown).
  */
-export function parseGeckoOhlcv(raw: unknown): ReadonlyArray<GeckoOhlcvBar> {
-  if (!isObject(raw)) return [];
-  const data = raw["data"];
-  if (!isObject(data)) return [];
-  const attrs = data["attributes"];
-  if (!isObject(attrs)) return [];
-  const list = attrs["ohlcv_list"];
+export function parseGeckoOhlcv<T>(raw: T): ReadonlyArray<GeckoOhlcvBar> {
+  if (!isNonNullObject(raw)) return [];
+  const response = raw as RawOhlcvResponse;
+  const data = response.data;
+  if (!isNonNullObject(data)) return [];
+  const attrs = data.attributes;
+  if (!isNonNullObject(attrs)) return [];
+  const list = attrs.ohlcv_list;
   if (!Array.isArray(list)) return [];
 
   const bars: GeckoOhlcvBar[] = [];

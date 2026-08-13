@@ -87,7 +87,7 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
 
                   if (discoveryFeeToTvlRatio < screenerConfig.minFeeRatio) return null;
 
-                  return {
+                  const candidate: ScreenedPool = {
                     address: pool.address,
                     tvlUsd: pool.tvlUsd,
                     volume24hUsd: pool.volume24hUsd,
@@ -98,8 +98,10 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
                     binUtilization: 0,
                     tokenX: pool.tokenX,
                     tokenY: pool.tokenY,
-                    ...(pool.createdAtMs === undefined ? {} : { createdAtMs: pool.createdAtMs }),
                   };
+                  return pool.createdAtMs !== undefined
+                    ? { ...candidate, createdAtMs: pool.createdAtMs }
+                    : candidate;
                 },
                 catch: (error) => (error instanceof Error ? error : new Error(String(error))),
               }).pipe(Effect.catch(() => Effect.succeed(null)));

@@ -45,12 +45,13 @@
     "chalk": "^6.0.0",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
-    "effect": "4.0.0-beta.105",
+    "effect": "4.0.0-rc.108",
     "semver": "^7.8.5",
     "sqlite-vec": "^0.1.9"
   },
   "devDependencies": {
     "@effect/tsgo": "0.35.0",
+    "@oxlint/plugins": "1.78.0",
     "@types/node": "^26.1.2",
     "@types/semver": "^7.8.0",
     "@vitest/coverage-istanbul": "^4.1.10",

@@ -34,7 +34,7 @@ import {
   type MeteoraPoolStats,
   type MemoryApi,
 } from "../engine/services.js";
-import { defaultAppConfig, makePool, makeBinArray, mockFetch } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, mockFetch, asOwner } from "./helpers.js";
 import { stringifySafe } from "../engine/bigint-json.js";
 import { clearTokenRiskCache } from "../engine/token-risk-service.js";
 
@@ -265,16 +265,18 @@ async function runOneCycle(layer: ReturnType<typeof makeTestLayer>) {
     return yield* audit.getRecentDecisions(50);
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as unknown as Effect.Effect<
-      ReadonlyArray<{
-        poolAddress: string;
-        action: string;
-        reasoning: string;
-        riskResult: { approved: boolean; reason: string };
-      }>,
-      Error,
-      never
-    >,
+    asOwner<
+      Effect.Effect<
+        ReadonlyArray<{
+          poolAddress: string;
+          action: string;
+          reasoning: string;
+          riskResult: { approved: boolean; reason: string };
+        }>,
+        Error,
+        never
+      >
+    >(Effect.provide(test, layer)),
   );
 }
 

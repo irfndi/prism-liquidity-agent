@@ -11,19 +11,8 @@ interface LockfileData {
   readonly timestamp: number;
 }
 
-function isNodeError(err: unknown): err is NodeJS.ErrnoException {
-  return err instanceof Error && "code" in err;
-}
-
-function isObject(err: unknown): err is Record<string, unknown> {
-  return typeof err === "object" && err !== null;
-}
-
-function isLockfileData(parsed: unknown): parsed is LockfileData {
-  if (!isObject(parsed)) return false;
-  if (typeof parsed.pid !== "number") return false;
-  if (typeof parsed.timestamp !== "number") return false;
-  return true;
+function isNodeError(cause: unknown): cause is NodeJS.ErrnoException {
+  return cause instanceof Error && "code" in cause;
 }
 
 export function ensureLockfileDir(lockfileDir = LOCKFILE_DIR): void {
@@ -35,13 +24,12 @@ export function ensureLockfileDir(lockfileDir = LOCKFILE_DIR): void {
 export function readLockfile(lockfilePath = LOCKFILE_PATH): LockfileData | null {
   try {
     const content = fs.readFileSync(lockfilePath, "utf-8");
-    const parsed: unknown = JSON.parse(content);
-    if (isLockfileData(parsed)) {
-      return parsed;
-    }
-    return null;
-  } catch (err) {
-    if (isNodeError(err) && err.code === "ENOENT") {
+    const parsed = JSON.parse(content) as LockfileData | null;
+    if (parsed === null) return null;
+    if (!Number.isFinite(parsed.pid) || !Number.isFinite(parsed.timestamp)) return null;
+    return parsed;
+  } catch (cause) {
+    if (isNodeError(cause) && cause.code === "ENOENT") {
       return null;
     }
     return null;
@@ -85,8 +73,7 @@ export function findRunningEngineProcess(
       timeout: 3000,
     });
     if (result.error || !result.stdout) return null;
-    const stdout =
-      typeof result.stdout === "string" ? result.stdout : result.stdout.toString("utf-8");
+    const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf-8") : result.stdout;
     const lines = stdout.trim().split("\n").slice(1);
     for (const line of lines) {
       const trimmed = line.trim();

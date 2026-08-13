@@ -67,6 +67,16 @@ interface PoolMeta {
   readonly tokenYSymbol: string;
 }
 
+/** GeckoTerminal pool attributes consumed by history import. */
+interface GeckoPoolAttributes {
+  readonly name?: string;
+  readonly reserve_in_usd?: string;
+}
+
+interface GeckoPoolPayload {
+  readonly data?: { readonly attributes?: GeckoPoolAttributes };
+}
+
 interface CliArgs {
   pools: ReadonlyArray<string>;
   dbPath: string;
@@ -109,13 +119,11 @@ function fetchPoolMeta(address: string, connection: Connection): Effect.Effect<P
       if (!poolRes.ok) {
         throw new Error(`GeckoTerminal pool ${address}: HTTP ${poolRes.status}`);
       }
-      const poolJson = (await poolRes.json()) as {
-        data?: { attributes?: Record<string, unknown> };
-      };
-      const attrs = poolJson.data?.attributes ?? {};
-      const name = (attrs.name as string | undefined) ?? "";
+      const poolJson = (await poolRes.json()) as GeckoPoolPayload;
+      const attrs = poolJson.data?.attributes;
+      const name = attrs?.name ?? "";
       const [xSym, ySym] = name.split("/").map((s) => s.trim());
-      const tvlStr = attrs.reserve_in_usd as string | undefined;
+      const tvlStr = attrs?.reserve_in_usd;
       const tvlUsd = tvlStr ? Number(tvlStr) : 0;
 
       return {

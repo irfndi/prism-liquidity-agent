@@ -75,13 +75,15 @@ export interface GitHubRelease {
 }
 
 export const R2_PUBLIC_URL = "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev";
+/** Outbound request headers (valid HeadersInit value form). */
+type FetchHeaders = Record<string, string>;
 export const R2_RELEASES_BUCKET = "prism-backups";
-export const R2_MANIFEST_PATHS: Record<"stable" | "beta" | "dev" | "canary", string> = {
+export const R2_MANIFEST_PATHS = {
   stable: "releases/latest.json",
   beta: "releases/channel/beta.json",
   dev: "releases/channel/dev.json",
   canary: "releases/channel/canary.json",
-};
+} as const;
 
 export function fetchR2Manifest(
   channel: "stable" | "beta" | "dev" | "canary",
@@ -130,7 +132,7 @@ export function fetchGitHubRelease(
         ? `https://api.github.com/repos/${repo}/releases/latest`
         : `https://api.github.com/repos/${repo}/releases`;
 
-    const headers: Record<string, string> = {
+    const headers: FetchHeaders = {
       "User-Agent": "prism-liquidity-agent",
       Accept: "application/vnd.github.v3+json",
     };
@@ -191,7 +193,7 @@ export function fetchGitHubRelease(
       }
 
       pageCount++;
-      const pageHeaders: Record<string, string> = {
+      const pageHeaders: FetchHeaders = {
         "User-Agent": "prism-liquidity-agent",
         Accept: "application/vnd.github.v3+json",
       };

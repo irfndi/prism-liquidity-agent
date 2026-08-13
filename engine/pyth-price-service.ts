@@ -49,12 +49,13 @@ export const PYTH_FEED_IDS = {
   USDT: "0x2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b",
 } as const;
 
-const SYMBOL_FEED_IDS: Readonly<Record<string, string>> = PYTH_FEED_IDS;
+const SYMBOL_FEED_IDS = PYTH_FEED_IDS;
 
 /** Resolve a symbol (SOL, USDC, USDT — case-insensitive) to its verified
  *  mainnet feed ID, or null when the symbol is not in the built-in map. */
 export function resolveFeedId(symbol: string): string | null {
-  return SYMBOL_FEED_IDS[symbol.trim().toUpperCase()] ?? null;
+  const key = symbol.trim().toUpperCase() as keyof typeof SYMBOL_FEED_IDS;
+  return SYMBOL_FEED_IDS[key] ?? null;
 }
 
 /**
@@ -79,16 +80,37 @@ export type PythParseResult =
 
 // ─── Response parsing (docs-verified shape) ──────────────────────────────────
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+interface RawPythPrice {
+  readonly price: unknown;
+  readonly expo: unknown;
+  readonly publish_time: unknown;
+}
+
+interface RawPythEntry {
+  readonly id: unknown;
+  readonly price: unknown;
+}
+
+interface RawPythParsed {
+  readonly parsed: unknown;
+}
+
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
 }
 
 /** Parse a Hermes number field (numeric in practice; a numeric string is
  *  tolerated) into a finite number, else null. */
-function readFiniteNumber(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number(value);
+function readFiniteNumber<T>(value: T): number | null {
+  if (Object.prototype.toString.call(value) === "[object Number]") {
+    const num = value as number;
+    return Number.isFinite(num) ? num : null;
+  }
+  if (
+    Object.prototype.toString.call(value) === "[object String]" &&
+    (value as string).trim().length > 0
+  ) {
+    const parsed = Number(value as string);
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
@@ -102,34 +124,43 @@ function readFiniteNumber(value: unknown): number | null {
  * `maxStalenessMs`, `malformed` for any structural/numeric problem. `nowMs` is
  * injectable so staleness is unit-testable without fake timers.
  */
-export function parsePythPriceUpdate(
-  raw: unknown,
+export function parsePythPriceUpdate<T>(
+  raw: T,
   maxStalenessMs: number,
   nowMs: number = Date.now(),
 ): PythParseResult {
-  if (!isObject(raw)) return { kind: "malformed" };
-  const parsed = raw["parsed"];
+  if (!isNonNullObject(raw)) return { kind: "malformed" };
+  const parsed = (raw as RawPythParsed).parsed;
   if (!Array.isArray(parsed) || parsed.length === 0) return { kind: "malformed" };
-  const entry: unknown = parsed[0];
-  if (!isObject(entry)) return { kind: "malformed" };
-  const price = entry["price"];
-  if (!isObject(price)) return { kind: "malformed" };
+  const entry = parsed[0];
+  if (!isNonNullObject(entry)) return { kind: "malformed" };
+  const entryObj = entry as RawPythEntry;
+  const price = entryObj.price;
+  if (!isNonNullObject(price)) return { kind: "malformed" };
+  const priceObj = price as RawPythPrice;
 
-  const rawPrice = price["price"];
-  if (typeof rawPrice !== "string") return { kind: "malformed" };
-
-  // expo is mathematically a base-10 exponent: USD = intPrice × 10^expo. Pyth
-  // crypto feeds use -8; any non-integer or positive value is a schema break.
-  const expo: unknown = price["expo"];
-  if (typeof expo !== "number" || !Number.isInteger(expo) || expo > 0) {
+  const rawPrice = priceObj.price;
+  if (Object.prototype.toString.call(rawPrice) !== "[object String]") {
     return { kind: "malformed" };
   }
 
+  // expo is mathematically a base-10 exponent: USD = intPrice × 10^expo. Pyth
+  // crypto feeds use -8; any non-integer or positive value is a schema break.
+  const expo = priceObj.expo;
+  if (
+    Object.prototype.toString.call(expo) !== "[object Number]" ||
+    !Number.isInteger(expo as number) ||
+    (expo as number) > 0
+  ) {
+    return { kind: "malformed" };
+  }
+  const expoNum = expo as number;
+
   const priceNum = Number(rawPrice);
-  const scaled = priceNum * 10 ** expo;
+  const scaled = priceNum * 10 ** expoNum;
   if (!Number.isFinite(scaled) || scaled <= 0) return { kind: "malformed" };
 
-  const publishTimeSec = readFiniteNumber(price["publish_time"]);
+  const publishTimeSec = readFiniteNumber(priceObj.publish_time);
   if (publishTimeSec === null || publishTimeSec <= 0) return { kind: "malformed" };
   const publishTimeMs = publishTimeSec * 1000;
 
@@ -137,13 +168,13 @@ export function parsePythPriceUpdate(
     return { kind: "stale", publishTimeMs };
   }
 
-  const id: unknown = entry["id"];
+  const id = entryObj.id;
   return {
     kind: "ok",
     point: {
       priceUsd: scaled,
       publishTimeMs,
-      feedId: typeof id === "string" ? id : "",
+      feedId: Object.prototype.toString.call(id) === "[object String]" ? (id as string) : "",
     },
   };
 }
@@ -173,6 +204,9 @@ export function clearPythCacheForTest(): void {
 }
 
 // ─── Fetcher (fail-open: never throws, null = unknown price) ─────────────────
+
+/** Optional request headers built without ever assigning `undefined`. */
+type PythHeaders = Record<string, string>;
 
 /**
  * Fetch one feed's USD price from Hermes. NEVER throws and never crashes a
@@ -210,7 +244,7 @@ export async function fetchPythPriceUsd(
   }
 
   const url = `${effectiveBase}/v2/updates/price/latest?ids[]=${encodeURIComponent(feedId)}&parsed=true`;
-  const headers: Record<string, string> = {};
+  const headers: PythHeaders = {};
   const apiKey = options.apiKey?.trim();
   if (apiKey !== undefined && apiKey.length > 0) {
     headers["Authorization"] = `Bearer ${apiKey}`;

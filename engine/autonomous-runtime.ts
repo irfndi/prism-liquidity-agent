@@ -275,10 +275,13 @@ export interface DailyEquityBaseline {
   readonly equityUsd: number;
 }
 
-function dailyBaselineKeys(scope: DailyEquityBaselineScope): {
+/** Owner contract for the metadata keys of a scope's daily equity baseline. */
+interface DailyBaselineKeys {
   readonly day: string;
   readonly equity: string;
-} {
+}
+
+function dailyBaselineKeys(scope: DailyEquityBaselineScope): DailyBaselineKeys {
   const prefix = `dailyBaseline:${encodeURIComponent(scope.walletAddress)}:${encodeURIComponent(scope.agentInstanceId)}`;
   return { day: `${prefix}:day`, equity: `${prefix}:equityUsd` };
 }
@@ -335,7 +338,7 @@ const TRANSIENT_HTTP_STATUS =
 const TRANSIENT_NETWORK =
   /fetch failed|timeout|timed out|timedout|aborted|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket hang up|connection refused|connection reset|network error|too many requests/i;
 
-export function isTransientSettlementError(error: unknown): boolean {
+export function isTransientSettlementError<T>(error: T): boolean {
   const message = error instanceof Error ? error.message : String(error);
   // Anchored to HTTP-status context — a bare \b\d{3}\b would classify
   // deterministic messages like "need 500 lamports" as transient and retry
@@ -343,7 +346,7 @@ export function isTransientSettlementError(error: unknown): boolean {
   return TRANSIENT_HTTP_STATUS.test(message) || TRANSIENT_NETWORK.test(message);
 }
 
-function retryableJob(job: SettlementJobRecord, now: number, error: unknown): SettlementJobRecord {
+function retryableJob<T>(job: SettlementJobRecord, now: number, error: T): SettlementJobRecord {
   const attempts = job.attempts + 1;
   // Transient failures (rate limits, network blips) never terminalize — the
   // failure mode is time, not logic, so the retry budget stays unbounded and
@@ -361,10 +364,10 @@ function retryableJob(job: SettlementJobRecord, now: number, error: unknown): Se
   };
 }
 
-function reconciliationJob(
+function reconciliationJob<T>(
   job: SettlementJobRecord,
   now: number,
-  error: unknown,
+  error: T,
 ): SettlementJobRecord {
   return {
     ...job,
@@ -515,7 +518,7 @@ export function processSettlementJobs(
           // Guard for partial adapters (mirrors the sweep's optional-method
           // checks): a missing balance reader fails open — keep the job
           // amount; the simulation still catches genuine insufficiency.
-          return typeof reader === "function"
+          return Object.prototype.toString.call(reader) === "[object Function]"
             ? reader
                 .call(input.adapter, job.tokenMint)
                 .pipe(Effect.catch(() => Effect.succeed(null)))

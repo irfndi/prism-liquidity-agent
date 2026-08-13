@@ -195,6 +195,11 @@ export function atomicToUnits(amountAtomic: bigint, decimals: number): number {
  * the caller can exclude same-mint rewards; the snapshot amount never
  * includes them.
  */
+interface WithdrawalMeasure {
+  readonly amountAtomic: string;
+  readonly measured: boolean;
+}
+
 export function measureWithdrawalDelta(input: {
   readonly beforeHeld: ReadonlyMap<
     string,
@@ -208,8 +213,8 @@ export function measureWithdrawalDelta(input: {
   readonly afterNativeSol: bigint | null;
   readonly mint: string;
   readonly snapshotAmount: string;
-}): { readonly amountAtomic: string; readonly measured: boolean } {
-  const fallback = (): { readonly amountAtomic: string; readonly measured: false } => ({
+}): WithdrawalMeasure {
+  const fallback = (): WithdrawalMeasure => ({
     amountAtomic: input.snapshotAmount,
     measured: false,
   });
@@ -361,8 +366,99 @@ interface MeteoraPoolsEnvelope {
   readonly data: ReadonlyArray<MeteoraPool>;
 }
 
-function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+/**
+ * Concrete owner type for JSON-decoded external data (RPC parsers, Data API
+ * responses). Decoders at each I/O boundary parse raw values into this
+ * contract instead of narrowing `unknown` with ad hoc `typeof` checks.
+ */
+type JsonValue = string | number | boolean | null | readonly JsonValue[] | JsonObject;
+
+interface JsonObject {
+  readonly [key: string]: JsonValue;
+}
+
+/** Mint → USD price lookup produced by `fetchTokenPrices`. */
+type TokenPriceMap = Readonly<Record<string, number>>;
+
+/** Fail-closed empty price map for the all-or-nothing fetch fallback. */
+const EMPTY_TOKEN_PRICES: TokenPriceMap = Object.create(null);
+
+/** Known-mint decimals lookup (SOL, USDC, USDT, …). */
+type KnownMintDecimals = Readonly<Record<string, { symbol: string; decimals: number }>>;
+
+/** Hardcoded fallback USD prices for a handful of well-known mints. */
+type FallbackPriceMap = Readonly<Record<string, number>>;
+
+/** HTTP request headers keyed by header name. */
+type RequestHeaders = Record<string, string>;
+
+const OBJECT_TAG = "[object Object]";
+const NUMBER_TAG = "[object Number]";
+const STRING_TAG = "[object String]";
+
+function isObject<T>(v: T): v is T & JsonObject {
+  return v !== null && Object.prototype.toString.call(v) === OBJECT_TAG;
+}
+
+/** True when the value is a runtime number (JSON-decoded primitives only). */
+function isNumberValue(v: JsonValue | undefined): v is number {
+  return v !== undefined && Object.prototype.toString.call(v) === NUMBER_TAG;
+}
+
+/** True when the value is a runtime string (JSON-decoded primitives only). */
+function isStringValue(v: JsonValue | undefined): v is string {
+  return v !== undefined && Object.prototype.toString.call(v) === STRING_TAG;
+}
+
+/** Decode a JSON value to a number, or undefined when it is not a number. */
+function asNumber(v: JsonValue | undefined): number | undefined {
+  return v !== undefined && Object.prototype.toString.call(v) === NUMBER_TAG
+    ? (v as number)
+    : undefined;
+}
+
+/** Return the value when it is a runtime string, else null. */
+function asStringOrNull(v: string | undefined): string | null {
+  return v !== undefined && Object.prototype.toString.call(v) === STRING_TAG ? v : null;
+}
+
+/** Transfer-fee rate fields on a Token-2022 extension (number or string form). */
+interface TransferFeeRate {
+  readonly transferFeeBasisPoints?: number | string;
+  readonly maximumFee?: number | string;
+}
+
+/** A Token-2022 mint extension entry from the parsed account RPC payload. */
+interface MintExtension {
+  readonly extension: string;
+  readonly state?: TransferFeeRate & {
+    readonly newerTransferFee?: TransferFeeRate;
+    readonly olderTransferFee?: TransferFeeRate;
+  };
+}
+
+/**
+ * Parsed Token-2022 mint account (`parsed.info` from getParsedAccountInfo).
+ * The genuine contract for the RPC payload decoded at the caller's boundary.
+ */
+export interface ParsedMintInfo {
+  readonly mintAuthority?: string;
+  readonly freezeAuthority?: string;
+  readonly extensions?: ReadonlyArray<MintExtension>;
+}
+
+/** True when a basis-point rate is a positive runtime number. */
+function positiveBasisPoints(v: number | string | undefined): boolean {
+  if (v === undefined) return false;
+  return Object.prototype.toString.call(v) === NUMBER_TAG && (v as number) > 0;
+}
+
+/** True when a max-fee is a positive number or a numeric string. */
+function positiveMaxFee(v: number | string | undefined): boolean {
+  if (v === undefined) return false;
+  if (Object.prototype.toString.call(v) === NUMBER_TAG) return (v as number) > 0;
+  if (Object.prototype.toString.call(v) === STRING_TAG) return Number(v as string) > 0;
+  return false;
 }
 
 /**
@@ -375,67 +471,50 @@ function isObject(v: unknown): v is Record<string, unknown> {
  * rate OR non-zero max fee means the mint taxes transfers (the Robinhood
  * rule 4 tax screen). Pure and exported for direct testing.
  */
-export function parsedMintHasTransferFee(parsedInfo: unknown): boolean {
-  if (!isObject(parsedInfo) || !Array.isArray(parsedInfo.extensions)) return false;
-  for (const ext of parsedInfo.extensions) {
-    if (!isObject(ext) || ext.extension !== "transferFeeConfig" || !isObject(ext.state)) {
-      continue;
-    }
-    const candidates: unknown[] = [
+export function parsedMintHasTransferFee(parsedInfo: ParsedMintInfo | null | undefined): boolean {
+  const extensions = parsedInfo?.extensions;
+  if (!Array.isArray(extensions)) return false;
+  for (const ext of extensions) {
+    if (ext.extension !== "transferFeeConfig" || !ext.state) continue;
+    const candidates: ReadonlyArray<TransferFeeRate | undefined> = [
       ext.state,
       ext.state.newerTransferFee,
       ext.state.olderTransferFee,
     ];
     for (const candidate of candidates) {
-      if (!isObject(candidate)) continue;
-      const bps = candidate.transferFeeBasisPoints;
-      const maxFee = candidate.maximumFee;
-      if (
-        (typeof bps === "number" && bps > 0) ||
-        (typeof maxFee === "string" && Number(maxFee) > 0) ||
-        (typeof maxFee === "number" && maxFee > 0)
-      ) {
-        return true;
-      }
+      if (!candidate) continue;
+      if (positiveBasisPoints(candidate.transferFeeBasisPoints)) return true;
+      if (positiveMaxFee(candidate.maximumFee)) return true;
     }
   }
   return false;
 }
 
-function isPoolsEnvelope(v: unknown): v is MeteoraPoolsEnvelope {
+function isPoolsEnvelope(v: JsonValue): v is MeteoraPoolsEnvelope & JsonObject {
   if (!isObject(v)) return false;
-  if (typeof v["total"] !== "number") return false;
-  if (typeof v["pages"] !== "number") return false;
-  if (typeof v["current_page"] !== "number") return false;
-  if (typeof v["page_size"] !== "number") return false;
+  if (!isNumberValue(v["total"])) return false;
+  if (!isNumberValue(v["pages"])) return false;
+  if (!isNumberValue(v["current_page"])) return false;
+  if (!isNumberValue(v["page_size"])) return false;
   if (!Array.isArray(v["data"])) return false;
   return true;
 }
 
-function isValidPoolShape(v: unknown): v is MeteoraPool {
+function isValidPoolShape(v: MeteoraPool): v is MeteoraPool & JsonObject {
   if (!isObject(v)) return false;
-  if (typeof v["address"] !== "string") return false;
-  if (typeof v["tvl"] !== "number") return false;
-  if (typeof v["apr"] !== "number") return false;
-  if (
-    !isObject(v["token_x"]) ||
-    typeof (v["token_x"] as Record<string, unknown>)["address"] !== "string"
-  )
-    return false;
-  if (
-    !isObject(v["token_y"]) ||
-    typeof (v["token_y"] as Record<string, unknown>)["address"] !== "string"
-  )
-    return false;
-  if (!isObject(v["pool_config"])) return false;
-  const cfg = v["pool_config"] as Record<string, unknown>;
-  if (typeof cfg["bin_step"] !== "number") return false;
-  if (!isObject(v["volume"])) return false;
-  const vol = v["volume"] as Record<string, unknown>;
-  if (typeof vol["24h"] !== "number") return false;
-  if (!isObject(v["fees"])) return false;
-  const fees = v["fees"] as Record<string, unknown>;
-  if (typeof fees["24h"] !== "number") return false;
+  if (!isStringValue(v["address"])) return false;
+  if (!isNumberValue(v["tvl"])) return false;
+  if (!isNumberValue(v["apr"])) return false;
+  const tokenX = v["token_x"];
+  if (!isObject(tokenX) || !isStringValue(tokenX["address"])) return false;
+  const tokenY = v["token_y"];
+  if (!isObject(tokenY) || !isStringValue(tokenY["address"])) return false;
+  const poolConfig = v["pool_config"];
+  if (!isObject(poolConfig) || !isNumberValue(poolConfig["bin_step"])) return false;
+  const volume = v["volume"];
+  if (!isObject(volume) || !isNumberValue(volume["24h"])) return false;
+  const fees = v["fees"];
+  if (!isObject(fees) || !isNumberValue(fees["24h"])) return false;
   return true;
 }
 
@@ -444,12 +523,12 @@ function isValidPoolShape(v: unknown): v is MeteoraPool {
  * (e.g. `fee_tvl_ratio` / `volume` with 30m/1h/2h/4h/12h/24h labels). Empty
  * when the object is missing or carries no finite windows.
  */
-function readWindowMap(raw: unknown): Map<string, number> {
+function readWindowMap(raw: JsonValue): Map<string, number> {
   if (!isObject(raw)) return new Map();
   const out = new Map<string, number>();
   for (const window of ["30m", "1h", "2h", "4h", "12h", "24h"] as const) {
-    const value = raw[window];
-    if (typeof value === "number" && Number.isFinite(value)) out.set(window, value);
+    const resolved = asNumber(raw[window]);
+    if (resolved !== undefined && Number.isFinite(resolved)) out.set(window, resolved);
   }
   return out;
 }
@@ -469,7 +548,12 @@ function toDiscoveredPool(p: MeteoraPool): DiscoveredPool {
   // hotness cross-checks surface with no extra API call.
   const feeYieldWindows = readWindowMap(p.fee_tvl_ratio);
   const volumeWindows = readWindowMap(p.volume);
-  return {
+  // Build through a mutable projected type so the optional radar fields can be
+  // assigned conditionally, then return it as the readonly public contract.
+  type MutableDiscoveredPool = {
+    -readonly [K in keyof DiscoveredPool]: DiscoveredPool[K];
+  };
+  const result: MutableDiscoveredPool = {
     address: p.address,
     tvlUsd: p.tvl,
     volume24hUsd: p.volume["24h"],
@@ -478,33 +562,6 @@ function toDiscoveredPool(p: MeteoraPool): DiscoveredPool {
     binStep: p.pool_config.bin_step,
     tokenX: tokenX.address,
     tokenY: tokenY.address,
-    ...(typeof p.created_at === "number" && Number.isFinite(p.created_at) && p.created_at > 0
-      ? {
-          createdAtMs: p.created_at > 1_000_000_000_000 ? p.created_at : p.created_at * 1000,
-        }
-      : {}),
-    // 1h fee-yield radar fields (launch mode): optional so pools where the
-    // Data API reports no 1h window (brand-new, zero-activity) stay admitted
-    // to the discovery feed and the launch gate rejects them fail-closed.
-    ...(typeof p.volume?.["1h"] === "number" && Number.isFinite(p.volume["1h"])
-      ? { volume1hUsd: p.volume["1h"] }
-      : {}),
-    ...(typeof p.fees?.["1h"] === "number" && Number.isFinite(p.fees["1h"])
-      ? { fees1hUsd: p.fees["1h"] }
-      : {}),
-    ...(typeof p.fee_tvl_ratio?.["1h"] === "number" && Number.isFinite(p.fee_tvl_ratio["1h"])
-      ? { feeYield1hPct: p.fee_tvl_ratio["1h"] }
-      : {}),
-    // Rolling-window curves for the radar's multi-timeframe probes: the same
-    // payload carries 30m/1h/2h/4h/12h/24h fee-yield and volume windows, so
-    // the radar can surface wash patterns (a burst confined to one window)
-    // and cross-check hotness without any extra API call.
-    ...(feeYieldWindows.size > 0 ? { feeYieldWindows: Object.fromEntries(feeYieldWindows) } : {}),
-    ...(volumeWindows.size > 0 ? { volumeWindows: Object.fromEntries(volumeWindows) } : {}),
-    ...(typeof p.pool_config?.base_fee_pct === "number" &&
-    Number.isFinite(p.pool_config.base_fee_pct)
-      ? { baseFeePct: p.pool_config.base_fee_pct }
-      : {}),
     tokenXSymbol: tokenX.symbol,
     tokenYSymbol: tokenY.symbol,
     tokenXVerified: tokenX.is_verified,
@@ -514,16 +571,41 @@ function toDiscoveredPool(p: MeteoraPool): DiscoveredPool {
     tokenXHolders: tokenX.holders,
     tokenYHolders: tokenY.holders,
   };
+  if (Number.isFinite(p.created_at) && p.created_at > 0) {
+    result.createdAtMs = p.created_at > 1_000_000_000_000 ? p.created_at : p.created_at * 1000;
+  }
+  // 1h fee-yield radar fields (launch mode): optional so pools where the
+  // Data API reports no 1h window (brand-new, zero-activity) stay admitted
+  // to the discovery feed and the launch gate rejects them fail-closed.
+  const volume1h = p.volume?.["1h"];
+  if (Number.isFinite(volume1h)) result.volume1hUsd = volume1h;
+  const fees1h = p.fees?.["1h"];
+  if (Number.isFinite(fees1h)) result.fees1hUsd = fees1h;
+  const feeYield1h = p.fee_tvl_ratio?.["1h"];
+  if (Number.isFinite(feeYield1h)) result.feeYield1hPct = feeYield1h;
+  // Rolling-window curves for the radar's multi-timeframe probes: the same
+  // payload carries 30m/1h/2h/4h/12h/24h fee-yield and volume windows, so
+  // the radar can surface wash patterns (a burst confined to one window)
+  // and cross-check hotness without any extra API call.
+  if (feeYieldWindows.size > 0) {
+    result.feeYieldWindows = Object.fromEntries(feeYieldWindows);
+  }
+  if (volumeWindows.size > 0) {
+    result.volumeWindows = Object.fromEntries(volumeWindows);
+  }
+  if (Number.isFinite(p.pool_config.base_fee_pct)) {
+    result.baseFeePct = p.pool_config.base_fee_pct;
+  }
+  return result;
 }
 
-function describe(v: unknown): string {
+function describe(v: JsonValue): string {
   if (v === null) return "null";
   if (Array.isArray(v)) return `array(length=${v.length})`;
-  if (typeof v === "object")
-    return `object(keys=${Object.keys(v as object)
-      .slice(0, 5)
-      .join(",")})`;
-  return typeof v;
+  if (isObject(v)) return `object(keys=${Object.keys(v).slice(0, 5).join(",")})`;
+  if (Object.prototype.toString.call(v) === STRING_TAG) return "string";
+  if (Object.prototype.toString.call(v) === NUMBER_TAG) return "number";
+  return "boolean";
 }
 
 // ─── Install ID helper (engine-safe mirror of cli/install-id.ts) ───────────
@@ -930,15 +1012,9 @@ export const AdapterLive = Layer.effect(
         }
         const mintPubkey = new PublicKey(mintAddress);
         const info = yield* rpcCall((conn) => conn.getParsedAccountInfo(mintPubkey));
-        const parsed = (
-          info.value?.data as {
-            parsed?: { info?: { mintAuthority?: unknown; freezeAuthority?: unknown } };
-          }
-        )?.parsed?.info;
-        const mintAuthority =
-          typeof parsed?.mintAuthority === "string" ? parsed.mintAuthority : null;
-        const freezeAuthority =
-          typeof parsed?.freezeAuthority === "string" ? parsed.freezeAuthority : null;
+        const parsed = (info.value?.data as { parsed?: { info?: ParsedMintInfo } })?.parsed?.info;
+        const mintAuthority = asStringOrNull(parsed?.mintAuthority);
+        const freezeAuthority = asStringOrNull(parsed?.freezeAuthority);
         // Token-2022 transfer-fee extension (Robinhood rule 4): a non-zero
         // transfer tax is surfaced so the market gate / launch branch can
         // reject the leg unless allowTransferFeeTokens opts in.
@@ -958,7 +1034,7 @@ export const AdapterLive = Layer.effect(
       const price = priceInfo?.price_per_token;
       const currency = priceInfo?.currency?.toUpperCase();
       if (
-        typeof price !== "number" ||
+        !isNumberValue(price) ||
         !Number.isFinite(price) ||
         price <= 0 ||
         (currency !== "USDC" && currency !== "USD")
@@ -1036,7 +1112,7 @@ export const AdapterLive = Layer.effect(
     // fails with Effect.fail, so callers must handle the error. For
     // non-Helius RPCs we use the SPL Token program (parsed account info),
     // which returns decimals for any valid SPL mint.
-    const KNOWN_MINT_DECIMALS: Record<string, { symbol: string; decimals: number }> = {
+    const KNOWN_MINT_DECIMALS: KnownMintDecimals = {
       [SOL_MINT]: { symbol: "SOL", decimals: 9 },
       [USDC_MINT]: { symbol: "USDC", decimals: 6 },
       Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: { symbol: "USDT", decimals: 6 },
@@ -1080,8 +1156,9 @@ export const AdapterLive = Layer.effect(
         const parsed = (
           info?.value?.data as { parsed?: { info?: { decimals?: number } } } | undefined
         )?.parsed?.info;
-        if (typeof parsed?.decimals === "number") {
-          const meta = { symbol: mint.slice(0, 4), decimals: parsed.decimals };
+        const decimals = parsed?.decimals;
+        if (isNumberValue(decimals)) {
+          const meta = { symbol: mint.slice(0, 4), decimals };
           yield* setMeta(meta);
           return meta;
         }
@@ -1093,13 +1170,17 @@ export const AdapterLive = Layer.effect(
         if (config.heliusApiKey) {
           const json = yield* fetchHeliusAsset(mint).pipe(Effect.catch(() => Effect.succeed(null)));
           const d = json?.result?.token_info?.decimals;
-          if (typeof d === "number") {
+          if (isNumberValue(d)) {
             const priceUsd = json ? readHeliusPrice(json) : undefined;
-            const meta = {
+            type MutableTokenMeta = { -readonly [K in keyof TokenMeta]: TokenMeta[K] };
+            const meta: MutableTokenMeta = {
               symbol: json?.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
               decimals: d,
-              ...(priceUsd !== undefined ? { priceUsd, priceFetchedAt: Date.now() } : {}),
             };
+            if (priceUsd !== undefined) {
+              meta.priceUsd = priceUsd;
+              meta.priceFetchedAt = Date.now();
+            }
             yield* setMeta(meta);
             return meta;
           }
@@ -1113,7 +1194,7 @@ export const AdapterLive = Layer.effect(
 
     // ─── Price fetching ────────────────────────────────────────────────────
 
-    const fallbackPrices: Record<string, number> = {
+    const fallbackPrices: FallbackPriceMap = {
       [SOL_MINT]: 165,
       [USDC_MINT]: 1.0,
       Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: 1.0,
@@ -1205,7 +1286,7 @@ export const AdapterLive = Layer.effect(
         const result: Record<string, number> = {};
         for (const mint of missing) {
           const price = json[mint]?.usdPrice ?? json.data?.[mint]?.price;
-          if (typeof price === "number" && Number.isFinite(price) && price > 0) {
+          if (isNumberValue(price) && Number.isFinite(price) && price > 0) {
             result[mint] = price;
             setCachedPrice(mint, price);
           }
@@ -1244,7 +1325,7 @@ export const AdapterLive = Layer.effect(
             >;
             for (const mint of batch) {
               const price = json[mint]?.usd;
-              if (typeof price === "number" && Number.isFinite(price) && price > 0) {
+              if (isNumberValue(price) && Number.isFinite(price) && price > 0) {
                 result[mint] = price;
                 setCachedPrice(mint, price);
               }
@@ -1419,7 +1500,7 @@ export const AdapterLive = Layer.effect(
           const tokenAmount = info["tokenAmount"];
           if (!isObject(tokenAmount)) continue;
           const amount = tokenAmount["amount"];
-          if (typeof amount === "string") total += BigInt(amount);
+          if (isStringValue(amount)) total += BigInt(amount);
         }
         tokenBalanceCache.set(mintAddress, {
           value: total,
@@ -1473,12 +1554,12 @@ export const AdapterLive = Layer.effect(
             const info = parsed["info"];
             if (!isObject(info)) continue;
             const mint = info["mint"];
-            if (typeof mint !== "string") continue;
+            if (!isStringValue(mint)) continue;
             const tokenAmount = info["tokenAmount"];
             if (!isObject(tokenAmount)) continue;
             const amountRaw = tokenAmount["amount"];
             const decimals = tokenAmount["decimals"];
-            if (typeof amountRaw !== "string" || typeof decimals !== "number") continue;
+            if (!isStringValue(amountRaw) || !isNumberValue(decimals)) continue;
             if (!/^\d+$/.test(amountRaw)) continue;
             const amountAtomic = BigInt(amountRaw);
             if (amountAtomic <= 0n) continue; // skip empty / rent-only ATAs
@@ -1545,7 +1626,7 @@ export const AdapterLive = Layer.effect(
 
         const solPrice = prices[SOL_MINT];
         if (lamports > 0) {
-          if (typeof solPrice === "number" && solPrice > 0) {
+          if (isNumberValue(solPrice) && solPrice > 0) {
             totalUsd += (lamports / 1e9) * solPrice;
           } else {
             warnUnpricedWalletMintOnce(SOL_MINT, {
@@ -1558,7 +1639,7 @@ export const AdapterLive = Layer.effect(
 
         for (const [mint, balance] of held) {
           const price = prices[mint];
-          if (typeof price !== "number" || price <= 0) {
+          if (!isNumberValue(price) || price <= 0) {
             warnUnpricedWalletMintOnce(mint, {
               amountAtomic: balance.amountAtomic,
               decimals: balance.decimals,
@@ -1591,7 +1672,7 @@ export const AdapterLive = Layer.effect(
       positionValueCache.clear();
     }).pipe(Effect.andThen(invalidateWalletSnapshot));
 
-    const quotedByRawPayload = new WeakMap<Record<string, unknown>, SwapQuote>();
+    const quotedByRawPayload = new WeakMap<object, SwapQuote>();
     const preparedTransactions = new Map<string, number>();
     const simulatedTransactions = new Map<string, number>();
 
@@ -1604,14 +1685,10 @@ export const AdapterLive = Layer.effect(
       }
     }
 
-    function isRecord(value: unknown): value is Record<string, unknown> {
-      return typeof value === "object" && value !== null && !Array.isArray(value);
-    }
-
-    function parseAtomicString(value: unknown): bigint | null {
-      if (typeof value !== "string" || !/^\d+$/.test(value)) return null;
+    function parseAtomicString(value: JsonValue | undefined): bigint | null {
+      if (value === undefined || Object.prototype.toString.call(value) !== STRING_TAG) return null;
       try {
-        return BigInt(value);
+        return BigInt(value as string);
       } catch {
         return null;
       }
@@ -1628,10 +1705,10 @@ export const AdapterLive = Layer.effect(
 
     function validateQuotePayload(
       request: SwapRequest,
-      payload: unknown,
+      payload: JsonValue,
       quotedAt: number,
     ): Effect.Effect<SwapQuote, SwapValidationError> {
-      if (!isRecord(payload)) {
+      if (!isObject(payload)) {
         return Effect.fail(
           swapValidationError("quote", "malformed_payload", "Jupiter quote is not an object"),
         );
@@ -1676,8 +1753,9 @@ export const AdapterLive = Layer.effect(
           ),
         );
       }
-      const priceImpactPct =
-        typeof payload.priceImpactPct === "string" ? Number(payload.priceImpactPct) : Number.NaN;
+      const priceImpactPct = isStringValue(payload.priceImpactPct)
+        ? Number(payload.priceImpactPct)
+        : Number.NaN;
       const priceImpactBps = priceImpactPct * 10_000;
       const configuredImpactCap = Math.min(
         config.maxSwapPriceImpactBps ?? HARD_MAX_SWAP_PRICE_IMPACT_BPS,
@@ -1716,14 +1794,14 @@ export const AdapterLive = Layer.effect(
       }
       const route: Array<{ readonly inputMint: string; readonly outputMint: string }> = [];
       for (const step of payload.routePlan) {
-        if (!isRecord(step) || !isRecord(step.swapInfo)) {
+        if (!isObject(step) || !isObject(step.swapInfo)) {
           return Effect.fail(
             swapValidationError("quote", "malformed_payload", "Jupiter route step is malformed"),
           );
         }
         const routeInputMint = step.swapInfo.inputMint;
         const routeOutputMint = step.swapInfo.outputMint;
-        if (typeof routeInputMint !== "string" || typeof routeOutputMint !== "string") {
+        if (!isStringValue(routeInputMint) || !isStringValue(routeOutputMint)) {
           return Effect.fail(
             swapValidationError("quote", "malformed_payload", "Jupiter route mints are malformed"),
           );
@@ -1767,8 +1845,8 @@ export const AdapterLive = Layer.effect(
       return Effect.void;
     }
 
-    function jupiterHeaders(): Record<string, string> {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
+    function jupiterHeaders(): RequestHeaders {
+      const headers: RequestHeaders = { "Content-Type": "application/json" };
       const apiKey = process.env.JUPITER_API_KEY?.trim() ?? "";
       if (apiKey) headers["x-api-key"] = apiKey;
       return headers;
@@ -1820,9 +1898,11 @@ export const AdapterLive = Layer.effect(
             new SwapQuoteError({ message: `Jupiter quote failed: ${response.status}` }),
           );
         }
-        const payload = yield* Effect.tryPromise(() => response.json());
+        const payload = yield* Effect.tryPromise(() =>
+          response.json().then((body) => body as JsonValue),
+        );
         const quote = yield* validateQuotePayload(request, payload, Date.now());
-        quotedByRawPayload.set(quote.rawQuote, quote);
+        quotedByRawPayload.set(quote.rawQuote as object, quote);
         return quote;
       });
     }
@@ -1905,7 +1985,7 @@ export const AdapterLive = Layer.effect(
           );
         }
         const payload = yield* Effect.tryPromise(() => response.json());
-        if (!isRecord(payload) || typeof payload.swapTransaction !== "string") {
+        if (!isObject(payload) || !isStringValue(payload.swapTransaction)) {
           return yield* Effect.fail(
             swapValidationError(
               "prepare",
@@ -2017,16 +2097,14 @@ export const AdapterLive = Layer.effect(
           const txError = confirmation.value.err;
           // Solana confirmations report string / structured TransactionError
           // values, not Errors — the channel promises Error, so normalize.
-          return yield* Effect.fail(
-            new Error(
-              typeof txError === "string"
-                ? txError
-                : typeof txError === "object" && txError !== null && "message" in txError
-                  ? String((txError as { message: unknown }).message)
-                  : String(txError as unknown),
-              { cause: txError },
-            ),
-          );
+          const txErrorTag = Object.prototype.toString.call(txError);
+          const message =
+            txErrorTag === STRING_TAG
+              ? (txError as string)
+              : txErrorTag === OBJECT_TAG && "message" in (txError as object)
+                ? String((txError as { message: unknown }).message)
+                : String(txError as unknown);
+          return yield* Effect.fail(new Error(message, { cause: txError }));
         }
         return signature;
       });
@@ -2085,7 +2163,7 @@ export const AdapterLive = Layer.effect(
 
         const preBalance = response.meta.preBalances[walletIndex];
         const postBalance = response.meta.postBalances[walletIndex];
-        if (typeof preBalance !== "number" || typeof postBalance !== "number") return null;
+        if (!isNumberValue(preBalance) || !isNumberValue(postBalance)) return null;
 
         const outputAtomic = BigInt(postBalance - preBalance);
         const feeAtomic = BigInt(response.meta.fee);
@@ -2099,7 +2177,7 @@ export const AdapterLive = Layer.effect(
     function quoteSwapUSDCForToken(
       outputMint: string,
       amountAtomic: bigint,
-    ): Effect.Effect<Record<string, unknown>, Error> {
+    ): Effect.Effect<JsonValue, Error> {
       if (!wallet) return Effect.fail(new AdapterError({ message: "No wallet configured" }));
       return quoteSwap({
         inputMint: USDC_MINT,
@@ -2113,7 +2191,7 @@ export const AdapterLive = Layer.effect(
       inputMint: string,
       outputMint: string,
       amountAtomic: bigint,
-    ): Effect.Effect<Record<string, unknown>, Error> {
+    ): Effect.Effect<JsonValue, Error> {
       return quoteSwap({
         inputMint,
         outputMint,
@@ -2133,7 +2211,7 @@ export const AdapterLive = Layer.effect(
     function swapUSDCForToken(
       outputMint: string,
       amountAtomic: bigint,
-      prefetchedQuote?: Record<string, unknown>,
+      prefetchedQuote?: JsonValue,
     ): Effect.Effect<string, Error> {
       return Effect.gen(function* () {
         if (amountAtomic <= 0n) {
@@ -2145,7 +2223,7 @@ export const AdapterLive = Layer.effect(
         }
         const rawQuote =
           prefetchedQuote ?? (yield* quoteSwapUSDCForToken(outputMint, amountAtomic));
-        const quote = quotedByRawPayload.get(rawQuote);
+        const quote = quotedByRawPayload.get(rawQuote as object);
         if (
           !quote ||
           quote.request.inputMint !== USDC_MINT ||
@@ -2166,11 +2244,11 @@ export const AdapterLive = Layer.effect(
       inputMint: string,
       outputMint: string,
       amountAtomic: bigint,
-      quoteData?: Record<string, unknown>,
+      quoteData?: JsonValue,
     ): Effect.Effect<string, Error> {
       return Effect.gen(function* () {
         const rawQuote = quoteData ?? (yield* quoteSwapToken(inputMint, outputMint, amountAtomic));
-        const quote = quotedByRawPayload.get(rawQuote);
+        const quote = quotedByRawPayload.get(rawQuote as object);
         if (!quote) {
           return yield* Effect.fail(
             new AdapterError({ message: "Validated Jupiter quote is unavailable or stale" }),
@@ -2341,11 +2419,11 @@ export const AdapterLive = Layer.effect(
           const url =
             `https://${enhancedHost}/v0/addresses/${poolAddress}/transactions` +
             `?limit=40&api-key=${encodeURIComponent(config.heliusApiKey)}`;
-          const parsed: unknown = yield* Effect.tryPromise({
+          const parsed: JsonValue = yield* Effect.tryPromise({
             try: async () => {
               const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
               if (!res.ok) throw new Error(`heluis wash fetch ${res.status}`);
-              return (await res.json()) as unknown;
+              return (await res.json()) as JsonValue;
             },
             catch: () => null,
           }).pipe(Effect.catch(() => Effect.succeed(null)));
@@ -2365,11 +2443,7 @@ export const AdapterLive = Layer.effect(
             const payer = tx["feePayer"];
             const timestamp = tx["timestamp"];
             const fee = tx["fee"];
-            if (
-              typeof payer !== "string" ||
-              typeof timestamp !== "number" ||
-              typeof fee !== "number"
-            ) {
+            if (!isStringValue(payer) || !isNumberValue(timestamp) || !isNumberValue(fee)) {
               continue;
             }
             rows.push({ payer, timestamp, feeLamports: fee });
@@ -2656,7 +2730,7 @@ export const AdapterLive = Layer.effect(
               upperBinId: p.upperBin!,
             }));
         }).pipe(
-          Effect.catch((err: unknown) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to crawl Data API positions: ${underlyingErrorMessage(err)}`,
@@ -2739,7 +2813,7 @@ export const AdapterLive = Layer.effect(
             source: "sdk-simulation" as const,
           };
         }).pipe(
-          Effect.catch((err: unknown) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to simulate rebalance: ${underlyingErrorMessage(err)}`,
@@ -2934,7 +3008,7 @@ export const AdapterLive = Layer.effect(
             minBinId: lowerBinId,
             maxBinId: upperBinId,
             strategyType: toSdkStrategyType(strategyShape),
-            ...(singleSidedX !== undefined ? { singleSidedX } : {}),
+            ...(singleSidedX !== undefined ? { singleSidedX } : undefined),
           };
 
           const positionKeypair = new Keypair();
@@ -2991,7 +3065,7 @@ export const AdapterLive = Layer.effect(
             amountYUsd,
           };
         }).pipe(
-          Effect.catch((err: unknown) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to enter position: ${String(err)}`,
@@ -3163,7 +3237,7 @@ export const AdapterLive = Layer.effect(
             // pending-fee legs AND the swept-reward mints, so the opt-out covers
             // every ledger-booking input at once (mirrors the wallet path).
             const prices = yield* fetchTokenPrices(priceMints, { useFallback: false }).pipe(
-              Effect.catch(() => Effect.succeed({} as Record<string, number>)),
+              Effect.catch(() => Effect.succeed(EMPTY_TOKEN_PRICES)),
             );
 
             // All-or-nothing on the withdrawn/pending legs: ANY unresolved leg
@@ -3228,7 +3302,7 @@ export const AdapterLive = Layer.effect(
             sweptRewards: accounting.sweptRewards,
           };
         }).pipe(
-          Effect.catch((err: unknown) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to exit position: ${String(err)}`,
@@ -3260,7 +3334,7 @@ export const AdapterLive = Layer.effect(
               { id: validated.targetBinId, amount: new BN(validated.amountAtomic.toString()) },
             ],
             ...(validated.maxActiveBinSlippage === undefined
-              ? {}
+              ? undefined
               : {
                   relativeBin: {
                     activeId: dlmm.lbPair.activeId,
@@ -3290,7 +3364,7 @@ export const AdapterLive = Layer.effect(
           yield* rpcCall((conn) => conn.confirmTransaction(txSignature, "confirmed"));
           return { orderPubKey: limitOrder.publicKey.toBase58(), txSignature };
         }).pipe(
-          Effect.catch((err: unknown) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to place limit order: ${underlyingErrorMessage(err)}`,
@@ -3331,7 +3405,7 @@ export const AdapterLive = Layer.effect(
           yield* rpcCall((conn) => conn.confirmTransaction(txSignature, "confirmed"));
           return { txSignature };
         }).pipe(
-          Effect.catch((err: unknown) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to cancel limit order: ${underlyingErrorMessage(err)}`,
@@ -3364,7 +3438,7 @@ export const AdapterLive = Layer.effect(
             positionData,
             newLowerBinId,
             newUpperBinId,
-            ...(topUp ? { topUp } : {}),
+            ...(topUp ? { topUp } : undefined),
           });
           // Simulation first: the response carries the quoted amounts and the
           // bin-array/bitmap coverage the instruction builder needs.
@@ -3410,7 +3484,7 @@ export const AdapterLive = Layer.effect(
 
           return { positionPubKey, txSignatures };
         }).pipe(
-          Effect.catch((err: unknown) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to atomically rebalance position: ${underlyingErrorMessage(err)}`,
@@ -3606,7 +3680,7 @@ export const AdapterLive = Layer.effect(
             // `?? 0` → the compound gate fails closed instead of booking fiction.
             const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint], {
               useFallback: false,
-            }).pipe(Effect.catch(() => Effect.succeed({} as Record<string, number>)));
+            }).pipe(Effect.catch(() => Effect.succeed(EMPTY_TOKEN_PRICES)));
             const priceX = prices[tokenXMint];
             const priceY = prices[tokenYMint];
             if (priceX == null || priceX <= 0 || priceY == null || priceY <= 0) return null;
@@ -3625,13 +3699,15 @@ export const AdapterLive = Layer.effect(
             netFeeX,
             netFeeY,
             netFeesUsd,
-            ...(transferInstructions.length > 0 ? { feeTransferTxSignature: signature } : {}),
+            ...(transferInstructions.length > 0
+              ? { feeTransferTxSignature: signature }
+              : undefined),
             ...(actualOperatorFeeX > 0 || actualOperatorFeeY > 0
               ? { operatorFeeX: actualOperatorFeeX, operatorFeeY: actualOperatorFeeY }
-              : {}),
+              : undefined),
           };
         }).pipe(
-          Effect.catch((err: unknown) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to claim fees: ${String(err)}`,
@@ -3664,7 +3740,7 @@ export const AdapterLive = Layer.effect(
           const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
           const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint], {
             useFallback: false,
-          }).pipe(Effect.catch(() => Effect.succeed({} as Record<string, number>)));
+          }).pipe(Effect.catch(() => Effect.succeed(EMPTY_TOKEN_PRICES)));
           const priceX = prices[tokenXMint];
           const priceY = prices[tokenYMint];
           if (priceX == null || priceX <= 0 || priceY == null || priceY <= 0) return null;
@@ -3673,7 +3749,7 @@ export const AdapterLive = Layer.effect(
             (feeY / 10 ** dlmm.tokenY.mint.decimals) * priceY
           );
         }).pipe(
-          Effect.catch((err: unknown) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to read claimable fees: ${String(err)}`,
@@ -3707,12 +3783,13 @@ export const AdapterLive = Layer.effect(
               continue;
             }
             const quote = yield* quoteSwapToken(inputMint, targetMint, BigInt(Math.trunc(amount)));
+            if (!isObject(quote) || !isStringValue(quote.outAmount)) {
+              return yield* Effect.fail(
+                new AdapterError({ message: "Jupiter fee conversion returned invalid output" }),
+              );
+            }
             const quotedOutput = quote.outAmount;
-            if (
-              typeof quotedOutput !== "string" ||
-              !/^\d+$/.test(quotedOutput) ||
-              quotedOutput === "0"
-            ) {
+            if (!/^\d+$/.test(quotedOutput) || quotedOutput === "0") {
               return yield* Effect.fail(
                 new AdapterError({ message: "Jupiter fee conversion returned invalid output" }),
               );
@@ -3818,7 +3895,7 @@ export const AdapterLive = Layer.effect(
           const prices =
             pricedMints.length > 0
               ? yield* fetchTokenPrices(pricedMints).pipe(
-                  Effect.catch(() => Effect.succeed({} as Record<string, number>)),
+                  Effect.catch(() => Effect.succeed(EMPTY_TOKEN_PRICES)),
                 )
               : {};
 
@@ -3858,7 +3935,7 @@ export const AdapterLive = Layer.effect(
 
           return { skipped: false, skipReason: null, txSignatures, rewards };
         }).pipe(
-          Effect.catch((err: unknown) =>
+          Effect.catch((err) =>
             Effect.fail(
               new AdapterError({
                 message: `Failed to claim rewards: ${String(err)}`,
@@ -3879,13 +3956,13 @@ export const AdapterLive = Layer.effect(
             try: () => {
               const credsPath = path.join(getPrismUserConfigDir(), "credentials.json");
               const creds = JSON.parse(fs.readFileSync(credsPath, "utf-8")) as {
-                apiKey?: unknown;
+                apiKey?: JsonValue;
               };
-              return typeof creds.apiKey === "string" ? creds.apiKey : "";
+              return isStringValue(creds.apiKey) ? creds.apiKey : "";
             },
             catch: () => "",
           });
-          const headers: Record<string, string> = { "Content-Type": "application/json" };
+          const headers: RequestHeaders = { "Content-Type": "application/json" };
           if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
           const res = yield* Effect.tryPromise({
             try: () =>
@@ -3967,8 +4044,8 @@ export const AdapterLive = Layer.effect(
               }),
             );
           }
-          const parsed: unknown = yield* Effect.tryPromise({
-            try: () => res.json(),
+          const parsed: JsonValue = yield* Effect.tryPromise({
+            try: () => res.json().then((body) => body as JsonValue),
             catch: (cause) =>
               new DiscoverPoolsError({
                 message: `Invalid JSON from ${url}: ${String(cause)}`,
@@ -4074,8 +4151,8 @@ export const AdapterLive = Layer.effect(
                 logger.warn("Market scan: page fetch non-OK", { page, status: res.status });
                 return [];
               }
-              const parsed: unknown = yield* Effect.tryPromise({
-                try: () => res.json(),
+              const parsed: JsonValue = yield* Effect.tryPromise({
+                try: () => res.json().then((body) => body as JsonValue),
                 catch: (cause) => cause as Error,
               });
               if (!isPoolsEnvelope(parsed)) return [];
@@ -4153,8 +4230,8 @@ export const AdapterLive = Layer.effect(
             logger.warn("Launch radar: hot-pool fetch non-OK", { status: res.status });
             return [];
           }
-          const parsed: unknown = yield* Effect.tryPromise({
-            try: () => res.json(),
+          const parsed: JsonValue = yield* Effect.tryPromise({
+            try: () => res.json().then((body) => body as JsonValue),
             catch: (cause) => cause as Error,
           });
           if (!isPoolsEnvelope(parsed)) return [];
@@ -4198,11 +4275,7 @@ export const AdapterLive = Layer.effect(
           ),
         ),
 
-      swapUSDCForToken: (
-        outputMint: string,
-        amountAtomic: bigint,
-        quoteData?: Record<string, unknown>,
-      ) =>
+      swapUSDCForToken: (outputMint: string, amountAtomic: bigint, quoteData?: JsonValue) =>
         swapUSDCForToken(outputMint, amountAtomic, quoteData).pipe(
           Effect.catch((err) =>
             Effect.fail(
@@ -4218,7 +4291,7 @@ export const AdapterLive = Layer.effect(
         inputMint: string,
         outputMint: string,
         amountAtomic: bigint,
-        quoteData?: Record<string, unknown>,
+        quoteData?: JsonValue,
       ) =>
         swapToken(inputMint, outputMint, amountAtomic, quoteData).pipe(
           Effect.catch((err) =>

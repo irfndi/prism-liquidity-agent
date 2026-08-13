@@ -12,10 +12,13 @@ const CLI = path.join(__dirname, "..", "cli", "index.ts");
 function runWalletShow(env: Record<string, string>) {
   // Resolve the keystore from the isolated HOME (getPrismUserConfigDir falls back to
   // $HOME/.config/prism), not the developer's real config dir.
-  const childEnv: Record<string, string | undefined> = { ...process.env, ...env };
+  const childEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries({ ...process.env, ...env })) {
+    if (value !== undefined) childEnv[key] = value;
+  }
   delete childEnv.PRISM_CONFIG_DIR;
   return Bun.spawnSync([process.execPath, CLI, "wallet", "show"], {
-    env: childEnv as Record<string, string>,
+    env: childEnv,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -33,7 +36,7 @@ const INVALID_BASE58_PRIVATE_KEY = "invalid-key";
 
 // Write a keystore wallet in an isolated HOME so the engine-equivalent resolution can be
 // exercised without touching the developer's real ~/.config/prism.
-function makeIsolatedKeystore(): { home: string; keystorePubkey: string } {
+function makeIsolatedKeystore() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "prism-wallet-test-"));
   const walletDir = path.join(home, ".config", "prism");
   fs.mkdirSync(walletDir, { recursive: true });
@@ -94,8 +97,12 @@ describe("wallet show (effective wallet resolution)", () => {
         WALLET_PRIVATE_KEY: _walletKey,
         PRISM_CONFIG_DIR: _configDir,
         ...envBase
-      } = process.env as Record<string, string | undefined>;
-      const env = { ...envBase, HOME: home } as Record<string, string>;
+      } = process.env;
+      const env: Record<string, string> = {};
+      for (const [key, value] of Object.entries(envBase)) {
+        if (value !== undefined) env[key] = value;
+      }
+      env.HOME = home;
       const result = Bun.spawnSync([process.execPath, CLI, "wallet", "show"], {
         env,
         stdout: "pipe",

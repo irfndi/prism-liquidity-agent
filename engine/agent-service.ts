@@ -31,6 +31,14 @@ const VALID_ACTIONS: ReadonlySet<string> = new Set(["HOLD", "REBALANCE", "EXIT",
  *  The skip engages only when BOTH the fresh-window p95 reaches 95% of the
  *  prompt budget AND enough individual samples are slow — a single timeout
  *  among quick reviews must not silence the advisor. */
+/** Owner contract for a latency-window skip decision. */
+interface PromptSkipDecision {
+  readonly skip: boolean;
+  readonly p95Ms: number | null;
+  readonly slowCount: number;
+  readonly windowSize: number;
+}
+
 export class LatencyWindow {
   private readonly samples: Array<{ readonly latencyMs: number; readonly at: number }> = [];
 
@@ -80,12 +88,7 @@ export class LatencyWindow {
 
   /** Whether a prompt should be skipped right now (fail-open), with the
    *  stats the caller logs when it is. */
-  shouldSkip(now: number): {
-    readonly skip: boolean;
-    readonly p95Ms: number | null;
-    readonly slowCount: number;
-    readonly windowSize: number;
-  } {
+  shouldSkip(now: number): PromptSkipDecision {
     this.evict(now);
     const sorted = this.samples.map((s) => s.latencyMs).sort((a, b) => a - b);
     const p95 =
@@ -142,11 +145,14 @@ export const AgentNoOp: AgentApi = {
   disconnect: () => Effect.void,
 };
 
-function formatRuntimeContext(ctx: AgentRuntimeContext): {
-  warningsBlock: string;
-  decisionsBlock: string;
-  positionBlock: string;
-} {
+/** Owner contract for the text blocks rendered into a prompt. */
+interface RuntimeContextBlocks {
+  readonly warningsBlock: string;
+  readonly decisionsBlock: string;
+  readonly positionBlock: string;
+}
+
+function formatRuntimeContext(ctx: AgentRuntimeContext): RuntimeContextBlocks {
   const { warnings, recentDecisions, position } = ctx;
   const warningsBlock =
     warnings.length > 0
@@ -443,7 +449,7 @@ function transportSupportsAlert(
 ): transport is AgentRuntimeTransport & {
   sendAlert: (alert: AgentRuntimeAlert) => Effect.Effect<void, Error>;
 } {
-  return typeof transport.sendAlert === "function";
+  return Object.prototype.toString.call(transport.sendAlert) === "[object Function]";
 }
 
 function transportSupportsCheckin(
@@ -451,7 +457,7 @@ function transportSupportsCheckin(
 ): transport is AgentRuntimeTransport & {
   sendCheckin: (checkin: AgentRuntimeCheckin) => Effect.Effect<void, Error>;
 } {
-  return typeof transport.sendCheckin === "function";
+  return Object.prototype.toString.call(transport.sendCheckin) === "[object Function]";
 }
 
 function connectTransport(transport: AgentRuntimeTransport): Effect.Effect<void, Error> {
@@ -534,7 +540,18 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
         logger.warn("Agent mode enabled but no runtime available", {
           requested: config.agentRuntime,
           selected: runtime,
-          detection,
+          detection: {
+            hermes: {
+              available: detection.hermes.available,
+              path: detection.hermes.path,
+            },
+            openclaw: {
+              available: detection.openclaw.available,
+              path: detection.openclaw.path,
+              gatewayRunning: detection.openclaw.gatewayRunning,
+            },
+            recommended: detection.recommended,
+          },
         });
         return AgentNoOp;
       }

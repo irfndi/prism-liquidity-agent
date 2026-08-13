@@ -12,7 +12,7 @@ import { AuditLive } from "../engine/audit-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { ScreenerLive } from "../engine/screener-service.js";
 import { DiscoverPoolsError } from "../engine/errors.js";
-import { mockFetch } from "./helpers.js";
+import { mockFetch, asOwner } from "./helpers.js";
 
 function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -202,10 +202,9 @@ function buildScreenerLayer(
         reportRevenue: () => Effect.never,
       } as never);
     }
-    return Layer.provide(
-      AdapterLive,
-      Layer.merge(configLayer, DbLive(":memory:")),
-    ) as unknown as Layer.Layer<AdapterService, never, never>;
+    return asOwner<Layer.Layer<AdapterService, never, never>>(
+      Layer.provide(AdapterLive, Layer.merge(configLayer, DbLive(":memory:"))),
+    );
   })();
   const allDeps = Layer.merge(configLayer, Layer.merge(adapterLayer, strategyLayer));
   return Layer.provide(
@@ -250,9 +249,7 @@ describe("ScreenerService.screenPools", () => {
   });
 
   it("returns empty array on a JSON parse error (DiscoverPoolsError from JSON failure)", async () => {
-    const restore = mockFetch(
-      (async () => new Response("not json at all", { status: 200 })) as unknown as typeof fetch,
-    );
+    const restore = mockFetch(async () => new Response("not json at all", { status: 200 }));
     try {
       const layer = buildScreenerLayer();
       const program = Effect.gen(function* () {

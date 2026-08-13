@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { Effect } from "effect";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonRecord = { [key: string]: JsonValue };
+import { asOwner } from "./helpers.js";
+import { Effect, Layer } from "effect";
 import {
   buildLayer,
   buildPositionSnapshots,
@@ -37,9 +41,12 @@ import {
   type RevenueConfigApi,
 } from "../engine/services.js";
 
-async function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): Promise<T> {
+async function run<T, E, R>(
+  effect: Effect.Effect<T, E, R>,
+  layer: Layer.Layer<R, never, never>,
+): Promise<T> {
   // v4 layer building is async (memoized provides) — runSync is no longer valid.
-  return Effect.runPromise((Effect.provide as any)(effect, layer, { local: true }));
+  return Effect.runPromise(Effect.provide(effect, layer, { local: true }));
 }
 
 describe("Program integration", () => {
@@ -152,7 +159,7 @@ describe("executeLive", () => {
         Effect.succeed({
           routePlan: [{ swapInfo: {} }],
           outAmount: "10000000000000",
-        } as unknown as Record<string, Error>),
+        }),
       swapUSDCForToken: () => Effect.succeed("mock-swap-tx"),
     };
   }
@@ -493,7 +500,7 @@ describe("executeLive", () => {
     expect(pos?.entryAmountYUsd).toBe(0);
 
     const enterEvent = savePositionEventSpy.mock.calls
-      .map((c) => c[0] as { event: string; metadata?: Record<string, unknown> })
+      .map((c) => c[0] as { event: string; metadata?: JsonRecord })
       .find((e) => e.event === "ENTER");
     expect(enterEvent?.metadata?.["depositMode"]).toBe("single-sided-x");
     expect(enterEvent?.metadata?.["strategyShape"]).toBe("spot");
@@ -520,10 +527,10 @@ describe("executePaper paper/live parity", () => {
       passesPreFilter: () => true,
     };
     // Only savePosition/savePositionEvent are touched by a paper ENTER.
-    const db = {
+    const db = asOwner<DbApi>({
       savePosition: () => Effect.void,
       savePositionEvent: () => Effect.void,
-    } as unknown as DbApi;
+    });
     const trackedPositions = new Map();
 
     const result = Effect.runSync(
@@ -575,10 +582,10 @@ describe("executePaper paper/live parity", () => {
       recommendBinRange: recommendBinRangeSpy,
       passesPreFilter: () => true,
     };
-    const db = {
+    const db = asOwner<DbApi>({
       savePosition: () => Effect.void,
       savePositionEvent: () => Effect.void,
-    } as unknown as DbApi;
+    });
     const trackedPositions = new Map();
 
     const result = Effect.runSync(

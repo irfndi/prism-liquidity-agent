@@ -41,6 +41,19 @@ interface CloudFeedbackPayload {
   reportedAt: number;
 }
 
+interface CloudFeedbackResponse {
+  readonly id?: unknown;
+  readonly duplicate?: unknown;
+}
+
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
+}
+
+function readString<T>(value: T): string | null {
+  return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
+}
+
 function submitCloudFeedback(
   apiUrl: string,
   payload: CloudFeedbackPayload,
@@ -63,9 +76,10 @@ function submitCloudFeedback(
     );
     if (res.status === 401 || res.status === 403) return { authFailure: true as const };
     if (!res.ok) return null;
-    const json = (yield* Effect.tryPromise(() => res.json())) as Record<string, unknown>;
-    if (typeof json.id !== "string") return null;
-    return { id: json.id, duplicate: json.duplicate === true };
+    const json = (yield* Effect.tryPromise(() => res.json())) as unknown;
+    const response = isNonNullObject(json) ? (json as CloudFeedbackResponse) : null;
+    if (response === null || readString(response.id) === null) return null;
+    return { id: response.id as string, duplicate: response.duplicate === true };
   }).pipe(Effect.catch(() => Effect.succeed(null)));
 }
 
@@ -96,20 +110,26 @@ function writeOptOut(value: boolean): Effect.Effect<void, never> {
   );
 }
 
+const bunRuntime = (globalThis as { readonly Bun?: { readonly version?: string } }).Bun;
+const runningOnBun = bunRuntime !== undefined;
+
+/** Owner contract for the mutable build of a FeedbackContext. */
+interface MutableFeedbackContext {
+  prismVersion: string;
+  installMethod: string;
+  platform: string;
+  runtime: string;
+  nodeVersion?: string;
+}
+
 function buildContext(): FeedbackContext {
-  const ctx: {
-    prismVersion: string;
-    installMethod: string;
-    platform: string;
-    runtime: string;
-    nodeVersion?: string;
-  } = {
+  const ctx: MutableFeedbackContext = {
     prismVersion: getCurrentVersion(),
     installMethod: detectInstallMethod(),
     platform: `${process.platform}-${process.arch}`,
-    runtime: typeof Bun !== "undefined" ? `bun ${Bun.version}` : `node ${process.version}`,
+    runtime: runningOnBun ? `bun ${bunRuntime?.version ?? ""}` : `node ${process.version}`,
   };
-  if (typeof Bun === "undefined") {
+  if (!runningOnBun) {
     ctx.nodeVersion = process.version;
   }
   return ctx;
@@ -147,7 +167,8 @@ function readPrismApiKey(): Effect.Effect<string | null, never> {
       const value = JSON.parse(readFileSync(credentialsFile, "utf-8")) as {
         apiKey?: unknown;
       };
-      return typeof value.apiKey === "string" && value.apiKey.length > 0 ? value.apiKey : null;
+      const apiKey = readString(value.apiKey);
+      return apiKey !== null && apiKey.length > 0 ? apiKey : null;
     },
     catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
   }).pipe(Effect.catch(() => Effect.succeed(null)));
@@ -319,7 +340,7 @@ export const FeedbackLive = Layer.effect(
         logger.warn(`Cloud feedback unavailable; feedback stored locally: ${feedback.summary}`);
         return { kind: "local_only" as const, localId };
       }).pipe(
-        Effect.catch((err: unknown) => {
+        Effect.catch(<T>(err: T) => {
           const message = err instanceof Error ? err.message : String(err);
           logger.error(`Feedback submission failed: ${message}`);
           return Effect.succeed({

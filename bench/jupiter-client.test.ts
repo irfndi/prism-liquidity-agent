@@ -4,11 +4,12 @@ import {
   resetJupiterGateForTest,
   setJupiterGateForTest,
 } from "../engine/jupiter-client.js";
+import { asFetch } from "./helpers.js";
 
 function mockFetchOnce(
   impl: (url: string | URL | Request, init?: RequestInit) => Response | Promise<Response>,
 ): void {
-  vi.spyOn(globalThis, "fetch").mockImplementation(impl as unknown as typeof fetch);
+  vi.spyOn(globalThis, "fetch").mockImplementation(asFetch(impl));
 }
 
 function okResponse(): Response {
@@ -16,7 +17,8 @@ function okResponse(): Response {
 }
 
 function rateLimitedResponse(resetAtSeconds?: number): Response {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  type HeadersMap = Record<string, string>;
+  const headers: HeadersMap = { "Content-Type": "application/json" };
   if (resetAtSeconds !== undefined) headers["x-ratelimit-reset"] = String(resetAtSeconds);
   return new Response(JSON.stringify({ code: 429, message: "[API Gateway] Too many requests" }), {
     status: 429,

@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 
-function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): T {
-  return Effect.runSync((Effect.provide as any)(effect, layer));
+function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: Layer.Layer<R, never, never>): T {
+  return Effect.runSync(Effect.provide(effect, layer));
 }
 
 function makePosition(

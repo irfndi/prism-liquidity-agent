@@ -5,7 +5,7 @@ import { ConfigService } from "../engine/config-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService, RevenueConfigService, type RevenueConfig } from "../engine/services.js";
 import { fetchConfigFromApi, parseRevenueConfig } from "../engine/revenue-config-service.js";
-import { defaultAppConfig } from "./helpers.js";
+import { asFetch, defaultAppConfig, asOwner } from "./helpers.js";
 
 // ─── Fee wallet acquisition — the REAL production pipeline ──────────────────
 //
@@ -52,15 +52,15 @@ function buildLayer(
 // stub just that path so no test touches the real user config directory.
 function mockCredentialsFile(apiKey = "test-api-key"): void {
   vi.spyOn(fs, "readFileSync").mockImplementation(((path: fs.PathOrFileDescriptor) => {
-    if (typeof path === "string" && path.includes("credentials.json")) {
+    if (String(path).includes("credentials.json")) {
       return JSON.stringify({ apiKey });
     }
     throw new Error(`ENOENT: no such file: ${String(path)}`);
   }) as typeof fs.readFileSync);
 }
 
-function okResponse(body: unknown): Response {
-  return { ok: true, json: () => Promise.resolve(body) } as unknown as Response;
+function okResponse(body: any): Response {
+  return asOwner<Response>({ ok: true, json: () => Promise.resolve(body) });
 }
 
 function runGetConfig(
@@ -131,7 +131,7 @@ describe("parseRevenueConfig", () => {
 describe("fetchConfigFromApi", () => {
   it("fetches /v1/config with the Bearer key and returns the parsed config", async () => {
     const fetchMock = vi.fn().mockResolvedValue(okResponse(VALID_CONFIG_BODY));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
 
     const result = await Effect.runPromise(Effect.result(fetchConfigFromApi("test-api-key")));
 
@@ -147,9 +147,7 @@ describe("fetchConfigFromApi", () => {
   });
 
   it("fails when the API returns a non-ok status", async () => {
-    globalThis.fetch = vi
-      .fn()
-      .mockResolvedValue({ ok: false, status: 503 }) as unknown as typeof fetch;
+    globalThis.fetch = asFetch(vi.fn().mockResolvedValue({ ok: false, status: 503 }));
 
     const result = await Effect.runPromise(Effect.result(fetchConfigFromApi("test-api-key")));
 
@@ -161,10 +159,12 @@ describe("fetchConfigFromApi", () => {
   });
 
   it("fails when the response body is not valid JSON", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.reject(new SyntaxError("Unexpected token '<'")),
-    }) as unknown as typeof fetch;
+    globalThis.fetch = asFetch(
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.reject(new SyntaxError("Unexpected token '<'")),
+      }),
+    );
 
     const result = await Effect.runPromise(Effect.result(fetchConfigFromApi("test-api-key")));
 
@@ -175,9 +175,7 @@ describe("fetchConfigFromApi", () => {
   });
 
   it("fails when the body is valid JSON but not an object", async () => {
-    globalThis.fetch = vi
-      .fn()
-      .mockResolvedValue(okResponse("not-an-object")) as unknown as typeof fetch;
+    globalThis.fetch = asFetch(vi.fn().mockResolvedValue(okResponse("not-an-object")));
 
     const result = await Effect.runPromise(Effect.result(fetchConfigFromApi("test-api-key")));
 
@@ -194,7 +192,7 @@ describe("RevenueConfigService fee wallet lifecycle", () => {
   it("caches the fee wallet for 30 minutes, then refetches", async () => {
     vi.useFakeTimers({ now: new Date("2026-01-01T00:00:00Z") });
     const fetchMock = vi.fn().mockResolvedValue(okResponse(VALID_CONFIG_BODY));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
     mockCredentialsFile();
     const layer = buildLayer({ paperTrading: true });
 
@@ -230,7 +228,7 @@ describe("RevenueConfigService fee wallet lifecycle", () => {
 
   it("returns an empty fee wallet when the API is unreachable in paper mode", async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("network error"));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
     mockCredentialsFile();
     const layer = buildLayer({ paperTrading: true });
 

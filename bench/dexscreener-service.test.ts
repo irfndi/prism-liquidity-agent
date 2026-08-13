@@ -33,11 +33,11 @@ const BASE_FEE_RATE = 0.003;
 /** A 200 with `pairs: null` is how DexScreener reports an unknown pair. */
 const NOT_FOUND_RESPONSE = { schemaVersion: "1.0.0", pairs: null, pair: null };
 
-function fetchReturning(body: unknown, status = 200): FetchLike {
+function fetchReturning(body: any, status = 200): FetchLike {
   return () => Promise.resolve(new Response(JSON.stringify(body), { status }));
 }
 
-function fetchRejecting(error: unknown): FetchLike {
+function fetchRejecting(error: any): FetchLike {
   return () => Promise.reject(error);
 }
 

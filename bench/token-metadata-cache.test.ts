@@ -28,10 +28,7 @@ function runSync<T>(effect: Effect.Effect<T, never>): T {
 }
 
 /** In-memory fake for the SQLite metadata store. */
-function makeFakeDb(): {
-  db: TokenMetadataDb;
-  store: Map<string, string>;
-} {
+function makeFakeDb() {
   const store = new Map<string, string>();
   const db: TokenMetadataDb = {
     getMetadata: (key) => Effect.sync(() => store.get(key) ?? null),

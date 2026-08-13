@@ -56,6 +56,15 @@ export interface ReplayEvaluation {
   readonly rejectTag?: string;
 }
 
+/** Mutable build of a ReplayEvaluation, for conditional reject-tag attachment. */
+interface RiskAssessmentBuild {
+  decision: AgentDecision;
+  riskApproved: boolean;
+  riskReason: string;
+  adjustedSizeUsd: number;
+  rejectTag?: string;
+}
+
 function tagRiskRejection(reason: string): string {
   // Allocation, exposure-cap, position-cap, and dust rejections map to the live
   // [alloc-gate] audit tag so the replay census groups identically to the live
@@ -146,11 +155,14 @@ export function evaluateReplayPool(input: ReplayEvaluationInput): ReplayEvaluati
     activeBinId: input.activeBinId,
   };
   const riskResult = evaluateRisk(input.risk, decision, context);
-  return {
+  const result: RiskAssessmentBuild = {
     decision,
     riskApproved: riskResult.approved,
     riskReason: riskResult.reason,
     adjustedSizeUsd: riskResult.adjustedSizeUsd ?? input.proposedSizeUsd,
-    ...(riskResult.approved ? {} : { rejectTag: tagRiskRejection(riskResult.reason) }),
   };
+  if (!riskResult.approved) {
+    result.rejectTag = tagRiskRejection(riskResult.reason);
+  }
+  return result;
 }

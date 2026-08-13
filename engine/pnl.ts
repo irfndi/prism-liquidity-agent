@@ -187,16 +187,18 @@ export function computeNetRealizedPnlUsd(input: NetRealizedPnlInput): number {
  * `depositedUsd` was inflated without adjusting the value columns (which
  * distorted PnL and the trailing stop).
  */
+export interface CompoundCostBasisResult {
+  readonly depositedUsd: number;
+  readonly currentValueUsd: number;
+  readonly highestValueUsd: number;
+}
+
 export function applyCompoundToCostBasis(input: {
   readonly depositedUsd: number;
   readonly currentValueUsd: number;
   readonly highestValueUsd: number | null;
   readonly compoundedFeesUsd: number;
-}): {
-  readonly depositedUsd: number;
-  readonly currentValueUsd: number;
-  readonly highestValueUsd: number;
-} {
+}): CompoundCostBasisResult {
   const depositedUsd = input.depositedUsd + input.compoundedFeesUsd;
   const currentValueUsd = input.currentValueUsd + input.compoundedFeesUsd;
   const highest = Math.max(input.highestValueUsd ?? input.depositedUsd, currentValueUsd);

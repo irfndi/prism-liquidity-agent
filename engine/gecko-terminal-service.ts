@@ -89,16 +89,42 @@ export interface GeckoPoolStats {
 
 // ─── Response parsing (live-verified semantics) ──────────────────────────────
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+interface RawVolume {
+  readonly h24: unknown;
+}
+
+interface RawGeckoAttributes {
+  readonly volume_usd: RawVolume;
+  readonly reserve_in_usd: unknown;
+  readonly pool_fee_percentage: unknown;
+  readonly base_token_price_usd: unknown;
+  readonly quote_token_price_usd: unknown;
+}
+
+interface RawGeckoData {
+  readonly attributes: RawGeckoAttributes;
+}
+
+interface RawGeckoResponse {
+  readonly data: RawGeckoData;
+}
+
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
 }
 
 /** Parse a numeric STRING or number into a finite number, else null. GeckoTerminal
  *  returns numeric fields as decimal strings ("23551730.42"). */
-function readFiniteNumber(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number(value);
+function readFiniteNumber<T>(value: T): number | null {
+  if (Object.prototype.toString.call(value) === "[object Number]") {
+    const num = value as number;
+    return Number.isFinite(num) ? num : null;
+  }
+  if (
+    Object.prototype.toString.call(value) === "[object String]" &&
+    (value as string).trim().length > 0
+  ) {
+    const parsed = Number(value as string);
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
@@ -110,7 +136,7 @@ function readFiniteNumber(value: unknown): number | null {
  * tested (verified live 2026-07-22) — the binStep-derived baseFeeRate is the
  * operative path; this only ever runs if GeckoTerminal starts populating it.
  */
-function parseFeePercentageFraction(value: unknown): number | null {
+function parseFeePercentageFraction<T>(value: T): number | null {
   const num = readFiniteNumber(value);
   if (num === null || num < 0) return null;
   return num / 100;
@@ -125,21 +151,22 @@ function parseFeePercentageFraction(value: unknown): number | null {
  * `baseFeeRate` is the pool's binStep-derived base-fee fraction used to price
  * real volume into fees when `pool_fee_percentage` is null (always, for DLMM).
  */
-export function parseGeckoPoolStats(raw: unknown, baseFeeRate: number): GeckoPoolStats | null {
-  if (!isObject(raw)) return null;
-  const data = raw["data"];
-  if (!isObject(data)) return null;
-  const attrs = data["attributes"];
-  if (!isObject(attrs)) return null;
+export function parseGeckoPoolStats<T>(raw: T, baseFeeRate: number): GeckoPoolStats | null {
+  if (!isNonNullObject(raw)) return null;
+  const response = raw as RawGeckoResponse;
+  const data = response.data;
+  if (!isNonNullObject(data)) return null;
+  const attrs = data.attributes;
+  if (!isNonNullObject(attrs)) return null;
 
-  const volumeUsd = attrs["volume_usd"];
-  const volume24hUsd = isObject(volumeUsd) ? readFiniteNumber(volumeUsd["h24"]) : null;
+  const volumeUsd = attrs.volume_usd;
+  const volume24hUsd = isNonNullObject(volumeUsd) ? readFiniteNumber(volumeUsd.h24) : null;
   // Volume is the one field every downstream gate (authenticity, fee/IL) needs;
   // non-positive volume is malformed data (a live pool never reports ≤0 24h
   // volume) — reject the stats ENTIRELY rather than marking garbage measured.
   if (volume24hUsd === null || volume24hUsd <= 0) return null;
 
-  const feePercentage = parseFeePercentageFraction(attrs["pool_fee_percentage"]);
+  const feePercentage = parseFeePercentageFraction(attrs.pool_fee_percentage);
   const effectiveFeeRate = feePercentage ?? baseFeeRate;
 
   // Non-positive reserves are equally malformed; null them so the caller treats
@@ -148,14 +175,14 @@ export function parseGeckoPoolStats(raw: unknown, baseFeeRate: number): GeckoPoo
   // is dead/wash data — enriching with it would substitute the fallback TVL yet
   // still tag the pool "geckoterminal", flipping volumeAuthenticityKnown true on
   // a TVL gecko never measured. Only a strictly positive reserve is usable.
-  const reserveUsd = readFiniteNumber(attrs["reserve_in_usd"]);
+  const reserveUsd = readFiniteNumber(attrs.reserve_in_usd);
 
   return {
     tvlUsd: reserveUsd !== null && reserveUsd <= 0 ? null : reserveUsd,
     volume24hUsd,
     fees24hUsd: volume24hUsd * effectiveFeeRate,
-    basePriceUsd: readFiniteNumber(attrs["base_token_price_usd"]),
-    quotePriceUsd: readFiniteNumber(attrs["quote_token_price_usd"]),
+    basePriceUsd: readFiniteNumber(attrs.base_token_price_usd),
+    quotePriceUsd: readFiniteNumber(attrs.quote_token_price_usd),
   };
 }
 

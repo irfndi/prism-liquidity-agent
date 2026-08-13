@@ -8,7 +8,7 @@ import { AdapterLive } from "../engine/adapter-service.js";
 import { ConfigService } from "../engine/config-service.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { DbLive } from "../engine/db-service.js";
-import { defaultAppConfig, mockFetch } from "./helpers.js";
+import { defaultAppConfig, mockFetch, asOwner } from "./helpers.js";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGQkZwyADt1v";
@@ -42,13 +42,13 @@ function mockTokenAccountsByProgram(
         filter as { readonly programId?: { toBase58(): string } }
       ).programId?.toBase58();
       const accounts = programId === TOKEN_2022 ? token2022 : tokenProgram;
-      return { value: accounts.map(tokenAccount) } as unknown as TokenAccountsResult;
+      return asOwner<TokenAccountsResult>({ value: accounts.map(tokenAccount) });
     },
   );
 }
 
 function mockJupiterPrices(prices: Record<string, number>): () => void {
-  return mockFetch((async (url: string | URL | Request) => {
+  return mockFetch(async (url: string | URL | Request) => {
     if (String(url as unknown).includes("api.jup.ag/price/v3")) {
       const body: Record<string, { usdPrice: number }> = {};
       for (const [mint, price] of Object.entries(prices)) body[mint] = { usdPrice: price };
@@ -58,7 +58,7 @@ function mockJupiterPrices(prices: Record<string, number>): () => void {
       });
     }
     return new Response("unexpected", { status: 500 });
-  }) as unknown as typeof fetch);
+  });
 }
 
 async function readWalletBalance(): Promise<number> {
@@ -213,7 +213,7 @@ describe("AdapterService wallet balance reconciliation", () => {
     // a keyless provider (Jupiter) can resolve the mint. Helius is the last
     // resort, so it must never be called when Jupiter succeeds.
     let heliusCalls = 0;
-    const restore = mockFetch((async (url: string | URL | Request) => {
+    const restore = mockFetch(async (url: string | URL | Request) => {
       const u = String(url as unknown);
       if (u.includes("api.jup.ag/price/v3")) {
         return new Response(JSON.stringify({ [USDC_MINT]: { usdPrice: 1 } }), {
@@ -226,7 +226,7 @@ describe("AdapterService wallet balance reconciliation", () => {
         return new Response("{}", { status: 429 });
       }
       return new Response("unexpected", { status: 500 });
-    }) as unknown as typeof fetch);
+    });
     vi.spyOn(Connection.prototype, "getBalance").mockResolvedValue(0);
     mockTokenAccountsByProgram([{ mint: USDC_MINT, amount: "3000000", decimals: 6 }]);
 
@@ -300,9 +300,9 @@ describe("AdapterService wallet holdings seam (getWalletHoldings)", () => {
     let tokenAccountReads = 0;
     vi.spyOn(Connection.prototype, "getParsedTokenAccountsByOwner").mockImplementation(async () => {
       tokenAccountReads += 1;
-      return {
+      return asOwner<TokenAccountsResult>({
         value: [tokenAccount({ mint: USDC_MINT, amount: "1000000", decimals: 6 })],
-      } as unknown as TokenAccountsResult;
+      });
     });
 
     try {
@@ -377,9 +377,7 @@ describe("AdapterService getTokenPrices fallback behavior", () => {
     // fallback price with the default. The stranded-status classification
     // passes useFallback: false precisely so a price-provider outage can
     // never report stranded capital at a fabricated value.
-    const restore = mockFetch(
-      (async () => new Response("down", { status: 500 })) as unknown as typeof fetch,
-    );
+    const restore = mockFetch(async () => new Response("down", { status: 500 }));
     try {
       expect(await readTokenPrices([SOL_MINT], false)).toEqual({ [SOL_MINT]: 0 });
       expect(await readTokenPrices([SOL_MINT], true)).toEqual({ [SOL_MINT]: 165 });

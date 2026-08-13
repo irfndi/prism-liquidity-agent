@@ -36,6 +36,19 @@ import type { DiscoverPoolsError, EntryPrepError } from "./errors.js";
 import type { CopySignalApi } from "./copy-trading-signals.js";
 import type { WashEvidence } from "./wash-forensics.js";
 
+/**
+ * A JSON-serializable value graph. Used where external/opaque JSON payloads
+ * (raw swap quotes, claim metadata, alert data) cross the service boundary
+ * without a fixed schema. Never uses `any`/`unknown` as the value contract.
+ */
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly JsonValue[]
+  | { readonly [key: string]: JsonValue };
+
 // ─── Adapter Service ─────────────────────────────────────────────────────────
 
 /** Data API fee/volume window labels (rolling windows over the last N). */
@@ -101,7 +114,7 @@ export interface SwapQuote {
     readonly inputMint: string;
     readonly outputMint: string;
   }>;
-  readonly rawQuote: Record<string, unknown>;
+  readonly rawQuote: JsonValue;
 }
 
 export interface PreparedSwap {
@@ -491,17 +504,17 @@ export interface AdapterApi {
   readonly quoteSwapUSDCForToken: (
     outputMint: string,
     amountAtomic: bigint,
-  ) => Effect.Effect<Record<string, unknown>, Error>;
+  ) => Effect.Effect<JsonValue, Error>;
   readonly swapUSDCForToken: (
     outputMint: string,
     amountAtomic: bigint,
-    quoteData?: Record<string, unknown>,
+    quoteData?: JsonValue,
   ) => Effect.Effect<string, Error>;
   readonly swapToken?: (
     inputMint: string,
     outputMint: string,
     amountAtomic: bigint,
-    quoteData?: Record<string, unknown>,
+    quoteData?: JsonValue,
   ) => Effect.Effect<string, Error>;
   readonly quoteSwap?: (request: SwapRequest) => Effect.Effect<SwapQuote, Error>;
   readonly prepareSwap?: (quote: SwapQuote) => Effect.Effect<PreparedSwap, Error>;
@@ -1069,7 +1082,7 @@ export interface DbApi {
     valueUsd: number | null;
     feesUsd: number | null;
     price: number | null;
-    metadata?: Record<string, unknown> | null;
+    metadata?: JsonValue | null;
     createdAt: number;
   }) => Effect.Effect<void, Error>;
   readonly getPositionEvents: (
@@ -1558,7 +1571,7 @@ export interface EngineAlert {
    * the same pool throttle independently.
    */
   readonly positionId?: string;
-  readonly data?: Record<string, unknown>;
+  readonly data?: JsonValue;
 }
 
 export interface AlertApi {

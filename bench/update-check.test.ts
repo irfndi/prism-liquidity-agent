@@ -7,6 +7,7 @@ import { AUTONOMOUS_TOKEN_CONFIG_DEFAULTS, ConfigService } from "../engine/confi
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 import { checkForAutoUpdate } from "../engine/update-check.js";
+import { asFetch } from "./helpers.js";
 
 function runAsync<T, E>(effect: Effect.Effect<T, E, never>): Promise<T> {
   return Effect.runPromise(effect);
@@ -187,18 +188,20 @@ describe("checkForAutoUpdate", () => {
   });
 
   it("does nothing when no newer version available", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: vi.fn().mockResolvedValue({
-        version: "0.0.0",
-        channel: "stable",
-        tarball_url: "",
-        sha256_url: "",
-        published_at: new Date().toISOString(),
-        min_cli_version: "1.0.0",
+    globalThis.fetch = asFetch(
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({
+          version: "0.0.0",
+          channel: "stable",
+          tarball_url: "",
+          sha256_url: "",
+          published_at: new Date().toISOString(),
+          min_cli_version: "1.0.0",
+        }),
       }),
-    }) as unknown as typeof fetch;
+    );
 
     const layer = buildLayer({ updateCheckIntervalMs: 0 });
 
@@ -215,18 +218,20 @@ describe("checkForAutoUpdate", () => {
   });
 
   it("forces shutdown when threshold exceeded and force enabled", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: vi.fn().mockResolvedValue({
-        version: "999.0.0",
-        channel: "stable",
-        tarball_url: "https://example.com/tarball.tar.gz",
-        sha256_url: "https://example.com/tarball.tar.gz.sha256",
-        published_at: new Date().toISOString(),
-        min_cli_version: "1.0.0",
+    globalThis.fetch = asFetch(
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({
+          version: "999.0.0",
+          channel: "stable",
+          tarball_url: "https://example.com/tarball.tar.gz",
+          sha256_url: "https://example.com/tarball.tar.gz.sha256",
+          published_at: new Date().toISOString(),
+          min_cli_version: "1.0.0",
+        }),
       }),
-    }) as unknown as typeof fetch;
+    );
 
     const layer = buildLayer({
       forceUpdateEnabled: true,
@@ -248,18 +253,20 @@ describe("checkForAutoUpdate", () => {
   });
 
   it("does not force shutdown when disabled", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: vi.fn().mockResolvedValue({
-        version: "999.0.0",
-        channel: "stable",
-        tarball_url: "https://example.com/tarball.tar.gz",
-        sha256_url: "https://example.com/tarball.tar.gz.sha256",
-        published_at: new Date().toISOString(),
-        min_cli_version: "1.0.0",
+    globalThis.fetch = asFetch(
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({
+          version: "999.0.0",
+          channel: "stable",
+          tarball_url: "https://example.com/tarball.tar.gz",
+          sha256_url: "https://example.com/tarball.tar.gz.sha256",
+          published_at: new Date().toISOString(),
+          min_cli_version: "1.0.0",
+        }),
       }),
-    }) as unknown as typeof fetch;
+    );
 
     const layer = buildLayer({
       forceUpdateEnabled: false,
@@ -281,9 +288,7 @@ describe("checkForAutoUpdate", () => {
   });
 
   it("survives network errors gracefully", async () => {
-    globalThis.fetch = vi
-      .fn()
-      .mockRejectedValue(new Error("network timeout")) as unknown as typeof fetch;
+    globalThis.fetch = asFetch(vi.fn().mockRejectedValue(new Error("network timeout")));
 
     const layer = buildLayer({ updateCheckIntervalMs: 0 });
 
@@ -300,18 +305,20 @@ describe("checkForAutoUpdate", () => {
   });
 
   it("warns when 1 day until forced shutdown", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: vi.fn().mockResolvedValue({
-        version: "999.0.0",
-        channel: "stable",
-        tarball_url: "https://example.com/tarball.tar.gz",
-        sha256_url: "https://example.com/tarball.tar.gz.sha256",
-        published_at: new Date().toISOString(),
-        min_cli_version: "1.0.0",
+    globalThis.fetch = asFetch(
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({
+          version: "999.0.0",
+          channel: "stable",
+          tarball_url: "https://example.com/tarball.tar.gz",
+          sha256_url: "https://example.com/tarball.tar.gz.sha256",
+          published_at: new Date().toISOString(),
+          min_cli_version: "1.0.0",
+        }),
       }),
-    }) as unknown as typeof fetch;
+    );
 
     const layer = buildLayer({
       forceUpdateEnabled: true,
@@ -334,18 +341,20 @@ describe("checkForAutoUpdate", () => {
   });
 
   it("warns when 2 days until forced shutdown", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: vi.fn().mockResolvedValue({
-        version: "999.0.0",
-        channel: "stable",
-        tarball_url: "https://example.com/tarball.tar.gz",
-        sha256_url: "https://example.com/tarball.tar.gz.sha256",
-        published_at: new Date().toISOString(),
-        min_cli_version: "1.0.0",
+    globalThis.fetch = asFetch(
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({
+          version: "999.0.0",
+          channel: "stable",
+          tarball_url: "https://example.com/tarball.tar.gz",
+          sha256_url: "https://example.com/tarball.tar.gz.sha256",
+          published_at: new Date().toISOString(),
+          min_cli_version: "1.0.0",
+        }),
       }),
-    }) as unknown as typeof fetch;
+    );
 
     const layer = buildLayer({
       forceUpdateEnabled: true,

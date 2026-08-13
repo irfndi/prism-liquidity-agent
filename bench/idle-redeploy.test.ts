@@ -44,7 +44,7 @@ import {
 } from "../engine/services.js";
 import type { PoolState } from "../engine/types.js";
 import { USDC_MINT } from "../engine/constants.js";
-import { defaultAppConfig, makePool, makeBinArray } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, asOwner } from "./helpers.js";
 
 // ─── Pure entry sizing ───────────────────────────────────────────────────────
 
@@ -379,7 +379,7 @@ function runOneCycle<E>(
     return { positions, decisions };
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as unknown as Effect.Effect<CycleResult, Error, never>,
+    asOwner<Effect.Effect<CycleResult, Error, never>>(Effect.provide(test, layer)),
   );
 }
 

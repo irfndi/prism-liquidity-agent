@@ -35,18 +35,85 @@ export interface OpenPosition {
 
 // ─── Response validation ─────────────────────────────────────────────────────
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+interface RawPosition {
+  readonly poolAddress?: unknown;
+  readonly pool?: unknown;
+  readonly pool_address?: unknown;
+  readonly lb_pair?: unknown;
+  readonly lbPair?: unknown;
+  readonly pair_address?: unknown;
+  readonly positionId?: unknown;
+  readonly position_id?: unknown;
+  readonly position_address?: unknown;
+  readonly positionAddress?: unknown;
+  readonly pubkey?: unknown;
+  readonly publicKey?: unknown;
+  readonly position_pubkey?: unknown;
+  readonly address?: unknown;
+  readonly mint?: unknown;
+  readonly mint_address?: unknown;
+  readonly tokenX?: unknown;
+  readonly token_x?: unknown;
+  readonly mintX?: unknown;
+  readonly mint_x?: unknown;
+  readonly tokenY?: unknown;
+  readonly token_y?: unknown;
+  readonly mintY?: unknown;
+  readonly mint_y?: unknown;
+  readonly lowerBin?: unknown;
+  readonly lower_bin_id?: unknown;
+  readonly minBinId?: unknown;
+  readonly min_bin_id?: unknown;
+  readonly lowerBinId?: unknown;
+  readonly upperBin?: unknown;
+  readonly upper_bin_id?: unknown;
+  readonly maxBinId?: unknown;
+  readonly max_bin_id?: unknown;
+  readonly upperBinId?: unknown;
+  readonly currentBin?: unknown;
+  readonly active_bin_id?: unknown;
+  readonly activeBin?: unknown;
+  readonly current_bin_id?: unknown;
+  readonly depositedUsd?: unknown;
+  readonly deposited_usd?: unknown;
+  readonly totalDepositedUsd?: unknown;
+  readonly depositUsd?: unknown;
+  readonly valueUsd?: unknown;
+  readonly value_usd?: unknown;
+  readonly currentValueUsd?: unknown;
+  readonly positionValueUsd?: unknown;
+  readonly value?: unknown;
+  readonly pnlUsd?: unknown;
+  readonly pnl_usd?: unknown;
+  readonly unrealizedPnlUsd?: unknown;
+  readonly pnl?: unknown;
+  readonly totalPnlUsd?: unknown;
+  readonly createdAt?: unknown;
+  readonly created_at?: unknown;
+  readonly openedAt?: unknown;
+  readonly opened_at?: unknown;
+  readonly ts?: unknown;
 }
 
-function readString(obj: Record<string, unknown>, key: string): string | undefined {
-  const value = obj[key];
-  return typeof value === "string" && value.length > 0 ? value : undefined;
+interface RawPortfolio {
+  readonly pools: unknown;
 }
 
-function readNumber(obj: Record<string, unknown>, key: string): number | undefined {
-  const value = obj[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
+}
+
+function readString<T>(value: T): string | undefined {
+  return Object.prototype.toString.call(value) === "[object String]" && (value as string).length > 0
+    ? (value as string)
+    : undefined;
+}
+
+function readNumber<T>(value: T): number | undefined {
+  return Object.prototype.toString.call(value) === "[object Number]" &&
+    Number.isFinite(value as number)
+    ? (value as number)
+    : undefined;
 }
 
 /**
@@ -56,25 +123,40 @@ function readNumber(obj: Record<string, unknown>, key: string): number | undefin
  * `position_address` vs `pubkey`), so we probe each candidate defensively.
  */
 function readStringCandidates(
-  obj: Record<string, unknown>,
-  keys: readonly string[],
+  record: RawPosition,
+  keys: readonly (keyof RawPosition)[],
 ): string | undefined {
   for (const key of keys) {
-    const value = readString(obj, key);
+    const value = readString(record[key]);
     if (value !== undefined) return value;
   }
   return undefined;
 }
 
 function readNumberCandidates(
-  obj: Record<string, unknown>,
-  keys: readonly string[],
+  record: RawPosition,
+  keys: readonly (keyof RawPosition)[],
 ): number | undefined {
   for (const key of keys) {
-    const value = readNumber(obj, key);
+    const value = readNumber(record[key]);
     if (value !== undefined) return value;
   }
   return undefined;
+}
+
+/** Mutable construction shape for {@link OpenPosition} (readonly on the public type). */
+interface MutableOpenPosition {
+  poolAddress: string;
+  positionId: string;
+  tokenX?: string;
+  tokenY?: string;
+  lowerBin?: number;
+  upperBin?: number;
+  currentBin?: number;
+  depositedUsd?: number;
+  valueUsd?: number;
+  pnlUsd?: number;
+  createdAt?: number;
 }
 
 /**
@@ -83,9 +165,10 @@ function readNumberCandidates(
  * identity pair (likely an upstream schema change) so the caller drops it
  * rather than surfacing a half-formed position. Every other field is optional.
  */
-export function parseOpenPosition(raw: unknown): OpenPosition | null {
-  if (!isObject(raw)) return null;
-  const poolAddress = readStringCandidates(raw, [
+export function parseOpenPosition<T>(raw: T): OpenPosition | null {
+  if (!isNonNullObject(raw)) return null;
+  const record = raw as RawPosition;
+  const poolAddress = readStringCandidates(record, [
     "poolAddress",
     "pool",
     "pool_address",
@@ -93,7 +176,7 @@ export function parseOpenPosition(raw: unknown): OpenPosition | null {
     "lbPair",
     "pair_address",
   ]);
-  const positionId = readStringCandidates(raw, [
+  const positionId = readStringCandidates(record, [
     "positionId",
     "position_id",
     "position_address",
@@ -105,83 +188,80 @@ export function parseOpenPosition(raw: unknown): OpenPosition | null {
   ]);
   if (poolAddress === undefined || positionId === undefined) return null;
 
-  const tokenX =
-    readStringCandidates(raw, ["tokenX", "token_x", "mintX", "mint_x"]) ?? readMint(raw, "token_x");
-  const tokenY =
-    readStringCandidates(raw, ["tokenY", "token_y", "mintY", "mint_y"]) ?? readMint(raw, "token_y");
+  const result: MutableOpenPosition = { poolAddress, positionId };
 
-  // Build the object with only the keys that are actually present. The repo
-  // compiles with `exactOptionalPropertyTypes` (an optional field must never
-  // be explicitly `undefined`) and the fields are `readonly`, so absent values
-  // are omitted via conditional spreads rather than assigned.
-  const lowerBin = readNumberCandidates(raw, [
+  const tokenX =
+    readStringCandidates(record, ["tokenX", "token_x", "mintX", "mint_x"]) ??
+    readMint(record, "token_x");
+  if (tokenX !== undefined) result.tokenX = tokenX;
+  const tokenY =
+    readStringCandidates(record, ["tokenY", "token_y", "mintY", "mint_y"]) ??
+    readMint(record, "token_y");
+  if (tokenY !== undefined) result.tokenY = tokenY;
+
+  const lowerBin = readNumberCandidates(record, [
     "lowerBin",
     "lower_bin_id",
     "minBinId",
     "min_bin_id",
     "lowerBinId",
   ]);
-  const upperBin = readNumberCandidates(raw, [
+  if (lowerBin !== undefined) result.lowerBin = lowerBin;
+  const upperBin = readNumberCandidates(record, [
     "upperBin",
     "upper_bin_id",
     "maxBinId",
     "max_bin_id",
     "upperBinId",
   ]);
-  const currentBin = readNumberCandidates(raw, [
+  if (upperBin !== undefined) result.upperBin = upperBin;
+  const currentBin = readNumberCandidates(record, [
     "currentBin",
     "active_bin_id",
     "activeBin",
     "current_bin_id",
   ]);
-  const depositedUsd = readNumberCandidates(raw, [
+  if (currentBin !== undefined) result.currentBin = currentBin;
+  const depositedUsd = readNumberCandidates(record, [
     "depositedUsd",
     "deposited_usd",
     "totalDepositedUsd",
     "depositUsd",
   ]);
-  const valueUsd = readNumberCandidates(raw, [
+  if (depositedUsd !== undefined) result.depositedUsd = depositedUsd;
+  const valueUsd = readNumberCandidates(record, [
     "valueUsd",
     "value_usd",
     "currentValueUsd",
     "positionValueUsd",
     "value",
   ]);
-  const pnlUsd = readNumberCandidates(raw, [
+  if (valueUsd !== undefined) result.valueUsd = valueUsd;
+  const pnlUsd = readNumberCandidates(record, [
     "pnlUsd",
     "pnl_usd",
     "unrealizedPnlUsd",
     "pnl",
     "totalPnlUsd",
   ]);
-  const createdAt = readNumberCandidates(raw, [
+  if (pnlUsd !== undefined) result.pnlUsd = pnlUsd;
+  const createdAt = readNumberCandidates(record, [
     "createdAt",
     "created_at",
     "openedAt",
     "opened_at",
     "ts",
   ]);
+  if (createdAt !== undefined) result.createdAt = createdAt;
 
-  return {
-    poolAddress,
-    positionId,
-    ...(tokenX !== undefined ? { tokenX } : {}),
-    ...(tokenY !== undefined ? { tokenY } : {}),
-    ...(lowerBin !== undefined ? { lowerBin } : {}),
-    ...(upperBin !== undefined ? { upperBin } : {}),
-    ...(currentBin !== undefined ? { currentBin } : {}),
-    ...(depositedUsd !== undefined ? { depositedUsd } : {}),
-    ...(valueUsd !== undefined ? { valueUsd } : {}),
-    ...(pnlUsd !== undefined ? { pnlUsd } : {}),
-    ...(createdAt !== undefined ? { createdAt } : {}),
-  } satisfies OpenPosition;
+  return result;
 }
 
 /** Read `token_x: { address }` / `token_y: { address }` nested objects. */
-function readMint(obj: Record<string, unknown>, key: string): string | undefined {
-  const nested = obj[key];
-  if (!isObject(nested)) return undefined;
-  return readStringCandidates(nested, ["address", "mint", "mint_address"]);
+function readMint(record: RawPosition, key: keyof RawPosition): string | undefined {
+  const nested = record[key];
+  if (!isNonNullObject(nested)) return undefined;
+  return readStringCandidates(nested as RawPosition, ["address", "mint", "mint_address"]);
 }
 
 /**
@@ -192,9 +272,10 @@ function readMint(obj: Record<string, unknown>, key: string): string | undefined
  * is treated as an empty portfolio, never an error. Any malformed payload
  * degrades to `[]` rather than throwing.
  */
-export function parseOpenPortfolio(raw: unknown): OpenPosition[] {
-  if (!isObject(raw)) return [];
-  const pools = raw["pools"];
+export function parseOpenPortfolio<T>(raw: T): OpenPosition[] {
+  if (!isNonNullObject(raw)) return [];
+  const record = raw as RawPortfolio;
+  const pools = record.pools;
   if (!Array.isArray(pools)) return [];
   const positions: OpenPosition[] = [];
   for (const entry of pools) {

@@ -6,9 +6,10 @@
 import { describe, expect, it } from "vitest";
 import { Effect } from "effect";
 import { program } from "../engine/program.js";
-import { makeTestLayer, makeAdapter, makeDatapiStats } from "./helpers.js";
+import { makeTestLayer, makeAdapter, makeDatapiStats, asOwner } from "./helpers.js";
 import { makePool, makePosition } from "./helpers.js";
 import { AuditService, DbService } from "../engine/services.js";
+import type { AppConfig } from "../engine/config-service.js";
 
 const POOL = "MaturityPool1111111111111111111111111111111111111";
 const POS_ID = "maturity-pos";
@@ -18,6 +19,18 @@ interface DecisionRow {
   reasoning: string;
   confidence: number;
   executed: boolean;
+}
+
+function makeConfigOverrides(opts: { minYieldExitAgeMs?: number }): Partial<AppConfig> {
+  let overrides: Partial<AppConfig> = {
+    paperTrading: false,
+    scanIntervalMs: 300,
+    watchlistPools: [POOL],
+  };
+  if (opts.minYieldExitAgeMs !== undefined) {
+    overrides = { ...overrides, minYieldExitAgeMs: opts.minYieldExitAgeMs };
+  }
+  return overrides;
 }
 
 function makeLayer(opts: { positionAgeMs: number; minYieldExitAgeMs?: number }) {
@@ -31,14 +44,7 @@ function makeLayer(opts: { positionAgeMs: number; minYieldExitAgeMs?: number }) 
           ]),
       },
     ),
-    configOverrides: {
-      paperTrading: false,
-      scanIntervalMs: 300,
-      watchlistPools: [POOL],
-      ...(opts.minYieldExitAgeMs !== undefined
-        ? { minYieldExitAgeMs: opts.minYieldExitAgeMs }
-        : {}),
-    },
+    configOverrides: makeConfigOverrides(opts),
     datapi: {
       getPoolData: () => Effect.succeed(makeDatapiStats({ address: POOL, fees24hUsd: 300 })),
     },
@@ -83,14 +89,10 @@ async function runCycle(opts: { positionAgeMs: number; minYieldExitAgeMs?: numbe
     yield* Effect.raceFirst(program, Effect.sleep(2_500));
     const audit = yield* AuditService;
     const decisions = yield* audit.getRecentDecisions(200);
-    return decisions as unknown as ReadonlyArray<DecisionRow>;
+    return asOwner<ReadonlyArray<DecisionRow>>(decisions);
   });
   return (await Effect.runPromise(
-    Effect.provide(test, layer) as unknown as Effect.Effect<
-      ReadonlyArray<DecisionRow>,
-      Error,
-      never
-    >,
+    asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
   )) as ReadonlyArray<DecisionRow>;
 }
 
@@ -167,14 +169,10 @@ describe("economic-exit maturity gate", () => {
       yield* Effect.raceFirst(program, Effect.sleep(6_000)); // wide window: parallel-load flake guard (2 confirm cycles)
       const audit = yield* AuditService;
       const decisions = yield* audit.getRecentDecisions(200);
-      return decisions as unknown as ReadonlyArray<DecisionRow>;
+      return asOwner<ReadonlyArray<DecisionRow>>(decisions);
     });
     const decisions = (await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        ReadonlyArray<DecisionRow>,
-        Error,
-        never
-      >,
+      asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
     )) as ReadonlyArray<DecisionRow>;
     const trailing = decisions.find((d) => d.reasoning.includes("Trailing stop"));
     expect(

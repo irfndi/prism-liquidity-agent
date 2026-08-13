@@ -13,7 +13,7 @@ import { AdapterLive } from "../engine/adapter-service.js";
 import { ConfigService } from "../engine/config-service.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { DbLive } from "../engine/db-service.js";
-import { defaultAppConfig } from "./helpers.js";
+import { defaultAppConfig, asOwner } from "./helpers.js";
 
 const POOL_ADDRESS = Keypair.generate().publicKey.toBase58();
 const TOKEN_X = Keypair.generate().publicKey;
@@ -90,17 +90,21 @@ beforeEach(() => {
   dlmmState.current = makeFakeDlmm();
   // RPC surface: reserve balances for the heuristic, mint metadata, wallet.
   vi.spyOn(Connection.prototype, "getTokenAccountBalance").mockImplementation(() =>
-    Promise.resolve({
-      context: { slot: 1 },
-      value: { amount: "1000000000", decimals: 9, uiAmount: 1, uiAmountString: "1" },
-    } as unknown as never),
+    asOwner<never>(
+      Promise.resolve({
+        context: { slot: 1 },
+        value: { amount: "1000000000", decimals: 9, uiAmount: 1, uiAmountString: "1" },
+      }),
+    ),
   );
   vi.spyOn(Connection.prototype, "getParsedAccountInfo").mockImplementation(() =>
-    Promise.resolve({
-      value: {
-        data: { parsed: { info: { decimals: 9, symbol: "SOL" } } },
-      },
-    } as unknown as never),
+    asOwner<never>(
+      Promise.resolve({
+        value: {
+          data: { parsed: { info: { decimals: 9, symbol: "SOL" } } },
+        },
+      }),
+    ),
   );
   vi.spyOn(Connection.prototype, "getBalance").mockResolvedValue(0);
   mockFetchImpl(async (url: string) => {

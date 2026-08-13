@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { Effect } from "effect";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonRecord = { [key: string]: JsonValue };
+import { Effect, Layer } from "effect";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 import { computePositionAnalytics, computeRealizedPnlUsd } from "../engine/pnl.js";
@@ -14,11 +17,11 @@ import {
 // accumulates USD-valued reward claims while cumulativeFeesClaimedUsd stays
 // fee-pure (fee APR must never include farm rewards). Total PnL includes both.
 
-function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): T {
-  return Effect.runSync((Effect.provide as any)(effect, layer));
+function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: Layer.Layer<R, never, never>): T {
+  return Effect.runSync(Effect.provide(effect, layer));
 }
 
-function makeDbPosition(overrides: Record<string, unknown> = {}) {
+function makeDbPosition(overrides: JsonRecord = {}) {
   return {
     positionId: "PosRewards11111111111111111111111111111111",
     poolAddress: "PoolRewards1111111111111111111111111111111",
@@ -120,7 +123,7 @@ describe("rewards helpers", () => {
     });
     expect(metadata.kind).toBe("lm_reward");
     expect(metadata.txSignatures).toEqual(["sig1", "sig2"]);
-    const rewards = metadata.rewards as Array<Record<string, unknown>>;
+    const rewards = metadata.rewards;
     expect(rewards).toHaveLength(2);
     expect(rewards[0]).toMatchObject({ mint: "MintA", amountAtomic: 250_000_000, amountUsd: 100 });
     expect(rewards[1]).toMatchObject({ mint: "MintB", amountAtomic: 50_000, amountUsd: null });
@@ -190,7 +193,7 @@ describe("DbService — cumulativeRewardsClaimedUsd", () => {
         expect(event.event).toBe("CLAIM");
         // fees_usd stays NULL on reward claims — fee queries stay fee-pure.
         expect(event.feesUsd).toBeNull();
-        const metadata = JSON.parse(event.metadata ?? "{}") as Record<string, unknown>;
+        const metadata = JSON.parse(event.metadata ?? "{}") as JsonRecord;
         expect(metadata.kind).toBe("lm_reward");
       }),
       layer,

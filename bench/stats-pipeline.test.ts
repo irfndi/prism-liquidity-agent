@@ -36,7 +36,7 @@ import {
   type EngineAlert,
 } from "../engine/services.js";
 import type { PoolMetrics } from "../engine/types.js";
-import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, makePosition, asOwner } from "./helpers.js";
 
 // ─── Stats source pipeline: datapi > geckoterminal > heuristic ──────────────
 // Fabricated (heuristic) stats must never pass a volume/fee gate. This file
@@ -234,11 +234,7 @@ function runWithSeed(
     return yield* audit.getRecentDecisions(200);
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as unknown as Effect.Effect<
-      ReadonlyArray<DecisionRow>,
-      Error,
-      never
-    >,
+    asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
   );
 }
 
@@ -531,7 +527,7 @@ describe("paper notional-fee accrual respects the stats source", () => {
       return pos?.cumulativeFeesClaimedUsd ?? -1;
     });
     return Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<number, Error, never>,
+      asOwner<Effect.Effect<number, Error, never>>(Effect.provide(test, layer)),
     );
   }
 

@@ -12,7 +12,7 @@ export interface TierConfig {
   readonly maxFreeSol: number; // SOL exempt from performance fee
 }
 
-export const TIERS: Record<string, TierConfig> = {
+export const TIERS = {
   free: {
     name: "free",
     minWalletSol: 0,
@@ -51,17 +51,30 @@ export function calculateTier(walletSol: number, referralCount: number): string 
   return "free";
 }
 
+export type TierName = keyof typeof TIERS;
+
+/** Resolve a tier config from a runtime tier name; unknown names fall back to `free`. */
+export function getTierConfig(tier: string): TierConfig {
+  if (tier === "pro") return TIERS.pro;
+  if (tier === "fund") return TIERS.fund;
+  return TIERS.free;
+}
+
+/** Split of a claimed fee into the platform's cut and the net amounts retained. */
+export interface PlatformFeeBreakdown {
+  readonly platformFeeUsd: number;
+  readonly netFeeX: number;
+  readonly netFeeY: number;
+}
+
 // Calculate platform fee deduction from claimed fees
 export function calculatePlatformFee(
   tier: string,
   feeXAmount: number,
   feeYAmount: number,
   tokenPrices: { x: number; y: number },
-): { platformFeeUsd: number; netFeeX: number; netFeeY: number } {
-  const tierConfig = TIERS[tier];
-  if (!tierConfig) {
-    return { platformFeeUsd: 0, netFeeX: feeXAmount, netFeeY: feeYAmount };
-  }
+): PlatformFeeBreakdown {
+  const tierConfig = getTierConfig(tier);
   if (
     !Number.isFinite(tokenPrices.x) ||
     !Number.isFinite(tokenPrices.y) ||

@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 
 const isDirectSetupExecution =
-  typeof Bun !== "undefined" &&
+  Boolean(globalThis.Bun) &&
   (Bun.main?.endsWith("ops/setup.ts") || Bun.main?.endsWith("ops/setup.js"));
 
 if (isDirectSetupExecution && process.env.PRISM_ALLOW_DIRECT !== "true") {

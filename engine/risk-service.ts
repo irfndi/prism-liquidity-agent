@@ -466,15 +466,20 @@ export interface AgentRebalanceCapitalGateInput {
   readonly oorRecoveryHoldThreshold: number;
 }
 
+/** Owner contract for the agent-rebalance capital-gate verdict. */
+export interface AgentRebalanceGateResult {
+  readonly approved: boolean;
+  readonly reason: string;
+}
+
 /**
  * Re-apply the deterministic REBALANCE capital-protection gates to an
  * agent-originated REBALANCE so advisors cannot bypass min-interval, gas, or
  * OOR recovery holds that protect the deterministic path.
  */
-export function evaluateAgentRebalanceCapitalGates(input: AgentRebalanceCapitalGateInput): {
-  readonly approved: boolean;
-  readonly reason: string;
-} {
+export function evaluateAgentRebalanceCapitalGates(
+  input: AgentRebalanceCapitalGateInput,
+): AgentRebalanceGateResult {
   const timeSinceRebal = input.now - input.lastRebalanceAt;
   if (timeSinceRebal < input.minRebalanceIntervalMs && !input.oorGraceExpired) {
     return {

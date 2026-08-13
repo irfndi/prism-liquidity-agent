@@ -26,6 +26,25 @@ export interface OpenClawWebhookTransportOptions {
  * same machine but a persistent WebSocket is not desired, or when routing
  * through an HTTP proxy/load balancer.
  */
+/** Static webhook request headers (valid HeadersInit value form). */
+type AuthHeaders = Record<string, string>;
+
+/** One outbound webhook payload: a prompt, check-in, or alert body. */
+type OpenClawPromptPayload = {
+  readonly type: "prism_prompt";
+  readonly prompt: string;
+  readonly decision: AgentRuntimeContext["decision"];
+  readonly pool: AgentRuntimeContext["pool"];
+  readonly metrics: AgentRuntimeContext["metrics"];
+  readonly warnings: AgentRuntimeContext["warnings"];
+  readonly recentDecisions: AgentRuntimeContext["recentDecisions"];
+};
+
+type OpenClawOutboundBody =
+  | OpenClawPromptPayload
+  | (AgentRuntimeCheckin & { readonly source: "prism" })
+  | (AgentRuntimeAlert & { readonly source: "prism" });
+
 export class OpenClawWebhookTransport implements AgentRuntimeTransport {
   readonly name = "openclaw-webhook";
 
@@ -80,7 +99,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
       this.emit({ type: "prompt_sent", poolAddress: ctx.decision.poolAddress });
       const startedAt = Date.now();
 
-      const payload = {
+      const payload: OpenClawPromptPayload = {
         type: "prism_prompt",
         prompt,
         decision: ctx.decision,
@@ -118,8 +137,8 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
     );
   }
 
-  private authHeaders(): Record<string, string> {
-    const headers: Record<string, string> = {
+  private authHeaders(): AuthHeaders {
+    const headers: AuthHeaders = {
       "Content-Type": "application/json",
     };
     if (this.options.token) {
@@ -129,7 +148,7 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
     return headers;
   }
 
-  private post(body: unknown, timeoutMs?: number): Effect.Effect<string, Error> {
+  private post(body: OpenClawOutboundBody, timeoutMs?: number): Effect.Effect<string, Error> {
     return Effect.tryPromise({
       try: async () => {
         const controller = new AbortController();

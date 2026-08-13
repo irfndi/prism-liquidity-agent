@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { createLogger } from "./logger.js";
 import type { AgentStateApi } from "./services.js";
 import { AgentStateService, McpServerService } from "./services.js";
+import type { JsonValue } from "./services.js";
 import type { AppConfig } from "./config-service.js";
 import { getCurrentVersion } from "./version.js";
 
@@ -26,7 +27,25 @@ interface McpResponse {
 interface McpTool {
   readonly name: string;
   readonly description: string;
-  readonly inputSchema: Record<string, unknown>;
+  readonly inputSchema: JsonValue;
+}
+
+/** Top-level `tools/call` params: tool name + the arguments object. */
+interface McpCallParams {
+  readonly name?: unknown;
+  readonly arguments?: unknown;
+}
+
+/** The tool-specific arguments object (pool/limit/token/proposalIds). */
+interface McpToolArguments {
+  readonly pool?: unknown;
+  readonly limit?: unknown;
+  readonly token?: unknown;
+  readonly proposalIds?: unknown;
+}
+
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
 }
 
 const tools: ReadonlyArray<McpTool> = [
@@ -100,7 +119,7 @@ const tools: ReadonlyArray<McpTool> = [
   },
 ];
 
-function sanitizeConfig(cfg: AppConfig): Record<string, unknown> {
+function sanitizeConfig(cfg: AppConfig): JsonValue {
   return {
     paperTrading: cfg.paperTrading,
     scanIntervalMs: cfg.scanIntervalMs,
@@ -153,11 +172,11 @@ export class McpServer {
     return { tools };
   }
 
-  private async handleToolsCall(params: unknown): Promise<McpResponse["result"]> {
-    const args =
-      typeof params === "object" && params !== null ? (params as Record<string, unknown>) : {};
-    const name = args.name;
-    const arguments_ = (args.arguments as Record<string, unknown>) ?? {};
+  private async handleToolsCall(params: McpCallParams): Promise<McpResponse["result"]> {
+    const name = params.name;
+    const arguments_ = isNonNullObject(params.arguments)
+      ? (params.arguments as McpToolArguments)
+      : ({} as McpToolArguments);
     const snapshot = await Effect.runPromise(this.state.getSnapshot());
 
     switch (name) {
@@ -191,7 +210,10 @@ export class McpServer {
         };
       }
       case "prism_decisions": {
-        const limit = typeof arguments_.limit === "number" ? arguments_.limit : 10;
+        const limit =
+          Object.prototype.toString.call(arguments_.limit) === "[object Number]"
+            ? (arguments_.limit as number)
+            : 10;
         const pool = arguments_.pool as string | undefined;
         let decisions = snapshot.recentDecisions;
         if (pool) {
@@ -246,7 +268,10 @@ export class McpServer {
         // advisor cannot approve its own proposals. Fail-closed: no fallback
         // to the proposal enqueue token.
         const expectedToken = this.config.agentApprovalToken;
-        const providedToken = typeof arguments_.token === "string" ? arguments_.token : "";
+        const providedToken =
+          Object.prototype.toString.call(arguments_.token) === "[object String]"
+            ? (arguments_.token as string)
+            : "";
         const expectedBuf = Buffer.from(expectedToken);
         const actualBuf = Buffer.from(providedToken);
         if (
@@ -257,7 +282,9 @@ export class McpServer {
           throw new Error("Unauthorized: invalid approval token");
         }
         const proposalIds = Array.isArray(arguments_.proposalIds)
-          ? arguments_.proposalIds.filter((id): id is string => typeof id === "string")
+          ? arguments_.proposalIds.filter(
+              (id): id is string => Object.prototype.toString.call(id) === "[object String]",
+            )
           : [];
         if (proposalIds.length === 0) {
           throw new Error("proposalIds must be a non-empty array of strings");
@@ -310,7 +337,7 @@ export class McpServer {
           return {
             jsonrpc: "2.0",
             id: id ?? 0,
-            result: await this.handleToolsCall(request.params),
+            result: await this.handleToolsCall(request.params as McpCallParams),
           };
         case "notifications/initialized":
           // JSON-RPC notifications are one-way; do not send a response.

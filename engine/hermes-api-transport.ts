@@ -12,6 +12,9 @@ import type {
 
 const logger = createLogger("HermesApiTransport");
 
+/** Static HTTP request headers (valid HeadersInit value form). */
+type ApiHeaders = Record<string, string>;
+
 // Hermes Agent exposes an OpenAI-compatible HTTP API (see Hermes' API server docs).
 // The agent model is registered under this name.
 const HERMES_MODEL = "hermes-agent";
@@ -121,8 +124,8 @@ export class HermesApiTransport implements AgentRuntimeTransport {
     return `${this.options.url.replace(/\/+$/, "")}/${segment}`;
   }
 
-  private authHeaders(): Record<string, string> {
-    const headers: Record<string, string> = {
+  private authHeaders(): ApiHeaders {
+    const headers: ApiHeaders = {
       "Content-Type": "application/json",
     };
     if (this.options.token) {

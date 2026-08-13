@@ -1,4 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { asOwner } from "./helpers.js";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonRecord = { [key: string]: JsonValue };
 import { Effect } from "effect";
 import { McpServer } from "../engine/mcp-server.js";
 import { type AgentStateApi } from "../engine/services.js";
@@ -152,21 +156,18 @@ function mockAgentState(overrides: Partial<AgentStateApi> = {}): AgentStateApi {
   };
 }
 
-function sendRequest(
-  server: McpServer,
-  request: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
+function sendRequest(server: McpServer, request: JsonRecord): Promise<JsonRecord> {
   return Effect.runPromise(
     Effect.gen(function* () {
       yield* server.start();
       try {
-        return yield* Effect.tryPromise<Record<string, unknown>>(
+        return yield* Effect.tryPromise<JsonRecord>(
           () =>
             new Promise((resolve, reject) => {
               const originalWrite = process.stdout.write.bind(process.stdout);
               let buffer = "";
               process.stdout.write = ((chunk: string | Uint8Array, ..._args: unknown[]) => {
-                buffer += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+                buffer += chunk instanceof Uint8Array ? Buffer.from(chunk).toString("utf8") : chunk;
                 const lines = buffer.split("\n");
                 buffer = lines.pop() ?? "";
                 for (const line of lines) {
@@ -218,7 +219,9 @@ describe("McpServer", () => {
 
     const response = await sendRequest(server, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     expect(response.result).toHaveProperty("tools");
-    const tools = (response.result as { tools: ReadonlyArray<{ name: string }> }).tools;
+    const tools = asOwner<{ tools: ReadonlyArray<{ name: string }> }>(
+      response.result as unknown,
+    ).tools;
     expect(tools.map((t) => t.name)).toEqual(
       expect.arrayContaining([
         "prism_status",
@@ -263,7 +266,9 @@ describe("McpServer", () => {
     });
 
     expect(response.error).toBeUndefined();
-    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    const content = asOwner<{ content: ReadonlyArray<{ text: string }> }>(
+      response.result as unknown,
+    ).content;
     expect(content).toHaveLength(1);
     const status = JSON.parse(content[0]!.text);
     expect(status.scanCount).toBe(5);
@@ -307,7 +312,9 @@ describe("McpServer", () => {
       params: { name: "prism_positions", arguments: {} },
     });
 
-    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    const content = asOwner<{ content: ReadonlyArray<{ text: string }> }>(
+      response.result as unknown,
+    ).content;
     expect(content).toHaveLength(1);
     const result = JSON.parse(content[0]!.text);
     expect(result.positions).toHaveLength(1);
@@ -324,7 +331,9 @@ describe("McpServer", () => {
       params: { name: "prism_config", arguments: {} },
     });
 
-    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    const content = asOwner<{ content: ReadonlyArray<{ text: string }> }>(
+      response.result as unknown,
+    ).content;
     expect(content).toHaveLength(1);
     const cfg = JSON.parse(content[0]!.text);
     expect(cfg.paperTrading).toBe(true);
@@ -377,7 +386,9 @@ describe("McpServer", () => {
     });
 
     expect(response.error).toBeUndefined();
-    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    const content = asOwner<{ content: ReadonlyArray<{ text: string }> }>(
+      response.result as unknown,
+    ).content;
     expect(content).toHaveLength(1);
     const policy = JSON.parse(content[0]!.text);
     expect(policy.mode).toBe("suggest");
@@ -446,7 +457,9 @@ describe("McpServer", () => {
     });
 
     expect(response.error).toBeUndefined();
-    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    const content = asOwner<{ content: ReadonlyArray<{ text: string }> }>(
+      response.result as unknown,
+    ).content;
     expect(content).toHaveLength(1);
     const result = JSON.parse(content[0]!.text);
     expect(result.proposals).toHaveLength(2);
@@ -462,8 +475,9 @@ describe("McpServer", () => {
       params: { name: "prism_pending_proposals", arguments: { pool: "PoolB" } },
     });
     expect(filtered.error).toBeUndefined();
-    const filteredContent = (filtered.result as { content: ReadonlyArray<{ text: string }> })
-      .content;
+    const filteredContent = asOwner<{ content: ReadonlyArray<{ text: string }> }>(
+      filtered.result as unknown,
+    ).content;
     const filteredResult = JSON.parse(filteredContent[0]!.text);
     expect(filteredResult.proposals).toHaveLength(1);
     expect(filteredResult.proposals[0].proposalId).toBe("id-2");
@@ -493,7 +507,7 @@ describe("McpServer", () => {
     });
   };
 
-  const callApprove = (server: McpServer, id: number, args: Record<string, unknown>) =>
+  const callApprove = (server: McpServer, id: number, args: JsonRecord) =>
     sendRequest(server, {
       jsonrpc: "2.0",
       id,
@@ -514,7 +528,9 @@ describe("McpServer", () => {
     });
 
     expect(response.error).toBeUndefined();
-    const content = (response.result as { content: ReadonlyArray<{ text: string }> }).content;
+    const content = asOwner<{ content: ReadonlyArray<{ text: string }> }>(
+      response.result as unknown,
+    ).content;
     const result = JSON.parse(content[0]!.text);
     expect(result.approved).toBe(2);
     expect(approvedIds).toEqual(["id-1", "id-2"]);

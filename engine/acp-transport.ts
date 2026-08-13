@@ -9,6 +9,7 @@ import type {
   AgentRuntimeEvent,
   AgentRuntimeCheckin,
 } from "./agent-transport.js";
+import type { JsonValue } from "./services.js";
 
 const logger = createLogger("AcpTransport");
 
@@ -21,20 +22,20 @@ interface AcpRequest {
   readonly jsonrpc: "2.0";
   readonly id: number;
   readonly method: string;
-  readonly params: Record<string, unknown>;
+  readonly params: JsonValue;
 }
 
 interface AcpResponse {
   readonly jsonrpc?: "2.0";
   readonly id?: number;
-  readonly result?: unknown;
+  readonly result?: JsonValue;
   readonly error?: { readonly message: string };
 }
 
 interface AcpNotification {
   readonly jsonrpc?: "2.0";
   readonly method?: string;
-  readonly params?: Record<string, unknown>;
+  readonly params?: JsonValue;
 }
 
 export interface AcpTransportOptions {
@@ -51,7 +52,7 @@ export class AcpTransport implements AgentRuntimeTransport {
   private pending = new Map<
     number,
     {
-      readonly resolve: (value: unknown) => void;
+      readonly resolve: (value: JsonValue) => void;
       readonly reject: (reason: Error) => void;
       readonly timer: ReturnType<typeof setTimeout>;
     }
@@ -282,12 +283,13 @@ export class AcpTransport implements AgentRuntimeTransport {
 
     if (
       "id" in msg &&
-      typeof msg.id === "number" &&
-      !("method" in msg) &&
-      this.pending.has(msg.id)
+      Object.prototype.toString.call(msg.id) === "[object Number]" &&
+      !("method" in msg)
     ) {
-      const p = this.pending.get(msg.id)!;
-      this.pending.delete(msg.id);
+      const id = msg.id as number;
+      if (!this.pending.has(id)) return;
+      const p = this.pending.get(id)!;
+      this.pending.delete(id);
       clearTimeout(p.timer);
       if ("error" in msg && msg.error) {
         p.reject(new Error(msg.error.message));
@@ -333,7 +335,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     });
   }
 
-  private write(message: unknown): void {
+  private write(message: JsonValue): void {
     try {
       this.process?.stdin?.write(JSON.stringify(message) + "\n");
     } catch (err) {
@@ -343,7 +345,7 @@ export class AcpTransport implements AgentRuntimeTransport {
 
   private request(
     method: string,
-    params: Record<string, unknown>,
+    params: JsonValue,
     timeoutMs?: number,
   ): Effect.Effect<unknown, Error> {
     return Effect.callback((resume) => {

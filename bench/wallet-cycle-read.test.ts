@@ -32,7 +32,7 @@ import {
 } from "../engine/services.js";
 import type { PrismStateSnapshot } from "../engine/state-service.js";
 import type { PoolSnapshot } from "../engine/types.js";
-import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, makePosition, asOwner } from "./helpers.js";
 
 // Wallet value is reconciled ONCE per cycle at the top of runScanCycle, reused
 // by every pool, degrades to the stale value on a live read failure (never
@@ -227,7 +227,7 @@ function runOneCycle<R>(layer: Layer.Layer<R, never, never>): Promise<CycleResul
     return { decisions, snapshot };
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as unknown as Effect.Effect<CycleResult, Error, never>,
+    asOwner<Effect.Effect<CycleResult, Error, never>>(Effect.provide(test, layer)),
   );
 }
 
@@ -369,14 +369,16 @@ describe("mid-cycle position close excludes the row from the portfolio sum", () 
     });
 
     const { decisions, snapshot } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        {
-          decisions: ReadonlyArray<{ action: string; reasoning: string }>;
-          snapshot: PrismStateSnapshot;
-        },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          {
+            decisions: ReadonlyArray<{ action: string; reasoning: string }>;
+            snapshot: PrismStateSnapshot;
+          },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     const exited = decisions.some(
@@ -411,7 +413,7 @@ describe("live wallet-read entry gate", () => {
       yield* Effect.raceFirst(program, Effect.sleep(2_000));
       const audit = yield* AuditService;
       const decisions = yield* audit.getRecentDecisions(50);
-      return { decisions: decisions as unknown as FullDecision[] };
+      return { decisions: asOwner<FullDecision[]>(decisions) };
     });
     return Effect.runPromise(
       Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
@@ -532,7 +534,7 @@ describe("live wallet-read entry gate", () => {
       yield* Effect.raceFirst(program, Effect.sleep(2_000));
       const audit = yield* AuditService;
       const decisions = yield* audit.getRecentDecisions(50);
-      return { decisions: decisions as unknown as FullDecision[] };
+      return { decisions: asOwner<FullDecision[]>(decisions) };
     });
 
     const { decisions } = await Effect.runPromise(
@@ -625,7 +627,7 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
       const state = yield* AgentStateService;
       const decisions = yield* audit.getRecentDecisions(50);
       const snapshot = yield* state.getSnapshot();
-      return { decisions: decisions as unknown as FullDecision[], snapshot };
+      return { decisions: asOwner<FullDecision[]>(decisions), snapshot };
     });
     return Effect.runPromise(
       Effect.provide(test, layer) as Effect.Effect<
@@ -740,7 +742,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
       yield* Effect.raceFirst(program, Effect.sleep(2_000));
       const audit = yield* AuditService;
       const decisions = yield* audit.getRecentDecisions(100);
-      return { decisions: decisions as unknown as FullDecision[] };
+      return { decisions: asOwner<FullDecision[]>(decisions) };
     });
     return Effect.runPromise(
       Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
@@ -886,7 +888,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
       yield* Effect.raceFirst(program, Effect.sleep(2_000));
       const audit = yield* AuditService;
       const decisions = yield* audit.getRecentDecisions(100);
-      return { decisions: decisions as unknown as FullDecision[] };
+      return { decisions: asOwner<FullDecision[]>(decisions) };
     });
     const { decisions } = await Effect.runPromise(
       Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
@@ -992,7 +994,7 @@ describe("hybrid live EXIT keeps paper sizing paper-pure", () => {
       const state = yield* AgentStateService;
       const decisions = yield* audit.getRecentDecisions(100);
       const snapshot = yield* state.getSnapshot();
-      return { decisions: decisions as unknown as FullDecision[], snapshot };
+      return { decisions: asOwner<FullDecision[]>(decisions), snapshot };
     });
     const { decisions, snapshot } = await Effect.runPromise(
       Effect.provide(test, layer) as Effect.Effect<

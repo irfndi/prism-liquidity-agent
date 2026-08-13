@@ -35,21 +35,21 @@ function liveResponse(priceStr: string, expo: number, publishSec: number) {
   };
 }
 
-function fetchReturning(body: unknown, status = 200): FetchLike {
+function fetchReturning(body: any, status = 200): FetchLike {
   return (_url, init) => {
     lastInit = init;
     return Promise.resolve(new Response(JSON.stringify(body), { status }));
   };
 }
 
-function fetchRejecting(error: unknown): FetchLike {
+function fetchRejecting(error: any): FetchLike {
   return () => Promise.reject(error);
 }
 
 let lastInit: RequestInit | undefined;
 let lastUrl: string | undefined;
 
-function fetchCapturing(body: unknown, status = 200): FetchLike {
+function fetchCapturing(body: any, status = 200): FetchLike {
   return (url, init) => {
     lastUrl = String(url as unknown);
     lastInit = init;

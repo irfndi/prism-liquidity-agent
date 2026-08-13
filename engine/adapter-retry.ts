@@ -1,36 +1,57 @@
 import { Effect } from "effect";
 import { createLogger } from "./logger.js";
+import type { JsonValue } from "./services.js";
 
 const logger = createLogger("adapter-retry");
 
-function isObject(err: unknown): err is Record<string, unknown> {
-  return typeof err === "object" && err !== null;
+interface UnknownRecord {
+  readonly [key: string]: JsonValue;
 }
 
-function hasCode(err: unknown): err is { readonly code: number } {
-  return isObject(err) && "code" in err && typeof err.code === "number";
+function isObject<T>(err: T): err is UnknownRecord & T {
+  return err !== null && err instanceof Object && !(err instanceof Function);
 }
 
-function hasMessage(err: unknown): err is { readonly message: string } {
-  return isObject(err) && "message" in err && typeof err.message === "string";
+function hasCode<T>(err: T): err is { readonly code: number } & T {
+  return isObject(err) && "code" in err && isNumberLike(err.code);
+}
+
+function hasMessage<T>(err: T): err is { readonly message: string } & T {
+  return isObject(err) && "message" in err && isStringLike(err.message);
+}
+
+function isStringLike<T>(value: T): value is string & T {
+  return Object.prototype.toString.call(value) === "[object String]";
+}
+
+function isNumberLike<T>(value: T): value is number & T {
+  return Object.prototype.toString.call(value) === "[object Number]";
+}
+
+/** A `Headers#get`-style accessor, after the value's function-ness is verified. */
+type HeaderGetter = (name: string) => string;
+
+function isGetter(value: JsonValue | undefined): value is JsonValue & HeaderGetter {
+  return Object.prototype.toString.call(value) === "[object Function]";
 }
 
 const RETRY_AFTER_MAX_MS = 300_000;
 
-export function retryAfterMs(err: unknown): number | undefined {
+export function retryAfterMs<T>(err: T): number | undefined {
   if (!isObject(err)) return undefined;
   const headers = err["headers"];
   const response = err["response"];
   const responseHeaders = isObject(response) ? response["headers"] : undefined;
-  const getHeader = (value: unknown): string | null => {
+  const getHeader = <T>(value: T): string | null => {
     if (!isObject(value)) return null;
-    if (typeof value["get"] === "function") {
-      const result = (value["get"] as (name: string) => unknown)("retry-after");
-      if (typeof result === "string") return result;
+    const getter = value["get"];
+    if (isGetter(getter)) {
+      const result = getter("retry-after");
+      if (isStringLike(result)) return result;
     }
     const direct = value["retry-after"] ?? value["Retry-After"];
-    if (typeof direct === "string") return direct;
-    if (typeof direct === "number") return String(direct);
+    if (isStringLike(direct)) return direct;
+    if (isNumberLike(direct)) return String(direct);
     return null;
   };
   const header = getHeader(headers) ?? getHeader(responseHeaders);
@@ -50,7 +71,13 @@ const retryLogState = new Map<string, { lastLoggedAt: number; suppressed: number
 const RETRY_LOG_INTERVAL_MS = 10_000;
 const RETRY_LOG_MAX_ENTRIES = 512;
 
-function errorMessage(err: unknown): string {
+/** Structured warn payload for a suppressed-retry log line. */
+type RetryLogLine = {
+  error: string;
+  suppressedRetries?: number;
+};
+
+function errorMessage<T>(err: T): string {
   if (hasMessage(err)) return err.message;
   if (isObject(err)) {
     try {
@@ -62,7 +89,7 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
-export function safeErrorMessage(err: unknown): string {
+export function safeErrorMessage<T>(err: T): string {
   return errorMessage(err)
     .replace(/([?&](?:api[-_]?key|token|authorization)=)[^&\s]+/gi, "$1***")
     .replace(/((?:bearer|basic|digest|token)\s+)[^\s]+/gi, "$1***")
@@ -75,7 +102,7 @@ export function safeErrorMessage(err: unknown): string {
     .replace(/(https?:\/\/)[^/@\s]+@/gi, "$1***@");
 }
 
-function logRetry(err: unknown, message: string): void {
+function logRetry<T>(err: T, message: string): void {
   const now = Date.now();
   const key = safeErrorMessage(err);
   const previous = retryLogState.get(key);
@@ -89,13 +116,12 @@ function logRetry(err: unknown, message: string): void {
     if (oldest !== undefined) retryLogState.delete(oldest);
   }
   retryLogState.set(key, { lastLoggedAt: now, suppressed: 0 });
-  logger.warn(message, {
-    error: key,
-    ...(suppressed > 0 ? { suppressedRetries: suppressed } : {}),
-  });
+  const entry: RetryLogLine = { error: key };
+  if (suppressed > 0) entry.suppressedRetries = suppressed;
+  logger.warn(message, entry);
 }
 
-export function isRetriableError(err: unknown): boolean {
+export function isRetriableError<T>(err: T): boolean {
   if (hasCode(err) && (err.code === 429 || err.code === -32005)) return true;
   if (hasMessage(err)) {
     const msg = err.message.toLowerCase();
@@ -107,7 +133,7 @@ export function isRetriableError(err: unknown): boolean {
   return false;
 }
 
-function isRateLimitError(err: unknown): boolean {
+function isRateLimitError<T>(err: T): boolean {
   if (hasCode(err) && (err.code === 429 || err.code === -32005)) return true;
   if (hasMessage(err)) {
     const msg = err.message.toLowerCase();
@@ -130,7 +156,7 @@ const NETWORK_ERROR_CODES = new Set([
   "EAI_AGAIN",
 ]);
 
-export function isRpcNetworkError(err: unknown): boolean {
+export function isRpcNetworkError<T>(err: T): boolean {
   if (
     isObject(err) &&
     (err["tag"] === "CircuitBreakerOpenError" || err["name"] === "CircuitBreakerOpenError")
@@ -139,7 +165,7 @@ export function isRpcNetworkError(err: unknown): boolean {
   }
 
   // Node.js system errors with a code like ECONNREFUSED, ETIMEDOUT, etc.
-  if (isObject(err) && typeof err.code === "string" && NETWORK_ERROR_CODES.has(err.code)) {
+  if (isObject(err) && isStringLike(err.code) && NETWORK_ERROR_CODES.has(err.code)) {
     return true;
   }
 
@@ -204,25 +230,16 @@ export function retryWithBackoff<T>(
       catch: (cause) => {
         if (cause instanceof Error) return cause;
         const message =
-          typeof cause === "object" &&
-          cause !== null &&
+          isObject(cause) &&
           "message" in cause &&
-          typeof (cause as { message?: unknown }).message === "string"
+          isStringLike((cause as { message?: unknown }).message)
             ? (cause as { message: string }).message
             : String(cause);
         const normalized = new Error(message, { cause });
         // The retry loop reads rate-limit metadata (headers/response/status)
         // off the rejected value — carry plain-object fields onto the Error.
-        if (typeof cause === "object" && cause !== null) {
-          for (const key of Object.keys(cause)) {
-            try {
-              (normalized as unknown as Record<string, unknown>)[key] = (
-                cause as Record<string, unknown>
-              )[key];
-            } catch {
-              // ignore non-writable keys
-            }
-          }
+        if (isObject(cause)) {
+          Object.assign(normalized, cause);
         }
         return normalized;
       },
@@ -306,7 +323,7 @@ export class CircuitBreaker {
 
   execute<T, E>(
     effect: Effect.Effect<T, E>,
-    isRetriable?: (err: unknown) => boolean,
+    isRetriable?: (err: E) => boolean,
   ): Effect.Effect<T, CircuitBreakerOpenError | E> {
     return Effect.gen({ self: this }, function* () {
       const current = this.getState();

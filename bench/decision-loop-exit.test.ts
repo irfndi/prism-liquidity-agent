@@ -46,6 +46,7 @@ import {
   makeDatapiStats,
   type DecisionRow,
   type RecordedMemory,
+  asOwner,
 } from "./helpers.js";
 import { stringifySafe } from "../engine/bigint-json.js";
 
@@ -59,11 +60,7 @@ async function runCycles(
     return yield* audit.getRecentDecisions(200);
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as unknown as Effect.Effect<
-      ReadonlyArray<DecisionRow>,
-      Error,
-      never
-    >,
+    asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
   );
 }
 
@@ -105,11 +102,13 @@ describe("phantom EXIT gating (Wave 2)", () => {
       return { decisions, evolutionCount };
     });
     const { decisions, evolutionCount } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        { decisions: ReadonlyArray<DecisionRow>; evolutionCount: string | null },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          { decisions: ReadonlyArray<DecisionRow>; evolutionCount: string | null },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     const exits = decisions.filter((d) => d.poolAddress === POOL && d.action === "EXIT");
@@ -137,11 +136,7 @@ describe("phantom EXIT gating (Wave 2)", () => {
       return yield* audit.getRecentDecisions(50);
     });
     const decisions = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        ReadonlyArray<DecisionRow>,
-        Error,
-        never
-      >,
+      asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
     );
 
     const tvlExit = decisions.find(
@@ -170,11 +165,9 @@ describe("phantom EXIT gating (Wave 2)", () => {
       return { decisions, cooldown };
     });
     const { decisions, cooldown } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        { decisions: ReadonlyArray<DecisionRow>; cooldown: unknown },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<{ decisions: ReadonlyArray<DecisionRow>; cooldown: unknown }, Error, never>
+      >(Effect.provide(test, layer)),
     );
 
     const exits = decisions.filter((d) => d.poolAddress === POOL && d.action === "EXIT");
@@ -228,11 +221,7 @@ describe("portfolio value math (Wave 2)", () => {
       return yield* audit.getRecentDecisions(50);
     });
     const decisions = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        ReadonlyArray<DecisionRow>,
-        Error,
-        never
-      >,
+      asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
     );
 
     const enter = decisions.find((d) => d.poolAddress === POOL_NEW && d.action === "ENTER");
@@ -313,11 +302,13 @@ describe("pool snapshot retention (Wave 2)", () => {
       return { oldRows, recentRows };
     });
     const { oldRows, recentRows } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        { oldRows: ReadonlyArray<PoolSnapshot>; recentRows: ReadonlyArray<PoolSnapshot> },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          { oldRows: ReadonlyArray<PoolSnapshot>; recentRows: ReadonlyArray<PoolSnapshot> },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     expect(oldRows, "30-day-old snapshot was not pruned").toHaveLength(0);
@@ -433,7 +424,7 @@ describe("agent position context wiring", () => {
       yield* Effect.raceFirst(program, Effect.sleep(2_000));
     });
     await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<unknown, Error, never>,
+      asOwner<Effect.Effect<unknown, Error, never>>(Effect.provide(test, layer)),
     );
 
     expect(capturedContext, "sync advisor must be consulted for the EXIT").toBeDefined();
@@ -507,23 +498,21 @@ describe("runner scale-in wiring (Heart Attack step 2)", () => {
       return { saved, decisions };
     });
     const { saved, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        { saved: PositionRecord | null; decisions: ReadonlyArray<DecisionRow> },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          { saved: PositionRecord | null; decisions: ReadonlyArray<DecisionRow> },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     // The rebalance fired with the dip-anchored range + a quote-only top-up:
     // dip 12% @ binStep 10 -> offset -128 bins; width min(5, 127, 25) = 5.
     expect(rebalanceSpy).toHaveBeenCalledTimes(1);
-    const [pool, pubkey, lower, upper, topUp] = rebalanceSpy.mock.calls[0] as unknown as [
-      string,
-      string,
-      number,
-      number,
-      { amountXAtomic: bigint; amountYAtomic: bigint },
-    ];
+    const [pool, pubkey, lower, upper, topUp] = asOwner<
+      [string, string, number, number, { amountXAtomic: bigint; amountYAtomic: bigint }]
+    >(rebalanceSpy.mock.calls[0]);
     expect(pool).toBe(POOL);
     expect(pubkey).toBe("mock-pos");
     expect(lower).toBe(5000 - 5 - 128);
@@ -694,11 +683,13 @@ describe("runner scale-in wiring (Heart Attack step 2)", () => {
       return { positions, decisions };
     });
     const { positions, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        { positions: PositionRecord[]; decisions: ReadonlyArray<DecisionRow> },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          { positions: PositionRecord[]; decisions: ReadonlyArray<DecisionRow> },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     // The launch lane REJECTED the entry at the allocation gate (portfolio
@@ -820,11 +811,7 @@ describe("no exit-and-reenter in one pass (launch lane)", () => {
       return yield* audit.getRecentDecisions(50);
     });
     const decisions = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        ReadonlyArray<DecisionRow>,
-        Error,
-        never
-      >,
+      asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
     );
 
     const exit = decisions.find(
@@ -907,11 +894,9 @@ describe("runner scale-in never fires on an exiting position", () => {
       return { decisions };
     });
     const { decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        { decisions: ReadonlyArray<DecisionRow> },
-        Error,
-        never
-      >,
+      asOwner<Effect.Effect<{ decisions: ReadonlyArray<DecisionRow> }, Error, never>>(
+        Effect.provide(test, layer),
+      ),
     );
 
     const timeboxExit = decisions.find(
@@ -1025,11 +1010,7 @@ describe("launch-cap boundary", () => {
       return yield* audit.getRecentDecisions(50);
     });
     const decisions = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        ReadonlyArray<DecisionRow>,
-        Error,
-        never
-      >,
+      asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
     );
 
     const forCandidate = decisions.filter((d) => d.poolAddress === CANDIDATE);

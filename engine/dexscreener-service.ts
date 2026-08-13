@@ -70,15 +70,39 @@ export interface DexscreenerPoolStats {
   readonly quotePriceUsd: number | null;
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+interface RawVolume {
+  readonly h24: unknown;
+}
+
+interface RawLiquidity {
+  readonly usd: unknown;
+}
+
+interface RawDexscreenerPair {
+  readonly volume: unknown;
+  readonly liquidity: unknown;
+  readonly priceUsd: unknown;
+}
+
+interface RawDexscreenerResponse {
+  readonly pairs: unknown;
+}
+
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
 }
 
 /** Parse a numeric STRING or number into a finite number, else null. */
-function readFiniteNumber(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number(value);
+function readFiniteNumber<T>(value: T): number | null {
+  if (Object.prototype.toString.call(value) === "[object Number]") {
+    const num = value as number;
+    return Number.isFinite(num) ? num : null;
+  }
+  if (
+    Object.prototype.toString.call(value) === "[object String]" &&
+    (value as string).trim().length > 0
+  ) {
+    const parsed = Number(value as string);
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
@@ -93,24 +117,30 @@ function readFiniteNumber(value: unknown): number | null {
  * `baseFeeRate` is the pool's binStep-derived base-fee fraction used to price
  * real volume into fees (DexScreener has no fees field — always applied).
  */
-export function parseDexscreenerPoolStats(
-  raw: unknown,
+export function parseDexscreenerPoolStats<T>(
+  raw: T,
   baseFeeRate: number,
 ): DexscreenerPoolStats | null {
-  if (!isObject(raw)) return null;
-  const pairs = raw["pairs"];
+  if (!isNonNullObject(raw)) return null;
+  const response = raw as RawDexscreenerResponse;
+  const pairs = response.pairs;
   // DexScreener returns `{"pairs": null}` (HTTP 200) for an unknown pair.
   if (!Array.isArray(pairs) || pairs.length === 0) return null;
   const pair = pairs[0];
-  if (!isObject(pair)) return null;
+  if (!isNonNullObject(pair)) return null;
+  const pairObj = pair as RawDexscreenerPair;
 
-  const volume = isObject(pair["volume"]) ? readFiniteNumber(pair["volume"]["h24"]) : null;
+  const volume = isNonNullObject(pairObj.volume)
+    ? readFiniteNumber((pairObj.volume as RawVolume).h24)
+    : null;
   // Volume is the one field every downstream gate (authenticity, fee/IL) needs;
   // non-positive volume is malformed data — reject the stats ENTIRELY rather
   // than marking garbage measured.
   if (volume === null || volume <= 0) return null;
 
-  const liquidity = isObject(pair["liquidity"]) ? readFiniteNumber(pair["liquidity"]["usd"]) : null;
+  const liquidity = isNonNullObject(pairObj.liquidity)
+    ? readFiniteNumber((pairObj.liquidity as RawLiquidity).usd)
+    : null;
   // Non-positive liquidity is malformed; null it so the caller treats the stats
   // as unavailable (the most conservative outcome). DexScreener has NO fees
   // field, so the fee rate is always the binStep-derived model.
@@ -118,7 +148,7 @@ export function parseDexscreenerPoolStats(
     tvlUsd: liquidity !== null && liquidity <= 0 ? null : liquidity,
     volume24hUsd: volume,
     fees24hUsd: volume * baseFeeRate,
-    basePriceUsd: readFiniteNumber(pair["priceUsd"]),
+    basePriceUsd: readFiniteNumber(pairObj.priceUsd),
     quotePriceUsd: null,
   };
 }

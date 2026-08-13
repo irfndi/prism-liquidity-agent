@@ -11,9 +11,17 @@ import {
   computeRequiredAtomic,
   computeUsdcInputAtomic,
 } from "../engine/entry-prep-service.js";
-import { AdapterService, DbService, type AdapterApi, type DbApi } from "../engine/services.js";
+import {
+  AdapterService,
+  DbService,
+  type AdapterApi,
+  type DbApi,
+  type JsonValue,
+} from "../engine/services.js";
 import { ConfigService } from "../engine/config-service.js";
-import { defaultAppConfig } from "./helpers.js";
+import { defaultAppConfig, asOwner } from "./helpers.js";
+type TokenBalanceMap = Record<string, bigint>;
+
 import { SOL_MINT, USDC_MINT, SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS } from "../engine/constants.js";
 import type { SettlementJobRecord } from "../engine/types.js";
 import { SwapQuoteError } from "../engine/errors.js";
@@ -115,10 +123,13 @@ function buildLayer(
     ConfigService,
     defaultAppConfig({ autoSwapEntry, autonomousTokenMode }),
   );
-  const dbLayer = Layer.succeed(DbService, {
-    listSettlementJobs: () => Effect.succeed([]),
-    ...dbOverrides,
-  } as unknown as DbApi);
+  const dbLayer = Layer.succeed(
+    DbService,
+    asOwner<DbApi>({
+      listSettlementJobs: () => Effect.succeed([]),
+      ...dbOverrides,
+    }),
+  );
   return Layer.provide(EntryPrepLive, Layer.merge(Layer.merge(adapterLayer, configLayer), dbLayer));
 }
 
@@ -381,7 +392,7 @@ describe("EntryPrepService", () => {
     // 4 SOL covers the $500 half but not the $1000 single-sided full size, so
     // the auto-swap path must still run.
     let solBalance = 4_000_000_000n;
-    const tokenBalances: Record<string, bigint> = { [TOKEN_Y]: 0n };
+    const tokenBalances: TokenBalanceMap = { [TOKEN_Y]: 0n };
     const swapSpy = vi.fn((mint: string) => {
       if (mint === SOL_MINT) {
         solBalance = 10_000_000_000n;
@@ -489,9 +500,9 @@ describe("EntryPrepService", () => {
   it("reuses the preflighted quote when executing swaps", async () => {
     // 4 SOL: below the single-sided full-size threshold, so the swap path runs.
     let solBalance = 4_000_000_000n;
-    const tokenBalances: Record<string, bigint> = { [TOKEN_Y]: 0n };
+    const tokenBalances: TokenBalanceMap = { [TOKEN_Y]: 0n };
     const quote = { routePlan: [{ swapInfo: {} }], outAmount: "10000000000000" };
-    const swapSpy = vi.fn((mint: string, _amount: bigint, quoteData?: Record<string, unknown>) => {
+    const swapSpy = vi.fn((mint: string, _amount: bigint, quoteData?: JsonValue) => {
       if (mint === SOL_MINT) {
         solBalance = 10_000_000_000n;
       } else {
@@ -524,7 +535,7 @@ describe("EntryPrepService", () => {
 
   it("swaps USDC for both missing legs", async () => {
     let solBalance = 0n;
-    const tokenBalances: Record<string, bigint> = { [TOKEN_Y]: 0n };
+    const tokenBalances: TokenBalanceMap = { [TOKEN_Y]: 0n };
     const swapSpy = vi.fn((mint: string) => {
       if (mint === SOL_MINT) {
         solBalance = 10_000_000_000n;
@@ -556,7 +567,7 @@ describe("EntryPrepService", () => {
 
   it("succeeds when swapped SOL exactly covers the buffered requirement", async () => {
     let solBalance = 0n;
-    const tokenBalances: Record<string, bigint> = { [TOKEN_Y]: 0n };
+    const tokenBalances: TokenBalanceMap = { [TOKEN_Y]: 0n };
     const swapSpy = vi.fn((mint: string) => {
       if (mint === SOL_MINT) {
         // Exact buffered requirement for $500 of SOL at $150 plus the 50M
@@ -963,11 +974,11 @@ describe("EntryPrepService", () => {
             buildLayer(baseAdapter, true, "off", {
               listSettlementJobs: () =>
                 Effect.succeed([
-                  {
+                  asOwner<SettlementJobRecord>({
                     tokenMint: USDC_MINT,
                     amountAtomic: "200000000",
                     status: "retryable",
-                  } as unknown as SettlementJobRecord,
+                  }),
                 ]),
             }),
           ),
@@ -982,7 +993,7 @@ describe("EntryPrepService", () => {
     // or the entry would consume the exit settlement's funds (the P1 gap:
     // leg-only claims missed this path).
     const TOKEN_Z = "FakeToken2222222222222222222222222222222222";
-    const tokenBalances: Record<string, bigint> = { [TOKEN_Y]: 600_000_000n };
+    const tokenBalances: TokenBalanceMap = { [TOKEN_Y]: 600_000_000n };
     const swapSpy = vi.fn((mint: string) => {
       // Simulate the swap landing so the post-swap balance reconciliation
       // passes in the no-claim scenario.
@@ -1040,11 +1051,11 @@ describe("EntryPrepService", () => {
             buildLayer(claimAdapter, true, "off", {
               listSettlementJobs: () =>
                 Effect.succeed([
-                  {
+                  asOwner<SettlementJobRecord>({
                     tokenMint: USDC_MINT,
                     amountAtomic: "400000000",
                     status: "retryable",
-                  } as unknown as SettlementJobRecord,
+                  }),
                 ]),
             }),
           ),
@@ -1169,7 +1180,7 @@ describe("EntryPrepService", () => {
     let solBalance = 1_000_000n;
     // $600 of FAKE covers its $500 half but not the $1000 single-sided full
     // size, so the swap path runs for the SOL leg.
-    const tokenBalances: Record<string, bigint> = { [TOKEN_Y]: 600_000_000n };
+    const tokenBalances: TokenBalanceMap = { [TOKEN_Y]: 600_000_000n };
     const swapSpy = vi.fn((mint: string) => {
       if (mint === SOL_MINT) {
         solBalance = 10_000_000_000n;

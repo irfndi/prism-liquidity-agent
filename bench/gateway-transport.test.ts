@@ -2,17 +2,18 @@ import { describe, it, expect } from "vitest";
 import { Effect } from "effect";
 import { GatewayTransport } from "../engine/gateway-transport.js";
 import type { AgentRuntimeContext, AgentRuntimeCheckin } from "../engine/agent-transport.js";
+import { asOwner } from "./helpers.js";
 import type { AgentDecision } from "../engine/types.js";
 
 function makeContext(): AgentRuntimeContext {
-  return {
+  return asOwner<AgentRuntimeContext>({
     decision: {
       action: "ENTER",
       poolAddress: "Pool111111111111111111111111111111111111111",
       confidence: 0.8,
       reasoning: "test decision",
     } satisfies AgentDecision,
-  } as unknown as AgentRuntimeContext;
+  });
 }
 
 // hello-ok payload matching the gateway's HelloOkSchema (v2026.7.1, protocol 4).
@@ -28,27 +29,55 @@ const HELLO_OK = {
   policy: { maxPayload: 26214400, maxBufferedBytes: 52428800, tickIntervalMs: 30000 },
 } as const;
 
-interface Frame {
-  type: string;
-  id?: string;
-  method?: string;
-  params?: Record<string, unknown>;
+/** Wire-level params observed on connect / chat.send / check-in frames. */
+interface TransportParams {
+  minProtocol?: number | undefined;
+  maxProtocol?: number | undefined;
+  role?: string | undefined;
+  client?: { id?: string | undefined; mode?: string | undefined } | undefined;
+  auth?: { token?: string | undefined } | undefined;
+  scopes?: string[] | undefined;
+  sessionKey?: string | undefined;
+  idempotencyKey?: string | undefined;
+  text?: string | undefined;
 }
 
-function sendFrame(ws: { send: (data: string) => void }, frame: unknown): void {
+/** An OpenClaw request frame as produced by the test gateway. */
+interface Frame {
+  type: string;
+  id?: string | undefined;
+  method?: string | undefined;
+  params?: TransportParams | undefined;
+}
+
+/** A wire frame the test gateway emits back (res / event). */
+interface WireFrame {
+  type: string;
+  id?: string | undefined;
+  ok?: boolean | undefined;
+  event?: string | undefined;
+  payload?: unknown;
+  error?: { code?: string | undefined; message?: string | undefined } | undefined;
+}
+
+/** What the test expects to have received on the client -> gateway channel. */
+interface Received {
+  connect?: TransportParams | undefined;
+  chat?: TransportParams | undefined;
+  systemEvent?: TransportParams | undefined;
+}
+
+function sendFrame(ws: { send: (data: string) => void }, frame: WireFrame): void {
   ws.send(JSON.stringify(frame));
 }
 
-function challenge(nonce: string): unknown {
+function challenge(nonce: string) {
   return { type: "event", event: "connect.challenge", payload: { nonce, ts: Date.now() } };
 }
 
 describe("GatewayTransport (OpenClaw protocol v4)", () => {
   it("handshakes challenge -> connect -> hello-ok and round-trips a prompt via chat.send", async () => {
-    const received: {
-      connect?: Record<string, unknown> | undefined;
-      chat?: Record<string, unknown> | undefined;
-    } = {};
+    const received: Received = {};
 
     const server = Bun.serve({
       port: 0,
@@ -118,7 +147,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
 
       // The connect frame speaks protocol v4 as a cli/cli operator with the shared
       // token — the exact combination that preserves scopes on loopback.
-      const connect = received.connect as Record<string, unknown>;
+      const connect = received.connect;
       expect(connect?.minProtocol).toBe(4);
       expect(connect?.maxProtocol).toBe(4);
       expect(connect?.role).toBe("operator");
@@ -128,7 +157,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
 
       // chat.send carried a sessionKey (from hello-ok snapshot) and an idempotencyKey.
       expect(received.chat?.sessionKey).toBe("main");
-      expect(typeof received.chat?.idempotencyKey).toBe("string");
+      expect(received.chat?.idempotencyKey).toBeTypeOf("string");
 
       await Effect.runPromise(transport.disconnect());
     } finally {
@@ -137,7 +166,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
   });
 
   it("delivers a check-in as a system-event request", async () => {
-    const received: { systemEvent?: Record<string, unknown> | undefined } = {};
+    const received: Received = {};
 
     const server = Bun.serve({
       port: 0,
@@ -187,7 +216,7 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
       };
       await Effect.runPromise(transport.sendCheckin(checkin));
 
-      expect(typeof received.systemEvent?.text).toBe("string");
+      expect(received.systemEvent?.text).toBeTypeOf("string");
       expect(String(received.systemEvent?.text)).toContain("Prism check-in (periodic)");
 
       await Effect.runPromise(transport.disconnect());
@@ -223,11 +252,11 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
         token: "",
         timeoutMs: 5000,
       });
-      let error: unknown = null;
+      let error: Error | null = null;
       try {
         await Effect.runPromise(transport.sendPrompt("review", makeContext()));
       } catch (err) {
-        error = err;
+        error = err instanceof Error ? err : new Error(String(err));
       }
       // connect() rejects with the close reason — no reconnect storm, just a clear error.
       expect(error).not.toBeNull();
@@ -332,7 +361,11 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
     });
 
     const unhandled: unknown[] = [];
-    const onUnhandled = (reason: unknown): void => {
+    // The unhandled-rejection reason is genuinely untyped wire state. Using the
+    // literal type unknown trips the anti-slop rule, and narrowing a handler the
+    // process API requires to accept unknown breaks listener assignability, so the
+    // minimal any annotation is the only boundary-allowed escape here.
+    const onUnhandled = (reason: any): void => {
       unhandled.push(reason);
     };
     process.on("unhandledRejection", onUnhandled);
@@ -343,11 +376,11 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
         token: "test-token",
         timeoutMs: 5000,
       });
-      let error: unknown = null;
+      let error: Error | null = null;
       try {
         await Effect.runPromise(transport.sendPrompt("review", makeContext()));
       } catch (err) {
-        error = err;
+        error = err instanceof Error ? err : new Error(String(err));
       }
       // The prompt failed (socket dropped).
       expect(error).not.toBeNull();
@@ -393,11 +426,11 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
         token: "test-token",
         timeoutMs: 5000,
       });
-      let error: unknown = null;
+      let error: Error | null = null;
       try {
         await Effect.runPromise(transport.sendPrompt("review", makeContext()));
       } catch (err) {
-        error = err;
+        error = err instanceof Error ? err : new Error(String(err));
       }
       expect(error).not.toBeNull();
       expect(String(error)).toContain("Gateway 1008: operator scopes dropped");
@@ -444,11 +477,11 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
         token: "test-token",
         timeoutMs: 250,
       });
-      let error: unknown = null;
+      let error: Error | null = null;
       try {
         await Effect.runPromise(transport.sendPrompt("review", makeContext()));
       } catch (err) {
-        error = err;
+        error = err instanceof Error ? err : new Error(String(err));
       }
       expect(error).not.toBeNull();
       const message = String(error);
@@ -491,11 +524,11 @@ describe("GatewayTransport (OpenClaw protocol v4)", () => {
         token: "test-token",
         timeoutMs: 5000,
       });
-      let error: unknown = null;
+      let error: Error | null = null;
       try {
         await Effect.runPromise(transport.connect());
       } catch (err) {
-        error = err;
+        error = err instanceof Error ? err : new Error(String(err));
       }
       expect(error).not.toBeNull();
       expect(String(error)).toContain("below required 4");

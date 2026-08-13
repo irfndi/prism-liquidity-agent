@@ -3,7 +3,7 @@ import { Effect, Layer } from "effect";
 import { ConfigService } from "../engine/config-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService, RevenueConfigService } from "../engine/services.js";
-import { defaultAppConfig } from "./helpers.js";
+import { asFetch, defaultAppConfig } from "./helpers.js";
 import fs from "fs";
 
 let RevenueConfigServiceLive: typeof import("../engine/revenue-config-service.js").RevenueConfigServiceLive;
@@ -26,7 +26,7 @@ function buildLayer(
 
 function mockCredentialsFile(apiKey = "test-api-key"): void {
   vi.spyOn(fs, "readFileSync").mockImplementation(((path: fs.PathOrFileDescriptor) => {
-    if (typeof path === "string" && path.includes("credentials.json")) {
+    if (String(path).includes("credentials.json")) {
       return JSON.stringify({
         apiKey,
         userId: "test-user",
@@ -52,9 +52,7 @@ afterEach(() => {
 
 describe("RevenueConfigService — paper mode fail-open", () => {
   it("returns default config when API is unreachable", async () => {
-    globalThis.fetch = vi
-      .fn()
-      .mockRejectedValue(new Error("network error")) as unknown as typeof fetch;
+    globalThis.fetch = asFetch(vi.fn().mockRejectedValue(new Error("network error")));
     mockCredentialsFile();
     const layer = buildLayer({ paperTrading: true });
 
@@ -80,9 +78,7 @@ describe("RevenueConfigService — paper mode fail-open", () => {
 
 describe("RevenueConfigService — live mode fail-closed", () => {
   it("returns fail-closed config with max fee rate when API is unreachable and no DB cache exists", async () => {
-    globalThis.fetch = vi
-      .fn()
-      .mockRejectedValue(new Error("network error")) as unknown as typeof fetch;
+    globalThis.fetch = asFetch(vi.fn().mockRejectedValue(new Error("network error")));
     mockCredentialsFile();
     const layer = buildLayer({ paperTrading: false });
 
@@ -119,7 +115,7 @@ describe("RevenueConfigService — SQLite caching", () => {
       ok: true,
       json: () => Promise.resolve(proConfig),
     });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
     mockCredentialsFile();
     const layer = buildLayer();
 
@@ -179,7 +175,7 @@ describe("RevenueConfigService — refreshConfig", () => {
         ok: true,
         json: () => Promise.resolve(secondConfig),
       });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
     mockCredentialsFile();
     const layer = buildLayer();
 
@@ -218,7 +214,7 @@ describe("RevenueConfigService — fetch timeout", () => {
       ok: true,
       json: () => Promise.resolve(config),
     });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
     mockCredentialsFile();
     const layer = buildLayer();
 
@@ -253,7 +249,7 @@ describe("RevenueConfigService — in-memory cache within TTL", () => {
       ok: true,
       json: () => Promise.resolve(config),
     });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
     mockCredentialsFile();
     const layer = buildLayer();
 

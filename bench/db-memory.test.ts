@@ -406,7 +406,7 @@ describe("probeVecAvailability", () => {
       const result = probeVecAvailability();
       const after = readdirSync(tmpDir);
       expect(after).toEqual(before);
-      expect(typeof result.available).toBe("boolean");
+      expect(result.available).toBeTypeOf("boolean");
     } finally {
       process.chdir(previousCwd);
       rmSync(tmpDir, { recursive: true, force: true });

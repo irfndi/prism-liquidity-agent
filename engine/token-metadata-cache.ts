@@ -114,16 +114,49 @@ export class TokenMetadataCache {
   }
 }
 
-function isValidMeta(value: unknown): value is TokenMeta {
-  if (typeof value !== "object" || value === null) return false;
-  const meta = value as Record<string, unknown>;
-  if (typeof meta["symbol"] !== "string") return false;
-  if (typeof meta["decimals"] !== "number") return false;
-  if (meta["priceUsd"] !== undefined && typeof meta["priceUsd"] !== "number") return false;
-  if (meta["priceFetchedAt"] !== undefined && typeof meta["priceFetchedAt"] !== "number") {
-    return false;
+interface RawTokenMeta {
+  readonly symbol: unknown;
+  readonly decimals: unknown;
+  readonly priceUsd?: unknown;
+  readonly priceFetchedAt?: unknown;
+}
+
+interface RawCacheEntry {
+  readonly fetchedAt: unknown;
+  readonly meta: unknown;
+}
+
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
+}
+
+function readString<T>(value: T): string | null {
+  return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
+}
+
+function readNumber<T>(value: T): number | null {
+  return Object.prototype.toString.call(value) === "[object Number]" ? (value as number) : null;
+}
+
+function parseTokenMeta<T>(value: T): TokenMeta | null {
+  if (!isNonNullObject(value)) return null;
+  const record = value as RawTokenMeta;
+  const symbol = readString(record.symbol);
+  if (symbol === null) return null;
+  const decimals = readNumber(record.decimals);
+  if (decimals === null) return null;
+  const meta: TokenMeta = { symbol, decimals };
+  if (record.priceUsd !== undefined) {
+    const priceUsd = readNumber(record.priceUsd);
+    if (priceUsd === null) return null;
+    meta.priceUsd = priceUsd;
   }
-  return true;
+  if (record.priceFetchedAt !== undefined) {
+    const priceFetchedAt = readNumber(record.priceFetchedAt);
+    if (priceFetchedAt === null) return null;
+    meta.priceFetchedAt = priceFetchedAt;
+  }
+  return meta;
 }
 
 /**
@@ -151,14 +184,16 @@ export function deserializeCache(json: string): Map<string, CacheEntry> {
   if (!Array.isArray(raw)) return result;
   for (const item of raw) {
     if (!Array.isArray(item) || item.length < 2) continue;
-    const mint = item[0];
+    const mint = readString(item[0]);
+    if (mint === null) continue;
     const entry = item[1];
-    if (typeof mint !== "string") continue;
-    if (typeof entry !== "object" || entry === null) continue;
-    const record = entry as Record<string, unknown>;
-    if (typeof record["fetchedAt"] !== "number") continue;
-    if (!isValidMeta(record["meta"])) continue;
-    result.set(mint, { meta: record["meta"], fetchedAt: record["fetchedAt"] });
+    if (!isNonNullObject(entry)) continue;
+    const record = entry as RawCacheEntry;
+    const fetchedAt = readNumber(record.fetchedAt);
+    if (fetchedAt === null) continue;
+    const meta = parseTokenMeta(record.meta);
+    if (meta === null) continue;
+    result.set(mint, { meta, fetchedAt });
   }
   return result;
 }

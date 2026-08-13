@@ -36,30 +36,61 @@ interface CachedConfig {
   readonly expiresAt: number;
 }
 
+interface RawRevenueConfig {
+  readonly tier?: unknown;
+  readonly platformFeeRate?: unknown;
+  readonly revenueShareEnabled?: unknown;
+  readonly revenueShareOperatorPct?: unknown;
+  readonly feeWalletAddress?: unknown;
+}
+
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
+}
+
+function readString<T>(value: T): string | null {
+  return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
+}
+
+function readNumber<T>(value: T): number | null {
+  if (Object.prototype.toString.call(value) !== "[object Number]") return null;
+  const n = value as number;
+  return Number.isFinite(n) ? n : null;
+}
+
+function readBoolean<T>(value: T): boolean | null {
+  return Object.prototype.toString.call(value) === "[object Boolean]" ? (value as boolean) : null;
+}
+
 function readApiKey(): Effect.Effect<string | null, never> {
   return Effect.try({
     try: () => {
       const raw = fs.readFileSync(CREDENTIALS_FILE, "utf-8");
       const parsed: unknown = JSON.parse(raw);
-      if (typeof parsed !== "object" || parsed === null || !("apiKey" in parsed)) return null;
-      const key = (parsed as { apiKey: unknown }).apiKey;
-      return typeof key === "string" && key.length > 0 ? key : null;
+      if (
+        parsed === null ||
+        !(parsed instanceof Object) ||
+        parsed instanceof Function ||
+        !("apiKey" in parsed)
+      ) {
+        return null;
+      }
+      const key = readString((parsed as { apiKey: unknown }).apiKey);
+      return key !== null && key.length > 0 ? key : null;
     },
     catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
   }).pipe(Effect.catch(() => Effect.succeed(null)));
 }
 
-export function parseRevenueConfig(data: unknown): RevenueConfig | null {
-  if (typeof data !== "object" || data === null) return null;
-  const obj = data as Record<string, unknown>;
+export function parseRevenueConfig<T>(data: T): RevenueConfig | null {
+  if (!isNonNullObject(data)) return null;
+  const obj = data as RawRevenueConfig;
   return {
-    tier: typeof obj.tier === "string" ? obj.tier : "free",
-    platformFeeRate: typeof obj.platformFeeRate === "number" ? obj.platformFeeRate : 0,
-    revenueShareEnabled:
-      typeof obj.revenueShareEnabled === "boolean" ? obj.revenueShareEnabled : false,
-    revenueShareOperatorPct:
-      typeof obj.revenueShareOperatorPct === "number" ? obj.revenueShareOperatorPct : 0,
-    feeWalletAddress: typeof obj.feeWalletAddress === "string" ? obj.feeWalletAddress : "",
+    tier: readString(obj.tier) ?? "free",
+    platformFeeRate: readNumber(obj.platformFeeRate) ?? 0,
+    revenueShareEnabled: readBoolean(obj.revenueShareEnabled) ?? false,
+    revenueShareOperatorPct: readNumber(obj.revenueShareOperatorPct) ?? 0,
+    feeWalletAddress: readString(obj.feeWalletAddress) ?? "",
   };
 }
 

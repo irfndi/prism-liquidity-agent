@@ -26,7 +26,7 @@ import {
   AlertService,
   type AdapterApi,
 } from "../engine/services.js";
-import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, makePosition, asOwner } from "./helpers.js";
 
 // ─── Wave 8: periodic LM reward claim cycle (full engine loop) ───────────────
 // A farm position with pending rewards must see exactly ONE reward CLAIM event
@@ -216,13 +216,13 @@ describe("periodic reward claim cycle", () => {
       ) as Effect.Effect<never, Error, never>,
     );
 
-    const { positions, events } = outcome as unknown as {
+    const { positions, events } = asOwner<{
       positions: ReadonlyArray<{
         cumulativeFeesClaimedUsd: number;
         cumulativeRewardsClaimedUsd: number;
       }>;
       events: ReadonlyArray<{ event: string; feesUsd: number | null; metadata: string | null }>;
-    };
+    }>(outcome);
 
     // Exactly one claim across ~15 scheduled cycles: the first claim re-armed
     // lastFeeClaimAt, so the shared gate stayed closed for the interval.
@@ -277,10 +277,10 @@ describe("periodic reward claim cycle", () => {
       ) as Effect.Effect<never, Error, never>,
     );
 
-    const { positions, events } = outcome as unknown as {
+    const { positions, events } = asOwner<{
       positions: ReadonlyArray<{ cumulativeRewardsClaimedUsd: number }>;
       events: ReadonlyArray<{ event: string; metadata: string | null }>;
-    };
+    }>(outcome);
 
     // At least the first (t≈0) and a re-armed (t≈400ms+) claim landed.
     expect(claimRewards.mock.calls.length).toBeGreaterThanOrEqual(2);

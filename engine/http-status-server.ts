@@ -6,12 +6,13 @@ import { AgentStateService, HttpStatusServerService } from "./services.js";
 import type { AppConfig } from "./config-service.js";
 import type { PrismStateSnapshot } from "./state-service.js";
 import type { AgentProposal } from "./types.js";
+import type { JsonValue } from "./services.js";
 import { parseHttpQueueProposal, ProposalParseError } from "./proposal-schema.js";
 import { getCurrentVersion } from "./version.js";
 
 const logger = createLogger("HttpStatusServer");
 
-function sanitizeConfig(cfg: AppConfig, snapshot: PrismStateSnapshot): Record<string, unknown> {
+function sanitizeConfig(cfg: AppConfig, snapshot: PrismStateSnapshot): JsonValue {
   return {
     paperTrading: cfg.paperTrading,
     scanIntervalMs: cfg.scanIntervalMs,
@@ -104,7 +105,7 @@ export class HttpStatusServer {
     const effect = Effect.gen({ self: this }, function* () {
       const proposals: AgentProposal[] = [];
       for (const [index, item] of items.entries()) {
-        if (item === null || typeof item !== "object") {
+        if (item === null || Object.prototype.toString.call(item) !== "[object Object]") {
           return new Response("Invalid proposal body", { status: 400 });
         }
         const raw = JSON.stringify(item);
@@ -276,14 +277,17 @@ export class HttpStatusServer {
 
     if (
       parsedBody === null ||
-      typeof parsedBody !== "object" ||
-      !Array.isArray((parsedBody as Record<string, unknown>).proposalIds)
+      Object.prototype.toString.call(parsedBody) !== "[object Object]" ||
+      !Array.isArray((parsedBody as { proposalIds?: unknown }).proposalIds)
     ) {
       return new Response("Missing proposalIds array", { status: 400 });
     }
 
     const proposalIds = (parsedBody as { proposalIds: unknown }).proposalIds;
-    if (!Array.isArray(proposalIds) || proposalIds.some((id) => typeof id !== "string")) {
+    if (
+      !Array.isArray(proposalIds) ||
+      proposalIds.some((id) => Object.prototype.toString.call(id) !== "[object String]")
+    ) {
       return new Response("proposalIds must be an array of strings", { status: 400 });
     }
 

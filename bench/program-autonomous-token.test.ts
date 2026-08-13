@@ -26,6 +26,7 @@ import type {
   SwapSimulation,
 } from "../engine/services.js";
 import type { SettlementJobRecord } from "../engine/types.js";
+import { makeAdapter, makeDb, makePosition, makePool } from "./helpers.js";
 import type { AutonomousTokenMode } from "../engine/types.js";
 
 function settlementJob(overrides: Partial<SettlementJobRecord> = {}): SettlementJobRecord {
@@ -81,13 +82,13 @@ function runSettlementProcessor(
   return Effect.runPromise(
     processSettlementJobs({
       adapter,
-      db: {
+      db: makeDb({
         saveSettlementJob: (job: SettlementJobRecord) =>
           Effect.sync(() => {
             savedJobs.push(job);
           }),
         getPosition: () => Effect.succeed(null),
-      } as unknown as DbApi,
+      }),
       jobs,
       mode,
       now: 10_000,
@@ -533,9 +534,12 @@ describe("settlement job processing", () => {
     // Given
     const job = settlementJob({ expiresAt: 9_999 });
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getTokenPrices: () => Effect.fail(new Error("expired settlement")),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.fail(new Error("expired settlement")),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
@@ -549,15 +553,18 @@ describe("settlement job processing", () => {
     // Given
     const job = settlementJob();
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      // Issue #201: the processor clamps the sell amount to the live
-      // wallet balance — these mocks hand back a generous balance so
-      // the clamp is a no-op for the tested scenarios.
-      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
-      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        // Issue #201: the processor clamps the sell amount to the live
+        // wallet balance — these mocks hand back a generous balance so
+        // the clamp is a no-op for the tested scenarios.
+        getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+        getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
@@ -571,9 +578,12 @@ describe("settlement job processing", () => {
     // Given
     const job = settlementJob({ status: "submitted", txSignature: "signature-1", attempts: 2 });
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getSwapStatus: () => Effect.succeed({ state: "processed", error: null }),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getSwapStatus: () => Effect.succeed({ state: "processed", error: null }),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
@@ -594,24 +604,27 @@ describe("settlement job processing", () => {
     const job = settlementJob({ status: "submitted", txSignature: "signature-1", attempts: 1 });
     const savedJobs: SettlementJobRecord[] = [];
     let quoteCalls = 0;
-    const adapter = {
-      getSwapStatus: () => Effect.succeed({ state: "not_found", error: null }),
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      // Issue #201: the processor clamps the sell amount to the live
-      // wallet balance — these mocks hand back a generous balance so
-      // the clamp is a no-op for the tested scenarios.
-      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
-      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
-      quoteSwap: () =>
-        Effect.sync(() => {
-          quoteCalls++;
-          return swapQuote(job);
-        }),
-      prepareSwap: () => Effect.fail(new Error("must not be called")),
-      simulateSwap: () => Effect.fail(new Error("must not be called")),
-      submitSwap: () => Effect.fail(new Error("must not be called")),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getSwapStatus: () => Effect.succeed({ state: "not_found", error: null }),
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        // Issue #201: the processor clamps the sell amount to the live
+        // wallet balance — these mocks hand back a generous balance so
+        // the clamp is a no-op for the tested scenarios.
+        getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+        getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+        quoteSwap: () =>
+          Effect.sync(() => {
+            quoteCalls++;
+            return swapQuote(job);
+          }),
+        prepareSwap: () => Effect.fail(new Error("must not be called")),
+        simulateSwap: () => Effect.fail(new Error("must not be called")),
+        submitSwap: () => Effect.fail(new Error("must not be called")),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
@@ -639,14 +652,17 @@ describe("settlement job processing", () => {
     });
     const savedJobs: SettlementJobRecord[] = [];
     let quoteCalls = 0;
-    const adapter = {
-      getSwapStatus: () => Effect.succeed({ state: "not_found", error: null }),
-      quoteSwap: () =>
-        Effect.sync(() => {
-          quoteCalls++;
-          return swapQuote(job);
-        }),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getSwapStatus: () => Effect.succeed({ state: "not_found", error: null }),
+        quoteSwap: () =>
+          Effect.sync(() => {
+            quoteCalls++;
+            return swapQuote(job);
+          }),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
@@ -673,26 +689,29 @@ describe("settlement job processing", () => {
     };
     const simulation: SwapSimulation = { successful: true, logs: [], unitsConsumed: null };
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      // Issue #201: the processor clamps the sell amount to the live
-      // wallet balance — these mocks hand back a generous balance so
-      // the clamp is a no-op for the tested scenarios.
-      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
-      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
-      quoteSwap: () => Effect.succeed(quote),
-      prepareSwap: () => Effect.succeed(prepared),
-      simulateSwap: () => Effect.succeed(simulation),
-      submitSwap: (
-        _prepared: PreparedSwap,
-        onBroadcast: ((signature: string) => Effect.Effect<void, Error>) | undefined,
-      ) =>
-        Effect.gen(function* () {
-          if (onBroadcast) yield* onBroadcast("broadcast-signature");
-          return "broadcast-signature";
-        }),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1, [job.tokenMint]: 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        // Issue #201: the processor clamps the sell amount to the live
+        // wallet balance — these mocks hand back a generous balance so
+        // the clamp is a no-op for the tested scenarios.
+        getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+        getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+        quoteSwap: () => Effect.succeed(quote),
+        prepareSwap: () => Effect.succeed(prepared),
+        simulateSwap: () => Effect.succeed(simulation),
+        submitSwap: (
+          _prepared: PreparedSwap,
+          onBroadcast: ((signature: string) => Effect.Effect<void, Error>) | undefined,
+        ) =>
+          Effect.gen(function* () {
+            if (onBroadcast) yield* onBroadcast("broadcast-signature");
+            return "broadcast-signature";
+          }),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
@@ -711,10 +730,13 @@ describe("settlement job processing", () => {
     // Given
     const job = settlementJob({ tokenMint: SOL_MINT });
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1 }),
-      getNativeSolBalance: () => Effect.succeed(10_000_000_000_000_000_000n),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 1 }),
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000_000_000_000n),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
@@ -739,9 +761,9 @@ describe("settlement job processing", () => {
     };
     let closedPnl: number | null = null;
     let outcome: { snapshotId: number; pnl: number } | null = null;
-    const db = {
+    const db = makeDb({
       saveSettlementJob: () => Effect.void,
-      getPosition: () => Effect.succeed(position),
+      getPosition: () => Effect.succeed(makePosition(position)),
       finalizeSettlementGroup: (input: {
         readonly realizedPnlUsd: number | null;
         readonly signalSnapshotId: number | null;
@@ -752,7 +774,7 @@ describe("settlement job processing", () => {
             outcome = { snapshotId: input.signalSnapshotId, pnl: input.realizedPnlUsd };
           }
         }),
-    } as unknown as DbApi;
+    });
 
     // When
     await Effect.runPromise(
@@ -789,14 +811,14 @@ describe("settlement job processing", () => {
       entrySignalSnapshotId: null,
     };
     let finalizedPnl: number | null = null;
-    const db = {
+    const db = makeDb({
       saveSettlementJob: () => Effect.void,
-      getPosition: () => Effect.succeed(position),
+      getPosition: () => Effect.succeed(makePosition(position)),
       finalizeSettlementGroup: (input: { readonly realizedPnlUsd: number | null }) =>
         Effect.sync(() => {
           finalizedPnl = input.realizedPnlUsd;
         }),
-    } as unknown as DbApi;
+    });
 
     // When
     await Effect.runPromise(
@@ -832,14 +854,14 @@ describe("settlement job processing", () => {
       entrySignalSnapshotId: null,
     };
     let finalizedPnl: number | null = null;
-    const db = {
+    const db = makeDb({
       saveSettlementJob: () => Effect.void,
-      getPosition: () => Effect.succeed(position),
+      getPosition: () => Effect.succeed(makePosition(position)),
       finalizeSettlementGroup: (input: { readonly realizedPnlUsd: number | null }) =>
         Effect.sync(() => {
           finalizedPnl = input.realizedPnlUsd;
         }),
-    } as unknown as DbApi;
+    });
 
     // When
     await Effect.runPromise(
@@ -867,12 +889,15 @@ describe("settlement job processing", () => {
       executionCostUsd: null,
     });
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
-      getConfirmedSwapOutput: () =>
-        Effect.succeed({ outputAtomic: 1_000_000_000n, feeAtomic: 5_000_000n }),
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100 }),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
+        getConfirmedSwapOutput: () =>
+          Effect.succeed({ outputAtomic: 1_000_000_000n, feeAtomic: 5_000_000n }),
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100 }),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
@@ -896,9 +921,12 @@ describe("settlement job processing", () => {
       executionCostUsd: 0.25,
     });
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
@@ -922,10 +950,13 @@ describe("settlement job processing", () => {
       executionCostUsd: null,
     });
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
-      getConfirmedSwapOutput: () => Effect.succeed(null),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
+        getConfirmedSwapOutput: () => Effect.succeed(null),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
@@ -947,12 +978,15 @@ describe("settlement job processing", () => {
       executionCostUsd: null,
     });
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
-      getConfirmedSwapOutput: () =>
-        Effect.succeed({ outputAtomic: 1_000_000_000n, feeAtomic: 5_000_000n }),
-      getTokenPrices: () => Effect.succeed({}),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
+        getConfirmedSwapOutput: () =>
+          Effect.succeed({ outputAtomic: 1_000_000_000n, feeAtomic: 5_000_000n }),
+        getTokenPrices: () => Effect.succeed({}),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs);
@@ -1011,9 +1045,9 @@ describe("settlement job processing", () => {
       depositedUsd: 100,
       entrySignalSnapshotId: null,
     };
-    const db = {
+    const db = makeDb({
       saveSettlementJob: () => Effect.void,
-      getPosition: () => Effect.succeed(position),
+      getPosition: () => Effect.succeed(makePosition(position)),
       finalizeSettlementGroup: (input: {
         readonly positionId: string;
         readonly jobIds: ReadonlyArray<string>;
@@ -1021,7 +1055,7 @@ describe("settlement job processing", () => {
         Effect.sync(() => {
           finalizedGroups.push(input);
         }),
-    } as unknown as DbApi;
+    });
 
     // When
     await Effect.runPromise(
@@ -1054,24 +1088,29 @@ describe("settlement job processing", () => {
       txSignature: "submitted-sig",
     });
     let finalizedCount = 0;
-    const db = {
+    const db = makeDb({
       saveSettlementJob: () => Effect.fail(new Error("database unavailable")),
       getPosition: () =>
-        Effect.succeed({
-          cumulativeFeesClaimedUsd: 0,
-          cumulativeRewardsClaimedUsd: 0,
-          depositedUsd: 100,
-          entrySignalSnapshotId: null,
-        }),
+        Effect.succeed(
+          makePosition({
+            cumulativeFeesClaimedUsd: 0,
+            cumulativeRewardsClaimedUsd: 0,
+            depositedUsd: 100,
+            entrySignalSnapshotId: null,
+          }),
+        ),
       finalizeSettlementGroup: () =>
         Effect.sync(() => {
           finalizedCount++;
         }),
-    } as unknown as DbApi;
-    const adapter = {
-      getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
-      getConfirmedSwapOutput: () => Effect.succeed(null),
-    } as unknown as AdapterApi;
+    });
+    const adapter = makeAdapter(
+      {},
+      {
+        getSwapStatus: () => Effect.succeed({ state: "confirmed", error: null }),
+        getConfirmedSwapOutput: () => Effect.succeed(null),
+      },
+    );
 
     // When
     const processed = await Effect.runPromise(
@@ -1097,13 +1136,13 @@ describe("settlement job processing", () => {
       ["dailyBaseline:wallet-1:primary:day", "2026-08-01"],
       ["dailyBaseline:wallet-1:primary:equityUsd", "50000"],
     ]);
-    const db = {
+    const db = makeDb({
       getMetadata: (key: string) => Effect.succeed(metadata.get(key) ?? null),
       setMetadataBatch: (entries: ReadonlyArray<{ key: string; value: string }>) =>
         Effect.sync(() => {
           for (const entry of entries) metadata.set(entry.key, entry.value);
         }),
-    };
+    });
 
     // When
     const loaded = await Effect.runPromise(loadDailyEquityBaseline(db, scope));
@@ -1147,19 +1186,22 @@ describe("issue #166 settlement recovery", () => {
     // Jupiter rate limit on every quote.
     const job = settlementJob({ expiresAt: 9_000 });
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      // Issue #201: the processor clamps the sell amount to the live
-      // wallet balance — these mocks hand back a generous balance so
-      // the clamp is a no-op for the tested scenarios.
-      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
-      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
-      quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 429")),
-      prepareSwap: () => Effect.fail(new Error("unused")),
-      simulateSwap: () => Effect.fail(new Error("unused")),
-      submitSwap: () => Effect.fail(new Error("unused")),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        // Issue #201: the processor clamps the sell amount to the live
+        // wallet balance — these mocks hand back a generous balance so
+        // the clamp is a no-op for the tested scenarios.
+        getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+        getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+        quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 429")),
+        prepareSwap: () => Effect.fail(new Error("unused")),
+        simulateSwap: () => Effect.fail(new Error("unused")),
+        submitSwap: () => Effect.fail(new Error("unused")),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs, "live");
@@ -1178,19 +1220,22 @@ describe("issue #166 settlement recovery", () => {
     // Given
     const job = settlementJob({ expiresAt: 9_000 });
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      // Issue #201: the processor clamps the sell amount to the live
-      // wallet balance — these mocks hand back a generous balance so
-      // the clamp is a no-op for the tested scenarios.
-      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
-      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
-      quoteSwap: () => Effect.fail(new Error("insufficient funds for swap")),
-      prepareSwap: () => Effect.fail(new Error("unused")),
-      simulateSwap: () => Effect.fail(new Error("unused")),
-      submitSwap: () => Effect.fail(new Error("unused")),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        // Issue #201: the processor clamps the sell amount to the live
+        // wallet balance — these mocks hand back a generous balance so
+        // the clamp is a no-op for the tested scenarios.
+        getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+        getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+        quoteSwap: () => Effect.fail(new Error("insufficient funds for swap")),
+        prepareSwap: () => Effect.fail(new Error("unused")),
+        simulateSwap: () => Effect.fail(new Error("unused")),
+        submitSwap: () => Effect.fail(new Error("unused")),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs, "live");
@@ -1216,22 +1261,25 @@ describe("issue #166 settlement recovery", () => {
       nextRetryAt: 9_000,
     });
     let quotedAmount: bigint | null = null;
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "usdc-mint": 1 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      getTokenBalance: (mint: string) => Effect.succeed(mint === "usdc-mint" ? 24_350_000n : 0n),
-      quoteSwap: (request: { amountAtomic: bigint }) => {
-        quotedAmount = request.amountAtomic;
-        return Effect.fail(new Error("Jupiter quote failed: 429"));
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "usdc-mint": 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        getTokenBalance: (mint: string) => Effect.succeed(mint === "usdc-mint" ? 24_350_000n : 0n),
+        quoteSwap: (request: { amountAtomic: bigint }) => {
+          quotedAmount = request.amountAtomic;
+          return Effect.fail(new Error("Jupiter quote failed: 429"));
+        },
+        prepareSwap: () => Effect.fail(new Error("unused")),
+        simulateSwap: () => Effect.fail(new Error("unused")),
+        submitSwap: () => Effect.fail(new Error("unused")),
       },
-      prepareSwap: () => Effect.fail(new Error("unused")),
-      simulateSwap: () => Effect.fail(new Error("unused")),
-      submitSwap: () => Effect.fail(new Error("unused")),
-    } as unknown as AdapterApi;
-    const db = {
+    );
+    const db = makeDb({
       saveSettlementJob: () => Effect.void,
       getPosition: () => Effect.succeed(null),
-    } as unknown as DbApi;
+    });
 
     // When
     const [processed] = await Effect.runPromise(
@@ -1263,19 +1311,22 @@ describe("issue #166 settlement recovery", () => {
       status: "retryable",
       nextRetryAt: 9_000,
     });
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "usdc-mint": 1 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      getTokenBalance: () => Effect.succeed(0n),
-      quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
-      prepareSwap: () => Effect.fail(new Error("unused")),
-      simulateSwap: () => Effect.fail(new Error("unused")),
-      submitSwap: () => Effect.fail(new Error("unused")),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "usdc-mint": 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        getTokenBalance: () => Effect.succeed(0n),
+        quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
+        prepareSwap: () => Effect.fail(new Error("unused")),
+        simulateSwap: () => Effect.fail(new Error("unused")),
+        submitSwap: () => Effect.fail(new Error("unused")),
+      },
+    );
+    const db = makeDb({
       saveSettlementJob: () => Effect.void,
       getPosition: () => Effect.succeed(null),
-    } as unknown as DbApi;
+    });
 
     // When
     const [processed] = await Effect.runPromise(
@@ -1302,19 +1353,22 @@ describe("issue #166 settlement recovery", () => {
     // Given
     const job = settlementJob({ expiresAt: 100_000 });
     const savedJobs: SettlementJobRecord[] = [];
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      // Issue #201: the processor clamps the sell amount to the live
-      // wallet balance — these mocks hand back a generous balance so
-      // the clamp is a no-op for the tested scenarios.
-      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
-      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
-      quoteSwap: () => Effect.fail(new Error("insufficient funds for swap")),
-      prepareSwap: () => Effect.fail(new Error("unused")),
-      simulateSwap: () => Effect.fail(new Error("unused")),
-      submitSwap: () => Effect.fail(new Error("unused")),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        // Issue #201: the processor clamps the sell amount to the live
+        // wallet balance — these mocks hand back a generous balance so
+        // the clamp is a no-op for the tested scenarios.
+        getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+        getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+        quoteSwap: () => Effect.fail(new Error("insufficient funds for swap")),
+        prepareSwap: () => Effect.fail(new Error("unused")),
+        simulateSwap: () => Effect.fail(new Error("unused")),
+        submitSwap: () => Effect.fail(new Error("unused")),
+      },
+    );
 
     // When
     const [processed] = await runSettlementProcessor([job], adapter, savedJobs, "live");
@@ -1330,23 +1384,26 @@ describe("issue #166 settlement recovery", () => {
     // no position row to finalize, so no PnL can be booked against the
     // still-in-wallet tokens.
     const job = settlementJob({ tokenMint: "no-price-1", positionId: "orphan:test" });
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      // Issue #201: the processor clamps the sell amount to the live
-      // wallet balance — these mocks hand back a generous balance so
-      // the clamp is a no-op for the tested scenarios.
-      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
-      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
-      quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
-      prepareSwap: () => Effect.fail(new Error("unused")),
-      simulateSwap: () => Effect.fail(new Error("unused")),
-      submitSwap: () => Effect.fail(new Error("unused")),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        // Issue #201: the processor clamps the sell amount to the live
+        // wallet balance — these mocks hand back a generous balance so
+        // the clamp is a no-op for the tested scenarios.
+        getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+        getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+        quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
+        prepareSwap: () => Effect.fail(new Error("unused")),
+        simulateSwap: () => Effect.fail(new Error("unused")),
+        submitSwap: () => Effect.fail(new Error("unused")),
+      },
+    );
+    const db = makeDb({
       saveSettlementJob: () => Effect.void,
       getPosition: () => Effect.succeed(null),
-    } as unknown as DbApi;
+    });
 
     // When
     const [processed] = await Effect.runPromise(
@@ -1380,23 +1437,26 @@ describe("issue #166 settlement recovery", () => {
     // in the wallet. It must fall through to the quote path instead
     // (bounded retries, then terminal on expiry — operator-visible).
     const job = settlementJob({ tokenMint: "no-price-1" }); // default real positionId
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      // Issue #201: the processor clamps the sell amount to the live
-      // wallet balance — these mocks hand back a generous balance so
-      // the clamp is a no-op for the tested scenarios.
-      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
-      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
-      quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 400")),
-      prepareSwap: () => Effect.fail(new Error("unused")),
-      simulateSwap: () => Effect.fail(new Error("unused")),
-      submitSwap: () => Effect.fail(new Error("unused")),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        // Issue #201: the processor clamps the sell amount to the live
+        // wallet balance — these mocks hand back a generous balance so
+        // the clamp is a no-op for the tested scenarios.
+        getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+        getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+        quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 400")),
+        prepareSwap: () => Effect.fail(new Error("unused")),
+        simulateSwap: () => Effect.fail(new Error("unused")),
+        submitSwap: () => Effect.fail(new Error("unused")),
+      },
+    );
+    const db = makeDb({
       saveSettlementJob: () => Effect.void,
       getPosition: () => Effect.succeed(null),
-    } as unknown as DbApi;
+    });
 
     // When
     const [processed] = await Effect.runPromise(
@@ -1422,23 +1482,26 @@ describe("issue #166 settlement recovery", () => {
   it("dust-confirms a priceable sub-dust settlement with the plain dust error", async () => {
     // Given a tiny priceable amount below the dust cutoff.
     const job = settlementJob({ amountAtomic: "1000" }); // 0.001 token at $1
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      // Issue #201: the processor clamps the sell amount to the live
-      // wallet balance — these mocks hand back a generous balance so
-      // the clamp is a no-op for the tested scenarios.
-      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
-      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
-      quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
-      prepareSwap: () => Effect.fail(new Error("unused")),
-      simulateSwap: () => Effect.fail(new Error("unused")),
-      submitSwap: () => Effect.fail(new Error("unused")),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "token-1": 1 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        // Issue #201: the processor clamps the sell amount to the live
+        // wallet balance — these mocks hand back a generous balance so
+        // the clamp is a no-op for the tested scenarios.
+        getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+        getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+        quoteSwap: () => Effect.fail(new Error("unused — quote must never run")),
+        prepareSwap: () => Effect.fail(new Error("unused")),
+        simulateSwap: () => Effect.fail(new Error("unused")),
+        submitSwap: () => Effect.fail(new Error("unused")),
+      },
+    );
+    const db = makeDb({
       saveSettlementJob: () => Effect.void,
       getPosition: () => Effect.succeed(null),
-    } as unknown as DbApi;
+    });
 
     // When
     const [processed] = await Effect.runPromise(
@@ -1487,16 +1550,19 @@ describe("issue #166 settlement recovery", () => {
       createdAt: 1,
       updatedAt: 1,
     });
-    const adapter = {
-      hasWallet: () => true,
-      getWalletHoldings: () => Effect.succeed(holdings),
-      getPoolState: () => Effect.succeed(null),
-      getTokenPrices: () => Effect.succeed({ "unpriceable-1": 0 }),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        hasWallet: () => true,
+        getWalletHoldings: () => Effect.succeed(holdings),
+        getPoolState: () => Effect.fail(new Error("pool unavailable")),
+        getTokenPrices: () => Effect.succeed({ "unpriceable-1": 0 }),
+      },
+    );
+    const db = makeDb({
       listSettlementJobs: () => Effect.succeed([terminalJob]),
       getAllPositions: () => Effect.succeed([]),
-    } as unknown as DbApi;
+    });
 
     // When
     const jobs = await Effect.runPromise(
@@ -1537,23 +1603,26 @@ describe("issue #166 settlement recovery", () => {
       createdAt: 1,
       error: "Jupiter quote failed: 429",
     });
-    const adapter = {
-      getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
-      getTokenDecimals: () => Effect.succeed(6),
-      // Issue #201: the processor clamps the sell amount to the live
-      // wallet balance — these mocks hand back a generous balance so
-      // the clamp is a no-op for the tested scenarios.
-      getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
-      getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
-      quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 429")),
-      prepareSwap: () => Effect.fail(new Error("unused")),
-      simulateSwap: () => Effect.fail(new Error("unused")),
-      submitSwap: () => Effect.fail(new Error("unused")),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        getTokenPrices: () => Effect.succeed({ [SOL_MINT]: 100, "no-price-1": 0 }),
+        getTokenDecimals: () => Effect.succeed(6),
+        // Issue #201: the processor clamps the sell amount to the live
+        // wallet balance — these mocks hand back a generous balance so
+        // the clamp is a no-op for the tested scenarios.
+        getTokenBalance: () => Effect.succeed(1_000_000_000_000_000_000n),
+        getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
+        quoteSwap: () => Effect.fail(new Error("Jupiter quote failed: 429")),
+        prepareSwap: () => Effect.fail(new Error("unused")),
+        simulateSwap: () => Effect.fail(new Error("unused")),
+        submitSwap: () => Effect.fail(new Error("unused")),
+      },
+    );
+    const db = makeDb({
       saveSettlementJob: () => Effect.void,
       getPosition: () => Effect.succeed(null),
-    } as unknown as DbApi;
+    });
 
     // When
     const [processed] = await Effect.runPromise(
@@ -1608,19 +1677,23 @@ describe("issue #166 settlement recovery", () => {
       [SOL_MINT, { amountAtomic: 1_000_000_000n, decimals: 9 }], // settlement asset → skip
       ["zero-1", { amountAtomic: 0n, decimals: 6 }], // nothing held → skip
     ]);
-    const adapter = {
-      hasWallet: () => true,
-      getWalletHoldings: () => Effect.succeed(holdings),
-      getPoolState: () => Effect.succeed({ tokenX: "backed-1", tokenY: "backed-y" }),
-      getTokenPrices: (mints: string[]) =>
-        Effect.succeed(
-          Object.fromEntries(mints.map((mint) => [mint, mint === "unpriceable-1" ? 0 : 1])),
-        ),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        hasWallet: () => true,
+        getWalletHoldings: () => Effect.succeed(holdings),
+        getPoolState: () => Effect.succeed(makePool({ tokenX: "backed-1", tokenY: "backed-y" })),
+        getTokenPrices: (mints: readonly string[]) =>
+          Effect.succeed(
+            Object.fromEntries(mints.map((mint) => [mint, mint === "unpriceable-1" ? 0 : 1])),
+          ),
+      },
+    );
+    const db = makeDb({
       listSettlementJobs: () => Effect.succeed([]),
-      getAllPositions: () => Effect.succeed([{ positionId: "live-pos-1", poolAddress: "pool-1" }]),
-    } as unknown as DbApi;
+      getAllPositions: () =>
+        Effect.succeed([makePosition({ positionId: "live-pos-1", poolAddress: "pool-1" })]),
+    });
 
     // When
     const jobs = await Effect.runPromise(
@@ -1677,16 +1750,20 @@ describe("issue #166 settlement recovery", () => {
       createdAt: 1,
       updatedAt: 1,
     });
-    const adapter = {
-      hasWallet: () => true,
-      getWalletHoldings: () => Effect.succeed(holdings),
-      getPoolState: () => Effect.succeed({ tokenX: "hype-mint", tokenY: "usdc-mint" }),
-      getTokenPrices: () => Effect.succeed({ "usdc-mint": 1 }),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        hasWallet: () => true,
+        getWalletHoldings: () => Effect.succeed(holdings),
+        getPoolState: () => Effect.succeed(makePool({ tokenX: "hype-mint", tokenY: "usdc-mint" })),
+        getTokenPrices: () => Effect.succeed({ "usdc-mint": 1 }),
+      },
+    );
+    const db = makeDb({
       listSettlementJobs: () => Effect.succeed([terminalJob]),
-      getAllPositions: () => Effect.succeed([{ positionId: "live-pos", poolAddress: "pool-1" }]),
-    } as unknown as DbApi;
+      getAllPositions: () =>
+        Effect.succeed([makePosition({ positionId: "live-pos", poolAddress: "pool-1" })]),
+    });
 
     // When
     const jobs = await Effect.runPromise(
@@ -1720,17 +1797,20 @@ describe("issue #166 settlement recovery", () => {
     const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
       ["unpriceable-1", { amountAtomic: 5_000_000n, decimals: 6 }],
     ]);
-    const adapter = {
-      hasWallet: () => true,
-      getWalletHoldings: () => Effect.succeed(holdings),
-      getPoolState: () => Effect.succeed(null),
-      getTokenPrices: (mints: string[]) =>
-        Effect.succeed(Object.fromEntries(mints.map((mint) => [mint, 0]))),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        hasWallet: () => true,
+        getWalletHoldings: () => Effect.succeed(holdings),
+        getPoolState: () => Effect.fail(new Error("pool unavailable")),
+        getTokenPrices: (mints: readonly string[]) =>
+          Effect.succeed(Object.fromEntries(mints.map((mint) => [mint, 0]))),
+      },
+    );
+    const db = makeDb({
       listSettlementJobs: () => Effect.succeed([]),
       getAllPositions: () => Effect.succeed([]),
-    } as unknown as DbApi;
+    });
 
     // When the dust gate is on (default), an unpriceable token is dust: no
     // sell job — otherwise it would be quoted (Jupiter 400) and retried
@@ -1773,26 +1853,30 @@ describe("issue #166 settlement recovery", () => {
       ["pool-leg-x", { amountAtomic: 1_000_000n, decimals: 6 }],
       ["active-job-token", { amountAtomic: 1_000_000n, decimals: 6 }],
     ]);
-    const adapter = {
-      hasWallet: () => true,
-      getWalletHoldings: () => Effect.succeed(holdings),
-      getPoolState: (poolAddress: string) =>
-        Effect.succeed(
-          poolAddress === "pool-1" ? { tokenX: "pool-leg-x", tokenY: "pool-leg-y" } : null,
-        ),
-      getTokenPrices: (mints: string[]) =>
-        Effect.succeed(
-          Object.fromEntries(mints.map((mint) => [mint, mint === "stranded-1" ? 1000 : 1])),
-        ),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        hasWallet: () => true,
+        getWalletHoldings: () => Effect.succeed(holdings),
+        getPoolState: (poolAddress: string) =>
+          poolAddress === "pool-1"
+            ? Effect.succeed(makePool({ tokenX: "pool-leg-x", tokenY: "pool-leg-y" }))
+            : Effect.fail(new Error("pool unavailable")),
+        getTokenPrices: (mints: readonly string[]) =>
+          Effect.succeed(
+            Object.fromEntries(mints.map((mint) => [mint, mint === "stranded-1" ? 1000 : 1])),
+          ),
+      },
+    );
+    const db = makeDb({
       listSettlementJobs: () =>
         Effect.succeed([
           settlementJob({ id: "active", tokenMint: "active-job-token", status: "retryable" }),
           settlementJob({ id: "dead", tokenMint: "stranded-1", status: "terminal" }),
         ]),
-      getAllPositions: () => Effect.succeed([{ positionId: "live-pos-1", poolAddress: "pool-1" }]),
-    } as unknown as DbApi;
+      getAllPositions: () =>
+        Effect.succeed([makePosition({ positionId: "live-pos-1", poolAddress: "pool-1" })]),
+    });
 
     // When
     const jobs = await Effect.runPromise(
@@ -1826,13 +1910,19 @@ describe("issue #166 settlement recovery", () => {
 
   it("skips the sweep entirely without a wallet or without candidate holdings", async () => {
     // Given
-    const walletless = {
-      hasWallet: () => false,
-    } as unknown as AdapterApi;
-    const emptyHoldings = {
-      hasWallet: () => true,
-      getWalletHoldings: () => Effect.succeed(new Map()),
-    } as unknown as AdapterApi;
+    const walletless = makeAdapter(
+      {},
+      {
+        hasWallet: () => false,
+      },
+    );
+    const emptyHoldings = makeAdapter(
+      {},
+      {
+        hasWallet: () => true,
+        getWalletHoldings: () => Effect.succeed(new Map()),
+      },
+    );
 
     // When / Then
     await expect(
@@ -1869,18 +1959,24 @@ describe("issue #166 settlement recovery", () => {
     const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
       ["paper-leg-token", { amountAtomic: 1_000_000n, decimals: 6 }],
     ]);
-    const adapter = {
-      hasWallet: () => true,
-      getWalletHoldings: () => Effect.succeed(holdings),
-      getPoolState: () => Effect.succeed({ tokenX: "paper-leg-token", tokenY: "paper-leg-y" }),
-      getTokenPrices: (mints: string[]) =>
-        Effect.succeed(Object.fromEntries(mints.map((mint) => [mint, 1]))),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        hasWallet: () => true,
+        getWalletHoldings: () => Effect.succeed(holdings),
+        getPoolState: () =>
+          Effect.succeed(makePool({ tokenX: "paper-leg-token", tokenY: "paper-leg-y" })),
+        getTokenPrices: (mints: readonly string[]) =>
+          Effect.succeed(Object.fromEntries(mints.map((mint) => [mint, 1]))),
+      },
+    );
+    const db = makeDb({
       listSettlementJobs: () => Effect.succeed([]),
       getAllPositions: () =>
-        Effect.succeed([{ positionId: "paper-pool-1-abc", poolAddress: "pool-paper" }]),
-    } as unknown as DbApi;
+        Effect.succeed([
+          makePosition({ positionId: "paper-pool-1-abc", poolAddress: "pool-paper" }),
+        ]),
+    });
 
     // When
     const jobs = await Effect.runPromise(
@@ -1907,14 +2003,17 @@ describe("issue #166 settlement recovery", () => {
     const holdings = new Map<string, { amountAtomic: bigint; decimals: number }>([
       ["stranded-1", { amountAtomic: 15_413n, decimals: 6 }],
     ]);
-    const adapter = {
-      hasWallet: () => true,
-      getWalletHoldings: () => Effect.succeed(holdings),
-      getPoolState: () => Effect.succeed(null),
-      getTokenPrices: (mints: string[]) =>
-        Effect.succeed(Object.fromEntries(mints.map((mint) => [mint, 1000]))),
-    } as unknown as AdapterApi;
-    const db = {
+    const adapter = makeAdapter(
+      {},
+      {
+        hasWallet: () => true,
+        getWalletHoldings: () => Effect.succeed(holdings),
+        getPoolState: () => Effect.fail(new Error("pool unavailable")),
+        getTokenPrices: (mints: readonly string[]) =>
+          Effect.succeed(Object.fromEntries(mints.map((mint) => [mint, 1000]))),
+      },
+    );
+    const db = makeDb({
       listSettlementJobs: () =>
         Effect.succeed([
           settlementJob({
@@ -1926,7 +2025,7 @@ describe("issue #166 settlement recovery", () => {
           }),
         ]),
       getAllPositions: () => Effect.succeed([]),
-    } as unknown as DbApi;
+    });
 
     // When
     const jobs = await Effect.runPromise(
@@ -1955,10 +2054,13 @@ describe("issue #166 settlement recovery", () => {
 
   it("fails open when the holdings read errors", async () => {
     // Given
-    const adapter = {
-      hasWallet: () => true,
-      getWalletHoldings: () => Effect.fail(new Error("rpc down")),
-    } as unknown as AdapterApi;
+    const adapter = makeAdapter(
+      {},
+      {
+        hasWallet: () => true,
+        getWalletHoldings: () => Effect.fail(new Error("rpc down")),
+      },
+    );
 
     // When / Then
     await expect(

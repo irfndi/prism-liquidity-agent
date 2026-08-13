@@ -22,6 +22,18 @@ import { evaluateReplayPool } from "../engine/cycle/evaluate-pool.js";
 
 const log = createLogger("Backtest");
 
+/** Range edges of a DLMM position expressed as bin prices. */
+interface BinRangePrices {
+  readonly pa: number;
+  readonly pb: number;
+}
+
+/** Mark-to-market and HODL-benchmark values of a CLMM position. */
+interface PositionValue {
+  readonly lpValueUsd: number;
+  readonly hodlValueUsd: number;
+}
+
 /** Range edges of a DLMM position expressed as bin prices. Bin i has price
  * P_i = P_anchor·(1+s)^(i−anchorBin), so the position's [lower, upper] bin
  * range maps to a CLMM price range [P_a, P_b]. */
@@ -31,7 +43,7 @@ export function binRangePrices(args: {
   lowerBinId: number;
   upperBinId: number;
   binStep: number;
-}): { pa: number; pb: number } {
+}): BinRangePrices {
   const s = 1 + args.binStep / 10_000;
   const pa = args.anchorPrice * Math.pow(s, args.lowerBinId - args.anchorBinId);
   const pb = args.anchorPrice * Math.pow(s, args.upperBinId - args.anchorBinId);
@@ -67,7 +79,7 @@ export function clmmPositionValue(args: {
   lowerBinId: number;
   upperBinId: number;
   binStep: number;
-}): { lpValueUsd: number; hodlValueUsd: number } {
+}): PositionValue {
   const { pa, pb } = binRangePrices(args);
   const p0 = args.anchorPrice;
   const p1 = args.currentPrice;
@@ -255,7 +267,11 @@ async function loadSnapshots(
   try {
     return await Effect.runPromise(Effect.provide(effect, layer));
   } catch (err) {
-    log.error("Failed to load snapshots", { pool, dbPath, err });
+    log.error("Failed to load snapshots", {
+      pool,
+      dbPath,
+      err: err instanceof Error ? err.message : String(err),
+    });
     return [];
   }
 }
@@ -892,7 +908,7 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
 export { runBacktest };
 
 const isDirectBacktestExecution =
-  typeof Bun !== "undefined" &&
+  Boolean(globalThis.Bun) &&
   (Bun.main?.endsWith("ops/backtest.ts") || Bun.main?.endsWith("ops/backtest.js"));
 if (isDirectBacktestExecution) {
   if (process.env.PRISM_ALLOW_DIRECT !== "true") {

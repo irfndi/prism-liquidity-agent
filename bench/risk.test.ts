@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { evaluateRisk, evaluateAgentProposal } from "../engine/risk-service.js";
 import type { AgentDecision, AgentProposal, Position } from "../engine/types.js";
-import { defaultAppConfig } from "./helpers.js";
+import { defaultAppConfig, asOwner } from "./helpers.js";
 
 function makeDecision(overrides: Partial<AgentDecision> = {}): AgentDecision {
   return {
@@ -290,14 +290,14 @@ describe("RiskEngine", () => {
         proposal,
         makeContext({
           openPositions: [
-            {
+            asOwner<Position>({
               poolAddress: "TestPool111111111111111111111111111111111111",
               depositedUsd: 1_000,
               currentValueUsd: 1_000,
               unrealizedPnlUsd: 0,
               feesEarnedUsd: 0,
               openedAt: Date.now(),
-            } as unknown as Position,
+            }),
           ],
         }),
         appConfig,

@@ -91,11 +91,16 @@ export class PersistenceContractError extends Data.TaggedError("PersistenceContr
 // wrapper and hides the real failure (e.g. "Gateway 1008: ..."). Walk the `.cause`
 // chain to the deepest non-empty Error message; fall back to `String(err)` when the
 // chain holds no Error with a message. A `seen` set guards self-referential causes.
-export function underlyingErrorMessage(err: unknown): string {
+export function underlyingErrorMessage<T>(err: T): string {
   let deepest: string | null = null;
   let current: unknown = err;
   const seen = new Set<unknown>();
-  while (current !== null && typeof current === "object" && !seen.has(current)) {
+  while (
+    current !== null &&
+    current instanceof Object &&
+    !(current instanceof Function) &&
+    !seen.has(current)
+  ) {
     seen.add(current);
     if (current instanceof Error && current.message.length > 0) {
       deepest = current.message;

@@ -2,7 +2,15 @@ import { Effect, Layer } from "effect";
 import { join } from "path";
 import { existsSync, readFileSync } from "fs";
 import { ConfigService } from "./config-service.js";
-import { AlertService, DbService, type AlertApi, type EngineAlert } from "./services.js";
+import {
+  AlertService,
+  DbService,
+  type AlertApi,
+  type AlertSeverity,
+  type AlertType,
+  type EngineAlert,
+  type JsonValue,
+} from "./services.js";
 import { createLogger } from "./logger.js";
 import { getPrismUserConfigDir } from "./paths.js";
 
@@ -22,9 +30,18 @@ function readPrismApiKey(): string | null {
     const credentialsFile = join(getPrismUserConfigDir(), "credentials.json");
     if (!existsSync(credentialsFile)) return null;
     const value: unknown = JSON.parse(readFileSync(credentialsFile, "utf-8"));
-    if (typeof value !== "object" || value === null || !("apiKey" in value)) return null;
+    if (
+      value === null ||
+      !(value instanceof Object) ||
+      value instanceof Function ||
+      !("apiKey" in value)
+    ) {
+      return null;
+    }
     const key = (value as { apiKey: unknown }).apiKey;
-    return typeof key === "string" && key.length > 0 ? key : null;
+    return Object.prototype.toString.call(key) === "[object String]" && (key as string).length > 0
+      ? (key as string)
+      : null;
   } catch {
     return null;
   }
@@ -48,11 +65,36 @@ function cooldownKey(alert: EngineAlert): string {
   return alert.positionId !== undefined ? `${base}:${alert.positionId}` : base;
 }
 
+interface AlertBody {
+  type: AlertType;
+  severity: AlertSeverity;
+  message: string;
+  poolAddress?: string;
+  positionId?: string;
+  data?: JsonValue;
+}
+
+/** Builds the wire payload without conditional spreads or `undefined` keys. */
+function buildAlertBody(alert: EngineAlert): AlertBody {
+  const body: AlertBody = {
+    type: alert.type,
+    severity: alert.severity,
+    message: alert.message,
+  };
+  if (alert.poolAddress !== undefined) body.poolAddress = alert.poolAddress;
+  if (alert.positionId !== undefined) body.positionId = alert.positionId;
+  if (alert.data !== undefined) body.data = alert.data;
+  return body;
+}
+
 function parseNumber(raw: string | null): number | null {
   if (raw === null || raw.trim() === "") return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
 }
+
+/** Request headers; `X-Install-Id` is set only when an install id exists. */
+type AlertHeaders = Record<string, string>;
 
 function postAlert(
   apiKey: string,
@@ -60,22 +102,16 @@ function postAlert(
   alert: EngineAlert,
 ): Effect.Effect<void, never> {
   const baseUrl = process.env.PRISM_API_URL ?? DEFAULT_API_BASE_URL;
+  const headers: AlertHeaders = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${apiKey}`,
+  };
+  if (installId) headers["X-Install-Id"] = installId;
   return Effect.tryPromise(() =>
     fetch(`${baseUrl}/v1/alerts`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        ...(installId ? { "X-Install-Id": installId } : {}),
-      },
-      body: JSON.stringify({
-        type: alert.type,
-        severity: alert.severity,
-        message: alert.message,
-        ...(alert.poolAddress !== undefined ? { poolAddress: alert.poolAddress } : {}),
-        ...(alert.positionId !== undefined ? { positionId: alert.positionId } : {}),
-        ...(alert.data !== undefined ? { data: alert.data } : {}),
-      }),
+      headers,
+      body: JSON.stringify(buildAlertBody(alert)),
       signal: AbortSignal.timeout(ALERT_POST_TIMEOUT_MS),
     }),
   ).pipe(

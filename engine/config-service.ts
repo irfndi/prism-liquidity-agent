@@ -85,10 +85,12 @@ function isHeliusHost(url: string): boolean {
  * prevent credential leakage to attacker-controlled domains such as
  * `helius-rpc.com.attacker.example`.  API key values are redacted in logs.
  */
-export function normalizeHeliusUrl(
-  url: string,
-  heliusApiKey: string,
-): { readonly url: string; readonly normalized: boolean } {
+export interface HeliusUrlNormalization {
+  readonly url: string;
+  readonly normalized: boolean;
+}
+
+export function normalizeHeliusUrl(url: string, heliusApiKey: string): HeliusUrlNormalization {
   const trimmed = url.trim();
   if (!trimmed || !isHeliusHost(trimmed)) {
     return { url: trimmed, normalized: false };

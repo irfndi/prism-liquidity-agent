@@ -18,14 +18,14 @@ function parseRiskResult(json: string | null): RiskResult {
     // DB-sourced riskResultJson is untrusted: validate the shape instead of
     // asserting, so a null/array/odd-typed value cannot masquerade as a
     // valid risk result (which would fail the caller's fallback logic).
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      typeof (parsed as { approved?: unknown }).approved === "boolean" &&
-      ((parsed as { reason?: unknown }).reason === undefined ||
-        typeof (parsed as { reason?: unknown }).reason === "string")
-    ) {
-      return parsed as RiskResult;
+    const raw =
+      parsed !== null && parsed instanceof Object && !(parsed instanceof Function)
+        ? (parsed as { approved?: unknown; reason?: unknown })
+        : null;
+    const approved = readBoolean(raw?.approved);
+    const reason = readString(raw?.reason);
+    if (approved !== null && (reason !== null || raw?.reason === undefined)) {
+      return { approved, reason: reason ?? "unknown" };
     }
     return { approved: false, reason: "unknown" };
   } catch {
@@ -33,6 +33,14 @@ function parseRiskResult(json: string | null): RiskResult {
     // a bad parse must never fail the whole getRecentDecisions call.
     return { approved: false, reason: "unknown" };
   }
+}
+
+function readBoolean<T>(value: T): boolean | null {
+  return Object.prototype.toString.call(value) === "[object Boolean]" ? (value as boolean) : null;
+}
+
+function readString<T>(value: T): string | null {
+  return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
 }
 
 export const AuditLive = Layer.effect(

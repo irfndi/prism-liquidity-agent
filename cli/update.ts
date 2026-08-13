@@ -33,7 +33,7 @@ import { Effect } from "effect";
 import { createLogger } from "../engine/logger.js";
 import { findRunningEngineProcess, isProcessAlive, readLockfile } from "./lockfile.js";
 
-if (typeof Bun === "undefined") {
+if (!globalThis.Bun) {
   console.error("The prism update command requires the Bun runtime.");
   process.exit(1);
 }
@@ -83,13 +83,14 @@ function runCommand(
   options?: { cwd?: string; timeout?: number },
 ): void {
   const bin = resolveBin(name);
-  const result = Bun.spawnSync([bin, ...args], {
+  const spawnOpts: Bun.SpawnOptions.SpawnSyncOptions<"inherit", "inherit", "inherit"> = {
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
-    ...(options?.cwd ? { cwd: options.cwd } : {}),
-    ...(options?.timeout ? { timeout: options.timeout } : {}),
-  });
+  };
+  if (options?.cwd) spawnOpts.cwd = options.cwd;
+  if (options?.timeout) spawnOpts.timeout = options.timeout;
+  const result = Bun.spawnSync([bin, ...args], spawnOpts);
   if (!result.success) {
     const cwdMsg = options?.cwd ? ` in ${options.cwd}` : "";
     throw new UpdateAbort(
@@ -104,13 +105,14 @@ function runCommandOutput(
   options?: { cwd?: string; timeout?: number },
 ): string {
   const bin = resolveBin(name);
-  const result = Bun.spawnSync([bin, ...args], {
+  const spawnOpts: Bun.SpawnOptions.SpawnSyncOptions<"inherit", "pipe", "inherit"> = {
     stdin: "inherit",
     stdout: "pipe",
     stderr: "inherit",
-    ...(options?.cwd ? { cwd: options.cwd } : {}),
-    ...(options?.timeout ? { timeout: options.timeout } : {}),
-  });
+  };
+  if (options?.cwd) spawnOpts.cwd = options.cwd;
+  if (options?.timeout) spawnOpts.timeout = options.timeout;
+  const result = Bun.spawnSync([bin, ...args], spawnOpts);
   if (!result.success) {
     const cwdMsg = options?.cwd ? ` in ${options.cwd}` : "";
     throw new UpdateAbort(
@@ -311,7 +313,7 @@ function resolveInstallRoot(): string {
   } catch {}
 
   try {
-    const main = typeof Bun !== "undefined" ? Bun.main : (process.argv[1] ?? "");
+    const main = globalThis.Bun ? Bun.main : (process.argv[1] ?? "");
     if (main) {
       const mainReal = realpathSync(main);
       const mainCandidate = dirname(dirname(mainReal));

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { asOwner } from "./helpers.js";
 import { Effect, Layer } from "effect";
 import {
   Connection,
@@ -178,7 +179,7 @@ function mockRpcSendPipeline(): void {
     return Promise.resolve(`mock-reward-sig-${n}`);
   });
   vi.spyOn(Connection.prototype, "confirmTransaction").mockImplementation(() =>
-    Promise.resolve(undefined as unknown as never),
+    Promise.resolve(asOwner<never>(undefined)),
   );
 }
 
@@ -205,7 +206,7 @@ function mockRewardMintDecimals(decimals = 6): void {
 }
 
 function mockPrices(prices: Record<string, number>): () => void {
-  return mockFetch((async (url: string | URL | Request) => {
+  return mockFetch(async (url: string | URL | Request) => {
     const u = String(url as unknown);
     if (u.includes("api.jup.ag/price/v3")) {
       const body: Record<string, { usdPrice: number }> = {};
@@ -215,7 +216,7 @@ function mockPrices(prices: Record<string, number>): () => void {
       return new Response(JSON.stringify(body), { status: 200 });
     }
     return new Response("unexpected", { status: 500 });
-  }) as unknown as typeof fetch);
+  });
 }
 
 describe("AdapterService.claimRewards", () => {

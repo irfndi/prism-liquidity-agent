@@ -32,11 +32,7 @@ function buildProgram(): Layer.Layer<DbService | AdapterService, Error, never> {
   const dbPath = process.env.SQLITE_DB_PATH ?? getPrismDbPath();
   const dbLayer = DbLive(dbPath);
   const adapterLayer = Layer.provide(AdapterLive, Layer.merge(ConfigLive, dbLayer));
-  return Layer.mergeAll(dbLayer, adapterLayer) as unknown as Layer.Layer<
-    DbService | AdapterService,
-    Error,
-    never
-  >;
+  return Layer.mergeAll(dbLayer, adapterLayer);
 }
 
 /**
@@ -133,10 +129,12 @@ function formatPct(value: number): string {
   return `${sign}${value.toFixed(2)}%`;
 }
 
-export function computePnl(
-  depositedUsd: number,
-  currentValueUsd: number,
-): { pnlUsd: number; pnlPct: number } {
+export interface PnlResult {
+  readonly pnlUsd: number;
+  readonly pnlPct: number;
+}
+
+export function computePnl(depositedUsd: number, currentValueUsd: number): PnlResult {
   const pnlUsd = currentValueUsd - depositedUsd;
   const pnlPct = depositedUsd > 0 ? (pnlUsd / depositedUsd) * 100 : 0;
   return { pnlUsd, pnlPct };
@@ -260,7 +258,7 @@ function formatPositionsList(
   return lines.join("\n");
 }
 
-function realizedPnlFor(pos: PositionRecord): { pnlUsd: number; pnlPct: number } {
+function realizedPnlFor(pos: PositionRecord): PnlResult {
   const pnlUsd =
     pos.realizedPnlUsd ??
     pos.currentValueUsd +

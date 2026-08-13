@@ -1,12 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { asFetch } from "./helpers.js";
 import { Effect, Layer } from "effect";
 import { AdapterService } from "../engine/services.js";
 import type { AdapterApi } from "../engine/services.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): Promise<T> {
-  return Effect.runPromise((Effect.provide as any)(effect, layer));
+function run<T, E, R>(
+  effect: Effect.Effect<T, E, R>,
+  layer: Layer.Layer<R, never, never>,
+): Promise<T> {
+  return Effect.runPromise(Effect.provide(effect, layer));
 }
 
 const FEE_WALLET_API_URL = "https://prism-api.irfndi.workers.dev";
@@ -110,7 +114,7 @@ describe("reportFeeCollection", () => {
 
   it("sends the correct payload to the API", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
 
     const layer = makeTestAdapterLayer();
 
@@ -145,7 +149,7 @@ describe("reportFeeCollection", () => {
 
   it("handles API errors gracefully (no throw)", async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("network timeout"));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
 
     const layer = makeTestAdapterLayer();
 

@@ -39,7 +39,10 @@ export function installBigintWarningFilter(): void {
 
   console.warn = ((...args: unknown[]): void => {
     const first = args[0];
-    if (typeof first === "string" && first.includes(BIGINT_BINDINGS_MARKER)) {
+    if (
+      Object.prototype.toString.call(first) === "[object String]" &&
+      (first as string).includes(BIGINT_BINDINGS_MARKER)
+    ) {
       if (!loggedOnce) {
         loggedOnce = true;
         // stderr channel (the original console.warn) — NOT logger.debug, which

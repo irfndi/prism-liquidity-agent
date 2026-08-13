@@ -29,7 +29,7 @@ import {
   type MeteoraDatapiApi,
 } from "../engine/services.js";
 import type { PoolSnapshot } from "../engine/types.js";
-import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, makePosition, asOwner } from "./helpers.js";
 
 // ─── (iii) TVL-drop EXIT at the evaluatePool level ───────────────────────────
 
@@ -219,11 +219,9 @@ describe("evaluatePool TVL-drop EXIT (integration)", () => {
     });
 
     const decisions = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        ReadonlyArray<{ action: string; reasoning: string }>,
-        Error,
-        never
-      >,
+      asOwner<Effect.Effect<ReadonlyArray<{ action: string; reasoning: string }>, Error, never>>(
+        Effect.provide(test, layer),
+      ),
     );
 
     const tvlExit = decisions.find(

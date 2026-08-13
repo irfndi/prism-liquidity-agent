@@ -29,6 +29,7 @@ import {
   AlertService,
   type AdapterApi,
   type AgentApi,
+  type DbApi,
   type MemoryApi,
   type MeteoraDatapiApi,
   type MeteoraPoolStats,
@@ -317,12 +318,33 @@ export async function runAsync<T, E>(effect: Effect.Effect<T, E, never>): Promis
 
 // ─── Fetch mock ──────────────────────────────────────────────────────────────
 
-export function mockFetch(impl: unknown): () => void {
+// A callable accepted by `mockFetch`. `never[]` rest keeps the parameter
+// contract open to any fetch-shaped implementation the tests inject while
+// remaining a concrete (non-`unknown`) function type.
+type FetchMockImpl = (...args: never[]) => Promise<Response>;
+
+export function mockFetch(impl: FetchMockImpl): () => void {
   const original = globalThis.fetch;
-  globalThis.fetch = vi.fn(impl as typeof fetch) as unknown as typeof globalThis.fetch;
+  globalThis.fetch = vi.fn(impl as typeof fetch) as typeof fetch;
   return () => {
     globalThis.fetch = original;
   };
+}
+
+// A single-assertion escape hatch for tests that inject a `vi.fn()` mock into
+// `globalThis.fetch` directly. `typeof fetch` cannot be produced from a mock
+// with one cast, and chained assertions are forbidden, so the widening happens
+// against the untyped function parameter instead of an expression chain.
+export function asFetch(mock: any): typeof fetch {
+  return mock as typeof fetch;
+}
+
+// Single-assertion boundary cast for test fixtures that must surface a value
+// under a specific owner type. Mirrors `asFetch`: the widening lives on the
+// untyped parameter instead of an expression chain, which keeps the cast a
+// single assertion at the fixture boundary.
+export function asOwner<T>(value: any): T {
+  return value as T;
 }
 
 // ─── Shared test factories (imported by decision-loop + harvest-gate) ──────
@@ -428,13 +450,95 @@ export function makeAdapter(
   } as AdapterApi;
 }
 
+// ─── Db & Memory factories ───────────────────────────────────────────────────────────────────
+
+// Every default DbApi method is a fail-on-use stub (valid for any
+// Effect.Effect<T, Error> return). Tests override only the methods they touch.
+function unmocked(method: string): Effect.Effect<never, Error> {
+  return Effect.fail(new Error(`makeDb: ${method} called without override`));
+}
+
+export function makeDb(overrides: Partial<DbApi> = {}): DbApi {
+  const base: DbApi = {
+    db: {},
+    savePosition: () => unmocked("savePosition"),
+    getPosition: () => unmocked("getPosition"),
+    getAllPositions: () => unmocked("getAllPositions"),
+    getPaperExitedPositions: () => unmocked("getPaperExitedPositions"),
+    deletePosition: () => unmocked("deletePosition"),
+    markPaperExited: () => unmocked("markPaperExited"),
+    closePosition: () => unmocked("closePosition"),
+    finalizeSettlementGroup: () => unmocked("finalizeSettlementGroup"),
+    getClosedPositions: () => unmocked("getClosedPositions"),
+    savePositionEvent: () => unmocked("savePositionEvent"),
+    getPositionEvents: () => unmocked("getPositionEvents"),
+    getLatestSnapshotPrice: () => unmocked("getLatestSnapshotPrice"),
+    updatePositionValue: () => unmocked("updatePositionValue"),
+    saveAudit: () => unmocked("saveAudit"),
+    getRecentAudit: () => unmocked("getRecentAudit"),
+    cacheBlacklist: () => unmocked("cacheBlacklist"),
+    isBlacklisted: () => unmocked("isBlacklisted"),
+    insertMemory: () => unmocked("insertMemory"),
+    queryMemory: () => unmocked("queryMemory"),
+    pruneMemory: () => unmocked("pruneMemory"),
+    saveSnapshot: () => unmocked("saveSnapshot"),
+    getSnapshots: () => unmocked("getSnapshots"),
+    getSnapshotPools: () => unmocked("getSnapshotPools"),
+    getSnapshotCount: () => unmocked("getSnapshotCount"),
+    pruneSnapshots: () => unmocked("pruneSnapshots"),
+    saveFeedback: () => unmocked("saveFeedback"),
+    getFeedbackByHash: () => unmocked("getFeedbackByHash"),
+    getRecentFeedbackForAgent: () => unmocked("getRecentFeedbackForAgent"),
+    getLastFeedbackForAgent: () => unmocked("getLastFeedbackForAgent"),
+    listFeedbackForAgent: () => unmocked("listFeedbackForAgent"),
+    getMetadata: () => unmocked("getMetadata"),
+    setMetadata: () => unmocked("setMetadata"),
+    deleteMetadata: () => unmocked("deleteMetadata"),
+    setMetadataBatch: () => unmocked("setMetadataBatch"),
+    saveFeeClaim: () => unmocked("saveFeeClaim"),
+    getUnreportedFeeClaims: () => unmocked("getUnreportedFeeClaims"),
+    markFeeClaimReported: () => unmocked("markFeeClaimReported"),
+    saveSignalSnapshot: () => unmocked("saveSignalSnapshot"),
+    getSignalSnapshots: () => unmocked("getSignalSnapshots"),
+    recordSignalOutcome: () => unmocked("recordSignalOutcome"),
+    getRecentOutcomes: () => unmocked("getRecentOutcomes"),
+    getEvolvedThresholds: () => unmocked("getEvolvedThresholds"),
+    saveEvolvedThresholds: () => unmocked("saveEvolvedThresholds"),
+    getClosedPositionOutcomes: () => unmocked("getClosedPositionOutcomes"),
+    getSignalWeights: () => unmocked("getSignalWeights"),
+    saveSignalWeights: () => unmocked("saveSignalWeights"),
+    getPoolCooldown: () => unmocked("getPoolCooldown"),
+    setPoolCooldown: () => unmocked("setPoolCooldown"),
+    clearPoolCooldown: () => unmocked("clearPoolCooldown"),
+    saveTokenCandidate: () => unmocked("saveTokenCandidate"),
+    getTokenCandidate: () => unmocked("getTokenCandidate"),
+    listTokenCandidates: () => unmocked("listTokenCandidates"),
+    saveExecutionOperation: () => unmocked("saveExecutionOperation"),
+    getExecutionOperation: () => unmocked("getExecutionOperation"),
+    listExecutionOperations: () => unmocked("listExecutionOperations"),
+    saveSettlementJob: () => unmocked("saveSettlementJob"),
+    getSettlementJob: () => unmocked("getSettlementJob"),
+    listSettlementJobs: () => unmocked("listSettlementJobs"),
+    saveSafetyPause: () => unmocked("saveSafetyPause"),
+    getSafetyPause: () => unmocked("getSafetyPause"),
+  };
+  return { ...base, ...overrides };
+}
+
+export function makeMemory(overrides: Partial<MemoryApi> = {}): MemoryApi {
+  return makeRecordingMemory([] as RecordedMemory[], overrides);
+}
+
 export interface RecordedMemory {
   category: string;
   content: string;
   poolAddress?: string | undefined;
 }
 
-function makeRecordingMemory(record: RecordedMemory[]): MemoryApi {
+function makeRecordingMemory(
+  record: RecordedMemory[],
+  overrides: Partial<MemoryApi> = {},
+): MemoryApi {
   return {
     initialize: () => Effect.void,
     upsert: (entry) =>
@@ -448,6 +552,7 @@ function makeRecordingMemory(record: RecordedMemory[]): MemoryApi {
     getRelevantContext: () => Effect.succeed([]),
     pruneExpired: () => Effect.succeed(0),
     recordOutcome: () => Effect.void,
+    ...overrides,
   };
 }
 

@@ -43,7 +43,24 @@ import {
   type MeteoraPoolStats,
 } from "../engine/services.js";
 import type { AgentDecision, PoolState, Position } from "../engine/types.js";
-import { defaultAppConfig, makePool, makeBinArray, mockFetch, run } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, mockFetch, run, asOwner } from "./helpers.js";
+
+interface PositionSqlRow {
+  position_id: string;
+  pool_address: string;
+  position_pubkey: string | null;
+  deposited_usd: number;
+  current_value_usd: number;
+  entry_price_usd: number | null;
+  cumulative_fees_claimed_usd: number;
+}
+interface DbEventRow {
+  positionId: string | null;
+  event: string;
+}
+interface AlertPost {
+  message: string;
+}
 import { randomUUID } from "crypto";
 import { stringifySafe } from "../engine/bigint-json.js";
 
@@ -370,7 +387,7 @@ describe("migration v18 (multi-position)", () => {
       .query(
         "SELECT position_id, pool_address, position_pubkey, deposited_usd, current_value_usd, entry_price_usd, cumulative_fees_claimed_usd FROM positions ORDER BY pool_address",
       )
-      .all() as Array<Record<string, unknown>>;
+      .all() as PositionSqlRow[];
 
     expect(rows).toHaveLength(2);
     const live = rows.find((r) => r.pool_address === "PoolLiveLegacy")!;
@@ -691,14 +708,14 @@ function makePaperDb() {
     saved: [] as PositionRecord[],
     closed: [] as Array<{ id: string; pnl: number | null }>,
     paperExited: [] as string[],
-    events: [] as Array<Record<string, unknown>>,
+    events: [] as DbEventRow[],
   };
   const db = {
     savePosition: (pos: PositionRecord) =>
       Effect.sync(() => {
         calls.saved.push(pos);
       }),
-    savePositionEvent: (evt: Record<string, unknown>) =>
+    savePositionEvent: (evt: DbEventRow) =>
       Effect.sync(() => {
         calls.events.push(evt);
       }),
@@ -1163,9 +1180,9 @@ describe("per-position alert cooldowns", () => {
   });
 
   it("OOR alerts for two positions on one pool do not share a cooldown", async () => {
-    const posts: Array<Record<string, unknown>> = [];
-    const restore = mockFetch((_url: unknown, init: { body?: string } = {}) => {
-      posts.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+    const posts: Array<AlertPost> = [];
+    const restore = mockFetch((_url: string | URL | Request, init: { body?: string } = {}) => {
+      posts.push(JSON.parse(init.body ?? "{}") as AlertPost);
       return Promise.resolve(new Response("{}", { status: 200 }));
     });
     try {
@@ -1417,15 +1434,17 @@ describe("program — multiple positions per pool", () => {
       return { positions, decisions, events };
     });
     const { positions, decisions, events } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        {
-          positions: ReadonlyArray<PositionRecord>;
-          decisions: ReadonlyArray<{ action: string; executed: boolean }>;
-          events: ReadonlyArray<{ event: string; positionId: string | null }>;
-        },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          {
+            positions: ReadonlyArray<PositionRecord>;
+            decisions: ReadonlyArray<{ action: string; executed: boolean }>;
+            events: ReadonlyArray<{ event: string; positionId: string | null }>;
+          },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     // Two positions on the same pool, keyed by distinct synthetic ids.
@@ -1466,14 +1485,16 @@ describe("program — multiple positions per pool", () => {
       return { positions, decisions };
     });
     const { positions, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        {
-          positions: ReadonlyArray<PositionRecord>;
-          decisions: ReadonlyArray<{ action: string; executed: boolean }>;
-        },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          {
+            positions: ReadonlyArray<PositionRecord>;
+            decisions: ReadonlyArray<{ action: string; executed: boolean }>;
+          },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     expect(positions).toHaveLength(1);
@@ -1568,20 +1589,22 @@ describe("program — multiple positions per pool", () => {
       return { active, closed, events, decisions };
     });
     const { active, closed, events, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        {
-          active: ReadonlyArray<PositionRecord>;
-          closed: ReadonlyArray<PositionRecord>;
-          events: ReadonlyArray<{
-            event: string;
-            positionId: string | null;
-            metadata: string | null;
-          }>;
-          decisions: ReadonlyArray<{ action: string; executed: boolean }>;
-        },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          {
+            active: ReadonlyArray<PositionRecord>;
+            closed: ReadonlyArray<PositionRecord>;
+            events: ReadonlyArray<{
+              event: string;
+              positionId: string | null;
+              metadata: string | null;
+            }>;
+            decisions: ReadonlyArray<{ action: string; executed: boolean }>;
+          },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     // A's value collapsed past the trailing stop and it exited. B is in range
@@ -1669,15 +1692,17 @@ describe("program — multiple positions per pool", () => {
       return { active, closed, decisions };
     });
     const { active, closed, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        {
-          active: ReadonlyArray<PositionRecord>;
-          closed: ReadonlyArray<PositionRecord>;
-          decisions: ReadonlyArray<{ action: string }>;
-        },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          {
+            active: ReadonlyArray<PositionRecord>;
+            closed: ReadonlyArray<PositionRecord>;
+            decisions: ReadonlyArray<{ action: string }>;
+          },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     // A's estimate collapsed (~50% drawdown) on cycle 1, but the breach must
@@ -1794,15 +1819,17 @@ describe("program — multiple positions per pool", () => {
       return { active, closed, decisions };
     });
     const { active, closed, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        {
-          active: ReadonlyArray<PositionRecord>;
-          closed: ReadonlyArray<PositionRecord>;
-          decisions: ReadonlyArray<{ action: string; reasoning: string | null }>;
-        },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          {
+            active: ReadonlyArray<PositionRecord>;
+            closed: ReadonlyArray<PositionRecord>;
+            decisions: ReadonlyArray<{ action: string; reasoning: string | null }>;
+          },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     expect(active.map((p) => p.positionId)).toEqual(["seeded-healthy"]);
@@ -1851,14 +1878,16 @@ describe("program — multiple positions per pool", () => {
       return { persisted, decisions };
     });
     const { persisted, decisions } = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        {
-          persisted: PositionRecord | null;
-          decisions: ReadonlyArray<{ action: string; reasoning: string | null }>;
-        },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          {
+            persisted: PositionRecord | null;
+            decisions: ReadonlyArray<{ action: string; reasoning: string | null }>;
+          },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     // The real 0 mark is honored: any non-zero persisted value would mean the
@@ -1958,11 +1987,13 @@ describe("program — multiple positions per pool", () => {
       return decisions;
     });
     const decisions = await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        ReadonlyArray<{ action: string; executed: boolean; poolAddress: string }>,
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          ReadonlyArray<{ action: string; executed: boolean; poolAddress: string }>,
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
 
     const goodEnters = decisions.filter(
@@ -1995,19 +2026,20 @@ describe("A4 paper fee accrual requires datapi-MEASURED fees", () => {
     statsSource: "datapi" | "geckoterminal" | "heuristic";
     datapi?: MeteoraDatapiApi;
   }): Promise<{ accruals: ReadonlyArray<{ feesUsd: number | null }>; accruedUsd: number }> {
-    const layer = makeProgramLayer({
+    const programOpts: Parameters<typeof makeProgramLayer>[0] = {
       // Positive modeled fees + in-range paper position: the numeric A4 guards
       // all pass, so ONLY the statsSource gate decides whether accrual happens.
       adapter: makeProgramAdapter({
         [POOL]: makePool({ address: POOL, fees24hUsd: 400, statsSource: opts.statsSource }),
       }),
-      ...(opts.datapi !== undefined ? { datapi: opts.datapi } : {}),
       configOverrides: {
         watchlistPools: [POOL],
         paperTrading: true,
         scanIntervalMs: 600_000,
       },
-    });
+    };
+    if (opts.datapi !== undefined) programOpts.datapi = opts.datapi;
+    const layer = makeProgramLayer(programOpts);
     const test = Effect.gen(function* () {
       const db = yield* DbService;
       yield* db.savePosition(makePos({ positionId: POS_ID, lowerBinId: 4980, upperBinId: 5020 }));
@@ -2025,11 +2057,13 @@ describe("A4 paper fee accrual requires datapi-MEASURED fees", () => {
       return { accruals, accruedUsd: pos?.cumulativeFeesClaimedUsd ?? 0 };
     });
     return Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
-        { accruals: ReadonlyArray<{ feesUsd: number | null }>; accruedUsd: number },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          { accruals: ReadonlyArray<{ feesUsd: number | null }>; accruedUsd: number },
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     );
   }
 

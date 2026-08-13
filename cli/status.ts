@@ -39,8 +39,8 @@ export type StrandedSettlementClassification =
  * two. Outage → Unavailable (retry later); unresolvable → Unpriceable
  * (permanent; a retry can never succeed). Exported for unit coverage.
  */
-export function decimalsFailureState(err: unknown): StrandedLookupState {
-  return err instanceof Error && err.message.includes("Cannot resolve decimals")
+export function decimalsFailureState(cause: unknown): StrandedLookupState {
+  return cause instanceof Error && cause.message.includes("Cannot resolve decimals")
     ? "unpriceable"
     : "unavailable";
 }
@@ -160,11 +160,7 @@ function buildProgram(): Layer.Layer<
   const auditLayer = Layer.provide(AuditLive, dbLayer);
   const configLayer = ConfigLive;
   const adapterLayer = Layer.provide(AdapterLive, Layer.merge(configLayer, dbLayer));
-  return Layer.mergeAll(dbLayer, auditLayer, configLayer, adapterLayer) as unknown as Layer.Layer<
-    DbService | AuditService | ConfigService | AdapterService,
-    Error,
-    never
-  >;
+  return Layer.mergeAll(dbLayer, auditLayer, configLayer, adapterLayer);
 }
 
 export const statusCommand = new Command("status")

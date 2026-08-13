@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { asOwner } from "./helpers.js";
 import {
   createErrorReporter,
   type ErrorReporter,
@@ -13,9 +14,9 @@ import {
  * via the vi.mocked API.
  */
 function mockFetch(): void {
-  globalThis.fetch = vi.fn(() =>
-    Promise.resolve(new Response(null, { status: 200 })),
-  ) as unknown as typeof globalThis.fetch;
+  globalThis.fetch = asOwner<typeof globalThis.fetch>(
+    vi.fn(() => Promise.resolve(new Response(null, { status: 200 }))),
+  );
 }
 
 /**
@@ -378,10 +379,10 @@ describe("createErrorReporter factory", () => {
   it("returns an ErrorReporter instance", () => {
     const r = createErrorReporter({ enabled: false });
     expect(r).toBeInstanceOf(Object);
-    expect(typeof r.report).toBe("function");
-    expect(typeof r.flushAsync).toBe("function");
-    expect(typeof r.getPending).toBe("function");
-    expect(typeof r.dispose).toBe("function");
+    expect(r).toHaveProperty("report", expect.any(Function));
+    expect(r).toHaveProperty("flushAsync", expect.any(Function));
+    expect(r).toHaveProperty("getPending", expect.any(Function));
+    expect(r).toHaveProperty("dispose", expect.any(Function));
     void r.dispose();
   });
 });

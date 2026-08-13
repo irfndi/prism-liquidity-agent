@@ -52,7 +52,7 @@ describe("bigintReviver (parse round-trip)", () => {
     expect(parsed.reserveY).toBe(456n);
     expect(parsed.liquiditySupply).toBe(789n);
     expect(parsed.name).toBe("x");
-    expect(typeof parsed.reserveX).toBe("bigint");
+    expect(parsed.reserveX).toBeTypeOf("bigint");
   });
 
   it("preserves non-bigint fields unchanged", () => {

@@ -1,13 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
 import { DbService } from "../engine/services.js";
 import { DbLive } from "../engine/db-service.js";
 import { reconcilePositions } from "../engine/program.js";
 import type { AdapterApi, MemoryApi } from "../engine/services.js";
 import type { PositionRecord } from "../engine/db-service.js";
 
-function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): T {
-  return Effect.runSync((Effect.provide as any)(effect, layer));
+function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: Layer.Layer<R, never, never>): T {
+  return Effect.runSync(Effect.provide(effect, layer));
 }
 
 function makeMockAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {

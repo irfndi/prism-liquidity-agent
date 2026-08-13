@@ -33,6 +33,11 @@ export interface ProposalCircuitBreakerOptions {
   readonly cooldownMs: number;
 }
 
+export interface ProposalBackoffState {
+  readonly failures: number;
+  readonly open: boolean;
+}
+
 export class ProposalCircuitBreaker {
   private failures = 0;
   private openedAt: number | null = null;
@@ -70,7 +75,7 @@ export class ProposalCircuitBreaker {
     return !this.isOpen(now);
   }
 
-  getState(): { readonly failures: number; readonly open: boolean } {
+  getState(): ProposalBackoffState {
     const open = this.isOpen(Date.now());
     return { failures: this.failures, open };
   }

@@ -22,19 +22,19 @@ function redirectStdoutStderrToFile(): void {
   const stream = fs.createWriteStream(logPath, { flags: "a" });
 
   const originalStdoutWrite = process.stdout.write.bind(process.stdout) as (
-    chunk: unknown,
-    encoding?: unknown,
-    cb?: unknown,
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding,
+    cb?: (error?: Error | null) => void,
   ) => boolean;
   const originalStderrWrite = process.stderr.write.bind(process.stderr) as (
-    chunk: unknown,
-    encoding?: unknown,
-    cb?: unknown,
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding,
+    cb?: (error?: Error | null) => void,
   ) => boolean;
   const streamWrite = stream.write.bind(stream) as (
-    chunk: unknown,
-    encoding?: unknown,
-    cb?: unknown,
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding,
+    cb?: (error?: Error | null) => void,
   ) => boolean;
 
   let streamBroken = false;
@@ -48,7 +48,11 @@ function redirectStdoutStderrToFile(): void {
     process.stderr.write(`[run-engine] log stream error: ${err.message}\n`);
   });
 
-  function safeStreamWrite(chunk: unknown, encoding?: unknown, cb?: unknown): void {
+  function safeStreamWrite(
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding,
+    cb?: (error?: Error | null) => void,
+  ): void {
     if (streamBroken) return;
     Effect.runSync(
       Effect.try({
@@ -58,15 +62,23 @@ function redirectStdoutStderrToFile(): void {
     );
   }
 
-  process.stdout.write = function (chunk: unknown, encoding?: unknown, cb?: unknown): boolean {
+  process.stdout.write = function (
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding,
+    cb?: (error?: Error | null) => void,
+  ): boolean {
     safeStreamWrite(chunk, encoding, cb);
     return originalStdoutWrite(chunk, encoding, cb);
   } as typeof process.stdout.write;
 
-  process.stderr.write = function (chunk: unknown, encoding?: unknown, cb?: unknown): boolean {
+  process.stderr.write = function (
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding,
+    cb?: (error?: Error | null) => void,
+  ): boolean {
     safeStreamWrite(chunk, encoding, cb);
     return originalStderrWrite(chunk, encoding, cb);
-  } as typeof process.stderr.write;
+  } as typeof process.stdout.write;
 }
 
 redirectStdoutStderrToFile();

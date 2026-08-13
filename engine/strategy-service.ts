@@ -192,13 +192,7 @@ export const DLMMStrategy: StrategyApi = {
     return Math.min(pool.fees24hUsd / estimatedIlDailyUsd, MAX_FEE_IL_RATIO);
   },
 
-  checkVolumeAuthenticity(
-    pool: PoolState,
-    feesMeasured: boolean,
-  ): {
-    score: number;
-    flags: ReadonlyArray<string>;
-  } {
+  checkVolumeAuthenticity(pool: PoolState, feesMeasured: boolean): VolumeAuthResult {
     const flags: string[] = [];
     let score = 1.0;
 
@@ -262,7 +256,7 @@ export const DLMMStrategy: StrategyApi = {
     binStep: number,
     halfWidthOverride?: number,
     dipOffsetBins = 0,
-  ): { lowerBinId: number; upperBinId: number } {
+  ): BinRange {
     const halfWidth = halfWidthOverride ?? baselineHalfWidthForBinStep(binStep);
     // dipOffsetBins shifts the WHOLE range below the active bin (negative =
     // below market): the Heart Attack bid ladder. The deposit fills on a
@@ -329,7 +323,7 @@ export function recommendBinRangeForVolatility(
   highVolatility: boolean,
   wideHalfWidth = 50,
   baseHalfWidthOverride?: number,
-): { lowerBinId: number; upperBinId: number; halfWidth: number } {
+): VolatilityBinRange {
   const baseHalfWidth = baseHalfWidthOverride ?? baselineHalfWidthForBinStep(binStep);
   const halfWidth = highVolatility ? Math.max(baseHalfWidth * 2, wideHalfWidth) : baseHalfWidth;
   return {
@@ -485,6 +479,31 @@ export interface OutcomeRecord {
   readonly outcomeRecordedAt: number;
 }
 
+/** Owner contract for `checkVolumeAuthenticity`, a score plus evidence flags. */
+export interface VolumeAuthResult {
+  readonly score: number;
+  readonly flags: ReadonlyArray<string>;
+}
+
+/** Owner contract for a bin-id range. */
+export interface BinRange {
+  readonly lowerBinId: number;
+  readonly upperBinId: number;
+}
+
+/** Owner contract for a volatility-adjusted bin range plus its half-width. */
+export interface VolatilityBinRange {
+  readonly lowerBinId: number;
+  readonly upperBinId: number;
+  readonly halfWidth: number;
+}
+
+/** Owner contract for threshold evolution: next thresholds + whether they moved. */
+export interface ThresholdEvolutionResult {
+  readonly thresholds: EvolvableThresholds;
+  readonly changed: boolean;
+}
+
 /**
  * Clamp a threshold nudge to ±maxChangePct of the current value.
  * When target > current, nudge upward but never exceed current × (1 + maxChangePct).
@@ -541,7 +560,7 @@ export function evolveThresholds(
     readonly maxChangePct?: number;
     readonly minOutcomes?: number;
   },
-): { readonly thresholds: EvolvableThresholds; readonly changed: boolean } {
+): ThresholdEvolutionResult {
   const minOutcomes = options?.minOutcomes ?? 5;
   if (outcomes.length < minOutcomes) {
     return { thresholds: current, changed: false };

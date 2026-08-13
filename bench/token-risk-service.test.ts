@@ -31,7 +31,6 @@ function headerRecord(init: RequestInit | undefined): object {
   const headers = init?.headers;
   return headers !== null &&
     headers !== undefined &&
-    typeof headers === "object" &&
     !Array.isArray(headers) &&
     !(headers instanceof Headers)
     ? headers

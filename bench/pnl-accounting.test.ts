@@ -1,4 +1,7 @@
 import { describe, it, expect, afterAll } from "vitest";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonRecord = { [key: string]: JsonValue };
 import { Effect, Layer } from "effect";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -359,7 +362,7 @@ describe("migration v16 — pnl_accounting", () => {
 
     const row = db
       .query("SELECT * FROM positions WHERE pool_address = ?")
-      .get("LegacyPool111") as Record<string, unknown> | null;
+      .get("LegacyPool111") as JsonRecord | null;
     expect(row).not.toBeNull();
     expect(Number(row!.deposited_usd)).toBe(1000);
     expect(Number(row!.current_value_usd)).toBe(1200);
@@ -1117,7 +1120,7 @@ describe("live lifecycle PnL accounting", () => {
     const meta = JSON.parse(exitEvent.metadata ?? "{}") as {
       pricing?: string;
       lastMarkUsd?: number;
-      raw?: Record<string, unknown>;
+      raw?: JsonRecord;
     };
     expect(meta.pricing).toBe("unresolved");
     expect(meta.lastMarkUsd).toBeCloseTo(950, 8);

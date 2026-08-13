@@ -34,6 +34,12 @@ const DEFAULT_CACHE_TTL_MIN = 30;
  */
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
+/** Optional fetch options built without ever assigning `undefined` (exactOptionalPropertyTypes). */
+export interface FetchTokenRisksOptions {
+  apiKey?: string;
+  fetchImpl?: FetchLike;
+}
+
 export interface TokenRiskSignal {
   readonly isVerified: boolean | null;
   readonly organicScore: number | null;
@@ -56,12 +62,48 @@ export interface TokenRiskConfigLike {
 
 // ─── Response parsing (live-verified semantics) ──────────────────────────────
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+interface RawAudit {
+  readonly isSus: unknown;
 }
 
-function readMint(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
+interface RawTokenRiskEntry {
+  readonly address: unknown;
+  readonly id: unknown;
+  readonly isVerified: unknown;
+  readonly organicScore: unknown;
+  readonly organicScoreLabel: unknown;
+  readonly audit: unknown;
+  readonly freezeAuthority: unknown;
+  readonly mintAuthority: unknown;
+}
+
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
+}
+
+function readString<T>(value: T): string | null {
+  return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
+}
+
+function readBoolean<T>(value: T): boolean | null {
+  return Object.prototype.toString.call(value) === "[object Boolean]" ? (value as boolean) : null;
+}
+
+function readFiniteNumber<T>(value: T): number | null {
+  return Object.prototype.toString.call(value) === "[object Number]" &&
+    Number.isFinite(value as number)
+    ? (value as number)
+    : null;
+}
+
+function readMint<T>(value: T): string | null {
+  const s = readString(value);
+  return s !== null && s.length > 0 ? s : null;
+}
+
+export interface ParsedTokenRiskEntry {
+  readonly mint: string;
+  readonly signal: TokenRiskSignal;
 }
 
 /**
@@ -69,27 +111,25 @@ function readMint(value: unknown): string | null {
  * carries no usable address (schema drift) so it is simply skipped — mints
  * absent from the response stay unknown to the caller (no fabricated entry).
  */
-export function parseTokenRiskEntry(raw: unknown): {
-  readonly mint: string;
-  readonly signal: TokenRiskSignal;
-} | null {
-  if (!isObject(raw)) return null;
+export function parseTokenRiskEntry<T>(raw: T): ParsedTokenRiskEntry | null {
+  if (!isNonNullObject(raw)) return null;
+  const entry = raw as RawTokenRiskEntry;
   // The response keys an entry by the token address; live payloads have also
   // carried `id`. Accept either, never guess.
-  const mint = readMint(raw["address"]) ?? readMint(raw["id"]);
+  const mint = readMint(entry.address) ?? readMint(entry.id);
   if (mint === null) return null;
-  const audit = raw["audit"];
-  const score = raw["organicScore"];
-  const label = raw["organicScoreLabel"];
+  const audit = entry.audit;
+  const score = entry.organicScore;
+  const label = entry.organicScoreLabel;
   return {
     mint,
     signal: {
-      isVerified: typeof raw["isVerified"] === "boolean" ? raw["isVerified"] : null,
-      organicScore: typeof score === "number" && Number.isFinite(score) ? score : null,
+      isVerified: readBoolean(entry.isVerified),
+      organicScore: readFiniteNumber(score),
       organicScoreLabel: label === "high" || label === "medium" || label === "low" ? label : null,
-      isSus: isObject(audit) && audit["isSus"] === true,
-      freezeAuthorityPresent: readMint(raw["freezeAuthority"]) !== null,
-      mintAuthorityPresent: readMint(raw["mintAuthority"]) !== null,
+      isSus: isNonNullObject(audit) && (audit as RawAudit).isSus === true,
+      freezeAuthorityPresent: readMint(entry.freezeAuthority) !== null,
+      mintAuthorityPresent: readMint(entry.mintAuthority) !== null,
     },
   };
 }
@@ -116,7 +156,7 @@ export async function fetchTokenRisks(
   // ONLY send the key when a non-empty value is configured — an empty
   // `x-api-key` header can be treated as an invalid key and 401; its absence
   // is the supported keyless path.
-  if (typeof options.apiKey === "string" && options.apiKey.length > 0) {
+  if (options.apiKey !== undefined && options.apiKey.length > 0) {
     headers["x-api-key"] = options.apiKey;
   }
 
@@ -241,7 +281,7 @@ export async function consultTokenRisks(
     // Build the request options without ever assigning `undefined` to an
     // optional field (exactOptionalPropertyTypes): an empty JUPITER_API_KEY is
     // omitted, never sent as an empty header.
-    const request: { apiKey?: string; fetchImpl?: FetchLike } = {};
+    const request: FetchTokenRisksOptions = {};
     const apiKey = process.env.JUPITER_API_KEY?.trim();
     if (apiKey) request.apiKey = apiKey;
     if (options.fetchImpl !== undefined) request.fetchImpl = options.fetchImpl;

@@ -12,7 +12,14 @@ import {
   normalEntryConfidence,
 } from "../engine/strategy-service.js";
 import { program } from "../engine/program.js";
-import { makeTestLayer, makeAdapter, makeDatapiStats, makePool, makePosition } from "./helpers.js";
+import {
+  makeTestLayer,
+  makeAdapter,
+  makeDatapiStats,
+  makePool,
+  makePosition,
+  asOwner,
+} from "./helpers.js";
 import { AuditService, DbService } from "../engine/services.js";
 import type { PoolMetrics } from "../engine/types.js";
 import type { SignalWeights } from "../engine/types.js";
@@ -30,7 +37,7 @@ function makeWeights(overrides: Partial<SignalWeights> = {}): SignalWeights {
 }
 
 function makeMetrics(overrides: Partial<PoolMetrics> = {}): PoolMetrics {
-  return {
+  let metrics: PoolMetrics = {
     pool: {
       address: "TestPool",
       tokenX: "SOL",
@@ -55,8 +62,11 @@ function makeMetrics(overrides: Partial<PoolMetrics> = {}): PoolMetrics {
     feeIlRatioKnown: overrides.feeIlRatioKnown ?? true,
     binUtilizationKnown: overrides.binUtilizationKnown ?? true,
     farmAprPct: overrides.farmAprPct ?? null,
-    ...(overrides.netDriftBins !== undefined ? { netDriftBins: overrides.netDriftBins } : {}),
   };
+  if (overrides.netDriftBins !== undefined) {
+    metrics = { ...metrics, netDriftBins: overrides.netDriftBins };
+  }
+  return metrics;
 }
 
 const MOMENTUM = { referenceBins: 20, scoreWeight: 0.15 };
@@ -216,24 +226,28 @@ describe("drift gate in the decision loop", () => {
       yield* Effect.raceFirst(program, Effect.sleep(8_000)); // wide window: parallel-load flake guard (real-clock expiry)
       const audit = yield* AuditService;
       const decisions = yield* audit.getRecentDecisions(300);
-      return decisions as unknown as ReadonlyArray<{
-        action: string;
-        reasoning: string;
-        executed: boolean;
-        poolAddress: string;
-      }>;
-    });
-    const decisions = (await Effect.runPromise(
-      Effect.provide(test, layer) as unknown as Effect.Effect<
+      return asOwner<
         ReadonlyArray<{
           action: string;
           reasoning: string;
           executed: boolean;
           poolAddress: string;
-        }>,
-        Error,
-        never
-      >,
+        }>
+      >(decisions);
+    });
+    const decisions = (await Effect.runPromise(
+      asOwner<
+        Effect.Effect<
+          ReadonlyArray<{
+            action: string;
+            reasoning: string;
+            executed: boolean;
+            poolAddress: string;
+          }>,
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
     )) as ReadonlyArray<{
       action: string;
       reasoning: string;

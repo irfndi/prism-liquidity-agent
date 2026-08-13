@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { asOwner } from "./helpers.js";
 import path from "path";
 import { fileURLToPath } from "url";
 import { Effect } from "effect";
@@ -10,14 +11,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_AGENT = path.join(__dirname, "fake-acp-agent.ts");
 
 function makeContext(): AgentRuntimeContext {
-  return {
+  return asOwner<AgentRuntimeContext>({
     decision: {
       action: "ENTER",
       poolAddress: "Pool111111111111111111111111111111111111111",
       confidence: 0.8,
       reasoning: "test decision",
     } satisfies AgentDecision,
-  } as unknown as AgentRuntimeContext;
+  });
 }
 
 describe("AcpTransport (ACP v1)", () => {

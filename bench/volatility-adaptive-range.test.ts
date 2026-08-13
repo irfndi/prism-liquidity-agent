@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { asOwner } from "./helpers.js";
 import { Effect } from "effect";
 import {
   DLMMStrategy,
@@ -471,10 +472,10 @@ describe("executePaper entry range threading (Wave 9)", () => {
       recommendBinRange: recommendBinRangeSpy,
       passesPreFilter: () => true,
     };
-    const db = {
+    const db = asOwner<DbApi>({
       savePosition: () => Effect.void,
       savePositionEvent: () => Effect.void,
-    } as unknown as DbApi;
+    });
     const trackedPositions = new Map();
 
     const result = Effect.runSync(

@@ -47,18 +47,18 @@ function stubPrismConfigDir(): void {
   const realExistsSync = fs.existsSync;
   vi.spyOn(fs, "readFileSync").mockImplementation(((
     path: fs.PathOrFileDescriptor,
-    options?: unknown,
+    options?: string | { encoding?: string | null },
   ) => {
-    if (typeof path === "string" && path.includes("install-id")) {
+    if (String(path).includes("install-id")) {
       return "ci-test-install-id-1234";
     }
-    if (typeof path === "string" && path.includes("credentials.json")) {
+    if (String(path).includes("credentials.json")) {
       return JSON.stringify({ apiKey: "ci-test-api-key", userId: "ci-test-user" });
     }
     return realReadFileSync(path, options as never);
   }) as typeof fs.readFileSync);
   vi.spyOn(fs, "existsSync").mockImplementation((path: fs.PathLike) => {
-    if (typeof path === "string" && path.includes("install-id")) return true;
+    if (String(path).includes("install-id")) return true;
     return realExistsSync(path);
   });
 }

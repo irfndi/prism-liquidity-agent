@@ -25,16 +25,17 @@ export interface PrismCredentials {
   createdAt: string;
 }
 
+/** JSON-serializable request body for the Prism Cloud API. */
+export type JsonBody = Readonly<Record<string, string | number | boolean | null>>;
+
 export async function prismApiPost<T = unknown>(
   path: string,
-  body: Record<string, unknown>,
+  body: JsonBody,
   options: { apiKey?: string; signal?: AbortSignal } = {},
 ): Promise<ApiResponse<T>> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
+  const headers = new Headers({ "Content-Type": "application/json" });
   if (options.apiKey) {
-    headers.Authorization = `Bearer ${options.apiKey}`;
+    headers.set("Authorization", `Bearer ${options.apiKey}`);
   }
   const init: RequestInit = {
     method: "POST",
@@ -145,13 +146,26 @@ export function writeCredentials(creds: {
   fs.chmodSync(CREDENTIALS_FILE, 0o600);
 }
 
+type InstallPingBody = {
+  readonly installId: string;
+  readonly event: string;
+  readonly version: string;
+  readonly channel: string;
+  readonly platform: string;
+};
+
+interface PingRequestOptions {
+  apiKey?: string;
+  signal: AbortSignal;
+}
+
 export function pingInstall(
   event: "install" | "setup" | "dev_start" | "register",
   options: { userId?: string } = {},
 ): Promise<boolean> {
   return (async () => {
     try {
-      const body: Record<string, string> = {
+      const body: InstallPingBody = {
         installId: getOrCreateInstallId(),
         event,
         version: getCurrentVersion(),
@@ -163,7 +177,7 @@ export function pingInstall(
       if (options.userId && credentials?.userId !== options.userId) return false;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 3000);
-      const requestOptions: { apiKey?: string; signal: AbortSignal } = {
+      const requestOptions: PingRequestOptions = {
         signal: controller.signal,
       };
       if (credentials?.apiKey) requestOptions.apiKey = credentials.apiKey;

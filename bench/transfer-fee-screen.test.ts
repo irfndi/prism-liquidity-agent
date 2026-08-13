@@ -9,7 +9,8 @@ import {
   type MarketGateConfig,
 } from "../engine/market-gate.js";
 import { legHasTransferFee } from "../engine/transfer-fee.js";
-import { parsedMintHasTransferFee } from "../engine/adapter-service.js";
+import { parsedMintHasTransferFee, type ParsedMintInfo } from "../engine/adapter-service.js";
+import { asOwner } from "./helpers.js";
 import type { DiscoveredPool } from "../engine/services.js";
 
 const SOL = "So11111111111111111111111111111111111111112";
@@ -182,7 +183,7 @@ describe("legHasTransferFee", () => {
 });
 
 describe("parsedMintHasTransferFee (adapter mint parse)", () => {
-  const baseMint = { mintAuthority: null, freezeAuthority: null, decimals: 6 };
+  const baseMint: ParsedMintInfo = {};
 
   it("detects a non-zero basis-point rate on the newer fee", () => {
     expect(
@@ -259,12 +260,16 @@ describe("parsedMintHasTransferFee (adapter mint parse)", () => {
     // depends on when getParsedAccountInfo returns nothing.
     expect(parsedMintHasTransferFee(undefined)).toBe(false);
     expect(parsedMintHasTransferFee(null)).toBe(false);
-    expect(parsedMintHasTransferFee({ ...baseMint, extensions: {} })).toBe(false);
+    expect(parsedMintHasTransferFee(asOwner<ParsedMintInfo>({ ...baseMint, extensions: {} }))).toBe(
+      false,
+    );
     expect(
-      parsedMintHasTransferFee({
-        ...baseMint,
-        extensions: [{ extension: "transferHook", state: { programId: "hook" } }],
-      }),
+      parsedMintHasTransferFee(
+        asOwner<ParsedMintInfo>({
+          ...baseMint,
+          extensions: [{ extension: "transferHook", state: { programId: "hook" } }],
+        }),
+      ),
     ).toBe(false);
   });
 

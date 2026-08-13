@@ -34,7 +34,7 @@ import {
   type MeteoraDatapiApi,
 } from "../engine/services.js";
 import type { PositionRecord } from "../engine/db-service.js";
-import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, makePosition, asOwner } from "./helpers.js";
 import { stringifySafe } from "../engine/bigint-json.js";
 
 // ─── Paper heuristic (decision-layer estimate for simulated mode) ────────────
@@ -177,7 +177,7 @@ describe("executeLive REBALANCE (atomic)", () => {
     const deps = {
       adapter: makeLiveAdapter(),
       strategy: liveStrategy,
-      db: null as unknown as DbApi,
+      db: asOwner<DbApi>(null),
       revenueConfigSvc: liveRevenueConfig,
       trackedPositions,
       entryPrep: liveEntryPrep,
@@ -261,7 +261,7 @@ describe("executeLive REBALANCE (atomic)", () => {
           Effect.fail(new AdapterError({ message: "atomic simulation reverted" })),
       }),
       strategy: liveStrategy,
-      db: null as unknown as DbApi,
+      db: asOwner<DbApi>(null),
       revenueConfigSvc: liveRevenueConfig,
       trackedPositions,
       entryPrep: liveEntryPrep,
@@ -573,27 +573,31 @@ describe("rebalance gate consumes the SDK simulation (live loop)", () => {
     const layer = makeLoopLayer({ adapter, configOverrides: gateConfigOverrides });
 
     const outcome = await Effect.runPromise(
-      Effect.provide(
-        Effect.gen(function* () {
-          const db = yield* DbService;
-          yield* db.savePosition(seedGatePosition());
-          yield* Effect.raceFirst(program, Effect.sleep(2_000));
-          const audit = yield* AuditService;
-          const decisions = yield* audit.getRecentDecisions(50);
-          const positions = yield* db.getAllPositions();
-          const events = yield* db.getPositionEvents(GATE_POOL);
-          return { decisions, positions, events };
-        }),
-        layer,
-      ) as unknown as Effect.Effect<
-        {
-          decisions: ReadonlyArray<DecisionRow>;
-          positions: ReadonlyArray<PositionRecord>;
-          events: ReadonlyArray<{ event: string; positionPubKey: string | null }>;
-        },
-        Error,
-        never
-      >,
+      asOwner<
+        Effect.Effect<
+          {
+            decisions: ReadonlyArray<DecisionRow>;
+            positions: ReadonlyArray<PositionRecord>;
+            events: ReadonlyArray<{ event: string; positionPubKey: string | null }>;
+          },
+          Error,
+          never
+        >
+      >(
+        Effect.provide(
+          Effect.gen(function* () {
+            const db = yield* DbService;
+            yield* db.savePosition(seedGatePosition());
+            yield* Effect.raceFirst(program, Effect.sleep(2_000));
+            const audit = yield* AuditService;
+            const decisions = yield* audit.getRecentDecisions(50);
+            const positions = yield* db.getAllPositions();
+            const events = yield* db.getPositionEvents(GATE_POOL);
+            return { decisions, positions, events };
+          }),
+          layer,
+        ),
+      ),
     );
 
     // The simulation ran against the tracked position's real pubkey.
@@ -657,16 +661,18 @@ describe("rebalance gate consumes the SDK simulation (live loop)", () => {
     const layer = makeLoopLayer({ adapter, configOverrides: gateConfigOverrides });
 
     const decisions = await Effect.runPromise(
-      Effect.provide(
-        Effect.gen(function* () {
-          const db = yield* DbService;
-          yield* db.savePosition(seedGatePosition());
-          yield* Effect.raceFirst(program, Effect.sleep(2_000));
-          const audit = yield* AuditService;
-          return yield* audit.getRecentDecisions(50);
-        }),
-        layer,
-      ) as unknown as Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>,
+      asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(
+        Effect.provide(
+          Effect.gen(function* () {
+            const db = yield* DbService;
+            yield* db.savePosition(seedGatePosition());
+            yield* Effect.raceFirst(program, Effect.sleep(2_000));
+            const audit = yield* AuditService;
+            return yield* audit.getRecentDecisions(50);
+          }),
+          layer,
+        ),
+      ),
     );
 
     // The simulation ran and fed the gate...

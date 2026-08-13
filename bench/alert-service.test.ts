@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonRecord = { [key: string]: JsonValue };
 import { Effect, Layer } from "effect";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -33,17 +36,17 @@ function makeAlertLayer(dbPath: string, overrides: Partial<AppConfig> = {}) {
 
 interface CapturedPost {
   url: string;
-  body: Record<string, unknown>;
+  body: JsonRecord;
   authorization: string | null;
 }
 
-function capturePosts(status = 200): { posts: CapturedPost[]; restore: () => void } {
+function capturePosts(status = 200) {
   const posts: CapturedPost[] = [];
-  const restore = mockFetch((url: unknown, init: { body?: string; headers?: unknown } = {}) => {
+  const restore = mockFetch((url: any, init: { body?: string; headers?: any } = {}) => {
     const headers = new Headers(init.headers as Record<string, string> | undefined);
     posts.push({
       url: String(url),
-      body: JSON.parse(init.body ?? "{}") as Record<string, unknown>,
+      body: JSON.parse(init.body ?? "{}") as JsonRecord,
       authorization: headers.get("Authorization"),
     });
     return Promise.resolve(new Response(JSON.stringify({ id: "x", delivered: false }), { status }));

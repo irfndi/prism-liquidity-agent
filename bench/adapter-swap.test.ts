@@ -11,7 +11,7 @@ import {
   type VersionedTransactionResponse,
 } from "@solana/web3.js";
 import bs58 from "bs58";
-import { AdapterService } from "../engine/services.js";
+import { AdapterService, type JsonValue } from "../engine/services.js";
 import { AdapterLive } from "../engine/adapter-service.js";
 import { ConfigService } from "../engine/config-service.js";
 import { AuditLive } from "../engine/audit-service.js";
@@ -52,11 +52,42 @@ function buildLayerNoWallet(): Layer.Layer<AdapterService, never, never> {
   return makeAdapterLayer({ walletPrivateKey: "" });
 }
 
+// Concrete owner types for the Jupiter swap HTTP fixtures. These back the
+// adapter&#39;s `swapToken` / quote boundaries instead of an open `Record`.
+type JupiterQuoteJson = {
+  inputMint: string;
+  outputMint: string;
+  inAmount: string;
+  outAmount: string;
+  otherAmountThreshold: string;
+  slippageBps: number;
+  priceImpactPct: string;
+  routePlan: Array<{
+    swapInfo: {
+      inputMint: string;
+      outputMint: string;
+      inAmount: string;
+      outAmount: string;
+    };
+    percent: number;
+  }>;
+};
+
+type SwapRequestBody = {
+  wrapAndUnwrapSol?: boolean;
+  asLegacyTransaction?: boolean;
+};
+
+type CapturedSwap = {
+  quoteUrl: string;
+  swapBody: SwapRequestBody;
+};
+
 function swapEffect(
   layer: Layer.Layer<AdapterService, never, never>,
   outputMint: string,
   amountAtomic: bigint,
-  prefetchedQuote?: Record<string, unknown>,
+  prefetchedQuote?: JsonValue,
 ): Effect.Effect<string, Error, never> {
   return Effect.gen(function* () {
     const adapter = yield* AdapterService;
@@ -68,7 +99,7 @@ function quoteEffect(
   layer: Layer.Layer<AdapterService, never, never>,
   outputMint: string,
   amountAtomic: bigint,
-): Effect.Effect<Record<string, unknown>, Error, never> {
+): Effect.Effect<JsonValue, Error, never> {
   return Effect.gen(function* () {
     const adapter = yield* AdapterService;
     return yield* adapter.quoteSwapUSDCForToken(outputMint, amountAtomic);
@@ -139,8 +170,8 @@ function jupiterQuote(
   inputMint: string,
   outputMint: string,
   amountAtomic: bigint,
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> {
+  overrides: Partial<JupiterQuoteJson> = {},
+): JupiterQuoteJson {
   return {
     inputMint,
     outputMint,
@@ -177,7 +208,7 @@ async function expectSwapFailure(
   outputMint: string,
   amountAtomic: bigint,
   expectedCauseMessage: string,
-  prefetchedQuote?: Record<string, unknown>,
+  prefetchedQuote?: JsonValue,
 ): Promise<void> {
   const result = await Effect.runPromise(
     swapEffect(layer, outputMint, amountAtomic, prefetchedQuote).pipe(Effect.result),
@@ -186,16 +217,11 @@ async function expectSwapFailure(
     expect.fail("expected swap to fail, but it succeeded");
   }
   const err = result.failure;
-  if (typeof err !== "object" || err === null || !("message" in err)) {
+  if (!(err instanceof Object) || !("message" in err)) {
     expect.fail("expected error object with message");
   }
   const cause = (err as { cause?: unknown }).cause;
-  if (
-    typeof cause !== "object" ||
-    cause === null ||
-    !("message" in cause) ||
-    typeof (cause as { message?: unknown }).message !== "string"
-  ) {
+  if (!(cause instanceof Object) || !("message" in cause)) {
     expect.fail("expected error cause with message");
   }
   expect((err as { message: string }).message).toContain("swapUSDCForToken failed:");
@@ -222,12 +248,9 @@ describe("AdapterService.swapUSDCForToken", () => {
       .serialize({ requireAllSignatures: false, verifySignatures: false })
       .toString("base64");
 
-    const captured: {
-      quoteUrl: string;
-      swapBody: Record<string, unknown>;
-    } = { quoteUrl: "", swapBody: {} };
+    const captured: CapturedSwap = { quoteUrl: "", swapBody: {} };
 
-    const restore = mockFetch((async (url: string | URL | Request, init?: RequestInit) => {
+    const restore = mockFetch(async (url: string | URL | Request, init?: RequestInit) => {
       const u = String(url as unknown);
       if (u.includes("/swap/v1/quote")) {
         captured.quoteUrl = u;
@@ -243,7 +266,7 @@ describe("AdapterService.swapUSDCForToken", () => {
         return new Response(JSON.stringify({ swapTransaction: validSwapTx }), { status: 200 });
       }
       return new Response("unexpected", { status: 500 });
-    }) as unknown as typeof fetch);
+    });
 
     vi.spyOn(Connection.prototype, "sendRawTransaction").mockResolvedValue("mock-sig");
     vi.spyOn(Connection.prototype, "simulateTransaction").mockResolvedValue({
@@ -268,9 +291,7 @@ describe("AdapterService.swapUSDCForToken", () => {
   });
 
   it("fails when no wallet is configured", async () => {
-    const restore = mockFetch(
-      (async () => new Response("unexpected", { status: 500 })) as unknown as typeof fetch,
-    );
+    const restore = mockFetch(async () => new Response("unexpected", { status: 500 }));
 
     try {
       await expectSwapFailure(buildLayerNoWallet(), SOL_MINT, 1_000_000n, "No wallet configured");
@@ -280,9 +301,7 @@ describe("AdapterService.swapUSDCForToken", () => {
   });
 
   it("fails for non-positive amounts without calling Jupiter", async () => {
-    const fetchImpl = vi.fn(
-      (async () => new Response("unexpected", { status: 500 })) as unknown as typeof fetch,
-    );
+    const fetchImpl = vi.fn(async () => new Response("unexpected", { status: 500 }));
     const restore = mockFetch(fetchImpl);
 
     try {
@@ -299,13 +318,13 @@ describe("AdapterService.swapUSDCForToken", () => {
   });
 
   it("fails when Jupiter quote request returns non-OK", async () => {
-    const restore = mockFetch((async (url: string | URL | Request) => {
+    const restore = mockFetch(async (url: string | URL | Request) => {
       const u = String(url as unknown);
       if (u.includes("/swap/v1/quote")) {
         return new Response("quote error", { status: 502 });
       }
       return new Response("unexpected", { status: 500 });
-    }) as unknown as typeof fetch);
+    });
 
     try {
       await expectSwapFailure(buildLayer(), SOL_MINT, 1_000_000n, "Jupiter quote failed: 502");
@@ -315,7 +334,7 @@ describe("AdapterService.swapUSDCForToken", () => {
   });
 
   it("fails when Jupiter swap build request returns non-OK", async () => {
-    const restore = mockFetch((async (url: string | URL | Request) => {
+    const restore = mockFetch(async (url: string | URL | Request) => {
       const u = String(url as unknown);
       if (u.includes("/swap/v1/quote")) {
         return new Response(
@@ -329,7 +348,7 @@ describe("AdapterService.swapUSDCForToken", () => {
         return new Response("swap error", { status: 503 });
       }
       return new Response("unexpected", { status: 500 });
-    }) as unknown as typeof fetch);
+    });
 
     try {
       await expectSwapFailure(buildLayer(), SOL_MINT, 1_000_000n, "Jupiter swap build failed: 503");
@@ -339,7 +358,7 @@ describe("AdapterService.swapUSDCForToken", () => {
   });
 
   it("fails when swap response is missing swapTransaction", async () => {
-    const restore = mockFetch((async (url: string | URL | Request) => {
+    const restore = mockFetch(async (url: string | URL | Request) => {
       const u = String(url as unknown);
       if (u.includes("/swap/v1/quote")) {
         return new Response(
@@ -353,7 +372,7 @@ describe("AdapterService.swapUSDCForToken", () => {
         return new Response(JSON.stringify({ transaction: "ignored" }), { status: 200 });
       }
       return new Response("unexpected", { status: 500 });
-    }) as unknown as typeof fetch);
+    });
 
     try {
       await expectSwapFailure(
@@ -368,7 +387,7 @@ describe("AdapterService.swapUSDCForToken", () => {
   });
 
   it("fails when Jupiter quote returns an empty route without building a swap", async () => {
-    const fetchImpl = vi.fn((async (url: string | URL | Request) => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const u = String(url as unknown);
       if (u.includes("/swap/v1/quote")) {
         return new Response(
@@ -381,7 +400,7 @@ describe("AdapterService.swapUSDCForToken", () => {
         );
       }
       return new Response("unexpected", { status: 500 });
-    }) as unknown as typeof fetch);
+    });
     const restore = mockFetch(fetchImpl);
 
     try {
@@ -405,16 +424,14 @@ describe("AdapterService.swapUSDCForToken", () => {
     expect(result._tag).toBe("Failure");
     if (result._tag !== "Failure") return;
     const err = result.failure;
-    expect(typeof err === "object" && err !== null && "message" in err).toBe(true);
+    expect(err instanceof Object && "message" in err).toBe(true);
     expect((err as { message: string }).message).toContain(
       "quoteSwapUSDCForToken failed: SwapQuoteError: Cannot quote swap for non-positive amount: 0",
     );
   });
 
   it("fails when prefetched quote outputMint does not match", async () => {
-    const fetchImpl = vi.fn(
-      (async () => new Response("unexpected", { status: 500 })) as unknown as typeof fetch,
-    );
+    const fetchImpl = vi.fn(async () => new Response("unexpected", { status: 500 }));
     const restore = mockFetch(fetchImpl);
 
     try {
@@ -437,9 +454,7 @@ describe("AdapterService.swapUSDCForToken", () => {
   });
 
   it("fails when prefetched quote amount does not match", async () => {
-    const fetchImpl = vi.fn(
-      (async () => new Response("unexpected", { status: 500 })) as unknown as typeof fetch,
-    );
+    const fetchImpl = vi.fn(async () => new Response("unexpected", { status: 500 }));
     const restore = mockFetch(fetchImpl);
 
     try {
@@ -479,7 +494,7 @@ describe("AdapterService generic Jupiter swaps", () => {
     const transactionBase64 = Buffer.from(new VersionedTransaction(message).serialize()).toString(
       "base64",
     );
-    const captured: { quoteUrl: string; swapBody: Record<string, unknown> } = {
+    const captured: CapturedSwap = {
       quoteUrl: "",
       swapBody: {},
     };
@@ -855,16 +870,7 @@ describe("AdapterService generic Jupiter swaps", () => {
             amountAtomic,
             slippageBps: 50,
           });
-          const swapToken = (
-            adapter as unknown as {
-              swapToken: (
-                inputMint: string,
-                outputMint: string,
-                amountAtomic: bigint,
-                quoteData?: Record<string, unknown>,
-              ) => Effect.Effect<string, Error>;
-            }
-          ).swapToken;
+          const swapToken = adapter.swapToken;
           if (!swapToken) return yield* Effect.fail(new Error("swapToken unavailable"));
           return yield* swapToken(
             "WrongMint1111111111111111111111111111111111",
@@ -907,16 +913,7 @@ describe("AdapterService generic Jupiter swaps", () => {
             amountAtomic,
             slippageBps: 50,
           });
-          const swapToken = (
-            adapter as unknown as {
-              swapToken: (
-                inputMint: string,
-                outputMint: string,
-                amountAtomic: bigint,
-                quoteData?: Record<string, unknown>,
-              ) => Effect.Effect<string, Error>;
-            }
-          ).swapToken;
+          const swapToken = adapter.swapToken;
           if (!swapToken) return yield* Effect.fail(new Error("swapToken unavailable"));
           return yield* swapToken(
             quote.request.inputMint,
@@ -959,16 +956,7 @@ describe("AdapterService generic Jupiter swaps", () => {
             amountAtomic,
             slippageBps: 50,
           });
-          const swapToken = (
-            adapter as unknown as {
-              swapToken: (
-                inputMint: string,
-                outputMint: string,
-                amountAtomic: bigint,
-                quoteData?: Record<string, unknown>,
-              ) => Effect.Effect<string, Error>;
-            }
-          ).swapToken;
+          const swapToken = adapter.swapToken;
           if (!swapToken) return yield* Effect.fail(new Error("swapToken unavailable"));
           return yield* swapToken(
             quote.request.inputMint,

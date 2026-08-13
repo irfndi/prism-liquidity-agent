@@ -23,8 +23,9 @@ export function setPrismEntryScriptOverride(entry: string | undefined): void {
 
 function resolveEntryScript(): string {
   if (entryScriptOverride !== undefined) return entryScriptOverride;
-  if (typeof Bun !== "undefined" && Bun.main) {
-    return Bun.main;
+  const bun = (globalThis as { Bun?: { readonly main?: string } }).Bun;
+  if (bun !== undefined && bun.main) {
+    return bun.main;
   }
   return process.argv[1] ?? "";
 }

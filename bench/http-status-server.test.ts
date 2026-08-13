@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonRecord = { [key: string]: JsonValue };
 import { Effect } from "effect";
 import { HttpStatusServer } from "../engine/http-status-server.js";
 import { AUTONOMOUS_TOKEN_CONFIG_DEFAULTS, type AppConfig } from "../engine/config-service.js";
@@ -134,7 +137,7 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   };
 }
 
-function mockState(snapshot: Record<string, unknown> = {}) {
+function mockState(snapshot: JsonRecord = {}) {
   return {
     getSnapshot: () => Effect.succeed(snapshot as never),
     updateSnapshot: () => Effect.void,

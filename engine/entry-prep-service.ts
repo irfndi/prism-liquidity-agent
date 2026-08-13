@@ -94,6 +94,15 @@ export function computeSwapInputAtomic(
   return numerator % denominator === 0n ? quotient : quotient + 1n;
 }
 
+/** Owner contract for the options passed to the EntryPrepError constructor. */
+interface EntryPrepOptions {
+  code: EntryPrepError["code"];
+  message: string;
+  poolAddress: string;
+  cause?: unknown;
+  partialPreparation?: EntryPreparationOutcome;
+}
+
 function makePrepError(
   code: EntryPrepError["code"],
   message: string,
@@ -101,50 +110,67 @@ function makePrepError(
   cause?: unknown,
   partialPreparation?: EntryPreparationOutcome,
 ): EntryPrepError {
-  return new EntryPrepError({
+  const options: EntryPrepOptions = {
     code,
     message: `[${code}] ${message}`,
     poolAddress,
     cause,
-    ...(partialPreparation === undefined ? {} : { partialPreparation }),
-  });
+  };
+  if (partialPreparation !== undefined) {
+    options.partialPreparation = partialPreparation;
+  }
+  return new EntryPrepError(options);
 }
 
-function isSwapQuoteError(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
+}
+
+/** The subset of a Jupiter swap quote the deficit checks read. */
+interface SwapQuoteData {
+  readonly outAmount?: unknown;
+  readonly otherAmountThreshold?: unknown;
+}
+
+function isSwapQuoteError<T>(err: T): boolean {
+  if (!isNonNullObject(err)) return false;
   if ((err as { _tag?: string })._tag === "SwapQuoteError") return true;
   const cause = (err as { cause?: unknown }).cause;
-  if (typeof cause !== "object" || cause === null) return false;
+  if (!isNonNullObject(cause)) return false;
   return (cause as { _tag?: string })._tag === "SwapQuoteError";
 }
 
-function parseAtomicAmount(value: unknown): bigint | null {
-  if (typeof value === "string") {
+function parseAtomicAmount<T>(value: T): bigint | null {
+  if (Object.prototype.toString.call(value) === "[object String]") {
     // Jupiter returns atomic amounts as non-negative integer strings. Reject
     // empty, non-integer, or negative strings so malformed quotes cannot throw
     // during BigInt conversion.
-    if (!/^\d+$/.test(value)) return null;
+    const text = value as string;
+    if (!/^\d+$/.test(text)) return null;
     try {
-      return BigInt(value);
+      return BigInt(text);
     } catch {
       return null;
     }
   }
-  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
-    return BigInt(Math.floor(value));
+  if (Object.prototype.toString.call(value) === "[object Number]") {
+    const n = value as number;
+    if (Number.isFinite(n) && n >= 0) return BigInt(Math.floor(n));
   }
   return null;
 }
 
-function quoteOutAmount(quoteData: Record<string, unknown>): bigint {
-  return parseAtomicAmount(quoteData.outAmount) ?? 0n;
+function quoteOutAmount<T>(quoteData: T): bigint {
+  if (!isNonNullObject(quoteData)) return 0n;
+  return parseAtomicAmount((quoteData as SwapQuoteData).outAmount) ?? 0n;
 }
 
-function quoteGuaranteedOutAmount(quoteData: Record<string, unknown>): bigint {
+function quoteGuaranteedOutAmount<T>(quoteData: T): bigint {
   // Jupiter's `otherAmountThreshold` is the minimum output guaranteed at the
   // quoted slippage; prefer it over the optimistic `outAmount` so a swap is
   // only submitted when it can actually cover the deficit after slippage.
-  const threshold = parseAtomicAmount(quoteData.otherAmountThreshold);
+  if (!isNonNullObject(quoteData)) return 0n;
+  const threshold = parseAtomicAmount((quoteData as SwapQuoteData).otherAmountThreshold);
   if (threshold !== null) return threshold;
   return quoteOutAmount(quoteData);
 }

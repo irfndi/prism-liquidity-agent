@@ -34,7 +34,7 @@ import {
   type MeteoraPoolStats,
 } from "../engine/services.js";
 import type { PoolState } from "../engine/types.js";
-import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, makePosition, asOwner } from "./helpers.js";
 
 // ─── Token-level execution-failure breaker (Robinhood rule 12) ──────────────
 // A genuine live EXIT failure on a pool arms `token_block:<mint>` for BOTH
@@ -88,7 +88,7 @@ function makeDatapiStats(overrides: Partial<MeteoraPoolStats> = {}): MeteoraPool
 }
 
 function makeProgramAdapter(
-  pools: Record<string, PoolState>,
+  pools: Map<string, PoolState>,
   overrides: Partial<AdapterApi> = {},
 ): AdapterApi {
   return {
@@ -102,7 +102,7 @@ function makeProgramAdapter(
       Effect.succeed(new Map<string, { amountAtomic: bigint; decimals: number }>()),
     getNativeSolBalance: () => Effect.succeed(10_000_000_000n), // 10 SOL — clears the live-ENTER SOL floor
     getPoolState: (addr: string) => {
-      const pool = pools[addr];
+      const pool = pools.get(addr);
       return pool ? Effect.succeed(pool) : Effect.fail(new Error(`unknown pool ${addr}`));
     },
     getBinArray: () => Effect.succeed(makeBinArray()),
@@ -232,31 +232,40 @@ function makeProgramLayer(opts: {
 }
 
 /** The three pools under test: EXIT (fails), SHARED (shares a leg), CLEAN. */
-function makePools(): Record<string, PoolState> {
-  return {
-    [EXIT_POOL]: makePool({
-      address: EXIT_POOL,
-      tokenX: TOKEN_A,
-      tokenY: TOKEN_B,
-      tokenXSymbol: "TOK_A",
-      tokenYSymbol: "TOK_B",
-      tvlUsd: 60_000, // → -40% vs the 100k previous snapshot (threshold 30%)
-    }),
-    [SHARED_POOL]: makePool({
-      address: SHARED_POOL,
-      tokenX: TOKEN_A,
-      tokenY: TOKEN_C,
-      tokenXSymbol: "TOK_A",
-      tokenYSymbol: "TOK_C",
-    }),
-    [CLEAN_POOL]: makePool({
-      address: CLEAN_POOL,
-      tokenX: TOKEN_C,
-      tokenY: TOKEN_D,
-      tokenXSymbol: "TOK_C",
-      tokenYSymbol: "TOK_D",
-    }),
-  };
+function makePools(): Map<string, PoolState> {
+  return new Map([
+    [
+      EXIT_POOL,
+      makePool({
+        address: EXIT_POOL,
+        tokenX: TOKEN_A,
+        tokenY: TOKEN_B,
+        tokenXSymbol: "TOK_A",
+        tokenYSymbol: "TOK_B",
+        tvlUsd: 60_000, // → -40% vs the 100k previous snapshot (threshold 30%)
+      }),
+    ],
+    [
+      SHARED_POOL,
+      makePool({
+        address: SHARED_POOL,
+        tokenX: TOKEN_A,
+        tokenY: TOKEN_C,
+        tokenXSymbol: "TOK_A",
+        tokenYSymbol: "TOK_C",
+      }),
+    ],
+    [
+      CLEAN_POOL,
+      makePool({
+        address: CLEAN_POOL,
+        tokenX: TOKEN_C,
+        tokenY: TOKEN_D,
+        tokenXSymbol: "TOK_C",
+        tokenYSymbol: "TOK_D",
+      }),
+    ],
+  ]);
 }
 
 function makeDatapi(): MeteoraDatapiApi {
@@ -340,9 +349,7 @@ function provideLayer<R, E, Req>(
   test: Effect.Effect<R, E, Req>,
   layer: Layer.Layer<never, never, never>,
 ): Promise<R> {
-  return Effect.runPromise(
-    Effect.provide(test, layer) as unknown as Effect.Effect<R, Error, never>,
-  );
+  return Effect.runPromise(asOwner<Effect.Effect<R, Error, never>>(Effect.provide(test, layer)));
 }
 
 describe("token-level execution-failure breaker (Robinhood rule 12)", () => {

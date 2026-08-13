@@ -1,8 +1,28 @@
 import fs from "fs";
 import path from "path";
 
+interface ReleaseBundle {
+  readonly url: string;
+  readonly sha256_url: string;
+}
+
+type ReleaseChannel = "stable" | "beta" | "dev" | "canary";
+
+/** The manifest the engine updater reads to resolve a release's artifacts. */
+interface ReleaseManifest {
+  readonly version: string;
+  readonly channel: ReleaseChannel;
+  readonly commit?: string;
+  readonly tarball_url: string;
+  readonly sha256_url: string;
+  readonly signature_url?: string;
+  readonly published_at: string;
+  readonly min_cli_version: string;
+  readonly bundles: Readonly<Record<string, ReleaseBundle>>;
+}
+
 const version = process.env.VERSION ?? "";
-const channel = (process.env.CHANNEL ?? "stable") as "stable" | "beta" | "dev" | "canary";
+const channel = (process.env.CHANNEL ?? "stable") as ReleaseChannel;
 const r2Base = (
   process.env.R2_BASE_URL ?? "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev"
 ).replace(/\/+$/, "");
@@ -27,7 +47,7 @@ const files = fs.readdirSync(cwd).filter((f) => {
 });
 
 const expectedPlatforms = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"];
-const bundles: Record<string, { url: string; sha256_url: string }> = {};
+const bundles: Record<string, ReleaseBundle> = {};
 
 for (const file of files) {
   // Reconstruct the platform key from the fixed file-name shape instead of
@@ -79,19 +99,24 @@ for (const name of requiredArtifacts) {
   }
 }
 
-const manifest: Record<string, unknown> = {
+let manifest: ReleaseManifest = {
   version,
   channel,
-  ...(commit ? { commit } : {}),
   tarball_url: tarballUrl,
   sha256_url: `${tarballUrl}.sha256`,
   // Only signed releases advertise a signature — an unsigned/canary manifest
-  // must not point clients at a dead .asc URL.
-  ...(requireSignature ? { signature_url: signatureUrl } : {}),
+  // must not point clients at a dead .asc URL (added below only when
+  // REQUIRE_SIGNATURE is set).
   published_at: new Date().toISOString(),
   min_cli_version: "1.0.0",
   bundles,
 };
+if (commit !== undefined) {
+  manifest = { ...manifest, commit };
+}
+if (requireSignature) {
+  manifest = { ...manifest, signature_url: signatureUrl };
+}
 
 fs.writeFileSync(outFile, JSON.stringify(manifest, null, 2) + "\n");
 console.log(`Wrote ${outFile} with bundles: ${Object.keys(bundles).join(", ") || "none"}`);

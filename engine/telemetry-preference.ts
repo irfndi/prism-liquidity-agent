@@ -17,6 +17,11 @@ export interface TelemetryPreference {
   readonly updatedAt: string;
 }
 
+export interface TelemetryPreferenceWrite {
+  readonly ok: boolean;
+  readonly error?: string;
+}
+
 export function getTelemetryPreferencePath(): string {
   return join(getPrismUserConfigDir(), TELEMETRY_PREFERENCE_FILE);
 }
@@ -29,12 +34,15 @@ export function readTelemetryPreference(): TelemetryPreference {
     }
     const raw = readFileSync(path, "utf-8");
     const parsed = JSON.parse(raw) as Partial<TelemetryPreference>;
-    if (typeof parsed.enabled !== "boolean") {
+    if (Object.prototype.toString.call(parsed.enabled) !== "[object Boolean]") {
       return { enabled: true, updatedAt: new Date().toISOString() };
     }
     return {
-      enabled: parsed.enabled,
-      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
+      enabled: parsed.enabled as boolean,
+      updatedAt:
+        Object.prototype.toString.call(parsed.updatedAt) === "[object String]"
+          ? (parsed.updatedAt as string)
+          : new Date().toISOString(),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -43,10 +51,7 @@ export function readTelemetryPreference(): TelemetryPreference {
   }
 }
 
-export function writeTelemetryPreference(enabled: boolean): {
-  readonly ok: boolean;
-  readonly error?: string;
-} {
+export function writeTelemetryPreference(enabled: boolean): TelemetryPreferenceWrite {
   const path = getTelemetryPreferencePath();
   const dir = dirname(path);
   try {
@@ -58,10 +63,12 @@ export function writeTelemetryPreference(enabled: boolean): {
       updatedAt: new Date().toISOString(),
     };
     writeFileSync(path, JSON.stringify(data, null, 2), { mode: 0o600 });
-    return { ok: true };
+    const result: TelemetryPreferenceWrite = { ok: true };
+    return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`[telemetry] Failed to write preference file: ${message}`);
-    return { ok: false, error: message };
+    const result: TelemetryPreferenceWrite = { ok: false, error: message };
+    return result;
   }
 }

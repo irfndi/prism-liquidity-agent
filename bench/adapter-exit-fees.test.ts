@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { asOwner } from "./helpers.js";
 import { Effect, Layer } from "effect";
 import {
   Connection,
@@ -108,8 +109,8 @@ function makeFakeDlmm(opts: { positionData: FakePositionData }) {
       publicKey: pubkey,
       positionData: opts.positionData,
     })),
-    removeLiquidity: vi.fn(async (_args: unknown) => [makeTx()]),
-    claimSwapFee: vi.fn(async (_args: unknown) => [makeTx()]),
+    removeLiquidity: vi.fn(async (_args: never) => [makeTx()]),
+    claimSwapFee: vi.fn(async (_args: never) => [makeTx()]),
   };
 }
 
@@ -139,8 +140,8 @@ function makeSolUsdcFakeDlmm(opts: { positionData: FakePositionData }) {
       publicKey: pubkey,
       positionData: opts.positionData,
     })),
-    removeLiquidity: vi.fn(async (_args: unknown) => [makeTx()]),
-    claimSwapFee: vi.fn(async (_args: unknown) => [makeTx()]),
+    removeLiquidity: vi.fn(async (_args: never) => [makeTx()]),
+    claimSwapFee: vi.fn(async (_args: never) => [makeTx()]),
   };
 }
 
@@ -200,7 +201,7 @@ function mockRpcSendPipeline(): void {
     return Promise.resolve(`mock-exit-sig-${n}`);
   });
   vi.spyOn(Connection.prototype, "confirmTransaction").mockImplementation(() =>
-    Promise.resolve(undefined as unknown as never),
+    Promise.resolve(asOwner<never>(undefined)),
   );
 }
 
@@ -229,7 +230,7 @@ function mockRewardMintDecimals(decimals = 6): void {
 // Empty `prices` → exotic mints are unpriced (no fallback) → adapter sees 0 →
 // the fail-closed null path.
 function mockPrices(prices: Record<string, number>): () => void {
-  return mockFetch((async (url: string | URL | Request) => {
+  return mockFetch(async (url: string | URL | Request) => {
     const u = String(url as unknown);
     if (u.includes("api.jup.ag/price/v3")) {
       const body: Record<string, { usdPrice: number }> = {};
@@ -239,7 +240,7 @@ function mockPrices(prices: Record<string, number>): () => void {
       return new Response(JSON.stringify(body), { status: 200 });
     }
     return new Response("unexpected", { status: 500 });
-  }) as unknown as typeof fetch);
+  });
 }
 
 describe("AdapterService.exitPosition accounting", () => {

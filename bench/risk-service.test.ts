@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { asOwner } from "./helpers.js";
 import { Effect } from "effect";
 import {
   evaluateAgentProposal,
@@ -177,10 +178,10 @@ describe("evaluateAgentProposal", () => {
   });
 
   it("rejects an unknown action", () => {
-    const proposal = {
+    const proposal = asOwner<AgentProposal>({
       ...makeProposal({ action: "HOLD", poolAddress: "pool1" }),
       action: "BUY" as const,
-    } as unknown as AgentProposal;
+    });
     const result = evaluateAgentProposal(proposal, makeContext(), makeConfig());
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/Invalid action/);
@@ -741,7 +742,7 @@ describe("evaluateAgentProposal", () => {
 
 describe("proposal template echo end-to-end", () => {
   const makePromptCtx = (decision: AgentDecision): AgentRuntimeContext =>
-    ({
+    asOwner<AgentRuntimeContext>({
       decision,
       pool: {
         address: decision.poolAddress,
@@ -761,7 +762,7 @@ describe("proposal template echo end-to-end", () => {
       warnings: [],
       recentDecisions: [],
       hasOpenPosition: decision.action === "REBALANCE" || decision.action === "EXIT",
-    }) as unknown as AgentRuntimeContext;
+    });
 
   // Simulate a faithful advisor: take the prompt's response template and
   // substitute only the action and confidence it is proposing.

@@ -36,45 +36,70 @@ type CopySignalConfig = {
   readonly maxBoost: number;
 };
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+interface RawCopySignalObs {
+  readonly wallet: unknown;
+  readonly poolAddress: unknown;
+  readonly action: unknown;
+  readonly confidence: unknown;
+  readonly observedAt: unknown;
+  readonly signature: unknown;
 }
 
-export function parseCopySignalPayload(raw: unknown): ReadonlyArray<CopySignalObservation> {
-  const values = Array.isArray(raw)
-    ? raw
-    : isObject(raw) && Array.isArray(raw["signals"])
-      ? raw["signals"]
+interface RawCopySignalPayload {
+  readonly signals: unknown;
+}
+
+function isNonNullObject<T>(value: T): boolean {
+  return value !== null && value instanceof Object && !(value instanceof Function);
+}
+
+function readString<T>(value: T): string | null {
+  return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
+}
+
+function readFiniteNumber<T>(value: T): number | null {
+  if (Object.prototype.toString.call(value) !== "[object Number]") return null;
+  const n = value as number;
+  return Number.isFinite(n) ? n : null;
+}
+
+export function parseCopySignalPayload<T>(raw: T): ReadonlyArray<CopySignalObservation> {
+  const embedded = isNonNullObject(raw) ? (raw as RawCopySignalPayload).signals : undefined;
+  const values: unknown[] = Array.isArray(raw)
+    ? (raw as unknown[])
+    : Array.isArray(embedded)
+      ? embedded
       : [];
   const observations: CopySignalObservation[] = [];
   for (const value of values) {
-    if (!isObject(value)) continue;
-    const wallet = value["wallet"];
-    const poolAddress = value["poolAddress"];
-    const action = value["action"];
-    const confidence = value["confidence"];
-    const observedAt = value["observedAt"];
+    if (!isNonNullObject(value)) continue;
+    const obs = value as RawCopySignalObs;
+    const wallet = readString(obs.wallet);
+    const poolAddress = readString(obs.poolAddress);
+    const action = readString(obs.action);
+    const confidence = readFiniteNumber(obs.confidence);
+    const observedAt = readFiniteNumber(obs.observedAt);
     if (
-      typeof wallet !== "string" ||
+      wallet === null ||
       !WALLET_PATTERN.test(wallet) ||
-      typeof poolAddress !== "string" ||
+      poolAddress === null ||
       poolAddress.length === 0 ||
+      action === null ||
       (action !== "ENTER" && action !== "HOLD" && action !== "REBALANCE") ||
-      typeof confidence !== "number" ||
-      !Number.isFinite(confidence) ||
+      confidence === null ||
       confidence < 0 ||
       confidence > 1 ||
-      typeof observedAt !== "number" ||
-      !Number.isFinite(observedAt)
+      observedAt === null
     )
       continue;
+    const signature = readString(obs.signature);
     observations.push({
       wallet,
       poolAddress,
       action,
       confidence,
       observedAt,
-      ...(typeof value["signature"] === "string" ? { signature: value["signature"] } : {}),
+      ...(signature !== null && { signature }),
     });
   }
   return observations;

@@ -3,11 +3,12 @@ import { createLogger } from "./logger.js";
 import { stringifySafe } from "./bigint-json.js";
 import { getCurrentVersion } from "./version.js";
 import { underlyingErrorMessage } from "./errors.js";
+import type { JsonValue } from "./services.js";
 
 /** v4 wraps tryPromise rejections in a generic UnknownError whose message hides
  * the real failure (e.g. "Gateway 1008: ...") — unwrap the cause chain so
  * operators keep seeing the actionable reason. */
-const surfaceGatewayError = (error: unknown): Error =>
+const surfaceGatewayError = <T>(error: T): Error =>
   new Error(underlyingErrorMessage(error), { cause: error });
 import type {
   AgentRuntimeContext,
@@ -58,15 +59,38 @@ interface GatewayResFrame {
   readonly type: "res";
   readonly id: string;
   readonly ok: boolean;
-  readonly payload?: unknown;
+  readonly payload?: JsonValue;
   readonly error?: GatewayErrorShape;
 }
 
 interface GatewayEventFrame {
   readonly type: "event";
   readonly event: string;
-  readonly payload?: unknown;
+  readonly payload?: JsonValue;
 }
+
+/** Connect request params (known owner contract, not a dictionary). */
+type GatewayConnectParams = {
+  readonly minProtocol: number;
+  readonly maxProtocol: number;
+  readonly client: {
+    readonly id: string;
+    readonly version: string;
+    readonly platform: string;
+    readonly mode: string;
+    readonly instanceId: string;
+  };
+  readonly role: string;
+  readonly scopes: readonly string[];
+  readonly auth: { readonly token?: string };
+};
+
+/** chat.send request params (known owner contract, not a dictionary). */
+type GatewayChatParams = {
+  readonly sessionKey: string;
+  readonly message: string;
+  readonly idempotencyKey: string;
+};
 
 interface HelloOkPayload {
   readonly type?: unknown;
@@ -75,7 +99,7 @@ interface HelloOkPayload {
 }
 
 interface PendingRequest {
-  readonly resolve: (payload: unknown) => void;
+  readonly resolve: (payload: JsonValue) => void;
   readonly reject: (reason: Error) => void;
 }
 
@@ -301,14 +325,20 @@ export class GatewayTransport implements AgentRuntimeTransport {
             if (hello.type !== HELLO_OK_TYPE) {
               throw new Error("Gateway rejected connect: expected hello-ok");
             }
-            if (typeof hello.protocol === "number" && hello.protocol < GATEWAY_PROTOCOL_VERSION) {
+            if (
+              Object.prototype.toString.call(hello.protocol) === "[object Number]" &&
+              (hello.protocol as number) < GATEWAY_PROTOCOL_VERSION
+            ) {
+              const peerProtocol = hello.protocol as number;
               throw new Error(
-                `Gateway protocol ${hello.protocol} is below required ${GATEWAY_PROTOCOL_VERSION}; update the gateway to >= 2026.7.1`,
+                `Gateway protocol ${peerProtocol} is below required ${GATEWAY_PROTOCOL_VERSION}; update the gateway to >= 2026.7.1`,
               );
             }
             const mainSessionKey = hello.snapshot?.sessionDefaults?.mainSessionKey;
             this.sessionKey =
-              typeof mainSessionKey === "string" ? mainSessionKey : FALLBACK_SESSION_KEY;
+              Object.prototype.toString.call(mainSessionKey) === "[object String]"
+                ? (mainSessionKey as string)
+                : FALLBACK_SESSION_KEY;
             succeed();
           })
           .catch((err) => fail(err instanceof Error ? err : new Error(String(err))));
@@ -336,7 +366,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
     });
   }
 
-  private buildConnectParams(): Record<string, unknown> {
+  private buildConnectParams(): GatewayConnectParams {
     return {
       minProtocol: GATEWAY_PROTOCOL_VERSION,
       maxProtocol: GATEWAY_PROTOCOL_VERSION,
@@ -396,7 +426,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
       // rejection is still handled. Promise.all attaches a handler to both; otherwise an
       // awaited-alone run promise could reject with no handler and Bun would treat it as
       // an unhandled rejection, terminating the whole process rather than just the call.
-      const chatParams: Record<string, unknown> = {
+      const chatParams: GatewayChatParams = {
         sessionKey: this.sessionKey,
         message,
         idempotencyKey: id,
@@ -413,7 +443,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
 
   private request(
     method: string,
-    params: Record<string, unknown>,
+    params: JsonValue,
     timeoutMs?: number,
     id: string = crypto.randomUUID(),
   ): Promise<unknown> {
@@ -505,9 +535,9 @@ export class GatewayTransport implements AgentRuntimeTransport {
     }
 
     if (frame.type === "res") {
-      this.handleRes(frame as unknown as GatewayResFrame);
+      this.handleRes(frame as GatewayResFrame);
     } else if (frame.type === "event") {
-      this.handleEvent(frame as unknown as GatewayEventFrame);
+      this.handleEvent(frame as GatewayEventFrame);
     }
   }
 
@@ -516,30 +546,40 @@ export class GatewayTransport implements AgentRuntimeTransport {
     if (!pendingRequest) return;
     this.pending.delete(frame.id);
     if (frame.ok) {
-      pendingRequest.resolve(frame.payload);
+      pendingRequest.resolve(frame.payload ?? null);
       return;
     }
-    const code = typeof frame.error?.code === "string" ? frame.error.code : "ERROR";
+    const error = frame.error;
+    const code =
+      error !== undefined && Object.prototype.toString.call(error.code) === "[object String]"
+        ? (error.code as string)
+        : "ERROR";
     const message =
-      typeof frame.error?.message === "string" ? frame.error.message : "request failed";
+      error !== undefined && Object.prototype.toString.call(error.message) === "[object String]"
+        ? (error.message as string)
+        : "request failed";
     pendingRequest.reject(new Error(`Gateway ${code}: ${message}`));
   }
 
   private handleEvent(frame: GatewayEventFrame): void {
     if (frame.event === CONNECT_CHALLENGE_EVENT) {
       const payload = (frame.payload ?? {}) as { nonce?: unknown };
-      this.challengeSettle?.resolve(typeof payload.nonce === "string" ? payload.nonce : "");
+      this.challengeSettle?.resolve(
+        Object.prototype.toString.call(payload.nonce) === "[object String]"
+          ? (payload.nonce as string)
+          : "",
+      );
       return;
     }
     if (frame.event === CHAT_EVENT) {
-      this.handleChatEvent(frame.payload);
+      this.handleChatEvent(frame.payload ?? null);
       return;
     }
     // "tick" heartbeats and other events need no action; Bun answers WS-level pings
     // so the socket stays alive without a client-side keepalive loop.
   }
 
-  private handleChatEvent(payload: unknown): void {
+  private handleChatEvent(payload: JsonValue): void {
     const p = (payload ?? {}) as {
       runId?: unknown;
       state?: unknown;
@@ -547,12 +587,15 @@ export class GatewayTransport implements AgentRuntimeTransport {
       message?: unknown;
       error?: unknown;
     };
-    const runId = typeof p.runId === "string" ? p.runId : null;
+    const runId =
+      Object.prototype.toString.call(p.runId) === "[object String]" ? (p.runId as string) : null;
     if (!runId || !this.chatRuns.has(runId)) return;
 
     if (p.state === "delta") {
       const run = this.chatRuns.get(runId);
-      if (run && typeof p.deltaText === "string") run.text += p.deltaText;
+      if (run && Object.prototype.toString.call(p.deltaText) === "[object String]") {
+        run.text += p.deltaText as string;
+      }
       return;
     }
     if (p.state === "final") {
@@ -560,8 +603,8 @@ export class GatewayTransport implements AgentRuntimeTransport {
       const content = Array.isArray(message.content) ? message.content : [];
       const first = content[0] as { text?: unknown } | undefined;
       const finalText =
-        first && typeof first.text === "string"
-          ? first.text
+        first && Object.prototype.toString.call(first.text) === "[object String]"
+          ? (first.text as string)
           : (this.chatRuns.get(runId)?.text ?? "");
       this.settleChatRun(runId, finalText);
       return;
@@ -570,7 +613,11 @@ export class GatewayTransport implements AgentRuntimeTransport {
       const err = (p.error ?? {}) as { message?: unknown };
       this.failChatRun(
         runId,
-        new Error(typeof err.message === "string" ? err.message : "agent run error"),
+        new Error(
+          Object.prototype.toString.call(err.message) === "[object String]"
+            ? (err.message as string)
+            : "agent run error",
+        ),
       );
       return;
     }

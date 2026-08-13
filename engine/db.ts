@@ -173,7 +173,7 @@ export interface VecProbeResult {
   readonly error: string | null;
 }
 
-function probeErrorMessage(err: unknown): string {
+function probeErrorMessage<T>(err: T): string {
   return err instanceof Error ? err.message : String(err);
 }
 

@@ -115,7 +115,7 @@ async function checkRegistration(): Promise<DoctorCheck> {
 }
 
 function checkRuntime(): DoctorCheck {
-  if (typeof Bun === "undefined") {
+  if (!globalThis.Bun) {
     return check(
       "runtime",
       "fail",
@@ -343,12 +343,17 @@ async function checkConfig(): Promise<DoctorCheck> {
     // DB-sidecar override ConfigLive applied onto the loaded config.
     const spec = findDbConfigSpec("MARKET_SCAN_ENABLED");
     const envRaw = process.env.MARKET_SCAN_ENABLED;
+    // The market-scan toggle is forward-declared config on the base AppConfig;
+    // read it through a concrete view of the effective value rather than a
+    // widened dictionary lookup.
+    const marketScanEnabled = (config as { readonly marketScanEnabled?: boolean })
+      .marketScanEnabled;
     const marketScan =
       spec === undefined
         ? false
         : envRaw !== undefined
           ? parseDbConfigValue(spec, envRaw) === true
-          : (config as unknown as Record<string, unknown>)[spec.field] === true;
+          : marketScanEnabled === true;
     return check(
       "config",
       "pass",

@@ -30,7 +30,7 @@ import {
   type MeteoraPoolStats,
   type EngineAlert,
 } from "../engine/services.js";
-import { defaultAppConfig, makePool, makeBinArray, makePosition } from "./helpers.js";
+import { defaultAppConfig, makePool, makeBinArray, makePosition, asOwner } from "./helpers.js";
 import { stringifySafe } from "../engine/bigint-json.js";
 
 // ─── Task 3: IL protection (ENTER fee/IL floor + IL-dominance fast EXIT) ─────
@@ -214,11 +214,7 @@ function runWithSeed(
     return yield* audit.getRecentDecisions(200);
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as unknown as Effect.Effect<
-      ReadonlyArray<DecisionRow>,
-      Error,
-      never
-    >,
+    asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
   );
 }
 
@@ -433,10 +429,12 @@ describe("IL protection — IL-dominance fast EXIT (Task 3b)", () => {
     expect(alert.severity).toBe("critical");
     expect(alert.positionId).toBe(position.positionId);
     expect(alert.poolAddress).toBe(POOL);
-    const data = alert.data ?? {};
-    expect(typeof data.ilUsd).toBe("number");
-    expect(data.ilUsd).toBeGreaterThan(0);
-    expect(typeof data.hodlValueUsd).toBe("number");
-    expect(typeof data.feesClaimedUsd).toBe("number");
+    const data = asOwner<{ ilUsd?: number; hodlValueUsd?: number; feesClaimedUsd?: number }>(
+      alert.data ?? {},
+    );
+    expect(data.ilUsd).toBeTypeOf("number");
+    expect(data.ilUsd!).toBeGreaterThan(0);
+    expect(data.hodlValueUsd).toBeTypeOf("number");
+    expect(data.feesClaimedUsd).toBeTypeOf("number");
   }, 15_000);
 });

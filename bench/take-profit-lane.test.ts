@@ -1,10 +1,20 @@
 import { describe, it, expect } from "vitest";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonRecord = { [key: string]: JsonValue };
 import { Effect, Layer } from "effect";
 import { program } from "../engine/program.js";
 import { AuditService, DbService } from "../engine/services.js";
 import { buildTpLadder, parseTpLadder, serializeTpLadder } from "../engine/tp-ladder.js";
 import type { PositionRecord } from "../engine/db-service.js";
-import { makePool, makePosition, makeTestLayer, makeAdapter, makeDatapiStats } from "./helpers.js";
+import {
+  makePool,
+  makePosition,
+  makeTestLayer,
+  makeAdapter,
+  makeDatapiStats,
+  asOwner,
+} from "./helpers.js";
 
 // Normal-lane take-profit (winrate fix): a normal ENTER carries a single-rung
 // TP ladder when TAKE_PROFIT_ENABLED, and the EXIT chain locks the profit with
@@ -40,11 +50,13 @@ async function runCycle(
     return { positions, decisions };
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as unknown as Effect.Effect<
-      { positions: ReadonlyArray<PositionRecord>; decisions: ReadonlyArray<TpDecisionRow> },
-      Error,
-      never
-    >,
+    asOwner<
+      Effect.Effect<
+        { positions: ReadonlyArray<PositionRecord>; decisions: ReadonlyArray<TpDecisionRow> },
+        Error,
+        never
+      >
+    >(Effect.provide(test, layer)),
   );
 }
 
@@ -77,15 +89,11 @@ async function runWithSeededPosition(
     return yield* audit.getRecentDecisions(200);
   });
   return Effect.runPromise(
-    Effect.provide(test, layer) as unknown as Effect.Effect<
-      ReadonlyArray<TpDecisionRow>,
-      Error,
-      never
-    >,
+    asOwner<Effect.Effect<ReadonlyArray<TpDecisionRow>, Error, never>>(Effect.provide(test, layer)),
   );
 }
 
-function enterLayer(configOverrides: Record<string, unknown>): TestLayer {
+function enterLayer(configOverrides: JsonRecord): TestLayer {
   return makeTestLayer({
     adapter: makeAdapter({ [POOL]: makePool({ address: POOL }) }),
     datapi: { getPoolData: () => Effect.succeed(makeDatapiStats({ address: POOL })) },

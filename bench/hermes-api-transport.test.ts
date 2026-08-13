@@ -1,25 +1,29 @@
 import { describe, it, expect } from "vitest";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonRecord = { [key: string]: JsonValue };
+import { asOwner } from "./helpers.js";
 import { Effect } from "effect";
 import { HermesApiTransport } from "../engine/hermes-api-transport.js";
 import type { AgentRuntimeContext } from "../engine/agent-transport.js";
 import type { AgentDecision } from "../engine/types.js";
 
 function makeContext(): AgentRuntimeContext {
-  return {
+  return asOwner<AgentRuntimeContext>({
     decision: {
       action: "HOLD",
       poolAddress: "Pool111111111111111111111111111111111111111",
       confidence: 0.65,
       reasoning: "test decision",
     } satisfies AgentDecision,
-  } as unknown as AgentRuntimeContext;
+  });
 }
 
 describe("HermesApiTransport (OpenAI-compatible API)", () => {
   it("POSTs a chat-completions request and parses choices[0].message.content", async () => {
     let capturedPath = "";
     let capturedAuth = "";
-    let capturedBody: Record<string, unknown> | null = null;
+    let capturedBody: JsonRecord | null = null;
 
     const server = Bun.serve({
       port: 0,
@@ -29,7 +33,7 @@ describe("HermesApiTransport (OpenAI-compatible API)", () => {
         capturedPath = url.pathname;
         capturedAuth = request.headers.get("authorization") ?? "";
         if (url.pathname === "/v1/chat/completions") {
-          capturedBody = (await request.json()) as Record<string, unknown>;
+          capturedBody = (await request.json()) as JsonRecord;
           return Response.json({
             choices: [
               { message: { role: "assistant", content: '{"action":"HOLD","confidence":0.5}' } },

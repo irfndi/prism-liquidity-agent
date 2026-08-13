@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { asOwner } from "./helpers.js";
 import { Effect } from "effect";
 import {
   parseResponse,
@@ -314,7 +315,7 @@ describe("LatencyWindow", () => {
 });
 
 const makePromptCtx = (decision: AgentDecision): AgentRuntimeContext =>
-  ({
+  asOwner<AgentRuntimeContext>({
     decision,
     pool: {
       address: decision.poolAddress,
@@ -334,7 +335,7 @@ const makePromptCtx = (decision: AgentDecision): AgentRuntimeContext =>
     warnings: [],
     recentDecisions: [],
     hasOpenPosition: decision.action === "REBALANCE" || decision.action === "EXIT",
-  }) as unknown as AgentRuntimeContext;
+  });
 
 const makePositionState = (overrides: Partial<AgentPositionState> = {}): AgentPositionState => ({
   positionId: "pos-1",

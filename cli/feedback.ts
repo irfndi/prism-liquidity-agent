@@ -108,8 +108,8 @@ async function runSubmit(feedback: AgentFeedback): Promise<FeedbackResult> {
       const service = yield* FeedbackService;
       return yield* service.submit(feedback);
     }).pipe(Effect.provide(program)),
-  ).catch((err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
+  ).catch((cause: unknown) => {
+    const message = cause instanceof Error ? cause.message : String(cause);
     logger.error(`Feedback submission crashed: ${message}`);
     return { kind: "error" as const, error: message } satisfies FeedbackResult;
   });
@@ -231,8 +231,8 @@ feedbackCommand
   });
 
 // Default action: if `prism feedback "summary"` is run, behave like `submit`.
-feedbackCommand.action(async (summary: string, opts: SubmitOptions) => {
-  if (typeof summary !== "string") {
+feedbackCommand.action(async (summary: string | undefined, opts: SubmitOptions) => {
+  if (summary === undefined) {
     feedbackCommand.help();
     return;
   }

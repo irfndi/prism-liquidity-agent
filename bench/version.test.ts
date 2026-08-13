@@ -4,7 +4,7 @@ import { getCurrentVersion } from "../engine/version.js";
 describe("version", () => {
   it("returns a non-empty string", () => {
     const version = getCurrentVersion();
-    expect(typeof version).toBe("string");
+    expect(version).toBeTypeOf("string");
     expect(version.length).toBeGreaterThan(0);
   });
 

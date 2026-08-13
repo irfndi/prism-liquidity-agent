@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { asOwner } from "./helpers.js";
 import { Effect, Layer } from "effect";
 import {
   Connection,
@@ -120,29 +121,33 @@ async function runEnter(
   configOverrides: Parameters<typeof defaultAppConfig>[0] = {},
 ) {
   return Effect.runPromise(
-    Effect.provide(
-      Effect.gen(function* () {
-        const adapter = yield* AdapterService;
-        return yield* adapter.enterPosition(
-          POOL_ADDRESS,
-          LOWER_BIN_ID,
-          UPPER_BIN_ID,
-          POSITION_SIZE_USD,
-          options,
-        );
-      }),
-      makeAdapterLayer(configOverrides),
-    ) as unknown as Effect.Effect<
-      {
-        positionPubKey: string;
-        txSignature: string;
-        depositMode: string;
-        amountXUsd: number;
-        amountYUsd: number;
-      },
-      Error,
-      never
-    >,
+    asOwner<
+      Effect.Effect<
+        {
+          positionPubKey: string;
+          txSignature: string;
+          depositMode: string;
+          amountXUsd: number;
+          amountYUsd: number;
+        },
+        Error,
+        never
+      >
+    >(
+      Effect.provide(
+        Effect.gen(function* () {
+          const adapter = yield* AdapterService;
+          return yield* adapter.enterPosition(
+            POOL_ADDRESS,
+            LOWER_BIN_ID,
+            UPPER_BIN_ID,
+            POSITION_SIZE_USD,
+            options,
+          );
+        }),
+        makeAdapterLayer(configOverrides),
+      ),
+    ),
   );
 }
 
@@ -159,7 +164,7 @@ function mockRpcAndBalances() {
   });
   vi.spyOn(Connection.prototype, "sendRawTransaction").mockResolvedValue("mock-sig-1");
   vi.spyOn(Connection.prototype, "confirmTransaction").mockImplementation(() =>
-    Promise.resolve(undefined as unknown as never),
+    Promise.resolve(asOwner<never>(undefined)),
   );
   vi.spyOn(Connection.prototype, "getBalance").mockImplementation(() =>
     Promise.resolve(Number(dlmmState.nativeLamports)),
@@ -181,19 +186,21 @@ function mockRpcAndBalances() {
                 },
               },
             ];
-      return Promise.resolve({ context: { slot: 1 }, value } as unknown as never);
+      return Promise.resolve(asOwner<never>({ context: { slot: 1 }, value }));
     },
   );
   vi.spyOn(Connection.prototype, "getTokenAccountBalance").mockImplementation(() =>
-    Promise.resolve({
-      context: { slot: 1 },
-      value: { amount: "1000000000", decimals: 9, uiAmount: 1, uiAmountString: "1" },
-    } as unknown as never),
+    Promise.resolve(
+      asOwner<never>({
+        context: { slot: 1 },
+        value: { amount: "1000000000", decimals: 9, uiAmount: 1, uiAmountString: "1" },
+      }),
+    ),
   );
 }
 
 function mockTokenPrices(): () => void {
-  return mockFetch((async (url: string | URL | Request) => {
+  return mockFetch(async (url: string | URL | Request) => {
     const u = String(url as unknown);
     if (u.includes("api.jup.ag/price/v3")) {
       return new Response(
@@ -205,7 +212,7 @@ function mockTokenPrices(): () => void {
       );
     }
     return new Response("unexpected", { status: 500 });
-  }) as unknown as typeof fetch);
+  });
 }
 
 function capturedStrategy() {
@@ -387,15 +394,17 @@ describe("adapter.enterPosition (strategy shapes + single-sided)", () => {
 
     try {
       const err = await Effect.runPromise(
-        Effect.provide(
-          Effect.gen(function* () {
-            const adapter = yield* AdapterService;
-            return yield* adapter
-              .enterPosition(POOL_ADDRESS, LOWER_BIN_ID, UPPER_BIN_ID, POSITION_SIZE_USD)
-              .pipe(Effect.flip);
-          }),
-          makeAdapterLayer(),
-        ) as unknown as Effect.Effect<{ message: string }, Error, never>,
+        asOwner<Effect.Effect<{ message: string }, Error, never>>(
+          Effect.provide(
+            Effect.gen(function* () {
+              const adapter = yield* AdapterService;
+              return yield* adapter
+                .enterPosition(POOL_ADDRESS, LOWER_BIN_ID, UPPER_BIN_ID, POSITION_SIZE_USD)
+                .pipe(Effect.flip);
+            }),
+            makeAdapterLayer(),
+          ),
+        ),
       );
 
       expect(err.message).toContain("Failed to enter position");
@@ -417,15 +426,17 @@ describe("adapter.enterPosition (strategy shapes + single-sided)", () => {
 
     try {
       const err = await Effect.runPromise(
-        Effect.provide(
-          Effect.gen(function* () {
-            const adapter = yield* AdapterService;
-            return yield* adapter
-              .enterPosition(POOL_ADDRESS, LOWER_BIN_ID, UPPER_BIN_ID, POSITION_SIZE_USD)
-              .pipe(Effect.flip);
-          }),
-          makeAdapterLayer(),
-        ) as unknown as Effect.Effect<{ message: string }, Error, never>,
+        asOwner<Effect.Effect<{ message: string }, Error, never>>(
+          Effect.provide(
+            Effect.gen(function* () {
+              const adapter = yield* AdapterService;
+              return yield* adapter
+                .enterPosition(POOL_ADDRESS, LOWER_BIN_ID, UPPER_BIN_ID, POSITION_SIZE_USD)
+                .pipe(Effect.flip);
+            }),
+            makeAdapterLayer(),
+          ),
+        ),
       );
 
       expect(err.message).toContain("Failed to enter position");

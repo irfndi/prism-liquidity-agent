@@ -22,15 +22,17 @@ export interface FeeSwap {
   readonly signature?: string;
 }
 
+export interface AccumulationSummary {
+  readonly destination: "accumulate-quote" | "accumulate-sol";
+  readonly outputAtomic: bigint;
+  readonly txSignatures: ReadonlyArray<string>;
+}
+
 export function summarizeAccumulation(
   destination: "accumulate-quote" | "accumulate-sol",
   swaps: ReadonlyArray<FeeSwap>,
   targetMint: string,
-): {
-  readonly destination: "accumulate-quote" | "accumulate-sol";
-  readonly outputAtomic: bigint;
-  readonly txSignatures: ReadonlyArray<string>;
-} {
+): AccumulationSummary {
   const outputAtomic = swaps.reduce((total, swap) => {
     if (swap.outputAtomic <= 0n || !swap.inputMint)
       throw new Error("invalid fee conversion output");

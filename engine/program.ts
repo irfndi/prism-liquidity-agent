@@ -227,15 +227,12 @@ const readEngineStatusApiKey = (): string | null => {
   try {
     const credentialsFile = join(getPrismUserConfigDir(), "credentials.json");
     if (!existsSync(credentialsFile)) return null;
-    const value: unknown = JSON.parse(readFileSync(credentialsFile, "utf-8"));
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      typeof (value as Record<string, unknown>).apiKey === "string"
-    ) {
-      return (value as { apiKey: string }).apiKey;
-    }
-    return null;
+    const parsed: unknown = JSON.parse(readFileSync(credentialsFile, "utf-8"));
+    return parsed !== null &&
+      Object.prototype.toString.call(parsed) === "[object Object]" &&
+      Object.prototype.toString.call((parsed as { apiKey?: unknown }).apiKey) === "[object String]"
+      ? (parsed as { apiKey: string }).apiKey
+      : null;
   } catch {
     return null;
   }
@@ -290,6 +287,14 @@ const PREVIOUS_SNAPSHOT_WINDOW_MS = 26 * 60 * 60 * 1000;
 
 /** How often pool_snapshots pruning runs (rows older than the retention window are deleted). */
 const SNAPSHOT_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/** Mint → USD price map returned by the adapter; a named owner contract so
+ * empty-lookup fallbacks don't widen a known value into an open dictionary. */
+export type TokenPriceMap = Record<string, number>;
+
+/** Shared empty price map for lookups that fail closed (indexing an empty map
+ * yields `undefined`, which `prices[mint] != null` checks treat as unknown). */
+const EMPTY_TOKEN_PRICES: TokenPriceMap = Object.create(null);
 
 export function isProposalStale(proposal: AgentProposal, staleMs: number, now: number): boolean {
   return now > proposal.proposedAt + staleMs || now > proposal.expiresAt;
@@ -617,7 +622,7 @@ export const persistMetadataIfSupported = (
   key: string,
   value: string,
 ): Effect.Effect<void, never> =>
-  typeof db.setMetadata === "function"
+  db.setMetadata != null
     ? db.setMetadata(key, value).pipe(Effect.catch(() => Effect.void))
     : Effect.void;
 
@@ -627,10 +632,16 @@ export interface HarvestGateConfig {
   readonly harvestTxCostUsdEst?: number;
 }
 
+/** Outcome of the economic harvest gate (claim vs skip). */
+export interface HarvestGateDecision {
+  readonly approved: boolean;
+  readonly reason: string;
+}
+
 export function evaluateHarvestGate(
   netUsd: number | null,
   config: HarvestGateConfig,
-): { approved: boolean; reason: string } {
+): HarvestGateDecision {
   const minNetUsd = config.harvestMinNetUsd ?? 1;
   const maxCostPct = config.harvestMaxCostPct ?? 0.15;
   const costUsd = config.harvestTxCostUsdEst ?? 0.005;
@@ -1300,7 +1311,7 @@ export function executePaper(
                 launchRunnerAnchorPrice: pool.currentPrice,
                 launchRunnerSteps: (current.launchRunnerSteps ?? 0) + 1,
               }
-            : {}),
+            : undefined),
           lastRebalanceAt: Date.now(),
         };
         trackedPositions.set(updated.positionId, updated);
@@ -1318,7 +1329,9 @@ export function executePaper(
             metadata: {
               newLowerBinId: decision.rebalanceParams.newLowerBinId,
               newUpperBinId: decision.rebalanceParams.newUpperBinId,
-              ...(decision.rebalanceParams.topUp !== undefined ? { scaleIn: true, topUpUsd } : {}),
+              ...(decision.rebalanceParams.topUp !== undefined
+                ? { scaleIn: true, topUpUsd }
+                : undefined),
             },
             createdAt: Date.now(),
           })
@@ -1530,7 +1543,7 @@ export function executeLive(
           Effect.catch(() => Effect.succeed(undefined)),
         );
         const effectiveSolPrice =
-          typeof liveSolPrice === "number" && liveSolPrice > 0 ? liveSolPrice : solPriceUsd;
+          liveSolPrice != null && liveSolPrice > 0 ? liveSolPrice : solPriceUsd;
         const topUpUsdc =
           effectiveSolPrice > 0
             ? Math.max(GAS_TOP_UP_USDC, Math.ceil(deficitSol * effectiveSolPrice * 1.2))
@@ -1705,7 +1718,7 @@ export function executeLive(
           decision.positionSizeUsd,
           {
             strategyShape: entryStrategyShape,
-            ...(runnerSingleSidedX === true ? { forceSingleSidedX: true } : {}),
+            ...(runnerSingleSidedX === true ? { forceSingleSidedX: true } : undefined),
           },
         )
         .pipe(
@@ -2061,7 +2074,7 @@ export function executeLive(
             };
           }
           const pendingFeeUsd = exitResultData.pendingFeeUsd;
-          if (typeof pendingFeeUsd === "number") {
+          if (pendingFeeUsd != null) {
             yield* db
               .savePositionEvent({
                 id: randomUUID(),
@@ -2150,7 +2163,7 @@ export function executeLive(
           // the claim-path consistency rationale at the credit block below.
           const sweptRewards = exitResultData?.sweptRewards ?? [];
           const pricedSweptRewardUsd = sweptRewards.reduce(
-            (acc, r) => (typeof r.amountUsd === "number" ? acc + r.amountUsd : acc),
+            (acc, r) => (r.amountUsd != null ? acc + r.amountUsd : acc),
             0,
           );
           // 2. Compute on the PRIOR cumulatives only — the exit sweep is
@@ -2171,7 +2184,7 @@ export function executeLive(
           const pendingFeeUsd = exitResultData?.pendingFeeUsd ?? null;
           const pendingFeeX = Number(exitResultData?.pendingFeeXAtomic ?? "0");
           const pendingFeeY = Number(exitResultData?.pendingFeeYAtomic ?? "0");
-          if (typeof pendingFeeUsd === "number") {
+          if (pendingFeeUsd != null) {
             pos.cumulativeFeesClaimedUsd += pendingFeeUsd;
             if ((pendingFeeX > 0 || pendingFeeY > 0) && pos.positionPubKey != null) {
               const sweepTxSignature = `exit-sweep:${pos.positionId}`;
@@ -2216,7 +2229,7 @@ export function executeLive(
           let sweptRewardUsd = 0;
           let unpricedReward = false;
           for (const reward of sweptRewards) {
-            if (typeof reward.amountUsd === "number") {
+            if (reward.amountUsd != null) {
               pos.cumulativeRewardsClaimedUsd += reward.amountUsd;
               sweptRewardUsd += reward.amountUsd;
             } else {
@@ -2267,17 +2280,19 @@ export function executeLive(
               .pipe(Effect.catch(() => Effect.void));
           }
           // 5. EXIT event: withdrawn USD (or null) + post-credit lifetime fees.
-          const exitMetadata: Record<string, unknown> = { realizedPnlUsd };
-          if (pricingUnresolved) {
-            exitMetadata.pricing = "unresolved";
-            exitMetadata.lastMarkUsd = pos.currentValueUsd;
-            exitMetadata.raw = {
-              withdrawnXAtomic: exitResultData?.withdrawnXAtomic,
-              withdrawnYAtomic: exitResultData?.withdrawnYAtomic,
-              pendingFeeXAtomic: exitResultData?.pendingFeeXAtomic,
-              pendingFeeYAtomic: exitResultData?.pendingFeeYAtomic,
-            };
-          }
+          const exitMetadata = pricingUnresolved
+            ? {
+                realizedPnlUsd,
+                pricing: "unresolved",
+                lastMarkUsd: pos.currentValueUsd,
+                raw: {
+                  withdrawnXAtomic: exitResultData?.withdrawnXAtomic ?? null,
+                  withdrawnYAtomic: exitResultData?.withdrawnYAtomic ?? null,
+                  pendingFeeXAtomic: exitResultData?.pendingFeeXAtomic ?? null,
+                  pendingFeeYAtomic: exitResultData?.pendingFeeYAtomic ?? null,
+                },
+              }
+            : { realizedPnlUsd };
           yield* db
             .savePositionEvent({
               id: randomUUID(),
@@ -2337,13 +2352,13 @@ export function executeLive(
                 evaluateHarvestGate(netUsd, {
                   ...(deps.harvestMinNetUsd !== undefined
                     ? { harvestMinNetUsd: deps.harvestMinNetUsd }
-                    : {}),
+                    : undefined),
                   ...(deps.harvestMaxCostPct !== undefined
                     ? { harvestMaxCostPct: deps.harvestMaxCostPct }
-                    : {}),
+                    : undefined),
                   ...(deps.harvestTxCostUsdEst !== undefined
                     ? { harvestTxCostUsdEst: deps.harvestTxCostUsdEst }
-                    : {}),
+                    : undefined),
                 }),
               ),
               Effect.catch(() =>
@@ -2510,7 +2525,7 @@ export function executeLive(
                   launchRunnerAnchorPrice: pool.currentPrice,
                   launchRunnerSteps: (pos.launchRunnerSteps ?? 0) + 1,
                 }
-              : {}),
+              : undefined),
             lastFeeClaimAt: Date.now(),
             lastRebalanceAt: Date.now(),
           };
@@ -3025,24 +3040,26 @@ export const program = Effect.gen(function* () {
   const runnerDispatchDeps = (poolAddress: string) => {
     const entryAprPct = poolFeeAprByAddress.get(poolAddress)?.feeAprPct;
     return {
-      ...(entryAprPct !== undefined ? { entryAprPct } : {}),
+      ...(entryAprPct !== undefined ? { entryAprPct } : undefined),
       poolAprByAddress: poolFeeAprByAddress,
       ...(config.marketScanRotationArmMs !== undefined
         ? { rotationArmMs: config.marketScanRotationArmMs }
-        : {}),
+        : undefined),
       ...(config.marketScanRunnerMinFeeApr !== undefined
         ? { runnerMinFeeApr: config.marketScanRunnerMinFeeApr }
-        : {}),
+        : undefined),
     };
   };
   const harvestDispatchDeps = () => ({
-    ...(config.harvestMinNetUsd !== undefined ? { harvestMinNetUsd: config.harvestMinNetUsd } : {}),
+    ...(config.harvestMinNetUsd !== undefined
+      ? { harvestMinNetUsd: config.harvestMinNetUsd }
+      : undefined),
     ...(config.harvestMaxCostPct !== undefined
       ? { harvestMaxCostPct: config.harvestMaxCostPct }
-      : {}),
+      : undefined),
     ...(config.harvestTxCostUsdEst !== undefined
       ? { harvestTxCostUsdEst: config.harvestTxCostUsdEst }
-      : {}),
+      : undefined),
   });
 
   // ─── Launch-mode execution state (Launch Mode v2) ────────────────────────
@@ -3120,7 +3137,7 @@ export const program = Effect.gen(function* () {
               tokenX: rank.pool.tokenX,
               tokenY: rank.pool.tokenY,
               ...(rank.pool.createdAtMs === undefined
-                ? {}
+                ? undefined
                 : { createdAtMs: rank.pool.createdAtMs }),
             }))
           : yield* screener.screenPools(scanOrdinal).pipe(
@@ -3686,7 +3703,7 @@ export const program = Effect.gen(function* () {
                   invalidationStopPrice: tpLadder.invalidationPrice,
                 };
               })()
-            : {}),
+            : undefined),
         };
 
         // ── Agent overlay (P1 3654054419): the redeploy deploys capital exactly
@@ -3820,10 +3837,10 @@ export const program = Effect.gen(function* () {
                 ...agentProposal,
                 ...(agentProposal.originalAction === undefined
                   ? { originalAction: decision.action }
-                  : {}),
+                  : undefined),
                 ...(agentProposal.originalConfidence === undefined
                   ? { originalConfidence: decision.confidence }
-                  : {}),
+                  : undefined),
               };
               const validation = evaluateAgentProposal(
                 proposalToEvaluate,
@@ -3990,7 +4007,7 @@ export const program = Effect.gen(function* () {
           // exceed the configured global cap.
           ...(decision.action === "ENTER" && decision.positionMode === "launch"
             ? { maxOpenPositions: config.maxOpenPositions }
-            : {}),
+            : undefined),
         };
         // Issue #148: the wallet safety pause is informational in shadow mode
         // (no-send by design) — it must never block a decision there.
@@ -4302,7 +4319,7 @@ export const program = Effect.gen(function* () {
               unpricedExitWarnedPools,
               ...runnerDispatchDeps(decision.poolAddress),
               ...harvestDispatchDeps(),
-              ...(autonomousExecution ? { autonomous: autonomousExecution } : {}),
+              ...(autonomousExecution ? { autonomous: autonomousExecution } : undefined),
             },
             decision,
             candidate.pool,
@@ -4593,7 +4610,7 @@ export const program = Effect.gen(function* () {
                     feeCv: evidence.feeCv,
                   },
                 }
-              : {}),
+              : undefined),
           };
         }),
       });
@@ -4811,7 +4828,7 @@ export const program = Effect.gen(function* () {
           Effect.catch(() => Effect.succeed(undefined)),
         );
         const priceOk =
-          typeof liveSolPrice === "number" &&
+          liveSolPrice != null &&
           Number.isFinite(liveSolPrice) &&
           liveSolPrice > 0 &&
           // config.solPriceUsd is validated with min 0 (0 = unset); a zero
@@ -5154,7 +5171,7 @@ export const program = Effect.gen(function* () {
           binUtilization: ctx.metrics.binUtilization,
           tvlVelocity: ctx.metrics.tvlVelocity,
         },
-        ...(position ? { position } : {}),
+        ...(position ? { position } : undefined),
       };
       yield* agent.sendAlert(alert).pipe(Effect.catch(() => Effect.void));
     });
@@ -6141,9 +6158,7 @@ export const program = Effect.gen(function* () {
               // 0 and the top-up is skipped).
               const priceX = (yield* adapter
                 .getTokenPrices([pool.tokenX], { useFallback: false })
-                .pipe(Effect.catch(() => Effect.succeed({} as Record<string, number>))))[
-                pool.tokenX
-              ];
+                .pipe(Effect.catch(() => Effect.succeed(EMPTY_TOKEN_PRICES))))[pool.tokenX];
               const topUpAtomicX =
                 tokenXDecimals !== null && priceX != null && priceX > 0
                   ? BigInt(Math.floor((topUpUsd / priceX) * 10 ** tokenXDecimals))
@@ -7758,7 +7773,7 @@ export const program = Effect.gen(function* () {
                           tpLadderJson: serializeTpLadder(tpLadder.ladder) ?? undefined,
                           invalidationStopPrice: tpLadder.invalidationPrice,
                         }
-                      : {}),
+                      : undefined),
                   });
                   // Idle-redeploy capture: the pool passed every in-slot gate
                   // (conditions, score, allocation, token-risk), so it is a
@@ -7882,7 +7897,9 @@ export const program = Effect.gen(function* () {
                   .getRecentDecisions(10)
                   .pipe(Effect.catch(() => Effect.succeed([]))),
                 hasOpenPosition,
-                ...(pos !== undefined ? { position: toAgentPositionState(pos, Date.now()) } : {}),
+                ...(pos !== undefined
+                  ? { position: toAgentPositionState(pos, Date.now()) }
+                  : undefined),
               })
               .pipe(
                 // Bound the ENTIRE veto op by the veto deadline, CONNECT included.
@@ -8019,7 +8036,7 @@ export const program = Effect.gen(function* () {
                       hasOpenPosition,
                       ...(pos !== undefined
                         ? { position: toAgentPositionState(pos, Date.now()) }
-                        : {}),
+                        : undefined),
                     })
                     .pipe(
                       // Outer deadline mirrors the veto path: sendPrompt's own
@@ -8061,10 +8078,10 @@ export const program = Effect.gen(function* () {
                 ...agentProposal,
                 ...(agentProposal.originalAction === undefined
                   ? { originalAction: decision.action }
-                  : {}),
+                  : undefined),
                 ...(agentProposal.originalConfidence === undefined
                   ? { originalConfidence: decision.confidence }
-                  : {}),
+                  : undefined),
               };
               let validation = evaluateAgentProposal(
                 proposalToEvaluate,
@@ -8340,7 +8357,7 @@ export const program = Effect.gen(function* () {
             severity: "warning",
             message: `Risk gate rejected ${decision.action} on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${riskResult.reason}`,
             poolAddress,
-            ...(pos !== undefined ? { positionId: pos.positionId } : {}),
+            ...(pos !== undefined ? { positionId: pos.positionId } : undefined),
             data: { action: decision.action, reason: riskResult.reason },
           });
           yield* audit
@@ -8628,8 +8645,8 @@ export const program = Effect.gen(function* () {
               ...harvestDispatchDeps(),
               ...(autonomousCandidateId !== undefined
                 ? { candidateId: autonomousCandidateId }
-                : {}),
-              ...(autonomousExecution ? { autonomous: autonomousExecution } : {}),
+                : undefined),
+              ...(autonomousExecution ? { autonomous: autonomousExecution } : undefined),
             },
             decision,
             pool,
@@ -8686,8 +8703,8 @@ export const program = Effect.gen(function* () {
               ...harvestDispatchDeps(),
               ...(autonomousCandidateId !== undefined
                 ? { candidateId: autonomousCandidateId }
-                : {}),
-              ...(autonomousExecution ? { autonomous: autonomousExecution } : {}),
+                : undefined),
+              ...(autonomousExecution ? { autonomous: autonomousExecution } : undefined),
             },
             decision,
             pool,
@@ -8855,7 +8872,7 @@ export const program = Effect.gen(function* () {
             severity: "critical",
             message: `EXIT executed on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${decision.reasoning}`,
             poolAddress,
-            ...(pos !== undefined ? { positionId: pos.positionId } : {}),
+            ...(pos !== undefined ? { positionId: pos.positionId } : undefined),
             data: { reasoning: decision.reasoning, paperTrading: config.paperTrading },
           });
         }

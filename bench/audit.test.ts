@@ -35,8 +35,8 @@ describe("AuditService", () => {
     };
   }
 
-  function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: unknown): T {
-    return Effect.runSync((Effect.provide as any)(effect, layer));
+  function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: Layer.Layer<R, never, never>): T {
+    return Effect.runSync(Effect.provide(effect, layer));
   }
 
   it("records a decision", () => {

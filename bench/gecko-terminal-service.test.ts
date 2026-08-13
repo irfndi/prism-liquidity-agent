@@ -31,11 +31,11 @@ const LIVE_RESPONSE = {
 
 const BASE_FEE_RATE = 0.003;
 
-function fetchReturning(body: unknown, status = 200): FetchLike {
+function fetchReturning(body: any, status = 200): FetchLike {
   return () => Promise.resolve(new Response(JSON.stringify(body), { status }));
 }
 
-function fetchRejecting(error: unknown): FetchLike {
+function fetchRejecting(error: any): FetchLike {
   return () => Promise.reject(error);
 }
 

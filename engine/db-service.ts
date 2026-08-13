@@ -1,5 +1,5 @@
 import { Effect, Layer } from "effect";
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { createDatabase, hasVecMemoryTable } from "./db.js";
 import { getEmbedding } from "./embeddings.js";
 import type {
@@ -104,23 +104,37 @@ export interface AuditRecord {
   error: string | null;
 }
 
-function queryOne<T>(db: Database, sql: string, ...params: unknown[]): T | null {
-  return (db.query(sql) as unknown as { get(...p: unknown[]): T | null }).get(...params);
+/**
+ * Concrete value contract for a raw SQLite row. Represents the finite set of
+ * column value types SQLite can produce; rows are decoded into owner types via
+ * the `rowTo*` functions at this file's I/O boundary.
+ */
+type DbRow = Record<string, SqlValue>;
+
+type SqlValue = string | number | bigint | boolean | null | Uint8Array;
+
+function queryOne<T>(db: Database, sql: string, ...params: SQLQueryBindings[]): T | null {
+  return db.query<T, SQLQueryBindings[]>(sql).get(...params);
 }
 
-function queryAll<T>(db: Database, sql: string, ...params: unknown[]): T[] {
-  return (db.query(sql) as unknown as { all(...p: unknown[]): T[] }).all(...params);
+function queryAll<T>(db: Database, sql: string, ...params: SQLQueryBindings[]): T[] {
+  return db.query<T, SQLQueryBindings[]>(sql).all(...params);
 }
 
 function runOne(db: Database, sql: string, ...params: unknown[]): void {
   (db.run as (sql: string, ...params: unknown[]) => void)(sql, ...params);
 }
 
-function isVecMemoryMissingError(e: unknown): boolean {
-  return e instanceof Error && e.message.includes("no such table: vec_memory");
+function isVecMemoryMissingError(e: Error): boolean {
+  return e.message.includes("no such table: vec_memory");
 }
 
-function serializeJson(value: unknown): string | null {
+/**
+ * Serialize an arbitrary JSON-serializable value at the persistence boundary.
+ * Accepts any value (including SDK/service objects) and stringifies it; a
+ * generic keeps the boundary open without an `unknown` escape hatch.
+ */
+function serializeJson<T>(value: T): string | null {
   try {
     return JSON.stringify(value);
   } catch {
@@ -134,16 +148,42 @@ function serializeBinArray(binArray: BinArray): string {
   return JSON.stringify(binArray, bigintReplacer);
 }
 
+// Parsed shape of a stored bin: reserveX/reserveY/liquiditySupply are bigint,
+// which bigintReplacer encodes as decimal strings.
+interface ParsedBinData {
+  binId: number;
+  price: number;
+  reserveX: string;
+  reserveY: string;
+  liquiditySupply: string;
+}
+
 function deserializeBinArray(json: string): BinArray {
-  const raw = JSON.parse(json) as { bins: Array<Record<string, unknown>> };
-  raw.bins = raw.bins.map((b) => ({
-    binId: Number(b.binId),
-    price: Number(b.price),
-    reserveX: BigInt(String(b.reserveX)),
-    reserveY: BigInt(String(b.reserveY)),
-    liquiditySupply: BigInt(String(b.liquiditySupply)),
-  }));
-  return raw as unknown as BinArray;
+  const raw = JSON.parse(json) as {
+    lowerBinId: number;
+    upperBinId: number;
+    activeBinId: number;
+    binStep?: number;
+    reservesKnown?: boolean;
+    bins: ParsedBinData[];
+  };
+  const binStep = raw.binStep != null ? Number(raw.binStep) : undefined;
+  const reservesKnown = raw.reservesKnown;
+  const result: BinArray = {
+    lowerBinId: Number(raw.lowerBinId),
+    upperBinId: Number(raw.upperBinId),
+    activeBinId: Number(raw.activeBinId),
+    bins: raw.bins.map((b) => ({
+      binId: Number(b.binId),
+      price: Number(b.price),
+      reserveX: BigInt(String(b.reserveX)),
+      reserveY: BigInt(String(b.reserveY)),
+      liquiditySupply: BigInt(String(b.liquiditySupply)),
+    })),
+  };
+  if (binStep !== undefined) result.binStep = binStep;
+  if (reservesKnown !== undefined) result.reservesKnown = reservesKnown;
+  return result;
 }
 
 export const DbLive = (dbPath?: string) =>
@@ -249,7 +289,7 @@ export const DbLive = (dbPath?: string) =>
 
         getPosition: (positionId) =>
           Effect.sync(() => {
-            const row = queryOne<Record<string, unknown>>(
+            const row = queryOne<DbRow>(
               db,
               "SELECT * FROM positions WHERE position_id = ?",
               positionId,
@@ -259,7 +299,7 @@ export const DbLive = (dbPath?: string) =>
 
         getAllPositions: () =>
           Effect.sync(() => {
-            const rows = queryAll<Record<string, unknown>>(
+            const rows = queryAll<DbRow>(
               db,
               "SELECT * FROM positions WHERE paper_exited_at IS NULL AND closed_at IS NULL",
             );
@@ -268,7 +308,7 @@ export const DbLive = (dbPath?: string) =>
 
         getPaperExitedPositions: () =>
           Effect.sync(() => {
-            const rows = queryAll<Record<string, unknown>>(
+            const rows = queryAll<DbRow>(
               db,
               "SELECT * FROM positions WHERE paper_exited_at IS NOT NULL ORDER BY paper_exited_at DESC",
             );
@@ -277,7 +317,7 @@ export const DbLive = (dbPath?: string) =>
 
         getClosedPositions: () =>
           Effect.sync(() => {
-            const rows = queryAll<Record<string, unknown>>(
+            const rows = queryAll<DbRow>(
               db,
               `SELECT * FROM positions
                WHERE closed_at IS NOT NULL OR paper_exited_at IS NOT NULL
@@ -372,7 +412,7 @@ export const DbLive = (dbPath?: string) =>
 
         getPositionEvents: (poolAddress, limit) =>
           Effect.sync(() => {
-            const rows = queryAll<Record<string, unknown>>(
+            const rows = queryAll<DbRow>(
               db,
               `SELECT * FROM position_events
                WHERE pool_address = ?
@@ -441,7 +481,7 @@ export const DbLive = (dbPath?: string) =>
 
         getRecentAudit: (limit) =>
           Effect.sync(() => {
-            const rows = queryAll<Record<string, unknown>>(
+            const rows = queryAll<DbRow>(
               db,
               "SELECT * FROM audit ORDER BY timestamp DESC LIMIT ?",
               limit,
@@ -466,7 +506,7 @@ export const DbLive = (dbPath?: string) =>
 
         isBlacklisted: (type, value) =>
           Effect.sync(() => {
-            const row = queryOne<Record<string, unknown>>(
+            const row = queryOne<DbRow>(
               db,
               "SELECT 1 FROM blacklists WHERE type = ? AND value = ?",
               type,
@@ -514,7 +554,8 @@ export const DbLive = (dbPath?: string) =>
                     catch: (error) => error as Error,
                   });
                 }),
-                (e) => (isVecMemoryMissingError(e) ? Effect.void : Effect.fail(e)),
+                (e) =>
+                  e instanceof Error && isVecMemoryMissingError(e) ? Effect.void : Effect.fail(e),
               )
             : Effect.void,
 
@@ -549,11 +590,11 @@ export const DbLive = (dbPath?: string) =>
                   // distance are preserved exactly.
                   const maxK = Math.max(topK * 8, 64);
                   let k = topK * 2;
-                  let candidates: Record<string, unknown>[] = [];
+                  let candidates: DbRow[] = [];
                   for (;;) {
                     const rows = yield* Effect.try({
                       try: () =>
-                        queryAll<Record<string, unknown>>(
+                        queryAll<DbRow>(
                           db,
                           `SELECT
                       id, category, content, pool_address, outcome, pnlUsd, confidence, createdAt, expiresAt,
@@ -616,7 +657,10 @@ export const DbLive = (dbPath?: string) =>
                     expiresAt: Number(row.expiresAt ?? 0),
                   }));
                 }),
-                (e) => (isVecMemoryMissingError(e) ? Effect.succeed([]) : Effect.fail(e)),
+                (e) =>
+                  e instanceof Error && isVecMemoryMissingError(e)
+                    ? Effect.succeed([])
+                    : Effect.fail(e),
               )
             : Effect.succeed([]),
 
@@ -668,7 +712,7 @@ export const DbLive = (dbPath?: string) =>
 
         getSnapshots: (poolAddress, startMs, endMs) =>
           Effect.sync(() => {
-            const rows = queryAll<Record<string, unknown>>(
+            const rows = queryAll<DbRow>(
               db,
               `SELECT * FROM pool_snapshots
                WHERE pool_address = ? AND timestamp >= ? AND timestamp <= ?
@@ -732,7 +776,7 @@ export const DbLive = (dbPath?: string) =>
 
         getFeedbackByHash: (hash, agentId) =>
           Effect.sync(() => {
-            const row = queryOne<Record<string, unknown>>(
+            const row = queryOne<DbRow>(
               db,
               "SELECT * FROM agent_feedback WHERE hash = ? AND agent_id = ? ORDER BY reported_at DESC LIMIT 1",
               hash,
@@ -743,7 +787,7 @@ export const DbLive = (dbPath?: string) =>
 
         getRecentFeedbackForAgent: (agentId, sinceMs) =>
           Effect.sync(() => {
-            const rows = queryAll<Record<string, unknown>>(
+            const rows = queryAll<DbRow>(
               db,
               "SELECT * FROM agent_feedback WHERE agent_id = ? AND reported_at >= ? ORDER BY reported_at ASC",
               agentId,
@@ -754,7 +798,7 @@ export const DbLive = (dbPath?: string) =>
 
         getLastFeedbackForAgent: (agentId) =>
           Effect.sync(() => {
-            const row = queryOne<Record<string, unknown>>(
+            const row = queryOne<DbRow>(
               db,
               "SELECT * FROM agent_feedback WHERE agent_id = ? ORDER BY reported_at DESC LIMIT 1",
               agentId,
@@ -764,7 +808,7 @@ export const DbLive = (dbPath?: string) =>
 
         listFeedbackForAgent: (agentId) =>
           Effect.sync(() => {
-            const rows = queryAll<Record<string, unknown>>(
+            const rows = queryAll<DbRow>(
               db,
               "SELECT * FROM agent_feedback WHERE agent_id = ? ORDER BY reported_at ASC",
               agentId,
@@ -908,7 +952,7 @@ export const DbLive = (dbPath?: string) =>
 
         getSignalSnapshots: (poolAddress, startMs, endMs) =>
           Effect.sync(() => {
-            const rows = queryAll<Record<string, unknown>>(
+            const rows = queryAll<DbRow>(
               db,
               `SELECT pool_address as poolAddress, timestamp, fee_il_ratio as feeIlRatio,
                 volume_authenticity as volumeAuthenticity, bin_utilization as binUtilization,
@@ -953,7 +997,7 @@ export const DbLive = (dbPath?: string) =>
 
         getRecentOutcomes: (limit) =>
           Effect.sync(() => {
-            const rows = queryAll<Record<string, unknown>>(
+            const rows = queryAll<DbRow>(
               db,
               `SELECT pool_address as poolAddress, timestamp, fee_il_ratio as feeIlRatio,
                 volume_authenticity as volumeAuthenticity, bin_utilization as binUtilization,
@@ -1035,7 +1079,7 @@ export const DbLive = (dbPath?: string) =>
 
         getClosedPositionOutcomes: (limit) =>
           Effect.sync(() => {
-            const rows = queryAll<Record<string, unknown>>(
+            const rows = queryAll<DbRow>(
               db,
               `SELECT fee_il_ratio as feeIlRatio,
                 volume_authenticity as volumeAuthenticity,
@@ -1087,7 +1131,7 @@ export const DbLive = (dbPath?: string) =>
 
         getPoolCooldown: (poolAddress) =>
           Effect.sync(() => {
-            const row = queryOne<Record<string, unknown>>(
+            const row = queryOne<DbRow>(
               db,
               "SELECT * FROM pool_cooldowns WHERE pool_address = ?",
               poolAddress,
@@ -1163,11 +1207,7 @@ export const DbLive = (dbPath?: string) =>
         getTokenCandidate: (id) =>
           Effect.try({
             try: () => {
-              const row = queryOne<Record<string, unknown>>(
-                db,
-                "SELECT * FROM token_candidates WHERE id = ?",
-                id,
-              );
+              const row = queryOne<DbRow>(db, "SELECT * FROM token_candidates WHERE id = ?", id);
               return row === null ? null : rowToTokenCandidate(row);
             },
             catch: (error) => error as Error,
@@ -1176,7 +1216,7 @@ export const DbLive = (dbPath?: string) =>
         listTokenCandidates: (walletAddress, agentInstanceId) =>
           Effect.try({
             try: () =>
-              queryAll<Record<string, unknown>>(
+              queryAll<DbRow>(
                 db,
                 `SELECT * FROM token_candidates
                WHERE wallet_address = ? AND agent_instance_id = ?
@@ -1229,7 +1269,7 @@ export const DbLive = (dbPath?: string) =>
         getExecutionOperation: (id) =>
           Effect.try({
             try: () => {
-              const row = queryOne<Record<string, unknown>>(
+              const row = queryOne<DbRow>(
                 db,
                 "SELECT * FROM execution_operations WHERE id = ?",
                 id,
@@ -1242,7 +1282,7 @@ export const DbLive = (dbPath?: string) =>
         listExecutionOperations: (walletAddress, agentInstanceId) =>
           Effect.try({
             try: () =>
-              queryAll<Record<string, unknown>>(
+              queryAll<DbRow>(
                 db,
                 `SELECT * FROM execution_operations
                WHERE wallet_address = ? AND agent_instance_id = ?
@@ -1311,11 +1351,7 @@ export const DbLive = (dbPath?: string) =>
         getSettlementJob: (id) =>
           Effect.try({
             try: () => {
-              const row = queryOne<Record<string, unknown>>(
-                db,
-                "SELECT * FROM settlement_jobs WHERE id = ?",
-                id,
-              );
+              const row = queryOne<DbRow>(db, "SELECT * FROM settlement_jobs WHERE id = ?", id);
               return row === null ? null : rowToSettlementJob(row);
             },
             catch: (error) => error as Error,
@@ -1324,7 +1360,7 @@ export const DbLive = (dbPath?: string) =>
         listSettlementJobs: (walletAddress, agentInstanceId) =>
           Effect.try({
             try: () =>
-              queryAll<Record<string, unknown>>(
+              queryAll<DbRow>(
                 db,
                 `SELECT * FROM settlement_jobs
                WHERE wallet_address = ? AND agent_instance_id = ?
@@ -1357,7 +1393,7 @@ export const DbLive = (dbPath?: string) =>
         getSafetyPause: (walletAddress, agentInstanceId) =>
           Effect.try({
             try: () => {
-              const row = queryOne<Record<string, unknown>>(
+              const row = queryOne<DbRow>(
                 db,
                 `SELECT * FROM wallet_safety_pauses
                WHERE wallet_address = ? AND agent_instance_id = ?`,
@@ -1374,7 +1410,7 @@ export const DbLive = (dbPath?: string) =>
     }),
   );
 
-function parseTokenCandidateState(value: unknown): TokenCandidateState {
+function parseTokenCandidateState(value: string): TokenCandidateState {
   switch (value) {
     case "discovered":
     case "observing":
@@ -1387,12 +1423,12 @@ function parseTokenCandidateState(value: unknown): TokenCandidateState {
       throw new PersistenceContractError({
         entity: "token_candidate",
         field: "state",
-        value: String(value),
+        value,
       });
   }
 }
 
-function parseExecutionOperationType(value: unknown): ExecutionOperationType {
+function parseExecutionOperationType(value: string): ExecutionOperationType {
   switch (value) {
     case "entry":
     case "exit":
@@ -1403,12 +1439,12 @@ function parseExecutionOperationType(value: unknown): ExecutionOperationType {
       throw new PersistenceContractError({
         entity: "execution_operation",
         field: "operation_type",
-        value: String(value),
+        value,
       });
   }
 }
 
-function parseExecutionOperationStatus(value: unknown): ExecutionOperationStatus {
+function parseExecutionOperationStatus(value: string): ExecutionOperationStatus {
   switch (value) {
     case "planned":
     case "prepared":
@@ -1421,12 +1457,12 @@ function parseExecutionOperationStatus(value: unknown): ExecutionOperationStatus
       throw new PersistenceContractError({
         entity: "execution_operation",
         field: "status",
-        value: String(value),
+        value,
       });
   }
 }
 
-function parseSettlementJobStatus(value: unknown): SettlementJobStatus {
+function parseSettlementJobStatus(value: string): SettlementJobStatus {
   switch (value) {
     case "pending":
     case "prepared":
@@ -1439,28 +1475,28 @@ function parseSettlementJobStatus(value: unknown): SettlementJobStatus {
       throw new PersistenceContractError({
         entity: "settlement_job",
         field: "status",
-        value: String(value),
+        value,
       });
   }
 }
 
-function parseSettlementAsset(value: unknown): SettlementAsset {
+function parseSettlementAsset(value: string): SettlementAsset {
   if (value === "SOL") return value;
   throw new PersistenceContractError({
     entity: "settlement_job",
     field: "destination_asset",
-    value: String(value),
+    value,
   });
 }
 
-function rowToTokenCandidate(row: Record<string, unknown>): TokenCandidateRecord {
+function rowToTokenCandidate(row: DbRow): TokenCandidateRecord {
   return {
     id: String(row.id),
     walletAddress: String(row.wallet_address),
     agentInstanceId: String(row.agent_instance_id),
     poolAddress: String(row.pool_address),
     tokenMint: String(row.token_mint),
-    state: parseTokenCandidateState(row.state),
+    state: parseTokenCandidateState(String(row.state)),
     healthyScanCount: Number(row.healthy_scan_count),
     firstSeenAt: Number(row.first_seen_at),
     lastSeenAt: Number(row.last_seen_at),
@@ -1473,7 +1509,7 @@ function rowToTokenCandidate(row: Record<string, unknown>): TokenCandidateRecord
   };
 }
 
-function rowToExecutionOperation(row: Record<string, unknown>): ExecutionOperationRecord {
+function rowToExecutionOperation(row: DbRow): ExecutionOperationRecord {
   return {
     id: String(row.id),
     walletAddress: String(row.wallet_address),
@@ -1482,8 +1518,8 @@ function rowToExecutionOperation(row: Record<string, unknown>): ExecutionOperati
     positionId: row.position_id === null ? null : String(row.position_id as unknown),
     poolAddress: String(row.pool_address),
     tokenMint: String(row.token_mint),
-    operationType: parseExecutionOperationType(row.operation_type),
-    status: parseExecutionOperationStatus(row.status),
+    operationType: parseExecutionOperationType(String(row.operation_type)),
+    status: parseExecutionOperationStatus(String(row.status)),
     amountAtomic: row.amount_atomic === null ? null : String(row.amount_atomic as unknown),
     txSignature: row.tx_signature === null ? null : String(row.tx_signature as unknown),
     error: row.error === null ? null : String(row.error as unknown),
@@ -1492,7 +1528,7 @@ function rowToExecutionOperation(row: Record<string, unknown>): ExecutionOperati
   };
 }
 
-function rowToSettlementJob(row: Record<string, unknown>): SettlementJobRecord {
+function rowToSettlementJob(row: DbRow): SettlementJobRecord {
   return {
     id: String(row.id),
     walletAddress: String(row.wallet_address),
@@ -1501,8 +1537,8 @@ function rowToSettlementJob(row: Record<string, unknown>): SettlementJobRecord {
     poolAddress: String(row.pool_address),
     tokenMint: String(row.token_mint),
     amountAtomic: String(row.amount_atomic),
-    destinationAsset: parseSettlementAsset(row.destination_asset),
-    status: parseSettlementJobStatus(row.status),
+    destinationAsset: parseSettlementAsset(String(row.destination_asset)),
+    status: parseSettlementJobStatus(String(row.status)),
     attempts: Number(row.attempts),
     nextRetryAt: row.next_retry_at === null ? null : Number(row.next_retry_at),
     txSignature: row.tx_signature === null ? null : String(row.tx_signature as unknown),
@@ -1519,7 +1555,7 @@ function rowToSettlementJob(row: Record<string, unknown>): SettlementJobRecord {
   };
 }
 
-function rowToSafetyPause(row: Record<string, unknown>): SafetyPauseRecord {
+function rowToSafetyPause(row: DbRow): SafetyPauseRecord {
   return {
     walletAddress: String(row.wallet_address),
     agentInstanceId: String(row.agent_instance_id),
@@ -1529,7 +1565,7 @@ function rowToSafetyPause(row: Record<string, unknown>): SafetyPauseRecord {
   };
 }
 
-function rowToPosition(row: Record<string, unknown>): PositionRecord {
+function rowToPosition(row: DbRow): PositionRecord {
   return {
     positionId: String(row.position_id),
     poolAddress: String(row.pool_address),
@@ -1572,7 +1608,7 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
   };
 }
 
-function rowToPositionEvent(row: Record<string, unknown>): PositionEventRecord {
+function rowToPositionEvent(row: DbRow): PositionEventRecord {
   return {
     id: String(row.id),
     poolAddress: String(row.pool_address),
@@ -1591,12 +1627,12 @@ function rowToPositionEvent(row: Record<string, unknown>): PositionEventRecord {
 // known members (legacy NULL, an unexpected literal) is treated as the
 // conservative, fail-closed "heuristic" — never silently upgraded to "datapi",
 // so an unknown provenance keeps the measured-fee-rate gate disabled on replay.
-function parseStatsSource(value: unknown): "datapi" | "geckoterminal" | "heuristic" {
+function parseStatsSource(value: string): "datapi" | "geckoterminal" | "heuristic" {
   if (value === "datapi" || value === "geckoterminal" || value === "heuristic") return value;
   return "heuristic";
 }
 
-function rowToSnapshot(row: Record<string, unknown>): PoolSnapshot {
+function rowToSnapshot(row: DbRow): PoolSnapshot {
   return {
     poolAddress: String(row.pool_address),
     timestamp: Number(row.timestamp),
@@ -1610,11 +1646,11 @@ function rowToSnapshot(row: Record<string, unknown>): PoolSnapshot {
     tokenXSymbol: String((row.token_x_symbol ?? "") as unknown),
     tokenYSymbol: String((row.token_y_symbol ?? "") as unknown),
     binArray: deserializeBinArray(String(row.bin_array_json)),
-    statsSource: parseStatsSource(row.stats_source),
+    statsSource: parseStatsSource(String(row.stats_source)),
   };
 }
 
-function rowToAudit(row: Record<string, unknown>): AuditRecord {
+function rowToAudit(row: DbRow): AuditRecord {
   return {
     id: String(row.id),
     timestamp: Number(row.timestamp ?? 0),
@@ -1632,7 +1668,7 @@ function rowToAudit(row: Record<string, unknown>): AuditRecord {
   };
 }
 
-function rowToFeedback(row: Record<string, unknown>): {
+interface FeedbackRecord {
   id: string;
   agentId: string;
   category: string;
@@ -1645,14 +1681,18 @@ function rowToFeedback(row: Record<string, unknown>): {
   githubIssueUrl: string | null;
   reportedAt: number;
   hash: string;
-} {
+}
+
+function rowToFeedback(row: DbRow): FeedbackRecord {
   const relatedRaw = row.related_files ? String(row.related_files as unknown) : null;
   let relatedFiles: ReadonlyArray<string> = [];
   if (relatedRaw) {
     try {
-      const parsed = JSON.parse(relatedRaw) as unknown;
+      const parsed: unknown = JSON.parse(relatedRaw);
       if (Array.isArray(parsed)) {
-        relatedFiles = parsed.filter((x): x is string => typeof x === "string");
+        relatedFiles = parsed.filter(
+          (x) => Object.prototype.toString.call(x) === "[object String]",
+        ) as ReadonlyArray<string>;
       }
     } catch {
       // ignore malformed stored value

@@ -10,14 +10,14 @@
 //   add to `cumulativeRewardsClaimedUsd`. Claiming is never blocked on pricing.
 
 /** One claimed LM reward slot (rewardOne → rewardInfos[0], rewardTwo → [1]). */
-export interface ClaimedReward {
+export type ClaimedReward = {
   /** Reward mint (base58), or "unknown" when the pool exposes none. */
   readonly mint: string;
   /** Claimed amount in the reward mint's atomic units (pre-transfer-fee). */
   readonly amountAtomic: number;
   /** USD value at claim time; null when the mint price is unavailable. */
   readonly amountUsd: number | null;
-}
+};
 
 export interface RewardClaimSummary {
   /** Sum of the USD-priced reward amounts (unpriced rewards excluded). */
@@ -46,10 +46,16 @@ export function summarizeRewardClaim(rewards: ReadonlyArray<ClaimedReward>): Rew
  * txSignature), and fees_usd stays NULL on reward rows so fee queries stay
  * fee-pure. Raw atomic amounts are always recorded, USD when priced.
  */
+export type RewardClaimMetadata = {
+  readonly kind: "lm_reward";
+  readonly txSignatures: ReadonlyArray<string>;
+  readonly rewards: ReadonlyArray<ClaimedReward>;
+};
+
 export function buildRewardClaimMetadata(args: {
   readonly txSignatures: ReadonlyArray<string>;
   readonly rewards: ReadonlyArray<ClaimedReward>;
-}): Record<string, unknown> {
+}): RewardClaimMetadata {
   return {
     kind: "lm_reward",
     txSignatures: [...args.txSignatures],
