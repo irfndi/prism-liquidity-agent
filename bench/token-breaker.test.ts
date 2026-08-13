@@ -467,3 +467,159 @@ describe("token-level execution-failure breaker (Robinhood rule 12)", () => {
     );
   }, 20_000);
 });
+
+// ─── Rug-token breaker (catastrophic realized loss) ────────────────────────
+// A position closed at a catastrophic realized loss (default ≥50% of its cost
+// basis) marks a rug/drained token: the engine arms `token_rug_block:<mint>`
+// for the NON-STABLE legs only and blocks re-entry into that token (any pool
+// holding it), while the stable base leg stays free so USDC/SOL are never
+// locked out of every other pool.
+
+// Rug pool legs: RUG_TOKEN (the drained token) + RUG_BASE (an operator-declared
+// stable, via stablecoinMints override). RUG_SHARED reuses RUG_TOKEN (must be
+// blocked); RUG_BASE_POOL reuses RUG_BASE (must stay free).
+const RUG_TOKEN = "RugTokenEvil1111111111111111111111111111111";
+const RUG_BASE = "RugBaseStable111111111111111111111111111111";
+const RUG_POOL = "RugPoolDead11111111111111111111111111111111";
+const RUG_SHARED_POOL = "RugSharedTokenPool11111111111111111111111";
+const RUG_BASE_POOL = "RugBaseTokenPool1111111111111111111111111";
+
+function makeRugPools(): Map<string, PoolState> {
+  return new Map([
+    [
+      RUG_POOL,
+      makePool({
+        address: RUG_POOL,
+        tokenX: RUG_TOKEN,
+        tokenY: RUG_BASE,
+        tokenXSymbol: "RUG",
+        tokenYSymbol: "BASE",
+        tvlUsd: 60_000, // → -40% vs the 100k previous snapshot (threshold 30%)
+      }),
+    ],
+    [
+      RUG_SHARED_POOL,
+      makePool({
+        address: RUG_SHARED_POOL,
+        tokenX: RUG_TOKEN,
+        tokenY: TOKEN_C,
+        tokenXSymbol: "RUG",
+        tokenYSymbol: "TOK_C",
+      }),
+    ],
+    [
+      RUG_BASE_POOL,
+      makePool({
+        address: RUG_BASE_POOL,
+        tokenX: RUG_BASE,
+        tokenY: TOKEN_D,
+        tokenXSymbol: "BASE",
+        tokenYSymbol: "TOK_D",
+      }),
+    ],
+  ]);
+}
+
+/** Strong stats for the two pools that must reach the ENTER gate this cycle. */
+function makeRugDatapi(): MeteoraDatapiApi {
+  return {
+    getPoolData: (addr: string) =>
+      Effect.succeed(
+        addr === RUG_SHARED_POOL || addr === RUG_BASE_POOL
+          ? makeDatapiStats({ address: addr })
+          : null,
+      ),
+  };
+}
+
+/** Seed a position on RUG_POOL that will realize a -95% loss when it exits. */
+function seedRugExit(db: DbApi): Effect.Effect<void, Error> {
+  return Effect.gen(function* () {
+    yield* db.savePosition(
+      makePosition({
+        poolAddress: RUG_POOL,
+        positionPubKey: "mock-rug-pos",
+        positionId: "mock-rug-pos",
+        depositedUsd: 1000,
+        currentValueUsd: 50,
+      }),
+    );
+    yield* db.saveSnapshot({
+      poolAddress: RUG_POOL,
+      timestamp: Date.now() - 600_000,
+      activeBinId: 5000,
+      tvlUsd: 100_000, // → -40% vs current 60k (threshold 30%)
+      volume24hUsd: 30_000,
+      fees24hUsd: 300,
+      apr: 60,
+      currentPrice: 150,
+      binStep: 10,
+      tokenXSymbol: "RUG",
+      tokenYSymbol: "BASE",
+      binArray: makeBinArray(),
+    });
+  });
+}
+
+/** Read the token_rug_block metadata rows for the two rug-pool legs. */
+function readRugBlocks(
+  db: DbApi,
+): Effect.Effect<{ [RUG_TOKEN]: string | null; [RUG_BASE]: string | null }, never> {
+  return Effect.gen(function* () {
+    const read = (mint: string) =>
+      db.getMetadata(`token_rug_block:${mint}`).pipe(Effect.catch(() => Effect.succeed(null)));
+    const [rug, base] = yield* Effect.all([read(RUG_TOKEN), read(RUG_BASE)]);
+    return { [RUG_TOKEN]: rug, [RUG_BASE]: base };
+  });
+}
+
+describe("rug-token breaker (catastrophic realized loss)", () => {
+  it("arms token_rug_block for the non-stable leg only and blocks re-entry into the drained token", async () => {
+    const layer = makeProgramLayer({
+      adapter: makeProgramAdapter(makeRugPools(), {
+        // A successful live EXIT that withdraws only $50 of the $1000 basis →
+        // realized -95% → the rug threshold (default 50%) arms the block.
+        exitPosition: () => Effect.succeed({ txSignature: "mock-tx", withdrawnUsd: 50 }),
+      }),
+      datapi: makeRugDatapi(),
+      configOverrides: {
+        paperTrading: false,
+        watchlistPools: [RUG_POOL, RUG_SHARED_POOL, RUG_BASE_POOL],
+        tvlDropExitPct: 0.3,
+        stablecoinMints: new Set([RUG_BASE]),
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* seedRugExit(db);
+      yield* Effect.raceFirst(program, Effect.sleep(2_500));
+      const audit = yield* AuditService;
+      const decisions = yield* audit.getRecentDecisions(200);
+      const blocks = yield* readRugBlocks(db);
+      return { decisions, blocks };
+    });
+
+    const { decisions, blocks } = await provideLayer(test, layer as never);
+
+    expect(blocks[RUG_TOKEN], "drained token must be rug-blocked").not.toBeNull();
+    expect(blocks[RUG_BASE], "stable base leg must NOT be rug-blocked").toBeNull();
+
+    const sharedEnter = decisions.find(
+      (d) => d.poolAddress === RUG_SHARED_POOL && d.action === "ENTER",
+    );
+    expect(sharedEnter, "shared-rugged-leg pool must reach the ENTER gate").toBeDefined();
+    expect(sharedEnter!.reasoning, "shared-rugged-leg ENTER must carry [token-block]").toContain(
+      "[token-block]",
+    );
+    expect(sharedEnter!.executed, "shared-rugged-leg ENTER must never execute").toBe(false);
+
+    const baseEnter = decisions.find(
+      (d) => d.poolAddress === RUG_BASE_POOL && d.action === "ENTER",
+    );
+    expect(baseEnter, "stable-base pool must reach the ENTER gate").toBeDefined();
+    expect(baseEnter!.reasoning, "stable-base pool must not be token-blocked").not.toContain(
+      "[token-block]",
+    );
+  }, 20_000);
+});

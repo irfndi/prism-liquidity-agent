@@ -213,6 +213,14 @@ export interface AppConfig {
   readonly harvestTxCostUsdEst?: number;
   readonly allowTransferFeeTokens?: boolean;
   readonly tokenFailureBlockMs?: number;
+  /** Rug exit = a closed position whose realized PnL ≤ -(depositedUsd × this).
+   *  Default 0.5: a 50%+ realized loss marks a rug/drain and arms the rug-token
+   *  block for the position's non-stable legs. Clamped [0.05, 1]. */
+  readonly rugExitLossPct?: number;
+  /** How long (ms) a rug exit blocks re-entry into the rugged token. Default
+   *  7 days; clamped [1h, 30 days]. Distinct from tokenFailureBlockMs so a
+   *  drained token stays blocked far longer than a transient exit failure. */
+  readonly rugTokenBlockMs?: number;
   readonly minYieldExitAgeMs?: number;
   readonly marketScanMaxNegativeDriftBins?: number;
   readonly entryMomentumConfBoost?: number;
@@ -1508,6 +1516,16 @@ const loadConfig = Effect.gen(function* () {
   // G6 token-level failure breaker: a failed EXIT on a token blocks new
   // entries into any pool holding that token for this window.
   const tokenFailureBlockMs = yield* validatedNumber("TOKEN_FAILURE_BLOCK_MS", 60_000, 3_600_000);
+  // Rug detection: a position closed at a catastrophic realized loss marks a
+  // rug/drained token — block re-entry into its non-stable legs (the base
+  // leg is never blocked) for a longer window than the failure breaker.
+  const rugExitLossPct = yield* validatedNumber("RUG_EXIT_LOSS_PCT", 0.05, 0.5, 1);
+  const rugTokenBlockMs = yield* validatedNumber(
+    "RUG_TOKEN_BLOCK_MS",
+    3_600_000,
+    604_800_000,
+    2_592_000_000,
+  );
   // ── TA / filter-quality (forensics-driven, paper-first) ────────────────
   // A: economic EXITs (fee/IL < 0.5, yield-regression, volume-auth) must NOT
   // fire before fees can accrue — the 33-min median paper hold was the top
@@ -1805,6 +1823,8 @@ const loadConfig = Effect.gen(function* () {
     harvestTxCostUsdEst,
     allowTransferFeeTokens,
     tokenFailureBlockMs,
+    rugExitLossPct,
+    rugTokenBlockMs,
     minYieldExitAgeMs,
     marketScanMaxNegativeDriftBins,
     entryMomentumConfBoost,

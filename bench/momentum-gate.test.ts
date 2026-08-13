@@ -217,12 +217,13 @@ describe("drift gate in the decision loop", () => {
       // expires after ~2s: while it blocks, the bin history accumulates; when
       // it clears, the ENTER slot reaches the drift gate with a deeply
       // negative drift and the pool is rejected [drift-gate] instead of
-      // entering on the first cycles (before any history exists).
+      // entering on the first cycles (before any history exists). `token_block`
+      // stores the block EXPIRY timestamp (armed-at + window).
       const TOKEN_A = "So11111111111111111111111111111111111111112";
       const TOKEN_B = "FakeToken1111111111111111111111111111111111";
-      const blockAt = Date.now() - 58_000; // 2s of a 60s window remaining
-      yield* db.setMetadata(`token_block:${TOKEN_A}`, String(blockAt));
-      yield* db.setMetadata(`token_block:${TOKEN_B}`, String(blockAt));
+      const blockExpiresAt = Date.now() + 2_000; // 2s remaining
+      yield* db.setMetadata(`token_block:${TOKEN_A}`, String(blockExpiresAt));
+      yield* db.setMetadata(`token_block:${TOKEN_B}`, String(blockExpiresAt));
       yield* Effect.raceFirst(program, Effect.sleep(8_000)); // wide window: parallel-load flake guard (real-clock expiry)
       const audit = yield* AuditService;
       const decisions = yield* audit.getRecentDecisions(300);

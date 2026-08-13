@@ -1086,6 +1086,30 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   return merged17 as Layer.Layer<AllServices, never, never>;
 }
 
+/**
+ * Which token legs should be rug-blocked after a position closed at a
+ * catastrophic realized loss. Returns only the NON-stable legs: a rug blocks
+ * the rugged token, never the base (stablecoin/SOL) leg it was paired with, so
+ * a drained token cannot lock USDC/SOL out of every other pool on the market.
+ */
+function rugBlockMints(input: {
+  readonly realizedPnlUsd: number | null;
+  readonly depositedUsd: number;
+  readonly rugExitLossPct: number;
+  readonly stablecoinMints: ReadonlySet<string> | undefined;
+  readonly tokenX: string | undefined;
+  readonly tokenY: string | undefined;
+}): ReadonlyArray<string> {
+  const { realizedPnlUsd, depositedUsd, rugExitLossPct } = input;
+  if (realizedPnlUsd === null || depositedUsd <= 0) return [];
+  if (-realizedPnlUsd / depositedUsd < rugExitLossPct) return [];
+  const isStable = (mint: string) =>
+    mint === SOL_MINT || (input.stablecoinMints?.has(mint) ?? false);
+  return [input.tokenX, input.tokenY].filter(
+    (mint): mint is string => mint !== undefined && mint !== "" && !isStable(mint),
+  );
+}
+
 // ─── Paper execution ─────────────────────────────────────────────────────────
 
 export function executePaper(
@@ -1105,6 +1129,10 @@ export function executePaper(
     harvestMinNetUsd?: number;
     harvestMaxCostPct?: number;
     harvestTxCostUsdEst?: number;
+    /** Rug detection: arm `token_rug_block` on a catastrophic realized loss. */
+    rugExitLossPct?: number;
+    rugTokenBlockMs?: number;
+    stablecoinMints?: ReadonlySet<string>;
   },
   decision: AgentDecision,
   pool: {
@@ -1112,6 +1140,8 @@ export function executePaper(
     binStep: number;
     tokenXSymbol: string;
     tokenYSymbol: string;
+    tokenX?: string;
+    tokenY?: string;
     currentPrice: number;
   },
   signalTimestamp?: number,
@@ -1276,6 +1306,33 @@ export function executePaper(
           `closePosition ${pos.positionId}`,
           db.closePosition(pos.positionId, realizedPnlUsd),
         );
+        // Rug detection: a paper position closed at a catastrophic loss arms
+        // `token_rug_block` for its non-stable legs so the engine never
+        // re-enters a drained token (mirrors the live executor's gate).
+        const rugMints = rugBlockMints({
+          realizedPnlUsd,
+          depositedUsd: pos.depositedUsd,
+          rugExitLossPct: deps.rugExitLossPct ?? 0.5,
+          stablecoinMints: deps.stablecoinMints,
+          tokenX: pool.tokenX,
+          tokenY: pool.tokenY,
+        });
+        if (rugMints.length > 0) {
+          const rugExpiresAt = Date.now() + (deps.rugTokenBlockMs ?? 604_800_000);
+          for (const mint of rugMints) {
+            yield* db.setMetadata(`token_rug_block:${mint}`, String(rugExpiresAt)).pipe(
+              Effect.catch((err) =>
+                Effect.sync(() =>
+                  logger.warn("Failed to record rug-token block", {
+                    pool: decision.poolAddress,
+                    mint,
+                    error: String(err),
+                  }),
+                ),
+              ),
+            );
+          }
+        }
         if (pos.entrySignalSnapshotId != null) {
           yield* db
             .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
@@ -1449,6 +1506,10 @@ export function executeLive(
     harvestMinNetUsd?: number;
     harvestMaxCostPct?: number;
     harvestTxCostUsdEst?: number;
+    /** Rug detection: arm `token_rug_block` on a catastrophic realized loss. */
+    rugExitLossPct?: number;
+    rugTokenBlockMs?: number;
+    stablecoinMints?: ReadonlySet<string>;
   },
   decision: AgentDecision,
   pool: {
@@ -1483,6 +1544,37 @@ export function executeLive(
       console.error("Live trading enabled but no wallet configured");
       return { executed: false, error: "Live trading enabled but no wallet configured" };
     }
+
+    // Rug detection: a live position closed at a catastrophic realized loss
+    // arms `token_rug_block` for its non-stable legs. Reused by both live EXIT
+    // paths (direct and settlement-attributable). A metadata write failure
+    // fails open (warn) — it must never block the close or the cycle.
+    const armRugBlocks = (realizedPnlUsd: number | null, depositedUsd: number) =>
+      Effect.gen(function* () {
+        const mints = rugBlockMints({
+          realizedPnlUsd,
+          depositedUsd,
+          rugExitLossPct: deps.rugExitLossPct ?? 0.5,
+          stablecoinMints: deps.stablecoinMints,
+          tokenX: pool.tokenX,
+          tokenY: pool.tokenY,
+        });
+        if (mints.length === 0) return;
+        const expiresAt = Date.now() + (deps.rugTokenBlockMs ?? 604_800_000);
+        for (const mint of mints) {
+          yield* db.setMetadata(`token_rug_block:${mint}`, String(expiresAt)).pipe(
+            Effect.catch((err) =>
+              Effect.sync(() =>
+                logger.warn("Failed to record rug-token block", {
+                  pool: decision.poolAddress,
+                  mint,
+                  error: String(err),
+                }),
+              ),
+            ),
+          );
+        }
+      });
 
     // F5 allocation gate already caps the number of simultaneously open
     // positions via evaluatePerPoolAllocation (rejected in the decision
@@ -2126,6 +2218,7 @@ export function executeLive(
             `closePosition ${pos.positionId}`,
             db.closePosition(pos.positionId, realizedPnlUsd),
           );
+          yield* armRugBlocks(realizedPnlUsd, pos.depositedUsd);
           trackedPositions.delete(pos.positionId);
           yield* db
             .savePositionEvent({
@@ -2274,6 +2367,7 @@ export function executeLive(
             `closePosition ${pos.positionId}`,
             db.closePosition(pos.positionId, realizedPnlUsd),
           );
+          yield* armRugBlocks(realizedPnlUsd, pos.depositedUsd);
           if (pos.entrySignalSnapshotId != null && realizedPnlUsd != null) {
             yield* db
               .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
@@ -2706,24 +2800,34 @@ export const program = Effect.gen(function* () {
     if (!executed) executionFailuresThisCycle++;
   };
 
-  // Token-level execution-failure breaker (Robinhood rule 12): a genuine live
-  // EXIT failure on a pool arms a per-leg token block (`token_block:<mint>`).
-  // Every ENTER gate checks both legs against active blocks, so a failed exit
-  // route blocks new deployment into that TOKEN (any pool holding it), not
-  // just into the pool that failed. Reads fail open (null on error) — a
-  // broken read must never freeze entry; a set block fails closed.
+  // Token-level breaker: a genuine live EXIT failure arms `token_block:<mint>`
+  // and a catastrophic realized loss (rug/drain) arms `token_rug_block:<mint>`.
+  // Every ENTER gate checks both legs against active blocks, so a broken exit
+  // route or a drained token blocks new deployment into that TOKEN (any pool
+  // holding it), not just into the pool that failed/rugged. Both keys store an
+  // EXPIRY timestamp (now + window) so each block reason can carry its own
+  // window (failure = tokenFailureBlockMs, rug = rugTokenBlockMs). Reads fail
+  // open (null on error) — a broken read must never freeze entry; a set block
+  // fails closed.
   const findBlockedToken = (pool: {
     readonly tokenX: string;
     readonly tokenY: string;
-  }): Effect.Effect<string | null, never> =>
+  }): Effect.Effect<{ mint: string; kind: "execution-failure" | "rug" } | null, never> =>
     Effect.gen(function* () {
-      const tokenBlockMs = config.tokenFailureBlockMs ?? 3_600_000;
       const now = Date.now();
       for (const mint of [pool.tokenX, pool.tokenY]) {
-        const raw = yield* db
+        const failureRaw = yield* db
           .getMetadata(`token_block:${mint}`)
           .pipe(Effect.catch(() => Effect.succeed(null)));
-        if (raw !== null && now - Number(raw) < tokenBlockMs) return mint;
+        if (failureRaw !== null && now < Number(failureRaw)) {
+          return { mint, kind: "execution-failure" };
+        }
+        const rugRaw = yield* db
+          .getMetadata(`token_rug_block:${mint}`)
+          .pipe(Effect.catch(() => Effect.succeed(null)));
+        if (rugRaw !== null && now < Number(rugRaw)) {
+          return { mint, kind: "rug" };
+        }
       }
       return null;
     });
@@ -3059,6 +3163,17 @@ export const program = Effect.gen(function* () {
       : undefined),
     ...(config.harvestTxCostUsdEst !== undefined
       ? { harvestTxCostUsdEst: config.harvestTxCostUsdEst }
+      : undefined),
+  });
+  const rugDispatchDeps = () => ({
+    ...(config.rugExitLossPct !== undefined
+      ? { rugExitLossPct: config.rugExitLossPct }
+      : undefined),
+    ...(config.rugTokenBlockMs !== undefined
+      ? { rugTokenBlockMs: config.rugTokenBlockMs }
+      : undefined),
+    ...(config.stablecoinMints !== undefined
+      ? { stablecoinMints: config.stablecoinMints }
       : undefined),
   });
 
@@ -4140,13 +4255,15 @@ export const program = Effect.gen(function* () {
         // a shared leg cannot slip idle capital back in this cycle.
         const blockedToken = yield* findBlockedToken(candidate.pool);
         if (blockedToken !== null) {
-          idleRedeployLogger.warn("Idle redeploy blocked by token execution-failure block", {
+          const blockLabel =
+            blockedToken.kind === "rug" ? "rug/drain block" : "execution-failure block";
+          idleRedeployLogger.warn(`Idle redeploy blocked by token ${blockLabel}`, {
             pool: candidate.poolAddress,
-            token: blockedToken,
+            token: blockedToken.mint,
           });
           yield* recordRedeploySkip(
-            `[idle-redeploy] [token-block] token ${blockedToken} under execution-failure block — redeploy ENTER rejected`,
-            `[token-block] token ${blockedToken} under execution-failure block`,
+            `[idle-redeploy] [token-block] token ${blockedToken.mint} under ${blockLabel} — redeploy ENTER rejected`,
+            `[token-block] token ${blockedToken.mint} under ${blockLabel}`,
           );
           continue;
         }
@@ -4213,6 +4330,7 @@ export const program = Effect.gen(function* () {
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
               ...runnerDispatchDeps(decision.poolAddress),
+              ...rugDispatchDeps(),
             },
             decision,
             candidate.pool,
@@ -4319,6 +4437,7 @@ export const program = Effect.gen(function* () {
               unpricedExitWarnedPools,
               ...runnerDispatchDeps(decision.poolAddress),
               ...harvestDispatchDeps(),
+              ...rugDispatchDeps(),
               ...(autonomousExecution ? { autonomous: autonomousExecution } : undefined),
             },
             decision,
@@ -7073,7 +7192,10 @@ export const program = Effect.gen(function* () {
             const blockedToken = yield* findBlockedToken(pool);
             if (blockedToken !== null) {
               cycle.poolsDecided++;
-              const reason = `[token-block] token ${blockedToken} under execution-failure block — ENTER rejected (failed EXIT route on a pool holding this leg)`;
+              const reason =
+                blockedToken.kind === "rug"
+                  ? `[token-block] token ${blockedToken.mint} under rug/drain block — ENTER rejected (prior catastrophic loss on a pool holding this leg)`
+                  : `[token-block] token ${blockedToken.mint} under execution-failure block — ENTER rejected (failed EXIT route on a pool holding this leg)`;
               yield* audit
                 .recordDecision({
                   timestamp: Date.now(),
@@ -7088,10 +7210,12 @@ export const program = Effect.gen(function* () {
                   paperTrading: config.paperTrading,
                 })
                 .pipe(Effect.catch(() => Effect.void));
+              const blockKindLabel =
+                blockedToken.kind === "rug" ? "rug/drain block" : "execution-failure block";
               yield* memory
                 .upsert({
                   category: "warning",
-                  content: `Entry blocked for ${poolAddress}: leg token ${blockedToken} is under an execution-failure block after a failed EXIT.`,
+                  content: `Entry blocked for ${poolAddress}: leg token ${blockedToken.mint} is under a ${blockKindLabel}.`,
                   poolAddress,
                 })
                 .pipe(Effect.catch(() => Effect.void));
@@ -8643,6 +8767,7 @@ export const program = Effect.gen(function* () {
               unpricedExitWarnedPools,
               ...runnerDispatchDeps(decision.poolAddress),
               ...harvestDispatchDeps(),
+              ...rugDispatchDeps(),
               ...(autonomousCandidateId !== undefined
                 ? { candidateId: autonomousCandidateId }
                 : undefined),
@@ -8671,6 +8796,7 @@ export const program = Effect.gen(function* () {
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
               ...runnerDispatchDeps(decision.poolAddress),
+              ...rugDispatchDeps(),
             },
             decision,
             pool,
@@ -8701,6 +8827,7 @@ export const program = Effect.gen(function* () {
               unpricedExitWarnedPools,
               ...runnerDispatchDeps(decision.poolAddress),
               ...harvestDispatchDeps(),
+              ...rugDispatchDeps(),
               ...(autonomousCandidateId !== undefined
                 ? { candidateId: autonomousCandidateId }
                 : undefined),
@@ -8821,14 +8948,15 @@ export const program = Effect.gen(function* () {
             // genuine live EXIT failure means the route OUT of this pool's
             // legs is broken — block new deployment into ANY pool holding
             // either leg for the configured window (see findBlockedToken on
-            // the ENTER gates). Paper skips and risk/capacity outcomes never
-            // reach this branch; only the same classification that arms the
-            // execution_failures pause. A metadata write failure fails open
-            // (warn) — it must never break the cycle.
+            // the ENTER gates). Stores the block EXPIRY so the failure window
+            // and the rug window can differ per key. Paper skips and
+            // risk/capacity outcomes never reach this branch; only the same
+            // classification that arms the execution_failures pause. A
+            // metadata write failure fails open (warn) — never breaks a cycle.
             if (decision.action === "EXIT" && !config.paperTrading) {
-              const blockedAt = Date.now();
+              const expiresAt = Date.now() + (config.tokenFailureBlockMs ?? 3_600_000);
               for (const mint of [pool.tokenX, pool.tokenY]) {
-                yield* db.setMetadata(`token_block:${mint}`, String(blockedAt)).pipe(
+                yield* db.setMetadata(`token_block:${mint}`, String(expiresAt)).pipe(
                   Effect.catch((err) =>
                     Effect.sync(() =>
                       logger.warn("Failed to record token execution-failure block", {
