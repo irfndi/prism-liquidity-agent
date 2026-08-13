@@ -720,11 +720,33 @@ export const AdapterLive = Layer.effect(
     const db = yield* DbService;
 
     const connection = new Connection(config.solanaRpcUrl, "confirmed");
-    const fallbackConnection =
-      config.solanaRpcFallbackUrl.trim() &&
-      config.solanaRpcFallbackUrl.trim() !== config.solanaRpcUrl.trim()
-        ? new Connection(config.solanaRpcFallbackUrl, "confirmed")
-        : null;
+    // Round-robin RPC pool: the primary URL plus any comma-separated extra
+    // endpoints in SOLANA_RPC_FALLBACK_URL. Spreading requests across free /
+    // keyless endpoints keeps a single one from tripping its per-method /
+    // per-IP rate limit, while each endpoint keeps its own circuit breaker so
+    // a 429 / 5xx rotates to the next endpoint instead of failing the call.
+    const rpcPoolUrls = [config.solanaRpcUrl];
+    for (const raw of config.solanaRpcFallbackUrl.split(",")) {
+      const url = raw.trim();
+      if (url && !rpcPoolUrls.includes(url)) rpcPoolUrls.push(url);
+    }
+    interface RpcEndpoint {
+      readonly url: string;
+      readonly conn: Connection;
+      readonly breaker: CircuitBreaker;
+    }
+    const rpcEndpoints: RpcEndpoint[] = [
+      {
+        url: config.solanaRpcUrl,
+        conn: connection,
+        breaker: new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 30_000 }),
+      },
+      ...rpcPoolUrls.slice(1).map((url) => ({
+        url,
+        conn: new Connection(url, "confirmed"),
+        breaker: new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 30_000 }),
+      })),
+    ];
     const wallet = config.walletPrivateKey
       ? yield* Effect.try({
           try: () => Keypair.fromSecretKey(bs58.decode(config.walletPrivateKey)),
@@ -738,22 +760,16 @@ export const AdapterLive = Layer.effect(
       : null;
 
     const DLMM_CACHE_TTL_MS = 5 * 60 * 1000;
-    const primaryRpcCircuitBreaker = new CircuitBreaker({
-      failureThreshold: 3,
-      resetTimeoutMs: 30_000,
-    });
-    const fallbackRpcCircuitBreaker = fallbackConnection
-      ? new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 30_000 })
-      : null;
-    const nextRpcStartAt = new Map<Connection, number>();
+    const rpcIntervalMs = config.rpcMinIntervalMs ?? RPC_MIN_INTERVAL_MS;
+    let nextRpcStartAt = 0;
+    let rpcRoundRobinCursor = 0;
     let nextHeliusRequestAt = 0;
 
-    function paceRpc(conn: Connection): Effect.Effect<void> {
+    function paceRpc(): Effect.Effect<void> {
       return Effect.sync(() => {
         const now = Date.now();
-        const nextStartAt = nextRpcStartAt.get(conn) ?? now;
-        const waitMs = Math.max(0, nextStartAt - now);
-        nextRpcStartAt.set(conn, Math.max(now, nextStartAt) + RPC_MIN_INTERVAL_MS);
+        const waitMs = Math.max(0, nextRpcStartAt - now);
+        nextRpcStartAt = Math.max(now, nextRpcStartAt) + rpcIntervalMs;
         return waitMs;
       }).pipe(Effect.flatMap(Effect.sleep));
     }
@@ -776,18 +792,18 @@ export const AdapterLive = Layer.effect(
       );
     }
 
-    function rpcCall<T>(
-      fn: (conn: Connection) => Promise<T>,
-      primaryConn: Connection = connection,
-    ): Effect.Effect<T, Error> {
-      const run = (conn: Connection, breaker: CircuitBreaker): Effect.Effect<T, Error> =>
-        paceRpc(conn).pipe(
+    function rpcCall<T>(fn: (conn: Connection) => Promise<T>): Effect.Effect<T, Error> {
+      const startIndex = rpcRoundRobinCursor % rpcEndpoints.length;
+      rpcRoundRobinCursor = (rpcRoundRobinCursor + 1) % rpcEndpoints.length;
+
+      const run = (endpoint: RpcEndpoint): Effect.Effect<T, Error> =>
+        paceRpc().pipe(
           Effect.andThen(
-            breaker.execute(
+            endpoint.breaker.execute(
               retryEffectWithBackoff(
                 withRpcTimeout(
                   Effect.tryPromise({
-                    try: () => fn(conn),
+                    try: () => fn(endpoint.conn),
                     catch: (cause) => cause as Error,
                   }),
                 ),
@@ -798,23 +814,25 @@ export const AdapterLive = Layer.effect(
           ),
         );
 
-      return run(primaryConn, primaryRpcCircuitBreaker).pipe(
-        Effect.catch((err) => {
-          if (
-            fallbackConnection &&
-            fallbackRpcCircuitBreaker &&
-            primaryConn === connection &&
-            isRpcNetworkError(err)
-          ) {
-            return Effect.sync(() =>
-              logger.warn("Primary RPC failed, trying fallback RPC", {
-                error: err instanceof Error ? err.message : String(err),
-              }),
-            ).pipe(Effect.andThen(run(fallbackConnection, fallbackRpcCircuitBreaker)));
-          }
-          return Effect.fail(err);
-        }),
-      );
+      const tryEndpoint = (offset: number, attemptsLeft: number): Effect.Effect<T, Error> => {
+        // The pool is non-empty by construction (primary URL is always present).
+        const endpoint = rpcEndpoints[(startIndex + offset) % rpcEndpoints.length]!;
+        return run(endpoint).pipe(
+          Effect.catch((err) => {
+            if (attemptsLeft > 1 && isRpcNetworkError(err)) {
+              return Effect.sync(() =>
+                logger.warn("RPC endpoint failed, rotating to next", {
+                  url: endpoint.url.replace(/api-key=[^&]+/g, "api-key=[REDACTED]"),
+                  error: err instanceof Error ? err.message : String(err),
+                }),
+              ).pipe(Effect.andThen(tryEndpoint(offset + 1, attemptsLeft - 1)));
+            }
+            return Effect.fail(err);
+          }),
+        );
+      };
+
+      return tryEndpoint(0, rpcEndpoints.length);
     }
 
     const dlmmCacheEntries = new Map<
@@ -946,7 +964,9 @@ export const AdapterLive = Layer.effect(
         if (memo && Date.now() - memo.fetchedAt < ACTIVE_BIN_MEMO_TTL_MS) {
           return { binId: memo.binId, price: memo.price, pricePerToken: memo.pricePerToken };
         }
-        const activeBin = yield* Effect.tryPromise(() => dlmm.getActiveBin());
+        const activeBin = yield* paceRpc().pipe(
+          Effect.andThen(Effect.tryPromise(() => dlmm.getActiveBin())),
+        );
         activeBinMemo.set(poolAddress, {
           binId: activeBin.binId,
           price: activeBin.price,
@@ -979,8 +999,10 @@ export const AdapterLive = Layer.effect(
         ) {
           return memo.binsAround;
         }
-        const bins = yield* Effect.tryPromise(() =>
-          dlmm.getBinsAroundActiveBin(halfRange, halfRange),
+        const bins = yield* paceRpc().pipe(
+          Effect.andThen(
+            Effect.tryPromise(() => dlmm.getBinsAroundActiveBin(halfRange, halfRange)),
+          ),
         );
         // The bins fetch carries its OWN active-bin snapshot (the SDK reads
         // the active bin internally): align the memo with it so binId/price

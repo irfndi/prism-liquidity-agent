@@ -134,6 +134,8 @@ export interface AppConfig {
   readonly heliusApiKey: string;
   readonly solanaRpcUrl: string;
   readonly solanaRpcFallbackUrl: string;
+  /** Minimum interval between Solana RPC requests (ms). Defaults to 150. */
+  readonly rpcMinIntervalMs?: number;
   readonly paperTrading: boolean;
   readonly autonomousTokenMode: AutonomousTokenMode;
   readonly settlementAsset: SettlementAsset;
@@ -742,6 +744,10 @@ const loadConfig = Effect.gen(function* () {
     resolveRpcFallbackUrl(solanaRpcFallbackUrlRaw, solanaRpcUrl, isTest),
     heliusApiKey,
   ).url;
+  // Rate-limit pacing for Solana RPC. Keyless public endpoints
+  // (api.mainnet-beta.solana.com) throttle at ~4 req/s per method, so the
+  // default is conservative; paid/high-tier endpoints can lower it.
+  const rpcMinIntervalMs = yield* validatedNumber("RPC_MIN_INTERVAL_MS", 0, 150, 10_000);
   const paperTrading = yield* Config.boolean("PAPER_TRADING").pipe(
     Effect.orElseSucceed(() => true),
   );
@@ -1768,6 +1774,7 @@ const loadConfig = Effect.gen(function* () {
     heliusApiKey,
     solanaRpcUrl,
     solanaRpcFallbackUrl,
+    rpcMinIntervalMs,
     paperTrading,
     autonomousTokenMode,
     settlementAsset,
