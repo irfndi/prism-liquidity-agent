@@ -111,6 +111,10 @@ function makeFakeDlmm(opts: { positionData: FakePositionData }) {
     })),
     removeLiquidity: vi.fn(async (_args: never) => [makeTx()]),
     claimSwapFee: vi.fn(async (_args: never) => [makeTx()]),
+    // Empty (zero-liquidity) positions are reaped via closePositionIfEmpty.
+    // Returning null models the best-effort rent-reclaim no-op; the empty-reap
+    // test overrides it with a tx to exercise the reclaim+send path.
+    closePositionIfEmpty: vi.fn(async () => null),
   };
 }
 
@@ -142,6 +146,7 @@ function makeSolUsdcFakeDlmm(opts: { positionData: FakePositionData }) {
     })),
     removeLiquidity: vi.fn(async (_args: never) => [makeTx()]),
     claimSwapFee: vi.fn(async (_args: never) => [makeTx()]),
+    closePositionIfEmpty: vi.fn(async () => null),
   };
 }
 
@@ -289,6 +294,44 @@ describe("AdapterService.exitPosition accounting", () => {
       expect(reward.mint).toBe(REWARD_MINT.toBase58());
       expect(reward.amountAtomic).toBe(250_000_000);
       expect(reward.amountUsd).toBeCloseTo(100, 6); // 250 × 0.4
+    } finally {
+      restore();
+    }
+  });
+
+  it("reaps an empty (zero-liquidity) position without removeLiquidity and realizes 0", async () => {
+    // totalX == totalY == 0 (net-of-transfer-fee): removeLiquidity would
+    // dereference activeBins[0] and THROW for a zero-liquidity account. The
+    // adapter must detect and reap instead, best-effort reclaiming rent via
+    // closePositionIfEmpty and returning isEmptyReap so the caller settles the
+    // ledger as cleanup (realized 0), not a fabricated loss.
+    dlmmState.current = makeFakeDlmm({
+      positionData: makePositionData({
+        totalXAmount: "0",
+        totalYAmount: "0",
+        totalXAmountExcludeTransferFee: new BN(0),
+        totalYAmountExcludeTransferFee: new BN(0),
+      }),
+    });
+    mockRpcSendPipeline();
+    const restore = mockPrices({}); // no prices → must still reap with USD 0
+    try {
+      const result = await runWithAdapter(
+        Effect.gen(function* () {
+          const adapter = yield* AdapterService;
+          return yield* adapter.exitPosition(POOL_ADDRESS, POSITION_ADDRESS);
+        }),
+      );
+      // The SDK-throwing close path MUST NOT run — no activeBins[0] deref.
+      expect(dlmmState.current.removeLiquidity).not.toHaveBeenCalled();
+      // Rent reclaim attempted best-effort.
+      expect(dlmmState.current.closePositionIfEmpty).toHaveBeenCalled();
+      expect(result.isEmptyReap).toBe(true);
+      expect(result.withdrawnUsd).toBe(0);
+      expect(result.withdrawnXAtomic).toBe("0");
+      expect(result.withdrawnYAtomic).toBe("0");
+      expect(result.pendingFeeUsd).toBe(0);
+      expect(result.sweptRewards).toEqual([]);
     } finally {
       restore();
     }
