@@ -2,6 +2,20 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.19] — 2026-08-14
+
+### Fixed
+
+- **Empty-position reap (crash-loop / phantom-loss fix)** — a live EXIT on a DLMM position that is **empty on-chain** (`totalX == totalY == 0`) used to throw inside the Meteora SDK's `removeLiquidity` (it dereferences `activeBins[0].binId`, which is missing for a zero-liquidity account). Every ~6-min cycle re-tried the doomed exit, escalated OOR cooldowns, and the heuristic PIP mark kept reporting phantom value (e.g. "$23.91 / -$4.99" on a $0 account). Now:
+  - `engine/adapter-service.ts` detects the empty state up front from data already held, best-effort reclaims rent via `closePositionIfEmpty`, and returns an `isEmptyReap` result (`withdrawnUsd: 0`) instead of throwing.
+  - `engine/program.ts` and `cli/close.ts` settle an empty-reap as a **no-op ledger cleanup** — realized PnL `0` (no fabricated loss against the suspect basis, no rug-block armed), not `null`/last-mark.
+  - Reclaiming the account removes it from the wallet's on-chain set, so the next reconcile's chain-delete loop is a no-op and the ghost is not re-discovered as an "external position".
+  - Regression test: `bench/decision-loop-exit.test.ts` "settles the ledger with realized 0 and no rug-block instead of crash-looping".
+
+### Added
+
+- **`HELIUS_DAS_DISABLED` knob** — skip the keyed Helius DAS `getAsset` metadata/decimal/price fallback entirely. An exhausted free-tier Helius key returns HTTP 429 and the exponential backoff stalls scan cycles; the keyless standard RPC still resolves decimals for most SPL mints. Gates the shared `fetchHeliusAsset` choke point so the Helius price and asset paths are suppressed too.
+
 ## [0.2.17] — 2026-08-12
 
 ### Added

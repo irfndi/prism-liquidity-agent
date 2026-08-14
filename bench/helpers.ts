@@ -132,6 +132,7 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
   return {
     walletPrivateKey: "",
     heliusApiKey: "",
+    heliusDasDisabled: false,
     solanaRpcUrl: "",
     solanaRpcFallbackUrl: "",
     paperTrading: true,

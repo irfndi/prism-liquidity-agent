@@ -2205,14 +2205,16 @@ export function executeLive(
           const withdrawnUsd = exitResultData.withdrawnUsd ?? null;
           const pricingUnresolved = withdrawnUsd === null;
           const realizedPnlUsd =
-            pricingUnresolved || attributable.length > 0
-              ? null
-              : computeRealizedPnlUsd(
-                  withdrawnUsd,
-                  pos.cumulativeFeesClaimedUsd,
-                  pos.depositedUsd,
-                  pos.cumulativeRewardsClaimedUsd,
-                );
+            exitResultData.isEmptyReap
+              ? 0
+              : pricingUnresolved || attributable.length > 0
+                ? null
+                : computeRealizedPnlUsd(
+                    withdrawnUsd,
+                    pos.cumulativeFeesClaimedUsd,
+                    pos.depositedUsd,
+                    pos.cumulativeRewardsClaimedUsd,
+                  );
           yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
           yield* persist(
             `closePosition ${pos.positionId}`,
@@ -2259,18 +2261,24 @@ export function executeLive(
             (acc, r) => (r.amountUsd != null ? acc + r.amountUsd : acc),
             0,
           );
+          const isEmptyReap = exitResultData?.isEmptyReap ?? false;
           // 2. Compute on the PRIOR cumulatives only — the exit sweep is
           //    credited AFTER this (step 4) so it is never double-counted.
           //    withdrawn already embeds unswept + recompounded fees; prior
           //    cumulatives cover earlier claims; basis embeds recompounded fees
-          //    → exactly-once across every FEE_DESTINATION mode.
-          const realizedPnlUsd = pricingUnresolved
-            ? null
-            : computeRealizedPnlUsd(
-                withdrawnUsd,
-                pos.cumulativeFeesClaimedUsd,
-                pos.depositedUsd,
-                pos.cumulativeRewardsClaimedUsd + pricedSweptRewardUsd,
+          //    → exactly-once across every FEE_DESTINATION mode. An empty-reap
+          //    (zero-liquidity on-chain account, see AdapterApi.exitPosition)
+          //    realizes 0: the heuristic mark was phantom, so no loss against
+          //    the (suspect) deposited basis and no rug-block is booked.
+          const realizedPnlUsd = isEmptyReap
+            ? 0
+            : pricingUnresolved
+              ? null
+              : computeRealizedPnlUsd(
+                  withdrawnUsd,
+                  pos.cumulativeFeesClaimedUsd,
+                  pos.depositedUsd,
+                  pos.cumulativeRewardsClaimedUsd + pricedSweptRewardUsd,
               );
           // 3. Credit the sweep post-compute — fee-APR / display / event
           //    continuity only, never a realized input.

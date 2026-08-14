@@ -1130,7 +1130,12 @@ export const AdapterLive = Layer.effect(
     }
 
     function fetchHeliusAsset(mint: string): Effect.Effect<HeliusAssetResponse | null, Error> {
-      if (!config.heliusApiKey) return Effect.succeed(null);
+      // HeliusDAS switch: skip the keyed getAsset entirely when the operator
+      // disabled it (an exhausted free-tier key returns 429 and the exponential
+      // backoff stalls cycles). The keyless standard RPC path still resolves
+      // decimals for the vast majority of SPL mints, so this only loses the
+      // last-resort DAS edge.
+      if (!config.heliusApiKey || (config.heliusDasDisabled ?? false)) return Effect.succeed(null);
       return Effect.gen(function* () {
         const [cached, invalidate] = yield* fetchHeliusAssetCached(mint);
         return yield* cached.pipe(Effect.tapError(() => invalidate));
@@ -3174,6 +3179,64 @@ export const AdapterLive = Layer.effect(
           const positionData = position.positionData;
           const lowerBinId = positionData.lowerBinId;
           const upperBinId = positionData.upperBinId;
+
+          // Empty-position reap: a position with zero principal on-chain cannot
+          // be withdrawn via `removeLiquidity` — the SDK dereferences
+          // `activeBins[0].binId` and THROWS for an empty account (the
+          // on-chain observation that made a live EXIT decision fail every
+          // cycle while the heuristic PIP mark kept showing phantom value).
+          // Detect the empty state up front (one `isZero` check on data we
+          // already hold), best-effort reclaim rent via `closePositionIfEmpty`,
+          // and return an `isEmptyReap` result so the caller settles the ledger
+          // as a no-op cleanup instead of a fabricated loss. Reclaiming the
+          // account also removes it from the wallet's on-chain set, so the next
+          // reconcile's chain-delete loop is a no-op and the ghost is not
+          // re-discovered as an "external position".
+          if (
+            positionData.totalXAmountExcludeTransferFee.isZero() &&
+            positionData.totalYAmountExcludeTransferFee.isZero()
+          ) {
+            let txSignature: string | null = null;
+            const closeTx = yield* Effect.tryPromise(() =>
+              dlmm.closePositionIfEmpty({ owner: wallet.publicKey, position }),
+            ).pipe(Effect.catch(() => Effect.succeed(null)));
+            if (closeTx) {
+              try {
+                const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
+                closeTx.feePayer = wallet.publicKey;
+                closeTx.recentBlockhash = blockhash;
+                closeTx.sign(wallet);
+                const signature = yield* rpcCall((conn) =>
+                  conn.sendRawTransaction(closeTx.serialize(), {
+                    skipPreflight: false,
+                    preflightCommitment: "confirmed",
+                  }),
+                );
+                yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
+                txSignature = signature;
+              } catch (err) {
+                // Rent reclaim is best-effort: the ledger reap must proceed
+                // regardless. A failed close leaves the empty account on-chain
+                // (rent-locked but inert); it carries no value, so subsequent
+                // passes keep reaping without booking anything.
+                logger.warn(
+                  `[exit] empty position ${positionPubkey.toBase58()} — ledger reaped, account close failed: ${String(err)}`,
+                );
+              }
+            }
+            yield* invalidateBalanceCaches;
+            return {
+              txSignature: txSignature ?? "empty-reap",
+              withdrawnXAtomic: "0",
+              withdrawnYAtomic: "0",
+              withdrawnUsd: 0,
+              pendingFeeXAtomic: "0",
+              pendingFeeYAtomic: "0",
+              pendingFeeUsd: 0,
+              sweptRewards: [],
+              isEmptyReap: true,
+            };
+          }
 
           // Pre-close snapshot of the exact on-chain amounts about to be
           // withdrawn. The close batch (`shouldClaimAndClose`) sweeps these

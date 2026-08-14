@@ -57,6 +57,29 @@ describe("ConfigService upper-bound clamping", () => {
   });
 });
 
+describe("ConfigService HELIUS_DAS_DISABLED (exhausted-key DAS opt-out)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults to false when unset", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.heliusDasDisabled).toBe(false);
+  });
+
+  it("honours HELIUS_DAS_DISABLED=true", async () => {
+    vi.stubEnv("HELIUS_DAS_DISABLED", "true");
+    const cfg = await loadConfig();
+    expect(cfg.heliusDasDisabled).toBe(true);
+  });
+
+  it("falls back to false for non-boolean values", async () => {
+    vi.stubEnv("HELIUS_DAS_DISABLED", "burned-key");
+    const cfg = await loadConfig();
+    expect(cfg.heliusDasDisabled).toBe(false);
+  });
+});
+
 describe("ConfigService ENTRY_STRATEGY_TYPE", () => {
   afterEach(() => {
     vi.unstubAllEnvs();

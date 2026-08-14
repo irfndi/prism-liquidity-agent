@@ -1025,3 +1025,81 @@ describe("launch-cap boundary", () => {
     expect(capRejection!.executed).toBe(false);
   }, 15_000);
 });
+
+// ─── Empty-position reap (zero-liquidity on-chain account) ──────────────────
+// A position with totalX==totalY==0 (empty on-chain) cannot be withdrawn: the
+// SDK's removeLiquidity dereferences activeBins[0] and throws. exitPosition
+// now reaps it (isEmptyReap:true), and the EXIT path must settle the ledger as
+// a NO-OP (realized 0, no rug-block) rather than book a fabricated -deposited
+// loss against the suspect basis. Regression for the 6GmA/SOL ghost that
+// crash-looped a live EXIT every cycle.
+describe("empty-position reap (zero-liquidity on-chain account)", () => {
+  const POOL = "EmptyReapPool111111111111111111";
+  const FAKE_MINT = "FakeToken111111111111111111111111111111111111";
+
+  it("settles the ledger with realized 0 and no rug-block instead of crash-looping", async () => {
+    const exitSpy = vi.fn(() =>
+      Effect.succeed({
+        txSignature: "empty-reap",
+        withdrawnXAtomic: "0",
+        withdrawnYAtomic: "0",
+        withdrawnUsd: 0,
+        pendingFeeXAtomic: "0",
+        pendingFeeYAtomic: "0",
+        pendingFeeUsd: 0,
+        sweptRewards: [],
+        isEmptyReap: true,
+      }),
+    );
+    const layer = makeTestLayer({
+      adapter: makeAdapter(
+        {
+          [POOL]: makePool({
+            address: POOL,
+            tvlUsd: 60_000,
+            // Non-stable blockable leg: IF the reap realized a fabricated
+            // -deposited loss, the token would be rug-blocked — the assertion
+            // below proves it is not.
+            tokenY: FAKE_MINT,
+            tokenYSymbol: "FAKE",
+          }),
+        },
+        { exitPosition: exitSpy, hasWallet: () => true },
+      ),
+      configOverrides: {
+        watchlistPools: [POOL],
+        paperTrading: false,
+        dustExitUsd: 2_000, // the held $1k position is below the dust floor
+      },
+    });
+
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(
+        makePosition({
+          poolAddress: POOL,
+          positionPubKey: "pos-empty",
+          depositedUsd: 1_000,
+          currentValueUsd: 1_000,
+        }),
+      );
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const closed = yield* db.getClosedPositions();
+      const rugBlock = yield* db
+        .getMetadata(`token_rug_block:${FAKE_MINT}`)
+        .pipe(Effect.catch(() => Effect.succeed(null)));
+      return { closed, rugBlock };
+    });
+    const { closed, rugBlock } = await Effect.runPromise(
+      asOwner<
+        Effect.Effect<{ closed: PositionRecord[]; rugBlock: string | null }, Error, never>
+      >(Effect.provide(test, layer)),
+    );
+
+    expect(exitSpy, "the EXIT for a held position must execute").toHaveBeenCalledTimes(1);
+    const reaped = closed.find((p) => p.positionPubKey === "pos-empty");
+    expect(reaped, `an empty reap must close the ledger row, got ${stringifySafe(closed)}`).toBeDefined();
+    expect(reaped!.realizedPnlUsd, "an empty reap realizes 0, never the -deposited phantom loss").toBe(0);
+    expect(rugBlock, "an empty reap must not rug-block the suspect token").toBeNull();
+  }, 15_000);
+});

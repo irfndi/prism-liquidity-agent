@@ -325,6 +325,16 @@ export interface AdapterApi {
    * Pricing runs under `catch → null` and must NEVER abort or delay the
    * removeLiquidity transactions — closing bleeding liquidity outranks the
    * ledger. Atomic amounts are always returned even when USD pricing fails.
+   *
+   * - `isEmptyReap`: TRUE when the position proved empty on-chain
+   *   (totalX == totalY == 0). The SDK's `removeLiquidity` dereferences
+   *   `activeBins[0]` and throws for a zero-liquidity account, so an empty
+   *   position is reaped instead: the account is best-effort closed for rent
+   *   via `closePositionIfEmpty`, atomics are reported as `0` and USD as `0`,
+   *   and the caller must settle the ledger row WITHOUT booking a fabricated
+   *   loss (the heuristic mark on an empty account is phantom value). Callers
+   *   MUST treat `isEmptyReap` as a no-op ledger cleanup, not a trade exit: no
+   *   realization against the (suspect) deposited basis and no rug-blocking.
    */
   readonly exitPosition: (
     poolAddress: string,
@@ -339,6 +349,7 @@ export interface AdapterApi {
       pendingFeeYAtomic?: string | undefined;
       pendingFeeUsd?: number | null | undefined;
       sweptRewards?: ReadonlyArray<ClaimedReward> | undefined;
+      isEmptyReap?: boolean | undefined;
     },
     Error
   >;

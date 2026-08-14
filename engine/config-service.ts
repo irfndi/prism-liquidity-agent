@@ -142,6 +142,8 @@ export function normalizeHeliusUrl(url: string, heliusApiKey: string): HeliusUrl
 export interface AppConfig {
   readonly walletPrivateKey: string;
   readonly heliusApiKey: string;
+  /** Skip the keyed Helius DAS `getAsset` metadata fallback (burned under an exhausted free-tier key). Defaults to false. */
+  readonly heliusDasDisabled?: boolean;
   readonly solanaRpcUrl: string;
   readonly solanaRpcFallbackUrl: string;
   /** Minimum interval between Solana RPC requests (ms). Defaults to 150. */
@@ -740,6 +742,9 @@ const loadConfig = Effect.gen(function* () {
   );
   const heliusApiKey = yield* Config.string("HELIUS_API_KEY").pipe(
     Effect.orElseSucceed(() => (isTest ? "test-helius-key" : "")),
+  );
+  const heliusDasDisabled = yield* Config.boolean("HELIUS_DAS_DISABLED").pipe(
+    Effect.orElseSucceed(() => false),
   );
   let solanaRpcUrl = yield* Config.string("SOLANA_RPC_URL").pipe(
     Effect.orElseSucceed(() =>
@@ -1809,6 +1814,7 @@ const loadConfig = Effect.gen(function* () {
   const cfg: AppConfig = {
     walletPrivateKey,
     heliusApiKey,
+    heliusDasDisabled,
     solanaRpcUrl,
     solanaRpcFallbackUrl,
     rpcMinIntervalMs,
