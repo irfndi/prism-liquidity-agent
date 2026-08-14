@@ -112,6 +112,18 @@ closeCommand.action(async function (this: Command, positionId: string) {
 
       yield* db.closePosition(pos.positionId, realizedPnlUsd);
 
+      if (result.isEmptyReap && pos.positionPubKey != null) {
+        // Mirror the engine's reaped-empty tombstone (same key + 24h TTL as
+        // engine/program.ts): stop reconcile from re-discovering the lingering
+        // ghost account when rent reclaim failed, avoiding EXIT->reap churn.
+        yield* db
+          .setMetadata(
+            `reaped_empty:${pos.positionPubKey}`,
+            String(Date.now() + 24 * 60 * 60 * 1000),
+          )
+          .pipe(Effect.catch(() => Effect.void));
+      }
+
       // Rug-block the non-stable legs when the close realized a catastrophic
       // loss (mirrors the live executor). Pool mints come from the adapter;
       // a failed pool-state read fails open (no block) like the engine's path.
