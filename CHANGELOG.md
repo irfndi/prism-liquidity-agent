@@ -2,6 +2,12 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.20] — 2026-08-14
+
+### Fixed
+
+- **Reaped-empty ghost re-admission (close-fail edge)** — when an empty-reap's best-effort rent reclaim (`closePositionIfEmpty`) fails, the zero-liquidity account lingers in the wallet's on-chain set and reconcile would keep re-discovering it as an "external position" on every cycle (pointless EXIT → reap churn). Now an empty-reap writes a durable 24h tombstone (`reaped_empty:<pubkey>` in the metadata table), and `reconcilePositions`' external-discovery skips any pubkey under an active tombstone. Bounded, so a later legitimate refill of the same account is re-admitted once the tombstone expires. Regression tests cover both the active-tombstone skip and the expired-tombstone re-admission.
+
 ## [0.2.19] — 2026-08-14
 
 ### Fixed

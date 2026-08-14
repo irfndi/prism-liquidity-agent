@@ -310,6 +310,93 @@ describe("reconcilePositions — integration", () => {
     );
   });
 
+  it("does not re-admit a reaped-empty position while its tombstone is active", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        // The reaped-empty ghost remains in the wallet's on-chain set (rent
+        // reclaim failed), so getAllWalletPositions still returns it.
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () =>
+            Effect.succeed([
+              {
+                poolAddress: "external-pool",
+                positionPubKey: "ghost-pubkey",
+                lowerBinId: 4980,
+                upperBinId: 5020,
+              },
+            ]),
+        });
+        // An ACTIVE tombstone (set by the empty-reap path in executeLive).
+        yield* db.setMetadata(
+          "reaped_empty:ghost-pubkey",
+          String(Date.now() + 24 * 60 * 60 * 1000),
+        );
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+
+        yield* reconcilePositions(adapter, db, memory, trackedPositions, ["external-pool"]);
+
+        // The ghost must NOT be re-added to tracking or the ledger.
+        expect(trackedPositions.has("ghost-pubkey")).toBe(false);
+        const all = yield* db.getAllPositions();
+        expect(all).toHaveLength(0);
+      }),
+      dbLayer,
+    );
+  });
+
+  it("re-admits a reaped-empty position once its tombstone has expired", () => {
+    const dbLayer = DbLive(":memory:");
+
+    run(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const adapter = makeMockAdapter({
+          getAllWalletPositions: () =>
+            Effect.succeed([
+              {
+                poolAddress: "external-pool",
+                positionPubKey: "refilled-pubkey",
+                lowerBinId: 4980,
+                upperBinId: 5020,
+              },
+            ]),
+          getPoolState: () =>
+            Effect.succeed({
+              address: "external-pool",
+              tokenX: "SOL",
+              tokenY: "USDC",
+              tokenXSymbol: "SOL",
+              tokenYSymbol: "USDC",
+              tvlUsd: 100_000,
+              volume24hUsd: 30_000,
+              fees24hUsd: 300,
+              apr: 60,
+              activeBinId: 5000,
+              binStep: 10,
+              currentPrice: 150,
+              timestamp: Date.now(),
+            }),
+        });
+        // EXPIRED tombstone: a later legitimate refill must be re-admitted.
+        yield* db.setMetadata(
+          "reaped_empty:refilled-pubkey",
+          String(Date.now() - 1),
+        );
+        const memory = makeMockMemory();
+        const trackedPositions = new Map<string, PositionRecord>();
+
+        yield* reconcilePositions(adapter, db, memory, trackedPositions, ["external-pool"]);
+
+        expect(trackedPositions.has("refilled-pubkey")).toBe(true);
+      }),
+      dbLayer,
+    );
+  });
+
   it("skips discovery for pools not in watchlist", () => {
     const dbLayer = DbLive(":memory:");
 

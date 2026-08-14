@@ -287,6 +287,13 @@ const PREVIOUS_SNAPSHOT_WINDOW_MS = 26 * 60 * 60 * 1000;
 
 /** How often pool_snapshots pruning runs (rows older than the retention window are deleted). */
 const SNAPSHOT_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// Empty-reap tombstone TTL. When rent reclaim fails, a reaped-empty position
+// account lingers on-chain and reconcile would otherwise re-discover it as an
+// "external position" every cycle (pointless EXIT -> reap churn). The pubkey
+// stays tombstoned away from re-admission for this long; bounded so a later
+// legitimate refill is eventually re-admitted. Shared by reconcilePositions
+// (guard) and executeLive (write).
+const EMPTY_REAP_REDISCOVERY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 /** Mint → USD price map returned by the adapter; a named owner contract so
  * empty-lookup fallbacks don't widen a known value into an open dictionary. */
@@ -913,6 +920,20 @@ export function reconcilePositions(
         continue;
       }
       if (watchedPoolSet.has(onChainPos.poolAddress)) {
+        // Never re-admit an account the engine already reaped as empty-on-chain
+        // (rent reclaim may have failed, leaving the ghost account in the
+        // wallet's on-chain set). Without this guard, reconcile would re-discover
+        // the phantom row every cycle -> pointless EXIT -> reap churn. Bounded so
+        // a later legitimate refill of the same account is eventually re-admitted.
+        const reapTombstone = yield* db
+          .getMetadata(`reaped_empty:${onChainPos.positionPubKey}`)
+          .pipe(Effect.catch(() => Effect.succeed(null)));
+        if (reapTombstone !== null && Date.now() < Number(reapTombstone)) {
+          console.warn(
+            `Reconciling: skipping re-admission of reaped-empty position ${onChainPos.positionPubKey} on ${onChainPos.poolAddress} (ghost on-chain account)`,
+          );
+          continue;
+        }
         console.warn(
           `Reconciling: discovered external position ${onChainPos.positionPubKey} in ${onChainPos.poolAddress} — adding to tracking`,
         );
@@ -2220,6 +2241,19 @@ export function executeLive(
             `closePosition ${pos.positionId}`,
             db.closePosition(pos.positionId, realizedPnlUsd),
           );
+          if (exitResultData?.isEmptyReap === true && pos.positionPubKey != null) {
+            // Tombstone the reaped-empty pubkey so reconcile never re-discovers
+            // the ghost account (rent reclaim may have failed, leaving it
+            // on-chain) and re-adds a phantom row every cycle. Bounded so a
+            // later legit refill is eventually re-admitted.
+            yield* persist(
+              `tombstone empty ${pos.positionPubKey}`,
+              db.setMetadata(
+                `reaped_empty:${pos.positionPubKey}`,
+                String(Date.now() + EMPTY_REAP_REDISCOVERY_COOLDOWN_MS),
+              ),
+            );
+          }
           yield* armRugBlocks(realizedPnlUsd, pos.depositedUsd);
           trackedPositions.delete(pos.positionId);
           yield* db
@@ -2375,6 +2409,19 @@ export function executeLive(
             `closePosition ${pos.positionId}`,
             db.closePosition(pos.positionId, realizedPnlUsd),
           );
+          if (exitResultData?.isEmptyReap === true && pos.positionPubKey != null) {
+            // Tombstone the reaped-empty pubkey so reconcile never re-discovers
+            // the ghost account (rent reclaim may have failed, leaving it
+            // on-chain) and re-adds a phantom row every cycle. Bounded so a
+            // later legit refill is eventually re-admitted.
+            yield* persist(
+              `tombstone empty ${pos.positionPubKey}`,
+              db.setMetadata(
+                `reaped_empty:${pos.positionPubKey}`,
+                String(Date.now() + EMPTY_REAP_REDISCOVERY_COOLDOWN_MS),
+              ),
+            );
+          }
           yield* armRugBlocks(realizedPnlUsd, pos.depositedUsd);
           if (pos.entrySignalSnapshotId != null && realizedPnlUsd != null) {
             yield* db
