@@ -5,6 +5,7 @@ import {
   ConfigLive,
   resolveRpcFallbackUrl,
   PUBLIC_SOLANA_RPC_URL,
+  PUBLICNODE_SOLANA_RPC_URL,
 } from "../engine/config-service.js";
 
 async function loadConfig() {
@@ -329,8 +330,8 @@ describe("resolveRpcFallbackUrl (public RPC fallback default)", () => {
     );
   });
 
-  it("does not self-fallback when the primary is already the public RPC", () => {
-    expect(resolveRpcFallbackUrl("", PUBLIC_SOLANA_RPC_URL, false)).toBe("");
+  it("routes a keyless public primary to PublicNode (no self-fallback)", () => {
+    expect(resolveRpcFallbackUrl("", PUBLIC_SOLANA_RPC_URL, false)).toBe(PUBLICNODE_SOLANA_RPC_URL);
   });
 
   it("keeps the fallback empty in test mode (tests never touch the network)", () => {

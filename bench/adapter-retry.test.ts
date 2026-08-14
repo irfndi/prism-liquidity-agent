@@ -460,12 +460,22 @@ describe("isRpcNetworkError", () => {
     );
   });
 
-  it("returns false for HTTP 400", () => {
-    expect(isRpcNetworkError({ code: 400 })).toBe(false);
+  it("returns true for HTTP 400 (endpoint rejects the request — rotate)", () => {
+    expect(isRpcNetworkError({ code: 400 })).toBe(true);
   });
 
-  it("returns false for HTTP 404", () => {
-    expect(isRpcNetworkError({ code: 404 })).toBe(false);
+  it("returns true for HTTP 404", () => {
+    expect(isRpcNetworkError({ code: 404 })).toBe(true);
+  });
+
+  it("returns true for a DRPC free-plan 'chain is not available' 400 message", () => {
+    expect(
+      isRpcNetworkError(
+        new Error(
+          '400 Bad Request: {"jsonrpc":"2.0","error":{"message":"chain is not available on free plan, please upgrade to paid plan","code":35}}',
+        ),
+      ),
+    ).toBe(true);
   });
 
   it("returns false for null", () => {

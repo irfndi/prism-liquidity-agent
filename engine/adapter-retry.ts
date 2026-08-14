@@ -176,10 +176,14 @@ export function isRpcNetworkError<T>(err: T): boolean {
     return true;
   }
 
-  // HTTP-level: 429 (rate limit) and 5xx (server errors)
+  // HTTP-level: 429 (rate limit), any other 4xx client error (a provider
+  // rejecting the request — e.g. DRPC's "chain is not available on free plan"
+  // 400), and 5xx server errors. All of these mean the ENDPOINT cannot serve
+  // the request, so the pool should rotate to the next endpoint rather than
+  // fail the call on the first dead endpoint.
   if (
     hasCode(err) &&
-    (err.code === 429 || err.code === -32005 || (err.code >= 500 && err.code < 600))
+    (err.code === 429 || err.code === -32005 || (err.code >= 400 && err.code < 600))
   ) {
     return true;
   }
@@ -189,7 +193,9 @@ export function isRpcNetworkError<T>(err: T): boolean {
       return true;
     }
     if (msg.includes("rpc request timeout")) return true;
-    if (/HTTP\s+5\d{2}/.test(err.message)) return true;
+    // web3.js surfaces a non-OK fetch as either "400 Bad Request: ..." (bare
+    // status) or "HTTP 502 Bad Gateway"; both are endpoint-level failures.
+    if (/(?:^|\s)(?:HTTP\s+)?[45]\d{2}\b/.test(err.message)) return true;
   }
 
   // TypeError from fetch when the network request itself fails (no connection)

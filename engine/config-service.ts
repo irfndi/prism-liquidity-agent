@@ -42,10 +42,18 @@ export function maskHeliusUrl(u: string): string {
 export const PUBLIC_SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com";
 
 /**
+ * Additional keyless public Solana RPC used to spread keyless load. PublicNode
+ * is keyless and verified reachable (2026-08); Ankr's endpoint now requires an
+ * API key, so it is deliberately NOT included.
+ */
+export const PUBLICNODE_SOLANA_RPC_URL = "https://solana-rpc.publicnode.com";
+
+/**
  * Resolve the RPC fallback URL. When the operator left `SOLANA_RPC_FALLBACK_URL`
- * empty, default it to the keyless public Solana RPC so a (shared) primary key's
- * 429s/5xx actually fail over instead of erroring. Pure and unit-testable.
- * - empty configured fallback + primary already the public RPC → "" (no self-fallback)
+ * empty, default it to keyless public Solana RPC so a (shared) primary key's
+ * 429s/5xx actually fail over instead of erroring — and so a keyless primary
+ * still has a second keyless endpoint to round-robin against. Pure + testable.
+ * - empty configured fallback + primary already the public RPC → PublicNode (no self-fallback)
  * - empty configured fallback + test mode → "" (tests never touch the network)
  * - empty configured fallback + production + non-public primary → public RPC
  * - non-empty configured fallback → used as-is
@@ -57,7 +65,9 @@ export function resolveRpcFallbackUrl(
 ): string {
   if (configuredFallback.trim()) return configuredFallback;
   if (isTest) return "";
-  return primaryUrl.trim() === PUBLIC_SOLANA_RPC_URL ? "" : PUBLIC_SOLANA_RPC_URL;
+  return primaryUrl.trim() === PUBLIC_SOLANA_RPC_URL
+    ? PUBLICNODE_SOLANA_RPC_URL
+    : PUBLIC_SOLANA_RPC_URL;
 }
 
 function isHeliusHost(url: string): boolean {
