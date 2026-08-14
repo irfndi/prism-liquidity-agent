@@ -6,6 +6,7 @@ import {
   type FetchLike,
   type TokenRiskConfigLike,
 } from "../engine/token-risk-service.js";
+import { clearGoPlusCache } from "../engine/goplus-token-security.js";
 
 // All tests inject fetchImpl — NO live network. The Jupiter Tokens V2 contract
 // was live-verified in the research wave (notepad R1); these lock the parse +
@@ -39,6 +40,7 @@ function headerRecord(init: RequestInit | undefined): object {
 
 beforeEach(() => {
   clearTokenRiskCache();
+  clearGoPlusCache();
 });
 
 describe("token-risk-service", () => {
@@ -275,5 +277,66 @@ describe("token-risk-service", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("(12) a GoPlus hard-risk merges into the result even when Jupiter omits the mint", async () => {
+    const jupiterFetch: FetchLike = async () => new Response("[]", { status: 200 });
+    const goPlusFetch: FetchLike = async (input) => {
+      const url = String(input as unknown);
+      if (url.includes("/api/v1/token")) {
+        return new Response(JSON.stringify({ result: { access_token: "tok", expires_in: 3600 } }), {
+          status: 200,
+        });
+      }
+      return new Response(
+        JSON.stringify({ result: { [USDC_MINT]: { closable: { status: "1" } } } }),
+        { status: 200 },
+      );
+    };
+    const config: TokenRiskConfigLike = {
+      jupiterTokenRiskEnabled: true,
+      goPlusApiKey: "app-key",
+      goPlusApiSecret: "app-secret",
+      goPlusTokenRiskEnabled: true,
+    };
+    const result = await consultTokenRisks([USDC_MINT], config, {
+      fetchImpl: jupiterFetch,
+      goPlusFetchImpl: goPlusFetch,
+    });
+    expect(result.get(USDC_MINT)?.goPlusHardRisk).toBe(
+      "closable program (assets can be eliminated)",
+    );
+  });
+
+  it("(13) GoPlus consults even when Jupiter is disabled (zero Jupiter fetches)", async () => {
+    let jupiterCalls = 0;
+    const jupiterFetch: FetchLike = async () => {
+      jupiterCalls += 1;
+      return new Response("[]", { status: 200 });
+    };
+    const goPlusFetch: FetchLike = async (input) => {
+      const url = String(input as unknown);
+      if (url.includes("/api/v1/token")) {
+        return new Response(JSON.stringify({ result: { access_token: "tok", expires_in: 3600 } }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({ result: { [USDC_MINT]: { none_transferable: "1" } } }), {
+        status: 200,
+      });
+    };
+    const config: TokenRiskConfigLike = {
+      jupiterTokenRiskEnabled: false,
+      goPlusApiKey: "app-key",
+      goPlusApiSecret: "app-secret",
+      goPlusTokenRiskEnabled: true,
+    };
+    const result = await consultTokenRisks([USDC_MINT], config, {
+      fetchImpl: jupiterFetch,
+      goPlusFetchImpl: goPlusFetch,
+    });
+    expect(jupiterCalls).toBe(0);
+    expect(result.get(USDC_MINT)?.goPlusHardRisk).toBe("non-transferable (honeypot risk)");
+    expect(result.get(USDC_MINT)?.isSus).toBe(false);
   });
 });

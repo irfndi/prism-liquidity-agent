@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import fs from "fs";
 import { createLogger } from "./logger.js";
+import { setupCustomSQLite } from "./db.js";
 import type { AppConfig } from "./config-service.js";
 
 /**
@@ -432,6 +433,11 @@ export function applyDbConfigOverrides(
 export function readDbConfigOverrides(dbPath: string): ReadonlyMap<string, string> {
   if (!dbPath || dbPath === ":memory:" || !fs.existsSync(dbPath)) return new Map<string, string>();
   try {
+    // Pin the extension-capable SQLite BEFORE the first open: this is often the
+    // FIRST Database the engine touches (config load precedes createDatabase),
+    // and once Bun's bundled SQLite auto-loads the process-wide one-shot is
+    // spent — sqlite-vec would then be permanently disabled.
+    setupCustomSQLite();
     const db = new Database(dbPath);
     try {
       const rows = db

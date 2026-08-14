@@ -1,5 +1,6 @@
 import { createLogger } from "./logger.js";
 import { jupiterFetch } from "./jupiter-client.js";
+import { consultGoPlusTokenSecurity, goPlusHardRiskReasons } from "./goplus-token-security.js";
 
 /**
  * Token-risk overlay (Wave 18): smart freeze-authority / scam detection that
@@ -51,13 +52,20 @@ export interface TokenRiskSignal {
   readonly freezeAuthorityPresent: boolean;
   /** Top-level mint-authority address present ⇒ authority ENABLED (risky). */
   readonly mintAuthorityPresent: boolean;
+  /** GoPlus contract-level hard-risk reason (Wave 20). null = clean/unknown.
+   *  A non-null value is a hard-reject reason independent of the Jupiter flags. */
+  readonly goPlusHardRisk: string | null;
 }
 
-/** The two optional fields the overlay consults; the engine's `AppConfig`
+/** The optional fields the overlay consults; the engine's `AppConfig`
  *  satisfies this structurally without coupling the module to the full config. */
 export interface TokenRiskConfigLike {
   readonly jupiterTokenRiskEnabled?: boolean;
   readonly jupiterTokenRiskCacheTtlMin?: number;
+  readonly goPlusApiKey?: string;
+  readonly goPlusApiSecret?: string;
+  readonly goPlusTokenRiskEnabled?: boolean;
+  readonly goPlusTokenRiskCacheTtlMin?: number;
 }
 
 // ─── Response parsing (live-verified semantics) ──────────────────────────────
@@ -130,6 +138,7 @@ export function parseTokenRiskEntry<T>(raw: T): ParsedTokenRiskEntry | null {
       isSus: isNonNullObject(audit) && (audit as RawAudit).isSus === true,
       freezeAuthorityPresent: readMint(entry.freezeAuthority) !== null,
       mintAuthorityPresent: readMint(entry.mintAuthority) !== null,
+      goPlusHardRisk: null,
     },
   };
 }
@@ -212,6 +221,7 @@ const UNKNOWN_TOKEN_RISK_SIGNAL: TokenRiskSignal = {
   isSus: false,
   freezeAuthorityPresent: false,
   mintAuthorityPresent: false,
+  goPlusHardRisk: null,
 };
 
 // Mint-global cache: a token's safety signals are not pool-specific, so the key
@@ -252,70 +262,101 @@ export function clearTokenRiskCache(): void {
 export async function consultTokenRisks(
   mints: ReadonlyArray<string>,
   config: TokenRiskConfigLike,
-  options: { readonly fetchImpl?: FetchLike } = {},
+  options: { readonly fetchImpl?: FetchLike; readonly goPlusFetchImpl?: FetchLike } = {},
 ): Promise<Map<string, TokenRiskSignal>> {
-  if (config.jupiterTokenRiskEnabled === false) return new Map();
+  const jupiterEnabled = config.jupiterTokenRiskEnabled !== false;
   const ttlMs = (config.jupiterTokenRiskCacheTtlMin ?? DEFAULT_CACHE_TTL_MIN) * 60_000;
   const now = Date.now();
 
   const result = new Map<string, TokenRiskSignal>();
-  const toFetch: string[] = [];
-  for (const mint of mints) {
-    const entry = cache.get(mint);
-    if (entry === undefined) {
-      toFetch.push(mint);
-    } else if (now - entry.fetchedAt >= ttlMs) {
-      // Expired: re-fetch. A stale REAL signal is served as resilience in case
-      // the refresh fails; a stale negative entry stays omitted.
-      if (entry.signal !== UNKNOWN_TOKEN_RISK_SIGNAL) result.set(mint, entry.signal);
-      toFetch.push(mint);
-    } else if (entry.signal !== UNKNOWN_TOKEN_RISK_SIGNAL) {
-      // Fresh real signal: serve from cache, no network call. A fresh negative
-      // entry is cached only to stop re-query spam — it is intentionally NOT
-      // served, so a revoked verification stops exempting the pool.
-      result.set(mint, entry.signal);
+  if (jupiterEnabled) {
+    const toFetch: string[] = [];
+    for (const mint of mints) {
+      const entry = cache.get(mint);
+      if (entry === undefined) {
+        toFetch.push(mint);
+      } else if (now - entry.fetchedAt >= ttlMs) {
+        // Expired: re-fetch. A stale REAL signal is served as resilience in case
+        // the refresh fails; a stale negative entry stays omitted.
+        if (entry.signal !== UNKNOWN_TOKEN_RISK_SIGNAL) result.set(mint, entry.signal);
+        toFetch.push(mint);
+      } else if (entry.signal !== UNKNOWN_TOKEN_RISK_SIGNAL) {
+        // Fresh real signal: serve from cache, no network call. A fresh negative
+        // entry is cached only to stop re-query spam — it is intentionally NOT
+        // served, so a revoked verification stops exempting the pool.
+        result.set(mint, entry.signal);
+      }
+    }
+
+    if (toFetch.length > 0) {
+      // Build the request options without ever assigning `undefined` to an
+      // optional field (exactOptionalPropertyTypes): an empty JUPITER_API_KEY is
+      // omitted, never sent as an empty header.
+      const request: FetchTokenRisksOptions = {};
+      const apiKey = process.env.JUPITER_API_KEY?.trim();
+      if (apiKey) request.apiKey = apiKey;
+      if (options.fetchImpl !== undefined) request.fetchImpl = options.fetchImpl;
+      try {
+        const fetched = await fetchTokenRisks(toFetch, request);
+        const fetchedAt = Date.now();
+        for (const mint of toFetch) {
+          const signal = fetched.get(mint);
+          if (signal !== undefined) {
+            setCacheEntry(mint, { signal, fetchedAt });
+            result.set(mint, signal);
+          } else {
+            // Omitted by a SUCCESSFUL refresh: NEGATIVE cache with a fresh
+            // timestamp (stops per-cycle re-query) and NOT served — revoked
+            // verification must not keep exempting the pool.
+            setCacheEntry(mint, { signal: UNKNOWN_TOKEN_RISK_SIGNAL, fetchedAt });
+            result.delete(mint);
+          }
+        }
+      } catch (err) {
+        // Fail-open: expired real signals keep their stale value in result;
+        // never-fetched mints stay absent. One warn per failing consult.
+        logger.warn("Jupiter token risk fetch failed — serving cached signals (fail-open)", {
+          mints: toFetch.length,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Prune TTL-expired entries so the cache cannot grow without bound across
+    // scan cycles. Runs after the fetch/resolve pass so a stale signal served
+    // for this consult (fail-open) is not removed mid-flight.
+    for (const [mint, entry] of cache) {
+      if (now - entry.fetchedAt >= ttlMs) cache.delete(mint);
     }
   }
 
-  if (toFetch.length > 0) {
-    // Build the request options without ever assigning `undefined` to an
-    // optional field (exactOptionalPropertyTypes): an empty JUPITER_API_KEY is
-    // omitted, never sent as an empty header.
-    const request: FetchTokenRisksOptions = {};
-    const apiKey = process.env.JUPITER_API_KEY?.trim();
-    if (apiKey) request.apiKey = apiKey;
-    if (options.fetchImpl !== undefined) request.fetchImpl = options.fetchImpl;
-    try {
-      const fetched = await fetchTokenRisks(toFetch, request);
-      const fetchedAt = Date.now();
-      for (const mint of toFetch) {
-        const signal = fetched.get(mint);
-        if (signal !== undefined) {
-          setCacheEntry(mint, { signal, fetchedAt });
-          result.set(mint, signal);
-        } else {
-          // Omitted by a SUCCESSFUL refresh: NEGATIVE cache with a fresh
-          // timestamp (stops per-cycle re-query) and NOT served — revoked
-          // verification must not keep exempting the pool.
-          setCacheEntry(mint, { signal: UNKNOWN_TOKEN_RISK_SIGNAL, fetchedAt });
-          result.delete(mint);
-        }
-      }
-    } catch (err) {
-      // Fail-open: expired real signals keep their stale value in result;
-      // never-fetched mints stay absent. One warn per failing consult.
-      logger.warn("Jupiter token risk fetch failed — serving cached signals (fail-open)", {
-        mints: toFetch.length,
-        error: err instanceof Error ? err.message : String(err),
+  // Merge GoPlus contract-level hard-risk (Wave 20). GoPlus runs independently
+  // of the Jupiter switch/result — a mint Jupiter omits but GoPlus hard-flags
+  // still gets a signal, so a contract-level rug signal can never be masked by
+  // a Jupiter miss. Unknown/failed GoPlus consults return empty (fail-open).
+  const goPlusOptions =
+    options.goPlusFetchImpl === undefined ? {} : { fetchImpl: options.goPlusFetchImpl };
+  const goPlusSignals = await consultGoPlusTokenSecurity(mints, config, goPlusOptions);
+  for (const [mint, goPlusSignal] of goPlusSignals) {
+    const reasons = goPlusHardRiskReasons(goPlusSignal);
+    if (reasons.length === 0) continue;
+    const goPlusHardRisk = reasons.join("; ");
+    const existing = result.get(mint);
+    if (existing !== undefined) {
+      // Copy, never mutate: the Jupiter cache holds the original object and a
+      // GoPlus overlay must not leak back into that cache entry.
+      result.set(mint, { ...existing, goPlusHardRisk });
+    } else {
+      result.set(mint, {
+        isVerified: null,
+        organicScore: null,
+        organicScoreLabel: null,
+        isSus: false,
+        freezeAuthorityPresent: false,
+        mintAuthorityPresent: false,
+        goPlusHardRisk,
       });
     }
-  }
-
-  // Prune TTL-expired entries so the cache cannot grow without bound across
-  // scan cycles. Runs after the fetch/resolve pass so a stale signal served
-  // for this consult (fail-open) is not removed mid-flight.
-  for (const [mint, entry] of cache) {
-    if (now - entry.fetchedAt >= ttlMs) cache.delete(mint);
   }
 
   return result;

@@ -5709,7 +5709,7 @@ export const program = Effect.gen(function* () {
           //   (d) otherwise the leg is unknown → smart-screening or strict reject.
           // Trusted mints were already exempted above, so this only sees untrusted
           // legs. Every branch logs its provenance; signals are never fabricated.
-          type LegStatus = "datapiVerified" | "sus" | "jupiterVerified" | "unknown";
+          type LegStatus = "datapiVerified" | "sus" | "goPlusRisk" | "jupiterVerified" | "unknown";
           const riskByMint: ReadonlyMap<string, TokenRiskSignal> =
             config.jupiterTokenRiskEnabled !== false
               ? yield* Effect.promise(() => consultTokenRisks([pool.tokenX, pool.tokenY], config))
@@ -5721,11 +5721,12 @@ export const program = Effect.gen(function* () {
             mint: string,
           ): LegStatus | null => {
             if (!flagged) return null;
-            // isSus is checked BEFORE any exemption: a Jupiter-flagged token is
-            // rejected even if the Data API marks it verified — one spoofed
-            // positive must not cancel the only hard reject.
+            // isSus and GoPlus hard-risk are checked BEFORE any exemption: a
+            // flagged token is rejected even if the Data API marks it verified —
+            // one spoofed positive must not cancel the only hard rejects.
             const signal = riskByMint.get(mint);
             if (signal?.isSus === true) return "sus";
+            if (signal?.goPlusHardRisk != null) return "goPlusRisk";
             if (datapiVerified) return "datapiVerified";
             if (signal?.isVerified === true) return "jupiterVerified";
             return "unknown";
@@ -5755,6 +5756,13 @@ export const program = Effect.gen(function* () {
           if (susLegs.length > 0) {
             return yield* rejectForSafety(
               `Jupiter token audit flags ${describe(susLegs)} as suspicious (isSus) with freeze authority enabled`,
+            );
+          }
+
+          const goPlusLegs = flaggedLegs.filter((leg) => leg.status === "goPlusRisk");
+          if (goPlusLegs.length > 0) {
+            return yield* rejectForSafety(
+              `GoPlus token security flags ${describe(goPlusLegs)} as a contract-level risk with freeze authority enabled`,
             );
           }
 
@@ -7748,6 +7756,9 @@ export const program = Effect.gen(function* () {
                           if (signal.isSus) {
                             return `${symbol} (${mint}): Jupiter audit flags suspicious (isSus)`;
                           }
+                          if (signal.goPlusHardRisk != null) {
+                            return `${symbol} (${mint}): GoPlus ${signal.goPlusHardRisk}`;
+                          }
                           if (signal.organicScoreLabel === "low") {
                             return `${symbol} (${mint}): Jupiter organic score is low`;
                           }
@@ -7854,7 +7865,9 @@ export const program = Effect.gen(function* () {
                       const legSignal = redeployLegRisks.get(legMint);
                       if (
                         legSignal !== undefined &&
-                        (legSignal.isSus || legSignal.organicScoreLabel === "low")
+                        (legSignal.isSus ||
+                          legSignal.goPlusHardRisk != null ||
+                          legSignal.organicScoreLabel === "low")
                       ) {
                         redeployTokenRiskClean = false;
                         break;
@@ -7906,6 +7919,9 @@ export const program = Effect.gen(function* () {
                     if (signal === undefined) return null;
                     if (signal.isSus) {
                       return `${symbol} (${mint}): Jupiter audit flags suspicious (isSus)`;
+                    }
+                    if (signal.goPlusHardRisk != null) {
+                      return `${symbol} (${mint}): GoPlus ${signal.goPlusHardRisk}`;
                     }
                     if (signal.organicScoreLabel === "low") {
                       return `${symbol} (${mint}): Jupiter organic score is low`;

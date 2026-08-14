@@ -369,6 +369,20 @@ export interface AppConfig {
   /** Minutes a Jupiter token-risk signal is cached before refresh. Default 30. */
   readonly jupiterTokenRiskCacheTtlMin?: number;
 
+  // ─── GoPlus token security (Wave 20) ─────────────────────────────────────────
+  // Optional so standalone test fixtures keep compiling; loadConfig always sets
+  // all three. GoPlus corroborates the Jupiter overlay with contract-level
+  // Solana token-security detection (honeypot/close/mutable-balance). Fail-open
+  // like Jupiter: unknown/disabled/failed signals never block entry.
+  /** GoPlus app_key. Empty = GoPlus disabled (the overlay skips its consult). */
+  readonly goPlusApiKey?: string;
+  /** GoPlus app_secret, used to SHA1-sign the access-token request. */
+  readonly goPlusApiSecret?: string;
+  /** Master switch for the GoPlus token-security consult. Default true. */
+  readonly goPlusTokenRiskEnabled?: boolean;
+  /** Minutes a GoPlus token-security signal is cached before refresh. Default 30. */
+  readonly goPlusTokenRiskCacheTtlMin?: number;
+
   /** Master switch for the GeckoTerminal secondary pool-stats source (tried when
    *  the Meteora Data API is down). Default true; absent = gecko active. The
    *  test fixture pins false (like jupiterTokenRiskEnabled) so the existing
@@ -931,6 +945,19 @@ const loadConfig = Effect.gen(function* () {
   );
   const jupiterTokenRiskCacheTtlMin = yield* validatedNumber(
     "JUPITER_TOKEN_RISK_CACHE_TTL_MIN",
+    1,
+    30,
+  );
+
+  const goPlusApiKey = yield* Config.string("GOPLUS_API_KEY").pipe(Effect.orElseSucceed(() => ""));
+  const goPlusApiSecret = yield* Config.string("GOPLUS_API_SECRET").pipe(
+    Effect.orElseSucceed(() => ""),
+  );
+  const goPlusTokenRiskEnabled = yield* Config.boolean("GOPLUS_TOKEN_RISK_ENABLED").pipe(
+    Effect.orElseSucceed(() => true),
+  );
+  const goPlusTokenRiskCacheTtlMin = yield* validatedNumber(
+    "GOPLUS_TOKEN_RISK_CACHE_TTL_MIN",
     1,
     30,
   );
@@ -1902,6 +1929,10 @@ const loadConfig = Effect.gen(function* () {
     dustExitUsd,
     jupiterTokenRiskEnabled,
     jupiterTokenRiskCacheTtlMin,
+    goPlusApiKey,
+    goPlusApiSecret,
+    goPlusTokenRiskEnabled,
+    goPlusTokenRiskCacheTtlMin,
     geckoTerminalEnabled,
     dexscreenerEnabled,
 

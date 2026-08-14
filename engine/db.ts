@@ -25,7 +25,7 @@ export function vecRemediationHint(platform: string = process.platform): string 
   return "Install an extension-capable SQLite (compiled with loadable-extension support) and restart; verify PRISM_VEC0_PATH and run `prism doctor`.";
 }
 
-function setupCustomSQLite() {
+export function setupCustomSQLite() {
   if (customSQLiteConfigured) return;
 
   if (process.platform === "darwin") {

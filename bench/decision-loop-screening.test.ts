@@ -699,9 +699,16 @@ describe("token-risk overlay + freeze screening (Wave 18)", () => {
   }, 15_000);
 
   it("(11) a disabled overlay performs zero fetches and keeps the strict reject", async () => {
-    let calls = 0;
-    const restore = mockFetch(async () => {
-      calls += 1;
+    let overlayCalls = 0;
+    const restore = mockFetch(async (url: string | URL | Request) => {
+      const target = String(url as unknown);
+      // Count only token-risk overlay requests (Jupiter/GoPlus). Unrelated
+      // engine telemetry (e.g. the Prism Cloud agent-status report, which
+      // fires when a local credentials.json exists) is not part of this
+      // assertion's contract.
+      if (target.includes("api.jup.ag") || target.includes("api.gopluslabs.io")) {
+        overlayCalls += 1;
+      }
       return new Response("[]", { status: 200 });
     });
     try {
@@ -716,7 +723,7 @@ describe("token-risk overlay + freeze screening (Wave 18)", () => {
       expect(forPool).toHaveLength(1);
       expect(forPool[0]!.riskResult.approved).toBe(false);
       expect(forPool[0]!.reasoning.toLowerCase()).toContain("freeze authority");
-      expect(calls).toBe(0);
+      expect(overlayCalls).toBe(0);
     } finally {
       restore();
     }
