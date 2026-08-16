@@ -6824,6 +6824,30 @@ export const program = Effect.gen(function* () {
               consecutiveOorExits: 0,
             };
           }
+
+          // Same-pool re-entry churn throttle (MIN_REENTRY_COOLDOWN_MS): arm a
+          // cooldown on EVERY exit, not just OOR/low-yield (which returned
+          // above, possibly longer). All other exit types — trailing-stop,
+          // rotation, take-profit, yield-regression, W15, fallen-angel —
+          // armed NOTHING before, so a hot pool could exit and re-admit the
+          // same pool minutes later. Live forensics (2026-08): 5rCf1 re-entered
+          // the same pool every ~10 min — 221 round-trips / 2 days, −$163 of
+          // pure swap/spread cost drag at ~50% win rate. A 2h throttle blocks
+          // ~90% of that churn class. 0 disables.
+          const minReentryMs = config.minReentryCooldownMs ?? 0;
+          if (minReentryMs > 0) {
+            const cooldownUntil = Date.now() + minReentryMs;
+            const hours = (minReentryMs / 3_600_000).toFixed(1);
+            console.info(
+              `[cooldown] Pool ${poolAddress} on churn-throttle cooldown for ${hours}h — re-entry buffer after exit`,
+            );
+            return {
+              poolAddress,
+              cooldownUntil,
+              reason: "Re-entry cooldown after exit (churn throttle)",
+              consecutiveOorExits: existingOorCount,
+            };
+          }
           return null;
         });
 

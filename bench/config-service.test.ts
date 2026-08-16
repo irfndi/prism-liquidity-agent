@@ -20,6 +20,35 @@ async function loadConfig() {
   );
 }
 
+describe("ConfigService MIN_REENTRY_COOLDOWN_MS (same-pool re-entry churn throttle)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults to 2h (7_200_000) when unset", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.minReentryCooldownMs).toBe(7_200_000);
+  });
+
+  it("carries a custom positive value", async () => {
+    vi.stubEnv("MIN_REENTRY_COOLDOWN_MS", "3600000");
+    const cfg = await loadConfig();
+    expect(cfg.minReentryCooldownMs).toBe(3_600_000);
+  });
+
+  it("allows 0 to disable the throttle", async () => {
+    vi.stubEnv("MIN_REENTRY_COOLDOWN_MS", "0");
+    const cfg = await loadConfig();
+    expect(cfg.minReentryCooldownMs).toBe(0);
+  });
+
+  it("clamps a negative value to the 0 minimum", async () => {
+    vi.stubEnv("MIN_REENTRY_COOLDOWN_MS", "-1");
+    const cfg = await loadConfig();
+    expect(cfg.minReentryCooldownMs).toBe(0);
+  });
+});
+
 describe("ConfigService upper-bound clamping", () => {
   afterEach(() => {
     vi.unstubAllEnvs();

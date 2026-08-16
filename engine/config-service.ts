@@ -491,6 +491,19 @@ export interface AppConfig {
   readonly oorCooldownMs: number;
   readonly repeatOorCooldownMs: number;
   readonly maxOorCooldownExits: number;
+  /**
+   * Same-pool re-entry churn throttle (MIN_REENTRY_COOLDOWN_MS). Arms a pool
+   * cooldown on EVERY exit (not just OOR/low-yield), so an exited pool is not
+   * re-admitted for at least this long regardless of exit type. Fixes the
+   * pathological churn class found in live forensics (2026-08): the pre-existing
+   * cooldown armed only for OOR/low-yield exits, so trailing-stop/rotation/TP/
+   * yield-regression exits armed NOTHING and a hot pool could exit and re-admit
+   * the same pool every ~10 min (5rCf1: 221 round-trips / 2 days, −$163 of pure
+   * swap/spread cost drag at ~50% win rate). A 2h throttle blocks ~90% of the
+   * observed re-entries. OOR/low-yield exits keep their own (possibly longer)
+   * cooldown above it. 0 disables. Default 7 200 000 (2 h).
+   */
+  readonly minReentryCooldownMs?: number;
 
   // ─── Fee-density-driven low-yield exit cooldowns ────────────────────────────
   /**
@@ -1135,6 +1148,13 @@ const loadConfig = Effect.gen(function* () {
     12 * 60 * 60 * 1000,
   );
   const maxOorCooldownExits = yield* validatedNumber("MAX_OOR_COOLDOWN_EXITS", 1, 3);
+
+  // Same-pool re-entry churn throttle — arms a cooldown on every exit.
+  const minReentryCooldownMs = yield* validatedNumber(
+    "MIN_REENTRY_COOLDOWN_MS",
+    0,
+    2 * 60 * 60 * 1000,
+  );
 
   // ─── Fee-density-driven low-yield exit cooldowns ────────────────────────────
   const feeDensityCooldowns = yield* Config.boolean("FEE_DENSITY_COOLDOWNS").pipe(
@@ -2005,6 +2025,7 @@ const loadConfig = Effect.gen(function* () {
     oorCooldownMs,
     repeatOorCooldownMs,
     maxOorCooldownExits,
+    minReentryCooldownMs,
     feeDensityCooldowns,
     feeDensityCooldownMinMs,
     feeDensityHighPct,
