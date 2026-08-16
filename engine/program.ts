@@ -63,6 +63,7 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import type { PositionRecord } from "./db-service.js";
 import { applyCompoundToCostBasis, computeHodlValueUsd, computeRealizedPnlUsd } from "./pnl.js";
+import { rollingRealizedPnlHalted as rollingRealizedPnlHaltSignal } from "./pnl-halt.js";
 import { buildRewardClaimMetadata, summarizeRewardClaim } from "./rewards.js";
 import { errorReporter } from "./error-reporter.js";
 import {
@@ -4245,6 +4246,7 @@ export const program = Effect.gen(function* () {
           recentPnlUsd,
           poolAddress: candidate.poolAddress,
           activeBinId: candidate.pool.activeBinId,
+          rollingRealizedPnlHalted: cycle.rollingRealizedPnlHalted,
           // Issue #201 review (P1): launch entries stay subject to the
           // portfolio-wide MAX_OPEN_POSITIONS — the launch lane adds its own
           // launchMaxOpenPositions sub-cap on top; it must not let the total
@@ -4876,6 +4878,32 @@ export const program = Effect.gen(function* () {
   const runScanCycle = (): Effect.Effect<void, never, EntryPrepService> =>
     Effect.gen(function* () {
       coreDataFailuresThisCycle = 0;
+
+      // Rolling realized-PnL loss halt (REALIZED_PNL_HALT_*): computed ONCE per
+      // cycle from the closed-position ledger so a single cycle shares one
+      // consistent verdict across every ENTER lane (the risk gate consumes it
+      // for normal/market/runner/launch/idle-redeploy/fallen-angel/proposals).
+      // The anti-bleed breaker for churn lanes that burn swap/spread cost + IL
+      // faster than fee capture. Recomputed next cycle → auto-lifts when the
+      // strategy nets back above the threshold. Fail-open on a DB read failure
+      // (leaves the flag false — no unexpected freeze) with a warning.
+      let cycleRealizedPnlHalted = false;
+      if (config.realizedPnLHaltEnabled ?? false) {
+        const closed = yield* db
+          .getClosedPositions()
+          .pipe(Effect.catch(() => Effect.succeed([])));
+        cycleRealizedPnlHalted = rollingRealizedPnlHaltSignal(
+          closed.map((p) => p.realizedPnlUsd),
+          config.realizedPnLHaltWindow ?? 100,
+          config.realizedPnLHaltThresholdUsd ?? -20,
+        );
+        if (cycleRealizedPnlHalted) {
+          console.warn(
+            `[rolling-pnl-halt] trailing realized PnL across last ${config.realizedPnLHaltWindow ?? 100} closes < $${(config.realizedPnLHaltThresholdUsd ?? -20).toFixed(0)} — pausing new ENTERs; EXIT/REBALANCE remain free`,
+          );
+        }
+      }
+
       const cycle: AgentCycle = {
         cycleId: randomUUID(),
         startedAt: Date.now(),
@@ -4886,6 +4914,7 @@ export const program = Effect.gen(function* () {
         decisions: [],
         totalGasCostSol: 0,
         paperTrading: config.paperTrading,
+        rollingRealizedPnlHalted: cycleRealizedPnlHalted,
       };
 
       console.info("Scan cycle started", { cycleId: cycle.cycleId });
@@ -8589,6 +8618,7 @@ export const program = Effect.gen(function* () {
           poolAddress,
           activeBinId: pool.activeBinId,
           positionId: decision.positionId,
+          rollingRealizedPnlHalted: cycle.rollingRealizedPnlHalted,
         };
         // Issue #148: the wallet safety pause is informational in shadow mode
         // (no-send by design) — it must never block a decision there.

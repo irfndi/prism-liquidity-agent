@@ -412,6 +412,14 @@ export interface AgentCycle {
   decisions: AgentDecision[];
   totalGasCostSol: number;
   paperTrading: boolean;
+  /**
+   * Per-cycle rolling realized-PnL halt verdict (REALIZED_PNL_HALT_*). Computed
+   * once at cycle start from the DB and threaded into the risk context so a
+   * single cycle shares one consistent verdict across every ENTER lane
+   * (bounded churn, market, runner, launch, idle-redeploy). Recomputed next
+   * cycle — auto-lifts on recovery.
+   */
+  rollingRealizedPnlHalted: boolean;
 }
 
 // ─── Backtest ─────────────────────────────────────────────────────────────────

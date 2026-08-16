@@ -46,6 +46,31 @@ export function evaluateRisk(
     };
   }
 
+  // 2a. Rolling realized-PnL loss halt — REALIZED_PNL_HALT_*. When the engine's
+  // trailing realized PnL over the last N closed positions nets below the
+  // configured threshold (computed once per cycle; REALIZED_PNL_HALT_ENABLED),
+  // stop DEPLOYING NEW CAPITAL everywhere: every new-capital ENTER across every
+  // lane (normal, market, runner, launch, idle-redeploy, fallen-angel, agent
+  // proposals) funnels through risk.evaluate, so this single gate covers them
+  // all. It is the anti-bleed breaker for high-frequency churn lanes that burn
+  // swap/spread cost + IL faster than fee capture (live: 50% win rate at -2.7%
+  // ROI on a pool churned hundreds of times/day). EXIT already returned at gate
+  // 1, and REBALANCE (position management, no new exposure) is left free, so
+  // capital protection and position reshaping are never blocked. The boolean is
+  // recomputed each cycle from the DB and auto-lifts when the strategy recovers.
+  // Fail-open: absent/false (env disabled or legacy backtest callers) never
+  // halts.
+  if (
+    decision.action === "ENTER" &&
+    ctx.rollingRealizedPnlHalted === true
+  ) {
+    return {
+      approved: false,
+      reason:
+        "[rolling-pnl-halt] trailing realized PnL below REALIZED_PNL_HALT_THRESHOLD_USD — pausing new entries until the strategy nets back up",
+    };
+  }
+
   // 3. Concurrent positions cap is enforced upstream by evaluatePerPoolAllocation.
 
   // 3a. Per-pool position cap (Wave 10): DLMM natively supports multiple

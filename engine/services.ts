@@ -798,6 +798,17 @@ export interface RiskContext {
    * by the normal cap. Normal decisions omit it (config default applies).
    */
   readonly maxOpenPositions?: number | undefined;
+  /**
+   * Per-cycle rolling realized-PnL halt (REALIZED_PNL_HALT_*). When true (and
+   * the halt is enabled in config), every new-capital ENTER across ALL lanes
+   * (normal, market, runner, launch, idle-redeploy, fallen-angel, proposals) is
+   * rejected at the execution gate — the engine stops deploying capital while
+   * its trailing realized PnL nets below the halt threshold. EXIT and REBALANCE
+   * are never blocked (capital protection / position management stay free).
+   * Recomputed each cycle from the DB; auto-lifts on recovery. Optional so
+   * legacy/backtest callers fail open to NOT halted.
+   */
+  readonly rollingRealizedPnlHalted?: boolean | undefined;
 }
 
 export interface RiskResult {

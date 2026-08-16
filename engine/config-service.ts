@@ -634,6 +634,22 @@ export interface AppConfig {
    *  per-pool allocation cap the risk tail re-applies. Default 2000. */
   readonly idleRedeployMaxSizeUsd: number;
 
+  /** Rolling realized-PnL loss halt master switch. When true, the engine
+   *  computes the trailing realized PnL over the last `realizedPnLHaltWindow`
+   *  closed positions once per cycle; if it nets below
+   *  `realizedPnLHaltThresholdUsd`, every new-capital ENTER across ALL lanes is
+   *  rejected at the risk gate until the strategy nets back up (EXIT/REBALANCE
+   *  stay free). The anti-bleed breaker for high-frequency churn lanes that
+   *  burn swap/spread cost + IL faster than fee capture. Default false (opt-in,
+   *  paper-first). */
+  readonly realizedPnLHaltEnabled?: boolean;
+  /** Number of most-recent closed positions whose realized PnL is summed for
+   *  the rolling halt window. Default 100, min 1. */
+  readonly realizedPnLHaltWindow?: number;
+  /** USD threshold below which the rolling realized-PnL sum trips the halt.
+   *  Default -20. */
+  readonly realizedPnLHaltThresholdUsd?: number;
+
   /** Master switch for periodic LM farm reward claims (Wave 8). Default true;
    *  scoring stays farm-aware regardless — this only gates on-chain claims. */
   readonly farmRewardsEnabled: boolean;
@@ -1097,6 +1113,13 @@ const loadConfig = Effect.gen(function* () {
   );
   const idleRedeployThresholdUsd = yield* validatedNumber("IDLE_REDEPLOY_THRESHOLD_USD", 0, 500);
   const idleRedeployMaxSizeUsd = yield* validatedNumber("IDLE_REDEPLOY_MAX_SIZE_USD", 0, 2000);
+
+  // ─── Rolling realized-PnL loss halt ─────────────────────────────────────────
+  const realizedPnLHaltEnabled = yield* Config.boolean("REALIZED_PNL_HALT_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const realizedPnLHaltWindow = yield* validatedNumber("REALIZED_PNL_HALT_WINDOW", 1, 100);
+  const realizedPnLHaltThresholdUsd = yield* validatedNumber("REALIZED_PNL_HALT_THRESHOLD_USD", -Number.MAX_SAFE_INTEGER, -20);
 
   // ─── F6: Paper-trading validation period ────────────────────────────────────
   const paperValidationMinDays = yield* validatedNumber("PAPER_VALIDATION_MIN_DAYS", 0, 7);
@@ -2031,6 +2054,9 @@ const loadConfig = Effect.gen(function* () {
     idleRedeployEnabled,
     idleRedeployThresholdUsd,
     idleRedeployMaxSizeUsd,
+    realizedPnLHaltEnabled,
+    realizedPnLHaltWindow,
+    realizedPnLHaltThresholdUsd,
     farmRewardsEnabled,
     limitOrdersEnabled,
     limitOrderMode,
