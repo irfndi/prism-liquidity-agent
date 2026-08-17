@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   gateAndRankMarketPools,
   marketLegPasses,
+  mintAuthorityRejectReason,
   type MarketGateConfig,
 } from "../engine/market-gate.js";
 import type { DiscoveredPool } from "../engine/services.js";
@@ -40,6 +41,7 @@ const config: MarketGateConfig = {
   minVolumeTurnover: 0.02,
   maxVolumeTurnover: 50,
   minHolders: 1000,
+  minPoolAgeHours: 0,
   minBinStep: 2,
   maxBinStep: 200,
   stablecoinMints: new Set([USDC, USDT]),
@@ -95,7 +97,9 @@ describe("gateAndRankMarketPools", () => {
     });
     const result = gateAndRankMarketPools([bad], config);
     expect(result.ranked).toHaveLength(0);
-    expect(result.rejected[0]!.reason).toContain("token safety");
+    // Now caught by the verification-blind hard holder floor (fires earlier
+    // than the token-safety pre-filter) — still a valid rug/IL rejection.
+    expect(result.rejected[0]!.reason).toMatch(/holders|token safety/);
   });
 
   it("rejects a freeze-enabled unverified leg", () => {
@@ -179,5 +183,117 @@ describe("gateAndRankMarketPools", () => {
         config.minHolders,
       ),
     ).toBe(false);
+  });
+});
+
+describe("rug-prevention: pool age floor", () => {
+  it("rejects a brand-new pool younger than the age floor", () => {
+    const fresh = makePool({ address: "fresh", createdAtMs: Date.now() - 2 * 3_600_000 });
+    const result = gateAndRankMarketPools([fresh], { ...config, minPoolAgeHours: 24 });
+    expect(result.ranked).toHaveLength(0);
+    expect(result.rejected[0]!.reason).toContain("2.0h < 24h");
+  });
+
+  it("admits a pool older than the age floor", () => {
+    const mature = makePool({ address: "mature", createdAtMs: Date.now() - 48 * 3_600_000 });
+    const result = gateAndRankMarketPools([mature], { ...config, minPoolAgeHours: 24 });
+    expect(result.ranked.map((r) => r.pool.address)).toEqual(["mature"]);
+  });
+
+  it("fails open on an unknown age (createdAtMs absent)", () => {
+    const unknown = makePool({ address: "unknown" });
+    const result = gateAndRankMarketPools([unknown], { ...config, minPoolAgeHours: 24 });
+    expect(result.ranked.map((r) => r.pool.address)).toEqual(["unknown"]);
+  });
+});
+
+describe("rug-prevention: hard holder floor (verification-blind)", () => {
+  it("rejects a VERIFIED token with dust holders — the single-cluster rug setup", () => {
+    const thin = makePool({
+      address: "thin",
+      tokenX: "VerifiedThin1111111111111111111111111111111111",
+      tokenXSymbol: "VTHIN",
+      tokenXVerified: true, // verification does not exempt a dust holder base
+      tokenXFreezeDisabled: true,
+      tokenXHolders: 50,
+    });
+    const result = gateAndRankMarketPools([thin], config);
+    expect(result.ranked).toHaveLength(0);
+    expect(result.rejected[0]!.reason).toContain("below 1000 holders");
+  });
+
+  it("passes a stablecoin/SOL leg even with a low holder count", () => {
+    const stable = makePool({ address: "stable", tokenXHolders: 10, tokenYHolders: 10 });
+    const result = gateAndRankMarketPools([stable], config);
+    expect(result.ranked.map((r) => r.pool.address)).toEqual(["stable"]);
+  });
+
+  it("fails open on an unknown holder count for the hard floor", () => {
+    const bare: DiscoveredPool = {
+      address: "bare",
+      tvlUsd: 1_000_000,
+      volume24hUsd: 500_000,
+      fees24hUsd: 1_500,
+      apr: 0.55,
+      binStep: 20,
+      tokenX: "BareTokenX1111111111111111111111111111111111",
+      tokenY: "BareTokenY1111111111111111111111111111111111",
+    };
+    const result = gateAndRankMarketPools([bare], config);
+    expect(result.ranked.map((r) => r.pool.address)).toEqual(["bare"]);
+  });
+});
+
+describe("rug-prevention: mint-authority-renounced gate", () => {
+  const STABLES = new Set([USDC, USDT]);
+  const MEME = "SomeMemecoin11111111111111111111111111111111";
+
+  it("rejects a non-stable leg with a live (un-renounced) mint authority", () => {
+    const reason = mintAuthorityRejectReason(
+      [{ symbol: "MEME", mint: MEME, mintAuthority: "dev-pubkey" }],
+      STABLES,
+      true,
+    );
+    expect(reason).not.toBeNull();
+    expect(reason).toContain("live mint authority");
+  });
+
+  it("passes a non-stable leg whose mint authority is renounced (null/undefined)", () => {
+    expect(
+      mintAuthorityRejectReason(
+        [{ symbol: "MEME", mint: MEME, mintAuthority: null }],
+        STABLES,
+        true,
+      ),
+    ).toBeNull();
+    expect(
+      mintAuthorityRejectReason(
+        [{ symbol: "MEME", mint: MEME, mintAuthority: undefined }],
+        STABLES,
+        true,
+      ),
+    ).toBeNull();
+  });
+
+  it("exempts stablecoin and SOL legs even with a mint authority", () => {
+    const reason = mintAuthorityRejectReason(
+      [
+        { symbol: "SOL", mint: SOL, mintAuthority: "sol-authority" },
+        { symbol: "USDC", mint: USDC, mintAuthority: "usdc-authority" },
+      ],
+      STABLES,
+      true,
+    );
+    expect(reason).toBeNull();
+  });
+
+  it("disables when requireRenounced is false", () => {
+    expect(
+      mintAuthorityRejectReason(
+        [{ symbol: "MEME", mint: MEME, mintAuthority: "x" }],
+        STABLES,
+        false,
+      ),
+    ).toBeNull();
   });
 });

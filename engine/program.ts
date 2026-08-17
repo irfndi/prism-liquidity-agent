@@ -52,7 +52,11 @@ import {
 } from "./market-runner.js";
 import { runnerNetAprPct, runnerNetDailyPctAfterCosts } from "./fee-capture.js";
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
-import { gateAndRankMarketPools, type MarketPoolRank } from "./market-gate.js";
+import {
+  gateAndRankMarketPools,
+  mintAuthorityRejectReason,
+  type MarketPoolRank,
+} from "./market-gate.js";
 import { gateAndRankLaunchPools, summarizeLaunchRejections } from "./launch-gate.js";
 import type { WashEvidence } from "./wash-forensics.js";
 import { transitionCandidate } from "./candidate-policy.js";
@@ -4708,6 +4712,7 @@ export const program = Effect.gen(function* () {
         minTvlUsd: config.marketScanMinTvlUsd ?? 250_000,
         minFeeApr: config.marketScanMinFeeApr ?? 25,
         minHolders: config.marketScanMinHolders ?? 1000,
+        minPoolAgeHours: config.marketScanMinPoolAgeHours ?? 24,
         minBinStep: config.marketScanMinBinStep ?? 2,
         maxBinStep: config.marketScanMaxBinStep ?? 200,
         stablecoinMints: config.stablecoinMints ?? new Set<string>(),
@@ -5718,6 +5723,23 @@ export const program = Effect.gen(function* () {
               .join(", ")} charges a transfer fee (ALLOW_TRANSFER_FEE_TOKENS not enabled)`,
           );
         }
+      }
+
+      // ─── Hot-lane rug precondition — mint authority (market-scan/runner) ──
+      // A non-trusted leg with a live mint authority (not renounced) lets the
+      // dev mint+dump. The strongest rug gate and it needs on-chain mint
+      // authorities (authX/authY), which are not in the Data API list payload,
+      // so it runs here per pool. Trusted legs (stables + SOL) are exempt.
+      if (marketScanPools.has(poolAddress)) {
+        const mintReject = mintAuthorityRejectReason(
+          [
+            { symbol: pool.tokenXSymbol, mint: pool.tokenX, mintAuthority: authX?.mintAuthority },
+            { symbol: pool.tokenYSymbol, mint: pool.tokenY, mintAuthority: authY?.mintAuthority },
+          ],
+          config.stablecoinMints ?? new Set<string>(),
+          config.marketScanRequireRenouncedMint,
+        );
+        if (mintReject !== null) return yield* rejectForSafety(mintReject);
       }
 
       // Deterministic local rejection precedes any network lookup: a pool

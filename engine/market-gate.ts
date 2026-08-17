@@ -20,6 +20,12 @@ export interface MarketGateConfig {
   readonly maxVolumeTurnover: number;
   /** Minimum holders for a non-stable, non-SOL leg (rug/IL pre-filter). */
   readonly minHolders: number;
+  /**
+   * Rug-factory age floor (hours): reject a pool younger than this.
+   * 0 disables. Unknown age (`createdAtMs` absent) fails open — the per-pool
+   * screen still gates ENTER.
+   */
+  readonly minPoolAgeHours: number;
   readonly minBinStep: number;
   readonly maxBinStep: number;
   readonly stablecoinMints: ReadonlySet<string>;
@@ -54,6 +60,33 @@ export interface MarketGateResult {
 
 export function isStableOrSol(mint: string, stablecoinMints: ReadonlySet<string>): boolean {
   return mint === SOL_MINT || stablecoinMints.has(mint);
+}
+
+/**
+ * Hot-lane mint-authority rug gate. Returns a rejection reason (or null) when
+ * a non-stable, non-SOL leg still has a live mint authority (not renounced) —
+ * the dev can mint+dump. The strongest rug gate; it needs on-chain mint
+ * authorities, which are absent from the Data API list payload, so the per-pool
+ * screen passes them in. Trusted legs (stables + SOL) are exempt.
+ * `requireRenounced === false` disables the gate (OpenClaw/test parity).
+ */
+export function mintAuthorityRejectReason(
+  legs: ReadonlyArray<{
+    readonly symbol: string;
+    readonly mint: string;
+    readonly mintAuthority: string | null | undefined;
+  }>,
+  stablecoinMints: ReadonlySet<string>,
+  requireRenounced: boolean | undefined,
+): string | null {
+  if (requireRenounced === false) return null;
+  const mintedLegs = legs.filter(
+    (leg) => leg.mintAuthority != null && !isStableOrSol(leg.mint, stablecoinMints),
+  );
+  if (mintedLegs.length === 0) return null;
+  return `leg(s) ${mintedLegs
+    .map((leg) => leg.symbol)
+    .join(", ")} have a live mint authority (not renounced) — dev can mint+dump`;
 }
 
 /**
@@ -120,6 +153,38 @@ export function gateAndRankMarketPools(
 
     if (!Number.isFinite(pool.tvlUsd) || pool.tvlUsd < config.minTvlUsd) {
       reject(`tvl ${pool.tvlUsd} < ${config.minTvlUsd}`);
+      continue;
+    }
+    // Rug-factory age floor: brand-new pools are the ruin tail. Fail-open on
+    // unknown age (missing metadata never blocks a legit pool), reject when
+    // the age is known and too young.
+    if (config.minPoolAgeHours > 0 && pool.createdAtMs != null && pool.createdAtMs > 0) {
+      const ageHours = (Date.now() - pool.createdAtMs) / 3_600_000;
+      if (ageHours < config.minPoolAgeHours) {
+        reject(`pool age ${ageHours.toFixed(1)}h < ${config.minPoolAgeHours}h (rug-factory)`);
+        continue;
+      }
+    }
+    // Holder floor, HARD and independent of verification: a non-stable, non-SOL
+    // leg with dust holders is a single-cluster rug setup even when Meteora
+    // "verified" it. Fail-open on unknown holder count (the per-pool screen
+    // still gates ENTER on live data).
+    const thinLegs = [pool.tokenX, pool.tokenY]
+      .map((mint) => ({
+        mint,
+        holders: mint === pool.tokenX ? pool.tokenXHolders : pool.tokenYHolders,
+        symbol: mint === pool.tokenX ? pool.tokenXSymbol : pool.tokenYSymbol,
+      }))
+      .filter((leg) => !isStableOrSol(leg.mint, config.stablecoinMints))
+      .filter(
+        (leg) => config.minHolders > 0 && leg.holders != null && leg.holders < config.minHolders,
+      );
+    if (thinLegs.length > 0) {
+      reject(
+        `leg ${thinLegs
+          .map((l) => `${l.symbol ?? l.mint} (${l.holders} holders)`)
+          .join(", ")} below ${config.minHolders} holders`,
+      );
       continue;
     }
     if (!Number.isFinite(pool.fees24hUsd) || pool.fees24hUsd <= 0) {

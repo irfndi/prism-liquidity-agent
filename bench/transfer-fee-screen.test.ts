@@ -45,6 +45,7 @@ const config: MarketGateConfig = {
   minVolumeTurnover: 0.02,
   maxVolumeTurnover: 50,
   minHolders: 1000,
+  minPoolAgeHours: 0,
   minBinStep: 2,
   maxBinStep: 200,
   stablecoinMints: new Set([USDC]),

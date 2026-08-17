@@ -257,6 +257,15 @@ export interface AppConfig {
   /** Minimum holders for a non-stable, non-SOL leg to pass the market gate
    *  (rug/IL-safety pre-filter; the per-pool token-risk overlay still runs). */
   readonly marketScanMinHolders?: number;
+  /** Hot-lane hard gate: reject a market candidate when a non-stable, non-SOL
+   *  leg still has a live mint authority (not renounced) — dev can mint+dump.
+   *  Advisory in the standalone token-risk overlay; here it is a hard reject
+   *  for the market/runner lane. Default true. */
+  readonly marketScanRequireRenouncedMint?: boolean;
+  /** Hot-lane hard gate: reject a market candidate younger than this many
+   *  hours (rug-factory filter — brand-new pools are the ruin tail; the runner
+   *  lane should trade proven-age pools only). 0 disables. Default 24. */
+  readonly marketScanMinPoolAgeHours?: number;
   /** Skip pools with bin step below this (ultra-fine bins churn). Default 2. */
   readonly marketScanMinBinStep?: number;
   /** Skip pools with bin step above this. Default 200. */
@@ -1668,6 +1677,15 @@ const loadConfig = Effect.gen(function* () {
   const marketScanTopK = yield* validatedNumber("MARKET_SCAN_TOP_K", 1, 30, 200);
   const marketScanMaxPools = yield* validatedNumber("MARKET_SCAN_MAX_POOLS", 1, 60, 500);
   const marketScanMinHolders = yield* validatedNumber("MARKET_SCAN_MIN_HOLDERS", 0, 1000);
+  const marketScanRequireRenouncedMint = yield* Config.boolean(
+    "MARKET_SCAN_REQUIRE_RENOUNCED_MINT",
+  ).pipe(Effect.orElseSucceed(() => true));
+  const marketScanMinPoolAgeHours = yield* validatedNumber(
+    "MARKET_SCAN_MIN_POOL_AGE_HOURS",
+    0,
+    24,
+    24 * 30,
+  );
   const marketScanMinBinStep = yield* validatedNumber("MARKET_SCAN_MIN_BIN_STEP", 0, 2, 100);
   const marketScanMaxBinStep = yield* validatedNumber("MARKET_SCAN_MAX_BIN_STEP", 1, 200, 2000);
   const launchScanEnabled = yield* Config.boolean("LAUNCH_SCAN_ENABLED").pipe(
@@ -1947,6 +1965,8 @@ const loadConfig = Effect.gen(function* () {
     marketScanTopK,
     marketScanMaxPools,
     marketScanMinHolders,
+    marketScanRequireRenouncedMint,
+    marketScanMinPoolAgeHours,
     marketScanMinBinStep,
     marketScanMaxBinStep,
     launchScanEnabled,
