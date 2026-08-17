@@ -2,6 +2,20 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.24] — 2026-08-17
+
+### Added
+
+- **`[entry-net-gate]` ENTER-side feasibility for the runner/hot lane**: a
+  candidate must clear its net-daily yield floor **after** churn/IL/swap cost
+  **before** entering — otherwise the engine spends an entry+exit round-trip to
+  discover the pool doesn't pay for its own churn (the deep-but-slow pool thrash
+  that drove 1,394 futile ENTER attempts/18h). It mirrors the `[net-bleed]` EXIT
+  gate, reuses the same tested model, only counts measured (datapi) fees, and
+  fails open (does not block) when fees are unmeasured or the runner lane is
+  off — normal/legacy entries are unaffected.
+
+
 ## [0.2.23] — 2026-08-17
 
 ### Added
