@@ -2,6 +2,38 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.23] — 2026-08-17
+
+### Added
+
+- **Hot-lane rug-prevention gates** (market-scan/runner lane only; stables + SOL
+  exempt). Closes the pre-live rug gaps so memecoin-offset runner entries are
+  protected before real capital is committed:
+  - **Mint-authority-renounced hard gate** (`MARKET_SCAN_REQUIRE_RENOUNCED_MINT`,
+    default `true`): a non-stable leg with a live mint authority (dev can
+    mint+dump) is rejected in the per-pool safety screen, from on-chain mint
+    authorities.
+  - **Pool-age floor** (`MARKET_SCAN_MIN_POOL_AGE_HOURS`, default `24`): the
+    universe-admission gate rejects candidates younger than this — brand-new
+    pools are the ruin tail.
+  - **Hard holder floor** (verification-blind): a non-stable leg with fewer than
+    `MARKET_SCAN_MIN_HOLDERS` holders is rejected even when Meteora marks it
+    "verified" — a verified token with dust holders is still a single-cluster
+    rug setup. Unknown metadata fails open (per-pool screen still gates ENTER).
+
+### Changed
+
+- **Cost-aware `[net-bleed]` EXIT gate** for launched runner positions: net
+  daily % is recomputed each cycle after fees − harvest − churn (swap + IL);
+  a runner clearing below `RUNNER_NET_FLOOR_PCT` is exited instead of being
+  held while churn silently erodes the account.
+
+### Fixed
+
+- Same-pool re-entry churn throttle (`MIN_REENTRY_COOLDOWN_MS`) and the rolling
+  realized-PnL halt (`REALIZED_PNL_HALT_*`) stop the live-forensic bleed class
+  (a hot pool churned every ~10 min).
+
 ## [0.2.20] — 2026-08-14
 
 ### Fixed
