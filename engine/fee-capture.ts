@@ -196,3 +196,174 @@ export function runnerNetAprPct(params: RunnerNetAprParams): number {
     100
   );
 }
+
+// ─── Position-scale churn / IL / swap cost model ─────────────────────────────
+// The runner's ENTER gate and the rotation model above discount a pool by
+// capture SHARE (concentration) but assume a single daily harvest and price
+// IL — they price neither the OOR-exit frequency nor the swap cost of every
+// re-anchor. On a hot volatile pool (big measured fee rate, narrow active-bin
+// range, violent whipsaw) that omission is exactly the bleed: narrow bins
+// concentrate fee capture, but they also churn OOR constantly, and each exit
+// + re-enter pays round-trip swap cost and realizes step IL. If the churn
+// cost exceeds the net capture, the runner is net-negative no matter how big
+// the headline APR is.
+//
+// This block adds that cost side, fail-closed (every required input invalid →
+// 0 cost / 0 net, never a fabricated edge). Callers pass a maxExitsPerDay
+// bound from the scan cadence so the model respects engine cycle limits.
+
+/** Floor on the churn model's expected exits/day (a flat pool still re-enters). */
+const OOR_EXITS_MIN = 0.5;
+
+/**
+ * Width of the position's bin range as a price fraction (2 × half-width bins
+ * × binStep). 0 on non-positive / non-finite inputs.
+ */
+export function bandWidthPctFromBins(rangeHalfWidthBins: number, binStep: number): number {
+  if (!finitePositive(rangeHalfWidthBins) || !finitePositive(binStep)) return 0;
+  return 2 * rangeHalfWidthBins * binStep * BIN_STEP_BPS_TO_PCT;
+}
+
+export interface OorExitsParams {
+  /** Half-width of the position's bin range, in bins. */
+  readonly rangeHalfWidthBins: number;
+  /** DLMM bin step in basis points. */
+  readonly binStep: number;
+  /** Realized daily volatility in DLMM bin units (active-bin stddev). */
+  readonly volatilityStddev: number;
+  /** Upper bound on exits/day, from the scan cadence (ms-per-day / scanIntervalMs). */
+  readonly maxExitsPerDay: number;
+}
+
+/**
+ * Expected number of out-of-range exits per day from range width and realized
+ * volatility. Band crossings of a random walk scale with (vol/band)², capped
+ * by the scan cadence (the engine can decide an OOR exit at most once per
+ * cycle). Narrower band or higher volatility → more churn.
+ */
+export function expectedOorExitsPerDay(params: OorExitsParams): number {
+  const band = bandWidthPctFromBins(params.rangeHalfWidthBins, params.binStep);
+  if (
+    band <= 0 ||
+    !Number.isFinite(params.volatilityStddev) ||
+    params.volatilityStddev <= 0 ||
+    !Number.isFinite(params.maxExitsPerDay) ||
+    params.maxExitsPerDay <= 0
+  ) {
+    return 0;
+  }
+  // bin-step converted to price-fraction stddev; crossings scale as (vol/band)².
+  const volPct = params.volatilityStddev * (params.binStep * BIN_STEP_BPS_TO_PCT);
+  const density = (volPct / band) * (volPct / band);
+  return Math.min(Math.max(density, OOR_EXITS_MIN), params.maxExitsPerDay);
+}
+
+/**
+ * Expected IL realized when an out-of-range position is exited and re-anchored,
+ * as USD. The characteristic re-anchor move is one band-width edge, so the
+ * realized equal-weight LP IL is that of a move of `bandWidthPct / 2`.
+ * Fail-closed: 0 on non-positive size or an invalid band.
+ */
+export function expectedIlCapturedPerExitUsd(
+  positionSizeUsd: number,
+  rangeHalfWidthBins: number,
+  binStep: number,
+): number {
+  const band = bandWidthPctFromBins(rangeHalfWidthBins, binStep);
+  if (!finitePositive(positionSizeUsd) || band <= 0) return 0;
+  const move = band / 2; // one-sided band edge, as a price fraction
+  const r = 1 + move;
+  const ilPct = 1 - (2 * Math.sqrt(r)) / (1 + r);
+  return Math.max(ilPct, 0) * positionSizeUsd;
+}
+
+export interface ChurnCostParams {
+  readonly positionSizeUsd: number;
+  readonly rangeHalfWidthBins: number;
+  readonly binStep: number;
+  readonly volatilityStddev: number;
+  /** Swap/conversion cost per swap, as a fraction (0.005 = 0.5%). In [0,1]. */
+  readonly swapCostPct: number;
+  readonly maxExitsPerDay: number;
+}
+
+/**
+ * Expected daily USD cost of the runner's churn: one round trip (two swaps)
+ * plus the realized step IL per OOR exit, scaled by the expected exits/day.
+ */
+export function churnCostDailyUsd(params: ChurnCostParams): number {
+  const exits = expectedOorExitsPerDay(params);
+  if (exits <= 0 || !finitePositive(params.positionSizeUsd)) return 0;
+  const swapPerExit = 2 * clamp01(params.swapCostPct) * params.positionSizeUsd;
+  const ilPerExit = expectedIlCapturedPerExitUsd(
+    params.positionSizeUsd,
+    params.rangeHalfWidthBins,
+    params.binStep,
+  );
+  return exits * (swapPerExit + ilPerExit);
+}
+
+export interface NetFeeWithCostsParams {
+  /** Pool gross fees over trailing 24h, USD (measured — datapi only for fees). */
+  readonly fees24hUsd: number;
+  readonly poolTvlUsd: number;
+  readonly positionSizeUsd: number;
+  readonly rangeHalfWidthBins: number;
+  readonly binStep: number;
+  readonly volatilityStddev: number;
+  readonly swapCostPct: number;
+  readonly harvestCostUsd: number;
+  readonly timeInRangePct: number;
+  readonly maxExitsPerDay: number;
+}
+
+/**
+ * Net expected daily fee velocity per deployed dollar, after every cost the
+ * churn model can name: capture share (concentration) → gross, minus the
+ * daily harvest cost and the churn cost (swap + IL per OOR exit). Floored at
+ * 0 — a position whose churn cost exceeds its gross capture signals 0, never
+ * a fabricated positive edge. This is the runner's "no bleeds" gate input.
+ */
+export function netFeeVelocityUsdWithCosts(params: NetFeeWithCostsParams): number {
+  if (!finitePositive(params.fees24hUsd) || !finitePositive(params.positionSizeUsd)) return 0;
+  const share = activeShareEstimate({
+    positionSizeUsd: params.positionSizeUsd,
+    poolTvlUsd: params.poolTvlUsd,
+    rangeHalfWidthBins: params.rangeHalfWidthBins,
+    binStep: params.binStep,
+  });
+  const gross = params.fees24hUsd * share * clamp01(params.timeInRangePct);
+  const harvest = Math.max(params.harvestCostUsd, 0);
+  const churn = churnCostDailyUsd({
+    positionSizeUsd: params.positionSizeUsd,
+    rangeHalfWidthBins: params.rangeHalfWidthBins,
+    binStep: params.binStep,
+    volatilityStddev: params.volatilityStddev,
+    swapCostPct: params.swapCostPct,
+    maxExitsPerDay: params.maxExitsPerDay,
+  });
+  const net = gross - harvest - churn;
+  return Math.max(net / params.positionSizeUsd, 0);
+}
+
+/**
+ * The same net velocity, expressed as a daily percent of the position
+ * (netFeeVelocityUsdWithCosts × 100). This is the signal the runner ENTER gate
+ * and the [net-bleed] continuation guard compare against a floor.
+ */
+export function runnerNetDailyPctAfterCosts(params: NetFeeWithCostsParams): number {
+  return netFeeVelocityUsdWithCosts(params) * 100;
+}
+
+/**
+ * True only when the position's net daily capture clears a positive floor —
+ * the "no bleeds at all" rule. A degenerate/unknown position (net 0) fails any
+ * positive floor; callers with a positive floor therefore fail closed. A zero
+ * floor (net >= 0) is trivially met by a zero-net position, so operators should
+ * keep the floor above 0 to actually gate on profitability. floorPct must be
+ * >= 0; a non-finite/negative floor is treated as 0.
+ */
+export function profitableRunner(params: NetFeeWithCostsParams, minNetDailyPct: number): boolean {
+  const floor = Number.isFinite(minNetDailyPct) ? Math.max(0, minNetDailyPct) : 0;
+  return runnerNetDailyPctAfterCosts(params) >= floor;
+}

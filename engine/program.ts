@@ -50,7 +50,7 @@ import {
   lowestAprHeldPosition,
   shouldRotate,
 } from "./market-runner.js";
-import { runnerNetAprPct } from "./fee-capture.js";
+import { runnerNetAprPct, runnerNetDailyPctAfterCosts } from "./fee-capture.js";
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
 import { gateAndRankMarketPools, type MarketPoolRank } from "./market-gate.js";
 import { gateAndRankLaunchPools, summarizeLaunchRejections } from "./launch-gate.js";
@@ -2226,17 +2226,16 @@ export function executeLive(
           }
           const withdrawnUsd = exitResultData.withdrawnUsd ?? null;
           const pricingUnresolved = withdrawnUsd === null;
-          const realizedPnlUsd =
-            exitResultData.isEmptyReap
-              ? 0
-              : pricingUnresolved || attributable.length > 0
-                ? null
-                : computeRealizedPnlUsd(
-                    withdrawnUsd,
-                    pos.cumulativeFeesClaimedUsd,
-                    pos.depositedUsd,
-                    pos.cumulativeRewardsClaimedUsd,
-                  );
+          const realizedPnlUsd = exitResultData.isEmptyReap
+            ? 0
+            : pricingUnresolved || attributable.length > 0
+              ? null
+              : computeRealizedPnlUsd(
+                  withdrawnUsd,
+                  pos.cumulativeFeesClaimedUsd,
+                  pos.depositedUsd,
+                  pos.cumulativeRewardsClaimedUsd,
+                );
           yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
           yield* persist(
             `closePosition ${pos.positionId}`,
@@ -2314,7 +2313,7 @@ export function executeLive(
                   pos.cumulativeFeesClaimedUsd,
                   pos.depositedUsd,
                   pos.cumulativeRewardsClaimedUsd + pricedSweptRewardUsd,
-              );
+                );
           // 3. Credit the sweep post-compute — fee-APR / display / event
           //    continuity only, never a realized input.
           const pendingFeeUsd = exitResultData?.pendingFeeUsd ?? null;
@@ -4889,9 +4888,7 @@ export const program = Effect.gen(function* () {
       // (leaves the flag false — no unexpected freeze) with a warning.
       let cycleRealizedPnlHalted = false;
       if (config.realizedPnLHaltEnabled ?? false) {
-        const closed = yield* db
-          .getClosedPositions()
-          .pipe(Effect.catch(() => Effect.succeed([])));
+        const closed = yield* db.getClosedPositions().pipe(Effect.catch(() => Effect.succeed([])));
         cycleRealizedPnlHalted = rollingRealizedPnlHaltSignal(
           closed.map((p) => p.realizedPnlUsd),
           config.realizedPnLHaltWindow ?? 100,
@@ -6964,7 +6961,68 @@ export const program = Effect.gen(function* () {
         // safety net.
         const isRunnerPosition = pos.launchRunner === true && pos.positionMode === "launch";
 
+        // Cost-aware runner guard ("no bleeds at all"): the launch lifecycle owns
+        // a runner's timebox / volume-decay / drawdown exits, but NONE of those
+        // name the churn cost of a volatile pool — a runner can sit in-range,
+        // accrue fees, and still net-negative once OOR-exit swap cost + realized
+        // IL are charged. When a launched runner no longer clears its
+        // net-daily-yield floor after churn/IL/swap costs, exit it rather than
+        // keep bleeding. Measured fees only (runner pools are datapi-only by
+        // admission via `statsSource === "datapi"`); a position with unmeasured
+        // fees or an unknown size fails closed (no net-bleed EXIT).
+        let runnerNetBleed = false;
+        let runnerNetBleedReason = "";
         if (
+          isRunnerPosition &&
+          config.marketScanRunnerEnabled === true &&
+          metrics.feeIlRatioKnown &&
+          (pos.currentValueUsd ?? pos.depositedUsd ?? 0) > 0
+        ) {
+          const sizeUsd = pos.currentValueUsd ?? pos.depositedUsd ?? 0;
+          const posHalfWidth =
+            Number.isFinite(positionHalfWidth) && positionHalfWidth > 0
+              ? positionHalfWidth
+              : rangeHalfWidth;
+          const floorPct = config.runnerNetFloorPct ?? 1;
+          const netPct = runnerNetDailyPctAfterCosts({
+            fees24hUsd: pool.fees24hUsd,
+            poolTvlUsd: pool.tvlUsd,
+            positionSizeUsd: sizeUsd,
+            rangeHalfWidthBins: posHalfWidth,
+            binStep: pool.binStep,
+            volatilityStddev,
+            swapCostPct: config.runnerSwapCostPct ?? 0.005,
+            harvestCostUsd: config.feeCaptureHarvestCostUsd ?? 0.01,
+            timeInRangePct: 1,
+            maxExitsPerDay: 86_400_000 / (config.scanIntervalMs ?? 600_000),
+          });
+          if (netPct < floorPct) {
+            runnerNetBleed = true;
+            runnerNetBleedReason = `[net-bleed] runner net ${netPct.toFixed(2)}%/day < floor ${floorPct}%/day after churn/IL/swap cost — exiting to stop the bleed`;
+          }
+        }
+
+        if (runnerNetBleed) {
+          console.info(
+            `[net-bleed] EXITING ${poolAddress} (${pos.positionId}) — ${runnerNetBleedReason}`,
+          );
+          decision = {
+            action: "EXIT",
+            poolAddress,
+            positionId: pos.positionId,
+            confidence: 1,
+            reasoning: runnerNetBleedReason,
+          };
+          if (!poolExitFired) {
+            yield* memory
+              .upsert({
+                category: "warning",
+                content: `Cost-aware runner exit for ${poolAddress}: ${runnerNetBleedReason}`,
+                poolAddress,
+              })
+              .pipe(Effect.catch(() => Effect.void));
+          }
+        } else if (
           !isRunnerPosition &&
           highVol &&
           driftPct > 0.6 &&

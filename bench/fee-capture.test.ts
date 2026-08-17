@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   activeShareEstimate,
+  bandWidthPctFromBins,
+  expectedIlCapturedPerExitUsd,
+  expectedOorExitsPerDay,
   FEE_CAPTURE_REFERENCE_SPAN_PCT,
   netFeeVelocityUsd,
+  netFeeVelocityUsdWithCosts,
+  profitableRunner,
   runnerNetAprPct,
+  runnerNetDailyPctAfterCosts,
 } from "../engine/fee-capture.js";
 
 describe("activeShareEstimate", () => {
@@ -363,5 +369,126 @@ describe("pipeline", () => {
     expect(breakEven).toBe(0);
     expect(costlyHarvest).toBe(0);
     expect(cheapHarvest).toBeGreaterThan(costlyHarvest);
+  });
+});
+
+describe("runner churn / IL / swap cost model (no-bleed gate)", () => {
+  it("bandWidthPctFromBins: 2×halfWidth×binStep, 0 on invalid inputs", () => {
+    expect(bandWidthPctFromBins(5, 40)).toBeCloseTo(2 * 5 * 40 * 0.0001, 12);
+    expect(bandWidthPctFromBins(0, 40)).toBe(0);
+    expect(bandWidthPctFromBins(5, 0)).toBe(0);
+    expect(bandWidthPctFromBins(-3, 40)).toBe(0);
+  });
+
+  it("expectedOorExitsPerDay: grows with volatility, shrinks with wider band, bounded by cadence, floored", () => {
+    const base = { rangeHalfWidthBins: 5, binStep: 40, volatilityStddev: 10, maxExitsPerDay: 200 };
+    const low = expectedOorExitsPerDay(base);
+    const high = expectedOorExitsPerDay({ ...base, volatilityStddev: 40 });
+    expect(high).toBeGreaterThan(low);
+    const wide = expectedOorExitsPerDay({ ...base, rangeHalfWidthBins: 50 });
+    expect(low).toBeGreaterThan(wide);
+    // Cadence cap respected.
+    const capped = expectedOorExitsPerDay({ ...base, maxExitsPerDay: low - 1 });
+    expect(capped).toBeLessThanOrEqual(low - 1);
+    // Flat pool hits the floor, never zero.
+    expect(expectedOorExitsPerDay({ ...base, volatilityStddev: 0.0001 })).toBeGreaterThan(0);
+    // Fail closed on invalid inputs.
+    expect(expectedOorExitsPerDay({ ...base, binStep: 0 })).toBe(0);
+    expect(expectedOorExitsPerDay({ ...base, volatilityStddev: Number.NaN })).toBe(0);
+  });
+
+  it("expectedIlCapturedPerExitUsd: 0 on invalid, grows with band width and size", () => {
+    expect(expectedIlCapturedPerExitUsd(1000, 0, 40)).toBe(0);
+    expect(expectedIlCapturedPerExitUsd(0, 5, 40)).toBe(0);
+    const narrow = expectedIlCapturedPerExitUsd(1000, 5, 40);
+    const wide = expectedIlCapturedPerExitUsd(1000, 20, 40);
+    expect(wide).toBeGreaterThan(narrow);
+    expect(wide).toBeGreaterThan(0);
+    expect(wide).toBeLessThan(1000); // a real LP position can't lose more than its size
+  });
+
+  it("netFeeVelocityUsdWithCosts: a bleeding runner returns 0 (churn cost > gross capture)", () => {
+    const bleed = netFeeVelocityUsdWithCosts({
+      fees24hUsd: 1000,
+      poolTvlUsd: 5000,
+      positionSizeUsd: 1000,
+      rangeHalfWidthBins: 2,
+      binStep: 20,
+      volatilityStddev: 50, // violent whipsaw -> heavy churn
+      swapCostPct: 0.005,
+      harvestCostUsd: 0.5,
+      timeInRangePct: 1,
+      maxExitsPerDay: 200,
+    });
+    expect(bleed).toBe(0); // floored, never negative
+  });
+
+  it("netFeeVelocityUsdWithCosts: a healthy runner clears a positive net velocity", () => {
+    const healthy = netFeeVelocityUsdWithCosts({
+      fees24hUsd: 50000,
+      poolTvlUsd: 100000,
+      positionSizeUsd: 1000,
+      rangeHalfWidthBins: 50,
+      binStep: 20,
+      volatilityStddev: 5,
+      swapCostPct: 0.001,
+      harvestCostUsd: 0.1,
+      timeInRangePct: 0.9,
+      maxExitsPerDay: 200,
+    });
+    expect(healthy).toBeGreaterThan(0);
+    expect(
+      runnerNetDailyPctAfterCosts({
+        fees24hUsd: 50000,
+        poolTvlUsd: 100000,
+        positionSizeUsd: 1000,
+        rangeHalfWidthBins: 50,
+        binStep: 20,
+        volatilityStddev: 5,
+        swapCostPct: 0.001,
+        harvestCostUsd: 0.1,
+        timeInRangePct: 0.9,
+        maxExitsPerDay: 200,
+      }),
+    ).toBeGreaterThan(1); // clears the default floor of 1%/day
+  });
+
+  it("netFeeVelocityUsdWithCosts: fails closed (0) on non-positive fees or size", () => {
+    const base = {
+      fees24hUsd: 1,
+      poolTvlUsd: 100000,
+      positionSizeUsd: 1000,
+      rangeHalfWidthBins: 50,
+      binStep: 20,
+      volatilityStddev: 5,
+      swapCostPct: 0.001,
+      harvestCostUsd: 0.1,
+      timeInRangePct: 0.9,
+      maxExitsPerDay: 200,
+    };
+    expect(netFeeVelocityUsdWithCosts({ ...base, fees24hUsd: 0 })).toBe(0);
+    expect(netFeeVelocityUsdWithCosts({ ...base, positionSizeUsd: 0 })).toBe(0);
+    expect(netFeeVelocityUsdWithCosts({ ...base, fees24hUsd: Number.NaN })).toBe(0);
+  });
+
+  it("profitableRunner: true only when net daily % clears the floor; degenerate never passes", () => {
+    const healthy = {
+      fees24hUsd: 50000,
+      poolTvlUsd: 100000,
+      positionSizeUsd: 1000,
+      rangeHalfWidthBins: 50,
+      binStep: 20,
+      volatilityStddev: 5,
+      swapCostPct: 0.001,
+      harvestCostUsd: 0.1,
+      timeInRangePct: 0.9,
+      maxExitsPerDay: 200,
+    };
+    expect(profitableRunner(healthy, 1)).toBe(true);
+    expect(profitableRunner(healthy, 100000)).toBe(false); // absurd floor
+    // A zero-net position fails a POSITIVE floor but trivially meets a zero
+    // floor (that's why the gate floor must be > 0 to bind on profitability).
+    expect(profitableRunner({ ...healthy, fees24hUsd: 0 }, 0)).toBe(true);
+    expect(profitableRunner({ ...healthy, fees24hUsd: 0 }, 0.0001)).toBe(false);
   });
 });

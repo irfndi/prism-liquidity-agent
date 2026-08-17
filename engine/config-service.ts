@@ -222,6 +222,13 @@ export interface AppConfig {
   readonly yieldRegressionExitPct?: number;
   readonly feeCaptureConversionCostPct?: number;
   readonly feeCaptureHarvestCostUsd?: number;
+  /** Per-swap cost (slippage + fees) the runner churn model charges each OOR
+   *  exit's round trip, as a fraction (0.005 = 0.5%). Default 0.005. */
+  readonly runnerSwapCostPct?: number;
+  /** Minimum net daily yield (% of the position) a runner must clear AFTER
+   *  churn/IL/swap costs to enter or keep running; below this the runner
+   *  bleeds and is skipped / exited. Default 1 (%/day). */
+  readonly runnerNetFloorPct?: number;
   readonly harvestMinNetUsd?: number;
   readonly harvestMaxCostPct?: number;
   readonly harvestTxCostUsdEst?: number;
@@ -1132,7 +1139,11 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => false),
   );
   const realizedPnLHaltWindow = yield* validatedNumber("REALIZED_PNL_HALT_WINDOW", 1, 100);
-  const realizedPnLHaltThresholdUsd = yield* validatedNumber("REALIZED_PNL_HALT_THRESHOLD_USD", -Number.MAX_SAFE_INTEGER, -20);
+  const realizedPnLHaltThresholdUsd = yield* validatedNumber(
+    "REALIZED_PNL_HALT_THRESHOLD_USD",
+    -Number.MAX_SAFE_INTEGER,
+    -20,
+  );
 
   // ─── F6: Paper-trading validation period ────────────────────────────────────
   const paperValidationMinDays = yield* validatedNumber("PAPER_VALIDATION_MIN_DAYS", 0, 7);
@@ -1594,6 +1605,11 @@ const loadConfig = Effect.gen(function* () {
     0.05,
   );
   const feeCaptureHarvestCostUsd = yield* validatedNumber("FEE_CAPTURE_HARVEST_COST_USD", 0, 0.01);
+  // Cost-aware runner gate: per-swap cost + a net-daily-yield floor the runner
+  // must clear AFTER churn/IL/swap costs. The floor is the "no bleeds" rule —
+  // a runner that cannot clear it is never entered, or is exited early.
+  const runnerSwapCostPct = yield* validatedNumber("RUNNER_SWAP_COST_PCT", 0, 0.005, 0.1);
+  const runnerNetFloorPct = yield* validatedNumber("RUNNER_NET_FLOOR_PCT", 0, 1, 100);
   // G4 economic harvest gate: claim only when net proceeds clear the floor
   // and estimated tx cost stays under the fraction of gross fees.
   const harvestMinNetUsd = yield* validatedNumber("HARVEST_MIN_NET_USD", 0, 1);
@@ -1911,6 +1927,8 @@ const loadConfig = Effect.gen(function* () {
     yieldRegressionExitPct,
     feeCaptureConversionCostPct,
     feeCaptureHarvestCostUsd,
+    runnerSwapCostPct,
+    runnerNetFloorPct,
     harvestMinNetUsd,
     harvestMaxCostPct,
     harvestTxCostUsdEst,
