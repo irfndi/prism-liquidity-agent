@@ -7928,6 +7928,55 @@ export const program = Effect.gen(function* () {
                         .pipe(Effect.catch(() => Effect.void));
                       enterGateRejected = true;
                     } else if (!enterGateRejected) {
+                      // [entry-net-gate] ENTER-side feasibility for the
+                      // runner/hot lane: a candidate must clear its net-daily
+                      // yield floor AFTER churn/IL/swap cost BEFORE entering —
+                      // otherwise we spend an entry+exit round-trip to discover
+                      // the pool doesn't pay for its own churn (the deep-but-slow
+                      // pool thrash). This is the mirror of the [net-bleed] EXIT
+                      // guard: measured fees only (runner pools are datapi-only
+                      // via `statsSource === "datapi"`); fails open does not
+                      // block when the fees are unmeasured or the runner lane is
+                      // off, so legacy/non-runner entries are unaffected.
+                      if (
+                        config.marketScanRunnerEnabled === true &&
+                        metrics.feeIlRatioKnown &&
+                        launchSizeUsd > 0
+                      ) {
+                        const entryNetPct = runnerNetDailyPctAfterCosts({
+                          fees24hUsd: pool.fees24hUsd,
+                          poolTvlUsd: pool.tvlUsd,
+                          positionSizeUsd: launchSizeUsd,
+                          rangeHalfWidthBins: rangeHalfWidth,
+                          binStep: pool.binStep,
+                          volatilityStddev,
+                          swapCostPct: config.runnerSwapCostPct ?? 0.005,
+                          harvestCostUsd: config.feeCaptureHarvestCostUsd ?? 0.01,
+                          timeInRangePct: 1,
+                          maxExitsPerDay: 86_400_000 / (config.scanIntervalMs ?? 600_000),
+                        });
+                        if (entryNetPct < (config.runnerNetFloorPct ?? 1)) {
+                          yield* audit
+                            .recordDecision({
+                              timestamp: Date.now(),
+                              cycleId,
+                              poolAddress,
+                              action: "ENTER",
+                              confidence: 0,
+                              reasoning: `[entry-net-gate] runner net ${entryNetPct.toFixed(2)}%/day < floor ${config.runnerNetFloorPct ?? 1}%/day after churn/IL/swap cost — entering would not be economical`,
+                              metrics,
+                              riskResult: {
+                                approved: false,
+                                reason: `[entry-net-gate] net ${entryNetPct.toFixed(2)}%/day < ${config.runnerNetFloorPct ?? 1}%/day`,
+                              },
+                              executed: false,
+                              paperTrading: config.paperTrading,
+                            })
+                            .pipe(Effect.catch(() => Effect.void));
+                          enterGateRejected = true;
+                        }
+                      }
+
                       // [token-risk] launch ENTER gate — the same advisory overlay
                       // as the normal lane: blocks when either leg carries a hard
                       // risk signal; unknown/disabled/failed signals never block.
