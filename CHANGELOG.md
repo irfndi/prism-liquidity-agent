@@ -2,6 +2,25 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.25] — 2026-08-18
+
+### Added
+
+- **Hot-window capture lane** (opt-in, `HOT_WINDOW_ENABLED=false` by default).
+  A high-frequency lane that ONLY enters a pool that is **currently printing
+  fees** (measured Data-API 1h fee ratio, not historical APR) and whose depth
+  falls in a band where a tiny entry captures a meaningful share, holds at most
+  a short timebox, then exits — a fast, bounded, repeatable fee-capture cycle
+  instead of a long hold. Bounded by a daily trip budget
+  (`HOT_WINDOW_MAX_TRIPS_PER_DAY`) and a daily loss halt
+  (`HOT_WINDOW_DAILY_LOSS_HALT_USD`) so a bad printing window cannot bleed the
+  account. Reuses the existing per-pool safety screen (rug/mint/age/holder
+  gates) and the full risk tail; fully owns any pool it holds or enters so a
+  hot pool is never double-traded by the normal lane. Won't build / tune the
+  structural fix on its own — it is the harness for measuring per-hold net
+  capture live at bounded size before any scale-up.
+
+
 ## [0.2.24] — 2026-08-17
 
 ### Added
