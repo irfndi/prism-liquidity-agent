@@ -315,6 +315,35 @@ export interface AppConfig {
   /** Launch position time-box: exit when held this many hours regardless of
    *  P&L. Default 6 (1..72). */
   readonly launchTimeboxHours?: number;
+  // ── Hot-window capture lane ────────────────────────────────────────────────
+  /** Master switch for the high-frequency hot-window capture lane. OFF by
+   *  default; opt-in and fully reversible. Enters only pools currently
+   *  printing fees (measured 1h Data-API fee ratio) within a depth band so a
+   *  tiny entry captures a meaningful share, holds at most a short timebox,
+   *  and exits — bounded by a daily trip budget and a daily loss halt. */
+  readonly hotWindowEnabled?: boolean;
+  /** USD entry per hot hold. Default $30 (5..500). */
+  readonly hotWindowEntrySizeUsd?: number;
+  /** Max pool TVL for a hot entry — beyond this depth an entry's share is too
+   *  thin for a short hold to pay for its round-trip churn. Default $25k. */
+  readonly hotWindowMaxPoolTvlUsd?: number;
+  /** Min pool TVL for a hot entry — below this is dust/rug zone. Default $500. */
+  readonly hotWindowMinPoolTvlUsd?: number;
+  /** Data-API `fee_tvl_ratio` 1h floor (%/h) that counts as "printing now".
+   *  Default 1.0. Measured fees only. */
+  readonly hotWindowPrintingRatio1h?: number;
+  /** Min share (entry / pool tvl) for an economic hold. Default 0.005 (0.5%). */
+  readonly hotWindowMinSharePct?: number;
+  /** Max share — never whale a small pool. Default 0.05 (5%). */
+  readonly hotWindowMaxSharePct?: number;
+  /** Max in-range hold before a timed EXIT. Default 30 min. */
+  readonly hotWindowHoldMaxMs?: number;
+  /** Max hot ENTERs per day (trip budget). Default 30. */
+  readonly hotWindowMaxTripsPerDay?: number;
+  /** Halt the lane when today's realized hot PnL falls below this. Default $3. */
+  readonly hotWindowDailyLossHaltUsd?: number;
+  /** Concurrent hot positions cap. Default 2. */
+  readonly hotWindowMaxOpen?: number;
   /** Volume-decay exit: exit when current 1h fees fall below this fraction
    *  of the position's observed peak. Default 0.1 (10%). */
   readonly launchVolumeDecayExitPct?: number;
@@ -1888,6 +1917,56 @@ const loadConfig = Effect.gen(function* () {
   }
   const stablecoinMints = new Set(stablecoinMintsList);
 
+  // ── Hot-window capture lane knobs ────────────────────────────────────────
+  const hotWindowEnabled = yield* Config.boolean("HOT_WINDOW_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const hotWindowEntrySizeUsd = yield* validatedNumber("HOT_WINDOW_ENTRY_SIZE_USD", 5, 30, 500);
+  const hotWindowMaxPoolTvlUsd = yield* validatedNumber(
+    "HOT_WINDOW_MAX_POOL_TVL_USD",
+    1_000,
+    25_000,
+    500_000,
+  );
+  const hotWindowMinPoolTvlUsd = yield* validatedNumber(
+    "HOT_WINDOW_MIN_POOL_TVL_USD",
+    100,
+    500,
+    20_000,
+  );
+  const hotWindowPrintingRatio1h = yield* validatedNumber(
+    "HOT_WINDOW_PRINTING_RATIO_1H",
+    0.1,
+    1,
+    50,
+  );
+  const hotWindowMinSharePct = yield* validatedNumber(
+    "HOT_WINDOW_MIN_SHARE_PCT",
+    0.001,
+    0.005,
+    0.5,
+  );
+  const hotWindowMaxSharePct = yield* validatedNumber("HOT_WINDOW_MAX_SHARE_PCT", 0.01, 0.05, 0.5);
+  const hotWindowHoldMaxMs = yield* validatedNumber(
+    "HOT_WINDOW_HOLD_MAX_MS",
+    60_000,
+    1_800_000,
+    6 * 60 * 60 * 1000,
+  );
+  const hotWindowMaxTripsPerDay = yield* validatedNumber(
+    "HOT_WINDOW_MAX_TRIPS_PER_DAY",
+    1,
+    30,
+    500,
+  );
+  const hotWindowDailyLossHaltUsd = yield* validatedNumber(
+    "HOT_WINDOW_DAILY_LOSS_HALT_USD",
+    0.1,
+    3,
+    100,
+  );
+  const hotWindowMaxOpen = yield* validatedNumber("HOT_WINDOW_MAX_OPEN", 1, 2, 20);
+
   const cfg: AppConfig = {
     walletPrivateKey,
     heliusApiKey,
@@ -1995,6 +2074,17 @@ const loadConfig = Effect.gen(function* () {
     launchRunnerScaleInSizePct,
     launchRunnerScaleInMaxSteps,
     launchWashForensicsEnabled,
+    hotWindowEnabled,
+    hotWindowEntrySizeUsd,
+    hotWindowMaxPoolTvlUsd,
+    hotWindowMinPoolTvlUsd,
+    hotWindowPrintingRatio1h,
+    hotWindowMinSharePct,
+    hotWindowMaxSharePct,
+    hotWindowHoldMaxMs,
+    hotWindowMaxTripsPerDay,
+    hotWindowDailyLossHaltUsd,
+    hotWindowMaxOpen,
     deployerBlacklistPath,
     tokenBlacklistPath,
     sqliteDbPath,

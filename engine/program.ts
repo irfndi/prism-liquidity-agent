@@ -135,6 +135,7 @@ import { identifyAssetMint } from "./fallen-angel-service.js";
 import { buildTpLadder, evaluateTpLadder, parseTpLadder, serializeTpLadder } from "./tp-ladder.js";
 import { getGeckoPoolOhlcv, type GeckoOhlcvSignals } from "./gecko-ohlcv-service.js";
 import { getRugCheckReport, type RugCheckReport } from "./rugcheck-service.js";
+import { evaluateHotWindowEnter, evaluateHotWindowExit, hotWindowDayKey } from "./hot-window.js";
 import {
   launchEntrySizeUsd,
   launchPositionExit,
@@ -5935,6 +5936,124 @@ export const program = Effect.gen(function* () {
           binUtilizationKnown: metrics.binUtilizationKnown,
           feeIlRatioKnown: metrics.feeIlRatioKnown,
         });
+      }
+
+      // ── Hot-window capture lane ──────────────────────────────────────────
+      // A config-gated high-frequency lane that ONLY enters a pool currently
+      // printing fees (measured 1h Data-API fee ratio) within a depth band so
+      // a tiny entry captures a meaningful share, holds at most a short
+      // timebox, and exits — bounded by a daily trip budget and a daily loss
+      // halt. It runs on pools that already cleared the safety screen above
+      // (rug/mint-renounce/age/holder gates), reuses the full risk tail for
+      // execution, and is OFF unless HOT_WINDOW_ENABLED=true. It fully owns
+      // any pool it holds a hot position on or is about to enter.
+      if (config.hotWindowEnabled === true) {
+        const nowMs = Date.now();
+        const allPoolPositions = positionsForPool(trackedPositions, poolAddress);
+        const hotPositions = allPoolPositions.filter((p) => p.positionMode === "hot-window");
+        const nonHotHeld =
+          allPoolPositions.filter((p) => p.positionMode !== "hot-window").length > 0;
+        const hotCfg = {
+          enabled: true,
+          entrySizeUsd: config.hotWindowEntrySizeUsd ?? 30,
+          maxPoolTvlUsd: config.hotWindowMaxPoolTvlUsd ?? 25_000,
+          minPoolTvlUsd: config.hotWindowMinPoolTvlUsd ?? 500,
+          printingRatio1h: config.hotWindowPrintingRatio1h ?? 1,
+          minSharePct: config.hotWindowMinSharePct ?? 0.005,
+          maxSharePct: config.hotWindowMaxSharePct ?? 0.05,
+          holdMaxMs: config.hotWindowHoldMaxMs ?? 1_800_000,
+          maxTripsPerDay: config.hotWindowMaxTripsPerDay ?? 30,
+          dailyLossHaltUsd: config.hotWindowDailyLossHaltUsd ?? 3,
+          maxOpen: config.hotWindowMaxOpen ?? 2,
+        };
+        // Daily loss halt: sum today's closed hot-window realized PnL.
+        let halted = false;
+        const closedHot = yield* db.getClosedPositions().pipe(
+          Effect.catch(() =>
+            Effect.succeed(
+              [] as ReadonlyArray<{
+                positionMode?: string | null;
+                closedAt: number | null;
+                paperExitedAt: number | null;
+                realizedPnlUsd: number | null;
+              }>,
+            ),
+          ),
+        );
+        const todayClosed: Array<{ at: number; realized: number }> = closedHot
+          .filter((r) => r.positionMode === "hot-window")
+          .map((r) => ({
+            at: r.closedAt ?? r.paperExitedAt ?? 0,
+            realized: r.realizedPnlUsd ?? 0,
+          }));
+        const dayKey = hotWindowDayKey(nowMs);
+        let todaysRealizedHot = 0;
+        for (const r of todayClosed)
+          if (hotWindowDayKey(r.at) === dayKey) todaysRealizedHot += r.realized;
+        if (todaysRealizedHot < -hotCfg.dailyLossHaltUsd) halted = true;
+        // Trip budget for today.
+        const tripsRaw = yield* db
+          .getMetadata(`hot_trips:${dayKey}`)
+          .pipe(Effect.catch(() => Effect.succeed(null)));
+        const tripsToday = tripsRaw === null ? 0 : Number(tripsRaw) || 0;
+        // Exit lifecycle for held hot positions.
+        const hotDecisions: Array<AgentDecision> = [];
+        for (const p of hotPositions) {
+          const exitEval = evaluateHotWindowExit({
+            config: hotCfg,
+            ageMs: nowMs - p.timestamp,
+            outOfRangeSince: p.outOfRangeSince,
+            halted,
+          });
+          if (exitEval.exit) {
+            hotDecisions.push({
+              action: "EXIT",
+              poolAddress,
+              positionId: p.positionId,
+              confidence: 1,
+              reasoning: `[hot-window:${exitEval.reason}] ${p.positionId} (halted=${halted}, age ${((nowMs - p.timestamp) / 60_000).toFixed(0)}m, hold ${hotCfg.holdMaxMs / 60_000}m)`,
+            });
+          }
+        }
+        // ENTER a currently-printing, correctly-sized pool (only when this pool
+        // holds no hot position and carries no non-hot position this cycle).
+        let hotEnter: AgentDecision | null = null;
+        if (hotPositions.length === 0 && !halted && nonHotHeld === false) {
+          const openHot = Array.from(trackedPositions.values()).filter(
+            (p) => p.positionMode === "hot-window",
+          ).length;
+          if (openHot < hotCfg.maxOpen && tripsToday < hotCfg.maxTripsPerDay) {
+            const enterEval = evaluateHotWindowEnter({
+              config: hotCfg,
+              feeTvlRatio1h: datapiStats?.feeTvlRatio1h ?? null,
+              tvlUsd: pool.tvlUsd,
+            });
+            if (enterEval.qualify) {
+              hotEnter = {
+                action: "ENTER",
+                poolAddress,
+                confidence: 0.7,
+                reasoning: `[hot-window] pool printing (1h ratio ${(datapiStats?.feeTvlRatio1h ?? 0).toFixed(2)}%/h), depth $${pool.tvlUsd.toFixed(0)}, size $${enterEval.sizeUsd.toFixed(0)}, trips ${tripsToday}/${hotCfg.maxTripsPerDay}`,
+                positionSizeUsd: enterEval.sizeUsd,
+                positionMode: "hot-window",
+              };
+            }
+          }
+        }
+        // The hot lane fully owns any pool it holds a hot position on or is
+        // about to enter — return its decisions and skip the generic loop so a
+        // hot pool cannot also be traded by the normal run (double-entry/double
+        // decision). Pools that also hold a non-hot position fall through to the
+        // generic loop (rare; the hot EXIT above is still emitted).
+        if (nonHotHeld === false && (hotPositions.length > 0 || hotEnter !== null)) {
+          if (hotEnter !== null) {
+            yield* db
+              .setMetadata(`hot_trips:${hotWindowDayKey(nowMs)}`, String(tripsToday + 1))
+              .pipe(Effect.catch(() => Effect.void));
+            hotDecisions.push(hotEnter);
+          }
+          return hotDecisions;
+        }
       }
 
       // Pre-filter

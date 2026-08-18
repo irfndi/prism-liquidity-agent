@@ -334,7 +334,7 @@ export interface AgentDecision {
   /** Position lifecycle mode carried on the decision so execution stamps the
    *  row. "fallen-angel" (Wave 19) and "launch" (Launch Mode v2) enter with
    *  lane-specific exits; undefined for standard positions. */
-  positionMode?: "fallen-angel" | "launch" | undefined;
+  positionMode?: "fallen-angel" | "launch" | "hot-window" | undefined;
   /** Serialized TP-ladder JSON (see engine/tp-ladder.ts) for FA positions. */
   tpLadderJson?: string | undefined;
   /** Invalidation stop price for FA positions. */
