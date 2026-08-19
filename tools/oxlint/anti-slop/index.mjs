@@ -1,9 +1,76 @@
+// @bun
 // node_modules/@oxlint/plugins/index.js
-function definePlugin(plugin) {
-  return plugin;
-}
 function defineRule(rule) {
   return rule;
+}
+var EMPTY_VISITOR = {};
+function eslintCompatPlugin(plugin) {
+  if (typeof plugin != "object" || !plugin)
+    throw Error("Plugin must be an object");
+  let { rules } = plugin;
+  if (typeof rules != "object" || !rules)
+    throw Error("Plugin must have an object as `rules` property");
+  let afterHooksState = new AfterHooksState;
+  for (let ruleName in rules)
+    Object.hasOwn(rules, ruleName) && convertRule(rules[ruleName], afterHooksState);
+  return plugin;
+}
+var AfterHooksState = class {
+  resetFunctions = [];
+  pendingStates = [];
+  pendingCount = 0;
+  lintFinishedCount = 0;
+  resetIsScheduled = false;
+  sourceCode = null;
+  resetMicrotask = this.resetMicrotaskImpl.bind(this);
+  registerResetFunction(reset) {
+    let { pendingStates } = this, index = pendingStates.length;
+    return pendingStates.push(0), this.resetFunctions.push(reset), index;
+  }
+  ruleFinished() {
+    this.lintFinishedCount++, this.lintFinishedCount === this.pendingCount && this.reset(false);
+  }
+  reset(ignoreErrors) {
+    this.pendingCount;
+    let { resetFunctions, pendingStates } = this, hooksLen = pendingStates.length, hasError = false, error;
+    for (let i = 0;i < hooksLen; i++)
+      if (pendingStates[i] !== 0) {
+        pendingStates[i] = 0;
+        try {
+          resetFunctions[i]();
+        } catch (e) {
+          hasError === false && (hasError = true, error = e);
+        }
+      }
+    if (this.pendingCount = 0, this.lintFinishedCount = 0, this.sourceCode = null, hasError === true && ignoreErrors === false)
+      throw error;
+  }
+  scheduleReset() {
+    queueMicrotask(this.resetMicrotask), this.resetIsScheduled = true;
+  }
+  resetMicrotaskImpl() {
+    this.resetIsScheduled = false, this.pendingCount !== 0 && this.reset(true);
+  }
+};
+function convertRule(rule, afterHooksState) {
+  if (typeof rule != "object" || !rule)
+    throw Error("Rule must be an object");
+  if ("create" in rule)
+    return;
+  let context = null, visitor, beforeHook, setupAfterHook;
+  rule.create = (eslintContext) => {
+    context === null && ({ context, visitor, beforeHook, setupAfterHook } = createContextAndVisitor(rule, afterHooksState));
+    let eslintFileContext = Object.getPrototypeOf(eslintContext);
+    if (setupAfterHook !== null) {
+      let { sourceCode } = eslintFileContext;
+      afterHooksState.sourceCode !== sourceCode && (afterHooksState.sourceCode = sourceCode, afterHooksState.pendingCount !== 0 && afterHooksState.reset(true));
+    }
+    return Object.defineProperties(context, {
+      id: { value: eslintContext.id },
+      options: { value: eslintContext.options },
+      report: { value: eslintContext.report }
+    }), Object.setPrototypeOf(context, eslintFileContext), beforeHook !== null && beforeHook() === false ? EMPTY_VISITOR : (setupAfterHook !== null && (setupAfterHook(eslintFileContext.sourceCode.ast), afterHooksState.resetIsScheduled === false && afterHooksState.scheduleReset()), visitor);
+  };
 }
 var FILE_CONTEXT = Object.freeze({
   get filename() {
@@ -46,6 +113,59 @@ var FILE_CONTEXT = Object.freeze({
     throw Error("Cannot access `context.parserPath` in `createOnce`");
   }
 });
+function createContextAndVisitor(rule, afterHooksState) {
+  let { createOnce } = rule;
+  if (createOnce == null)
+    throw Error("Rules must define either a `create` or `createOnce` method");
+  if (typeof createOnce != "function")
+    throw Error("Rule `createOnce` property must be a function");
+  let context = Object.create(FILE_CONTEXT, {
+    id: {
+      value: null,
+      enumerable: true,
+      configurable: true
+    },
+    options: {
+      value: null,
+      enumerable: true,
+      configurable: true
+    },
+    report: {
+      value() {
+        throw Error("Cannot report errors in `createOnce`");
+      },
+      enumerable: true,
+      configurable: true
+    }
+  }), { before: beforeHook, after: afterHook, ...visitor } = createOnce.call(rule, context);
+  if (beforeHook === undefined)
+    beforeHook = null;
+  else if (beforeHook !== null && typeof beforeHook != "function")
+    throw Error("`before` property of visitor must be a function if defined");
+  let setupAfterHook = null;
+  if (afterHook != null) {
+    if (typeof afterHook != "function")
+      throw Error("`after` property of visitor must be a function if defined");
+    let program = null, ruleIndex = afterHooksState.registerResetFunction(() => {
+      program = null, afterHook();
+    });
+    setupAfterHook = (ast) => {
+      program = ast, afterHooksState.pendingStates[ruleIndex] = 1, afterHooksState.pendingCount++;
+    };
+    let onCodePathEnd = visitor.onCodePathEnd;
+    visitor.onCodePathEnd = onCodePathEnd == null ? function(_codePath, node) {
+      node === program && afterHooksState.ruleFinished();
+    } : function(codePath, node) {
+      onCodePathEnd.call(this, codePath, node), node === program && afterHooksState.ruleFinished();
+    };
+  }
+  return {
+    context,
+    visitor,
+    beforeHook,
+    setupAfterHook
+  };
+}
 
 // tools/oxlint/anti-slop/rules/no-chained-type-assertions.ts
 function isTypeAssertionExpression(node) {
@@ -89,10 +209,10 @@ var noChainedTypeAssertionsRule = defineRule({
       description: "Disallow chained TypeScript as and angle-bracket assertions, including parenthesized chains."
     },
     messages: {
-      chained: "Chained type assertions discard existing type evidence and fabricate the target type without parsing. Preserve the value's original precise type, or parse genuinely unknown input at its boundary before using it."
+      chained: "This assertion chain discards type evidence. Keep the original precise type, or parse untrusted input at its boundary before narrowing it."
     }
   },
-  create(context) {
+  createOnce(context) {
     const checkTypeAssertion = (node) => {
       if (!isOutermostAssertionInChain(node) || !isForbiddenAssertionChain(node))
         return;
@@ -116,82 +236,28 @@ function unwrapParentheses(node) {
 function isEmptyObjectExpression(node) {
   return node.type === "ObjectExpression" && node.properties.length === 0;
 }
-function singleObjectProperty(node) {
-  if (node.type !== "ObjectExpression" || node.properties.length !== 1)
-    return null;
-  const [property] = node.properties;
-  if (property?.type !== "Property" || property.kind !== "init" || property.method || property.computed) {
-    return null;
-  }
-  return property;
-}
-function conditionalEmptyObjectSpread(node) {
+function isConditionalEmptyObjectSpread(node) {
   const conditional = unwrapParentheses(node);
-  if (conditional.type !== "ConditionalExpression")
-    return null;
-  if (isEmptyObjectExpression(conditional.consequent)) {
-    return { conditional, property: singleObjectProperty(conditional.alternate) };
-  }
-  if (isEmptyObjectExpression(conditional.alternate)) {
-    return { conditional, property: singleObjectProperty(conditional.consequent) };
-  }
-  return null;
-}
-function undefinedCheckedExpression(test) {
-  const binary = unwrapParentheses(test);
-  if (binary.type !== "BinaryExpression")
-    return null;
-  if (binary.operator !== "===" && binary.operator !== "!==")
-    return null;
-  const left = unwrapParentheses(binary.left);
-  const right = unwrapParentheses(binary.right);
-  const leftIsUndefined = left.type === "Identifier" && left.name === "undefined";
-  const rightIsUndefined = right.type === "Identifier" && right.name === "undefined";
-  if (leftIsUndefined === rightIsUndefined)
-    return null;
-  return {
-    expression: leftIsUndefined ? right : left,
-    isDefinedWhenTrue: binary.operator === "!=="
-  };
-}
-function canAutofixConditionalEmptyObjectSpread(sourceCode, conditional, property) {
-  const checked = undefinedCheckedExpression(conditional.test);
-  if (checked === null)
-    return false;
-  const propertyIsConsequent = conditional.consequent === property.parent;
-  if (propertyIsConsequent !== checked.isDefinedWhenTrue)
-    return false;
-  return sourceCode.getText(unwrapParentheses(checked.expression)) === sourceCode.getText(property.value);
+  return conditional.type === "ConditionalExpression" && (isEmptyObjectExpression(conditional.consequent) || isEmptyObjectExpression(conditional.alternate));
 }
 var noConditionalEmptyObjectSpreadRule = defineRule({
   meta: {
     type: "suggestion",
-    fixable: "code",
     docs: {
       description: "Disallow object spreads that conditionally spread an empty object to omit fields."
     },
     messages: {
-      avoid: "Do not use conditional empty-object spreads. Prefer a direct property or build the object in separate statements."
+      avoid: "This conditional spread hides property omission behind an empty object. Build the object in separate statements and add the property only when present."
     }
   },
-  create(context) {
+  createOnce(context) {
     return {
       SpreadElement(node) {
         if (node.parent.type !== "ObjectExpression")
           return;
-        const match = conditionalEmptyObjectSpread(node.argument);
-        if (match === null)
-          return;
-        const { conditional, property } = match;
-        if (property !== null && canAutofixConditionalEmptyObjectSpread(context.sourceCode, conditional, property)) {
-          context.report({
-            node,
-            messageId: "avoid",
-            fix: (fixer) => fixer.replaceText(node, context.sourceCode.getText(property))
-          });
-          return;
+        if (isConditionalEmptyObjectSpread(node.argument)) {
+          context.report({ node, messageId: "avoid" });
         }
-        context.report({ node, messageId: "avoid" });
       }
     };
   }
@@ -287,15 +353,19 @@ function isEffectivelyEmptyInterface(declarations) {
   const [type] = declarations;
   return type !== undefined && type.extends.length === 0 && (type.body.body.length === 0 || type.body.body.every(isEffectivelyEmptyMember));
 }
-function resolvedSubstitutionArgument(type, base) {
+function resolvedSubstitutionArgument(type, base, resolving = new Set) {
   const unwrapped = unwrapTransparentType(type);
   if (unwrapped.type !== "TSTypeReference")
     return type;
   const name = typeReferenceName(unwrapped);
-  if (name === null)
+  if (name === null || resolving.has(name))
     return type;
   const substitution = base.get(name);
-  return substitution === undefined ? type : resolvedSubstitutionArgument(substitution, base);
+  if (substitution === undefined)
+    return type;
+  const nextResolving = new Set(resolving);
+  nextResolving.add(name);
+  return resolvedSubstitutionArgument(substitution, base, nextResolving);
 }
 function aliasSubstitution(alias, type, base) {
   const parameters = alias.typeParameters?.params ?? [];
@@ -434,6 +504,8 @@ function classifyWideningTarget(type, environment) {
   const alias = environment.aliases.get(name);
   if (alias === undefined)
     return null;
+  if ((alias.typeParameters?.params.length ?? 0) === 0)
+    return null;
   if ((alias.typeParameters?.params.length ?? 0) > 0) {
     const substitutions2 = aliasSubstitution(alias, unwrapped, new Map);
     return substitutions2 !== null && resolvesToDictionary(alias.typeAnnotation, environment, substitutions2, new Set([name])) ? { kind: "generic container" } : null;
@@ -444,12 +516,37 @@ function classifyWideningTarget(type, environment) {
   const resolved = classifyAliasBroadTarget(alias.typeAnnotation, environment, substitutions, new Set([name]));
   return resolved;
 }
+function isBroadMappedKey(type, environment, substitutions) {
+  const unwrapped = unwrapTransparentType(type);
+  if (unwrapped.type === "TSStringKeyword" || unwrapped.type === "TSNumberKeyword" || unwrapped.type === "TSSymbolKeyword") {
+    return true;
+  }
+  if (unwrapped.type === "TSUnionType") {
+    return unwrapped.types.every((member) => isBroadMappedKey(member, environment, substitutions));
+  }
+  if (unwrapped.type !== "TSTypeReference")
+    return false;
+  const name = typeReferenceName(unwrapped);
+  if (name === null)
+    return false;
+  const substitution = substitutions.get(name);
+  if (substitution !== undefined && !isUnappliedReferenceTo(substitution, name)) {
+    return isBroadMappedKey(substitution, environment, substitutions);
+  }
+  return name === "PropertyKey" && isBuiltIn(name, environment);
+}
 function classifyAliasBroadTarget(type, environment, substitutions, resolvingAliases) {
   const unwrapped = unwrapTransparentType(type);
   if (unwrapped.type === "TSUnknownKeyword")
     return { kind: "unknown" };
   if (unwrapped.type === "TSObjectKeyword")
     return { kind: "object" };
+  if (unwrapped.type === "TSTypeLiteral") {
+    return unwrapped.members.some((member) => member.type === "TSIndexSignature") ? { kind: "open dictionary" } : null;
+  }
+  if (unwrapped.type === "TSMappedType") {
+    return isBroadMappedKey(unwrapped.constraint, environment, substitutions) ? { kind: "open dictionary" } : null;
+  }
   if (unwrapped.type !== "TSTypeReference")
     return null;
   const name = typeReferenceName(unwrapped);
@@ -457,7 +554,14 @@ function classifyAliasBroadTarget(type, environment, substitutions, resolvingAli
     return null;
   const substitution = substitutions.get(name);
   if (substitution !== undefined) {
-    return classifyAliasBroadTarget(substitution, environment, substitutions, resolvingAliases);
+    return isUnappliedReferenceTo(substitution, name) ? null : classifyAliasBroadTarget(substitution, environment, substitutions, resolvingAliases);
+  }
+  if (TRANSPARENT_WRAPPERS.has(name) && isBuiltIn(name, environment)) {
+    const wrapped = unwrapped.typeArguments?.params[0];
+    return wrapped === undefined ? null : classifyAliasBroadTarget(wrapped, environment, substitutions, resolvingAliases);
+  }
+  if (name === "Record" && isBuiltIn(name, environment)) {
+    return { kind: "open dictionary" };
   }
   const alias = environment.aliases.get(name);
   if (alias === undefined || resolvingAliases.has(name))
@@ -571,15 +675,15 @@ var noKnownValueWideningRule = defineRule({
       description: "Disallow syntactically established values from flowing into explicitly broad or anonymous target types that discard useful evidence."
     },
     messages: {
-      widening: "The known initializer supplying {{subject}} carries established type evidence, but the explicit {{target}} target type discards it. Preserve inference, use `satisfies`, or introduce/use a named owner contract; parse genuinely external data once at its boundary."
+      widening: "The explicit {{target}} type on {{subject}} discards known type evidence. Keep inference, validate with `satisfies`, or use a named owner contract."
     }
   },
   createOnce(context) {
     let environment = null;
-    const reportFlow = (expression, destination, subject, options = {}) => {
+    const reportFlow = (expression, destination, subject) => {
       if (destination === null)
         return;
-      if (options.allowEmptyDictionaryAccumulator === true && isDictionaryAccumulatorTarget(destination) && isEmptyObjectExpression2(expression)) {
+      if (isDictionaryAccumulatorTarget(destination) && isEmptyObjectExpression2(expression)) {
         return;
       }
       if (!hasKnownEvidence(context.sourceCode, expression))
@@ -598,7 +702,7 @@ var noKnownValueWideningRule = defineRule({
       VariableDeclarator(node) {
         if (node.init === null || node.id.type !== "Identifier")
           return;
-        reportFlow(node.init, targetFromAnnotation(node.id.typeAnnotation), `binding \`${node.id.name}\``, { allowEmptyDictionaryAccumulator: true });
+        reportFlow(node.init, targetFromAnnotation(node.id.typeAnnotation), `binding \`${node.id.name}\``);
       },
       PropertyDefinition(node) {
         if (node.value === null)
@@ -646,6 +750,118 @@ var noKnownValueWideningRule = defineRule({
   }
 });
 
+// tools/oxlint/anti-slop/rules/no-module-mocking.ts
+var moduleMockMethods = new Set(["doMock", "mock", "unstable_mockModule"]);
+function resolveVariable2(sourceCode, identifier) {
+  let scope = sourceCode.getScope(identifier);
+  while (scope !== null) {
+    const variable = scope.set.get(identifier.name);
+    if (variable !== undefined)
+      return variable;
+    scope = scope.upper;
+  }
+  return null;
+}
+function importedName(node) {
+  if (node.type !== "ImportSpecifier")
+    return null;
+  return node.imported.type === "Identifier" ? node.imported.name : node.imported.value;
+}
+function isTestFrameworkObject(sourceCode, expression) {
+  if (expression.type !== "Identifier")
+    return false;
+  if ((expression.name === "vi" || expression.name === "jest") && sourceCode.isGlobalReference(expression)) {
+    return true;
+  }
+  const variable = resolveVariable2(sourceCode, expression);
+  if (variable === null || variable.defs.length === 0) {
+    return expression.name === "vi" || expression.name === "jest";
+  }
+  return variable.defs.some((definition) => {
+    if (definition.type !== "ImportBinding" || definition.parent?.type !== "ImportDeclaration") {
+      return false;
+    }
+    const source = definition.parent.source.value;
+    const name = importedName(definition.node);
+    return source === "vitest" && name === "vi" || source === "@jest/globals" && name === "jest";
+  });
+}
+function moduleMockCall(sourceCode, callee) {
+  if (!("property" in callee) || !("object" in callee) || !("computed" in callee))
+    return false;
+  if (!isTestFrameworkObject(sourceCode, callee.object))
+    return false;
+  const property = callee.property;
+  const method = callee.computed ? property.type === "Literal" && (property.value === "doMock" || property.value === "mock" || property.value === "unstable_mockModule") ? property.value : null : property.type === "Identifier" ? property.name : null;
+  return method !== null && moduleMockMethods.has(method);
+}
+var noModuleMockingRule = defineRule({
+  meta: {
+    type: "problem",
+    docs: {
+      description: "Disallow Vitest and Jest module mocking; tests must replace dependencies through real interfaces."
+    },
+    messages: {
+      moduleMock: "Replace module mocking with dependency injection through a real interface, service layer, or faithful test implementation."
+    }
+  },
+  createOnce(context) {
+    return {
+      CallExpression(node) {
+        if (node.callee.type === "Super" || node.callee.type === "V8IntrinsicExpression")
+          return;
+        if (moduleMockCall(context.sourceCode, node.callee)) {
+          context.report({ node, messageId: "moduleMock" });
+        }
+      }
+    };
+  }
+});
+
+// tools/oxlint/anti-slop/shared/lexical-type-parameters.ts
+function isNode(value) {
+  return typeof value === "object" && value !== null && "type" in value && typeof value.type === "string";
+}
+function collectInferTypeParameterNames(node, visitorKeys, names) {
+  if (node.type === "TSInferType")
+    names.add(node.typeParameter.name.name);
+  const record = node;
+  for (const key of visitorKeys[node.type] ?? []) {
+    const value = record[key];
+    if (isNode(value)) {
+      collectInferTypeParameterNames(value, visitorKeys, names);
+      continue;
+    }
+    if (!Array.isArray(value))
+      continue;
+    for (const child of value) {
+      if (isNode(child))
+        collectInferTypeParameterNames(child, visitorKeys, names);
+    }
+  }
+}
+function lexicalTypeParameterNames(node, visitorKeys) {
+  const names = new Set;
+  let descendant = node;
+  let current = node;
+  while (current !== null && current.type !== "Program") {
+    if ("typeParameters" in current) {
+      for (const parameter of current.typeParameters?.params ?? []) {
+        names.add(parameter.name.name);
+      }
+    }
+    if (current.type === "TSMappedType" && (descendant === current.nameType || descendant === current.typeAnnotation)) {
+      names.add(current.key.name);
+    }
+    if (current.type === "TSConditionalType" && descendant === current.trueType) {
+      collectInferTypeParameterNames(current.extendsType, visitorKeys, names);
+    }
+    descendant = current;
+    current = current.parent;
+  }
+  return names;
+}
+
 // tools/oxlint/anti-slop/rules/no-object-parameters.ts
 function parameterAnnotation(parameter) {
   if (parameter.type === "TSParameterProperty") {
@@ -669,20 +885,20 @@ var noObjectParametersRule = defineRule({
       description: "Disallow object function parameters; inputs must use an owner-provided type and be parsed at their boundary."
     },
     messages: {
-      objectParameter: "Parameter `{{parameter}}` accepts the broad `object` type. Use the expected owner type or decode the external input at its boundary."
+      objectParameter: "Parameter `{{parameter}}` uses the broad `object` type. Accept a named owner type; parse external input at its boundary before calling this function."
     }
   },
-  create(context) {
+  createOnce(context) {
     const aliases = new Map;
-    const resolvesToObject = (type, visited = new Set) => {
+    const resolvesToObject = (type, shadowedAliases, visited = new Set) => {
       if (type.type === "TSObjectKeyword")
         return true;
       if (type.type === "TSParenthesizedType")
-        return resolvesToObject(type.typeAnnotation, visited);
+        return resolvesToObject(type.typeAnnotation, shadowedAliases, visited);
       if (type.type === "TSUnionType") {
-        return type.types.some((member) => resolvesToObject(member, visited));
+        return type.types.some((member) => resolvesToObject(member, shadowedAliases, visited));
       }
-      if (type.type !== "TSTypeReference" || type.typeName.type !== "Identifier" || type.typeArguments !== null && type.typeArguments !== undefined && type.typeArguments.params.length > 0 || visited.has(type.typeName.name)) {
+      if (type.type !== "TSTypeReference" || type.typeName.type !== "Identifier" || type.typeArguments !== null && type.typeArguments !== undefined && type.typeArguments.params.length > 0 || visited.has(type.typeName.name) || shadowedAliases.has(type.typeName.name)) {
         return false;
       }
       const alias = aliases.get(type.typeName.name);
@@ -690,14 +906,15 @@ var noObjectParametersRule = defineRule({
         return false;
       const nextVisited = new Set(visited);
       nextVisited.add(type.typeName.name);
-      return resolvesToObject(alias, nextVisited);
+      return resolvesToObject(alias, shadowedAliases, nextVisited);
     };
     const checkParameters = (node) => {
+      const shadowedAliases = lexicalTypeParameterNames(node, context.sourceCode.visitorKeys);
       for (const parameter of node.params) {
         const annotation = parameterAnnotation(parameter);
         if (annotation === null || annotation === undefined)
           continue;
-        if (!resolvesToObject(annotation.typeAnnotation))
+        if (!resolvesToObject(annotation.typeAnnotation, shadowedAliases))
           continue;
         context.report({
           node: annotation.typeAnnotation,
@@ -708,6 +925,7 @@ var noObjectParametersRule = defineRule({
     };
     return {
       Program(node) {
+        aliases.clear();
         for (const statement of node.body) {
           const declaration = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
           if (declaration?.type === "TSTypeAliasDeclaration" && (declaration.typeParameters === null || declaration.typeParameters === undefined)) {
@@ -729,7 +947,96 @@ var noObjectParametersRule = defineRule({
   }
 });
 
+// tools/oxlint/anti-slop/shared/reflect-method.ts
+function resolveVariable3(sourceCode, identifier) {
+  let scope = sourceCode.getScope(identifier);
+  while (scope !== null) {
+    const variable = scope.set.get(identifier.name);
+    if (variable !== undefined)
+      return variable;
+    scope = scope.upper;
+  }
+  return null;
+}
+function isGlobalReflect(sourceCode, expression) {
+  if (expression.type !== "Identifier" || expression.name !== "Reflect")
+    return false;
+  if (sourceCode.isGlobalReference(expression))
+    return true;
+  const variable = resolveVariable3(sourceCode, expression);
+  return variable === null || variable.defs.length === 0;
+}
+function isGlobalReflectMethodCall(sourceCode, callee, methodName) {
+  if (!("property" in callee) || !("object" in callee) || !("computed" in callee))
+    return false;
+  if (!isGlobalReflect(sourceCode, callee.object))
+    return false;
+  const property = callee.property;
+  return callee.computed ? property.type === "Literal" && property.value === methodName : property.type === "Identifier" && property.name === methodName;
+}
+
+// tools/oxlint/anti-slop/rules/no-reflect-apply.ts
+var noReflectApplyRule = defineRule({
+  meta: {
+    type: "problem",
+    docs: {
+      description: "Disallow Reflect.apply; call typed functions directly or model dynamic dispatch behind an interface."
+    },
+    messages: {
+      reflectApply: "Replace `Reflect.apply` with a typed function call. Model dynamic dispatch behind a named interface."
+    }
+  },
+  createOnce(context) {
+    return {
+      CallExpression(node) {
+        if (node.callee.type === "Super" || node.callee.type === "V8IntrinsicExpression")
+          return;
+        if (isGlobalReflectMethodCall(context.sourceCode, node.callee, "apply")) {
+          context.report({ node, messageId: "reflectApply" });
+        }
+      }
+    };
+  }
+});
+
+// tools/oxlint/anti-slop/rules/no-reflect-get.ts
+var noReflectGetRule = defineRule({
+  meta: {
+    type: "problem",
+    docs: {
+      description: "Disallow Reflect.get; use typed property access or parse dynamic input into a domain type."
+    },
+    messages: {
+      reflectGet: "Replace `Reflect.get` with typed property access. Parse dynamic input into a named domain type before reading it."
+    }
+  },
+  createOnce(context) {
+    return {
+      CallExpression(node) {
+        if (node.callee.type === "Super" || node.callee.type === "V8IntrinsicExpression")
+          return;
+        if (isGlobalReflectMethodCall(context.sourceCode, node.callee, "get")) {
+          context.report({ node, messageId: "reflectGet" });
+        }
+      }
+    };
+  }
+});
+
 // tools/oxlint/anti-slop/rules/no-runtime-typeof.ts
+function isRuntimeFunction(node) {
+  return node.type === "ArrowFunctionExpression" || node.type === "FunctionDeclaration" || node.type === "FunctionExpression";
+}
+function isInsideTypeGuard(node) {
+  let current = node.parent;
+  while (current !== null && current.type !== "Program") {
+    if (isRuntimeFunction(current)) {
+      return current.returnType?.typeAnnotation.type === "TSTypePredicate";
+    }
+    current = current.parent;
+  }
+  return false;
+}
 var noRuntimeTypeofRule = defineRule({
   meta: {
     type: "problem",
@@ -737,13 +1044,25 @@ var noRuntimeTypeofRule = defineRule({
       description: "Disallow runtime typeof checks; external values must be decoded into meaningful types at their I/O boundary."
     },
     messages: {
-      runtimeTypeof: "A runtime `typeof` check only narrows an unparsed representation; it does not establish the expected contract. Parse the value into a strongly typed domain type at the earliest possible point, as close as possible to the I/O boundary where the data originated."
-    }
+      runtimeTypeof: "A `typeof` check narrows a representation without establishing its contract. Parse input at its I/O boundary, then branch on the domain value."
+    },
+    schema: [
+      {
+        type: "object",
+        properties: {
+          allowInTypeGuards: { type: "boolean" }
+        },
+        additionalProperties: false
+      }
+    ],
+    defaultOptions: [{ allowInTypeGuards: false }]
   },
-  create(context) {
+  createOnce(context) {
     return {
       UnaryExpression(node) {
-        if (node.operator === "typeof") {
+        const option = context.options?.[0];
+        const allowInTypeGuards = typeof option === "object" && option !== null && !Array.isArray(option) && option.allowInTypeGuards === true;
+        if (node.operator === "typeof" && (!allowInTypeGuards || !isInsideTypeGuard(node))) {
           context.report({ node, messageId: "runtimeTypeof" });
         }
       }
@@ -763,10 +1082,10 @@ var noForbiddenTermInSymbolNamesRule = defineRule({
       description: 'Disallow the case-insensitive substring "shape" in JavaScript, TypeScript, private, and JSX symbol names.'
     },
     messages: {
-      forbiddenSymbolName: 'Do not use the case-insensitive substring "shape" in symbol names (found "{{name}}").'
+      forbiddenSymbolName: 'Rename symbol "{{name}}" for its domain role; "shape" describes structure rather than ownership.'
     }
   },
-  create(context) {
+  createOnce(context) {
     const reportForbiddenSymbolName = (node) => {
       if (!containsForbiddenSymbolName(node.name))
         return;
@@ -816,10 +1135,10 @@ var noUnknownParametersRule = defineRule({
       description: "Disallow explicitly unknown function parameters except `cause`; decode unknown input at its I/O boundary instead."
     },
     messages: {
-      unknownParameter: "Parameter `{{parameter}}` accepts `unknown` without establishing its contract. Define the expected schema or parser so the value becomes a strongly typed domain type at the earliest possible point, as close as possible to the I/O boundary where the data originated."
+      unknownParameter: "Parameter `{{parameter}}` leaves input unparsed. Accept a named domain type; run the expected schema or parser at the I/O boundary before calling this function."
     }
   },
-  create(context) {
+  createOnce(context) {
     const checkParameters = (node) => {
       for (const parameter of node.params) {
         const annotation = parameterAnnotation2(parameter);
@@ -850,10 +1169,87 @@ var noUnknownParametersRule = defineRule({
   }
 });
 
-// tools/oxlint/anti-slop/rules/no-unknown-type-aliases.ts
+// tools/oxlint/anti-slop/rules/no-unknown-returns.ts
 function referencedAliasName(type) {
   if (type.type === "TSParenthesizedType")
     return referencedAliasName(type.typeAnnotation);
+  if (type.type !== "TSTypeReference" || type.typeName.type !== "Identifier")
+    return null;
+  return type.typeArguments === null || type.typeArguments === undefined || type.typeArguments.params.length === 0 ? type.typeName.name : null;
+}
+var noUnknownReturnsRule = defineRule({
+  meta: {
+    type: "problem",
+    docs: {
+      description: "Disallow functions whose explicit return contract is unknown or Promise<unknown>."
+    },
+    messages: {
+      unknownReturn: "This function exposes `unknown` to its caller. Parse the value at its boundary and return a named domain type."
+    }
+  },
+  createOnce(context) {
+    const aliases = new Map;
+    const resolvesToUnknown = (type, shadowedAliases, visited = new Set) => {
+      if (type.type === "TSUnknownKeyword")
+        return true;
+      if (type.type === "TSParenthesizedType") {
+        return resolvesToUnknown(type.typeAnnotation, shadowedAliases, visited);
+      }
+      if (type.type === "TSUnionType") {
+        return type.types.some((member) => resolvesToUnknown(member, shadowedAliases, visited));
+      }
+      if (type.type === "TSTypeReference" && type.typeName.type === "Identifier" && (type.typeName.name === "Promise" || type.typeName.name === "PromiseLike")) {
+        const value = type.typeArguments?.params[0];
+        return value !== undefined && resolvesToUnknown(value, shadowedAliases, visited);
+      }
+      const name = referencedAliasName(type);
+      if (name === null || visited.has(name) || shadowedAliases.has(name))
+        return false;
+      const alias = aliases.get(name);
+      if (alias === undefined || alias.typeParameters !== null && alias.typeParameters !== undefined) {
+        return false;
+      }
+      const nextVisited = new Set(visited);
+      nextVisited.add(name);
+      return resolvesToUnknown(alias.typeAnnotation, shadowedAliases, nextVisited);
+    };
+    const checkReturnType = (node) => {
+      const annotation = node.returnType;
+      if (annotation === null || annotation === undefined)
+        return;
+      if (!resolvesToUnknown(annotation.typeAnnotation, lexicalTypeParameterNames(node, context.sourceCode.visitorKeys))) {
+        return;
+      }
+      context.report({ node: annotation.typeAnnotation, messageId: "unknownReturn" });
+    };
+    return {
+      Program(node) {
+        aliases.clear();
+        for (const statement of node.body) {
+          const declaration = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
+          if (declaration?.type === "TSTypeAliasDeclaration") {
+            aliases.set(declaration.id.name, declaration);
+          }
+        }
+      },
+      ArrowFunctionExpression: checkReturnType,
+      FunctionDeclaration: checkReturnType,
+      FunctionExpression: checkReturnType,
+      TSCallSignatureDeclaration: checkReturnType,
+      TSConstructSignatureDeclaration: checkReturnType,
+      TSConstructorType: checkReturnType,
+      TSDeclareFunction: checkReturnType,
+      TSEmptyBodyFunctionExpression: checkReturnType,
+      TSFunctionType: checkReturnType,
+      TSMethodSignature: checkReturnType
+    };
+  }
+});
+
+// tools/oxlint/anti-slop/rules/no-unknown-type-aliases.ts
+function referencedAliasName2(type) {
+  if (type.type === "TSParenthesizedType")
+    return referencedAliasName2(type.typeAnnotation);
   if (type.type !== "TSTypeReference" || type.typeName.type !== "Identifier")
     return null;
   return type.typeArguments === null || type.typeArguments === undefined || type.typeArguments.params.length === 0 ? type.typeName.name : null;
@@ -865,17 +1261,17 @@ var noUnknownTypeAliasesRule = defineRule({
       description: "Disallow type aliases whose resolved type is unknown; unknown must remain visible at an allowed boundary."
     },
     messages: {
-      unknownAlias: "Type alias `{{alias}}` only renames `unknown`. Keep `unknown` explicit on an allowed `cause` field or replace it with the parsed owner type."
+      unknownAlias: "Type alias `{{alias}}` hides `unknown`. Keep `unknown` explicit at the parsing boundary or on an allowed `cause` field; otherwise use the parsed owner type."
     }
   },
-  create(context) {
+  createOnce(context) {
     const aliases = new Map;
     const resolvesToUnknown = (type, visited = new Set) => {
       if (type.type === "TSUnknownKeyword")
         return true;
       if (type.type === "TSParenthesizedType")
         return resolvesToUnknown(type.typeAnnotation, visited);
-      const name = referencedAliasName(type);
+      const name = referencedAliasName2(type);
       if (name === null || visited.has(name))
         return false;
       const alias = aliases.get(name);
@@ -888,6 +1284,7 @@ var noUnknownTypeAliasesRule = defineRule({
     };
     return {
       Program(node) {
+        aliases.clear();
         for (const statement of node.body) {
           const declaration = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
           if (declaration?.type === "TSTypeAliasDeclaration") {
@@ -909,8 +1306,47 @@ var noUnknownTypeAliasesRule = defineRule({
 });
 
 // tools/oxlint/anti-slop/rules/no-unsafe-dictionary-type.ts
+var typeNodeKinds = new Set([
+  "JSDocNonNullableType",
+  "JSDocNullableType",
+  "JSDocUnknownType",
+  "TSAnyKeyword",
+  "TSArrayType",
+  "TSBigIntKeyword",
+  "TSBooleanKeyword",
+  "TSConditionalType",
+  "TSConstructorType",
+  "TSFunctionType",
+  "TSImportType",
+  "TSIndexedAccessType",
+  "TSInferType",
+  "TSIntersectionType",
+  "TSIntrinsicKeyword",
+  "TSLiteralType",
+  "TSMappedType",
+  "TSNamedTupleMember",
+  "TSNeverKeyword",
+  "TSNullKeyword",
+  "TSNumberKeyword",
+  "TSObjectKeyword",
+  "TSParenthesizedType",
+  "TSStringKeyword",
+  "TSSymbolKeyword",
+  "TSTemplateLiteralType",
+  "TSThisType",
+  "TSTupleType",
+  "TSTypeLiteral",
+  "TSTypeOperator",
+  "TSTypePredicate",
+  "TSTypeQuery",
+  "TSTypeReference",
+  "TSUndefinedKeyword",
+  "TSUnionType",
+  "TSUnknownKeyword",
+  "TSVoidKeyword"
+]);
 function isTypeNode(node) {
-  return node.type.startsWith("TS") && node.type !== "TSTypeAnnotation";
+  return typeNodeKinds.has(node.type);
 }
 function typeReferenceName2(type) {
   return type.typeName.type === "Identifier" ? type.typeName.name : null;
@@ -950,7 +1386,7 @@ var noUnsafeDictionaryTypeRule = defineRule({
       description: "Disallow object-dictionary contracts whose direct value type is unknown, any, object, {}, or a union/alias containing one of those escape hatches."
     },
     messages: {
-      unsafeDictionary: "This object dictionary's direct value type is an unsafe {{value}} escape hatch. Replace it with a concrete owner/schema-derived value type and parse external data at its boundary."
+      unsafeDictionary: "This dictionary's {{value}} value type gives callers no concrete value contract. Use an owner/schema-derived value type; parse external payloads before insertion."
     }
   },
   createOnce(context) {
@@ -1187,11 +1623,11 @@ var noWidenThenAssertRule = defineRule({
       description: "Disallow local const flows that explicitly widen a known value before asserting the widened binding to a narrower type."
     },
     messages: {
-      widenThenAssert: 'Binding "{{name}}" erases established type evidence by widening the value, then reconstructs that evidence with a type assertion. Preserve the precise type end-to-end; if the input is genuinely unknown, parse it once at the boundary instead.'
+      widenThenAssert: 'Binding "{{name}}" discards type evidence and later recreates it with an assertion. Keep the precise type from initialization through use; parse boundary input once.'
     }
   },
-  create(context) {
-    const scopes = context.sourceCode.scopeManager.scopes;
+  createOnce(context) {
+    let scopes = [];
     const checkAssertion = (node) => {
       const expression = assertedExpression(node);
       if (expression.type !== "Identifier")
@@ -1210,6 +1646,54 @@ var noWidenThenAssertRule = defineRule({
       });
     };
     return {
+      Program() {
+        scopes = context.sourceCode.scopeManager.scopes;
+      },
+      TSAsExpression: checkAssertion,
+      TSTypeAssertion: checkAssertion
+    };
+  }
+});
+
+// tools/oxlint/anti-slop/rules/require-safety-comment-for-type-assertion.ts
+var commentOwnerKinds = new Set([
+  "ExpressionStatement",
+  "PropertyDefinition",
+  "ReturnStatement",
+  "ThrowStatement",
+  "VariableDeclaration"
+]);
+function isConstAssertion2(node) {
+  return node.typeAnnotation.type === "TSTypeReference" && node.typeAnnotation.typeName.type === "Identifier" && node.typeAnnotation.typeName.name === "const";
+}
+function hasSafetyComment(sourceCode, node) {
+  let current = node;
+  while (true) {
+    if (sourceCode.getCommentsBefore(current).some((comment) => comment.end <= node.start && /\bSAFETY\s*:/u.test(comment.value))) {
+      return true;
+    }
+    if (commentOwnerKinds.has(current.type) || current.parent.type === "Program")
+      return false;
+    current = current.parent;
+  }
+}
+var requireSafetyCommentForTypeAssertionRule = defineRule({
+  meta: {
+    type: "problem",
+    docs: {
+      description: "Require a nearby SAFETY comment for every TypeScript type assertion except const assertions."
+    },
+    messages: {
+      missingSafetyComment: "This type assertion has no `SAFETY:` justification. State the checked invariant immediately before the assertion or its containing statement."
+    }
+  },
+  createOnce(context) {
+    const checkAssertion = (node) => {
+      if (isConstAssertion2(node) || hasSafetyComment(context.sourceCode, node))
+        return;
+      context.report({ node, messageId: "missingSafetyComment" });
+    };
+    return {
       TSAsExpression: checkAssertion,
       TSTypeAssertion: checkAssertion
     };
@@ -1217,19 +1701,24 @@ var noWidenThenAssertRule = defineRule({
 });
 
 // tools/oxlint/anti-slop/index.ts
-var antiSlopPlugin = definePlugin({
+var antiSlopPlugin = eslintCompatPlugin({
   meta: { name: "anti-slop" },
   rules: {
     "no-chained-type-assertions": noChainedTypeAssertionsRule,
     "no-conditional-empty-object-spread": noConditionalEmptyObjectSpreadRule,
     "no-known-value-widening": noKnownValueWideningRule,
+    "no-module-mocking": noModuleMockingRule,
     "no-object-parameters": noObjectParametersRule,
+    "no-reflect-apply": noReflectApplyRule,
+    "no-reflect-get": noReflectGetRule,
     "no-runtime-typeof": noRuntimeTypeofRule,
     "no-unsafe-dictionary-type": noUnsafeDictionaryTypeRule,
     "no-shape-in-symbol-names": noForbiddenTermInSymbolNamesRule,
     "no-unknown-parameters": noUnknownParametersRule,
+    "no-unknown-returns": noUnknownReturnsRule,
     "no-unknown-type-aliases": noUnknownTypeAliasesRule,
-    "no-widen-then-assert": noWidenThenAssertRule
+    "no-widen-then-assert": noWidenThenAssertRule,
+    "require-safety-comment-for-type-assertion": requireSafetyCommentForTypeAssertionRule
   }
 });
 var anti_slop_default = antiSlopPlugin;

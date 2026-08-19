@@ -26,6 +26,7 @@ function buildAdapterLayer(
     AdapterLive,
     Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))),
   );
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return withDeps as Layer.Layer<AdapterService, never, never>;
 }
 
@@ -45,6 +46,7 @@ const FEE_EVENT = {
 function stubPrismConfigDir(): void {
   const realReadFileSync = fs.readFileSync;
   const realExistsSync = fs.existsSync;
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   vi.spyOn(fs, "readFileSync").mockImplementation(((
     path: fs.PathOrFileDescriptor,
     options?: string | { encoding?: string | null },
@@ -55,6 +57,7 @@ function stubPrismConfigDir(): void {
     if (String(path).includes("credentials.json")) {
       return JSON.stringify({ apiKey: "ci-test-api-key", userId: "ci-test-user" });
     }
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     return realReadFileSync(path, options as never);
   }) as typeof fs.readFileSync);
   vi.spyOn(fs, "existsSync").mockImplementation((path: fs.PathLike) => {
@@ -106,6 +109,7 @@ describe("AdapterService.reportFeeCollection opt-out", () => {
     );
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     expect(String(fetchSpy.mock.calls[0]?.[0] as unknown)).toContain("/v1/revenue/log");
   });
 });

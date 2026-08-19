@@ -98,17 +98,16 @@ closeCommand.action(async function (this: Command, positionId: string) {
       // An empty-reap (zero-liquidity on-chain account) realizes 0: there is
       // nothing to withdraw and the heuristic mark was phantom, so no loss
       // against the (suspect) deposited basis and no rug-block is booked.
-      const realizedPnlUsd =
-        result.isEmptyReap
-          ? 0
-          : withdrawnUsd === null
-            ? null
-            : computeRealizedPnlUsd(
-                withdrawnUsd,
-                pos.cumulativeFeesClaimedUsd,
-                pos.depositedUsd,
-                pos.cumulativeRewardsClaimedUsd,
-              );
+      const realizedPnlUsd = result.isEmptyReap
+        ? 0
+        : withdrawnUsd === null
+          ? null
+          : computeRealizedPnlUsd(
+              withdrawnUsd,
+              pos.cumulativeFeesClaimedUsd,
+              pos.depositedUsd,
+              pos.cumulativeRewardsClaimedUsd,
+            );
 
       yield* db.closePosition(pos.positionId, realizedPnlUsd);
 

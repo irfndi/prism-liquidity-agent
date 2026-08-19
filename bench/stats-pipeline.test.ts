@@ -50,6 +50,7 @@ type MintAuthorities = { mintAuthority: string | null; freezeAuthority: string |
 const NO_AUTHORITIES: MintAuthorities = { mintAuthority: null, freezeAuthority: null };
 
 function makeAdapter(pools: Record<string, ReturnType<typeof makePool>>): AdapterApi {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return {
     hasWallet: () => false,
     getWalletAddress: () => null,

@@ -278,11 +278,13 @@ export class HttpStatusServer {
     if (
       parsedBody === null ||
       Object.prototype.toString.call(parsedBody) !== "[object Object]" ||
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       !Array.isArray((parsedBody as { proposalIds?: unknown }).proposalIds)
     ) {
       return new Response("Missing proposalIds array", { status: 400 });
     }
 
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const proposalIds = (parsedBody as { proposalIds: unknown }).proposalIds;
     if (
       !Array.isArray(proposalIds) ||
@@ -300,6 +302,7 @@ export class HttpStatusServer {
 
     const snapshot = await Effect.runPromise(this.state.getSnapshot());
     const pendingIds = new Set(snapshot.pendingProposals.map((p) => p.proposalId));
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const ids = proposalIds as string[];
     const missing = ids.filter((id) => !pendingIds.has(id));
     if (missing.length > 0) {

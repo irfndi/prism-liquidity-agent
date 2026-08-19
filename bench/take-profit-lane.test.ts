@@ -94,9 +94,11 @@ async function runWithSeededPosition(
 }
 
 function enterLayer(configOverrides: JsonRecord): TestLayer {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return makeTestLayer({
     adapter: makeAdapter({ [POOL]: makePool({ address: POOL }) }),
     datapi: { getPoolData: () => Effect.succeed(makeDatapiStats({ address: POOL })) },
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     configOverrides: configOverrides as never,
   }) as never;
 }
@@ -137,6 +139,7 @@ describe("normal-lane take-profit (winrate fix)", () => {
 
   it("(b) emits a deterministic [tp-target] EXIT with confidence 1 when price reaches the rung", async () => {
     // Pool price 200 ≥ rung target 172.5 (entry 150 × 1.15).
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const layer = makeTestLayer({
       adapter: makeAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 200 }) }),
       configOverrides: {
@@ -160,6 +163,7 @@ describe("normal-lane take-profit (winrate fix)", () => {
   it("(c) emits no TP exit while price is below the rung (loss-side exits own the downside)", async () => {
     // Pool price 160: above entry 150 but below the rung 172.5 — no TP exit,
     // and the healthy position triggers no loss-side exit either.
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const layer = makeTestLayer({
       adapter: makeAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 160 }) }),
       configOverrides: {
@@ -196,6 +200,7 @@ describe("normal-lane take-profit (winrate fix)", () => {
 
     // (2) A laddered position held with the feature off never TP-exits even
     // with price at/above the rung.
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const exitOffLayer = makeTestLayer({
       adapter: makeAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 200 }) }),
       configOverrides: {

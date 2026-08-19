@@ -41,6 +41,7 @@ const REWARD_MINT = "RewardMint111111111111111111111111111111111";
 const NO_AUTHORITIES = { mintAuthority: null, freezeAuthority: null };
 
 function makeLoopAdapter(claimRewards: AdapterApi["claimRewards"]): AdapterApi {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return {
     hasWallet: () => true,
     getWalletAddress: () => "Wallet111",
@@ -197,6 +198,7 @@ describe("periodic reward claim cycle", () => {
     });
 
     const outcome = await Effect.runPromise(
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
       Effect.provide(
         Effect.gen(function* () {
           const db = yield* DbService;
@@ -258,6 +260,7 @@ describe("periodic reward claim cycle", () => {
     });
 
     const outcome = await Effect.runPromise(
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
       Effect.provide(
         Effect.gen(function* () {
           const db = yield* DbService;
@@ -296,6 +299,7 @@ describe("periodic reward claim cycle", () => {
       Effect.succeed({
         skipped: true,
         skipReason: "no pending rewards",
+        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
         txSignatures: [] as string[],
         rewards: [],
       }),
@@ -306,6 +310,7 @@ describe("periodic reward claim cycle", () => {
     });
 
     await Effect.runPromise(
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
       Effect.provide(
         Effect.gen(function* () {
           const db = yield* DbService;

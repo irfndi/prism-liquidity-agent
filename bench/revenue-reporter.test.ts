@@ -135,6 +135,7 @@ describe("reportFeeCollection", () => {
     expect(options.method).toBe("POST");
     expect(options.headers).toEqual({ "Content-Type": "application/json" });
 
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const body = JSON.parse(options.body as string);
     expect(body.poolAddress).toBe(sampleEvent.poolAddress);
     expect(body.positionPubkey).toBe(sampleEvent.positionPubkey);

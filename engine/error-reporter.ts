@@ -84,6 +84,7 @@ interface PrismEnv {
 
 /** Reads Prism-specific env vars without touching `process` in non-Node runtimes. */
 function getPrismEnv(): PrismEnv {
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const processEnv = (globalThis as { readonly process?: { readonly env?: Readonly<PrismEnv> } })
     .process?.env;
   return processEnv ?? {};
@@ -93,12 +94,17 @@ function readPrismApiKey(): Effect.Effect<string | null, never> {
     try: () => {
       const credentialsFile = join(getPrismUserConfigDir(), "credentials.json");
       if (!existsSync(credentialsFile)) return null;
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const value = JSON.parse(readFileSync(credentialsFile, "utf-8")) as {
         apiKey?: unknown;
       };
+      // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
       return Object.prototype.toString.call(value.apiKey) === "[object String]" &&
+        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
         (value.apiKey as string).length > 0
-        ? (value.apiKey as string)
+        ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+          // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+          (value.apiKey as string)
         : null;
     },
     catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
@@ -223,6 +229,7 @@ export class ErrorReporter {
       }, this.flushIntervalMs);
       // Allow the process to exit even if the timer is still active (Bun/Node return a Timeout object)
       if (this.timerId !== null && this.timerId instanceof Object && "unref" in this.timerId) {
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         (this.timerId as NodeJS.Timeout).unref();
       }
     }

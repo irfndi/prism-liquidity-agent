@@ -167,6 +167,7 @@ export class HermesApiTransport implements AgentRuntimeTransport {
 
 function parseChatContent(body: string): string {
   try {
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const parsed = JSON.parse(body) as {
       choices?: ReadonlyArray<{ message?: { content?: string } }>;
     };

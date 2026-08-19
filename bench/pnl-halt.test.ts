@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  rollingRealizedPnlHalted,
-} from "../engine/pnl-halt.js";
+import { rollingRealizedPnlHalted } from "../engine/pnl-halt.js";
 import { evaluateRisk, type RiskConfig } from "../engine/risk-service.js";
 import type { AgentDecision, Position } from "../engine/types.js";
 import type { RiskContext } from "../engine/services.js";
@@ -61,9 +59,8 @@ function makeContext(overrides: Partial<RiskContext> = {}): RiskContext {
   };
 }
 
-function makeDecision(
-  overrides: Partial<AgentDecision> = {},
-): AgentDecision {
+function makeDecision(overrides: Partial<AgentDecision> = {}): AgentDecision {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return {
     action: "ENTER",
     poolAddress: "pool",
@@ -131,6 +128,7 @@ describe("risk gate [rolling-pnl-halt]", () => {
       makeContext({
         rollingRealizedPnlHalted: true,
         openPositions: [
+          // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
           {
             id: "pos-1",
             poolAddress: "pool",

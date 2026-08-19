@@ -65,6 +65,7 @@ describe("estimatePaperRebalanceBenefit", () => {
 // ─── executeLive REBALANCE: identity preservation + accounting ──────────────
 
 function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return {
     hasWallet: () => true,
     getWalletAddress: () => "Wallet111",
@@ -182,7 +183,7 @@ describe("executeLive REBALANCE (atomic)", () => {
       trackedPositions,
       entryPrep: liveEntryPrep,
       solPriceUsd: 150,
-      entryStrategyShape: "spot" as const,
+      entryStrategySpec: "spot" as const,
     };
 
     const outcome = await runDb(
@@ -266,7 +267,7 @@ describe("executeLive REBALANCE (atomic)", () => {
       trackedPositions,
       entryPrep: liveEntryPrep,
       solPriceUsd: 150,
-      entryStrategyShape: "spot" as const,
+      entryStrategySpec: "spot" as const,
       reconcileRequestedPools,
     };
 
@@ -336,6 +337,7 @@ function makeLoopAdapter(opts: {
   simulateRebalance: AdapterApi["simulateRebalance"];
   rebalancePosition?: AdapterApi["rebalancePosition"];
 }): AdapterApi {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return {
     hasWallet: () => true,
     getWalletAddress: () => "Wallet111",

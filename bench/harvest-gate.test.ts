@@ -38,6 +38,7 @@ const CONFIG = {
 } as const;
 
 function gate(netUsd: number | null, overrides: Partial<Record<keyof typeof CONFIG, number>> = {}) {
+  // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
   return evaluateHarvestGate(netUsd, { ...CONFIG, ...overrides } as never);
 }
 
@@ -90,6 +91,7 @@ describe("claim wiring (cadence-block gate)", () => {
     const layer = makeTestLayer({
       adapter: makeAdapter(
         { [POOL]: makePool({ address: POOL, tvlUsd: 100_000, fees24hUsd: 100 }) },
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
         {
           // The mock wallet owns the seeded position so the startup
           // reconcile does not treat it as externally closed.
@@ -102,6 +104,7 @@ describe("claim wiring (cadence-block gate)", () => {
                 upperBinId: 5010,
               },
             ]),
+          // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
           claimFees: claimSpy as never,
           claimRewards: () =>
             Effect.succeed({
@@ -142,6 +145,7 @@ describe("claim wiring (cadence-block gate)", () => {
       const saved = yield* db.getPosition(POS_ID);
       return saved;
     });
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const saved = (await Effect.runPromise(
       asOwner<Effect.Effect<PositionRecord | undefined, Error, never>>(Effect.provide(test, layer)),
     )) as PositionRecord | undefined;

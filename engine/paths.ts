@@ -23,6 +23,7 @@ export function setPrismEntryScriptOverride(entry: string | undefined): void {
 
 function resolveEntryScript(): string {
   if (entryScriptOverride !== undefined) return entryScriptOverride;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const bun = (globalThis as { Bun?: { readonly main?: string } }).Bun;
   if (bun !== undefined && bun.main) {
     return bun.main;

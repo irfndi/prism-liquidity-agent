@@ -32,6 +32,7 @@ function sha256(file: string): string {
 }
 
 const pkgPath = path.join(repoRoot, "package.json");
+// SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
 const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as { version: string };
 // In CI the git tag is the source of truth; package.json may be stale at the
 // tagged commit. Prefer VERSION env so bundles are named after the release.

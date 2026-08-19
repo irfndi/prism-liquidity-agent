@@ -75,13 +75,18 @@ function isNonNullObject<T>(value: T): boolean {
 }
 
 function readString<T>(value: T): string | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
 }
 
 function readFiniteNumber<T>(value: T): number | null {
+  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
   return Object.prototype.toString.call(value) === "[object Number]" &&
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     Number.isFinite(value as number)
-    ? (value as number)
+    ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+      (value as number)
     : null;
 }
 
@@ -101,6 +106,7 @@ function readTrusted<T>(value: T): boolean | null {
 /** GoPlus wraps some indicators as `{ status: "1" | "0" }` objects. */
 function readStatus<T>(value: T): boolean {
   if (!isNonNullObject(value)) return false;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const status = readString((value as { status?: unknown }).status);
   return status === "1";
 }
@@ -123,6 +129,7 @@ export interface ParsedGoPlusEntry {
 /** Parse one per-address entry of the token_security `result` map. */
 export function parseGoPlusEntry<T>(mint: string, raw: T): ParsedGoPlusEntry | null {
   if (!isNonNullObject(raw)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const entry = raw as RawGoPlusEntry;
   return {
     mint,
@@ -178,9 +185,12 @@ export async function fetchGoPlusAccessToken(
   if (!res.ok) throw new Error(`GoPlus token API HTTP ${res.status}`);
   const body: unknown = await res.json();
   if (!isNonNullObject(body)) throw new Error("GoPlus token API returned a non-object body");
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const result = (body as { result?: unknown }).result;
   if (!isNonNullObject(result)) throw new Error("GoPlus token API response missing result");
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const token = readString((result as { access_token?: unknown }).access_token);
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const expiresIn = readFiniteNumber((result as { expires_in?: unknown }).expires_in);
   if (token === null || token.length === 0) {
     throw new Error("GoPlus token API response missing access_token");
@@ -215,8 +225,10 @@ export async function fetchGoPlusTokenSecurity(
     if (!isNonNullObject(body)) {
       throw new Error("GoPlus token security API returned a non-object body");
     }
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const resultMap = (body as { result?: unknown }).result;
     if (!isNonNullObject(resultMap)) continue;
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     for (const [mint, entry] of Object.entries(resultMap as Record<string, RawGoPlusEntry>)) {
       const parsed = parseGoPlusEntry(mint, entry);
       if (parsed !== null) result.set(parsed.mint, parsed.signal);

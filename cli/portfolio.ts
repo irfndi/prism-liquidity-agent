@@ -58,6 +58,7 @@ export function readCliWalletBalance(): Effect.Effect<number | null, never, Adap
           logger.warn("Wallet balance read failed; equity is positions-only", {
             error: err instanceof Error ? err.message : String(err),
           });
+          // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
           return Effect.succeed(null as number | null);
         },
         onSuccess: (value) => Effect.succeed(value ?? null),

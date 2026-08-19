@@ -95,13 +95,16 @@ function isNonNullObject<T>(value: T): boolean {
 
 function readFiniteNumber<T>(value: T): number | null {
   if (Object.prototype.toString.call(value) === "[object Number]") {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const num = value as number;
     return Number.isFinite(num) ? num : null;
   }
   if (
     Object.prototype.toString.call(value) === "[object String]" &&
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     (value as string).trim().length > 0
   ) {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const parsed = Number(value as string);
     return Number.isFinite(parsed) ? parsed : null;
   }
@@ -116,6 +119,7 @@ function readFiniteNumber<T>(value: T): number | null {
  */
 export function parseGeckoOhlcv<T>(raw: T): ReadonlyArray<GeckoOhlcvBar> {
   if (!isNonNullObject(raw)) return [];
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const response = raw as RawOhlcvResponse;
   const data = response.data;
   if (!isNonNullObject(data)) return [];

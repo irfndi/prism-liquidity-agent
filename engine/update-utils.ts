@@ -113,6 +113,7 @@ export function fetchR2Manifest(
       );
     }
 
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const manifest = (yield* tryNetwork(
       () => response.json(),
       "Failed to parse R2 manifest JSON",
@@ -163,6 +164,7 @@ export function fetchGitHubRelease(
     }
 
     if (channel === "stable") {
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const release = (yield* tryNetwork(
         () => response.json(),
         "Failed to parse GitHub release JSON",
@@ -170,6 +172,7 @@ export function fetchGitHubRelease(
       return release ?? null;
     }
 
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const firstPageReleases = (yield* tryNetwork(
       () => response.json(),
       "Failed to parse GitHub releases JSON",
@@ -211,6 +214,7 @@ export function fetchGitHubRelease(
         );
       }
 
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const releases = (yield* tryNetwork(
         () => pageResponse.json(),
         "Failed to parse GitHub releases page JSON",

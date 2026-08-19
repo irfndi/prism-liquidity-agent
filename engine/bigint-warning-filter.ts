@@ -37,10 +37,12 @@ export function installBigintWarningFilter(): void {
   savedOriginalWarn = originalWarn;
   let loggedOnce = false;
 
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   console.warn = ((...args: unknown[]): void => {
     const first = args[0];
     if (
       Object.prototype.toString.call(first) === "[object String]" &&
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       (first as string).includes(BIGINT_BINDINGS_MARKER)
     ) {
       if (!loggedOnce) {

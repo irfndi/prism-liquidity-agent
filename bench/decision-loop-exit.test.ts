@@ -1091,15 +1091,21 @@ describe("empty-position reap (zero-liquidity on-chain account)", () => {
       return { closed, rugBlock };
     });
     const { closed, rugBlock } = await Effect.runPromise(
-      asOwner<
-        Effect.Effect<{ closed: PositionRecord[]; rugBlock: string | null }, Error, never>
-      >(Effect.provide(test, layer)),
+      asOwner<Effect.Effect<{ closed: PositionRecord[]; rugBlock: string | null }, Error, never>>(
+        Effect.provide(test, layer),
+      ),
     );
 
     expect(exitSpy, "the EXIT for a held position must execute").toHaveBeenCalledTimes(1);
     const reaped = closed.find((p) => p.positionPubKey === "pos-empty");
-    expect(reaped, `an empty reap must close the ledger row, got ${stringifySafe(closed)}`).toBeDefined();
-    expect(reaped!.realizedPnlUsd, "an empty reap realizes 0, never the -deposited phantom loss").toBe(0);
+    expect(
+      reaped,
+      `an empty reap must close the ledger row, got ${stringifySafe(closed)}`,
+    ).toBeDefined();
+    expect(
+      reaped!.realizedPnlUsd,
+      "an empty reap realizes 0, never the -deposited phantom loss",
+    ).toBe(0);
     expect(rugBlock, "an empty reap must not rug-block the suspect token").toBeNull();
   }, 15_000);
 });

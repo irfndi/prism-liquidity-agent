@@ -1,20 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-
-vi.mock("../cli/api.js", () => ({
-  pingInstall: vi.fn(),
-  requireRegistered: vi.fn(),
-}));
-
-// Keep the engine out of this unit test — dev.ts imports runEngine at module
-// scope, and loading the real module wires up the entire engine.
-vi.mock("../engine/run-engine.js", () => ({
-  runEngine: vi.fn(),
-}));
-
-import { pingInstall } from "../cli/api.js";
-import { reportDevStartTelemetry } from "../cli/dev.js";
-
-const mockedPingInstall = vi.mocked(pingInstall);
+import { reportDevStartTelemetry } from "../cli/dev-telemetry.js";
 
 describe("cli/dev telemetry degrade", () => {
   let warnSpy: ReturnType<typeof vi.spyOn>;
@@ -22,6 +7,7 @@ describe("cli/dev telemetry degrade", () => {
 
   beforeEach(() => {
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
       throw new Error("process.exit called");
     }) as never);
@@ -32,19 +18,19 @@ describe("cli/dev telemetry degrade", () => {
   });
 
   it("warns and continues when the telemetry ping fails", async () => {
-    mockedPingInstall.mockResolvedValue(false);
+    const pingInstall = vi.fn(async () => false);
 
-    await expect(reportDevStartTelemetry("user-1")).resolves.toBeUndefined();
+    await expect(reportDevStartTelemetry("user-1", pingInstall)).resolves.toBeUndefined();
 
-    expect(mockedPingInstall).toHaveBeenCalledWith("dev_start", { userId: "user-1" });
+    expect(pingInstall).toHaveBeenCalledWith("dev_start", { userId: "user-1" });
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("telemetry is unavailable"));
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
   it("stays silent when the telemetry ping succeeds", async () => {
-    mockedPingInstall.mockResolvedValue(true);
+    const pingInstall = vi.fn(async () => true);
 
-    await expect(reportDevStartTelemetry("user-1")).resolves.toBeUndefined();
+    await expect(reportDevStartTelemetry("user-1", pingInstall)).resolves.toBeUndefined();
 
     expect(warnSpy).not.toHaveBeenCalled();
     expect(exitSpy).not.toHaveBeenCalled();

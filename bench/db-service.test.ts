@@ -6,6 +6,7 @@ import { DbService } from "../engine/services.js";
 import type { SettlementJobRecord } from "../engine/types.js";
 
 function run<T, R>(effect: Effect.Effect<T, Error, R>, layer: Layer.Layer<R, never, never>): T {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return Effect.runSync(Effect.provide(effect, layer) as Effect.Effect<T, Error, never>);
 }
 

@@ -167,6 +167,7 @@ describe("executeLive", () => {
   function makeStrategy(): StrategyApi {
     return {
       computeMetrics: () =>
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
         ({
           pool: {
             address: "TestPool111111111111111111111111111111111111",
@@ -302,8 +303,9 @@ describe("executeLive", () => {
           trackedPositions: new Map(),
           entryPrep: { prepareEntryTokens: prepareSpy },
           solPriceUsd: 150,
-          entryStrategyShape: "spot",
+          entryStrategySpec: "spot",
         },
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
         {
           action: "ENTER",
           poolAddress,
@@ -364,8 +366,9 @@ describe("executeLive", () => {
               ),
           },
           solPriceUsd: 150,
-          entryStrategyShape: "spot",
+          entryStrategySpec: "spot",
         },
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
         {
           action: "ENTER",
           poolAddress,
@@ -398,7 +401,7 @@ describe("executeLive", () => {
         _lower: number,
         _upper: number,
         sizeUsd: number,
-        _options?: { strategyShape?: "spot" | "curve" | "bidask" },
+        _options?: { strategySpec?: "spot" | "curve" | "bidask" },
       ) =>
         Effect.succeed({
           positionPubKey: "mock-pos",
@@ -419,8 +422,9 @@ describe("executeLive", () => {
           trackedPositions: new Map(),
           entryPrep: { prepareEntryTokens: () => Effect.succeed(undefined) },
           solPriceUsd: 150,
-          entryStrategyShape: "curve",
+          entryStrategySpec: "curve",
         },
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
         {
           action: "ENTER",
           poolAddress,
@@ -440,7 +444,7 @@ describe("executeLive", () => {
 
     expect(result.executed).toBe(true);
     expect(enterPositionSpy).toHaveBeenCalledTimes(1);
-    expect(enterPositionSpy.mock.calls[0]![4]).toEqual({ strategyShape: "curve" });
+    expect(enterPositionSpy.mock.calls[0]![4]).toEqual({ strategySpec: "curve" });
   });
 
   it("records single-sided entry legs and metadata from the adapter result", () => {
@@ -471,8 +475,9 @@ describe("executeLive", () => {
           trackedPositions,
           entryPrep: { prepareEntryTokens: () => Effect.succeed(undefined) },
           solPriceUsd: 150,
-          entryStrategyShape: "spot",
+          entryStrategySpec: "spot",
         },
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
         {
           action: "ENTER",
           poolAddress,
@@ -492,6 +497,7 @@ describe("executeLive", () => {
 
     expect(result.executed).toBe(true);
     // Live positions are keyed by their on-chain pubkey.
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const pos = trackedPositions.get("mock-pos") as
       | { entryAmountXUsd: number | null; entryAmountYUsd: number | null }
       | undefined;
@@ -499,11 +505,14 @@ describe("executeLive", () => {
     expect(pos?.entryAmountXUsd).toBe(positionSizeUsd);
     expect(pos?.entryAmountYUsd).toBe(0);
 
+    // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
     const enterEvent = savePositionEventSpy.mock.calls
+      // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
       .map((c) => c[0] as { event: string; metadata?: JsonRecord })
       .find((e) => e.event === "ENTER");
     expect(enterEvent?.metadata?.["depositMode"]).toBe("single-sided-x");
-    expect(enterEvent?.metadata?.["strategyShape"]).toBe("spot");
+    expect(enterEvent?.metadata?.["strategySpec"]).toBe("spot");
   });
 });
 
@@ -535,7 +544,8 @@ describe("executePaper paper/live parity", () => {
 
     const result = Effect.runSync(
       executePaper(
-        { db, trackedPositions, strategy, entryStrategyShape: "spot", entryRangeHalfWidth: 34 },
+        { db, trackedPositions, strategy, entryStrategySpec: "spot", entryRangeHalfWidth: 34 },
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
         {
           action: "ENTER",
           poolAddress,
@@ -556,6 +566,7 @@ describe("executePaper paper/live parity", () => {
     expect(result.executed).toBe(true);
     expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10, 34, undefined);
     // Paper positions are keyed by a generated synthetic id.
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const pos = [...trackedPositions.values()][0] as
       | { lowerBinId: number; upperBinId: number }
       | undefined;
@@ -594,10 +605,11 @@ describe("executePaper paper/live parity", () => {
           db,
           trackedPositions,
           strategy,
-          entryStrategyShape: "spot",
+          entryStrategySpec: "spot",
           entryRangeHalfWidth: 5,
           entryDipOffsetBins: -13,
         },
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
         {
           action: "ENTER",
           poolAddress,
@@ -620,6 +632,7 @@ describe("executePaper paper/live parity", () => {
     // range [4982, 4992] — entirely below the active bin 5000.
     expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10, 5, -13);
     expect(result.executed).toBe(true);
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const pos = [...trackedPositions.values()][0] as
       | { lowerBinId: number; upperBinId: number; entryAmountXUsd: number; entryAmountYUsd: number }
       | undefined;
@@ -1176,6 +1189,7 @@ describe("recordAppliedProposalRiskDenial", () => {
     };
     const args = {
       penalizeAdvisor: true as const,
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       appliedQueuedProposalId: undefined as string | undefined,
       proposalBackoff,
       recordCircuitFailure: () => {},

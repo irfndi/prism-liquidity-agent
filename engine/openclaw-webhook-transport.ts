@@ -26,8 +26,12 @@ export interface OpenClawWebhookTransportOptions {
  * same machine but a persistent WebSocket is not desired, or when routing
  * through an HTTP proxy/load balancer.
  */
-/** Static webhook request headers (valid HeadersInit value form). */
-type AuthHeaders = Record<string, string>;
+/** Exact headers emitted by the webhook transport. */
+type AuthHeaders = {
+  readonly "Content-Type": "application/json";
+  readonly Authorization?: string;
+  readonly "x-openclaw-token"?: string;
+};
 
 /** One outbound webhook payload: a prompt, check-in, or alert body. */
 type OpenClawPromptPayload = {
@@ -138,14 +142,14 @@ export class OpenClawWebhookTransport implements AgentRuntimeTransport {
   }
 
   private authHeaders(): AuthHeaders {
-    const headers: AuthHeaders = {
-      "Content-Type": "application/json",
-    };
     if (this.options.token) {
-      headers.Authorization = `Bearer ${this.options.token}`;
-      headers["x-openclaw-token"] = this.options.token;
+      return {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.options.token}`,
+        "x-openclaw-token": this.options.token,
+      };
     }
-    return headers;
+    return { "Content-Type": "application/json" };
   }
 
   private post(body: OpenClawOutboundBody, timeoutMs?: number): Effect.Effect<string, Error> {

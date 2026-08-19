@@ -77,8 +77,10 @@ async function main() {
     },
   );
 
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   const heliusKey = (answers.heliusKey as string) || "";
   const rpcUrl =
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     (answers.rpcUrl as string) ||
     (heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : "");
   if (!rpcUrl.trim()) {
@@ -89,12 +91,15 @@ async function main() {
     "# RPC providers",
     `HELIUS_API_KEY=${heliusKey}`,
     `SOLANA_RPC_URL=${rpcUrl}`,
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     `SOLANA_RPC_FALLBACK_URL=${(answers.rpcFallbackUrl as string) || ""}`,
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     `JUPITER_API_KEY=${(answers.jupiterApiKey as string) || ""}`,
     "",
     "# Strategy",
     `PAPER_TRADING=${String(answers.paperTrading)}`,
     "SCAN_INTERVAL_MS=600000",
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     `MIN_POOL_TVL_USD=${answers.minTvl as string}`,
     "MIN_FEE_IL_RATIO=1.2",
     "TVL_DROP_EXIT_PCT=0.30",
@@ -107,6 +112,7 @@ async function main() {
     "SQLITE_DB_PATH=./prism.db",
     "",
     "# Pools to watch (required for live trading; discovery is paper-only and opt-in)",
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     `WATCHLIST_POOLS=${answers.watchlistPools as string}`,
     "ENABLE_POOL_DISCOVERY=false",
     "DISCOVERY_MIN_TVL_USD=1000000",

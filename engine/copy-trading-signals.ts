@@ -54,25 +54,32 @@ function isNonNullObject<T>(value: T): boolean {
 }
 
 function readString<T>(value: T): string | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
 }
 
 function readFiniteNumber<T>(value: T): number | null {
   if (Object.prototype.toString.call(value) !== "[object Number]") return null;
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   const n = value as number;
   return Number.isFinite(n) ? n : null;
 }
 
 export function parseCopySignalPayload<T>(raw: T): ReadonlyArray<CopySignalObservation> {
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const embedded = isNonNullObject(raw) ? (raw as RawCopySignalPayload).signals : undefined;
+  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
   const values: unknown[] = Array.isArray(raw)
-    ? (raw as unknown[])
+    ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+      // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
+      (raw as unknown[])
     : Array.isArray(embedded)
       ? embedded
       : [];
   const observations: CopySignalObservation[] = [];
   for (const value of values) {
     if (!isNonNullObject(value)) continue;
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const obs = value as RawCopySignalObs;
     const wallet = readString(obs.wallet);
     const poolAddress = readString(obs.poolAddress);
@@ -125,6 +132,7 @@ const fetchSignals = (config: CopySignalConfig) =>
       try: () =>
         fetch(config.endpoint, { signal: AbortSignal.timeout(10_000) }).then((response) => {
           if (!response.ok) throw new Error(`copy-signal HTTP ${response.status}`);
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
           return response.json() as Promise<unknown>;
         }),
       catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),

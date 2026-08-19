@@ -5,7 +5,7 @@ import type {
   AgentProposal,
   BinArray,
   EntryDepositMode,
-  EntryStrategyShape,
+  EntryStrategySpec,
   MemoryCategory,
   MemoryEntry,
   PoolCooldown,
@@ -274,7 +274,7 @@ export interface AdapterApi {
   >;
   /**
    * Open a live position and deposit liquidity by strategy. The deposit
-   * distribution comes from `options.strategyShape` (resolved per pool by the
+   * distribution comes from `options.strategySpec` (resolved per pool by the
    * decision loop) falling back to the configured `ENTRY_STRATEGY_TYPE`
    * (`auto` falls back to `spot` here — the adapter has no volatility
    * context). When the wallet can fund only one of the pool's tokens, the
@@ -289,7 +289,7 @@ export interface AdapterApi {
     upperBinId: number,
     positionSizeUsd: number,
     options?: {
-      strategyShape?: EntryStrategyShape;
+      strategySpec?: EntryStrategySpec;
       /** Runner mode: force the single-sided-X deposit (full size in the
        *  quote leg) for dip-anchored ranges wholly below the active bin. */
       forceSingleSidedX?: boolean;

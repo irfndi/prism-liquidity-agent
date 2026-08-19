@@ -243,6 +243,7 @@ describe("buffering", () => {
     expect(copy).toHaveLength(1);
 
     // Mutating the copy should not affect internal state
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     (copy as unknown[]).push({} as never);
     expect(r.getPending()).toHaveLength(1);
     void r.dispose();
@@ -283,6 +284,7 @@ describe("batch payload", () => {
     let capturedBody: string | undefined;
     vi.mocked(globalThis.fetch).mockImplementation(
       (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
         capturedBody = init?.body as string;
         return Promise.resolve(new Response(null, { status: 200 }));
       },

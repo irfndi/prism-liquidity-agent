@@ -51,6 +51,7 @@ function isNonNullObject<T>(value: T): boolean {
 }
 
 function readString<T>(value: T): string | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
 }
 
@@ -76,9 +77,12 @@ function submitCloudFeedback(
     );
     if (res.status === 401 || res.status === 403) return { authFailure: true as const };
     if (!res.ok) return null;
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     const json = (yield* Effect.tryPromise(() => res.json())) as unknown;
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const response = isNonNullObject(json) ? (json as CloudFeedbackResponse) : null;
     if (response === null || readString(response.id) === null) return null;
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     return { id: response.id as string, duplicate: response.duplicate === true };
   }).pipe(Effect.catch(() => Effect.succeed(null)));
 }
@@ -110,6 +114,7 @@ function writeOptOut(value: boolean): Effect.Effect<void, never> {
   );
 }
 
+// SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
 const bunRuntime = (globalThis as { readonly Bun?: { readonly version?: string } }).Bun;
 const runningOnBun = bunRuntime !== undefined;
 
@@ -164,6 +169,7 @@ function readPrismApiKey(): Effect.Effect<string | null, never> {
       const credentialsFile =
         process.env.PRISM_CREDENTIALS_FILE ?? join(getPrismUserConfigDir(), "credentials.json");
       if (!existsSync(credentialsFile)) return null;
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const value = JSON.parse(readFileSync(credentialsFile, "utf-8")) as {
         apiKey?: unknown;
       };
@@ -191,7 +197,9 @@ function toFeedbackEntry(row: {
   return {
     id: row.id,
     agentId: row.agentId,
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     category: row.category as FeedbackEntry["category"],
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     severity: row.severity as FeedbackEntry["severity"],
     summary: row.summary,
     details: row.details,

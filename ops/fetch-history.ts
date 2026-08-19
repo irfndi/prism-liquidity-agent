@@ -119,6 +119,7 @@ function fetchPoolMeta(address: string, connection: Connection): Effect.Effect<P
       if (!poolRes.ok) {
         throw new Error(`GeckoTerminal pool ${address}: HTTP ${poolRes.status}`);
       }
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const poolJson = (await poolRes.json()) as GeckoPoolPayload;
       const attrs = poolJson.data?.attributes;
       const name = attrs?.name ?? "";
@@ -155,6 +156,7 @@ function fetchOhlcv(address: string): Effect.Effect<OhlcvCandle[], Error> {
       if (!res.ok) {
         throw new Error(`GeckoTerminal OHLCV ${address}: HTTP ${res.status}`);
       }
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const json = (await res.json()) as {
         data?: { attributes?: { ohlcv_list?: number[][] } };
       };

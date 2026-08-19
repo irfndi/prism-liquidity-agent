@@ -83,7 +83,7 @@ function decodeProposalJson(raw: string): Effect.Effect<DecodedProposalJson, Pro
     }
 
     const parsed = yield* Effect.try({
-      try: (): unknown => JSON.parse(jsonText),
+      try: () => JSON.parse(jsonText),
       catch: (err) =>
         new ProposalParseError({
           message: "Failed to parse JSON object",

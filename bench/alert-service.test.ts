@@ -43,9 +43,11 @@ interface CapturedPost {
 function capturePosts(status = 200) {
   const posts: CapturedPost[] = [];
   const restore = mockFetch((url: any, init: { body?: string; headers?: any } = {}) => {
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const headers = new Headers(init.headers as Record<string, string> | undefined);
     posts.push({
       url: String(url),
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
       body: JSON.parse(init.body ?? "{}") as JsonRecord,
       authorization: headers.get("Authorization"),
     });

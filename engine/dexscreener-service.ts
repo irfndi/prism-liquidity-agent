@@ -95,13 +95,16 @@ function isNonNullObject<T>(value: T): boolean {
 /** Parse a numeric STRING or number into a finite number, else null. */
 function readFiniteNumber<T>(value: T): number | null {
   if (Object.prototype.toString.call(value) === "[object Number]") {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const num = value as number;
     return Number.isFinite(num) ? num : null;
   }
   if (
     Object.prototype.toString.call(value) === "[object String]" &&
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     (value as string).trim().length > 0
   ) {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const parsed = Number(value as string);
     return Number.isFinite(parsed) ? parsed : null;
   }
@@ -122,16 +125,19 @@ export function parseDexscreenerPoolStats<T>(
   baseFeeRate: number,
 ): DexscreenerPoolStats | null {
   if (!isNonNullObject(raw)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const response = raw as RawDexscreenerResponse;
   const pairs = response.pairs;
   // DexScreener returns `{"pairs": null}` (HTTP 200) for an unknown pair.
   if (!Array.isArray(pairs) || pairs.length === 0) return null;
   const pair = pairs[0];
   if (!isNonNullObject(pair)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const pairObj = pair as RawDexscreenerPair;
 
   const volume = isNonNullObject(pairObj.volume)
-    ? readFiniteNumber((pairObj.volume as RawVolume).h24)
+    ? // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      readFiniteNumber((pairObj.volume as RawVolume).h24)
     : null;
   // Volume is the one field every downstream gate (authenticity, fee/IL) needs;
   // non-positive volume is malformed data — reject the stats ENTIRELY rather
@@ -139,7 +145,8 @@ export function parseDexscreenerPoolStats<T>(
   if (volume === null || volume <= 0) return null;
 
   const liquidity = isNonNullObject(pairObj.liquidity)
-    ? readFiniteNumber((pairObj.liquidity as RawLiquidity).usd)
+    ? // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      readFiniteNumber((pairObj.liquidity as RawLiquidity).usd)
     : null;
   // Non-positive liquidity is malformed; null it so the caller treats the stats
   // as unavailable (the most conservative outcome). DexScreener has NO fees

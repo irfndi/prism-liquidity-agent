@@ -37,6 +37,7 @@ describe("dipOffsetBinsForPct (runner-mode dip anchor)", () => {
   it("shifts the whole range below the active bin via recommendBinRange", () => {
     // Exercises the strategy surface directly: a ±5 bin band anchored -13
     // bins below active bin 5000 lands entirely below market.
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const { DLMMStrategy } = require("../engine/strategy-service.js") as {
       DLMMStrategy: {
         recommendBinRange: (

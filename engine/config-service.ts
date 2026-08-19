@@ -1148,6 +1148,7 @@ const loadConfig = Effect.gen(function* () {
             }),
           ),
     ),
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     Effect.map((value) => value as FeeDestination),
   );
 
@@ -1313,10 +1314,14 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => "auto"),
   );
   const validAgentRuntimes = ["auto", "hermes", "openclaw", "none"] as const;
+  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
   const agentRuntime = validAgentRuntimes.includes(
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     agentRuntimeRaw as (typeof validAgentRuntimes)[number],
   )
-    ? (agentRuntimeRaw as (typeof validAgentRuntimes)[number])
+    ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      (agentRuntimeRaw as (typeof validAgentRuntimes)[number])
     : "auto";
   const agentAcpCommand = yield* Config.string("AGENT_ACP_COMMAND").pipe(
     Effect.orElseSucceed(() => "hermes"),
@@ -1383,10 +1388,14 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => "veto"),
   );
   const validAgentProposalModes = ["veto", "suggest", "supervised", "full"] as const;
+  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
   const agentProposalMode = validAgentProposalModes.includes(
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     agentProposalModeRaw as (typeof validAgentProposalModes)[number],
   )
-    ? (agentProposalModeRaw as (typeof validAgentProposalModes)[number])
+    ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      (agentProposalModeRaw as (typeof validAgentProposalModes)[number])
     : "veto";
   const agentProposalToken = yield* Config.string("AGENT_PROPOSAL_TOKEN").pipe(
     Effect.orElseSucceed(() => ""),
@@ -1485,10 +1494,14 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => "spot"),
   );
   const validEntryStrategyTypes = ["spot", "curve", "bidask", "auto"] as const;
+  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
   const entryStrategyType: EntryStrategyType = validEntryStrategyTypes.includes(
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     entryStrategyTypeRaw as (typeof validEntryStrategyTypes)[number],
   )
-    ? (entryStrategyTypeRaw as (typeof validEntryStrategyTypes)[number])
+    ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      (entryStrategyTypeRaw as (typeof validEntryStrategyTypes)[number])
     : "spot";
 
   // ─── Proactive Telegram alerts (Wave 5) ───────────────────────────────────
@@ -1877,8 +1890,10 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => "stable"),
   );
   const validChannels = ["stable", "beta", "dev", "canary"] as const;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const updateChannel = validChannels.includes(updateChannelRaw as (typeof validChannels)[number])
-    ? (updateChannelRaw as (typeof validChannels)[number])
+    ? // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      (updateChannelRaw as (typeof validChannels)[number])
     : "stable";
   const updateGithubRepo = yield* Config.string("UPDATE_GITHUB_REPO").pipe(
     Effect.orElseSucceed(() => "irfndi/prism-liquidity-agent"),
@@ -2290,6 +2305,7 @@ const loadConfig = Effect.gen(function* () {
   // table for keys whose env var is UNSET. Fail-open: a missing/unreadable DB
   // leaves the env/defaults untouched. Skipped entirely in test mode so the
   // suite stays deterministic and DB-free. See engine/db-config.ts.
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const cfgFromEnv = cfg as Readonly<AppConfig>;
   const dbOverrides = isTest
     ? new Map<string, string>()

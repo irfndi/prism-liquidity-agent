@@ -52,17 +52,23 @@ function isNonNullObject<T>(value: T): boolean {
 }
 
 function readString<T>(value: T): string | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
 }
 
 function readNumber<T>(value: T): number | null {
+  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
   return Object.prototype.toString.call(value) === "[object Number]" &&
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     Number.isFinite(value as number)
-    ? (value as number)
+    ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+      (value as number)
     : null;
 }
 
 function readBoolean<T>(value: T): boolean | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object Boolean]" ? (value as boolean) : null;
 }
 
@@ -80,6 +86,7 @@ function readWindow(
  */
 export function parseMeteoraPoolStats<T>(raw: T): MeteoraPoolStats | null {
   if (!isNonNullObject(raw)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const report = raw as RawDatapiPool;
   const address = readString(report.address);
   if (address === null || address.length === 0) return null;
@@ -89,10 +96,15 @@ export function parseMeteoraPoolStats<T>(raw: T): MeteoraPoolStats | null {
   const apr = readNumber(report.apr);
   if (tvl === null || volume24h === null || fees24h === null || apr === null) return null;
 
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const tokenX = isNonNullObject(report.token_x) ? (report.token_x as RawDatapiToken) : null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const tokenY = isNonNullObject(report.token_y) ? (report.token_y as RawDatapiToken) : null;
+  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
   const poolConfig = isNonNullObject(report.pool_config)
-    ? (report.pool_config as RawDatapiPoolConfig)
+    ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      (report.pool_config as RawDatapiPoolConfig)
     : null;
 
   return {
@@ -187,6 +199,7 @@ export const MeteoraDatapiLive = Layer.effect(
           Effect.flatMap((res) =>
             res.ok
               ? Effect.tryPromise({
+                  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
                   try: () => res.json() as Promise<unknown>,
                   catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
                 })

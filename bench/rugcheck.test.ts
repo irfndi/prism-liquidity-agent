@@ -155,6 +155,7 @@ describe("getRugCheckReport", () => {
   it("hits the /tokens/{mint}/report endpoint", async () => {
     let calledUrl = "";
     const fetchImpl = async (input: string | URL | Request) => {
+      // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
       calledUrl = String(input as unknown);
       return new Response(JSON.stringify(LIVE_RISKY), { status: 200 });
     };

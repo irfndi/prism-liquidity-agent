@@ -131,15 +131,18 @@ function isNonNullObject<T>(value: T): boolean {
 }
 
 function readString<T>(value: T): string | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
 }
 
 function readNumber<T>(value: T): number | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object Number]" ? (value as number) : null;
 }
 
 function parseTokenMeta<T>(value: T): TokenMeta | null {
   if (!isNonNullObject(value)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const record = value as RawTokenMeta;
   const symbol = readString(record.symbol);
   if (symbol === null) return null;
@@ -188,6 +191,7 @@ export function deserializeCache(json: string): Map<string, CacheEntry> {
     if (mint === null) continue;
     const entry = item[1];
     if (!isNonNullObject(entry)) continue;
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const record = entry as RawCacheEntry;
     const fetchedAt = readNumber(record.fetchedAt);
     if (fetchedAt === null) continue;

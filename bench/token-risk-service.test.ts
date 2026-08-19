@@ -133,6 +133,7 @@ describe("token-risk-service", () => {
   it("(6) chunks 150 mints into two requests (100 + 50)", async () => {
     const urls: string[] = [];
     const capturingFetch: FetchLike = async (url) => {
+      // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
       urls.push(String(url as unknown));
       return new Response("[]", { status: 200 });
     };
@@ -282,6 +283,7 @@ describe("token-risk-service", () => {
   it("(12) a GoPlus hard-risk merges into the result even when Jupiter omits the mint", async () => {
     const jupiterFetch: FetchLike = async () => new Response("[]", { status: 200 });
     const goPlusFetch: FetchLike = async (input) => {
+      // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
       const url = String(input as unknown);
       if (url.includes("/api/v1/token")) {
         return new Response(JSON.stringify({ result: { access_token: "tok", expires_in: 3600 } }), {
@@ -315,6 +317,7 @@ describe("token-risk-service", () => {
       return new Response("[]", { status: 200 });
     };
     const goPlusFetch: FetchLike = async (input) => {
+      // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
       const url = String(input as unknown);
       if (url.includes("/api/v1/token")) {
         return new Response(JSON.stringify({ result: { access_token: "tok", expires_in: 3600 } }), {

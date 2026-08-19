@@ -19,23 +19,23 @@
       },
       "devDependencies": {
         "@effect/tsgo": "0.35.0",
-        "@oxlint/plugins": "1.78.0",
+        "@oxlint/plugins": "1.77.0",
         "@types/node": "^26.1.2",
         "@types/semver": "^7.8.0",
         "@vitest/coverage-istanbul": "^4.1.10",
         "bun-types": "1.4.0-canary.20260519T150915",
         "fast-check": "^4.9.0",
         "oxfmt": "^0.62.0",
-        "oxlint": "^1.77.0",
+        "oxlint": "1.77.0",
         "oxlint-tsgolint": "7.0.2001",
         "tsdown": "^0.22.14",
-        "typescript": "^7.0.2",
+        "typescript": "7.0.2",
         "vitest": "^4.1.10",
       },
     },
   },
   "overrides": {
-    "typescript": "^7.0.2",
+    "typescript": "7.0.2",
   },
   "packages": {
     "@babel/code-frame": ["@babel/code-frame@7.29.7", "", { "dependencies": { "@babel/helper-validator-identifier": "^7.29.7", "js-tokens": "^4.0.0", "picocolors": "^1.1.1" } }, "sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw=="],
@@ -228,7 +228,7 @@
 
     "@oxlint/binding-win32-x64-msvc": ["@oxlint/binding-win32-x64-msvc@1.77.0", "", { "os": "win32", "cpu": "x64" }, "sha512-+teyvPDZ2RjUvo+SuCqS/UhaJl1QtdW5fWT5NJTV61V5MIuIS90Db9LixmtEGvXixyttiK62P96MSu3UlpviBw=="],
 
-    "@oxlint/plugins": ["@oxlint/plugins@1.78.0", "", {}, "sha512-Ypt8KeRYw+4jUtlPirfcHWMrn5ms12VrrFPD+Mds477/7tJxG1Kcz2Yrg2nVcTQEUx/GdlhS+BUg1kmxNm04Ug=="],
+    "@oxlint/plugins": ["@oxlint/plugins@1.77.0", "", {}, "sha512-6KtPXskPgpt+0Kyl2nNSxNnYXt7lbkxW1C7vi2L7xwtq/AisZlsmV+hnzOTEyM5tU1TxPv1GpTqpUBbZfPzBLg=="],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 

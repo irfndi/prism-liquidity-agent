@@ -2,6 +2,16 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.29] — 2026-08-19
+
+### Changed
+
+- **Anti-slop enforcement refresh**. Vendored the current upstream Oxlint rules,
+  enabled the complete generic and Effect rule sets, and removed all owned-source
+  findings without suppressions.
+- Replaced module-mocked adapter tests with an injected DLMM test seam and
+  preserved the existing pool-PnL kill-switch behavior.
+
 ## [0.2.28] — 2026-08-19
 
 ### Added

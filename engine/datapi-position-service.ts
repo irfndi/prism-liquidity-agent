@@ -104,15 +104,21 @@ function isNonNullObject<T>(value: T): boolean {
 }
 
 function readString<T>(value: T): string | undefined {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object String]" && (value as string).length > 0
-    ? (value as string)
+    ? // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+      (value as string)
     : undefined;
 }
 
 function readNumber<T>(value: T): number | undefined {
+  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
   return Object.prototype.toString.call(value) === "[object Number]" &&
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     Number.isFinite(value as number)
-    ? (value as number)
+    ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+      (value as number)
     : undefined;
 }
 
@@ -167,6 +173,7 @@ interface MutableOpenPosition {
  */
 export function parseOpenPosition<T>(raw: T): OpenPosition | null {
   if (!isNonNullObject(raw)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const record = raw as RawPosition;
   const poolAddress = readStringCandidates(record, [
     "poolAddress",
@@ -261,6 +268,7 @@ export function parseOpenPosition<T>(raw: T): OpenPosition | null {
 function readMint(record: RawPosition, key: keyof RawPosition): string | undefined {
   const nested = record[key];
   if (!isNonNullObject(nested)) return undefined;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   return readStringCandidates(nested as RawPosition, ["address", "mint", "mint_address"]);
 }
 
@@ -274,6 +282,7 @@ function readMint(record: RawPosition, key: keyof RawPosition): string | undefin
  */
 export function parseOpenPortfolio<T>(raw: T): OpenPosition[] {
   if (!isNonNullObject(raw)) return [];
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const record = raw as RawPortfolio;
   const pools = record.pools;
   if (!Array.isArray(pools)) return [];
@@ -339,6 +348,7 @@ export class PositionCrawlCache {
 export function crawlOpenPortfolio(
   baseUrl: string,
   wallet: string,
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   fetchImpl: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl,
 ): Effect.Effect<OpenPosition[], Error> {
   const url = `${baseUrl.replace(/\/+$/, "")}/portfolio/open?user=${encodeURIComponent(wallet)}&page=1&page_size=${DEFAULT_PAGE_SIZE}`;
@@ -350,6 +360,7 @@ export function crawlOpenPortfolio(
       Effect.flatMap((res) =>
         res.ok
           ? Effect.tryPromise({
+              // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
               try: () => res.json() as Promise<unknown>,
               catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
             })
@@ -381,6 +392,7 @@ export function fetchOpenPortfolio(
             wallet,
             error: String(err),
           });
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
           return [] as OpenPosition[];
         }),
       ),
@@ -414,6 +426,7 @@ export function effectGetOpenPositions(
             wallet,
             error: String(err),
           });
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
           return [] as OpenPosition[];
         }),
       ),

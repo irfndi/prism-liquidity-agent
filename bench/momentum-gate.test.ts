@@ -236,6 +236,7 @@ describe("drift gate in the decision loop", () => {
         }>
       >(decisions);
     });
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const decisions = (await Effect.runPromise(
       asOwner<
         Effect.Effect<

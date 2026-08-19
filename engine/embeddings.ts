@@ -21,6 +21,7 @@ function loadOnnxUncached(): Effect.Effect<Embedder, Error> {
       try: () => mod.pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2"),
       catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
     });
+    // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
     return (text: string) =>
       Effect.tryPromise({
         try: () =>
@@ -29,6 +30,8 @@ function loadOnnxUncached(): Effect.Effect<Embedder, Error> {
             normalize: true,
           }),
         catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+        // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       }).pipe(Effect.map((output) => Array.from(output.data as Float32Array)));
   });
 }

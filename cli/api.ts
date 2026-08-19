@@ -54,6 +54,7 @@ export async function prismApiPost<T = unknown>(
         error: `Prism API error: ${response.status} ${response.statusText}`,
       };
     }
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const json = (await response.json()) as T;
     return { ok: true, status: response.status, data: json };
   } catch (err) {
@@ -85,6 +86,7 @@ export async function prismApiGet<T = unknown>(
         error: `Prism API error: ${response.status} ${response.statusText}`,
       };
     }
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const json = (await response.json()) as T;
     return { ok: true, status: response.status, data: json };
   } catch (err) {

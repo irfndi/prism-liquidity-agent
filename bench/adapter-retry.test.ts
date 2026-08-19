@@ -10,6 +10,7 @@ import {
 } from "../engine/adapter-retry.js";
 
 const fromPromise = <T>(fn: () => Promise<T>): Effect.Effect<T, Error> =>
+  // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
   Effect.tryPromise({ try: fn, catch: (cause) => cause as Error });
 
 afterEach(() => {

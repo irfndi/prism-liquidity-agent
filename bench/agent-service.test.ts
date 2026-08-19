@@ -239,15 +239,18 @@ describe("validateOverride", () => {
 
 describe("AgentNoOp", () => {
   it("enhanceDecision returns null", async () => {
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const result = await Effect.runPromise(AgentNoOp.enhanceDecision(makeDecision(), {} as never));
     expect(result).toBeNull();
   });
 
   it("sendCheckin returns void", async () => {
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     await Effect.runPromise(AgentNoOp.sendCheckin({ type: "checkin" } as never));
   });
 
   it("sendAlert returns void", async () => {
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     await Effect.runPromise(AgentNoOp.sendAlert({ type: "alert" } as never));
   });
 

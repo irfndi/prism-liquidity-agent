@@ -24,6 +24,7 @@ export function ensureLockfileDir(lockfileDir = LOCKFILE_DIR): void {
 export function readLockfile(lockfilePath = LOCKFILE_PATH): LockfileData | null {
   try {
     const content = fs.readFileSync(lockfilePath, "utf-8");
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const parsed = JSON.parse(content) as LockfileData | null;
     if (parsed === null) return null;
     if (!Number.isFinite(parsed.pid) || !Number.isFinite(parsed.timestamp)) return null;

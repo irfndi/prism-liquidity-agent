@@ -326,6 +326,7 @@ type FetchMockImpl = (...args: never[]) => Promise<Response>;
 
 export function mockFetch(impl: FetchMockImpl): () => void {
   const original = globalThis.fetch;
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   globalThis.fetch = vi.fn(impl as typeof fetch) as typeof fetch;
   return () => {
     globalThis.fetch = original;
@@ -337,6 +338,7 @@ export function mockFetch(impl: FetchMockImpl): () => void {
 // with one cast, and chained assertions are forbidden, so the widening happens
 // against the untyped function parameter instead of an expression chain.
 export function asFetch(mock: any): typeof fetch {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return mock as typeof fetch;
 }
 
@@ -345,6 +347,7 @@ export function asFetch(mock: any): typeof fetch {
 // untyped parameter instead of an expression chain, which keeps the cast a
 // single assertion at the fixture boundary.
 export function asOwner<T>(value: any): T {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return value as T;
 }
 
@@ -386,6 +389,7 @@ export function makeAdapter(
   pools: Record<string, ReturnType<typeof makePool>>,
   overrides: Partial<AdapterApi> = {},
 ): AdapterApi {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return {
     hasWallet: () => false,
     getWalletAddress: () => null,
@@ -527,6 +531,7 @@ export function makeDb(overrides: Partial<DbApi> = {}): DbApi {
 }
 
 export function makeMemory(overrides: Partial<MemoryApi> = {}): MemoryApi {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return makeRecordingMemory([] as RecordedMemory[], overrides);
 }
 

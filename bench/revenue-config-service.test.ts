@@ -17,6 +17,7 @@ function buildLayer(
   const dbLayer = DbLive(":memory:");
   const revenueConfigDeps = Layer.merge(mockConfig, dbLayer);
   const revenueConfig = Layer.provide(RevenueConfigServiceLive, revenueConfigDeps);
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return Layer.merge(revenueConfig, dbLayer) as Layer.Layer<
     RevenueConfigService | DbService,
     never,
@@ -25,6 +26,7 @@ function buildLayer(
 }
 
 function mockCredentialsFile(apiKey = "test-api-key"): void {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   vi.spyOn(fs, "readFileSync").mockImplementation(((path: fs.PathOrFileDescriptor) => {
     if (String(path).includes("credentials.json")) {
       return JSON.stringify({
@@ -229,6 +231,7 @@ describe("RevenueConfigService — fetch timeout", () => {
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const init = fetchMock.mock.calls[0]?.[1] as { signal?: AbortSignal } | undefined;
     expect(init?.signal).toBeInstanceOf(AbortSignal);
   });

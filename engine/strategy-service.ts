@@ -2,7 +2,7 @@ import { Layer } from "effect";
 import { StrategyService, type StrategyApi } from "./services.js";
 import type {
   BinArray,
-  EntryStrategyShape,
+  EntryStrategySpec,
   PoolMetrics,
   PoolState,
   PriceDriftContext,
@@ -452,11 +452,11 @@ export function resolveRangeHalfWidth(args: {
  * - Calm / mean-reverting (default, including no history yet) → `curve`,
  *   concentrated around the active bin for maximum fee capture.
  */
-export function recommendStrategyShape(args: {
+export function recommendStrategy(args: {
   readonly volatilityStddev: number;
   readonly highVolThreshold: number;
   readonly netDriftBins: number;
-}): EntryStrategyShape {
+}): EntryStrategySpec {
   const trendDominates = Math.abs(args.netDriftBins) >= Math.max(3, 2 * args.volatilityStddev);
   if (trendDominates) return "bidask";
   if (isHighVolatility(args.volatilityStddev, args.highVolThreshold)) return "spot";

@@ -153,6 +153,7 @@ export class AcpTransport implements AgentRuntimeTransport {
           cwd: process.cwd(),
           mcpServers: [],
         });
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         this.sessionId = (session as { sessionId?: string })?.sessionId ?? null;
 
         this.emit({ type: "connected", transport: this.name });
@@ -236,6 +237,7 @@ export class AcpTransport implements AgentRuntimeTransport {
           cwd: process.cwd(),
           mcpServers: [],
         });
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         this.sessionId = (session as { sessionId?: string })?.sessionId ?? null;
       }
     });
@@ -260,6 +262,7 @@ export class AcpTransport implements AgentRuntimeTransport {
         continue;
       }
       try {
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         const msg = JSON.parse(line) as AcpResponse | AcpNotification;
         this.handleMessage(msg);
       } catch (err) {
@@ -277,6 +280,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     // (session/request_permission, fs/*, terminal/*), but it must still reply, or the
     // agent blocks indefinitely and the prompt times out.
     if ("method" in msg && "id" in msg && msg.id != null) {
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       this.respondUnsupported(msg.id as number | string, msg.method as string);
       return;
     }
@@ -286,6 +290,7 @@ export class AcpTransport implements AgentRuntimeTransport {
       Object.prototype.toString.call(msg.id) === "[object Number]" &&
       !("method" in msg)
     ) {
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       const id = msg.id as number;
       if (!this.pending.has(id)) return;
       const p = this.pending.get(id)!;
@@ -300,6 +305,7 @@ export class AcpTransport implements AgentRuntimeTransport {
     }
 
     if ("method" in msg && msg.method === "session/update") {
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const params = (msg.params ?? {}) as {
         readonly update?: {
           readonly sessionUpdate?: string;

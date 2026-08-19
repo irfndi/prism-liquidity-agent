@@ -382,10 +382,7 @@ describe("reconcilePositions — integration", () => {
             }),
         });
         // EXPIRED tombstone: a later legitimate refill must be re-admitted.
-        yield* db.setMetadata(
-          "reaped_empty:refilled-pubkey",
-          String(Date.now() - 1),
-        );
+        yield* db.setMetadata("reaped_empty:refilled-pubkey", String(Date.now() - 1));
         const memory = makeMockMemory();
         const trackedPositions = new Map<string, PositionRecord>();
 
