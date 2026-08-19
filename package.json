@@ -45,7 +45,7 @@
     "chalk": "^6.0.0",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
-    "effect": "4.0.0-rc.108",
+    "effect": "4.0.0-rc.109",
     "semver": "^7.8.5",
     "sqlite-vec": "^0.1.9"
   },
