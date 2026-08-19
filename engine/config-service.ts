@@ -988,20 +988,20 @@ const loadConfig = Effect.gen(function* () {
       }),
     );
   }
-  const scanIntervalMs = yield* validatedNumber("SCAN_INTERVAL_MS", 10_000, 600_000);
+  const scanIntervalMs = yield* validatedNumber("SCAN_INTERVAL_MS", 10_000, 600_000, 3_600_000);
   const minPoolTvlUsd = yield* validatedNumber("MIN_POOL_TVL_USD", 0, 50_000);
-  const minFeeIlRatio = yield* validatedNumber("MIN_FEE_IL_RATIO", 0, 1.2);
-  const tvlDropExitPct = yield* validatedNumber("TVL_DROP_EXIT_PCT", 0, 0.3);
-  const volumeAuthThreshold = yield* validatedNumber("VOLUME_AUTH_THRESHOLD", 0, 0.7);
+  const minFeeIlRatio = yield* validatedNumber("MIN_FEE_IL_RATIO", 0, 1.2, 10);
+  const tvlDropExitPct = yield* validatedNumber("TVL_DROP_EXIT_PCT", 0, 0.3, 1);
+  const volumeAuthThreshold = yield* validatedNumber("VOLUME_AUTH_THRESHOLD", 0, 0.7, 1);
   const minRebalanceIntervalMs = yield* validatedNumber(
     "MIN_REBALANCE_INTERVAL_MS",
     0,
     24 * 60 * 60 * 1000,
   );
   const minRebalanceNetBenefitUsd = yield* validatedNumber("MIN_REBALANCE_NET_BENEFIT_USD", 0, 10);
-  const confidenceThreshold = yield* validatedNumber("CONFIDENCE_THRESHOLD", 0, 0.65);
+  const confidenceThreshold = yield* validatedNumber("CONFIDENCE_THRESHOLD", 0, 0.65, 1);
   const paperPortfolioUsd = yield* validatedNumber("PAPER_PORTFOLIO_USD", 1, 10_000);
-  const minBinUtilization = yield* validatedNumber("MIN_BIN_UTILIZATION", 0, 0.3);
+  const minBinUtilization = yield* validatedNumber("MIN_BIN_UTILIZATION", 0, 0.3, 1);
   const maxRebalanceRangeBins = yield* validatedNumber("MAX_REBALANCE_RANGE_BINS", 1, 200, 200);
   const watchlistPoolsRaw = yield* Config.string("WATCHLIST_POOLS").pipe(
     Effect.orElseSucceed(() => ""),

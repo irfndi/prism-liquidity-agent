@@ -178,6 +178,14 @@ interface HistoryTick {
   binArray: BinArray;
 }
 
+/**
+ * Synthetic history is a STRESS TEST, not a realistic market:
+ * - TVL drifts by `tvl *= 1 ± ~1%` per tick (line `tvl *= 1 + (rand-0.49)*0.02`),
+ *   so TVL is quasi-constant; TVL-dependent gates see almost no real drain.
+ * - Every bin's liquiditySupply is random BigInt (all >0), so binUtil is always
+ *   1.0; the binUtil pre-filter can never reject synthetic ticks. Together these
+ *   make reported win rates / Sharpe a lower-bound stress-test only.
+ */
 function generateMockHistory(poolAddress: string, days: number, startTvl: number): HistoryTick[] {
   const history: HistoryTick[] = [];
   const intervalMs = 10 * 60 * 1000; // 10 min
@@ -777,8 +785,12 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
   log.warn("    agent proposals, gas/recovery gates, and on-chain execution.");
   log.warn("  • Each pool runs independently with $10K. Total PnL is the");
   log.warn("    sum of 6 independent portfolios ($60K deployed, not $10K).");
-  log.warn("  • Synthetic bins (all liquiditySupply=1n) make binUtil=1.0");
-  log.warn("    always, so the binUtil pre-filter is a no-op.");
+  log.warn("  • Synthetic TVL is quasi-constant (tvl *= 1±1% per tick) and");
+  log.warn("    synthetic bins use random liquiditySupply so binUtil=1.0 always.");
+  log.warn("    The binUtil gate never rejects; TVL-dependent gates see no real");
+  log.warn("    drain. Results are a LOWER-BOUND STRESS TEST only — not a");
+  log.warn("    realistic PnL / Sharpe / win-rate estimate.");
+  log.warn("    See generateMockHistory comment for the synthetic model.");
   log.warn("  • NO TOKEN PRICE DEPRECIATION: the backtest models no");
   log.warn("    mechanism for the underlying token value to decrease.");
   log.warn("    Portfolio value only changes through fee accrual (+),");
