@@ -2,6 +2,16 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.28] — 2026-08-19
+
+### Added
+
+- **Pool-local realized-PnL kill switch** (`POOL_PNL_KILL_SWITCH_*`). When
+  enabled, a pool whose latest known closes net below the configured threshold
+  is placed on an ENTER cooldown while existing positions remain eligible for
+  EXIT and REBALANCE. The paper-runner profile enables the proposed 10-close,
+  -$15, 48-hour settings.
+
 ## [0.2.27] — 2026-08-19
 
 ### Fixed
