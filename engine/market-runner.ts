@@ -12,11 +12,20 @@
 
 export const DEFAULT_RUNNER_MIN_FEE_APR = 500;
 export const DEFAULT_ROTATION_APR_MULT = 5;
+/** Default runner drift floor: matches the normal-lane drift-gate default
+ *  (MARKET_SCAN_MAX_NEGATIVE_DRIFT_BINS = -8). A runner below this floor is a
+ *  sustained decliner, not a dip. */
+export const DEFAULT_RUNNER_MIN_DRIFT_BINS = -8;
 
 /** A market-scan pool is a RUNNER when the lane is enabled, the pool is in
  * the market scan set, its fees are MEASURED (datapi — modeled gecko /
  * heuristic fees never classify, same measured-only exclusion as paper fee
- * accrual), and its fee APR clears the runner floor. */
+ * accrual), and its fee APR clears the runner floor. The drift floor keeps the
+ * dip-ladder honest: a runner whose net active-bin drift sits BELOW
+ * `runnerMinDriftBins` is a sustained decliner, not a shakeout — it is never
+ * admitted even when its APR is enormous (the normal lane's drift-gate would
+ * have rejected it). Unknown drift (no bin history) fails OPEN — it cannot
+ * prove a decline, so admission is not blocked on a cold start. */
 export function isMarketRunnerPool(params: {
   enabled: boolean;
   marketScanPools: ReadonlySet<string>;
@@ -24,11 +33,23 @@ export function isMarketRunnerPool(params: {
   statsSource: string | undefined;
   feeAprPct: number;
   runnerMinFeeApr: number | undefined;
+  /** Net active-bin drift over the recent-bin window, or null when unknown. */
+  netDriftBins?: number | null;
+  runnerMinDriftBins?: number | undefined;
 }): boolean {
   if (!params.enabled) return false;
   if (!params.marketScanPools.has(params.poolAddress)) return false;
   if (params.statsSource !== "datapi") return false;
-  return params.feeAprPct >= (params.runnerMinFeeApr ?? DEFAULT_RUNNER_MIN_FEE_APR);
+  if (params.feeAprPct < (params.runnerMinFeeApr ?? DEFAULT_RUNNER_MIN_FEE_APR)) return false;
+  if (
+    params.netDriftBins !== undefined &&
+    params.netDriftBins !== null &&
+    Number.isFinite(params.netDriftBins) &&
+    params.netDriftBins < (params.runnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export interface HeldPositionApr {

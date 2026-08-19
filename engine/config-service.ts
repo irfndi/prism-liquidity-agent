@@ -215,6 +215,11 @@ export interface AppConfig {
   readonly marketScanMinFeeApr?: number;
   readonly marketScanRunnerEnabled?: boolean;
   readonly marketScanRunnerMinFeeApr?: number;
+  /** Minimum net active-bin drift (bins) for runner admission. A runner whose
+   *  drift sits below this floor is a sustained decliner, not a dip — reject
+   *  BEFORE the drift-gate exemption can buy it. Default -8 (matches the
+   *  normal-lane drift floor). */
+  readonly marketScanRunnerMinDriftBins?: number;
   readonly marketScanRotationEnabled?: boolean;
   readonly marketScanRotationAprMult?: number;
   readonly marketScanRunnerConfirmCycles?: number;
@@ -1614,6 +1619,17 @@ const loadConfig = Effect.gen(function* () {
     0,
     500,
   );
+  // Runner drift floor: a runner whose net active-bin drift sits below this
+  // floor is a sustained decliner, not a dip — the runner lane's dip-ladder
+  // premise is buying the shakeout WITHIN a healthy rising pool, not buying a
+  // pool already bleeding for hours. Mirrors the normal-lane drift gate's
+  // default. Clamped at 0 so it can never reject on a positive floor.
+  const marketScanRunnerMinDriftBins = yield* validatedNumber(
+    "MARKET_SCAN_RUNNER_MIN_DRIFT_BINS",
+    -100,
+    -8,
+    0,
+  );
   const marketScanRotationEnabled = yield* Config.boolean("MARKET_SCAN_ROTATION_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
@@ -2017,6 +2033,7 @@ const loadConfig = Effect.gen(function* () {
     marketScanMinFeeApr,
     marketScanRunnerEnabled,
     marketScanRunnerMinFeeApr,
+    marketScanRunnerMinDriftBins,
     marketScanRotationEnabled,
     marketScanRotationAprMult,
     marketScanRunnerConfirmCycles,

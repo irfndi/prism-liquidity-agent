@@ -2,6 +2,7 @@
  * the lowest-APR rotation exit. */
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_RUNNER_MIN_DRIFT_BINS,
   consecutiveAboveFloorObservations,
   isMarketRunnerPool,
   lowestAprHeldPosition,
@@ -51,6 +52,38 @@ describe("isMarketRunnerPool (high-yield classification)", () => {
 
   it("exactly at the floor -> runner", () => {
     expect(classify({ feeAprPct: 500 })).toBe(true);
+  });
+});
+
+describe("isMarketRunnerPool (drift-aware admission)", () => {
+  it("admits a runner with healthy (non-declining) drift", () => {
+    expect(classify({ netDriftBins: 0 })).toBe(true);
+    expect(classify({ netDriftBins: 5 })).toBe(true);
+    expect(classify({ netDriftBins: -5 })).toBe(true);
+  });
+
+  it("rejects a runner below the drift floor (sustained decliner, not a dip)", () => {
+    expect(classify({ netDriftBins: -9 })).toBe(false);
+    expect(classify({ netDriftBins: -20 })).toBe(false);
+  });
+
+  it("applies the configured drift floor", () => {
+    expect(classify({ netDriftBins: -3, runnerMinDriftBins: -4 })).toBe(true);
+    expect(classify({ netDriftBins: -5, runnerMinDriftBins: -4 })).toBe(false);
+  });
+
+  it("fails OPEN on unknown drift (cold start — cannot prove a decline)", () => {
+    expect(classify({ netDriftBins: null })).toBe(true);
+    // Omitted netDriftBins (undefined) also fails open — no bin history yet.
+    expect(classify({ feeAprPct: 5_000 })).toBe(true);
+  });
+
+  it("fails open on non-finite drift", () => {
+    expect(classify({ netDriftBins: NaN })).toBe(true);
+  });
+
+  it("default floor matches the normal-lane drift gate", () => {
+    expect(DEFAULT_RUNNER_MIN_DRIFT_BINS).toBe(-8);
   });
 });
 

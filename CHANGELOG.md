@@ -2,6 +2,25 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.26] — 2026-08-19
+
+### Added
+
+- **Drift-aware runner admission** (`MARKET_SCAN_RUNNER_MIN_DRIFT_BINS`,
+  default `-8`). The market-runner lane is drift-gate-exempt at the generic
+  ENTER gate (the dip-ladder fills ON dips by design), but it now enforces its
+  own drift floor in `isMarketRunnerPool`: a runner whose net active-bin drift
+  sits below the floor is a sustained decliner, not a dip — it is rejected
+  with an audited `[runner-drift-gate]` decision even when its APR is
+  enormous. Unknown drift (no bin history) fails open; `0` disables the floor.
+  Fixes the 2026-08 field incident where the lane bought a pool already
+  bleeding for hours at −20 bins and tripped the daily drawdown pause.
+- **Hot-window funnel audit log**: the idle hot-window lane now emits one
+  attributable `Hot-window skip` log per pool per cycle (already-holding-hot /
+  daily-loss-halt / non-hot-held / open-cap / trip-budget / the specific
+  `evaluateHotWindowEnter` reject reason) so a lane sitting at 0 entries is
+  diagnosable instead of a silent black box.
+
 ## [0.2.25] — 2026-08-18
 
 ### Added

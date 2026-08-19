@@ -44,6 +44,7 @@ import { HttpStatusServerLive } from "./http-status-server.js";
 import { EntryPrepLive } from "./entry-prep-service.js";
 import { shouldDiscoverPools } from "./pool-policy.js";
 import {
+  DEFAULT_RUNNER_MIN_DRIFT_BINS,
   DEFAULT_RUNNER_MIN_FEE_APR,
   consecutiveAboveFloorObservations,
   isMarketRunnerPool,
@@ -5601,6 +5602,8 @@ export const program = Effect.gen(function* () {
           statsSource: pool.statsSource,
           feeAprPct: poolFeeAprPct,
           runnerMinFeeApr: config.marketScanRunnerMinFeeApr,
+          netDriftBins,
+          runnerMinDriftBins: config.marketScanRunnerMinDriftBins,
         }) && runnerConsecutiveCount >= (config.marketScanRunnerConfirmCycles ?? 2);
       poolFeeAprByAddress.set(poolAddress, { feeAprPct: poolFeeAprPct, tvlUsd: pool.tvlUsd });
 
@@ -6018,11 +6021,26 @@ export const program = Effect.gen(function* () {
         // ENTER a currently-printing, correctly-sized pool (only when this pool
         // holds no hot position and carries no non-hot position this cycle).
         let hotEnter: AgentDecision | null = null;
-        if (hotPositions.length === 0 && !halted && nonHotHeld === false) {
+        // Per-cycle funnel counters — the lane's observable answer to "why did
+        // the hot window admit nothing" (the lane sat at 0 entries for ~19h
+        // with no visibility into whether pools were not-printing, out-of-depth,
+        // safety-rejected, or budget-limited). Logged once per pool.
+        let hotSkipReason: string | null = null;
+        if (hotPositions.length > 0) {
+          hotSkipReason = "already-holding-hot";
+        } else if (halted) {
+          hotSkipReason = "daily-loss-halt";
+        } else if (nonHotHeld) {
+          hotSkipReason = "non-hot-held";
+        } else {
           const openHot = Array.from(trackedPositions.values()).filter(
             (p) => p.positionMode === "hot-window",
           ).length;
-          if (openHot < hotCfg.maxOpen && tripsToday < hotCfg.maxTripsPerDay) {
+          if (openHot >= hotCfg.maxOpen) {
+            hotSkipReason = "open-cap";
+          } else if (tripsToday >= hotCfg.maxTripsPerDay) {
+            hotSkipReason = "trip-budget";
+          } else {
             const enterEval = evaluateHotWindowEnter({
               config: hotCfg,
               feeTvlRatio1h: datapiStats?.feeTvlRatio1h ?? null,
@@ -6037,8 +6055,24 @@ export const program = Effect.gen(function* () {
                 positionSizeUsd: enterEval.sizeUsd,
                 positionMode: "hot-window",
               };
+            } else {
+              hotSkipReason = enterEval.rejectReason ?? "rejected";
             }
           }
+        }
+        // Funnel audit: every pool the lane does not enter gets one
+        // attributable skip line so the idle lane is never a silent black box.
+        if (hotSkipReason !== null) {
+          logger.info("Hot-window skip", {
+            pool: poolAddress,
+            reason: hotSkipReason,
+            feeTvlRatio1h: datapiStats?.feeTvlRatio1h ?? null,
+            tvlUsd: pool.tvlUsd,
+            tripsToday,
+            openHot: Array.from(trackedPositions.values()).filter(
+              (p) => p.positionMode === "hot-window",
+            ).length,
+          });
         }
         // The hot lane fully owns any pool it holds a hot position on or is
         // about to enter — return its decisions and skip the generic loop so a
@@ -6195,6 +6229,12 @@ export const program = Effect.gen(function* () {
       }
 
       const recentBins = binHistory.get(poolAddress) ?? [];
+      // Net active-bin drift over the recent-bin ring — the momentum signal
+      // shared by the entry-shape resolution, the drift gate, and runner
+      // admission. Null when the pool has no bin history (cold start): runner
+      // admission fails OPEN on unknown drift (it cannot prove a decline).
+      const netDriftBins =
+        recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0;
       const volatilityLookback = Math.max(2, config.volatilityLookbackSnapshots);
       const volatilityBins =
         recentBins.length > volatilityLookback
@@ -7380,10 +7420,6 @@ export const program = Effect.gen(function* () {
         }
       }
 
-      // Recent-bin drift shared by the entry-shape resolution and the
-      // idle-redeploy capture (identical expression the shape path used inline).
-      const netDriftBins =
-        recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0;
       // Momentum-aware metrics for the weighted score: the momentum term reads
       // netDriftBins, which is only known after metrics construction, so it
       // rides on a derived copy (audit rows keep the original metrics).
@@ -7728,15 +7764,53 @@ export const program = Effect.gen(function* () {
             }
           }
 
+          // [runner-drift-gate] a drift-exempt market-runner candidate that is
+          // itself a sustained decliner is rejected with an explicit audit row.
+          // The runner lane's dip-ladder premise is buying the shakeout WITHIN
+          // a healthy rising pool, not buying a pool already bleeding for
+          // hours. This mirrors the normal-lane drift gate's signal so the
+          // rejection is attributable instead of the pool silently falling
+          // through to the generic gate.
+          if (
+            !enterGateRejected &&
+            isMarketRunner(poolAddress) &&
+            netDriftBins < (config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS)
+          ) {
+            console.info(
+              `[runner-drift-gate] Rejecting runner ENTER ${poolAddress} — net drift ${netDriftBins} bins < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
+            );
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "ENTER",
+                confidence: 0,
+                reasoning: `[runner-drift-gate] runner net drift ${netDriftBins} bins below ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS} — sustained decliner, not a dip`,
+                metrics,
+                riskResult: {
+                  approved: false,
+                  reason: `[runner-drift-gate] drift ${netDriftBins} < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
+                },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catch(() => Effect.void));
+            enterGateRejected = true;
+          }
+
           // [drift-gate] negative-drift ENTER rejection — a pool trending DOWN
           // hard (net active-bin drift below MARKET_SCAN_MAX_NEGATIVE_DRIFT_BINS
           // over the recent-bin window) is not a momentum entry; reject BEFORE
           // the candidate conditions so a falling pool cannot clear the
           // fee/IL quality gates on fees earned before the slide. EXEMPT:
-          // market-runner entries (the dip-ladder fills ON dips by design) and
-          // launch-lane entries (young pools have no bin history to drift);
-          // fallen-angel consumed the slot above — its thesis IS post-drawdown
-          // entry. Applies to the NORMAL/market lane only.
+          // market-runner entries — the dip-ladder fills ON dips by design —
+          // BUT the runner lane now enforces its own drift floor in
+          // `isMarketRunnerPool` (MARKET_SCAN_RUNNER_MIN_DRIFT_BINS), so a
+          // runner below that floor is never admitted here and falls through
+          // to this gate. Launch-lane entries (young pools have no bin history
+          // to drift) stay exempt; fallen-angel consumed the slot above — its
+          // thesis IS post-drawdown entry. Applies to the NORMAL/market lane only.
           if (
             !enterGateRejected &&
             !isMarketRunner(poolAddress) &&
