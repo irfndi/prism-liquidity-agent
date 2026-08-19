@@ -738,6 +738,135 @@ describe("evaluateAgentProposal", () => {
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/position cap/i);
   });
+
+  it("waives the confidence floor for ENTER -> HOLD (defensive downgrade)", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "HOLD", poolAddress: "pool1", confidence: 0.52 }),
+      makeContext({
+        originalDecision: {
+          action: "ENTER",
+          poolAddress: "pool1",
+          confidence: 0.75,
+          reasoning: "deterministic",
+          positionSizeUsd: 1_000,
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.adjustedDecision?.action).toBe("HOLD");
+  });
+
+  it("waives the confidence floor for REBALANCE -> HOLD", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "HOLD", poolAddress: "pool1", confidence: 0.4 }),
+      makeContext({
+        originalDecision: {
+          action: "REBALANCE",
+          poolAddress: "pool1",
+          confidence: 0.7,
+          reasoning: "deterministic",
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.adjustedDecision?.action).toBe("HOLD");
+  });
+
+  it("waives the floor for ENTER -> REBALANCE (HOLD=0 < REBALANCE=2 < ENTER=3)", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "REBALANCE",
+        poolAddress: "pool1",
+        confidence: 0.5,
+        rebalanceParams: { newLowerBinId: 100, newUpperBinId: 110, slippageBps: 0 },
+      }),
+      makeContext({
+        openPositions: [
+          {
+            id: "pos-1",
+            poolAddress: "pool1",
+            poolName: "SOL/USDC",
+            lowerBinId: 90,
+            upperBinId: 120,
+            liquidityShares: 0n,
+            depositedUsd: 1_000,
+            currentValueUsd: 1_000,
+            unrealizedPnlUsd: 0,
+            feesEarnedUsd: 0,
+            openedAt: Date.now(),
+          },
+        ],
+        originalDecision: {
+          action: "ENTER",
+          poolAddress: "pool1",
+          confidence: 0.8,
+          reasoning: "deterministic",
+          positionSizeUsd: 1_000,
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.adjustedDecision?.action).toBe("REBALANCE");
+  });
+
+  it("does NOT waive the floor for HOLD -> ENTER (promotion)", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "ENTER", poolAddress: "pool1", confidence: 0.5 }),
+      makeContext({
+        originalDecision: {
+          action: "HOLD",
+          poolAddress: "pool1",
+          confidence: 0.5,
+          reasoning: "deterministic",
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it("does NOT waive when the trusted original is HOLD (no downgrade exists)", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({ action: "HOLD", poolAddress: "pool1", confidence: 0.4 }),
+      makeContext({
+        originalDecision: {
+          action: "HOLD",
+          poolAddress: "pool1",
+          confidence: 0.5,
+          reasoning: "deterministic",
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/Confidence/);
+  });
+
+  it("does NOT waive when claimed originalAction conflicts with trusted decision", () => {
+    const result = evaluateAgentProposal(
+      makeProposal({
+        action: "HOLD",
+        poolAddress: "pool1",
+        confidence: 0.4,
+        originalAction: "ENTER",
+        originalConfidence: 0.7,
+      }),
+      makeContext({
+        originalDecision: {
+          action: "HOLD",
+          poolAddress: "pool1",
+          confidence: 0.5,
+          reasoning: "deterministic",
+        },
+      }),
+      makeConfig(),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/Confidence/);
+  });
 });
 
 describe("proposal template echo end-to-end", () => {

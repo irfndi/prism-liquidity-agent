@@ -2,6 +2,34 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.27] — 2026-08-19
+
+### Fixed
+
+- **Launch-drift gate** (`[launch-drift-gate]`). The launch lane
+  (Launch Mode v2, drift-exempt for young pools) could enter a sustained
+  decliner: a 24h-old pool already bleeding for hours at −20 bins tripped
+  the daily drawdown pause via the launch ENTER branch, which was exempt
+  from the generic drift gate. The 0.2.26 market-runner drift floor did
+  not cover the launch branch. A shared `MARKET_SCAN_RUNNER_MIN_DRIFT_BINS`
+  (default −8) now blocks the launch ENTER for sustained decliners too,
+  with an audited rejection — the same floor the normal lane enforces.
+- **Proposal hard-floor**. A harness in `full`/`supervised` mode could push
+  an ENTER through an audited engine hard rejection (drift / fee-IL) by
+  re-submitting it as a proposal. Proposal-applied ENTERs now re-run the
+  same predicates the deterministic chain enforces (fee-IL gate, drift
+  gate, launch-drift gate) before apply — any hit forces HOLD with an
+  audited `[proposal-hard-floor]` reason. The harness can downgrade,
+  resize, or echo, but never enter a pool the engine would hard-reject.
+- **Veto confidence floor**. A conservative `ENTER -> HOLD` downgrade at
+  e.g. 0.55 confidence was rejected with "must be between 0.65 and 1"
+  instead of being honored as the veto it was — the `AGENT_PROPOSAL_MIN_CONFIDENCE`
+  floor rejected the harness's safety vote, so a falling pool was not vetoed.
+  Defensive downgrades (any action strictly less aggressive than the
+  deterministic original) are now exempt from the floor; aggressive
+  proposals (ENTER, confidence above original) still require it. This matches
+  the veto overlay's documented behavior (only reduce confidence or change to HOLD).
+
 ## [0.2.26] — 2026-08-19
 
 ### Added

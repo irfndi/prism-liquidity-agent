@@ -60,10 +60,7 @@ export function evaluateRisk(
   // recomputed each cycle from the DB and auto-lifts when the strategy recovers.
   // Fail-open: absent/false (env disabled or legacy backtest callers) never
   // halts.
-  if (
-    decision.action === "ENTER" &&
-    ctx.rollingRealizedPnlHalted === true
-  ) {
+  if (decision.action === "ENTER" && ctx.rollingRealizedPnlHalted === true) {
     return {
       approved: false,
       reason:
@@ -230,6 +227,26 @@ export function evaluateRisk(
 
 const VALID_ACTIONS: ReadonlyArray<ActionType> = ["HOLD", "REBALANCE", "EXIT", "ENTER"];
 
+/** Aggressiveness order for agent-proposal downgrade semantics: a proposal is
+ *  a DEFENSIVE downgrade when it moves the action strictly toward HOLD/EXIT
+ *  (less capital-at-risk) than the deterministic original. ENTER is the most
+ *  aggressive; HOLD the least. EXIT is capital-PROTECTIVE and ranks below
+ *  REBALANCE (which keeps liquidity deployed). A downgrade never requires the
+ *  confidence floor — it is the harness's conservative veto. */
+const ACTION_AGGRESSION = {
+  HOLD: 0,
+  EXIT: 1,
+  REBALANCE: 2,
+  ENTER: 3,
+} satisfies Record<ActionType, number>;
+
+function isDefensiveProposalAction(
+  originalAction: ActionType,
+  proposedAction: ActionType,
+): boolean {
+  return ACTION_AGGRESSION[proposedAction] < ACTION_AGGRESSION[originalAction];
+}
+
 // Slippage is intentionally excluded: the proposal schema does not accept it
 // (buildProposal hardcodes 0 while deterministic decisions use 50), and it is
 // never read during execution — only the bin range alters execution.
@@ -282,6 +299,16 @@ export function evaluateAgentProposal(
   //    preserves the original low-confidence decision unchanged — verified against
   //    the trusted original decision (same action, same confidence, same
   //    executable parameters). Without one, the waiver does not apply.
+  //    A DEFENSIVE downgrade is also exempt from the floor: a proposal that
+  //    makes the decision strictly LESS aggressive than the deterministic
+  //    original (ENTER -> HOLD/EXIT/REBALANCE, REBALANCE -> HOLD/EXIT, EXIT ->
+  //    EXIT-echo) is a veto, and vetoing at low confidence is the harness's
+  //    legitimate conservative signal — rejecting it because confidence < 0.65
+  //    silenced the very safety vote the overlay exists for (observed in the
+  //    field: the OpenClaw harness voted HOLD @ 0.55 on a falling pool and was
+  //    rejected with "must be between 0.65 and 1", so the ENTER was not
+  //    vetoed). An AGGRESSIVE proposal (ENTER, or any confidence above the
+  //    original) still requires the floor.
   const original = ctx.originalDecision;
   const preservesOriginalDecision =
     original !== undefined &&
@@ -293,8 +320,15 @@ export function evaluateAgentProposal(
       (original.rebalanceParams !== undefined &&
         rebalanceParamsEqual(proposal.rebalanceParams, original.rebalanceParams)));
 
+  const isDefensiveDowngrade =
+    original !== undefined &&
+    isDefensiveProposalAction(original.action, proposal.action) &&
+    // The harness's own claimed originalAction must match the trusted
+    // original — a spoofed originalAction cannot manufacture a downgrade waiver.
+    (proposal.originalAction === undefined || proposal.originalAction === original.action);
+  const confidenceNeedsFloor = !preservesOriginalDecision && !isDefensiveDowngrade;
   if (
-    !preservesOriginalDecision &&
+    confidenceNeedsFloor &&
     (!Number.isFinite(proposal.confidence) ||
       proposal.confidence < config.agentProposalMinConfidence ||
       proposal.confidence > 1)

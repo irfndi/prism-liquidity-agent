@@ -4113,28 +4113,64 @@ export const program = Effect.gen(function* () {
                     suggested: validation.adjustedDecision.action,
                   });
                 } else if (validation.adjustedDecision.action === "ENTER") {
-                  idleRedeployLogger.info("Agent proposal applied to idle-redeploy", {
-                    source: proposalSource,
-                    pool: overlayPoolAddress,
-                    to: validation.adjustedDecision.action,
-                  });
-                  // Follow-up 3655404920: capture the pre-apply decision and flag a
-                  // real executable change so a later deterministic risk denial can
-                  // penalize the advisor exactly as the in-slot tail does.
-                  overlayPreApplyDecision = decision;
-                  decision = validation.adjustedDecision;
-                  overlayProposalValidated = true;
-                  if (
-                    decisionChangesExecutableBehavior(
-                      overlayPreApplyDecision,
-                      decision,
-                      config.confidenceThreshold,
-                    )
-                  ) {
-                    overlayAppliedAgentProposal = true;
-                  }
-                  if (proposalSource === "queue" && agentProposal.proposalId) {
-                    overlayAppliedProposalId = agentProposal.proposalId;
+                  // Proposal hard-floor (0.2.27): the idle-redeploy overlay can
+                  // also apply an agent ENTER — it must not bypass the engine's
+                  // hard rejections. Re-run the same predicates the in-slot tail
+                  // enforces against the adjusted decision.
+                  const candidateMetrics = candidate.metrics;
+                  const candidateDrift = candidate.netDriftBins;
+                  const hardRejectReason: string | null = (() => {
+                    if (
+                      config.ilProtectionEnabled === true &&
+                      candidateMetrics.feeIlRatioKnown &&
+                      candidateMetrics.feeIlRatio < config.minFeeIlRatio
+                    ) {
+                      return `[fee-il-gate] Fee/IL ${candidateMetrics.feeIlRatio.toFixed(2)} below ${config.minFeeIlRatio}`;
+                    }
+                    if (
+                      driftGateRejected(
+                        candidateDrift,
+                        config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS,
+                      )
+                    ) {
+                      return `[drift-gate] net drift ${candidateDrift} < ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS}`;
+                    }
+                    return null;
+                  })();
+                  if (hardRejectReason !== null) {
+                    idleRedeployLogger.warn(
+                      "Agent proposal ENTER blocked by hard floor on idle-redeploy",
+                      { pool: overlayPoolAddress, reason: hardRejectReason },
+                    );
+                    yield* recordRedeploySkip(
+                      `[proposal-hard-floor] ${hardRejectReason} — agent-proposed redeploy ENTER overridden`,
+                      `[proposal-hard-floor] ${hardRejectReason}`,
+                    );
+                    overlaySkip = true;
+                  } else {
+                    idleRedeployLogger.info("Agent proposal applied to idle-redeploy", {
+                      source: proposalSource,
+                      pool: overlayPoolAddress,
+                      to: validation.adjustedDecision.action,
+                    });
+                    // Follow-up 3655404920: capture the pre-apply decision and flag a
+                    // real executable change so a later deterministic risk denial can
+                    // penalize the advisor exactly as the in-slot tail does.
+                    overlayPreApplyDecision = decision;
+                    decision = validation.adjustedDecision;
+                    overlayProposalValidated = true;
+                    if (
+                      decisionChangesExecutableBehavior(
+                        overlayPreApplyDecision,
+                        decision,
+                        config.confidenceThreshold,
+                      )
+                    ) {
+                      overlayAppliedAgentProposal = true;
+                    }
+                    if (proposalSource === "queue" && agentProposal.proposalId) {
+                      overlayAppliedProposalId = agentProposal.proposalId;
+                    }
                   }
                 } else {
                   idleRedeployLogger.info("Agent proposal cancelled idle-redeploy", {
@@ -7951,7 +7987,42 @@ export const program = Effect.gen(function* () {
               if (isLaunchPool) {
                 const totalOpenPositions = trackedPositions.size;
                 const portfolioFull = totalOpenPositions >= (config.maxOpenPositions ?? 3);
-                if (openLaunchPositions >= launchMaxOpenPositions || portfolioFull) {
+                // [launch-drift-gate] a launch/runner candidate that is itself
+                // a sustained decliner is rejected with an explicit audit row —
+                // the same drift floor the normal lane enforces, applied to the
+                // drift-exempt launch lane. A young pool can absolutely already
+                // be bleeding for hours (the 2026-08 5A15QU field incident: a
+                // 24h-old pool at −20 bins tripped the daily drawdown pause),
+                // and the launch timebox is not a momentum filter. Unknown
+                // drift (cold start, <2 bin snapshots) fails OPEN — a young
+                // pool with no history cannot prove a decline.
+                if (
+                  config.launchScanEnabled === true &&
+                  netDriftBins <
+                    (config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS)
+                ) {
+                  console.info(
+                    `[launch-drift-gate] Rejecting launch ENTER ${poolAddress} — net drift ${netDriftBins} bins < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
+                  );
+                  yield* audit
+                    .recordDecision({
+                      timestamp: Date.now(),
+                      cycleId,
+                      poolAddress,
+                      action: "ENTER",
+                      confidence: 0,
+                      reasoning: `[launch-drift-gate] launch net drift ${netDriftBins} bins below ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS} — sustained decliner, not a dip`,
+                      metrics,
+                      riskResult: {
+                        approved: false,
+                        reason: `[launch-drift-gate] drift ${netDriftBins} < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
+                      },
+                      executed: false,
+                      paperTrading: config.paperTrading,
+                    })
+                    .pipe(Effect.catch(() => Effect.void));
+                  enterGateRejected = true;
+                } else if (openLaunchPositions >= launchMaxOpenPositions || portfolioFull) {
                   // Rotation (market-runner lane only): the portfolio is full
                   // and a much hotter runner is available — exit the LOWEST-
                   // APR held position so the freed slot admits the runner next
@@ -8828,6 +8899,72 @@ export const program = Effect.gen(function* () {
                     deterministicReasoning.length > 0
                   ) {
                     decision = { ...decision, reasoning: deterministicReasoning };
+                  }
+                  // Proposal hard-floor (0.2.27): a proposal-applied ENTER must
+                  // not bypass the engine's deterministic hard rejections. The
+                  // harness (full/supervised) may only operate WITHIN the same
+                  // safety envelope the deterministic chain enforces — it can
+                  // downgrade, resize, or echo, but it cannot enter a pool the
+                  // engine would hard-reject (drift, fee/IL, launch drift).
+                  // Re-run the same predicates against the ADJUSTED decision;
+                  // any hit forces HOLD with an audited reason.
+                  if (decision.action === "ENTER") {
+                    const hardRejectReason: string | null = (() => {
+                      if (
+                        config.ilProtectionEnabled === true &&
+                        metrics.feeIlRatioKnown &&
+                        feeIlRatio < config.minFeeIlRatio
+                      ) {
+                        return `[fee-il-gate] Fee/IL ${feeIlRatio.toFixed(2)} below ${config.minFeeIlRatio}`;
+                      }
+                      if (
+                        !launchScanPools.has(poolAddress) &&
+                        !isMarketRunner(poolAddress) &&
+                        driftGateRejected(
+                          netDriftBins,
+                          config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS,
+                        )
+                      ) {
+                        return `[drift-gate] net drift ${netDriftBins} < ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS}`;
+                      }
+                      if (
+                        config.launchScanEnabled === true &&
+                        netDriftBins <
+                          (config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS)
+                      ) {
+                        return `[launch-drift-gate] net drift ${netDriftBins} < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`;
+                      }
+                      return null;
+                    })();
+                    if (hardRejectReason !== null) {
+                      logger.warn("Agent proposal ENTER blocked by hard floor — forcing HOLD", {
+                        pool: poolAddress,
+                        reason: hardRejectReason,
+                      });
+                      yield* audit
+                        .recordDecision({
+                          timestamp: Date.now(),
+                          cycleId,
+                          poolAddress,
+                          action: "HOLD",
+                          confidence: 0,
+                          reasoning: `[proposal-hard-floor] ${hardRejectReason} — agent-proposed ENTER overridden to HOLD`,
+                          metrics,
+                          riskResult: {
+                            approved: false,
+                            reason: `[proposal-hard-floor] ${hardRejectReason}`,
+                          },
+                          executed: false,
+                          paperTrading: config.paperTrading,
+                        })
+                        .pipe(Effect.catch(() => Effect.void));
+                      decision = {
+                        action: "HOLD",
+                        poolAddress,
+                        confidence: 0,
+                        reasoning: `[proposal-hard-floor] ${hardRejectReason} — agent-proposed ENTER overridden to HOLD`,
+                      };
+                    }
                   }
                   // Only count real executable changes toward risk-deny backoff /
                   // circuit failure. Pure preserve-original echoes that later
