@@ -86,6 +86,31 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
   { envKey: "MAX_POSITIONS_PER_POOL", kind: "number", field: "maxPositionsPerPool", min: 1 },
   { envKey: "MAX_ENTRY_SIZE_USD", kind: "number", field: "maxEntrySizeUsd", min: 10 },
   {
+    envKey: "POOL_PNL_KILL_SWITCH_ENABLED",
+    kind: "boolean",
+    field: "poolPnlKillSwitchEnabled",
+  },
+  {
+    envKey: "POOL_PNL_KILL_SWITCH_MIN_CLOSED_POSITIONS",
+    kind: "number",
+    field: "poolPnlKillSwitchMinClosedPositions",
+    min: 1,
+  },
+  {
+    envKey: "POOL_PNL_KILL_SWITCH_THRESHOLD_USD",
+    kind: "number",
+    field: "poolPnlKillSwitchThresholdUsd",
+    min: -Number.MAX_SAFE_INTEGER,
+    max: 0,
+  },
+  {
+    envKey: "POOL_PNL_KILL_SWITCH_COOLDOWN_MS",
+    kind: "number",
+    field: "poolPnlKillSwitchCooldownMs",
+    min: 1,
+    max: 30 * 24 * 60 * 60 * 1000,
+  },
+  {
     envKey: "MAX_PER_POOL_ALLOCATION_PCT",
     kind: "number",
     field: "maxPerPoolAllocationPct",

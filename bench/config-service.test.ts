@@ -49,6 +49,32 @@ describe("ConfigService MIN_REENTRY_COOLDOWN_MS (same-pool re-entry churn thrott
   });
 });
 
+describe("ConfigService pool PnL kill switch", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults to opt-in off with the proposed thresholds", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.poolPnlKillSwitchEnabled).toBe(false);
+    expect(cfg.poolPnlKillSwitchMinClosedPositions).toBe(10);
+    expect(cfg.poolPnlKillSwitchThresholdUsd).toBe(-15);
+    expect(cfg.poolPnlKillSwitchCooldownMs).toBe(172_800_000);
+  });
+
+  it("honours enabled values and clamps unsafe threshold/cooldown inputs", async () => {
+    vi.stubEnv("POOL_PNL_KILL_SWITCH_ENABLED", "true");
+    vi.stubEnv("POOL_PNL_KILL_SWITCH_MIN_CLOSED_POSITIONS", "12");
+    vi.stubEnv("POOL_PNL_KILL_SWITCH_THRESHOLD_USD", "5");
+    vi.stubEnv("POOL_PNL_KILL_SWITCH_COOLDOWN_MS", "999999999999");
+    const cfg = await loadConfig();
+    expect(cfg.poolPnlKillSwitchEnabled).toBe(true);
+    expect(cfg.poolPnlKillSwitchMinClosedPositions).toBe(12);
+    expect(cfg.poolPnlKillSwitchThresholdUsd).toBe(0);
+    expect(cfg.poolPnlKillSwitchCooldownMs).toBe(2_592_000_000);
+  });
+});
+
 describe("ConfigService upper-bound clamping", () => {
   afterEach(() => {
     vi.unstubAllEnvs();

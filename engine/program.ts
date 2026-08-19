@@ -69,6 +69,7 @@ import { join } from "path";
 import type { PositionRecord } from "./db-service.js";
 import { applyCompoundToCostBasis, computeHodlValueUsd, computeRealizedPnlUsd } from "./pnl.js";
 import { rollingRealizedPnlHalted as rollingRealizedPnlHaltSignal } from "./pnl-halt.js";
+import { findPoolPnlKillSwitchTrips } from "./pool-pnl-kill-switch.js";
 import { buildRewardClaimMetadata, summarizeRewardClaim } from "./rewards.js";
 import { errorReporter } from "./error-reporter.js";
 import {
@@ -4921,6 +4922,16 @@ export const program = Effect.gen(function* () {
     Effect.gen(function* () {
       coreDataFailuresThisCycle = 0;
 
+      // The closed ledger is newest-first. Reuse one per-cycle snapshot for
+      // both portfolio-wide and pool-local PnL guards. A read failure fails
+      // open here; it must not prevent existing positions from reaching EXIT
+      // evaluation.
+      const needsClosedLedger =
+        (config.realizedPnLHaltEnabled ?? false) || (config.poolPnlKillSwitchEnabled ?? false);
+      const closedPositionsForCycle = needsClosedLedger
+        ? yield* db.getClosedPositions().pipe(Effect.catch(() => Effect.succeed([])))
+        : [];
+
       // Rolling realized-PnL loss halt (REALIZED_PNL_HALT_*): computed ONCE per
       // cycle from the closed-position ledger so a single cycle shares one
       // consistent verdict across every ENTER lane (the risk gate consumes it
@@ -4931,15 +4942,60 @@ export const program = Effect.gen(function* () {
       // (leaves the flag false — no unexpected freeze) with a warning.
       let cycleRealizedPnlHalted = false;
       if (config.realizedPnLHaltEnabled ?? false) {
-        const closed = yield* db.getClosedPositions().pipe(Effect.catch(() => Effect.succeed([])));
         cycleRealizedPnlHalted = rollingRealizedPnlHaltSignal(
-          closed.map((p) => p.realizedPnlUsd),
+          closedPositionsForCycle.map((p) => p.realizedPnlUsd),
           config.realizedPnLHaltWindow ?? 100,
           config.realizedPnLHaltThresholdUsd ?? -20,
         );
         if (cycleRealizedPnlHalted) {
           console.warn(
             `[rolling-pnl-halt] trailing realized PnL across last ${config.realizedPnLHaltWindow ?? 100} closes < $${(config.realizedPnLHaltThresholdUsd ?? -20).toFixed(0)} — pausing new ENTERs; EXIT/REBALANCE remain free`,
+          );
+        }
+      }
+
+      // Pool-local realized-PnL kill switch. This only arms a persisted
+      // ENTER cooldown; open positions remain in the active scan set and
+      // continue through the normal EXIT/REBALANCE path. The latest position
+      // id is included in the reason so an expired cooldown is not repeatedly
+      // re-armed from the exact same stale ledger observation.
+      if (config.poolPnlKillSwitchEnabled ?? false) {
+        const trips = findPoolPnlKillSwitchTrips(
+          closedPositionsForCycle,
+          {
+            minClosedPositions: config.poolPnlKillSwitchMinClosedPositions ?? 10,
+            thresholdUsd: config.poolPnlKillSwitchThresholdUsd ?? -15,
+          },
+        );
+        for (const trip of trips) {
+          const now = Date.now();
+          const existing = yield* db
+            .getPoolCooldown(trip.poolAddress)
+            .pipe(Effect.catch(() => Effect.succeed(null)));
+          const latestPositionId = trip.positionIds[0] ?? "unknown";
+          const observationMarker = `[pool-pnl-kill-switch] ${latestPositionId}`;
+
+          // Do not re-arm forever from an unchanged trailing window after the
+          // cooldown expires. A newer close changes the marker and can trip it
+          // again with fresh evidence.
+          if (existing?.reason.startsWith(observationMarker)) continue;
+
+          const desiredUntil =
+            now + (config.poolPnlKillSwitchCooldownMs ?? 48 * 60 * 60 * 1000);
+          if (existing && existing.cooldownUntil >= desiredUntil) continue;
+
+          const cooldown = {
+            poolAddress: trip.poolAddress,
+            cooldownUntil: Math.max(existing?.cooldownUntil ?? 0, desiredUntil),
+            reason:
+              `${observationMarker} trailing ${trip.positionIds.length} known closes ` +
+              `net $${trip.realizedPnlUsd.toFixed(2)} below ` +
+              `$${(config.poolPnlKillSwitchThresholdUsd ?? -15).toFixed(2)}`,
+            consecutiveOorExits: existing?.consecutiveOorExits ?? 0,
+          };
+          yield* db.setPoolCooldown(cooldown).pipe(Effect.catch(() => Effect.void));
+          console.warn(
+            `[pool-pnl-kill-switch] Pool ${trip.poolAddress} cooled down until ${new Date(cooldown.cooldownUntil).toISOString()} — trailing realized PnL $${trip.realizedPnlUsd.toFixed(2)} across ${trip.positionIds.length} closes`,
           );
         }
       }

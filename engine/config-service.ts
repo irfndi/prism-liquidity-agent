@@ -712,6 +712,14 @@ export interface AppConfig {
   /** USD threshold below which the rolling realized-PnL sum trips the halt.
    *  Default -20. */
   readonly realizedPnLHaltThresholdUsd?: number;
+  /** Pool-local realized-PnL kill switch. When enabled, a pool whose latest
+   * N known closes net below the threshold is kept out of new ENTERs for the
+   * configured cooldown. Existing positions remain eligible for EXIT and
+   * REBALANCE. Default false (opt-in). */
+  readonly poolPnlKillSwitchEnabled?: boolean;
+  readonly poolPnlKillSwitchMinClosedPositions?: number;
+  readonly poolPnlKillSwitchThresholdUsd?: number;
+  readonly poolPnlKillSwitchCooldownMs?: number;
 
   /** Master switch for periodic LM farm reward claims (Wave 8). Default true;
    *  scoring stays farm-aware regardless — this only gates on-chain claims. */
@@ -1186,6 +1194,28 @@ const loadConfig = Effect.gen(function* () {
     "REALIZED_PNL_HALT_THRESHOLD_USD",
     -Number.MAX_SAFE_INTEGER,
     -20,
+  );
+
+  // ─── Pool-local realized-PnL kill switch ─────────────────────────────────
+  const poolPnlKillSwitchEnabled = yield* Config.boolean("POOL_PNL_KILL_SWITCH_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const poolPnlKillSwitchMinClosedPositions = yield* validatedNumber(
+    "POOL_PNL_KILL_SWITCH_MIN_CLOSED_POSITIONS",
+    1,
+    10,
+  );
+  const poolPnlKillSwitchThresholdUsd = yield* validatedNumber(
+    "POOL_PNL_KILL_SWITCH_THRESHOLD_USD",
+    -Number.MAX_SAFE_INTEGER,
+    -15,
+    0,
+  );
+  const poolPnlKillSwitchCooldownMs = yield* validatedNumber(
+    "POOL_PNL_KILL_SWITCH_COOLDOWN_MS",
+    1,
+    48 * 60 * 60 * 1000,
+    30 * 24 * 60 * 60 * 1000,
   );
 
   // ─── F6: Paper-trading validation period ────────────────────────────────────
@@ -2223,6 +2253,10 @@ const loadConfig = Effect.gen(function* () {
     realizedPnLHaltEnabled,
     realizedPnLHaltWindow,
     realizedPnLHaltThresholdUsd,
+    poolPnlKillSwitchEnabled,
+    poolPnlKillSwitchMinClosedPositions,
+    poolPnlKillSwitchThresholdUsd,
+    poolPnlKillSwitchCooldownMs,
     farmRewardsEnabled,
     limitOrdersEnabled,
     limitOrderMode,
