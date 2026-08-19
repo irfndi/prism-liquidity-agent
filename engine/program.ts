@@ -1,6 +1,6 @@
 import { Effect, Fiber, Layer } from "effect";
 import { ConfigService, ConfigLive, type AppConfig } from "./config-service.js";
-import { AdapterLive } from "./adapter-service.js";
+import { AdapterLive, getUnpricedWalletMintCount } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
 import { MemoryLive } from "./memory-service.js";
 import {
@@ -5121,6 +5121,20 @@ export const program = Effect.gen(function* () {
         );
       } else {
         lastWalletBalanceUsd = config.paperPortfolioUsd;
+      }
+      // Throughput-throttle surface: unpriced wallet tokens silently shrink
+      // portfolioValueUsd (fail-closed), so every ENTER is sized smaller and
+      // new entries appear to "pause" with no log. Surface it once per cycle
+      // when the adapter has accumulated unpriced mints (live only).
+      if (!config.paperTrading) {
+        const unpricedCount = getUnpricedWalletMintCount();
+        if (unpricedCount > 0) {
+          logger.warn("Wallet balance excludes unpriced tokens — throughput may be throttled", {
+            unpricedMintCount: unpricedCount,
+            walletBalanceUsd: lastWalletBalanceUsd.toFixed(2),
+            paperPortfolioUsd: config.paperPortfolioUsd.toFixed(2),
+          });
+        }
       }
 
       // Issue #170: batch wallet-reserve gate — refresh the per-cycle native

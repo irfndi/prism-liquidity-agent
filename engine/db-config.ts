@@ -280,6 +280,51 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
     field: "idleRedeployMaxSizeUsd",
     min: 0,
   },
+  // ── Profitability hot-tuning (paper-aggressive without .env restart) ───────
+  { envKey: "LAUNCH_SCAN_ENABLED", kind: "boolean", field: "launchScanEnabled" },
+  { envKey: "LAUNCH_EXECUTION_ENABLED", kind: "boolean", field: "launchExecutionEnabled" },
+  { envKey: "LAUNCH_POSITION_MAX_SIZE_USD", kind: "number", field: "launchPositionMaxSizeUsd", min: 10 },
+  { envKey: "LAUNCH_TIMEBOX_HOURS", kind: "number", field: "launchTimeboxHours", min: 1, max: 72 },
+  { envKey: "LAUNCH_RUNNER_MODE_ENABLED", kind: "boolean", field: "launchRunnerModeEnabled" },
+  { envKey: "HOT_WINDOW_ENABLED", kind: "boolean", field: "hotWindowEnabled" },
+  { envKey: "MARKET_SCAN_RUNNER_ENABLED", kind: "boolean", field: "marketScanRunnerEnabled" },
+  { envKey: "MARKET_SCAN_ROTATION_ENABLED", kind: "boolean", field: "marketScanRotationEnabled" },
+  {
+    envKey: "MARKET_SCAN_RUNNER_MIN_FEE_APR",
+    kind: "number",
+    field: "marketScanRunnerMinFeeApr",
+    min: 0,
+  },
+  {
+    envKey: "MARKET_SCAN_RUNNER_MIN_DRIFT_BINS",
+    kind: "number",
+    field: "marketScanRunnerMinDriftBins",
+    min: -100,
+    max: 0,
+  },
+  { envKey: "RUG_EXIT_LOSS_PCT", kind: "number", field: "rugExitLossPct", min: 0.05, max: 1 },
+  { envKey: "RUG_TOKEN_BLOCK_MS", kind: "number", field: "rugTokenBlockMs", min: 3_600_000, max: 2_592_000_000 },
+  { envKey: "HARVEST_MIN_NET_USD", kind: "number", field: "harvestMinNetUsd", min: 0 },
+  { envKey: "HARVEST_MAX_COST_PCT", kind: "number", field: "harvestMaxCostPct", min: 0 },
+  {
+    envKey: "HARVEST_TX_COST_USD_EST",
+    kind: "number",
+    field: "harvestTxCostUsdEst",
+    min: 0,
+  },
+  {
+    envKey: "MIN_YIELD_EXIT_AGE_MS",
+    kind: "number",
+    field: "minYieldExitAgeMs",
+    min: 0,
+  },
+  {
+    envKey: "MARKET_SCAN_MAX_NEGATIVE_DRIFT_BINS",
+    kind: "number",
+    field: "marketScanMaxNegativeDriftBins",
+    min: -100,
+    max: 0,
+  },
 ];
 
 /**

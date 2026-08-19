@@ -265,6 +265,12 @@ const logger = createLogger("adapter-service");
 // price feed) warns once per process instead of every scan cycle.
 const warnedUnpricedWalletMints = new Set<string>();
 let warnedSplEnumerationFailure = false;
+// Count of distinct unpriced mints currently excluded from wallet balance (for
+// the throughput-throttle alert in program.ts).
+let unpricedWalletMintCount = 0;
+export function getUnpricedWalletMintCount(): number {
+  return unpricedWalletMintCount;
+}
 function warnUnpricedWalletMintOnce(
   mint: string,
   opts?: {
@@ -275,6 +281,7 @@ function warnUnpricedWalletMintOnce(
 ): void {
   if (warnedUnpricedWalletMints.has(mint)) return;
   warnedUnpricedWalletMints.add(mint);
+  unpricedWalletMintCount += 1;
   const amountHuman =
     opts?.amountAtomic !== undefined && opts?.decimals !== undefined
       ? formatTokenAmount(opts.amountAtomic, opts.decimals)
