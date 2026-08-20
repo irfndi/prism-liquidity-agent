@@ -4,8 +4,11 @@
  * reports the admit/reject census + winrate by exit reason. */
 import { describe, expect, it } from "vitest";
 import {
+  aggregateBacktestResults,
   createSeededRandom,
   generateMockHistory,
+  parseArgs,
+  parseSeedList,
   rankBacktestResults,
   runBacktestFromTicks,
   snapshotsToTicks,
@@ -72,6 +75,163 @@ function runWithBins(
 }
 
 describe("backtest replay fidelity", () => {
+  describe("synthetic sweep parsing", () => {
+    it("parses a bounded comma-separated unsigned 32-bit seed list", () => {
+      expect(parseSeedList("0, 42, 4294967295")).toEqual([0, 42, 4294967295]);
+      expect(parseArgs(["--seeds", "0,42"]).seeds).toEqual([0, 42]);
+    });
+
+    it("rejects malformed, duplicate, and over-limit seed lists", () => {
+      expect(() => parseSeedList("1,,2")).toThrow(/comma-separated list/);
+      expect(() => parseSeedList("1,1")).toThrow(/duplicate/);
+      expect(() => parseSeedList("4294967296")).toThrow(/unsigned 32-bit/);
+      expect(() => parseArgs(["--seeds"])).toThrow(/comma-separated list/);
+      expect(() => parseSeedList(Array.from({ length: 33 }, (_, i) => `${i}`).join(","))).toThrow(
+        /at most 32 seeds/,
+      );
+    });
+
+    it("rejects replay sweeps and mixing --seed with --seeds", () => {
+      expect(() => parseArgs(["--source", "replay", "--seeds", "1,2"])).toThrow(
+        /only supported with the synthetic source/,
+      );
+      expect(() => parseArgs(["--seed", "1", "--seeds", "2,3"])).toThrow(/mutually exclusive/);
+    });
+
+    it("parses zero-default execution costs and validates bounded nonnegative values", () => {
+      expect(parseArgs([])).toMatchObject({
+        entryCostBps: 0,
+        exitCostBps: 0,
+        fixedActionCostUsd: 0,
+      });
+      expect(
+        parseArgs([
+          "--entry-cost-bps",
+          "12.5",
+          "--exit-cost-bps",
+          "25",
+          "--fixed-action-cost-usd",
+          "1.75",
+        ]),
+      ).toMatchObject({ entryCostBps: 12.5, exitCostBps: 25, fixedActionCostUsd: 1.75 });
+      expect(() => parseArgs(["--entry-cost-bps", "-1"])).toThrow(/finite, nonnegative/);
+      expect(() => parseArgs(["--exit-cost-bps", "10001"])).toThrow(/at most 10000 bps/);
+      expect(() => parseArgs(["--fixed-action-cost-usd", "Infinity"])).toThrow(
+        /finite, nonnegative/,
+      );
+    });
+
+    it("parses and validates the optional fee-share dilution reference width", () => {
+      expect(parseArgs([]).feeShareDilutionRefWidth).toBeUndefined();
+      expect(parseArgs(["--fee-share-ref-width", "250"]).feeShareDilutionRefWidth).toBe(250);
+      expect(parseArgs(["--fee-share-ref-width", "0"]).feeShareDilutionRefWidth).toBe(0);
+      expect(() => parseArgs(["--fee-share-ref-width", "-1"])).toThrow(/finite, nonnegative/);
+      expect(() => parseArgs(["--fee-share-ref-width", "10001"])).toThrow(/at most 10000 bins/);
+    });
+  });
+
+  describe("synthetic sweep aggregation", () => {
+    it("reports mean, stability, ranges, and profitable-run count per configuration", () => {
+      const aggregates = aggregateBacktestResults([
+        { name: "C1", seed: 1, result: makeResult({ netPnlUsd: 10, winRate: 0.2 }) },
+        { name: "C1", seed: 2, result: makeResult({ netPnlUsd: 30, winRate: 0.6 }) },
+        { name: "C2", seed: 1, result: makeResult({ netPnlUsd: -5, winRate: 0.4 }) },
+      ]);
+
+      expect(aggregates).toHaveLength(2);
+      expect(aggregates[0]).toMatchObject({
+        name: "C1",
+        seedCount: 2,
+        meanNetPnlUsd: 20,
+        netPnlStdDevUsd: 10,
+        minNetPnlUsd: 10,
+        maxNetPnlUsd: 30,
+        meanWinRate: 0.4,
+        minWinRate: 0.2,
+        maxWinRate: 0.6,
+        profitableRuns: 2,
+      });
+      expect(aggregates[0]!.winRateStdDev).toBeCloseTo(0.2);
+      expect(aggregates[1]).toEqual({
+        name: "C2",
+        seedCount: 1,
+        meanNetPnlUsd: -5,
+        netPnlStdDevUsd: 0,
+        minNetPnlUsd: -5,
+        maxNetPnlUsd: -5,
+        meanWinRate: 0.4,
+        winRateStdDev: 0,
+        minWinRate: 0.4,
+        maxWinRate: 0.4,
+        profitableRuns: 0,
+      });
+    });
+  });
+
+  describe("round-trip execution costs", () => {
+    const roundTripTicks = snapshotsToTicks([
+      makeSnapshot({
+        timestamp: 1_800_000_000_000,
+        fees24hUsd: 12_000,
+        activeBinId: 5000,
+        currentPrice: 150,
+        binArray: makeBinArray(5000),
+      }),
+      makeSnapshot({
+        timestamp: 1_800_000_600_000,
+        fees24hUsd: 12_000,
+        activeBinId: 5000,
+        currentPrice: 150,
+        binArray: makeBinArray(5000),
+      }),
+      makeSnapshot({
+        timestamp: 1_801_200_000_000,
+        fees24hUsd: 12_000,
+        activeBinId: 5002,
+        currentPrice: 150 * Math.pow(1.001, 2),
+        binArray: makeBinArray(5002),
+      }),
+    ]);
+
+    const roundTripConfig: BacktestConfig = {
+      ...BASE_CONFIG,
+      halfWidth: 1,
+      ilProtectionEnabled: true,
+      ilDominanceExitFactor: 0,
+      ilDominanceMinUsd: 0,
+    };
+
+    it("preserves exact results when all execution costs are explicitly zero", () => {
+      const implicitZero = runBacktestFromTicks(roundTripTicks, roundTripConfig);
+      const explicitZero = runBacktestFromTicks(roundTripTicks, {
+        ...roundTripConfig,
+        entryCostBps: 0,
+        exitCostBps: 0,
+        fixedActionCostUsd: 0,
+      });
+      expect(explicitZero).toEqual(implicitZero);
+    });
+
+    it("makes a fee-poor completed round trip negative when costs are enabled", () => {
+      const noCosts = runBacktestFromTicks(roundTripTicks, roundTripConfig);
+      const withCosts = runBacktestFromTicks(roundTripTicks, {
+        ...roundTripConfig,
+        entryCostBps: 100,
+        exitCostBps: 100,
+        fixedActionCostUsd: 25,
+      });
+      const exits = Object.values(withCosts.exitsByReason ?? {}).reduce(
+        (sum, count) => sum + count,
+        0,
+      );
+
+      expect(exits).toBe(1);
+      expect(noCosts.netPnlUsd).toBeGreaterThan(0);
+      expect(withCosts.netPnlUsd).toBeLessThan(0);
+      expect(withCosts.netPnlUsd).toBeLessThan(noCosts.netPnlUsd);
+    });
+  });
+
   it("produces identical synthetic history for the same seed and end time", () => {
     const first = generateMockHistory(
       "SeedPool1111111111111111111111111111111111111",

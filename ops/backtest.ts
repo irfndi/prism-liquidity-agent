@@ -125,14 +125,69 @@ interface CliArgs {
   source: "synthetic" | "replay";
   dbPath: string;
   seed?: number;
+  seeds?: ReadonlyArray<number>;
+  entryCostBps: number;
+  exitCostBps: number;
+  fixedActionCostUsd: number;
+  feeShareDilutionRefWidth?: number;
 }
 
-function parseArgs(argv: ReadonlyArray<string>): CliArgs {
+export const MAX_SYNTHETIC_SWEEP_SEEDS = 32;
+const MAX_EXECUTION_COST_BPS = 10_000;
+const MAX_FIXED_ACTION_COST_USD = 100_000;
+
+function parseUnsignedSeed(value: string, flag: "--seed" | "--seeds"): number {
+  const parsed = Number(value);
+  if (!value.trim() || !Number.isInteger(parsed) || parsed < 0 || parsed > 0xffffffff) {
+    throw new Error(`Invalid ${flag} value: ${value}. Must be an unsigned 32-bit integer.`);
+  }
+  return parsed;
+}
+
+function parseBoundedNonnegative(
+  value: string | undefined,
+  flag: string,
+  max: number,
+  unit: string,
+): number {
+  const parsed = value === undefined ? Number.NaN : Number(value);
+  if (!value?.trim() || !Number.isFinite(parsed) || parsed < 0 || parsed > max) {
+    throw new Error(
+      `Invalid ${flag} value: ${value ?? ""}. Must be finite, nonnegative, and at most ${max} ${unit}.`,
+    );
+  }
+  return parsed;
+}
+
+export function parseSeedList(value: string): number[] {
+  const parts = value.split(",").map((part) => part.trim());
+  if (parts.length === 0 || parts.some((part) => part.length === 0)) {
+    throw new Error(
+      "Invalid --seeds value: expected a comma-separated list of unsigned 32-bit integers.",
+    );
+  }
+  if (parts.length > MAX_SYNTHETIC_SWEEP_SEEDS) {
+    throw new Error(
+      `Invalid --seeds value: at most ${MAX_SYNTHETIC_SWEEP_SEEDS} seeds are allowed per sweep.`,
+    );
+  }
+
+  const seeds = parts.map((part) => parseUnsignedSeed(part, "--seeds"));
+  if (new Set(seeds).size !== seeds.length) {
+    throw new Error("Invalid --seeds value: duplicate seeds are not allowed.");
+  }
+  return seeds;
+}
+
+export function parseArgs(argv: ReadonlyArray<string>): CliArgs {
   const out: CliArgs = {
     days: 7,
     pools: ["5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"],
     source: "synthetic",
     dbPath: "./prism.db",
+    entryCostBps: 0,
+    exitCostBps: 0,
+    fixedActionCostUsd: 0,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -159,13 +214,74 @@ function parseArgs(argv: ReadonlyArray<string>): CliArgs {
       out.dbPath = next;
       i++;
     } else if (a === "--seed" && next) {
-      const parsed = Number(next);
-      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 0xffffffff) {
-        throw new Error(`Invalid --seed value: ${next}. Must be an unsigned 32-bit integer.`);
+      if (out.seeds !== undefined) {
+        throw new Error("The --seed and --seeds options are mutually exclusive.");
       }
-      out.seed = parsed;
+      out.seed = parseUnsignedSeed(next, "--seed");
+      i++;
+    } else if (a === "--seeds") {
+      if (!next || next.startsWith("--")) {
+        throw new Error(
+          "Invalid --seeds value: expected a comma-separated list of unsigned 32-bit integers.",
+        );
+      }
+      if (out.seed !== undefined) {
+        throw new Error("The --seed and --seeds options are mutually exclusive.");
+      }
+      out.seeds = parseSeedList(next);
+      i++;
+    } else if (a === "--entry-cost-bps") {
+      if (!next || next.startsWith("--")) {
+        throw new Error("Invalid --entry-cost-bps value: expected a finite nonnegative number.");
+      }
+      out.entryCostBps = parseBoundedNonnegative(
+        next,
+        "--entry-cost-bps",
+        MAX_EXECUTION_COST_BPS,
+        "bps",
+      );
+      i++;
+    } else if (a === "--exit-cost-bps") {
+      if (!next || next.startsWith("--")) {
+        throw new Error("Invalid --exit-cost-bps value: expected a finite nonnegative number.");
+      }
+      out.exitCostBps = parseBoundedNonnegative(
+        next,
+        "--exit-cost-bps",
+        MAX_EXECUTION_COST_BPS,
+        "bps",
+      );
+      i++;
+    } else if (a === "--fixed-action-cost-usd") {
+      if (!next || next.startsWith("--")) {
+        throw new Error(
+          "Invalid --fixed-action-cost-usd value: expected a finite nonnegative number.",
+        );
+      }
+      out.fixedActionCostUsd = parseBoundedNonnegative(
+        next,
+        "--fixed-action-cost-usd",
+        MAX_FIXED_ACTION_COST_USD,
+        "USD",
+      );
+      i++;
+    } else if (a === "--fee-share-ref-width") {
+      if (!next || next.startsWith("--")) {
+        throw new Error(
+          "Invalid --fee-share-ref-width value: expected a finite nonnegative number.",
+        );
+      }
+      out.feeShareDilutionRefWidth = parseBoundedNonnegative(
+        next,
+        "--fee-share-ref-width",
+        10_000,
+        "bins",
+      );
       i++;
     }
+  }
+  if (out.seeds !== undefined && out.source !== "synthetic") {
+    throw new Error("The --seeds option is only supported with the synthetic source.");
   }
   return out;
 }
@@ -322,6 +438,10 @@ export interface BacktestConfig {
   minNetBenefitUsd: number;
   maxRebalances: number;
   maxPositionsPerPool: number;
+  /** Optional round-trip execution costs; omitted values preserve zero-cost behavior. */
+  entryCostBps?: number;
+  exitCostBps?: number;
+  fixedActionCostUsd?: number;
   /**
    * Price-coverage floor for the entry range half-width (percent each side),
    * mirroring the engine's MIN_RANGE_HALF_WIDTH_PCT. When > 0, the effective
@@ -364,6 +484,65 @@ export interface BacktestConfig {
 export interface NamedBacktestResult {
   readonly name: string;
   readonly result: BacktestResult;
+}
+
+export interface SeededBacktestResult extends NamedBacktestResult {
+  readonly seed: number;
+}
+
+export interface BacktestSweepAggregate {
+  readonly name: string;
+  readonly seedCount: number;
+  readonly meanNetPnlUsd: number;
+  readonly netPnlStdDevUsd: number;
+  readonly minNetPnlUsd: number;
+  readonly maxNetPnlUsd: number;
+  readonly meanWinRate: number;
+  readonly winRateStdDev: number;
+  readonly minWinRate: number;
+  readonly maxWinRate: number;
+  readonly profitableRuns: number;
+}
+
+function mean(values: ReadonlyArray<number>): number {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function populationStdDev(values: ReadonlyArray<number>, average: number): number {
+  const variance = mean(values.map((value) => (value - average) ** 2));
+  return Math.sqrt(Math.max(variance, 0));
+}
+
+/** Aggregate deterministic synthetic runs by configuration. */
+export function aggregateBacktestResults(
+  results: ReadonlyArray<SeededBacktestResult>,
+): BacktestSweepAggregate[] {
+  const byConfig = new Map<string, SeededBacktestResult[]>();
+  for (const result of results) {
+    const group = byConfig.get(result.name) ?? [];
+    group.push(result);
+    byConfig.set(result.name, group);
+  }
+
+  return [...byConfig.entries()].map(([name, group]) => {
+    const netPnl = group.map(({ result }) => result.netPnlUsd);
+    const winRates = group.map(({ result }) => result.winRate);
+    const meanNetPnlUsd = mean(netPnl);
+    const meanWinRate = mean(winRates);
+    return {
+      name,
+      seedCount: group.length,
+      meanNetPnlUsd,
+      netPnlStdDevUsd: populationStdDev(netPnl, meanNetPnlUsd),
+      minNetPnlUsd: Math.min(...netPnl),
+      maxNetPnlUsd: Math.max(...netPnl),
+      meanWinRate,
+      winRateStdDev: populationStdDev(winRates, meanWinRate),
+      minWinRate: Math.min(...winRates),
+      maxWinRate: Math.max(...winRates),
+      profitableRuns: netPnl.filter((value) => value > 0).length,
+    };
+  });
 }
 
 function descendingMetric(value: number): number {
@@ -481,6 +660,17 @@ export function runBacktestFromTicks(
     entryTimestamp = 0;
     entryDepositedUsd = 0;
     positionFeesUsd = 0;
+  }
+
+  function executionCostUsd(notionalUsd: number, costBps: number | undefined): number {
+    const rateBps = costBps !== undefined && Number.isFinite(costBps) && costBps >= 0 ? costBps : 0;
+    const fixedCost =
+      cfg.fixedActionCostUsd !== undefined &&
+      Number.isFinite(cfg.fixedActionCostUsd) &&
+      cfg.fixedActionCostUsd >= 0
+        ? cfg.fixedActionCostUsd
+        : 0;
+    return Math.max(0, notionalUsd) * (rateBps / 10_000) + fixedCost;
   }
 
   const strategyReturns: number[] = [0];
@@ -649,10 +839,12 @@ export function runBacktestFromTicks(
       hasPosition = true;
       positionSizeUsd = replay.adjustedSizeUsd;
       positionPeakUsd = positionSizeUsd;
+      const entryCostUsd = executionCostUsd(positionSizeUsd, cfg.entryCostBps);
+      portfolioValue -= entryCostUsd;
       admitted++;
       enterAttempts++;
       entryTimestamp = tick.pool.timestamp;
-      entryDepositedUsd = positionSizeUsd;
+      entryDepositedUsd = positionSizeUsd + entryCostUsd;
       positionFeesUsd = 0;
       referencePrice = tick.pool.currentPrice;
       referenceBinId = tick.pool.activeBinId;
@@ -669,12 +861,14 @@ export function runBacktestFromTicks(
         isIlDominance && replayPosition !== undefined
           ? Math.max(0, replayPosition.hodlValueUsd - replayPosition.currentValueUsd)
           : 0;
+      const exitNotionalUsd = replayPosition?.currentValueUsd ?? positionSizeUsd;
+      const exitCostUsd = executionCostUsd(exitNotionalUsd, cfg.exitCostBps);
       totalIl += realizedLoss;
-      portfolioValue -= realizedLoss;
+      portfolioValue -= realizedLoss + exitCostUsd;
       recordExit(
         isIlDominance ? "il-dominance" : "trailing-stop",
         i,
-        (replayPosition?.currentValueUsd ?? positionSizeUsd) + positionFeesUsd,
+        exitNotionalUsd + positionFeesUsd - exitCostUsd,
       );
       hasPosition = false;
       positionSizeUsd = 0;
@@ -743,13 +937,17 @@ export function runBacktestFromTicks(
         binStep: tick.pool.binStep,
       });
       const driftIlUsd = Math.max(0, val.hodlValueUsd - val.lpValueUsd);
+      const driftExitNotionalUsd = replayPosition?.currentValueUsd ?? positionSizeUsd;
+      const configuredExitCostUsd = executionCostUsd(driftExitNotionalUsd, cfg.exitCostBps);
+      const existingDriftExitCostUsd = portfolioValue * 0.0005;
       const driftExitRealizedUsd =
-        (replayPosition?.currentValueUsd ?? positionSizeUsd) +
+        driftExitNotionalUsd +
         positionFeesUsd -
         driftIlUsd -
-        portfolioValue * 0.0005;
+        existingDriftExitCostUsd -
+        configuredExitCostUsd;
       totalIl += driftIlUsd;
-      portfolioValue -= driftIlUsd + portfolioValue * 0.0005;
+      portfolioValue -= driftIlUsd + existingDriftExitCostUsd + configuredExitCostUsd;
       recordExit("drift", i, driftExitRealizedUsd);
       hasPosition = false;
       positionSizeUsd = 0;
@@ -766,7 +964,9 @@ export function runBacktestFromTicks(
       // ponytail: unreachable while the replay ENTER admits every no-position
       // tick, but keep the census hold-trackers correct if that ever changes.
       entryTimestamp = tick.pool.timestamp;
-      entryDepositedUsd = positionSizeUsd;
+      const entryCostUsd = executionCostUsd(positionSizeUsd, cfg.entryCostBps);
+      portfolioValue -= entryCostUsd;
+      entryDepositedUsd = positionSizeUsd + entryCostUsd;
       positionFeesUsd = 0;
       referencePrice = tick.pool.currentPrice;
       referenceBinId = tick.pool.activeBinId;
@@ -862,7 +1062,11 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
     log.warn("    The binUtil gate never rejects; TVL-dependent gates see no real");
     log.warn("    drain. Results are a LOWER-BOUND STRESS TEST only — not a");
     log.warn("    realistic PnL / Sharpe / win-rate estimate.");
-    if (args.seed === undefined) {
+    if (args.seeds !== undefined) {
+      log.warn(
+        `    Synthetic randomness is deterministic across ${args.seeds.length} seeds: ${args.seeds.join(",")}.`,
+      );
+    } else if (args.seed === undefined) {
       log.warn("    Synthetic randomness is unseeded and therefore non-reproducible.");
     } else {
       log.warn(`    Synthetic randomness is deterministic with seed ${args.seed}.`);
@@ -873,12 +1077,34 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
   log.warn("    through the range-aware LP/HODL valuation. It does not model");
   log.warn("    live-only execution effects such as slippage, gas, or oracle");
   log.warn("    outages; those remain outside this replay.");
+  if (args.entryCostBps > 0 || args.exitCostBps > 0 || args.fixedActionCostUsd > 0) {
+    log.warn(
+      `  • Execution costs: entry=${args.entryCostBps}bps, exit=${args.exitCostBps}bps, ` +
+        `fixed=${args.fixedActionCostUsd.toFixed(2)} USD/action.`,
+    );
+  }
+  if (args.feeShareDilutionRefWidth !== undefined && args.feeShareDilutionRefWidth > 0) {
+    log.warn(
+      `  • Fee-share dilution enabled with reference width ${args.feeShareDilutionRefWidth} bins.`,
+    );
+  }
   log.warn("═══════════════════════════════════════════════════════════════");
 
   // Mirror the live config-service default (BACKTEST_TOLERATE_EMPTY_BINS,
   // default true) so `bun run backtest` admits empty-bin snapshots exactly
   // like the agent's replay does.
   const tolerateEmptyBins = process.env.BACKTEST_TOLERATE_EMPTY_BINS !== "false";
+  const executionCosts: Pick<
+    BacktestConfig,
+    "entryCostBps" | "exitCostBps" | "fixedActionCostUsd" | "feeShareDilutionRefWidth"
+  > = {
+    entryCostBps: args.entryCostBps,
+    exitCostBps: args.exitCostBps,
+    fixedActionCostUsd: args.fixedActionCostUsd,
+  };
+  if (args.feeShareDilutionRefWidth !== undefined) {
+    executionCosts.feeShareDilutionRefWidth = args.feeShareDilutionRefWidth;
+  }
 
   const configs: ReadonlyArray<{ name: string; cfg: BacktestConfig }> = [
     {
@@ -929,10 +1155,45 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
         backtestTolerateEmptyBins: tolerateEmptyBins,
       },
     },
-  ];
+  ].map(({ name, cfg }) => ({
+    name,
+    cfg: { ...cfg, ...executionCosts },
+  }));
 
   for (const pool of args.pools) {
     log.info(`\n=== Pool: ${pool} (source=${args.source}, days=${args.days}) ===\n`);
+
+    if (args.source === "synthetic" && args.seeds !== undefined) {
+      const endMs = Date.UTC(2020, 0, 1);
+      const seededResults = args.seeds.flatMap((seed) => {
+        const ticks = generateMockHistory(
+          pool,
+          args.days,
+          100_000,
+          createSeededRandom(seed),
+          endMs,
+        );
+        return configs.map(({ name, cfg }) => ({
+          name,
+          seed,
+          result: runBacktestFromTicks(ticks, cfg),
+        }));
+      });
+      const aggregates = aggregateBacktestResults(seededResults);
+      const table = aggregates.map((summary) => ({
+        Config: summary.name,
+        Seeds: summary.seedCount,
+        "Mean Net PnL": `$${summary.meanNetPnlUsd.toFixed(0)}`,
+        "Net PnL σ": `$${summary.netPnlStdDevUsd.toFixed(0)}`,
+        "Net PnL Range": `$${summary.minNetPnlUsd.toFixed(0)}..$${summary.maxNetPnlUsd.toFixed(0)}`,
+        "Mean Win %": `${(summary.meanWinRate * 100).toFixed(0)}%`,
+        "Win % σ": `${(summary.winRateStdDev * 100).toFixed(1)}pp`,
+        "Win % Range": `${(summary.minWinRate * 100).toFixed(0)}..${(summary.maxWinRate * 100).toFixed(0)}%`,
+        Profitable: `${summary.profitableRuns}/${summary.seedCount}`,
+      }));
+      log.info(`Synthetic robustness sweep: ${JSON.stringify(table)}`);
+      continue;
+    }
 
     let ticks: HistoryTick[];
     if (args.source === "synthetic") {
