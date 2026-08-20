@@ -677,11 +677,16 @@ export function runBacktestFromTicks(
   let prevPortfolioValue = initialValue;
 
   // Helper: compute position's share of pool fees for this tick.
-  // fees24hUsd is a 24h aggregate; divide by tick count to get per-tick,
-  // then scale by position share of pool TVL.
-  function feesForTick(tick: HistoryTick): number {
+  // fees24hUsd is a 24h aggregate; scale it by the actual elapsed time since
+  // the preceding snapshot, then apply the position share of pool TVL.
+  function feesForTick(tickIndex: number): number {
+    const tick = ticks[tickIndex]!;
     const tvl = tick.pool.tvlUsd;
     if (tvl <= 0) return 0;
+    const elapsedMs =
+      tickIndex > 0 ? ticks[tickIndex]!.pool.timestamp - ticks[tickIndex - 1]!.pool.timestamp : 0;
+    const intervalMs = elapsedMs > 0 ? elapsedMs : tickIntervalMs;
+    const ticksPerYearForInterval = (365 * 24 * 60 * 60 * 1000) / intervalMs;
     // Fee share is the deployed position size, not the whole portfolio; fall
     // back to the portfolio value when no position size is recorded yet.
     const size = positionSizeUsd > 0 ? positionSizeUsd : portfolioValue;
@@ -695,7 +700,7 @@ export function runBacktestFromTicks(
       cfg.feeShareDilutionRefWidth && cfg.feeShareDilutionRefWidth > 0 && effectiveHalfWidth > 0
         ? Math.min(1, cfg.feeShareDilutionRefWidth / effectiveHalfWidth)
         : 1;
-    return (tick.pool.fees24hUsd / ticksPerYear) * 365 * positionShare * dilution;
+    return (tick.pool.fees24hUsd / ticksPerYearForInterval) * 365 * positionShare * dilution;
   }
 
   // Mark the open position to the current DLMM value (correct range-aware IL,
@@ -767,7 +772,7 @@ export function runBacktestFromTicks(
 
     const inRange =
       tick.pool.activeBinId >= currentLowerBinId && tick.pool.activeBinId <= currentUpperBinId;
-    const feesThisTick = hasPosition && inRange ? feesForTick(tick) : 0;
+    const feesThisTick = hasPosition && inRange ? feesForTick(i) : 0;
     totalFees += feesThisTick;
     portfolioValue += feesThisTick;
     if (hasPosition) positionFeesUsd += feesThisTick;
@@ -919,7 +924,7 @@ export function runBacktestFromTicks(
           const nextInRange =
             nextTick.pool.activeBinId >= currentLowerBinId &&
             nextTick.pool.activeBinId <= currentUpperBinId;
-          if (nextInRange) feesInNextWindow += feesForTick(nextTick);
+          if (nextInRange) feesInNextWindow += feesForTick(j);
         }
         if (feesInNextWindow > totalCost) wins++;
       }

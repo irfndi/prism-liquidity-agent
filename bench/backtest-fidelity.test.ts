@@ -358,6 +358,39 @@ describe("backtest replay fidelity", () => {
     expect(result.avgHoldHoursByExitReason).toBeDefined();
   }, 15_000);
 
+  describe("replay fee accrual timing", () => {
+    const startTimestamp = 1_800_000_000_000;
+    const tenMinutes = 10 * 60 * 1000;
+
+    function runFeeHistory(gaps: ReadonlyArray<number>): BacktestResult {
+      let timestamp = startTimestamp;
+      const snapshots = [makeSnapshot({ timestamp })];
+      for (const gap of gaps) {
+        timestamp += gap;
+        snapshots.push(makeSnapshot({ timestamp }));
+      }
+      return runBacktestFromTicks(snapshotsToTicks(snapshots), {
+        ...BASE_CONFIG,
+        minHoldTicks: 100,
+      });
+    }
+
+    it("preserves the existing fee amount for fixed 10-minute cadence", () => {
+      const result = runFeeHistory([tenMinutes, tenMinutes]);
+      const expectedFeePerTick =
+        (300 / ((365 * 24 * 60 * 60 * 1000) / tenMinutes)) * 365 * (2_000 / 100_000);
+
+      expect(result.totalFeesUsd).toBe(expectedFeePerTick * 2);
+    });
+
+    it("scales a one-hour snapshot gap to six times a ten-minute gap", () => {
+      const tenMinuteResult = runFeeHistory([tenMinutes]);
+      const oneHourResult = runFeeHistory([6 * tenMinutes]);
+
+      expect(oneHourResult.totalFeesUsd).toBe(tenMinuteResult.totalFeesUsd * 6);
+    });
+  });
+
   describe("concentration-aware fee share (feeShareDilutionRefWidth)", () => {
     // Two ticks: admission on the first, then a stable in-range hold. The
     // `fees24hUsd` is identical on both, so a wider range collects MORE total
