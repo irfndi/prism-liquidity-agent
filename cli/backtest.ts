@@ -10,6 +10,7 @@ export const backtestCommand = new Command("backtest")
   .option("-p, --pools <addresses>", "Comma-separated pool addresses")
   .option("-s, --source <type>", 'Data source: "synthetic" or "replay"', "synthetic")
   .option("--db <path>", "SQLite database path for replay source", "./prism.db")
+  .option("--seed <number>", "Unsigned 32-bit seed for repeatable synthetic runs")
   .action(async () => {
     logger.info("Starting backtest...");
     // Filter out the subcommand name so the underlying backtest parser sees only

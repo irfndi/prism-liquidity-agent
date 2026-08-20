@@ -3,7 +3,15 @@
  * rejected every tick), rejections carry live-vocabulary tags, and the result
  * reports the admit/reject census + winrate by exit reason. */
 import { describe, expect, it } from "vitest";
-import { runBacktestFromTicks, snapshotsToTicks, type BacktestConfig } from "../ops/backtest.js";
+import {
+  createSeededRandom,
+  generateMockHistory,
+  rankBacktestResults,
+  runBacktestFromTicks,
+  snapshotsToTicks,
+  type BacktestConfig,
+} from "../ops/backtest.js";
+import type { BacktestResult } from "../engine/types.js";
 import { makeBinArray } from "./helpers.js";
 import type { PoolSnapshot } from "../engine/types.js";
 
@@ -34,6 +42,23 @@ const BASE_CONFIG: BacktestConfig = {
   maxPositionsPerPool: 2,
 };
 
+function makeResult(overrides: Partial<BacktestResult>): BacktestResult {
+  return {
+    poolAddress: "RankingPool111111111111111111111111111111111111",
+    startDate: 1,
+    endDate: 2,
+    initialValueUsd: 10_000,
+    finalValueUsd: 10_000,
+    totalFeesUsd: 0,
+    totalIlUsd: 0,
+    netPnlUsd: 0,
+    totalRebalances: 0,
+    winRate: 0,
+    sharpeRatio: 0,
+    ...overrides,
+  };
+}
+
 function runWithBins(
   bins: PoolSnapshot["binArray"],
   tolerate: boolean,
@@ -47,6 +72,79 @@ function runWithBins(
 }
 
 describe("backtest replay fidelity", () => {
+  it("produces identical synthetic history for the same seed and end time", () => {
+    const first = generateMockHistory(
+      "SeedPool1111111111111111111111111111111111111",
+      1,
+      100_000,
+      createSeededRandom(42),
+      1_700_000_000_000,
+    );
+    const second = generateMockHistory(
+      "SeedPool1111111111111111111111111111111111111",
+      1,
+      100_000,
+      createSeededRandom(42),
+      1_700_000_000_000,
+    );
+
+    expect(second).toEqual(first);
+  });
+
+  it("produces different synthetic history for different seeds", () => {
+    const first = generateMockHistory(
+      "SeedPool1111111111111111111111111111111111111",
+      1,
+      100_000,
+      createSeededRandom(42),
+      1_700_000_000_000,
+    );
+    const second = generateMockHistory(
+      "SeedPool1111111111111111111111111111111111111",
+      1,
+      100_000,
+      createSeededRandom(43),
+      1_700_000_000_000,
+    );
+
+    expect(second).not.toEqual(first);
+  });
+
+  describe("configuration ranking", () => {
+    it("ranks net PnL ahead of win rate", () => {
+      const ranked = rankBacktestResults([
+        {
+          name: "high-win-rate-loser",
+          result: makeResult({ netPnlUsd: -100, winRate: 0.95 }),
+        },
+        {
+          name: "profitable-lower-win-rate",
+          result: makeResult({ netPnlUsd: 250, winRate: 0.4 }),
+        },
+      ]);
+
+      expect(ranked.map(({ name }) => name)).toEqual([
+        "profitable-lower-win-rate",
+        "high-win-rate-loser",
+      ]);
+    });
+
+    it("uses deterministic tie-breakers after net PnL", () => {
+      const ranked = rankBacktestResults([
+        {
+          name: "zeta",
+          result: makeResult({ netPnlUsd: 100, winRate: 0.5, sharpeRatio: 1 }),
+        },
+        {
+          name: "alpha",
+          result: makeResult({ netPnlUsd: 100, winRate: 0.5, sharpeRatio: 1 }),
+        },
+      ]);
+
+      expect(ranked.map(({ name }) => name)).toEqual(["alpha", "zeta"]);
+    });
+  });
+
   it("empty-bin snapshots pass the pre-filter by default (tolerate=true)", () => {
     const result = runWithBins(
       { lowerBinId: 4980, upperBinId: 5020, bins: [], activeBinId: 5000 },

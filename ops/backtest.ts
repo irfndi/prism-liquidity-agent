@@ -3,12 +3,13 @@
  * to evaluate decision quality without spending real capital.
  *
  * Two sources:
- *   - synthetic: deterministic mock generator (regression baseline)
+ *   - synthetic: stochastic mock generator (stress-test baseline)
  *   - replay:    snapshots stored in SQLite by a live paper run
  *                (set ENABLE_SNAPSHOT_CAPTURE=true on the agent)
  *
  * Usage:
  *   bun run backtest                                          # default: synthetic, 7d
+ *   bun run backtest -- --seed 42                             # repeatable synthetic run
  *   bun run ops/backtest.ts --days 30 --pools <addr1,addr2>
  *   bun run ops/backtest.ts --source replay --db ./prism.db
  */
@@ -123,6 +124,7 @@ interface CliArgs {
   pools: ReadonlyArray<string>;
   source: "synthetic" | "replay";
   dbPath: string;
+  seed?: number;
 }
 
 function parseArgs(argv: ReadonlyArray<string>): CliArgs {
@@ -156,9 +158,28 @@ function parseArgs(argv: ReadonlyArray<string>): CliArgs {
     } else if (a === "--db" && next) {
       out.dbPath = next;
       i++;
+    } else if (a === "--seed" && next) {
+      const parsed = Number(next);
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 0xffffffff) {
+        throw new Error(`Invalid --seed value: ${next}. Must be an unsigned 32-bit integer.`);
+      }
+      out.seed = parsed;
+      i++;
     }
   }
   return out;
+}
+
+/** Small deterministic PRNG for repeatable synthetic research runs. */
+export function createSeededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
 }
 
 // ─── Synthetic data (regression baseline) ────────────────────────────────────
@@ -180,13 +201,21 @@ interface HistoryTick {
 
 /**
  * Synthetic history is a STRESS TEST, not a realistic market:
- * - TVL drifts by `tvl *= 1 ± ~1%` per tick (line `tvl *= 1 + (rand-0.49)*0.02`),
- *   so TVL is quasi-constant; TVL-dependent gates see almost no real drain.
+ * - TVL changes by roughly ±1% per tick, so it is time-varying but still
+ *   quasi-constant; TVL-dependent gates see almost no sustained drain.
  * - Every bin's liquiditySupply is random BigInt (all >0), so binUtil is always
  *   1.0; the binUtil pre-filter can never reject synthetic ticks. Together these
  *   make reported win rates / Sharpe a lower-bound stress-test only.
+ * - Randomness is intentionally unseeded, so repeated synthetic runs are not
+ *   reproducible. Use replay for repeatable analysis of captured snapshots.
  */
-function generateMockHistory(poolAddress: string, days: number, startTvl: number): HistoryTick[] {
+export function generateMockHistory(
+  poolAddress: string,
+  days: number,
+  startTvl: number,
+  random: () => number = Math.random,
+  endMs: number = Date.now(),
+): HistoryTick[] {
   const history: HistoryTick[] = [];
   const intervalMs = 10 * 60 * 1000; // 10 min
   const ticks = (days * 24 * 60 * 60 * 1000) / intervalMs;
@@ -198,23 +227,23 @@ function generateMockHistory(poolAddress: string, days: number, startTvl: number
   let volatility = 0.015;
 
   for (let i = 0; i < ticks; i++) {
-    const timestamp = Date.now() - (ticks - i) * intervalMs;
+    const timestamp = endMs - (ticks - i) * intervalMs;
 
     if (i % 720 === 0) {
-      volatility = 0.005 + Math.random() * 0.025;
-      trend = (Math.random() - 0.5) * 0.004;
+      volatility = 0.005 + random() * 0.025;
+      trend = (random() - 0.5) * 0.004;
     }
 
-    if (Math.random() < 0.02) {
-      const jump = (Math.random() - 0.5) * 0.08;
+    if (random() < 0.02) {
+      const jump = (random() - 0.5) * 0.08;
       price *= 1 + jump;
       activeBin += Math.floor(jump * 200);
     }
 
-    const shock = (Math.random() - 0.5) * volatility * 2;
-    tvl *= 1 + (Math.random() - 0.49) * 0.02;
+    const shock = (random() - 0.5) * volatility * 2;
+    tvl *= 1 + (random() - 0.49) * 0.02;
     price *= 1 + trend + shock;
-    activeBin += Math.floor(trend * 200 + shock * 100 + (Math.random() - 0.5) * 10);
+    activeBin += Math.floor(trend * 200 + shock * 100 + (random() - 0.5) * 10);
 
     const pool: PoolState = {
       address: poolAddress,
@@ -223,9 +252,9 @@ function generateMockHistory(poolAddress: string, days: number, startTvl: number
       tokenXSymbol: "SOL",
       tokenYSymbol: "USDC",
       tvlUsd: Math.max(tvl, 1000),
-      volume24hUsd: tvl * (0.3 + Math.random() * 0.5),
-      fees24hUsd: tvl * 0.003 * (0.5 + Math.random() * 0.5),
-      apr: 40 + Math.random() * 80,
+      volume24hUsd: tvl * (0.3 + random() * 0.5),
+      fees24hUsd: tvl * 0.003 * (0.5 + random() * 0.5),
+      apr: 40 + random() * 80,
       activeBinId: activeBin,
       binStep: 10,
       currentPrice: price,
@@ -240,9 +269,9 @@ function generateMockHistory(poolAddress: string, days: number, startTvl: number
     const bins = Array.from({ length: 40 }, (_, j) => ({
       binId: activeBin - 20 + j,
       price: price * (1 + (j - 20) * 0.001),
-      reserveX: BigInt(Math.floor(Math.random() * 1e9)),
-      reserveY: BigInt(Math.floor(Math.random() * 1e9)),
-      liquiditySupply: BigInt(Math.floor(Math.random() * 1e12)),
+      reserveX: BigInt(Math.floor(random() * 1e9)),
+      reserveY: BigInt(Math.floor(random() * 1e9)),
+      liquiditySupply: BigInt(Math.floor(random() * 1e12)),
     }));
 
     const binArray: BinArray = {
@@ -330,6 +359,47 @@ export interface BacktestConfig {
    * floor on the fee side of any range-widening profitability claim.
    */
   feeShareDilutionRefWidth?: number;
+}
+
+export interface NamedBacktestResult {
+  readonly name: string;
+  readonly result: BacktestResult;
+}
+
+function descendingMetric(value: number): number {
+  return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
+}
+
+function ascendingMetric(value: number): number {
+  return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Rank configurations by economic outcome first. The remaining metrics only
+ * break exact net-PnL ties, and the name makes the result stable even when all
+ * numeric metrics are equal.
+ */
+export function rankBacktestResults(
+  results: ReadonlyArray<NamedBacktestResult>,
+): NamedBacktestResult[] {
+  return [...results].sort((a, b) => {
+    const netPnl = descendingMetric(b.result.netPnlUsd) - descendingMetric(a.result.netPnlUsd);
+    if (netPnl !== 0) return netPnl;
+
+    const winRate = descendingMetric(b.result.winRate) - descendingMetric(a.result.winRate);
+    if (winRate !== 0) return winRate;
+
+    const sharpe = descendingMetric(b.result.sharpeRatio) - descendingMetric(a.result.sharpeRatio);
+    if (sharpe !== 0) return sharpe;
+
+    const il = ascendingMetric(a.result.totalIlUsd) - ascendingMetric(b.result.totalIlUsd);
+    if (il !== 0) return il;
+
+    const rebalances = a.result.totalRebalances - b.result.totalRebalances;
+    if (rebalances !== 0) return rebalances;
+
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
 }
 
 export function runBacktestFromTicks(
@@ -777,26 +847,32 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
   log.warn("═══════════════════════════════════════════════════════════════");
   log.warn("  BACKTEST LIMITATIONS — read before interpreting results");
   log.warn("═══════════════════════════════════════════════════════════════");
-  log.warn("  • TVL is CONSTANT per pool (current snapshot, not historical).");
-  log.warn("    Position share, APR, and volume-auth checks use stale TVL.");
+  log.warn("  • Replay and synthetic ticks use time-varying TVL values.");
+  log.warn("    Synthetic TVL is only a quasi-constant random walk; it is not a");
+  log.warn("    realistic liquidity-drain model. Replay reflects captured TVL.");
   log.warn("  • Replay uses the shared risk kernel for ENTER sizing, confidence,");
   log.warn("    allocation, and trailing-stop EXIT decisions.");
   log.warn("    Live-only effects remain unavailable: memory retrieval/persistence,");
   log.warn("    agent proposals, gas/recovery gates, and on-chain execution.");
   log.warn("  • Each pool runs independently with $10K. Total PnL is the");
   log.warn("    sum of 6 independent portfolios ($60K deployed, not $10K).");
-  log.warn("  • Synthetic TVL is quasi-constant (tvl *= 1±1% per tick) and");
-  log.warn("    synthetic bins use random liquiditySupply so binUtil=1.0 always.");
-  log.warn("    The binUtil gate never rejects; TVL-dependent gates see no real");
-  log.warn("    drain. Results are a LOWER-BOUND STRESS TEST only — not a");
-  log.warn("    realistic PnL / Sharpe / win-rate estimate.");
-  log.warn("    See generateMockHistory comment for the synthetic model.");
-  log.warn("  • NO TOKEN PRICE DEPRECIATION: the backtest models no");
-  log.warn("    mechanism for the underlying token value to decrease.");
-  log.warn("    Portfolio value only changes through fee accrual (+),");
-  log.warn("    rebalancing IL (-), and force-exit penalties (-). A pool");
-  log.warn("    for a token that dropped 90% would still show positive");
-  log.warn("    returns. The reported PnL is a meaningful overestimate.");
+  if (args.source === "synthetic") {
+    log.warn("  • Synthetic TVL is quasi-constant (tvl *= 1±1% per tick) and");
+    log.warn("    synthetic bins use random liquiditySupply so binUtil=1.0 always.");
+    log.warn("    The binUtil gate never rejects; TVL-dependent gates see no real");
+    log.warn("    drain. Results are a LOWER-BOUND STRESS TEST only — not a");
+    log.warn("    realistic PnL / Sharpe / win-rate estimate.");
+    if (args.seed === undefined) {
+      log.warn("    Synthetic randomness is unseeded and therefore non-reproducible.");
+    } else {
+      log.warn(`    Synthetic randomness is deterministic with seed ${args.seed}.`);
+    }
+    log.warn("    See generateMockHistory comment for the synthetic model.");
+  }
+  log.warn("  • clmmPositionValue marks price movement and token depreciation");
+  log.warn("    through the range-aware LP/HODL valuation. It does not model");
+  log.warn("    live-only execution effects such as slippage, gas, or oracle");
+  log.warn("    outages; those remain outside this replay.");
   log.warn("═══════════════════════════════════════════════════════════════");
 
   // Mirror the live config-service default (BACKTEST_TOLERATE_EMPTY_BINS,
@@ -860,7 +936,12 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
 
     let ticks: HistoryTick[];
     if (args.source === "synthetic") {
-      ticks = generateMockHistory(pool, args.days, 100_000);
+      const random = args.seed === undefined ? Math.random : createSeededRandom(args.seed);
+      const endMs = args.seed === undefined ? Date.now() : Date.UTC(2020, 0, 1);
+      ticks = generateMockHistory(pool, args.days, 100_000, random, endMs);
+      if (args.seed !== undefined) {
+        log.info(`  synthetic seed=${args.seed}`);
+      }
     } else {
       const endMs = Date.now();
       const snaps = await loadSnapshots(args.dbPath, pool, endMs, args.days);
@@ -895,16 +976,8 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
     }));
     log.info(`Results table: ${JSON.stringify(table)}`);
 
-    const best = results.reduce((best, curr) => {
-      if (curr.result.winRate > best.result.winRate) return curr;
-      if (
-        curr.result.winRate === best.result.winRate &&
-        curr.result.netPnlUsd > best.result.netPnlUsd
-      ) {
-        return curr;
-      }
-      return best;
-    });
+    const [best] = rankBacktestResults(results);
+    if (!best) throw new Error(`No backtest result for ${pool}`);
 
     log.info("Best config", {
       pool,
