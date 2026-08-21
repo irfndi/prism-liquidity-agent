@@ -3,6 +3,7 @@ import { createLogger } from "./logger.js";
 import { stringifySafe } from "./bigint-json.js";
 import { getCurrentVersion } from "./version.js";
 import { underlyingErrorMessage } from "./errors.js";
+import { createBunWebSocket } from "./bun-websocket.js";
 import type { JsonValue } from "./services.js";
 
 /** v4 wraps tryPromise rejections in a generic UnknownError whose message hides
@@ -174,7 +175,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
         // the upgrade so gateways that reject unauthenticated upgrades answer. The WS
         // upgrade succeeds before any app-level handshake, so settle on "open".
         ws = this.options.token
-          ? new WebSocket(this.options.url, {
+          ? createBunWebSocket(this.options.url, {
               headers: { Authorization: `Bearer ${this.options.token}` },
             })
           : new WebSocket(this.options.url);
@@ -289,7 +290,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
       let ws: WebSocket;
       try {
         ws = this.options.token
-          ? new WebSocket(this.options.url, {
+          ? createBunWebSocket(this.options.url, {
               headers: { Authorization: `Bearer ${this.options.token}` },
             })
           : new WebSocket(this.options.url);

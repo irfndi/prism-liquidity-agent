@@ -40,9 +40,9 @@ if [ -z "$BUN_BIN" ]; then
   exit 1
 fi
 
-# Enforce the declared engines.bun >= 1.4.0-canary.1 constraint so an old bun
+# Enforce the declared engines.bun >= 1.4.0 constraint so an old bun
 # fails with an actionable message instead of a confusing runtime error.
-MIN_BUN_VERSION="1.4.0-canary.1"
+MIN_BUN_VERSION="1.4.0"
 BUN_VERSION_RAW="$("$BUN_BIN" --version 2>/dev/null || true)"
 if [ -z "$BUN_VERSION_RAW" ]; then
   echo "ERROR: could not determine bun version from '$BUN_BIN'" >&2
@@ -96,4 +96,3 @@ if ! awk -v a="$BUN_VERSION_RAW" -v b="$MIN_BUN_VERSION" '
 fi
 
 exec "$BUN_BIN" "$PACKAGE_ROOT/cli/index.ts" ${1+"$@"}
-

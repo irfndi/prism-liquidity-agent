@@ -1,0 +1,6 @@
+# Bun 1.4 isolated installs with a shared global virtual store.
+# This keeps each package's dependency graph explicit while reusing package
+# contents across projects and worktrees.
+[install]
+linker = "isolated"
+globalStore = true

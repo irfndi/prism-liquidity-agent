@@ -155,9 +155,9 @@ ensure_bun() {
   if ! current="$("$BUN_BIN" --version 2>/dev/null)"; then
     current="unknown"
   fi
-  if ! version_gte "$current" "1.4.0-canary.1"; then
-    log_error "Bun $current is installed but >= 1.4.0-canary.1 is required."
-    log_error "Upgrade with:  curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.0-canary.1"
+  if ! version_gte "$current" "1.4.0"; then
+    log_error "Bun $current is installed but >= 1.4.0 is required."
+    log_error "Upgrade with:  curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.0"
     return 1
   fi
   log_step "Bun $current at $BUN_BIN"

@@ -122,9 +122,9 @@ function checkRuntime(): DoctorCheck {
       `Bun runtime not detected (running under Node ${process.version})`,
     );
   }
-  return gte(Bun.version, "1.4.0-canary.1")
+  return gte(Bun.version, "1.4.0")
     ? check("runtime", "pass", `Bun ${Bun.version}`)
-    : check("runtime", "fail", `Bun ${Bun.version} is below 1.4.0-canary.1`);
+    : check("runtime", "fail", `Bun ${Bun.version} is below 1.4.0`);
 }
 
 function checkRpc(): DoctorCheck {

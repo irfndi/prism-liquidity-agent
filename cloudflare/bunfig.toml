@@ -1,0 +1,4 @@
+# Bun 1.4 isolated installs with a shared global virtual store.
+[install]
+linker = "isolated"
+globalStore = true

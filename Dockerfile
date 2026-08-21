@@ -1,10 +1,13 @@
 # ── Stage 1: Build ─────────────────────────────────────────────────────────
-FROM oven/bun:canary-slim AS builder
+FROM oven/bun:1.4.0-slim AS builder
 
 WORKDIR /app
 
 COPY package.json bun.lock* ./
-RUN bun install --frozen-lockfile --ignore-scripts
+# The repository uses Bun's isolated/global-store linker for development and
+# CI. The runtime stage copies node_modules without Bun's global cache, so use
+# a self-contained hoisted artifact in this single-package image.
+RUN bun install --linker hoisted --frozen-lockfile --ignore-scripts
 
 COPY tsconfig.json tsdown.config.ts ./
 COPY engine ./engine
@@ -15,7 +18,7 @@ COPY types ./types
 RUN bun run build
 
 # ── Stage 2: Runtime ───────────────────────────────────────────────────────
-FROM oven/bun:canary-slim AS runtime
+FROM oven/bun:1.4.0-slim AS runtime
 
 WORKDIR /app
 

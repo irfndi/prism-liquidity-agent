@@ -15,6 +15,7 @@
     "solana"
   ],
   "license": "MIT",
+  "packageManager": "bun@1.4.0",
   "bin": {
     "prism": "./scripts/prism.sh"
   },
@@ -38,10 +39,12 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.7.0",
+    "@coral-xyz/anchor": "^0.31.0",
     "@meteora-ag/dlmm": "^1.9.14",
     "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.98.4",
     "@xenova/transformers": "^2.17.2",
+    "bs58": "^4.0.1",
     "chalk": "^6.0.0",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
@@ -55,7 +58,8 @@
     "@types/node": "^26.1.2",
     "@types/semver": "^7.8.0",
     "@vitest/coverage-istanbul": "^4.1.10",
-    "bun-types": "1.4.0-canary.20260519T150915",
+    "bigint-buffer": "^1.1.5",
+    "bun-types": "1.4.0",
     "fast-check": "^4.9.0",
     "oxfmt": "^0.62.0",
     "oxlint": "1.77.0",
@@ -68,6 +72,6 @@
     "typescript": "$typescript"
   },
   "engines": {
-    "bun": ">=1.4.0-canary.1"
+    "bun": ">=1.4.0"
   }
 }
