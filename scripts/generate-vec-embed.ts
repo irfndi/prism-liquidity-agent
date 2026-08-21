@@ -18,13 +18,30 @@ function platformPackageName(platform: string, arch: string): string {
   return `sqlite-vec-${os}-${arch}`;
 }
 
+function findVec0(packageName: string, ext: string): string | null {
+  const fileName = `vec0.${ext}`;
+  const hoisted = path.join(repoRoot, "node_modules", packageName, fileName);
+  if (fs.existsSync(hoisted)) return hoisted;
+  // Bun isolated linker nests transitive deps under node_modules/.bun/<pkg>@<ver>/.
+  const storeDir = path.join(repoRoot, "node_modules", ".bun");
+  if (fs.existsSync(storeDir)) {
+    for (const entry of fs.readdirSync(storeDir)) {
+      if (!entry.startsWith(`${packageName}@`)) continue;
+      const candidate = path.join(storeDir, entry, "node_modules", packageName, fileName);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
 function generate(platform: string, arch: string): void {
   const packageName = platformPackageName(platform, arch);
   const ext = extensionSuffix(platform);
-  const vec0Path = path.join(repoRoot, "node_modules", packageName, `vec0.${ext}`);
+  const vec0Path = findVec0(packageName, ext);
 
-  if (!fs.existsSync(vec0Path)) {
-    console.error(`sqlite-vec extension not found: ${vec0Path}`);
+  if (!vec0Path) {
+    console.error(`sqlite-vec extension not found for ${platform}-${arch}`);
+    console.error(`Searched node_modules/${packageName} and node_modules/.bun/${packageName}@*/`);
     console.error(`Install the platform package first: bun install ${packageName}`);
     process.exit(1);
   }
