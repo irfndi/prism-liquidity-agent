@@ -8129,6 +8129,12 @@ export const program = Effect.gen(function* () {
                     .pipe(Effect.catch(() => Effect.void));
                   enterGateRejected = true;
                 } else if (openLaunchPositions >= launchMaxOpenPositions || portfolioFull) {
+                  // Two triggers share this branch: the launch cap being full,
+                  // or the portfolio-wide cap being full. The audit row below
+                  // names WHICH one fired — a bare "0 launch positions >= 2"
+                  // line when the real trigger was portfolio-full sent the
+                  // 2026-08-21 forensics down the wrong path.
+                  const launchCapFull = openLaunchPositions >= launchMaxOpenPositions;
                   // Rotation (market-runner lane only): the portfolio is full
                   // and a much hotter runner is available — exit the LOWEST-
                   // APR held position so the freed slot admits the runner next
@@ -8143,9 +8149,16 @@ export const program = Effect.gen(function* () {
                     isMarketRunner(poolAddress)
                   ) {
                     const worst = lowestAprHeldPosition(
-                      trackedPositions.values(),
+                      Array.from(trackedPositions.values(), (p) => ({
+                        poolAddress: p.poolAddress,
+                        openedAt: p.timestamp,
+                      })),
                       poolFeeAprByAddress,
                       poolAddress, // never rotate out of the candidate runner
+                      // Economic-exit maturity gate: a minutes-old entry is
+                      // never a rotation target (same MIN_YIELD_EXIT_AGE_MS
+                      // class as the yield-regression exit).
+                      { minAgeMs: config.minYieldExitAgeMs ?? 14_400_000, nowMs: Date.now() },
                     );
                     if (worst) {
                       // G3 net-fee comparison (rule: measure practical
@@ -8219,6 +8232,9 @@ export const program = Effect.gen(function* () {
                   // Launch cap full: reject the ENTER for this pool — it must
                   // NOT fall through to the normal lane, which would size it
                   // with the uncapped normal entry sizing.
+                  const launchBlockReason = launchCapFull
+                    ? `${openLaunchPositions} launch positions >= cap ${launchMaxOpenPositions}`
+                    : `portfolio full ${totalOpenPositions}/${config.maxOpenPositions ?? 3}`;
                   yield* audit
                     .recordDecision({
                       timestamp: Date.now(),
@@ -8226,11 +8242,11 @@ export const program = Effect.gen(function* () {
                       poolAddress,
                       action: "ENTER",
                       confidence: 0,
-                      reasoning: `[launch-cap] ${openLaunchPositions} launch positions >= ${launchMaxOpenPositions}`,
+                      reasoning: `[launch-cap] ${launchBlockReason} — no launch slot`,
                       metrics,
                       riskResult: {
                         approved: false,
-                        reason: `[launch-cap] ${openLaunchPositions} >= ${launchMaxOpenPositions}`,
+                        reason: `[launch-cap] ${launchBlockReason}`,
                       },
                       executed: false,
                       paperTrading: config.paperTrading,

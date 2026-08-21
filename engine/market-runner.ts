@@ -61,20 +61,44 @@ export interface HeldPositionApr {
   readonly tvlUsd: number;
 }
 
-/** The lowest-APR held position, or null when every held position's APR is
- * unknown/zero (nothing to rotate out of). Unmeasured held pools never
- * rotate — fail-closed, a made-up-low APR must not sell a real position.
- * `excludePoolAddress` (the candidate runner) is never a rotation target —
- * a held position on the runner pool must not be exited while the same pool
- * re-enters in the same cycle. */
+/** Rotation-target eligibility filters (all optional; absent = no filter). */
+export interface RotationTargetFilter {
+  /** Economic-exit maturity gate (MIN_YIELD_EXIT_AGE_MS, default 4h): a held
+   *  position younger than this is never a rotation target. Rotation is the
+   *  same economic-exit class as the yield-regression exit — it must not
+   *  churn a minutes-old entry (2026-08-21 field incident: a $20 position
+   *  entered at 14:32 was rotation-exited at 14:37 for −$0.01). Only
+   *  capital-protection exits stay age-free. */
+  readonly minAgeMs?: number | undefined;
+  /** Clock override for tests. */
+  readonly nowMs?: number | undefined;
+}
+
+/** The lowest-APR held position, or null when every eligible held position's
+ *  APR is unknown/zero (nothing to rotate out of). Unmeasured held pools never
+ *  rotate — fail-closed, a made-up-low APR must not sell a real position.
+ *  `excludePoolAddress` (the candidate runner) is never a rotation target —
+ *  a held position on the runner pool must not be exited while the same pool
+ *  re-enters in the same cycle. Positions failing `filter` (too young) are
+ *  skipped; if every held position is filtered out the result is null and no
+ *  rotation fires this cycle. */
 export function lowestAprHeldPosition(
-  positions: Iterable<{ readonly poolAddress: string }>,
+  positions: Iterable<{ readonly poolAddress: string; readonly openedAt?: number }>,
   poolAprByAddress: ReadonlyMap<string, { feeAprPct: number; tvlUsd: number }>,
   excludePoolAddress?: string,
+  filter?: RotationTargetFilter,
 ): HeldPositionApr | null {
+  const nowMs = filter?.nowMs ?? Date.now();
   let worst: HeldPositionApr | null = null;
   for (const pos of positions) {
     if (pos.poolAddress === excludePoolAddress) continue;
+    if (
+      filter?.minAgeMs !== undefined &&
+      filter.minAgeMs > 0 &&
+      nowMs - (pos.openedAt ?? 0) < filter.minAgeMs
+    ) {
+      continue;
+    }
     const entry = poolAprByAddress.get(pos.poolAddress);
     if (!entry) continue;
     const apr = entry.feeAprPct;
