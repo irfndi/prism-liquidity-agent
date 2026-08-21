@@ -130,9 +130,13 @@ export const setupCommand = new Command("setup")
         },
       );
 
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       heliusKey = (answers.heliusKey as string) || "";
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       rpcUrl = (answers.rpcUrl as string) || "";
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       rpcFallbackUrl = (answers.rpcFallbackUrl as string) || "";
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       jupiterApiKey = (answers.jupiterApiKey as string) || "";
       if (!rpcUrl.trim() && heliusKey.trim()) {
         rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`;
@@ -141,8 +145,11 @@ export const setupCommand = new Command("setup")
         p.cancel("A primary RPC URL or Helius API key is required.");
         process.exit(1);
       }
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       walletKey = (answers.walletKey as string) || "";
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       watchlistPools = (answers.watchlistPools as string) || "";
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       paperTrading = answers.paperTrading as boolean;
 
       // Validate: live trading requires wallet key

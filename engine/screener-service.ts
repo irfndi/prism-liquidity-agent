@@ -39,12 +39,14 @@ export const ScreenerLive = (screenerConfig: ScreenerConfig) =>
                 Effect.catch((err) => {
                   if (
                     err instanceof DiscoverPoolsError ||
+                    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
                     (err as { _tag?: string })?._tag === "DiscoverPoolsError"
                   ) {
                     logger.warn(
                       "Pool discovery failed; falling back to watchlist-only mode:",
                       err.message,
                     );
+                    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
                     return Effect.succeed([] as ReadonlyArray<DiscoveredPool>);
                   }
                   return Effect.fail(err);

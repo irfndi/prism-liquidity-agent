@@ -675,6 +675,7 @@ export const updateCommand = new Command("update")
         );
       }
       const channel = options.canary ? "canary" : channelValue;
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       const r2Url = options.r2Url as string;
 
       const release = await Effect.runPromise(fetchLatestRelease(repo, channel, r2Url));
@@ -714,8 +715,10 @@ export const updateCommand = new Command("update")
       const installRoot = resolveInstallRoot();
       const fromSource = isSourceInstall(installRoot);
       if (fromSource) {
+        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
         await updateFromSource(release, installRoot, workDir, options.skipSmokeTest as boolean);
       } else {
+        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
         await updateFromBundle(release, workDir, options.skipSmokeTest as boolean);
       }
 

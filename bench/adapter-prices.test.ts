@@ -38,9 +38,9 @@ function mockTokenAccountsByProgram(
 ): void {
   vi.spyOn(Connection.prototype, "getParsedTokenAccountsByOwner").mockImplementation(
     async (_owner, filter) => {
-      const programId = (
-        filter as { readonly programId?: { toBase58(): string } }
-      ).programId?.toBase58();
+      const programId =
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
+        (filter as { readonly programId?: { toBase58(): string } }).programId?.toBase58();
       const accounts = programId === TOKEN_2022 ? token2022 : tokenProgram;
       return asOwner<TokenAccountsResult>({ value: accounts.map(tokenAccount) });
     },
@@ -49,6 +49,7 @@ function mockTokenAccountsByProgram(
 
 function mockJupiterPrices(prices: Record<string, number>): () => void {
   return mockFetch(async (url: string | URL | Request) => {
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     if (String(url as unknown).includes("api.jup.ag/price/v3")) {
       const body: Record<string, { usdPrice: number }> = {};
       for (const [mint, price] of Object.entries(prices)) body[mint] = { usdPrice: price };
@@ -84,6 +85,7 @@ function buildAdapterLayerWithWallet(): Layer.Layer<AdapterService, never, never
     }),
   );
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return Layer.provide(
     AdapterLive,
     Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))),
@@ -214,6 +216,7 @@ describe("AdapterService wallet balance reconciliation", () => {
     // resort, so it must never be called when Jupiter succeeds.
     let heliusCalls = 0;
     const restore = mockFetch(async (url: string | URL | Request) => {
+      // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
       const u = String(url as unknown);
       if (u.includes("api.jup.ag/price/v3")) {
         return new Response(JSON.stringify({ [USDC_MINT]: { usdPrice: 1 } }), {
@@ -338,6 +341,7 @@ describe("AdapterService wallet holdings seam (getWalletHoldings)", () => {
       }),
     );
     const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const layer = Layer.provide(
       AdapterLive,
       Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))),

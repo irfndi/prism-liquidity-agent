@@ -80,6 +80,7 @@ export const subscriptionCommand = new Command("subscription")
       }
 
       const { tier, walletSol, referralCount, credits, platformFeeRate } = result.data;
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const info = (TIER_INFO[tier as TierName] ?? TIER_INFO.free)!;
 
       console.log(`Tier: ${info.name}`);
@@ -105,11 +106,13 @@ export const subscriptionCommand = new Command("subscription")
           process.exit(1);
         }
 
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         if (!TIER_INFO[tier as TierName]) {
           console.error(`Error: Unknown tier '${tier}'. Available: pro, fund`);
           process.exit(1);
         }
 
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         const info = TIER_INFO[tier as TierName];
 
         console.log(`Upgrade to ${info.name}`);
@@ -184,6 +187,7 @@ export const subscriptionCommand = new Command("subscription")
 
         // Import revenue service
         void import("../engine/revenue-service.js").then(({ TIERS }) => {
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
           const tier = TIERS[tierName as keyof typeof TIERS];
           if (!tier) {
             console.error(`Error: Unknown tier '${tierName}'`);

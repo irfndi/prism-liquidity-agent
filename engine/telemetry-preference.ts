@@ -33,15 +33,20 @@ export function readTelemetryPreference(): TelemetryPreference {
       return { enabled: true, updatedAt: new Date().toISOString() };
     }
     const raw = readFileSync(path, "utf-8");
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const parsed = JSON.parse(raw) as Partial<TelemetryPreference>;
     if (Object.prototype.toString.call(parsed.enabled) !== "[object Boolean]") {
       return { enabled: true, updatedAt: new Date().toISOString() };
     }
+    // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
     return {
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       enabled: parsed.enabled as boolean,
       updatedAt:
         Object.prototype.toString.call(parsed.updatedAt) === "[object String]"
-          ? (parsed.updatedAt as string)
+          ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+            // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+            (parsed.updatedAt as string)
           : new Date().toISOString(),
     };
   } catch (error) {

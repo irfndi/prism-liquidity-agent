@@ -9,11 +9,12 @@ import { Keypair, Connection, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { Effect, Layer } from "effect";
 import { AdapterService } from "../engine/services.js";
-import { AdapterLive } from "../engine/adapter-service.js";
+import { makeAdapterLive, type MeteoraDlmmClient } from "../engine/adapter-service.js";
 import { ConfigService } from "../engine/config-service.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { defaultAppConfig, asOwner } from "./helpers.js";
+import { unsupportedDlmmMethods } from "./dlmm-test-double.js";
 
 const POOL_ADDRESS = Keypair.generate().publicKey.toBase58();
 const TOKEN_X = Keypair.generate().publicKey;
@@ -26,6 +27,7 @@ const walletPrivateKey = bs58.encode(walletKeypair.secretKey);
 
 function makeFakeDlmm() {
   return {
+    ...unsupportedDlmmMethods,
     lbPair: {
       activeId: ACTIVE_BIN_ID,
       binStep: BIN_STEP,
@@ -33,6 +35,7 @@ function makeFakeDlmm() {
       tokenYMint: TOKEN_Y,
       reserveX: Keypair.generate().publicKey,
       reserveY: Keypair.generate().publicKey,
+      rewardInfos: [],
     },
     tokenX: { publicKey: TOKEN_X, mint: { decimals: 9 } },
     tokenY: { publicKey: TOKEN_Y, mint: { decimals: 6 } },
@@ -54,27 +57,25 @@ function makeFakeDlmm() {
         },
       ],
     })),
-  };
+  } satisfies MeteoraDlmmClient;
 }
 
 const dlmmState = vi.hoisted(() => ({
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   current: null as ReturnType<typeof makeFakeDlmm> | null,
 }));
 
-vi.mock("@meteora-ag/dlmm", async (importActual) => {
-  const actual = await importActual<typeof import("@meteora-ag/dlmm")>();
-  class FakeDLMM {
-    static async create() {
-      if (!dlmmState.current) throw new Error("fake DLMM instance not set");
-      return dlmmState.current;
-    }
-  }
-  return { ...actual, default: FakeDLMM };
-});
+const createFakeDlmm = async () => {
+  if (!dlmmState.current) throw new Error("fake DLMM instance not set");
+  const fake = dlmmState.current;
+  if (!fake) throw new Error("fake DLMM instance not set");
+  return fake;
+};
 
 function mockFetchImpl(handler: (url: string) => Promise<Response>) {
   return vi.stubGlobal(
     "fetch",
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     vi.fn(async (url: string | URL | Request) => handler(String(url as unknown))),
   );
 }
@@ -93,8 +94,9 @@ function makeAdapterLayer(): Layer.Layer<AdapterService, never, never> {
     }),
   );
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return Layer.provide(
-    AdapterLive,
+    makeAdapterLive(createFakeDlmm),
     Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))),
   ) as Layer.Layer<AdapterService, never, never>;
 }

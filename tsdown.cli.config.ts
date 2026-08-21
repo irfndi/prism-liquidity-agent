@@ -29,9 +29,6 @@ export default defineConfig({
   alias: {
     "bigint-buffer": bigintBufferPureJs,
   },
-  deps: {
-    neverBundle: ["bun:sqlite"],
-  },
   // Release bundles ship without node_modules and the runtime resolves bare
   // imports from bun's global cache — which can hold the WRONG effect major
   // (issue #179: v0.1.9 bundle called Context.Service against cached effect 3).
@@ -39,17 +36,21 @@ export default defineConfig({
   // self-contained. @xenova/transformers stays external: it is only loaded for
   // the optional ONNX embeddings backend and its import failure is already
   // caught with a fallback to hash vectors.
-  noExternal: [
-    "sqlite-vec",
-    "effect",
-    "commander",
-    "chalk",
-    "dotenv",
-    "@clack/prompts",
-    "semver",
-    "bs58",
-    "@solana/web3.js",
-    "@solana/spl-token",
-    "@meteora-ag/dlmm",
-  ],
+  deps: {
+    neverBundle: ["bun:sqlite"],
+    onlyBundle: false,
+    alwaysBundle: [
+      "sqlite-vec",
+      "effect",
+      "commander",
+      "chalk",
+      "dotenv",
+      "@clack/prompts",
+      "semver",
+      "bs58",
+      "@solana/web3.js",
+      "@solana/spl-token",
+      "@meteora-ag/dlmm",
+    ],
+  },
 });

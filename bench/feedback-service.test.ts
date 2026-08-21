@@ -162,6 +162,7 @@ function buildLayer(
     alertFeeMilestoneUsd: 10,
   });
   const baseLayer = Layer.merge(mockConfig, DbLive(":memory:"));
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return Layer.provide(FeedbackLive, baseLayer) as Layer.Layer<FeedbackService, never, never>;
 }
 
@@ -236,6 +237,7 @@ describe("feedback service — cloud fallback", () => {
     enableCredentials();
     mockFetch(
       vi.fn(async (url: string | URL | Request) => {
+        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
         const u = String(url as string | URL);
         if (u.includes("/v1/feedback")) {
           return new Response(JSON.stringify({ id: "cloud-test-id" }), { status: 200 });
@@ -313,6 +315,7 @@ describe("feedback service — D1 cloud submissions", () => {
     enableCredentials();
     mockFetch(
       vi.fn(async (url: string | URL | Request) =>
+        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
         String(url as string | URL).includes("/v1/feedback")
           ? new Response(JSON.stringify({ id: "cloud-new" }), { status: 200 })
           : new Response("unexpected", { status: 500 }),

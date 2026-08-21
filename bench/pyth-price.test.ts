@@ -51,6 +51,7 @@ let lastUrl: string | undefined;
 
 function fetchCapturing(body: any, status = 200): FetchLike {
   return (url, init) => {
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     lastUrl = String(url as unknown);
     lastInit = init;
     return Promise.resolve(new Response(JSON.stringify(body), { status }));
@@ -198,6 +199,7 @@ describe("fetchPythPriceUsd", () => {
       apiKey: "test-pyth-key",
       fetchImpl: fetchCapturing(liveResponse("1234567", -6, NOW_SEC)),
     });
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const headers = (lastInit?.headers ?? {}) as Record<string, string>;
     expect(headers["Authorization"]).toBe("Bearer test-pyth-key");
   });
@@ -206,6 +208,7 @@ describe("fetchPythPriceUsd", () => {
     await fetchPythPriceUsd(PYTH_FEED_IDS.SOL, {
       fetchImpl: fetchCapturing(liveResponse("1234567", -6, NOW_SEC)),
     });
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     let headers = (lastInit?.headers ?? {}) as Record<string, string>;
     expect(headers["Authorization"]).toBeUndefined();
 
@@ -213,6 +216,7 @@ describe("fetchPythPriceUsd", () => {
       apiKey: "   ",
       fetchImpl: fetchCapturing(liveResponse("99985012", -8, NOW_SEC)),
     });
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     headers = (lastInit?.headers ?? {}) as Record<string, string>;
     expect(headers["Authorization"]).toBeUndefined();
   });

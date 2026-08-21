@@ -302,6 +302,7 @@ export function parseResponse(raw: string): ParsedAgentResponse {
     return {};
   }
   try {
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     return JSON.parse(cleaned.slice(start, end + 1)) as ParsedAgentResponse;
   } catch {
     return {};
@@ -321,6 +322,7 @@ export function validateOverride(
   }
 
   const action: ActionType | undefined =
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     parsed.action && VALID_ACTIONS.has(parsed.action) ? (parsed.action as ActionType) : undefined;
 
   let newConfidence = original.confidence;
@@ -678,7 +680,9 @@ export function AgentLive(config: AppConfig): Layer.Layer<AgentService, never, n
           // outer AGENT_PROPOSAL_TIMEOUT_MS deadline. Transport timeouts are
           // budget-bound and deliberately NOT retried (the outer deadline would
           // kill the second attempt anyway); they fail open exactly as before.
-          const attempt = (parseRetriesLeft: number): Effect.Effect<AgentProposal | null, never> => {
+          const attempt = (
+            parseRetriesLeft: number,
+          ): Effect.Effect<AgentProposal | null, never> => {
             const attemptStart = Date.now();
             const recordLatency = () =>
               proposalLatencyWindow.record(

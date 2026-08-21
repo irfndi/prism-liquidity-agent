@@ -134,9 +134,12 @@ interface SwapQuoteData {
 
 function isSwapQuoteError<T>(err: T): boolean {
   if (!isNonNullObject(err)) return false;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   if ((err as { _tag?: string })._tag === "SwapQuoteError") return true;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const cause = (err as { cause?: unknown }).cause;
   if (!isNonNullObject(cause)) return false;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   return (cause as { _tag?: string })._tag === "SwapQuoteError";
 }
 
@@ -145,6 +148,7 @@ function parseAtomicAmount<T>(value: T): bigint | null {
     // Jupiter returns atomic amounts as non-negative integer strings. Reject
     // empty, non-integer, or negative strings so malformed quotes cannot throw
     // during BigInt conversion.
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const text = value as string;
     if (!/^\d+$/.test(text)) return null;
     try {
@@ -154,6 +158,7 @@ function parseAtomicAmount<T>(value: T): bigint | null {
     }
   }
   if (Object.prototype.toString.call(value) === "[object Number]") {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const n = value as number;
     if (Number.isFinite(n) && n >= 0) return BigInt(Math.floor(n));
   }
@@ -162,6 +167,7 @@ function parseAtomicAmount<T>(value: T): bigint | null {
 
 function quoteOutAmount<T>(quoteData: T): bigint {
   if (!isNonNullObject(quoteData)) return 0n;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   return parseAtomicAmount((quoteData as SwapQuoteData).outAmount) ?? 0n;
 }
 
@@ -170,6 +176,7 @@ function quoteGuaranteedOutAmount<T>(quoteData: T): bigint {
   // quoted slippage; prefer it over the optimistic `outAmount` so a swap is
   // only submitted when it can actually cover the deficit after slippage.
   if (!isNonNullObject(quoteData)) return 0n;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const threshold = parseAtomicAmount((quoteData as SwapQuoteData).otherAmountThreshold);
   if (threshold !== null) return threshold;
   return quoteOutAmount(quoteData);

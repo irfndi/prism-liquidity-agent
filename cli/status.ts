@@ -423,6 +423,7 @@ network; with no stranded settlements it is fully offline.`,
                 const price = p[mint] ?? 0;
                 return {
                   mint,
+                  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
                   state: (price > 0 ? "ok" : "unpriceable") as StrandedLookupState,
                   value: price,
                 };
@@ -440,6 +441,7 @@ network; with no stranded settlements it is fully offline.`,
                   return [
                     mint,
                     {
+                      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
                       state: (price > 0 ? "ok" : "unpriceable") as StrandedLookupState,
                       value: price,
                     },

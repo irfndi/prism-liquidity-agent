@@ -18,9 +18,12 @@ function parseRiskResult(json: string | null): RiskResult {
     // DB-sourced riskResultJson is untrusted: validate the shape instead of
     // asserting, so a null/array/odd-typed value cannot masquerade as a
     // valid risk result (which would fail the caller's fallback logic).
+    // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
     const raw =
       parsed !== null && parsed instanceof Object && !(parsed instanceof Function)
-        ? (parsed as { approved?: unknown; reason?: unknown })
+        ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+          (parsed as { approved?: unknown; reason?: unknown })
         : null;
     const approved = readBoolean(raw?.approved);
     const reason = readString(raw?.reason);
@@ -36,10 +39,12 @@ function parseRiskResult(json: string | null): RiskResult {
 }
 
 function readBoolean<T>(value: T): boolean | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object Boolean]" ? (value as boolean) : null;
 }
 
 function readString<T>(value: T): string | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
 }
 

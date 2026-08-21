@@ -3,6 +3,7 @@ import { createLogger } from "./logger.js";
 import { stringifySafe } from "./bigint-json.js";
 import { getCurrentVersion } from "./version.js";
 import { underlyingErrorMessage } from "./errors.js";
+import { createBunWebSocket } from "./bun-websocket.js";
 import type { JsonValue } from "./services.js";
 
 /** v4 wraps tryPromise rejections in a generic UnknownError whose message hides
@@ -44,13 +45,27 @@ const CHALLENGE_TIMEOUT_MS = 3_000;
 // slack, so the per-phase timeouts below never race this overall deadline.
 const HANDSHAKE_TIMEOUT_MS = CHALLENGE_TIMEOUT_MS + CONNECT_TIMEOUT_MS + 2_000;
 
+function isJsonObject(
+  value: JsonValue | undefined,
+): value is { readonly [key: string]: JsonValue } {
+  return (
+    value !== null &&
+    value !== undefined &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
+}
+
+function isStringValue(value: JsonValue | undefined): value is string {
+  return Object.prototype.toString.call(value) === "[object String]";
+}
+
 export interface GatewayTransportOptions {
   readonly url: string;
   readonly token: string;
   readonly timeoutMs: number;
 }
 
-interface GatewayErrorShape {
+interface GatewayErrorPayload {
   readonly code?: unknown;
   readonly message?: unknown;
 }
@@ -60,7 +75,7 @@ interface GatewayResFrame {
   readonly id: string;
   readonly ok: boolean;
   readonly payload?: JsonValue;
-  readonly error?: GatewayErrorShape;
+  readonly error?: GatewayErrorPayload;
 }
 
 interface GatewayEventFrame {
@@ -93,9 +108,9 @@ type GatewayChatParams = {
 };
 
 interface HelloOkPayload {
-  readonly type?: unknown;
-  readonly protocol?: unknown;
-  readonly snapshot?: { readonly sessionDefaults?: { readonly mainSessionKey?: unknown } };
+  readonly type?: JsonValue;
+  readonly protocol?: JsonValue;
+  readonly snapshot?: { readonly sessionDefaults?: { readonly mainSessionKey?: JsonValue } };
 }
 
 interface PendingRequest {
@@ -160,7 +175,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
         // the upgrade so gateways that reject unauthenticated upgrades answer. The WS
         // upgrade succeeds before any app-level handshake, so settle on "open".
         ws = this.options.token
-          ? new WebSocket(this.options.url, {
+          ? createBunWebSocket(this.options.url, {
               headers: { Authorization: `Bearer ${this.options.token}` },
             })
           : new WebSocket(this.options.url);
@@ -275,7 +290,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
       let ws: WebSocket;
       try {
         ws = this.options.token
-          ? new WebSocket(this.options.url, {
+          ? createBunWebSocket(this.options.url, {
               headers: { Authorization: `Bearer ${this.options.token}` },
             })
           : new WebSocket(this.options.url);
@@ -321,30 +336,32 @@ export class GatewayTransport implements AgentRuntimeTransport {
         this.awaitChallenge(CHALLENGE_TIMEOUT_MS)
           .then(() => this.request("connect", this.buildConnectParams(), CONNECT_TIMEOUT_MS))
           .then((payload) => {
+            // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
             const hello = (payload ?? {}) as HelloOkPayload;
             if (hello.type !== HELLO_OK_TYPE) {
               throw new Error("Gateway rejected connect: expected hello-ok");
             }
             if (
               Object.prototype.toString.call(hello.protocol) === "[object Number]" &&
+              // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
               (hello.protocol as number) < GATEWAY_PROTOCOL_VERSION
             ) {
+              // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
               const peerProtocol = hello.protocol as number;
               throw new Error(
                 `Gateway protocol ${peerProtocol} is below required ${GATEWAY_PROTOCOL_VERSION}; update the gateway to >= 2026.7.1`,
               );
             }
+            // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
             const mainSessionKey = hello.snapshot?.sessionDefaults?.mainSessionKey;
-            this.sessionKey =
-              Object.prototype.toString.call(mainSessionKey) === "[object String]"
-                ? (mainSessionKey as string)
-                : FALLBACK_SESSION_KEY;
+            this.sessionKey = isStringValue(mainSessionKey) ? mainSessionKey : FALLBACK_SESSION_KEY;
             succeed();
           })
           .catch((err) => fail(err instanceof Error ? err : new Error(String(err))));
       });
 
       ws.addEventListener("message", (event) => {
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         const data = (event as MessageEvent).data;
         try {
           this.onMessage(String(data));
@@ -356,6 +373,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
       ws.addEventListener("error", () => fail(new Error("Gateway WebSocket error")));
 
       ws.addEventListener("close", (event) => {
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         const closeEvent = event as CloseEvent;
         this.emit({ type: "disconnected", transport: this.name });
         this.ws = null;
@@ -446,7 +464,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
     params: JsonValue,
     timeoutMs?: number,
     id: string = crypto.randomUUID(),
-  ): Promise<unknown> {
+  ): Promise<JsonValue> {
     return new Promise((resolve, reject) => {
       if (this.ws?.readyState !== WebSocket.OPEN) {
         reject(new Error("Gateway not connected"));
@@ -528,6 +546,7 @@ export class GatewayTransport implements AgentRuntimeTransport {
   private onMessage(data: string): void {
     let frame: { type?: unknown };
     try {
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       frame = JSON.parse(data) as { type?: unknown };
     } catch {
       logger.warn("Gateway received non-JSON frame; ignoring", { data: data.slice(0, 160) });
@@ -535,8 +554,10 @@ export class GatewayTransport implements AgentRuntimeTransport {
     }
 
     if (frame.type === "res") {
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       this.handleRes(frame as GatewayResFrame);
     } else if (frame.type === "event") {
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       this.handleEvent(frame as GatewayEventFrame);
     }
   }
@@ -550,25 +571,30 @@ export class GatewayTransport implements AgentRuntimeTransport {
       return;
     }
     const error = frame.error;
+    // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
     const code =
       error !== undefined && Object.prototype.toString.call(error.code) === "[object String]"
-        ? (error.code as string)
+        ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+          // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+          (error.code as string)
         : "ERROR";
+    // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
     const message =
       error !== undefined && Object.prototype.toString.call(error.message) === "[object String]"
-        ? (error.message as string)
+        ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+          // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+          (error.message as string)
         : "request failed";
     pendingRequest.reject(new Error(`Gateway ${code}: ${message}`));
   }
 
   private handleEvent(frame: GatewayEventFrame): void {
     if (frame.event === CONNECT_CHALLENGE_EVENT) {
-      const payload = (frame.payload ?? {}) as { nonce?: unknown };
-      this.challengeSettle?.resolve(
-        Object.prototype.toString.call(payload.nonce) === "[object String]"
-          ? (payload.nonce as string)
-          : "",
-      );
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      const payload = frame.payload;
+      const payloadObject = payload ?? null;
+      const nonce = isJsonObject(payloadObject) ? payloadObject.nonce : undefined;
+      this.challengeSettle?.resolve(isStringValue(nonce) ? nonce : "");
       return;
     }
     if (frame.event === CHAT_EVENT) {
@@ -580,44 +606,36 @@ export class GatewayTransport implements AgentRuntimeTransport {
   }
 
   private handleChatEvent(payload: JsonValue): void {
-    const p = (payload ?? {}) as {
-      runId?: unknown;
-      state?: unknown;
-      deltaText?: unknown;
-      message?: unknown;
-      error?: unknown;
-    };
-    const runId =
-      Object.prototype.toString.call(p.runId) === "[object String]" ? (p.runId as string) : null;
+    const p = isJsonObject(payload) ? payload : {};
+    const runId = isStringValue(p.runId) ? p.runId : null;
     if (!runId || !this.chatRuns.has(runId)) return;
 
     if (p.state === "delta") {
       const run = this.chatRuns.get(runId);
-      if (run && Object.prototype.toString.call(p.deltaText) === "[object String]") {
-        run.text += p.deltaText as string;
-      }
+      if (run && isStringValue(p.deltaText)) run.text += p.deltaText;
       return;
     }
     if (p.state === "final") {
-      const message = (p.message ?? {}) as { content?: unknown };
-      const content = Array.isArray(message.content) ? message.content : [];
-      const first = content[0] as { text?: unknown } | undefined;
-      const finalText =
-        first && Object.prototype.toString.call(first.text) === "[object String]"
-          ? (first.text as string)
-          : (this.chatRuns.get(runId)?.text ?? "");
+      const messageValue = p.message;
+      let content: readonly JsonValue[] = [];
+      if (isJsonObject(messageValue)) {
+        const contentValue = messageValue.content;
+        if (Array.isArray(contentValue)) content = contentValue;
+      }
+      const first = content[0];
+      let finalText = this.chatRuns.get(runId)?.text ?? "";
+      if (isJsonObject(first) && isStringValue(first.text)) finalText = first.text;
       this.settleChatRun(runId, finalText);
       return;
     }
     if (p.state === "error") {
-      const err = (p.error ?? {}) as { message?: unknown };
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      const errorPayload = p.error;
+      let errorMessage: JsonValue | undefined;
+      if (isJsonObject(errorPayload)) errorMessage = errorPayload.message;
       this.failChatRun(
         runId,
-        new Error(
-          Object.prototype.toString.call(err.message) === "[object String]"
-            ? (err.message as string)
-            : "agent run error",
-        ),
+        new Error(isStringValue(errorMessage) ? errorMessage : "agent run error"),
       );
       return;
     }

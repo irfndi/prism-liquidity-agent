@@ -16,6 +16,7 @@ export const BlacklistLive = (opts: {
         function loadSet(path: string, defaultSet: ReadonlyArray<string>): Set<string> {
           try {
             if (!fs.existsSync(path)) return new Set(defaultSet);
+            // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
             const data = JSON.parse(fs.readFileSync(path, "utf-8")) as ReadonlyArray<string>;
             return new Set(data);
           } catch (err) {

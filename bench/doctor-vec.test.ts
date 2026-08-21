@@ -2,21 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 
-// Release bundles have no node_modules (sqlite-vec npm load() always fails there)
-// and the embedded fallback only matches its build platform. Stub both sources
-// off so the probe's failure shape is deterministic on ANY host — every test
-// here exercises exactly the failure surface a bundle user hits.
-vi.mock("sqlite-vec", () => ({
-  load: () => {
-    throw new Error("sqlite-vec npm load disabled in test (no node_modules in bundle)");
-  },
-}));
-vi.mock("../engine/sqlite-vec-embedded.js", () => ({
-  getEmbeddedVec0Path: () => null,
-}));
-
 import { probeVecAvailability } from "../engine/db.js";
 import { checkMemory, checkNativeBindings } from "../cli/doctor.js";
+
+const unavailableVecDependencies = {
+  loadVec: () => {
+    throw new Error("sqlite-vec disabled by the test dependency seam");
+  },
+  getEmbeddedVec0Path: () => null,
+};
 
 function withEnv(key: string, value: string | undefined, run: () => void): void {
   const previous = process.env[key];
@@ -40,7 +34,7 @@ describe("probeVecAvailability failure surface (bundle path)", () => {
   it("reports unavailable with an error when PRISM_VEC0_PATH points at a nonexistent file", () => {
     const garbagePath = "/nonexistent/prism-doctor-test/vec0.dylib";
     withEnv("PRISM_VEC0_PATH", garbagePath, () => {
-      const result = probeVecAvailability();
+      const result = probeVecAvailability(unavailableVecDependencies);
       expect(result.available).toBe(false);
       expect(result.source).toBeNull();
       expect(result.error).not.toBeNull();
@@ -51,7 +45,7 @@ describe("probeVecAvailability failure surface (bundle path)", () => {
 
   it("reports unavailable with an error when PRISM_VEC0_PATH is unset", () => {
     withEnv("PRISM_VEC0_PATH", undefined, () => {
-      const result = probeVecAvailability();
+      const result = probeVecAvailability(unavailableVecDependencies);
       expect(result.available).toBe(false);
       expect(result.source).toBeNull();
       expect(result.error).not.toBeNull();
@@ -61,7 +55,7 @@ describe("probeVecAvailability failure surface (bundle path)", () => {
 
   it("never names a load source when unavailable", () => {
     withEnv("PRISM_VEC0_PATH", "/definitely/not/vec0.so", () => {
-      expect(probeVecAvailability().source).toBeNull();
+      expect(probeVecAvailability(unavailableVecDependencies).source).toBeNull();
     });
   });
 
@@ -77,7 +71,7 @@ describe("probeVecAvailability failure surface (bundle path)", () => {
       return;
     }
     withEnv("PRISM_VEC0_PATH", libPath, () => {
-      const result = probeVecAvailability();
+      const result = probeVecAvailability(unavailableVecDependencies);
       if (!result.available) {
         // Host SQLite is not extension-capable; skip the positive path.
         return;
@@ -113,7 +107,7 @@ describe("doctor memory check", () => {
 
   it("fails through the real probe when every vec0 source is unavailable", () => {
     withEnv("PRISM_VEC0_PATH", "/nonexistent/prism-doctor-test/vec0.dylib", () => {
-      const result = checkMemory();
+      const result = checkMemory(() => probeVecAvailability(unavailableVecDependencies));
       expect(result.status).toBe("fail");
       expect(result.message).toContain("unavailable");
     });

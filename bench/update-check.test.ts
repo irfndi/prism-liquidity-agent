@@ -157,6 +157,7 @@ describe("checkForAutoUpdate", () => {
     tempHome = mkdtempSync(join(tmpdir(), "prism-update-check-"));
     vi.stubEnv("HOME", tempHome);
     vi.stubEnv("USERPROFILE", tempHome);
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
   });
 

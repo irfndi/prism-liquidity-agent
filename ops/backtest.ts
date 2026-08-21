@@ -3,12 +3,13 @@
  * to evaluate decision quality without spending real capital.
  *
  * Two sources:
- *   - synthetic: deterministic mock generator (regression baseline)
+ *   - synthetic: stochastic mock generator (stress-test baseline)
  *   - replay:    snapshots stored in SQLite by a live paper run
  *                (set ENABLE_SNAPSHOT_CAPTURE=true on the agent)
  *
  * Usage:
  *   bun run backtest                                          # default: synthetic, 7d
+ *   bun run backtest -- --seed 42                             # repeatable synthetic run
  *   bun run ops/backtest.ts --days 30 --pools <addr1,addr2>
  *   bun run ops/backtest.ts --source replay --db ./prism.db
  */
@@ -123,14 +124,70 @@ interface CliArgs {
   pools: ReadonlyArray<string>;
   source: "synthetic" | "replay";
   dbPath: string;
+  seed?: number;
+  seeds?: ReadonlyArray<number>;
+  entryCostBps: number;
+  exitCostBps: number;
+  fixedActionCostUsd: number;
+  feeShareDilutionRefWidth?: number;
 }
 
-function parseArgs(argv: ReadonlyArray<string>): CliArgs {
+export const MAX_SYNTHETIC_SWEEP_SEEDS = 32;
+const MAX_EXECUTION_COST_BPS = 10_000;
+const MAX_FIXED_ACTION_COST_USD = 100_000;
+
+function parseUnsignedSeed(value: string, flag: "--seed" | "--seeds"): number {
+  const parsed = Number(value);
+  if (!value.trim() || !Number.isInteger(parsed) || parsed < 0 || parsed > 0xffffffff) {
+    throw new Error(`Invalid ${flag} value: ${value}. Must be an unsigned 32-bit integer.`);
+  }
+  return parsed;
+}
+
+function parseBoundedNonnegative(
+  value: string | undefined,
+  flag: string,
+  max: number,
+  unit: string,
+): number {
+  const parsed = value === undefined ? Number.NaN : Number(value);
+  if (!value?.trim() || !Number.isFinite(parsed) || parsed < 0 || parsed > max) {
+    throw new Error(
+      `Invalid ${flag} value: ${value ?? ""}. Must be finite, nonnegative, and at most ${max} ${unit}.`,
+    );
+  }
+  return parsed;
+}
+
+export function parseSeedList(value: string): number[] {
+  const parts = value.split(",").map((part) => part.trim());
+  if (parts.length === 0 || parts.some((part) => part.length === 0)) {
+    throw new Error(
+      "Invalid --seeds value: expected a comma-separated list of unsigned 32-bit integers.",
+    );
+  }
+  if (parts.length > MAX_SYNTHETIC_SWEEP_SEEDS) {
+    throw new Error(
+      `Invalid --seeds value: at most ${MAX_SYNTHETIC_SWEEP_SEEDS} seeds are allowed per sweep.`,
+    );
+  }
+
+  const seeds = parts.map((part) => parseUnsignedSeed(part, "--seeds"));
+  if (new Set(seeds).size !== seeds.length) {
+    throw new Error("Invalid --seeds value: duplicate seeds are not allowed.");
+  }
+  return seeds;
+}
+
+export function parseArgs(argv: ReadonlyArray<string>): CliArgs {
   const out: CliArgs = {
     days: 7,
     pools: ["5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"],
     source: "synthetic",
     dbPath: "./prism.db",
+    entryCostBps: 0,
+    exitCostBps: 0,
+    fixedActionCostUsd: 0,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -156,9 +213,89 @@ function parseArgs(argv: ReadonlyArray<string>): CliArgs {
     } else if (a === "--db" && next) {
       out.dbPath = next;
       i++;
+    } else if (a === "--seed" && next) {
+      if (out.seeds !== undefined) {
+        throw new Error("The --seed and --seeds options are mutually exclusive.");
+      }
+      out.seed = parseUnsignedSeed(next, "--seed");
+      i++;
+    } else if (a === "--seeds") {
+      if (!next || next.startsWith("--")) {
+        throw new Error(
+          "Invalid --seeds value: expected a comma-separated list of unsigned 32-bit integers.",
+        );
+      }
+      if (out.seed !== undefined) {
+        throw new Error("The --seed and --seeds options are mutually exclusive.");
+      }
+      out.seeds = parseSeedList(next);
+      i++;
+    } else if (a === "--entry-cost-bps") {
+      if (!next || next.startsWith("--")) {
+        throw new Error("Invalid --entry-cost-bps value: expected a finite nonnegative number.");
+      }
+      out.entryCostBps = parseBoundedNonnegative(
+        next,
+        "--entry-cost-bps",
+        MAX_EXECUTION_COST_BPS,
+        "bps",
+      );
+      i++;
+    } else if (a === "--exit-cost-bps") {
+      if (!next || next.startsWith("--")) {
+        throw new Error("Invalid --exit-cost-bps value: expected a finite nonnegative number.");
+      }
+      out.exitCostBps = parseBoundedNonnegative(
+        next,
+        "--exit-cost-bps",
+        MAX_EXECUTION_COST_BPS,
+        "bps",
+      );
+      i++;
+    } else if (a === "--fixed-action-cost-usd") {
+      if (!next || next.startsWith("--")) {
+        throw new Error(
+          "Invalid --fixed-action-cost-usd value: expected a finite nonnegative number.",
+        );
+      }
+      out.fixedActionCostUsd = parseBoundedNonnegative(
+        next,
+        "--fixed-action-cost-usd",
+        MAX_FIXED_ACTION_COST_USD,
+        "USD",
+      );
+      i++;
+    } else if (a === "--fee-share-ref-width") {
+      if (!next || next.startsWith("--")) {
+        throw new Error(
+          "Invalid --fee-share-ref-width value: expected a finite nonnegative number.",
+        );
+      }
+      out.feeShareDilutionRefWidth = parseBoundedNonnegative(
+        next,
+        "--fee-share-ref-width",
+        10_000,
+        "bins",
+      );
+      i++;
     }
   }
+  if (out.seeds !== undefined && out.source !== "synthetic") {
+    throw new Error("The --seeds option is only supported with the synthetic source.");
+  }
   return out;
+}
+
+/** Small deterministic PRNG for repeatable synthetic research runs. */
+export function createSeededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
 }
 
 // ─── Synthetic data (regression baseline) ────────────────────────────────────
@@ -180,13 +317,21 @@ interface HistoryTick {
 
 /**
  * Synthetic history is a STRESS TEST, not a realistic market:
- * - TVL drifts by `tvl *= 1 ± ~1%` per tick (line `tvl *= 1 + (rand-0.49)*0.02`),
- *   so TVL is quasi-constant; TVL-dependent gates see almost no real drain.
+ * - TVL changes by roughly ±1% per tick, so it is time-varying but still
+ *   quasi-constant; TVL-dependent gates see almost no sustained drain.
  * - Every bin's liquiditySupply is random BigInt (all >0), so binUtil is always
  *   1.0; the binUtil pre-filter can never reject synthetic ticks. Together these
  *   make reported win rates / Sharpe a lower-bound stress-test only.
+ * - Randomness is intentionally unseeded, so repeated synthetic runs are not
+ *   reproducible. Use replay for repeatable analysis of captured snapshots.
  */
-function generateMockHistory(poolAddress: string, days: number, startTvl: number): HistoryTick[] {
+export function generateMockHistory(
+  poolAddress: string,
+  days: number,
+  startTvl: number,
+  random: () => number = Math.random,
+  endMs: number = Date.now(),
+): HistoryTick[] {
   const history: HistoryTick[] = [];
   const intervalMs = 10 * 60 * 1000; // 10 min
   const ticks = (days * 24 * 60 * 60 * 1000) / intervalMs;
@@ -198,23 +343,23 @@ function generateMockHistory(poolAddress: string, days: number, startTvl: number
   let volatility = 0.015;
 
   for (let i = 0; i < ticks; i++) {
-    const timestamp = Date.now() - (ticks - i) * intervalMs;
+    const timestamp = endMs - (ticks - i) * intervalMs;
 
     if (i % 720 === 0) {
-      volatility = 0.005 + Math.random() * 0.025;
-      trend = (Math.random() - 0.5) * 0.004;
+      volatility = 0.005 + random() * 0.025;
+      trend = (random() - 0.5) * 0.004;
     }
 
-    if (Math.random() < 0.02) {
-      const jump = (Math.random() - 0.5) * 0.08;
+    if (random() < 0.02) {
+      const jump = (random() - 0.5) * 0.08;
       price *= 1 + jump;
       activeBin += Math.floor(jump * 200);
     }
 
-    const shock = (Math.random() - 0.5) * volatility * 2;
-    tvl *= 1 + (Math.random() - 0.49) * 0.02;
+    const shock = (random() - 0.5) * volatility * 2;
+    tvl *= 1 + (random() - 0.49) * 0.02;
     price *= 1 + trend + shock;
-    activeBin += Math.floor(trend * 200 + shock * 100 + (Math.random() - 0.5) * 10);
+    activeBin += Math.floor(trend * 200 + shock * 100 + (random() - 0.5) * 10);
 
     const pool: PoolState = {
       address: poolAddress,
@@ -223,9 +368,9 @@ function generateMockHistory(poolAddress: string, days: number, startTvl: number
       tokenXSymbol: "SOL",
       tokenYSymbol: "USDC",
       tvlUsd: Math.max(tvl, 1000),
-      volume24hUsd: tvl * (0.3 + Math.random() * 0.5),
-      fees24hUsd: tvl * 0.003 * (0.5 + Math.random() * 0.5),
-      apr: 40 + Math.random() * 80,
+      volume24hUsd: tvl * (0.3 + random() * 0.5),
+      fees24hUsd: tvl * 0.003 * (0.5 + random() * 0.5),
+      apr: 40 + random() * 80,
       activeBinId: activeBin,
       binStep: 10,
       currentPrice: price,
@@ -240,9 +385,9 @@ function generateMockHistory(poolAddress: string, days: number, startTvl: number
     const bins = Array.from({ length: 40 }, (_, j) => ({
       binId: activeBin - 20 + j,
       price: price * (1 + (j - 20) * 0.001),
-      reserveX: BigInt(Math.floor(Math.random() * 1e9)),
-      reserveY: BigInt(Math.floor(Math.random() * 1e9)),
-      liquiditySupply: BigInt(Math.floor(Math.random() * 1e12)),
+      reserveX: BigInt(Math.floor(random() * 1e9)),
+      reserveY: BigInt(Math.floor(random() * 1e9)),
+      liquiditySupply: BigInt(Math.floor(random() * 1e12)),
     }));
 
     const binArray: BinArray = {
@@ -293,6 +438,10 @@ export interface BacktestConfig {
   minNetBenefitUsd: number;
   maxRebalances: number;
   maxPositionsPerPool: number;
+  /** Optional round-trip execution costs; omitted values preserve zero-cost behavior. */
+  entryCostBps?: number;
+  exitCostBps?: number;
+  fixedActionCostUsd?: number;
   /**
    * Price-coverage floor for the entry range half-width (percent each side),
    * mirroring the engine's MIN_RANGE_HALF_WIDTH_PCT. When > 0, the effective
@@ -330,6 +479,106 @@ export interface BacktestConfig {
    * floor on the fee side of any range-widening profitability claim.
    */
   feeShareDilutionRefWidth?: number;
+}
+
+export interface NamedBacktestResult {
+  readonly name: string;
+  readonly result: BacktestResult;
+}
+
+export interface SeededBacktestResult extends NamedBacktestResult {
+  readonly seed: number;
+}
+
+export interface BacktestSweepAggregate {
+  readonly name: string;
+  readonly seedCount: number;
+  readonly meanNetPnlUsd: number;
+  readonly netPnlStdDevUsd: number;
+  readonly minNetPnlUsd: number;
+  readonly maxNetPnlUsd: number;
+  readonly meanWinRate: number;
+  readonly winRateStdDev: number;
+  readonly minWinRate: number;
+  readonly maxWinRate: number;
+  readonly profitableRuns: number;
+}
+
+function mean(values: ReadonlyArray<number>): number {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function populationStdDev(values: ReadonlyArray<number>, average: number): number {
+  const variance = mean(values.map((value) => (value - average) ** 2));
+  return Math.sqrt(Math.max(variance, 0));
+}
+
+/** Aggregate deterministic synthetic runs by configuration. */
+export function aggregateBacktestResults(
+  results: ReadonlyArray<SeededBacktestResult>,
+): BacktestSweepAggregate[] {
+  const byConfig = new Map<string, SeededBacktestResult[]>();
+  for (const result of results) {
+    const group = byConfig.get(result.name) ?? [];
+    group.push(result);
+    byConfig.set(result.name, group);
+  }
+
+  return [...byConfig.entries()].map(([name, group]) => {
+    const netPnl = group.map(({ result }) => result.netPnlUsd);
+    const winRates = group.map(({ result }) => result.winRate);
+    const meanNetPnlUsd = mean(netPnl);
+    const meanWinRate = mean(winRates);
+    return {
+      name,
+      seedCount: group.length,
+      meanNetPnlUsd,
+      netPnlStdDevUsd: populationStdDev(netPnl, meanNetPnlUsd),
+      minNetPnlUsd: Math.min(...netPnl),
+      maxNetPnlUsd: Math.max(...netPnl),
+      meanWinRate,
+      winRateStdDev: populationStdDev(winRates, meanWinRate),
+      minWinRate: Math.min(...winRates),
+      maxWinRate: Math.max(...winRates),
+      profitableRuns: netPnl.filter((value) => value > 0).length,
+    };
+  });
+}
+
+function descendingMetric(value: number): number {
+  return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
+}
+
+function ascendingMetric(value: number): number {
+  return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Rank configurations by economic outcome first. The remaining metrics only
+ * break exact net-PnL ties, and the name makes the result stable even when all
+ * numeric metrics are equal.
+ */
+export function rankBacktestResults(
+  results: ReadonlyArray<NamedBacktestResult>,
+): NamedBacktestResult[] {
+  return [...results].sort((a, b) => {
+    const netPnl = descendingMetric(b.result.netPnlUsd) - descendingMetric(a.result.netPnlUsd);
+    if (netPnl !== 0) return netPnl;
+
+    const winRate = descendingMetric(b.result.winRate) - descendingMetric(a.result.winRate);
+    if (winRate !== 0) return winRate;
+
+    const sharpe = descendingMetric(b.result.sharpeRatio) - descendingMetric(a.result.sharpeRatio);
+    if (sharpe !== 0) return sharpe;
+
+    const il = ascendingMetric(a.result.totalIlUsd) - ascendingMetric(b.result.totalIlUsd);
+    if (il !== 0) return il;
+
+    const rebalances = a.result.totalRebalances - b.result.totalRebalances;
+    if (rebalances !== 0) return rebalances;
+
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
 }
 
 export function runBacktestFromTicks(
@@ -413,15 +662,31 @@ export function runBacktestFromTicks(
     positionFeesUsd = 0;
   }
 
+  function executionCostUsd(notionalUsd: number, costBps: number | undefined): number {
+    const rateBps = costBps !== undefined && Number.isFinite(costBps) && costBps >= 0 ? costBps : 0;
+    const fixedCost =
+      cfg.fixedActionCostUsd !== undefined &&
+      Number.isFinite(cfg.fixedActionCostUsd) &&
+      cfg.fixedActionCostUsd >= 0
+        ? cfg.fixedActionCostUsd
+        : 0;
+    return Math.max(0, notionalUsd) * (rateBps / 10_000) + fixedCost;
+  }
+
   const strategyReturns: number[] = [0];
   let prevPortfolioValue = initialValue;
 
   // Helper: compute position's share of pool fees for this tick.
-  // fees24hUsd is a 24h aggregate; divide by tick count to get per-tick,
-  // then scale by position share of pool TVL.
-  function feesForTick(tick: HistoryTick): number {
+  // fees24hUsd is a 24h aggregate; scale it by the actual elapsed time since
+  // the preceding snapshot, then apply the position share of pool TVL.
+  function feesForTick(tickIndex: number): number {
+    const tick = ticks[tickIndex]!;
     const tvl = tick.pool.tvlUsd;
     if (tvl <= 0) return 0;
+    const elapsedMs =
+      tickIndex > 0 ? ticks[tickIndex]!.pool.timestamp - ticks[tickIndex - 1]!.pool.timestamp : 0;
+    const intervalMs = elapsedMs > 0 ? elapsedMs : tickIntervalMs;
+    const ticksPerYearForInterval = (365 * 24 * 60 * 60 * 1000) / intervalMs;
     // Fee share is the deployed position size, not the whole portfolio; fall
     // back to the portfolio value when no position size is recorded yet.
     const size = positionSizeUsd > 0 ? positionSizeUsd : portfolioValue;
@@ -435,7 +700,7 @@ export function runBacktestFromTicks(
       cfg.feeShareDilutionRefWidth && cfg.feeShareDilutionRefWidth > 0 && effectiveHalfWidth > 0
         ? Math.min(1, cfg.feeShareDilutionRefWidth / effectiveHalfWidth)
         : 1;
-    return (tick.pool.fees24hUsd / ticksPerYear) * 365 * positionShare * dilution;
+    return (tick.pool.fees24hUsd / ticksPerYearForInterval) * 365 * positionShare * dilution;
   }
 
   // Mark the open position to the current DLMM value (correct range-aware IL,
@@ -507,7 +772,7 @@ export function runBacktestFromTicks(
 
     const inRange =
       tick.pool.activeBinId >= currentLowerBinId && tick.pool.activeBinId <= currentUpperBinId;
-    const feesThisTick = hasPosition && inRange ? feesForTick(tick) : 0;
+    const feesThisTick = hasPosition && inRange ? feesForTick(i) : 0;
     totalFees += feesThisTick;
     portfolioValue += feesThisTick;
     if (hasPosition) positionFeesUsd += feesThisTick;
@@ -579,10 +844,12 @@ export function runBacktestFromTicks(
       hasPosition = true;
       positionSizeUsd = replay.adjustedSizeUsd;
       positionPeakUsd = positionSizeUsd;
+      const entryCostUsd = executionCostUsd(positionSizeUsd, cfg.entryCostBps);
+      portfolioValue -= entryCostUsd;
       admitted++;
       enterAttempts++;
       entryTimestamp = tick.pool.timestamp;
-      entryDepositedUsd = positionSizeUsd;
+      entryDepositedUsd = positionSizeUsd + entryCostUsd;
       positionFeesUsd = 0;
       referencePrice = tick.pool.currentPrice;
       referenceBinId = tick.pool.activeBinId;
@@ -599,12 +866,14 @@ export function runBacktestFromTicks(
         isIlDominance && replayPosition !== undefined
           ? Math.max(0, replayPosition.hodlValueUsd - replayPosition.currentValueUsd)
           : 0;
+      const exitNotionalUsd = replayPosition?.currentValueUsd ?? positionSizeUsd;
+      const exitCostUsd = executionCostUsd(exitNotionalUsd, cfg.exitCostBps);
       totalIl += realizedLoss;
-      portfolioValue -= realizedLoss;
+      portfolioValue -= realizedLoss + exitCostUsd;
       recordExit(
         isIlDominance ? "il-dominance" : "trailing-stop",
         i,
-        (replayPosition?.currentValueUsd ?? positionSizeUsd) + positionFeesUsd,
+        exitNotionalUsd + positionFeesUsd - exitCostUsd,
       );
       hasPosition = false;
       positionSizeUsd = 0;
@@ -655,7 +924,7 @@ export function runBacktestFromTicks(
           const nextInRange =
             nextTick.pool.activeBinId >= currentLowerBinId &&
             nextTick.pool.activeBinId <= currentUpperBinId;
-          if (nextInRange) feesInNextWindow += feesForTick(nextTick);
+          if (nextInRange) feesInNextWindow += feesForTick(j);
         }
         if (feesInNextWindow > totalCost) wins++;
       }
@@ -673,13 +942,17 @@ export function runBacktestFromTicks(
         binStep: tick.pool.binStep,
       });
       const driftIlUsd = Math.max(0, val.hodlValueUsd - val.lpValueUsd);
+      const driftExitNotionalUsd = replayPosition?.currentValueUsd ?? positionSizeUsd;
+      const configuredExitCostUsd = executionCostUsd(driftExitNotionalUsd, cfg.exitCostBps);
+      const existingDriftExitCostUsd = portfolioValue * 0.0005;
       const driftExitRealizedUsd =
-        (replayPosition?.currentValueUsd ?? positionSizeUsd) +
+        driftExitNotionalUsd +
         positionFeesUsd -
         driftIlUsd -
-        portfolioValue * 0.0005;
+        existingDriftExitCostUsd -
+        configuredExitCostUsd;
       totalIl += driftIlUsd;
-      portfolioValue -= driftIlUsd + portfolioValue * 0.0005;
+      portfolioValue -= driftIlUsd + existingDriftExitCostUsd + configuredExitCostUsd;
       recordExit("drift", i, driftExitRealizedUsd);
       hasPosition = false;
       positionSizeUsd = 0;
@@ -696,7 +969,9 @@ export function runBacktestFromTicks(
       // ponytail: unreachable while the replay ENTER admits every no-position
       // tick, but keep the census hold-trackers correct if that ever changes.
       entryTimestamp = tick.pool.timestamp;
-      entryDepositedUsd = positionSizeUsd;
+      const entryCostUsd = executionCostUsd(positionSizeUsd, cfg.entryCostBps);
+      portfolioValue -= entryCostUsd;
+      entryDepositedUsd = positionSizeUsd + entryCostUsd;
       positionFeesUsd = 0;
       referencePrice = tick.pool.currentPrice;
       referenceBinId = tick.pool.activeBinId;
@@ -777,32 +1052,64 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
   log.warn("═══════════════════════════════════════════════════════════════");
   log.warn("  BACKTEST LIMITATIONS — read before interpreting results");
   log.warn("═══════════════════════════════════════════════════════════════");
-  log.warn("  • TVL is CONSTANT per pool (current snapshot, not historical).");
-  log.warn("    Position share, APR, and volume-auth checks use stale TVL.");
+  log.warn("  • Replay and synthetic ticks use time-varying TVL values.");
+  log.warn("    Synthetic TVL is only a quasi-constant random walk; it is not a");
+  log.warn("    realistic liquidity-drain model. Replay reflects captured TVL.");
   log.warn("  • Replay uses the shared risk kernel for ENTER sizing, confidence,");
   log.warn("    allocation, and trailing-stop EXIT decisions.");
   log.warn("    Live-only effects remain unavailable: memory retrieval/persistence,");
   log.warn("    agent proposals, gas/recovery gates, and on-chain execution.");
   log.warn("  • Each pool runs independently with $10K. Total PnL is the");
   log.warn("    sum of 6 independent portfolios ($60K deployed, not $10K).");
-  log.warn("  • Synthetic TVL is quasi-constant (tvl *= 1±1% per tick) and");
-  log.warn("    synthetic bins use random liquiditySupply so binUtil=1.0 always.");
-  log.warn("    The binUtil gate never rejects; TVL-dependent gates see no real");
-  log.warn("    drain. Results are a LOWER-BOUND STRESS TEST only — not a");
-  log.warn("    realistic PnL / Sharpe / win-rate estimate.");
-  log.warn("    See generateMockHistory comment for the synthetic model.");
-  log.warn("  • NO TOKEN PRICE DEPRECIATION: the backtest models no");
-  log.warn("    mechanism for the underlying token value to decrease.");
-  log.warn("    Portfolio value only changes through fee accrual (+),");
-  log.warn("    rebalancing IL (-), and force-exit penalties (-). A pool");
-  log.warn("    for a token that dropped 90% would still show positive");
-  log.warn("    returns. The reported PnL is a meaningful overestimate.");
+  if (args.source === "synthetic") {
+    log.warn("  • Synthetic TVL is quasi-constant (tvl *= 1±1% per tick) and");
+    log.warn("    synthetic bins use random liquiditySupply so binUtil=1.0 always.");
+    log.warn("    The binUtil gate never rejects; TVL-dependent gates see no real");
+    log.warn("    drain. Results are a LOWER-BOUND STRESS TEST only — not a");
+    log.warn("    realistic PnL / Sharpe / win-rate estimate.");
+    if (args.seeds !== undefined) {
+      log.warn(
+        `    Synthetic randomness is deterministic across ${args.seeds.length} seeds: ${args.seeds.join(",")}.`,
+      );
+    } else if (args.seed === undefined) {
+      log.warn("    Synthetic randomness is unseeded and therefore non-reproducible.");
+    } else {
+      log.warn(`    Synthetic randomness is deterministic with seed ${args.seed}.`);
+    }
+    log.warn("    See generateMockHistory comment for the synthetic model.");
+  }
+  log.warn("  • clmmPositionValue marks price movement and token depreciation");
+  log.warn("    through the range-aware LP/HODL valuation. It does not model");
+  log.warn("    live-only execution effects such as slippage, gas, or oracle");
+  log.warn("    outages; those remain outside this replay.");
+  if (args.entryCostBps > 0 || args.exitCostBps > 0 || args.fixedActionCostUsd > 0) {
+    log.warn(
+      `  • Execution costs: entry=${args.entryCostBps}bps, exit=${args.exitCostBps}bps, ` +
+        `fixed=${args.fixedActionCostUsd.toFixed(2)} USD/action.`,
+    );
+  }
+  if (args.feeShareDilutionRefWidth !== undefined && args.feeShareDilutionRefWidth > 0) {
+    log.warn(
+      `  • Fee-share dilution enabled with reference width ${args.feeShareDilutionRefWidth} bins.`,
+    );
+  }
   log.warn("═══════════════════════════════════════════════════════════════");
 
   // Mirror the live config-service default (BACKTEST_TOLERATE_EMPTY_BINS,
   // default true) so `bun run backtest` admits empty-bin snapshots exactly
   // like the agent's replay does.
   const tolerateEmptyBins = process.env.BACKTEST_TOLERATE_EMPTY_BINS !== "false";
+  const executionCosts: Pick<
+    BacktestConfig,
+    "entryCostBps" | "exitCostBps" | "fixedActionCostUsd" | "feeShareDilutionRefWidth"
+  > = {
+    entryCostBps: args.entryCostBps,
+    exitCostBps: args.exitCostBps,
+    fixedActionCostUsd: args.fixedActionCostUsd,
+  };
+  if (args.feeShareDilutionRefWidth !== undefined) {
+    executionCosts.feeShareDilutionRefWidth = args.feeShareDilutionRefWidth;
+  }
 
   const configs: ReadonlyArray<{ name: string; cfg: BacktestConfig }> = [
     {
@@ -853,14 +1160,54 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
         backtestTolerateEmptyBins: tolerateEmptyBins,
       },
     },
-  ];
+  ].map(({ name, cfg }) => ({
+    name,
+    cfg: { ...cfg, ...executionCosts },
+  }));
 
   for (const pool of args.pools) {
     log.info(`\n=== Pool: ${pool} (source=${args.source}, days=${args.days}) ===\n`);
 
+    if (args.source === "synthetic" && args.seeds !== undefined) {
+      const endMs = Date.UTC(2020, 0, 1);
+      const seededResults = args.seeds.flatMap((seed) => {
+        const ticks = generateMockHistory(
+          pool,
+          args.days,
+          100_000,
+          createSeededRandom(seed),
+          endMs,
+        );
+        return configs.map(({ name, cfg }) => ({
+          name,
+          seed,
+          result: runBacktestFromTicks(ticks, cfg),
+        }));
+      });
+      const aggregates = aggregateBacktestResults(seededResults);
+      const table = aggregates.map((summary) => ({
+        Config: summary.name,
+        Seeds: summary.seedCount,
+        "Mean Net PnL": `$${summary.meanNetPnlUsd.toFixed(0)}`,
+        "Net PnL σ": `$${summary.netPnlStdDevUsd.toFixed(0)}`,
+        "Net PnL Range": `$${summary.minNetPnlUsd.toFixed(0)}..$${summary.maxNetPnlUsd.toFixed(0)}`,
+        "Mean Win %": `${(summary.meanWinRate * 100).toFixed(0)}%`,
+        "Win % σ": `${(summary.winRateStdDev * 100).toFixed(1)}pp`,
+        "Win % Range": `${(summary.minWinRate * 100).toFixed(0)}..${(summary.maxWinRate * 100).toFixed(0)}%`,
+        Profitable: `${summary.profitableRuns}/${summary.seedCount}`,
+      }));
+      log.info(`Synthetic robustness sweep: ${JSON.stringify(table)}`);
+      continue;
+    }
+
     let ticks: HistoryTick[];
     if (args.source === "synthetic") {
-      ticks = generateMockHistory(pool, args.days, 100_000);
+      const random = args.seed === undefined ? Math.random : createSeededRandom(args.seed);
+      const endMs = args.seed === undefined ? Date.now() : Date.UTC(2020, 0, 1);
+      ticks = generateMockHistory(pool, args.days, 100_000, random, endMs);
+      if (args.seed !== undefined) {
+        log.info(`  synthetic seed=${args.seed}`);
+      }
     } else {
       const endMs = Date.now();
       const snaps = await loadSnapshots(args.dbPath, pool, endMs, args.days);
@@ -895,16 +1242,8 @@ async function runBacktest(argv: ReadonlyArray<string>): Promise<void> {
     }));
     log.info(`Results table: ${JSON.stringify(table)}`);
 
-    const best = results.reduce((best, curr) => {
-      if (curr.result.winRate > best.result.winRate) return curr;
-      if (
-        curr.result.winRate === best.result.winRate &&
-        curr.result.netPnlUsd > best.result.netPnlUsd
-      ) {
-        return curr;
-      }
-      return best;
-    });
+    const [best] = rankBacktestResults(results);
+    if (!best) throw new Error(`No backtest result for ${pool}`);
 
     log.info("Best config", {
       pool,

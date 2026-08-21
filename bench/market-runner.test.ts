@@ -122,6 +122,52 @@ describe("lowestAprHeldPosition (rotation target)", () => {
   it("empty positions -> null", () => {
     expect(lowestAprHeldPosition([], new Map())).toBeNull();
   });
+
+  it("maturity gate: skips a position younger than minAgeMs", () => {
+    // 2026-08-21 field incident: a $20 position entered at 14:32 was
+    // rotation-exited at 14:37 for −$0.01. Young entries are never targets.
+    const aprs = new Map([[FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }]]);
+    const now = 1_800_000_000_000;
+    const young = { poolAddress: FLAT, openedAt: now - 6 * 60_000 };
+    expect(
+      lowestAprHeldPosition([young], aprs, undefined, { minAgeMs: 14_400_000, nowMs: now }),
+    ).toBeNull();
+  });
+
+  it("maturity gate: an old-enough position stays a target", () => {
+    const aprs = new Map([[FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }]]);
+    const now = 1_800_000_000_000;
+    const old = { poolAddress: FLAT, openedAt: now - 14_400_000 };
+    expect(
+      lowestAprHeldPosition([old], aprs, undefined, { minAgeMs: 14_400_000, nowMs: now }),
+    ).toEqual({ poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 });
+  });
+
+  it("maturity gate: all-young portfolio -> no rotation (fail-closed)", () => {
+    const aprs = new Map([
+      [RUNNER, { feeAprPct: 5_000, tvlUsd: 200_000 }],
+      [FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }],
+    ]);
+    const now = 1_800_000_000_000;
+    const positions = [
+      { poolAddress: RUNNER, openedAt: now - 60_000 },
+      { poolAddress: FLAT, openedAt: now - 120_000 },
+    ];
+    expect(
+      lowestAprHeldPosition(positions, aprs, RUNNER, { minAgeMs: 14_400_000, nowMs: now }),
+    ).toBeNull();
+  });
+
+  it("legacy rows without openedAt bypass the maturity gate (treated as old)", () => {
+    const aprs = new Map([[FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }]]);
+    const now = 1_800_000_000_000;
+    expect(
+      lowestAprHeldPosition([{ poolAddress: FLAT }], aprs, undefined, {
+        minAgeMs: 14_400_000,
+        nowMs: now,
+      }),
+    ).toEqual({ poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 });
+  });
 });
 
 describe("consecutiveAboveFloorObservations (persistence gate)", () => {

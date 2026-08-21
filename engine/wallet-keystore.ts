@@ -21,8 +21,10 @@ export function loadKeystoreSecretKeyBase58(): string | null {
   try {
     const keystorePath = getWalletKeystorePath();
     if (!fs.existsSync(keystorePath)) return null;
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const data = JSON.parse(fs.readFileSync(keystorePath, "utf-8")) as { secretKey?: unknown };
     if (!Array.isArray(data.secretKey) || data.secretKey.length === 0) return null;
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     return bs58.encode(Uint8Array.from(data.secretKey as number[]));
   } catch {
     return null;

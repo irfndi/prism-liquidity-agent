@@ -91,6 +91,7 @@ async function runCycle(opts: { positionAgeMs: number; minYieldExitAgeMs?: numbe
     const decisions = yield* audit.getRecentDecisions(200);
     return asOwner<ReadonlyArray<DecisionRow>>(decisions);
   });
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return (await Effect.runPromise(
     asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
   )) as ReadonlyArray<DecisionRow>;
@@ -171,6 +172,7 @@ describe("economic-exit maturity gate", () => {
       const decisions = yield* audit.getRecentDecisions(200);
       return asOwner<ReadonlyArray<DecisionRow>>(decisions);
     });
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const decisions = (await Effect.runPromise(
       asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
     )) as ReadonlyArray<DecisionRow>;

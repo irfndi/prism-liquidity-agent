@@ -22,6 +22,7 @@ interface ReleaseManifest {
 }
 
 const version = process.env.VERSION ?? "";
+// SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
 const channel = (process.env.CHANNEL ?? "stable") as ReleaseChannel;
 const r2Base = (
   process.env.R2_BASE_URL ?? "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev"

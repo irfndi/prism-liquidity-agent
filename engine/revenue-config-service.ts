@@ -49,16 +49,19 @@ function isNonNullObject<T>(value: T): boolean {
 }
 
 function readString<T>(value: T): string | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
 }
 
 function readNumber<T>(value: T): number | null {
   if (Object.prototype.toString.call(value) !== "[object Number]") return null;
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   const n = value as number;
   return Number.isFinite(n) ? n : null;
 }
 
 function readBoolean<T>(value: T): boolean | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object Boolean]" ? (value as boolean) : null;
 }
 
@@ -75,6 +78,7 @@ function readApiKey(): Effect.Effect<string | null, never> {
       ) {
         return null;
       }
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const key = readString((parsed as { apiKey: unknown }).apiKey);
       return key !== null && key.length > 0 ? key : null;
     },
@@ -84,6 +88,7 @@ function readApiKey(): Effect.Effect<string | null, never> {
 
 export function parseRevenueConfig<T>(data: T): RevenueConfig | null {
   if (!isNonNullObject(data)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const obj = data as RawRevenueConfig;
   return {
     tier: readString(obj.tier) ?? "free",
@@ -121,6 +126,7 @@ function loadFromDb(db: DbApi): Effect.Effect<RevenueConfig | null, Error> {
     const raw = yield* db.getMetadata(METADATA_KEY);
     if (raw === null) return null;
     const parsed = yield* Effect.try({
+      // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
       try: () => JSON.parse(raw) as unknown,
       catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
     }).pipe(Effect.catch(() => Effect.succeed(null)));
@@ -145,6 +151,7 @@ function fetchWithRetry(apiKey: string): Effect.Effect<RevenueConfig, Error> {
         yield* Effect.sleep(RETRY_DELAY_MS);
       }
     }
+    // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
     return yield* Effect.fail(lastError as Error);
   });
 }

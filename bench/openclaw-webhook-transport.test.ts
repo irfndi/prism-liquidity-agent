@@ -65,6 +65,7 @@ describe("OpenClawWebhookTransport", () => {
       port: 0,
       hostname: "127.0.0.1",
       fetch: async (request) => {
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
         capturedBody = (await request.json()) as JsonRecord;
         return Response.json({ action: "HOLD", confidence: 0.65, reasoning: "ok" });
       },

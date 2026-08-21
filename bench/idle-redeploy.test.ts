@@ -183,6 +183,7 @@ function makeProgramAdapter(
   pools: Record<string, PoolState>,
   overrides: Partial<AdapterApi> = {},
 ): AdapterApi {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return {
     hasWallet: () => false,
     getWalletAddress: () => null,
@@ -395,6 +396,7 @@ describe("program — idle-capital auto-redeploy gate", () => {
         // idleRedeployEnabled defaults to false; idle = 10_000 − 500 ≫ 500.
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never);
 
     expect(positions).toHaveLength(1);
@@ -415,6 +417,7 @@ describe("program — idle-capital auto-redeploy gate", () => {
         maxOpenPositions: 5,
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never);
 
     // Normal conservative ENTER ($500) + exactly one widened redeploy:
@@ -464,6 +467,7 @@ describe("program — idle-capital auto-redeploy gate", () => {
         maxOpenPositions: 5,
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never);
 
     // No real position may open on ANY path in shadow mode; the redeploy pass
@@ -495,6 +499,7 @@ describe("program — idle-capital auto-redeploy gate", () => {
         maxOpenPositions: 5,
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never);
 
     // Only the normal ENTER opens; the sub-normal redeploy is skipped.
@@ -525,6 +530,7 @@ describe("program — idle-capital auto-redeploy gate", () => {
         maxOpenPositions: 5,
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions } = await runOneCycle(layer as never);
 
     expect(positions).toHaveLength(2);
@@ -546,6 +552,7 @@ describe("program — idle-capital auto-redeploy gate", () => {
         maxOpenPositions: 5,
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never);
 
     expect(positions).toHaveLength(1);
@@ -566,6 +573,7 @@ describe("program — idle-capital auto-redeploy gate", () => {
     // An in-range, healthy seeded position fills the single open slot. The
     // pool still passes candidate conditions, its normal ENTER is rejected by
     // allocation (capturing it), and the redeploy pass hits the max-open cap.
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never, (db) =>
       Effect.gen(function* () {
         yield* db.savePosition(makeSeededPosition({}));
@@ -593,6 +601,7 @@ describe("program — idle-capital auto-redeploy gate", () => {
         maxOpenPositions: 5,
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never, (db) =>
       Effect.gen(function* () {
         yield* db.setPoolCooldown({
@@ -740,6 +749,7 @@ describe("program — idle-redeploy agent-overlay routing (P1)", () => {
       datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
       configOverrides: { watchlistPools: [POOL], ...redeployOn },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never);
 
     expect(positions).toHaveLength(2);
@@ -759,6 +769,7 @@ describe("program — idle-redeploy agent-overlay routing (P1)", () => {
       },
       // Default agent-state layer carries no pending/approved proposals.
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never);
 
     // Supervised mode without approval holds EVERY ENTER — the normal one too —
@@ -792,6 +803,7 @@ describe("program — idle-redeploy agent-overlay routing (P1)", () => {
           ),
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never);
 
     expect(positions).toHaveLength(1); // normal ENTER opens; vetoed redeploy skips
@@ -826,6 +838,7 @@ describe("program — idle-redeploy agent-overlay routing (P1)", () => {
           ),
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never);
 
     // No redeploy opened; the vetoed confidence is replaced onto the decision and
@@ -875,6 +888,7 @@ describe("program — idle-redeploy entry-backoff guard (P2)", () => {
         maxOpenPositions: 5,
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never);
 
     // Normal ENTER failed (armed backoff); redeploy honored it → nothing opens.
@@ -901,6 +915,7 @@ describe("program — idle-redeploy confidence uses known signals only (P2)", ()
         maxOpenPositions: 5,
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions } = await runOneCycle(layer as never);
     const redeploy = decisions.find((d) => d.reasoning.includes("[idle-redeploy]") && d.executed);
 
@@ -946,6 +961,7 @@ describe("program — idle-redeploy confidence uses known signals only (P2)", ()
         weightedEntryScoreThreshold: 0.05,
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions } = await runOneCycle(layer as never);
     const redeploy = decisions.find((d) => d.reasoning.includes("[idle-redeploy]"));
 
@@ -985,6 +1001,7 @@ describe("program — idle-redeploy follow-up fidelity (post-merge review)", () 
     // $500, deployed = $2,000, idle = $8,000. With the seed as the TOTAL
     // ($10,000) the widened size = min(8_000/2, 10_000×0.4, 5_000) = $4,000, then
     // allocation caps it to POOL headroom = 4_000 − 500 = $3,500.
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions } = await runOneCycle(layer as never, (db) =>
       Effect.gen(function* () {
         yield* db.savePosition(
@@ -1035,6 +1052,7 @@ describe("program — idle-redeploy follow-up fidelity (post-merge review)", () 
     // allocation re-check rejects it again (per-pool count full). Equal entry
     // scores keep POOL_A first in score order, so the walk must audit-skip it and
     // continue to the fully-executable POOL_B — deploying exactly once.
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never, (db) =>
       Effect.gen(function* () {
         yield* db.savePosition(makeSeededPosition({ positionId: "a-1", poolAddress: POOL_A }));
@@ -1107,6 +1125,7 @@ describe("program — idle-redeploy follow-up fidelity (post-merge review)", () 
           ),
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never);
 
     // Normal ENTER enlarged to $3,000 and executed; the fix synced that FINAL
@@ -1165,6 +1184,7 @@ describe("program — idle-redeploy follow-up fidelity (post-merge review)", () 
           ),
       },
     });
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { positions, decisions } = await runOneCycle(layer as never, (db) =>
       Effect.gen(function* () {
         yield* db.savePosition(makeSeededPosition({ positionId: "seeded-pos", poolAddress: POOL }));

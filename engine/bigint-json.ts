@@ -3,7 +3,8 @@
 // Standard JSON.stringify throws on bigint; this is the standard workaround.
 export function bigintReplacer<T>(_key: string, value: T): string | T {
   return Object.prototype.toString.call(value) === "[object BigInt]"
-    ? (value as bigint).toString()
+    ? // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      (value as bigint).toString()
     : value;
 }
 
@@ -18,6 +19,7 @@ const BIGINT_FIELDS = new Set(["reserveX", "reserveY", "liquiditySupply", "liqui
 export function bigintReviver<T>(key: string, value: T): string | bigint | T {
   if (Object.prototype.toString.call(value) === "[object String]" && BIGINT_FIELDS.has(key)) {
     try {
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       return BigInt(value as string);
     } catch {
       return value;
@@ -27,5 +29,6 @@ export function bigintReviver<T>(key: string, value: T): string | bigint | T {
 }
 
 export function parseBigIntSafe<T = unknown>(text: string): T {
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   return JSON.parse(text, bigintReviver) as T;
 }

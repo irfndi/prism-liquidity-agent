@@ -4,7 +4,9 @@ import { evaluateRisk } from "../engine/risk-service.js";
 import type { PoolMetrics, Position } from "../engine/types.js";
 
 const metrics: PoolMetrics = {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   pool: {} as PoolMetrics["pool"],
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   binArray: {} as PoolMetrics["binArray"],
   tvlVelocity: 0,
   feeIlRatio: 2,

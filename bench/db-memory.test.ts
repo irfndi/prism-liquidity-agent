@@ -13,6 +13,7 @@ async function run<T, E, R, E2, R2>(
   layer: Layer.Layer<R, E2, R2>,
 ): Promise<T> {
   return Effect.runPromise(
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     (Effect.provide as any)(effect, layer) as Effect.Effect<T, Error, never>,
   );
 }

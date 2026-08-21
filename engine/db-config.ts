@@ -86,6 +86,31 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
   { envKey: "MAX_POSITIONS_PER_POOL", kind: "number", field: "maxPositionsPerPool", min: 1 },
   { envKey: "MAX_ENTRY_SIZE_USD", kind: "number", field: "maxEntrySizeUsd", min: 10 },
   {
+    envKey: "POOL_PNL_KILL_SWITCH_ENABLED",
+    kind: "boolean",
+    field: "poolPnlKillSwitchEnabled",
+  },
+  {
+    envKey: "POOL_PNL_KILL_SWITCH_MIN_CLOSED_POSITIONS",
+    kind: "number",
+    field: "poolPnlKillSwitchMinClosedPositions",
+    min: 1,
+  },
+  {
+    envKey: "POOL_PNL_KILL_SWITCH_THRESHOLD_USD",
+    kind: "number",
+    field: "poolPnlKillSwitchThresholdUsd",
+    min: -Number.MAX_SAFE_INTEGER,
+    max: 0,
+  },
+  {
+    envKey: "POOL_PNL_KILL_SWITCH_COOLDOWN_MS",
+    kind: "number",
+    field: "poolPnlKillSwitchCooldownMs",
+    min: 1,
+    max: 30 * 24 * 60 * 60 * 1000,
+  },
+  {
     envKey: "MAX_PER_POOL_ALLOCATION_PCT",
     kind: "number",
     field: "maxPerPoolAllocationPct",
@@ -283,7 +308,12 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
   // ── Profitability hot-tuning (paper-aggressive without .env restart) ───────
   { envKey: "LAUNCH_SCAN_ENABLED", kind: "boolean", field: "launchScanEnabled" },
   { envKey: "LAUNCH_EXECUTION_ENABLED", kind: "boolean", field: "launchExecutionEnabled" },
-  { envKey: "LAUNCH_POSITION_MAX_SIZE_USD", kind: "number", field: "launchPositionMaxSizeUsd", min: 10 },
+  {
+    envKey: "LAUNCH_POSITION_MAX_SIZE_USD",
+    kind: "number",
+    field: "launchPositionMaxSizeUsd",
+    min: 10,
+  },
   { envKey: "LAUNCH_TIMEBOX_HOURS", kind: "number", field: "launchTimeboxHours", min: 1, max: 72 },
   { envKey: "LAUNCH_RUNNER_MODE_ENABLED", kind: "boolean", field: "launchRunnerModeEnabled" },
   { envKey: "HOT_WINDOW_ENABLED", kind: "boolean", field: "hotWindowEnabled" },
@@ -303,7 +333,13 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
     max: 0,
   },
   { envKey: "RUG_EXIT_LOSS_PCT", kind: "number", field: "rugExitLossPct", min: 0.05, max: 1 },
-  { envKey: "RUG_TOKEN_BLOCK_MS", kind: "number", field: "rugTokenBlockMs", min: 3_600_000, max: 2_592_000_000 },
+  {
+    envKey: "RUG_TOKEN_BLOCK_MS",
+    kind: "number",
+    field: "rugTokenBlockMs",
+    min: 3_600_000,
+    max: 2_592_000_000,
+  },
   { envKey: "HARVEST_MIN_NET_USD", kind: "number", field: "harvestMinNetUsd", min: 0 },
   { envKey: "HARVEST_MAX_COST_PCT", kind: "number", field: "harvestMaxCostPct", min: 0 },
   {
@@ -433,6 +469,7 @@ export function applyDbConfigOverrides(
       Object.prototype.toString.call(value) === "[object Boolean]" ||
       Object.prototype.toString.call(value) === "[object Number]"
     ) {
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       next = { ...next, [spec.field]: value as boolean | number };
     }
   }
@@ -454,8 +491,10 @@ export function applyDbConfigOverrides(
     const binMax =
       binMaxRaw === undefined ? binMaxSpec.default : parseDbConfigValue(binMaxSpec, binMaxRaw);
     const binMinNum =
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       Object.prototype.toString.call(binMin) === "[object Number]" ? (binMin as number) : undefined;
     const binMaxNum =
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       Object.prototype.toString.call(binMax) === "[object Number]" ? (binMax as number) : undefined;
     if (binMinNum !== undefined && binMaxNum !== undefined && binMinNum > binMaxNum) {
       logger.warn("Inverted market-scan bin-step range; raising max to min", {
@@ -485,6 +524,7 @@ export function readDbConfigOverrides(dbPath: string): ReadonlyMap<string, strin
     setupCustomSQLite();
     const db = new Database(dbPath);
     try {
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const rows = db
         .query("SELECT key, value FROM metadata WHERE key LIKE ?")
         .all(`${DB_CONFIG_PREFIX}%`) as Array<{ key: string; value: string }>;

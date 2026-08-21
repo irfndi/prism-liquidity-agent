@@ -33,6 +33,7 @@ describe("HermesApiTransport (OpenAI-compatible API)", () => {
         capturedPath = url.pathname;
         capturedAuth = request.headers.get("authorization") ?? "";
         if (url.pathname === "/v1/chat/completions") {
+          // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
           capturedBody = (await request.json()) as JsonRecord;
           return Response.json({
             choices: [

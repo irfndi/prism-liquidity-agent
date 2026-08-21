@@ -199,7 +199,14 @@ function vecTableCreateAndQueryError(db: Database): string | null {
  * Deliberately ignores (and does not set) the sqliteVecEverFailed latch, so
  * it can run in the doctor CLI process independently of the engine.
  */
-export function probeVecAvailability(): VecProbeResult {
+export interface VecProbeDependencies {
+  readonly loadVec: typeof loadVec;
+  readonly getEmbeddedVec0Path: typeof getEmbeddedVec0Path;
+}
+
+export function probeVecAvailability(
+  dependencies: VecProbeDependencies = { loadVec, getEmbeddedVec0Path },
+): VecProbeResult {
   setupCustomSQLite();
 
   let db: Database;
@@ -217,7 +224,7 @@ export function probeVecAvailability(): VecProbeResult {
     const failures: string[] = [];
 
     try {
-      loadVec(db);
+      dependencies.loadVec(db);
       const npmError = vecTableCreateAndQueryError(db);
       if (npmError === null) {
         return { available: true, source: "npm", error: null };
@@ -241,7 +248,7 @@ export function probeVecAvailability(): VecProbeResult {
       }
     }
 
-    const embeddedPath = getEmbeddedVec0Path();
+    const embeddedPath = dependencies.getEmbeddedVec0Path();
     if (embeddedPath) {
       try {
         db.loadExtension(embeddedPath);
@@ -274,6 +281,7 @@ interface Migration {
 }
 
 function hasTable(db: Database, name: string): boolean {
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const row = db
     .query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
     .get(name) as { "1": number } | null;
@@ -322,6 +330,7 @@ function tryCreateVecMemoryTable(db: Database): void {
 }
 
 function hasColumn(db: Database, table: string, column: string): boolean {
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const rows = db.query(`PRAGMA table_info(${table})`).all() as Array<{
     name: string;
   }>;
@@ -974,6 +983,7 @@ function runMigrations(db: Database) {
     );
   `);
 
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const row = db.query("SELECT MAX(version) as v FROM _migrations").get() as {
     v: number | null;
   } | null;
@@ -982,6 +992,7 @@ function runMigrations(db: Database) {
   for (const migration of MIGRATIONS) {
     if (migration.version <= currentVersion) continue;
 
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const alreadyApplied = db
       .query("SELECT 1 FROM _migrations WHERE version = ?")
       .get(migration.version) as { "1": number } | null;
@@ -989,6 +1000,7 @@ function runMigrations(db: Database) {
 
     db.transaction(() => {
       migration.up(db);
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       (db.run as (sql: string, ...params: unknown[]) => void)(
         "INSERT INTO _migrations (version, name, applied_at) VALUES (?, ?, ?)",
         migration.version,

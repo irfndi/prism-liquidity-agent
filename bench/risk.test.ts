@@ -23,6 +23,7 @@ function makeContext(
   }> = {},
 ) {
   return {
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     openPositions: [] as ReadonlyArray<Position>,
     portfolioValueUsd: 10_000,
     recentPnlUsd: 0,

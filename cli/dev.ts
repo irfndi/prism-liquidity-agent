@@ -2,18 +2,10 @@ import { Command } from "commander";
 import { pingInstall, requireRegistered, type PrismCredentials } from "./api.js";
 import { acquireLock, releaseLock, LOCKFILE_PATH } from "./lockfile.js";
 import { runEngine } from "../engine/run-engine.js";
+import { reportDevStartTelemetry } from "./dev-telemetry.js";
 
 interface DevCommandOptions {
   exitLive: boolean;
-}
-
-// Telemetry must never block agent startup — degrade to a warning when the
-// API is unreachable so offline work keeps running.
-export async function reportDevStartTelemetry(userId: string): Promise<void> {
-  if (!(await pingInstall("dev_start", { userId }))) {
-    console.warn("⚠️  Prism telemetry is unavailable; continuing without telemetry.");
-    console.warn("Run 'prism doctor' to diagnose the account and API connection.");
-  }
 }
 
 export const devCommand = new Command("dev")

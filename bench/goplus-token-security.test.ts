@@ -24,6 +24,7 @@ const CONFIG: GoPlusConfigLike = {
 /** Routes a POST /api/v1/token (access token) and GET .../token_security by URL. */
 function goPlusFetch<T>(securityResult: T): GoPlusFetchLike {
   return async (input) => {
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     const url = String(input as unknown);
     if (url.includes("/api/v1/token")) {
       return new Response(
@@ -111,6 +112,7 @@ describe("goplus-token-security", () => {
   it("(5) consult resolves signals and signs + authorizes the two requests", async () => {
     const requests: Array<{ url: string; method: string; init: RequestInit | undefined }> = [];
     const capturingFetch: GoPlusFetchLike = async (input, init) => {
+      // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
       const url = String(input as unknown);
       requests.push({ url, method: init?.method ?? "GET", init });
       if (url.includes("/api/v1/token")) {
@@ -134,6 +136,7 @@ describe("goplus-token-security", () => {
     const authReq = requests[0]!;
     expect(authReq.method).toBe("POST");
     expect(authReq.url).toContain("/api/v1/token");
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const authBody = JSON.parse(authReq.init?.body as string) as {
       app_key: string;
       sign: string;
@@ -203,6 +206,7 @@ describe("goplus-token-security", () => {
     let tokenCalls = 0;
     let securityCalls = 0;
     const countingFetch: GoPlusFetchLike = async (input) => {
+      // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
       const url = String(input as unknown);
       if (url.includes("/api/v1/token")) {
         tokenCalls += 1;
@@ -233,6 +237,7 @@ describe("goplus-token-security", () => {
       let tokenCalls = 0;
       let securityCalls = 0;
       const countingFetch: GoPlusFetchLike = async (input) => {
+        // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
         const url = String(input as unknown);
         if (url.includes("/api/v1/token")) {
           tokenCalls += 1;

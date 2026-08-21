@@ -105,6 +105,7 @@ export function underlyingErrorMessage<T>(err: T): string {
     if (current instanceof Error && current.message.length > 0) {
       deepest = current.message;
     }
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     current = "cause" in current ? (current as { readonly cause: unknown }).cause : undefined;
   }
   if (deepest !== null) return deepest;

@@ -5,6 +5,7 @@ import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 
 function run<T, E, R, E2, R2>(effect: Effect.Effect<T, E, R>, layer: Layer.Layer<R, E2, R2>): T {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return Effect.runSync((Effect.provide as any)(effect, layer) as Effect.Effect<T, Error, never>);
 }
 

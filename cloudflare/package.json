@@ -2,10 +2,14 @@
   "name": "@prism-liquidity-agent/cloudflare",
   "version": "1.0.0",
   "description": "Cloudflare Workers for Prism DLMM platform",
+  "packageManager": "bun@1.4.0",
   "workspaces": [
     "infra"
   ],
   "type": "module",
+  "engines": {
+    "bun": ">=1.4.0"
+  },
   "scripts": {
     "dev": "bun run --cwd infra dev",
     "build:workers": "esbuild workers/api/index.ts --bundle --format=esm --target=es2022 --conditions=workerd,worker,browser --minify --outfile=dist/api/index.mjs && esbuild workers/telegram-bot/index.ts --bundle --format=esm --target=es2022 --conditions=workerd,worker,browser --minify --outfile=dist/telegram-bot/index.mjs",

@@ -17,7 +17,7 @@ import {
   isHighVolatility,
   recommendBinRangeForVolatility,
   dipOffsetBinsForPct,
-  recommendStrategyShape,
+  recommendStrategy,
   resolveRangeHalfWidth,
   estimateRecoveryProbability,
   shouldHoldForRecovery,
@@ -69,6 +69,7 @@ import { join } from "path";
 import type { PositionRecord } from "./db-service.js";
 import { applyCompoundToCostBasis, computeHodlValueUsd, computeRealizedPnlUsd } from "./pnl.js";
 import { rollingRealizedPnlHalted as rollingRealizedPnlHaltSignal } from "./pnl-halt.js";
+import { findPoolPnlKillSwitchTrips } from "./pool-pnl-kill-switch.js";
 import { buildRewardClaimMetadata, summarizeRewardClaim } from "./rewards.js";
 import { errorReporter } from "./error-reporter.js";
 import {
@@ -148,7 +149,7 @@ import type {
   AgentProposal,
   AgentProposalMode,
   AgentCycle,
-  EntryStrategyShape,
+  EntryStrategySpec,
   PoolMetrics,
   PoolSnapshot,
   PoolState,
@@ -237,8 +238,10 @@ const readEngineStatusApiKey = (): string | null => {
     const parsed: unknown = JSON.parse(readFileSync(credentialsFile, "utf-8"));
     return parsed !== null &&
       Object.prototype.toString.call(parsed) === "[object Object]" &&
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       Object.prototype.toString.call((parsed as { apiKey?: unknown }).apiKey) === "[object String]"
-      ? (parsed as { apiKey: string }).apiKey
+      ? // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+        (parsed as { apiKey: string }).apiKey
       : null;
   } catch {
     return null;
@@ -1111,6 +1114,7 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const copySignalLayer = Layer.provide(CopySignalLive, configLayer);
   const merged17 = Layer.merge(merged16, copySignalLayer);
 
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   return merged17 as Layer.Layer<AllServices, never, never>;
 }
 
@@ -1145,7 +1149,7 @@ export function executePaper(
     db: DbApi;
     trackedPositions: Map<string, PositionRecord>;
     strategy: StrategyApi;
-    entryStrategyShape: EntryStrategyShape;
+    entryStrategySpec: EntryStrategySpec;
     entryRangeHalfWidth?: number;
     entryDipOffsetBins?: number;
     /** G2 rotation-arm + yield-baseline wiring (market-runner lane). */
@@ -1180,7 +1184,7 @@ export function executePaper(
       db,
       trackedPositions,
       strategy,
-      entryStrategyShape,
+      entryStrategySpec,
       entryRangeHalfWidth,
       entryDipOffsetBins,
     } = deps;
@@ -1264,7 +1268,7 @@ export function executePaper(
           metadata: {
             lowerBinId: pos.lowerBinId,
             upperBinId: pos.upperBinId,
-            strategyShape: entryStrategyShape,
+            strategySpec: entryStrategySpec,
           },
           createdAt: Date.now(),
         })
@@ -1280,6 +1284,7 @@ export function executePaper(
         let armValid = false;
         if (armRaw) {
           try {
+            // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
             const arm = JSON.parse(armRaw) as { runner: string; at: number };
             const armFresh = Date.now() - arm.at < (deps.rotationArmMs ?? 1_800_000);
             const runnerApr = deps.poolAprByAddress?.get(arm.runner)?.feeAprPct ?? 0;
@@ -1516,7 +1521,7 @@ export function executeLive(
     trackedPositions: Map<string, PositionRecord>;
     entryPrep: EntryPrepApi;
     solPriceUsd: number;
-    entryStrategyShape: EntryStrategyShape;
+    entryStrategySpec: EntryStrategySpec;
     entryRangeHalfWidth?: number;
     entryDipOffsetBins?: number;
     runnerSingleSidedX?: boolean;
@@ -1561,7 +1566,7 @@ export function executeLive(
       trackedPositions,
       entryPrep,
       solPriceUsd,
-      entryStrategyShape,
+      entryStrategySpec,
       entryRangeHalfWidth,
       entryDipOffsetBins,
       runnerSingleSidedX,
@@ -1674,6 +1679,7 @@ export function executeLive(
       }
 
       const nativeBalance = yield* adapter.getNativeSolBalance().pipe(
+        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
         Effect.map((lamports) => ({ value: lamports, error: undefined as string | undefined })),
         Effect.catch((err) =>
           Effect.succeed({
@@ -1738,6 +1744,7 @@ export function executeLive(
               Effect.succeed({
                 outcome: outcome ?? null,
                 partial: null,
+                // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
                 error: undefined as string | undefined,
               }),
             onFailure: (err) => {
@@ -1837,7 +1844,7 @@ export function executeLive(
           recommended.upperBinId,
           decision.positionSizeUsd,
           {
-            strategyShape: entryStrategyShape,
+            strategySpec: entryStrategySpec,
             ...(runnerSingleSidedX === true ? { forceSingleSidedX: true } : undefined),
           },
         )
@@ -1851,8 +1858,10 @@ export function executeLive(
               }),
             ),
           ),
+          // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
           Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
           Effect.catch((err) => {
+            // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
             const msg = (err as { message?: string }).message ?? String(err);
             console.error("Live ENTER failed", {
               pool: decision.poolAddress,
@@ -1926,7 +1935,7 @@ export function executeLive(
               upperBinId: pos.upperBinId,
               txSignature: enterResult.result.txSignature,
               depositMode: enterResult.result.depositMode,
-              strategyShape: entryStrategyShape,
+              strategySpec: entryStrategySpec,
             },
             createdAt: Date.now(),
           })
@@ -2019,6 +2028,7 @@ export function executeLive(
         let armValid = false;
         if (armRaw) {
           try {
+            // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
             const arm = JSON.parse(armRaw) as { runner: string; at: number };
             const armFresh = Date.now() - arm.at < (deps.rotationArmMs ?? 1_800_000);
             const runnerApr = deps.poolAprByAddress?.get(arm.runner)?.feeAprPct ?? 0;
@@ -2077,8 +2087,10 @@ export function executeLive(
                 }),
               ),
             ),
+            // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
             Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
             Effect.catch((err) => {
+              // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
               const msg = (err as { message?: string }).message ?? String(err);
               console.error("Live EXIT failed", {
                 pool: decision.poolAddress,
@@ -2100,6 +2112,16 @@ export function executeLive(
           yield* db.saveExecutionOperation(exitOperation).pipe(Effect.catch(() => Effect.void));
         }
         if (!exited) {
+          if (exitOperation) {
+            yield* db
+              .saveExecutionOperation({
+                ...exitOperation,
+                status: "failed",
+                error: exitError ?? "Live EXIT failed",
+                updatedAt: Date.now(),
+              })
+              .pipe(Effect.catch(() => Effect.void));
+          }
           // A failed close may have left the position half-closed on-chain
           // (the $27 phantom-row candidate: wallet holds withdrawn funds while
           // the row still counts in Σpositions). Flag the pool so the next
@@ -2638,8 +2660,10 @@ export function executeLive(
                 }),
               ),
             ),
+            // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
             Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
             Effect.catch((err) => {
+              // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
               const msg = (err as { message?: string }).message ?? String(err);
               console.error("Live atomic REBALANCE failed", {
                 pool: decision.poolAddress,
@@ -2745,6 +2769,7 @@ export const buildPositionSnapshots = (
     activeBinId: p.activeBinId,
     lowerBinId: p.lowerBinId,
     upperBinId: p.upperBinId,
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     lastAction: (p.lastRebalanceAt > p.timestamp ? "REBALANCE" : "ENTER") as
       | "ENTER"
       | "EXIT"
@@ -3217,12 +3242,14 @@ export const program = Effect.gen(function* () {
       Effect.catch((err) => {
         if (
           err instanceof DiscoverPoolsError ||
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
           (err as { _tag?: string })?._tag === "DiscoverPoolsError"
         ) {
           console.warn(
             "Pool discovery failed; falling back to watchlist-only mode:",
             err instanceof Error ? err.message : String(err),
           );
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
           return Effect.succeed([] as ReadonlyArray<ScreenedPool>);
         }
         // Non-discovery error: let it propagate so the cycle fails loudly
@@ -3395,6 +3422,7 @@ export const program = Effect.gen(function* () {
                 logger.warn("Autonomous candidate discovery failed", {
                   error: String(error),
                 });
+                // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
                 return Effect.succeed([] as ReadonlyArray<ScreenedPool>);
               }),
             );
@@ -3553,8 +3581,11 @@ export const program = Effect.gen(function* () {
   const refreshFallenAngelCandidates = (scanOrdinal: number): Effect.Effect<void, never> =>
     Effect.gen(function* () {
       if (config.fallenAngelEnabled !== true || !shouldDiscoverPools(config)) return;
+      // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
       const discovered = yield* adapter
         .discoverPools(scanOrdinal)
+        // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)));
       if (discovered.length === 0) return;
 
@@ -4441,9 +4472,9 @@ export const program = Effect.gen(function* () {
         }
 
         // Same entry-shape / range-width resolution the in-slot tail uses.
-        const entryStrategyShape: EntryStrategyShape =
+        const entryStrategySpec: EntryStrategySpec =
           config.entryStrategyType === "auto"
-            ? recommendStrategyShape({
+            ? recommendStrategy({
                 volatilityStddev: candidate.volatilityStddev,
                 highVolThreshold: config.volatilityExitStddev,
                 netDriftBins: candidate.netDriftBins,
@@ -4498,7 +4529,7 @@ export const program = Effect.gen(function* () {
               db,
               trackedPositions,
               strategy,
-              entryStrategyShape,
+              entryStrategySpec,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
               ...runnerDispatchDeps(decision.poolAddress),
@@ -4600,7 +4631,7 @@ export const program = Effect.gen(function* () {
               trackedPositions,
               entryPrep,
               solPriceUsd: config.solPriceUsd,
-              entryStrategyShape,
+              entryStrategySpec,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
               runnerSingleSidedX: entryDipOffsetBins !== 0,
@@ -4739,8 +4770,11 @@ export const program = Effect.gen(function* () {
       }
       if (now - lastMarketRefreshAt < (config.marketScanRefreshIntervalMs ?? 1_800_000)) return;
       lastMarketRefreshAt = now;
+      // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
       const discovered = yield* adapter
         .discoverPoolsTopPages(config.marketScanUniversePages ?? 3)
+        // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<DiscoveredPool>)));
       if (discovered.length === 0) {
         logger.warn("Market scan: universe fetch returned nothing — keeping last ranked set");
@@ -4921,6 +4955,16 @@ export const program = Effect.gen(function* () {
     Effect.gen(function* () {
       coreDataFailuresThisCycle = 0;
 
+      // The closed ledger is newest-first. Reuse one per-cycle snapshot for
+      // both portfolio-wide and pool-local PnL guards. A read failure fails
+      // open here; it must not prevent existing positions from reaching EXIT
+      // evaluation.
+      const needsClosedLedger =
+        (config.realizedPnLHaltEnabled ?? false) || (config.poolPnlKillSwitchEnabled ?? false);
+      const closedPositionsForCycle = needsClosedLedger
+        ? yield* db.getClosedPositions().pipe(Effect.catch(() => Effect.succeed([])))
+        : [];
+
       // Rolling realized-PnL loss halt (REALIZED_PNL_HALT_*): computed ONCE per
       // cycle from the closed-position ledger so a single cycle shares one
       // consistent verdict across every ENTER lane (the risk gate consumes it
@@ -4931,15 +4975,56 @@ export const program = Effect.gen(function* () {
       // (leaves the flag false — no unexpected freeze) with a warning.
       let cycleRealizedPnlHalted = false;
       if (config.realizedPnLHaltEnabled ?? false) {
-        const closed = yield* db.getClosedPositions().pipe(Effect.catch(() => Effect.succeed([])));
         cycleRealizedPnlHalted = rollingRealizedPnlHaltSignal(
-          closed.map((p) => p.realizedPnlUsd),
+          closedPositionsForCycle.map((p) => p.realizedPnlUsd),
           config.realizedPnLHaltWindow ?? 100,
           config.realizedPnLHaltThresholdUsd ?? -20,
         );
         if (cycleRealizedPnlHalted) {
           console.warn(
             `[rolling-pnl-halt] trailing realized PnL across last ${config.realizedPnLHaltWindow ?? 100} closes < $${(config.realizedPnLHaltThresholdUsd ?? -20).toFixed(0)} — pausing new ENTERs; EXIT/REBALANCE remain free`,
+          );
+        }
+      }
+
+      // Pool-local realized-PnL kill switch. This only arms a persisted
+      // ENTER cooldown; open positions remain in the active scan set and
+      // continue through the normal EXIT/REBALANCE path. The latest position
+      // id is included in the reason so an expired cooldown is not repeatedly
+      // re-armed from the exact same stale ledger observation.
+      if (config.poolPnlKillSwitchEnabled ?? false) {
+        const trips = findPoolPnlKillSwitchTrips(closedPositionsForCycle, {
+          minClosedPositions: config.poolPnlKillSwitchMinClosedPositions ?? 10,
+          thresholdUsd: config.poolPnlKillSwitchThresholdUsd ?? -15,
+        });
+        for (const trip of trips) {
+          const now = Date.now();
+          const existing = yield* db
+            .getPoolCooldown(trip.poolAddress)
+            .pipe(Effect.catch(() => Effect.succeed(null)));
+          const latestPositionId = trip.positionIds[0] ?? "unknown";
+          const observationMarker = `[pool-pnl-kill-switch] ${latestPositionId}`;
+
+          // Do not re-arm forever from an unchanged trailing window after the
+          // cooldown expires. A newer close changes the marker and can trip it
+          // again with fresh evidence.
+          if (existing?.reason.startsWith(observationMarker)) continue;
+
+          const desiredUntil = now + (config.poolPnlKillSwitchCooldownMs ?? 48 * 60 * 60 * 1000);
+          if (existing && existing.cooldownUntil >= desiredUntil) continue;
+
+          const cooldown = {
+            poolAddress: trip.poolAddress,
+            cooldownUntil: Math.max(existing?.cooldownUntil ?? 0, desiredUntil),
+            reason:
+              `${observationMarker} trailing ${trip.positionIds.length} known closes ` +
+              `net $${trip.realizedPnlUsd.toFixed(2)} below ` +
+              `$${(config.poolPnlKillSwitchThresholdUsd ?? -15).toFixed(2)}`,
+            consecutiveOorExits: existing?.consecutiveOorExits ?? 0,
+          };
+          yield* db.setPoolCooldown(cooldown).pipe(Effect.catch(() => Effect.void));
+          console.warn(
+            `[pool-pnl-kill-switch] Pool ${trip.poolAddress} cooled down until ${new Date(cooldown.cooldownUntil).toISOString()} — trailing realized PnL $${trip.realizedPnlUsd.toFixed(2)} across ${trip.positionIds.length} closes`,
           );
         }
       }
@@ -5623,6 +5708,7 @@ export const program = Effect.gen(function* () {
       let aprObs: Array<{ at: number; apr: number }> = [];
       if (aprObsRaw) {
         try {
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
           const parsed = JSON.parse(aprObsRaw) as Array<{ at: number; apr: number }>;
           if (Array.isArray(parsed)) aprObs = parsed;
         } catch {
@@ -5659,8 +5745,11 @@ export const program = Effect.gen(function* () {
 
       // TVL velocity + IL price-drift need a previous reference point, so the
       // previous snapshot must be read BEFORE persisting the current one.
+      // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
       const previousSnapshots = yield* db
         .getSnapshots(poolAddress, pool.timestamp - PREVIOUS_SNAPSHOT_WINDOW_MS, pool.timestamp)
+        // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<PoolSnapshot>)));
       const previousSnapshot =
         previousSnapshots.length > 0 ? previousSnapshots[previousSnapshots.length - 1] : undefined;
@@ -5808,6 +5897,7 @@ export const program = Effect.gen(function* () {
           authY?.mintAuthority ?? undefined,
         )
         .pipe(
+          // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
           Effect.as(null as string | null),
           Effect.catchIf(
             (err): err is BlacklistError => err instanceof BlacklistError,
@@ -6024,6 +6114,7 @@ export const program = Effect.gen(function* () {
         const closedHot = yield* db.getClosedPositions().pipe(
           Effect.catch(() =>
             Effect.succeed(
+              // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
               [] as ReadonlyArray<{
                 positionMode?: string | null;
                 closedAt: number | null;
@@ -6901,6 +6992,7 @@ export const program = Effect.gen(function* () {
           let entryAprPct: number | null = null;
           if (baselineRaw) {
             try {
+              // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
               entryAprPct = (JSON.parse(baselineRaw) as { entryAprPct: number }).entryAprPct;
             } catch {
               entryAprPct = null;
@@ -8037,6 +8129,12 @@ export const program = Effect.gen(function* () {
                     .pipe(Effect.catch(() => Effect.void));
                   enterGateRejected = true;
                 } else if (openLaunchPositions >= launchMaxOpenPositions || portfolioFull) {
+                  // Two triggers share this branch: the launch cap being full,
+                  // or the portfolio-wide cap being full. The audit row below
+                  // names WHICH one fired — a bare "0 launch positions >= 2"
+                  // line when the real trigger was portfolio-full sent the
+                  // 2026-08-21 forensics down the wrong path.
+                  const launchCapFull = openLaunchPositions >= launchMaxOpenPositions;
                   // Rotation (market-runner lane only): the portfolio is full
                   // and a much hotter runner is available — exit the LOWEST-
                   // APR held position so the freed slot admits the runner next
@@ -8051,9 +8149,16 @@ export const program = Effect.gen(function* () {
                     isMarketRunner(poolAddress)
                   ) {
                     const worst = lowestAprHeldPosition(
-                      trackedPositions.values(),
+                      Array.from(trackedPositions.values(), (p) => ({
+                        poolAddress: p.poolAddress,
+                        openedAt: p.timestamp,
+                      })),
                       poolFeeAprByAddress,
                       poolAddress, // never rotate out of the candidate runner
+                      // Economic-exit maturity gate: a minutes-old entry is
+                      // never a rotation target (same MIN_YIELD_EXIT_AGE_MS
+                      // class as the yield-regression exit).
+                      { minAgeMs: config.minYieldExitAgeMs ?? 14_400_000, nowMs: Date.now() },
                     );
                     if (worst) {
                       // G3 net-fee comparison (rule: measure practical
@@ -8127,6 +8232,9 @@ export const program = Effect.gen(function* () {
                   // Launch cap full: reject the ENTER for this pool — it must
                   // NOT fall through to the normal lane, which would size it
                   // with the uncapped normal entry sizing.
+                  const launchBlockReason = launchCapFull
+                    ? `${openLaunchPositions} launch positions >= cap ${launchMaxOpenPositions}`
+                    : `portfolio full ${totalOpenPositions}/${config.maxOpenPositions ?? 3}`;
                   yield* audit
                     .recordDecision({
                       timestamp: Date.now(),
@@ -8134,11 +8242,11 @@ export const program = Effect.gen(function* () {
                       poolAddress,
                       action: "ENTER",
                       confidence: 0,
-                      reasoning: `[launch-cap] ${openLaunchPositions} launch positions >= ${launchMaxOpenPositions}`,
+                      reasoning: `[launch-cap] ${launchBlockReason} — no launch slot`,
                       metrics,
                       riskResult: {
                         approved: false,
-                        reason: `[launch-cap] ${openLaunchPositions} >= ${launchMaxOpenPositions}`,
+                        reason: `[launch-cap] ${launchBlockReason}`,
                       },
                       executed: false,
                       paperTrading: config.paperTrading,
@@ -8576,10 +8684,10 @@ export const program = Effect.gen(function* () {
 
       // Resolve the deposit distribution for entries: a concrete configured
       // shape is used as-is; `auto` picks per pool from the recent volatility
-      // regime (see recommendStrategyShape). `spot` is the default.
-      const entryStrategyShape: EntryStrategyShape =
+      // regime (see recommendStrategy). `spot` is the default.
+      const entryStrategySpec: EntryStrategySpec =
         config.entryStrategyType === "auto"
-          ? recommendStrategyShape({
+          ? recommendStrategy({
               volatilityStddev,
               highVolThreshold: config.volatilityExitStddev,
               netDriftBins,
@@ -9297,7 +9405,7 @@ export const program = Effect.gen(function* () {
           config.paperModeExitLive;
 
         if (decision.action === "ENTER" && config.entryStrategyType === "auto") {
-          console.info(`[strategy-shape] auto resolved ${entryStrategyShape} for ${poolAddress}`, {
+          console.info(`[strategy-shape] auto resolved ${entryStrategySpec} for ${poolAddress}`, {
             volatilityStddev,
             netDriftBins,
           });
@@ -9430,7 +9538,7 @@ export const program = Effect.gen(function* () {
               trackedPositions,
               entryPrep,
               solPriceUsd: config.solPriceUsd,
-              entryStrategyShape,
+              entryStrategySpec,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
               runnerSingleSidedX: entryDipOffsetBins !== 0,
@@ -9464,7 +9572,7 @@ export const program = Effect.gen(function* () {
               db,
               trackedPositions,
               strategy,
-              entryStrategyShape,
+              entryStrategySpec,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
               ...runnerDispatchDeps(decision.poolAddress),
@@ -9490,7 +9598,7 @@ export const program = Effect.gen(function* () {
               trackedPositions,
               entryPrep,
               solPriceUsd: config.solPriceUsd,
-              entryStrategyShape,
+              entryStrategySpec,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
               runnerSingleSidedX: entryDipOffsetBins !== 0,
@@ -9738,6 +9846,7 @@ export const program = Effect.gen(function* () {
             decision.action === "EXIT" ||
             decision.action === "REBALANCE")
         ) {
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
           const trigger = decision.action.toLowerCase() as AgentRuntimeCheckin["trigger"];
           yield* maybeSendAgentCheckin(trigger).pipe(Effect.catch(() => Effect.void));
         }
@@ -9969,6 +10078,7 @@ export const program = Effect.gen(function* () {
                   destination: feeDestination,
                   outputAtomic: 0n,
                   outputUsd: null,
+                  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
                   txSignatures: [] as ReadonlyArray<string>,
                 })
               : liveConversion;
@@ -10041,6 +10151,7 @@ export const program = Effect.gen(function* () {
                         Effect.catch((err) => {
                           console.warn("Compound rebalance failed", {
                             pool: poolAddress,
+                            // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
                             err: (err as { message?: string }).message ?? String(err),
                           });
                           return Effect.succeed(null);

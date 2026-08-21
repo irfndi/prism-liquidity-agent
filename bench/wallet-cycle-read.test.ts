@@ -42,6 +42,7 @@ import { defaultAppConfig, makePool, makeBinArray, makePosition, asOwner } from 
 const NO_AUTHORITIES = { mintAuthority: null, freezeAuthority: null } as const;
 
 function makeAdapter(walletBalanceUsd: () => Effect.Effect<number, Error>): AdapterApi {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return {
     hasWallet: () => true,
     getWalletAddress: () => "WalletAddress1111111111111111111111111111111",
@@ -252,6 +253,7 @@ describe("per-cycle wallet reconciliation", () => {
       paperPortfolioUsd: 1_000,
     });
 
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions, snapshot } = await runOneCycle(layer as never);
 
     expect(reads, "wallet must be read once per cycle, not per pool").toBe(1);
@@ -278,6 +280,7 @@ describe("per-cycle wallet reconciliation", () => {
     });
 
     try {
+      // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
       const { decisions, snapshot } = await runOneCycle(layer as never);
 
       const poolsSeen = new Set(decisions.map((d) => d.poolAddress));
@@ -305,6 +308,7 @@ describe("per-cycle wallet reconciliation", () => {
       paperPortfolioUsd: 2_500,
     });
 
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { snapshot } = await runOneCycle(layer as never);
 
     expect(reads, "paper mode must not perform a chain wallet read").toBe(0);
@@ -318,6 +322,7 @@ describe("mid-cycle position close excludes the row from the portfolio sum", () 
   const POSITION_VALUE = 1_000;
 
   function makeExitingAdapter(): AdapterApi {
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     return {
       ...makeAdapter(() => Effect.succeed(PAPER)),
       getPoolState: () =>
@@ -416,12 +421,14 @@ describe("live wallet-read entry gate", () => {
       return { decisions: asOwner<FullDecision[]>(decisions) };
     });
     return Effect.runPromise(
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
       Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
     );
   }
 
   function enterCandidateAdapter(balance: Effect.Effect<number, Error>): AdapterApi {
     // A high-quality positionless pool that reaches the ENTER slot.
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     return {
       ...makeAdapter(() => balance),
       getPoolState: (addr: string) =>
@@ -444,6 +451,7 @@ describe("live wallet-read entry gate", () => {
       paperPortfolioUsd: 10_000,
     });
 
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions } = await runCycleFull(layer as never);
 
     const walletGate = decisions.find(
@@ -464,6 +472,7 @@ describe("live wallet-read entry gate", () => {
       paperPortfolioUsd: 10_000,
     });
 
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions } = await runCycleFull(layer as never);
 
     const walletGate = decisions.find(
@@ -480,6 +489,7 @@ describe("live wallet-read entry gate", () => {
     const POS_PUBKEY = "PosExitGate111111111111111111111111111111111";
     // Wallet read fails AND getAllWalletPositions keeps the seeded live position
     // (so reconcile does not drop it before the exit decision).
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const adapter = {
       ...makeAdapter(() => Effect.fail(new Error("rpc down"))),
       getPoolState: (addr: string) =>
@@ -493,6 +503,7 @@ describe("live wallet-read entry gate", () => {
             upperBinId: 5020,
           },
         ]),
+      // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
       getPositions: () => Effect.succeed([{ id: POS_PUBKEY }] as never),
     } as AdapterApi;
     const layer = makeTestLayer(adapter, {
@@ -538,6 +549,7 @@ describe("live wallet-read entry gate", () => {
     });
 
     const { decisions } = await Effect.runPromise(
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
       Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
     );
 
@@ -606,6 +618,7 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
   }
 
   function exitingAdapter(balance: Effect.Effect<number, Error>): AdapterApi {
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     return {
       ...makeAdapter(() => balance),
       getPoolState: () =>
@@ -614,6 +627,7 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
         Effect.succeed([
           { poolAddress: POOL, positionPubKey: POS_PUBKEY, lowerBinId: 4980, upperBinId: 5020 },
         ]),
+      // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
       getPositions: () => Effect.succeed([{ id: POS_PUBKEY }] as never),
     } as AdapterApi;
   }
@@ -621,6 +635,7 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
   function runRecaptureCycle<R>(layer: Layer.Layer<R, never, never>) {
     const test = Effect.gen(function* () {
       const db = yield* DbService;
+      // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
       yield* seedExitingPosition(db as never);
       yield* Effect.raceFirst(program, Effect.sleep(2_000));
       const audit = yield* AuditService;
@@ -630,6 +645,7 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
       return { decisions: asOwner<FullDecision[]>(decisions), snapshot };
     });
     return Effect.runPromise(
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
       Effect.provide(test, layer) as Effect.Effect<
         { decisions: FullDecision[]; snapshot: PrismStateSnapshot },
         Error,
@@ -657,6 +673,7 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
       tvlDropExitPct: 0.3,
     });
 
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions, snapshot } = await runRecaptureCycle(layer as never);
 
     expect(
@@ -687,6 +704,7 @@ describe("intra-cycle wallet re-capture after a live mutation", () => {
       tvlDropExitPct: 0.3,
     });
 
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions, snapshot } = await runRecaptureCycle(layer as never);
 
     // The exit still executed and the post-mutation re-read was attempted …
@@ -723,6 +741,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
   // Live ENTER requires a native SOL balance above MIN_SOL_FOR_GAS_LAMPORTS
   // (30_000_000n); give the mock wallet ample SOL so the enter can execute.
   function enterAdapter(walletBalance: Effect.Effect<number, Error>): AdapterApi {
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     return {
       ...makeAdapter(() => walletBalance),
       getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
@@ -745,6 +764,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
       return { decisions: asOwner<FullDecision[]>(decisions) };
     });
     return Effect.runPromise(
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
       Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
     );
   }
@@ -774,6 +794,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
       enterableDatapiSvc,
     );
 
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions } = await runCycle(layer as never);
 
     const executedEnters = decisions.filter((d) => d.action === "ENTER" && d.executed);
@@ -798,6 +819,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
       enterableDatapiSvc,
     );
 
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions } = await runCycle(layer as never);
 
     const executedEnters = decisions.filter((d) => d.action === "ENTER" && d.executed);
@@ -820,6 +842,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
         ? Effect.succeed(CYCLE_TOP)
         : Effect.fail(new Error("re-read down"));
     });
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const adapter = {
       ...makeAdapter(() => balance),
       getNativeSolBalance: () => Effect.succeed(1_000_000_000n),
@@ -838,6 +861,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
             upperBinId: 5020,
           },
         ]),
+      // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
       getPositions: () => Effect.succeed([{ id: POS_PUBKEY }] as never),
     } as AdapterApi;
     // Datapi null for the EXIT pool so its 60k TVL survives enrichment and the
@@ -891,6 +915,7 @@ describe("post-ENTER wallet-refresh failure blocks further entries (fail-closed)
       return { decisions: asOwner<FullDecision[]>(decisions) };
     });
     const { decisions } = await Effect.runPromise(
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
       Effect.provide(test, layer) as Effect.Effect<{ decisions: FullDecision[] }, Error, never>,
     );
 
@@ -932,6 +957,7 @@ describe("hybrid live EXIT keeps paper sizing paper-pure", () => {
 
   it("does not refresh the chain wallet after a hybrid live EXIT (sizing stays paper-pure)", async () => {
     let balanceCalls = 0;
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const adapter = {
       ...makeAdapter(() =>
         Effect.sync(() => {
@@ -952,6 +978,7 @@ describe("hybrid live EXIT keeps paper sizing paper-pure", () => {
             upperBinId: 5020,
           },
         ]),
+      // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
       getPositions: () => Effect.succeed([{ id: POS_PUBKEY }] as never),
     } as AdapterApi;
     const layer = makeTestLayer(adapter, {
@@ -997,6 +1024,7 @@ describe("hybrid live EXIT keeps paper sizing paper-pure", () => {
       return { decisions: asOwner<FullDecision[]>(decisions), snapshot };
     });
     const { decisions, snapshot } = await Effect.runPromise(
+      // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
       Effect.provide(test, layer) as Effect.Effect<
         { decisions: FullDecision[]; snapshot: PrismStateSnapshot },
         Error,

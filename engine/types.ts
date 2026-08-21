@@ -291,14 +291,14 @@ export type ActionType = "HOLD" | "REBALANCE" | "EXIT" | "ENTER";
  * - `bidask` — weighted toward the range edges (StrategyType.BidAsk); suits
  *   trending / one-sided-leaning deployment.
  */
-export type EntryStrategyShape = "spot" | "curve" | "bidask";
+export type EntryStrategySpec = "spot" | "curve" | "bidask";
 
 /**
  * ENTRY_STRATEGY_TYPE config value. `auto` resolves per pool from recent
- * volatility/trend metrics in the decision loop (see recommendStrategyShape);
+ * volatility/trend metrics in the decision loop (see recommendStrategy);
  * anything else is used as-is. Default: `spot`.
  */
-export type EntryStrategyType = EntryStrategyShape | "auto";
+export type EntryStrategyType = EntryStrategySpec | "auto";
 
 /** How a live entry was funded, as executed by the adapter. */
 export type EntryDepositMode = "two-sided" | "single-sided-x" | "single-sided-y";

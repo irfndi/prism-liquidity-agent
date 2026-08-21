@@ -25,17 +25,21 @@ const VALID_SEVERITIES: ReadonlyArray<FeedbackSeverity> = ["low", "medium", "hig
 
 function parseCategory(raw: string | undefined, fallback: FeedbackCategory): FeedbackCategory {
   const value = raw ?? fallback;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   if (!VALID_CATEGORIES.includes(value as FeedbackCategory)) {
     throw new Error(`Invalid category '${value}'. Valid: ${VALID_CATEGORIES.join(", ")}`);
   }
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   return value as FeedbackCategory;
 }
 
 function parseSeverity(raw: string | undefined, fallback: FeedbackSeverity): FeedbackSeverity {
   const value = raw ?? fallback;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   if (!VALID_SEVERITIES.includes(value as FeedbackSeverity)) {
     throw new Error(`Invalid severity '${value}'. Valid: ${VALID_SEVERITIES.join(", ")}`);
   }
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   return value as FeedbackSeverity;
 }
 
@@ -64,6 +68,7 @@ function formatResult(result: FeedbackResult): string {
     case "error":
       return `✗ Failed to submit feedback: ${result.error}`;
     default:
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       return `✗ Unknown feedback result: ${String((result as { kind: string }).kind)}`;
   }
 }

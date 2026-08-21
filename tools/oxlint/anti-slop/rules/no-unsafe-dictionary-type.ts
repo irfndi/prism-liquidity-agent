@@ -9,8 +9,48 @@ import {
 
 import type { ESTree } from "@oxlint/plugins";
 
+const typeNodeKinds: ReadonlySet<string> = new Set([
+	"JSDocNonNullableType",
+	"JSDocNullableType",
+	"JSDocUnknownType",
+	"TSAnyKeyword",
+	"TSArrayType",
+	"TSBigIntKeyword",
+	"TSBooleanKeyword",
+	"TSConditionalType",
+	"TSConstructorType",
+	"TSFunctionType",
+	"TSImportType",
+	"TSIndexedAccessType",
+	"TSInferType",
+	"TSIntersectionType",
+	"TSIntrinsicKeyword",
+	"TSLiteralType",
+	"TSMappedType",
+	"TSNamedTupleMember",
+	"TSNeverKeyword",
+	"TSNullKeyword",
+	"TSNumberKeyword",
+	"TSObjectKeyword",
+	"TSParenthesizedType",
+	"TSStringKeyword",
+	"TSSymbolKeyword",
+	"TSTemplateLiteralType",
+	"TSThisType",
+	"TSTupleType",
+	"TSTypeLiteral",
+	"TSTypeOperator",
+	"TSTypePredicate",
+	"TSTypeQuery",
+	"TSTypeReference",
+	"TSUndefinedKeyword",
+	"TSUnionType",
+	"TSUnknownKeyword",
+	"TSVoidKeyword",
+]);
+
 function isTypeNode(node: ESTree.Node): node is ESTree.TSType {
-	return node.type.startsWith("TS") && node.type !== "TSTypeAnnotation";
+	return typeNodeKinds.has(node.type);
 }
 
 function typeReferenceName(type: ESTree.TSTypeReference): string | null {
@@ -54,7 +94,7 @@ export const noUnsafeDictionaryTypeRule = defineRule({
 		},
 		messages: {
 			unsafeDictionary:
-				"This object dictionary's direct value type is an unsafe {{value}} escape hatch. Replace it with a concrete owner/schema-derived value type and parse external data at its boundary.",
+				"This dictionary's {{value}} value type gives callers no concrete value contract. Use an owner/schema-derived value type; parse external payloads before insertion.",
 		},
 	},
 	createOnce(context) {

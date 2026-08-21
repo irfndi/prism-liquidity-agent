@@ -120,22 +120,27 @@ function isNonNullObject<T>(value: T): boolean {
 }
 
 function readString<T>(value: T): string | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
 }
 
 function readBoolean<T>(value: T): boolean | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object Boolean]" ? (value as boolean) : null;
 }
 
 function readFiniteNumber<T>(value: T): number | null {
   if (Object.prototype.toString.call(value) === "[object Number]") {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const num = value as number;
     return Number.isFinite(num) ? num : null;
   }
   if (
     Object.prototype.toString.call(value) === "[object String]" &&
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     (value as string).trim().length > 0
   ) {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const num = Number(value as string);
     return Number.isFinite(num) ? num : null;
   }
@@ -149,13 +154,18 @@ function readFiniteNumber<T>(value: T): number | null {
  */
 export function parseRugCheckReport<T>(raw: T): RugCheckReport | null {
   if (!isNonNullObject(raw)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const report = raw as RawRugCheckReport;
   const mint = readString(report.mint);
   if (mint === null || mint.length === 0) return null;
 
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const token = isNonNullObject(report.token) ? (report.token as RawTokenFields) : null;
+  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
   const tokenMeta = isNonNullObject(report.tokenMeta)
-    ? (report.tokenMeta as RawTokenMetaFields)
+    ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      (report.tokenMeta as RawTokenMetaFields)
     : null;
 
   const mintAuthority = readString(token?.mintAuthority);
@@ -166,6 +176,7 @@ export function parseRugCheckReport<T>(raw: T): RugCheckReport | null {
   if (Array.isArray(report.risks)) {
     for (const risk of report.risks) {
       if (!isNonNullObject(risk)) continue;
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const r = risk as RawRisk;
       risks.push({
         name: readString(r.name) ?? "unknown risk",
@@ -180,6 +191,7 @@ export function parseRugCheckReport<T>(raw: T): RugCheckReport | null {
   if (Array.isArray(report.topHolders)) {
     for (const holder of report.topHolders) {
       if (!isNonNullObject(holder)) continue;
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const h = holder as RawHolder;
       const address = readString(h.address);
       if (address === null || address.length === 0) continue;

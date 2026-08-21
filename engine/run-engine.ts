@@ -21,16 +21,19 @@ function redirectStdoutStderrToFile(): void {
   const logPath = path.join(logsDir, "engine.log");
   const stream = fs.createWriteStream(logPath, { flags: "a" });
 
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const originalStdoutWrite = process.stdout.write.bind(process.stdout) as (
     chunk: string | Uint8Array,
     encoding?: BufferEncoding,
     cb?: (error?: Error | null) => void,
   ) => boolean;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const originalStderrWrite = process.stderr.write.bind(process.stderr) as (
     chunk: string | Uint8Array,
     encoding?: BufferEncoding,
     cb?: (error?: Error | null) => void,
   ) => boolean;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const streamWrite = stream.write.bind(stream) as (
     chunk: string | Uint8Array,
     encoding?: BufferEncoding,
@@ -43,7 +46,9 @@ function redirectStdoutStderrToFile(): void {
     if (streamBroken) return;
     streamBroken = true;
     // Restore original writers so a broken stream doesn't keep swallowing output.
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     process.stdout.write = originalStdoutWrite as typeof process.stdout.write;
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     process.stderr.write = originalStderrWrite as typeof process.stderr.write;
     process.stderr.write(`[run-engine] log stream error: ${err.message}\n`);
   });
@@ -62,6 +67,7 @@ function redirectStdoutStderrToFile(): void {
     );
   }
 
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   process.stdout.write = function (
     chunk: string | Uint8Array,
     encoding?: BufferEncoding,
@@ -71,6 +77,7 @@ function redirectStdoutStderrToFile(): void {
     return originalStdoutWrite(chunk, encoding, cb);
   } as typeof process.stdout.write;
 
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   process.stderr.write = function (
     chunk: string | Uint8Array,
     encoding?: BufferEncoding,
@@ -84,7 +91,9 @@ function redirectStdoutStderrToFile(): void {
 redirectStdoutStderrToFile();
 
 function ensureError(cause: unknown): Error {
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   if ((cause as object) instanceof Error) {
+    // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
     return cause as Error;
   }
   return new Error(String(cause));

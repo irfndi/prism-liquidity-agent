@@ -122,9 +122,9 @@ function checkRuntime(): DoctorCheck {
       `Bun runtime not detected (running under Node ${process.version})`,
     );
   }
-  return gte(Bun.version, "1.4.0-canary.1")
+  return gte(Bun.version, "1.4.0")
     ? check("runtime", "pass", `Bun ${Bun.version}`)
-    : check("runtime", "fail", `Bun ${Bun.version} is below 1.4.0-canary.1`);
+    : check("runtime", "fail", `Bun ${Bun.version} is below 1.4.0`);
 }
 
 function checkRpc(): DoctorCheck {
@@ -180,6 +180,7 @@ async function probeRpcEndpoint(
     }
     let json: { result?: unknown; error?: { message?: string } };
     try {
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       json = (await res.json()) as { result?: unknown; error?: { message?: string } };
     } catch (parseErr) {
       return {
@@ -346,6 +347,7 @@ async function checkConfig(): Promise<DoctorCheck> {
     // The market-scan toggle is forward-declared config on the base AppConfig;
     // read it through a concrete view of the effective value rather than a
     // widened dictionary lookup.
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const marketScanEnabled = (config as { readonly marketScanEnabled?: boolean })
       .marketScanEnabled;
     const marketScan =

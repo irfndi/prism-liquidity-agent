@@ -6,7 +6,7 @@ import {
   baselineHalfWidthForBinStep,
   resolveRangeHalfWidth,
   recommendBinRangeForVolatility,
-  recommendStrategyShape,
+  recommendStrategy,
   halfWidthForPriceCoveragePct,
   ADAPTIVE_RANGE_REFERENCE_STDDEV,
   ADAPTIVE_RANGE_MIN_MULTIPLIER,
@@ -342,12 +342,12 @@ describe("width is orthogonal to the W7 strategy shape (Wave 9)", () => {
   it("same σ feeds shape and width independently — no cross-talk", () => {
     const highVolStddev = 5;
     // W7 shape rule: high-vol chop (no trend) → spot. Unchanged by Wave 9.
-    const shape = recommendStrategyShape({
+    const strategySpec = recommendStrategy({
       volatilityStddev: highVolStddev,
       highVolThreshold: 5,
       netDriftBins: 0,
     });
-    expect(shape).toBe("spot");
+    expect(strategySpec).toBe("spot");
     // Wave 9 width rule on the same σ: widened, bounded.
     const width = resolveRangeHalfWidth({
       binStep: 20,
@@ -358,12 +358,12 @@ describe("width is orthogonal to the W7 strategy shape (Wave 9)", () => {
     });
     expect(width).toBe(40);
     // Calm regime: W7 → curve, Wave 9 → narrower. Orthogonal knobs.
-    const calmShape = recommendStrategyShape({
+    const calmRange = recommendStrategy({
       volatilityStddev: 1,
       highVolThreshold: 5,
       netDriftBins: 0,
     });
-    expect(calmShape).toBe("curve");
+    expect(calmRange).toBe("curve");
     const calmWidth = resolveRangeHalfWidth({
       binStep: 20,
       configuredBaseHalfWidth: 0,
@@ -480,7 +480,8 @@ describe("executePaper entry range threading (Wave 9)", () => {
 
     const result = Effect.runSync(
       executePaper(
-        { db, trackedPositions, strategy, entryStrategyShape: "spot", entryRangeHalfWidth: 40 },
+        { db, trackedPositions, strategy, entryStrategySpec: "spot", entryRangeHalfWidth: 40 },
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
         {
           action: "ENTER",
           poolAddress,
@@ -502,6 +503,7 @@ describe("executePaper entry range threading (Wave 9)", () => {
     // The resolved adaptive width (e.g. 2× the ±20 baseline in a high-vol
     // regime) is threaded through, not recomputed inside the executor.
     expect(recommendBinRangeSpy).toHaveBeenCalledWith(5000, 10, 40, undefined);
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const pos = [...trackedPositions.values()][0] as
       | { lowerBinId: number; upperBinId: number }
       | undefined;

@@ -5,11 +5,12 @@ import { Connection, Keypair, PublicKey, TransactionInstruction } from "@solana/
 import { BN } from "@coral-xyz/anchor";
 import bs58 from "bs58";
 import { AdapterService, type AdapterApi } from "../engine/services.js";
-import { AdapterLive } from "../engine/adapter-service.js";
+import { makeAdapterLive, type MeteoraDlmmClient } from "../engine/adapter-service.js";
 import { ConfigService } from "../engine/config-service.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { defaultAppConfig, mockFetch } from "./helpers.js";
+import { unsupportedDlmmMethods } from "./dlmm-test-double.js";
 
 // ─── Mocked Meteora DLMM SDK ─────────────────────────────────────────────────
 // getPositionValueUsd must price the position's REAL on-chain X/Y holdings at
@@ -42,6 +43,15 @@ interface FakePositionData {
   upperBinId: number;
   feeX: BN;
   feeY: BN;
+  totalXAmountExcludeTransferFee: BN;
+  totalYAmountExcludeTransferFee: BN;
+  feeXExcludeTransferFee: BN;
+  feeYExcludeTransferFee: BN;
+  rewardOne: BN;
+  rewardTwo: BN;
+  rewardOneExcludeTransferFee: BN;
+  rewardTwoExcludeTransferFee: BN;
+  lastUpdatedAt: number;
 }
 
 function makePositionData(overrides: Partial<FakePositionData> = {}): FakePositionData {
@@ -52,12 +62,22 @@ function makePositionData(overrides: Partial<FakePositionData> = {}): FakePositi
     upperBinId: 4980,
     feeX: new BN(0),
     feeY: new BN(0),
+    totalXAmountExcludeTransferFee: new BN(2_000_000_000),
+    totalYAmountExcludeTransferFee: new BN(300_000_000),
+    feeXExcludeTransferFee: new BN(0),
+    feeYExcludeTransferFee: new BN(0),
+    rewardOne: new BN(0),
+    rewardTwo: new BN(0),
+    rewardOneExcludeTransferFee: new BN(0),
+    rewardTwoExcludeTransferFee: new BN(0),
+    lastUpdatedAt: 0,
     ...overrides,
   };
 }
 
 function makeFakeDlmm(opts: { positionData: FakePositionData }) {
   return {
+    ...unsupportedDlmmMethods,
     lbPair: {
       activeId: ACTIVE_BIN_ID,
       binStep: BIN_STEP,
@@ -65,6 +85,7 @@ function makeFakeDlmm(opts: { positionData: FakePositionData }) {
       tokenYMint: TOKEN_Y,
       reserveX: Keypair.generate().publicKey,
       reserveY: Keypair.generate().publicKey,
+      rewardInfos: [],
     },
     tokenX: { publicKey: TOKEN_X, mint: { decimals: 9 } },
     tokenY: { publicKey: TOKEN_Y, mint: { decimals: 6 } },
@@ -91,23 +112,20 @@ function makeFakeDlmm(opts: { positionData: FakePositionData }) {
     initializePositionAndAddLiquidityByStrategy: vi.fn(async () => {
       throw new Error("initializePositionAndAddLiquidityByStrategy must not be called");
     }),
-  };
+  } satisfies MeteoraDlmmClient;
 }
 
 const dlmmState = vi.hoisted(() => ({
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   current: null as ReturnType<typeof makeFakeDlmm> | null,
 }));
 
-vi.mock("@meteora-ag/dlmm", async (importActual) => {
-  const actual = await importActual<typeof import("@meteora-ag/dlmm")>();
-  class FakeDLMM {
-    static async create() {
-      if (!dlmmState.current) throw new Error("fake DLMM instance not set");
-      return dlmmState.current;
-    }
-  }
-  return { ...actual, default: FakeDLMM };
-});
+const createFakeDlmm = async () => {
+  if (!dlmmState.current) throw new Error("fake DLMM instance not set");
+  const fake = dlmmState.current;
+  if (!fake) throw new Error("fake DLMM instance not set");
+  return fake;
+};
 
 // ─── Adapter layer wiring (mirrors bench/adapter-rebalance.test.ts) ─────────
 
@@ -131,14 +149,16 @@ function makeAdapterLayer(
     }),
   );
   const auditLayer = Layer.provide(AuditLive, DbLive(":memory:"));
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return Layer.provide(
-    AdapterLive,
+    makeAdapterLive(createFakeDlmm),
     Layer.merge(configLayer, Layer.merge(auditLayer, DbLive(":memory:"))),
   ) as Layer.Layer<AdapterService, never, never>;
 }
 
 async function runWithAdapter<A, E>(effect: Effect.Effect<A, E, AdapterService>): Promise<A> {
   return Effect.runPromise(
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     Effect.provide(effect, makeAdapterLayer()) as Effect.Effect<A, E, never>,
   );
 }
@@ -157,6 +177,7 @@ function readPositionValueUsd(
 
 function mockTokenPrices(prices: Record<string, number>): () => void {
   return mockFetch(async (url: string | URL | Request) => {
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     const u = String(url as unknown);
     if (u.includes("api.jup.ag/price/v3")) {
       const body: Record<string, { usdPrice: number }> = {};

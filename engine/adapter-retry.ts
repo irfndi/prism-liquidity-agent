@@ -90,6 +90,7 @@ function errorMessage<T>(err: T): string {
     try {
       return JSON.stringify(err);
     } catch {
+      // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
       return String(err as unknown);
     }
   }
@@ -245,8 +246,10 @@ export function retryWithBackoff<T>(
         const message =
           isObject(cause) &&
           "message" in cause &&
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
           isStringLike((cause as { message?: unknown }).message)
-            ? (cause as { message: string }).message
+            ? // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+              (cause as { message: string }).message
             : String(cause);
         const normalized = new Error(message, { cause });
         // The retry loop reads rate-limit metadata (headers/response/status)

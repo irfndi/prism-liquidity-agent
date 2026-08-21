@@ -90,17 +90,23 @@ function isNonNullObject<T>(value: T): boolean {
 }
 
 function readString<T>(value: T): string | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object String]" ? (value as string) : null;
 }
 
 function readBoolean<T>(value: T): boolean | null {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   return Object.prototype.toString.call(value) === "[object Boolean]" ? (value as boolean) : null;
 }
 
 function readFiniteNumber<T>(value: T): number | null {
+  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
   return Object.prototype.toString.call(value) === "[object Number]" &&
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     Number.isFinite(value as number)
-    ? (value as number)
+    ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+      (value as number)
     : null;
 }
 
@@ -121,6 +127,7 @@ export interface ParsedTokenRiskEntry {
  */
 export function parseTokenRiskEntry<T>(raw: T): ParsedTokenRiskEntry | null {
   if (!isNonNullObject(raw)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const entry = raw as RawTokenRiskEntry;
   // The response keys an entry by the token address; live payloads have also
   // carried `id`. Accept either, never guess.
@@ -135,6 +142,7 @@ export function parseTokenRiskEntry<T>(raw: T): ParsedTokenRiskEntry | null {
       isVerified: readBoolean(entry.isVerified),
       organicScore: readFiniteNumber(score),
       organicScoreLabel: label === "high" || label === "medium" || label === "low" ? label : null,
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       isSus: isNonNullObject(audit) && (audit as RawAudit).isSus === true,
       freezeAuthorityPresent: readMint(entry.freezeAuthority) !== null,
       mintAuthorityPresent: readMint(entry.mintAuthority) !== null,

@@ -193,6 +193,7 @@ describe("DbService — cumulativeRewardsClaimedUsd", () => {
         expect(event.event).toBe("CLAIM");
         // fees_usd stays NULL on reward claims — fee queries stay fee-pure.
         expect(event.feesUsd).toBeNull();
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
         const metadata = JSON.parse(event.metadata ?? "{}") as JsonRecord;
         expect(metadata.kind).toBe("lm_reward");
       }),

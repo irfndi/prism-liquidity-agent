@@ -140,7 +140,7 @@ export const noKnownValueWideningRule = defineRule({
 		},
 		messages: {
 			widening:
-				"The known initializer supplying {{subject}} carries established type evidence, but the explicit {{target}} target type discards it. Preserve inference, use `satisfies`, or introduce/use a named owner contract; parse genuinely external data once at its boundary.",
+				"The explicit {{target}} type on {{subject}} discards known type evidence. Keep inference, validate with `satisfies`, or use a named owner contract.",
 		},
 	},
 	createOnce(context) {
@@ -150,11 +150,9 @@ export const noKnownValueWideningRule = defineRule({
 			expression: ESTree.Expression,
 			destination: WideningTarget | null,
 			subject: string,
-			options: Readonly<{ allowEmptyDictionaryAccumulator?: boolean }> = {},
 		) => {
 			if (destination === null) return;
 			if (
-				options.allowEmptyDictionaryAccumulator === true &&
 				isDictionaryAccumulatorTarget(destination) &&
 				isEmptyObjectExpression(expression)
 			) {
@@ -181,7 +179,6 @@ export const noKnownValueWideningRule = defineRule({
 					node.init,
 					targetFromAnnotation(node.id.typeAnnotation),
 					`binding \`${node.id.name}\``,
-					{ allowEmptyDictionaryAccumulator: true },
 				);
 			},
 			PropertyDefinition(node) {

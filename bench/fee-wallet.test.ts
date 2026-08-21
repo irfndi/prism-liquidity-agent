@@ -41,6 +41,7 @@ function buildLayer(
   const dbLayer = DbLive(":memory:");
   const revenueConfigDeps = Layer.merge(mockConfig, dbLayer);
   const revenueConfig = Layer.provide(RevenueConfigServiceLive, revenueConfigDeps);
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return Layer.merge(revenueConfig, dbLayer) as Layer.Layer<
     RevenueConfigService | DbService,
     never,
@@ -51,6 +52,7 @@ function buildLayer(
 // readApiKey() reads ${PRISM_CONFIG_DIR}/credentials.json via fs.readFileSync;
 // stub just that path so no test touches the real user config directory.
 function mockCredentialsFile(apiKey = "test-api-key"): void {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   vi.spyOn(fs, "readFileSync").mockImplementation(((path: fs.PathOrFileDescriptor) => {
     if (String(path).includes("credentials.json")) {
       return JSON.stringify({ apiKey });
@@ -141,6 +143,7 @@ describe("fetchConfigFromApi", () => {
       expect(result.success.tier).toBe("pro");
     }
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const [url, init] = fetchMock.mock.calls[0] as [string, { headers: Record<string, string> }];
     expect(url).toBe("https://prism-api.irfndi.workers.dev/v1/config");
     expect(init.headers.Authorization).toBe("Bearer test-api-key");
@@ -154,6 +157,7 @@ describe("fetchConfigFromApi", () => {
     expect(result._tag).toBe("Failure");
     if (result._tag === "Failure") {
       expect(result.failure).toBeInstanceOf(Error);
+      // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
       expect((result.failure as Error).message).toBe("API returned 503");
     }
   });
@@ -181,6 +185,7 @@ describe("fetchConfigFromApi", () => {
 
     expect(result._tag).toBe("Failure");
     if (result._tag === "Failure") {
+      // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
       expect((result.failure as Error).message).toBe("Invalid API response");
     }
   });

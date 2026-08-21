@@ -42,7 +42,7 @@ There are also optional peripheral subprojects:
 
 ## Technology stack
 
-- **Runtime:** Bun `>=1.4.0-canary.1` for development, tests and engine builds. Node 22+ is used only by the Docker image and the `mcp-server` subproject.
+- **Runtime:** Bun `>=1.4.0` for development, tests and engine builds. The root and Cloudflare projects use Bun's isolated linker with the shared global virtual store configured in `bunfig.toml`. Node 22+ is used only by the Docker image and the `mcp-server` subproject.
 - **Language:** TypeScript with strict settings: `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride`, `exactOptionalPropertyTypes`, `noFallthroughCasesInSwitch`.
 - **Framework / DI:** [Effect-TS](https://effect.website) (`Context.Tag` + `Layer`). All side effects go through services.
 - **On-chain:** `@meteora-ag/dlmm` SDK + Helius RPC (`SOLANA_RPC_URL`).
@@ -66,7 +66,7 @@ There are also optional peripheral subprojects:
 | `.oxlintrc.json`                                      | `oxlint` rules: `correctness: error`, `no-unused-vars` and `require-yield` off.                                                               |
 | `.oxfmtrc.json`                                       | `oxfmt` config (empty `ignorePatterns`).                                                                                                      |
 | `.env.example`                                        | Example env file. **Incomplete** — canonical defaults and full env set live in `engine/config-service.ts`.                                    |
-| `Dockerfile`                                          | Multi-stage Bun-based image; runtime uses `oven/bun:canary-slim`, installs `libsqlite3-0` + `ca-certificates`, runs as non-root `agent` user. |
+| `Dockerfile`                                          | Multi-stage Bun-based image; runtime uses `oven/bun:1.4.0-slim`, installs `libsqlite3-0` + `ca-certificates`, runs as non-root `agent` user. |
 | `scripts/prism.sh`                                    | The `prism` binary wrapper; resolves install root, sets `PRISM_INSTALL_DIR`, then runs `cli/index.ts`.                                        |
 | `cloudflare/package.json`                             | Separate subproject for API + Telegram workers.                                                                                               |
 | `cloudflare/wrangler.toml` / `wrangler.telegram.toml` | Cloudflare Worker configs.                                                                                                                    |
@@ -396,7 +396,7 @@ Required secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
 
 ### Docker
 
-The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copies `dist/`, `node_modules/` and `package.json` into a runtime stage that installs `libsqlite3-0` and `ca-certificates`. The container runs as the `agent` user and executes `bun dist/index.mjs`.
+The `Dockerfile` builds the engine bundle with `oven/bun:1.4.0-slim`, using a self-contained hoisted install for the copied runtime artifact, then copies `dist/`, `node_modules/` and `package.json` into a runtime stage that installs `libsqlite3-0` and `ca-certificates`. The container runs as the `agent` user and executes `bun dist/index.mjs`.
 
 ## Security and privacy
 
@@ -512,6 +512,10 @@ The `Dockerfile` builds the engine bundle with `oven/bun:canary-slim`, then copi
 | `REALIZED_PNL_HALT_ENABLED`   | `false`                                                            | Rolling realized-PnL loss halt master switch. When on, the engine sums the trailing realized PnL over the last `REALIZED_PNL_HALT_WINDOW` closed positions once per cycle; if it nets below `REALIZED_PNL_HALT_THRESHOLD_USD`, every new-capital ENTER across ALL lanes is rejected at the risk gate (`[rolling-pnl-halt]`) until the strategy nets back above the threshold. EXIT/REBALANCE stay free (capital protection + position management never blocked). The anti-bleed breaker for high-frequency churn lanes whose swap/spread cost + IL exceeds fee capture (live forensics: 50% win rate at −2.7% ROI on a pool churned hundreds of times/day). Recomputed each cycle from the DB; auto-lifts on recovery. Fail-open: empty/absent realized history never halts. |
 | `REALIZED_PNL_HALT_WINDOW`    | `100`                                                              | Number of most-recent closed positions whose realized PnL is summed for the rolling halt (min 1). |
 | `REALIZED_PNL_HALT_THRESHOLD_USD` | `-20`                                                          | USD threshold below which the rolling realized-PnL sum trips the halt.   |
+| `POOL_PNL_KILL_SWITCH_ENABLED` | `false`                                                            | Pool-local anti-bleed breaker. When enabled, the latest N known realized closes for each pool netting below the threshold arm that pool's persisted ENTER cooldown; EXIT/REBALANCE remain free. |
+| `POOL_PNL_KILL_SWITCH_MIN_CLOSED_POSITIONS` | `10`                                                    | Minimum known realized closes for one pool before its local PnL kill switch can trip. |
+| `POOL_PNL_KILL_SWITCH_THRESHOLD_USD` | `-15`                                                        | Trailing per-pool realized-PnL threshold; a sum strictly below it trips the local cooldown. |
+| `POOL_PNL_KILL_SWITCH_COOLDOWN_MS` | `172800000` (48h)                                           | Duration of the pool-local ENTER cooldown after a confirmed trailing-PnL breach. |
 | `FARM_REWARDS_ENABLED`        | `true`                                                             | Master switch for periodic LM farm reward claims (live only). Scoring stays farm-aware regardless. See Farm rewards. |
 | `AGENTIC_MODE`                | `false`                                                            | Enable agent runtime overlay.                                                                                      |
 | `AGENT_MCP_ENABLED`           | `false`                                                            | Expose stdio MCP server.                                                                                           |

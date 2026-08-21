@@ -82,6 +82,10 @@ bun install
 bun run dev          # during development; uses the local source, no wrapper needed
 ```
 
+Development requires Bun 1.4.0. The checked-in `bunfig.toml` files use Bun's
+isolated linker and shared global virtual store, reducing duplicated dependency
+materialization across the root, Cloudflare workspace, and worktrees.
+
 The bundle-install paths (one-liner and pinned release) create a `prism` wrapper on `PATH`. The wrapper is a thin shim that sets `PRISM_INSTALL_DIR` and `PRISM_VEC0_PATH`, then runs the compiled bundle with `bun`, so the install root and config are resolved consistently regardless of where you invoke it from. The source workflow runs `bun run dev` directly and does not create `~/.local/bin/prism`.
 
 ### Agent operating contract

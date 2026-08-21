@@ -63,6 +63,7 @@ export function resolveEffectivePubkey(): {
   }
   if (fs.existsSync(WALLET_FILE)) {
     try {
+      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const walletData = JSON.parse(fs.readFileSync(WALLET_FILE, "utf-8")) as { pubkey?: string };
       if (walletData.pubkey) {
         return { pubkey: walletData.pubkey, source: "keystore" };

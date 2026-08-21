@@ -38,9 +38,12 @@ function readPrismApiKey(): string | null {
     ) {
       return null;
     }
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const key = (value as { apiKey: unknown }).apiKey;
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     return Object.prototype.toString.call(key) === "[object String]" && (key as string).length > 0
-      ? (key as string)
+      ? // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+        (key as string)
       : null;
   } catch {
     return null;

@@ -47,6 +47,7 @@ rl.on("line", (line) => {
   if (!line.trim()) return;
   let req: { id?: number; method?: string; params?: JsonRecord };
   try {
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     req = JSON.parse(line) as { id?: number; method?: string; params?: JsonRecord };
   } catch {
     return;
@@ -68,6 +69,7 @@ rl.on("line", (line) => {
     if (
       params === null ||
       params === undefined ||
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       (params.protocolVersion as number) !== params.protocolVersion
     ) {
       send({

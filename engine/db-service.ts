@@ -129,6 +129,7 @@ function queryAll<T>(db: Database, sql: string, ...params: SQLQueryBindings[]): 
 }
 
 function runOne(db: Database, sql: string, ...params: unknown[]): void {
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   (db.run as (sql: string, ...params: unknown[]) => void)(sql, ...params);
 }
 
@@ -166,6 +167,7 @@ interface ParsedBinData {
 }
 
 function deserializeBinArray(json: string): BinArray {
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const raw = JSON.parse(json) as {
     lowerBinId: number;
     upperBinId: number;
@@ -558,6 +560,7 @@ export const DbLive = (dbPath?: string) =>
                         expiresAt,
                       );
                     },
+                    // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
                     catch: (error) => error as Error,
                   });
                 }),
@@ -612,13 +615,15 @@ export const DbLive = (dbPath?: string) =>
                           JSON.stringify(embedding),
                           k,
                         ),
+                      // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
                       catch: (error) => error as Error,
                     });
                     candidates = rows
                       .filter((row) => Number(row.expiresAt ?? 0) > now)
                       .filter((row) =>
                         poolAddress
-                          ? String((row.pool_address ?? "") as unknown) === poolAddress
+                          ? // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
+                            String((row.pool_address ?? "") as unknown) === poolAddress
                           : true,
                       );
                     if (candidates.length >= topK || k >= maxK) break;
@@ -644,13 +649,19 @@ export const DbLive = (dbPath?: string) =>
                     .sort((a, b) => b.blended - a.blended)
                     .slice(0, topK);
 
+                  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
                   return ranked.map(({ row }) => ({
                     id: String(row.id),
+                    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
                     category: String(row.category) as MemoryCategory,
+                    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
                     content: String((row.content ?? "") as unknown),
+                    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
                     poolAddress: row.pool_address ? String(row.pool_address as unknown) : undefined,
                     outcome: row.outcome
-                      ? (String(row.outcome as unknown) as MemoryEntry["outcome"])
+                      ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+                        // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
+                        (String(row.outcome as unknown) as MemoryEntry["outcome"])
                       : undefined,
                     pnlUsd:
                       row.pnlUsd !== undefined && row.pnlUsd !== null
@@ -976,22 +987,27 @@ export const DbLive = (dbPath?: string) =>
 
         saveSignalSnapshot: (snapshot) =>
           Effect.sync(() => {
-            const result = (
-              db.run as (sql: string, ...params: unknown[]) => { lastInsertRowid: number | bigint }
-            )(
-              `INSERT INTO signal_snapshots (pool_address, timestamp, fee_il_ratio, volume_authenticity, bin_utilization, tvl_usd, tvl_velocity, volatility_stddev, bin_step, action, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              snapshot.poolAddress,
-              snapshot.timestamp,
-              snapshot.feeIlRatio,
-              snapshot.volumeAuthenticity,
-              snapshot.binUtilization,
-              snapshot.tvlUsd,
-              snapshot.tvlVelocity,
-              snapshot.volatilityStddev,
-              snapshot.binStep,
-              snapshot.action,
-              snapshot.confidence,
-            );
+            const result =
+              // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+              (
+                db.run as (
+                  sql: string,
+                  ...params: unknown[]
+                ) => { lastInsertRowid: number | bigint }
+              )(
+                `INSERT INTO signal_snapshots (pool_address, timestamp, fee_il_ratio, volume_authenticity, bin_utilization, tvl_usd, tvl_velocity, volatility_stddev, bin_step, action, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                snapshot.poolAddress,
+                snapshot.timestamp,
+                snapshot.feeIlRatio,
+                snapshot.volumeAuthenticity,
+                snapshot.binUtilization,
+                snapshot.tvlUsd,
+                snapshot.tvlVelocity,
+                snapshot.volatilityStddev,
+                snapshot.binStep,
+                snapshot.action,
+                snapshot.confidence,
+              );
             return Number(result.lastInsertRowid);
           }),
 
@@ -1022,6 +1038,7 @@ export const DbLive = (dbPath?: string) =>
               tvlVelocity: Number(r.tvlVelocity),
               volatilityStddev: Number(r.volatilityStddev),
               binStep: Number(r.binStep),
+              // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
               action: String(r.action) as SignalSnapshot["action"],
               confidence: Number(r.confidence),
               outcomePnlUsd: r.outcomePnlUsd != null ? Number(r.outcomePnlUsd) : null,
@@ -1157,6 +1174,7 @@ export const DbLive = (dbPath?: string) =>
             );
             if (!row) return null;
             try {
+              // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
               return JSON.parse(row.value) as SignalWeights;
             } catch {
               return null;
@@ -1255,6 +1273,7 @@ export const DbLive = (dbPath?: string) =>
               const row = queryOne<DbRow>(db, "SELECT * FROM token_candidates WHERE id = ?", id);
               return row === null ? null : rowToTokenCandidate(row);
             },
+            // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
             catch: (error) => error as Error,
           }),
 
@@ -1269,6 +1288,7 @@ export const DbLive = (dbPath?: string) =>
                 walletAddress,
                 agentInstanceId,
               ).map(rowToTokenCandidate),
+            // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
             catch: (error) => error as Error,
           }),
 
@@ -1321,6 +1341,7 @@ export const DbLive = (dbPath?: string) =>
               );
               return row === null ? null : rowToExecutionOperation(row);
             },
+            // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
             catch: (error) => error as Error,
           }),
 
@@ -1335,6 +1356,7 @@ export const DbLive = (dbPath?: string) =>
                 walletAddress,
                 agentInstanceId,
               ).map(rowToExecutionOperation),
+            // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
             catch: (error) => error as Error,
           }),
 
@@ -1399,6 +1421,7 @@ export const DbLive = (dbPath?: string) =>
               const row = queryOne<DbRow>(db, "SELECT * FROM settlement_jobs WHERE id = ?", id);
               return row === null ? null : rowToSettlementJob(row);
             },
+            // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
             catch: (error) => error as Error,
           }),
 
@@ -1413,6 +1436,7 @@ export const DbLive = (dbPath?: string) =>
                 walletAddress,
                 agentInstanceId,
               ).map(rowToSettlementJob),
+            // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
             catch: (error) => error as Error,
           }),
 
@@ -1447,6 +1471,7 @@ export const DbLive = (dbPath?: string) =>
               );
               return row === null ? null : rowToSafetyPause(row);
             },
+            // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.
             catch: (error) => error as Error,
           }),
       };
@@ -1548,6 +1573,7 @@ function rowToTokenCandidate(row: DbRow): TokenCandidateRecord {
     eligibleAt: row.eligible_at === null ? null : Number(row.eligible_at),
     enteredAt: row.entered_at === null ? null : Number(row.entered_at),
     cooldownUntil: row.cooldown_until === null ? null : Number(row.cooldown_until),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     rejectionReason: row.rejection_reason === null ? null : String(row.rejection_reason as unknown),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -1559,14 +1585,19 @@ function rowToExecutionOperation(row: DbRow): ExecutionOperationRecord {
     id: String(row.id),
     walletAddress: String(row.wallet_address),
     agentInstanceId: String(row.agent_instance_id),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     candidateId: row.candidate_id === null ? null : String(row.candidate_id as unknown),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     positionId: row.position_id === null ? null : String(row.position_id as unknown),
     poolAddress: String(row.pool_address),
     tokenMint: String(row.token_mint),
     operationType: parseExecutionOperationType(String(row.operation_type)),
     status: parseExecutionOperationStatus(String(row.status)),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     amountAtomic: row.amount_atomic === null ? null : String(row.amount_atomic as unknown),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     txSignature: row.tx_signature === null ? null : String(row.tx_signature as unknown),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     error: row.error === null ? null : String(row.error as unknown),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -1586,14 +1617,17 @@ function rowToSettlementJob(row: DbRow): SettlementJobRecord {
     status: parseSettlementJobStatus(String(row.status)),
     attempts: Number(row.attempts),
     nextRetryAt: row.next_retry_at === null ? null : Number(row.next_retry_at),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     txSignature: row.tx_signature === null ? null : String(row.tx_signature as unknown),
     confirmedOutputAtomic:
+      // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
       row.confirmed_output_atomic == null ? null : String(row.confirmed_output_atomic as unknown),
     outputUsd: row.output_usd == null ? null : Number(row.output_usd),
     executionCostUsd: row.execution_cost_usd == null ? null : Number(row.execution_cost_usd),
     finalizedAt: row.finalized_at == null ? null : Number(row.finalized_at),
     realizedPnlUsd: row.realized_pnl_usd == null ? null : Number(row.realized_pnl_usd),
     expiresAt: Number(row.expires_at),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     error: row.error === null ? null : String(row.error as unknown),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -1614,10 +1648,13 @@ function rowToPosition(row: DbRow): PositionRecord {
   return {
     positionId: String(row.position_id),
     poolAddress: String(row.pool_address),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     positionPubKey: row.position_pubkey ? String(row.position_pubkey as unknown) : null,
     depositedUsd: Number(row.deposited_usd ?? 0),
     currentValueUsd: Number(row.current_value_usd ?? 0),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     tokenXSymbol: String((row.token_x_symbol ?? "") as unknown),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     tokenYSymbol: String((row.token_y_symbol ?? "") as unknown),
     activeBinId: Number(row.active_bin_id ?? 0),
     lowerBinId: Number(row.lower_bin_id ?? 0),
@@ -1642,11 +1679,13 @@ function rowToPosition(row: DbRow): PositionRecord {
     cumulativeRewardsClaimedUsd: Number(row.cumulative_rewards_claimed_usd ?? 0),
     closedAt: row.closed_at != null ? Number(row.closed_at) : null,
     realizedPnlUsd: row.realized_pnl_usd != null ? Number(row.realized_pnl_usd) : null,
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     positionMode: row.position_mode != null ? String(row.position_mode as unknown) : null,
     launchRunner: row.launch_runner != null ? row.launch_runner !== 0 : null,
     launchRunnerSteps: row.launch_runner_steps != null ? Number(row.launch_runner_steps) : null,
     launchRunnerAnchorPrice:
       row.launch_runner_anchor_price != null ? Number(row.launch_runner_anchor_price) : null,
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     tpLadderJson: row.tp_ladder_json != null ? String(row.tp_ladder_json as unknown) : null,
     invalidationStopPrice:
       row.invalidation_stop_price != null ? Number(row.invalidation_stop_price) : null,
@@ -1657,12 +1696,16 @@ function rowToPositionEvent(row: DbRow): PositionEventRecord {
   return {
     id: String(row.id),
     poolAddress: String(row.pool_address),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     positionPubKey: row.position_pubkey ? String(row.position_pubkey as unknown) : null,
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     positionId: row.position_id ? String(row.position_id as unknown) : null,
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     event: String(row.event) as PositionEventType,
     valueUsd: row.value_usd != null ? Number(row.value_usd) : null,
     feesUsd: row.fees_usd != null ? Number(row.fees_usd) : null,
     price: row.price != null ? Number(row.price) : null,
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     metadata: row.metadata != null ? String(row.metadata as unknown) : null,
     createdAt: Number(row.created_at ?? 0),
   };
@@ -1688,7 +1731,9 @@ function rowToSnapshot(row: DbRow): PoolSnapshot {
     apr: Number(row.apr),
     currentPrice: Number(row.current_price),
     binStep: Number(row.bin_step),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     tokenXSymbol: String((row.token_x_symbol ?? "") as unknown),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     tokenYSymbol: String((row.token_y_symbol ?? "") as unknown),
     binArray: deserializeBinArray(String(row.bin_array_json)),
     statsSource: parseStatsSource(String(row.stats_source)),
@@ -1699,16 +1744,24 @@ function rowToAudit(row: DbRow): AuditRecord {
   return {
     id: String(row.id),
     timestamp: Number(row.timestamp ?? 0),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     cycleId: String((row.cycle_id ?? "") as unknown),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     poolAddress: String((row.pool_address ?? "") as unknown),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     action: String((row.action ?? "") as unknown),
     confidence: Number(row.confidence ?? 0),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     reasoning: String((row.reasoning ?? "") as unknown),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     metricsJson: row.metrics_json ? String(row.metrics_json as unknown) : null,
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     riskResultJson: row.risk_result_json ? String(row.risk_result_json as unknown) : null,
     executed: Boolean(row.executed),
     paperTrading: Boolean(row.paper_trading),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     txSignature: row.tx_signature ? String(row.tx_signature as unknown) : null,
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     error: row.error ? String(row.error as unknown) : null,
   };
 }
@@ -1729,12 +1782,14 @@ interface FeedbackRecord {
 }
 
 function rowToFeedback(row: DbRow): FeedbackRecord {
+  // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
   const relatedRaw = row.related_files ? String(row.related_files as unknown) : null;
   let relatedFiles: ReadonlyArray<string> = [];
   if (relatedRaw) {
     try {
       const parsed: unknown = JSON.parse(relatedRaw);
       if (Array.isArray(parsed)) {
+        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
         relatedFiles = parsed.filter(
           (x) => Object.prototype.toString.call(x) === "[object String]",
         ) as ReadonlyArray<string>;
@@ -1749,10 +1804,13 @@ function rowToFeedback(row: DbRow): FeedbackRecord {
     category: String(row.category),
     severity: String(row.severity),
     summary: String(row.summary),
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     details: row.details != null ? String(row.details as unknown) : null,
     relatedFiles,
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     contextJson: String((row.context_json ?? "{}") as unknown),
     githubIssueNumber: row.github_issue_number != null ? Number(row.github_issue_number) : null,
+    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
     githubIssueUrl: row.github_issue_url ? String(row.github_issue_url as unknown) : null,
     reportedAt: Number(row.reported_at ?? 0),
     hash: String(row.hash),

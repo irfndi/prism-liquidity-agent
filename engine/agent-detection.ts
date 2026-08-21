@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import { spawn, type ChildProcess } from "child_process";
 import { createLogger } from "./logger.js";
 import type { AgentRuntimeDetection, AgentRuntimeKind } from "./agent-transport.js";
+import { createBunWebSocket } from "./bun-websocket.js";
 
 const logger = createLogger("AgentDetection");
 
@@ -81,7 +82,9 @@ function isGatewayRunning(url: string, token: string): Effect.Effect<boolean, Er
       // Bun's WebSocket takes an options object as the 2nd arg; pass the token on
       // the upgrade so gateways that reject unauthenticated upgrades still answer.
       ws = token
-        ? new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } })
+        ? createBunWebSocket(url, {
+            headers: { Authorization: `Bearer ${token}` },
+          })
         : new WebSocket(url);
       ws.addEventListener("open", () => {
         clearTimeout(timer);

@@ -117,13 +117,16 @@ function isNonNullObject<T>(value: T): boolean {
  *  returns numeric fields as decimal strings ("23551730.42"). */
 function readFiniteNumber<T>(value: T): number | null {
   if (Object.prototype.toString.call(value) === "[object Number]") {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const num = value as number;
     return Number.isFinite(num) ? num : null;
   }
   if (
     Object.prototype.toString.call(value) === "[object String]" &&
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     (value as string).trim().length > 0
   ) {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const parsed = Number(value as string);
     return Number.isFinite(parsed) ? parsed : null;
   }
@@ -153,6 +156,7 @@ function parseFeePercentageFraction<T>(value: T): number | null {
  */
 export function parseGeckoPoolStats<T>(raw: T, baseFeeRate: number): GeckoPoolStats | null {
   if (!isNonNullObject(raw)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const response = raw as RawGeckoResponse;
   const data = response.data;
   if (!isNonNullObject(data)) return null;

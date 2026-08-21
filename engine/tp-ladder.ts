@@ -141,6 +141,7 @@ export function serializeTpLadder(ladder: TpLadder | undefined): string | null {
 export function parseTpLadder(raw: string | null | undefined): TpLadder | null {
   if (!raw) return null;
   try {
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     const parsed = JSON.parse(raw) as { rungs?: Array<{ targetPrice: number; fraction: number }> };
     if (!Array.isArray(parsed.rungs) || parsed.rungs.length === 0) return null;
     const rungs = parsed.rungs

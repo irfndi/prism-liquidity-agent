@@ -54,6 +54,7 @@ const SYMBOL_FEED_IDS = PYTH_FEED_IDS;
 /** Resolve a symbol (SOL, USDC, USDT — case-insensitive) to its verified
  *  mainnet feed ID, or null when the symbol is not in the built-in map. */
 export function resolveFeedId(symbol: string): string | null {
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const key = symbol.trim().toUpperCase() as keyof typeof SYMBOL_FEED_IDS;
   return SYMBOL_FEED_IDS[key] ?? null;
 }
@@ -103,13 +104,16 @@ function isNonNullObject<T>(value: T): boolean {
  *  tolerated) into a finite number, else null. */
 function readFiniteNumber<T>(value: T): number | null {
   if (Object.prototype.toString.call(value) === "[object Number]") {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const num = value as number;
     return Number.isFinite(num) ? num : null;
   }
   if (
     Object.prototype.toString.call(value) === "[object String]" &&
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     (value as string).trim().length > 0
   ) {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     const parsed = Number(value as string);
     return Number.isFinite(parsed) ? parsed : null;
   }
@@ -130,13 +134,16 @@ export function parsePythPriceUpdate<T>(
   nowMs: number = Date.now(),
 ): PythParseResult {
   if (!isNonNullObject(raw)) return { kind: "malformed" };
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const parsed = (raw as RawPythParsed).parsed;
   if (!Array.isArray(parsed) || parsed.length === 0) return { kind: "malformed" };
   const entry = parsed[0];
   if (!isNonNullObject(entry)) return { kind: "malformed" };
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const entryObj = entry as RawPythEntry;
   const price = entryObj.price;
   if (!isNonNullObject(price)) return { kind: "malformed" };
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const priceObj = price as RawPythPrice;
 
   const rawPrice = priceObj.price;
@@ -149,11 +156,14 @@ export function parsePythPriceUpdate<T>(
   const expo = priceObj.expo;
   if (
     Object.prototype.toString.call(expo) !== "[object Number]" ||
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     !Number.isInteger(expo as number) ||
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     (expo as number) > 0
   ) {
     return { kind: "malformed" };
   }
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   const expoNum = expo as number;
 
   const priceNum = Number(rawPrice);
@@ -174,6 +184,7 @@ export function parsePythPriceUpdate<T>(
     point: {
       priceUsd: scaled,
       publishTimeMs,
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       feedId: Object.prototype.toString.call(id) === "[object String]" ? (id as string) : "",
     },
   };

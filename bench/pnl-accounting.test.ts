@@ -341,6 +341,7 @@ describe("migration v16 — pnl_accounting", () => {
 
     // Opening via createDatabase must run migration v16.
     const db = createDatabase(dbPath);
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const columns = (db.query("PRAGMA table_info(positions)").all() as Array<{ name: string }>).map(
       (r) => r.name,
     );
@@ -360,6 +361,7 @@ describe("migration v16 — pnl_accounting", () => {
       .get();
     expect(eventsTable).not.toBeNull();
 
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const row = db
       .query("SELECT * FROM positions WHERE pool_address = ?")
       .get("LegacyPool111") as JsonRecord | null;
@@ -527,7 +529,7 @@ describe("paper lifecycle PnL accounting", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         const result = yield* executePaper(
-          { db, trackedPositions, strategy: paperStrategy, entryStrategyShape: "spot" },
+          { db, trackedPositions, strategy: paperStrategy, entryStrategySpec: "spot" },
           {
             action: "ENTER",
             poolAddress: "pool1",
@@ -573,7 +575,7 @@ describe("paper lifecycle PnL accounting", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         yield* executePaper(
-          { db, trackedPositions, strategy: paperStrategy, entryStrategyShape: "spot" },
+          { db, trackedPositions, strategy: paperStrategy, entryStrategySpec: "spot" },
           {
             action: "ENTER",
             poolAddress: "pool1",
@@ -605,7 +607,7 @@ describe("paper lifecycle PnL accounting", () => {
         yield* db.savePosition(pos);
 
         const exitResult = yield* executePaper(
-          { db, trackedPositions, strategy: paperStrategy, entryStrategyShape: "spot" },
+          { db, trackedPositions, strategy: paperStrategy, entryStrategySpec: "spot" },
           { action: "EXIT", poolAddress: "pool1", confidence: 0.9, reasoning: "test exit" },
           { ...pool, currentPrice: 110 },
         );
@@ -656,6 +658,7 @@ describe("paper lifecycle PnL accounting", () => {
 // ─── Live REBALANCE inline-claim accounting ──────────────────────────────────
 
 function makeLiveAdapter(overrides: Partial<AdapterApi> = {}): AdapterApi {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return {
     hasWallet: () => true,
     getWalletAddress: () => "Wallet111",
@@ -814,7 +817,7 @@ describe("live lifecycle PnL accounting", () => {
           trackedPositions,
           entryPrep: liveEntryPrep,
           solPriceUsd: 150,
-          entryStrategyShape: "spot" as const,
+          entryStrategySpec: "spot" as const,
         };
 
         // 1. ENTER $1000 at price 100.
@@ -926,7 +929,7 @@ describe("live lifecycle PnL accounting", () => {
           trackedPositions,
           entryPrep: liveEntryPrep,
           solPriceUsd: 150,
-          entryStrategyShape: "spot" as const,
+          entryStrategySpec: "spot" as const,
         };
         const enter = yield* executeLive(
           deps,
@@ -1117,6 +1120,7 @@ describe("live lifecycle PnL accounting", () => {
 
     const exitEvent = outcome.events.find((e) => e.event === "EXIT")!;
     expect(exitEvent.valueUsd).toBeNull();
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
     const meta = JSON.parse(exitEvent.metadata ?? "{}") as {
       pricing?: string;
       lastMarkUsd?: number;
@@ -1164,7 +1168,7 @@ describe("live lifecycle PnL accounting", () => {
             trackedPositions,
             entryPrep: liveEntryPrep,
             solPriceUsd: 150,
-            entryStrategyShape: "spot" as const,
+            entryStrategySpec: "spot" as const,
             reconcileRequestedPools,
           },
           {
@@ -1191,6 +1195,7 @@ describe("live lifecycle PnL accounting", () => {
 
 describe("computePaperFeeAccrualUsd", () => {
   const base = {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
     fees24hUsd: 300 as number | null | undefined,
     tvlUsd: 100_000,
     depositedUsd: 800,

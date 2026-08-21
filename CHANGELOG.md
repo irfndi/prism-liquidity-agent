@@ -2,6 +2,26 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.29] — 2026-08-19
+
+### Changed
+
+- **Anti-slop enforcement refresh**. Vendored the current upstream Oxlint rules,
+  enabled the complete generic and Effect rule sets, and removed all owned-source
+  findings without suppressions.
+- Replaced module-mocked adapter tests with an injected DLMM test seam and
+  preserved the existing pool-PnL kill-switch behavior.
+
+## [0.2.28] — 2026-08-19
+
+### Added
+
+- **Pool-local realized-PnL kill switch** (`POOL_PNL_KILL_SWITCH_*`). When
+  enabled, a pool whose latest known closes net below the configured threshold
+  is placed on an ENTER cooldown while existing positions remain eligible for
+  EXIT and REBALANCE. The paper-runner profile enables the proposed 10-close,
+  -$15, 48-hour settings.
+
 ## [0.2.27] — 2026-08-19
 
 ### Fixed

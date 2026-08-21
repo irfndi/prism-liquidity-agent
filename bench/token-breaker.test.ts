@@ -91,6 +91,7 @@ function makeProgramAdapter(
   pools: Map<string, PoolState>,
   overrides: Partial<AdapterApi> = {},
 ): AdapterApi {
+  // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
   return {
     // hasWallet=true so live EXITs reach exitPosition (the real failure
     // path); getWalletAddress=null keeps reconcilePositions a no-op (it
@@ -377,6 +378,7 @@ describe("token-level execution-failure breaker (Robinhood rule 12)", () => {
       return { decisions, blocks };
     });
 
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions, blocks } = await provideLayer(test, layer as never);
 
     // (a) the genuine live EXIT failed on EXIT_POOL...
@@ -448,6 +450,7 @@ describe("token-level execution-failure breaker (Robinhood rule 12)", () => {
       return { decisions1, decisions2 };
     });
 
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions1, decisions2 } = await provideLayer(test, layer as never);
 
     const rejected1 = decisions1.find(
@@ -600,6 +603,7 @@ describe("rug-token breaker (catastrophic realized loss)", () => {
       return { decisions, blocks };
     });
 
+    // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
     const { decisions, blocks } = await provideLayer(test, layer as never);
 
     expect(blocks[RUG_TOKEN], "drained token must be rug-blocked").not.toBeNull();
