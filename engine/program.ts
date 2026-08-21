@@ -2112,6 +2112,16 @@ export function executeLive(
           yield* db.saveExecutionOperation(exitOperation).pipe(Effect.catch(() => Effect.void));
         }
         if (!exited) {
+          if (exitOperation) {
+            yield* db
+              .saveExecutionOperation({
+                ...exitOperation,
+                status: "failed",
+                error: exitError ?? "Live EXIT failed",
+                updatedAt: Date.now(),
+              })
+              .pipe(Effect.catch(() => Effect.void));
+          }
           // A failed close may have left the position half-closed on-chain
           // (the $27 phantom-row candidate: wallet holds withdrawn funds while
           // the row still counts in Σpositions). Flag the pool so the next
