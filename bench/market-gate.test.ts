@@ -186,6 +186,47 @@ describe("gateAndRankMarketPools", () => {
   });
 });
 
+describe("volume+fees absolute floors", () => {
+  it("rejects a pool below the absolute fee floor despite high APR", () => {
+    // fees24h $400 on $1M TVL = 14.6% APR... too low for the APR gate; use
+    // $2k APR-73% pool with fees under a $5k floor: spectacular ratio,
+    // dollars below the absolute bar.
+    const micro = makePool({ address: "micro", fees24hUsd: 2_000 });
+    const result = gateAndRankMarketPools([micro], { ...config, minFees24hUsd: 5_000 });
+    expect(result.ranked).toHaveLength(0);
+    expect(result.rejected[0]?.reason).toContain("absolute floor");
+  });
+
+  it("admits a pool clearing both floors", () => {
+    const solid = makePool({ address: "solid" }); // $1.5k fees, $500k volume
+    const result = gateAndRankMarketPools([solid], {
+      ...config,
+      minFees24hUsd: 500,
+      minVolume24hUsd: 250_000,
+    });
+    expect(result.ranked).toHaveLength(1);
+  });
+
+  it("rejects a pool below the absolute volume floor", () => {
+    // Volume $300k passes turnover (0.3) but fails the $500k absolute floor.
+    const quietish = makePool({ address: "quietish", volume24hUsd: 300_000 });
+    const result = gateAndRankMarketPools([quietish], { ...config, minVolume24hUsd: 500_000 });
+    expect(result.ranked).toHaveLength(0);
+    expect(result.rejected[0]?.reason).toContain("absolute floor");
+  });
+
+  it("floors default to disabled (backward compatible)", () => {
+    const result = gateAndRankMarketPools([makePool({ address: "p1" })], config);
+    expect(result.ranked).toHaveLength(1);
+  });
+
+  it("does not fabricate rejections when the metric is non-finite", () => {
+    const nanVol = makePool({ address: "nanvol", volume24hUsd: Number.NaN });
+    const result = gateAndRankMarketPools([nanVol], { ...config, minVolume24hUsd: 100 });
+    expect(result.rejected[0]?.reason).not.toContain("absolute floor");
+  });
+});
+
 describe("rug-prevention: pool age floor", () => {
   it("rejects a brand-new pool younger than the age floor", () => {
     const fresh = makePool({ address: "fresh", createdAtMs: Date.now() - 2 * 3_600_000 });

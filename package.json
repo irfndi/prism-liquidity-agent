@@ -1,6 +1,6 @@
 {
   "name": "prism-liquidity-agent",
-  "version": "0.2.31",
+  "version": "0.2.32",
   "description": "Autonomous liquidity agent for Solana pools (currently Meteora DLMM)",
   "keywords": [
     "ai-agent",
@@ -15,7 +15,6 @@
     "solana"
   ],
   "license": "MIT",
-  "packageManager": "bun@1.4.0",
   "bin": {
     "prism": "./scripts/prism.sh"
   },
@@ -73,5 +72,6 @@
   },
   "engines": {
     "bun": ">=1.4.0"
-  }
+  },
+  "packageManager": "bun@1.4.0"
 }

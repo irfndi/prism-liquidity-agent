@@ -224,6 +224,41 @@ export interface AppConfig {
   readonly marketScanRotationAprMult?: number;
   readonly marketScanRunnerConfirmCycles?: number;
   readonly marketScanRotationArmMs?: number;
+  /** Regime-gate master switch: herding ENTER damper. Default false. */
+  readonly regimeHerdingGateEnabled?: boolean;
+  /** Herding block threshold on cross-pool edge density (default 0.8). */
+  readonly regimeHerdingEdgeThreshold?: number;
+  /** Herding block threshold on mean pairwise correlation (default 0.6). */
+  readonly regimeHerdingCorrThreshold?: number;
+  /** Euphoria damper for the runner lane (self-relative APR outlier). Default false. */
+  readonly runnerAprOutlierEnabled?: boolean;
+  /** Self-rank at/above which a runner APR is a spike outlier (default 0.98). */
+  readonly runnerAprOutlierPercentile?: number;
+  /** Arms the volume-burst trigger inside the hot-window lane. Default false. */
+  readonly flashVolumeTriggerEnabled?: boolean;
+  /** Volume burst multiple vs trailing median required (default 2.5). */
+  readonly flashMinSpikeRatio?: number;
+  /** Trailing per-cycle readings forming the spike baseline (default 8). */
+  readonly flashBaselineWindow?: number;
+  /** Minimum current 24h volume (USD) for a burst entry (default 10000). */
+  readonly flashMinVolumeUsd?: number;
+  /** Churn circuit breaker: max ENTERs per pool per UTC day. Default 4.
+   *  0 disables the cap. Exits are never restricted. */
+  readonly churnMaxEntriesPerPoolPerDay?: number;
+  /** Hold-bias master switch: suppress the fee-trend economic EXITs
+   *  (fee/IL < 0.5, volume-authenticity, yield-regression) while a position
+   *  stays in-range, so liquidity keeps collecting fees instead of churning
+   *  round-trips at spread cost. Capital-protection exits (W15, IL
+   *  dominance, dust, TVL drop, trailing stop, lifecycles) are NEVER
+   *  suppressed. Default false. */
+  readonly holdBiasEnabled?: boolean;
+  /** Market-gate absolute 24h fee floor (USD). Focuses the scan universe on
+   *  pools with real fee dollars — percentage APR alone admits micro-pools
+   *  with spectacular ratios but trivial income. Default 0 = disabled. */
+  readonly marketScanMinFees24hUsd?: number;
+  /** Market-gate absolute 24h volume floor (USD). Real sustained volume is
+   *  the honeypot counter-signal. Default 0 = disabled. */
+  readonly marketScanMinVolume24hUsd?: number;
   readonly yieldRegressionExitPct?: number;
   readonly feeCaptureConversionCostPct?: number;
   readonly feeCaptureHarvestCostUsd?: number;
@@ -1707,6 +1742,80 @@ const loadConfig = Effect.gen(function* () {
   // a runner that cannot clear it is never entered, or is exited early.
   const runnerSwapCostPct = yield* validatedNumber("RUNNER_SWAP_COST_PCT", 0, 0.005, 0.1);
   const runnerNetFloorPct = yield* validatedNumber("RUNNER_NET_FLOOR_PCT", 0, 1, 100);
+  // ── Regime gate (ORCA-inspired, paper-first, advisory-only) ────────────
+  // Herding damper: block NEW ENTERs while scanned pools move in lockstep
+  // (systemic stress — the window where rugs cluster). Fail-open: unknown
+  // correlation state never blocks; exits are never affected.
+  const regimeHerdingGateEnabled = yield* Config.boolean("REGIME_HERDING_GATE_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const regimeHerdingEdgeThreshold = yield* validatedNumber(
+    "REGIME_HERDING_EDGE_THRESHOLD",
+    0.5,
+    0.8,
+    1,
+  );
+  const regimeHerdingCorrThreshold = yield* validatedNumber(
+    "REGIME_HERDING_CORR_THRESHOLD",
+    0.3,
+    0.6,
+    1,
+  );
+  // Euphoria damper (runner lane): reject a runner whose current measured APR
+  // is a vertical spike vs its OWN recent history (top-percentile self-rank).
+  // Durable high APR is flat-high and passes; blow-off tops fail.
+  const runnerAprOutlierEnabled = yield* Config.boolean("RUNNER_APR_OUTLIER_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const runnerAprOutlierPercentile = yield* validatedNumber(
+    "RUNNER_APR_OUTLIER_PERCENTILE",
+    0.5,
+    0.98,
+    0.999,
+  );
+
+  // ── Flash volume trigger (hot-window lane, paper-first) ────────────────
+  // Fees lag volume: a measured burst against a pool's OWN trailing snapshot
+  // baseline is the EARLY entry signal while the 1h fee ratio still lags its
+  // floor. Signal source is the pool_snapshots history we already persist —
+  // zero new API load. Measured stats only; default OFF.
+  const flashVolumeTriggerEnabled = yield* Config.boolean("FLASH_VOLUME_TRIGGER_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  const flashMinSpikeRatio = yield* validatedNumber("FLASH_MIN_SPIKE_RATIO", 1, 1.2, 20);
+  const flashBaselineWindow = yield* validatedNumber("FLASH_BASELINE_WINDOW", 3, 8, 24);
+  const flashMinVolumeUsd = yield* validatedNumber("FLASH_MIN_VOLUME_USD", 0, 10_000, 10_000_000);
+
+  // ── Churn circuit breaker + hold bias (2026-08-22 audit) ───────────────
+  // All-time losses concentrated in two churned pools (−$163/221 trades and
+  // −$64.76/125 trades) while a passive replay of the same pool nets +$17:
+  // trade COUNT is the damage mechanism. Cap same-pool re-entries per UTC
+  // day BEFORE the bleed accumulates, and let in-range positions keep
+  // collecting fees instead of being recycled by fee-trend exits.
+  const churnMaxEntriesPerPoolPerDay = yield* validatedNumber(
+    "CHURN_MAX_ENTRIES_PER_POOL_PER_DAY",
+    0,
+    4,
+    100,
+  );
+  const holdBiasEnabled = yield* Config.boolean("HOLD_BIAS_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
+  // Volume+fees focus: absolute activity floors keep the scan universe on
+  // pools with real fee dollars and real volume (honeypot counter-signal).
+  const marketScanMinFees24hUsd = yield* validatedNumber(
+    "MARKET_SCAN_MIN_FEES_24H_USD",
+    0,
+    0,
+    1_000_000,
+  );
+  const marketScanMinVolume24hUsd = yield* validatedNumber(
+    "MARKET_SCAN_MIN_VOLUME_24H_USD",
+    0,
+    0,
+    100_000_000,
+  );
+
   // G4 economic harvest gate: claim only when net proceeds clear the floor
   // and estimated tx cost stays under the fraction of gross fees.
   const harvestMinNetUsd = yield* validatedNumber("HARVEST_MIN_NET_USD", 0, 1);
@@ -2091,6 +2200,19 @@ const loadConfig = Effect.gen(function* () {
     harvestMinNetUsd,
     harvestMaxCostPct,
     harvestTxCostUsdEst,
+    regimeHerdingGateEnabled,
+    regimeHerdingEdgeThreshold,
+    regimeHerdingCorrThreshold,
+    runnerAprOutlierEnabled,
+    runnerAprOutlierPercentile,
+    flashVolumeTriggerEnabled,
+    flashMinSpikeRatio,
+    flashBaselineWindow,
+    flashMinVolumeUsd,
+    churnMaxEntriesPerPoolPerDay,
+    holdBiasEnabled,
+    marketScanMinFees24hUsd,
+    marketScanMinVolume24hUsd,
     allowTransferFeeTokens,
     tokenFailureBlockMs,
     rugExitLossPct,

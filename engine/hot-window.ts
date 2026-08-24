@@ -50,6 +50,66 @@ export interface HotWindowConfig {
   dailyLossHaltUsd: number;
   /** Concurrent hot positions cap. */
   maxOpen: number;
+  /** Volume-spike trigger (optional; absent = trigger disabled). A measured
+   *  volume burst against the pool's OWN trailing baseline qualifies the
+   *  entry even while the 1h fee ratio lags below its floor — fees lag
+   *  volume, so the spike is the EARLY signal. */
+  volumeSpike?: HotWindowVolumeSpikeConfig | undefined;
+}
+
+export interface HotWindowVolumeSpikeConfig {
+  /** Trailing per-cycle readings forming the baseline (default 8). */
+  baselineWindow: number;
+  /** Current reading must exceed the baseline median by this factor. */
+  spikeRatio: number;
+  /** Minimum baseline points before a verdict (fail-open below). */
+  minPoints: number;
+  /** Absolute floor on the current 24h volume (USD) — a 3x burst on a dead
+   *  pool is still a dead pool. */
+  minVolumeUsd: number;
+}
+
+/** One per-cycle 24h-volume reading; callers pass oldest-first with the
+ *  CURRENT reading as the last element. */
+export type VolumeSeries = ReadonlyArray<number>;
+
+export interface VolumeSpikeResult {
+  readonly isSpike: boolean;
+  /** Burst multiple vs the window-start reading (0 when unknown). */
+  readonly ratio: number;
+}
+
+/** Detect a volume burst. The per-cycle reading is a trailing-24h ROLLING
+ *  figure, so comparing adjacent readings is useless (it moves a few percent
+ *  per scan no matter what). Instead the CURRENT reading is compared against
+ *  the reading `baselineWindow` cycles AGO (window start): a genuine burst
+ *  injects enough fresh volume over ~30 min to lift the rolling figure by a
+ *  meaningful multiple, while ordinary drift does not. NOTE the arithmetic:
+ *  because ~23.5h of baseline volume stays inside the rolling sum, even a
+ *  pool trading 10× its normal rate for the whole window only lifts the
+ *  reading ~1.2× — thresholds must live in the 1.1–1.5 band, NOT 2.5+
+ *  (which would require adding 1.5 DAYS of volume in half an hour).
+ *  Fail-open — fewer than `minPoints` baseline points yields NO verdict (a
+ *  cold-start pool is not a signal either way). */
+export function detectVolumeSpike(params: {
+  volumes: VolumeSeries;
+  baselineWindow: number;
+  spikeRatio: number;
+  minPoints: number;
+}): VolumeSpikeResult {
+  const finite = params.volumes.filter((v) => Number.isFinite(v) && v >= 0);
+  if (finite.length < params.minPoints + 1) return { isSpike: false, ratio: 0 };
+  const current = finite[finite.length - 1]!;
+  const base = finite[finite.length - 1 - params.baselineWindow];
+  if (base === undefined) return { isSpike: false, ratio: 0 };
+  if (base <= 0) {
+    // A dead pool coming alive is itself a burst when the reading is real.
+    return current > 0
+      ? { isSpike: true, ratio: Number.POSITIVE_INFINITY }
+      : { isSpike: false, ratio: 0 };
+  }
+  const ratio = current / base;
+  return { isSpike: ratio >= params.spikeRatio, ratio };
 }
 
 export interface HotWindowEnterInput {
@@ -57,6 +117,12 @@ export interface HotWindowEnterInput {
   /** Measured Data-API 1h fee/TVL ratio (percent), or null when unmeasured. */
   feeTvlRatio1h: number | null;
   tvlUsd: number;
+  /** Precomputed volume-spike verdict for this pool (when the caller has the
+   *  snapshot history to compute one). Absent/null = no spike evidence. */
+  volumeSpike?: VolumeSpikeResult | null | undefined;
+  /** Current measured 24h volume (USD) — the absolute floor for the spike
+   *  trigger. Null/unmeasured disables the spike path. */
+  volume24hUsd?: number | null | undefined;
 }
 
 export interface HotWindowEnterResult {
@@ -67,25 +133,48 @@ export interface HotWindowEnterResult {
 
 /**
  * Is this pool a hot-window ENTER right now?
- *  - measured printing signal present and above the floor (currently printing,
- *    never stale historical APR);
+ *  - EITHER trigger A (printing): measured 1h fee ratio above its floor —
+ *    fees realized NOW; OR trigger B (burst, when configured): a measured
+ *    volume spike vs the pool's own trailing baseline AND an absolute volume
+ *    floor — volume LEADS fees, so the burst is the early signal;
  *  - pool within the depth band [minPoolTvl, min(maxPoolTvl, entry/minSharePct)]
  *    so a tiny entry captures a meaningful share without whaling the pool;
- *  - fail-closed: missing measured fees or out-of-band depth => no entry.
+ *  - fail-closed: no qualifying measured signal or out-of-band depth => no entry.
  */
 export function evaluateHotWindowEnter(input: HotWindowEnterInput): HotWindowEnterResult {
   const c = input.config;
   if (!c.enabled) {
     return { qualify: false, sizeUsd: 0, rejectReason: "hot-window disabled" };
   }
-  if (input.feeTvlRatio1h === null || !Number.isFinite(input.feeTvlRatio1h)) {
-    return { qualify: false, sizeUsd: 0, rejectReason: "no measured 1h printing signal" };
+
+  // Trigger A: measured printing-now fee ratio.
+  const ratioKnown =
+    input.feeTvlRatio1h !== null &&
+    Number.isFinite(input.feeTvlRatio1h) &&
+    (input.feeTvlRatio1h ?? 0) >= 0;
+  const printing = ratioKnown && input.feeTvlRatio1h! >= c.printingRatio1h;
+
+  // Trigger B: measured volume burst vs own baseline (early signal).
+  let bursting = false;
+  if (c.volumeSpike !== undefined) {
+    const spike = input.volumeSpike;
+    const volKnown = input.volume24hUsd !== null && Number.isFinite(input.volume24hUsd);
+    bursting =
+      spike !== null &&
+      spike !== undefined &&
+      spike.isSpike &&
+      volKnown &&
+      (input.volume24hUsd ?? 0) >= c.volumeSpike.minVolumeUsd;
   }
-  if (input.feeTvlRatio1h < c.printingRatio1h) {
+
+  if (!printing && !bursting) {
+    if (!ratioKnown) {
+      return { qualify: false, sizeUsd: 0, rejectReason: "no measured 1h printing signal" };
+    }
     return {
       qualify: false,
       sizeUsd: 0,
-      rejectReason: `1h fee ratio ${input.feeTvlRatio1h.toFixed(2)} < floor ${c.printingRatio1h}`,
+      rejectReason: `1h fee ratio ${input.feeTvlRatio1h?.toFixed(2)} < floor ${c.printingRatio1h}`,
     };
   }
   if (c.entrySizeUsd <= 0 || input.tvlUsd <= 0) {

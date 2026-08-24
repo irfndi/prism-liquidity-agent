@@ -46,11 +46,18 @@ import { shouldDiscoverPools } from "./pool-policy.js";
 import {
   DEFAULT_RUNNER_MIN_DRIFT_BINS,
   DEFAULT_RUNNER_MIN_FEE_APR,
+  DEFAULT_ROTATION_APR_MULT,
   consecutiveAboveFloorObservations,
   isMarketRunnerPool,
   lowestAprHeldPosition,
   shouldRotate,
 } from "./market-runner.js";
+import {
+  assessHerding,
+  herdingBlocksEntry,
+  isAprSelfOutlier,
+  type ReturnSeries,
+} from "./regime-gate.js";
 import { runnerNetAprPct, runnerNetDailyPctAfterCosts } from "./fee-capture.js";
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
 import {
@@ -137,7 +144,14 @@ import { identifyAssetMint } from "./fallen-angel-service.js";
 import { buildTpLadder, evaluateTpLadder, parseTpLadder, serializeTpLadder } from "./tp-ladder.js";
 import { getGeckoPoolOhlcv, type GeckoOhlcvSignals } from "./gecko-ohlcv-service.js";
 import { getRugCheckReport, type RugCheckReport } from "./rugcheck-service.js";
-import { evaluateHotWindowEnter, evaluateHotWindowExit, hotWindowDayKey } from "./hot-window.js";
+import {
+  detectVolumeSpike,
+  evaluateHotWindowEnter,
+  evaluateHotWindowExit,
+  hotWindowDayKey,
+  type VolumeSpikeResult,
+} from "./hot-window.js";
+import { evaluateChurnGuard, type ChurnEntry } from "./churn-guard.js";
 import {
   launchEntrySizeUsd,
   launchPositionExit,
@@ -2912,6 +2926,10 @@ export const program = Effect.gen(function* () {
   // proves the spike passed.
   let executionFailuresThisCycle = 0;
   let coreDataFailuresThisCycle = 0;
+  // Regime-gate verdict for the CURRENT cycle, recomputed at the top of
+  // runScanCycle (module scope: the ENTER gate chain lives in a sibling
+  // function). Advisory-only — see the runScanCycle block for semantics.
+  let cycleHerdingBlock = false;
   const dailyBaselineScope = {
     walletAddress: executionWalletAddress ?? "paper",
     agentInstanceId: config.agentInstanceId,
@@ -3000,6 +3018,9 @@ export const program = Effect.gen(function* () {
     2,
   );
   const binHistory = new Map<string, number[]>();
+  // Latest bin step per pool (regime-gate needs it to convert bin deltas into
+  // price-return space; refreshed alongside the bin history).
+  const binStepByAddress = new Map<string, number>();
   // Issue #196 follow-up: route-probe results cache. The autonomous-candidate
   // refresh probes every non-SOL candidate mint in both directions (SOL→token
   // and token→SOL) with FIXED probe amounts — identical requests repeated
@@ -4783,6 +4804,8 @@ export const program = Effect.gen(function* () {
       const marketCfg = {
         minTvlUsd: config.marketScanMinTvlUsd ?? 250_000,
         minFeeApr: config.marketScanMinFeeApr ?? 25,
+        minFees24hUsd: config.marketScanMinFees24hUsd,
+        minVolume24hUsd: config.marketScanMinVolume24hUsd,
         minHolders: config.marketScanMinHolders ?? 1000,
         minPoolAgeHours: config.marketScanMinPoolAgeHours ?? 24,
         minBinStep: config.marketScanMinBinStep ?? 2,
@@ -4954,6 +4977,48 @@ export const program = Effect.gen(function* () {
   const runScanCycle = (): Effect.Effect<void, never, EntryPrepService> =>
     Effect.gen(function* () {
       coreDataFailuresThisCycle = 0;
+
+      // ── Regime gate: once-per-cycle herding assessment ──────────────────
+      // ORCA (arXiv:2604.17251): systemic stress shows up as cross-asset
+      // correlation collapse into lockstep BEFORE price indicators react.
+      // Computed from the in-memory per-pool bin history (bin ids map
+      // monotonically to price, so deltaBins × ln(1+binStep/1e4) is the
+      // per-cycle return — no oracle needed). Advisory-only: an unknown or
+      // sub-threshold regime changes nothing; a herding regime blocks NEW
+      // ENTERs for THIS cycle only (exits are never touched). Fail-open by
+      // construction: too few comparable pools → known:false → no block.
+      cycleHerdingBlock = false;
+      if (config.regimeHerdingGateEnabled === true) {
+        const seriesByPool = new Map<string, ReturnSeries>();
+        for (const [addr, bins] of binHistory) {
+          const bs = binStepByAddress.get(addr) ?? 0;
+          if (!Number.isFinite(bs) || bs <= 0 || bins.length < 2) continue;
+          const factor = Math.log(1 + bs / 10_000);
+          seriesByPool.set(
+            addr,
+            bins.slice(1).map((b, i) => (b - bins[i]!) * factor),
+          );
+        }
+        // The bin-history ring caps at max(VOLATILITY_LOOKBACK_SNAPSHOTS,
+        // OOR_RECOVERY_LOOKBACK_CYCLES, 2) entries = cap−1 return points per
+        // pool. Derive the minimum from the REAL cap — demanding more points
+        // than the ring can ever hold would keep the assessment permanently
+        // unknown (silent fail-open dead code). Floor 6: fewer points make
+        // pairwise correlation noise; below that stay unknown instead.
+        const herdingMinPoints = Math.min(12, Math.max(6, binHistoryCap - 1));
+        const herding = assessHerding(seriesByPool, { minPoints: herdingMinPoints });
+        cycleHerdingBlock =
+          herding.known &&
+          herdingBlocksEntry(herding, {
+            edgeDensityThreshold: config.regimeHerdingEdgeThreshold,
+            meanCorrThreshold: config.regimeHerdingCorrThreshold,
+          });
+        if (herding.known) {
+          console.info(
+            `[regime-gate] herding known: pairs=${herding.pairCount} meanCorr=${herding.meanCorrelation.toFixed(3)} edgeDensity=${herding.edgeDensity.toFixed(2)} block=${cycleHerdingBlock}`,
+          );
+        }
+      }
 
       // The closed ledger is newest-first. Reuse one per-cycle snapshot for
       // both portfolio-wide and pool-local PnL guards. A read failure fails
@@ -5644,6 +5709,7 @@ export const program = Effect.gen(function* () {
       const rawPool = yield* adapter.getPoolState(poolAddress);
       const binArray = yield* adapter.getBinArray(poolAddress);
       pushBinHistory(poolAddress, rawPool.activeBinId);
+      binStepByAddress.set(poolAddress, rawPool.binStep);
 
       // Real pool stats, resolved datapi (primary) > geckoterminal (secondary)
       // > dexscreener (secondary resilience) > the adapter's fabricated
@@ -5730,7 +5796,28 @@ export const program = Effect.gen(function* () {
         obsNow,
         runnerMaxGapMs,
       );
+      // Euphoria damper (ORCA's strongest sell signal — confidence-at-extreme
+      // marks tops, not continuation): a runner whose CURRENT measured APR is
+      // a vertical spike vs its OWN recent history (top-percentile self-rank)
+      // is suppressed from BOTH admission and rotation superiority. Durable
+      // yield is flat-high (prior observations equally elevated → low self-
+      // rank) and passes unchanged; a cold-start pool (<3 prior obs)
+      // fail-opens. When the spike proves durable the self-rank falls as
+      // history catches up and the pool classifies again.
+      const runnerAprOutlier =
+        config.runnerAprOutlierEnabled === true &&
+        isAprSelfOutlier({
+          priorAprs: aprObs.map((o) => o.apr),
+          currentApr: poolFeeAprPct,
+          outlierPercentile: config.runnerAprOutlierPercentile,
+        });
+      if (runnerAprOutlier) {
+        console.info(
+          `[regime-gate] runner APR self-outlier ${poolAddress} — ${poolFeeAprPct.toFixed(0)}% sits at the top of its own recent history; runner classification suppressed`,
+        );
+      }
       const isMarketRunner = (addr: string): boolean =>
+        !runnerAprOutlier &&
         isMarketRunnerPool({
           enabled: config.marketScanRunnerEnabled === true,
           marketScanPools,
@@ -5740,7 +5827,8 @@ export const program = Effect.gen(function* () {
           runnerMinFeeApr: config.marketScanRunnerMinFeeApr,
           netDriftBins,
           runnerMinDriftBins: config.marketScanRunnerMinDriftBins,
-        }) && runnerConsecutiveCount >= (config.marketScanRunnerConfirmCycles ?? 2);
+        }) &&
+        runnerConsecutiveCount >= (config.marketScanRunnerConfirmCycles ?? 2);
       poolFeeAprByAddress.set(poolAddress, { feeAprPct: poolFeeAprPct, tvlUsd: pool.tvlUsd });
 
       // TVL velocity + IL price-drift need a previous reference point, so the
@@ -6108,6 +6196,15 @@ export const program = Effect.gen(function* () {
           maxTripsPerDay: config.hotWindowMaxTripsPerDay ?? 30,
           dailyLossHaltUsd: config.hotWindowDailyLossHaltUsd ?? 3,
           maxOpen: config.hotWindowMaxOpen ?? 2,
+          volumeSpike:
+            config.flashVolumeTriggerEnabled === true
+              ? {
+                  baselineWindow: config.flashBaselineWindow ?? 8,
+                  spikeRatio: config.flashMinSpikeRatio ?? 2.5,
+                  minPoints: 5,
+                  minVolumeUsd: config.flashMinVolumeUsd ?? 10_000,
+                }
+              : undefined,
         };
         // Daily loss halt: sum today's closed hot-window realized PnL.
         let halted = false;
@@ -6182,17 +6279,59 @@ export const program = Effect.gen(function* () {
           } else if (tripsToday >= hotCfg.maxTripsPerDay) {
             hotSkipReason = "trip-budget";
           } else {
+            // Flash trigger B (volume burst): fees lag volume, so a measured
+            // burst against the pool's OWN trailing snapshot baseline is the
+            // EARLY entry signal while the 1h fee ratio still lags its floor.
+            // Zero added API load — the per-cycle volume history is already
+            // persisted. Measured stats only (datapi/gecko rows); modeled
+            // heuristic volume never classifies. Fail-open: thin history or
+            // unmeasured source → no verdict → trigger A rules alone.
+            let volumeSpikeVerdict: VolumeSpikeResult | null = null;
+            let measuredVolume24h: number | null = null;
+            if (
+              hotCfg.volumeSpike !== undefined &&
+              (pool.statsSource === "datapi" || pool.statsSource === "geckoterminal")
+            ) {
+              const volWindowMs = Math.max(
+                30 * 60_000,
+                (hotCfg.volumeSpike.baselineWindow + 3) * (config.scanIntervalMs ?? 600_000),
+              );
+              const volSnaps = yield* db.getSnapshots(poolAddress, nowMs - volWindowMs, nowMs).pipe(
+                Effect.catch(() =>
+                  // SAFETY: The fallback literal satisfies the declared readonly array type.
+                  Effect.succeed([] as ReadonlyArray<PoolSnapshot>),
+                ),
+              );
+              const measuredVols = volSnaps
+                .filter((s) => s.statsSource === "datapi" || s.statsSource === "geckoterminal")
+                .map((s) => s.volume24hUsd);
+              if (measuredVols.length > 0) {
+                volumeSpikeVerdict = detectVolumeSpike({
+                  volumes: measuredVols,
+                  baselineWindow: hotCfg.volumeSpike.baselineWindow,
+                  spikeRatio: hotCfg.volumeSpike.spikeRatio,
+                  minPoints: hotCfg.volumeSpike.minPoints,
+                });
+                measuredVolume24h = pool.volume24hUsd;
+              }
+            }
             const enterEval = evaluateHotWindowEnter({
               config: hotCfg,
               feeTvlRatio1h: datapiStats?.feeTvlRatio1h ?? null,
               tvlUsd: pool.tvlUsd,
+              volumeSpike: volumeSpikeVerdict,
+              volume24hUsd: measuredVolume24h,
             });
             if (enterEval.qualify) {
+              const burstEntry =
+                volumeSpikeVerdict !== null &&
+                volumeSpikeVerdict.isSpike &&
+                (datapiStats?.feeTvlRatio1h ?? 0) < hotCfg.printingRatio1h;
               hotEnter = {
                 action: "ENTER",
                 poolAddress,
                 confidence: 0.7,
-                reasoning: `[hot-window] pool printing (1h ratio ${(datapiStats?.feeTvlRatio1h ?? 0).toFixed(2)}%/h), depth $${pool.tvlUsd.toFixed(0)}, size $${enterEval.sizeUsd.toFixed(0)}, trips ${tripsToday}/${hotCfg.maxTripsPerDay}`,
+                reasoning: `[hot-window${burstEntry ? ":burst" : ""}] ${burstEntry ? `volume burst x${volumeSpikeVerdict!.ratio.toFixed(1)} vs baseline` : `pool printing (1h ratio ${(datapiStats?.feeTvlRatio1h ?? 0).toFixed(2)}%/h)`}, depth $${pool.tvlUsd.toFixed(0)}, size $${enterEval.sizeUsd.toFixed(0)}, trips ${tripsToday}/${hotCfg.maxTripsPerDay}`,
                 positionSizeUsd: enterEval.sizeUsd,
                 positionMode: "hot-window",
               };
@@ -6941,19 +7080,31 @@ export const program = Effect.gen(function* () {
           metrics.volumeAuthenticityKnown &&
           volumeAuth < evolvedThresholds.volumeAuthThreshold
         ) {
-          decision = {
-            action: "EXIT",
-            poolAddress,
-            positionId: pos.positionId,
-            confidence: 0.8,
-            reasoning: `Volume authenticity ${volumeAuth.toFixed(2)} below threshold`,
-          };
-          yield* sendAgentAlert(
-            "warning",
-            "risk_rejected",
-            `Volume authenticity ${volumeAuth.toFixed(2)} below threshold on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
-            { pool, metrics, position: pos },
-          );
+          // Hold-bias (HOLD_BIAS_ENABLED): the volume-authenticity EXIT is a
+          // fee-TREND signal — it fires on measured volume composition, not
+          // on capital danger. Under hold-bias an in-range position keeps
+          // collecting fees instead of being recycled through spread cost
+          // (audit: 221 round-trips on one pool turned a +$17 passive edge
+          // into −$163). Capital-protection exits are never suppressed.
+          if (config.holdBiasEnabled === true && pos.outOfRangeSince === null) {
+            console.info(
+              `[hold-bias] suppressing volume-auth EXIT ${poolAddress} — in-range position keeps harvesting`,
+            );
+          } else {
+            decision = {
+              action: "EXIT",
+              poolAddress,
+              positionId: pos.positionId,
+              confidence: 0.8,
+              reasoning: `Volume authenticity ${volumeAuth.toFixed(2)} below threshold`,
+            };
+            yield* sendAgentAlert(
+              "warning",
+              "risk_rejected",
+              `Volume authenticity ${volumeAuth.toFixed(2)} below threshold on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
+              { pool, metrics, position: pos },
+            );
+          }
         } else if (yieldExitMature && metrics.feeIlRatioKnown && feeIlRatio < 0.5) {
           // feeIlRatioUnknown (heuristic) → skip: a fabricated-low ratio must
           // not force an exit. The metric-unavailability warn above logs the skip.
@@ -6961,19 +7112,32 @@ export const program = Effect.gen(function* () {
           // ratio is near-zero before fees accrue — exiting locks in temporary
           // IL that often reverses (forensics: median 33-min holds, pools that
           // pumped +24-32% within 24h of the paper loss exit).
-          decision = {
-            action: "EXIT",
-            poolAddress,
-            positionId: pos.positionId,
-            confidence: 0.75,
-            reasoning: `Fee/IL ratio ${feeIlRatio.toFixed(2)} below 0.5`,
-          };
-          yield* sendAgentAlert(
-            "warning",
-            "risk_rejected",
-            `Fee/IL ratio ${feeIlRatio.toFixed(2)} below 0.5 on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
-            { pool, metrics, position: pos },
-          );
+          if (
+            config.holdBiasEnabled === true &&
+            pos.outOfRangeSince === null &&
+            pos.currentValueUsd >= pos.depositedUsd * 0.9
+          ) {
+            // Hold-bias: a fee/IL dip on an in-range position not yet down
+            // >10% is a fee-trend wobble, not capital danger — keep
+            // harvesting. A real drawdown still exits via the trailing stop.
+            console.info(
+              `[hold-bias] suppressing fee/IL EXIT ${poolAddress} — in-range, drawdown ${(100 - (pos.currentValueUsd / Math.max(pos.depositedUsd, 0.01)) * 100).toFixed(1)}% within tolerance`,
+            );
+          } else {
+            decision = {
+              action: "EXIT",
+              poolAddress,
+              positionId: pos.positionId,
+              confidence: 0.75,
+              reasoning: `Fee/IL ratio ${feeIlRatio.toFixed(2)} below 0.5`,
+            };
+            yield* sendAgentAlert(
+              "warning",
+              "risk_rejected",
+              `Fee/IL ratio ${feeIlRatio.toFixed(2)} below 0.5 on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — EXIT`,
+              { pool, metrics, position: pos },
+            );
+          }
         } else if (
           yieldExitMature &&
           pos.positionMode !== "launch" &&
@@ -7004,13 +7168,27 @@ export const program = Effect.gen(function* () {
             entryAprPct > 0 &&
             poolFeeAprPct < entryAprPct * regressionPct
           ) {
-            decision = {
-              action: "EXIT",
-              poolAddress,
-              positionId: pos.positionId,
-              confidence: 1,
-              reasoning: `[yield-regression] APR ${poolFeeAprPct.toFixed(0)}% < ${(regressionPct * 100).toFixed(0)}% of entry ${entryAprPct.toFixed(0)}%`,
-            };
+            if (
+              config.holdBiasEnabled === true &&
+              pos.outOfRangeSince === null &&
+              pos.currentValueUsd >= pos.depositedUsd * 0.9
+            ) {
+              // Hold-bias: APR decay alone doesn't sell an in-range position
+              // that isn't materially underwater — fees still accrue, and the
+              // round-trip cost is what historically turned winners into
+              // losers. The trailing stop remains the drawdown backstop.
+              console.info(
+                `[hold-bias] suppressing yield-regression EXIT ${poolAddress} — in-range, APR decay only`,
+              );
+            } else {
+              decision = {
+                action: "EXIT",
+                poolAddress,
+                positionId: pos.positionId,
+                confidence: 1,
+                reasoning: `[yield-regression] APR ${poolFeeAprPct.toFixed(0)}% < ${(regressionPct * 100).toFixed(0)}% of entry ${entryAprPct.toFixed(0)}%`,
+              };
+            }
           }
         }
 
@@ -7749,6 +7927,73 @@ export const program = Effect.gen(function* () {
             }
           }
 
+          // Churn circuit breaker (CHURN_MAX_ENTRIES_PER_POOL_PER_DAY): cap
+          // same-pool re-entries per UTC day BEFORE losses accumulate. The
+          // audit showed the entire all-time loss concentrated in two churned
+          // pools (221 and 125 round-trips) while a passive replay of the
+          // same pool netted positive — trade COUNT is the damage mechanism.
+          // Exits are never restricted; hot-window positions are exempt (the
+          // lane has its own trip budget + daily loss halt). Fail-open when
+          // the cap is 0 or history is unreadable.
+          if (
+            !enterGateRejected &&
+            !launchScanPools.has(poolAddress) &&
+            (config.churnMaxEntriesPerPoolPerDay ?? 0) > 0
+          ) {
+            const closedLedger = yield* db.getClosedPositions().pipe(
+              Effect.catch(() =>
+                // SAFETY: The fallback literal satisfies the declared readonly array type.
+                Effect.succeed([] as ReadonlyArray<PositionRecord>),
+              ),
+            );
+            // Count BOTH closed rows and currently-open tracked positions on
+            // this pool — an ENTER made earlier today that is still open must
+            // consume the daily budget too.
+            const churnHistory: Array<ChurnEntry> = closedLedger
+              .filter((p) => p.poolAddress === poolAddress)
+              .map((p) => ({ openedAt: p.timestamp, closed: true }));
+            for (const p of trackedPositions.values()) {
+              if (p.poolAddress === poolAddress && p.positionMode !== "hot-window") {
+                churnHistory.push({ openedAt: p.timestamp, closed: false });
+              }
+            }
+            const churnVerdict = evaluateChurnGuard({
+              history: churnHistory,
+              maxEntriesPerPoolPerDay: config.churnMaxEntriesPerPoolPerDay ?? 0,
+              nowMs: Date.now(),
+            });
+            if (churnVerdict.blocked) {
+              console.info(
+                `[churn-guard] Skipping ENTER ${poolAddress} — ${churnVerdict.todayCount} entries today >= cap ${config.churnMaxEntriesPerPoolPerDay}`,
+              );
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Churn guard blocked ENTER on ${poolAddress}: ${churnVerdict.todayCount} entries today >= daily cap ${config.churnMaxEntriesPerPoolPerDay}`,
+                  poolAddress,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: 0,
+                  reasoning: `[churn-guard] ${churnVerdict.todayCount} entries today >= cap ${config.churnMaxEntriesPerPoolPerDay} — re-entry rationed`,
+                  metrics,
+                  riskResult: {
+                    approved: false,
+                    reason: `[churn-guard] daily cap ${config.churnMaxEntriesPerPoolPerDay}`,
+                  },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              enterGateRejected = true;
+            }
+          }
+
           // Token-level execution-failure breaker (Robinhood rule 12): a
           // genuine live EXIT failure on ANY pool armed `token_block:<mint>`
           // for its legs — new deployment into a blocked token is rejected
@@ -7933,6 +8178,38 @@ export const program = Effect.gen(function* () {
                 riskResult: {
                   approved: false,
                   reason: `[runner-drift-gate] drift ${netDriftBins} < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
+                },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catch(() => Effect.void));
+            enterGateRejected = true;
+          }
+
+          // [regime-gate] herding ENTER damper — ORCA's crash signature:
+          // scanned pools moving in lockstep (high pairwise correlation /
+          // edge density) marks systemic stress, exactly when rugs cluster
+          // and freshly opened LP positions bleed. Blocks NEW entries for
+          // THIS cycle only, every lane (a rotation executed under herding
+          // churns capital twice inside the danger window); EXIT/REBALANCE
+          // are untouched. Fail-open: unknown regime never blocks.
+          if (!enterGateRejected && cycleHerdingBlock) {
+            console.info(
+              `[regime-gate] Blocking ENTER ${poolAddress} — cross-pool herding above threshold`,
+            );
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "ENTER",
+                confidence: 0,
+                reasoning:
+                  "[regime-gate] cross-pool herding above threshold — systemic-stress window, no new capital",
+                metrics,
+                riskResult: {
+                  approved: false,
+                  reason: "[regime-gate] herding",
                 },
                 executed: false,
                 paperTrading: config.paperTrading,
@@ -8204,7 +8481,13 @@ export const program = Effect.gen(function* () {
                             feeAprPct: incumbentNetApr,
                             tvlUsd: worst.tvlUsd,
                           },
-                          config.marketScanRotationAprMult,
+                          // Euphoria damper: when the challenger's headline APR
+                          // is a self-history spike, demanding double the
+                          // superiority keeps a blow-off top from buying an
+                          // exit of a durable incumbent at the top tick.
+                          runnerAprOutlier
+                            ? (config.marketScanRotationAprMult ?? DEFAULT_ROTATION_APR_MULT) * 2
+                            : config.marketScanRotationAprMult,
                         )
                       ) {
                         rawDecisions.push({

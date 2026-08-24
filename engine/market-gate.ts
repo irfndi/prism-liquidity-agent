@@ -15,9 +15,16 @@ export interface MarketGateConfig {
   readonly minTvlUsd: number;
   /** Minimum annualized fee/TVL percent: fees24h × 365 / tvl × 100. */
   readonly minFeeApr: number;
+  /** Absolute 24h fee floor (USD). Percentage APR alone admits micro-pools
+   *  with spectacular ratios but trivial dollars; this floor keeps only pools
+   *  with real fee dollars (default 0 = disabled). */
+  readonly minFees24hUsd?: number | undefined;
   /** Minimum daily volume/TVL ratio (wash-trading and dead-pool guard). */
   readonly minVolumeTurnover: number;
   readonly maxVolumeTurnover: number;
+  /** Absolute 24h volume floor (USD) — real sustained volume is also the
+   *  honeypot counter-signal (default 0 = disabled). */
+  readonly minVolume24hUsd?: number | undefined;
   /** Minimum holders for a non-stable, non-SOL leg (rug/IL pre-filter). */
   readonly minHolders: number;
   /**
@@ -191,6 +198,14 @@ export function gateAndRankMarketPools(
       reject("no 24h fees");
       continue;
     }
+    // Absolute activity floors (volume+fees focus): percentage ratios alone
+    // admit micro-pools with spectacular percentages but trivial dollars.
+    // Real sustained volume doubles as the honeypot counter-signal.
+    const minFees = config.minFees24hUsd ?? 0;
+    if (minFees > 0 && pool.fees24hUsd < minFees) {
+      reject(`fees24h $${pool.fees24hUsd.toFixed(0)} < $${minFees.toFixed(0)} (absolute floor)`);
+      continue;
+    }
     const feeAprPct = (pool.fees24hUsd * 365 * 100) / pool.tvlUsd;
     if (feeAprPct < config.minFeeApr) {
       reject(`fee APR ${feeAprPct.toFixed(1)}% < ${config.minFeeApr}%`);
@@ -198,6 +213,11 @@ export function gateAndRankMarketPools(
     }
     if (!Number.isFinite(pool.volume24hUsd) || pool.volume24hUsd <= 0) {
       reject("no 24h volume");
+      continue;
+    }
+    const minVol = config.minVolume24hUsd ?? 0;
+    if (minVol > 0 && pool.volume24hUsd < minVol) {
+      reject(`volume24h $${pool.volume24hUsd.toFixed(0)} < $${minVol.toFixed(0)} (absolute floor)`);
       continue;
     }
     const volumeTurnover = pool.volume24hUsd / pool.tvlUsd;
