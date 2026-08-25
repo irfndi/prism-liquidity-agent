@@ -2,6 +2,12 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.35] — 2026-08-25
+
+### Added
+
+- **Laddering: tight+wide split** (`LADDER_ENABLED`, `LADDER_TIGHT_MULT=0.6`, `LADDER_WIDE_MULT=1.6`). When enabled (OFF by default, paper-first), an `ENTER $20` is executed as `2× $10` positions: tight `0.6× halfWidth` (fee harvest) + wide `1.6×` (chop buffer) — reuses existing `MAX_POSITIONS_PER_POOL=2` capacity (no new table, no extra tx on live until validated). `canLadder` fail-closed on size $<20$, live-identity, or capacity. Paper validates fee vs buffer; live stays single till `PF>1` on 50 closes. Implements "Laddering/Multiple positions" and "Smart Exit" via existing `trailing 7% + holdBias + hot-window 30m`.
+
 ## [0.2.34] — 2026-08-25
 
 ### Fixed

@@ -354,6 +354,9 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
     field: "minYieldExitAgeMs",
     min: 0,
   },
+  { envKey: "LADDER_ENABLED", kind: "boolean", field: "ladderEnabled" },
+  { envKey: "LADDER_TIGHT_MULT", kind: "number", field: "ladderTightMult", min: 0.1, max: 2 },
+  { envKey: "LADDER_WIDE_MULT", kind: "number", field: "ladderWideMult", min: 0.1, max: 3 },
   {
     envKey: "MARKET_SCAN_MAX_NEGATIVE_DRIFT_BINS",
     kind: "number",

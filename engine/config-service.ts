@@ -254,6 +254,12 @@ export interface AppConfig {
    *  dominance, dust, TVL drop, trailing stop, lifecycles) are NEVER
    *  suppressed. Default false. */
   readonly holdBiasEnabled?: boolean;
+  /** Laddering: split an ENTER into tight+wide positions for fee vs buffer. OFF by default. */
+  readonly ladderEnabled?: boolean;
+  /** Tight leg multiplier on the resolved half-width (e.g. 0.6). */
+  readonly ladderTightMult?: number;
+  /** Wide leg multiplier on the resolved half-width (e.g. 1.6). */
+  readonly ladderWideMult?: number;
   /** Market-gate absolute 24h fee floor (USD). Focuses the scan universe on
    *  pools with real fee dollars — percentage APR alone admits micro-pools
    *  with spectacular ratios but trivial income. Default 0 = disabled. */
@@ -1803,6 +1809,12 @@ const loadConfig = Effect.gen(function* () {
   const holdBiasEnabled = yield* Config.boolean("HOLD_BIAS_ENABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
+  // Laddering: tight+wide split for fee capture vs buffer. Default OFF — when ON an ENTER
+  // is executed as two positions (half size each) with scaled half-widths, reusing the
+  // existing MAX_POSITIONS_PER_POOL=2 capacity. Tight leg harvests fees, wide leg survives chop.
+  const ladderEnabled = yield* Config.boolean("LADDER_ENABLED").pipe(Effect.orElseSucceed(() => false));
+  const ladderTightMult = yield* validatedNumber("LADDER_TIGHT_MULT", 0.1, 0.6, 2);
+  const ladderWideMult = yield* validatedNumber("LADDER_WIDE_MULT", 0.1, 1.6, 3);
   // Volume+fees focus: absolute activity floors keep the scan universe on
   // pools with real fee dollars and real volume (honeypot counter-signal).
   const marketScanMinFees24hUsd = yield* validatedNumber(
@@ -2213,6 +2225,9 @@ const loadConfig = Effect.gen(function* () {
     flashMinVolumeUsd,
     churnMaxEntriesPerPoolPerDay,
     holdBiasEnabled,
+    ladderEnabled,
+    ladderTightMult,
+    ladderWideMult,
     marketScanMinFees24hUsd,
     marketScanMinVolume24hUsd,
     allowTransferFeeTokens,

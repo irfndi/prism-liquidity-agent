@@ -1165,6 +1165,12 @@ export function executePaper(
     strategy: StrategyApi;
     entryStrategySpec: EntryStrategySpec;
     entryRangeHalfWidth?: number;
+    /** Laddering: tight+wide split (OFF by default, paper-first). */
+    ladderEnabled?: boolean;
+    ladderTightMult?: number;
+    ladderWideMult?: number;
+    maxOpenPositions?: number;
+    maxPositionsPerPool?: number;
     entryDipOffsetBins?: number;
     /** G2 rotation-arm + yield-baseline wiring (market-runner lane). */
     rotationArmMs?: number;
@@ -1200,6 +1206,11 @@ export function executePaper(
       strategy,
       entryStrategySpec,
       entryRangeHalfWidth,
+      ladderEnabled,
+      ladderTightMult,
+      ladderWideMult,
+      maxOpenPositions,
+      maxPositionsPerPool,
       entryDipOffsetBins,
     } = deps;
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
@@ -1208,85 +1219,167 @@ export function executePaper(
       const liveExited = positionsForPool(trackedPositions, decision.poolAddress).find(
         (p) => p.paperExitedAt !== null && p.positionPubKey !== null,
       );
-      // Paper/live parity: the simulated range comes from the same
-      // recommendBinRange live entries use, so paper validates real behavior.
-      const recommended = strategy.recommendBinRange(
-        pool.activeBinId,
-        pool.binStep,
-        entryRangeHalfWidth,
-        entryDipOffsetBins,
-      );
-      const positionId = liveExited
-        ? liveExited.positionPubKey!
-        : `paper-${decision.poolAddress}-${randomUUID()}`;
-      const pos: PositionRecord = {
-        positionId,
-        poolAddress: decision.poolAddress,
-        positionPubKey: liveExited ? liveExited.positionPubKey : null,
-        depositedUsd: decision.positionSizeUsd,
-        currentValueUsd: decision.positionSizeUsd,
-        tokenXSymbol: pool.tokenXSymbol,
-        tokenYSymbol: pool.tokenYSymbol,
-        activeBinId: pool.activeBinId,
-        lowerBinId: recommended.lowerBinId,
-        upperBinId: recommended.upperBinId,
-        timestamp: Date.now(),
-        outOfRangeSince: null,
-        oorCycleCount: 0,
-        lastFeeClaimAt: Date.now(),
-        trailingStopThreshold: null,
-        highestValueUsd: null,
-        lastRebalanceAt: 0,
-        paperExitedAt: liveExited ? liveExited.paperExitedAt : null,
-        entrySignalTimestamp: signalTimestamp ?? null,
-        entrySignalSnapshotId: signalSnapshotId ?? null,
-        entryPriceUsd: pool.currentPrice,
-        // Paper/live parity for runner entries: live deposits the FULL size
-        // in X (single-sided) — the paper legs must model the same exposure
-        // or PnL/HODL validation drifts from real behavior.
-        entryAmountXUsd:
-          (entryDipOffsetBins ?? 0) !== 0 ? decision.positionSizeUsd : decision.positionSizeUsd / 2,
-        entryAmountYUsd: (entryDipOffsetBins ?? 0) !== 0 ? 0 : decision.positionSizeUsd / 2,
-        cumulativeFeesClaimedUsd: 0,
-        cumulativeRewardsClaimedUsd: 0,
-        closedAt: null,
-        realizedPnlUsd: null,
-        positionMode: decision.positionMode ?? null,
-        tpLadderJson: decision.tpLadderJson ?? null,
-        invalidationStopPrice: decision.invalidationStopPrice ?? null,
-        launchRunner: (entryDipOffsetBins ?? 0) !== 0 ? true : null,
-        launchRunnerSteps: (entryDipOffsetBins ?? 0) !== 0 ? 0 : null,
-        launchRunnerAnchorPrice: (entryDipOffsetBins ?? 0) !== 0 ? pool.currentPrice : null,
-      };
-      trackedPositions.set(pos.positionId, pos);
-      yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
-      // G7 yield-regression baseline: the entry-time fee APR, recorded for
-      // non-launch positions (launch has its own lifecycle).
-      if (pos.positionMode !== "launch") {
-        yield* persistMetadataIfSupported(
-          db,
-          `yieldbase:${pos.positionId}`,
-          JSON.stringify({ entryAprPct: deps.entryAprPct ?? 0, at: Date.now() }),
+      // Laddering: tight+wide split (paper-first, OFF by default). Reuses existing
+      // MAX_POSITIONS_PER_POOL capacity; tight harvests fees, wide survives chop.
+      // Fail-closed: single position when capacity, size, or live-identity would break the invariant.
+      const poolPositionsForLadder = positionsForPool(trackedPositions, decision.poolAddress);
+      const canLadder =
+        ladderEnabled &&
+        !liveExited &&
+        decision.positionSizeUsd >= 20 &&
+        trackedPositions.size + 2 <= (maxOpenPositions ?? 3) &&
+        poolPositionsForLadder.length + 2 <= (maxPositionsPerPool ?? 2);
+      if (canLadder) {
+        const halfSize = decision.positionSizeUsd / 2;
+        const tightHalf = Math.max(5, Math.round((entryRangeHalfWidth ?? 20) * (ladderTightMult ?? 0.6)));
+        const wideHalf = Math.round((entryRangeHalfWidth ?? 20) * (ladderWideMult ?? 1.6));
+        const tightRange = strategy.recommendBinRange(pool.activeBinId, pool.binStep, tightHalf, entryDipOffsetBins);
+        const wideRange = strategy.recommendBinRange(pool.activeBinId, pool.binStep, wideHalf, entryDipOffsetBins);
+        for (const [range, label] of [
+          [tightRange, "tight"] as const,
+          [wideRange, "wide"] as const,
+        ]) {
+          const positionId = `paper-${decision.poolAddress}-${randomUUID()}`;
+          const pos: PositionRecord = {
+            positionId,
+            poolAddress: decision.poolAddress,
+            positionPubKey: null,
+            depositedUsd: halfSize,
+            currentValueUsd: halfSize,
+            tokenXSymbol: pool.tokenXSymbol,
+            tokenYSymbol: pool.tokenYSymbol,
+            activeBinId: pool.activeBinId,
+            lowerBinId: range.lowerBinId,
+            upperBinId: range.upperBinId,
+            timestamp: Date.now(),
+            outOfRangeSince: null,
+            oorCycleCount: 0,
+            lastFeeClaimAt: Date.now(),
+            trailingStopThreshold: null,
+            highestValueUsd: null,
+            lastRebalanceAt: 0,
+            paperExitedAt: null,
+            entrySignalTimestamp: signalTimestamp ?? null,
+            entrySignalSnapshotId: signalSnapshotId ?? null,
+            entryPriceUsd: pool.currentPrice,
+            entryAmountXUsd: (entryDipOffsetBins ?? 0) !== 0 ? halfSize : halfSize / 2,
+            entryAmountYUsd: (entryDipOffsetBins ?? 0) !== 0 ? 0 : halfSize / 2,
+            cumulativeFeesClaimedUsd: 0,
+            cumulativeRewardsClaimedUsd: 0,
+            closedAt: null,
+            realizedPnlUsd: null,
+            positionMode: decision.positionMode ?? null,
+            tpLadderJson: decision.tpLadderJson ?? null,
+            invalidationStopPrice: decision.invalidationStopPrice ?? null,
+            launchRunner: (entryDipOffsetBins ?? 0) !== 0 ? true : null,
+            launchRunnerSteps: (entryDipOffsetBins ?? 0) !== 0 ? 0 : null,
+            launchRunnerAnchorPrice: (entryDipOffsetBins ?? 0) !== 0 ? pool.currentPrice : null,
+          };
+          trackedPositions.set(pos.positionId, pos);
+          yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
+          if (pos.positionMode !== "launch") {
+            yield* persistMetadataIfSupported(
+              db,
+              `yieldbase:${pos.positionId}`,
+              JSON.stringify({ entryAprPct: deps.entryAprPct ?? 0, at: Date.now() }),
+            );
+          }
+          yield* db
+            .savePositionEvent({
+              id: randomUUID(),
+              poolAddress: decision.poolAddress,
+              positionPubKey: pos.positionPubKey,
+              positionId: pos.positionId,
+              event: "ENTER",
+              valueUsd: halfSize,
+              feesUsd: null,
+              price: pool.currentPrice,
+              metadata: {
+                lowerBinId: pos.lowerBinId,
+                upperBinId: pos.upperBinId,
+                strategySpec: entryStrategySpec,
+                ladder: label,
+              },
+              createdAt: Date.now(),
+            })
+            .pipe(Effect.catch(() => Effect.void));
+        }
+      } else {
+        // Paper/live parity: the simulated range comes from the same
+        // recommendBinRange live entries use, so paper validates real behavior.
+        const recommended = strategy.recommendBinRange(
+          pool.activeBinId,
+          pool.binStep,
+          entryRangeHalfWidth,
+          entryDipOffsetBins,
         );
-      }
-      yield* db
-        .savePositionEvent({
-          id: randomUUID(),
+        const positionId = liveExited
+          ? liveExited.positionPubKey!
+          : `paper-${decision.poolAddress}-${randomUUID()}`;
+        const pos: PositionRecord = {
+          positionId,
           poolAddress: decision.poolAddress,
-          positionPubKey: pos.positionPubKey,
-          positionId: pos.positionId,
-          event: "ENTER",
-          valueUsd: decision.positionSizeUsd,
-          feesUsd: null,
-          price: pool.currentPrice,
-          metadata: {
-            lowerBinId: pos.lowerBinId,
-            upperBinId: pos.upperBinId,
-            strategySpec: entryStrategySpec,
-          },
-          createdAt: Date.now(),
-        })
-        .pipe(Effect.catch(() => Effect.void));
+          positionPubKey: liveExited ? liveExited.positionPubKey : null,
+          depositedUsd: decision.positionSizeUsd,
+          currentValueUsd: decision.positionSizeUsd,
+          tokenXSymbol: pool.tokenXSymbol,
+          tokenYSymbol: pool.tokenYSymbol,
+          activeBinId: pool.activeBinId,
+          lowerBinId: recommended.lowerBinId,
+          upperBinId: recommended.upperBinId,
+          timestamp: Date.now(),
+          outOfRangeSince: null,
+          oorCycleCount: 0,
+          lastFeeClaimAt: Date.now(),
+          trailingStopThreshold: null,
+          highestValueUsd: null,
+          lastRebalanceAt: 0,
+          paperExitedAt: liveExited ? liveExited.paperExitedAt : null,
+          entrySignalTimestamp: signalTimestamp ?? null,
+          entrySignalSnapshotId: signalSnapshotId ?? null,
+          entryPriceUsd: pool.currentPrice,
+          entryAmountXUsd:
+            (entryDipOffsetBins ?? 0) !== 0 ? decision.positionSizeUsd : decision.positionSizeUsd / 2,
+          entryAmountYUsd: (entryDipOffsetBins ?? 0) !== 0 ? 0 : decision.positionSizeUsd / 2,
+          cumulativeFeesClaimedUsd: 0,
+          cumulativeRewardsClaimedUsd: 0,
+          closedAt: null,
+          realizedPnlUsd: null,
+          positionMode: decision.positionMode ?? null,
+          tpLadderJson: decision.tpLadderJson ?? null,
+          invalidationStopPrice: decision.invalidationStopPrice ?? null,
+          launchRunner: (entryDipOffsetBins ?? 0) !== 0 ? true : null,
+          launchRunnerSteps: (entryDipOffsetBins ?? 0) !== 0 ? 0 : null,
+          launchRunnerAnchorPrice: (entryDipOffsetBins ?? 0) !== 0 ? pool.currentPrice : null,
+        };
+        trackedPositions.set(pos.positionId, pos);
+        yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
+        if (pos.positionMode !== "launch") {
+          yield* persistMetadataIfSupported(
+            db,
+            `yieldbase:${pos.positionId}`,
+            JSON.stringify({ entryAprPct: deps.entryAprPct ?? 0, at: Date.now() }),
+          );
+        }
+        yield* db
+          .savePositionEvent({
+            id: randomUUID(),
+            poolAddress: decision.poolAddress,
+            positionPubKey: pos.positionPubKey,
+            positionId: pos.positionId,
+            event: "ENTER",
+            valueUsd: decision.positionSizeUsd,
+            feesUsd: null,
+            price: pool.currentPrice,
+            metadata: {
+              lowerBinId: pos.lowerBinId,
+              upperBinId: pos.upperBinId,
+              strategySpec: entryStrategySpec,
+            },
+            createdAt: Date.now(),
+          })
+          .pipe(Effect.catch(() => Effect.void));
+      }
     } else if (decision.action === "EXIT") {
       // G2 rotation-arm re-check: a Rotation EXIT executes only while its
       // arm is fresh and the runner still qualifies — cancel-and-preserve
@@ -4553,6 +4646,11 @@ export const program = Effect.gen(function* () {
               entryStrategySpec,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
+              ladderEnabled: config.ladderEnabled ?? false,
+              ladderTightMult: config.ladderTightMult ?? 0.6,
+              ladderWideMult: config.ladderWideMult ?? 1.6,
+              maxOpenPositions: config.maxOpenPositions,
+              maxPositionsPerPool: config.maxPositionsPerPool,
               ...runnerDispatchDeps(decision.poolAddress),
               ...rugDispatchDeps(),
             },
@@ -9858,6 +9956,11 @@ export const program = Effect.gen(function* () {
               entryStrategySpec,
               entryRangeHalfWidth: effectiveEntryHalfWidth,
               entryDipOffsetBins,
+              ladderEnabled: config.ladderEnabled ?? false,
+              ladderTightMult: config.ladderTightMult ?? 0.6,
+              ladderWideMult: config.ladderWideMult ?? 1.6,
+              maxOpenPositions: config.maxOpenPositions,
+              maxPositionsPerPool: config.maxPositionsPerPool,
               ...runnerDispatchDeps(decision.poolAddress),
               ...rugDispatchDeps(),
             },
