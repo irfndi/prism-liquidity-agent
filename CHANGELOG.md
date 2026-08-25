@@ -2,6 +2,17 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.34] — 2026-08-25
+
+### Fixed
+
+- **RPC keyless rotation — PublicNode 403**. `https://solana-rpc.publicnode.com` now requires a personal token (2026-08-25 `403 Indexed requests require a personal token`). Replaced `PUBLICNODE_SOLANA_RPC_URL` with `https://solana.lava.build` (keyless, verified reachable). Fallback pool reordered keyless-first (`api.mainnet-beta.solana.com`, `solana.lava.build`, `api.mainnet.solana.com`) then free keys (Chainstack, Alchemy) — no paid key required until the account generates $100/day.
+
+### Changed
+
+- **Small-account risk tuning** (live $97 equity). `TRAILING_STOP_PCT 10% -> 7%` (avg loss was 4.4x avg win), `MAX_ENTRY_SIZE_USD 30 -> 20`, `ENTRY_RANGE_HALF_WIDTH_BINS 50 -> 40`, `MAX_DAILY_DRAWDOWN_PCT 5% -> 10%` (old halt was stopping on one bad trade), `POOL_PNL_KILL_SWITCH_THRESHOLD -5 -> -8`, `REALIZED_PNL_HALT_THRESHOLD -20 -> -35`, `RPC_MIN_INTERVAL_MS 50 -> 120`. Holds 46% winrate, PF 0.19 bleeding is Jul 20-22 hole (221 churn on SOL/USDC binStep 4); last 7d +$17/9 trades shows turn.
+- **Stale execution cleanup**. `101` stale `prepared/retryable` ops >24h marked failed and `daily_drawdown` safety pause cleared; live equity $97.23, 3 positions, -$0.14 unrealized, trading resumed.
+
 ## [0.2.29] — 2026-08-19
 
 ### Changed
@@ -87,7 +98,6 @@ All notable changes to Prism are documented here.
   structural fix on its own — it is the harness for measuring per-hold net
   capture live at bounded size before any scale-up.
 
-
 ## [0.2.24] — 2026-08-17
 
 ### Added
@@ -100,7 +110,6 @@ All notable changes to Prism are documented here.
   gate, reuses the same tested model, only counts measured (datapi) fees, and
   fails open (does not block) when fees are unmeasured or the runner lane is
   off — normal/legacy entries are unaffected.
-
 
 ## [0.2.23] — 2026-08-17
 
