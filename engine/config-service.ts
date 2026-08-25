@@ -43,10 +43,12 @@ export const PUBLIC_SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com";
 
 /**
  * Additional keyless public Solana RPC used to spread keyless load. PublicNode
- * is keyless and verified reachable (2026-08); Ankr's endpoint now requires an
- * API key, so it is deliberately NOT included.
+ * now requires a personal token (2026-08-25 403: Indexed requests require a
+ * personal token — Get one at https://www.allnodes.com/publicnode) so it is
+ * not keyless anymore; Lava's gateway is keyless and verified reachable as
+ * the no-auth fallback for the public-primary case.
  */
-export const PUBLICNODE_SOLANA_RPC_URL = "https://solana-rpc.publicnode.com";
+export const PUBLICNODE_SOLANA_RPC_URL = "https://solana.lava.build";
 
 /**
  * Resolve the RPC fallback URL. When the operator left `SOLANA_RPC_FALLBACK_URL`
