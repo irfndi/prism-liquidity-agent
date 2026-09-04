@@ -397,24 +397,28 @@ export function findDbConfigSpec(envKey: string): DbConfigSpec | undefined {
  * Numbers are clamped to [min, max] (mirroring the env loader's
  * `validatedNumber` clamp semantics), never bounced.
  */
+function parseBooleanDbConfigValue(trimmed: string): boolean | null {
+  if (trimmed === "true" || trimmed === "1") return true;
+  if (trimmed === "false" || trimmed === "0") return false;
+  return null;
+}
+
+function clampDbConfigNumber(spec: DbConfigSpec, value: number): number {
+  if (spec.min !== undefined && value < spec.min) return spec.min;
+  if (spec.max !== undefined && value > spec.max) return spec.max;
+  return value;
+}
+
 export function parseDbConfigValue(
   spec: DbConfigSpec,
   raw: string,
 ): string | number | boolean | null {
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
-
-  if (spec.kind === "boolean") {
-    if (trimmed === "true" || trimmed === "1") return true;
-    if (trimmed === "false" || trimmed === "0") return false;
-    return null;
-  }
-
+  if (spec.kind === "boolean") return parseBooleanDbConfigValue(trimmed);
   const value = Number(trimmed);
   if (!Number.isFinite(value)) return null;
-  if (spec.min !== undefined && value < spec.min) return spec.min;
-  if (spec.max !== undefined && value > spec.max) return spec.max;
-  return value;
+  return clampDbConfigNumber(spec, value);
 }
 
 /**
@@ -435,48 +439,55 @@ export function isKnownConfigField(field: string, base: AppConfig): boolean {
  * normalized (max raised to min) with a warning. Returns a new object
  * (never mutates `base`).
  */
-export function applyDbConfigOverrides(
+function applySingleDbOverride(
+  next: AppConfig,
+  spec: DbConfigSpec,
   base: AppConfig,
   overrides: ReadonlyMap<string, string>,
 ): AppConfig {
-  let next: AppConfig = base;
-
-  for (const spec of DB_CONFIG_KEYS) {
-    // Env wins over the DB, always.
-    if (process.env[spec.envKey] !== undefined) continue;
-
-    const raw = overrides.get(dbConfigKey(spec.envKey));
-    if (raw === undefined) continue;
-
-    // Typo guard: the field must be declared on AppConfig or be an explicit
-    // forward reference to a newer feature branch's config; otherwise the
-    // row would silently create an unused property and the setting would
-    // have no effect.
-    if (!isKnownConfigField(spec.field, base)) {
-      logger.warn("Skipping DB config row for unknown AppConfig field", {
-        key: spec.envKey,
-        field: spec.field,
-      });
-      continue;
-    }
-    const value = parseDbConfigValue(spec, raw);
-    if (value === null) {
-      logger.warn("Skipping malformed DB config row", { key: spec.envKey, raw });
-      continue;
-    }
-
-    // Narrowed writes: booleans and numbers spread cleanly onto both optional
-    // (absent = safe off) and required AppConfig fields. A malformed row is
-    // silently dropped above, never clamped into a fake value.
-    if (
-      Object.prototype.toString.call(value) === "[object Boolean]" ||
-      Object.prototype.toString.call(value) === "[object Number]"
-    ) {
-      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-      next = { ...next, [spec.field]: value as boolean | number };
-    }
+  // Env wins over the DB, always.
+  if (process.env[spec.envKey] !== undefined) return next;
+  const raw = overrides.get(dbConfigKey(spec.envKey));
+  if (raw === undefined) return next;
+  // Typo guard: the field must be declared on AppConfig or be an explicit
+  // forward reference to a newer feature branch's config; otherwise the
+  // row would silently create an unused property and the setting would
+  // have no effect.
+  if (!isKnownConfigField(spec.field, base)) {
+    logger.warn("Skipping DB config row for unknown AppConfig field", {
+      key: spec.envKey,
+      field: spec.field,
+    });
+    return next;
   }
+  const value = parseDbConfigValue(spec, raw);
+  if (value === null) {
+    logger.warn("Skipping malformed DB config row", { key: spec.envKey, raw });
+    return next;
+  }
+  // Narrowed writes: booleans and numbers spread cleanly onto both optional
+  // (absent = safe off) and required AppConfig fields. A malformed row is
+  // silently dropped above, never clamped into a fake value.
+  if (
+    Object.prototype.toString.call(value) === "[object Boolean]" ||
+    Object.prototype.toString.call(value) === "[object Number]"
+  ) {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+    return { ...next, [spec.field]: value as boolean | number };
+  }
+  return next;
+}
 
+function resolveBinStepEndNumber(spec: DbConfigSpec, raw: string | undefined): number | undefined {
+  const parsed = raw === undefined ? spec.default : parseDbConfigValue(spec, raw);
+  if (Object.prototype.toString.call(parsed) === "[object Number]") {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+    return parsed as number;
+  }
+  return undefined;
+}
+
+function normalizeBinStepRange(next: AppConfig, overrides: ReadonlyMap<string, string>): AppConfig {
   // ── Market-scan bin-step range cross-check ──────────────────────────────
   // Individual clamps permit MIN > MAX (e.g. MIN=100, MAX=1), which would
   // make every pool fail the bin-step filter. Resolve both ends with the
@@ -484,31 +495,29 @@ export function applyDbConfigOverrides(
   // raising the max to the min (never narrows the operator's lower bound).
   const binMinSpec = findDbConfigSpec("MARKET_SCAN_MIN_BIN_STEP");
   const binMaxSpec = findDbConfigSpec("MARKET_SCAN_MAX_BIN_STEP");
-  if (binMinSpec !== undefined && binMaxSpec !== undefined) {
-    const binMinRaw =
-      process.env[binMinSpec.envKey] ?? overrides.get(dbConfigKey(binMinSpec.envKey));
-    const binMaxRaw =
-      process.env[binMaxSpec.envKey] ?? overrides.get(dbConfigKey(binMaxSpec.envKey));
-    const binMin =
-      binMinRaw === undefined ? binMinSpec.default : parseDbConfigValue(binMinSpec, binMinRaw);
-    const binMax =
-      binMaxRaw === undefined ? binMaxSpec.default : parseDbConfigValue(binMaxSpec, binMaxRaw);
-    const binMinNum =
-      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-      Object.prototype.toString.call(binMin) === "[object Number]" ? (binMin as number) : undefined;
-    const binMaxNum =
-      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-      Object.prototype.toString.call(binMax) === "[object Number]" ? (binMax as number) : undefined;
-    if (binMinNum !== undefined && binMaxNum !== undefined && binMinNum > binMaxNum) {
-      logger.warn("Inverted market-scan bin-step range; raising max to min", {
-        marketScanMinBinStep: binMinNum,
-        marketScanMaxBinStep: binMaxNum,
-      });
-      next = { ...next, [binMinSpec.field]: binMinNum, [binMaxSpec.field]: binMinNum };
-    }
-  }
+  if (binMinSpec === undefined || binMaxSpec === undefined) return next;
+  const binMinRaw = process.env[binMinSpec.envKey] ?? overrides.get(dbConfigKey(binMinSpec.envKey));
+  const binMaxRaw = process.env[binMaxSpec.envKey] ?? overrides.get(dbConfigKey(binMaxSpec.envKey));
+  const binMinNum = resolveBinStepEndNumber(binMinSpec, binMinRaw);
+  const binMaxNum = resolveBinStepEndNumber(binMaxSpec, binMaxRaw);
+  if (binMinNum === undefined || binMaxNum === undefined) return next;
+  if (binMinNum <= binMaxNum) return next;
+  logger.warn("Inverted market-scan bin-step range; raising max to min", {
+    marketScanMinBinStep: binMinNum,
+    marketScanMaxBinStep: binMaxNum,
+  });
+  return { ...next, [binMinSpec.field]: binMinNum, [binMaxSpec.field]: binMinNum };
+}
 
-  return next;
+export function applyDbConfigOverrides(
+  base: AppConfig,
+  overrides: ReadonlyMap<string, string>,
+): AppConfig {
+  let next: AppConfig = base;
+  for (const spec of DB_CONFIG_KEYS) {
+    next = applySingleDbOverride(next, spec, base, overrides);
+  }
+  return normalizeBinStepRange(next, overrides);
 }
 
 /**

@@ -35,6 +35,21 @@ const ProposalJsonSchema = Schema.Struct({
 
 type DecodedProposalJson = Schema.Schema.Type<typeof ProposalJsonSchema>;
 
+/** Single string-mode step: 0 = literal consumed, 1 = escape opened, 3 = string closed. */
+function nextJsonStringStep(char: string | undefined, escaped: boolean): number {
+  if (escaped) return 0;
+  if (char === "\\") return 1;
+  if (char === '"') return 3;
+  return 0;
+}
+
+/** Single code-mode step: braces adjust the depth, everything else is inert. */
+function stepJsonDepth(char: string | undefined, depth: number): number {
+  if (char === "{") return depth + 1;
+  if (char === "}") return depth - 1;
+  return depth;
+}
+
 function extractFirstJsonObject(raw: string): string | null {
   const start = raw.indexOf("{");
   if (start === -1) {
@@ -49,23 +64,18 @@ function extractFirstJsonObject(raw: string): string | null {
     const char = raw[i];
 
     if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === '"') {
+      const step = nextJsonStringStep(char, escaped);
+      if (step === 3) {
         inString = false;
+      } else {
+        escaped = step === 1;
       }
+    } else if (char === '"') {
+      inString = true;
     } else {
-      if (char === '"') {
-        inString = true;
-      } else if (char === "{") {
-        depth++;
-      } else if (char === "}") {
-        depth--;
-        if (depth === 0) {
-          return raw.slice(start, i + 1);
-        }
+      depth = stepJsonDepth(char, depth);
+      if (char === "}" && depth === 0) {
+        return raw.slice(start, i + 1);
       }
     }
   }

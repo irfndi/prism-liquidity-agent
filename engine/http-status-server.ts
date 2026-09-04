@@ -65,6 +65,145 @@ function parseRequestUrl(requestUrl: string): URL | null {
     return null;
   }
 }
+/** Loopback read endpoints that require the Bearer credential; /health stays open. */
+const READ_AUTH_PATHNAMES: readonly string[] = [
+  "/status",
+  "/positions",
+  "/decisions",
+  "/config",
+  "/agent-policy",
+];
+
+/** Open liveness probe body. */
+function buildHealthResponse(snapshot: PrismStateSnapshot): Response {
+  return Response.json({
+    ok: true,
+    uptimeMs: Date.now() - snapshot.programStartTime,
+    version: getCurrentVersion(),
+  });
+}
+
+/** Parse the /decisions limit query param, clamped to [0, 100]. */
+function parseDecisionsLimit(rawLimit: string | null): number {
+  const parsed = parseInt(rawLimit ?? "10", 10);
+  const sane = Number.isFinite(parsed) && parsed >= 0 ? parsed : 10;
+  return Math.min(Math.max(0, sane), 100);
+}
+
+function statusResponse(snapshot: PrismStateSnapshot): Response {
+  return Response.json({
+    uptimeMs: Date.now() - snapshot.programStartTime,
+    scanCount: snapshot.scanCount,
+    lastCycleAt: snapshot.lastCycleAt,
+    portfolio: snapshot.portfolio,
+  });
+}
+
+function positionsResponse(snapshot: PrismStateSnapshot, pool: string | null): Response {
+  const positions = pool
+    ? snapshot.positions.filter((p) => p.poolAddress === pool)
+    : snapshot.positions;
+  return Response.json({ positions });
+}
+
+function decisionsResponse(
+  snapshot: PrismStateSnapshot,
+  pool: string | null,
+  limit: number,
+): Response {
+  const decisions = pool
+    ? snapshot.recentDecisions.filter((d) => d.poolAddress === pool)
+    : snapshot.recentDecisions;
+  return Response.json({ decisions: decisions.slice(0, limit) });
+}
+
+function configResponse(cfg: AppConfig, snapshot: PrismStateSnapshot): Response {
+  return Response.json(sanitizeConfig(cfg, snapshot));
+}
+
+function policyResponse(snapshot: PrismStateSnapshot): Response {
+  return Response.json(snapshot.agentPolicy);
+}
+
+/** 503 body when the queue fills mid-batch; keeps partial accepts visible. */
+function queueFullResponse(
+  acceptedIds: readonly string[],
+  replacedIds: readonly string[],
+  skipped: readonly SkippedProposal[],
+  totalProposals: number,
+  maxQueueSize: number,
+): Response {
+  const acceptedSuffix =
+    acceptedIds.length > 0 ? ` after accepting ${acceptedIds.length} of ${totalProposals}` : "";
+  return Response.json(
+    {
+      accepted: acceptedIds.length,
+      proposalIds: acceptedIds,
+      ...(replacedIds.length > 0 && { replacedIds }),
+      ...(skipped.length > 0 && { skipped }),
+      error: "queue_full",
+      message: `Proposal queue full (max ${maxQueueSize})${acceptedSuffix}`,
+    },
+    { status: 503 },
+  );
+}
+
+/** 500 body for an enqueue rejection reason the batch loop does not handle. */
+function unhandledRejectionResponse(
+  acceptedIds: readonly string[],
+  replacedIds: readonly string[],
+  skipped: readonly SkippedProposal[],
+  reasonText: string,
+): Response {
+  return Response.json(
+    {
+      accepted: acceptedIds.length,
+      proposalIds: acceptedIds,
+      ...(replacedIds.length > 0 && { replacedIds }),
+      ...(skipped.length > 0 && { skipped }),
+      error: "enqueue_rejected",
+      message: `Unhandled enqueue rejection: ${reasonText}`,
+    },
+    { status: 500 },
+  );
+}
+
+/** Record an accepted/replaced enqueue into the batch accumulators. */
+function recordEnqueueAccepted(
+  status: "enqueued" | "replaced",
+  newReplacedIds: readonly string[],
+  acceptedIds: string[],
+  replacedIds: string[],
+  proposalId: string,
+): void {
+  if (status === "replaced") {
+    replacedIds.push(...newReplacedIds);
+  }
+  acceptedIds.push(proposalId);
+}
+
+/** Unvalidated /approve JSON body at the HTTP boundary; narrowed by guards below. */
+interface RawApproveBody {
+  readonly proposalIds?: unknown;
+}
+
+/** True when the body carries a proposalIds array (narrowing guard). */
+function hasProposalIdsArray(
+  parsedBody: RawApproveBody | null,
+): parsedBody is RawApproveBody & { readonly proposalIds: readonly unknown[] } {
+  if (parsedBody === null) {
+    return false;
+  }
+  if (Object.prototype.toString.call(parsedBody) !== "[object Object]") {
+    return false;
+  }
+  return Array.isArray(parsedBody.proposalIds);
+}
+
+/** True when any id in a proposalIds array is not a string. */
+function hasNonStringProposalId(proposalIds: readonly unknown[]): boolean {
+  return proposalIds.some((id) => Object.prototype.toString.call(id) !== "[object String]");
+}
 
 export class HttpStatusServer {
   private server: ReturnType<typeof Bun.serve> | null = null;
@@ -157,20 +296,12 @@ export class HttpStatusServer {
               // Global — fail closed for the rest of the batch.
               return {
                 done: false,
-                response: Response.json(
-                  {
-                    accepted: acceptedIds.length,
-                    proposalIds: acceptedIds,
-                    ...(replacedIds.length > 0 && { replacedIds }),
-                    ...(skipped.length > 0 && { skipped }),
-                    error: "queue_full",
-                    message:
-                      `Proposal queue full (max ${this.config.agentProposalMaxQueueSize})` +
-                      (acceptedIds.length > 0
-                        ? ` after accepting ${acceptedIds.length} of ${proposals.length}`
-                        : ""),
-                  },
-                  { status: 503 },
+                response: queueFullResponse(
+                  acceptedIds,
+                  replacedIds,
+                  skipped,
+                  proposals.length,
+                  this.config.agentProposalMaxQueueSize,
                 ),
               };
             case "approved_exists":
@@ -186,26 +317,26 @@ export class HttpStatusServer {
               const unexpected: never = result.reason;
               return {
                 done: false,
-                response: Response.json(
-                  {
-                    accepted: acceptedIds.length,
-                    proposalIds: acceptedIds,
-                    ...(replacedIds.length > 0 && { replacedIds }),
-                    ...(skipped.length > 0 && { skipped }),
-                    error: "enqueue_rejected",
-                    message: `Unhandled enqueue rejection: ${String(unexpected)}`,
-                  },
-                  { status: 500 },
+                response: unhandledRejectionResponse(
+                  acceptedIds,
+                  replacedIds,
+                  skipped,
+                  String(unexpected),
                 ),
               };
             }
           }
         }
         if (result.status === "replaced") {
-          replacedIds.push(...result.replacedIds);
-        }
-        if (result.status === "enqueued" || result.status === "replaced") {
-          acceptedIds.push(proposal.proposalId);
+          recordEnqueueAccepted(
+            result.status,
+            result.replacedIds,
+            acceptedIds,
+            replacedIds,
+            proposal.proposalId,
+          );
+        } else if (result.status === "enqueued") {
+          recordEnqueueAccepted(result.status, [], acceptedIds, replacedIds, proposal.proposalId);
         }
       }
       return { done: true, acceptedIds, replacedIds, skipped, unscannable };
@@ -341,7 +472,7 @@ export class HttpStatusServer {
       return new Response("Unauthorized", { status: 401 });
     }
 
-    let parsedBody: unknown;
+    let parsedBody: RawApproveBody | null;
     try {
       parsedBody = await request.json();
     } catch (e) {
@@ -351,21 +482,12 @@ export class HttpStatusServer {
       throw e;
     }
 
-    if (
-      parsedBody === null ||
-      Object.prototype.toString.call(parsedBody) !== "[object Object]" ||
-      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-      !Array.isArray((parsedBody as { proposalIds?: unknown }).proposalIds)
-    ) {
+    if (!hasProposalIdsArray(parsedBody)) {
       return new Response("Missing proposalIds array", { status: 400 });
     }
 
-    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-    const proposalIds = (parsedBody as { proposalIds: unknown }).proposalIds;
-    if (
-      !Array.isArray(proposalIds) ||
-      proposalIds.some((id) => Object.prototype.toString.call(id) !== "[object String]")
-    ) {
+    const proposalIds = parsedBody.proposalIds;
+    if (hasNonStringProposalId(proposalIds)) {
       return new Response("proposalIds must be an array of strings", { status: 400 });
     }
 
@@ -396,48 +518,62 @@ export class HttpStatusServer {
    *  pathname is not a read endpoint. */
   private readEndpointResponse(url: URL, snapshot: PrismStateSnapshot): Response | null {
     if (url.pathname === "/status") {
-      return Response.json({
-        uptimeMs: Date.now() - snapshot.programStartTime,
-        scanCount: snapshot.scanCount,
-        lastCycleAt: snapshot.lastCycleAt,
-        portfolio: snapshot.portfolio,
-      });
+      return statusResponse(snapshot);
     }
 
     if (url.pathname === "/positions") {
-      const pool = url.searchParams.get("pool");
-      const positions = pool
-        ? snapshot.positions.filter((p) => p.poolAddress === pool)
-        : snapshot.positions;
-      return Response.json({ positions });
+      return positionsResponse(snapshot, url.searchParams.get("pool"));
     }
 
     if (url.pathname === "/decisions") {
-      const limitParam = parseInt(url.searchParams.get("limit") ?? "10", 10);
-      const limit = Math.min(
-        Math.max(0, Number.isFinite(limitParam) && limitParam >= 0 ? limitParam : 10),
-        100,
+      return decisionsResponse(
+        snapshot,
+        url.searchParams.get("pool"),
+        parseDecisionsLimit(url.searchParams.get("limit")),
       );
-      const pool = url.searchParams.get("pool");
-      let decisions = snapshot.recentDecisions;
-      if (pool) {
-        decisions = decisions.filter((d) => d.poolAddress === pool);
-      }
-      return Response.json({ decisions: decisions.slice(0, limit) });
     }
 
     if (url.pathname === "/config") {
-      return Response.json(sanitizeConfig(this.config, snapshot));
+      return configResponse(this.config, snapshot);
     }
 
     if (url.pathname === "/agent-policy") {
-      return Response.json(snapshot.agentPolicy);
+      return policyResponse(snapshot);
     }
 
     return null;
   }
 
-  /** POST endpoints. Returns null when the pathname is not a POST endpoint. */
+  /** Route one Bun.serve fetch after the URL parsed and the snapshot loaded. */
+  private async routeFetch(
+    request: Request,
+    url: URL,
+    snapshot: PrismStateSnapshot,
+  ): Promise<Response> {
+    if (url.pathname === "/health") {
+      return buildHealthResponse(snapshot);
+    }
+
+    // Read endpoints expose portfolio/positions/decisions on loopback;
+    // require the same Bearer credential as /propose (fail-closed when
+    // no token is configured). Only /health stays open as a liveness probe.
+    if (READ_AUTH_PATHNAMES.includes(url.pathname)) {
+      if (!this.isAuthorized(request, this.config.agentProposalToken)) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+    }
+
+    const readResponse = this.readEndpointResponse(url, snapshot);
+    if (readResponse !== null) {
+      return readResponse;
+    }
+    const postResponse = await this.postEndpointResponse(request, url);
+    if (postResponse !== null) {
+      return postResponse;
+    }
+    return new Response("Not found", { status: 404 });
+  }
+
   private async postEndpointResponse(request: Request, url: URL): Promise<Response | null> {
     if (url.pathname === "/propose") {
       return this.handlePropose(request);
@@ -463,39 +599,7 @@ export class HttpStatusServer {
             return new Response("Bad request", { status: 400 });
           }
           const snapshot = await Effect.runPromise(this.state.getSnapshot());
-
-          if (url.pathname === "/health") {
-            return Response.json({
-              ok: true,
-              uptimeMs: Date.now() - snapshot.programStartTime,
-              version: getCurrentVersion(),
-            });
-          }
-
-          // Read endpoints expose portfolio/positions/decisions on loopback;
-          // require the same Bearer credential as /propose (fail-closed when
-          // no token is configured). Only /health stays open as a liveness probe.
-          if (
-            url.pathname === "/status" ||
-            url.pathname === "/positions" ||
-            url.pathname === "/decisions" ||
-            url.pathname === "/config" ||
-            url.pathname === "/agent-policy"
-          ) {
-            if (!this.isAuthorized(request, this.config.agentProposalToken)) {
-              return new Response("Unauthorized", { status: 401 });
-            }
-          }
-
-          const readResponse = this.readEndpointResponse(url, snapshot);
-          if (readResponse !== null) {
-            return readResponse;
-          }
-          const postResponse = await this.postEndpointResponse(request, url);
-          if (postResponse !== null) {
-            return postResponse;
-          }
-          return new Response("Not found", { status: 404 });
+          return this.routeFetch(request, url, snapshot);
         },
       });
 

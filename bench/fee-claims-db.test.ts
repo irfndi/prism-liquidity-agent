@@ -9,6 +9,39 @@ function run<T, E, R, E2, R2>(effect: Effect.Effect<T, E, R>, layer: Layer.Layer
   return Effect.runSync((Effect.provide as any)(effect, layer) as Effect.Effect<T, Error, never>);
 }
 
+function feeAmountDefaults(
+  feeX: number | undefined,
+  feeY: number | undefined,
+  platformFeeX: number | undefined,
+  platformFeeY: number | undefined,
+  netFeeX: number | undefined,
+  netFeeY: number | undefined,
+) {
+  return {
+    feeX: feeX ?? 0.5,
+    feeY: feeY ?? 1.25,
+    platformFeeX: platformFeeX ?? 0.05,
+    platformFeeY: platformFeeY ?? 0.125,
+    netFeeX: netFeeX ?? 0.45,
+    netFeeY: netFeeY ?? 1.125,
+  };
+}
+
+function feeStatusDefaults(
+  txSignature: string | null | undefined,
+  feeTransferTxSignature: string | null | undefined,
+  reportedToApi: boolean | undefined,
+  createdAt: number | undefined,
+) {
+  return {
+    txSignature: txSignature === undefined ? "txSig1" : txSignature,
+    feeTransferTxSignature:
+      feeTransferTxSignature === undefined ? "feeTxSig1" : feeTransferTxSignature,
+    reportedToApi: reportedToApi ?? false,
+    createdAt: createdAt ?? Date.now(),
+  };
+}
+
 function makeFeeClaim(
   overrides: Partial<{
     id: string;
@@ -30,19 +63,20 @@ function makeFeeClaim(
     id: overrides.id ?? randomUUID(),
     poolAddress: overrides.poolAddress ?? "PoolA111111111111111111111111111111111111111",
     positionPubkey: overrides.positionPubkey ?? "PosA1111111111111111111111111111111111111111",
-    feeX: overrides.feeX ?? 0.5,
-    feeY: overrides.feeY ?? 1.25,
-    platformFeeX: overrides.platformFeeX ?? 0.05,
-    platformFeeY: overrides.platformFeeY ?? 0.125,
-    netFeeX: overrides.netFeeX ?? 0.45,
-    netFeeY: overrides.netFeeY ?? 1.125,
-    txSignature: overrides.txSignature === undefined ? "txSig1" : overrides.txSignature,
-    feeTransferTxSignature:
-      overrides.feeTransferTxSignature === undefined
-        ? "feeTxSig1"
-        : overrides.feeTransferTxSignature,
-    reportedToApi: overrides.reportedToApi ?? false,
-    createdAt: overrides.createdAt ?? Date.now(),
+    ...feeAmountDefaults(
+      overrides.feeX,
+      overrides.feeY,
+      overrides.platformFeeX,
+      overrides.platformFeeY,
+      overrides.netFeeX,
+      overrides.netFeeY,
+    ),
+    ...feeStatusDefaults(
+      overrides.txSignature,
+      overrides.feeTransferTxSignature,
+      overrides.reportedToApi,
+      overrides.createdAt,
+    ),
   };
 }
 

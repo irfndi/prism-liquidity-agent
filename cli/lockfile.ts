@@ -59,14 +59,15 @@ const EXCLUDED_PATTERNS = [
   "bun run backtest",
 ];
 
-export function findRunningEngineProcess(
-  spawner: (
-    command: string,
-    args: ReadonlyArray<string>,
-    options: { encoding: "utf-8"; shell: false; timeout?: number },
-  ) => { readonly stdout?: string | Buffer; readonly error?: Error } = spawnSync,
-): { readonly pid: number; readonly command: string } | null {
-  if (process.platform === "win32") return null;
+/** Spawner signature for `ps` scans (defaults to `spawnSync`). */
+type PsSpawner = (
+  command: string,
+  args: ReadonlyArray<string>,
+  options: { encoding: "utf-8"; shell: false; timeout?: number },
+) => { readonly stdout?: string | Buffer; readonly error?: Error };
+
+/** Run `ps` and return stdout text, or null when the scan itself fails. */
+function readPsStdout(spawner: PsSpawner): string | null {
   try {
     const result = spawner("ps", ["-eo", "pid,args"], {
       encoding: "utf-8",
@@ -74,39 +75,61 @@ export function findRunningEngineProcess(
       timeout: 3000,
     });
     if (result.error || !result.stdout) return null;
-    const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf-8") : result.stdout;
-    const lines = stdout.trim().split("\n").slice(1);
-    for (const line of lines) {
-      const trimmed = line.trim();
-      const match = trimmed.match(/^(\d+)\s+(.+)$/);
-      if (!match) continue;
-      const pidStr = match[1];
-      const args = match[2];
-      if (pidStr === undefined || args === undefined) continue;
-      const pid = Number.parseInt(pidStr, 10);
-      if (pid === process.pid) continue;
-      if (!args.includes("bun")) continue;
-      if (EXCLUDED_PATTERNS.some((pattern) => args.includes(pattern))) continue;
-      if (
-        args.includes("engine/index.ts") ||
-        args.includes("run dev") ||
-        args.includes("cli/dev.ts") ||
-        // Bundled/source CLI dev process (e.g. `bun /root/.prism/dist/cli/
-        // index.mjs dev` under systemd, or a relative `bun cli/index.ts dev`
-        // from the repo root): the source-path patterns above do not match
-        // the bundle. Scoped to Prism's CLI layout — the `cli/` segment must
-        // be preceded by a whitespace, slash, or line start (so an unrelated
-        // `*-cli/` or `mycli/` directory cannot match) — with a STANDALONE
-        // `dev` argument: a bare substring `dev` (dev-server, development,
-        // /devtools/) or an unrelated project's index.mjs must never
-        // false-positive the RESTART REQUIRED notice and its kill hint.
-        (/(^|[\s/])cli\/index\.(mjs|ts)(\s|$)/.test(args) && /(^|\s)dev($|\s)/.test(args))
-      ) {
-        return { pid, command: args };
-      }
-    }
+    return Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf-8") : result.stdout;
   } catch {
     return null;
+  }
+}
+
+/** Parse one `ps -eo pid,args` line, excluding our own process. */
+function parsePsLine(
+  line: string,
+  selfPid: number,
+): { readonly pid: number; readonly command: string } | null {
+  const trimmed = line.trim();
+  const match = trimmed.match(/^(\d+)\s+(.+)$/);
+  if (match === null) return null;
+  const pidStr = match[1];
+  const args = match[2];
+  if (pidStr === undefined || args === undefined) return null;
+  const pid = Number.parseInt(pidStr, 10);
+  if (pid === selfPid) return null;
+  return { pid, command: args };
+}
+
+/** Whether a process command line is a Prism engine/dev process. */
+function isEngineCommandLine(args: string): boolean {
+  if (!args.includes("bun")) return false;
+  if (EXCLUDED_PATTERNS.some((pattern) => args.includes(pattern))) return false;
+  return (
+    args.includes("engine/index.ts") ||
+    args.includes("run dev") ||
+    args.includes("cli/dev.ts") ||
+    // Bundled/source CLI dev process (e.g. `bun /root/.prism/dist/cli/
+    // index.mjs dev` under systemd, or a relative `bun cli/index.ts dev`
+    // from the repo root): the source-path patterns above do not match
+    // the bundle. Scoped to Prism's CLI layout — the `cli/` segment must
+    // be preceded by a whitespace, slash, or line start (so an unrelated
+    // `*-cli/` or `mycli/` directory cannot match) — with a STANDALONE
+    // `dev` argument: a bare substring `dev` (dev-server, development,
+    // /devtools/) or an unrelated project's index.mjs must never
+    // false-positive the RESTART REQUIRED notice and its kill hint.
+    (/(^|[\s/])cli\/index\.(mjs|ts)(\s|$)/.test(args) && /(^|\s)dev($|\s)/.test(args))
+  );
+}
+
+export function findRunningEngineProcess(
+  spawner: PsSpawner = spawnSync,
+): { readonly pid: number; readonly command: string } | null {
+  if (process.platform === "win32") return null;
+  const stdout = readPsStdout(spawner);
+  if (stdout === null) return null;
+  const lines = stdout.trim().split("\n").slice(1);
+  for (const line of lines) {
+    const parsed = parsePsLine(line, process.pid);
+    if (parsed === null) continue;
+    if (!isEngineCommandLine(parsed.command)) continue;
+    return parsed;
   }
   return null;
 }
@@ -173,23 +196,45 @@ function restoreDisplacedLock(
  * without a check-then-act race; the exclusive create can then only fail if
  * another launcher already owns the lock.
  */
+/** Rename the stale lock aside; false when it vanished under us (ENOENT). */
+function tryRenameAside(lockfilePath: string, backupPath: string): boolean {
+  try {
+    fs.renameSync(lockfilePath, backupPath);
+    return true;
+  } catch (err) {
+    if (!isNodeError(err) || err.code !== "ENOENT") {
+      throw err;
+    }
+    return false;
+  }
+}
+
+/** The lock vanished mid-replace — only an exclusive create can win now. */
+function claimVacantLock(lockfilePath: string): { readonly acquired: true } | LockFailure {
+  const created = tryAtomicCreate(lockfilePath);
+  if (created.acquired) return { acquired: true };
+  return { acquired: false, pid: created.existing?.pid ?? 0 };
+}
+
+/**
+ * `existing` is a valid stale lock (dead PID) — replace it atomically. The
+ * old unlink-then-create flow had a TOCTOU window: a concurrent launcher
+ * could re-acquire the lock between our unlink and our exclusive create, and
+ * our unlink would delete their fresh lock, leaving both launchers believing
+ * they hold it. Renaming the stale file aside first is atomic, and checking
+ * the moved copy (not the live path) detects a concurrent re-acquisition
+ * without a check-then-act race; the exclusive create can then only fail if
+ * another launcher already owns the lock.
+ */
 function replaceStaleLock(
   lockfilePath: string,
   existing: LockfileData,
 ): { readonly acquired: true } | LockFailure {
   const backupPath = `${lockfilePath}.${process.pid}.${Date.now()}.tmp`;
-  try {
-    fs.renameSync(lockfilePath, backupPath);
-  } catch (err) {
-    if (!isNodeError(err) || err.code !== "ENOENT") {
-      throw err;
-    }
+  if (!tryRenameAside(lockfilePath, backupPath)) {
     // The lock vanished between our read and rename — another launcher is
     // replacing it. Only an exclusive create can win now.
-    const created = tryAtomicCreate(lockfilePath);
-    return created.acquired
-      ? { acquired: true }
-      : { acquired: false, pid: created.existing?.pid ?? 0 };
+    return claimVacantLock(lockfilePath);
   }
 
   try {

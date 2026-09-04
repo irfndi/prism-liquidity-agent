@@ -346,26 +346,73 @@ interface EntryDepositInput {
   readonly forceSingleSidedX: boolean;
 }
 
-function resolveEntryDeposit(
+function failSingleSidedImpossible(
+  poolAddress: string,
+  heldMint: string,
+  heldAvailable: bigint,
+  heldDecimals: number,
+  fullSizeAtomic: bigint,
+  positionSizeUsd: number,
+  missingShortage: string,
+): Effect.Effect<never, AdapterError> {
+  return Effect.fail(
+    new AdapterError({
+      message: `Single-sided entry impossible for ${heldMint}: available ${formatTokenAmount(heldAvailable, heldDecimals)} is below the full-size requirement ${formatTokenAmount(fullSizeAtomic, heldDecimals)} for a $${positionSizeUsd} single-sided deposit (${missingShortage}). Fund the held token up to the full position size or enable AUTO_SWAP_ENTRY.`,
+      poolAddress,
+    }),
+  );
+}
+
+function resolveForcedSingleSidedX(
   input: EntryDepositInput,
 ): Effect.Effect<EntryDepositPlan, AdapterError> {
-  const halfUsd = input.positionSizeUsd / 2;
-  if (input.forceSingleSidedX) {
-    const fullSizeXAtomic = computeRequiredAtomic(
-      input.positionSizeUsd,
-      input.priceX,
-      input.tokenXDecimals,
+  const fullSizeXAtomic = computeRequiredAtomic(
+    input.positionSizeUsd,
+    input.priceX,
+    input.tokenXDecimals,
+  );
+  if (fullSizeXAtomic === 0n || fullSizeXAtomic > input.maxX) {
+    return Effect.fail(
+      new AdapterError({
+        message: `Runner single-sided-X entry impossible: available ${formatTokenAmount(input.maxX, input.tokenXDecimals)} is below the full-size requirement ${formatTokenAmount(fullSizeXAtomic, input.tokenXDecimals)} for a $${input.positionSizeUsd} deposit in ${input.tokenX}. Fund the quote leg up to the full position size.`,
+        poolAddress: input.poolAddress,
+      }),
     );
-    if (fullSizeXAtomic === 0n || fullSizeXAtomic > input.maxX) {
-      return Effect.fail(
-        new AdapterError({
-          message: `Runner single-sided-X entry impossible: available ${formatTokenAmount(input.maxX, input.tokenXDecimals)} is below the full-size requirement ${formatTokenAmount(fullSizeXAtomic, input.tokenXDecimals)} for a $${input.positionSizeUsd} deposit in ${input.tokenX}. Fund the quote leg up to the full position size.`,
-          poolAddress: input.poolAddress,
-        }),
-      );
-    }
+  }
+  return Effect.succeed({
+    depositXAtomic: fullSizeXAtomic,
+    depositYAtomic: 0n,
+    singleSidedX: true,
+    depositMode: "single-sided-x",
+    amountXUsd: input.positionSizeUsd,
+    amountYUsd: 0,
+  });
+}
+
+function resolveHeldLegSingleSided(
+  input: EntryDepositInput,
+  heldIsX: boolean,
+): Effect.Effect<EntryDepositPlan, AdapterError> {
+  const heldMint = heldIsX ? input.tokenX : input.tokenY;
+  const heldDecimals = heldIsX ? input.tokenXDecimals : input.tokenYDecimals;
+  const heldPrice = heldIsX ? input.priceX : input.priceY;
+  const heldAvailable = heldIsX ? input.maxX : input.maxY;
+  const missingShortage = heldIsX ? input.shortageY : input.shortageX;
+  const fullSizeAtomic = computeRequiredAtomic(input.positionSizeUsd, heldPrice, heldDecimals);
+  if (fullSizeAtomic === 0n || fullSizeAtomic > heldAvailable) {
+    return failSingleSidedImpossible(
+      input.poolAddress,
+      heldMint,
+      heldAvailable,
+      heldDecimals,
+      fullSizeAtomic,
+      input.positionSizeUsd,
+      missingShortage,
+    );
+  }
+  if (heldIsX) {
     return Effect.succeed({
-      depositXAtomic: fullSizeXAtomic,
+      depositXAtomic: fullSizeAtomic,
       depositYAtomic: 0n,
       singleSidedX: true,
       depositMode: "single-sided-x",
@@ -373,6 +420,21 @@ function resolveEntryDeposit(
       amountYUsd: 0,
     });
   }
+  return Effect.succeed({
+    depositXAtomic: 0n,
+    depositYAtomic: fullSizeAtomic,
+    singleSidedX: false,
+    depositMode: "single-sided-y",
+    amountXUsd: 0,
+    amountYUsd: input.positionSizeUsd,
+  });
+}
+
+function resolveEntryDeposit(
+  input: EntryDepositInput,
+): Effect.Effect<EntryDepositPlan, AdapterError> {
+  const halfUsd = input.positionSizeUsd / 2;
+  if (input.forceSingleSidedX) return resolveForcedSingleSidedX(input);
   if (input.xShort && input.yShort) {
     return Effect.fail(
       new AdapterError({
@@ -381,31 +443,7 @@ function resolveEntryDeposit(
       }),
     );
   }
-  if (input.xShort || input.yShort) {
-    const heldIsX = input.yShort;
-    const heldMint = heldIsX ? input.tokenX : input.tokenY;
-    const heldDecimals = heldIsX ? input.tokenXDecimals : input.tokenYDecimals;
-    const heldPrice = heldIsX ? input.priceX : input.priceY;
-    const heldAvailable = heldIsX ? input.maxX : input.maxY;
-    const missingShortage = heldIsX ? input.shortageY : input.shortageX;
-    const fullSizeAtomic = computeRequiredAtomic(input.positionSizeUsd, heldPrice, heldDecimals);
-    if (fullSizeAtomic === 0n || fullSizeAtomic > heldAvailable) {
-      return Effect.fail(
-        new AdapterError({
-          message: `Single-sided entry impossible for ${heldMint}: available ${formatTokenAmount(heldAvailable, heldDecimals)} is below the full-size requirement ${formatTokenAmount(fullSizeAtomic, heldDecimals)} for a $${input.positionSizeUsd} single-sided deposit (${missingShortage}). Fund the held token up to the full position size or enable AUTO_SWAP_ENTRY.`,
-          poolAddress: input.poolAddress,
-        }),
-      );
-    }
-    return Effect.succeed({
-      depositXAtomic: heldIsX ? fullSizeAtomic : 0n,
-      depositYAtomic: heldIsX ? 0n : fullSizeAtomic,
-      singleSidedX: heldIsX,
-      depositMode: heldIsX ? "single-sided-x" : "single-sided-y",
-      amountXUsd: heldIsX ? input.positionSizeUsd : 0,
-      amountYUsd: heldIsX ? 0 : input.positionSizeUsd,
-    });
-  }
+  if (input.xShort || input.yShort) return resolveHeldLegSingleSided(input, input.yShort);
   return Effect.succeed({
     depositXAtomic: input.requestedXAmount,
     depositYAtomic: input.requestedYAmount,
@@ -444,6 +482,41 @@ interface WithdrawalMeasure {
   readonly measured: boolean;
 }
 
+function measureSolWithdrawalDelta(
+  beforeNativeSol: bigint | null,
+  afterNativeSol: bigint | null,
+  snapshotAmount: string,
+): WithdrawalMeasure {
+  if (beforeNativeSol === null || afterNativeSol === null) {
+    return { amountAtomic: snapshotAmount, measured: false };
+  }
+  const delta = afterNativeSol - beforeNativeSol;
+  if (delta < 0n) return { amountAtomic: snapshotAmount, measured: false };
+  return { amountAtomic: delta.toString(), measured: true };
+}
+
+function measureSplWithdrawalDelta(
+  beforeHeld: ReadonlyMap<
+    string,
+    { readonly amountAtomic: bigint; readonly decimals?: number }
+  > | null,
+  afterHeld: ReadonlyMap<
+    string,
+    { readonly amountAtomic: bigint; readonly decimals?: number }
+  > | null,
+  mint: string,
+  snapshotAmount: string,
+): WithdrawalMeasure {
+  if (beforeHeld === null || afterHeld === null) {
+    return { amountAtomic: snapshotAmount, measured: false };
+  }
+  const before = beforeHeld.get(mint)?.amountAtomic ?? 0n;
+  const after = afterHeld.get(mint)?.amountAtomic ?? 0n;
+  const delta = after - before;
+  if (delta < 0n) return { amountAtomic: snapshotAmount, measured: false };
+  return { amountAtomic: delta.toString(), measured: true };
+}
+
 export function measureWithdrawalDelta(input: {
   readonly beforeHeld: ReadonlyMap<
     string,
@@ -458,24 +531,21 @@ export function measureWithdrawalDelta(input: {
   readonly mint: string;
   readonly snapshotAmount: string;
 }): WithdrawalMeasure {
-  const fallback = (): WithdrawalMeasure => ({
-    amountAtomic: input.snapshotAmount,
-    measured: false,
-  });
   // Native SOL is measured from the balance delta alone — an SPL holdings
   // read failing must not block a measurable SOL leg.
   if (input.mint === SOL_MINT) {
-    if (input.beforeNativeSol === null || input.afterNativeSol === null) return fallback();
-    const delta = input.afterNativeSol - input.beforeNativeSol;
-    if (delta < 0n) return fallback();
-    return { amountAtomic: delta.toString(), measured: true };
+    return measureSolWithdrawalDelta(
+      input.beforeNativeSol,
+      input.afterNativeSol,
+      input.snapshotAmount,
+    );
   }
-  if (input.beforeHeld === null || input.afterHeld === null) return fallback();
-  const before = input.beforeHeld.get(input.mint)?.amountAtomic ?? 0n;
-  const after = input.afterHeld.get(input.mint)?.amountAtomic ?? 0n;
-  const delta = after - before;
-  if (delta < 0n) return fallback();
-  return { amountAtomic: delta.toString(), measured: true };
+  return measureSplWithdrawalDelta(
+    input.beforeHeld,
+    input.afterHeld,
+    input.mint,
+    input.snapshotAmount,
+  );
 }
 
 /**
@@ -772,6 +842,93 @@ interface ParsedDiscoveryPage {
   readonly pages: number;
 }
 
+function isPaginationNumbersValid(
+  total: number,
+  pages: number,
+  currentPage: number,
+  responsePageSize: number,
+): boolean {
+  if (!Number.isSafeInteger(total) || total < 0) return false;
+  if (!Number.isSafeInteger(pages) || pages < 0) return false;
+  if (!Number.isSafeInteger(currentPage) || currentPage < 1) return false;
+  if (!Number.isSafeInteger(responsePageSize) || responsePageSize < 0) return false;
+  return true;
+}
+
+function isPaginationRangeValid(
+  total: number,
+  pages: number,
+  currentPage: number,
+  responsePageSize: number,
+  requestedPage: number | null,
+  pageSize: number,
+): boolean {
+  if (total === 0) {
+    return (
+      requestedPage === null || (currentPage === requestedPage && responsePageSize === pageSize)
+    );
+  }
+  if (pages < 1 || responsePageSize < 1 || currentPage > pages) return false;
+  if (requestedPage === null) return true;
+  return currentPage === requestedPage && responsePageSize === pageSize;
+}
+
+function isDiscoveryPaginationValid(
+  total: number,
+  pages: number,
+  currentPage: number,
+  responsePageSize: number,
+  requestedPage: number | null,
+  pageSize: number,
+): boolean {
+  if (!isPaginationNumbersValid(total, pages, currentPage, responsePageSize)) return false;
+  return isPaginationRangeValid(
+    total,
+    pages,
+    currentPage,
+    responsePageSize,
+    requestedPage,
+    pageSize,
+  );
+}
+
+function failWhenAllPoolsInvalid(
+  dataLength: number,
+  validLength: number,
+  url: string,
+  total: number,
+  pages: number,
+): Effect.Effect<void, DiscoverPoolsError> {
+  if (dataLength === 0 || validLength > 0) return Effect.void;
+  logger.warn("Pool discovery: ALL pool objects had invalid shape; treating as a schema error", {
+    dropped: dataLength,
+    kept: 0,
+    total,
+    pages,
+  });
+  return Effect.fail(
+    new DiscoverPoolsError({
+      message: `Meteora API returned ${dataLength} pool rows but none matched the expected shape. Likely a schema change. Pool discovery disabled for this cycle.`,
+      url,
+    }),
+  );
+}
+
+function warnWhenPoolsDropped(
+  dataLength: number,
+  validLength: number,
+  total: number,
+  pages: number,
+): void {
+  if (validLength >= dataLength) return;
+  logger.warn("Pool discovery: some pool objects had invalid shape and were dropped", {
+    dropped: dataLength - validLength,
+    kept: validLength,
+    total,
+    pages,
+  });
+}
+
 function parseDiscoveryResponse(
   parsed: JsonValue,
   url: string,
@@ -787,18 +944,16 @@ function parseDiscoveryResponse(
     );
   }
   const { data, total, pages, current_page: currentPage, page_size: responsePageSize } = parsed;
-  const paginationValid =
-    Number.isSafeInteger(total) &&
-    total >= 0 &&
-    Number.isSafeInteger(pages) &&
-    pages >= 0 &&
-    Number.isSafeInteger(currentPage) &&
-    currentPage >= 1 &&
-    Number.isSafeInteger(responsePageSize) &&
-    responsePageSize >= 0 &&
-    (total === 0 || (pages >= 1 && responsePageSize >= 1 && currentPage <= pages)) &&
-    (requestedPage === null || (currentPage === requestedPage && responsePageSize === pageSize));
-  if (!paginationValid) {
+  if (
+    !isDiscoveryPaginationValid(
+      total,
+      pages,
+      currentPage,
+      responsePageSize,
+      requestedPage,
+      pageSize,
+    )
+  ) {
     return Effect.fail(
       new DiscoverPoolsError({
         message: `Meteora API returned malformed pagination metadata from ${url}`,
@@ -807,46 +962,58 @@ function parseDiscoveryResponse(
     );
   }
   const valid = data.filter(isValidPoolState);
-  if (data.length > 0 && valid.length === 0) {
-    logger.warn("Pool discovery: ALL pool objects had invalid shape; treating as a schema error", {
-      dropped: data.length,
-      kept: 0,
-      total,
-      pages,
-    });
-    return Effect.fail(
-      new DiscoverPoolsError({
-        message: `Meteora API returned ${data.length} pool rows but none matched the expected shape. Likely a schema change. Pool discovery disabled for this cycle.`,
-        url,
-      }),
-    );
-  }
-  if (valid.length < data.length) {
-    logger.warn("Pool discovery: some pool objects had invalid shape and were dropped", {
-      dropped: data.length - valid.length,
-      kept: valid.length,
-      total,
-      pages,
-    });
-  }
-  return Effect.succeed({ pools: valid.filter((p) => !p.launchpad).map(toDiscoveredPool), pages });
+  return failWhenAllPoolsInvalid(data.length, valid.length, url, total, pages).pipe(
+    Effect.andThen(() => {
+      warnWhenPoolsDropped(data.length, valid.length, total, pages);
+      return Effect.succeed({
+        pools: valid.filter((p) => !p.launchpad).map(toDiscoveredPool),
+        pages,
+      });
+    }),
+  );
+}
+
+function hasPoolScalars(v: JsonObject): boolean {
+  if (!isStringValue(v["address"])) return false;
+  if (!isNumberValue(v["tvl"])) return false;
+  if (!isNumberValue(v["apr"])) return false;
+  return true;
+}
+function hasPoolTokenLeg(v: JsonValue | undefined): boolean {
+  if (!isObject(v)) return false;
+  return isStringValue(v["address"]);
+}
+
+function hasPoolTokenLegs(v: JsonObject): boolean {
+  if (!hasPoolTokenLeg(v["token_x"])) return false;
+  return hasPoolTokenLeg(v["token_y"]);
+}
+
+function hasPoolConfig(v: JsonObject): boolean {
+  const poolConfig = v["pool_config"];
+  if (!isObject(poolConfig)) return false;
+  return isNumberValue(poolConfig["bin_step"]);
+}
+
+function hasPoolWindowVolume(v: JsonObject): boolean {
+  const volume = v["volume"];
+  if (!isObject(volume)) return false;
+  return isNumberValue(volume["24h"]);
+}
+
+function hasPoolWindowFees(v: JsonObject): boolean {
+  const fees = v["fees"];
+  if (!isObject(fees)) return false;
+  return isNumberValue(fees["24h"]);
 }
 
 function isValidPoolState(v: MeteoraPool): v is MeteoraPool & JsonObject {
   if (!isObject(v)) return false;
-  if (!isStringValue(v["address"])) return false;
-  if (!isNumberValue(v["tvl"])) return false;
-  if (!isNumberValue(v["apr"])) return false;
-  const tokenX = v["token_x"];
-  if (!isObject(tokenX) || !isStringValue(tokenX["address"])) return false;
-  const tokenY = v["token_y"];
-  if (!isObject(tokenY) || !isStringValue(tokenY["address"])) return false;
-  const poolConfig = v["pool_config"];
-  if (!isObject(poolConfig) || !isNumberValue(poolConfig["bin_step"])) return false;
-  const volume = v["volume"];
-  if (!isObject(volume) || !isNumberValue(volume["24h"])) return false;
-  const fees = v["fees"];
-  if (!isObject(fees) || !isNumberValue(fees["24h"])) return false;
+  if (!hasPoolScalars(v)) return false;
+  if (!hasPoolTokenLegs(v)) return false;
+  if (!hasPoolConfig(v)) return false;
+  if (!hasPoolWindowVolume(v)) return false;
+  if (!hasPoolWindowFees(v)) return false;
   return true;
 }
 
@@ -872,6 +1039,51 @@ function readWindowMap(raw: JsonValue): Map<string, number> {
  * symbol) so the market gate can pre-filter risky legs before they burn
  * scan cycles; the fields are optional so legacy consumers compile unchanged.
  */
+type MutableDiscoveredPool = {
+  -readonly [K in keyof DiscoveredPool]: DiscoveredPool[K];
+};
+
+function applyPoolCreatedAt(result: MutableDiscoveredPool, createdAt: number): void {
+  if (!Number.isFinite(createdAt) || createdAt <= 0) return;
+  result.createdAtMs = createdAt > 1_000_000_000_000 ? createdAt : createdAt * 1000;
+}
+
+function applyPoolHourlyRadar(
+  result: MutableDiscoveredPool,
+  volume1h: number | undefined,
+  fees1h: number | undefined,
+  feeYield1h: number | undefined,
+): void {
+  // 1h fee-yield radar fields (launch mode): optional so pools where the
+  // Data API reports no 1h window (brand-new, zero-activity) stay admitted
+  // to the discovery feed and the launch gate rejects them fail-closed.
+  if (volume1h !== undefined && Number.isFinite(volume1h)) result.volume1hUsd = volume1h;
+  if (fees1h !== undefined && Number.isFinite(fees1h)) result.fees1hUsd = fees1h;
+  if (feeYield1h !== undefined && Number.isFinite(feeYield1h)) result.feeYield1hPct = feeYield1h;
+}
+
+function applyPoolWindowCurves(
+  result: MutableDiscoveredPool,
+  feeYieldWindows: ReadonlyMap<string, number>,
+  volumeWindows: ReadonlyMap<string, number>,
+): void {
+  // Rolling-window curves for the radar's multi-timeframe probes: the same
+  // payload carries 30m/1h/2h/4h/12h/24h fee-yield and volume windows, so
+  // the radar can surface wash patterns (a burst confined to one window)
+  // and cross-check hotness without any extra API call.
+  if (feeYieldWindows.size > 0) {
+    result.feeYieldWindows = Object.fromEntries(feeYieldWindows);
+  }
+  if (volumeWindows.size > 0) {
+    result.volumeWindows = Object.fromEntries(volumeWindows);
+  }
+}
+
+function applyPoolBaseFee(result: MutableDiscoveredPool, baseFeePct: number): void {
+  if (!Number.isFinite(baseFeePct)) return;
+  result.baseFeePct = baseFeePct;
+}
+
 function toDiscoveredPool(p: MeteoraPool): DiscoveredPool {
   const { token_x: tokenX, token_y: tokenY } = p;
   // Rolling-window curves (30m/1h/2h/4h/12h/24h) for the radar's
@@ -882,9 +1094,6 @@ function toDiscoveredPool(p: MeteoraPool): DiscoveredPool {
   const volumeWindows = readWindowMap(p.volume);
   // Build through a mutable projected type so the optional radar fields can be
   // assigned conditionally, then return it as the readonly public contract.
-  type MutableDiscoveredPool = {
-    -readonly [K in keyof DiscoveredPool]: DiscoveredPool[K];
-  };
   const result: MutableDiscoveredPool = {
     address: p.address,
     tvlUsd: p.tvl,
@@ -903,31 +1112,10 @@ function toDiscoveredPool(p: MeteoraPool): DiscoveredPool {
     tokenXHolders: tokenX.holders,
     tokenYHolders: tokenY.holders,
   };
-  if (Number.isFinite(p.created_at) && p.created_at > 0) {
-    result.createdAtMs = p.created_at > 1_000_000_000_000 ? p.created_at : p.created_at * 1000;
-  }
-  // 1h fee-yield radar fields (launch mode): optional so pools where the
-  // Data API reports no 1h window (brand-new, zero-activity) stay admitted
-  // to the discovery feed and the launch gate rejects them fail-closed.
-  const volume1h = p.volume?.["1h"];
-  if (Number.isFinite(volume1h)) result.volume1hUsd = volume1h;
-  const fees1h = p.fees?.["1h"];
-  if (Number.isFinite(fees1h)) result.fees1hUsd = fees1h;
-  const feeYield1h = p.fee_tvl_ratio?.["1h"];
-  if (Number.isFinite(feeYield1h)) result.feeYield1hPct = feeYield1h;
-  // Rolling-window curves for the radar's multi-timeframe probes: the same
-  // payload carries 30m/1h/2h/4h/12h/24h fee-yield and volume windows, so
-  // the radar can surface wash patterns (a burst confined to one window)
-  // and cross-check hotness without any extra API call.
-  if (feeYieldWindows.size > 0) {
-    result.feeYieldWindows = Object.fromEntries(feeYieldWindows);
-  }
-  if (volumeWindows.size > 0) {
-    result.volumeWindows = Object.fromEntries(volumeWindows);
-  }
-  if (Number.isFinite(p.pool_config.base_fee_pct)) {
-    result.baseFeePct = p.pool_config.base_fee_pct;
-  }
+  applyPoolCreatedAt(result, p.created_at);
+  applyPoolHourlyRadar(result, p.volume?.["1h"], p.fees?.["1h"], p.fee_tvl_ratio?.["1h"]);
+  applyPoolWindowCurves(result, feeYieldWindows, volumeWindows);
+  applyPoolBaseFee(result, p.pool_config.base_fee_pct);
   return result;
 }
 
@@ -1053,6 +1241,629 @@ function isSdkRebalanceResponse(
   value: MeteoraDlmmRebalanceSimulation | RebalancePositionResponse,
 ): value is RebalancePositionResponse {
   return "rebalancePosition" in value && "simulationResult" in value;
+}
+
+interface TokenMeta {
+  readonly symbol: string;
+  readonly decimals: number;
+  readonly priceUsd?: number;
+  readonly priceFetchedAt?: number;
+}
+
+type MutableTokenMeta = { -readonly [K in keyof TokenMeta]: TokenMeta[K] };
+
+interface HeliusAssetResponse {
+  readonly result?: {
+    readonly content?: { readonly metadata?: { readonly symbol?: string } };
+    readonly token_info?: {
+      readonly decimals?: number;
+      readonly price_info?: {
+        readonly price_per_token?: number;
+        readonly currency?: string;
+      };
+    };
+  };
+  readonly error?: { readonly code?: number; readonly message?: string };
+}
+
+interface ActiveBinMemo {
+  readonly binId: number;
+  readonly price: string;
+  /** Real human price (tokenY per tokenX) — pricePerLamport × 10^(decX - decY). */
+  readonly pricePerToken: string;
+  readonly fetchedAt: number;
+  readonly halfRange: number;
+  readonly binsAround: MeteoraDlmmBinsAround | null;
+}
+
+/** True when a Helius price is a finite positive USD/USDC quote. */
+function isHeliusPriceValid(
+  price: JsonValue | undefined,
+  currency: string | undefined,
+): price is number {
+  if (!isNumberValue(price)) return false;
+  if (!Number.isFinite(price) || price <= 0) return false;
+  return currency === "USDC" || currency === "USD";
+}
+
+function readHeliusPrice(asset: HeliusAssetResponse): number | undefined {
+  const priceInfo = asset.result?.token_info?.price_info;
+  const price = priceInfo?.price_per_token;
+  const currency = priceInfo?.currency?.toUpperCase();
+  if (!isHeliusPriceValid(price, currency)) return undefined;
+  return price;
+}
+
+function resolveHeliusTokenPrice(json: HeliusAssetResponse | null): number | undefined {
+  if (json === null) return undefined;
+  return readHeliusPrice(json);
+}
+
+function attachHeliusPrice(meta: MutableTokenMeta, priceUsd: number | undefined): void {
+  if (priceUsd === undefined) return;
+  meta.priceUsd = priceUsd;
+  meta.priceFetchedAt = Date.now();
+}
+
+function parseHeliusTokenMeta(mint: string, json: HeliusAssetResponse | null): TokenMeta | null {
+  const d = json?.result?.token_info?.decimals;
+  if (!isNumberValue(d)) return null;
+  const meta: MutableTokenMeta = {
+    symbol: json?.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
+    decimals: d,
+  };
+  attachHeliusPrice(meta, resolveHeliusTokenPrice(json));
+  return meta;
+}
+
+/** True when the cached bins-around entry covers this half-range and is fresh. */
+function isBinsAroundMemoFresh(
+  memo: ActiveBinMemo | undefined,
+  halfRange: number,
+  ttlMs: number,
+): boolean {
+  if (memo === undefined) return false;
+  if (memo.binsAround === null) return false;
+  if (memo.halfRange !== halfRange) return false;
+  return Date.now() - memo.fetchedAt < ttlMs;
+}
+
+function buildBinsAroundMemo(
+  bins: MeteoraDlmmBinsAround,
+  memo: ActiveBinMemo | undefined,
+  halfRange: number,
+): ActiveBinMemo {
+  // The bins fetch carries its OWN active-bin snapshot (the SDK reads
+  // the active bin internally): align the memo with it so binId/price
+  // and binsAround always describe the SAME point in time — retaining
+  // the old binId while refreshing fetchedAt would serve a stale active
+  // bin for another TTL window, and mixing bins from a newer snapshot
+  // with the old id would be internally inconsistent.
+  const activeBinSnapshot = bins.bins.find((b) => b.binId === bins.activeBin);
+  return {
+    binId: bins.activeBin,
+    price: activeBinSnapshot?.price ?? memo?.price ?? "",
+    pricePerToken: activeBinSnapshot?.pricePerToken ?? memo?.pricePerToken ?? "",
+    fetchedAt: Date.now(),
+    halfRange,
+    binsAround: bins,
+  };
+}
+
+/** Extract SPL mint decimals from a parsed-account-info RPC response. */
+function extractRpcMintDecimals(
+  info: { readonly value?: { readonly data?: unknown } | null } | null,
+): number | null {
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+  const parsed = (info?.value?.data as { parsed?: { info?: { decimals?: number } } } | undefined)
+    ?.parsed?.info;
+  const decimals = parsed?.decimals;
+  return isNumberValue(decimals) ? decimals : null;
+}
+
+/** Single-mint quote rows in the Jupiter price payload. */
+interface JupiterPriceQuote {
+  readonly usdPrice?: number;
+  readonly price?: number;
+}
+
+type JupiterPricePayload = Record<string, JupiterPriceQuote | undefined> & {
+  readonly data?: Record<string, { readonly price?: number } | undefined>;
+};
+
+/** Single-mint quote rows in the CoinGecko token-price payload. */
+interface CoinGeckoPriceQuote {
+  readonly usd?: number;
+}
+
+type CoinGeckoPricePayload = Record<string, CoinGeckoPriceQuote | undefined>;
+
+/** True when a provider price is usable: defined, finite, and positive. */
+function isQuotablePrice(price: number | undefined): price is number {
+  return price !== undefined && Number.isFinite(price) && price > 0;
+}
+
+function buildJupiterPriceRequest(missing: ReadonlyArray<string>): PriceProviderRequest {
+  const ids = encodeURIComponent(missing.join(","));
+  const jupiterApiKey = process.env.JUPITER_API_KEY?.trim() ?? "";
+  const requestInit: RequestInit = { signal: AbortSignal.timeout(10_000) };
+  if (jupiterApiKey) requestInit.headers = { "x-api-key": jupiterApiKey };
+  return { url: `https://api.jup.ag/price/v3?ids=${ids}`, requestInit };
+}
+
+function parseJupiterMintPrice(json: JupiterPricePayload, mint: string): number | undefined {
+  const direct = json[mint]?.usdPrice;
+  if (isNumberValue(direct)) return direct;
+  const nested = json.data?.[mint]?.price;
+  if (isNumberValue(nested)) return nested;
+  return undefined;
+}
+
+function buildCoinGeckoBatchRequest(
+  batch: ReadonlyArray<string>,
+  apiKey: string,
+): PriceProviderRequest {
+  const ids = encodeURIComponent(batch.join(","));
+  const requestInit: RequestInit = { signal: AbortSignal.timeout(10_000) };
+  if (apiKey) requestInit.headers = { "x-cg-pro-api-key": apiKey };
+  const baseUrl = apiKey ? "https://pro-api.coingecko.com" : "https://api.coingecko.com";
+  return {
+    url: `${baseUrl}/api/v3/simple/token_price/solana?contract_addresses=${ids}&vs_currencies=usd`,
+    requestInit,
+  };
+}
+
+function applyCoinGeckoBatchPrices(
+  result: Record<string, number>,
+  json: CoinGeckoPricePayload,
+  batch: ReadonlyArray<string>,
+  cachePrice: (mint: string, price: number) => void,
+): void {
+  for (const mint of batch) {
+    const price = json[mint]?.usd;
+    if (!isNumberValue(price) || !isQuotablePrice(price)) continue;
+    result[mint] = price;
+    cachePrice(mint, price);
+  }
+}
+
+function bookNegativeCachePrice(
+  mint: string,
+  prices: Record<string, number>,
+  useFallback: boolean,
+  fallbackPrice: number | undefined,
+  provenanceOut: Map<string, string> | undefined,
+): void {
+  prices[mint] = useFallback ? (fallbackPrice ?? 0) : 0;
+  if (provenanceOut === undefined || useFallback || prices[mint] !== 0) return;
+  provenanceOut.set(mint, "negative-cache");
+}
+
+function resolveMetadataPriceLayer(
+  mint: string,
+  metaEntry: CacheEntry | undefined,
+  prices: Record<string, number>,
+  tokenMetaCache: Map<string, CacheEntry>,
+  cachePrice: (mint: string, price: number) => void,
+  priceCacheTtlMs: number,
+): boolean {
+  const metadataPrice = metaEntry?.meta.priceUsd;
+  if (!isQuotablePrice(metadataPrice)) return false;
+  const metadataFetchedAt = metaEntry?.meta.priceFetchedAt;
+  if (metadataFetchedAt !== undefined && Date.now() - metadataFetchedAt > priceCacheTtlMs) {
+    tokenMetaCache.delete(mint);
+    return false;
+  }
+  cachePrice(mint, metadataPrice);
+  prices[mint] = metadataPrice;
+  return true;
+}
+
+function resolveNegativeCacheLayer(
+  mint: string,
+  prices: Record<string, number>,
+  useFallback: boolean,
+  fallbackPrices: FallbackPriceMap,
+  provenanceOut: Map<string, string> | undefined,
+  negativePriceCache: Map<string, number>,
+  missTtlMs: number,
+): boolean {
+  const missFetchedAt = negativePriceCache.get(mint);
+  if (missFetchedAt === undefined) return false;
+  if (Date.now() - missFetchedAt >= missTtlMs) {
+    negativePriceCache.delete(mint);
+    return false;
+  }
+  bookNegativeCachePrice(mint, prices, useFallback, fallbackPrices[mint], provenanceOut);
+  return true;
+}
+
+interface HoldingRow {
+  readonly mint: string;
+  readonly amountAtomic: bigint;
+  readonly decimals: number;
+}
+
+interface PriceProviderRequest {
+  readonly url: string;
+  readonly requestInit: RequestInit;
+}
+
+interface EntryMaxBalances {
+  readonly maxX: bigint;
+  readonly maxY: bigint;
+}
+
+interface ParsedTokenAccountData {
+  readonly program: string;
+  readonly parsed: unknown;
+  readonly space: number;
+}
+
+function parseHoldingAmount(tokenAmount: JsonValue | undefined): Omit<HoldingRow, "mint"> | null {
+  if (!isObject(tokenAmount)) return null;
+  const amountRaw = tokenAmount["amount"];
+  const decimals = tokenAmount["decimals"];
+  if (!isStringValue(amountRaw) || !isNumberValue(decimals)) return null;
+  if (!/^\d+$/.test(amountRaw)) return null;
+  const amountAtomic = BigInt(amountRaw);
+  if (amountAtomic <= 0n) return null; // skip empty / rent-only ATAs
+  return { amountAtomic, decimals };
+}
+
+function parseHoldingRow(data: ParsedTokenAccountData): HoldingRow | null {
+  const parsed = data.parsed;
+  if (!isObject(parsed)) return null;
+  const info = parsed["info"];
+  if (!isObject(info)) return null;
+  const mint = info["mint"];
+  if (!isStringValue(mint)) return null;
+  const amounts = parseHoldingAmount(info["tokenAmount"]);
+  if (amounts === null) return null;
+  return { mint, amountAtomic: amounts.amountAtomic, decimals: amounts.decimals };
+}
+
+function accumulateHoldingRow(
+  held: Map<string, { amountAtomic: bigint; decimals: number }>,
+  row: HoldingRow,
+): void {
+  const existing = held.get(row.mint);
+  if (existing) {
+    existing.amountAtomic += row.amountAtomic;
+    return;
+  }
+  held.set(row.mint, { amountAtomic: row.amountAtomic, decimals: row.decimals });
+}
+
+function findWalletKeyIndex(
+  keysLength: number,
+  keyAt: (index: number) => { equals(other: PublicKey): boolean } | undefined,
+  walletKey: PublicKey,
+): number {
+  for (let index = 0; index < keysLength; index += 1) {
+    const key = keyAt(index);
+    if (key !== undefined && key.equals(walletKey)) return index;
+  }
+  return -1;
+}
+
+function computeSwapOutputAtomic(
+  preBalance: number | undefined,
+  postBalance: number | undefined,
+  fee: number,
+): { readonly outputAtomic: bigint; readonly feeAtomic: bigint } | null {
+  if (!isNumberValue(preBalance) || !isNumberValue(postBalance)) return null;
+  const outputAtomic = BigInt(postBalance - preBalance);
+  if (outputAtomic <= 0n) return null;
+  return { outputAtomic, feeAtomic: BigInt(fee) };
+}
+
+function mapWashEnhancedHost(host: string): string {
+  // Helius serves the enhanced address-history API from the
+  // api- prefixed host (api-mainnet.helius-rpc.com), NOT the RPC
+  // host — reusing the RPC host would silently null every response
+  // under the standard setup. map per network; the bare host keeps.
+  if (host.startsWith("mainnet.")) return `api-mainnet.${host.slice("mainnet.".length)}`;
+  if (host.startsWith("devnet.")) return `api-devnet.${host.slice("devnet.".length)}`;
+  return host;
+}
+
+function resolveWashEnhancedHost(rpcUrl: string): string | null {
+  let host: string;
+  try {
+    host = new URL(rpcUrl).host;
+  } catch {
+    return null;
+  }
+  if (host !== "helius-rpc.com" && !host.endsWith(".helius-rpc.com")) return null;
+  return mapWashEnhancedHost(host);
+}
+
+function parseWashRow(tx: JsonValue): WashTradeRow | null {
+  if (!isObject(tx)) return null;
+  // Only successful METEORA instructions count as volume: failed
+  // txs (err set) and system transfers are not swap activity, and a
+  // single active LP's maintenance txs must not satisfy the
+  // concentration thresholds. DLMM swaps and LP ops are both
+  // type UNKNOWN — the residual noise is bounded by the
+  // extreme-tail thresholds.
+  if (tx["err"] != null) return null;
+  if (tx["type"] === "TRANSFER") return null;
+  if (tx["source"] !== "METEORA") return null;
+  const payer = tx["feePayer"];
+  const timestamp = tx["timestamp"];
+  const fee = tx["fee"];
+  if (!isStringValue(payer) || !isNumberValue(timestamp) || !isNumberValue(fee)) return null;
+  return { payer, timestamp, feeLamports: fee };
+}
+
+function collectWashRows(parsed: ReadonlyArray<JsonValue>): WashTradeRow[] {
+  const rows: WashTradeRow[] = [];
+  for (const tx of parsed) {
+    const row = parseWashRow(tx);
+    if (row !== null) rows.push(row);
+  }
+  return rows;
+}
+
+/** Cap a SOL leg at the spendable balance (anything at/below the gas reserve is unfundable). */
+function capSolLegForGas(
+  balance: bigint,
+  isSolLeg: boolean,
+  nativeSolBalance: bigint | undefined,
+): bigint {
+  if (!isSolLeg) return balance;
+  if (nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS) {
+    return nativeSolBalance - GAS_RESERVE_LAMPORTS;
+  }
+  return 0n;
+}
+
+function resolveEntryMaxBalances(
+  balanceX: bigint,
+  balanceY: bigint,
+  nativeSolBalance: bigint | undefined,
+  tokenX: string,
+  tokenY: string,
+  forceSingleSidedX: boolean,
+): EntryMaxBalances {
+  const maxX = capSolLegForGas(balanceX, tokenX === SOL_MINT, nativeSolBalance);
+  if (forceSingleSidedX) return { maxX, maxY: 0n };
+  return { maxX, maxY: capSolLegForGas(balanceY, tokenY === SOL_MINT, nativeSolBalance) };
+}
+
+function requireNonZeroEntryLegs(
+  requestedXAmount: bigint,
+  requestedYAmount: bigint,
+  forceSingleSidedX: boolean,
+  poolAddress: string,
+): Effect.Effect<void, AdapterError> {
+  if (forceSingleSidedX || (requestedXAmount !== 0n && requestedYAmount !== 0n)) {
+    return Effect.void;
+  }
+  return Effect.fail(
+    new AdapterError({
+      message: "Cannot enter a position with a zero-sized token leg",
+      poolAddress,
+    }),
+  );
+}
+
+function isEmptyExitPosition(positionData: MeteoraDlmmPositionData): boolean {
+  return (
+    positionData.totalXAmountExcludeTransferFee.isZero() &&
+    positionData.totalYAmountExcludeTransferFee.isZero()
+  );
+}
+
+function rewardMintOrNull(mint: PublicKey | undefined): string | null {
+  const base58 = mint?.toBase58();
+  if (base58 === undefined || base58 === DEFAULT_PUBLIC_KEY) return null;
+  return base58;
+}
+interface ExitRewardSlot {
+  readonly mint: string | null;
+  readonly amountAtomic: MeteoraDlmmPositionData["rewardOneExcludeTransferFee"];
+}
+
+function buildExitRewardSlots(
+  rewardInfos: MeteoraDlmmClient["lbPair"]["rewardInfos"],
+  rewardOneAtomic: MeteoraDlmmPositionData["rewardOneExcludeTransferFee"],
+  rewardTwoAtomic: MeteoraDlmmPositionData["rewardTwoExcludeTransferFee"],
+): ExitRewardSlot[] {
+  const rewardSlots = [
+    { mint: rewardMintOrNull(rewardInfos[0]?.mint), amountAtomic: rewardOneAtomic },
+    { mint: rewardMintOrNull(rewardInfos[1]?.mint), amountAtomic: rewardTwoAtomic },
+  ].filter((s) => s.amountAtomic > 0n);
+  return rewardSlots;
+}
+
+interface SettledWithdrawals {
+  readonly withdrawnXAtomic: string;
+  readonly withdrawnYAtomic: string;
+}
+
+interface PricedExitLegs {
+  readonly withdrawnUsd: number | null;
+  readonly pendingFeeUsd: number | null;
+}
+
+function settleMeasuredWithdrawals(
+  beforeHeld: ReadonlyMap<
+    string,
+    { readonly amountAtomic: bigint; readonly decimals: number }
+  > | null,
+  beforeNativeSol: bigint | null,
+  afterHeld: ReadonlyMap<
+    string,
+    { readonly amountAtomic: bigint; readonly decimals: number }
+  > | null,
+  afterNativeSol: bigint | null,
+  tokenXMint: string,
+  tokenYMint: string,
+  snapshotXAtomic: string,
+  snapshotYAtomic: string,
+  rewardSlots: ReadonlyArray<ExitRewardSlot>,
+  positionPubkeyStr: string,
+): SettledWithdrawals {
+  const measuredX = measureWithdrawalDelta({
+    beforeHeld,
+    afterHeld,
+    beforeNativeSol,
+    afterNativeSol,
+    mint: tokenXMint,
+    snapshotAmount: snapshotXAtomic,
+  });
+  const measuredY = measureWithdrawalDelta({
+    beforeHeld,
+    afterHeld,
+    beforeNativeSol,
+    afterNativeSol,
+    mint: tokenYMint,
+    snapshotAmount: snapshotYAtomic,
+  });
+  const withdrawnXAtomic = excludeSameMintRewards(measuredX, tokenXMint, rewardSlots);
+  const withdrawnYAtomic = excludeSameMintRewards(measuredY, tokenYMint, rewardSlots);
+  if (!measuredX.measured || !measuredY.measured) {
+    // The measured flag distinguishes on-chain-delta withdrawals from
+    // the known-understating SDK snapshot in the audit trail — a
+    // silent fallback would defeat the point of #205. Exits are rare,
+    // so an unbounded warn per exit is fine.
+    logger.warn(
+      `[exit] withdrawal delta unmeasured for ${positionPubkeyStr} — booking SDK snapshot amounts (X: ${measuredX.measured ? "measured" : "snapshot"}, Y: ${measuredY.measured ? "measured" : "snapshot"})`,
+    );
+  }
+  return { withdrawnXAtomic, withdrawnYAtomic };
+}
+
+function priceExitLegs(
+  withdrawnXAtomic: string,
+  withdrawnYAtomic: string,
+  pendingFeeXAtomic: string,
+  pendingFeeYAtomic: string,
+  decimalsX: number,
+  decimalsY: number,
+  priceX: number | undefined,
+  priceY: number | undefined,
+): PricedExitLegs {
+  // All-or-nothing on the withdrawn/pending legs: ANY unresolved leg
+  // price poisons both (a partial USD value would mis-state realized
+  // PnL). price<=0 (incl. the negative-cache 0) counts as unresolved.
+  if (priceX == null || priceX <= 0 || priceY == null || priceY <= 0) {
+    return { withdrawnUsd: null, pendingFeeUsd: null };
+  }
+  return {
+    withdrawnUsd:
+      atomicToUnits(BigInt(withdrawnXAtomic), decimalsX) * priceX +
+      atomicToUnits(BigInt(withdrawnYAtomic), decimalsY) * priceY,
+    pendingFeeUsd:
+      atomicToUnits(BigInt(pendingFeeXAtomic), decimalsX) * priceX +
+      atomicToUnits(BigInt(pendingFeeYAtomic), decimalsY) * priceY,
+  };
+}
+
+function requireEntryGas(
+  actualSolBalance: bigint,
+  requiredLamports: bigint,
+  poolAddress: string,
+): Effect.Effect<void, AdapterError> {
+  if (actualSolBalance >= requiredLamports) return Effect.void;
+  return Effect.fail(
+    new AdapterError({
+      message: `Insufficient SOL for live entry transaction: required ${formatTokenAmount(requiredLamports, 9)} (direct System Program debits plus ${formatTokenAmount(GAS_RESERVE_LAMPORTS, 9)} reserve for fees, ATA rent and other costs), available ${formatTokenAmount(actualSolBalance, 9)}.`,
+      poolAddress,
+    }),
+  );
+}
+
+interface SettledRevenueShare {
+  readonly transferInstructions: ReadonlyArray<TransactionInstruction>;
+  readonly actualPlatformFeeX: number;
+  readonly actualPlatformFeeY: number;
+  readonly actualOperatorFeeX: number;
+  readonly actualOperatorFeeY: number;
+}
+function requireConvertibleFees(feeX: number, feeY: number): Effect.Effect<void, AdapterError> {
+  if (!Number.isFinite(feeX) || !Number.isFinite(feeY) || (feeX <= 0 && feeY <= 0)) {
+    return Effect.fail(new AdapterError({ message: "Cannot convert zero claimed fees" }));
+  }
+  return Effect.void;
+}
+
+function requireFeeConversionOutput(quote: JsonValue): Effect.Effect<string, AdapterError> {
+  if (!isObject(quote) || !isStringValue(quote.outAmount)) {
+    return Effect.fail(
+      new AdapterError({ message: "Jupiter fee conversion returned invalid output" }),
+    );
+  }
+  const quotedOutput = quote.outAmount;
+  if (!/^\d+$/.test(quotedOutput) || quotedOutput === "0") {
+    return Effect.fail(
+      new AdapterError({ message: "Jupiter fee conversion returned invalid output" }),
+    );
+  }
+  return Effect.succeed(quotedOutput);
+}
+function buildClaimFeesResult(
+  signature: string,
+  feeX: number,
+  feeY: number,
+  netFeeX: number,
+  netFeeY: number,
+  netFeesUsd: number | null,
+  settled: SettledRevenueShare,
+) {
+  return {
+    txSignature: signature,
+    feeX,
+    feeY,
+    platformFeeX: settled.actualPlatformFeeX,
+    platformFeeY: settled.actualPlatformFeeY,
+    netFeeX,
+    netFeeY,
+    netFeesUsd,
+    ...(settled.transferInstructions.length > 0
+      ? { feeTransferTxSignature: signature }
+      : undefined),
+    ...(settled.actualOperatorFeeX > 0 || settled.actualOperatorFeeY > 0
+      ? { operatorFeeX: settled.actualOperatorFeeX, operatorFeeY: settled.actualOperatorFeeY }
+      : undefined),
+  };
+}
+function hasPendingRewards(pendingOne: number, pendingTwo: number): boolean {
+  if (Number.isFinite(pendingOne) && pendingOne > 0) return true;
+  return Number.isFinite(pendingTwo) && pendingTwo > 0;
+}
+
+function skipReasonForEmptyRewards(concreteFunctionType: number | undefined): string {
+  if (concreteFunctionType === ConcreteFunctionType.LimitOrder) {
+    return "pool is LimitOrder function type (no LM rewards)";
+  }
+  return "no pending rewards";
+}
+
+function rewardMintOrUnknown(mint: PublicKey | undefined): string {
+  const base58 = mint?.toBase58();
+  if (base58 === undefined || base58 === DEFAULT_PUBLIC_KEY) return "unknown";
+  return base58;
+}
+
+interface RewardClaimSlot {
+  readonly mint: PublicKey | undefined;
+  readonly amountAtomic: number;
+}
+
+function buildRewardClaimSlots(
+  rewardInfos: MeteoraDlmmClient["lbPair"]["rewardInfos"],
+  pendingOne: number,
+  pendingTwo: number,
+): RewardClaimSlot[] {
+  // Slot mapping per the DLMM layout: rewardOne ↔ rewardInfos[0],
+  // rewardTwo ↔ rewardInfos[1].
+  return [
+    { mint: rewardInfos[0]?.mint, amountAtomic: pendingOne },
+    { mint: rewardInfos[1]?.mint, amountAtomic: pendingTwo },
+  ].filter((s) => Number.isFinite(s.amountAtomic) && s.amountAtomic > 0);
 }
 
 export const makeAdapterLive = (
@@ -1231,26 +2042,8 @@ export const makeAdapterLive = (
 
       // ─── Token metadata cache ──────────────────────────────────────────────
 
-      interface TokenMeta {
-        readonly symbol: string;
-        readonly decimals: number;
-        readonly priceUsd?: number;
-        readonly priceFetchedAt?: number;
-      }
-
-      interface HeliusAssetResponse {
-        readonly result?: {
-          readonly content?: { readonly metadata?: { readonly symbol?: string } };
-          readonly token_info?: {
-            readonly decimals?: number;
-            readonly price_info?: {
-              readonly price_per_token?: number;
-              readonly currency?: string;
-            };
-          };
-        };
-        readonly error?: { readonly code?: number; readonly message?: string };
-      }
+      // TokenMeta and HeliusAssetResponse live at module scope (shared with the
+      // module-level price/metadata parsers below).
 
       // Token metadata is resolved keyless-first (standard RPC, then Helius DAS
       // last). The Helius path is the only keyed call and should be hit at most
@@ -1292,15 +2085,6 @@ export const makeAdapterLive = (
       // going stale across cycles (the active bin moves with every swap). The
       // DLMM instance itself is cached 5 min; this memo is strictly tighter.
       const ACTIVE_BIN_MEMO_TTL_MS = 3_000;
-      interface ActiveBinMemo {
-        readonly binId: number;
-        readonly price: string;
-        /** Real human price (tokenY per tokenX) — pricePerLamport × 10^(decX - decY). */
-        readonly pricePerToken: string;
-        readonly fetchedAt: number;
-        readonly halfRange: number;
-        readonly binsAround: MeteoraDlmmBinsAround | null;
-      }
       const activeBinMemo = new Map<string, ActiveBinMemo>();
 
       // Opportunistic eviction: pools rotate out of the active set, and in
@@ -1355,33 +2139,18 @@ export const makeAdapterLive = (
           pruneActiveBinMemo();
           const memo = activeBinMemo.get(poolAddress);
           if (
-            memo &&
-            memo.binsAround !== null &&
-            memo.halfRange === halfRange &&
-            Date.now() - memo.fetchedAt < ACTIVE_BIN_MEMO_TTL_MS
+            memo !== undefined &&
+            isBinsAroundMemoFresh(memo, halfRange, ACTIVE_BIN_MEMO_TTL_MS)
           ) {
-            return memo.binsAround;
+            const cached = memo.binsAround;
+            if (cached !== null) return cached;
           }
           const bins = yield* paceRpc().pipe(
             Effect.andThen(
               Effect.tryPromise(() => dlmm.getBinsAroundActiveBin(halfRange, halfRange)),
             ),
           );
-          // The bins fetch carries its OWN active-bin snapshot (the SDK reads
-          // the active bin internally): align the memo with it so binId/price
-          // and binsAround always describe the SAME point in time — retaining
-          // the old binId while refreshing fetchedAt would serve a stale active
-          // bin for another TTL window, and mixing bins from a newer snapshot
-          // with the old id would be internally inconsistent.
-          const activeBinSnapshot = bins.bins.find((b) => b.binId === bins.activeBin);
-          activeBinMemo.set(poolAddress, {
-            binId: bins.activeBin,
-            price: activeBinSnapshot?.price ?? memo?.price ?? "",
-            pricePerToken: activeBinSnapshot?.pricePerToken ?? memo?.pricePerToken ?? "",
-            fetchedAt: Date.now(),
-            halfRange,
-            binsAround: bins,
-          });
+          activeBinMemo.set(poolAddress, buildBinsAroundMemo(bins, memo, halfRange));
           return bins;
         });
       }
@@ -1423,20 +2192,7 @@ export const makeAdapterLive = (
         });
       }
 
-      function readHeliusPrice(asset: HeliusAssetResponse): number | undefined {
-        const priceInfo = asset.result?.token_info?.price_info;
-        const price = priceInfo?.price_per_token;
-        const currency = priceInfo?.currency?.toUpperCase();
-        if (
-          !isNumberValue(price) ||
-          !Number.isFinite(price) ||
-          price <= 0 ||
-          (currency !== "USDC" && currency !== "USD")
-        ) {
-          return undefined;
-        }
-        return price;
-      }
+      // readHeliusPrice lives at module scope (shared price validator).
 
       const heliusAssetCacheEntries = new Map<
         string,
@@ -1523,23 +2279,51 @@ export const makeAdapterLive = (
         JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: { symbol: "JUP", decimals: 6 },
       };
 
-      function parseHeliusTokenMeta(
-        mint: string,
-        json: HeliusAssetResponse | null,
-      ): TokenMeta | null {
-        const d = json?.result?.token_info?.decimals;
-        if (!isNumberValue(d)) return null;
-        const priceUsd = json ? readHeliusPrice(json) : undefined;
-        type MutableTokenMeta = { -readonly [K in keyof TokenMeta]: TokenMeta[K] };
-        const meta: MutableTokenMeta = {
-          symbol: json?.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
-          decimals: d,
-        };
-        if (priceUsd !== undefined) {
-          meta.priceUsd = priceUsd;
-          meta.priceFetchedAt = Date.now();
-        }
-        return meta;
+      // parseHeliusTokenMeta lives at module scope (shared metadata parser).
+
+      // Persist a resolved token metadata to the in-memory cache (and, best
+      // effort, to SQLite so the keyed Helius lookup is not repeated after a
+      // restart). Fail-open: a persistence error never fails the lookup.
+      function persistTokenMeta(mint: string, meta: TokenMeta): Effect.Effect<void, never> {
+        return Effect.gen(function* () {
+          tokenMetaCache.set(mint, { meta, fetchedAt: Date.now() });
+          yield* savePersistedCache(db, TOKEN_META_NAMESPACE, tokenMetaCache).pipe(
+            Effect.catch(() => Effect.void),
+          );
+        });
+      }
+
+      // Standard Solana RPC probe (keyless): parsed account info exposes
+      // decimals for any SPL mint via the Token Program (works on mainnet-beta
+      // and every other standard RPC). Preferred over Helius DAS getAsset so
+      // the shared Helius key is NOT burned on the hot decimals path — the
+      // public RPC serves this for free. Does NOT call Helius DAS getAsset.
+      function probeRpcTokenMeta(mint: string): Effect.Effect<TokenMeta | null, never> {
+        return Effect.gen(function* () {
+          const mintPubkey = new PublicKey(mint);
+          const info = yield* rpcCall((conn) => conn.getParsedAccountInfo(mintPubkey)).pipe(
+            Effect.catch(() => Effect.succeed(null)),
+          );
+          const decimals = extractRpcMintDecimals(info);
+          if (decimals === null) return null;
+          const meta = { symbol: mint.slice(0, 4), decimals };
+          yield* persistTokenMeta(mint, meta);
+          return meta;
+        });
+      }
+
+      // Helius probe (last resort): DAS getAsset returns token_info.decimals
+      // for any mint Helius has indexed. Only available when heliusApiKey is
+      // set, and only reached when the keyless standard RPC could not resolve
+      // decimals. Also carries a price the standard RPC path cannot.
+      function probeHeliusTokenMeta(mint: string): Effect.Effect<TokenMeta | null, never> {
+        return Effect.gen(function* () {
+          const json = yield* fetchHeliusAsset(mint).pipe(Effect.catch(() => Effect.succeed(null)));
+          const meta = parseHeliusTokenMeta(mint, json);
+          if (meta === null) return null;
+          yield* persistTokenMeta(mint, meta);
+          return meta;
+        });
       }
 
       function getTokenMeta(mint: string): Effect.Effect<TokenMeta, Error> {
@@ -1547,57 +2331,19 @@ export const makeAdapterLive = (
           const cachedEntry = tokenMetaCache.get(mint);
           if (cachedEntry) return cachedEntry.meta;
 
-          // Persist a resolved token metadata to the in-memory cache (and, best
-          // effort, to SQLite so the keyed Helius lookup is not repeated after a
-          // restart). Fail-open: a persistence error never fails the lookup.
-          const setMeta = (meta: TokenMeta): Effect.Effect<void, never> =>
-            Effect.gen(function* () {
-              tokenMetaCache.set(mint, { meta, fetchedAt: Date.now() });
-              yield* savePersistedCache(db, TOKEN_META_NAMESPACE, tokenMetaCache).pipe(
-                Effect.catch(() => Effect.void),
-              );
-            });
-
           // Fast path: known mints (SOL, USDC, USDT, etc.) — no network.
           const known = KNOWN_MINT_DECIMALS[mint];
           if (known) {
-            yield* setMeta(known);
+            yield* persistTokenMeta(mint, known);
             return known;
           }
 
-          // Standard Solana RPC path first (keyless): parsed account info exposes
-          // decimals for any SPL mint via the Token Program (works on mainnet-beta
-          // and every other standard RPC). Preferred over Helius DAS getAsset so
-          // the shared Helius key is NOT burned on the hot decimals path — the
-          // public RPC serves this for free. Does NOT call Helius DAS getAsset.
-          const mintPubkey = new PublicKey(mint);
-          const info = yield* rpcCall((conn) => conn.getParsedAccountInfo(mintPubkey)).pipe(
-            Effect.catch(() => Effect.succeed(null)),
-          );
-          const parsed =
-            // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-            (info?.value?.data as { parsed?: { info?: { decimals?: number } } } | undefined)?.parsed
-              ?.info;
-          const decimals = parsed?.decimals;
-          if (isNumberValue(decimals)) {
-            const meta = { symbol: mint.slice(0, 4), decimals };
-            yield* setMeta(meta);
-            return meta;
-          }
+          const rpcMeta = yield* probeRpcTokenMeta(mint);
+          if (rpcMeta !== null) return rpcMeta;
 
-          // Helius path (last resort): DAS getAsset returns token_info.decimals
-          // for any mint Helius has indexed. Only available when heliusApiKey is
-          // set, and only reached when the keyless standard RPC could not resolve
-          // decimals. Also carries a price the standard RPC path cannot.
           if (config.heliusApiKey) {
-            const json = yield* fetchHeliusAsset(mint).pipe(
-              Effect.catch(() => Effect.succeed(null)),
-            );
-            const meta = parseHeliusTokenMeta(mint, json);
-            if (meta) {
-              yield* setMeta(meta);
-              return meta;
-            }
+            const heliusMeta = yield* probeHeliusTokenMeta(mint);
+            if (heliusMeta !== null) return heliusMeta;
           }
 
           return yield* Effect.fail(
@@ -1683,31 +2429,36 @@ export const makeAdapterLive = (
       ): Effect.Effect<Record<string, number>, never> {
         if (missing.length === 0) return Effect.succeed({});
         return Effect.gen(function* () {
-          const ids = encodeURIComponent(missing.join(","));
-          const jupiterApiKey = process.env.JUPITER_API_KEY?.trim() ?? "";
-          const requestInit: RequestInit = { signal: AbortSignal.timeout(10_000) };
-          if (jupiterApiKey) requestInit.headers = { "x-api-key": jupiterApiKey };
-          const res = yield* Effect.tryPromise(() =>
-            jupiterFetch(`https://api.jup.ag/price/v3?ids=${ids}`, requestInit),
-          );
+          const { url, requestInit } = buildJupiterPriceRequest(missing);
+          const res = yield* Effect.tryPromise(() => jupiterFetch(url, requestInit));
           if (!res.ok) return {};
           // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-          const json = (yield* Effect.tryPromise(() => res.json())) as Record<
-            string,
-            { readonly usdPrice?: number; readonly price?: number } | undefined
-          > & {
-            readonly data?: Record<string, { readonly price?: number } | undefined>;
-          };
+          const json = (yield* Effect.tryPromise(() => res.json())) as JupiterPricePayload;
           const result: Record<string, number> = {};
           for (const mint of missing) {
-            const price = json[mint]?.usdPrice ?? json.data?.[mint]?.price;
-            if (isNumberValue(price) && Number.isFinite(price) && price > 0) {
+            const price = parseJupiterMintPrice(json, mint);
+            if (isQuotablePrice(price)) {
               result[mint] = price;
               setCachedPrice(mint, price);
             }
           }
           return result;
         }).pipe(Effect.catch(() => Effect.succeed({})));
+      }
+
+      function fetchCoinGeckoBatch(
+        batch: ReadonlyArray<string>,
+        apiKey: string,
+        result: Record<string, number>,
+      ) {
+        return Effect.gen(function* () {
+          const { url, requestInit } = buildCoinGeckoBatchRequest(batch, apiKey);
+          const res = yield* Effect.tryPromise(() => fetch(url, requestInit));
+          if (!res.ok) return;
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+          const json = (yield* Effect.tryPromise(() => res.json())) as CoinGeckoPricePayload;
+          applyCoinGeckoBatchPrices(result, json, batch, setCachedPrice);
+        });
       }
 
       function fetchCoinGeckoPrices(
@@ -1718,35 +2469,11 @@ export const makeAdapterLive = (
           const result: Record<string, number> = {};
           const coinGeckoApiKey = process.env.COINGECKO_API_KEY?.trim() ?? "";
           for (let i = 0; i < missing.length; i += COINGECKO_BATCH_SIZE) {
-            const batch = missing.slice(i, i + COINGECKO_BATCH_SIZE);
-            const ids = encodeURIComponent(batch.join(","));
-            const requestInit: RequestInit = { signal: AbortSignal.timeout(10_000) };
-            if (coinGeckoApiKey) {
-              requestInit.headers = { "x-cg-pro-api-key": coinGeckoApiKey };
-            }
-            const baseUrl = coinGeckoApiKey
-              ? "https://pro-api.coingecko.com"
-              : "https://api.coingecko.com";
-            const res = yield* Effect.tryPromise(() =>
-              fetch(
-                `${baseUrl}/api/v3/simple/token_price/solana?contract_addresses=${ids}&vs_currencies=usd`,
-                requestInit,
-              ),
+            yield* fetchCoinGeckoBatch(
+              missing.slice(i, i + COINGECKO_BATCH_SIZE),
+              coinGeckoApiKey,
+              result,
             );
-            if (res.ok) {
-              // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-              const json = (yield* Effect.tryPromise(() => res.json())) as Record<
-                string,
-                { readonly usd?: number } | undefined
-              >;
-              for (const mint of batch) {
-                const price = json[mint]?.usd;
-                if (isNumberValue(price) && Number.isFinite(price) && price > 0) {
-                  result[mint] = price;
-                  setCachedPrice(mint, price);
-                }
-              }
-            }
             if (i + COINGECKO_BATCH_SIZE < missing.length) {
               yield* Effect.sleep(COINGECKO_DELAY_MS);
             }
@@ -1771,30 +2498,30 @@ export const makeAdapterLive = (
             prices[mint] = cached;
             continue;
           }
-          const metaEntry = tokenMetaCache.get(mint);
-          const metadataPrice = metaEntry?.meta.priceUsd;
-          if (metadataPrice !== undefined && Number.isFinite(metadataPrice) && metadataPrice > 0) {
-            const metadataFetchedAt = metaEntry?.meta.priceFetchedAt;
-            if (
-              metadataFetchedAt === undefined ||
-              Date.now() - metadataFetchedAt <= PRICE_CACHE_TTL_MS
-            ) {
-              setCachedPrice(mint, metadataPrice);
-              prices[mint] = metadataPrice;
-              continue;
-            }
-            tokenMetaCache.delete(mint);
+          if (
+            resolveMetadataPriceLayer(
+              mint,
+              tokenMetaCache.get(mint),
+              prices,
+              tokenMetaCache,
+              setCachedPrice,
+              PRICE_CACHE_TTL_MS,
+            )
+          ) {
+            continue;
           }
-          const missFetchedAt = negativePriceCache.get(mint);
-          if (missFetchedAt !== undefined) {
-            if (Date.now() - missFetchedAt < PRICE_MISS_CACHE_TTL_MS) {
-              prices[mint] = useFallback ? (fallbackPrices[mint] ?? 0) : 0;
-              if (provenanceOut && !useFallback && prices[mint] === 0) {
-                provenanceOut.set(mint, "negative-cache");
-              }
-              continue;
-            }
-            negativePriceCache.delete(mint);
+          if (
+            resolveNegativeCacheLayer(
+              mint,
+              prices,
+              useFallback,
+              fallbackPrices,
+              provenanceOut,
+              negativePriceCache,
+              PRICE_MISS_CACHE_TTL_MS,
+            )
+          ) {
+            continue;
           }
           missing.push(mint);
         }
@@ -2001,25 +2728,9 @@ export const makeAdapterLive = (
               conn.getParsedTokenAccountsByOwner(wallet.publicKey, { programId }),
             );
             for (const account of accounts.value) {
-              const data = account.account.data;
-              if (!isObject(data)) continue;
-              const parsed = data["parsed"];
-              if (!isObject(parsed)) continue;
-              const info = parsed["info"];
-              if (!isObject(info)) continue;
-              const mint = info["mint"];
-              if (!isStringValue(mint)) continue;
-              const tokenAmount = info["tokenAmount"];
-              if (!isObject(tokenAmount)) continue;
-              const amountRaw = tokenAmount["amount"];
-              const decimals = tokenAmount["decimals"];
-              if (!isStringValue(amountRaw) || !isNumberValue(decimals)) continue;
-              if (!/^\d+$/.test(amountRaw)) continue;
-              const amountAtomic = BigInt(amountRaw);
-              if (amountAtomic <= 0n) continue; // skip empty / rent-only ATAs
-              const existing = held.get(mint);
-              if (existing) existing.amountAtomic += amountAtomic;
-              else held.set(mint, { amountAtomic, decimals });
+              const row = parseHoldingRow(account.account.data);
+              if (row === null) continue;
+              accumulateHoldingRow(held, row);
             }
           }
           return held;
@@ -2685,6 +3396,7 @@ export const makeAdapterLive = (
       ): Effect.Effect<{ outputAtomic: bigint; feeAtomic: bigint } | null, Error> {
         return Effect.gen(function* () {
           if (!wallet) return null;
+          const walletKey = wallet.publicKey;
           const response = yield* rpcCall((conn) =>
             conn.getTransaction(signature, {
               commitment: "confirmed",
@@ -2700,25 +3412,17 @@ export const makeAdapterLive = (
                   accountKeysFromLookups: response.meta.loadedAddresses ?? null,
                 })
               : message.getAccountKeys();
-          let walletIndex = -1;
-          for (let index = 0; index < accountKeys.length; index += 1) {
-            if (accountKeys.get(index)?.equals(wallet.publicKey)) {
-              walletIndex = index;
-              break;
-            }
-          }
+          const walletIndex = findWalletKeyIndex(
+            accountKeys.length,
+            (index) => accountKeys.get(index),
+            walletKey,
+          );
           if (walletIndex === -1) return null;
-
-          const preBalance = response.meta.preBalances[walletIndex];
-          const postBalance = response.meta.postBalances[walletIndex];
-          if (!isNumberValue(preBalance) || !isNumberValue(postBalance)) return null;
-
-          const outputAtomic = BigInt(postBalance - preBalance);
-          const feeAtomic = BigInt(response.meta.fee);
-
-          if (outputAtomic <= 0n) return null;
-
-          return { outputAtomic, feeAtomic };
+          return computeSwapOutputAtomic(
+            response.meta.preBalances[walletIndex],
+            response.meta.postBalances[walletIndex],
+            response.meta.fee,
+          );
         }).pipe(Effect.catch(() => Effect.succeed(null)));
       }
 
@@ -2938,16 +3642,20 @@ export const makeAdapterLive = (
         });
       }
 
-      /** Cap a SOL leg at the spendable balance (anything at/below the gas reserve is unfundable). */
-      function capSolLegForGas(
-        balance: bigint,
-        isSolLeg: boolean,
-        nativeSolBalance: bigint | undefined,
-      ): bigint {
-        if (!isSolLeg) return balance;
-        return nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
-          ? nativeSolBalance - GAS_RESERVE_LAMPORTS
-          : 0n;
+      // capSolLegForGas lives at module scope (shared gas-reserve cap).
+
+      /** Resolve entry-leg decimals (single-sided-X skips the Y leg metadata). */
+      function resolveEntryDecimals(
+        tokenX: string,
+        tokenY: string,
+        forceSingleSidedX: boolean,
+      ): Effect.Effect<{ tokenXDecimals: number; tokenYDecimals: number }, Error> {
+        return Effect.gen(function* () {
+          const tokenXDecimals = yield* getTokenMeta(tokenX).pipe(Effect.map((m) => m.decimals));
+          if (forceSingleSidedX) return { tokenXDecimals, tokenYDecimals: 0 };
+          const tokenYDecimals = yield* getTokenMeta(tokenY).pipe(Effect.map((m) => m.decimals));
+          return { tokenXDecimals, tokenYDecimals };
+        });
       }
 
       /** Announce which deposit path the entry takes (runner/single-sided vs two-sided). */
@@ -2995,6 +3703,449 @@ export const makeAdapterLive = (
           strategyType: toSdkStrategyType(strategySpec),
           ...(singleSidedX !== undefined ? { singleSidedX } : undefined),
         };
+      }
+
+      function reapEmptyPosition(
+        dlmm: MeteoraDlmmClient,
+        position: MeteoraDlmmPosition,
+        positionPubkeyStr: string,
+      ) {
+        return Effect.gen(function* () {
+          const owner = wallet!.publicKey;
+          const closeTx = yield* Effect.tryPromise(() =>
+            dlmm.closePositionIfEmpty({ owner, position }),
+          ).pipe(Effect.catch(() => Effect.succeed(null)));
+          if (closeTx === null) return "empty-reap";
+          try {
+            const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
+            closeTx.feePayer = owner;
+            closeTx.recentBlockhash = blockhash;
+            closeTx.sign(wallet!);
+            const signature = yield* rpcCall((conn) =>
+              conn.sendRawTransaction(closeTx.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: "confirmed",
+              }),
+            );
+            yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
+            return signature;
+          } catch (err) {
+            // Rent reclaim is best-effort: the ledger reap must proceed
+            // regardless. A failed close leaves the empty account on-chain
+            // (rent-locked but inert); it carries no value, so subsequent
+            // passes keep reaping without booking anything.
+            logger.warn(
+              `[exit] empty position ${positionPubkeyStr} — ledger reaped, account close failed: ${String(err)}`,
+            );
+            return "empty-reap";
+          }
+        });
+      }
+
+      function readPreCloseSnapshot() {
+        return Effect.all(
+          {
+            held: cachedWalletHoldings.pipe(Effect.catch(() => Effect.succeed(null))),
+            nativeSol: readNativeSolBalance({ force: true }).pipe(
+              Effect.catch(() => Effect.succeed(null)),
+            ),
+          },
+          { concurrency: "unbounded" },
+        ).pipe(
+          Effect.timeout(Duration.millis(2000)),
+          Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
+        );
+      }
+
+      function readPostCloseSnapshot() {
+        return Effect.all(
+          {
+            held: readWalletHoldingsRaw().pipe(Effect.catch(() => Effect.succeed(null))),
+            nativeSol: readNativeSolBalance().pipe(Effect.catch(() => Effect.succeed(null))),
+          },
+          { concurrency: "unbounded" },
+        ).pipe(
+          Effect.timeout(Duration.millis(20000)),
+          Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
+        );
+      }
+
+      function broadcastCloseTransactions(txs: ReadonlyArray<Transaction>) {
+        return Effect.gen(function* () {
+          for (const tx of txs) {
+            const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
+            tx.feePayer = wallet!.publicKey;
+            tx.recentBlockhash = blockhash;
+            tx.sign(wallet!);
+            const signature = yield* rpcCall((conn) =>
+              conn.sendRawTransaction(tx.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: "confirmed",
+              }),
+            );
+            yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
+          }
+        });
+      }
+
+      function priceSweptRewardSlot(slot: ExitRewardSlot, prices: TokenPriceMap) {
+        return Effect.gen(function* () {
+          const amountAtomic = Number(slot.amountAtomic.toString());
+          if (slot.mint === null) return { mint: "unknown", amountAtomic, amountUsd: null };
+          const price = prices[slot.mint];
+          if (price === undefined || price <= 0) {
+            return { mint: slot.mint, amountAtomic, amountUsd: null };
+          }
+          const decimals = yield* getTokenMeta(slot.mint).pipe(
+            Effect.map((m) => m.decimals),
+            Effect.catch(() => Effect.succeed(null)),
+          );
+          if (decimals === null) return { mint: slot.mint, amountAtomic, amountUsd: null };
+          return {
+            mint: slot.mint,
+            amountAtomic,
+            amountUsd: atomicToUnits(BigInt(slot.amountAtomic), decimals) * price,
+          };
+        });
+      }
+
+      function priceSweptRewards(
+        rewardSlots: ReadonlyArray<ExitRewardSlot>,
+        prices: TokenPriceMap,
+      ) {
+        return Effect.gen(function* () {
+          const sweptRewards: ClaimedReward[] = [];
+          for (const slot of rewardSlots) {
+            sweptRewards.push(yield* priceSweptRewardSlot(slot, prices));
+          }
+          return sweptRewards;
+        });
+      }
+
+      function priceExitAccounting(
+        dlmm: MeteoraDlmmClient,
+        tokenXMint: string,
+        tokenYMint: string,
+        rewardSlots: ReadonlyArray<ExitRewardSlot>,
+        withdrawnXAtomic: string,
+        withdrawnYAtomic: string,
+        pendingFeeXAtomic: string,
+        pendingFeeYAtomic: string,
+      ) {
+        return Effect.gen(function* () {
+          const decimalsX = dlmm.tokenX.mint.decimals;
+          const decimalsY = dlmm.tokenY.mint.decimals;
+
+          const priceMints = [
+            tokenXMint,
+            tokenYMint,
+            ...rewardSlots.map((s) => s.mint).filter((m): m is string => m != null),
+          ];
+          // useFallback: false — the static $165/$1 fallback map must NOT pass
+          // the all-or-nothing gate here, or a FABRICATED realized would be
+          // booked instead of NULL. This batch prices the withdraw legs, the
+          // pending-fee legs AND the swept-reward mints, so the opt-out covers
+          // every ledger-booking input at once (mirrors the wallet path).
+          const prices = yield* fetchTokenPrices(priceMints, { useFallback: false }).pipe(
+            Effect.catch(() => Effect.succeed(EMPTY_TOKEN_PRICES)),
+          );
+
+          const legs = priceExitLegs(
+            withdrawnXAtomic,
+            withdrawnYAtomic,
+            pendingFeeXAtomic,
+            pendingFeeYAtomic,
+            decimalsX,
+            decimalsY,
+            prices[tokenXMint],
+            prices[tokenYMint],
+          );
+          const sweptRewards = yield* priceSweptRewards(rewardSlots, prices);
+          return {
+            withdrawnUsd: legs.withdrawnUsd,
+            pendingFeeUsd: legs.pendingFeeUsd,
+            sweptRewards,
+          };
+        }).pipe(
+          Effect.catch(() =>
+            Effect.succeed({
+              // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+              withdrawnUsd: null as number | null,
+              // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+              pendingFeeUsd: null as number | null,
+              // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+              sweptRewards: [] as ClaimedReward[],
+            }),
+          ),
+        );
+      }
+      function buildPlatformTransferInstructions(
+        tokenXMint: PublicKey,
+        tokenYMint: PublicKey,
+        revenueShare: RevenueShareResult,
+        feeWallet: string,
+        poolAddress: string,
+      ) {
+        return Effect.gen(function* () {
+          const feeWalletPubkey = new PublicKey(feeWallet);
+          const mints: Array<[PublicKey, number]> = [
+            [tokenXMint, revenueShare.amountToTransferX],
+            [tokenYMint, revenueShare.amountToTransferY],
+          ];
+          const transferInstructions: TransactionInstruction[] = [];
+          for (const [mint, amount] of mints) {
+            if (amount < 1) continue;
+            const fromAta = yield* Effect.tryPromise(() =>
+              getAssociatedTokenAddress(mint, wallet!.publicKey),
+            );
+            const toAta = yield* Effect.tryPromise(() =>
+              getAssociatedTokenAddress(mint, feeWalletPubkey),
+            );
+            // Check if destination ATA exists
+            const toAtaInfo = yield* rpcCall((conn) => conn.getAccountInfo(toAta));
+            if (!toAtaInfo) {
+              transferInstructions.push(
+                createAssociatedTokenAccountInstruction(
+                  wallet!.publicKey,
+                  toAta,
+                  feeWalletPubkey,
+                  mint,
+                ),
+              );
+            }
+            transferInstructions.push(
+              createTransferInstruction(
+                fromAta,
+                toAta,
+                wallet!.publicKey,
+                BigInt(Math.floor(amount)),
+              ),
+            );
+          }
+          if (transferInstructions.length > 0) {
+            return {
+              transferInstructions,
+              actualPlatformFeeX: revenueShare.platformFeeX,
+              actualPlatformFeeY: revenueShare.platformFeeY,
+              actualOperatorFeeX: revenueShare.operatorFeeX,
+              actualOperatorFeeY: revenueShare.operatorFeeY,
+            };
+          }
+          logger.info("No platform fee to transfer — operator keeps full share", {
+            pool: poolAddress,
+          });
+          return {
+            transferInstructions,
+            actualPlatformFeeX: 0,
+            actualPlatformFeeY: 0,
+            actualOperatorFeeX: 0,
+            actualOperatorFeeY: 0,
+          };
+        });
+      }
+
+      function settleRevenueShare(
+        dlmm: MeteoraDlmmClient,
+        revenueShare: RevenueShareResult,
+        feeWallet: string,
+        poolAddress: string,
+      ) {
+        return Effect.gen(function* () {
+          if (revenueShare.platformFeeX <= 0 && revenueShare.platformFeeY <= 0) {
+            return {
+              transferInstructions: [],
+              actualPlatformFeeX: 0,
+              actualPlatformFeeY: 0,
+              actualOperatorFeeX: 0,
+              actualOperatorFeeY: 0,
+            };
+          }
+          if (revenueShare.isCircular) {
+            logger.info("Circular wallet detected — fees retained by operator", {
+              pool: poolAddress,
+              platformFeeX: revenueShare.platformFeeX,
+              platformFeeY: revenueShare.platformFeeY,
+            });
+            return {
+              transferInstructions: [],
+              actualPlatformFeeX: revenueShare.platformFeeX,
+              actualPlatformFeeY: revenueShare.platformFeeY,
+              actualOperatorFeeX: revenueShare.platformFeeX,
+              actualOperatorFeeY: revenueShare.platformFeeY,
+            };
+          }
+          if (!feeWallet) {
+            logger.warn("No fee wallet configured — skipping platform fee transfer", {
+              pool: poolAddress,
+            });
+            return {
+              transferInstructions: [],
+              actualPlatformFeeX: 0,
+              actualPlatformFeeY: 0,
+              actualOperatorFeeX: 0,
+              actualOperatorFeeY: 0,
+            };
+          }
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+          const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+          const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
+          return yield* buildPlatformTransferInstructions(
+            tokenXMint,
+            tokenYMint,
+            revenueShare,
+            feeWallet,
+            poolAddress,
+          );
+        });
+      }
+
+      function priceNetClaimUsd(
+        dlmm: MeteoraDlmmClient,
+        netFeeX: number,
+        netFeeY: number,
+      ): Effect.Effect<number | null, never> {
+        // Mint-based USD of the NET claim, priced here where dlmm + mints +
+        // decimals are in scope (mirrors simulateRebalance). Null when
+        // either leg is unpriceable so callers fail the compound gate closed
+        // instead of booking a symbol-based mis-estimate. Pricing is
+        // best-effort and must not fail an already-confirmed claim.
+        return Effect.gen(function* () {
+          const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
+          const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
+          // useFallback: false — netFeesUsd books into cumulativeFeesClaimedUsd
+          // (the compound gate input), so it carries the same ledger-booking
+          // responsibility as the exit path: a $165/$1 fallback fabrication
+          // here would compound on phantom value. Unresolvable → null → caller
+          // `?? 0` → the compound gate fails closed instead of booking fiction.
+          const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint], {
+            useFallback: false,
+          }).pipe(Effect.catch(() => Effect.succeed(EMPTY_TOKEN_PRICES)));
+          const priceX = prices[tokenXMint];
+          const priceY = prices[tokenYMint];
+          if (priceX == null || priceX <= 0 || priceY == null || priceY <= 0) return null;
+          return (
+            (netFeeX / 10 ** dlmm.tokenX.mint.decimals) * priceX +
+            (netFeeY / 10 ** dlmm.tokenY.mint.decimals) * priceY
+          );
+        }).pipe(
+          // SAFETY: Pricing is best-effort after a confirmed claim — any pricing failure resolves to null (never 0, never the mark) so callers book NULL realized PnL.
+          Effect.catch(() => Effect.succeed(null as number | null)),
+        );
+      }
+      function convertOneFeeLeg(
+        inputMint: string | undefined,
+        amount: number | undefined,
+        targetMint: string,
+      ) {
+        return Effect.gen(function* () {
+          if (!inputMint || amount === undefined || amount <= 0) return null;
+          if (inputMint === targetMint) {
+            return { outputAtomic: BigInt(Math.trunc(amount)), signature: null };
+          }
+          const quote = yield* quoteSwapToken(inputMint, targetMint, BigInt(Math.trunc(amount)));
+          const quotedOutput = yield* requireFeeConversionOutput(quote);
+          const signature = yield* swapToken(
+            inputMint,
+            targetMint,
+            BigInt(Math.trunc(amount)),
+            quote,
+          );
+          return { outputAtomic: BigInt(quotedOutput), signature };
+        });
+      }
+
+      function priceConvertedOutput(targetMint: string, outputAtomic: bigint) {
+        return Effect.gen(function* () {
+          const prices = yield* fetchTokenPrices([targetMint]);
+          const decimals = yield* getTokenMeta(targetMint).pipe(
+            Effect.map((meta) => meta.decimals),
+          );
+          const price = prices[targetMint];
+          if (price === undefined) return null;
+          return (Number(outputAtomic) / 10 ** decimals) * price;
+        });
+      }
+      function broadcastRewardClaimTxs(claimTxs: ReadonlyArray<Transaction>) {
+        return Effect.gen(function* () {
+          const txSignatures: string[] = [];
+          for (const tx of claimTxs) {
+            const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
+            tx.feePayer = wallet!.publicKey;
+            tx.recentBlockhash = blockhash;
+            tx.sign(wallet!);
+            const signature = yield* rpcCall((conn) =>
+              conn.sendRawTransaction(tx.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: "confirmed",
+              }),
+            );
+            yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
+            txSignatures.push(signature);
+          }
+          return txSignatures;
+        });
+      }
+
+      function fetchRewardPrices(
+        pricedMints: ReadonlyArray<string>,
+      ): Effect.Effect<TokenPriceMap, never> {
+        return Effect.gen(function* () {
+          if (pricedMints.length === 0) return EMPTY_TOKEN_PRICES;
+          return yield* fetchTokenPrices(pricedMints).pipe(
+            Effect.catch(() => Effect.succeed(EMPTY_TOKEN_PRICES)),
+          );
+        });
+      }
+
+      function priceRewardClaimSlot(
+        slot: RewardClaimSlot,
+        prices: TokenPriceMap,
+        poolAddress: string,
+      ) {
+        return Effect.gen(function* () {
+          const mint = rewardMintOrUnknown(slot.mint);
+          const price = mint === "unknown" ? undefined : prices[mint];
+          if (price === undefined || price <= 0) {
+            if (mint !== "unknown") {
+              logger.warn("Reward mint price unavailable — recording raw amount only", {
+                pool: poolAddress,
+                mint,
+              });
+            }
+            return { mint, amountAtomic: slot.amountAtomic, amountUsd: null };
+          }
+          const decimals = yield* getTokenMeta(mint).pipe(
+            Effect.map((m) => m.decimals),
+            Effect.catch(() => Effect.succeed(null)),
+          );
+          if (decimals === null) {
+            logger.warn("Reward mint decimals unavailable — recording raw amount only", {
+              pool: poolAddress,
+              mint,
+            });
+            return { mint, amountAtomic: slot.amountAtomic, amountUsd: null };
+          }
+          return {
+            mint,
+            amountAtomic: slot.amountAtomic,
+            amountUsd: (slot.amountAtomic / Math.pow(10, decimals)) * price,
+          };
+        });
+      }
+
+      function priceRewardClaimSlots(
+        slots: ReadonlyArray<RewardClaimSlot>,
+        prices: TokenPriceMap,
+        poolAddress: string,
+      ) {
+        return Effect.gen(function* () {
+          const rewards: ClaimedReward[] = [];
+          for (const slot of slots) {
+            rewards.push(yield* priceRewardClaimSlot(slot, prices, poolAddress));
+          }
+          return rewards;
+        });
       }
 
       // ─── API implementation ────────────────────────────────────────────────
@@ -3051,24 +4202,8 @@ export const makeAdapterLive = (
           Effect.gen(function* () {
             if (config.launchWashForensicsEnabled !== true) return null;
             if (!config.heliusApiKey) return null;
-            let host: string;
-            try {
-              host = new URL(config.solanaRpcUrl).host;
-            } catch {
-              return null;
-            }
-            if (host !== "helius-rpc.com" && !host.endsWith(".helius-rpc.com")) {
-              return null;
-            }
-            // Helius serves the enhanced address-history API from the
-            // api- prefixed host (api-mainnet.helius-rpc.com), NOT the RPC
-            // host — reusing the RPC host would silently null every response
-            // under the standard setup. map per network; the bare host keeps.
-            const enhancedHost = host.startsWith("mainnet.")
-              ? `api-mainnet.${host.slice("mainnet.".length)}`
-              : host.startsWith("devnet.")
-                ? `api-devnet.${host.slice("devnet.".length)}`
-                : host;
+            const enhancedHost = resolveWashEnhancedHost(config.solanaRpcUrl);
+            if (enhancedHost === null) return null;
             const url =
               `https://${enhancedHost}/v0/addresses/${poolAddress}/transactions` +
               `?limit=40&api-key=${encodeURIComponent(config.heliusApiKey)}`;
@@ -3082,26 +4217,7 @@ export const makeAdapterLive = (
               catch: () => null,
             }).pipe(Effect.catch(() => Effect.succeed(null)));
             if (!Array.isArray(parsed) || parsed.length === 0) return null;
-            const rows: WashTradeRow[] = [];
-            for (const tx of parsed) {
-              if (!isObject(tx)) continue;
-              // Only successful METEORA instructions count as volume: failed
-              // txs (err set) and system transfers are not swap activity, and a
-              // single active LP's maintenance txs must not satisfy the
-              // concentration thresholds. DLMM swaps and LP ops are both
-              // type UNKNOWN — the residual noise is bounded by the
-              // extreme-tail thresholds.
-              if (tx["err"] != null) continue;
-              if (tx["type"] === "TRANSFER") continue;
-              if (tx["source"] !== "METEORA") continue;
-              const payer = tx["feePayer"];
-              const timestamp = tx["timestamp"];
-              const fee = tx["fee"];
-              if (!isStringValue(payer) || !isNumberValue(timestamp) || !isNumberValue(fee)) {
-                continue;
-              }
-              rows.push({ payer, timestamp, feeLamports: fee });
-            }
+            const rows = collectWashRows(parsed);
             return rows.length > 0 ? scoreWashEvidence(rows) : null;
           }).pipe(Effect.catch(() => Effect.succeed(null))),
 
@@ -3533,24 +4649,21 @@ export const makeAdapterLive = (
             );
 
             const halfUsd = positionSizeUsd / 2;
-            const tokenXDecimals = yield* getTokenMeta(pool.tokenX).pipe(
-              Effect.map((m) => m.decimals),
+            const { tokenXDecimals, tokenYDecimals } = yield* resolveEntryDecimals(
+              pool.tokenX,
+              pool.tokenY,
+              forceSingleSidedX,
             );
-            const tokenYDecimals = forceSingleSidedX
-              ? 0
-              : yield* getTokenMeta(pool.tokenY).pipe(Effect.map((m) => m.decimals));
 
             const requestedXAmount = computeRequiredAtomic(halfUsd, priceX, tokenXDecimals);
             const requestedYAmount = computeRequiredAtomic(halfUsd, priceY, tokenYDecimals);
 
-            if (!forceSingleSidedX && (requestedXAmount === 0n || requestedYAmount === 0n)) {
-              return yield* Effect.fail(
-                new AdapterError({
-                  message: "Cannot enter a position with a zero-sized token leg",
-                  poolAddress,
-                }),
-              );
-            }
+            yield* requireNonZeroEntryLegs(
+              requestedXAmount,
+              requestedYAmount,
+              forceSingleSidedX,
+              poolAddress,
+            );
 
             // Check balances
             const { balanceX, balanceY, nativeSolBalance } = yield* readEntryBalances(
@@ -3558,10 +4671,14 @@ export const makeAdapterLive = (
               pool.tokenY,
               forceSingleSidedX,
             );
-            const maxX = capSolLegForGas(balanceX, pool.tokenX === SOL_MINT, nativeSolBalance);
-            const maxY = forceSingleSidedX
-              ? 0n
-              : capSolLegForGas(balanceY, pool.tokenY === SOL_MINT, nativeSolBalance);
+            const { maxX, maxY } = resolveEntryMaxBalances(
+              balanceX,
+              balanceY,
+              nativeSolBalance,
+              pool.tokenX,
+              pool.tokenY,
+              forceSingleSidedX,
+            );
 
             // Funding classification: two-sided when both legs cover their half
             // of the position; otherwise the SDK single-sided deposit path with
@@ -3639,14 +4756,7 @@ export const makeAdapterLive = (
             );
             const requiredLamports = transactionLamports + GAS_RESERVE_LAMPORTS;
             const actualSolBalance = yield* readNativeSolBalance({ force: true });
-            if (actualSolBalance < requiredLamports) {
-              return yield* Effect.fail(
-                new AdapterError({
-                  message: `Insufficient SOL for live entry transaction: required ${formatTokenAmount(requiredLamports, 9)} (direct System Program debits plus ${formatTokenAmount(GAS_RESERVE_LAMPORTS, 9)} reserve for fees, ATA rent and other costs), available ${formatTokenAmount(actualSolBalance, 9)}.`,
-                  poolAddress,
-                }),
-              );
-            }
+            yield* requireEntryGas(actualSolBalance, requiredLamports, poolAddress);
 
             tx.feePayer = wallet.publicKey;
             const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
@@ -3715,41 +4825,15 @@ export const makeAdapterLive = (
             // account also removes it from the wallet's on-chain set, so the next
             // reconcile's chain-delete loop is a no-op and the ghost is not
             // re-discovered as an "external position".
-            if (
-              positionData.totalXAmountExcludeTransferFee.isZero() &&
-              positionData.totalYAmountExcludeTransferFee.isZero()
-            ) {
-              let txSignature: string | null = null;
-              const closeTx = yield* Effect.tryPromise(() =>
-                dlmm.closePositionIfEmpty({ owner: wallet.publicKey, position }),
-              ).pipe(Effect.catch(() => Effect.succeed(null)));
-              if (closeTx) {
-                try {
-                  const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
-                  closeTx.feePayer = wallet.publicKey;
-                  closeTx.recentBlockhash = blockhash;
-                  closeTx.sign(wallet);
-                  const signature = yield* rpcCall((conn) =>
-                    conn.sendRawTransaction(closeTx.serialize(), {
-                      skipPreflight: false,
-                      preflightCommitment: "confirmed",
-                    }),
-                  );
-                  yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
-                  txSignature = signature;
-                } catch (err) {
-                  // Rent reclaim is best-effort: the ledger reap must proceed
-                  // regardless. A failed close leaves the empty account on-chain
-                  // (rent-locked but inert); it carries no value, so subsequent
-                  // passes keep reaping without booking anything.
-                  logger.warn(
-                    `[exit] empty position ${positionPubkey.toBase58()} — ledger reaped, account close failed: ${String(err)}`,
-                  );
-                }
-              }
+            if (isEmptyExitPosition(positionData)) {
+              const txSignature = yield* reapEmptyPosition(
+                dlmm,
+                position,
+                positionPubkey.toBase58(),
+              );
               yield* invalidateBalanceCaches;
               return {
-                txSignature: txSignature ?? "empty-reap",
+                txSignature,
                 withdrawnXAtomic: "0",
                 withdrawnYAtomic: "0",
                 withdrawnUsd: 0,
@@ -3775,15 +4859,11 @@ export const makeAdapterLive = (
             // Reward slots (mint + pending atomic), resolved once and shared by
             // the same-mint reward exclusion on the measured withdrawal delta
             // and the sweptRewards ledger below.
-            const rewardInfos = dlmm.lbPair.rewardInfos;
-            const mintOf = (mint: PublicKey | undefined): string | null => {
-              const base58 = mint?.toBase58();
-              return base58 != null && base58 !== DEFAULT_PUBLIC_KEY ? base58 : null;
-            };
-            const rewardSlots = [
-              { mint: mintOf(rewardInfos[0]?.mint), amountAtomic: rewardOneAtomic },
-              { mint: mintOf(rewardInfos[1]?.mint), amountAtomic: rewardTwoAtomic },
-            ].filter((s) => s.amountAtomic > 0n);
+            const rewardSlots = buildExitRewardSlots(
+              dlmm.lbPair.rewardInfos,
+              rewardOneAtomic,
+              rewardTwoAtomic,
+            );
 
             // Pre-close wallet holdings WITHOUT pricing (a price lookup must not
             // delay broadcasting an exit) and a FORCED native-SOL read (bypasses
@@ -3795,18 +4875,7 @@ export const makeAdapterLive = (
             // to the known-understating SDK snapshot (the phantom-loss path).
             // A cache miss still re-fetches and stays bounded by the short
             // deadline, so the exit is never postponed.
-            const preClose = yield* Effect.all(
-              {
-                held: cachedWalletHoldings.pipe(Effect.catch(() => Effect.succeed(null))),
-                nativeSol: readNativeSolBalance({ force: true }).pipe(
-                  Effect.catch(() => Effect.succeed(null)),
-                ),
-              },
-              { concurrency: "unbounded" },
-            ).pipe(
-              Effect.timeout(Duration.millis(2000)),
-              Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
-            );
+            const preClose = yield* readPreCloseSnapshot();
             const beforeHeld = preClose.held;
             const beforeNativeSol = preClose.nativeSol;
 
@@ -3821,20 +4890,7 @@ export const makeAdapterLive = (
               }),
             );
 
-            for (const tx of txs) {
-              const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
-              tx.feePayer = wallet.publicKey;
-              tx.recentBlockhash = blockhash;
-              tx.sign(wallet);
-
-              const signature = yield* rpcCall((conn) =>
-                conn.sendRawTransaction(tx.serialize(), {
-                  skipPreflight: false,
-                  preflightCommitment: "confirmed",
-                }),
-              );
-              yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
-            }
+            yield* broadcastCloseTransactions(txs);
             yield* invalidateBalanceCaches;
 
             const snapshotWithdrawnXAtomic = positionData.totalXAmountExcludeTransferFee
@@ -3854,43 +4910,19 @@ export const makeAdapterLive = (
             // slow read here only delays the accounting (never the exit) — give
             // it a generous deadline so the measured delta survives a degraded
             // RPC instead of silently booking the understating snapshot.
-            const afterSnapshot = yield* Effect.all(
-              {
-                held: readWalletHoldingsRaw().pipe(Effect.catch(() => Effect.succeed(null))),
-                nativeSol: readNativeSolBalance().pipe(Effect.catch(() => Effect.succeed(null))),
-              },
-              { concurrency: "unbounded" },
-            ).pipe(
-              Effect.timeout(Duration.millis(20000)),
-              Effect.catch(() => Effect.succeed({ held: null, nativeSol: null })),
+            const afterSnapshot = yield* readPostCloseSnapshot();
+            const { withdrawnXAtomic, withdrawnYAtomic } = settleMeasuredWithdrawals(
+              beforeHeld,
+              beforeNativeSol,
+              afterSnapshot.held,
+              afterSnapshot.nativeSol,
+              tokenXMint,
+              tokenYMint,
+              snapshotWithdrawnXAtomic,
+              snapshotWithdrawnYAtomic,
+              rewardSlots,
+              positionPubkey.toBase58(),
             );
-            const measuredX = measureWithdrawalDelta({
-              beforeHeld,
-              afterHeld: afterSnapshot.held,
-              beforeNativeSol,
-              afterNativeSol: afterSnapshot.nativeSol,
-              mint: tokenXMint,
-              snapshotAmount: snapshotWithdrawnXAtomic,
-            });
-            const measuredY = measureWithdrawalDelta({
-              beforeHeld,
-              afterHeld: afterSnapshot.held,
-              beforeNativeSol,
-              afterNativeSol: afterSnapshot.nativeSol,
-              mint: tokenYMint,
-              snapshotAmount: snapshotWithdrawnYAtomic,
-            });
-            const withdrawnXAtomic = excludeSameMintRewards(measuredX, tokenXMint, rewardSlots);
-            const withdrawnYAtomic = excludeSameMintRewards(measuredY, tokenYMint, rewardSlots);
-            if (!measuredX.measured || !measuredY.measured) {
-              // The measured flag distinguishes on-chain-delta withdrawals from
-              // the known-understating SDK snapshot in the audit trail — a
-              // silent fallback would defeat the point of #205. Exits are rare,
-              // so an unbounded warn per exit is fine.
-              logger.warn(
-                `[exit] withdrawal delta unmeasured for ${positionPubkey.toBase58()} — booking SDK snapshot amounts (X: ${measuredX.measured ? "measured" : "snapshot"}, Y: ${measuredY.measured ? "measured" : "snapshot"})`,
-              );
-            }
             const pendingFeeXAtomic = positionData.feeXExcludeTransferFee.toString();
             const pendingFeeYAtomic = positionData.feeYExcludeTransferFee.toString();
 
@@ -3898,76 +4930,15 @@ export const makeAdapterLive = (
             // it must never abort or delay removing bleeding liquidity. Any
             // failure resolves the USD legs to null (never 0, never the mark) so
             // the caller books a NULL realized PnL; atomics are always returned.
-            const accounting = yield* Effect.gen(function* () {
-              const decimalsX = dlmm.tokenX.mint.decimals;
-              const decimalsY = dlmm.tokenY.mint.decimals;
-
-              const priceMints = [
-                tokenXMint,
-                tokenYMint,
-                ...rewardSlots.map((s) => s.mint).filter((m): m is string => m != null),
-              ];
-              // useFallback: false — the static $165/$1 fallback map must NOT pass
-              // the all-or-nothing gate here, or a FABRICATED realized would be
-              // booked instead of NULL. This batch prices the withdraw legs, the
-              // pending-fee legs AND the swept-reward mints, so the opt-out covers
-              // every ledger-booking input at once (mirrors the wallet path).
-              const prices = yield* fetchTokenPrices(priceMints, { useFallback: false }).pipe(
-                Effect.catch(() => Effect.succeed(EMPTY_TOKEN_PRICES)),
-              );
-
-              // All-or-nothing on the withdrawn/pending legs: ANY unresolved leg
-              // price poisons both (a partial USD value would mis-state realized
-              // PnL). price<=0 (incl. the negative-cache 0) counts as unresolved.
-              const priceX = prices[tokenXMint];
-              const priceY = prices[tokenYMint];
-              let withdrawnUsd: number | null = null;
-              let pendingFeeUsd: number | null = null;
-              if (priceX != null && priceX > 0 && priceY != null && priceY > 0) {
-                withdrawnUsd =
-                  atomicToUnits(BigInt(withdrawnXAtomic), decimalsX) * priceX +
-                  atomicToUnits(BigInt(withdrawnYAtomic), decimalsY) * priceY;
-                pendingFeeUsd =
-                  atomicToUnits(BigInt(pendingFeeXAtomic), decimalsX) * priceX +
-                  atomicToUnits(BigInt(pendingFeeYAtomic), decimalsY) * priceY;
-              }
-
-              // Reward slots price independently (mirror claimRewards): an
-              // unpriceable slot records amountUsd null, never blocks the exit.
-              const sweptRewards: ClaimedReward[] = [];
-              for (const slot of rewardSlots) {
-                let amountUsd: number | null = null;
-                if (slot.mint != null) {
-                  const price = prices[slot.mint];
-                  if (price != null && price > 0) {
-                    const decimals = yield* getTokenMeta(slot.mint).pipe(
-                      Effect.map((m) => m.decimals),
-                      Effect.catch(() => Effect.succeed(null)),
-                    );
-                    if (decimals != null) {
-                      amountUsd = atomicToUnits(BigInt(slot.amountAtomic), decimals) * price;
-                    }
-                  }
-                }
-                sweptRewards.push({
-                  mint: slot.mint ?? "unknown",
-                  amountAtomic: Number(slot.amountAtomic.toString()),
-                  amountUsd,
-                });
-              }
-
-              return { withdrawnUsd, pendingFeeUsd, sweptRewards };
-            }).pipe(
-              Effect.catch(() =>
-                Effect.succeed({
-                  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-                  withdrawnUsd: null as number | null,
-                  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-                  pendingFeeUsd: null as number | null,
-                  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-                  sweptRewards: [] as ClaimedReward[],
-                }),
-              ),
+            const accounting = yield* priceExitAccounting(
+              dlmm,
+              tokenXMint,
+              tokenYMint,
+              rewardSlots,
+              withdrawnXAtomic,
+              withdrawnYAtomic,
+              pendingFeeXAtomic,
+              pendingFeeYAtomic,
             );
 
             return {
@@ -4252,83 +5223,9 @@ export const makeAdapterLive = (
               feeWallet,
               operatorWalletAddress,
             );
-            let transferInstructions: TransactionInstruction[] = [];
-            let actualPlatformFeeX = 0;
-            let actualPlatformFeeY = 0;
-            let actualOperatorFeeX = 0;
-            let actualOperatorFeeY = 0;
+            const settled = yield* settleRevenueShare(dlmm, revenueShare, feeWallet, poolAddress);
 
-            if (revenueShare.platformFeeX > 0 || revenueShare.platformFeeY > 0) {
-              if (revenueShare.isCircular) {
-                logger.info("Circular wallet detected — fees retained by operator", {
-                  pool: poolAddress,
-                  platformFeeX: revenueShare.platformFeeX,
-                  platformFeeY: revenueShare.platformFeeY,
-                });
-                actualPlatformFeeX = revenueShare.platformFeeX;
-                actualPlatformFeeY = revenueShare.platformFeeY;
-                actualOperatorFeeX = revenueShare.platformFeeX;
-                actualOperatorFeeY = revenueShare.platformFeeY;
-              } else if (feeWallet) {
-                const feeWalletPubkey = new PublicKey(feeWallet);
-                // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-                const tokenXMint = dlmm.lbPair.tokenXMint as PublicKey;
-                // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-                const tokenYMint = dlmm.lbPair.tokenYMint as PublicKey;
-
-                const mints: Array<[PublicKey, number]> = [
-                  [tokenXMint, revenueShare.amountToTransferX],
-                  [tokenYMint, revenueShare.amountToTransferY],
-                ];
-
-                for (const [mint, amount] of mints) {
-                  if (amount < 1) continue;
-                  const fromAta = yield* Effect.tryPromise(() =>
-                    getAssociatedTokenAddress(mint, wallet!.publicKey),
-                  );
-                  const toAta = yield* Effect.tryPromise(() =>
-                    getAssociatedTokenAddress(mint, feeWalletPubkey),
-                  );
-                  // Check if destination ATA exists
-                  const toAtaInfo = yield* rpcCall((conn) => conn.getAccountInfo(toAta));
-                  if (!toAtaInfo) {
-                    transferInstructions.push(
-                      createAssociatedTokenAccountInstruction(
-                        wallet!.publicKey,
-                        toAta,
-                        feeWalletPubkey,
-                        mint,
-                      ),
-                    );
-                  }
-                  transferInstructions.push(
-                    createTransferInstruction(
-                      fromAta,
-                      toAta,
-                      wallet!.publicKey,
-                      BigInt(Math.floor(amount)),
-                    ),
-                  );
-                }
-
-                if (transferInstructions.length > 0) {
-                  actualPlatformFeeX = revenueShare.platformFeeX;
-                  actualPlatformFeeY = revenueShare.platformFeeY;
-                  actualOperatorFeeX = revenueShare.operatorFeeX;
-                  actualOperatorFeeY = revenueShare.operatorFeeY;
-                } else {
-                  logger.info("No platform fee to transfer — operator keeps full share", {
-                    pool: poolAddress,
-                  });
-                }
-              } else {
-                logger.warn("No fee wallet configured — skipping platform fee transfer", {
-                  pool: poolAddress,
-                });
-              }
-            }
-
-            const allInstructions = [...claimInstructions, ...transferInstructions];
+            const allInstructions = [...claimInstructions, ...settled.transferInstructions];
 
             const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
 
@@ -4350,53 +5247,23 @@ export const makeAdapterLive = (
 
             yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
             yield* invalidateBalanceCaches;
+            const netFeeX = feeX - settled.actualPlatformFeeX;
+            const netFeeY = feeY - settled.actualPlatformFeeY;
+            // Mint-based USD of the NET claim (null when either leg is
+            // unpriceable so callers fail the compound gate closed instead of
+            // booking a symbol-based mis-estimate). Best-effort: must not fail
+            // an already-confirmed claim.
+            const netFeesUsd = yield* priceNetClaimUsd(dlmm, netFeeX, netFeeY);
 
-            const netFeeX = feeX - actualPlatformFeeX;
-            const netFeeY = feeY - actualPlatformFeeY;
-            // Mint-based USD of the NET claim, priced here where dlmm + mints +
-            // decimals are in scope (mirrors simulateRebalance). Null when
-            // either leg is unpriceable so callers fail the compound gate closed
-            // instead of booking a symbol-based mis-estimate. Pricing is
-            // best-effort and must not fail an already-confirmed claim.
-            // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
-            const netFeesUsd = yield* Effect.gen(function* () {
-              const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
-              const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
-              // useFallback: false — netFeesUsd books into cumulativeFeesClaimedUsd
-              // (the compound gate input), so it carries the same ledger-booking
-              // responsibility as the exit path: a $165/$1 fallback fabrication
-              // here would compound on phantom value. Unresolvable → null → caller
-              // `?? 0` → the compound gate fails closed instead of booking fiction.
-              const prices = yield* fetchTokenPrices([tokenXMint, tokenYMint], {
-                useFallback: false,
-              }).pipe(Effect.catch(() => Effect.succeed(EMPTY_TOKEN_PRICES)));
-              const priceX = prices[tokenXMint];
-              const priceY = prices[tokenYMint];
-              if (priceX == null || priceX <= 0 || priceY == null || priceY <= 0) return null;
-              return (
-                (netFeeX / 10 ** dlmm.tokenX.mint.decimals) * priceX +
-                (netFeeY / 10 ** dlmm.tokenY.mint.decimals) * priceY
-              );
-              // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
-              // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-            }).pipe(Effect.catch(() => Effect.succeed(null as number | null)));
-
-            return {
-              txSignature: signature,
+            return buildClaimFeesResult(
+              signature,
               feeX,
               feeY,
-              platformFeeX: actualPlatformFeeX,
-              platformFeeY: actualPlatformFeeY,
               netFeeX,
               netFeeY,
               netFeesUsd,
-              ...(transferInstructions.length > 0
-                ? { feeTransferTxSignature: signature }
-                : undefined),
-              ...(actualOperatorFeeX > 0 || actualOperatorFeeY > 0
-                ? { operatorFeeX: actualOperatorFeeX, operatorFeeY: actualOperatorFeeY }
-                : undefined),
-            };
+              settled,
+            );
           }).pipe(
             Effect.catch((err) =>
               Effect.fail(
@@ -4450,15 +5317,11 @@ export const makeAdapterLive = (
               ),
             ),
           ),
-
         convertClaimedFees: (poolAddress, destination, feeX, feeY) =>
           Effect.gen(function* () {
             if (!wallet)
               return yield* Effect.fail(new AdapterError({ message: "No wallet configured" }));
-            if (!Number.isFinite(feeX) || !Number.isFinite(feeY) || (feeX <= 0 && feeY <= 0))
-              return yield* Effect.fail(
-                new AdapterError({ message: "Cannot convert zero claimed fees" }),
-              );
+            yield* requireConvertibleFees(feeX, feeY);
             const dlmm = yield* getDlmm(poolAddress);
             const inputMints = [
               dlmm.lbPair.tokenXMint.toBase58(),
@@ -4469,46 +5332,20 @@ export const makeAdapterLive = (
             const signatures: string[] = [];
             let outputAtomic = 0n;
             for (let index = 0; index < inputMints.length; index += 1) {
-              const inputMint = inputMints[index];
-              const amount = amounts[index];
-              if (!inputMint || amount === undefined || amount <= 0) continue;
-              if (inputMint === targetMint) {
-                outputAtomic += BigInt(Math.trunc(amount));
-                continue;
-              }
-              const quote = yield* quoteSwapToken(
-                inputMint,
+              const converted = yield* convertOneFeeLeg(
+                inputMints[index],
+                amounts[index],
                 targetMint,
-                BigInt(Math.trunc(amount)),
               );
-              if (!isObject(quote) || !isStringValue(quote.outAmount)) {
-                return yield* Effect.fail(
-                  new AdapterError({ message: "Jupiter fee conversion returned invalid output" }),
-                );
-              }
-              const quotedOutput = quote.outAmount;
-              if (!/^\d+$/.test(quotedOutput) || quotedOutput === "0") {
-                return yield* Effect.fail(
-                  new AdapterError({ message: "Jupiter fee conversion returned invalid output" }),
-                );
-              }
-              signatures.push(
-                yield* swapToken(inputMint, targetMint, BigInt(Math.trunc(amount)), quote),
-              );
-              outputAtomic += BigInt(quotedOutput);
+              if (converted === null) continue;
+              if (converted.signature !== null) signatures.push(converted.signature);
+              outputAtomic += converted.outputAtomic;
             }
             if (outputAtomic === 0n)
               return yield* Effect.fail(
                 new AdapterError({ message: "No supported fee token was converted" }),
               );
-            const prices = yield* fetchTokenPrices([targetMint]);
-            const decimals = yield* getTokenMeta(targetMint).pipe(
-              Effect.map((meta) => meta.decimals),
-            );
-            const outputUsd =
-              prices[targetMint] === undefined
-                ? null
-                : (Number(outputAtomic) / 10 ** decimals) * prices[targetMint];
+            const outputUsd = yield* priceConvertedOutput(targetMint, outputAtomic);
             return { destination, outputAtomic, outputUsd, txSignatures: signatures };
           }),
 
@@ -4528,10 +5365,6 @@ export const makeAdapterLive = (
 
             const pendingOne = Number(position.positionData.rewardOne.toString());
             const pendingTwo = Number(position.positionData.rewardTwo.toString());
-            const hasPending =
-              (Number.isFinite(pendingOne) && pendingOne > 0) ||
-              (Number.isFinite(pendingTwo) && pendingTwo > 0);
-
             // ConcreteFunctionType gate: post-0.12.0 pools are LimitOrder-xor-
             // LiquidityMining. Legacy pools predate the field and read 0
             // (LimitOrder) — pending reward amounts are objective proof that
@@ -4540,12 +5373,13 @@ export const makeAdapterLive = (
             // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
             const concreteFunctionType = (dlmm.lbPair as { concreteFunctionType?: number })
               .concreteFunctionType;
-            if (!hasPending) {
-              const reason =
-                concreteFunctionType === ConcreteFunctionType.LimitOrder
-                  ? "pool is LimitOrder function type (no LM rewards)"
-                  : "no pending rewards";
-              return { skipped: true, skipReason: reason, txSignatures: [], rewards: [] };
+            if (!hasPendingRewards(pendingOne, pendingTwo)) {
+              return {
+                skipped: true,
+                skipReason: skipReasonForEmptyRewards(concreteFunctionType),
+                txSignatures: [],
+                rewards: [],
+              };
             }
 
             const claimTxs = yield* Effect.tryPromise(() =>
@@ -4560,70 +5394,18 @@ export const makeAdapterLive = (
               };
             }
 
-            const txSignatures: string[] = [];
-            for (const tx of claimTxs) {
-              const { blockhash } = yield* rpcCall((conn) => conn.getLatestBlockhash());
-              tx.feePayer = wallet.publicKey;
-              tx.recentBlockhash = blockhash;
-              tx.sign(wallet);
-              const signature = yield* rpcCall((conn) =>
-                conn.sendRawTransaction(tx.serialize(), {
-                  skipPreflight: false,
-                  preflightCommitment: "confirmed",
-                }),
-              );
-              yield* rpcCall((conn) => conn.confirmTransaction(signature, "confirmed"));
-              txSignatures.push(signature);
-            }
+            const txSignatures = yield* broadcastRewardClaimTxs(claimTxs);
             yield* invalidateBalanceCaches;
 
             // Slot mapping per the DLMM layout: rewardOne ↔ rewardInfos[0],
             // rewardTwo ↔ rewardInfos[1]. An all-1s mint means the slot is
             // inactive — record the mint as "unknown" and skip USD valuation.
-            const rewardInfos = dlmm.lbPair.rewardInfos;
-            const slots = [
-              { mint: rewardInfos[0]?.mint, amountAtomic: pendingOne },
-              { mint: rewardInfos[1]?.mint, amountAtomic: pendingTwo },
-            ].filter((s) => Number.isFinite(s.amountAtomic) && s.amountAtomic > 0);
-
-            const mintOf = (mint: PublicKey | undefined): string => {
-              const base58 = mint?.toBase58();
-              return base58 != null && base58 !== DEFAULT_PUBLIC_KEY ? base58 : "unknown";
-            };
-            const pricedMints = slots.map((s) => mintOf(s.mint)).filter((m) => m !== "unknown");
-            const prices =
-              pricedMints.length > 0
-                ? yield* fetchTokenPrices(pricedMints).pipe(
-                    Effect.catch(() => Effect.succeed(EMPTY_TOKEN_PRICES)),
-                  )
-                : {};
-
-            const rewards: ClaimedReward[] = [];
-            for (const slot of slots) {
-              const mint = mintOf(slot.mint);
-              let amountUsd: number | null = null;
-              const price = mint !== "unknown" ? prices[mint] : undefined;
-              if (price != null && price > 0) {
-                const decimals = yield* getTokenMeta(mint).pipe(
-                  Effect.map((m) => m.decimals),
-                  Effect.catch(() => Effect.succeed(null)),
-                );
-                if (decimals != null) {
-                  amountUsd = (slot.amountAtomic / Math.pow(10, decimals)) * price;
-                } else {
-                  logger.warn("Reward mint decimals unavailable — recording raw amount only", {
-                    pool: poolAddress,
-                    mint,
-                  });
-                }
-              } else if (mint !== "unknown") {
-                logger.warn("Reward mint price unavailable — recording raw amount only", {
-                  pool: poolAddress,
-                  mint,
-                });
-              }
-              rewards.push({ mint, amountAtomic: slot.amountAtomic, amountUsd });
-            }
+            const slots = buildRewardClaimSlots(dlmm.lbPair.rewardInfos, pendingOne, pendingTwo);
+            const pricedMints = slots
+              .map((s) => rewardMintOrUnknown(s.mint))
+              .filter((m) => m !== "unknown");
+            const prices = yield* fetchRewardPrices(pricedMints);
+            const rewards = yield* priceRewardClaimSlots(slots, prices, poolAddress);
 
             logger.info("LM rewards claimed", {
               pool: poolAddress,

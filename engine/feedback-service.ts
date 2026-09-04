@@ -4,14 +4,16 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { ConfigService } from "./config-service.js";
-import { DbService } from "./services.js";
+import { DbService, type DbApi } from "./services.js";
 import { createLogger } from "./logger.js";
 import {
   FeedbackService,
   type AgentFeedback,
+  type FeedbackCategory,
   type FeedbackContext,
   type FeedbackEntry,
   type FeedbackResult,
+  type FeedbackSeverity,
 } from "./services.js";
 import { getCurrentVersion } from "./version.js";
 import { detectInstallMethod } from "./install-method.js";
@@ -59,10 +61,7 @@ function submitCloudFeedback(
   apiUrl: string,
   payload: CloudFeedbackPayload,
   apiKey: string,
-): Effect.Effect<
-  { readonly id: string; readonly duplicate: boolean } | { readonly authFailure: true } | null,
-  never
-> {
+): Effect.Effect<CloudFeedbackResult, never> {
   return Effect.gen(function* () {
     const res = yield* Effect.tryPromise(() =>
       fetch(apiUrl, {
@@ -212,6 +211,141 @@ function toFeedbackEntry(row: {
   };
 }
 
+type CloudFeedbackResult =
+  | { readonly id: string; readonly duplicate: boolean }
+  | { readonly authFailure: true }
+  | null;
+
+function resolveCloudFeedbackUrl(envApiUrl: string | undefined): string {
+  if (!envApiUrl) return DEFAULT_CLOUD_FEEDBACK_URL;
+  return `${envApiUrl}/v1/feedback`;
+}
+
+function duplicateCooldownResult(local: FeedbackEntry | null, now: number): FeedbackResult | null {
+  if (local === null) return null;
+  const ageMs = now - local.reportedAt;
+  if (ageMs >= FEEDBACK_LIMITS.duplicateCooldownMs) return null;
+  logger.info(`Skipping duplicate feedback (cooldown ${Math.round(ageMs / 1000)}s)`);
+  return { kind: "local_only", localId: local.id };
+}
+
+function countRecentSubmissions(
+  entries: ReadonlyArray<{ readonly reportedAt: number }>,
+  now: number,
+  windowMs: number,
+): number {
+  const cutoff = now - windowMs;
+  let count = 0;
+  for (const entry of entries) {
+    if (entry.reportedAt > cutoff) count += 1;
+  }
+  return count;
+}
+
+function lastSubmissionAt(entries: ReadonlyArray<{ readonly reportedAt: number }>): number | null {
+  if (entries.length === 0) return null;
+  return Math.max(...entries.map((entry) => entry.reportedAt));
+}
+
+function rateLimitResult(
+  entries: ReadonlyArray<{ readonly reportedAt: number }>,
+  now: number,
+): FeedbackResult | null {
+  if (countRecentSubmissions(entries, now, 60 * 60 * 1000) >= FEEDBACK_LIMITS.perHour) {
+    return { kind: "rate_limited", reason: `Exceeded ${FEEDBACK_LIMITS.perHour} per hour` };
+  }
+  if (countRecentSubmissions(entries, now, 24 * 60 * 60 * 1000) >= FEEDBACK_LIMITS.perDay) {
+    return { kind: "rate_limited", reason: `Exceeded ${FEEDBACK_LIMITS.perDay} per day` };
+  }
+  const last = lastSubmissionAt(entries);
+  if (last !== null && now - last < FEEDBACK_LIMITS.minIntervalMs) {
+    return {
+      kind: "rate_limited",
+      reason: `Minimum interval is ${FEEDBACK_LIMITS.minIntervalMs / 1000}s`,
+    };
+  }
+  return null;
+}
+
+function buildCloudPayload(
+  cloudId: string,
+  agentId: string,
+  category: FeedbackCategory,
+  severity: FeedbackSeverity,
+  summary: string,
+  details: string | undefined,
+  relatedFiles: ReadonlyArray<string> | undefined,
+  context: FeedbackContext,
+  hash: string,
+  reportedAt: number,
+): CloudFeedbackPayload {
+  return {
+    id: cloudId,
+    agentId,
+    category,
+    severity,
+    summary,
+    details,
+    relatedFiles: relatedFiles ? [...relatedFiles] : undefined,
+    context,
+    hash,
+    reportedAt,
+  };
+}
+
+function buildStoredFeedbackEntry(
+  id: string,
+  agentId: string,
+  category: FeedbackCategory,
+  severity: FeedbackSeverity,
+  summary: string,
+  details: string | undefined,
+  relatedFiles: ReadonlyArray<string> | undefined,
+  contextJson: string,
+  reportedAt: number,
+  hash: string,
+): FeedbackEntry {
+  return {
+    id,
+    agentId,
+    category,
+    severity,
+    summary,
+    details: details ?? null,
+    relatedFiles: relatedFiles ?? [],
+    contextJson,
+    githubIssueNumber: null,
+    githubIssueUrl: null,
+    reportedAt,
+    hash,
+  };
+}
+
+function persistCloudOrLocal(
+  db: DbApi,
+  cloudResult: CloudFeedbackResult,
+  entry: FeedbackEntry,
+  summary: string,
+): Effect.Effect<FeedbackResult, Error> {
+  return Effect.gen(function* () {
+    if (cloudResult && "authFailure" in cloudResult) {
+      return {
+        kind: "error" as const,
+        error: "Prism cloud rejected the stored credentials. Run 'prism login' again.",
+      } satisfies FeedbackResult;
+    }
+    if (cloudResult) {
+      const cloudEntry: FeedbackEntry = { ...entry, id: cloudResult.id };
+      yield* db.saveFeedback(cloudEntry);
+      logger.info(`Submitted feedback to Prism cloud: ${summary}`);
+      return { kind: "cloud" as const, id: cloudResult.id, duplicate: cloudResult.duplicate };
+    }
+    yield* db.saveFeedback(entry);
+    logger.warn(`Cloud feedback unavailable; feedback stored locally: ${summary}`);
+    return { kind: "local_only" as const, localId: entry.id };
+  });
+}
+
 export const FeedbackLive = Layer.effect(
   FeedbackService,
   Effect.gen(function* () {
@@ -240,113 +374,50 @@ export const FeedbackLive = Layer.effect(
         }
 
         const localRow = yield* db.getFeedbackByHash(hash, agentId);
-        const local = localRow ? toFeedbackEntry(localRow) : null;
-        if (local) {
-          const ageMs = Date.now() - local.reportedAt;
-          if (ageMs < FEEDBACK_LIMITS.duplicateCooldownMs) {
-            logger.info(`Skipping duplicate feedback (cooldown ${Math.round(ageMs / 1000)}s)`);
-            return {
-              kind: "local_only" as const,
-              localId: local.id,
-            };
-          }
+        const duplicate = duplicateCooldownResult(
+          localRow ? toFeedbackEntry(localRow) : null,
+          Date.now(),
+        );
+        if (duplicate) {
+          return duplicate;
         }
 
         const allRecent = yield* db.listFeedbackForAgent(agentId);
-        const now = Date.now();
-        const rateHourCount = allRecent.filter((f) => f.reportedAt > now - 60 * 60 * 1000).length;
-        if (rateHourCount >= FEEDBACK_LIMITS.perHour) {
-          return {
-            kind: "rate_limited" as const,
-            reason: `Exceeded ${FEEDBACK_LIMITS.perHour} per hour`,
-          };
-        }
-        const rateDayCount = allRecent.filter(
-          (f) => f.reportedAt > now - 24 * 60 * 60 * 1000,
-        ).length;
-        if (rateDayCount >= FEEDBACK_LIMITS.perDay) {
-          return {
-            kind: "rate_limited" as const,
-            reason: `Exceeded ${FEEDBACK_LIMITS.perDay} per day`,
-          };
-        }
-        if (allRecent.length > 0) {
-          const lastSubmission = Math.max(...allRecent.map((f) => f.reportedAt));
-          if (now - lastSubmission < FEEDBACK_LIMITS.minIntervalMs) {
-            return {
-              kind: "rate_limited" as const,
-              reason: `Minimum interval is ${FEEDBACK_LIMITS.minIntervalMs / 1000}s`,
-            };
-          }
+        const limited = rateLimitResult(allRecent, Date.now());
+        if (limited) {
+          return limited;
         }
 
-        const cloudUrl = process.env.PRISM_API_URL
-          ? `${process.env.PRISM_API_URL}/v1/feedback`
-          : DEFAULT_CLOUD_FEEDBACK_URL;
         const reportedAt = Date.now();
-        const cloudId = randomUUID();
         const cloudResult = yield* submitCloudFeedback(
-          cloudUrl,
-          {
-            id: cloudId,
+          resolveCloudFeedbackUrl(process.env.PRISM_API_URL),
+          buildCloudPayload(
+            randomUUID(),
             agentId,
-            category: feedback.category,
-            severity: feedback.severity,
-            summary: feedback.summary,
-            details: feedback.details,
-            relatedFiles: feedback.relatedFiles ? [...feedback.relatedFiles] : undefined,
+            feedback.category,
+            feedback.severity,
+            feedback.summary,
+            feedback.details,
+            feedback.relatedFiles,
             context,
             hash,
             reportedAt,
-          },
+          ),
           apiKey,
         );
-
-        if (cloudResult && "authFailure" in cloudResult) {
-          return {
-            kind: "error" as const,
-            error: "Prism cloud rejected the stored credentials. Run 'prism login' again.",
-          } satisfies FeedbackResult;
-        }
-
-        if (cloudResult) {
-          const entry: FeedbackEntry = {
-            id: cloudResult.id,
-            agentId,
-            category: feedback.category,
-            severity: feedback.severity,
-            summary: feedback.summary,
-            details: feedback.details ?? null,
-            relatedFiles: feedback.relatedFiles ?? [],
-            contextJson: JSON.stringify(context),
-            githubIssueNumber: null,
-            githubIssueUrl: null,
-            reportedAt,
-            hash,
-          };
-          yield* db.saveFeedback(entry);
-          logger.info(`Submitted feedback to Prism cloud: ${feedback.summary}`);
-          return { kind: "cloud" as const, id: cloudResult.id, duplicate: cloudResult.duplicate };
-        }
-
-        const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const entry: FeedbackEntry = {
-          id: localId,
+        const entry = buildStoredFeedbackEntry(
+          `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           agentId,
-          category: feedback.category,
-          severity: feedback.severity,
-          summary: feedback.summary,
-          details: feedback.details ?? null,
-          relatedFiles: feedback.relatedFiles ?? [],
-          contextJson: JSON.stringify(context),
-          githubIssueNumber: null,
-          githubIssueUrl: null,
+          feedback.category,
+          feedback.severity,
+          feedback.summary,
+          feedback.details,
+          feedback.relatedFiles,
+          JSON.stringify(context),
           reportedAt,
           hash,
-        };
-        yield* db.saveFeedback(entry);
-        logger.warn(`Cloud feedback unavailable; feedback stored locally: ${feedback.summary}`);
-        return { kind: "local_only" as const, localId };
+        );
+        return yield* persistCloudOrLocal(db, cloudResult, entry, feedback.summary);
       }).pipe(
         Effect.catch(<T>(err: T) => {
           const message = err instanceof Error ? err.message : String(err);

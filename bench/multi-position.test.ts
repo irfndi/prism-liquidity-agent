@@ -68,35 +68,93 @@ import { stringifySafe } from "../engine/bigint-json.js";
 
 const POOL = "PoolMulti1111111111111111111111111111111111";
 
+function posMarketDefaults(
+  poolAddress: string | undefined,
+  positionPubKey: string | null | undefined,
+  lowerBinId: number | undefined,
+  upperBinId: number | undefined,
+  timestamp: number | undefined,
+  oorCycleCount: number | undefined,
+) {
+  return {
+    poolAddress: poolAddress ?? POOL,
+    positionPubKey: positionPubKey ?? null,
+    lowerBinId: lowerBinId ?? 4980,
+    upperBinId: upperBinId ?? 5020,
+    timestamp: timestamp ?? Date.now(),
+    oorCycleCount: oorCycleCount ?? 0,
+  };
+}
+
+function posValueDefaults(
+  depositedUsd: number | undefined,
+  currentValueUsd: number | undefined,
+  highestValueUsd: number | null | undefined,
+  paperExitedAt: number | null | undefined,
+  entryPriceUsd: number | null | undefined,
+  entryAmountXUsd: number | null | undefined,
+  entryAmountYUsd: number | null | undefined,
+) {
+  return {
+    depositedUsd: depositedUsd ?? 1000,
+    currentValueUsd: currentValueUsd ?? 1000,
+    highestValueUsd: highestValueUsd ?? null,
+    paperExitedAt: paperExitedAt ?? null,
+    entryPriceUsd: entryPriceUsd ?? 150,
+    entryAmountXUsd: entryAmountXUsd ?? 500,
+    entryAmountYUsd: entryAmountYUsd ?? 500,
+  };
+}
+
+function posSettlementDefaults(
+  cumulativeFeesClaimedUsd: number | undefined,
+  cumulativeRewardsClaimedUsd: number | undefined,
+  closedAt: number | null | undefined,
+  realizedPnlUsd: number | null | undefined,
+) {
+  return {
+    cumulativeFeesClaimedUsd: cumulativeFeesClaimedUsd ?? 0,
+    cumulativeRewardsClaimedUsd: cumulativeRewardsClaimedUsd ?? 0,
+    closedAt: closedAt ?? null,
+    realizedPnlUsd: realizedPnlUsd ?? null,
+  };
+}
+
 function makePos(overrides: Partial<PositionRecord> & { positionId: string }): PositionRecord {
   return {
     positionId: overrides.positionId,
-    poolAddress: overrides.poolAddress ?? POOL,
-    positionPubKey: overrides.positionPubKey ?? null,
-    depositedUsd: overrides.depositedUsd ?? 1000,
-    currentValueUsd: overrides.currentValueUsd ?? 1000,
+    ...posMarketDefaults(
+      overrides.poolAddress,
+      overrides.positionPubKey,
+      overrides.lowerBinId,
+      overrides.upperBinId,
+      overrides.timestamp,
+      overrides.oorCycleCount,
+    ),
+    ...posValueDefaults(
+      overrides.depositedUsd,
+      overrides.currentValueUsd,
+      overrides.highestValueUsd,
+      overrides.paperExitedAt,
+      overrides.entryPriceUsd,
+      overrides.entryAmountXUsd,
+      overrides.entryAmountYUsd,
+    ),
     tokenXSymbol: "SOL",
     tokenYSymbol: "USDC",
     activeBinId: 5000,
-    lowerBinId: overrides.lowerBinId ?? 4980,
-    upperBinId: overrides.upperBinId ?? 5020,
-    timestamp: overrides.timestamp ?? Date.now(),
     outOfRangeSince: null,
-    oorCycleCount: overrides.oorCycleCount ?? 0,
     lastFeeClaimAt: Date.now(),
     trailingStopThreshold: null,
-    highestValueUsd: overrides.highestValueUsd ?? null,
     lastRebalanceAt: 0,
-    paperExitedAt: overrides.paperExitedAt ?? null,
     entrySignalTimestamp: null,
     entrySignalSnapshotId: null,
-    entryPriceUsd: overrides.entryPriceUsd ?? 150,
-    entryAmountXUsd: overrides.entryAmountXUsd ?? 500,
-    entryAmountYUsd: overrides.entryAmountYUsd ?? 500,
-    cumulativeFeesClaimedUsd: overrides.cumulativeFeesClaimedUsd ?? 0,
-    cumulativeRewardsClaimedUsd: overrides.cumulativeRewardsClaimedUsd ?? 0,
-    closedAt: overrides.closedAt ?? null,
-    realizedPnlUsd: overrides.realizedPnlUsd ?? null,
+    ...posSettlementDefaults(
+      overrides.cumulativeFeesClaimedUsd,
+      overrides.cumulativeRewardsClaimedUsd,
+      overrides.closedAt,
+      overrides.realizedPnlUsd,
+    ),
   };
 }
 

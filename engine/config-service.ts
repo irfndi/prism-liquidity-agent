@@ -1012,15 +1012,61 @@ function resolveFeeDensityBand(highRaw: number, lowRaw: number): FeeDensityBand 
   return { high: DEFAULT_FEE_DENSITY_HIGH_PCT, low: DEFAULT_FEE_DENSITY_LOW_PCT };
 }
 
+/* Test/prod default pairs stay inline (ts-no-tiny-functions: one-use wrappers cost more than they save). */
+/**
+ * WALLET_PRIVATE_KEY (env / .env) takes precedence; otherwise fall back to the local
+ * keystore written by `prism wallet generate|import`, so a generated wallet actually
+ * enables live trading (engine/adapter-service.ts decodes this base58 key).
+ */
+function loadWalletPrivateKey(): Effect.Effect<string> {
+  return Config.string("WALLET_PRIVATE_KEY").pipe(
+    Effect.orElseSucceed(() => loadKeystoreSecretKeyBase58() ?? ""),
+  );
+}
+
+/** SETTLEMENT_ASSET must be SOL; anything else dies before the scan loop starts. */
+function parseSettlementAsset(raw: string): Effect.Effect<SettlementAsset, ConfigError> {
+  if (raw !== "SOL") {
+    return Effect.die(
+      new ConfigError({
+        message: "SETTLEMENT_ASSET must be SOL",
+        issues: [{ path: "SETTLEMENT_ASSET", message: `Unsupported asset: ${raw}` }],
+      }),
+    );
+  }
+  // SAFETY: the guard above narrows raw to the "SOL" literal.
+  return Effect.succeed(raw as SettlementAsset);
+}
+
+/** AGENT_INSTANCE_ID must not be blank; the instance id owns telemetry and errors. */
+function requireAgentInstanceId(raw: string): Effect.Effect<string, ConfigError> {
+  const id = raw.trim();
+  if (id.length > 0) return Effect.succeed(id);
+  return Effect.die(
+    new ConfigError({
+      message: "AGENT_INSTANCE_ID must not be blank",
+      issues: [{ path: "AGENT_INSTANCE_ID", message: "Agent instance ID is required" }],
+    }),
+  );
+}
+
+/**
+ * DB-backed config sidecar (env > DB > defaults): apply persisted overrides
+ * for keys whose env var is UNSET. Fail-open: a missing/unreadable DB leaves
+ * env/defaults untouched. Skipped entirely in test mode so the suite stays
+ * deterministic and DB-free. See engine/db-config.ts.
+ */
+function applyDbOverridesIfPresent(cfg: AppConfig, isTest: boolean): AppConfig {
+  if (isTest) return cfg;
+  const dbOverrides = readDbConfigOverrides(cfg.sqliteDbPath);
+  if (dbOverrides.size === 0) return cfg;
+  return applyDbConfigOverrides(cfg, dbOverrides);
+}
+
 const loadConfig = Effect.gen(function* () {
   const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 
-  // WALLET_PRIVATE_KEY (env / .env) takes precedence; otherwise fall back to the local
-  // keystore written by `prism wallet generate|import`, so a generated wallet actually
-  // enables live trading (engine/adapter-service.ts decodes this base58 key).
-  const walletPrivateKey = yield* Config.string("WALLET_PRIVATE_KEY").pipe(
-    Effect.orElseSucceed(() => loadKeystoreSecretKeyBase58() ?? ""),
-  );
+  const walletPrivateKey = yield* loadWalletPrivateKey();
   const heliusApiKey = yield* Config.string("HELIUS_API_KEY").pipe(
     Effect.orElseSucceed(() => (isTest ? "test-helius-key" : "")),
   );
@@ -1066,15 +1112,7 @@ const loadConfig = Effect.gen(function* () {
   const settlementAssetRaw = yield* Config.string("SETTLEMENT_ASSET").pipe(
     Effect.orElseSucceed(() => AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.settlementAsset),
   );
-  if (settlementAssetRaw !== "SOL") {
-    return yield* Effect.die(
-      new ConfigError({
-        message: "SETTLEMENT_ASSET must be SOL",
-        issues: [{ path: "SETTLEMENT_ASSET", message: `Unsupported asset: ${settlementAssetRaw}` }],
-      }),
-    );
-  }
-  const settlementAsset: SettlementAsset = settlementAssetRaw;
+  const settlementAsset: SettlementAsset = yield* parseSettlementAsset(settlementAssetRaw);
   const candidateMinHealthyScans = Math.floor(
     yield* validatedNumber(
       "CANDIDATE_MIN_HEALTHY_SCANS",
@@ -1147,15 +1185,7 @@ const loadConfig = Effect.gen(function* () {
   const agentInstanceIdRaw = yield* Config.string("AGENT_INSTANCE_ID").pipe(
     Effect.orElseSucceed(() => AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.agentInstanceId),
   );
-  const agentInstanceId = agentInstanceIdRaw.trim();
-  if (agentInstanceId.length === 0) {
-    return yield* Effect.die(
-      new ConfigError({
-        message: "AGENT_INSTANCE_ID must not be blank",
-        issues: [{ path: "AGENT_INSTANCE_ID", message: "Agent instance ID is required" }],
-      }),
-    );
-  }
+  const agentInstanceId = yield* requireAgentInstanceId(agentInstanceIdRaw);
   const scanIntervalMs = yield* validatedNumber("SCAN_INTERVAL_MS", 10_000, 600_000, 3_600_000);
   const minPoolTvlUsd = yield* validatedNumber("MIN_POOL_TVL_USD", 0, 50_000);
   const minFeeIlRatio = yield* validatedNumber("MIN_FEE_IL_RATIO", 0, 1.2, 10);
@@ -1299,15 +1329,7 @@ const loadConfig = Effect.gen(function* () {
   const compoundGasBufferUsd = yield* validatedNumber("COMPOUND_GAS_BUFFER_USD", 0, 0.05);
   const feeDestination: FeeDestination = yield* Config.string("FEE_DESTINATION").pipe(
     Config.withDefault("compound"),
-    Effect.flatMap((value) =>
-      value === "compound" || value === "accumulate-quote" || value === "accumulate-sol"
-        ? Effect.succeed(value)
-        : Effect.fail(
-            new ConfigError({
-              message: `FEE_DESTINATION must be compound, accumulate-quote, or accumulate-sol; got ${value}`,
-            }),
-          ),
-    ),
+    Effect.flatMap((value) => parseFeeDestination(value)),
     // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
     Effect.map((value) => value as FeeDestination),
   );
@@ -1419,20 +1441,10 @@ const loadConfig = Effect.gen(function* () {
   // itself is left untouched; when the static duration is 0 the floor is
   // pinned at 0 (cooldown.ts's guard then returns the static duration for
   // every density in that degenerate case).
-  const feeDensityCooldownMinMsInverted = feeDensityCooldownMinMsRaw >= oorCooldownMs;
-  if (feeDensityCooldownMinMsInverted) {
-    logger.warn(
-      "FEE_DENSITY_COOLDOWN_MIN_MS must be below OOR_COOLDOWN_MS; clamping the floor just under the static value",
-      {
-        feeDensityCooldownMinMs: feeDensityCooldownMinMsRaw,
-        oorCooldownMs,
-        fallback: Math.min(feeDensityCooldownMinMsRaw, Math.max(oorCooldownMs - 1, 0)),
-      },
-    );
-  }
-  const feeDensityCooldownMinMs = feeDensityCooldownMinMsInverted
-    ? Math.min(feeDensityCooldownMinMsRaw, Math.max(oorCooldownMs - 1, 0))
-    : feeDensityCooldownMinMsRaw;
+  const feeDensityCooldownMinMs = resolveFeeDensityCooldownMinMs(
+    feeDensityCooldownMinMsRaw,
+    oorCooldownMs,
+  );
   const DEFAULT_FEE_DENSITY_HIGH_PCT = 0.005;
   const DEFAULT_FEE_DENSITY_LOW_PCT = 0.0005;
   const feeDensityHighPctRaw = yield* validatedNumber(
@@ -1678,7 +1690,11 @@ const loadConfig = Effect.gen(function* () {
   const limitOrderModeRaw = yield* Config.string("LIMIT_ORDER_MODE").pipe(
     Effect.orElseSucceed(() => "take-profit"),
   );
-  const limitOrderMode = limitOrderModeRaw === "dca" ? "dca" : "take-profit";
+  const limitOrderMode = coerceOneOf(
+    limitOrderModeRaw,
+    ["dca", "take-profit"] as const,
+    "take-profit",
+  );
   const limitOrderTargetBinOffset = yield* validatedNumber("LIMIT_ORDER_TARGET_BIN_OFFSET", 1, 20);
   const limitOrderMaxActiveBinSlippage = yield* validatedNumber(
     "LIMIT_ORDER_MAX_ACTIVE_BIN_SLIPPAGE",
@@ -1805,7 +1821,11 @@ const loadConfig = Effect.gen(function* () {
   const marketScanUniverseSortRaw = yield* Config.string("MARKET_SCAN_UNIVERSE_SORT").pipe(
     Effect.orElseSucceed(() => "tvl"),
   );
-  const marketScanUniverseSort: "tvl" | "fee" = marketScanUniverseSortRaw === "fee" ? "fee" : "tvl";
+  const marketScanUniverseSort = coerceOneOf(
+    marketScanUniverseSortRaw,
+    ["tvl", "fee"] as const,
+    "tvl",
+  );
   const marketScanMinTvlUsd = yield* validatedNumber("MARKET_SCAN_MIN_TVL_USD", 0, 50_000);
   const marketScanMinFeeApr = yield* validatedNumber("MARKET_SCAN_MIN_FEE_APR", 0, 100);
   // Market-runner lane: when enabled, market-scan pools whose fee APR clears
@@ -2176,54 +2196,11 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => "https://dlmm.datapi.meteora.ag"),
   );
 
-  const watchlistPools = watchlistPoolsRaw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const invalidPools = watchlistPools.filter((pool) => {
-    try {
-      new PublicKey(pool);
-      return false;
-    } catch {
-      return true;
-    }
-  });
-  if (invalidPools.length > 0) {
-    return yield* Effect.die(
-      new ConfigError({
-        message: `WATCHLIST_POOLS contains invalid Solana public keys: ${invalidPools.join(", ")}`,
-        issues: invalidPools.map((pool) => ({
-          path: "WATCHLIST_POOLS",
-          message: `Invalid public key: ${pool}`,
-        })),
-      }),
-    );
-  }
+  const watchlistPools = yield* parsePublicKeyList(watchlistPoolsRaw, "WATCHLIST_POOLS");
 
-  const stablecoinMintsList = stablecoinMintsRaw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const invalidStablecoinMints = stablecoinMintsList.filter((mint) => {
-    try {
-      new PublicKey(mint);
-      return false;
-    } catch {
-      return true;
-    }
-  });
-  if (invalidStablecoinMints.length > 0) {
-    return yield* Effect.die(
-      new ConfigError({
-        message: `STABLECOIN_MINTS contains invalid Solana public keys: ${invalidStablecoinMints.join(", ")}`,
-        issues: invalidStablecoinMints.map((mint) => ({
-          path: "STABLECOIN_MINTS",
-          message: `Invalid public key: ${mint}`,
-        })),
-      }),
-    );
-  }
-  const stablecoinMints = new Set(stablecoinMintsList);
+  const stablecoinMints = new Set(
+    yield* parsePublicKeyList(stablecoinMintsRaw, "STABLECOIN_MINTS"),
+  );
 
   // ── Hot-window capture lane knobs ────────────────────────────────────────
   const hotWindowEnabled = yield* Config.boolean("HOT_WINDOW_ENABLED").pipe(
@@ -2569,16 +2546,7 @@ const loadConfig = Effect.gen(function* () {
   // table for keys whose env var is UNSET. Fail-open: a missing/unreadable DB
   // leaves the env/defaults untouched. Skipped entirely in test mode so the
   // suite stays deterministic and DB-free. See engine/db-config.ts.
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  const cfgFromEnv = cfg as Readonly<AppConfig>;
-  const dbOverrides = isTest
-    ? new Map<string, string>()
-    : readDbConfigOverrides(cfgFromEnv.sqliteDbPath);
-  if (dbOverrides.size > 0) {
-    return applyDbConfigOverrides(cfg, dbOverrides);
-  }
-
-  return cfg;
+  return applyDbOverridesIfPresent(cfg, isTest);
 });
 
 // v4's default ConfigProvider snapshots process.env once per process; snapshot

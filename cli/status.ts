@@ -15,6 +15,8 @@ import { createLogger } from "../engine/logger.js";
 import { readLockfile, isProcessAlive, findRunningEngineProcess } from "./lockfile.js";
 import { getPrismDbPath } from "../engine/paths.js";
 import { resolveEffectivePubkey } from "./wallet.js";
+import type { DecisionRecord } from "../engine/services.js";
+import type { SafetyPauseRecord, SettlementJobRecord } from "../engine/types.js";
 
 const logger = createLogger("status-cli");
 
@@ -180,6 +182,124 @@ function isEngineRunning(
     (hasDb && Date.now() - lastActivityAt < scanIntervalMs * 2)
   );
 }
+/** Wallet address for status display: null when resolution reported an error. */
+function resolveStatusWalletAddress(
+  effectiveWallet: ReturnType<typeof resolveEffectivePubkey>,
+): string | null {
+  if (effectiveWallet?.error) return null;
+  return effectiveWallet?.pubkey ?? null;
+}
+
+/** Most recent decision timestamp, or 0 when there are no decisions. */
+function lastDecisionTimestamp(recentAudit: ReadonlyArray<DecisionRecord>): number {
+  const latest = recentAudit[0];
+  if (latest === undefined) return 0;
+  return latest.timestamp;
+}
+
+/** Portfolio section of the human status output (database through autonomy). */
+function buildPortfolioStatusLines(
+  dbPath: string,
+  activeCount: number,
+  summary: PortfolioSummary,
+  agentiveMode: boolean,
+  agentRuntime: string,
+  autonomousMode: string,
+  walletAddress: string | null,
+): ReadonlyArray<string> {
+  const pnlText = `${summary.totalUnrealizedPnlUsd >= 0 ? "+" : ""}$${summary.totalUnrealizedPnlUsd.toFixed(2)} (${summary.totalUnrealizedPnlPct.toFixed(2)}%)`;
+  const agentStatus = agentiveMode ? `agent overlay: ${agentRuntime}` : "agent overlay: off";
+  return [
+    `  Database:    ${dbPath}`,
+    `  Positions:   ${activeCount} active`,
+    `  Deposited:   $${summary.totalDepositedUsd.toFixed(2)}`,
+    `  Current:     $${summary.totalCurrentValueUsd.toFixed(2)}`,
+    ...(summary.walletKnown
+      ? [`  Wallet:      $${(summary.walletBalanceUsd ?? 0).toFixed(2)}`]
+      : []),
+    `  Equity:      $${summary.totalEquityUsd.toFixed(2)}`,
+    `  Fees:        $${summary.totalFeesClaimedUsd.toFixed(2)}`,
+    ...(summary.totalRewardsClaimedUsd > 0
+      ? [`  Rewards:     $${summary.totalRewardsClaimedUsd.toFixed(2)}`]
+      : []),
+    `  Unrealized:  ${pnlText}`,
+    `  ${agentStatus}`,
+    `  Autonomous:  ${autonomousMode} (${walletAddress ?? "paper"})`,
+  ];
+}
+
+/** Wallet-resolution error line for the human status output. */
+function walletErrorStatusLines(
+  effectiveWallet: ReturnType<typeof resolveEffectivePubkey>,
+): ReadonlyArray<string> {
+  if (!effectiveWallet?.error) return [];
+  return [`  Wallet error: ${effectiveWallet.error}`];
+}
+
+/** Compact pool/mint tag shared by the terminal-settlement lines. */
+function formatTerminalMint(settlement: SettlementJobRecord): string {
+  return `${(settlement.poolAddress || "?").slice(0, 8)}/${settlement.tokenMint.slice(0, 8)}`;
+}
+
+/** Overdue-settlement line for the human status output. */
+function overdueStatusLines(
+  settlements: ReadonlyArray<SettlementJobRecord>,
+): ReadonlyArray<string> {
+  if (settlements.length === 0) return [];
+  return [
+    `  Overdue:     ${settlements.length} settlement(s) past the max-pending window and not final (${settlements
+      .slice(0, 3)
+      .map(
+        (settlement) =>
+          `${settlement.id.slice(0, 8)} ${((Date.now() - settlement.createdAt) / 3_600_000).toFixed(1)}h`,
+      )
+      .join(", ")}) — monitor for recovery`,
+  ];
+}
+
+/** Stranded-capital line for the human status output. */
+function strandedStatusLines(
+  entries: ReadonlyArray<{ readonly settlement: SettlementJobRecord; readonly valueUsd: number }>,
+): ReadonlyArray<string> {
+  if (entries.length === 0) return [];
+  return [
+    `  Stranded:    ${entries.length} terminal settlement(s) with unspent balance (${entries
+      .map((entry) => `${formatTerminalMint(entry.settlement)} ($${entry.valueUsd.toFixed(2)})`)
+      .join(", ")}) — see --json for details`,
+  ];
+}
+
+/** Unpriceable-terminal line for the human status output. */
+function unpriceableStatusLines(
+  entries: ReadonlyArray<{ readonly settlement: SettlementJobRecord }>,
+): ReadonlyArray<string> {
+  if (entries.length === 0) return [];
+  return [
+    `  Unpriceable: ${entries.length} terminal settlement(s) with no USD price resolved at query time — cannot value, left in wallet (${entries
+      .map((entry) => formatTerminalMint(entry.settlement))
+      .join(", ")})`,
+  ];
+}
+
+/** Lookup-unreachable terminal line for the human status output. */
+function unavailableStatusLines(
+  entries: ReadonlyArray<{ readonly settlement: SettlementJobRecord }>,
+): ReadonlyArray<string> {
+  if (entries.length === 0) return [];
+  return [
+    `  Unavailable: ${entries.length} terminal settlement(s) — price/decimals lookup unreachable, value unknown (${entries
+      .map((entry) => formatTerminalMint(entry.settlement))
+      .join(", ")}) — retry later`,
+  ];
+}
+
+/** Safety-pause state text for the human status output. */
+function formatSafetyPauseStatus(safetyPause: SafetyPauseRecord | null): string {
+  if (safetyPause === null) return "none";
+  return safetyPause.resolvedAt === null
+    ? `ACTIVE (${safetyPause.reason})`
+    : `resolved (${safetyPause.reason})`;
+}
 
 export const statusCommand = new Command("status")
   .description("Show current agent status for humans and agent runtimes")
@@ -212,7 +332,7 @@ network; with no stranded settlements it is fully offline.`,
           const walletBalanceUsd = yield* readCliWalletBalance();
           const summary = computeSummaryWithEquity(positions, walletBalanceUsd);
           const effectiveWallet = resolveEffectivePubkey();
-          const walletAddress = effectiveWallet?.error ? null : (effectiveWallet?.pubkey ?? null);
+          const walletAddress = resolveStatusWalletAddress(effectiveWallet);
           const autonomousWalletAddress = walletAddress ?? "paper";
           const autonomous = {
             candidates: yield* db.listTokenCandidates(
@@ -245,9 +365,10 @@ network; with no stranded settlements it is fully offline.`,
             });
           }
           const prices = yield* loadSnapshotPrices();
+          const dbPath = process.env.SQLITE_DB_PATH ?? getPrismDbPath();
 
           const hasDb = positions.length > 0 || recentAudit.length > 0;
-          const lastActivityAt = recentAudit[0]?.timestamp ?? 0;
+          const lastActivityAt = lastDecisionTimestamp(recentAudit);
           const lock = readLockfile();
           const runningProcess = findRunningEngineProcess();
           const running = isEngineRunning(
@@ -261,7 +382,7 @@ network; with no stranded settlements it is fully offline.`,
           function buildStatusJson(runningFlag: boolean): StatusJsonOutput {
             const json: StatusJsonOutput = {
               running: runningFlag,
-              dbPath: process.env.SQLITE_DB_PATH ?? getPrismDbPath(),
+              dbPath,
               timestamp: new Date().toISOString(),
               agentRuntime: {
                 enabled: config.agentiveMode,
@@ -592,105 +713,54 @@ network; with no stranded settlements it is fully offline.`,
 
           // Acceptance for issue #167: an active settlement_overdue pause
           // names the non-terminal jobs keeping it latched (oldest first).
-          function buildLatchedByLine(): string | null {
+          function buildLatchedByLines(): ReadonlyArray<string> {
             if (
               autonomous.safetyPause === null ||
               autonomous.safetyPause.resolvedAt !== null ||
               autonomous.safetyPause.reason !== "settlement_overdue"
             ) {
-              return null;
+              return [];
             }
             const now = Date.now();
             const offenders = autonomous.settlements
               .filter((job) => job.status !== "confirmed" && job.status !== "terminal")
               .sort((a, b) => a.createdAt - b.createdAt)
               .slice(0, 3);
-            if (offenders.length === 0) return null;
-            return `  Latched by: ${offenders
-              .map(
-                (job) =>
-                  `${job.id.slice(0, 8)}… ${job.status} ${((now - job.createdAt) / 3_600_000).toFixed(1)}h${job.error ? ` (${job.error})` : ""}`,
-              )
-              .join(", ")}`;
+            if (offenders.length === 0) return [];
+            return [
+              `  Latched by: ${offenders
+                .map(
+                  (job) =>
+                    `${job.id.slice(0, 8)}… ${job.status} ${((now - job.createdAt) / 3_600_000).toFixed(1)}h${job.error ? ` (${job.error})` : ""}`,
+                )
+                .join(", ")}`,
+            ];
           }
-          const latchedBySettlements = buildLatchedByLine();
+          const latchedByLines = buildLatchedByLines();
 
           function buildHumanStatusOutput(): string {
-            const pnlText = `${summary.totalUnrealizedPnlUsd >= 0 ? "+" : ""}$${summary.totalUnrealizedPnlUsd.toFixed(2)} (${summary.totalUnrealizedPnlPct.toFixed(2)}%)`;
-            const agentStatus = config.agentiveMode
-              ? `agent overlay: ${config.agentRuntime}`
-              : "agent overlay: off";
             return [
               "Prism Status",
               "============",
-              `  Database:    ${process.env.SQLITE_DB_PATH ?? getPrismDbPath()}`,
-              `  Positions:   ${activePositions.length} active`,
-              `  Deposited:   $${summary.totalDepositedUsd.toFixed(2)}`,
-              `  Current:     $${summary.totalCurrentValueUsd.toFixed(2)}`,
-              ...(summary.walletKnown
-                ? [`  Wallet:      $${(summary.walletBalanceUsd ?? 0).toFixed(2)}`]
-                : []),
-              `  Equity:      $${summary.totalEquityUsd.toFixed(2)}`,
-              `  Fees:        $${summary.totalFeesClaimedUsd.toFixed(2)}`,
-              ...(summary.totalRewardsClaimedUsd > 0
-                ? [`  Rewards:     $${summary.totalRewardsClaimedUsd.toFixed(2)}`]
-                : []),
-              `  Unrealized:  ${pnlText}`,
-              `  ${agentStatus}`,
-              `  Autonomous:  ${config.autonomousTokenMode} (${walletAddress ?? "paper"})`,
-              ...(effectiveWallet?.error ? [`  Wallet error: ${effectiveWallet.error}`] : []),
+              ...buildPortfolioStatusLines(
+                dbPath,
+                activePositions.length,
+                summary,
+                config.agentiveMode,
+                config.agentRuntime,
+                config.autonomousTokenMode,
+                walletAddress,
+              ),
+              ...walletErrorStatusLines(effectiveWallet),
               `  Candidates:  ${autonomous.candidates.length}`,
               `  Operations:  ${autonomous.operations.length}`,
               `  Settlements: ${autonomous.settlements.length}`,
-              ...(staleRetryingSettlements.length > 0
-                ? [
-                    `  Overdue:     ${staleRetryingSettlements.length} settlement(s) past the max-pending window and not final (${staleRetryingSettlements
-                      .slice(0, 3)
-                      .map(
-                        (settlement) =>
-                          `${settlement.id.slice(0, 8)} ${((Date.now() - settlement.createdAt) / 3_600_000).toFixed(1)}h`,
-                      )
-                      .join(", ")}) — monitor for recovery`,
-                  ]
-                : []),
-              ...(strandedSettlements.length > 0
-                ? [
-                    `  Stranded:    ${strandedSettlements.length} terminal settlement(s) with unspent balance (${strandedSettlements
-                      .map(
-                        (entry) =>
-                          `${(entry.settlement.poolAddress || "?").slice(0, 8)}/${entry.settlement.tokenMint.slice(0, 8)} ($${entry.valueUsd.toFixed(2)})`,
-                      )
-                      .join(", ")}) — see --json for details`,
-                  ]
-                : []),
-              ...(unpriceableStranded.length > 0
-                ? [
-                    `  Unpriceable: ${unpriceableStranded.length} terminal settlement(s) with no USD price resolved at query time — cannot value, left in wallet (${unpriceableStranded
-                      .map(
-                        (entry) =>
-                          `${(entry.settlement.poolAddress || "?").slice(0, 8)}/${entry.settlement.tokenMint.slice(0, 8)}`,
-                      )
-                      .join(", ")})`,
-                  ]
-                : []),
-              ...(unavailableStranded.length > 0
-                ? [
-                    `  Unavailable: ${unavailableStranded.length} terminal settlement(s) — price/decimals lookup unreachable, value unknown (${unavailableStranded
-                      .map(
-                        (entry) =>
-                          `${(entry.settlement.poolAddress || "?").slice(0, 8)}/${entry.settlement.tokenMint.slice(0, 8)}`,
-                      )
-                      .join(", ")}) — retry later`,
-                  ]
-                : []),
-              `  Safety pause: ${
-                autonomous.safetyPause === null
-                  ? "none"
-                  : autonomous.safetyPause.resolvedAt === null
-                    ? `ACTIVE (${autonomous.safetyPause.reason})`
-                    : `resolved (${autonomous.safetyPause.reason})`
-              }`,
-              ...(latchedBySettlements !== null ? [latchedBySettlements] : []),
+              ...overdueStatusLines(staleRetryingSettlements),
+              ...strandedStatusLines(strandedSettlements),
+              ...unpriceableStatusLines(unpriceableStranded),
+              ...unavailableStatusLines(unavailableStranded),
+              `  Safety pause: ${formatSafetyPauseStatus(autonomous.safetyPause)}`,
+              ...latchedByLines,
               "",
               `  Recent decisions: ${recentAudit.length}`,
               ...recentAudit

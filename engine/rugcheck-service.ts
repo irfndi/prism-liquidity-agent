@@ -242,6 +242,24 @@ export function parseRugCheckReport<T>(raw: T): RugCheckReport | null {
  * caller treats the security as unknown (fail-closed for the positive gate).
  * Logs ONE warning per failing fetch.
  */
+/** Resolve the report base URL: an empty/blank override falls back to the default. */
+function resolveRugCheckBase(baseUrl: string | undefined): string {
+  const base = (baseUrl ?? process.env.RUGCHECK_API_URL ?? DEFAULT_BASE_URL)
+    .trim()
+    .replace(/\/+$/, "");
+  return base.length > 0 ? base : DEFAULT_BASE_URL;
+}
+
+/** Parse the report body; an unparseable body is fail-open null (one warn). */
+function parseRugCheckBody<T>(body: T, mint: string): RugCheckReport | null {
+  const parsed = parseRugCheckReport(body);
+  if (parsed === null) {
+    logger.warn("RugCheck returned an unparseable report", { mint });
+    return null;
+  }
+  return parsed;
+}
+
 export async function getRugCheckReport(
   mint: string,
   options: {
@@ -252,11 +270,7 @@ export async function getRugCheckReport(
 ): Promise<RugCheckReport | null> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
-  const base = (options.baseUrl ?? process.env.RUGCHECK_API_URL ?? DEFAULT_BASE_URL)
-    .trim()
-    .replace(/\/+$/, "");
-  const effectiveBase = base.length > 0 ? base : DEFAULT_BASE_URL;
-  const url = `${effectiveBase}/tokens/${mint}/report`;
+  const url = `${resolveRugCheckBase(options.baseUrl)}/tokens/${mint}/report`;
 
   try {
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
@@ -268,12 +282,7 @@ export async function getRugCheckReport(
       return null;
     }
     const body: unknown = await res.json();
-    const parsed = parseRugCheckReport(body);
-    if (parsed === null) {
-      logger.warn("RugCheck returned an unparseable report", { mint });
-      return null;
-    }
-    return parsed;
+    return parseRugCheckBody(body, mint);
   } catch (err) {
     logger.warn("RugCheck fetch failed — security unknown", {
       mint,

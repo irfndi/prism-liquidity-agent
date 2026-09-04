@@ -33,7 +33,7 @@
   },
   "rules": {
     "no-unused-vars": "off",
-    "complexity": "error",
+    "complexity": ["error", { "max": 10 }],
     "require-yield": "off",
     "effecttsgo/any-unknown-in-error-context": "error",
     "typescript/no-base-to-string": "error",

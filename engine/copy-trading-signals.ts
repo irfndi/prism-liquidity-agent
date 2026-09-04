@@ -65,6 +65,44 @@ function readFiniteNumber<T>(value: T): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+function isValidSignalWallet(wallet: string | null): wallet is string {
+  return wallet !== null && WALLET_PATTERN.test(wallet);
+}
+
+function isValidSignalAction(action: string | null): action is "ENTER" | "HOLD" | "REBALANCE" {
+  return action === "ENTER" || action === "HOLD" || action === "REBALANCE";
+}
+
+function isValidSignalConfidence(confidence: number | null): confidence is number {
+  return confidence !== null && confidence >= 0 && confidence <= 1;
+}
+
+/** Validate one raw observation; null = skip (fail-open, never fabricated). */
+function parseCopySignalObservation<T>(value: T): CopySignalObservation | null {
+  if (!isNonNullObject(value)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+  const obs = value as RawCopySignalObs;
+  const wallet = readString(obs.wallet);
+  const poolAddress = readString(obs.poolAddress);
+  const action = readString(obs.action);
+  const confidence = readFiniteNumber(obs.confidence);
+  const observedAt = readFiniteNumber(obs.observedAt);
+  if (!isValidSignalWallet(wallet)) return null;
+  if (poolAddress === null || poolAddress.length === 0) return null;
+  if (!isValidSignalAction(action)) return null;
+  if (!isValidSignalConfidence(confidence)) return null;
+  if (observedAt === null) return null;
+  const signature = readString(obs.signature);
+  return {
+    wallet,
+    poolAddress,
+    action,
+    confidence,
+    observedAt,
+    ...(signature !== null && { signature }),
+  };
+}
+
 export function parseCopySignalPayload<T>(raw: T): ReadonlyArray<CopySignalObservation> {
   // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const embedded = isNonNullObject(raw) ? (raw as RawCopySignalPayload).signals : undefined;
@@ -78,36 +116,8 @@ export function parseCopySignalPayload<T>(raw: T): ReadonlyArray<CopySignalObser
       : [];
   const observations: CopySignalObservation[] = [];
   for (const value of values) {
-    if (!isNonNullObject(value)) continue;
-    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-    const obs = value as RawCopySignalObs;
-    const wallet = readString(obs.wallet);
-    const poolAddress = readString(obs.poolAddress);
-    const action = readString(obs.action);
-    const confidence = readFiniteNumber(obs.confidence);
-    const observedAt = readFiniteNumber(obs.observedAt);
-    if (
-      wallet === null ||
-      !WALLET_PATTERN.test(wallet) ||
-      poolAddress === null ||
-      poolAddress.length === 0 ||
-      action === null ||
-      (action !== "ENTER" && action !== "HOLD" && action !== "REBALANCE") ||
-      confidence === null ||
-      confidence < 0 ||
-      confidence > 1 ||
-      observedAt === null
-    )
-      continue;
-    const signature = readString(obs.signature);
-    observations.push({
-      wallet,
-      poolAddress,
-      action,
-      confidence,
-      observedAt,
-      ...(signature !== null && { signature }),
-    });
+    const observation = parseCopySignalObservation(value);
+    if (observation !== null) observations.push(observation);
   }
   return observations;
 }

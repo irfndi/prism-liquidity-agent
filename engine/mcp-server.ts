@@ -364,45 +364,53 @@ export class McpServer {
   }
 
   private async handleRequest(request: McpRequest): Promise<McpResponse | undefined> {
-    const id = request.id ?? null;
+    const responseId = request.id ?? 0;
     if (request.jsonrpc !== "2.0") {
       return {
         jsonrpc: "2.0",
-        id: id ?? 0,
+        id: responseId,
         error: { code: -32600, message: "Invalid Request" },
       };
     }
 
     try {
-      switch (request.method) {
-        case "initialize":
-          return { jsonrpc: "2.0", id: id ?? 0, result: await this.handleInitialize() };
-        case "tools/list":
-          return { jsonrpc: "2.0", id: id ?? 0, result: await this.handleToolsList() };
-        case "tools/call":
-          return {
-            jsonrpc: "2.0",
-            id: id ?? 0,
-            // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-            result: await this.handleToolsCall(request.params as McpCallParams),
-          };
-        case "notifications/initialized":
-          // JSON-RPC notifications are one-way; do not send a response.
-          return undefined;
-        default:
-          return {
-            jsonrpc: "2.0",
-            id: id ?? 0,
-            error: { code: -32601, message: `Method not found: ${request.method}` },
-          };
-      }
+      return await this.dispatchMethod(request, responseId);
     } catch (err) {
       logger.error("MCP request failed", { error: String(err) });
       return {
         jsonrpc: "2.0",
-        id: id ?? 0,
+        id: responseId,
         error: { code: -32603, message: String(err) },
       };
+    }
+  }
+
+  /** JSON-RPC method dispatch for handleRequest; notifications return undefined. */
+  private async dispatchMethod(
+    request: McpRequest,
+    responseId: string | number,
+  ): Promise<McpResponse | undefined> {
+    switch (request.method) {
+      case "initialize":
+        return { jsonrpc: "2.0", id: responseId, result: await this.handleInitialize() };
+      case "tools/list":
+        return { jsonrpc: "2.0", id: responseId, result: await this.handleToolsList() };
+      case "tools/call":
+        return {
+          jsonrpc: "2.0",
+          id: responseId,
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+          result: await this.handleToolsCall(request.params as McpCallParams),
+        };
+      case "notifications/initialized":
+        // JSON-RPC notifications are one-way; do not send a response.
+        return undefined;
+      default:
+        return {
+          jsonrpc: "2.0",
+          id: responseId,
+          error: { code: -32601, message: `Method not found: ${request.method}` },
+        };
     }
   }
 

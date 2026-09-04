@@ -35,7 +35,7 @@ import {
 } from "../engine/services.js";
 import type { PoolSnapshot } from "../engine/types.js";
 import type { PositionRecord } from "../engine/db-service.js";
-import type { AgentRuntimeContext } from "../engine/agent-transport.js";
+import type { AgentPositionState, AgentRuntimeContext } from "../engine/agent-transport.js";
 import {
   defaultAppConfig,
   makePool,
@@ -377,6 +377,16 @@ describe("veto deadline bounds the entire transport operation (P1)", () => {
 
 // ─── Wave 20: agent position context wiring ──────────────────────────────────
 
+function requireAdvisorPosition(
+  capturedContext: AgentRuntimeContext | undefined,
+): AgentPositionState {
+  expect(capturedContext, "sync advisor must be consulted for the EXIT").toBeDefined();
+  const position = capturedContext?.position;
+  expect(position, "position state must reach the advisor").toBeDefined();
+  // SAFETY: The preceding expectation establishes that the advisor received position state before this value is consumed.
+  return position as AgentPositionState;
+}
+
 describe("agent position context wiring", () => {
   const POOL = "PoolAgentPosCtx11111111111111111111111111111";
 
@@ -427,14 +437,13 @@ describe("agent position context wiring", () => {
       asOwner<Effect.Effect<unknown, Error, never>>(Effect.provide(test, layer)),
     );
 
-    expect(capturedContext, "sync advisor must be consulted for the EXIT").toBeDefined();
-    expect(capturedContext?.position, "position state must reach the advisor").toBeDefined();
-    expect(capturedContext?.position?.positionId).toBeDefined();
-    expect(capturedContext?.position?.depositedUsd).toBe(1_000);
-    expect(capturedContext?.position?.valueUsd).toBe(1_000);
+    const position = requireAdvisorPosition(capturedContext);
+    expect(position.positionId).toBeDefined();
+    expect(position.depositedUsd).toBe(1_000);
+    expect(position.valueUsd).toBe(1_000);
     // value + fees + rewards − deposited = 0
-    expect(capturedContext?.position?.unrealizedPnlUsd).toBe(0);
-    expect(capturedContext?.position?.hoursHeld).toBeGreaterThanOrEqual(0);
+    expect(position.unrealizedPnlUsd).toBe(0);
+    expect(position.hoursHeld).toBeGreaterThanOrEqual(0);
   }, 15_000);
 });
 

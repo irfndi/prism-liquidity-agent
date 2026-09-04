@@ -229,10 +229,8 @@ Respond with JSON only:
 `;
 }
 
-export function buildProposalPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
-  const { pool, metrics } = ctx;
-  const { warningsBlock, decisionsBlock, positionBlock } = formatRuntimeContext(ctx);
-  const currentParamsBlock = [
+function formatCurrentParams(decision: AgentDecision): string {
+  return [
     decision.positionSizeUsd !== undefined
       ? `Position Size: $${decision.positionSizeUsd.toFixed(0)}`
       : null,
@@ -242,19 +240,29 @@ export function buildProposalPrompt(decision: AgentDecision, ctx: AgentRuntimeCo
   ]
     .filter((line): line is string => line !== null)
     .join("\n");
+}
 
-  // Mirror the validator's action limits so compliant advisors are not
-  // penalized for impossible promotions or downgrades. For ENTER the pool has
-  // no open position, so REBALANCE/EXIT are not executable either. For an
-  // unheld default HOLD, only HOLD is executable.
-  const allowedActions =
-    decision.action === "EXIT"
-      ? ["EXIT"]
-      : decision.action === "ENTER"
-        ? ["HOLD", "ENTER"]
-        : ctx.hasOpenPosition
-          ? ["HOLD", "REBALANCE", "EXIT"]
-          : ["HOLD"];
+/**
+ * Executable proposal actions for the current engine decision. Mirrors the
+ * validator's action limits so compliant advisors are not penalized for
+ * impossible promotions or downgrades. For ENTER the pool has no open
+ * position, so REBALANCE/EXIT are not executable either. For an unheld
+ * default HOLD, only HOLD is executable.
+ */
+function allowedProposalActions(
+  action: ActionType,
+  hasOpenPosition: boolean,
+): ReadonlyArray<string> {
+  if (action === "EXIT") return ["EXIT"];
+  if (action === "ENTER") return ["HOLD", "ENTER"];
+  return hasOpenPosition ? ["HOLD", "REBALANCE", "EXIT"] : ["HOLD"];
+}
+
+export function buildProposalPrompt(decision: AgentDecision, ctx: AgentRuntimeContext): string {
+  const { pool, metrics } = ctx;
+  const { warningsBlock, decisionsBlock, positionBlock } = formatRuntimeContext(ctx);
+  const currentParams = formatCurrentParams(decision);
+  const allowedActions = allowedProposalActions(decision.action, ctx.hasOpenPosition);
   const allowedActionsText = allowedActions.join(", ");
 
   return `You are a liquidity pool strategy advisor. Review the deterministic agent's decision and propose the best action for this pool.
@@ -271,7 +279,7 @@ DECISION TO REVIEW:
 Action: ${decision.action}
 Confidence: ${decision.confidence.toFixed(2)}
 Reasoning: ${decision.reasoning}
-${currentParamsBlock === "" ? "" : `${currentParamsBlock}\n`}Pool: ${pool.tokenXSymbol}/${pool.tokenYSymbol} (${pool.address})
+${currentParams === "" ? "" : `${currentParams}\n`}Pool: ${pool.tokenXSymbol}/${pool.tokenYSymbol} (${pool.address})
 TVL: $${pool.tvlUsd.toFixed(0)}
 24h Volume: $${pool.volume24hUsd.toFixed(0)}
 24h Fees: $${pool.fees24hUsd.toFixed(0)}
@@ -309,6 +317,40 @@ export function parseResponse(raw: string): ParsedAgentResponse {
   }
 }
 
+/**
+ * Clamps a parsed confidence into [0,1]. The agent overlay can only reduce
+ * confidence, never increase it.
+ */
+function clampOverrideConfidence(
+  originalConfidence: number,
+  parsedConfidence: number | undefined,
+): number {
+  if (parsedConfidence === undefined) return originalConfidence;
+  if (!Number.isFinite(parsedConfidence)) return originalConfidence;
+  return Math.min(originalConfidence, Math.max(0, Math.min(1, parsedConfidence)));
+}
+
+/**
+ * Resolves the post-override action, or null when the proposal must be
+ * rejected. Unknown actions echo the original; a deterministic
+ * capital-protection EXIT must never be downgraded to a less-defensive action
+ * (mirrors the agent-proposal gate in risk-service); anything other than HOLD
+ * or echoing the original action is rejected.
+ */
+function nextOverrideAction(
+  originalAction: ActionType,
+  parsedAction: string | undefined,
+): ActionType | null {
+  if (parsedAction === undefined) return originalAction;
+  if (!VALID_ACTIONS.has(parsedAction)) return originalAction;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+  const candidate = parsedAction as ActionType;
+  if (originalAction === "EXIT" && candidate !== "EXIT") return null;
+  if (candidate === "HOLD") return "HOLD";
+  if (candidate === originalAction) return originalAction;
+  return null;
+}
+
 export function validateOverride(
   original: AgentDecision,
   parsed: ParsedAgentResponse,
@@ -321,37 +363,9 @@ export function validateOverride(
     return null;
   }
 
-  const action: ActionType | undefined =
-    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-    parsed.action && VALID_ACTIONS.has(parsed.action) ? (parsed.action as ActionType) : undefined;
-
-  let newConfidence = original.confidence;
-  if (parsed.confidence !== undefined) {
-    if (Number.isFinite(parsed.confidence)) {
-      newConfidence = Math.max(0, Math.min(1, parsed.confidence));
-    }
-  }
-
-  // Agent overlay can only reduce confidence, never increase it.
-  if (newConfidence > original.confidence) {
-    newConfidence = original.confidence;
-  }
-
-  let newAction = original.action;
-  if (action) {
-    // A deterministic capital-protection EXIT must never be downgraded to a
-    // less-defensive action (mirrors the agent-proposal gate in risk-service).
-    if (original.action === "EXIT" && action !== "EXIT") {
-      return null;
-    }
-    if (action === "HOLD") {
-      newAction = "HOLD";
-    } else if (action === original.action) {
-      newAction = original.action;
-    } else {
-      return null;
-    }
-  }
+  const newConfidence = clampOverrideConfidence(original.confidence, parsed.confidence);
+  const newAction = nextOverrideAction(original.action, parsed.action);
+  if (newAction === null) return null;
 
   const hasChange = newAction !== original.action || newConfidence !== original.confidence;
   if (!hasChange) return null;
@@ -366,6 +380,51 @@ export function validateOverride(
   };
 }
 
+function createHermesTransport(config: AppConfig): AgentRuntimeTransport {
+  return new AcpTransport({
+    command: config.agentAcpCommand,
+    args: config.agentAcpArgs,
+    timeoutMs: config.agentPromptTimeoutMs,
+  });
+}
+
+/**
+ * Resolves the OpenClaw gateway transport, or null when the gateway is
+ * unusable. A tokenless AUTO prefers a working Hermes/ACP review transport
+ * over no review; an explicit openclaw keeps warn-and-disable semantics.
+ */
+function resolveOpenclawTransport(
+  config: AppConfig,
+  detection: AgentRuntimeDetection,
+): AgentRuntimeTransport | null {
+  // The gateway transport authenticates with the shared token; with no token the
+  // connection loses its operator scopes and every per-decision re-handshake fails
+  // (detection only probes the pre-auth WS upgrade, so it cannot catch this).
+  if ((config.agentGatewayToken ?? "").trim() !== "") {
+    return new GatewayTransport({
+      url: config.agentGatewayUrl,
+      token: config.agentGatewayToken,
+      timeoutMs: config.agentPromptTimeoutMs,
+    });
+  }
+  // Tokenless AUTO: prefer a working review transport over no review — fall back
+  // to ACP/Hermes when available.
+  if (config.agentRuntime === "auto" && detection.hermes.available) {
+    logger.info(
+      "OpenClaw gateway reachable but AGENT_GATEWAY_TOKEN empty; falling back to the Hermes/ACP transport for decision review",
+      { url: config.agentGatewayUrl },
+    );
+    return createHermesTransport(config);
+  }
+  if (config.agentRuntime === "openclaw") {
+    logger.warn(
+      "AGENT_GATEWAY_TOKEN is required for the OpenClaw gateway runtime; decision review disabled",
+      { url: config.agentGatewayUrl },
+    );
+  }
+  return null;
+}
+
 export function selectTransport(
   config: AppConfig,
   detection: AgentRuntimeDetection,
@@ -373,48 +432,11 @@ export function selectTransport(
   const runtime = config.agentRuntime === "auto" ? detection.recommended : config.agentRuntime;
 
   if (runtime === "hermes" && detection.hermes.available) {
-    return new AcpTransport({
-      command: config.agentAcpCommand,
-      args: config.agentAcpArgs,
-      timeoutMs: config.agentPromptTimeoutMs,
-    });
+    return createHermesTransport(config);
   }
 
   if (runtime === "openclaw" && detection.openclaw.gatewayRunning) {
-    // The gateway transport authenticates with the shared token; with no token the
-    // connection loses its operator scopes and every per-decision re-handshake fails
-    // (detection only probes the pre-auth WS upgrade, so it cannot catch this). With a
-    // token, use the gateway. Without one, `auto` prefers a working review transport
-    // (Hermes/ACP) over no review — falling back when it is available, otherwise
-    // falling through to null; an EXPLICIT AGENT_RUNTIME=openclaw keeps the
-    // warn-and-disable semantics, since the user asked for the gateway specifically.
-    if ((config.agentGatewayToken ?? "").trim() !== "") {
-      return new GatewayTransport({
-        url: config.agentGatewayUrl,
-        token: config.agentGatewayToken,
-        timeoutMs: config.agentPromptTimeoutMs,
-      });
-    }
-    // Tokenless AUTO: prefer a working review transport over no review — fall back
-    // to ACP/Hermes when available. An EXPLICIT AGENT_RUNTIME=openclaw keeps the
-    // warn-and-disable semantics (the user asked for the gateway specifically).
-    if (config.agentRuntime === "auto" && detection.hermes.available) {
-      logger.info(
-        "OpenClaw gateway reachable but AGENT_GATEWAY_TOKEN empty; falling back to the Hermes/ACP transport for decision review",
-        { url: config.agentGatewayUrl },
-      );
-      return new AcpTransport({
-        command: config.agentAcpCommand,
-        args: config.agentAcpArgs,
-        timeoutMs: config.agentPromptTimeoutMs,
-      });
-    }
-    if (config.agentRuntime === "openclaw") {
-      logger.warn(
-        "AGENT_GATEWAY_TOKEN is required for the OpenClaw gateway runtime; decision review disabled",
-        { url: config.agentGatewayUrl },
-      );
-    }
+    return resolveOpenclawTransport(config, detection);
   }
 
   return null;

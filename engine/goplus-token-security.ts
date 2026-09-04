@@ -293,18 +293,15 @@ async function getAccessToken(
  * NEVER blocks the scan cycle. Disabled config, an unset key/secret, and fetch
  * failures all fail open (serve stale or omit). Signals are never fabricated.
  */
-export async function consultGoPlusTokenSecurity(
+/** Serve fresh cache hits into `result` and return the mints that need a
+ *  network fetch. Expired entries are served stale as resilience in case the
+ *  refresh fails. */
+function collectGoPlusCached(
   mints: ReadonlyArray<string>,
-  config: GoPlusConfigLike,
-  options: { readonly fetchImpl?: GoPlusFetchLike; readonly timeoutMs?: number } = {},
-): Promise<Map<string, GoPlusTokenSecuritySignal>> {
-  if (config.goPlusTokenRiskEnabled === false || !goPlusConfigured(config)) {
-    return new Map();
-  }
-  const ttlMs = (config.goPlusTokenRiskCacheTtlMin ?? DEFAULT_CACHE_TTL_MIN) * 60_000;
-  const now = Date.now();
-
-  const result = new Map<string, GoPlusTokenSecuritySignal>();
+  ttlMs: number,
+  now: number,
+  result: Map<string, GoPlusTokenSecuritySignal>,
+): string[] {
   const toFetch: string[] = [];
   for (const mint of mints) {
     const entry = mintCache.get(mint);
@@ -317,19 +314,52 @@ export async function consultGoPlusTokenSecurity(
       result.set(mint, entry.signal);
     }
   }
+  return toFetch;
+}
+
+/** Store freshly fetched signals in the bounded cache + `result`. Mints the
+ *  fetch omits keep their stale value (fail-open), never-fetched stay absent. */
+function storeGoPlusFetched(
+  toFetch: ReadonlyArray<string>,
+  fetched: Map<string, GoPlusTokenSecuritySignal>,
+  fetchedAt: number,
+  result: Map<string, GoPlusTokenSecuritySignal>,
+): void {
+  for (const mint of toFetch) {
+    const signal = fetched.get(mint);
+    if (signal !== undefined) {
+      setMintCacheEntry(mint, { signal, fetchedAt });
+      result.set(mint, signal);
+    }
+  }
+}
+
+/** Prune TTL-expired entries so the cache cannot grow without bound. */
+function pruneGoPlusCache(ttlMs: number, now: number): void {
+  for (const [mint, entry] of mintCache) {
+    if (now - entry.fetchedAt >= ttlMs) mintCache.delete(mint);
+  }
+}
+
+export async function consultGoPlusTokenSecurity(
+  mints: ReadonlyArray<string>,
+  config: GoPlusConfigLike,
+  options: { readonly fetchImpl?: GoPlusFetchLike; readonly timeoutMs?: number } = {},
+): Promise<Map<string, GoPlusTokenSecuritySignal>> {
+  if (config.goPlusTokenRiskEnabled === false || !goPlusConfigured(config)) {
+    return new Map();
+  }
+  const ttlMs = (config.goPlusTokenRiskCacheTtlMin ?? DEFAULT_CACHE_TTL_MIN) * 60_000;
+  const now = Date.now();
+
+  const result = new Map<string, GoPlusTokenSecuritySignal>();
+  const toFetch = collectGoPlusCached(mints, ttlMs, now, result);
 
   if (toFetch.length > 0) {
     try {
       const accessToken = await getAccessToken(config, options);
       const fetched = await fetchGoPlusTokenSecurity(toFetch, accessToken, options);
-      const fetchedAt = Date.now();
-      for (const mint of toFetch) {
-        const signal = fetched.get(mint);
-        if (signal !== undefined) {
-          setMintCacheEntry(mint, { signal, fetchedAt });
-          result.set(mint, signal);
-        }
-      }
+      storeGoPlusFetched(toFetch, fetched, Date.now(), result);
     } catch (err) {
       // Fail-open: stale signals keep their value in result; never-fetched
       // mints stay absent. One warn per failing consult, not per mint.
@@ -340,10 +370,7 @@ export async function consultGoPlusTokenSecurity(
     }
   }
 
-  // Prune TTL-expired entries so the cache cannot grow without bound.
-  for (const [mint, entry] of mintCache) {
-    if (now - entry.fetchedAt >= ttlMs) mintCache.delete(mint);
-  }
+  pruneGoPlusCache(ttlMs, now);
 
   return result;
 }

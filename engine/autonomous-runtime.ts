@@ -619,160 +619,226 @@ function requireSettlementSwapOps(
   });
 }
 
-/** Processes due settlement jobs and finalizes positions whose settlements completed. */
-export function processSettlementJobs(
-  input: SettlementProcessorInput,
-): Effect.Effect<ReadonlyArray<SettlementJobRecord>, never> {
-  return Effect.gen(function* () {
-    if (input.mode === "off" || input.mode === "shadow") return input.jobs;
-    const processed: SettlementJobRecord[] = [];
-    for (const job of input.jobs) {
-      if (job.status === "terminal" || (job.nextRetryAt !== null && job.nextRetryAt > input.now)) {
-        processed.push(job);
-        continue;
-      }
-      if (
-        job.status === "confirmed" &&
-        job.confirmedOutputAtomic !== null &&
-        job.outputUsd !== null &&
-        job.executionCostUsd !== null
-      ) {
-        processed.push(job);
-        continue;
-      }
-      let submitted = false;
-      let capturedSignature: string | null = null;
-      let capturedConfirmedOutputAtomic: bigint = 0n;
-      const result = yield* Effect.gen(function* () {
-        const broadcast = yield* resolveBroadcastSettlement(input, job);
-        if (broadcast) return broadcast;
-        if (job.status === "prepared" && job.txSignature === null) {
-          return yield* Effect.fail(
-            new Error("Prepared settlement requires operator reconciliation"),
-          );
-        }
-        let amountAtomic = BigInt(job.amountAtomic);
-        const prices = yield* input.adapter.getTokenPrices([job.tokenMint, SOL_MINT]);
-        const solPriceUsd = prices[SOL_MINT] ?? 0;
-        if (!(solPriceUsd > 0)) return yield* Effect.fail(new Error("SOL price unavailable"));
-        // Issue #201: reconcile the sell amount with the LIVE wallet balance.
-        // The job amount is fixed at creation, but a concurrent entry can
-        // consume part of the wallet (field evidence: an exit settlement
-        // expecting 41.91 USDC while the wallet held 24.35 — quoting the
-        // stale amount made the swap simulation fail with insufficient
-        // balance 130 times, then terminal). Clamp to what the wallet
-        // actually holds; a failed balance read fails open (keeps the job
-        // amount — the simulation still catches genuine insufficiency).
-        // When the wallet holds nothing of the mint, the funds were consumed
-        // elsewhere — terminalize with a clear error instead of looping.
-        amountAtomic = yield* clampSettlementToWalletBalance(input, job, amountAtomic);
-        if (amountAtomic <= 0n) {
-          return {
-            ...job,
-            status: "terminal" as const,
-            attempts: job.attempts + 1,
-            nextRetryAt: null,
-            error:
-              "Settlement amount exhausted — wallet holds no balance of the mint (concurrent activity consumed it)",
-            updatedAt: input.now,
-          };
-        }
-        if (job.tokenMint === SOL_MINT) {
-          return {
-            ...job,
-            status: "confirmed" as const,
-            confirmedOutputAtomic: amountAtomic.toString(),
-            outputUsd: atomicUsd(amountAtomic, 9, solPriceUsd),
-            executionCostUsd: 0,
-            attempts: job.attempts + 1,
-            nextRetryAt: null,
-            error: null,
-            updatedAt: input.now,
-          };
-        }
-        const inputDecimals = yield* input.adapter.getTokenDecimals(job.tokenMint);
-        const inputPriceUsd = prices[job.tokenMint] ?? 0;
-        const dust = dustSettlementRecord(input, job, amountAtomic, inputDecimals, inputPriceUsd);
-        if (dust) return dust;
-        const ops = yield* requireSettlementSwapOps(input.adapter);
-        const quote = yield* ops.quoteSwap({
-          inputMint: job.tokenMint,
-          outputMint: SOL_MINT,
-          amountAtomic,
-          slippageBps: input.maxSwapSlippageBps,
-        });
-        const prepared = yield* ops.prepareSwap(quote);
-        yield* ops.simulateSwap(prepared);
-        const nativeBefore = yield* input.adapter.getNativeSolBalance();
-        yield* input.db.saveSettlementJob({
-          ...job,
-          status: "prepared",
-          attempts: job.attempts + 1,
-          confirmedOutputAtomic: null,
-          outputUsd: null,
-          executionCostUsd: null,
-          updatedAt: input.now,
-        });
-        const signature = yield* ops.submitSwap(prepared, (broadcastSignature) => {
-          submitted = true;
-          capturedSignature = broadcastSignature;
-          return input.db.saveSettlementJob({
-            ...job,
-            status: "submitted",
-            attempts: job.attempts + 1,
-            nextRetryAt: nextSettlementRetryAt(input.now, job.attempts + 1),
-            txSignature: broadcastSignature,
-            updatedAt: input.now,
-          });
-        });
-        submitted = true;
-        capturedSignature = signature;
-        const nativeAfter = yield* input.adapter.getNativeSolBalance();
-        const confirmedOutputAtomic = nativeAfter > nativeBefore ? nativeAfter - nativeBefore : 0n;
-        capturedConfirmedOutputAtomic = confirmedOutputAtomic;
-        if (confirmedOutputAtomic <= 0n) {
-          return yield* Effect.fail(new Error("Settlement output balance delta unavailable"));
-        }
-        const outputUsd = atomicUsd(confirmedOutputAtomic, 9, solPriceUsd);
-        const realizedInputUsd =
-          inputPriceUsd > 0 ? atomicUsd(amountAtomic, inputDecimals, inputPriceUsd) : outputUsd;
-        const executionCostUsd = Math.max(0, realizedInputUsd - outputUsd);
-        return {
-          ...job,
-          status: "confirmed" as const,
-          attempts: job.attempts + 1,
-          nextRetryAt: null,
-          txSignature: signature,
-          confirmedOutputAtomic: confirmedOutputAtomic.toString(),
-          outputUsd,
-          executionCostUsd,
-          error: null,
-          updatedAt: input.now,
-        };
-      }).pipe(
-        Effect.catch((error) =>
-          Effect.succeed(
-            submitted
-              ? reconciliationJob(
-                  {
-                    ...job,
-                    txSignature: capturedSignature ?? job.txSignature,
-                    confirmedOutputAtomic: capturedConfirmedOutputAtomic.toString(),
-                  },
-                  input.now,
-                  error,
-                )
-              : retryableJob(job, input.now, error),
-          ),
-        ),
-      );
-      const persisted = yield* input.db.saveSettlementJob(result).pipe(
-        Effect.as(true),
-        Effect.catch(() => Effect.succeed(false)),
-      );
-      if (persisted) processed.push(result);
-    }
+/** Jobs that need no further work: terminal rows, future-retry rows, and fully-recorded confirmed rows. */
+function isSkippableSettlementJob(job: SettlementJobRecord, now: number): boolean {
+  if (job.status === "terminal") return true;
+  if (job.nextRetryAt !== null && job.nextRetryAt > now) return true;
+  return (
+    job.status === "confirmed" &&
+    job.confirmedOutputAtomic !== null &&
+    job.outputUsd !== null &&
+    job.executionCostUsd !== null
+  );
+}
 
+/** Terminal/exhausted and SOL fast-path results for the fresh-settlement path; null means continue to quoting. */
+function earlySettlementResult(
+  job: SettlementJobRecord,
+  amountAtomic: bigint,
+  solPriceUsd: number,
+  now: number,
+): SettlementJobRecord | null {
+  if (amountAtomic <= 0n) {
+    return {
+      ...job,
+      status: "terminal" as const,
+      attempts: job.attempts + 1,
+      nextRetryAt: null,
+      error:
+        "Settlement amount exhausted — wallet holds no balance of the mint (concurrent activity consumed it)",
+      updatedAt: now,
+    };
+  }
+  if (job.tokenMint === SOL_MINT) {
+    return {
+      ...job,
+      status: "confirmed" as const,
+      confirmedOutputAtomic: amountAtomic.toString(),
+      outputUsd: atomicUsd(amountAtomic, 9, solPriceUsd),
+      executionCostUsd: 0,
+      attempts: job.attempts + 1,
+      nextRetryAt: null,
+      error: null,
+      updatedAt: now,
+    };
+  }
+  return null;
+}
+
+/** Builds the confirmed record from measured SOL balance-delta evidence. */
+function buildConfirmedSettlement(
+  job: SettlementJobRecord,
+  amountAtomic: bigint,
+  confirmedOutputAtomic: bigint,
+  solPriceUsd: number,
+  inputDecimals: number,
+  inputPriceUsd: number,
+  signature: string,
+  now: number,
+): SettlementJobRecord {
+  const outputUsd = atomicUsd(confirmedOutputAtomic, 9, solPriceUsd);
+  const realizedInputUsd =
+    inputPriceUsd > 0 ? atomicUsd(amountAtomic, inputDecimals, inputPriceUsd) : outputUsd;
+  return {
+    ...job,
+    status: "confirmed" as const,
+    attempts: job.attempts + 1,
+    nextRetryAt: null,
+    txSignature: signature,
+    confirmedOutputAtomic: confirmedOutputAtomic.toString(),
+    outputUsd,
+    executionCostUsd: Math.max(0, realizedInputUsd - outputUsd),
+    error: null,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Fresh quote→simulate→submit path for one settlement job. Pre-submit failures
+ * propagate as errors (the caller maps them to retryable); once the swap is
+ * broadcast, failures map to reconciliation state carrying the signature.
+ */
+function quoteAndSubmitSettlement(
+  input: SettlementProcessorInput,
+  job: SettlementJobRecord,
+  amountAtomic: bigint,
+  solPriceUsd: number,
+  inputDecimals: number,
+  inputPriceUsd: number,
+): Effect.Effect<SettlementJobRecord, Error> {
+  return Effect.gen(function* () {
+    const ops = yield* requireSettlementSwapOps(input.adapter);
+    const quote = yield* ops.quoteSwap({
+      inputMint: job.tokenMint,
+      outputMint: SOL_MINT,
+      amountAtomic,
+      slippageBps: input.maxSwapSlippageBps,
+    });
+    const prepared = yield* ops.prepareSwap(quote);
+    yield* ops.simulateSwap(prepared);
+    const nativeBefore = yield* input.adapter.getNativeSolBalance();
+    yield* input.db.saveSettlementJob({
+      ...job,
+      status: "prepared",
+      attempts: job.attempts + 1,
+      confirmedOutputAtomic: null,
+      outputUsd: null,
+      executionCostUsd: null,
+      updatedAt: input.now,
+    });
+    let submitted = false;
+    let capturedSignature: string | null = null;
+    let capturedConfirmedOutputAtomic = 0n;
+    return yield* Effect.gen(function* () {
+      const signature = yield* ops.submitSwap(prepared, (broadcastSignature) => {
+        submitted = true;
+        capturedSignature = broadcastSignature;
+        return input.db.saveSettlementJob({
+          ...job,
+          status: "submitted",
+          attempts: job.attempts + 1,
+          nextRetryAt: nextSettlementRetryAt(input.now, job.attempts + 1),
+          txSignature: broadcastSignature,
+          updatedAt: input.now,
+        });
+      });
+      submitted = true;
+      capturedSignature = signature;
+      const nativeAfter = yield* input.adapter.getNativeSolBalance();
+      const confirmedOutputAtomic = nativeAfter > nativeBefore ? nativeAfter - nativeBefore : 0n;
+      capturedConfirmedOutputAtomic = confirmedOutputAtomic;
+      if (confirmedOutputAtomic <= 0n) {
+        return yield* Effect.fail(new Error("Settlement output balance delta unavailable"));
+      }
+      return buildConfirmedSettlement(
+        job,
+        amountAtomic,
+        confirmedOutputAtomic,
+        solPriceUsd,
+        inputDecimals,
+        inputPriceUsd,
+        signature,
+        input.now,
+      );
+    }).pipe(
+      Effect.catch((error) =>
+        submitted
+          ? Effect.succeed(
+              reconciliationJob(
+                {
+                  ...job,
+                  txSignature: capturedSignature ?? job.txSignature,
+                  confirmedOutputAtomic: capturedConfirmedOutputAtomic.toString(),
+                },
+                input.now,
+                error,
+              ),
+            )
+          : Effect.fail(error),
+      ),
+    );
+  });
+}
+
+/** Processes one settlement job through broadcast-resolution or a fresh submit; null when persistence failed. */
+function processOneSettlementJob(
+  input: SettlementProcessorInput,
+  job: SettlementJobRecord,
+): Effect.Effect<SettlementJobRecord | null, never> {
+  return Effect.gen(function* () {
+    if (isSkippableSettlementJob(job, input.now)) return job;
+    const result = yield* Effect.gen(function* () {
+      const broadcast = yield* resolveBroadcastSettlement(input, job);
+      if (broadcast) return broadcast;
+      if (job.status === "prepared" && job.txSignature === null) {
+        return yield* Effect.fail(
+          new Error("Prepared settlement requires operator reconciliation"),
+        );
+      }
+      let amountAtomic = BigInt(job.amountAtomic);
+      const prices = yield* input.adapter.getTokenPrices([job.tokenMint, SOL_MINT]);
+      const solPriceUsd = prices[SOL_MINT] ?? 0;
+      if (!(solPriceUsd > 0)) return yield* Effect.fail(new Error("SOL price unavailable"));
+      // Issue #201: reconcile the sell amount with the LIVE wallet balance.
+      // The job amount is fixed at creation, but a concurrent entry can
+      // consume part of the wallet (field evidence: an exit settlement
+      // expecting 41.91 USDC while the wallet held 24.35 — quoting the
+      // stale amount made the swap simulation fail with insufficient
+      // balance 130 times, then terminal). Clamp to what the wallet
+      // actually holds; a failed balance read fails open (keeps the job
+      // amount — the simulation still catches genuine insufficiency).
+      // When the wallet holds nothing of the mint, the funds were consumed
+      // elsewhere — terminalize with a clear error instead of looping.
+      amountAtomic = yield* clampSettlementToWalletBalance(input, job, amountAtomic);
+      const early = earlySettlementResult(job, amountAtomic, solPriceUsd, input.now);
+      if (early) return early;
+      const inputDecimals = yield* input.adapter.getTokenDecimals(job.tokenMint);
+      const inputPriceUsd = prices[job.tokenMint] ?? 0;
+      const dust = dustSettlementRecord(input, job, amountAtomic, inputDecimals, inputPriceUsd);
+      if (dust) return dust;
+      return yield* quoteAndSubmitSettlement(
+        input,
+        job,
+        amountAtomic,
+        solPriceUsd,
+        inputDecimals,
+        inputPriceUsd,
+      );
+    }).pipe(Effect.catch((error) => Effect.succeed(retryableJob(job, input.now, error))));
+    const persisted = yield* input.db.saveSettlementJob(result).pipe(
+      Effect.as(true),
+      Effect.catch(() => Effect.succeed(false)),
+    );
+    return persisted ? result : null;
+  });
+}
+
+/** Finalizes positions whose every settlement job confirmed (never clobbers withdrawal-priced PnL). */
+function finalizeSettlementGroups(
+  input: SettlementProcessorInput,
+  processed: ReadonlyArray<SettlementJobRecord>,
+): Effect.Effect<void, never> {
+  return Effect.gen(function* () {
     const byPosition = Map.groupBy(processed, (job) => job.positionId);
     for (const [positionId, jobs] of byPosition) {
       const unfinalized = jobs.filter((job) => job.finalizedAt === null);
@@ -813,6 +879,21 @@ export function processSettlementJobs(
         })
         .pipe(Effect.catch(() => Effect.void));
     }
+  });
+}
+
+/** Processes due settlement jobs and finalizes positions whose settlements completed. */
+export function processSettlementJobs(
+  input: SettlementProcessorInput,
+): Effect.Effect<ReadonlyArray<SettlementJobRecord>, never> {
+  return Effect.gen(function* () {
+    if (input.mode === "off" || input.mode === "shadow") return input.jobs;
+    const processed: SettlementJobRecord[] = [];
+    for (const job of input.jobs) {
+      const result = yield* processOneSettlementJob(input, job);
+      if (result) processed.push(result);
+    }
+    yield* finalizeSettlementGroups(input, processed);
     return processed;
   });
 }
@@ -825,6 +906,142 @@ export interface OrphanSettlementSweepInput {
   readonly settlementMaxPendingMs: number;
   readonly settlementDustUsd: number;
   readonly now: number;
+}
+
+/**
+ * Pool-leg mints backing the CURRENT wallet's live on-chain positions.
+ * getAllPositions has no wallet filter and paper rows share the table, so
+ * `paper-*` rows are excluded — a paper position's pool legs must not exempt
+ * a live wallet's stranded tokens. The engine's model is one wallet per DB
+ * (portfolio/equity math already assumes it), so remaining rows belong to
+ * the current wallet.
+ */
+function loadPositionBackedMints(
+  input: OrphanSettlementSweepInput,
+): Effect.Effect<Set<string>, never> {
+  return Effect.gen(function* () {
+    const positionBackedMints = new Set<string>();
+    const openPositions = yield* input.db
+      .getAllPositions()
+      .pipe(Effect.catch(() => Effect.succeed([])));
+    for (const poolAddress of new Set(
+      openPositions
+        .filter((position) => !position.positionId.startsWith("paper-"))
+        .map((position) => position.poolAddress),
+    )) {
+      const state = yield* input.adapter
+        .getPoolState(poolAddress)
+        .pipe(Effect.catch(() => Effect.succeed(null)));
+      if (state) {
+        positionBackedMints.add(state.tokenX);
+        positionBackedMints.add(state.tokenY);
+      }
+    }
+    return positionBackedMints;
+  });
+}
+
+/**
+ * Latest terminal row per mint eligible for in-place revival (upsert on id,
+ * so attempts carry over and backoff escalates across generations instead of
+ * growing ~1 row per max-pending window). Terminal rows carrying a
+ * txSignature are the operator-reconciliation bucket (swap signature never
+ * became visible) — reviving them would re-poll a dead signature forever, so
+ * only signature-less terminal rows are auto-revived.
+ */
+function terminalOrphanByMint(
+  existingJobs: ReadonlyArray<SettlementJobRecord>,
+): Map<string, SettlementJobRecord> {
+  return new Map<string, SettlementJobRecord>(
+    existingJobs
+      .filter(
+        (job) =>
+          job.status === "terminal" &&
+          job.confirmedOutputAtomic === null &&
+          job.txSignature === null,
+      )
+      .map((job) => [job.tokenMint, job]),
+  );
+}
+
+/** Dust check for the orphan sweep: unknown value counts as $0 (issue #183). */
+function isOrphanDust(
+  amountAtomic: bigint,
+  decimals: number,
+  priceUsd: number,
+  settlementDustUsd: number,
+): boolean {
+  if (settlementDustUsd <= 0) return false;
+  if (priceUsd <= 0) return true;
+  return atomicUsd(amountAtomic, decimals, priceUsd) < settlementDustUsd;
+}
+
+/**
+ * Builds the sweep job for one wallet holding, or null when it must stay put
+ * (SOL, empty, owned by an active job, position-backed without
+ * stranded-terminal evidence, or dust). A stranded-terminal row is revived in
+ * place, selling what the wallet actually holds now.
+ */
+function nextOrphanSweepJob(
+  mint: string,
+  holding: { readonly amountAtomic: bigint; readonly decimals: number },
+  activeJobMints: ReadonlySet<string>,
+  positionBackedMints: ReadonlySet<string>,
+  terminalByMint: ReadonlyMap<string, SettlementJobRecord>,
+  priceUsd: number,
+  walletAddress: string,
+  agentInstanceId: string,
+  settlementDustUsd: number,
+  settlementMaxPendingMs: number,
+  now: number,
+): SettlementJobRecord | null {
+  if (mint === SOL_MINT || holding.amountAtomic <= 0n) return null;
+  if (activeJobMints.has(mint)) return null;
+  // A position-backed mint is still swept when a stranded-terminal job
+  // exists for it (issue #201): the terminal job's unspent balance is
+  // wallet-held excess the sweep must recover.
+  if (positionBackedMints.has(mint) && !terminalByMint.has(mint)) return null;
+  if (isOrphanDust(holding.amountAtomic, holding.decimals, priceUsd, settlementDustUsd)) {
+    return null;
+  }
+  const terminal = terminalByMint.get(mint);
+  if (terminal) {
+    return {
+      ...terminal,
+      status: "pending",
+      attempts: terminal.attempts + 1,
+      // Sell what the wallet actually holds now, not the stale row amount.
+      amountAtomic: holding.amountAtomic.toString(),
+      nextRetryAt: now,
+      expiresAt: now + settlementMaxPendingMs,
+      error: null,
+      updatedAt: now,
+    };
+  }
+  const id = randomUUID();
+  return {
+    id,
+    walletAddress,
+    agentInstanceId,
+    positionId: `orphan:${id}`,
+    poolAddress: "",
+    tokenMint: mint,
+    amountAtomic: holding.amountAtomic.toString(),
+    destinationAsset: "SOL",
+    status: "pending",
+    attempts: 0,
+    nextRetryAt: now,
+    txSignature: null,
+    confirmedOutputAtomic: null,
+    outputUsd: null,
+    executionCostUsd: null,
+    finalizedAt: null,
+    realizedPnlUsd: null,
+    expiresAt: now + settlementMaxPendingMs,
+    error: null,
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 /**
@@ -874,29 +1091,7 @@ export function sweepOrphanSettlements(
         .filter((job) => job.status !== "terminal" && job.status !== "confirmed")
         .map((job) => job.tokenMint),
     );
-    // Backing positions are the CURRENT wallet's live on-chain positions.
-    // getAllPositions has no wallet filter and paper rows share the table, so
-    // exclude `paper-*` rows — a paper position's pool legs must not exempt a
-    // live wallet's stranded tokens. The engine's model is one wallet per DB
-    // (portfolio/equity math already assumes it), so remaining rows belong to
-    // the current wallet.
-    const positionBackedMints = new Set<string>();
-    const openPositions = yield* input.db
-      .getAllPositions()
-      .pipe(Effect.catch(() => Effect.succeed([])));
-    for (const poolAddress of new Set(
-      openPositions
-        .filter((position) => !position.positionId.startsWith("paper-"))
-        .map((position) => position.poolAddress),
-    )) {
-      const state = yield* input.adapter
-        .getPoolState(poolAddress)
-        .pipe(Effect.catch(() => Effect.succeed(null)));
-      if (state) {
-        positionBackedMints.add(state.tokenX);
-        positionBackedMints.add(state.tokenY);
-      }
-    }
+    const positionBackedMints = yield* loadPositionBackedMints(input);
     const prices = yield* input.adapter.getTokenPrices(candidates.map(([mint]) => mint)).pipe(
       // Issue #183: a price-fetch failure must not be silent — every
       // holding would read price 0 and be skipped as dust for the cycle
@@ -913,79 +1108,23 @@ export function sweepOrphanSettlements(
         return Effect.succeed<Record<string, number>>({});
       }),
     );
-    // A terminal job for the mint is revived in place (upsert on id) rather
-    // than replaced by a fresh row: attempts carry over so backoff escalates
-    // across generations, and the settlements table stays one row per mint
-    // instead of growing ~1 row per max-pending window for a doomed token.
-    // Terminal rows carrying a txSignature are the operator-reconciliation
-    // bucket (swap signature never became visible) — reviving them would
-    // re-poll a dead signature forever, so only signature-less terminal rows
-    // are auto-revived; a signature terminal spawns a fresh job instead.
-    const terminalByMint = new Map<string, SettlementJobRecord>(
-      existingJobs
-        .filter(
-          (job) =>
-            job.status === "terminal" &&
-            job.confirmedOutputAtomic === null &&
-            job.txSignature === null,
-        )
-        .map((job) => [job.tokenMint, job]),
-    );
+    const terminalByMint = terminalOrphanByMint(existingJobs);
     const jobs: SettlementJobRecord[] = [];
     for (const [mint, holding] of holdings) {
-      if (mint === SOL_MINT || holding.amountAtomic <= 0n) continue;
-      if (activeJobMints.has(mint)) continue;
-      // A position-backed mint is still swept when a stranded-terminal job
-      // exists for it (issue #201): the terminal job's unspent balance is
-      // wallet-held excess the sweep must recover.
-      if (positionBackedMints.has(mint) && !terminalByMint.has(mint)) continue;
-      const priceUsd = prices[mint] ?? 0;
-      if (
-        input.settlementDustUsd > 0 &&
-        (priceUsd <= 0 ||
-          atomicUsd(holding.amountAtomic, holding.decimals, priceUsd) < input.settlementDustUsd)
-      ) {
-        continue;
-      }
-      const terminal = terminalByMint.get(mint);
-      if (terminal) {
-        jobs.push({
-          ...terminal,
-          status: "pending",
-          attempts: terminal.attempts + 1,
-          // Sell what the wallet actually holds now, not the stale row amount.
-          amountAtomic: holding.amountAtomic.toString(),
-          nextRetryAt: input.now,
-          expiresAt: input.now + input.settlementMaxPendingMs,
-          error: null,
-          updatedAt: input.now,
-        });
-        continue;
-      }
-      const id = randomUUID();
-      jobs.push({
-        id,
-        walletAddress: input.walletAddress,
-        agentInstanceId: input.agentInstanceId,
-        positionId: `orphan:${id}`,
-        poolAddress: "",
-        tokenMint: mint,
-        amountAtomic: holding.amountAtomic.toString(),
-        destinationAsset: "SOL",
-        status: "pending",
-        attempts: 0,
-        nextRetryAt: input.now,
-        txSignature: null,
-        confirmedOutputAtomic: null,
-        outputUsd: null,
-        executionCostUsd: null,
-        finalizedAt: null,
-        realizedPnlUsd: null,
-        expiresAt: input.now + input.settlementMaxPendingMs,
-        error: null,
-        createdAt: input.now,
-        updatedAt: input.now,
-      });
+      const swept = nextOrphanSweepJob(
+        mint,
+        holding,
+        activeJobMints,
+        positionBackedMints,
+        terminalByMint,
+        prices[mint] ?? 0,
+        input.walletAddress,
+        input.agentInstanceId,
+        input.settlementDustUsd,
+        input.settlementMaxPendingMs,
+        input.now,
+      );
+      if (swept) jobs.push(swept);
     }
     return jobs;
   });

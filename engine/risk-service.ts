@@ -322,6 +322,30 @@ function isDefensiveProposalAction(
 const rebalanceParamsEqual = (a: RebalanceParams, b: RebalanceParams): boolean =>
   a.newLowerBinId === b.newLowerBinId && a.newUpperBinId === b.newUpperBinId;
 
+function buildAgentValidatedDecision(
+  proposal: AgentProposal,
+  ctx: RiskContext,
+  size: number | undefined,
+  positionId: string | undefined,
+): AgentDecision {
+  return {
+    action: proposal.action,
+    poolAddress: proposal.poolAddress,
+    // A preserve-original waiver keeps the trusted original confidence so a
+    // rounded prompt echo cannot promote a sub-threshold decision into an
+    // execution-approved one.
+    confidence:
+      preservesOriginalDecision(proposal, ctx.originalDecision) &&
+      ctx.originalDecision !== undefined
+        ? ctx.originalDecision.confidence
+        : proposal.confidence,
+    reasoning: proposal.reasoning,
+    ...(size !== undefined && { positionSizeUsd: size }),
+    ...(proposal.rebalanceParams !== undefined && { rebalanceParams: proposal.rebalanceParams }),
+    ...(positionId !== undefined && { positionId }),
+  };
+}
+
 export function evaluateAgentProposal(
   proposal: AgentProposal,
   ctx: RiskContext,
@@ -342,29 +366,10 @@ export function evaluateAgentProposal(
 
   const target = resolveProposalPositionTarget(proposal, ctx);
   if (target.rejection !== undefined) return { valid: false, reason: target.rejection };
-  const positionId = target.positionId;
-
-  const adjustedDecision: AgentDecision = {
-    action: proposal.action,
-    poolAddress: proposal.poolAddress,
-    // A preserve-original waiver keeps the trusted original confidence so a
-    // rounded prompt echo cannot promote a sub-threshold decision into an
-    // execution-approved one.
-    confidence:
-      preservesOriginalDecision(proposal, ctx.originalDecision) &&
-      ctx.originalDecision !== undefined
-        ? ctx.originalDecision.confidence
-        : proposal.confidence,
-    reasoning: proposal.reasoning,
-    ...(sizing.approved && sizing.size !== undefined && { positionSizeUsd: sizing.size }),
-    ...(proposal.rebalanceParams !== undefined && { rebalanceParams: proposal.rebalanceParams }),
-    ...(positionId !== undefined && { positionId }),
-  };
-
   return {
     valid: true,
     reason: "Agent proposal validated",
-    adjustedDecision,
+    adjustedDecision: buildAgentValidatedDecision(proposal, ctx, sizing.size, target.positionId),
   };
 }
 
@@ -468,6 +473,47 @@ type ProposalSizeResult =
   | { readonly approved: false; readonly reason: string }
   | { readonly approved: true; readonly size?: number };
 
+function hasOpenPoolPosition(
+  openPositions: RiskContext["openPositions"],
+  poolAddress: string,
+): boolean {
+  return openPositions.some((p) => p.poolAddress === poolAddress);
+}
+
+function checkEnterProposalSizeGate(proposal: AgentProposal): string | null {
+  if (proposal.action !== "ENTER") return null;
+  if (proposal.positionSizeUsd === undefined) {
+    return "ENTER proposals must include positionSizeUsd";
+  }
+  if (!Number.isFinite(proposal.positionSizeUsd) || proposal.positionSizeUsd <= 0) {
+    return "positionSizeUsd must be a positive finite number for ENTER";
+  }
+  return null;
+}
+
+function checkRebalanceProposalPositionGate(
+  proposal: AgentProposal,
+  ctx: RiskContext,
+): string | null {
+  if (proposal.action !== "REBALANCE") return null;
+  if (proposal.rebalanceParams === undefined) {
+    return "REBALANCE proposals must include rebalanceParams";
+  }
+  if (!hasOpenPoolPosition(ctx.openPositions, proposal.poolAddress)) {
+    return `Cannot REBALANCE pool ${proposal.poolAddress} — no open position`;
+  }
+  return null;
+}
+
+function checkExitProposalPositionGate(proposal: AgentProposal, ctx: RiskContext): string | null {
+  if (proposal.action !== "EXIT") return null;
+  if (hasOpenPoolPosition(ctx.openPositions, proposal.poolAddress)) return null;
+  // An echoed deterministic EXIT on an unheld pool is a no-op, not a bad
+  // proposal — only reject advisor-initiated exits with no position.
+  if (proposal.originalAction === "EXIT") return null;
+  return `Cannot EXIT pool ${proposal.poolAddress} — no open position`;
+}
+
 // 7. Position size must be non-negative and capped to the stricter of the
 //    agent proposal limit and the existing per-pool allocation cap.
 function resolveProposalPositionSize(
@@ -475,51 +521,19 @@ function resolveProposalPositionSize(
   ctx: RiskContext,
   config: AppConfig,
 ): ProposalSizeResult {
-  if (proposal.action === "ENTER" && proposal.positionSizeUsd === undefined) {
-    return { approved: false, reason: "ENTER proposals must include positionSizeUsd" };
-  }
-  if (proposal.action === "ENTER") {
-    if (
-      proposal.positionSizeUsd === undefined ||
-      !Number.isFinite(proposal.positionSizeUsd) ||
-      proposal.positionSizeUsd <= 0
-    ) {
-      return {
-        approved: false,
-        reason: "positionSizeUsd must be a positive finite number for ENTER",
-      };
-    }
-  }
-  if (proposal.action === "REBALANCE") {
-    if (proposal.rebalanceParams === undefined) {
-      return { approved: false, reason: "REBALANCE proposals must include rebalanceParams" };
-    }
-    const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
-    if (!hasPosition) {
-      return {
-        approved: false,
-        reason: `Cannot REBALANCE pool ${proposal.poolAddress} — no open position`,
-      };
-    }
-  }
-  if (proposal.action === "EXIT") {
-    const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
-    // An echoed deterministic EXIT on an unheld pool is a no-op, not a bad
-    // proposal — only reject advisor-initiated exits with no position.
-    if (!hasPosition && proposal.originalAction !== "EXIT") {
-      return {
-        approved: false,
-        reason: `Cannot EXIT pool ${proposal.poolAddress} — no open position`,
-      };
-    }
-  }
+  const enterReason = checkEnterProposalSizeGate(proposal);
+  if (enterReason !== null) return { approved: false, reason: enterReason };
+  const rebalanceReason = checkRebalanceProposalPositionGate(proposal, ctx);
+  if (rebalanceReason !== null) return { approved: false, reason: rebalanceReason };
+  const exitReason = checkExitProposalPositionGate(proposal, ctx);
+  if (exitReason !== null) return { approved: false, reason: exitReason };
   if (proposal.positionSizeUsd === undefined) return { approved: true };
   if (!Number.isFinite(proposal.positionSizeUsd) || proposal.positionSizeUsd < 0) {
     return { approved: false, reason: "positionSizeUsd must be a finite non-negative number" };
   }
   const agentMaxSizeUsd = ctx.portfolioValueUsd * config.agentProposalMaxPositionSizePct;
   const perPoolCapUsd = ctx.portfolioValueUsd * config.maxPerPoolAllocationPct;
-  let cappedSizeUsd = Math.min(proposal.positionSizeUsd, agentMaxSizeUsd, perPoolCapUsd);
+  const cappedSizeUsd = Math.min(proposal.positionSizeUsd, agentMaxSizeUsd, perPoolCapUsd);
   if (proposal.action === "ENTER") {
     const allocationResult = evaluatePerPoolAllocation({
       proposedDepositUsd: cappedSizeUsd,
@@ -533,7 +547,7 @@ function resolveProposalPositionSize(
     if (!allocationResult.approved) {
       return { approved: false, reason: allocationResult.reason };
     }
-    cappedSizeUsd = allocationResult.adjustedDepositUsd;
+    return { approved: true, size: allocationResult.adjustedDepositUsd };
   }
   return { approved: true, size: cappedSizeUsd };
 }

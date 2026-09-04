@@ -148,41 +148,43 @@ function sanitizeStack(stack: string): string {
 
 // ─── Error classification ────────────────────────────────────────────────────
 
-function classifyError(error: Error): ErrorCategory {
-  const msg = error.message ?? "";
-  const stack = error.stack ?? "";
-  const combined = `${msg} ${stack}`.toLowerCase();
+/** Ordered: every substring must hit in the combined message+stack. Checked first. */
+const COMBINED_ALL_RULES: ReadonlyArray<readonly [ReadonlyArray<string>, ErrorCategory]> = [
+  [["bigint", "serializ"], "ONNX_BigInt"],
+  [["sqlite", "vec"], "SQLite_Vec"],
+];
 
-  if (combined.includes("bigint") && combined.includes("serializ")) {
-    return "ONNX_BigInt";
+/** Ordered: first substring hit wins. Covers any-of semantics without predicate helpers. */
+const COMBINED_ANY_RULES: ReadonlyArray<readonly [string, ErrorCategory]> = [
+  ["rate limit", "RPC_RateLimit"],
+  [" 429 ", "RPC_RateLimit"],
+  ["helius", "Helius_Error"],
+  ["solana", "Solana_RPC"],
+  ["rpc error", "Solana_RPC"],
+  ["config", "Config_Error"],
+];
+
+const UPDATE_MESSAGE_KEYWORDS: ReadonlyArray<string> = ["update", "tarball", "download"];
+
+function matchCombinedRule(combined: string): ErrorCategory | null {
+  for (const rule of COMBINED_ALL_RULES) {
+    if (rule[0].every((part) => combined.includes(part))) return rule[1];
   }
-  if (combined.includes("sqlite") && combined.includes("vec")) {
-    return "SQLite_Vec";
+  for (const rule of COMBINED_ANY_RULES) {
+    if (combined.includes(rule[0])) return rule[1];
   }
-  if (combined.includes("rate limit") || combined.includes(" 429 ")) {
-    return "RPC_RateLimit";
-  }
-  if (combined.includes("helius")) {
-    return "Helius_Error";
-  }
-  if (combined.includes("solana") || combined.includes("rpc error")) {
-    return "Solana_RPC";
-  }
-  if (combined.includes("config")) {
-    return "Config_Error";
-  }
+  return null;
+}
+
+function classifyError(error: Error): ErrorCategory {
+  const combined = `${error.message ?? ""} ${error.stack ?? ""}`.toLowerCase();
+  const matched = matchCombinedRule(combined);
+  if (matched !== null) return matched;
   // Only inspect the error message for update-related keywords; stack traces
   // from test frameworks or Vitest internals (e.g. "updateSnapshot") must not
   // cause unrelated errors to be classified as UpdateFailure.
-  const lowerMsg = msg.toLowerCase();
-  if (
-    lowerMsg.includes("update") ||
-    lowerMsg.includes("tarball") ||
-    lowerMsg.includes("download")
-  ) {
-    return "UpdateFailure";
-  }
-
+  const lowerMsg = (error.message ?? "").toLowerCase();
+  if (UPDATE_MESSAGE_KEYWORDS.some((keyword) => lowerMsg.includes(keyword))) return "UpdateFailure";
   return "Unknown";
 }
 
@@ -193,6 +195,60 @@ let idCounter = 0;
 function generateId(): string {
   idCounter++;
   return `${Date.now().toString(36)}-${idCounter.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function resolveReportingActive(
+  configEnabled: boolean | undefined,
+  reportingEnv: string | undefined,
+  configOptOut: boolean | undefined,
+): boolean {
+  if (reportingEnv === "false") return false;
+  if (configOptOut ?? !readTelemetryPreference().enabled) return false;
+  if (configEnabled !== undefined) return configEnabled;
+  return reportingEnv !== "false";
+}
+
+function resolveReporterEndpoint(
+  explicitEndpoint: string | undefined,
+  active: boolean,
+): string | undefined {
+  if (explicitEndpoint !== undefined) return explicitEndpoint;
+  if (active) return DEFAULT_ERROR_ENDPOINT;
+  return undefined;
+}
+
+function resolveAgentId(configAgentId: string | undefined, envAgentId: string | undefined): string {
+  if (configAgentId !== undefined) return configAgentId;
+  if (envAgentId !== undefined) return envAgentId;
+  return "engine";
+}
+
+function unrefFlushTimer(timerId: ReturnType<typeof setInterval>): void {
+  if (timerId instanceof Object && "unref" in timerId) {
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+    (timerId as NodeJS.Timeout).unref();
+  }
+}
+
+function buildErrorReport(
+  agentId: string,
+  error: Error,
+  severity: ErrorSeverity | undefined,
+  cycleId: string | undefined,
+  poolAddress: string | undefined,
+): ErrorReport {
+  const report: ErrorReport = {
+    id: generateId(),
+    agentId,
+    ts: new Date().toISOString(),
+    message: sanitizeMessage(error.message),
+    stack: error.stack ? sanitizeStack(error.stack) : "",
+    category: classifyError(error),
+    severity: severity ?? "medium",
+  };
+  if (cycleId !== undefined) report.cycleId = cycleId;
+  if (poolAddress !== undefined) report.poolAddress = poolAddress;
+  return report;
 }
 
 // ─── ErrorReporter class ─────────────────────────────────────────────────────
@@ -210,29 +266,24 @@ export class ErrorReporter {
 
   constructor(config: ErrorReporterConfig = {}) {
     const env = getPrismEnv();
-    const explicitEndpoint = config.endpoint ?? env.PRISM_ERROR_ENDPOINT;
-    const reportingEnv = env.PRISM_ERROR_REPORTING;
-    const optOut = config.optOut ?? !readTelemetryPreference().enabled;
-    const explicitEnabled = config.enabled ?? reportingEnv !== "false";
-    const envDisabled = reportingEnv === "false";
-    this.endpoint =
-      explicitEndpoint ??
-      (explicitEnabled && !envDisabled && !optOut ? DEFAULT_ERROR_ENDPOINT : undefined);
-    this.enabled = explicitEnabled && !envDisabled && !optOut;
-    this.agentId = config.agentId ?? env.PRISM_AGENT_ID ?? "engine";
+    const active = resolveReportingActive(config.enabled, env.PRISM_ERROR_REPORTING, config.optOut);
+    this.endpoint = resolveReporterEndpoint(config.endpoint ?? env.PRISM_ERROR_ENDPOINT, active);
+    this.enabled = active;
+    this.agentId = resolveAgentId(config.agentId, env.PRISM_AGENT_ID);
     this.batchSize = config.batchSize ?? DEFAULT_BATCH_SIZE;
     this.flushIntervalMs = config.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
 
     if (this.enabled && this.endpoint) {
-      this.timerId = setInterval(() => {
-        Effect.runFork(this.flushEffect());
-      }, this.flushIntervalMs);
-      // Allow the process to exit even if the timer is still active (Bun/Node return a Timeout object)
-      if (this.timerId !== null && this.timerId instanceof Object && "unref" in this.timerId) {
-        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-        (this.timerId as NodeJS.Timeout).unref();
-      }
+      this.startFlushTimer();
     }
+  }
+
+  private startFlushTimer(): void {
+    this.timerId = setInterval(() => {
+      Effect.runFork(this.flushEffect());
+    }, this.flushIntervalMs);
+    // Allow the process to exit even if the timer is still active (Bun/Node return a Timeout object)
+    unrefFlushTimer(this.timerId);
   }
 
   setAppVersion(version: string): void {
@@ -243,23 +294,17 @@ export class ErrorReporter {
     if (!this.enabled || !this.endpoint) {
       return;
     }
+    const report = buildErrorReport(
+      this.agentId,
+      error,
+      context?.severity,
+      context?.cycleId,
+      context?.poolAddress,
+    );
+    this.enqueueReport(report);
+  }
 
-    const category = classifyError(error);
-    const sanitizedMessage = sanitizeMessage(error.message);
-    const sanitizedStack = error.stack ? sanitizeStack(error.stack) : "";
-
-    const report: ErrorReport = {
-      id: generateId(),
-      agentId: this.agentId,
-      ts: new Date().toISOString(),
-      message: sanitizedMessage,
-      stack: sanitizedStack,
-      category,
-      severity: context?.severity ?? "medium",
-    };
-    if (context?.cycleId !== undefined) report.cycleId = context.cycleId;
-    if (context?.poolAddress !== undefined) report.poolAddress = context.poolAddress;
-
+  private enqueueReport(report: ErrorReport): void {
     if (this.pending.length >= MAX_PENDING_BUFFER) {
       this.pending.shift();
     }
@@ -269,7 +314,7 @@ export class ErrorReporter {
       Effect.runFork(this.flushEffect());
     }
 
-    console.error(`[ErrorReporter] ${category}: ${sanitizedMessage}`);
+    console.error(`[ErrorReporter] ${report.category}: ${report.message}`);
   }
 
   flushEffect(timeoutMs = 10_000): Effect.Effect<void, never> {

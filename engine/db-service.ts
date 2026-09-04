@@ -1783,29 +1783,33 @@ function rowToSnapshot(row: DbRow): PoolSnapshot {
   };
 }
 
+/** Required audit text column — NULL/absent becomes "". */
+function auditRequiredText(value: SqlValue | undefined): string {
+  // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
+  return String((value ?? "") as unknown);
+}
+
+/** Optional audit text column — falsy (NULL/"") stays null. */
+function auditOptionalText(value: SqlValue | undefined): string | null {
+  // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
+  return value ? String(value as unknown) : null;
+}
+
 function rowToAudit(row: DbRow): AuditRecord {
   return {
     id: String(row.id),
     timestamp: Number(row.timestamp ?? 0),
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    cycleId: String((row.cycle_id ?? "") as unknown),
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    poolAddress: String((row.pool_address ?? "") as unknown),
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    action: String((row.action ?? "") as unknown),
+    cycleId: auditRequiredText(row.cycle_id),
+    poolAddress: auditRequiredText(row.pool_address),
+    action: auditRequiredText(row.action),
     confidence: Number(row.confidence ?? 0),
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    reasoning: String((row.reasoning ?? "") as unknown),
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    metricsJson: row.metrics_json ? String(row.metrics_json as unknown) : null,
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    riskResultJson: row.risk_result_json ? String(row.risk_result_json as unknown) : null,
+    reasoning: auditRequiredText(row.reasoning),
+    metricsJson: auditOptionalText(row.metrics_json),
+    riskResultJson: auditOptionalText(row.risk_result_json),
     executed: Boolean(row.executed),
     paperTrading: Boolean(row.paper_trading),
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    txSignature: row.tx_signature ? String(row.tx_signature as unknown) : null,
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    error: row.error ? String(row.error as unknown) : null,
+    txSignature: auditOptionalText(row.tx_signature),
+    error: auditOptionalText(row.error),
   };
 }
 

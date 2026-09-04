@@ -43,6 +43,19 @@ function sendReply(promptId: number | undefined): void {
 }
 
 const rl = readline.createInterface({ input: process.stdin });
+function isPermissionReply(id: number | undefined, method: string | undefined): boolean {
+  return id === PERMISSION_REQUEST_ID && String(method) !== method;
+}
+
+function isBadProtocolVersion(params: JsonRecord | null | undefined): boolean {
+  return (
+    params === null ||
+    params === undefined ||
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+    (params.protocolVersion as number) !== params.protocolVersion
+  );
+}
+
 rl.on("line", (line) => {
   if (!line.trim()) return;
   let req: { id?: number; method?: string; params?: JsonRecord };
@@ -58,7 +71,7 @@ rl.on("line", (line) => {
   // reply (a response carrying our id and no method). The content is irrelevant;
   // receiving it (rather than timing out) proves the host answers inbound ACP requests.
   if (awaitingPermissionAck) {
-    if (id === PERMISSION_REQUEST_ID && String(method) !== method) {
+    if (isPermissionReply(id, method)) {
       awaitingPermissionAck = false;
       sendReply(pendingPromptId);
     }
@@ -66,12 +79,7 @@ rl.on("line", (line) => {
   }
 
   if (method === "initialize") {
-    if (
-      params === null ||
-      params === undefined ||
-      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-      (params.protocolVersion as number) !== params.protocolVersion
-    ) {
+    if (isBadProtocolVersion(params)) {
       send({
         jsonrpc: "2.0",
         id,
@@ -82,7 +90,7 @@ rl.on("line", (line) => {
     send({
       jsonrpc: "2.0",
       id,
-      result: { protocolVersion: params.protocolVersion, agentCapabilities: {} },
+      result: { protocolVersion: params?.protocolVersion, agentCapabilities: {} },
     });
   } else if (method === "session/new") {
     send({ jsonrpc: "2.0", id, result: { sessionId: "sess-test" } });

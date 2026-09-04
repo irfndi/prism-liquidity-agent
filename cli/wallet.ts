@@ -35,6 +35,95 @@ function resolveImportPath(candidate: string): string {
   return callerCwd ? path.resolve(callerCwd, candidate) : candidate;
 }
 
+function guardWalletAbsent(force: boolean): void {
+  if (fs.existsSync(WALLET_FILE) && !force) {
+    console.error("Error: Wallet already exists. Use --force to overwrite.");
+    process.exit(1);
+  }
+}
+
+function writeWalletFile(keypair: Keypair): string {
+  const walletData = {
+    pubkey: keypair.publicKey.toBase58(),
+    secretKey: Array.from(keypair.secretKey),
+  };
+  fs.writeFileSync(WALLET_FILE, JSON.stringify(walletData, null, 2), { mode: 0o600 });
+  fs.chmodSync(WALLET_FILE, 0o600);
+  return walletData.pubkey;
+}
+
+function syncWalletToCloud(pubkey: string, command: string): void {
+  const creds = readCredentials();
+  if (!creds) return;
+  void prismApiPost("/v1/wallet", { pubkey }, { apiKey: creds.apiKey }).then((result) => {
+    if (!result.ok) {
+      console.warn(
+        `Warning: Could not sync wallet to cloud. Run 'prism wallet ${command}' again if needed.`,
+      );
+    }
+  });
+}
+
+function loadKeypairFile(resolvedPath: string, displayPath: string): number[] {
+  try {
+    return JSON.parse(fs.readFileSync(resolvedPath, "utf-8"));
+  } catch {
+    console.error(`Error: Failed to read or parse keypair file '${displayPath}'`);
+    process.exit(1);
+  }
+}
+
+function parseStdinKeypair(input: string): number[] {
+  try {
+    return JSON.parse(input);
+  } catch {
+    console.error("Error: Invalid keypair JSON from stdin");
+    process.exit(1);
+  }
+}
+
+function parseInlineKeypair(keypairStr: string): number[] {
+  console.warn(
+    "⚠️  SECURITY WARNING: Providing a keypair as a CLI argument exposes it to `ps aux` and shell history. Use --file or --stdin instead.",
+  );
+  try {
+    return JSON.parse(keypairStr);
+  } catch {
+    console.error(
+      "Error: Invalid keypair JSON, and no such keypair file exists. Provide a valid JSON array or an existing file path.",
+    );
+    process.exit(1);
+  }
+}
+
+async function readImportSecretKey(
+  keypairStr: string | undefined,
+  fileOpt: string | undefined,
+  stdinOpt: boolean,
+): Promise<number[]> {
+  if (fileOpt) return loadKeypairFile(resolveImportPath(fileOpt), fileOpt);
+  if (stdinOpt) return parseStdinKeypair(await readStdin());
+  if (keypairStr && isExistingFile(resolveImportPath(keypairStr))) {
+    return loadKeypairFile(resolveImportPath(keypairStr), keypairStr);
+  }
+  if (keypairStr) return parseInlineKeypair(keypairStr);
+  console.error(
+    "Error: Keypair required. Provide via --file <path>, --stdin, or as a positional argument (not recommended).",
+  );
+  process.exit(1);
+}
+
+function buildImportKeypair(secretKey: number[]): Keypair {
+  try {
+    return Keypair.fromSecretKey(Uint8Array.from(secretKey));
+  } catch {
+    console.error(
+      "Error: Invalid keypair. The secret key array may have the wrong length or format.",
+    );
+    process.exit(1);
+  }
+}
+
 // Effective-wallet resolution, mirroring the engine (engine/config-service.ts):
 // WALLET_PRIVATE_KEY (base58, decoded exactly like engine/adapter-service.ts) takes
 // precedence, then the local keystore written by `prism wallet generate|import` — the
@@ -83,37 +172,12 @@ export const walletCommand = new Command("wallet")
       .option("--force", "Overwrite existing wallet")
       .action((options) => {
         ensureWalletDir();
-        if (fs.existsSync(WALLET_FILE) && !options.force) {
-          console.error("Error: Wallet already exists. Use --force to overwrite.");
-          process.exit(1);
-        }
-        const keypair = Keypair.generate();
-        const walletData = {
-          pubkey: keypair.publicKey.toBase58(),
-          secretKey: Array.from(keypair.secretKey),
-        };
-        fs.writeFileSync(WALLET_FILE, JSON.stringify(walletData, null, 2), {
-          mode: 0o600,
-        });
-        fs.chmodSync(WALLET_FILE, 0o600);
+        guardWalletAbsent(options.force);
+        const pubkey = writeWalletFile(Keypair.generate());
         console.log("✓ New wallet created");
-        console.log(`  Pubkey: ${walletData.pubkey}`);
+        console.log(`  Pubkey: ${pubkey}`);
         console.log(`  Saved to: ${WALLET_FILE}`);
-
-        const creds = readCredentials();
-        if (creds) {
-          void prismApiPost(
-            "/v1/wallet",
-            { pubkey: walletData.pubkey },
-            { apiKey: creds.apiKey },
-          ).then((result) => {
-            if (!result.ok) {
-              console.warn(
-                "Warning: Could not sync wallet to cloud. Run 'prism wallet generate' again if needed.",
-              );
-            }
-          });
-        }
+        syncWalletToCloud(pubkey, "generate");
       }),
   )
   .addCommand(
@@ -163,97 +227,15 @@ Examples:
       )
       .action(async (keypairStr, options) => {
         ensureWalletDir();
-        if (fs.existsSync(WALLET_FILE) && !options.force) {
-          console.error("Error: Wallet already exists. Use --force to overwrite.");
-          process.exit(1);
-        }
-
-        let secretKey: number[];
-
-        if (options.file) {
-          const filePath = resolveImportPath(options.file);
-          try {
-            const fileContent = fs.readFileSync(filePath, "utf-8");
-            secretKey = JSON.parse(fileContent);
-          } catch (err) {
-            console.error(`Error: Failed to read or parse keypair file '${options.file}'`);
-            process.exit(1);
-          }
-        } else if (options.stdin) {
-          const input = await readStdin();
-          try {
-            secretKey = JSON.parse(input);
-          } catch (err) {
-            console.error("Error: Invalid keypair JSON from stdin");
-            process.exit(1);
-          }
-        } else if (keypairStr) {
-          const candidatePath = resolveImportPath(keypairStr);
-          if (isExistingFile(candidatePath)) {
-            // A bare file path passed positionally, e.g. `prism wallet import ./kp.json`
-            // (resolved against the caller's directory). A JSON array string is never an
-            // existing file, so this detection is unambiguous.
-            try {
-              const fileContent = fs.readFileSync(candidatePath, "utf-8");
-              secretKey = JSON.parse(fileContent);
-            } catch {
-              console.error(`Error: Failed to read or parse keypair file '${keypairStr}'`);
-              process.exit(1);
-            }
-          } else {
-            console.warn(
-              "⚠️  SECURITY WARNING: Providing a keypair as a CLI argument exposes it to `ps aux` and shell history. Use --file or --stdin instead.",
-            );
-            try {
-              secretKey = JSON.parse(keypairStr);
-            } catch {
-              console.error(
-                "Error: Invalid keypair JSON, and no such keypair file exists. Provide a valid JSON array or an existing file path.",
-              );
-              process.exit(1);
-            }
-          }
-        } else {
-          console.error(
-            "Error: Keypair required. Provide via --file <path>, --stdin, or as a positional argument (not recommended).",
-          );
-          process.exit(1);
-        }
-
-        let keypair: Keypair;
-        try {
-          keypair = Keypair.fromSecretKey(Uint8Array.from(secretKey));
-        } catch (err) {
-          console.error(
-            "Error: Invalid keypair. The secret key array may have the wrong length or format.",
-          );
-          process.exit(1);
-        }
-        const walletData = {
-          pubkey: keypair.publicKey.toBase58(),
-          secretKey: Array.from(keypair.secretKey),
-        };
-        fs.writeFileSync(WALLET_FILE, JSON.stringify(walletData, null, 2), {
-          mode: 0o600,
-        });
-        fs.chmodSync(WALLET_FILE, 0o600);
+        guardWalletAbsent(options.force);
+        // A bare file path passed positionally, e.g. `prism wallet import ./kp.json`
+        // (resolved against the caller's directory). A JSON array string is never an
+        // existing file, so this detection is unambiguous.
+        const secretKey = await readImportSecretKey(keypairStr, options.file, options.stdin);
+        const pubkey = writeWalletFile(buildImportKeypair(secretKey));
         console.log("✓ Wallet imported");
-        console.log(`  Pubkey: ${walletData.pubkey}`);
-
-        const creds = readCredentials();
-        if (creds) {
-          void prismApiPost(
-            "/v1/wallet",
-            { pubkey: walletData.pubkey },
-            { apiKey: creds.apiKey },
-          ).then((result) => {
-            if (!result.ok) {
-              console.warn(
-                "Warning: Could not sync wallet to cloud. Run 'prism wallet import' again if needed.",
-              );
-            }
-          });
-        }
+        console.log(`  Pubkey: ${pubkey}`);
+        syncWalletToCloud(pubkey, "import");
       }),
   );
 

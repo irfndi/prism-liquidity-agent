@@ -48,21 +48,28 @@ function check(name: string, status: DoctorStatus, message: string): DoctorCheck
 
 // Mirror engine/config-service.ts PAPER_TRADING parsing (Effect Config.boolean):
 // true/yes/on/1 = paper, false/no/off/0 = live, anything else = default paper.
+const PAPER_TRUTHY = ["true", "yes", "on", "1"];
+const PAPER_FALSY = ["false", "no", "off", "0"];
+
 function isPaperTrading(): boolean {
-  switch (process.env.PAPER_TRADING?.trim().toLowerCase()) {
-    case "true":
-    case "yes":
-    case "on":
-    case "1":
-      return true;
-    case "false":
-    case "no":
-    case "off":
-    case "0":
-      return false;
-    default:
-      return true;
-  }
+  const raw = process.env.PAPER_TRADING?.trim().toLowerCase() ?? "";
+  if (PAPER_TRUTHY.includes(raw)) return true;
+  if (PAPER_FALSY.includes(raw)) return false;
+  return true;
+}
+
+interface RpcEnv {
+  readonly primary: string;
+  readonly helius: string;
+  readonly fallback: string;
+}
+
+function readRpcEnv(): RpcEnv {
+  return {
+    primary: process.env.SOLANA_RPC_URL?.trim() ?? "",
+    helius: process.env.HELIUS_API_KEY?.trim() ?? "",
+    fallback: process.env.SOLANA_RPC_FALLBACK_URL?.trim() ?? "",
+  };
 }
 
 function checkDirectory(name: string, directory: string, fix: boolean): DoctorCheck {
@@ -127,22 +134,12 @@ function checkRuntime(): DoctorCheck {
     : check("runtime", "fail", `Bun ${Bun.version} is below 1.4.0`);
 }
 
-function checkRpc(): DoctorCheck {
-  const primary = process.env.SOLANA_RPC_URL?.trim() ?? "";
-  const helius = process.env.HELIUS_API_KEY?.trim() ?? "";
-  const fallback = process.env.SOLANA_RPC_FALLBACK_URL?.trim() ?? "";
-  const paperTrading = isPaperTrading();
-  const effectivePrimary = primary || (helius ? "helius" : "");
-  if (!effectivePrimary) {
-    return check("rpc", "fail", "No SOLANA_RPC_URL or HELIUS_API_KEY configured");
-  }
-  if (primary === "https://api.mainnet-beta.solana.com") {
-    return check(
-      "rpc",
-      paperTrading ? "warn" : "fail",
-      "Public Solana RPC is configured; use a paid/private provider for live trading",
-    );
-  }
+function checkRpcPair(
+  primary: string,
+  fallback: string,
+  helius: string,
+  paperTrading: boolean,
+): DoctorCheck {
   if (
     fallback &&
     normalizeHeliusUrl(fallback, helius).url === normalizeHeliusUrl(primary, helius).url
@@ -157,6 +154,52 @@ function checkRpc(): DoctorCheck {
     "pass",
     fallback ? "Primary and fallback RPC providers configured" : "Primary RPC configured",
   );
+}
+
+function checkRpc(): DoctorCheck {
+  const { primary, helius, fallback } = readRpcEnv();
+  const paperTrading = isPaperTrading();
+  if (!primary && !helius) {
+    return check("rpc", "fail", "No SOLANA_RPC_URL or HELIUS_API_KEY configured");
+  }
+  if (primary === "https://api.mainnet-beta.solana.com") {
+    return check(
+      "rpc",
+      paperTrading ? "warn" : "fail",
+      "Public Solana RPC is configured; use a paid/private provider for live trading",
+    );
+  }
+  return checkRpcPair(primary, fallback, helius, paperTrading);
+}
+
+async function readHealthPayload(
+  res: Response,
+  status: number,
+): Promise<{ ok: boolean; status: number; error?: string }> {
+  let json: { result?: unknown; error?: { message?: string } };
+  try {
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+    json = (await res.json()) as { result?: unknown; error?: { message?: string } };
+  } catch (parseErr) {
+    return {
+      ok: false,
+      status,
+      error: maskHeliusUrl(
+        `Invalid JSON response: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+      ),
+    };
+  }
+  if (json.error) {
+    return { ok: false, status, error: maskHeliusUrl(json.error.message ?? "RPC error") };
+  }
+  if (json.result !== "ok") {
+    return {
+      ok: false,
+      status,
+      error: `getHealth returned unexpected result: ${JSON.stringify(json.result ?? null)}`,
+    };
+  }
+  return { ok: true, status };
 }
 
 async function probeRpcEndpoint(
@@ -178,34 +221,7 @@ async function probeRpcEndpoint(
     if (!res.ok) {
       return { ok: false, status: res.status, error: `HTTP ${res.status}` };
     }
-    let json: { result?: unknown; error?: { message?: string } };
-    try {
-      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-      json = (await res.json()) as { result?: unknown; error?: { message?: string } };
-    } catch (parseErr) {
-      return {
-        ok: false,
-        status: res.status,
-        error: maskHeliusUrl(
-          `Invalid JSON response: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
-        ),
-      };
-    }
-    if (json.error) {
-      return {
-        ok: false,
-        status: res.status,
-        error: maskHeliusUrl(json.error.message ?? "RPC error"),
-      };
-    }
-    if (json.result !== "ok") {
-      return {
-        ok: false,
-        status: res.status,
-        error: `getHealth returned unexpected result: ${JSON.stringify(json.result ?? null)}`,
-      };
-    }
-    return { ok: true, status: res.status };
+    return readHealthPayload(res, res.status);
   } catch (err) {
     return {
       ok: false,
@@ -215,10 +231,20 @@ async function probeRpcEndpoint(
   }
 }
 
+async function checkFallbackConnectivity(fallback: string, helius: string): Promise<DoctorCheck> {
+  const fallbackResult = await probeRpcEndpoint(normalizeHeliusUrl(fallback, helius).url);
+  if (!fallbackResult.ok) {
+    return check(
+      "rpc-connectivity",
+      "warn",
+      `Primary RPC reachable but fallback failed: ${fallbackResult.error}`,
+    );
+  }
+  return check("rpc-connectivity", "pass", "Primary and fallback RPC endpoints reachable");
+}
+
 async function checkRpcConnectivity(): Promise<DoctorCheck> {
-  const primary = process.env.SOLANA_RPC_URL?.trim() ?? "";
-  const helius = process.env.HELIUS_API_KEY?.trim() ?? "";
-  const fallback = process.env.SOLANA_RPC_FALLBACK_URL?.trim() ?? "";
+  const { primary, helius, fallback } = readRpcEnv();
 
   const effectivePrimary =
     primary || (helius ? `https://mainnet.helius-rpc.com/?api-key=${helius}` : "");
@@ -227,25 +253,12 @@ async function checkRpcConnectivity(): Promise<DoctorCheck> {
     return check("rpc-connectivity", "warn", "No RPC endpoint configured; skipping live probe");
   }
 
-  const normalizedPrimary = normalizeHeliusUrl(effectivePrimary, helius).url;
-  const primaryResult = await probeRpcEndpoint(normalizedPrimary);
+  const primaryResult = await probeRpcEndpoint(normalizeHeliusUrl(effectivePrimary, helius).url);
   if (!primaryResult.ok) {
     return check("rpc-connectivity", "fail", `Primary RPC unreachable: ${primaryResult.error}`);
   }
 
-  if (fallback) {
-    const normalizedFallback = normalizeHeliusUrl(fallback, helius).url;
-    const fallbackResult = await probeRpcEndpoint(normalizedFallback);
-    if (!fallbackResult.ok) {
-      return check(
-        "rpc-connectivity",
-        "warn",
-        `Primary RPC reachable but fallback failed: ${fallbackResult.error}`,
-      );
-    }
-    return check("rpc-connectivity", "pass", "Primary and fallback RPC endpoints reachable");
-  }
-
+  if (fallback) return checkFallbackConnectivity(fallback, helius);
   return check("rpc-connectivity", "pass", "Primary RPC endpoint reachable");
 }
 
@@ -321,6 +334,16 @@ function checkPriceProviders(): DoctorCheck {
   );
 }
 
+function resolveMarketScanFlag(
+  spec: Parameters<typeof parseDbConfigValue>[0] | undefined,
+  envRaw: string | undefined,
+  marketScanEnabled: boolean | undefined,
+): boolean {
+  if (spec === undefined) return false;
+  if (envRaw !== undefined) return parseDbConfigValue(spec, envRaw) === true;
+  return marketScanEnabled === true;
+}
+
 export /**
  * Validate that the FULL config actually loads (env + .env + DB sidecar
  * overrides, with every numeric clamp and structured warning), not just that
@@ -345,17 +368,11 @@ async function checkConfig(): Promise<DoctorCheck> {
     const spec = findDbConfigSpec("MARKET_SCAN_ENABLED");
     const envRaw = process.env.MARKET_SCAN_ENABLED;
     // The market-scan toggle is forward-declared config on the base AppConfig;
-    // read it through a concrete view of the effective value rather than a
+    // read it through a named view of the effective value rather than a
     // widened dictionary lookup.
     // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-    const marketScanEnabled = (config as { readonly marketScanEnabled?: boolean })
-      .marketScanEnabled;
-    const marketScan =
-      spec === undefined
-        ? false
-        : envRaw !== undefined
-          ? parseDbConfigValue(spec, envRaw) === true
-          : marketScanEnabled === true;
+    const configView = config as { readonly marketScanEnabled?: boolean };
+    const marketScan = resolveMarketScanFlag(spec, envRaw, configView.marketScanEnabled);
     return check(
       "config",
       "pass",
@@ -366,13 +383,12 @@ async function checkConfig(): Promise<DoctorCheck> {
   }
 }
 
-async function runDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
-  const fix = options.fix === true;
-  const sourceInstall = isSourceInstall(getPrismConfigDir());
+function collectLocalChecks(fix: boolean, sourceInstall: boolean): DoctorCheck[] {
+  const repair = fix && !sourceInstall;
   const checks: DoctorCheck[] = [checkRuntime()];
-  checks.push(checkDirectory("config", getPrismConfigDir(), fix && !sourceInstall));
-  checks.push(checkDirectory("data", getPrismDataDir(), fix && !sourceInstall));
-  checks.push(checkDirectory("logs", getPrismLogsDir(), fix && !sourceInstall));
+  checks.push(checkDirectory("config", getPrismConfigDir(), repair));
+  checks.push(checkDirectory("data", getPrismDataDir(), repair));
+  checks.push(checkDirectory("logs", getPrismLogsDir(), repair));
 
   const envPath = getPrismEnvPath();
   checks.push(
@@ -388,40 +404,55 @@ async function runDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
   checks.push(checkMemory());
   checks.push(checkNativeBindings());
   checks.push(checkRpc());
+  return checks;
+}
+
+function checkTelemetry(): DoctorCheck {
+  const telemetryEnabled =
+    process.env.PRISM_ERROR_REPORTING !== "false" && readTelemetryPreference().enabled;
+  if (!telemetryEnabled) {
+    return check("error telemetry", "warn", "Disabled by explicit local or environment opt-out");
+  }
+  if (readCredentials() === null) {
+    return check(
+      "error telemetry",
+      "warn",
+      "Enabled but not registered — error reports are queued until an API key is available",
+    );
+  }
+  return check("error telemetry", "pass", "Enabled by default for registered agents");
+}
+
+async function runDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
+  const fix = options.fix === true;
+  const checks = collectLocalChecks(fix, isSourceInstall(getPrismConfigDir()));
   const [rpcConnectivity, heliusApiKey] = await Promise.all([
     checkRpcConnectivity(),
     checkHeliusApiKey(),
   ]);
-  checks.push(rpcConnectivity);
-  checks.push(heliusApiKey);
+  checks.push(rpcConnectivity, heliusApiKey);
   checks.push(checkPriceProviders());
   checks.push(checkWallet());
   checks.push(await checkConfig());
   checks.push(await checkRegistration());
-  const telemetryEnabled =
-    process.env.PRISM_ERROR_REPORTING !== "false" && readTelemetryPreference().enabled;
-  const telemetryRegistered = readCredentials() !== null;
-  if (!telemetryEnabled) {
-    checks.push(
-      check("error telemetry", "warn", "Disabled by explicit local or environment opt-out"),
-    );
-  } else if (!telemetryRegistered) {
-    checks.push(
-      check(
-        "error telemetry",
-        "warn",
-        "Enabled but not registered — error reports are queued until an API key is available",
-      ),
-    );
-  } else {
-    checks.push(check("error telemetry", "pass", "Enabled by default for registered agents"));
-  }
+  checks.push(checkTelemetry());
 
   return {
     ok: checks.every((item) => item.status !== "fail"),
     version: getCurrentVersion(),
     checks,
   };
+}
+
+function formatCheckLine(item: DoctorCheck): string {
+  const label = item.status === "pass" ? "PASS" : item.status === "warn" ? "WARN" : "FAIL";
+  return `${label} ${item.name}: ${item.message}`;
+}
+
+function printHumanReport(report: DoctorReport): void {
+  console.log(`Prism doctor ${report.version}`);
+  for (const item of report.checks) console.log(formatCheckLine(item));
+  console.log(report.ok ? "Doctor passed." : "Doctor found blocking issues.");
 }
 
 export const doctorCommand = new Command("doctor")
@@ -433,13 +464,7 @@ export const doctorCommand = new Command("doctor")
     if (options.json) {
       console.log(JSON.stringify(report, null, 2));
     } else {
-      console.log(`Prism doctor ${report.version}`);
-      for (const item of report.checks) {
-        console.log(
-          `${item.status === "pass" ? "PASS" : item.status === "warn" ? "WARN" : "FAIL"} ${item.name}: ${item.message}`,
-        );
-      }
-      console.log(report.ok ? "Doctor passed." : "Doctor found blocking issues.");
+      printHumanReport(report);
     }
     if (!report.ok) process.exitCode = 1;
   });

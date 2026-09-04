@@ -7,6 +7,34 @@ function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: Layer.Layer<R, neve
   return Effect.runSync(Effect.provide(effect, layer));
 }
 
+function positionFinancialDefaults(
+  depositedUsd: number | undefined,
+  currentValueUsd: number | undefined,
+  highestValueUsd: number | null | undefined,
+  trailingStopThreshold: number | null | undefined,
+  lastRebalanceAt: number | undefined,
+) {
+  return {
+    depositedUsd: depositedUsd ?? 1000,
+    currentValueUsd: currentValueUsd ?? 1000,
+    highestValueUsd: highestValueUsd ?? null,
+    trailingStopThreshold: trailingStopThreshold ?? null,
+    lastRebalanceAt: lastRebalanceAt ?? 0,
+  };
+}
+
+function positionSignalDefaults(
+  paperExitedAt: number | null | undefined,
+  entrySignalTimestamp: number | null | undefined,
+  entrySignalSnapshotId: number | null | undefined,
+) {
+  return {
+    paperExitedAt: paperExitedAt ?? null,
+    entrySignalTimestamp: entrySignalTimestamp ?? null,
+    entrySignalSnapshotId: entrySignalSnapshotId ?? null,
+  };
+}
+
 function makePosition(
   overrides: Partial<{
     positionId: string;
@@ -28,8 +56,13 @@ function makePosition(
     positionId: overrides.positionId ?? positionPubKey ?? `paper-${poolAddress}`,
     poolAddress,
     positionPubKey,
-    depositedUsd: overrides.depositedUsd ?? 1000,
-    currentValueUsd: overrides.currentValueUsd ?? 1000,
+    ...positionFinancialDefaults(
+      overrides.depositedUsd,
+      overrides.currentValueUsd,
+      overrides.highestValueUsd,
+      overrides.trailingStopThreshold,
+      overrides.lastRebalanceAt,
+    ),
     tokenXSymbol: "SOL",
     tokenYSymbol: "USDC",
     activeBinId: 5000,
@@ -39,12 +72,11 @@ function makePosition(
     outOfRangeSince: null,
     oorCycleCount: 0,
     lastFeeClaimAt: Date.now(),
-    trailingStopThreshold: overrides.trailingStopThreshold ?? null,
-    highestValueUsd: overrides.highestValueUsd ?? null,
-    lastRebalanceAt: overrides.lastRebalanceAt ?? 0,
-    paperExitedAt: overrides.paperExitedAt ?? null,
-    entrySignalTimestamp: overrides.entrySignalTimestamp ?? null,
-    entrySignalSnapshotId: overrides.entrySignalSnapshotId ?? null,
+    ...positionSignalDefaults(
+      overrides.paperExitedAt,
+      overrides.entrySignalTimestamp,
+      overrides.entrySignalSnapshotId,
+    ),
     entryPriceUsd: null,
     entryAmountXUsd: null,
     entryAmountYUsd: null,

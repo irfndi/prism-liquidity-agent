@@ -272,43 +272,81 @@ export function getPlatformKey(): string {
   return `${os}-${arch}`;
 }
 
+/** Release-asset lookup helpers for githubReleaseToInfo (positional args per repo rule). */
+type ReleaseAsset = GitHubRelease["assets"][number];
+
+/** Download URL of a release asset, empty when the asset is absent (5 call sites). */
+function assetUrl(asset: ReleaseAsset | undefined): string {
+  return asset?.browser_download_url ?? "";
+}
+
+function findTarballAsset(assets: GitHubRelease["assets"]): ReleaseAsset | undefined {
+  return assets.find(
+    (a) => a.name.endsWith(".tar.gz") && !a.name.endsWith(".sha256") && !a.name.endsWith(".asc"),
+  );
+}
+
+function findSha256Asset(
+  assets: GitHubRelease["assets"],
+  tarballAsset: ReleaseAsset | undefined,
+): ReleaseAsset | undefined {
+  const tarballName = tarballAsset?.name;
+  if (tarballName !== undefined) {
+    const expected = `${tarballName}.sha256`;
+    return assets.find((a) => a.name === expected);
+  }
+  return assets.find((a) => a.name.endsWith(".sha256"));
+}
+
 export function githubReleaseToInfo(
   release: GitHubRelease,
   channel: "stable" | "beta" | "dev" | "canary",
 ): ReleaseInfo {
   const platformKey = getPlatformKey();
-  const tarballAsset = release.assets.find(
-    (a) => a.name.endsWith(".tar.gz") && !a.name.endsWith(".sha256") && !a.name.endsWith(".asc"),
-  );
-  const sha256Asset = tarballAsset
-    ? release.assets.find((a) => a.name === `${tarballAsset.name}.sha256`)
-    : release.assets.find((a) => a.name.endsWith(".sha256"));
+  const bundleVersion = release.tag_name.replace(/^v/, "");
+  const tarballAsset = findTarballAsset(release.assets);
+  const sha256Asset = findSha256Asset(release.assets, tarballAsset);
   const sigAsset = release.assets.find((a) => a.name.endsWith(".asc"));
-  const bundleAsset = release.assets.find(
-    (a) =>
-      a.name.startsWith(`prism-v${release.tag_name.replace(/^v/, "")}-${platformKey}`) &&
-      a.name.endsWith(".tar.gz") &&
-      !a.name.endsWith(".sha256"),
-  );
-  const bundleSha256Asset = release.assets.find(
-    (a) =>
-      a.name.startsWith(`prism-v${release.tag_name.replace(/^v/, "")}-${platformKey}`) &&
-      a.name.endsWith(".sha256"),
-  );
+  const bundleAsset = findBundleAsset(release.assets, bundleVersion, platformKey);
+  const bundleSha256Asset = findBundleSha256Asset(release.assets, bundleVersion, platformKey);
 
   return {
     version: release.tag_name,
     channel,
-    tarballUrl: tarballAsset?.browser_download_url ?? "",
-    sha256Url: sha256Asset?.browser_download_url ?? "",
-    signatureUrl: sigAsset?.browser_download_url ?? "",
+    tarballUrl: assetUrl(tarballAsset),
+    sha256Url: assetUrl(sha256Asset),
+    signatureUrl: assetUrl(sigAsset),
     publishedAt: release.published_at,
     minCliVersion: "1.0.0",
     source: "github",
-    bundleUrl: bundleAsset?.browser_download_url ?? "",
-    bundleSha256Url: bundleSha256Asset?.browser_download_url ?? "",
+    bundleUrl: assetUrl(bundleAsset),
+    bundleSha256Url: assetUrl(bundleSha256Asset),
     commit: "",
   };
+}
+
+function findBundleAsset(
+  assets: GitHubRelease["assets"],
+  bundleVersion: string,
+  platformKey: string,
+): ReleaseAsset | undefined {
+  return assets.find(
+    (a) =>
+      a.name.startsWith(`prism-v${bundleVersion}-${platformKey}`) &&
+      a.name.endsWith(".tar.gz") &&
+      !a.name.endsWith(".sha256"),
+  );
+}
+
+function findBundleSha256Asset(
+  assets: GitHubRelease["assets"],
+  bundleVersion: string,
+  platformKey: string,
+): ReleaseAsset | undefined {
+  return assets.find(
+    (a) =>
+      a.name.startsWith(`prism-v${bundleVersion}-${platformKey}`) && a.name.endsWith(".sha256"),
+  );
 }
 
 export function r2ManifestToInfo(manifest: R2Manifest): ReleaseInfo {

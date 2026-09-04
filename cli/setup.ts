@@ -48,35 +48,82 @@ function readWalletKey(options: SetupOptions): string {
   }
 }
 
-function loadNonInteractiveAnswers(options: SetupOptions): SetupAnswers {
-  const configuredHeliusKey = options.heliusKey || process.env.HELIUS_API_KEY || "";
-  let rpcUrl = options.rpcUrl || process.env.SOLANA_RPC_URL || "";
-  if (!rpcUrl && configuredHeliusKey) {
-    rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${configuredHeliusKey}`;
+/** First defined value, falling back to env then to "" (flag-or-env resolution). */
+function firstNonEmpty(primary: string | undefined, secondary: string | undefined): string {
+  return primary || secondary || "";
+}
+
+/** RPC URL for non-interactive setup: flag, env, then Helius-derived. Exits when empty. */
+function resolveNonInteractiveRpcUrl(
+  flagUrl: string | undefined,
+  envUrl: string | undefined,
+  heliusKey: string,
+): string {
+  let rpcUrl = firstNonEmpty(flagUrl, envUrl);
+  if (rpcUrl === "" && heliusKey !== "") {
+    rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`;
   }
-  if (!rpcUrl) {
+  if (rpcUrl === "") {
     console.error("Error: provide --rpc-url or --helius-key in non-interactive mode");
     process.exit(1);
   }
+  return rpcUrl;
+}
+
+/** Live trading needs a wallet key; paper trading does not. Exits otherwise. */
+function requireNonInteractiveWallet(paperTrading: boolean, walletKey: string): void {
+  if (paperTrading || walletKey.trim() !== "") return;
+  console.error("Error: Wallet private key is required when paper trading is disabled.");
+  console.error("Provide via --wallet-key-file or WALLET_PRIVATE_KEY env var.");
+  process.exit(1);
+}
+
+function loadNonInteractiveAnswers(options: SetupOptions): SetupAnswers {
+  const configuredHeliusKey = firstNonEmpty(options.heliusKey, process.env.HELIUS_API_KEY);
+  const rpcUrl = resolveNonInteractiveRpcUrl(
+    options.rpcUrl,
+    process.env.SOLANA_RPC_URL,
+    configuredHeliusKey,
+  );
   const paperTrading = options.paperTrading !== false;
   const walletKey = readWalletKey(options);
-
-  // Validate: live trading requires wallet key
-  if (!paperTrading && !walletKey.trim()) {
-    console.error("Error: Wallet private key is required when paper trading is disabled.");
-    console.error("Provide via --wallet-key-file or WALLET_PRIVATE_KEY env var.");
-    process.exit(1);
-  }
+  requireNonInteractiveWallet(paperTrading, walletKey);
 
   return {
     heliusKey: configuredHeliusKey,
     walletKey,
-    watchlistPools: options.watchlist || "",
+    watchlistPools: firstNonEmpty(options.watchlist, ""),
     paperTrading,
     rpcUrl,
-    rpcFallbackUrl: options.rpcFallbackUrl || process.env.SOLANA_RPC_FALLBACK_URL || "",
-    jupiterApiKey: options.jupiterApiKey || process.env.JUPITER_API_KEY || "",
+    rpcFallbackUrl: firstNonEmpty(options.rpcFallbackUrl, process.env.SOLANA_RPC_FALLBACK_URL),
+    jupiterApiKey: firstNonEmpty(options.jupiterApiKey, process.env.JUPITER_API_KEY),
   };
+}
+
+/** Coerce an interactive text answer to a string (blank when skipped). */
+function toTextAnswer(value: string | symbol | undefined): string {
+  // SAFETY: The @clack/prompts group resolves each answer to its prompt's primitive type, and onCancel exits before a symbol can reach this coercion.
+  return (value as string) || "";
+}
+
+/** Interactive RPC URL: answer, else Helius-derived. Cancels when empty. */
+function resolveInteractiveRpcUrl(rpcUrl: string, heliusKey: string): string {
+  const resolved =
+    rpcUrl.trim() === "" && heliusKey.trim() !== ""
+      ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`
+      : rpcUrl;
+  if (resolved.trim() === "") {
+    p.cancel("A primary RPC URL or Helius API key is required.");
+    process.exit(1);
+  }
+  return resolved;
+}
+
+/** Live trading needs a wallet key; paper trading does not. Cancels otherwise. */
+function requireInteractiveWallet(paperTrading: boolean, walletKey: string): void {
+  if (paperTrading || walletKey.trim() !== "") return;
+  p.cancel("Wallet private key is required when paper trading is disabled.");
+  process.exit(1);
 }
 
 async function promptInteractiveSetup(): Promise<SetupAnswers> {
@@ -143,33 +190,15 @@ async function promptInteractiveSetup(): Promise<SetupAnswers> {
     },
   );
 
-  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-  const heliusKey = (answers.heliusKey as string) || "";
-  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-  let rpcUrl = (answers.rpcUrl as string) || "";
-  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-  const rpcFallbackUrl = (answers.rpcFallbackUrl as string) || "";
-  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-  const jupiterApiKey = (answers.jupiterApiKey as string) || "";
-  if (!rpcUrl.trim() && heliusKey.trim()) {
-    rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`;
-  }
-  if (!rpcUrl.trim()) {
-    p.cancel("A primary RPC URL or Helius API key is required.");
-    process.exit(1);
-  }
-  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-  const walletKey = (answers.walletKey as string) || "";
-  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-  const watchlistPools = (answers.watchlistPools as string) || "";
+  const heliusKey = toTextAnswer(answers.heliusKey);
+  const rpcUrl = resolveInteractiveRpcUrl(toTextAnswer(answers.rpcUrl), heliusKey);
+  const rpcFallbackUrl = toTextAnswer(answers.rpcFallbackUrl);
+  const jupiterApiKey = toTextAnswer(answers.jupiterApiKey);
+  const walletKey = toTextAnswer(answers.walletKey);
+  const watchlistPools = toTextAnswer(answers.watchlistPools);
   // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
   const paperTrading = answers.paperTrading as boolean;
-
-  // Validate: live trading requires wallet key
-  if (!paperTrading && !walletKey.trim()) {
-    p.cancel("Wallet private key is required when paper trading is disabled.");
-    process.exit(1);
-  }
+  requireInteractiveWallet(paperTrading, walletKey);
 
   return {
     heliusKey,

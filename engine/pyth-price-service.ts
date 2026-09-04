@@ -120,6 +120,57 @@ function readFiniteNumber<T>(value: T): number | null {
   return null;
 }
 
+/** Read the first parsed Hermes entry envelope, or null when the shape is off. */
+function readPythEntry<T>(raw: T): RawPythEntry | null {
+  if (!isNonNullObject(raw)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+  const parsed = (raw as RawPythParsed).parsed;
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const entry = parsed[0];
+  if (!isNonNullObject(entry)) return null;
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+  return entry as RawPythEntry;
+}
+
+/** Read the price object off an entry, or null when it is missing. */
+function readEntryPrice(entry: RawPythEntry): RawPythPrice | null {
+  if (!isNonNullObject(entry.price)) return null;
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+  return entry.price as RawPythPrice;
+}
+
+/** Scale an integer-string price by its base-10 exponent into USD, else null. */
+function readScaledPythPrice(price: RawPythPrice): number | null {
+  if (Object.prototype.toString.call(price.price) !== "[object String]") return null;
+  const expo = price.expo;
+  if (
+    Object.prototype.toString.call(expo) !== "[object Number]" ||
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+    !Number.isInteger(expo as number) ||
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+    (expo as number) > 0
+  ) {
+    return null;
+  }
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+  const scaled = Number(price.price) * 10 ** (expo as number);
+  if (!Number.isFinite(scaled) || scaled <= 0) return null;
+  return scaled;
+}
+
+/** Read `publish_time` (unix seconds) as epoch millis, else null. */
+function readPythPublishTimeMs(price: RawPythPrice): number | null {
+  const publishTimeSec = readFiniteNumber(price.publish_time);
+  if (publishTimeSec === null || publishTimeSec <= 0) return null;
+  return publishTimeSec * 1000;
+}
+
+/** Read the element-level feed id, defaulting to "" when absent. */
+function readPythFeedId(entry: RawPythEntry): string {
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+  return Object.prototype.toString.call(entry.id) === "[object String]" ? (entry.id as string) : "";
+}
+
 /**
  * Decode one `/v2/updates/price/latest` body into a scaled USD price. `price`
  * is an integer string (e.g. "1234567") and `expo` a non-positive integer
@@ -133,60 +184,20 @@ export function parsePythPriceUpdate<T>(
   maxStalenessMs: number,
   nowMs: number = Date.now(),
 ): PythParseResult {
-  if (!isNonNullObject(raw)) return { kind: "malformed" };
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  const parsed = (raw as RawPythParsed).parsed;
-  if (!Array.isArray(parsed) || parsed.length === 0) return { kind: "malformed" };
-  const entry = parsed[0];
-  if (!isNonNullObject(entry)) return { kind: "malformed" };
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  const entryObj = entry as RawPythEntry;
-  const price = entryObj.price;
-  if (!isNonNullObject(price)) return { kind: "malformed" };
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  const priceObj = price as RawPythPrice;
-
-  const rawPrice = priceObj.price;
-  if (Object.prototype.toString.call(rawPrice) !== "[object String]") {
-    return { kind: "malformed" };
-  }
-
-  // expo is mathematically a base-10 exponent: USD = intPrice × 10^expo. Pyth
-  // crypto feeds use -8; any non-integer or positive value is a schema break.
-  const expo = priceObj.expo;
-  if (
-    Object.prototype.toString.call(expo) !== "[object Number]" ||
-    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-    !Number.isInteger(expo as number) ||
-    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-    (expo as number) > 0
-  ) {
-    return { kind: "malformed" };
-  }
-  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-  const expoNum = expo as number;
-
-  const priceNum = Number(rawPrice);
-  const scaled = priceNum * 10 ** expoNum;
-  if (!Number.isFinite(scaled) || scaled <= 0) return { kind: "malformed" };
-
-  const publishTimeSec = readFiniteNumber(priceObj.publish_time);
-  if (publishTimeSec === null || publishTimeSec <= 0) return { kind: "malformed" };
-  const publishTimeMs = publishTimeSec * 1000;
-
+  const entry = readPythEntry(raw);
+  if (entry === null) return { kind: "malformed" };
+  const price = readEntryPrice(entry);
+  if (price === null) return { kind: "malformed" };
+  const scaled = readScaledPythPrice(price);
+  if (scaled === null) return { kind: "malformed" };
+  const publishTimeMs = readPythPublishTimeMs(price);
+  if (publishTimeMs === null) return { kind: "malformed" };
   if (nowMs - publishTimeMs > maxStalenessMs) {
     return { kind: "stale", publishTimeMs };
   }
-
-  const id = entryObj.id;
   return {
     kind: "ok",
-    point: {
-      priceUsd: scaled,
-      publishTimeMs,
-      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-      feedId: Object.prototype.toString.call(id) === "[object String]" ? (id as string) : "",
-    },
+    point: { priceUsd: scaled, publishTimeMs, feedId: readPythFeedId(entry) },
   };
 }
 
@@ -216,8 +227,53 @@ export function clearPythCacheForTest(): void {
 
 // ─── Fetcher (fail-open: never throws, null = unknown price) ─────────────────
 
+/** Resolve an optional base-URL override to a trailing-slash-free endpoint. */
+function resolvePythBaseUrl(baseUrl: string | undefined): string {
+  const base = (baseUrl ?? DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
+  return base.length > 0 ? base : DEFAULT_BASE_URL;
+}
+
+/** Read a fresh cached price for a feed key, or null on miss/expiry. */
+function readCachedPythPrice(cacheKey: string, ttlMs: number, nowMs: number): number | null {
+  const cached = priceCache.get(cacheKey);
+  if (cached !== undefined && nowMs - cached.fetchedAtMs < ttlMs) return cached.priceUsd;
+  return null;
+}
+
 /** Optional request headers built without ever assigning `undefined`. */
 type PythHeaders = Record<string, string>;
+/** Build request headers, adding bearer auth only for a non-empty key. */
+function buildPythHeaders(apiKey: string | undefined): PythHeaders {
+  const headers: PythHeaders = {};
+  const key = apiKey?.trim();
+  if (key !== undefined && key.length > 0) {
+    headers["Authorization"] = `Bearer ${key}`;
+  }
+  return headers;
+}
+
+/** Log + cache a parse outcome as a fail-open price (null = unknown). */
+function settlePythResult(
+  result: PythParseResult,
+  feedId: string,
+  cacheKey: string,
+  maxStalenessMs: number,
+): number | null {
+  if (result.kind === "malformed") {
+    logger.warn("Pyth Hermes returned an unparseable price payload", { feedId });
+    return null;
+  }
+  if (result.kind === "stale") {
+    logger.warn("Pyth Hermes price is stale — treating as unknown", {
+      feedId,
+      ageMs: Date.now() - result.publishTimeMs,
+      maxStalenessMs,
+    });
+    return null;
+  }
+  priceCache.set(cacheKey, { priceUsd: result.point.priceUsd, fetchedAtMs: Date.now() });
+  return result.point.priceUsd;
+}
 
 /**
  * Fetch one feed's USD price from Hermes. NEVER throws and never crashes a
@@ -244,22 +300,16 @@ export async function fetchPythPriceUsd(
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const maxStalenessMs = options.maxStalenessMs ?? DEFAULT_MAX_STALENESS_MS;
   const ttlMs = options.cacheTtlMs ?? cacheTtlMs;
-  const base = (options.baseUrl ?? DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
-  const effectiveBase = base.length > 0 ? base : DEFAULT_BASE_URL;
+  const effectiveBase = resolvePythBaseUrl(options.baseUrl);
 
   const cacheKey = feedId.trim().toLowerCase();
-  const now = Date.now();
-  const cached = priceCache.get(cacheKey);
-  if (cached !== undefined && now - cached.fetchedAtMs < ttlMs) {
-    return cached.priceUsd;
+  const cachedPrice = readCachedPythPrice(cacheKey, ttlMs, Date.now());
+  if (cachedPrice !== null) {
+    return cachedPrice;
   }
 
   const url = `${effectiveBase}/v2/updates/price/latest?ids[]=${encodeURIComponent(feedId)}&parsed=true`;
-  const headers: PythHeaders = {};
-  const apiKey = options.apiKey?.trim();
-  if (apiKey !== undefined && apiKey.length > 0) {
-    headers["Authorization"] = `Bearer ${apiKey}`;
-  }
+  const headers = buildPythHeaders(options.apiKey);
 
   try {
     const res = await fetchImpl(url, {
@@ -274,21 +324,12 @@ export async function fetchPythPriceUsd(
       return null;
     }
     const body: unknown = await res.json();
-    const result = parsePythPriceUpdate(body, maxStalenessMs);
-    if (result.kind === "malformed") {
-      logger.warn("Pyth Hermes returned an unparseable price payload", { feedId });
-      return null;
-    }
-    if (result.kind === "stale") {
-      logger.warn("Pyth Hermes price is stale — treating as unknown", {
-        feedId,
-        ageMs: Date.now() - result.publishTimeMs,
-        maxStalenessMs,
-      });
-      return null;
-    }
-    priceCache.set(cacheKey, { priceUsd: result.point.priceUsd, fetchedAtMs: Date.now() });
-    return result.point.priceUsd;
+    return settlePythResult(
+      parsePythPriceUpdate(body, maxStalenessMs),
+      feedId,
+      cacheKey,
+      maxStalenessMs,
+    );
   } catch (err) {
     logger.warn("Pyth Hermes fetch failed — price treated as unknown", {
       feedId,

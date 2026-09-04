@@ -82,6 +82,38 @@ interface CliArgs {
   dbPath: string;
   clean: boolean;
 }
+/** GeckoTerminal allows ~30 req/min: retry a GET while it answers 429. */
+async function fetchWithGeckoRetry(url: string, maxAttempts: number): Promise<Response> {
+  let res = await fetch(url);
+  for (let attempt = 1; attempt < maxAttempts && res.status === 429; attempt++) {
+    await new Promise((r) => setTimeout(r, RATE_LIMIT_MS * (attempt + 1)));
+    res = await fetch(url);
+  }
+  return res;
+}
+
+/** Split the GeckoTerminal pool name/TVL into the replay's pool metadata. */
+function buildPoolMeta(
+  address: string,
+  binStep: number,
+  refActiveBinId: number,
+  refPrice: number,
+  attrs: GeckoPoolAttributes | undefined,
+): PoolMeta {
+  const name = attrs?.name ?? "";
+  const [xSym, ySym] = name.split("/").map((s) => s.trim());
+  const tvlStr = attrs?.reserve_in_usd;
+  const tvlUsd = tvlStr ? Number(tvlStr) : 0;
+  return {
+    address,
+    binStep,
+    refActiveBinId,
+    refPrice,
+    tvlUsd,
+    tokenXSymbol: xSym ?? "",
+    tokenYSymbol: ySym ?? "",
+  };
+}
 
 function parseArgs(argv: ReadonlyArray<string>): CliArgs {
   const out: CliArgs = { pools: DEFAULT_POOLS, dbPath: "./prism.db", clean: false };
@@ -111,31 +143,22 @@ function fetchPoolMeta(address: string, connection: Connection): Effect.Effect<P
       const lbPair = dlmm.lbPair;
       const activeBin = await dlmm.getActiveBin();
 
-      let poolRes = await fetch(`${GECKO_BASE}/networks/solana/pools/${address}`);
-      for (let attempt = 0; attempt < 3 && poolRes.status === 429; attempt++) {
-        await new Promise((r) => setTimeout(r, RATE_LIMIT_MS * (attempt + 2)));
-        poolRes = await fetch(`${GECKO_BASE}/networks/solana/pools/${address}`);
-      }
+      const poolRes = await fetchWithGeckoRetry(
+        `${GECKO_BASE}/networks/solana/pools/${address}`,
+        4,
+      );
       if (!poolRes.ok) {
         throw new Error(`GeckoTerminal pool ${address}: HTTP ${poolRes.status}`);
       }
       // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
       const poolJson = (await poolRes.json()) as GeckoPoolPayload;
-      const attrs = poolJson.data?.attributes;
-      const name = attrs?.name ?? "";
-      const [xSym, ySym] = name.split("/").map((s) => s.trim());
-      const tvlStr = attrs?.reserve_in_usd;
-      const tvlUsd = tvlStr ? Number(tvlStr) : 0;
-
-      return {
+      return buildPoolMeta(
         address,
-        binStep: lbPair.binStep,
-        refActiveBinId: activeBin.binId,
-        refPrice: Number(activeBin.price),
-        tvlUsd,
-        tokenXSymbol: xSym ?? "",
-        tokenYSymbol: ySym ?? "",
-      };
+        lbPair.binStep,
+        activeBin.binId,
+        Number(activeBin.price),
+        poolJson.data?.attributes,
+      );
     },
     catch: (e) => (e instanceof Error ? e : new Error(String(e))),
   });
@@ -144,15 +167,10 @@ function fetchPoolMeta(address: string, connection: Connection): Effect.Effect<P
 function fetchOhlcv(address: string): Effect.Effect<OhlcvCandle[], Error> {
   return Effect.tryPromise({
     try: async () => {
-      let res = await fetch(
+      const res = await fetchWithGeckoRetry(
         `${GECKO_BASE}/networks/solana/pools/${address}/ohlcv/hour?aggregate=1&limit=${OHLCV_LIMIT}&currency=usd`,
+        4,
       );
-      for (let attempt = 0; attempt < 3 && res.status === 429; attempt++) {
-        await new Promise((r) => setTimeout(r, RATE_LIMIT_MS * (attempt + 2)));
-        res = await fetch(
-          `${GECKO_BASE}/networks/solana/pools/${address}/ohlcv/hour?aggregate=1&limit=${OHLCV_LIMIT}&currency=usd`,
-        );
-      }
       if (!res.ok) {
         throw new Error(`GeckoTerminal OHLCV ${address}: HTTP ${res.status}`);
       }

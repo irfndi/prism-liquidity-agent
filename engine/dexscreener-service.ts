@@ -111,6 +111,52 @@ function readFiniteNumber<T>(value: T): number | null {
   return null;
 }
 
+/** Read the first pair object, or null when the payload has no usable pair. */
+function readDexPair<T>(raw: T): RawDexscreenerPair | null {
+  if (!isNonNullObject(raw)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+  const pairs = (raw as RawDexscreenerResponse).pairs;
+  // DexScreener returns `{"pairs": null}` (HTTP 200) for an unknown pair.
+  if (!Array.isArray(pairs) || pairs.length === 0) return null;
+  const pair = pairs[0];
+  if (!isNonNullObject(pair)) return null;
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+  return pair as RawDexscreenerPair;
+}
+
+/** Read 24h volume; null when missing or non-positive (unusable downstream). */
+function readDexVolumeUsd(pair: RawDexscreenerPair): number | null {
+  const volume = isNonNullObject(pair.volume)
+    ? // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      readFiniteNumber((pair.volume as RawVolume).h24)
+    : null;
+  if (volume === null || volume <= 0) return null;
+  return volume;
+}
+
+/** Read liquidity as TVL; missing or non-positive values degrade to null. */
+function readDexLiquidityUsd(pair: RawDexscreenerPair): number | null {
+  const liquidity = isNonNullObject(pair.liquidity)
+    ? // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+      readFiniteNumber((pair.liquidity as RawLiquidity).usd)
+    : null;
+  if (liquidity !== null && liquidity <= 0) return null;
+  return liquidity;
+}
+
+/** Resolve an optional base-URL override (env, then default) to a clean endpoint. */
+function resolveDexBaseUrl(configured: string | undefined, envUrl: string | undefined): string {
+  const base = (configured ?? envUrl ?? DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
+  return base.length > 0 ? base : DEFAULT_BASE_URL;
+}
+
+/** Reserve the next pacing slot; returns the millis the caller must wait. */
+function claimDexRequestSlot(nowMs: number): number {
+  const delayMs = Math.max(0, nextDexscreenerRequestAt - nowMs);
+  nextDexscreenerRequestAt = Math.max(nowMs, nextDexscreenerRequestAt) + requestIntervalMs;
+  return delayMs;
+}
+
 /**
  * Parse one `GET .../pairs/solana/{address}` response. Returns null when the
  * payload has no usable pair object or 24h volume cannot be read (the one field
@@ -124,38 +170,15 @@ export function parseDexscreenerPoolStats<T>(
   raw: T,
   baseFeeRate: number,
 ): DexscreenerPoolStats | null {
-  if (!isNonNullObject(raw)) return null;
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  const response = raw as RawDexscreenerResponse;
-  const pairs = response.pairs;
-  // DexScreener returns `{"pairs": null}` (HTTP 200) for an unknown pair.
-  if (!Array.isArray(pairs) || pairs.length === 0) return null;
-  const pair = pairs[0];
-  if (!isNonNullObject(pair)) return null;
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  const pairObj = pair as RawDexscreenerPair;
-
-  const volume = isNonNullObject(pairObj.volume)
-    ? // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-      readFiniteNumber((pairObj.volume as RawVolume).h24)
-    : null;
-  // Volume is the one field every downstream gate (authenticity, fee/IL) needs;
-  // non-positive volume is malformed data — reject the stats ENTIRELY rather
-  // than marking garbage measured.
-  if (volume === null || volume <= 0) return null;
-
-  const liquidity = isNonNullObject(pairObj.liquidity)
-    ? // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-      readFiniteNumber((pairObj.liquidity as RawLiquidity).usd)
-    : null;
-  // Non-positive liquidity is malformed; null it so the caller treats the stats
-  // as unavailable (the most conservative outcome). DexScreener has NO fees
-  // field, so the fee rate is always the binStep-derived model.
+  const pair = readDexPair(raw);
+  if (pair === null) return null;
+  const volume = readDexVolumeUsd(pair);
+  if (volume === null) return null;
   return {
-    tvlUsd: liquidity !== null && liquidity <= 0 ? null : liquidity,
+    tvlUsd: readDexLiquidityUsd(pair),
     volume24hUsd: volume,
     fees24hUsd: volume * baseFeeRate,
-    basePriceUsd: readFiniteNumber(pairObj.priceUsd),
+    basePriceUsd: readFiniteNumber(pair.priceUsd),
     quotePriceUsd: null,
   };
 }
@@ -189,18 +212,13 @@ export async function getDexscreenerPoolStats(
 ): Promise<DexscreenerPoolStats | null> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
-  const base = (options.baseUrl ?? process.env.DEXSCREENER_API_URL ?? DEFAULT_BASE_URL)
-    .trim()
-    .replace(/\/+$/, "");
-  const effectiveBase = base.length > 0 ? base : DEFAULT_BASE_URL;
+  const effectiveBase = resolveDexBaseUrl(options.baseUrl, process.env.DEXSCREENER_API_URL);
   const url = `${effectiveBase}/pairs/solana/${poolAddress}`;
 
   // Pace toward the keyless quota (see the pacing constants above). Reserving
   // the next slot synchronously before any await keeps concurrent callers from
   // observing the same free slot.
-  const now = Date.now();
-  const delayMs = Math.max(0, nextDexscreenerRequestAt - now);
-  nextDexscreenerRequestAt = Math.max(now, nextDexscreenerRequestAt) + requestIntervalMs;
+  const delayMs = claimDexRequestSlot(Date.now());
   if (delayMs > 0) {
     await sleep(delayMs);
   }

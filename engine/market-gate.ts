@@ -164,18 +164,7 @@ export function marketLegPasses(
 /** Ordered market admission checks — rejection order and reason strings are
  *  contractual (screens/tests assert them). Returns the first rejection
  *  reason, or null when the pool is admitted. */
-function marketAdmissionReject(pool: DiscoveredPool, config: MarketGateConfig): string | null {
-  if (isBelowMarketTvlFloor(pool, config)) {
-    return `tvl ${pool.tvlUsd} < ${config.minTvlUsd}`;
-  }
-  const ageReason = marketAgeRejectReason(pool, config);
-  if (ageReason !== null) {
-    return ageReason;
-  }
-  const holderReason = marketThinHoldersRejectReason(pool, config);
-  if (holderReason !== null) {
-    return holderReason;
-  }
+function marketFeeRejectReason(pool: DiscoveredPool, config: MarketGateConfig): string | null {
   if (hasNo24hFees(pool)) {
     return "no 24h fees";
   }
@@ -190,6 +179,10 @@ function marketAdmissionReject(pool: DiscoveredPool, config: MarketGateConfig): 
   if (feeAprPct < config.minFeeApr) {
     return `fee APR ${feeAprPct.toFixed(1)}% < ${config.minFeeApr}%`;
   }
+  return null;
+}
+
+function marketVolumeRejectReason(pool: DiscoveredPool, config: MarketGateConfig): string | null {
   if (hasNo24hVolume(pool)) {
     return "no 24h volume";
   }
@@ -204,11 +197,42 @@ function marketAdmissionReject(pool: DiscoveredPool, config: MarketGateConfig): 
   if (volumeTurnover > config.maxVolumeTurnover) {
     return `volume turnover ${volumeTurnover.toFixed(1)} > ${config.maxVolumeTurnover} (wash)`;
   }
+  return null;
+}
+
+function marketBinStepRejectReason(pool: DiscoveredPool, config: MarketGateConfig): string | null {
   if (isUltraFineBinStep(pool, config)) {
     return `binStep ${pool.binStep} < ${config.minBinStep} (ultra-fine churn)`;
   }
   if (pool.binStep > config.maxBinStep) {
     return `binStep ${pool.binStep} > ${config.maxBinStep}`;
+  }
+  return null;
+}
+
+function marketAdmissionReject(pool: DiscoveredPool, config: MarketGateConfig): string | null {
+  if (isBelowMarketTvlFloor(pool, config)) {
+    return `tvl ${pool.tvlUsd} < ${config.minTvlUsd}`;
+  }
+  const ageReason = marketAgeRejectReason(pool, config);
+  if (ageReason !== null) {
+    return ageReason;
+  }
+  const holderReason = marketThinHoldersRejectReason(pool, config);
+  if (holderReason !== null) {
+    return holderReason;
+  }
+  const feeReason = marketFeeRejectReason(pool, config);
+  if (feeReason !== null) {
+    return feeReason;
+  }
+  const volumeReason = marketVolumeRejectReason(pool, config);
+  if (volumeReason !== null) {
+    return volumeReason;
+  }
+  const binStepReason = marketBinStepRejectReason(pool, config);
+  if (binStepReason !== null) {
+    return binStepReason;
   }
   const legReason = marketLegRejectReason(pool, config);
   if (legReason !== null) {

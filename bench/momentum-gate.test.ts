@@ -36,6 +36,34 @@ function makeWeights(overrides: Partial<SignalWeights> = {}): SignalWeights {
   };
 }
 
+function metricSignalDefaults(
+  tvlVelocity: number | undefined,
+  feeIlRatio: number | undefined,
+  volumeAuthenticity: number | undefined,
+  binUtilization: number | undefined,
+) {
+  return {
+    tvlVelocity: tvlVelocity ?? 0.1,
+    feeIlRatio: feeIlRatio ?? 1.5,
+    volumeAuthenticity: volumeAuthenticity ?? 0.85,
+    binUtilization: binUtilization ?? 0.6,
+  };
+}
+
+function metricKnowledgeDefaults(
+  volumeAuthenticityKnown: boolean | undefined,
+  feeIlRatioKnown: boolean | undefined,
+  binUtilizationKnown: boolean | undefined,
+  farmAprPct: number | null | undefined,
+) {
+  return {
+    volumeAuthenticityKnown: volumeAuthenticityKnown ?? true,
+    feeIlRatioKnown: feeIlRatioKnown ?? true,
+    binUtilizationKnown: binUtilizationKnown ?? true,
+    farmAprPct: farmAprPct ?? null,
+  };
+}
+
 function makeMetrics(overrides: Partial<PoolMetrics> = {}): PoolMetrics {
   let metrics: PoolMetrics = {
     pool: {
@@ -54,14 +82,18 @@ function makeMetrics(overrides: Partial<PoolMetrics> = {}): PoolMetrics {
       timestamp: Date.now(),
     },
     binArray: { lowerBinId: 4980, upperBinId: 5020, bins: [], activeBinId: 5000 },
-    tvlVelocity: overrides.tvlVelocity ?? 0.1,
-    feeIlRatio: overrides.feeIlRatio ?? 1.5,
-    volumeAuthenticity: overrides.volumeAuthenticity ?? 0.85,
-    binUtilization: overrides.binUtilization ?? 0.6,
-    volumeAuthenticityKnown: overrides.volumeAuthenticityKnown ?? true,
-    feeIlRatioKnown: overrides.feeIlRatioKnown ?? true,
-    binUtilizationKnown: overrides.binUtilizationKnown ?? true,
-    farmAprPct: overrides.farmAprPct ?? null,
+    ...metricSignalDefaults(
+      overrides.tvlVelocity,
+      overrides.feeIlRatio,
+      overrides.volumeAuthenticity,
+      overrides.binUtilization,
+    ),
+    ...metricKnowledgeDefaults(
+      overrides.volumeAuthenticityKnown,
+      overrides.feeIlRatioKnown,
+      overrides.binUtilizationKnown,
+      overrides.farmAprPct,
+    ),
   };
   if (overrides.netDriftBins !== undefined) {
     metrics = { ...metrics, netDriftBins: overrides.netDriftBins };

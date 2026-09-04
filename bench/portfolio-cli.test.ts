@@ -21,37 +21,117 @@ import type { PositionRecord } from "../engine/db-service.js";
 
 // Per-field defaulting split out of makePosition to stay under the complexity cap;
 // each helper returns a partial of the same defaulted values makePosition always produced.
+function marketIdentityDefaults(
+  tokenXSymbol: string | undefined,
+  tokenYSymbol: string | undefined,
+  activeBinId: number | undefined,
+  lowerBinId: number | undefined,
+  upperBinId: number | undefined,
+) {
+  return {
+    tokenXSymbol: tokenXSymbol ?? "SOL",
+    tokenYSymbol: tokenYSymbol ?? "USDC",
+    activeBinId: activeBinId ?? 5000,
+    lowerBinId: lowerBinId ?? 4980,
+    upperBinId: upperBinId ?? 5020,
+  };
+}
+
+function marketLedgerDefaults(
+  depositedUsd: number | undefined,
+  currentValueUsd: number | undefined,
+  timestamp: number | undefined,
+  outOfRangeSince: number | null | undefined,
+  oorCycleCount: number | undefined,
+  lastFeeClaimAt: number | undefined,
+) {
+  return {
+    depositedUsd: depositedUsd ?? 1000,
+    currentValueUsd: currentValueUsd ?? 1000,
+    timestamp: timestamp ?? Date.now(),
+    outOfRangeSince: outOfRangeSince ?? null,
+    oorCycleCount: oorCycleCount ?? 0,
+    lastFeeClaimAt: lastFeeClaimAt ?? Date.now(),
+  };
+}
+
 function positionMarketDefaults(overrides: Partial<PositionRecord>) {
   return {
-    depositedUsd: overrides.depositedUsd ?? 1000,
-    currentValueUsd: overrides.currentValueUsd ?? 1000,
-    tokenXSymbol: overrides.tokenXSymbol ?? "SOL",
-    tokenYSymbol: overrides.tokenYSymbol ?? "USDC",
-    activeBinId: overrides.activeBinId ?? 5000,
-    lowerBinId: overrides.lowerBinId ?? 4980,
-    upperBinId: overrides.upperBinId ?? 5020,
-    timestamp: overrides.timestamp ?? Date.now(),
-    outOfRangeSince: overrides.outOfRangeSince ?? null,
-    oorCycleCount: overrides.oorCycleCount ?? 0,
-    lastFeeClaimAt: overrides.lastFeeClaimAt ?? Date.now(),
+    ...marketLedgerDefaults(
+      overrides.depositedUsd,
+      overrides.currentValueUsd,
+      overrides.timestamp,
+      overrides.outOfRangeSince,
+      overrides.oorCycleCount,
+      overrides.lastFeeClaimAt,
+    ),
+    ...marketIdentityDefaults(
+      overrides.tokenXSymbol,
+      overrides.tokenYSymbol,
+      overrides.activeBinId,
+      overrides.lowerBinId,
+      overrides.upperBinId,
+    ),
+  };
+}
+
+function lifecycleExitDefaults(
+  trailingStopThreshold: number | null | undefined,
+  highestValueUsd: number | null | undefined,
+  lastRebalanceAt: number | undefined,
+  paperExitedAt: number | null | undefined,
+  closedAt: number | null | undefined,
+  realizedPnlUsd: number | null | undefined,
+) {
+  return {
+    trailingStopThreshold: trailingStopThreshold ?? null,
+    highestValueUsd: highestValueUsd ?? null,
+    lastRebalanceAt: lastRebalanceAt ?? 0,
+    paperExitedAt: paperExitedAt ?? null,
+    closedAt: closedAt ?? null,
+    realizedPnlUsd: realizedPnlUsd ?? null,
+  };
+}
+
+function lifecycleEntryDefaults(
+  entrySignalTimestamp: number | null | undefined,
+  entrySignalSnapshotId: number | null | undefined,
+  entryPriceUsd: number | null | undefined,
+  entryAmountXUsd: number | null | undefined,
+  entryAmountYUsd: number | null | undefined,
+  cumulativeFeesClaimedUsd: number | undefined,
+  cumulativeRewardsClaimedUsd: number | undefined,
+) {
+  return {
+    entrySignalTimestamp: entrySignalTimestamp ?? null,
+    entrySignalSnapshotId: entrySignalSnapshotId ?? null,
+    entryPriceUsd: entryPriceUsd ?? null,
+    entryAmountXUsd: entryAmountXUsd ?? null,
+    entryAmountYUsd: entryAmountYUsd ?? null,
+    cumulativeFeesClaimedUsd: cumulativeFeesClaimedUsd ?? 0,
+    cumulativeRewardsClaimedUsd: cumulativeRewardsClaimedUsd ?? 0,
   };
 }
 
 function positionLifecycleDefaults(overrides: Partial<PositionRecord>) {
   return {
-    trailingStopThreshold: overrides.trailingStopThreshold ?? null,
-    highestValueUsd: overrides.highestValueUsd ?? null,
-    lastRebalanceAt: overrides.lastRebalanceAt ?? 0,
-    paperExitedAt: overrides.paperExitedAt ?? null,
-    entrySignalTimestamp: overrides.entrySignalTimestamp ?? null,
-    entrySignalSnapshotId: overrides.entrySignalSnapshotId ?? null,
-    entryPriceUsd: overrides.entryPriceUsd ?? null,
-    entryAmountXUsd: overrides.entryAmountXUsd ?? null,
-    entryAmountYUsd: overrides.entryAmountYUsd ?? null,
-    cumulativeFeesClaimedUsd: overrides.cumulativeFeesClaimedUsd ?? 0,
-    cumulativeRewardsClaimedUsd: overrides.cumulativeRewardsClaimedUsd ?? 0,
-    closedAt: overrides.closedAt ?? null,
-    realizedPnlUsd: overrides.realizedPnlUsd ?? null,
+    ...lifecycleExitDefaults(
+      overrides.trailingStopThreshold,
+      overrides.highestValueUsd,
+      overrides.lastRebalanceAt,
+      overrides.paperExitedAt,
+      overrides.closedAt,
+      overrides.realizedPnlUsd,
+    ),
+    ...lifecycleEntryDefaults(
+      overrides.entrySignalTimestamp,
+      overrides.entrySignalSnapshotId,
+      overrides.entryPriceUsd,
+      overrides.entryAmountXUsd,
+      overrides.entryAmountYUsd,
+      overrides.cumulativeFeesClaimedUsd,
+      overrides.cumulativeRewardsClaimedUsd,
+    ),
   };
 }
 

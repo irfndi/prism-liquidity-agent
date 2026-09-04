@@ -608,40 +608,52 @@ export class GatewayTransport implements AgentRuntimeTransport {
   private handleChatEvent(payload: JsonValue): void {
     const p = isJsonObject(payload) ? payload : {};
     const runId = isStringValue(p.runId) ? p.runId : null;
-    if (!runId || !this.chatRuns.has(runId)) return;
-
+    if (runId === null || !this.chatRuns.has(runId)) return;
     if (p.state === "delta") {
-      const run = this.chatRuns.get(runId);
-      if (run && isStringValue(p.deltaText)) run.text += p.deltaText;
+      this.appendChatDelta(runId, payload);
       return;
     }
     if (p.state === "final") {
-      const messageValue = p.message;
-      let content: readonly JsonValue[] = [];
-      if (isJsonObject(messageValue)) {
-        const contentValue = messageValue.content;
-        if (Array.isArray(contentValue)) content = contentValue;
-      }
-      const first = content[0];
-      let finalText = this.chatRuns.get(runId)?.text ?? "";
-      if (isJsonObject(first) && isStringValue(first.text)) finalText = first.text;
-      this.settleChatRun(runId, finalText);
+      this.settleChatFinal(runId, payload);
       return;
     }
     if (p.state === "error") {
-      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-      const errorPayload = p.error;
-      let errorMessage: JsonValue | undefined;
-      if (isJsonObject(errorPayload)) errorMessage = errorPayload.message;
-      this.failChatRun(
-        runId,
-        new Error(isStringValue(errorMessage) ? errorMessage : "agent run error"),
-      );
+      this.failChatFromPayload(runId, payload);
       return;
     }
     if (p.state === "aborted") {
       this.failChatRun(runId, new Error("agent run aborted"));
     }
+  }
+
+  private appendChatDelta(runId: string, payload: JsonValue): void {
+    const run = this.chatRuns.get(runId);
+    const delta = isJsonObject(payload) ? payload.deltaText : undefined;
+    if (run !== undefined && isStringValue(delta)) run.text += delta;
+  }
+
+  private settleChatFinal(runId: string, payload: JsonValue): void {
+    const message = isJsonObject(payload) ? payload.message : undefined;
+    let content: readonly JsonValue[] = [];
+    if (isJsonObject(message)) {
+      const contentValue = message.content;
+      if (Array.isArray(contentValue)) content = contentValue;
+    }
+    const first = content[0];
+    let finalText = this.chatRuns.get(runId)?.text ?? "";
+    if (isJsonObject(first) && isStringValue(first.text)) finalText = first.text;
+    this.settleChatRun(runId, finalText);
+  }
+
+  private failChatFromPayload(runId: string, payload: JsonValue): void {
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+    const errorPayload = isJsonObject(payload) ? payload.error : undefined;
+    let errorMessage: JsonValue | undefined;
+    if (isJsonObject(errorPayload)) errorMessage = errorPayload.message;
+    this.failChatRun(
+      runId,
+      new Error(isStringValue(errorMessage) ? errorMessage : "agent run error"),
+    );
   }
 
   private rejectAll(err: Error): void {

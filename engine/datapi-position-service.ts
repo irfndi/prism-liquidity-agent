@@ -122,6 +122,35 @@ function readNumber<T>(value: T): number | undefined {
     : undefined;
 }
 
+/** Candidate keys for the pool identity of a position (upstream names drift). */
+const POOL_ADDRESS_KEYS: ReadonlyArray<keyof RawPosition> = [
+  "poolAddress",
+  "pool",
+  "pool_address",
+  "lb_pair",
+  "lbPair",
+  "pair_address",
+];
+
+/** Candidate keys for the position identity of a position. */
+const POSITION_ID_KEYS: ReadonlyArray<keyof RawPosition> = [
+  "positionId",
+  "position_id",
+  "position_address",
+  "positionAddress",
+  "pubkey",
+  "publicKey",
+  "position_pubkey",
+  "address",
+];
+
+/** Candidate token keys per side, plus the nested-object key per side. */
+const POSITION_TOKEN_KEYS = {
+  x: ["tokenX", "token_x", "mintX", "mint_x"],
+  y: ["tokenY", "token_y", "mintY", "mint_y"],
+} satisfies Record<"x" | "y", ReadonlyArray<keyof RawPosition>>;
+const POSITION_MINT_KEYS = { x: "token_x", y: "token_y" } as const;
+
 /**
  * Resolve a field from a list of candidate keys, returning the first present
  * value. The Data API's position payload field names have drifted across
@@ -165,6 +194,53 @@ interface MutableOpenPosition {
   createdAt?: number;
 }
 
+/** Optional numeric fields of a position, each with its upstream key drift. */
+type PositionNumberField =
+  | "lowerBin"
+  | "upperBin"
+  | "currentBin"
+  | "depositedUsd"
+  | "valueUsd"
+  | "pnlUsd"
+  | "createdAt";
+const POSITION_NUMBER_KEYS = {
+  lowerBin: ["lowerBin", "lower_bin_id", "minBinId", "min_bin_id", "lowerBinId"],
+  upperBin: ["upperBin", "upper_bin_id", "maxBinId", "max_bin_id", "upperBinId"],
+  currentBin: ["currentBin", "active_bin_id", "activeBin", "current_bin_id"],
+  depositedUsd: ["depositedUsd", "deposited_usd", "totalDepositedUsd", "depositUsd"],
+  valueUsd: ["valueUsd", "value_usd", "currentValueUsd", "positionValueUsd", "value"],
+  pnlUsd: ["pnlUsd", "pnl_usd", "unrealizedPnlUsd", "pnl", "totalPnlUsd"],
+  createdAt: ["createdAt", "created_at", "openedAt", "opened_at", "ts"],
+} satisfies Record<PositionNumberField, ReadonlyArray<keyof RawPosition>>;
+
+/** Read the pool + position identity pair; null when either leg is missing. */
+function readPositionIdentity(
+  record: RawPosition,
+): { readonly poolAddress: string; readonly positionId: string } | null {
+  const poolAddress = readStringCandidates(record, POOL_ADDRESS_KEYS);
+  const positionId = readStringCandidates(record, POSITION_ID_KEYS);
+  if (poolAddress === undefined || positionId === undefined) return null;
+  return { poolAddress, positionId };
+}
+
+/** Read one side's mint (flat candidates, then the nested `token_x/y` object). */
+function readPositionToken(record: RawPosition, side: "x" | "y"): string | undefined {
+  return (
+    readStringCandidates(record, POSITION_TOKEN_KEYS[side]) ??
+    readMint(record, POSITION_MINT_KEYS[side])
+  );
+}
+
+/** Copy one optional numeric field onto the result when present upstream. */
+function assignPositionNumber(
+  result: MutableOpenPosition,
+  record: RawPosition,
+  field: PositionNumberField,
+): void {
+  const value = readNumberCandidates(record, POSITION_NUMBER_KEYS[field]);
+  if (value !== undefined) result[field] = value;
+}
+
 /**
  * Parse one position object from the /portfolio/open `pools[...]` array.
  * Returns null when the object lacks a usable poolAddress + positionId
@@ -175,91 +251,26 @@ export function parseOpenPosition<T>(raw: T): OpenPosition | null {
   if (!isNonNullObject(raw)) return null;
   // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const record = raw as RawPosition;
-  const poolAddress = readStringCandidates(record, [
-    "poolAddress",
-    "pool",
-    "pool_address",
-    "lb_pair",
-    "lbPair",
-    "pair_address",
-  ]);
-  const positionId = readStringCandidates(record, [
-    "positionId",
-    "position_id",
-    "position_address",
-    "positionAddress",
-    "pubkey",
-    "publicKey",
-    "position_pubkey",
-    "address",
-  ]);
-  if (poolAddress === undefined || positionId === undefined) return null;
+  const identity = readPositionIdentity(record);
+  if (identity === null) return null;
 
-  const result: MutableOpenPosition = { poolAddress, positionId };
+  const result: MutableOpenPosition = {
+    poolAddress: identity.poolAddress,
+    positionId: identity.positionId,
+  };
 
-  const tokenX =
-    readStringCandidates(record, ["tokenX", "token_x", "mintX", "mint_x"]) ??
-    readMint(record, "token_x");
+  const tokenX = readPositionToken(record, "x");
   if (tokenX !== undefined) result.tokenX = tokenX;
-  const tokenY =
-    readStringCandidates(record, ["tokenY", "token_y", "mintY", "mint_y"]) ??
-    readMint(record, "token_y");
+  const tokenY = readPositionToken(record, "y");
   if (tokenY !== undefined) result.tokenY = tokenY;
 
-  const lowerBin = readNumberCandidates(record, [
-    "lowerBin",
-    "lower_bin_id",
-    "minBinId",
-    "min_bin_id",
-    "lowerBinId",
-  ]);
-  if (lowerBin !== undefined) result.lowerBin = lowerBin;
-  const upperBin = readNumberCandidates(record, [
-    "upperBin",
-    "upper_bin_id",
-    "maxBinId",
-    "max_bin_id",
-    "upperBinId",
-  ]);
-  if (upperBin !== undefined) result.upperBin = upperBin;
-  const currentBin = readNumberCandidates(record, [
-    "currentBin",
-    "active_bin_id",
-    "activeBin",
-    "current_bin_id",
-  ]);
-  if (currentBin !== undefined) result.currentBin = currentBin;
-  const depositedUsd = readNumberCandidates(record, [
-    "depositedUsd",
-    "deposited_usd",
-    "totalDepositedUsd",
-    "depositUsd",
-  ]);
-  if (depositedUsd !== undefined) result.depositedUsd = depositedUsd;
-  const valueUsd = readNumberCandidates(record, [
-    "valueUsd",
-    "value_usd",
-    "currentValueUsd",
-    "positionValueUsd",
-    "value",
-  ]);
-  if (valueUsd !== undefined) result.valueUsd = valueUsd;
-  const pnlUsd = readNumberCandidates(record, [
-    "pnlUsd",
-    "pnl_usd",
-    "unrealizedPnlUsd",
-    "pnl",
-    "totalPnlUsd",
-  ]);
-  if (pnlUsd !== undefined) result.pnlUsd = pnlUsd;
-  const createdAt = readNumberCandidates(record, [
-    "createdAt",
-    "created_at",
-    "openedAt",
-    "opened_at",
-    "ts",
-  ]);
-  if (createdAt !== undefined) result.createdAt = createdAt;
+  assignPositionNumber(result, record, "lowerBin");
+  assignPositionNumber(result, record, "upperBin");
+  assignPositionNumber(result, record, "currentBin");
+  assignPositionNumber(result, record, "depositedUsd");
+  assignPositionNumber(result, record, "valueUsd");
+  assignPositionNumber(result, record, "pnlUsd");
+  assignPositionNumber(result, record, "createdAt");
 
   return result;
 }

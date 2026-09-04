@@ -10,6 +10,40 @@ function run<T, E, R>(effect: Effect.Effect<T, E, R>, layer: Layer.Layer<R, neve
   return Effect.runSync(Effect.provide(effect, layer));
 }
 
+function snapshotIdentityDefaults(
+  poolAddress: string | undefined,
+  timestamp: number | undefined,
+  activeBinId: number | undefined,
+  binStep: number | undefined,
+  tokenXSymbol: string | undefined,
+  tokenYSymbol: string | undefined,
+) {
+  return {
+    poolAddress: poolAddress ?? "Pool111111111111111111111111111111111111111",
+    timestamp: timestamp ?? 1_700_000_000_000,
+    activeBinId: activeBinId ?? 4,
+    binStep: binStep ?? 10,
+    tokenXSymbol: tokenXSymbol ?? "SOL",
+    tokenYSymbol: tokenYSymbol ?? "USDC",
+  };
+}
+
+function snapshotMarketDefaults(
+  tvlUsd: number | undefined,
+  volume24hUsd: number | undefined,
+  fees24hUsd: number | undefined,
+  apr: number | undefined,
+  currentPrice: number | undefined,
+) {
+  return {
+    tvlUsd: tvlUsd ?? 50_000,
+    volume24hUsd: volume24hUsd ?? 100_000,
+    fees24hUsd: fees24hUsd ?? 150,
+    apr: apr ?? 60,
+    currentPrice: currentPrice ?? 100,
+  };
+}
+
 function makeSnapshot(overrides: Partial<PoolSnapshot> = {}): PoolSnapshot {
   const bins = Array.from({ length: 8 }, (_, j) => ({
     binId: j,
@@ -26,17 +60,21 @@ function makeSnapshot(overrides: Partial<PoolSnapshot> = {}): PoolSnapshot {
     binStep: 10,
   };
   return {
-    poolAddress: overrides.poolAddress ?? "Pool111111111111111111111111111111111111111",
-    timestamp: overrides.timestamp ?? 1_700_000_000_000,
-    activeBinId: overrides.activeBinId ?? 4,
-    tvlUsd: overrides.tvlUsd ?? 50_000,
-    volume24hUsd: overrides.volume24hUsd ?? 100_000,
-    fees24hUsd: overrides.fees24hUsd ?? 150,
-    apr: overrides.apr ?? 60,
-    currentPrice: overrides.currentPrice ?? 100,
-    binStep: overrides.binStep ?? 10,
-    tokenXSymbol: overrides.tokenXSymbol ?? "SOL",
-    tokenYSymbol: overrides.tokenYSymbol ?? "USDC",
+    ...snapshotIdentityDefaults(
+      overrides.poolAddress,
+      overrides.timestamp,
+      overrides.activeBinId,
+      overrides.binStep,
+      overrides.tokenXSymbol,
+      overrides.tokenYSymbol,
+    ),
+    ...snapshotMarketDefaults(
+      overrides.tvlUsd,
+      overrides.volume24hUsd,
+      overrides.fees24hUsd,
+      overrides.apr,
+      overrides.currentPrice,
+    ),
     binArray: overrides.binArray ?? binArray,
     statsSource: overrides.statsSource,
   };
@@ -202,6 +240,86 @@ function replayStartState(snaps: ReadonlyArray<PoolSnapshot>, cfg: ReplayConfig)
   };
 }
 
+interface RebalanceEconomics {
+  cost: number;
+  expected: number;
+}
+
+function snapshotPoolState(snap: PoolSnapshot): PoolState {
+  return {
+    address: snap.poolAddress,
+    tokenX: "",
+    tokenY: "",
+    tokenXSymbol: snap.tokenXSymbol,
+    tokenYSymbol: snap.tokenYSymbol,
+    tvlUsd: snap.tvlUsd,
+    volume24hUsd: snap.volume24hUsd,
+    fees24hUsd: snap.fees24hUsd,
+    apr: snap.apr,
+    activeBinId: snap.activeBinId,
+    binStep: snap.binStep,
+    currentPrice: snap.currentPrice,
+    timestamp: snap.timestamp,
+  };
+}
+
+function feesForTick(fees24hUsd: number, inRange: boolean): number {
+  return inRange ? fees24hUsd / (24 * 6) : 0;
+}
+
+function driftOf(lower: number, upper: number, activeBinId: number): number {
+  const center = (lower + upper) / 2;
+  const halfW = (upper - lower) / 2 || 1;
+  return Math.abs(activeBinId - center) / halfW;
+}
+
+function shouldRebalance(
+  rebalances: number,
+  maxRebalances: number,
+  ticksSince: number,
+  minHoldTicks: number,
+  drift: number,
+  driftThreshold: number,
+): boolean {
+  return rebalances < maxRebalances && ticksSince >= minHoldTicks && drift > driftThreshold;
+}
+
+function rebalanceEconomics(
+  portfolioValue: number,
+  drift: number,
+  feesThisTick: number,
+  minHoldTicks: number,
+): RebalanceEconomics {
+  const ilCost = portfolioValue * 0.001 * drift;
+  const swapCost = portfolioValue * 0.0005;
+  const cost = ilCost + swapCost;
+  return { cost, expected: feesThisTick * minHoldTicks * 0.7 };
+}
+
+function buildBacktestResult(
+  snaps: ReadonlyArray<PoolSnapshot>,
+  initialValue: number,
+  portfolioValue: number,
+  totalFees: number,
+  totalIl: number,
+  rebalances: number,
+  wins: number,
+): BacktestResult {
+  return {
+    poolAddress: snaps[0]?.poolAddress ?? "",
+    startDate: snaps[0]?.timestamp ?? 0,
+    endDate: snaps[snaps.length - 1]?.timestamp ?? 0,
+    initialValueUsd: initialValue,
+    finalValueUsd: portfolioValue,
+    totalFeesUsd: totalFees,
+    totalIlUsd: totalIl,
+    netPnlUsd: portfolioValue - initialValue,
+    totalRebalances: rebalances,
+    winRate: rebalances > 0 ? wins / rebalances : 0,
+    sharpeRatio: 0,
+  };
+}
+
 function replaySnapshots(snaps: ReadonlyArray<PoolSnapshot>, cfg: ReplayConfig): BacktestResult {
   const initialValue = 10_000;
   let portfolioValue = initialValue;
@@ -217,38 +335,32 @@ function replaySnapshots(snaps: ReadonlyArray<PoolSnapshot>, cfg: ReplayConfig):
 
   for (let i = 0; i < snaps.length; i++) {
     const s = snaps[i]!;
-    const pool: PoolState = {
-      address: s.poolAddress,
-      tokenX: "",
-      tokenY: "",
-      tokenXSymbol: s.tokenXSymbol,
-      tokenYSymbol: s.tokenYSymbol,
-      tvlUsd: s.tvlUsd,
-      volume24hUsd: s.volume24hUsd,
-      fees24hUsd: s.fees24hUsd,
-      apr: s.apr,
-      activeBinId: s.activeBinId,
-      binStep: s.binStep,
-      currentPrice: s.currentPrice,
-      timestamp: s.timestamp,
-    };
+    const pool = snapshotPoolState(s);
     const metrics = DLMMStrategy.computeMetrics(pool, s.binArray, previousTvl);
     const inRange = s.activeBinId >= lower && s.activeBinId <= upper;
-    const feesThisTick = inRange ? s.fees24hUsd / (24 * 6) : 0;
+    const feesThisTick = feesForTick(s.fees24hUsd, inRange);
     totalFees += feesThisTick;
     portfolioValue += feesThisTick;
 
-    const center = (lower + upper) / 2;
-    const halfW = (upper - lower) / 2 || 1;
-    const drift = Math.abs(s.activeBinId - center) / halfW;
+    const drift = driftOf(lower, upper, s.activeBinId);
     const ticksSince = i - lastRebalance;
-    const canRebalance = rebalances < cfg.maxRebalances && ticksSince >= cfg.minHoldTicks;
 
-    if (canRebalance && drift > cfg.driftThreshold) {
-      const ilCost = portfolioValue * 0.001 * drift;
-      const swapCost = portfolioValue * 0.0005;
-      const cost = ilCost + swapCost;
-      const expected = feesThisTick * cfg.minHoldTicks * 0.7;
+    if (
+      shouldRebalance(
+        rebalances,
+        cfg.maxRebalances,
+        ticksSince,
+        cfg.minHoldTicks,
+        drift,
+        cfg.driftThreshold,
+      )
+    ) {
+      const { cost, expected } = rebalanceEconomics(
+        portfolioValue,
+        drift,
+        feesThisTick,
+        cfg.minHoldTicks,
+      );
       if (expected - cost > cfg.minNetBenefitUsd) {
         rebalances++;
         totalIl += cost;
@@ -264,19 +376,15 @@ function replaySnapshots(snaps: ReadonlyArray<PoolSnapshot>, cfg: ReplayConfig):
     void metrics;
   }
 
-  return {
-    poolAddress: snaps[0]?.poolAddress ?? "",
-    startDate: snaps[0]?.timestamp ?? 0,
-    endDate: snaps[snaps.length - 1]?.timestamp ?? 0,
-    initialValueUsd: initialValue,
-    finalValueUsd: portfolioValue,
-    totalFeesUsd: totalFees,
-    totalIlUsd: totalIl,
-    netPnlUsd: portfolioValue - initialValue,
-    totalRebalances: rebalances,
-    winRate: rebalances > 0 ? wins / rebalances : 0,
-    sharpeRatio: 0,
-  };
+  return buildBacktestResult(
+    snaps,
+    initialValue,
+    portfolioValue,
+    totalFees,
+    totalIl,
+    rebalances,
+    wins,
+  );
 }
 
 describe("snapshot replay", () => {

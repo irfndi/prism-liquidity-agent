@@ -640,6 +640,90 @@ export function shouldHoldForRecovery(recoveryProbability: number, holdThreshold
 
 // ─── Darwinian signal weighting ─────────────────────────────────────────────
 
+interface ResolvedSignalWeightOptions {
+  readonly windowDays: number;
+  readonly minOutcomes: number;
+  readonly boostFactor: number;
+  readonly decayFactor: number;
+  readonly weightFloor: number;
+  readonly weightCeiling: number;
+}
+
+function resolveSignalWeightOptions(
+  options:
+    | {
+        readonly windowDays?: number;
+        readonly minOutcomes?: number;
+        readonly boostFactor?: number;
+        readonly decayFactor?: number;
+        readonly weightFloor?: number;
+        readonly weightCeiling?: number;
+      }
+    | undefined,
+): ResolvedSignalWeightOptions {
+  if (options === undefined) {
+    return {
+      windowDays: 60,
+      minOutcomes: 10,
+      boostFactor: 1.05,
+      decayFactor: 0.95,
+      weightFloor: 0.3,
+      weightCeiling: 2.5,
+    };
+  }
+  return {
+    windowDays: options.windowDays ?? 60,
+    minOutcomes: options.minOutcomes ?? 10,
+    boostFactor: options.boostFactor ?? 1.05,
+    decayFactor: options.decayFactor ?? 0.95,
+    weightFloor: options.weightFloor ?? 0.3,
+    weightCeiling: options.weightCeiling ?? 2.5,
+  };
+}
+
+function recentOutcomesInWindow(
+  outcomes: ReadonlyArray<OutcomeRecord>,
+  cutoff: number,
+): Array<OutcomeRecord> {
+  return outcomes.filter((o) => o.outcomeRecordedAt > cutoff);
+}
+
+function signalWeightNudge(
+  quartile: number,
+  lift: number,
+  boostFactor: number,
+  decayFactor: number,
+): number {
+  if (quartile === 0) return decayFactor;
+  if (quartile === 3) return boostFactor;
+  return 1 + lift * 0.05;
+}
+
+const WEIGHTED_SIGNALS: ReadonlyArray<keyof Omit<OutcomeRecord, "pnlUsd" | "outcomeRecordedAt">> = [
+  "feeIlRatio",
+  "volumeAuthenticity",
+  "binUtilization",
+];
+
+function applySignalWeightNudges(
+  current: SignalWeights,
+  recent: ReadonlyArray<OutcomeRecord>,
+  boostFactor: number,
+  decayFactor: number,
+  weightFloor: number,
+  weightCeiling: number,
+): SignalWeights {
+  let updated = { ...current, updatedAt: Date.now() };
+  for (const signal of WEIGHTED_SIGNALS) {
+    const lift = computeSignalLift(recent, signal);
+    const quartile = computeQuartile(recent, signal);
+    const nudge = signalWeightNudge(quartile, lift, boostFactor, decayFactor);
+    const newWeight = clampWeight(updated[signal] * nudge, weightFloor, weightCeiling);
+    updated = { ...updated, [signal]: newWeight };
+  }
+  return updated;
+}
+
 export function computeSignalWeights(
   outcomes: ReadonlyArray<OutcomeRecord>,
   current: SignalWeights,
@@ -652,47 +736,20 @@ export function computeSignalWeights(
     readonly weightCeiling?: number;
   },
 ): SignalWeights {
-  const windowDays = options?.windowDays ?? 60;
-  const minOutcomes = options?.minOutcomes ?? 10;
-  const boostFactor = options?.boostFactor ?? 1.05;
-  const decayFactor = options?.decayFactor ?? 0.95;
-  const weightFloor = options?.weightFloor ?? 0.3;
-  const weightCeiling = options?.weightCeiling ?? 2.5;
-
-  const cutoff = Date.now() - windowDays * 24 * 60 * 60 * 1000;
-  const recent = outcomes.filter((o) => o.outcomeRecordedAt > cutoff);
-
-  if (recent.length < minOutcomes) {
+  const resolved = resolveSignalWeightOptions(options);
+  const cutoff = Date.now() - resolved.windowDays * 24 * 60 * 60 * 1000;
+  const recent = recentOutcomesInWindow(outcomes, cutoff);
+  if (recent.length < resolved.minOutcomes) {
     return current;
   }
-
-  const signals: ReadonlyArray<keyof Omit<OutcomeRecord, "pnlUsd" | "outcomeRecordedAt">> = [
-    "feeIlRatio",
-    "volumeAuthenticity",
-    "binUtilization",
-  ];
-
-  let updated = { ...current, updatedAt: Date.now() };
-
-  for (const signal of signals) {
-    const lift = computeSignalLift(recent, signal);
-    const quartile = computeQuartile(recent, signal);
-
-    let nudge = 1;
-    if (quartile === 0) {
-      nudge = decayFactor;
-    } else if (quartile === 3) {
-      nudge = boostFactor;
-    } else {
-      nudge = 1 + lift * 0.05;
-    }
-
-    const currentWeight = updated[signal];
-    const newWeight = clampWeight(currentWeight * nudge, weightFloor, weightCeiling);
-    updated = { ...updated, [signal]: newWeight };
-  }
-
-  return updated;
+  return applySignalWeightNudges(
+    current,
+    recent,
+    resolved.boostFactor,
+    resolved.decayFactor,
+    resolved.weightFloor,
+    resolved.weightCeiling,
+  );
 }
 
 function computeQuartile(

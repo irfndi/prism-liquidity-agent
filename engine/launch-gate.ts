@@ -187,16 +187,26 @@ function launchLegRejectReason(pool: DiscoveredPool, config: LaunchGateConfig): 
   return null;
 }
 
-/** Ordered launch admission checks — rejection order, reason strings and
- *  stable categories are contractual (radar histograms bucket on category). */
-function launchAdmission(pool: DiscoveredPool, config: LaunchGateConfig): LaunchAdmissionOutcome {
-  // Fail closed on missing data — hotness is the point.
+function poolAgeHours(createdAtMs: number | undefined, now: number): number {
+  if (createdAtMs === undefined) return 0;
+  return Math.max(0, now - createdAtMs) / HOUR_MS;
+}
+
+function rejectMissingData(pool: DiscoveredPool): LaunchAdmissionOutcome | null {
   if (isUnknownFeeYield(pool)) {
     return { passed: false, reason: "missing 1h fee yield", category: "missing-data" };
   }
   if (pool.createdAtMs === undefined) {
     return { passed: false, reason: "missing createdAt", category: "missing-data" };
   }
+  return null;
+}
+
+function rejectBadAge(
+  pool: DiscoveredPool,
+  config: LaunchGateConfig,
+): LaunchAdmissionOutcome | null {
+  if (pool.createdAtMs === undefined) return null;
   if (isFutureCreatedAt(pool.createdAtMs, config.now)) {
     return {
       passed: false,
@@ -204,7 +214,7 @@ function launchAdmission(pool: DiscoveredPool, config: LaunchGateConfig): Launch
       category: "created-at",
     };
   }
-  const ageHours = Math.max(0, config.now - pool.createdAtMs) / HOUR_MS;
+  const ageHours = poolAgeHours(pool.createdAtMs, config.now);
   if (ageHours > config.maxAgeHours) {
     return {
       passed: false,
@@ -212,6 +222,13 @@ function launchAdmission(pool: DiscoveredPool, config: LaunchGateConfig): Launch
       category: "age",
     };
   }
+  return null;
+}
+
+function rejectBadTvl(
+  pool: DiscoveredPool,
+  config: LaunchGateConfig,
+): LaunchAdmissionOutcome | null {
   if (isBelowLaunchTvlFloor(pool, config)) {
     return { passed: false, reason: `tvl ${pool.tvlUsd} < ${config.minTvlUsd}`, category: "tvl" };
   }
@@ -222,6 +239,13 @@ function launchAdmission(pool: DiscoveredPool, config: LaunchGateConfig): Launch
       category: "tvl",
     };
   }
+  return null;
+}
+
+function rejectThinFlow(
+  pool: DiscoveredPool,
+  config: LaunchGateConfig,
+): LaunchAdmissionOutcome | null {
   if (isThin1hVolume(pool, config)) {
     return {
       passed: false,
@@ -243,6 +267,13 @@ function launchAdmission(pool: DiscoveredPool, config: LaunchGateConfig): Launch
       category: "bin-step",
     };
   }
+  return null;
+}
+
+function rejectWashTurnover(
+  pool: DiscoveredPool,
+  config: LaunchGateConfig,
+): LaunchAdmissionOutcome | null {
   // Wash-turnover guard: 24h volume/TVL must land in (0, max].
   if (hasNo24hVolume(pool)) {
     return {
@@ -259,11 +290,34 @@ function launchAdmission(pool: DiscoveredPool, config: LaunchGateConfig): Launch
       category: "turnover",
     };
   }
+  return null;
+}
+
+/** Ordered launch admission checks — rejection order, reason strings and
+ *  stable categories are contractual (radar histograms bucket on category). */
+function launchAdmission(pool: DiscoveredPool, config: LaunchGateConfig): LaunchAdmissionOutcome {
+  // Fail closed on missing data — hotness is the point. Stage order, reason
+  // strings and stable categories are contractual (radar histograms bucket
+  // on category); each stage below preserves them in order.
+  const missing = rejectMissingData(pool);
+  if (missing !== null) return missing;
+  const age = rejectBadAge(pool, config);
+  if (age !== null) return age;
+  const tvl = rejectBadTvl(pool, config);
+  if (tvl !== null) return tvl;
+  const flow = rejectThinFlow(pool, config);
+  if (flow !== null) return flow;
+  const turnover = rejectWashTurnover(pool, config);
+  if (turnover !== null) return turnover;
   const legReason = launchLegRejectReason(pool, config);
   if (legReason !== null) {
     return { passed: false, reason: legReason, category: "token-safety" };
   }
-  return { passed: true, ageHours, volumeTurnover };
+  return {
+    passed: true,
+    ageHours: poolAgeHours(pool.createdAtMs, config.now),
+    volumeTurnover: pool.volume24hUsd / pool.tvlUsd,
+  };
 }
 
 /** Admission already rejected pools missing these metrics; a fail-closed 0

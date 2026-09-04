@@ -55,6 +55,44 @@ export function hasDangerRisks(report: RugCheckReport): boolean {
   return report.dangerRiskCount > 0;
 }
 
+function dangerRiskNames(report: RugCheckReport): string | null {
+  if (!hasDangerRisks(report)) return null;
+  return report.risks
+    .filter((r) => r.level === "danger")
+    .map((r) => r.name)
+    .join(", ");
+}
+
+function rugcheckScoreReason(
+  scoreNormalised: number | null,
+  maxRugcheckScore: number,
+): string | null {
+  if (scoreNormalised === null) return "RugCheck score unknown — fail closed";
+  if (scoreNormalised > maxRugcheckScore) {
+    return `RugCheck risk score ${scoreNormalised} exceeds max ${maxRugcheckScore}`;
+  }
+  return null;
+}
+
+function rugcheckHolderReason(totalHolders: number | null, minHolders: number): string | null {
+  if (totalHolders === null) return "RugCheck holder count unknown — fail closed";
+  if (totalHolders < minHolders) {
+    return `Holder count ${totalHolders} below minimum ${minHolders}`;
+  }
+  return null;
+}
+
+function rugcheckConcentrationReason(
+  top10HolderPct: number | null,
+  maxTop10HolderPct: number,
+): string | null {
+  // Holder concentration fails OPEN (API returns null topHolders for majors).
+  // top10HolderPct is a percent (0..100); config.maxTop10HolderPct is a fraction
+  // (0..1) — normalize to fractions before comparing.
+  if (top10HolderPct === null || top10HolderPct / 100 <= maxTop10HolderPct) return null;
+  return `Top-10 holder concentration ${top10HolderPct.toFixed(1)}% exceeds max ${(maxTop10HolderPct * 100).toFixed(0)}%`;
+}
+
 /** RugCheck sub-gate: every reason the token's security profile disqualifies it. */
 function collectRugcheckReasons(
   report: RugCheckReport,
@@ -64,19 +102,13 @@ function collectRugcheckReasons(
   if (report.rugged) {
     reasons.push("RugCheck flags token as rugged");
   }
-  if (hasDangerRisks(report)) {
-    const dangerNames = report.risks
-      .filter((r) => r.level === "danger")
-      .map((r) => r.name)
-      .join(", ");
+  const dangerNames = dangerRiskNames(report);
+  if (dangerNames !== null) {
     reasons.push(`RugCheck danger risks present: ${dangerNames}`);
   }
-  if (report.scoreNormalised === null) {
-    reasons.push("RugCheck score unknown — fail closed");
-  } else if (report.scoreNormalised > config.maxRugcheckScore) {
-    reasons.push(
-      `RugCheck risk score ${report.scoreNormalised} exceeds max ${config.maxRugcheckScore}`,
-    );
+  const scoreReason = rugcheckScoreReason(report.scoreNormalised, config.maxRugcheckScore);
+  if (scoreReason !== null) {
+    reasons.push(scoreReason);
   }
   if (report.mintAuthority !== null) {
     reasons.push("Token mint authority is still enabled");
@@ -84,18 +116,16 @@ function collectRugcheckReasons(
   if (report.freezeAuthority !== null) {
     reasons.push("Token freeze authority is still enabled");
   }
-  if (report.totalHolders === null) {
-    reasons.push("RugCheck holder count unknown — fail closed");
-  } else if (report.totalHolders < config.minHolders) {
-    reasons.push(`Holder count ${report.totalHolders} below minimum ${config.minHolders}`);
+  const holderReason = rugcheckHolderReason(report.totalHolders, config.minHolders);
+  if (holderReason !== null) {
+    reasons.push(holderReason);
   }
-  // Holder concentration fails OPEN (API returns null topHolders for majors).
-  // top10HolderPct is a percent (0..100); config.maxTop10HolderPct is a fraction
-  // (0..1) — normalize to fractions before comparing.
-  if (report.top10HolderPct !== null && report.top10HolderPct / 100 > config.maxTop10HolderPct) {
-    reasons.push(
-      `Top-10 holder concentration ${report.top10HolderPct.toFixed(1)}% exceeds max ${(config.maxTop10HolderPct * 100).toFixed(0)}%`,
-    );
+  const concentrationReason = rugcheckConcentrationReason(
+    report.top10HolderPct,
+    config.maxTop10HolderPct,
+  );
+  if (concentrationReason !== null) {
+    reasons.push(concentrationReason);
   }
 }
 
@@ -165,6 +195,27 @@ export function evaluateFallenAngelGate(input: FallenAngelGateInput): FallenAnge
  * SOL is always excluded: it is the settlement/quote leg, never the
  * fallen-angel asset (RugCheck reports for SOL carry no useful signal).
  */
+function isStableOrBaseLeg(
+  mint: string,
+  stablecoinMints: ReadonlySet<string>,
+  solMint: string,
+): boolean {
+  return stablecoinMints.has(mint) || mint === solMint;
+}
+
+function pickAssetLeg(
+  tokenX: string,
+  tokenY: string,
+  xIsStable: boolean,
+  yIsStable: boolean,
+): string | null {
+  if (!xIsStable && yIsStable) return tokenX;
+  if (xIsStable && !yIsStable) return tokenY;
+  if (xIsStable && yIsStable) return null;
+  // Neither leg is stable/SOL — prefer the first (tokenX) as the asset.
+  return tokenX;
+}
+
 export function identifyAssetMint(
   tokenX: string,
   tokenY: string,
@@ -172,11 +223,7 @@ export function identifyAssetMint(
   solMint: string,
 ): string | null {
   if (stablecoinMints === undefined || stablecoinMints.size === 0) return null;
-  const xIsStable = stablecoinMints.has(tokenX) || tokenX === solMint;
-  const yIsStable = stablecoinMints.has(tokenY) || tokenY === solMint;
-  if (!xIsStable && yIsStable) return tokenX;
-  if (xIsStable && !yIsStable) return tokenY;
-  if (xIsStable && yIsStable) return null;
-  // Neither leg is stable/SOL — prefer the first (tokenX) as the asset.
-  return tokenX;
+  const xIsStable = isStableOrBaseLeg(tokenX, stablecoinMints, solMint);
+  const yIsStable = isStableOrBaseLeg(tokenY, stablecoinMints, solMint);
+  return pickAssetLeg(tokenX, tokenY, xIsStable, yIsStable);
 }

@@ -28,25 +28,34 @@ export interface PrismCredentials {
 /** JSON-serializable request body for the Prism Cloud API. */
 export type JsonBody = Readonly<Record<string, string | number | boolean | null>>;
 
+async function readSuccessBody<T>(response: Response): Promise<ApiResponse<T>> {
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+  const json = (await response.json()) as T;
+  return { ok: true, status: response.status, data: json };
+}
+
+function buildPostInit(
+  body: JsonBody,
+  apiKey: string | undefined,
+  signal: AbortSignal | undefined,
+): RequestInit {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
+  const init: RequestInit = { method: "POST", headers, body: JSON.stringify(body) };
+  if (signal) init.signal = signal;
+  return init;
+}
+
 export async function prismApiPost<T = unknown>(
   path: string,
   body: JsonBody,
   options: { apiKey?: string; signal?: AbortSignal } = {},
 ): Promise<ApiResponse<T>> {
-  const headers = new Headers({ "Content-Type": "application/json" });
-  if (options.apiKey) {
-    headers.set("Authorization", `Bearer ${options.apiKey}`);
-  }
-  const init: RequestInit = {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  };
-  if (options.signal) {
-    init.signal = options.signal;
-  }
   try {
-    const response = await fetch(`${getApiBaseUrl()}${path}`, init);
+    const response = await fetch(
+      `${getApiBaseUrl()}${path}`,
+      buildPostInit(body, options.apiKey, options.signal),
+    );
     if (!response.ok) {
       return {
         ok: false,
@@ -54,15 +63,9 @@ export async function prismApiPost<T = unknown>(
         error: `Prism API error: ${response.status} ${response.statusText}`,
       };
     }
-    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-    const json = (await response.json()) as T;
-    return { ok: true, status: response.status, data: json };
+    return readSuccessBody<T>(response);
   } catch (err) {
-    return {
-      ok: false,
-      status: 0,
-      error: err instanceof Error ? err.message : String(err),
-    };
+    return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -71,14 +74,9 @@ export async function prismApiGet<T = unknown>(
   options: { apiKey?: string } = {},
 ): Promise<ApiResponse<T>> {
   const headers: Record<string, string> = {};
-  if (options.apiKey) {
-    headers.Authorization = `Bearer ${options.apiKey}`;
-  }
+  if (options.apiKey) headers.Authorization = `Bearer ${options.apiKey}`;
   try {
-    const response = await fetch(`${getApiBaseUrl()}${path}`, {
-      method: "GET",
-      headers,
-    });
+    const response = await fetch(`${getApiBaseUrl()}${path}`, { method: "GET", headers });
     if (!response.ok) {
       return {
         ok: false,
@@ -86,15 +84,9 @@ export async function prismApiGet<T = unknown>(
         error: `Prism API error: ${response.status} ${response.statusText}`,
       };
     }
-    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-    const json = (await response.json()) as T;
-    return { ok: true, status: response.status, data: json };
+    return readSuccessBody<T>(response);
   } catch (err) {
-    return {
-      ok: false,
-      status: 0,
-      error: err instanceof Error ? err.message : String(err),
-    };
+    return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -111,24 +103,23 @@ export function readCredentials(): {
   }
 }
 
+async function ensureCredentialsValid(apiKey: string): Promise<string | null> {
+  const result = await prismApiPost("/v1/login", {}, { apiKey, signal: AbortSignal.timeout(5000) });
+  if (result.ok) return null;
+  return result.error ? ` ${result.error}` : "";
+}
+
 export async function requireRegistered(validate = false): Promise<PrismCredentials> {
   const credentials = readCredentials();
   if (!credentials?.apiKey || !credentials.userId) {
     throw new Error("Prism account required. Run 'prism register' first.");
   }
-  if (validate) {
-    const result = await prismApiPost(
-      "/v1/login",
-      {},
-      { apiKey: credentials.apiKey, signal: AbortSignal.timeout(5000) },
+  if (!validate) return credentials;
+  const detail = await ensureCredentialsValid(credentials.apiKey);
+  if (detail !== null) {
+    throw new Error(
+      `Stored Prism credentials are invalid or unavailable. Run 'prism login <key>'.${detail}`,
     );
-    if (!result.ok) {
-      throw new Error(
-        `Stored Prism credentials are invalid or unavailable. Run 'prism login <key>'.${
-          result.error ? ` ${result.error}` : ""
-        }`,
-      );
-    }
   }
   return credentials;
 }
@@ -161,32 +152,50 @@ interface PingRequestOptions {
   signal: AbortSignal;
 }
 
+function buildPingBody(event: "install" | "setup" | "dev_start" | "register"): InstallPingBody {
+  return {
+    installId: getOrCreateInstallId(),
+    event,
+    version: getCurrentVersion(),
+    channel: process.env.UPDATE_CHANNEL ?? "stable",
+    platform: process.platform,
+  };
+}
+
+function isPingSkipped(
+  event: "install" | "setup" | "dev_start" | "register",
+  storedApiKey: string | undefined,
+  storedUserId: string | undefined,
+  wantedUserId: string | undefined,
+): boolean {
+  if (event !== "install" && !storedApiKey) return true;
+  if (wantedUserId !== undefined && storedUserId !== wantedUserId) return true;
+  return false;
+}
+
+async function postPing(body: InstallPingBody, apiKey: string | undefined): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  const requestOptions: PingRequestOptions = { signal: controller.signal };
+  if (apiKey) requestOptions.apiKey = apiKey;
+  try {
+    const result = await prismApiPost("/v1/installs/ping", body, requestOptions);
+    return result.ok;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export function pingInstall(
   event: "install" | "setup" | "dev_start" | "register",
   options: { userId?: string } = {},
 ): Promise<boolean> {
   return (async () => {
     try {
-      const body: InstallPingBody = {
-        installId: getOrCreateInstallId(),
-        event,
-        version: getCurrentVersion(),
-        channel: process.env.UPDATE_CHANNEL ?? "stable",
-        platform: process.platform,
-      };
       const credentials = readCredentials();
-      if (event !== "install" && !credentials?.apiKey) return false;
-      if (options.userId && credentials?.userId !== options.userId) return false;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3000);
-      const requestOptions: PingRequestOptions = {
-        signal: controller.signal,
-      };
-      if (credentials?.apiKey) requestOptions.apiKey = credentials.apiKey;
-      const result = await prismApiPost("/v1/installs/ping", body, requestOptions).finally(() =>
-        clearTimeout(timeout),
-      );
-      return result.ok;
+      if (isPingSkipped(event, credentials?.apiKey, credentials?.userId, options.userId))
+        return false;
+      return postPing(buildPingBody(event), credentials?.apiKey);
     } catch {
       return false;
     }

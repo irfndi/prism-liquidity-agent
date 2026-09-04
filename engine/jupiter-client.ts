@@ -80,72 +80,104 @@ function syntheticRateLimitedResponse(): Response {
  * sites so pacing and the 429 breaker apply process-wide (the bucket is
  * shared across endpoints — per-site throttles would not protect it).
  */
-export async function jupiterFetch(
-  input: string | URL | Request,
-  init?: RequestInit,
-): Promise<Response> {
-  const signal = init?.signal ?? undefined;
-  // Fail fast while the 429 cooldown is open — no network traffic, so a ban
-  // cannot be refreshed by retry loops.
-  if (Date.now() < breakerCooldownUntil) {
-    return syntheticRateLimitedResponse();
-  }
-  // Pace to the sustained keyless rate. Waiting callers hold NO reservation:
-  // the loop sleeps in ≤interval chunks until the slot is free, then claims
-  // and sends atomically (single-threaded). Concurrent callers still end up
-  // interval-spaced — the first to wake claims and sends, the rest see the
-  // advanced counter and wait again — but an aborted waiter leaves nothing
-  // behind, so no abandoned slot can queue later callers behind dead
-  // reservations.
-  while (true) {
-    const now = Date.now();
-    let waitMs = nextJupiterSlotAt - now;
-    // A slot more than 5 minutes out is a clock anomaly (NTP jump back, or
-    // stale state across test isolation) — never sleep that long for pacing;
-    // a queue that deep is pathological and the 429 breaker should have
-    // opened long before it forms.
-    if (waitMs > MAX_JUPITER_SLOT_WAIT_MS) {
-      nextJupiterSlotAt = now + intervalMs();
-      waitMs = 0;
-    }
-    if (waitMs <= 0) break;
-    await sleepWithAbort(Math.min(waitMs, intervalMs()), signal);
-    // Re-check after every wake: an EARLIER request may have received a 429
-    // and opened the breaker mid-wait (the waiting request must fail fast
-    // instead of refreshing the ban), or the caller's signal may have fired.
-    if (Date.now() < breakerCooldownUntil) {
-      return syntheticRateLimitedResponse();
-    }
-    if (signal !== undefined && signal.aborted) {
-      throw signal.reason ?? new Error("The operation was aborted");
-    }
-  }
-  const slotStart = Date.now();
-  nextJupiterSlotAt = slotStart + intervalMs();
-  const response = await fetch(input, init);
+/** Clamp the x-ratelimit-reset backoff target so a malformed or far-future
+ *  stamp can never wedge the breaker (no self-heal) for hours or days. */
+function clampedResetMs(resetHeader: string | null): number {
+  if (resetHeader === null) return 0;
+  const resetAtMs = Number(resetHeader) * 1000;
+  if (!Number.isFinite(resetAtMs) || resetAtMs <= 0) return 0;
+  return Math.min(resetAtMs, Date.now() + BREAKER_MAX_COOLDOWN_MS);
+}
+
+/** Escalate the cooldown on 429 (x-ratelimit-reset is the documented backoff
+ *  target); a success after the cooldown clears the breaker (half-open). */
+function recordJupiterResponse(response: Response): void {
   if (response.status === 429) {
-    // Escalate the cooldown; x-ratelimit-reset (Unix seconds) is the
-    // documented backoff target when the oldest in-window request ages out.
-    // Clamped: the escalated cooldown is bounded at 60 min, and the header
-    // override must be too — a malformed or far-future stamp would otherwise
-    // wedge the breaker (no self-heal) for hours or days.
     breakerFailures += 1;
     const cooldownMs = Math.min(
       baseCooldownMs() * 2 ** (breakerFailures - 1),
       BREAKER_MAX_COOLDOWN_MS,
     );
-    const resetHeader = response.headers.get("x-ratelimit-reset");
-    const resetAtMs = resetHeader === null ? 0 : Number(resetHeader) * 1000;
-    const clampedResetAtMs =
-      Number.isFinite(resetAtMs) && resetAtMs > 0
-        ? Math.min(resetAtMs, Date.now() + BREAKER_MAX_COOLDOWN_MS)
-        : 0;
-    breakerCooldownUntil = Math.max(Date.now() + cooldownMs, clampedResetAtMs);
-  } else if (response.ok && breakerFailures > 0) {
-    // Half-open recovery: a success after the cooldown clears the breaker.
+    breakerCooldownUntil = Math.max(
+      Date.now() + cooldownMs,
+      clampedResetMs(response.headers.get("x-ratelimit-reset")),
+    );
+    return;
+  }
+  if (response.ok && breakerFailures > 0) {
     breakerFailures = 0;
     breakerCooldownUntil = 0;
   }
+}
+
+/**
+ * Pace to the sustained keyless rate. Slots are claimed SYNCHRONOUSLY at
+ * call time (single-threaded: the sync prefix runs atomically), so
+ * concurrent callers fan out to distinct slots instead of bursting. An
+ * aborted tail waiter releases its slot, so no abandoned reservation queues
+ * later callers behind dead air. Returns the synthetic 429 when the breaker
+ * opened mid-wait, null once the caller owns the slot and may send.
+ */
+function claimJupiterSlot() {
+  const now = Date.now();
+  const slotAt = Math.max(now, nextJupiterSlotAt);
+  // A slot more than 5 minutes out is a clock anomaly (NTP jump back, or
+  // stale state across test isolation) — never sleep that long for pacing;
+  // a queue that deep is pathological and the 429 breaker should have
+  // opened long before it forms.
+  if (slotAt - now > MAX_JUPITER_SLOT_WAIT_MS) {
+    nextJupiterSlotAt = now + intervalMs();
+    return { slotAt: now, waitMs: 0 };
+  }
+  nextJupiterSlotAt = slotAt + intervalMs();
+  return { slotAt, waitMs: slotAt - now };
+}
+
+/** Release a tail reservation (aborted waiters must not strand later callers). */
+function releaseJupiterSlot(slotAt: number): void {
+  if (nextJupiterSlotAt === slotAt + intervalMs()) {
+    nextJupiterSlotAt = slotAt;
+  }
+}
+
+async function waitJupiterSlot(
+  slotAt: number,
+  waitMs: number,
+  signal: AbortSignal | undefined,
+): Promise<Response | null> {
+  if (waitMs <= 0) return null;
+  // Re-check after every wake: an EARLIER request may have received a 429
+  // and opened the breaker mid-wait (the waiting request must fail fast
+  // instead of refreshing the ban), or the caller's signal may have fired.
+  await sleepWithAbort(Math.min(waitMs, intervalMs()), signal);
+  if (Date.now() < breakerCooldownUntil) {
+    return syntheticRateLimitedResponse();
+  }
+  if (signal !== undefined && signal.aborted) {
+    releaseJupiterSlot(slotAt);
+    throw signal.reason ?? new Error("The operation was aborted");
+  }
+  return waitJupiterSlot(slotAt, slotAt - Date.now(), signal);
+}
+
+/**
+ * The single choke point for every api.jup.ag request in the process.
+ * (see the traffic-gate note at the top of this file)
+ */
+export async function jupiterFetch(
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<Response> {
+  // Fail fast while the 429 cooldown is open — no network traffic, so a ban
+  // cannot be refreshed by retry loops.
+  if (Date.now() < breakerCooldownUntil) {
+    return syntheticRateLimitedResponse();
+  }
+  const claimed = claimJupiterSlot();
+  const waiting = await waitJupiterSlot(claimed.slotAt, claimed.waitMs, init?.signal ?? undefined);
+  if (waiting !== null) return waiting;
+  const response = await fetch(input, init);
+  recordJupiterResponse(response);
   return response;
 }
 

@@ -275,58 +275,70 @@ export class AcpTransport implements AgentRuntimeTransport {
   }
 
   private handleMessage(msg: AcpResponse | AcpNotification | AcpRequest): void {
-    // Inbound request from the agent (carries both a method and an id). Prism is a
-    // non-interactive ACP client and implements none of the client callbacks
-    // (session/request_permission, fs/*, terminal/*), but it must still reply, or the
-    // agent blocks indefinitely and the prompt times out.
+    if (this.handleInboundRequest(msg)) return;
+    if (this.settlePendingResponse(msg)) return;
+    this.handleSessionUpdate(msg);
+  }
+
+  // Inbound request from the agent (carries both a method and an id). Prism is a
+  // non-interactive ACP client and implements none of the client callbacks
+  // (session/request_permission, fs/*, terminal/*), but it must still reply, or the
+  // agent blocks indefinitely and the prompt times out.
+  private handleInboundRequest(msg: AcpResponse | AcpNotification | AcpRequest): boolean {
     if ("method" in msg && "id" in msg && msg.id != null) {
       // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       this.respondUnsupported(msg.id as number | string, msg.method as string);
-      return;
+      return true;
     }
+    return false;
+  }
 
+  private settlePendingResponse(msg: AcpResponse | AcpNotification | AcpRequest): boolean {
     if (
-      "id" in msg &&
-      Object.prototype.toString.call(msg.id) === "[object Number]" &&
-      !("method" in msg)
+      !("id" in msg) ||
+      Object.prototype.toString.call(msg.id) !== "[object Number]" ||
+      "method" in msg
     ) {
-      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-      const id = msg.id as number;
-      if (!this.pending.has(id)) return;
-      const p = this.pending.get(id)!;
-      this.pending.delete(id);
-      clearTimeout(p.timer);
-      if ("error" in msg && msg.error) {
-        p.reject(new Error(msg.error.message));
-      } else {
-        p.resolve(msg.result ?? null);
-      }
-      return;
+      return false;
     }
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+    const id = msg.id as number;
+    if (!this.pending.has(id)) return false;
+    const p = this.pending.get(id)!;
+    this.pending.delete(id);
+    clearTimeout(p.timer);
+    if ("error" in msg && msg.error) {
+      p.reject(new Error(msg.error.message));
+    } else {
+      p.resolve(msg.result ?? null);
+    }
+    return true;
+  }
 
-    if ("method" in msg && msg.method === "session/update") {
-      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-      const params = (msg.params ?? {}) as {
-        readonly update?: {
-          readonly sessionUpdate?: string;
-          readonly content?: { readonly type?: string; readonly text?: string };
-        };
+  private handleSessionUpdate(msg: AcpResponse | AcpNotification | AcpRequest): void {
+    if (!("method" in msg) || msg.method !== "session/update") return;
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+    const params = (msg.params ?? {}) as {
+      readonly update?: {
+        readonly sessionUpdate?: string;
+        readonly content?: { readonly type?: string; readonly text?: string };
       };
-      const update = params.update;
-      if (
-        update?.sessionUpdate === "agent_message_chunk" &&
-        update.content?.type === "text" &&
-        update.content.text
-      ) {
-        // Cap the streamed reply so a chatty agent cannot grow sessionText
-        // unboundedly; the reply is only used for the veto/raw text surface.
-        if (this.sessionText.length < MAX_SESSION_TEXT_LENGTH) {
-          this.sessionText += update.content.text.slice(
-            0,
-            MAX_SESSION_TEXT_LENGTH - this.sessionText.length,
-          );
-        }
-      }
+    };
+    const update = params.update;
+    if (
+      update?.sessionUpdate === "agent_message_chunk" &&
+      update.content?.type === "text" &&
+      update.content.text
+    ) {
+      this.appendSessionText(update.content.text);
+    }
+  }
+
+  private appendSessionText(text: string): void {
+    // Cap the streamed reply so a chatty agent cannot grow sessionText
+    // unboundedly; the reply is only used for the veto/raw text surface.
+    if (this.sessionText.length < MAX_SESSION_TEXT_LENGTH) {
+      this.sessionText += text.slice(0, MAX_SESSION_TEXT_LENGTH - this.sessionText.length);
     }
   }
 

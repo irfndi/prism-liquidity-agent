@@ -3,9 +3,14 @@ import {
   AdapterService,
   DbService,
   EntryPrepService,
+  type AdapterApi,
   type EntryPreparationOutcome,
   type EntryPreparationReceipt,
   type EntryPrepApi,
+  type PreparedSwap,
+  type SwapQuote,
+  type SwapRequest,
+  type SwapSimulation,
 } from "./services.js";
 import { ConfigService } from "./config-service.js";
 import { EntryPrepError } from "./errors.js";
@@ -255,6 +260,144 @@ function solLegRequirement(
 ): bigint {
   return (tokenX === SOL_MINT ? requiredX : 0n) + (tokenY === SOL_MINT ? requiredY : 0n);
 }
+/** Price lookup with a zero fallback for mints missing from the quote. */
+function priceOrZero(prices: Record<string, number>, mint: string): number {
+  return prices[mint] ?? 0;
+}
+
+/** Mints whose prices the preparation must load (runner xOnly skips the Y leg). */
+function prepPriceMints(
+  tokenX: string,
+  tokenY: string,
+  xOnly: boolean,
+  solFunded: boolean,
+): string[] {
+  if (xOnly) return solFunded ? [tokenX, SOL_MINT] : [tokenX];
+  if (solFunded) return [tokenX, tokenY, SOL_MINT];
+  return [tokenX, tokenY];
+}
+
+/** Leg-price gate (runner xOnly skips the Y leg). */
+function prepPricesValid(priceX: number, priceY: number, xOnly: boolean): boolean {
+  if (!isUsablePrice(priceX)) return false;
+  if (xOnly) return true;
+  return isUsablePrice(priceY);
+}
+
+/** SOL-funded mode covers canary and live autonomous operation. */
+function solFundedFromMode(mode: string): boolean {
+  if (mode === "canary") return true;
+  return mode === "live";
+}
+
+/** Skip preparation when neither auto-swap nor SOL-funded mode is active. */
+function shouldSkipPrep(autoSwapEntry: boolean, solFunded: boolean): boolean {
+  if (autoSwapEntry) return false;
+  return !solFunded;
+}
+
+/** Pending settlement claim reserved against a mint (missing claims reserve nothing). */
+function claimFor(claims: Map<string, bigint>, mint: string): bigint {
+  return claims.get(mint) ?? 0n;
+}
+
+/** A price is usable when it is finite and positive. */
+function isUsablePrice(price: number): boolean {
+  return Number.isFinite(price) && price > 0;
+}
+
+/** Fail-fast error when a USDC leg is short outside SOL-funded mode. */
+function legUsdcShortfallError(
+  mint: string,
+  solFunded: boolean,
+  required: bigint,
+  available: bigint,
+  legLabel: string,
+  poolAddress: string,
+): EntryPrepError | null {
+  if (solFunded || mint !== USDC_MINT || required <= available) return null;
+  return makePrepError(
+    "INSUFFICIENT_USDC_BALANCE",
+    `Wallet USDC balance ${formatAtomic(available, USDC_DECIMALS)} is less than required ${formatAtomic(required, USDC_DECIMALS)} for pool token ${legLabel}`,
+    poolAddress,
+  );
+}
+
+/** Single-leg funding shortfall (SOL legs need no swap inside SOL-funded mode). */
+function legDeficit(
+  mint: string,
+  required: bigint,
+  available: bigint,
+  decimals: number,
+  price: number,
+  solFunded: boolean,
+): PrepDeficit | null {
+  if (required <= available) return null;
+  if (!solFunded || mint !== SOL_MINT)
+    return { mint, amount: required - available, decimals, price };
+  return null;
+}
+
+interface SolSwapOps {
+  readonly quoteSwap: (request: SwapRequest) => Effect.Effect<SwapQuote, Error, never>;
+  readonly prepareSwap: (quote: SwapQuote) => Effect.Effect<PreparedSwap, Error, never>;
+  readonly simulateSwap: (prepared: PreparedSwap) => Effect.Effect<SwapSimulation, Error, never>;
+  readonly submitSwap: (prepared: PreparedSwap) => Effect.Effect<string, Error, never>;
+}
+/** Acquired fill from a balance delta (floored at zero — fees can exceed it). */
+function acquiredFill(balanceBefore: bigint, balanceAfter: bigint): bigint {
+  return balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0n;
+}
+
+function solSwapOps(adapter: AdapterApi): SolSwapOps | null {
+  const { quoteSwap, prepareSwap, simulateSwap, submitSwap } = adapter;
+  if (!quoteSwap || !prepareSwap || !simulateSwap || !submitSwap) return null;
+  return { quoteSwap, prepareSwap, simulateSwap, submitSwap };
+}
+
+/** USDC atoms reserved for the gas top-up (zero when the wallet holds enough SOL). */
+function gasTopUpFor(nativeSol: bigint): bigint {
+  if (nativeSol >= SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS) return 0n;
+  return BigInt(GAS_TOP_UP_USDC) * 10n ** BigInt(USDC_DECIMALS);
+}
+
+/** Both legs meet their buffered requirements after funding swaps. */
+function legsFunded(
+  balanceX: bigint,
+  balanceY: bigint,
+  requiredX: bigint,
+  requiredY: bigint,
+): boolean {
+  if (balanceX < requiredX) return false;
+  return balanceY >= requiredY;
+}
+
+/** Spendable amount after reserving pending settlement claims. */
+function spendableAfterClaim(balance: bigint, claimed: bigint): bigint {
+  return balance > claimed ? balance - claimed : 0n;
+}
+
+/** Full insufficient-USDC error including the gas top-up note. */
+function insufficientUsdcError(
+  spendable: bigint,
+  claimed: bigint,
+  required: bigint,
+  topUp: boolean,
+  poolAddress: string,
+): EntryPrepError {
+  const gasNote = topUp ? " + gas top-up" : "";
+  return makePrepError(
+    "INSUFFICIENT_USDC_BALANCE",
+    `Wallet USDC balance ${formatAtomic(spendable, USDC_DECIMALS)} (after ${formatAtomic(claimed, USDC_DECIMALS)} pending settlement claims) is less than required ${formatAtomic(required, USDC_DECIMALS)} for auto-swap entry (swaps + USDC pool leg${gasNote})`,
+    poolAddress,
+  );
+}
+
+/** Gas check after USDC swaps consumed native SOL fees. */
+function gasDepleted(swapped: boolean, nativeAfter: bigint): boolean {
+  if (!swapped) return false;
+  return nativeAfter < MIN_SOL_FOR_GAS_LAMPORTS;
+}
 
 /** Resolve the atomic funding requirements for each leg (xOnly funds the X leg at full size). */
 function resolvePrepRequirements(
@@ -321,45 +464,43 @@ function singleSidedNativeDeposit(input: PrepSingleSidedInput): Effect.Effect<bo
 function collectPrepDeficits(
   input: PrepDeficitInput,
 ): Effect.Effect<PrepDeficit[], EntryPrepError> {
+  const shortX = legUsdcShortfallError(
+    input.tokenX,
+    input.solFunded,
+    input.requiredX,
+    input.availableX,
+    "X",
+    input.poolAddress,
+  );
+  if (shortX !== null) return Effect.fail(shortX);
+  const shortY = legUsdcShortfallError(
+    input.tokenY,
+    input.solFunded,
+    input.requiredY,
+    input.availableY,
+    "Y",
+    input.poolAddress,
+  );
+  if (shortY !== null) return Effect.fail(shortY);
   const deficits: PrepDeficit[] = [];
-  if (input.requiredX > input.availableX) {
-    if (!input.solFunded && input.tokenX === USDC_MINT) {
-      return Effect.fail(
-        makePrepError(
-          "INSUFFICIENT_USDC_BALANCE",
-          `Wallet USDC balance ${formatAtomic(input.availableX, USDC_DECIMALS)} is less than required ${formatAtomic(input.requiredX, USDC_DECIMALS)} for pool token X`,
-          input.poolAddress,
-        ),
-      );
-    }
-    if (!input.solFunded || input.tokenX !== SOL_MINT) {
-      deficits.push({
-        mint: input.tokenX,
-        amount: input.requiredX - input.availableX,
-        decimals: input.tokenXDecimals,
-        price: input.priceX,
-      });
-    }
-  }
-  if (input.requiredY > input.availableY) {
-    if (!input.solFunded && input.tokenY === USDC_MINT) {
-      return Effect.fail(
-        makePrepError(
-          "INSUFFICIENT_USDC_BALANCE",
-          `Wallet USDC balance ${formatAtomic(input.availableY, USDC_DECIMALS)} is less than required ${formatAtomic(input.requiredY, USDC_DECIMALS)} for pool token Y`,
-          input.poolAddress,
-        ),
-      );
-    }
-    if (!input.solFunded || input.tokenY !== SOL_MINT) {
-      deficits.push({
-        mint: input.tokenY,
-        amount: input.requiredY - input.availableY,
-        decimals: input.tokenYDecimals,
-        price: input.priceY,
-      });
-    }
-  }
+  const deficitX = legDeficit(
+    input.tokenX,
+    input.requiredX,
+    input.availableX,
+    input.tokenXDecimals,
+    input.priceX,
+    input.solFunded,
+  );
+  if (deficitX !== null) deficits.push(deficitX);
+  const deficitY = legDeficit(
+    input.tokenY,
+    input.requiredY,
+    input.availableY,
+    input.tokenYDecimals,
+    input.priceY,
+    input.solFunded,
+  );
+  if (deficitY !== null) deficits.push(deficitY);
   return Effect.succeed(deficits);
 }
 
@@ -387,6 +528,50 @@ export const EntryPrepLive = Layer.effect(
         }
       }
       return Effect.void;
+    }
+    /** Native SOL read with preparation error mapping. */
+    function readNativeSol(poolAddress: string): Effect.Effect<bigint, EntryPrepError> {
+      return adapter
+        .getNativeSolBalance()
+        .pipe(
+          Effect.mapError((err) =>
+            makePrepError(
+              "BALANCE_READ_FAILED",
+              `Failed to read native SOL balance: ${String(err)}`,
+              poolAddress,
+              err,
+            ),
+          ),
+        );
+    }
+
+    /** Token balance read with preparation error mapping. */
+    function readMintBalance(
+      mint: string,
+      poolAddress: string,
+    ): Effect.Effect<bigint, EntryPrepError> {
+      return adapter
+        .getTokenBalance(mint)
+        .pipe(
+          Effect.mapError((err) =>
+            makePrepError(
+              "BALANCE_READ_FAILED",
+              `Failed to read balance for ${mint}: ${String(err)}`,
+              poolAddress,
+              err,
+            ),
+          ),
+        );
+    }
+
+    /** Leg balance: SOL legs resolve to the already-read native balance. */
+    function readLegBalance(
+      mint: string,
+      nativeSol: bigint,
+      poolAddress: string,
+    ): Effect.Effect<bigint, EntryPrepError> {
+      if (mint === SOL_MINT) return Effect.succeed(nativeSol);
+      return readMintBalance(mint, poolAddress);
     }
 
     /**
@@ -424,13 +609,7 @@ export const EntryPrepLive = Layer.effect(
         const [prices, tokenXDecimals, maybeTokenYDecimals] = yield* Effect.all(
           [
             adapter
-              .getTokenPrices(
-                xOnly
-                  ? [pool.tokenX, ...(solFunded ? [SOL_MINT] : [])]
-                  : solFunded
-                    ? [pool.tokenX, pool.tokenY, SOL_MINT]
-                    : [pool.tokenX, pool.tokenY],
-              )
+              .getTokenPrices(prepPriceMints(pool.tokenX, pool.tokenY, xOnly, solFunded))
               .pipe(
                 Effect.mapError((err) =>
                   makePrepError(
@@ -480,14 +659,10 @@ export const EntryPrepLive = Layer.effect(
           ],
           poolAddress,
         );
-        const priceX = prices[pool.tokenX] ?? 0;
-        const priceY = prices[pool.tokenY] ?? 0;
-        const solPrice = prices[SOL_MINT] ?? 0;
-        if (
-          !Number.isFinite(priceX) ||
-          priceX <= 0 ||
-          (!xOnly && (!Number.isFinite(priceY) || priceY <= 0))
-        ) {
+        const priceX = priceOrZero(prices, pool.tokenX);
+        const priceY = priceOrZero(prices, pool.tokenY);
+        const solPrice = priceOrZero(prices, SOL_MINT);
+        if (!prepPricesValid(priceX, priceY, xOnly)) {
           return yield* Effect.fail(
             makePrepError(
               "PRICE_UNAVAILABLE",
@@ -531,12 +706,11 @@ export const EntryPrepLive = Layer.effect(
     const api: EntryPrepApi = {
       prepareEntryTokens: (poolAddress, positionSizeUsd, opts) =>
         Effect.gen(function* () {
-          const autonomousMode = config.autonomousTokenMode ?? "off";
-          const solFunded = autonomousMode === "canary" || autonomousMode === "live";
+          const solFunded = solFundedFromMode(config.autonomousTokenMode);
           // Runner mode: only the quote (X) leg is funded — the dip-anchored
           // deposit is single-sided X, so acquiring the Y half is a wasted swap.
           const xOnly = opts?.xOnly === true;
-          if (!config.autoSwapEntry && !solFunded) {
+          if (shouldSkipPrep(config.autoSwapEntry, solFunded)) {
             return;
           }
 
@@ -560,36 +734,7 @@ export const EntryPrepLive = Layer.effect(
             tokenYDecimals,
             xOnly,
           });
-          const readTokenBalance = (mint: string) =>
-            adapter
-              .getTokenBalance(mint)
-              .pipe(
-                Effect.mapError((err) =>
-                  makePrepError(
-                    "BALANCE_READ_FAILED",
-                    `Failed to read balance for ${mint}: ${String(err)}`,
-                    poolAddress,
-                    err,
-                  ),
-                ),
-              );
-
-          const readNativeSolBalance = () =>
-            adapter
-              .getNativeSolBalance()
-              .pipe(
-                Effect.mapError((err) =>
-                  makePrepError(
-                    "BALANCE_READ_FAILED",
-                    `Failed to read native SOL balance: ${String(err)}`,
-                    poolAddress,
-                    err,
-                  ),
-                ),
-              );
-
-          const nativeSolLamports = yield* readNativeSolBalance();
-
+          const nativeSolLamports = yield* readNativeSol(poolAddress);
           // Issue #201: a pending settlement job claims wallet funds that
           // this entry must not spend — a concurrent entry consuming the
           // exit settlement's USDC was the root cause of the field stranding
@@ -597,19 +742,59 @@ export const EntryPrepLive = Layer.effect(
           // non-final job amounts per mint by subtracting it from the
           // spendable balance (floor 0). A claim read failure fails open.
           const pendingClaims = yield* readPendingSettlementClaims();
-          const claimedX = pendingClaims.get(pool.tokenX) ?? 0n;
-          const claimedY = pendingClaims.get(pool.tokenY) ?? 0n;
+          const claimedX = claimFor(pendingClaims, pool.tokenX);
+          const claimedY = claimFor(pendingClaims, pool.tokenY);
 
-          const balanceX =
-            pool.tokenX === SOL_MINT ? nativeSolLamports : yield* readTokenBalance(pool.tokenX);
+          const balanceX = yield* readLegBalance(pool.tokenX, nativeSolLamports, poolAddress);
           const balanceY = xOnly
             ? 0n
-            : pool.tokenY === SOL_MINT
-              ? nativeSolLamports
-              : yield* readTokenBalance(pool.tokenY);
+            : yield* readLegBalance(pool.tokenY, nativeSolLamports, poolAddress);
 
           const availableX = spendableLeg(balanceX, pool.tokenX === SOL_MINT, claimedX);
           const availableY = spendableLeg(balanceY, pool.tokenY === SOL_MINT, claimedY);
+          /** Post-swap leg read for the SOL-funded phase (reconciliation failures carry the partial receipts). */
+          function readSolPhaseLeg(
+            mint: string,
+            nativeAfter: bigint,
+            receipts: EntryPreparationReceipt[],
+          ): Effect.Effect<bigint, EntryPrepError> {
+            if (mint === SOL_MINT) return Effect.succeed(nativeAfter);
+            return readMintBalance(mint, poolAddress).pipe(
+              Effect.mapError((err) =>
+                makePrepError(
+                  "SWAP_TRANSACTION_FAILED",
+                  `Final ${mint} balance reconciliation failed: ${String(err)}`,
+                  poolAddress,
+                  err,
+                  { status: "partial", receipts: [...receipts] },
+                ),
+              ),
+            );
+          }
+
+          /** Post-swap leg read for the USDC phase. */
+          function readUsdcPhaseLeg(
+            mint: string,
+            nativeAfter: bigint,
+          ): Effect.Effect<bigint, EntryPrepError> {
+            if (mint === SOL_MINT) return Effect.succeed(nativeAfter);
+            return readMintBalance(mint, poolAddress);
+          }
+
+          /** Fail when a computed USDC input is too small to quote. */
+          function failOnTinyUsdcInput(
+            usdcInput: bigint,
+            mint: string,
+          ): Effect.Effect<void, EntryPrepError> {
+            if (usdcInput > 0n) return Effect.void;
+            return Effect.fail(
+              makePrepError(
+                "SWAP_QUOTE_FAILED",
+                `Computed USDC input too small for ${mint}`,
+                poolAddress,
+              ),
+            );
+          }
 
           // Single-sided precedence (Wave 7): when exactly one leg cannot fund
           // its half and the other leg alone covers a full-size single-sided
@@ -661,11 +846,8 @@ export const EntryPrepLive = Layer.effect(
             EntryPrepError
           > {
             return Effect.gen(function* () {
-              const quoteSwap = adapter.quoteSwap;
-              const prepareSwap = adapter.prepareSwap;
-              const simulateSwap = adapter.simulateSwap;
-              const submitSwap = adapter.submitSwap;
-              if (!quoteSwap || !prepareSwap || !simulateSwap || !submitSwap) {
+              const swapOps = solSwapOps(adapter);
+              if (!swapOps) {
                 return yield* Effect.fail(
                   makePrepError(
                     "SWAP_TRANSACTION_FAILED",
@@ -674,7 +856,7 @@ export const EntryPrepLive = Layer.effect(
                   ),
                 );
               }
-              if (!Number.isFinite(solPrice) || solPrice <= 0) {
+              if (!isUsablePrice(solPrice)) {
                 return yield* Effect.fail(
                   makePrepError(
                     "PRICE_UNAVAILABLE",
@@ -723,40 +905,42 @@ export const EntryPrepLive = Layer.effect(
               }
               const quoted = yield* Effect.all(
                 requests.map(({ deficit, amountAtomic }) =>
-                  quoteSwap({
-                    inputMint: SOL_MINT,
-                    outputMint: deficit.mint,
-                    amountAtomic,
-                    slippageBps: Math.min(config.maxSwapSlippageBps ?? 50, 50),
-                  }).pipe(
-                    Effect.mapError((err) =>
-                      makePrepError(
-                        "SWAP_QUOTE_FAILED",
-                        `Failed to quote swap SOL -> ${deficit.mint}: ${String(err)}`,
-                        poolAddress,
-                        err,
+                  swapOps
+                    .quoteSwap({
+                      inputMint: SOL_MINT,
+                      outputMint: deficit.mint,
+                      amountAtomic,
+                      slippageBps: Math.min(config.maxSwapSlippageBps ?? 50, 50),
+                    })
+                    .pipe(
+                      Effect.mapError((err) =>
+                        makePrepError(
+                          "SWAP_QUOTE_FAILED",
+                          `Failed to quote swap SOL -> ${deficit.mint}: ${String(err)}`,
+                          poolAddress,
+                          err,
+                        ),
+                      ),
+                      Effect.flatMap((quote) =>
+                        quote.minimumOutAmountAtomic >= deficit.amount
+                          ? Effect.succeed({ deficit, quote })
+                          : Effect.fail(
+                              makePrepError(
+                                "SWAP_QUOTE_FAILED",
+                                `Guaranteed output for ${deficit.mint} is below its deficit`,
+                                poolAddress,
+                              ),
+                            ),
                       ),
                     ),
-                    Effect.flatMap((quote) =>
-                      quote.minimumOutAmountAtomic >= deficit.amount
-                        ? Effect.succeed({ deficit, quote })
-                        : Effect.fail(
-                            makePrepError(
-                              "SWAP_QUOTE_FAILED",
-                              `Guaranteed output for ${deficit.mint} is below its deficit`,
-                              poolAddress,
-                            ),
-                          ),
-                    ),
-                  ),
                 ),
                 { concurrency: "unbounded" },
               );
               const prepared = yield* Effect.all(
                 quoted.map(({ deficit, quote }) =>
-                  prepareSwap(quote).pipe(
+                  swapOps.prepareSwap(quote).pipe(
                     Effect.flatMap((operation) =>
-                      simulateSwap(operation).pipe(Effect.as({ deficit, operation })),
+                      swapOps.simulateSwap(operation).pipe(Effect.as({ deficit, operation })),
                     ),
                     Effect.mapError((err) =>
                       makePrepError(
@@ -773,22 +957,24 @@ export const EntryPrepLive = Layer.effect(
               let submittedCount = 0;
               const receipts: EntryPreparationReceipt[] = [];
               for (const { deficit, operation } of prepared) {
-                const balanceBefore = yield* readTokenBalance(deficit.mint);
-                const signature = yield* submitSwap(operation).pipe(
-                  Effect.mapError((err) =>
-                    makePrepError(
-                      "SWAP_TRANSACTION_FAILED",
-                      `SOL-funded entry stopped after ${submittedCount} of ${prepared.length} submissions while swapping ${deficit.mint}: ${String(err)}`,
-                      poolAddress,
-                      err,
-                      receipts.length === 0
-                        ? undefined
-                        : { status: "partial", receipts: [...receipts] },
+                const balanceBefore = yield* readMintBalance(deficit.mint, poolAddress);
+                const signature = yield* swapOps
+                  .submitSwap(operation)
+                  .pipe(
+                    Effect.mapError((err) =>
+                      makePrepError(
+                        "SWAP_TRANSACTION_FAILED",
+                        `SOL-funded entry stopped after ${submittedCount} of ${prepared.length} submissions while swapping ${deficit.mint}: ${String(err)}`,
+                        poolAddress,
+                        err,
+                        receipts.length === 0
+                          ? undefined
+                          : { status: "partial", receipts: [...receipts] },
+                      ),
                     ),
-                  ),
-                );
+                  );
                 submittedCount += 1;
-                const balanceAfter = yield* readTokenBalance(deficit.mint).pipe(
+                const balanceAfter = yield* readMintBalance(deficit.mint, poolAddress).pipe(
                   Effect.mapError((err) =>
                     makePrepError(
                       "SWAP_TRANSACTION_FAILED",
@@ -811,8 +997,7 @@ export const EntryPrepLive = Layer.effect(
                     ),
                   ),
                 );
-                const acquiredAmountAtomic =
-                  balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0n;
+                const acquiredAmountAtomic = acquiredFill(balanceBefore, balanceAfter);
                 receipts.push({
                   inputMint: SOL_MINT,
                   outputMint: deficit.mint,
@@ -828,47 +1013,20 @@ export const EntryPrepLive = Layer.effect(
                   total: prepared.length,
                 });
               }
-              const partialPreparation = { status: "partial" as const, receipts: [...receipts] };
-              const nativeSolAfter = yield* readNativeSolBalance().pipe(
+              const nativeSolAfter = yield* readNativeSol(poolAddress).pipe(
                 Effect.mapError((err) =>
                   makePrepError(
                     "SWAP_TRANSACTION_FAILED",
                     `Final SOL balance reconciliation failed: ${String(err)}`,
                     poolAddress,
                     err,
-                    partialPreparation,
+                    { status: "partial", receipts: [...receipts] },
                   ),
                 ),
               );
-              const balanceXAfter =
-                pool.tokenX === SOL_MINT
-                  ? nativeSolAfter
-                  : yield* readTokenBalance(pool.tokenX).pipe(
-                      Effect.mapError((err) =>
-                        makePrepError(
-                          "SWAP_TRANSACTION_FAILED",
-                          `Final ${pool.tokenX} balance reconciliation failed: ${String(err)}`,
-                          poolAddress,
-                          err,
-                          partialPreparation,
-                        ),
-                      ),
-                    );
-              const balanceYAfter =
-                pool.tokenY === SOL_MINT
-                  ? nativeSolAfter
-                  : yield* readTokenBalance(pool.tokenY).pipe(
-                      Effect.mapError((err) =>
-                        makePrepError(
-                          "SWAP_TRANSACTION_FAILED",
-                          `Final ${pool.tokenY} balance reconciliation failed: ${String(err)}`,
-                          poolAddress,
-                          err,
-                          partialPreparation,
-                        ),
-                      ),
-                    );
-              if (balanceXAfter < requiredX || balanceYAfter < requiredY) {
+              const balanceXAfter = yield* readSolPhaseLeg(pool.tokenX, nativeSolAfter, receipts);
+              const balanceYAfter = yield* readSolPhaseLeg(pool.tokenY, nativeSolAfter, receipts);
+              if (!legsFunded(balanceXAfter, balanceYAfter, requiredX, requiredY)) {
                 return yield* Effect.fail(
                   makePrepError(
                     "INSUFFICIENT_BALANCE_AFTER_SWAP",
@@ -902,13 +1060,13 @@ export const EntryPrepLive = Layer.effect(
           // stays a thin orchestrator; every name below closes over the context.
           function runUsdcPhase(): Effect.Effect<void, EntryPrepError> {
             return Effect.gen(function* () {
-              const usdcBalance = yield* readTokenBalance(USDC_MINT);
+              const usdcBalance = yield* readMintBalance(USDC_MINT, poolAddress);
               // Issue #201: even when neither pool leg is USDC, the funding swaps
               // spend wallet USDC — subtract pending USDC settlement claims so a
               // token/token entry cannot consume USDC an exit settlement is about
               // to sell.
-              const usdcClaimed = pendingClaims.get(USDC_MINT) ?? 0n;
-              const spendableUsdc = usdcBalance > usdcClaimed ? usdcBalance - usdcClaimed : 0n;
+              const usdcClaimed = claimFor(pendingClaims, USDC_MINT);
+              const spendableUsdc = spendableAfterClaim(usdcBalance, usdcClaimed);
               const totalUsdcInputAtomic = deficits.reduce(
                 (sum, deficit) =>
                   sum + computeUsdcInputAtomic(deficit.amount, deficit.decimals, deficit.price),
@@ -918,16 +1076,15 @@ export const EntryPrepLive = Layer.effect(
                 (pool.tokenX === USDC_MINT ? requiredX : 0n) +
                 (pool.tokenY === USDC_MINT ? requiredY : 0n);
               const needsGasTopUp = nativeSolLamports < SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS;
-              const gasTopUpAtomic = needsGasTopUp
-                ? BigInt(GAS_TOP_UP_USDC) * 10n ** BigInt(USDC_DECIMALS)
-                : 0n;
+              const gasTopUpAtomic = gasTopUpFor(nativeSolLamports);
               const totalUsdcRequired = totalUsdcInputAtomic + requiredUsdcPoolLeg + gasTopUpAtomic;
               if (spendableUsdc < totalUsdcRequired) {
-                const gasNote = needsGasTopUp ? " + gas top-up" : "";
                 return yield* Effect.fail(
-                  makePrepError(
-                    "INSUFFICIENT_USDC_BALANCE",
-                    `Wallet USDC balance ${formatAtomic(spendableUsdc, USDC_DECIMALS)} (after ${formatAtomic(usdcClaimed, USDC_DECIMALS)} pending settlement claims) is less than required ${formatAtomic(totalUsdcRequired, USDC_DECIMALS)} for auto-swap entry (swaps + USDC pool leg${gasNote})`,
+                  insufficientUsdcError(
+                    spendableUsdc,
+                    usdcClaimed,
+                    totalUsdcRequired,
+                    needsGasTopUp,
                     poolAddress,
                   ),
                 );
@@ -995,15 +1152,7 @@ export const EntryPrepLive = Layer.effect(
                   deficit.decimals,
                   deficit.price,
                 );
-                if (usdcInputAtomic <= 0n) {
-                  return yield* Effect.fail(
-                    makePrepError(
-                      "SWAP_QUOTE_FAILED",
-                      `Computed USDC input too small for ${deficit.mint}`,
-                      poolAddress,
-                    ),
-                  );
-                }
+                yield* failOnTinyUsdcInput(usdcInputAtomic, deficit.mint);
                 const quoteData = preflightedQuotes.get(deficit.mint);
                 const txSig = yield* adapter
                   .swapUSDCForToken(deficit.mint, usdcInputAtomic, quoteData)
@@ -1033,15 +1182,13 @@ export const EntryPrepLive = Layer.effect(
                   tx: txSig,
                 });
               }
-              const nativeSolAfter = swapped ? yield* readNativeSolBalance() : 0n;
-              const balanceXAfter =
-                pool.tokenX === SOL_MINT ? nativeSolAfter : yield* readTokenBalance(pool.tokenX);
-              const balanceYAfter =
-                pool.tokenY === SOL_MINT ? nativeSolAfter : yield* readTokenBalance(pool.tokenY);
+              const nativeSolAfter = swapped ? yield* readNativeSol(poolAddress) : 0n;
+              const balanceXAfter = yield* readUsdcPhaseLeg(pool.tokenX, nativeSolAfter);
+              const balanceYAfter = yield* readUsdcPhaseLeg(pool.tokenY, nativeSolAfter);
               // For SOL legs, requiredX/Y already include SOL_ENTRY_TRANSACTION_BUFFER_LAMPORTS,
               // so compare the raw post-swap balance against the buffered requirement.
               // Re-subtracting GAS_RESERVE_LAMPORTS here would double-count the reserve.
-              if (balanceXAfter < requiredX || balanceYAfter < requiredY) {
+              if (!legsFunded(balanceXAfter, balanceYAfter, requiredX, requiredY)) {
                 return yield* Effect.fail(
                   makePrepError(
                     "INSUFFICIENT_BALANCE_AFTER_SWAP",
@@ -1053,7 +1200,7 @@ export const EntryPrepLive = Layer.effect(
               // Swaps consumed native SOL fees; ensure the wallet still has enough
               // gas for the final enterPosition transaction. Use the same threshold
               // as the live entry gate so the two checks stay aligned.
-              if (swapped && nativeSolAfter < MIN_SOL_FOR_GAS_LAMPORTS) {
+              if (gasDepleted(swapped, nativeSolAfter)) {
                 return yield* Effect.fail(
                   makePrepError(
                     "INSUFFICIENT_BALANCE_AFTER_SWAP",

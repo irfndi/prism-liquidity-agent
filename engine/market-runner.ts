@@ -26,6 +26,16 @@ export const DEFAULT_RUNNER_MIN_DRIFT_BINS = -8;
  * admitted even when its APR is enormous (the normal lane's drift-gate would
  * have rejected it). Unknown drift (no bin history) fails OPEN — it cannot
  * prove a decline, so admission is not blocked on a cold start. */
+function passesRunnerDriftFloor(
+  netDriftBins: number | null | undefined,
+  runnerMinDriftBins: number | undefined,
+): boolean {
+  if (netDriftBins === undefined) return true;
+  if (netDriftBins === null) return true;
+  if (!Number.isFinite(netDriftBins)) return true;
+  return netDriftBins >= (runnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS);
+}
+
 export function isMarketRunnerPool(params: {
   enabled: boolean;
   marketScanPools: ReadonlySet<string>;
@@ -41,14 +51,7 @@ export function isMarketRunnerPool(params: {
   if (!params.marketScanPools.has(params.poolAddress)) return false;
   if (params.statsSource !== "datapi") return false;
   if (params.feeAprPct < (params.runnerMinFeeApr ?? DEFAULT_RUNNER_MIN_FEE_APR)) return false;
-  if (
-    params.netDriftBins !== undefined &&
-    params.netDriftBins !== null &&
-    Number.isFinite(params.netDriftBins) &&
-    params.netDriftBins < (params.runnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS)
-  ) {
-    return false;
-  }
+  if (!passesRunnerDriftFloor(params.netDriftBins, params.runnerMinDriftBins)) return false;
   return true;
 }
 
@@ -74,6 +77,30 @@ export interface RotationTargetFilter {
   readonly nowMs?: number | undefined;
 }
 
+function resolveRotationNowMs(nowMs: number | undefined): number {
+  if (nowMs === undefined) return Date.now();
+  return nowMs;
+}
+
+function rotationPositionSkipped(
+  poolAddress: string,
+  openedAt: number | undefined,
+  excludePoolAddress: string | undefined,
+  nowMs: number,
+  minAgeMs: number | undefined,
+): boolean {
+  if (poolAddress === excludePoolAddress) return true;
+  if (minAgeMs === undefined) return false;
+  if (minAgeMs <= 0) return false;
+  return nowMs - (openedAt ?? 0) < minAgeMs;
+}
+
+function rotationCandidateApr(feeAprPct: number | undefined): number | null {
+  if (feeAprPct === undefined) return null;
+  if (feeAprPct <= 0) return null;
+  return feeAprPct;
+}
+
 /** The lowest-APR held position, or null when every eligible held position's
  *  APR is unknown/zero (nothing to rotate out of). Unmeasured held pools never
  *  rotate — fail-closed, a made-up-low APR must not sell a real position.
@@ -88,22 +115,20 @@ export function lowestAprHeldPosition(
   excludePoolAddress?: string,
   filter?: RotationTargetFilter,
 ): HeldPositionApr | null {
-  const nowMs = filter?.nowMs ?? Date.now();
+  const nowMs = resolveRotationNowMs(filter?.nowMs);
+  const minAgeMs = filter?.minAgeMs;
   let worst: HeldPositionApr | null = null;
   for (const pos of positions) {
-    if (pos.poolAddress === excludePoolAddress) continue;
     if (
-      filter?.minAgeMs !== undefined &&
-      filter.minAgeMs > 0 &&
-      nowMs - (pos.openedAt ?? 0) < filter.minAgeMs
+      rotationPositionSkipped(pos.poolAddress, pos.openedAt, excludePoolAddress, nowMs, minAgeMs)
     ) {
       continue;
     }
     const entry = poolAprByAddress.get(pos.poolAddress);
-    if (!entry) continue;
-    const apr = entry.feeAprPct;
-    if (apr <= 0) continue;
-    if (!worst || apr < worst.feeAprPct) {
+    if (entry === undefined) continue;
+    const apr = rotationCandidateApr(entry.feeAprPct);
+    if (apr === null) continue;
+    if (worst === null || apr < worst.feeAprPct) {
       worst = { poolAddress: pos.poolAddress, feeAprPct: apr, tvlUsd: entry.tvlUsd };
     }
   }

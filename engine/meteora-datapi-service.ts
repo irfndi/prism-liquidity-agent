@@ -79,6 +79,56 @@ function readWindow(
   return readNumber(obj?.[window]);
 }
 
+/** Read a non-empty pool address, or null when it is missing. */
+function readDatapiAddress(report: RawDatapiPool): string | null {
+  const address = readString(report.address);
+  if (address === null || address.length === 0) return null;
+  return address;
+}
+
+/** Required numeric core of a pool payload. */
+interface DatapiCoreMetrics {
+  readonly tvl: number;
+  readonly volume24h: number;
+  readonly fees24h: number;
+  readonly apr: number;
+}
+
+/** Read the required numeric core; null when any leg is missing. */
+function readDatapiCoreMetrics(report: RawDatapiPool): DatapiCoreMetrics | null {
+  const tvl = readNumber(report.tvl);
+  const volume24h = readWindow(report.volume, "24h");
+  const fees24h = readWindow(report.fees, "24h");
+  const apr = readNumber(report.apr);
+  if (tvl === null || volume24h === null || fees24h === null || apr === null) return null;
+  return { tvl, volume24h, fees24h, apr };
+}
+
+/** Read a nested token object (`token_x` / `token_y`), or null when absent. */
+function readDatapiToken(report: RawDatapiPool, key: "token_x" | "token_y"): RawDatapiToken | null {
+  const token = report[key];
+  if (!isNonNullObject(token)) return null;
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+  return token as RawDatapiToken;
+}
+
+/** Read the base fee pct out of the nested pool config, or null when absent. */
+function readDatapiBaseFeePct(report: RawDatapiPool): number | null {
+  const config = report.pool_config;
+  if (!isNonNullObject(config)) return null;
+  // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+  return readNumber((config as RawDatapiPoolConfig).base_fee_pct);
+}
+
+/** Read one boolean token flag, or null when the token (or flag) is absent. */
+function readTokenFlag(
+  token: RawDatapiToken | null,
+  key: "freeze_authority_disabled" | "is_verified",
+): boolean | null {
+  if (token === null) return null;
+  return readBoolean(token[key]);
+}
+
 /**
  * Parse one pool object from the Data API. Returns null when required numeric
  * fields are missing (likely an upstream schema change) so the caller falls
@@ -88,47 +138,34 @@ export function parseMeteoraPoolStats<T>(raw: T): MeteoraPoolStats | null {
   if (!isNonNullObject(raw)) return null;
   // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const report = raw as RawDatapiPool;
-  const address = readString(report.address);
-  if (address === null || address.length === 0) return null;
-  const tvl = readNumber(report.tvl);
-  const volume24h = readWindow(report.volume, "24h");
-  const fees24h = readWindow(report.fees, "24h");
-  const apr = readNumber(report.apr);
-  if (tvl === null || volume24h === null || fees24h === null || apr === null) return null;
-
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  const tokenX = isNonNullObject(report.token_x) ? (report.token_x as RawDatapiToken) : null;
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  const tokenY = isNonNullObject(report.token_y) ? (report.token_y as RawDatapiToken) : null;
-  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
-  const poolConfig = isNonNullObject(report.pool_config)
-    ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
-      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-      (report.pool_config as RawDatapiPoolConfig)
-    : null;
-
+  const address = readDatapiAddress(report);
+  if (address === null) return null;
+  const core = readDatapiCoreMetrics(report);
+  if (core === null) return null;
+  const tokenX = readDatapiToken(report, "token_x");
+  const tokenY = readDatapiToken(report, "token_y");
   return {
     address,
     name: readString(report.name) ?? "",
-    tvlUsd: tvl,
-    volume24hUsd: volume24h,
-    fees24hUsd: fees24h,
-    apr,
+    tvlUsd: core.tvl,
+    volume24hUsd: core.volume24h,
+    fees24hUsd: core.fees24h,
+    apr: core.apr,
     apy: readNumber(report.apy) ?? 0,
     currentPrice: readNumber(report.current_price) ?? 0,
     feeTvlRatio24h: readWindow(report.fee_tvl_ratio, "24h"),
     feeTvlRatio12h: readWindow(report.fee_tvl_ratio, "12h"),
     feeTvlRatio1h: readWindow(report.fee_tvl_ratio, "1h"),
     dynamicFeePct: readNumber(report.dynamic_fee_pct),
-    baseFeePct: readNumber(poolConfig?.base_fee_pct),
+    baseFeePct: readDatapiBaseFeePct(report),
     hasFarm: readBoolean(report.has_farm),
     farmApr: readNumber(report.farm_apr),
     farmApy: readNumber(report.farm_apy),
     isBlacklisted: readBoolean(report.is_blacklisted),
-    tokenXFreezeAuthorityDisabled: readBoolean(tokenX?.freeze_authority_disabled),
-    tokenYFreezeAuthorityDisabled: readBoolean(tokenY?.freeze_authority_disabled),
-    tokenXVerified: readBoolean(tokenX?.is_verified),
-    tokenYVerified: readBoolean(tokenY?.is_verified),
+    tokenXFreezeAuthorityDisabled: readTokenFlag(tokenX, "freeze_authority_disabled"),
+    tokenYFreezeAuthorityDisabled: readTokenFlag(tokenY, "freeze_authority_disabled"),
+    tokenXVerified: readTokenFlag(tokenX, "is_verified"),
+    tokenYVerified: readTokenFlag(tokenY, "is_verified"),
   };
 }
 

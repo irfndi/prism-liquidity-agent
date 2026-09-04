@@ -46,35 +46,66 @@ export const WASH_MAX_DISTINCT_PAYERS = 2;
 /** > this many trades/sec from ≤2 wallets = bot burst. */
 export const WASH_MAX_TPS_FOR_BURST = 5;
 
+function sampleSpanSec(timestamps: ReadonlyArray<number>): number {
+  if (timestamps.length < 2) return 0;
+  return Math.max(1, Math.max(...timestamps) - Math.min(...timestamps));
+}
+
+function txsPerSecondOf(tradeCount: number, spanSec: number): number {
+  return spanSec > 0 ? tradeCount / spanSec : 0;
+}
+
+function uniquePayerRateOf(distinctPayers: number, tradeCount: number): number {
+  return tradeCount > 0 ? distinctPayers / tradeCount : 0;
+}
+
+function feeCoefficientOfVariation(rows: ReadonlyArray<WashTradeRow>): number | null {
+  const fees = rows.map((r) => r.feeLamports).filter((f) => f > 0);
+  if (fees.length < 3) return null;
+  const mean = fees.reduce((s, f) => s + f, 0) / fees.length;
+  if (mean <= 0) return null;
+  const variance = fees.reduce((s, f) => s + (f - mean) * (f - mean), 0) / fees.length;
+  return Math.sqrt(variance) / mean;
+}
+
+function concentratedWalletReason(tradeCount: number, distinctPayers: number): string | null {
+  if (tradeCount < WASH_MIN_TRADES || distinctPayers > WASH_MAX_DISTINCT_PAYERS) return null;
+  return `${distinctPayers} wallet(s) produced ${tradeCount} recent trades — concentrated`;
+}
+
+function lowUniqueRateReason(tradeCount: number, uniquePayerRate: number): string | null {
+  if (tradeCount < WASH_MIN_TRADES || uniquePayerRate > WASH_MAX_UNIQUE_PAYER_RATE) return null;
+  return `only ${(uniquePayerRate * 100).toFixed(0)}% distinct payers across ${tradeCount} trades — wash pattern`;
+}
+
+function botBurstReason(distinctPayers: number, txsPerSecond: number): string | null {
+  if (distinctPayers > WASH_MAX_DISTINCT_PAYERS || txsPerSecond < WASH_MAX_TPS_FOR_BURST) {
+    return null;
+  }
+  return `${txsPerSecond.toFixed(1)} trades/sec from ${distinctPayers} wallet(s) — bot burst`;
+}
+
+function classifyWash(
+  tradeCount: number,
+  distinctPayers: number,
+  uniquePayerRate: number,
+  txsPerSecond: number,
+) {
+  const concentrated = concentratedWalletReason(tradeCount, distinctPayers);
+  if (concentrated !== null) return { suspicious: true, reason: concentrated };
+  const lowRate = lowUniqueRateReason(tradeCount, uniquePayerRate);
+  if (lowRate !== null) return { suspicious: true, reason: lowRate };
+  const burst = botBurstReason(distinctPayers, txsPerSecond);
+  if (burst !== null) return { suspicious: true, reason: burst };
+  return { suspicious: false, reason: null };
+}
+
 export function scoreWashEvidence(rows: ReadonlyArray<WashTradeRow>): WashEvidence {
   const tradeCount = rows.length;
   const distinctPayers = new Set(rows.map((r) => r.payer)).size;
-  const timestamps = rows.map((r) => r.timestamp);
-  const spanSec =
-    tradeCount >= 2 ? Math.max(1, Math.max(...timestamps) - Math.min(...timestamps)) : 0;
-  const txsPerSecond = spanSec > 0 ? tradeCount / spanSec : 0;
-  const uniquePayerRate = tradeCount > 0 ? distinctPayers / tradeCount : 0;
-
-  const fees = rows.map((r) => r.feeLamports).filter((f) => f > 0);
-  let feeCv: number | null = null;
-  if (fees.length >= 3) {
-    const mean = fees.reduce((s, f) => s + f, 0) / fees.length;
-    const variance = fees.reduce((s, f) => s + (f - mean) * (f - mean), 0) / fees.length;
-    feeCv = mean > 0 ? Math.sqrt(variance) / mean : null;
-  }
-
-  let suspicious = false;
-  let reason: string | null = null;
-  if (tradeCount >= WASH_MIN_TRADES && distinctPayers <= WASH_MAX_DISTINCT_PAYERS) {
-    suspicious = true;
-    reason = `${distinctPayers} wallet(s) produced ${tradeCount} recent trades — concentrated`;
-  } else if (tradeCount >= WASH_MIN_TRADES && uniquePayerRate <= WASH_MAX_UNIQUE_PAYER_RATE) {
-    suspicious = true;
-    reason = `only ${(uniquePayerRate * 100).toFixed(0)}% distinct payers across ${tradeCount} trades — wash pattern`;
-  } else if (distinctPayers <= WASH_MAX_DISTINCT_PAYERS && txsPerSecond >= WASH_MAX_TPS_FOR_BURST) {
-    suspicious = true;
-    reason = `${txsPerSecond.toFixed(1)} trades/sec from ${distinctPayers} wallet(s) — bot burst`;
-  }
-
-  return { tradeCount, distinctPayers, txsPerSecond, uniquePayerRate, feeCv, suspicious, reason };
+  const txsPerSecond = txsPerSecondOf(tradeCount, sampleSpanSec(rows.map((r) => r.timestamp)));
+  const uniquePayerRate = uniquePayerRateOf(distinctPayers, tradeCount);
+  const feeCv = feeCoefficientOfVariation(rows);
+  const verdict = classifyWash(tradeCount, distinctPayers, uniquePayerRate, txsPerSecond);
+  return { tradeCount, distinctPayers, txsPerSecond, uniquePayerRate, feeCv, ...verdict };
 }

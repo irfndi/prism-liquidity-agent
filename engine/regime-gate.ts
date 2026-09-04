@@ -85,20 +85,26 @@ export interface HerdingOptions {
 /** Cross-pool herding assessment over per-pool return series. Uses the
  *  trailing common window of each pair; series shorter than `minPoints` are
  *  skipped (cold-start pools never contribute). */
-export function assessHerding(
+function collectUsableSeries(
   seriesByPool: ReadonlyMap<string, ReturnSeries>,
-  options?: HerdingOptions,
-): HerdingAssessment {
-  const minPoints = options?.minPoints ?? 12;
-  const minPairs = options?.minPairs ?? 6;
-  const maxPools = options?.maxPools ?? 64;
-
+  minPoints: number,
+  maxPools: number,
+): Array<ReturnSeries> {
   const usable: Array<ReturnSeries> = [];
   for (const s of seriesByPool.values()) {
     if (s.length >= minPoints) usable.push(s);
     if (usable.length >= maxPools) break;
   }
+  return usable;
+}
 
+interface HerdingPairTotals {
+  readonly sum: number;
+  readonly count: number;
+  readonly edges: number;
+}
+
+function scoreHerdingPairs(usable: ReadonlyArray<ReturnSeries>): HerdingPairTotals {
   let sum = 0;
   let count = 0;
   let edges = 0;
@@ -111,7 +117,15 @@ export function assessHerding(
       if (r > 0.5) edges += 1;
     }
   }
+  return { sum, count, edges };
+}
 
+function buildHerdingAssessment(
+  sum: number,
+  count: number,
+  edges: number,
+  minPairs: number,
+): HerdingAssessment {
   if (count < minPairs) {
     return { known: false, pairCount: count, meanCorrelation: 0, edgeDensity: 0 };
   }
@@ -121,6 +135,16 @@ export function assessHerding(
     meanCorrelation: sum / count,
     edgeDensity: edges / count,
   };
+}
+
+export function assessHerding(
+  seriesByPool: ReadonlyMap<string, ReturnSeries>,
+  options?: HerdingOptions,
+): HerdingAssessment {
+  const opts = options ?? {};
+  const usable = collectUsableSeries(seriesByPool, opts.minPoints ?? 12, opts.maxPools ?? 64);
+  const totals = scoreHerdingPairs(usable);
+  return buildHerdingAssessment(totals.sum, totals.count, totals.edges, opts.minPairs ?? 6);
 }
 
 export interface HerdingThresholds {

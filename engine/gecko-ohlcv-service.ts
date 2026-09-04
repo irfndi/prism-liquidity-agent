@@ -111,6 +111,53 @@ function readFiniteNumber<T>(value: T): number | null {
   return null;
 }
 
+/** Read the OHLCV attributes envelope, or null when the shape is off. */
+function readOhlcvAttributes<T>(raw: T): RawOhlcvAttrs | null {
+  if (!isNonNullObject(raw)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+  const data = (raw as RawOhlcvResponse).data;
+  if (!isNonNullObject(data)) return null;
+  const attrs = data.attributes;
+  if (!isNonNullObject(attrs)) return null;
+  return attrs;
+}
+
+/** Bundle the five required bar fields; null when any failed to decode. */
+function readBarFields(
+  timestampSec: number | null,
+  open: number | null,
+  high: number | null,
+  low: number | null,
+  close: number | null,
+): readonly [number, number, number, number, number] | null {
+  if (timestampSec === null || open === null || high === null || low === null || close === null)
+    return null;
+  return [timestampSec, open, high, low, close];
+}
+
+/** Parse one `ohlcv_list` row into a bar; null when malformed or dead. */
+function parseOhlcvRow<T>(entry: T): GeckoOhlcvBar | null {
+  if (!Array.isArray(entry) || entry.length < 5) return null;
+  const fields = readBarFields(
+    readFiniteNumber(entry[0]),
+    readFiniteNumber(entry[1]),
+    readFiniteNumber(entry[2]),
+    readFiniteNumber(entry[3]),
+    readFiniteNumber(entry[4]),
+  );
+  if (fields === null) return null;
+  const [timestampSec, open, high, low, close] = fields;
+  if (close <= 0) return null;
+  return {
+    timestampSec,
+    open,
+    high,
+    low,
+    close,
+    volumeQuote: readFiniteNumber(entry[5]) ?? 0,
+  };
+}
+
 /**
  * Parse a raw `ohlcv_list` into bars. Returns [] when the payload is not a
  * usable ohlcv_list (malformed, missing, or empty). Bars with a non-positive
@@ -118,45 +165,67 @@ function readFiniteNumber<T>(value: T): number | null {
  * compute log returns and drawdown).
  */
 export function parseGeckoOhlcv<T>(raw: T): ReadonlyArray<GeckoOhlcvBar> {
-  if (!isNonNullObject(raw)) return [];
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  const response = raw as RawOhlcvResponse;
-  const data = response.data;
-  if (!isNonNullObject(data)) return [];
-  const attrs = data.attributes;
-  if (!isNonNullObject(attrs)) return [];
+  const attrs = readOhlcvAttributes(raw);
+  if (attrs === null) return [];
   const list = attrs.ohlcv_list;
   if (!Array.isArray(list)) return [];
 
   const bars: GeckoOhlcvBar[] = [];
   for (const entry of list) {
-    if (!Array.isArray(entry) || entry.length < 5) continue;
-    const timestampSec = readFiniteNumber(entry[0]);
-    const open = readFiniteNumber(entry[1]);
-    const high = readFiniteNumber(entry[2]);
-    const low = readFiniteNumber(entry[3]);
-    const close = readFiniteNumber(entry[4]);
-    const volumeQuote = readFiniteNumber(entry[5]);
-    if (
-      timestampSec === null ||
-      open === null ||
-      high === null ||
-      low === null ||
-      close === null ||
-      close <= 0
-    ) {
-      continue;
-    }
-    bars.push({
-      timestampSec,
-      open,
-      high,
-      low,
-      close,
-      volumeQuote: volumeQuote ?? 0,
-    });
+    const bar = parseOhlcvRow(entry);
+    if (bar === null) continue;
+    bars.push(bar);
   }
   return bars;
+}
+
+/** Empty-signal shape for a bar-less window. */
+function emptyOhlcvSignals(bars: ReadonlyArray<GeckoOhlcvBar>): GeckoOhlcvSignals {
+  return {
+    bars,
+    atlHigh: 0,
+    latestClose: 0,
+    drawdownFromAth: 0,
+    dailyReturnStddev: 0,
+    totalVolumeQuote: 0,
+    barCount: 0,
+  };
+}
+
+/** Highest `high` across ascending bars. */
+function findAthHigh(ascending: ReadonlyArray<GeckoOhlcvBar>): number {
+  let atlHigh = 0;
+  for (const bar of ascending) {
+    if (bar.high > atlHigh) atlHigh = bar.high;
+  }
+  return atlHigh;
+}
+
+/** Summed quote volume across ascending bars. */
+function sumQuoteVolume(ascending: ReadonlyArray<GeckoOhlcvBar>): number {
+  let totalVolumeQuote = 0;
+  for (const bar of ascending) totalVolumeQuote += bar.volumeQuote;
+  return totalVolumeQuote;
+}
+
+/** Consecutive log returns over ascending closes (positive pairs only). */
+function collectLogReturns(ascending: ReadonlyArray<GeckoOhlcvBar>): number[] {
+  const logReturns: number[] = [];
+  for (let i = 1; i < ascending.length; i++) {
+    const prev = ascending[i - 1]!.close;
+    const cur = ascending[i]!.close;
+    if (prev > 0 && cur > 0) logReturns.push(Math.log(cur / prev));
+  }
+  return logReturns;
+}
+
+/** Sample stddev of log returns; 0 when fewer than two samples. */
+function measureReturnStddev(logReturns: ReadonlyArray<number>): number {
+  if (logReturns.length < 2) return 0;
+  const mean = logReturns.reduce((s, v) => s + v, 0) / logReturns.length;
+  const variance =
+    logReturns.reduce((s, v) => s + (v - mean) * (v - mean), 0) / (logReturns.length - 1);
+  return Math.sqrt(variance);
 }
 
 /**
@@ -167,17 +236,7 @@ export function parseGeckoOhlcv<T>(raw: T): ReadonlyArray<GeckoOhlcvBar> {
  *   Skipped when < 2 bars (0).
  */
 export function summarizeGeckoOhlcv(bars: ReadonlyArray<GeckoOhlcvBar>): GeckoOhlcvSignals {
-  if (bars.length === 0) {
-    return {
-      bars,
-      atlHigh: 0,
-      latestClose: 0,
-      drawdownFromAth: 0,
-      dailyReturnStddev: 0,
-      totalVolumeQuote: 0,
-      barCount: 0,
-    };
-  }
+  if (bars.length === 0) return emptyOhlcvSignals(bars);
 
   // GeckoTerminal returns OHLCV newest-FIRST (verified live). Normalize to
   // ascending timestamp so "latest" is always the last bar and consecutive
@@ -186,40 +245,15 @@ export function summarizeGeckoOhlcv(bars: ReadonlyArray<GeckoOhlcvBar>): GeckoOh
   // the sign of every return.
   const ascending = [...bars].sort((a, b) => a.timestampSec - b.timestampSec);
 
-  let atlHigh = 0;
-  let totalVolumeQuote = 0;
-  for (const bar of ascending) {
-    if (bar.high > atlHigh) atlHigh = bar.high;
-    totalVolumeQuote += bar.volumeQuote;
-  }
+  const atlHigh = findAthHigh(ascending);
   const latestClose = ascending[ascending.length - 1]!.close;
-  const drawdownFromAth = atlHigh > 0 ? Math.max(0, 1 - latestClose / atlHigh) : 0;
-
-  let dailyReturnStddev = 0;
-  if (ascending.length >= 2) {
-    const logReturns: number[] = [];
-    for (let i = 1; i < ascending.length; i++) {
-      const prev = ascending[i - 1]!.close;
-      const cur = ascending[i]!.close;
-      if (prev > 0 && cur > 0) {
-        logReturns.push(Math.log(cur / prev));
-      }
-    }
-    if (logReturns.length >= 2) {
-      const mean = logReturns.reduce((s, v) => s + v, 0) / logReturns.length;
-      const variance =
-        logReturns.reduce((s, v) => s + (v - mean) * (v - mean), 0) / (logReturns.length - 1);
-      dailyReturnStddev = Math.sqrt(variance);
-    }
-  }
-
   return {
     bars,
     atlHigh,
     latestClose,
-    drawdownFromAth,
-    dailyReturnStddev,
-    totalVolumeQuote,
+    drawdownFromAth: atlHigh > 0 ? Math.max(0, 1 - latestClose / atlHigh) : 0,
+    dailyReturnStddev: measureReturnStddev(collectLogReturns(ascending)),
+    totalVolumeQuote: sumQuoteVolume(ascending),
     barCount: bars.length,
   };
 }
@@ -264,6 +298,79 @@ function pruneOhlcvState(nowMs: number): void {
     backoff.delete(oldest);
   }
 }
+/** Resolve an optional base-URL override (env, then default) to a clean endpoint. */
+function resolveOhlcvBaseUrl(baseUrl: string | undefined, envUrl: string | undefined): string {
+  const base = (baseUrl ?? envUrl ?? DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
+  return base.length > 0 ? base : DEFAULT_BASE_URL;
+}
+
+/** Read a fresh last-good series, or null on miss/expiry. */
+function readFreshOhlcvCache(
+  poolAddress: string,
+  ttlMs: number,
+  nowMs: number,
+): GeckoOhlcvSignals | null {
+  const cached = lastGoodCache.get(poolAddress);
+  if (cached !== undefined && nowMs - cached.fetchedAt < ttlMs) return cached.signals;
+  return null;
+}
+
+/** Read any last-good series regardless of age (backoff/failure cover). */
+function readOhlcvFallback(poolAddress: string): GeckoOhlcvSignals | null {
+  return lastGoodCache.get(poolAddress)?.signals ?? null;
+}
+
+/** True when a failing pool is still inside its backoff window. */
+function isOhlcvBackedOff(poolAddress: string, nowMs: number): boolean {
+  const pending = backoff.get(poolAddress);
+  return pending !== undefined && nowMs < pending.nextAttemptAt;
+}
+
+/** Enter/extend backoff, serving the last-good series when one exists. */
+function recordOhlcvFailure(poolAddress: string, nowMs: number): GeckoOhlcvSignals | null {
+  const failures = (backoff.get(poolAddress)?.failures ?? 0) + 1;
+  backoff.set(poolAddress, {
+    nextAttemptAt: nowMs + Math.min(BACKOFF_BASE_MS * 2 ** (failures - 1), BACKOFF_MAX_MS),
+    failures,
+  });
+  const cached = lastGoodCache.get(poolAddress);
+  if (cached === undefined) return null;
+  logger.debug("GeckoTerminal OHLCV fetch failed — reusing last-good series", {
+    pool: poolAddress,
+    ageMs: nowMs - cached.fetchedAt,
+  });
+  return cached.signals;
+}
+
+/** Fetch + decode one OHLCV page; null on any HTTP/parse/transport failure. */
+async function fetchOhlcvBars(
+  fetchImpl: FetchLike,
+  url: string,
+  timeoutMs: number,
+  poolAddress: string,
+): Promise<ReadonlyArray<GeckoOhlcvBar> | null> {
+  try {
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) {
+      logger.warn("GeckoTerminal OHLCV request failed", { pool: poolAddress, status: res.status });
+      return null;
+    }
+    const body: unknown = await res.json();
+    const bars = parseGeckoOhlcv(body);
+    if (bars.length === 0) {
+      logger.warn("GeckoTerminal OHLCV returned no usable bars", { pool: poolAddress });
+      return null;
+    }
+    return bars;
+  } catch (err) {
+    logger.warn("GeckoTerminal OHLCV fetch threw", {
+      pool: poolAddress,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
 /**
  * Fetch a daily OHLCV series for a pool. NEVER throws and NEVER crashes the
  * scan: 404/429/5xx, timeout, fetch failure, or parse failure all return null
@@ -289,64 +396,20 @@ export async function getGeckoPoolOhlcv(
 ): Promise<GeckoOhlcvSignals | null> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
-  const base = (options.baseUrl ?? process.env.GECKO_TERMINAL_API_URL ?? DEFAULT_BASE_URL)
-    .trim()
-    .replace(/\/+$/, "");
-  const effectiveBase = base.length > 0 ? base : DEFAULT_BASE_URL;
   const limit = options.limit ?? DEFAULT_OHLCV_LIMIT;
+  const effectiveBase = resolveOhlcvBaseUrl(options.baseUrl, process.env.GECKO_TERMINAL_API_URL);
   const url = `${effectiveBase}/networks/solana/pools/${poolAddress}/ohlcv/day?limit=${limit}`;
-  pruneOhlcvState(Date.now());
+  const nowMs = Date.now();
+  pruneOhlcvState(nowMs);
 
-  const cached = lastGoodCache.get(poolAddress);
-  if (cached && Date.now() - cached.fetchedAt < (options.cacheTtlMs ?? CACHE_TTL_MS)) {
-    return cached.signals;
-  }
+  const fresh = readFreshOhlcvCache(poolAddress, options.cacheTtlMs ?? CACHE_TTL_MS, nowMs);
+  if (fresh !== null) return fresh;
+  if (isOhlcvBackedOff(poolAddress, nowMs)) return readOhlcvFallback(poolAddress);
 
-  const pendingBackoff = backoff.get(poolAddress);
-  if (pendingBackoff && Date.now() < pendingBackoff.nextAttemptAt) {
-    return cached?.signals ?? null;
-  }
-
-  const serveFailure = (): GeckoOhlcvSignals | null => {
-    const failures = (backoff.get(poolAddress)?.failures ?? 0) + 1;
-    backoff.set(poolAddress, {
-      nextAttemptAt: Date.now() + Math.min(BACKOFF_BASE_MS * 2 ** (failures - 1), BACKOFF_MAX_MS),
-      failures,
-    });
-    if (cached) {
-      logger.debug("GeckoTerminal OHLCV fetch failed — reusing last-good series", {
-        pool: poolAddress,
-        ageMs: Date.now() - cached.fetchedAt,
-      });
-      return cached.signals;
-    }
-    return null;
-  };
-
-  try {
-    const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
-    if (!res.ok) {
-      logger.warn("GeckoTerminal OHLCV request failed", {
-        pool: poolAddress,
-        status: res.status,
-      });
-      return serveFailure();
-    }
-    const body: unknown = await res.json();
-    const bars = parseGeckoOhlcv(body);
-    if (bars.length === 0) {
-      logger.warn("GeckoTerminal OHLCV returned no usable bars", { pool: poolAddress });
-      return serveFailure();
-    }
-    const signals = summarizeGeckoOhlcv(bars);
-    lastGoodCache.set(poolAddress, { signals, fetchedAt: Date.now() });
-    backoff.delete(poolAddress);
-    return signals;
-  } catch (err) {
-    logger.warn("GeckoTerminal OHLCV fetch threw", {
-      pool: poolAddress,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return serveFailure();
-  }
+  const bars = await fetchOhlcvBars(fetchImpl, url, timeoutMs, poolAddress);
+  if (bars === null) return recordOhlcvFailure(poolAddress, Date.now());
+  const signals = summarizeGeckoOhlcv(bars);
+  lastGoodCache.set(poolAddress, { signals, fetchedAt: Date.now() });
+  backoff.delete(poolAddress);
+  return signals;
 }

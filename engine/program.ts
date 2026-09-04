@@ -144,7 +144,10 @@ import { GeckoTerminalLive, enrichPoolFromGecko } from "./gecko-terminal-service
 import { DexScreenerLive } from "./dexscreener-service.js";
 import { PythPriceLive } from "./pyth-price-service.js";
 import { AlertLive } from "./alert-service.js";
-import { detectDepegAndLiquidityDrain } from "./depeg-liquidity-detector.js";
+import {
+  detectDepegAndLiquidityDrain,
+  type DepegLiquiditySignals,
+} from "./depeg-liquidity-detector.js";
 import { consultTokenRisks, type TokenRiskSignal } from "./token-risk-service.js";
 import { CopySignalLive, applyCopySignalBoost } from "./copy-trading-signals.js";
 import { evaluateFallenAngelDiscovery } from "./fallen-angel-discovery.js";
@@ -172,6 +175,7 @@ import type {
   AgentProposalMode,
   AgentCycle,
   EntryStrategySpec,
+  EntryStrategyType,
   PoolMetrics,
   PoolSnapshot,
   PoolState,
@@ -423,20 +427,8 @@ export function decisionChangesExecutableBehavior(
   ) {
     return true;
   }
-  if ((before.positionSizeUsd ?? undefined) !== (after.positionSizeUsd ?? undefined)) {
-    return true;
-  }
-  const beforeParams = before.rebalanceParams;
-  const afterParams = after.rebalanceParams;
-  if (beforeParams === undefined && afterParams === undefined) return false;
-  if (beforeParams === undefined || afterParams === undefined) return true;
-  // Slippage is intentionally excluded, mirroring rebalanceParamsEqual in
-  // risk-service.ts: proposals hardcode slippageBps 0 while deterministic
-  // decisions use 50, and execution never reads it.
-  return (
-    beforeParams.newLowerBinId !== afterParams.newLowerBinId ||
-    beforeParams.newUpperBinId !== afterParams.newUpperBinId
-  );
+  if (before.positionSizeUsd !== after.positionSizeUsd) return true;
+  return !rebalanceParamsEquivalent(before.rebalanceParams, after.rebalanceParams);
 }
 
 /**
@@ -555,26 +547,34 @@ export function hasSyncProposalTransport(status: { readonly transport: string | 
 // that cannot price simply returns the cost basis — a flat mark never
 // invents a loss.
 
-export function estimatePositionValue(pos: PositionRecord, pool: PoolState): number {
-  const entryPriceUsd = pos.entryPriceUsd;
-  if (
-    entryPriceUsd != null &&
-    entryPriceUsd > 0 &&
+/**
+ * True when the position carries finite entry legs against a positive live
+ * price, so the HODL benchmark is computable (pre-v16 rows fail open to cost).
+ */
+function hasKnownEntryLegs(pos: PositionRecord, pool: PoolState): boolean {
+  return (
+    pos.entryPriceUsd != null &&
+    pos.entryPriceUsd > 0 &&
     pos.entryAmountXUsd != null &&
     pos.entryAmountYUsd != null &&
     Number.isFinite(pos.entryAmountXUsd) &&
     Number.isFinite(pos.entryAmountYUsd) &&
     Number.isFinite(pool.currentPrice) &&
     pool.currentPrice > 0
-  ) {
-    const hodl = computeHodlValueUsd(
-      pos.entryAmountXUsd,
-      pos.entryAmountYUsd,
-      entryPriceUsd,
-      pool.currentPrice,
-    );
-    if (hodl !== null && Number.isFinite(hodl) && hodl > 0) return hodl;
-  }
+  );
+}
+
+export function estimatePositionValue(pos: PositionRecord, pool: PoolState): number {
+  if (!hasKnownEntryLegs(pos, pool)) return pos.depositedUsd;
+  // SAFETY: hasKnownEntryLegs proved every leg non-null; the ?? 0 legs are dead
+  // fallbacks that keep the typechecker honest without narrowing assertions.
+  const hodl = computeHodlValueUsd(
+    pos.entryAmountXUsd ?? 0,
+    pos.entryAmountYUsd ?? 0,
+    pos.entryPriceUsd ?? 0,
+    pool.currentPrice,
+  );
+  if (hodl !== null && Number.isFinite(hodl) && hodl > 0) return hodl;
   return pos.depositedUsd;
 }
 
@@ -836,6 +836,175 @@ function resolveTargetPosition(
   return poolPositions.length === 1 ? poolPositions[0] : undefined;
 }
 
+/** On-chain position identity from either reconcile source (chain or Data API). */
+interface ReconcilablePosition {
+  readonly poolAddress: string;
+  readonly positionPubKey: string;
+  readonly lowerBinId: number;
+  readonly upperBinId: number;
+}
+
+/** Reconcile wallet address (null = walletless; reconcile degrades to success). */
+function resolveReconcileWallet(adapter: AdapterApi): string | null | undefined {
+  if (!adapter.hasWallet()) return null;
+  return adapter.getWalletAddress();
+}
+
+/**
+ * Delete loop — chain-only. A Data API feed must never drive a removal:
+ * a stale/partial crawl would falsely mark a live position as externally
+ * closed and delete real capital.
+ */
+function pruneExternallyClosedPositions(
+  db: DbApi,
+  memory: MemoryApi,
+  trackedPositions: Map<string, PositionRecord>,
+  onChainByPubkey: ReadonlyMap<string, ReconcilablePosition>,
+): Effect.Effect<void, never> {
+  return Effect.gen(function* () {
+    for (const [positionId, pos] of trackedPositions) {
+      if (pos.positionPubKey && !onChainByPubkey.has(pos.positionPubKey)) {
+        console.warn(
+          `Reconciling: position ${positionId} on ${pos.poolAddress} no longer on-chain — removing from tracking`,
+        );
+        trackedPositions.delete(positionId);
+        yield* persist(`deletePosition ${positionId}`, db.deletePosition(positionId));
+        yield* memory
+          .upsert({
+            category: "warning",
+            content: `Position ${positionId} on ${pos.poolAddress} was closed externally (e.g. via Solscan/Meteora UI). Removed from tracking.`,
+            poolAddress: pos.poolAddress,
+          })
+          .pipe(Effect.catch(() => Effect.void));
+      }
+    }
+  });
+}
+
+/**
+ * Range-sync for one tracked position — chain-only (source authority). A
+ * tracked position whose on-chain range moved under the same pubkey is
+ * synced back to the real range instead of deciding on stale bins. On the
+ * Data API path the range is never mutated from a third-party view.
+ */
+function syncDriftedPositionRange(
+  db: DbApi,
+  memory: MemoryApi,
+  trackedPositions: Map<string, PositionRecord>,
+  tracked: PositionRecord,
+  onChainPos: ReconcilablePosition,
+  source: "chain" | "datapi",
+): Effect.Effect<void, never> {
+  return Effect.gen(function* () {
+    if (source !== "chain") return;
+    if (
+      tracked.lowerBinId === onChainPos.lowerBinId &&
+      tracked.upperBinId === onChainPos.upperBinId
+    ) {
+      return;
+    }
+    console.warn(
+      `Reconciling: position ${onChainPos.positionPubKey} on ${onChainPos.poolAddress} range drifted on-chain (${tracked.lowerBinId}-${tracked.upperBinId} → ${onChainPos.lowerBinId}-${onChainPos.upperBinId}) — syncing record`,
+    );
+    const updated: PositionRecord = {
+      ...tracked,
+      lowerBinId: onChainPos.lowerBinId,
+      upperBinId: onChainPos.upperBinId,
+    };
+    trackedPositions.set(onChainPos.positionPubKey, updated);
+    yield* persist(`savePosition ${updated.positionId}`, db.savePosition(updated));
+    yield* memory
+      .upsert({
+        category: "warning",
+        content: `Position ${onChainPos.positionPubKey} on ${onChainPos.poolAddress} range synced to on-chain state (${onChainPos.lowerBinId}-${onChainPos.upperBinId}).`,
+        poolAddress: onChainPos.poolAddress,
+      })
+      .pipe(Effect.catch(() => Effect.void));
+  });
+}
+
+/**
+ * Adopt one newly discovered on-chain position on a watched pool (tombstoned
+ * reaped-empty ghosts stay excluded until the bound lapses).
+ */
+function discoverExternalPosition(
+  adapter: AdapterApi,
+  db: DbApi,
+  memory: MemoryApi,
+  trackedPositions: Map<string, PositionRecord>,
+  unresolvedPoolAddresses: Set<string>,
+  onChainPos: ReconcilablePosition,
+): Effect.Effect<void, never> {
+  return Effect.gen(function* () {
+    // Never re-admit an account the engine already reaped as empty-on-chain
+    // (rent reclaim may have failed, leaving the ghost account in the
+    // wallet's on-chain set). Without this guard, reconcile would re-discover
+    // the phantom row every cycle -> pointless EXIT -> reap churn. Bounded so
+    // a later legitimate refill of the same account is eventually re-admitted.
+    const reapTombstone = yield* db
+      .getMetadata(`reaped_empty:${onChainPos.positionPubKey}`)
+      .pipe(Effect.catch(() => Effect.succeed(null)));
+    if (reapTombstone !== null && Date.now() < Number(reapTombstone)) {
+      console.warn(
+        `Reconciling: skipping re-admission of reaped-empty position ${onChainPos.positionPubKey} on ${onChainPos.poolAddress} (ghost on-chain account)`,
+      );
+      return;
+    }
+    console.warn(
+      `Reconciling: discovered external position ${onChainPos.positionPubKey} in ${onChainPos.poolAddress} — adding to tracking`,
+    );
+    const pool = yield* adapter.getPoolState(onChainPos.poolAddress).pipe(
+      Effect.catch((err) => {
+        console.error("Reconcile: failed to fetch pool state for external position", {
+          pool: onChainPos.poolAddress,
+          err: String(err),
+        });
+        unresolvedPoolAddresses.add(onChainPos.poolAddress);
+        return Effect.succeed(null);
+      }),
+    );
+    if (!pool) return;
+    const pos: PositionRecord = {
+      positionId: onChainPos.positionPubKey,
+      poolAddress: onChainPos.poolAddress,
+      positionPubKey: onChainPos.positionPubKey,
+      depositedUsd: 0,
+      currentValueUsd: 0,
+      tokenXSymbol: pool.tokenXSymbol,
+      tokenYSymbol: pool.tokenYSymbol,
+      activeBinId: pool.activeBinId,
+      lowerBinId: onChainPos.lowerBinId,
+      upperBinId: onChainPos.upperBinId,
+      timestamp: Date.now(),
+      outOfRangeSince: null,
+      oorCycleCount: 0,
+      lastFeeClaimAt: Date.now(),
+      trailingStopThreshold: null,
+      highestValueUsd: null,
+      lastRebalanceAt: 0,
+      paperExitedAt: null,
+      entrySignalTimestamp: null,
+      entrySignalSnapshotId: null,
+      entryPriceUsd: null,
+      entryAmountXUsd: null,
+      entryAmountYUsd: null,
+      cumulativeFeesClaimedUsd: 0,
+      cumulativeRewardsClaimedUsd: 0,
+      closedAt: null,
+      realizedPnlUsd: null,
+    };
+    trackedPositions.set(onChainPos.positionPubKey, pos);
+    yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
+    yield* memory
+      .upsert({
+        category: "warning",
+        content: `External position ${onChainPos.positionPubKey} detected in ${onChainPos.poolAddress} and added to tracking.`,
+        poolAddress: onChainPos.poolAddress,
+      })
+      .pipe(Effect.catch(() => Effect.void));
+  });
+}
+
 export function reconcilePositions(
   adapter: AdapterApi,
   db: DbApi,
@@ -844,10 +1013,7 @@ export function reconcilePositions(
   poolsToScan: ReadonlyArray<string>,
 ): Effect.Effect<PositionReconcileResult> {
   return Effect.gen(function* () {
-    if (!adapter.hasWallet()) {
-      return { succeeded: true, unresolvedPoolAddresses: new Set<string>() };
-    }
-    const walletAddress = adapter.getWalletAddress();
+    const walletAddress = resolveReconcileWallet(adapter);
     if (!walletAddress) {
       return { succeeded: true, unresolvedPoolAddresses: new Set<string>() };
     }
@@ -898,22 +1064,7 @@ export function reconcilePositions(
     // closed and delete real capital. On the Data API path this loop is
     // skipped entirely.
     if (source === "chain") {
-      for (const [positionId, pos] of trackedPositions) {
-        if (pos.positionPubKey && !onChainByPubkey.has(pos.positionPubKey)) {
-          console.warn(
-            `Reconciling: position ${positionId} on ${pos.poolAddress} no longer on-chain — removing from tracking`,
-          );
-          trackedPositions.delete(positionId);
-          yield* persist(`deletePosition ${positionId}`, db.deletePosition(positionId));
-          yield* memory
-            .upsert({
-              category: "warning",
-              content: `Position ${positionId} on ${pos.poolAddress} was closed externally (e.g. via Solscan/Meteora UI). Removed from tracking.`,
-              poolAddress: pos.poolAddress,
-            })
-            .pipe(Effect.catch(() => Effect.void));
-        }
-      }
+      yield* pruneExternallyClosedPositions(db, memory, trackedPositions, onChainByPubkey);
     }
 
     for (const onChainPos of reconcilablePositions) {
@@ -926,99 +1077,18 @@ export function reconcilePositions(
         // instead of deciding on stale bins. On the Data API path we do NOT
         // mutate a tracked position's range from a possibly-stale third-party
         // view — the chain read is the only authority that adjusts it.
-        if (
-          source === "chain" &&
-          (tracked.lowerBinId !== onChainPos.lowerBinId ||
-            tracked.upperBinId !== onChainPos.upperBinId)
-        ) {
-          console.warn(
-            `Reconciling: position ${onChainPos.positionPubKey} on ${onChainPos.poolAddress} range drifted on-chain (${tracked.lowerBinId}-${tracked.upperBinId} → ${onChainPos.lowerBinId}-${onChainPos.upperBinId}) — syncing record`,
-          );
-          const updated: PositionRecord = {
-            ...tracked,
-            lowerBinId: onChainPos.lowerBinId,
-            upperBinId: onChainPos.upperBinId,
-          };
-          trackedPositions.set(onChainPos.positionPubKey, updated);
-          yield* persist(`savePosition ${updated.positionId}`, db.savePosition(updated));
-          yield* memory
-            .upsert({
-              category: "warning",
-              content: `Position ${onChainPos.positionPubKey} on ${onChainPos.poolAddress} range synced to on-chain state (${onChainPos.lowerBinId}-${onChainPos.upperBinId}).`,
-              poolAddress: onChainPos.poolAddress,
-            })
-            .pipe(Effect.catch(() => Effect.void));
-        }
+        yield* syncDriftedPositionRange(db, memory, trackedPositions, tracked, onChainPos, source);
         continue;
       }
       if (watchedPoolSet.has(onChainPos.poolAddress)) {
-        // Never re-admit an account the engine already reaped as empty-on-chain
-        // (rent reclaim may have failed, leaving the ghost account in the
-        // wallet's on-chain set). Without this guard, reconcile would re-discover
-        // the phantom row every cycle -> pointless EXIT -> reap churn. Bounded so
-        // a later legitimate refill of the same account is eventually re-admitted.
-        const reapTombstone = yield* db
-          .getMetadata(`reaped_empty:${onChainPos.positionPubKey}`)
-          .pipe(Effect.catch(() => Effect.succeed(null)));
-        if (reapTombstone !== null && Date.now() < Number(reapTombstone)) {
-          console.warn(
-            `Reconciling: skipping re-admission of reaped-empty position ${onChainPos.positionPubKey} on ${onChainPos.poolAddress} (ghost on-chain account)`,
-          );
-          continue;
-        }
-        console.warn(
-          `Reconciling: discovered external position ${onChainPos.positionPubKey} in ${onChainPos.poolAddress} — adding to tracking`,
+        yield* discoverExternalPosition(
+          adapter,
+          db,
+          memory,
+          trackedPositions,
+          unresolvedPoolAddresses,
+          onChainPos,
         );
-        const pool = yield* adapter.getPoolState(onChainPos.poolAddress).pipe(
-          Effect.catch((err) => {
-            console.error("Reconcile: failed to fetch pool state for external position", {
-              pool: onChainPos.poolAddress,
-              err: String(err),
-            });
-            unresolvedPoolAddresses.add(onChainPos.poolAddress);
-            return Effect.succeed(null);
-          }),
-        );
-        if (pool) {
-          const pos: PositionRecord = {
-            positionId: onChainPos.positionPubKey,
-            poolAddress: onChainPos.poolAddress,
-            positionPubKey: onChainPos.positionPubKey,
-            depositedUsd: 0,
-            currentValueUsd: 0,
-            tokenXSymbol: pool.tokenXSymbol,
-            tokenYSymbol: pool.tokenYSymbol,
-            activeBinId: pool.activeBinId,
-            lowerBinId: onChainPos.lowerBinId,
-            upperBinId: onChainPos.upperBinId,
-            timestamp: Date.now(),
-            outOfRangeSince: null,
-            oorCycleCount: 0,
-            lastFeeClaimAt: Date.now(),
-            trailingStopThreshold: null,
-            highestValueUsd: null,
-            lastRebalanceAt: 0,
-            paperExitedAt: null,
-            entrySignalTimestamp: null,
-            entrySignalSnapshotId: null,
-            entryPriceUsd: null,
-            entryAmountXUsd: null,
-            entryAmountYUsd: null,
-            cumulativeFeesClaimedUsd: 0,
-            cumulativeRewardsClaimedUsd: 0,
-            closedAt: null,
-            realizedPnlUsd: null,
-          };
-          trackedPositions.set(onChainPos.positionPubKey, pos);
-          yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
-          yield* memory
-            .upsert({
-              category: "warning",
-              content: `External position ${onChainPos.positionPubKey} detected in ${onChainPos.poolAddress} and added to tracking.`,
-              poolAddress: onChainPos.poolAddress,
-            })
-            .pipe(Effect.catch(() => Effect.void));
-        }
       }
     }
 
@@ -1061,13 +1131,56 @@ function screenerLayerConfig(cfg?: AppConfig): ScreenerConfig {
 }
 
 function riskLayerConfig(cfg?: AppConfig): RiskConfig {
+  const {
+    confidenceThreshold = 0.65,
+    maxRebalanceRangeBins = 50,
+    stopLossPct = 0.15,
+    maxPerPoolAllocationPct = 0.4,
+    maxPositionsPerPool = 2,
+  } = cfg ?? {};
   return {
-    confidenceThreshold: cfg?.confidenceThreshold ?? 0.65,
-    maxRebalanceRangeBins: cfg?.maxRebalanceRangeBins ?? 50,
-    stopLossPct: cfg?.stopLossPct ?? 0.15,
-    maxPerPoolAllocationPct: cfg?.maxPerPoolAllocationPct ?? 0.4,
-    maxPositionsPerPool: cfg?.maxPositionsPerPool ?? 2,
+    confidenceThreshold,
+    maxRebalanceRangeBins,
+    stopLossPct,
+    maxPerPoolAllocationPct,
+    maxPositionsPerPool,
   };
+}
+
+/** Agent decision-review layer: live transport when agentic mode is on, no-op otherwise. */
+function resolveAgentLayer(cfg?: AppConfig): Layer.Layer<AgentService, never, never> {
+  if (cfg?.agentiveMode !== true) return Layer.succeed(AgentService, AgentNoOp);
+  return AgentLive(cfg);
+}
+
+/** Agent-state layer with the operator proposal-queue bound. */
+function buildAgentStateLayer(cfg?: AppConfig): Layer.Layer<AgentStateService, never, never> {
+  return AgentStateMutable({ maxPendingProposals: cfg?.agentProposalMaxQueueSize ?? 50 }).layer;
+}
+
+/** MCP stdio layer: live server when enabled, inert stub otherwise. */
+function resolveMcpLayer(
+  cfg: AppConfig | undefined,
+  agentStateLayer: Layer.Layer<AgentStateService, never, never>,
+): Layer.Layer<McpServerService, never, never> {
+  if (cfg?.agentMcpEnabled !== true) {
+    return Layer.succeed(McpServerService, { start: () => Effect.void, stop: () => Effect.void });
+  }
+  return Layer.provide(McpServerLive(cfg), agentStateLayer);
+}
+
+/** HTTP status layer: live server on a configured port, inert stub otherwise. */
+function resolveHttpLayer(
+  cfg: AppConfig | undefined,
+  agentStateLayer: Layer.Layer<AgentStateService, never, never>,
+): Layer.Layer<HttpStatusServerService, never, never> {
+  if (cfg && cfg.agentHttpPort > 0) {
+    return Layer.provide(HttpStatusServerLive(cfg), agentStateLayer);
+  }
+  return Layer.succeed(HttpStatusServerService, {
+    start: () => Effect.void,
+    stop: () => Effect.void,
+  });
 }
 
 export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, never> {
@@ -1112,23 +1225,13 @@ export function buildLayer(cfg?: AppConfig): Layer.Layer<AllServices, never, nev
   const merged11d = Layer.merge(merged11c, DexScreenerLive);
   const merged11e = Layer.merge(merged11d, pythPrice);
 
-  const agentLayer = cfg?.agentiveMode ? AgentLive(cfg) : Layer.succeed(AgentService, AgentNoOp);
+  const agentLayer = resolveAgentLayer(cfg);
 
-  const agentStateLayer = AgentStateMutable({
-    maxPendingProposals: cfg?.agentProposalMaxQueueSize ?? 50,
-  }).layer;
+  const agentStateLayer = buildAgentStateLayer(cfg);
 
-  const mcpLayer = cfg?.agentMcpEnabled
-    ? Layer.provide(McpServerLive(cfg), agentStateLayer)
-    : Layer.succeed(McpServerService, { start: () => Effect.void, stop: () => Effect.void });
+  const mcpLayer = resolveMcpLayer(cfg, agentStateLayer);
 
-  const httpLayer =
-    cfg && cfg.agentHttpPort > 0
-      ? Layer.provide(HttpStatusServerLive(cfg), agentStateLayer)
-      : Layer.succeed(HttpStatusServerService, {
-          start: () => Effect.void,
-          stop: () => Effect.void,
-        });
+  const httpLayer = resolveHttpLayer(cfg, agentStateLayer);
 
   const merged12 = Layer.merge(merged11e, agentLayer);
   const merged13 = Layer.merge(merged12, agentStateLayer);
@@ -1193,10 +1296,38 @@ interface PaperPositionInput {
   readonly paperExitedAt?: number | null | undefined;
 }
 
+/** Nullable-field normalizer: six lockstep `?? null` call sites below. */
+function orNull<T>(value: T | null | undefined): T | null {
+  return value ?? null;
+}
+
+/** Entry-leg split USD: dip entries go single-sided X, otherwise 50/50. */
+interface PaperEntryLegUsd {
+  readonly xUsd: number;
+  readonly yUsd: number;
+}
+function paperEntryLegSplit(fullSizeUsd: number, dipEntry: boolean): PaperEntryLegUsd {
+  if (dipEntry) return { xUsd: fullSizeUsd, yUsd: 0 };
+  return { xUsd: fullSizeUsd / 2, yUsd: fullSizeUsd / 2 };
+}
+
+/** Launch-runner seed fields: set together on dip entries, null otherwise. */
+interface PaperLaunchRunnerSeed {
+  readonly runner: true | null;
+  readonly steps: number | null;
+  readonly anchorPrice: number | null;
+}
+function paperLaunchRunnerSeed(dipEntry: boolean, anchorPrice: number): PaperLaunchRunnerSeed {
+  if (!dipEntry) return { runner: null, steps: null, anchorPrice: null };
+  return { runner: true, steps: 0, anchorPrice };
+}
+
 /** Build a paper PositionRecord (single + ladder legs share every dip/shape rule). */
 function makePaperPositionRecord(input: PaperPositionInput): PositionRecord {
   const { decision, pool } = input;
   const dipEntry = (input.entryDipOffsetBins ?? 0) !== 0;
+  const legs = paperEntryLegSplit(input.fullSizeUsd, dipEntry);
+  const runnerSeed = paperLaunchRunnerSeed(dipEntry, pool.currentPrice);
   return {
     positionId: input.positionId,
     poolAddress: decision.poolAddress,
@@ -1215,22 +1346,22 @@ function makePaperPositionRecord(input: PaperPositionInput): PositionRecord {
     trailingStopThreshold: null,
     highestValueUsd: null,
     lastRebalanceAt: 0,
-    paperExitedAt: input.paperExitedAt ?? null,
-    entrySignalTimestamp: input.signalTimestamp ?? null,
-    entrySignalSnapshotId: input.signalSnapshotId ?? null,
+    paperExitedAt: orNull(input.paperExitedAt),
+    entrySignalTimestamp: orNull(input.signalTimestamp),
+    entrySignalSnapshotId: orNull(input.signalSnapshotId),
     entryPriceUsd: pool.currentPrice,
-    entryAmountXUsd: dipEntry ? input.fullSizeUsd : input.fullSizeUsd / 2,
-    entryAmountYUsd: dipEntry ? 0 : input.fullSizeUsd / 2,
+    entryAmountXUsd: legs.xUsd,
+    entryAmountYUsd: legs.yUsd,
     cumulativeFeesClaimedUsd: 0,
     cumulativeRewardsClaimedUsd: 0,
     closedAt: null,
     realizedPnlUsd: null,
-    positionMode: decision.positionMode ?? null,
-    tpLadderJson: decision.tpLadderJson ?? null,
-    invalidationStopPrice: decision.invalidationStopPrice ?? null,
-    launchRunner: dipEntry ? true : null,
-    launchRunnerSteps: dipEntry ? 0 : null,
-    launchRunnerAnchorPrice: dipEntry ? pool.currentPrice : null,
+    positionMode: orNull(decision.positionMode),
+    tpLadderJson: orNull(decision.tpLadderJson),
+    invalidationStopPrice: orNull(decision.invalidationStopPrice),
+    launchRunner: runnerSeed.runner,
+    launchRunnerSteps: runnerSeed.steps,
+    launchRunnerAnchorPrice: runnerSeed.anchorPrice,
   };
 }
 
@@ -1241,6 +1372,30 @@ interface PaperLadderPlan {
   readonly wideHalf: number;
 }
 
+/** Ladder range halves from operator widths (5-bin tight floor). */
+interface LadderRangeHalves {
+  readonly tightHalf: number;
+  readonly wideHalf: number;
+}
+function ladderRangeHalves(
+  halfWidth: number | undefined,
+  tightMult: number | undefined,
+  wideMult: number | undefined,
+): LadderRangeHalves {
+  return {
+    tightHalf: Math.max(5, Math.round((halfWidth ?? 20) * (tightMult ?? 0.6))),
+    wideHalf: Math.round((halfWidth ?? 20) * (wideMult ?? 1.6)),
+  };
+}
+
+/** Ladder capacity: headroom for the tight+wide pair portfolio- and pool-wide. */
+function ladderCapacityOk(deps: PaperExecDeps, poolCount: number): boolean {
+  return (
+    deps.trackedPositions.size + 2 <= (deps.maxOpenPositions ?? 3) &&
+    poolCount + 2 <= (deps.maxPositionsPerPool ?? 2)
+  );
+}
+
 /** Ladder eligibility + derived halves: tight harvests fees, wide survives chop. */
 function paperLadderPlan(
   deps: PaperExecDeps,
@@ -1249,22 +1404,75 @@ function paperLadderPlan(
 ): PaperLadderPlan | null {
   const sizeUsd = decision.positionSizeUsd ?? 0;
   const poolCount = positionsForPool(deps.trackedPositions, decision.poolAddress).length;
-  const canLadder =
-    deps.ladderEnabled &&
-    !liveExited &&
-    sizeUsd >= 20 &&
-    deps.trackedPositions.size + 2 <= (deps.maxOpenPositions ?? 3) &&
-    poolCount + 2 <= (deps.maxPositionsPerPool ?? 2);
-  if (!canLadder) return null;
-  const halfSize = sizeUsd / 2;
-  return {
-    halfSize,
-    tightHalf: Math.max(
-      5,
-      Math.round((deps.entryRangeHalfWidth ?? 20) * (deps.ladderTightMult ?? 0.6)),
-    ),
-    wideHalf: Math.round((deps.entryRangeHalfWidth ?? 20) * (deps.ladderWideMult ?? 1.6)),
-  };
+  if (!deps.ladderEnabled || liveExited || sizeUsd < 20 || !ladderCapacityOk(deps, poolCount)) {
+    return null;
+  }
+  const halves = ladderRangeHalves(
+    deps.entryRangeHalfWidth,
+    deps.ladderTightMult,
+    deps.ladderWideMult,
+  );
+  return { halfSize: sizeUsd / 2, tightHalf: halves.tightHalf, wideHalf: halves.wideHalf };
+}
+
+/** Persist one paper ladder leg (record + baseline + ENTER event). */
+function savePaperLadderLeg(
+  deps: PaperExecDeps,
+  decision: AgentDecision,
+  pool: PaperExecPool,
+  entryStrategySpec: EntryStrategySpec,
+  signalTimestamp: number | undefined,
+  signalSnapshotId: number | undefined,
+  lowerBinId: number,
+  upperBinId: number,
+  halfSize: number,
+  label: "tight" | "wide",
+): Effect.Effect<void, never> {
+  return Effect.gen(function* () {
+    const pos = makePaperPositionRecord({
+      decision,
+      pool,
+      positionId: `paper-${decision.poolAddress}-${randomUUID()}`,
+      positionPubKey: null,
+      depositedUsd: halfSize,
+      fullSizeUsd: halfSize,
+      activeBinId: pool.activeBinId,
+      lowerBinId,
+      upperBinId,
+      entryStrategySpec,
+      entryDipOffsetBins: deps.entryDipOffsetBins,
+      signalTimestamp,
+      signalSnapshotId,
+    });
+    deps.trackedPositions.set(pos.positionId, pos);
+    yield* persist(`savePosition ${pos.positionId}`, deps.db.savePosition(pos));
+    if (pos.positionMode !== "launch") {
+      yield* persistMetadataIfSupported(
+        deps.db,
+        `yieldbase:${pos.positionId}`,
+        JSON.stringify({ entryAprPct: deps.entryAprPct ?? 0, at: Date.now() }),
+      );
+    }
+    yield* deps.db
+      .savePositionEvent({
+        id: randomUUID(),
+        poolAddress: decision.poolAddress,
+        positionPubKey: pos.positionPubKey,
+        positionId: pos.positionId,
+        event: "ENTER",
+        valueUsd: halfSize,
+        feesUsd: null,
+        price: pool.currentPrice,
+        metadata: {
+          lowerBinId: pos.lowerBinId,
+          upperBinId: pos.upperBinId,
+          strategySpec: entryStrategySpec,
+          ladder: label,
+        },
+        createdAt: Date.now(),
+      })
+      .pipe(Effect.catch(() => Effect.void));
+  });
 }
 
 /** Paper ENTER: laddered tight+wide pair or a single position (paper/live parity range). */
@@ -1301,49 +1509,18 @@ function executePaperEnter(
         deps.entryDipOffsetBins,
       );
       for (const [range, label] of [[tightRange, "tight"] as const, [wideRange, "wide"] as const]) {
-        const pos = makePaperPositionRecord({
+        yield* savePaperLadderLeg(
+          deps,
           decision,
           pool,
-          positionId: `paper-${decision.poolAddress}-${randomUUID()}`,
-          positionPubKey: null,
-          depositedUsd: halfSize,
-          fullSizeUsd: halfSize,
-          activeBinId: pool.activeBinId,
-          lowerBinId: range.lowerBinId,
-          upperBinId: range.upperBinId,
           entryStrategySpec,
-          entryDipOffsetBins: deps.entryDipOffsetBins,
           signalTimestamp,
           signalSnapshotId,
-        });
-        deps.trackedPositions.set(pos.positionId, pos);
-        yield* persist(`savePosition ${pos.positionId}`, deps.db.savePosition(pos));
-        if (pos.positionMode !== "launch") {
-          yield* persistMetadataIfSupported(
-            deps.db,
-            `yieldbase:${pos.positionId}`,
-            JSON.stringify({ entryAprPct: deps.entryAprPct ?? 0, at: Date.now() }),
-          );
-        }
-        yield* deps.db
-          .savePositionEvent({
-            id: randomUUID(),
-            poolAddress: decision.poolAddress,
-            positionPubKey: pos.positionPubKey,
-            positionId: pos.positionId,
-            event: "ENTER",
-            valueUsd: halfSize,
-            feesUsd: null,
-            price: pool.currentPrice,
-            metadata: {
-              lowerBinId: pos.lowerBinId,
-              upperBinId: pos.upperBinId,
-              strategySpec: entryStrategySpec,
-              ladder: label,
-            },
-            createdAt: Date.now(),
-          })
-          .pipe(Effect.catch(() => Effect.void));
+          range.lowerBinId,
+          range.upperBinId,
+          halfSize,
+          label,
+        );
       }
       return { executed: true, error: undefined };
     }
@@ -1444,11 +1621,9 @@ function executePaperExit(
   pool: PaperExecPool,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never> {
   return Effect.gen(function* () {
-    if (decision.reasoning.startsWith("Rotation:")) {
-      const armValid = yield* checkRotationArm(deps, decision);
-      if (!armValid) {
-        return { executed: false, error: "rotation canceled — incumbent preserved" };
-      }
+    const rotationBlocked = yield* isExitRotationBlocked(deps, decision);
+    if (rotationBlocked) {
+      return { executed: false, error: "rotation canceled — incumbent preserved" };
     }
     const pos = resolveTargetPosition(deps.trackedPositions, decision);
     if (pos?.positionPubKey) {
@@ -1499,22 +1674,12 @@ function executePaperExit(
         tokenX: pool.tokenX,
         tokenY: pool.tokenY,
       });
-      if (rugMints.length > 0) {
-        const rugExpiresAt = Date.now() + (deps.rugTokenBlockMs ?? 604_800_000);
-        for (const mint of rugMints) {
-          yield* deps.db.setMetadata(`token_rug_block:${mint}`, String(rugExpiresAt)).pipe(
-            Effect.catch((err) =>
-              Effect.sync(() =>
-                logger.warn("Failed to record rug-token block", {
-                  pool: decision.poolAddress,
-                  mint,
-                  error: String(err),
-                }),
-              ),
-            ),
-          );
-        }
-      }
+      yield* persistPaperExitRugBlocks(
+        deps.db,
+        decision.poolAddress,
+        rugMints,
+        deps.rugTokenBlockMs,
+      );
       if (pos.entrySignalSnapshotId != null) {
         yield* deps.db
           .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
@@ -1837,6 +2002,54 @@ function planLiveEntryOperation(
 /** Live SOL gate: deficit-sized top-up swap, balance read, entry minimum.
  * A planned entry operation is failed-closed here so the ledger never keeps
  * a dangling 'planned' row. */
+/**
+ * Align the automatic top-up with the live-entry SOL reserve, sized to the
+ * ACTUAL DEFICIT (plus a slippage/fee buffer), not the full reserve. When the
+ * balance read fails (null), skip the top-up entirely.
+ */
+function topUpSolReserve(
+  adapter: AdapterApi,
+  entryReserveSol: number,
+  solPriceUsd: number,
+): Effect.Effect<void, never> {
+  return Effect.gen(function* () {
+    const preSwapSol = yield* adapter.getNativeSolBalance().pipe(
+      Effect.map((lamports) => Number(lamports) / 1e9),
+      Effect.catch(() => Effect.succeed(null)),
+    );
+    if (preSwapSol === null || preSwapSol >= entryReserveSol) return;
+    const deficitSol = entryReserveSol - preSwapSol;
+    // Prefer a live SOL price from the adapter's price chain over the static
+    // config fallback; a failed lookup falls back to the config value.
+    const liveSolPrice = yield* adapter.getTokenPrices([SOL_MINT], { useFallback: false }).pipe(
+      Effect.map((prices) => prices[SOL_MINT]),
+      Effect.catch(() => Effect.succeed(undefined)),
+    );
+    const effectiveSolPrice = liveSolPrice != null && liveSolPrice > 0 ? liveSolPrice : solPriceUsd;
+    const topUpUsdc =
+      effectiveSolPrice > 0
+        ? Math.max(GAS_TOP_UP_USDC, Math.ceil(deficitSol * effectiveSolPrice * 1.2))
+        : GAS_TOP_UP_USDC;
+    yield* adapter.swapUSDCForSOL(entryReserveSol, topUpUsdc).pipe(Effect.catch(() => Effect.void));
+  });
+}
+
+/** Abandon a planned entry operation (failed) so the ledger keeps no dangling row. */
+function failPlannedEntryOp(
+  db: DbApi,
+  operation: ExecutionOperationRecord,
+  error: string,
+): Effect.Effect<void, never> {
+  return db
+    .saveExecutionOperation({
+      ...operation,
+      status: "failed",
+      error,
+      updatedAt: Date.now(),
+    })
+    .pipe(Effect.catch(() => Effect.void));
+}
+
 function checkLiveEntrySolGate(
   deps: LiveExecDeps,
   decision: AgentDecision,
@@ -1849,30 +2062,7 @@ function checkLiveEntrySolGate(
     // swap to the ACTUAL DEFICIT (plus a slippage/fee buffer), not the full
     // reserve. When the balance read fails (null), skip the top-up entirely.
     const entryReserveSol = Number(SOL_GAS_TOP_UP_THRESHOLD_LAMPORTS) / 1e9;
-    const preSwapSol = yield* deps.adapter.getNativeSolBalance().pipe(
-      Effect.map((lamports) => Number(lamports) / 1e9),
-      Effect.catch(() => Effect.succeed(null)),
-    );
-    if (preSwapSol !== null && preSwapSol < entryReserveSol) {
-      const deficitSol = entryReserveSol - preSwapSol;
-      // Prefer a live SOL price from the adapter's price chain over the static
-      // config fallback; a failed lookup falls back to the config value.
-      const liveSolPrice = yield* deps.adapter
-        .getTokenPrices([SOL_MINT], { useFallback: false })
-        .pipe(
-          Effect.map((prices) => prices[SOL_MINT]),
-          Effect.catch(() => Effect.succeed(undefined)),
-        );
-      const effectiveSolPrice =
-        liveSolPrice != null && liveSolPrice > 0 ? liveSolPrice : solPriceUsd;
-      const topUpUsdc =
-        effectiveSolPrice > 0
-          ? Math.max(GAS_TOP_UP_USDC, Math.ceil(deficitSol * effectiveSolPrice * 1.2))
-          : GAS_TOP_UP_USDC;
-      yield* deps.adapter
-        .swapUSDCForSOL(entryReserveSol, topUpUsdc)
-        .pipe(Effect.catch(() => Effect.void));
-    }
+    yield* topUpSolReserve(deps.adapter, entryReserveSol, solPriceUsd);
     const nativeBalance = yield* deps.adapter.getNativeSolBalance().pipe(
       // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       Effect.map((lamports) => ({ value: lamports, error: undefined as string | undefined })),
@@ -1886,19 +2076,10 @@ function checkLiveEntrySolGate(
     // A planned entry operation is abandoned here — the ENTER is rejected by
     // the SOL gate before any on-chain action. Close it out (failed) so the
     // execution_operations ledger does not retain a dangling 'planned' row.
-    const failPlannedEntry = (operation: ExecutionOperationRecord, error: string) =>
-      deps.db
-        .saveExecutionOperation({
-          ...operation,
-          status: "failed",
-          error,
-          updatedAt: Date.now(),
-        })
-        .pipe(Effect.catch(() => Effect.void));
     if (nativeBalance.value === null) {
       const error = nativeBalance.error ?? "Unable to read native SOL balance";
       if (autonomous && entryOperation) {
-        yield* failPlannedEntry(entryOperation, error);
+        yield* failPlannedEntryOp(deps.db, entryOperation, error);
       }
       return { fatalError: error };
     }
@@ -1919,7 +2100,7 @@ function checkLiveEntrySolGate(
         `needed: ${neededHuman} SOL, ` +
         `reserve: ${reserveHuman} SOL`;
       if (autonomous && entryOperation) {
-        yield* failPlannedEntry(entryOperation, error);
+        yield* failPlannedEntryOp(deps.db, entryOperation, error);
       }
       return { fatalError: error };
     }
@@ -2132,6 +2313,103 @@ function makeLivePositionRecord(input: LivePositionInput): PositionRecord {
   };
 }
 
+/**
+ * Adapter ENTER attempt with success/error settlement (never throws: the
+ * caller branches on result nullability).
+ */
+function enterPositionAttempt(
+  adapter: AdapterApi,
+  poolAddress: string,
+  lowerBinId: number,
+  upperBinId: number,
+  positionSizeUsd: number,
+  entryStrategySpec: EntryStrategySpec,
+  runnerSingleSidedX: boolean | undefined,
+) {
+  return adapter
+    .enterPosition(poolAddress, lowerBinId, upperBinId, positionSizeUsd, {
+      strategySpec: entryStrategySpec,
+      ...(runnerSingleSidedX === true ? { forceSingleSidedX: true } : undefined),
+    })
+    .pipe(
+      Effect.tap((r) =>
+        Effect.sync(() =>
+          console.info("Live position entered", {
+            pool: poolAddress,
+            position: r.positionPubKey,
+            tx: r.txSignature,
+          }),
+        ),
+      ),
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+      Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
+      Effect.catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("Live ENTER failed", {
+          pool: poolAddress,
+          err: msg,
+        });
+        return Effect.succeed({ result: null, error: msg });
+      }),
+    );
+}
+
+/** G7 yield-regression baseline for non-launch positions (launch has its own lifecycle). */
+function recordYieldBaseline(
+  db: DbApi,
+  pos: PositionRecord,
+  entryAprPct: number | undefined,
+): Effect.Effect<void, never> {
+  if (pos.positionMode === "launch") return Effect.void;
+  return persistMetadataIfSupported(
+    db,
+    `yieldbase:${pos.positionId}`,
+    JSON.stringify({ entryAprPct: entryAprPct ?? 0, at: Date.now() }),
+  );
+}
+
+/** Confirm the planned entry operation on success (autonomous ledger continuity). */
+function confirmEnterOperation(
+  db: DbApi,
+  entryOperation: ExecutionOperationRecord | null,
+  positionId: string,
+  txSignature: string,
+): Effect.Effect<void, never> {
+  if (!entryOperation) return Effect.void;
+  return db
+    .saveExecutionOperation({
+      ...entryOperation,
+      positionId,
+      status: "confirmed",
+      txSignature,
+      updatedAt: Date.now(),
+    })
+    .pipe(Effect.catch(() => Effect.void));
+}
+
+/** Roll back a failed ENTER (autonomous mode with funding receipts only). */
+function rollbackFailedEnter(
+  deps: LiveExecDeps,
+  decision: AgentDecision,
+  autonomous: AutonomousExecutionContext | null | undefined,
+  entryOperation: ExecutionOperationRecord | null,
+  preparation: EntryPreparationOutcome | null,
+  error: string | undefined,
+): Effect.Effect<void, never> {
+  if (!autonomous || !entryOperation || !preparation) return Effect.void;
+  return persistRollbackSettlements(
+    deps,
+    decision,
+    autonomous,
+    entryOperation,
+    `rollback:${entryOperation.id}`,
+    preparation.receipts,
+    "retryable",
+    error ?? "Position entry failed after funding swaps",
+    Date.now(),
+  ).pipe(Effect.map(() => undefined));
+}
+
 /** Execute the live ENTER: range, deposit, ledger row, failure rollback. */
 function executeLiveEnterPosition(
   deps: LiveExecDeps,
@@ -2155,112 +2433,71 @@ function executeLiveEnterPosition(
       entryRangeHalfWidth,
       entryDipOffsetBins,
     );
-    const enterResult = yield* deps.adapter
-      .enterPosition(
-        decision.poolAddress,
-        recommended.lowerBinId,
-        recommended.upperBinId,
-        positionSizeUsd,
-        {
-          strategySpec: entryStrategySpec,
-          ...(runnerSingleSidedX === true ? { forceSingleSidedX: true } : undefined),
-        },
-      )
-      .pipe(
-        Effect.tap((r) =>
-          Effect.sync(() =>
-            console.info("Live position entered", {
-              pool: decision.poolAddress,
-              position: r.positionPubKey,
-              tx: r.txSignature,
-            }),
-          ),
-        ),
-        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-        Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
-        Effect.catch((err) => {
-          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-          const msg = (err as { message?: string }).message ?? String(err);
-          console.error("Live ENTER failed", {
-            pool: decision.poolAddress,
-            err: msg,
-          });
-          return Effect.succeed({ result: null, error: msg });
-        }),
-      );
-    if (enterResult.result) {
-      const pos = makeLivePositionRecord({
-        decision,
-        pool,
-        positionPubKey: enterResult.result.positionPubKey,
-        depositedUsd: positionSizeUsd,
-        amountXUsd: enterResult.result.amountXUsd,
-        amountYUsd: enterResult.result.amountYUsd,
-        lowerBinId: recommended.lowerBinId,
-        upperBinId: recommended.upperBinId,
-        entryDipOffsetBins,
-        signalTimestamp,
-        signalSnapshotId,
-      });
-      deps.trackedPositions.set(pos.positionId, pos);
-      yield* persist(`savePosition ${pos.positionId}`, deps.db.savePosition(pos));
-      // G7 yield-regression baseline: the entry-time fee APR, recorded for
-      // non-launch positions (launch has its own lifecycle).
-      if (pos.positionMode !== "launch") {
-        yield* persistMetadataIfSupported(
-          deps.db,
-          `yieldbase:${pos.positionId}`,
-          JSON.stringify({ entryAprPct: deps.entryAprPct ?? 0, at: Date.now() }),
-        );
-      }
-      yield* deps.db
-        .savePositionEvent({
-          id: randomUUID(),
-          poolAddress: decision.poolAddress,
-          positionPubKey: pos.positionPubKey,
-          positionId: pos.positionId,
-          event: "ENTER",
-          valueUsd: positionSizeUsd,
-          feesUsd: null,
-          price: pool.currentPrice,
-          metadata: {
-            lowerBinId: pos.lowerBinId,
-            upperBinId: pos.upperBinId,
-            txSignature: enterResult.result.txSignature,
-            depositMode: enterResult.result.depositMode,
-            strategySpec: entryStrategySpec,
-          },
-          createdAt: Date.now(),
-        })
-        .pipe(Effect.catch(() => Effect.void));
-      if (entryOperation) {
-        yield* deps.db
-          .saveExecutionOperation({
-            ...entryOperation,
-            positionId: pos.positionId,
-            status: "confirmed",
-            txSignature: enterResult.result.txSignature,
-            updatedAt: Date.now(),
-          })
-          .pipe(Effect.catch(() => Effect.void));
-      }
-      return { executed: true, error: undefined };
-    }
-    if (autonomous && entryOperation && preparation) {
-      const now = Date.now();
-      yield* persistRollbackSettlements(
+    const enterResult = yield* enterPositionAttempt(
+      deps.adapter,
+      decision.poolAddress,
+      recommended.lowerBinId,
+      recommended.upperBinId,
+      positionSizeUsd,
+      entryStrategySpec,
+      runnerSingleSidedX,
+    );
+    if (!enterResult.result) {
+      yield* rollbackFailedEnter(
         deps,
         decision,
         autonomous,
         entryOperation,
-        `rollback:${entryOperation.id}`,
-        preparation.receipts,
-        "retryable",
-        enterResult.error ?? "Position entry failed after funding swaps",
-        now,
+        preparation,
+        enterResult.error,
       );
+      return { executed: false, error: enterResult.error };
     }
-    return { executed: false, error: enterResult.error };
+    const pos = makeLivePositionRecord({
+      decision,
+      pool,
+      positionPubKey: enterResult.result.positionPubKey,
+      depositedUsd: positionSizeUsd,
+      amountXUsd: enterResult.result.amountXUsd,
+      amountYUsd: enterResult.result.amountYUsd,
+      lowerBinId: recommended.lowerBinId,
+      upperBinId: recommended.upperBinId,
+      entryDipOffsetBins,
+      signalTimestamp,
+      signalSnapshotId,
+    });
+    deps.trackedPositions.set(pos.positionId, pos);
+    yield* persist(`savePosition ${pos.positionId}`, deps.db.savePosition(pos));
+    // G7 yield-regression baseline: the entry-time fee APR, recorded for
+    // non-launch positions (launch has its own lifecycle).
+    yield* recordYieldBaseline(deps.db, pos, deps.entryAprPct);
+    yield* deps.db
+      .savePositionEvent({
+        id: randomUUID(),
+        poolAddress: decision.poolAddress,
+        positionPubKey: pos.positionPubKey,
+        positionId: pos.positionId,
+        event: "ENTER",
+        valueUsd: positionSizeUsd,
+        feesUsd: null,
+        price: pool.currentPrice,
+        metadata: {
+          lowerBinId: pos.lowerBinId,
+          upperBinId: pos.upperBinId,
+          txSignature: enterResult.result.txSignature,
+          depositMode: enterResult.result.depositMode,
+          strategySpec: entryStrategySpec,
+        },
+        createdAt: Date.now(),
+      })
+      .pipe(Effect.catch(() => Effect.void));
+    yield* confirmEnterOperation(
+      deps.db,
+      entryOperation,
+      pos.positionId,
+      enterResult.result.txSignature,
+    );
+    return { executed: true, error: undefined };
   });
 }
 
@@ -2341,8 +2578,7 @@ function runLiveExitPosition(
       // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
       Effect.catch((err) => {
-        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-        const msg = (err as { message?: string }).message ?? String(err);
+        const msg = err instanceof Error ? err.message : String(err);
         console.error("Live EXIT failed", {
           pool: decision.poolAddress,
           err: msg,
@@ -2427,82 +2663,93 @@ function warnUnpricedExit(
     : Effect.void;
 }
 
-function settleLiveExitAttribution(
+/** Positive exit attributions: withdrawn legs + known-mint rewards above zero. */
+function positiveAttributions(exitResultData: LiveExitResultData, tokenX: string, tokenY: string) {
+  return [
+    { mint: tokenX, amountAtomic: exitResultData.withdrawnXAtomic ?? "0" },
+    { mint: tokenY, amountAtomic: exitResultData.withdrawnYAtomic ?? "0" },
+    ...(exitResultData.sweptRewards ?? [])
+      .filter((reward) => reward.mint !== "unknown")
+      .map((reward) => ({ mint: reward.mint, amountAtomic: String(reward.amountAtomic) })),
+  ].filter(({ amountAtomic }) => {
+    try {
+      return BigInt(amountAtomic) > 0n;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Persist one exit settlement job (true when stored). */
+function persistExitSettlement(
+  deps: LiveExecDeps,
+  autonomous: AutonomousExecutionContext,
+  decision: AgentDecision,
+  pos: PositionRecord,
+  item: { readonly mint: string; readonly amountAtomic: string },
+  now: number,
+): Effect.Effect<boolean, never> {
+  const job: SettlementJobRecord = {
+    id: randomUUID(),
+    walletAddress: autonomous.walletAddress,
+    agentInstanceId: autonomous.agentInstanceId,
+    positionId: pos.positionId,
+    poolAddress: decision.poolAddress,
+    tokenMint: item.mint,
+    amountAtomic: String(item.amountAtomic),
+    destinationAsset: "SOL",
+    status: "pending",
+    attempts: 0,
+    nextRetryAt: now,
+    txSignature: null,
+    confirmedOutputAtomic: null,
+    outputUsd: null,
+    executionCostUsd: null,
+    finalizedAt: null,
+    realizedPnlUsd: null,
+    expiresAt: now + autonomous.settlementMaxPendingMs,
+    error: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  return deps.db.saveSettlementJob(job).pipe(
+    Effect.as(true),
+    Effect.catch(() => Effect.succeed(false)),
+  );
+}
+
+/** Flag a settlement-persistence failure for reconcile (never blocks the exit). */
+function flagSettlementPersistenceFailure(
+  deps: LiveExecDeps,
+  autonomous: AutonomousExecutionContext,
+  decision: AgentDecision,
+  now: number,
+): Effect.Effect<void, never> {
+  deps.reconcileRequestedPools?.add(decision.poolAddress);
+  return deps.db
+    .saveSafetyPause({
+      walletAddress: autonomous.walletAddress,
+      agentInstanceId: autonomous.agentInstanceId,
+      reason: "settlement_persistence_failed",
+      triggeredAt: now,
+      resolvedAt: null,
+    })
+    .pipe(Effect.catch(() => Effect.void));
+}
+
+/**
+ * Exit-sweep CLAIM events: pending-fee sweep and swept-reward rollup
+ * (best-effort rows, delivery failures swallowed).
+ */
+function recordExitSweepEvents(
   deps: LiveExecDeps,
   decision: AgentDecision,
   pool: LiveExecPool,
   pos: PositionRecord,
   exitResultData: LiveExitResultData,
-  tokenX: string,
-  tokenY: string,
-  autonomous: AutonomousExecutionContext,
-): Effect.Effect<{ readonly fatal: string | null }, never> {
+  now: number,
+): Effect.Effect<void, never> {
   return Effect.gen(function* () {
-    const now = Date.now();
-    const attributable = [
-      { mint: tokenX, amountAtomic: exitResultData.withdrawnXAtomic ?? "0" },
-      { mint: tokenY, amountAtomic: exitResultData.withdrawnYAtomic ?? "0" },
-      ...(exitResultData.sweptRewards ?? [])
-        .filter((reward) => reward.mint !== "unknown")
-        .map((reward) => ({ mint: reward.mint, amountAtomic: reward.amountAtomic })),
-    ].filter(({ amountAtomic }) => {
-      try {
-        return BigInt(amountAtomic) > 0n;
-      } catch {
-        return false;
-      }
-    });
-    let settlementPersisted = true;
-    for (const item of attributable) {
-      const job: SettlementJobRecord = {
-        id: randomUUID(),
-        walletAddress: autonomous.walletAddress,
-        agentInstanceId: autonomous.agentInstanceId,
-        positionId: pos.positionId,
-        poolAddress: decision.poolAddress,
-        tokenMint: item.mint,
-        amountAtomic: String(item.amountAtomic),
-        destinationAsset: "SOL",
-        status: "pending",
-        attempts: 0,
-        nextRetryAt: now,
-        txSignature: null,
-        confirmedOutputAtomic: null,
-        outputUsd: null,
-        executionCostUsd: null,
-        finalizedAt: null,
-        realizedPnlUsd: null,
-        expiresAt: now + autonomous.settlementMaxPendingMs,
-        error: null,
-        createdAt: now,
-        updatedAt: now,
-      };
-      yield* deps.db.saveSettlementJob(job).pipe(
-        Effect.catch(() =>
-          Effect.sync(() => {
-            settlementPersisted = false;
-          }),
-        ),
-      );
-      if (!settlementPersisted) {
-        deps.reconcileRequestedPools?.add(decision.poolAddress);
-        yield* deps.db
-          .saveSafetyPause({
-            walletAddress: autonomous.walletAddress,
-            agentInstanceId: autonomous.agentInstanceId,
-            reason: "settlement_persistence_failed",
-            triggeredAt: now,
-            resolvedAt: null,
-          })
-          .pipe(Effect.catch(() => Effect.void));
-        break;
-      }
-    }
-    if (!settlementPersisted) {
-      return {
-        fatal: "Unable to persist all exit settlement jobs; reconciliation required",
-      };
-    }
     const pendingFeeUsd = exitResultData.pendingFeeUsd;
     if (pendingFeeUsd != null) {
       yield* deps.db
@@ -2540,6 +2787,43 @@ function settleLiveExitAttribution(
         })
         .pipe(Effect.catch(() => Effect.void));
     }
+  });
+}
+
+function settleLiveExitAttribution(
+  deps: LiveExecDeps,
+  decision: AgentDecision,
+  pool: LiveExecPool,
+  pos: PositionRecord,
+  exitResultData: LiveExitResultData,
+  tokenX: string,
+  tokenY: string,
+  autonomous: AutonomousExecutionContext,
+): Effect.Effect<{ readonly fatal: string | null }, never> {
+  return Effect.gen(function* () {
+    const now = Date.now();
+    const attributable = positiveAttributions(exitResultData, tokenX, tokenY);
+    let settlementPersisted = true;
+    for (const item of attributable) {
+      settlementPersisted = yield* persistExitSettlement(
+        deps,
+        autonomous,
+        decision,
+        pos,
+        item,
+        now,
+      );
+      if (!settlementPersisted) {
+        yield* flagSettlementPersistenceFailure(deps, autonomous, decision, now);
+        break;
+      }
+    }
+    if (!settlementPersisted) {
+      return {
+        fatal: "Unable to persist all exit settlement jobs; reconciliation required",
+      };
+    }
+    yield* recordExitSweepEvents(deps, decision, pool, pos, exitResultData, now);
     const withdrawnUsd = exitResultData.withdrawnUsd ?? null;
     const pricingUnresolved = withdrawnUsd === null;
     const realizedPnlUsd = exitResultData.isEmptyReap
@@ -2632,7 +2916,144 @@ function computeLedgerExitRealized(
   return { realizedPnlUsd, pricedSweptRewardUsd, withdrawnUsd, pricingUnresolved, isEmptyReap };
 }
 
+/** Swept-reward credit rollup: USD accrual plus an unpriced flag for the warn path. */
+interface SweptRewardCredit {
+  readonly sweptRewardUsd: number;
+  readonly unpricedReward: boolean;
+}
+function creditSweptRewards(
+  pos: PositionRecord,
+  sweptRewards:
+    | ReadonlyArray<{
+        readonly mint: string;
+        readonly amountAtomic: number;
+        readonly amountUsd: number | null;
+      }>
+    | null
+    | undefined,
+): SweptRewardCredit {
+  let sweptRewardUsd = 0;
+  let unpricedReward = false;
+  for (const reward of sweptRewards ?? []) {
+    if (reward.amountUsd != null) {
+      pos.cumulativeRewardsClaimedUsd += reward.amountUsd;
+      sweptRewardUsd += reward.amountUsd;
+    } else {
+      unpricedReward = true;
+    }
+  }
+  return { sweptRewardUsd, unpricedReward };
+}
+
+/**
+ * Exit-sweep fee booking: fee_claims row plus the mirrored CLAIM event,
+ * gated on a positive sweep with a known position pubkey.
+ */
+function recordExitSweepFeeClaim(
+  deps: LiveExecDeps,
+  decision: AgentDecision,
+  pool: LiveExecPool,
+  pos: PositionRecord,
+  pendingFeeUsd: number,
+  pendingFeeX: number,
+  pendingFeeY: number,
+): Effect.Effect<void, never> {
+  return Effect.gen(function* () {
+    if ((pendingFeeX > 0 || pendingFeeY > 0) && pos.positionPubKey != null) {
+      const sweepTxSignature = `exit-sweep:${pos.positionId}`;
+      yield* deps.db
+        .saveFeeClaim({
+          id: randomUUID(),
+          poolAddress: decision.poolAddress,
+          positionPubkey: pos.positionPubKey,
+          feeX: pendingFeeX,
+          feeY: pendingFeeY,
+          platformFeeX: 0,
+          platformFeeY: 0,
+          netFeeX: pendingFeeX,
+          netFeeY: pendingFeeY,
+          operatorFeeX: 0,
+          operatorFeeY: 0,
+          txSignature: sweepTxSignature,
+          feeTransferTxSignature: null,
+          reportedToApi: false,
+          createdAt: Date.now(),
+        })
+        .pipe(Effect.catch(() => Effect.void));
+      // CLAIM event mirrors every other fee booking (a CLAIM row beside
+      // the fee_claims record), tagged kind exit_sweep so the swept-fee
+      // leg is distinguishable from periodic claims in the event log.
+      yield* deps.db
+        .savePositionEvent({
+          id: randomUUID(),
+          poolAddress: decision.poolAddress,
+          positionPubKey: pos.positionPubKey,
+          positionId: pos.positionId,
+          event: "CLAIM",
+          valueUsd: null,
+          feesUsd: pendingFeeUsd,
+          price: pool.currentPrice,
+          metadata: { kind: "exit_sweep", txSignature: sweepTxSignature },
+          createdAt: Date.now(),
+        })
+        .pipe(Effect.catch(() => Effect.void));
+    }
+  });
+}
+
+/** Swept-reward CLAIM rollup event (best-effort row, delivery failure swallowed). */
+function recordSweptRewardEvent(
+  deps: LiveExecDeps,
+  decision: AgentDecision,
+  pool: LiveExecPool,
+  pos: PositionRecord,
+  sweptRewards: ReadonlyArray<{
+    readonly mint: string;
+    readonly amountAtomic: number;
+    readonly amountUsd: number | null;
+  }>,
+  sweptRewardUsd: number,
+): Effect.Effect<void, never> {
+  return Effect.gen(function* () {
+    if (sweptRewards.length === 0) return;
+    yield* deps.db
+      .savePositionEvent({
+        id: randomUUID(),
+        poolAddress: decision.poolAddress,
+        positionPubKey: pos.positionPubKey,
+        positionId: pos.positionId,
+        event: "CLAIM",
+        valueUsd: sweptRewardUsd > 0 ? sweptRewardUsd : null,
+        feesUsd: null,
+        price: pool.currentPrice,
+        metadata: {
+          kind: "exit_sweep_reward",
+          rewards: sweptRewards.map((r) => ({
+            mint: r.mint,
+            amountAtomic: r.amountAtomic,
+            amountUsd: r.amountUsd,
+          })),
+        },
+        createdAt: Date.now(),
+      })
+      .pipe(Effect.catch(() => Effect.void));
+  });
+}
+/** Pending-fee sweep reads (null USD = no sweep, zero atomics = nothing to book). */
+interface ExitSweepFees {
+  readonly feeUsd: number | null;
+  readonly feeX: number;
+  readonly feeY: number;
+}
+function readExitSweepFees(exitResultData: LiveExitResultData | null): ExitSweepFees {
+  return {
+    feeUsd: exitResultData?.pendingFeeUsd ?? null,
+    feeX: Number(exitResultData?.pendingFeeXAtomic ?? "0"),
+    feeY: Number(exitResultData?.pendingFeeYAtomic ?? "0"),
+  };
+}
 /** Credit the exit sweep post-compute (fee-APR/display/event continuity only). */
+
 function creditExitSweep(
   deps: LiveExecDeps,
   decision: AgentDecision,
@@ -2641,92 +3062,80 @@ function creditExitSweep(
   exitResultData: LiveExitResultData | null,
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
-    const pendingFeeUsd = exitResultData?.pendingFeeUsd ?? null;
-    const pendingFeeX = Number(exitResultData?.pendingFeeXAtomic ?? "0");
-    const pendingFeeY = Number(exitResultData?.pendingFeeYAtomic ?? "0");
-    if (pendingFeeUsd != null) {
-      pos.cumulativeFeesClaimedUsd += pendingFeeUsd;
-      if ((pendingFeeX > 0 || pendingFeeY > 0) && pos.positionPubKey != null) {
-        const sweepTxSignature = `exit-sweep:${pos.positionId}`;
-        yield* deps.db
-          .saveFeeClaim({
-            id: randomUUID(),
-            poolAddress: decision.poolAddress,
-            positionPubkey: pos.positionPubKey,
-            feeX: pendingFeeX,
-            feeY: pendingFeeY,
-            platformFeeX: 0,
-            platformFeeY: 0,
-            netFeeX: pendingFeeX,
-            netFeeY: pendingFeeY,
-            operatorFeeX: 0,
-            operatorFeeY: 0,
-            txSignature: sweepTxSignature,
-            feeTransferTxSignature: null,
-            reportedToApi: false,
-            createdAt: Date.now(),
-          })
-          .pipe(Effect.catch(() => Effect.void));
-        // CLAIM event mirrors every other fee booking (a CLAIM row beside
-        // the fee_claims record), tagged kind exit_sweep so the swept-fee
-        // leg is distinguishable from periodic claims in the event log.
-        yield* deps.db
-          .savePositionEvent({
-            id: randomUUID(),
-            poolAddress: decision.poolAddress,
-            positionPubKey: pos.positionPubKey,
-            positionId: pos.positionId,
-            event: "CLAIM",
-            valueUsd: null,
-            feesUsd: pendingFeeUsd,
-            price: pool.currentPrice,
-            metadata: { kind: "exit_sweep", txSignature: sweepTxSignature },
-            createdAt: Date.now(),
-          })
-          .pipe(Effect.catch(() => Effect.void));
-      }
+    const sweep = readExitSweepFees(exitResultData);
+    if (sweep.feeUsd != null) {
+      pos.cumulativeFeesClaimedUsd += sweep.feeUsd;
+      yield* recordExitSweepFeeClaim(
+        deps,
+        decision,
+        pool,
+        pos,
+        sweep.feeUsd,
+        sweep.feeX,
+        sweep.feeY,
+      );
     }
-    const sweptRewards = exitResultData?.sweptRewards ?? [];
-    let sweptRewardUsd = 0;
-    let unpricedReward = false;
-    for (const reward of sweptRewards) {
-      if (reward.amountUsd != null) {
-        pos.cumulativeRewardsClaimedUsd += reward.amountUsd;
-        sweptRewardUsd += reward.amountUsd;
-      } else {
-        unpricedReward = true;
-      }
-    }
-    if (unpricedReward) {
+    const credit = creditSweptRewards(pos, exitResultData?.sweptRewards);
+    if (credit.unpricedReward) {
       logger.warn("Exit sweep included an unpriceable LM reward — recorded with null USD", {
         pool: decision.poolAddress,
         position: pos.positionId,
       });
     }
-    if (sweptRewards.length > 0) {
-      yield* deps.db
-        .savePositionEvent({
-          id: randomUUID(),
-          poolAddress: decision.poolAddress,
-          positionPubKey: pos.positionPubKey,
-          positionId: pos.positionId,
-          event: "CLAIM",
-          valueUsd: sweptRewardUsd > 0 ? sweptRewardUsd : null,
-          feesUsd: null,
-          price: pool.currentPrice,
-          metadata: {
-            kind: "exit_sweep_reward",
-            rewards: sweptRewards.map((r) => ({
-              mint: r.mint,
-              amountAtomic: r.amountAtomic,
-              amountUsd: r.amountUsd,
-            })),
-          },
-          createdAt: Date.now(),
-        })
-        .pipe(Effect.catch(() => Effect.void));
-    }
+    yield* recordSweptRewardEvent(
+      deps,
+      decision,
+      pool,
+      pos,
+      exitResultData?.sweptRewards ?? [],
+      credit.sweptRewardUsd,
+    );
   });
+}
+
+/** Record the entry-signal outcome when both the signal id and PnL are known. */
+function recordSignalOutcomeIfKnown(
+  db: DbApi,
+  entrySignalSnapshotId: number | null | undefined,
+  realizedPnlUsd: number | null,
+): Effect.Effect<void, never> {
+  if (entrySignalSnapshotId == null || realizedPnlUsd == null) return Effect.void;
+  return db
+    .recordSignalOutcome(entrySignalSnapshotId, realizedPnlUsd)
+    .pipe(Effect.catch(() => Effect.void));
+}
+
+/** EXIT event metadata: full forensics when pricing is unresolved, PnL alone otherwise. */
+function buildExitMetadata(
+  realizedPnlUsd: number | null,
+  pricingUnresolved: boolean,
+  currentValueUsd: number,
+  exitResultData: LiveExitResultData | null,
+) {
+  if (!pricingUnresolved) return { realizedPnlUsd };
+  return {
+    realizedPnlUsd,
+    pricing: "unresolved",
+    lastMarkUsd: currentValueUsd,
+    raw: {
+      withdrawnXAtomic: exitResultData?.withdrawnXAtomic ?? null,
+      withdrawnYAtomic: exitResultData?.withdrawnYAtomic ?? null,
+      pendingFeeXAtomic: exitResultData?.pendingFeeXAtomic ?? null,
+      pendingFeeYAtomic: exitResultData?.pendingFeeYAtomic ?? null,
+    },
+  };
+}
+
+/** One-time unpriced-exit warning per pool (warned set lives in deps). */
+function warnUnpricedExitOnce(
+  deps: LiveExecDeps,
+  decision: AgentDecision,
+  pos: PositionRecord,
+  pricingUnresolved: boolean,
+): Effect.Effect<void, never> {
+  if (!pricingUnresolved) return Effect.void;
+  if (deps.unpricedExitWarnedPools?.has(decision.poolAddress) ?? false) return Effect.void;
+  return warnUnpricedExit(deps, decision, pos);
 }
 
 /** Close the ledger for a non-attributed EXIT: persist, tombstone, rug arm,
@@ -2761,26 +3170,15 @@ function finalizeLiveExitLedger(
       tokenX: pool.tokenX,
       tokenY: pool.tokenY,
     });
-    if (pos.entrySignalSnapshotId != null && realizedPnlUsd != null) {
-      yield* deps.db
-        .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
-        .pipe(Effect.catch(() => Effect.void));
-    }
+    yield* recordSignalOutcomeIfKnown(deps.db, pos.entrySignalSnapshotId, realizedPnlUsd);
     const withdrawnUsd = exitResultData?.withdrawnUsd ?? null;
     // 5. EXIT event: withdrawn USD (or null) + post-credit lifetime fees.
-    const exitMetadata = pricingUnresolved
-      ? {
-          realizedPnlUsd,
-          pricing: "unresolved",
-          lastMarkUsd: pos.currentValueUsd,
-          raw: {
-            withdrawnXAtomic: exitResultData?.withdrawnXAtomic ?? null,
-            withdrawnYAtomic: exitResultData?.withdrawnYAtomic ?? null,
-            pendingFeeXAtomic: exitResultData?.pendingFeeXAtomic ?? null,
-            pendingFeeYAtomic: exitResultData?.pendingFeeYAtomic ?? null,
-          },
-        }
-      : { realizedPnlUsd };
+    const exitMetadata = buildExitMetadata(
+      realizedPnlUsd,
+      pricingUnresolved,
+      pos.currentValueUsd,
+      exitResultData,
+    );
     yield* deps.db
       .savePositionEvent({
         id: randomUUID(),
@@ -2795,10 +3193,43 @@ function finalizeLiveExitLedger(
         createdAt: Date.now(),
       })
       .pipe(Effect.catch(() => Effect.void));
-    if (pricingUnresolved && !(deps.unpricedExitWarnedPools?.has(decision.poolAddress) ?? false)) {
-      yield* warnUnpricedExit(deps, decision, pos);
-    }
+    yield* warnUnpricedExitOnce(deps, decision, pos, pricingUnresolved);
     deps.trackedPositions.delete(pos.positionId);
+  });
+}
+
+/** Rotation EXIT gate: true when the arm lapsed and the incumbent is preserved. */
+function isExitRotationBlocked(
+  deps: RotationArmDeps,
+  decision: AgentDecision,
+): Effect.Effect<boolean, never> {
+  if (!decision.reasoning.startsWith("Rotation:")) return Effect.succeed(false);
+  return checkRotationArm(deps, decision).pipe(Effect.map((armValid) => !armValid));
+}
+
+/** Persist rug-token blocks after a catastrophic paper EXIT. */
+function persistPaperExitRugBlocks(
+  db: PaperExecDeps["db"],
+  poolAddress: string,
+  rugMints: ReadonlyArray<string>,
+  rugTokenBlockMs: number | undefined,
+): Effect.Effect<void, never> {
+  if (rugMints.length === 0) return Effect.void;
+  return Effect.gen(function* () {
+    const rugExpiresAt = Date.now() + (rugTokenBlockMs ?? 604_800_000);
+    for (const mint of rugMints) {
+      yield* db.setMetadata(`token_rug_block:${mint}`, String(rugExpiresAt)).pipe(
+        Effect.catch((err) =>
+          Effect.sync(() =>
+            logger.warn("Failed to record rug-token block", {
+              pool: poolAddress,
+              mint,
+              error: String(err),
+            }),
+          ),
+        ),
+      );
+    }
   });
 }
 
@@ -2817,8 +3248,955 @@ function harvestGateOverrides(deps: LiveExecDeps) {
   };
 }
 
+/** Daily drawdown pct vs the day baseline (0 when baseline unknown). */
+function computeDailyDrawdownPct(baselineEquityUsd: number, equityUsd: number): number {
+  return baselineEquityUsd > 0 && equityUsd < baselineEquityUsd
+    ? ((baselineEquityUsd - equityUsd) / baselineEquityUsd) * 100
+    : 0;
+}
+
+/** Redeploy capture site: capped pool still passing candidate gates. */
+function isRedeployCaptureSite(
+  idleRedeployEnabled: boolean | undefined,
+  poolExitFired: boolean,
+  poolPositionCount: number,
+  maxPositionsPerPool: number,
+  unresolved: boolean,
+  managed: boolean,
+): boolean {
+  return (
+    idleRedeployEnabled === true &&
+    !poolExitFired &&
+    poolPositionCount >= maxPositionsPerPool &&
+    !unresolved &&
+    managed
+  );
+}
+
+/** Launch-lane membership for the redeploy capture site. */
+function isRedeployLaunchPool(
+  launchScanEnabled: boolean | undefined,
+  launchExecutionEnabled: boolean | undefined,
+  inLaunchScan: boolean,
+): boolean {
+  return launchScanEnabled === true && launchExecutionEnabled === true && inLaunchScan;
+}
+
+/** Idle-redeploy pass gate (opt-in, candidates, no live-entry block). */
+function shouldRunIdleRedeploy(
+  idleRedeployEnabled: boolean | undefined,
+  candidateCount: number,
+  entriesBlocked: boolean,
+): boolean {
+  return idleRedeployEnabled === true && candidateCount > 0 && !entriesBlocked;
+}
+
+/** Consecutive core-data-failure counter (full-cycle failure increments). */
+function updateCoreDataFailureCounter(
+  consecutive: number,
+  poolsScanned: number,
+  failuresThisCycle: number,
+): number {
+  return poolsScanned > 0 && failuresThisCycle >= poolsScanned ? consecutive + 1 : 0;
+}
+
+/** Safety-pause armed check (autonomous with an unresolved pause). */
+function isSafetyPauseArmed(
+  autonomousExecution: AutonomousExecutionContext | null,
+  activeSafetyPause: { readonly resolvedAt: number | null } | null,
+): autonomousExecution is AutonomousExecutionContext {
+  return autonomousExecution !== null && activeSafetyPause?.resolvedAt !== null;
+}
+
+/** Aggregate unrealized PnL across tracked positions (PnL formula parity). */
+function computeCycleUnrealizedPnl(trackedPositions: ReadonlyMap<string, PositionRecord>): number {
+  let pnl = 0;
+  for (const p of trackedPositions.values()) {
+    pnl +=
+      p.currentValueUsd +
+      p.cumulativeFeesClaimedUsd +
+      p.cumulativeRewardsClaimedUsd -
+      p.depositedUsd;
+  }
+  return pnl;
+}
+
+/** Kill-switch re-arm skip: same observation or longer cooldown already set. */
+function shouldSkipKillSwitchRearm(
+  existing: { readonly reason: string; readonly cooldownUntil: number } | null,
+  observationMarker: string,
+  desiredUntil: number,
+): boolean {
+  if (!existing) return false;
+  if (existing.reason.startsWith(observationMarker)) return true;
+  return existing.cooldownUntil >= desiredUntil;
+}
+
+/** Kill-switch cooldown row for a fresh trip. */
+function buildKillSwitchCooldown(
+  tripPoolAddress: string,
+  tripPositionIdsLength: number,
+  tripRealizedPnlUsd: number,
+  existing: { readonly cooldownUntil: number; readonly consecutiveOorExits: number } | null,
+  desiredUntil: number,
+  thresholdUsd: number | undefined,
+  observationMarker: string,
+) {
+  return {
+    poolAddress: tripPoolAddress,
+    cooldownUntil: Math.max(existing?.cooldownUntil ?? 0, desiredUntil),
+    reason:
+      `${observationMarker} trailing ${tripPositionIdsLength} known closes ` +
+      `net $${tripRealizedPnlUsd.toFixed(2)} below ` +
+      `$${(thresholdUsd ?? -15).toFixed(2)}`,
+    consecutiveOorExits: existing?.consecutiveOorExits ?? 0,
+  };
+}
+
+/** Market-scan gate config with operator defaults. */
+function resolveMarketScanConfig(config: AppConfig) {
+  return {
+    minTvlUsd: config.marketScanMinTvlUsd ?? 250_000,
+    minFeeApr: config.marketScanMinFeeApr ?? 25,
+    minFees24hUsd: config.marketScanMinFees24hUsd,
+    minVolume24hUsd: config.marketScanMinVolume24hUsd,
+    minHolders: config.marketScanMinHolders ?? 1000,
+    minPoolAgeHours: config.marketScanMinPoolAgeHours ?? 24,
+    minBinStep: config.marketScanMinBinStep ?? 2,
+    maxBinStep: config.marketScanMaxBinStep ?? 200,
+    stablecoinMints: config.stablecoinMints ?? new Set<string>(),
+  };
+}
+
+/** Active market-scan set size (top-K bounded by the max pool cap). */
+function resolveMarketActiveCount(config: AppConfig): number {
+  return Math.min(config.marketScanTopK ?? 30, config.marketScanMaxPools ?? 60);
+}
+
+/** Redeploy portfolio value (paper seed vs wallet + positions). */
+function resolveRedeployPortfolioValueUsd(
+  paperTrading: boolean,
+  hasWallet: boolean,
+  paperPortfolioUsd: number,
+  lastWalletBalanceUsd: number,
+  openPositions: ReadonlyArray<Position>,
+): number {
+  if (paperTrading || !hasWallet) return paperPortfolioUsd;
+  return lastWalletBalanceUsd + openPositions.reduce((sum, pos) => sum + pos.currentValueUsd, 0);
+}
+
+/** Queue/sync source for an adopted redeploy proposal. */
+function resolveRedeployProposalSource(
+  agentProposal: AgentProposal | null,
+): "queue" | "sync" | undefined {
+  return agentProposal ? "queue" : undefined;
+}
+
+/** Sync-proposal eligibility (transport + breaker + backoff + latency). */
+function isSyncProposalEligible(
+  hasTransport: boolean,
+  breakerCanTry: boolean,
+  backoffActive: boolean,
+  latencySkipped: boolean,
+): boolean {
+  return hasTransport && breakerCanTry && !backoffActive && !latencySkipped;
+}
+
+/** Routable mints from probe results (positional parallel arrays). */
+function collectRoutableMints(
+  nonSolMints: ReadonlyArray<string>,
+  routeAvailableResults: ReadonlyArray<boolean>,
+): Set<string> {
+  const routable = new Set<string>();
+  for (let i = 0; i < nonSolMints.length; i++) {
+    const mint = nonSolMints[i];
+    if (mint && routeAvailableResults[i]) routable.add(mint);
+  }
+  return routable;
+}
+
+/** Pools needing price-scale backfill (position pools + snapshot pools). */
+function collectBackfillPools(
+  positions: ReadonlyArray<{ readonly poolAddress: string; readonly entryPriceUsd: number | null }>,
+  snapshotPools: ReadonlyArray<string>,
+): Set<string> {
+  const pools = new Set<string>();
+  for (const pos of positions) {
+    if (pos.entryPriceUsd != null) pools.add(pos.poolAddress);
+  }
+  for (const pool of snapshotPools) pools.add(pool);
+  return pools;
+}
+
+/** Cached-or-fetched price-scale factor for one pool (fails on invalid). */
+function resolveBackfillFactor(
+  db: DbApi,
+  adapter: AdapterApi,
+  pool: string,
+): Effect.Effect<number, Error> {
+  return Effect.gen(function* () {
+    const key = priceScaleFactorKey(pool);
+    const cached = yield* db.getMetadata(key).pipe(Effect.catch(() => Effect.succeed(null)));
+    if (cached != null) {
+      const cachedFactor = Number(cached);
+      if (Number.isFinite(cachedFactor) && cachedFactor > 0) return cachedFactor;
+    }
+    const factor = adapter.getPriceScale ? yield* adapter.getPriceScale(pool) : 1;
+    if (!Number.isFinite(factor) || factor <= 0) {
+      return yield* Effect.fail(
+        new Error(`Price-scale backfill: invalid factor ${factor} for ${pool}`),
+      );
+    }
+    yield* db.setMetadata(key, String(factor)).pipe(Effect.catch(() => Effect.void));
+    return factor;
+  });
+}
+
+/** Autonomous execution context (null outside canary/live with a wallet). */
+function resolveAutonomousExecution(
+  config: AppConfig,
+  executionWalletAddress: string | null,
+): AutonomousExecutionContext | null {
+  if (config.autonomousTokenMode === "off" || executionWalletAddress === null) return null;
+  return {
+    mode: config.autonomousTokenMode,
+    walletAddress: executionWalletAddress,
+    agentInstanceId: config.agentInstanceId,
+    settlementMaxPendingMs: config.settlementMaxPendingMs,
+    settlementDustUsd: config.settlementDustUsd,
+  };
+}
+
+/** SOL-funded entry mode (autonomous canary/live spend native SOL for legs). */
+function isSolFundedEntryMode(autonomousTokenMode: AppConfig["autonomousTokenMode"]): boolean {
+  return autonomousTokenMode === "canary" || autonomousTokenMode === "live";
+}
+
+/** Candidate wallet identity ("paper" when walletless). */
+function resolveCandidateWallet(executionWalletAddress: string | null): string {
+  return executionWalletAddress ?? "paper";
+}
+
+/** Exempted-leg labels for the trusted-stablecoin freeze exemption. */
+function describeExemptedFreezeLegs(
+  pool: PoolState,
+  freezeEnabledX: boolean,
+  trustedX: boolean,
+  freezeEnabledY: boolean,
+  trustedY: boolean,
+): string {
+  return [
+    freezeEnabledX && trustedX ? `${pool.tokenXSymbol} (${pool.tokenX})` : null,
+    freezeEnabledY && trustedY ? `${pool.tokenYSymbol} (${pool.tokenY})` : null,
+  ]
+    .filter((s) => s !== null)
+    .join(" and ");
+}
+
+/** Freeze authority enabled via Data API flag or on-chain authority. */
+function isFreezeAuthorityEnabled(
+  freezeDisabledFlag: boolean | null | undefined,
+  onChainFreezeAuthority: string | null | undefined,
+): boolean {
+  return freezeDisabledFlag === false || onChainFreezeAuthority != null;
+}
+
+/** Stablecoin-allowlist trust for a token leg. */
+function isTrustedMint(stablecoinMints: ReadonlySet<string> | undefined, mint: string): boolean {
+  return stablecoinMints?.has(mint) === true;
+}
+
+/** Freeze-enabled leg outside the trust allowlist. */
+function hasUntrustedFreeze(freezeEnabled: boolean, trusted: boolean): boolean {
+  return freezeEnabled && !trusted;
+}
+
+/** Mint authority for blacklist screening (undefined when unknown). */
+function resolveMintAuthority(
+  auth: { readonly mintAuthority?: string | null } | null,
+): string | undefined {
+  return auth?.mintAuthority ?? undefined;
+}
+
+/** Measured-APR self-outlier flag for runner classification. */
+function resolveRunnerAprOutlier(
+  outlierEnabled: boolean | undefined,
+  priorAprs: ReadonlyArray<number>,
+  currentApr: number,
+  outlierPercentile: number | undefined,
+): boolean {
+  return outlierEnabled === true && isAprSelfOutlier({ priorAprs, currentApr, outlierPercentile });
+}
+
+/** Hot-window size band with operator defaults. */
+function resolveHotWindowSizeBand(
+  entrySizeUsd: number | undefined,
+  maxPoolTvlUsd: number | undefined,
+  minPoolTvlUsd: number | undefined,
+  printingRatio1h: number | undefined,
+) {
+  return {
+    entrySizeUsd: entrySizeUsd ?? 30,
+    maxPoolTvlUsd: maxPoolTvlUsd ?? 25_000,
+    minPoolTvlUsd: minPoolTvlUsd ?? 500,
+    printingRatio1h: printingRatio1h ?? 1,
+  };
+}
+
+/** Flash volume-trigger config (undefined when the trigger is off). */
+function buildHotWindowVolumeSpike(
+  flashVolumeTriggerEnabled: boolean | undefined,
+  flashBaselineWindow: number | undefined,
+  flashMinSpikeRatio: number | undefined,
+  flashMinVolumeUsd: number | undefined,
+):
+  | {
+      readonly baselineWindow: number;
+      readonly spikeRatio: number;
+      readonly minPoints: number;
+      readonly minVolumeUsd: number;
+    }
+  | undefined {
+  if (flashVolumeTriggerEnabled !== true) return undefined;
+  return {
+    baselineWindow: flashBaselineWindow ?? 8,
+    spikeRatio: flashMinSpikeRatio ?? 2.5,
+    minPoints: 5,
+    minVolumeUsd: flashMinVolumeUsd ?? 10_000,
+  };
+}
+
+/** Burst entry: measured spike above the printing floor. */
+function isHotBurstEntry(
+  volumeSpikeVerdict: VolumeSpikeResult | null,
+  feeTvlRatio1h: number | null | undefined,
+  printingRatio1h: number,
+): boolean {
+  return (
+    volumeSpikeVerdict !== null &&
+    volumeSpikeVerdict.isSpike &&
+    (feeTvlRatio1h ?? 0) < printingRatio1h
+  );
+}
+
+/** Hot-window ENTER reasoning (burst vs printing trigger). */
+function buildHotEnterReasoning(
+  burstEntry: boolean,
+  volumeSpikeRatio: number | null,
+  feeTvlRatio1h: number | null | undefined,
+  tvlUsd: number,
+  sizeUsd: number,
+  tripsToday: number,
+  maxTripsPerDay: number,
+): string {
+  const trigger = burstEntry
+    ? `:burst] volume burst x${(volumeSpikeRatio ?? 0).toFixed(1)} vs baseline`
+    : `] pool printing (1h ratio ${(feeTvlRatio1h ?? 0).toFixed(2)}%/h)`;
+  return `[hot-window${trigger}, depth $${tvlUsd.toFixed(0)}, size $${sizeUsd.toFixed(0)}, trips ${tripsToday}/${maxTripsPerDay}`;
+}
+
+/** SOL cost of a runner scale-in top-up (0 outside SOL-funded mode). */
+function resolveScaleInSolCost(
+  solFundedEntryMode: boolean,
+  topUpUsd: number,
+  solPriceUsd: number,
+  poolHasSolLeg: boolean,
+): bigint {
+  return solFundedEntryMode
+    ? estimateEntrySolLamports({
+        positionSizeUsd: topUpUsd,
+        solPriceUsd,
+        poolHasSolLeg,
+        solFunded: true,
+      })
+    : 0n;
+}
+
+/** Scale-in trigger inputs with operator defaults. */
+function resolveScaleInTrigger(
+  anchorPrice: number | null | undefined,
+  currentPrice: number,
+  stepPct: number | undefined,
+  steps: number | null | undefined,
+  maxSteps: number | undefined,
+) {
+  return {
+    anchorPrice: anchorPrice ?? 0,
+    currentPrice,
+    stepPct: stepPct ?? 0.05,
+    steps: steps ?? 0,
+    maxSteps: maxSteps ?? 3,
+  };
+}
+
+/** Measured 1h launch fees (null unless datapi-measured over positive TVL). */
+function measureCurrentLaunchFees1h(
+  statsSource: PoolState["statsSource"],
+  feeTvlRatio1h: number | null,
+  tvlUsd: number,
+): number | null {
+  if (
+    statsSource !== "datapi" ||
+    feeTvlRatio1h === null ||
+    !Number.isFinite(feeTvlRatio1h) ||
+    tvlUsd <= 0
+  ) {
+    return null;
+  }
+  return (feeTvlRatio1h / 100) * tvlUsd;
+}
+
+/** Track the per-position peak 1h fees; returns the stored peak. */
+function trackLaunchFeePeak(
+  peaks: Map<string, number>,
+  positionId: string,
+  currentFees1hUsd: number | null,
+): number | null {
+  const prevPeak = peaks.get(positionId);
+  if (currentFees1hUsd !== null && (prevPeak === undefined || currentFees1hUsd > prevPeak)) {
+    peaks.set(positionId, currentFees1hUsd);
+  }
+  return peaks.get(positionId) ?? null;
+}
+
+/** Time-box leg of a launch-lifecycle exit reason. */
+function describeLaunchTimeboxExit(
+  positionTimestamp: number,
+  timeboxHours: number | undefined,
+): string {
+  return `age ${((Date.now() - positionTimestamp) / 3.6e6).toFixed(1)}h >= ${timeboxHours ?? 6}h`;
+}
+
+/** Volume-decay leg of a launch-lifecycle exit reason. */
+function describeLaunchVolumeDecayExit(
+  currentFees1hUsd: number | null,
+  volumeDecayExitPct: number | undefined,
+  peakFees1hUsd: number | null,
+): string {
+  return `1h fees $${(currentFees1hUsd ?? 0).toFixed(2)} < ${(volumeDecayExitPct ?? 0.1) * 100}% of peak $${(peakFees1hUsd ?? 0).toFixed(2)}`;
+}
+
+/** Drawdown pct for a launch position (shakeout-tolerant for runners). */
+function resolveLaunchDrawdownPct(
+  launchRunner: boolean | null | undefined,
+  runnerDrawdownPct: number | undefined,
+  exitDrawdownPct: number | undefined,
+): number {
+  return launchRunner === true ? (runnerDrawdownPct ?? 0.25) : (exitDrawdownPct ?? 0.25);
+}
+
+/** Drawdown leg of a launch-lifecycle exit reason. */
+function describeLaunchDrawdownExit(
+  currentValueUsd: number,
+  drawdownPct: number,
+  peakValueUsd: number | null,
+): string {
+  return `value $${currentValueUsd.toFixed(2)} <= ${(1 - drawdownPct) * 100}% of peak $${(peakValueUsd ?? 0).toFixed(2)}`;
+}
+
+/** IL-dominance trigger: IL exceeds fees by factor and floor. */
+function isIlDominant(
+  ilUsd: number,
+  feesClaimedUsd: number,
+  exitFactor: number | undefined,
+  minUsd: number | undefined,
+): boolean {
+  return ilUsd > 0 && ilUsd > feesClaimedUsd * (exitFactor ?? 2) && ilUsd > (minUsd ?? 5);
+}
+
+/** Runner net-bleed candidacy (measured fees only; unmeasured size fails closed). */
+function isNetBleedCandidate(
+  launchRunner: boolean | null | undefined,
+  positionMode: string | null | undefined,
+  runnerEnabled: boolean | undefined,
+  feeIlRatioKnown: boolean,
+  currentValueUsd: number,
+  depositedUsd: number,
+): boolean {
+  return (
+    launchRunner === true &&
+    positionMode === "launch" &&
+    runnerEnabled === true &&
+    feeIlRatioKnown &&
+    (currentValueUsd ?? depositedUsd ?? 0) > 0
+  );
+}
+
+/** Runner size for net-yield math (0 when unmeasurable). */
+function resolveRunnerSizeUsd(currentValueUsd: number, depositedUsd: number): number {
+  return currentValueUsd ?? depositedUsd ?? 0;
+}
+
+/** Runner half-width (finite positive override, else the pool width). */
+function resolveRunnerHalfWidth(positionHalfWidth: number, rangeHalfWidth: number): number {
+  return Number.isFinite(positionHalfWidth) && positionHalfWidth > 0
+    ? positionHalfWidth
+    : rangeHalfWidth;
+}
+
+/** Peak + drawdown from the trailing-stop mark. */
+function computeTrailingDrawdown(
+  currentValueUsd: number,
+  highestValueUsd: number | null,
+  depositedUsd: number,
+) {
+  const highest = highestValueUsd ?? depositedUsd;
+  return { highest, drawdown: highest > 0 ? (highest - currentValueUsd) / highest : 0 };
+}
+
+/** Unrealized PnL fraction (0 when the deposit is unknown). */
+function computeUnrealizedPnlPct(depositedUsd: number, estimatedValue: number): number {
+  return depositedUsd > 0 ? (estimatedValue - depositedUsd) / depositedUsd : 0;
+}
+
+/** EXIT cooldown trigger class (null = churn-throttle path). */
+function classifyExitCooldownTrigger(
+  exitReasoning: string,
+  position: PositionRecord | undefined,
+  oorGracePeriodCycles: number,
+): "oor" | "low-yield" | null {
+  if (
+    exitReasoning.includes("volatility") ||
+    (position !== undefined &&
+      position.oorCycleCount >= oorGracePeriodCycles &&
+      position.oorCycleCount > 0)
+  ) {
+    return "oor";
+  }
+  if (exitReasoning.includes("Fee/IL ratio") || exitReasoning.includes("Volume authenticity")) {
+    return "low-yield";
+  }
+  return null;
+}
+
+/** Measured fee density per day (null unless datapi-measured). */
+function resolveFeeDensityPerDay(
+  statsSource: PoolState["statsSource"],
+  tvlUsd: number,
+  fees24hUsd: number,
+): number | null {
+  return statsSource === "datapi" && tvlUsd > 0 && Number.isFinite(fees24hUsd) && fees24hUsd >= 0
+    ? fees24hUsd / tvlUsd
+    : null;
+}
+
+/** W15 fast-EXIT reasoning from present signals. */
+function buildW15ExitReasoning(
+  depeg: DepegLiquiditySignals["depeg"],
+  liquidityDrain: DepegLiquiditySignals["liquidityDrain"],
+): string {
+  return `W15 fast EXIT: ${[
+    depeg ? "stablecoin depeg" : null,
+    liquidityDrain ? "liquidity drain" : null,
+  ]
+    .filter(Boolean)
+    .join(" + ")}`;
+}
+
+/** Dust-cleanup EXIT gate: REAL mark below the dust threshold. */
+function isDustExit(dustExitUsd: number | undefined, currentValueUsd: number): boolean {
+  return (dustExitUsd ?? 0) > 0 && currentValueUsd < (dustExitUsd ?? 0);
+}
+
+/** Dust-cleanup EXIT reasoning. */
+function buildDustExitReasoning(currentValueUsd: number, dustExitUsd: number | undefined): string {
+  return `[dust-cleanup] Position value $${currentValueUsd.toFixed(2)} below $${(dustExitUsd ?? 0).toFixed(2)} dust threshold — reclaiming slot`;
+}
+
+/** Single-rung TP ladder for a normal ENTER (null when disabled). */
+function resolveNormalEnterTpLadder(
+  currentPrice: number,
+  takeProfitEnabled: boolean | undefined,
+  takeProfitPct: number | undefined,
+  trailingStopPct: number | undefined,
+): ReturnType<typeof buildTpLadder> | null {
+  if (takeProfitEnabled !== true) return null;
+  return buildTpLadder(currentPrice, {
+    rungs: [takeProfitPct ?? 0.15],
+    fractions: [1],
+    invalidationStopPct: trailingStopPct ?? 0.1,
+  });
+}
+
+/** Momentum-boosted normal ENTER confidence with operator defaults. */
+function resolveNormalEntryConfidence(
+  feeIlRatio: number,
+  netDriftBins: number,
+  referenceBins: number | undefined,
+  confBoost: number | undefined,
+): number {
+  return normalEntryConfidence(feeIlRatio, netDriftBins, {
+    referenceBins: referenceBins ?? DEFAULT_MOMENTUM_REFERENCE_BINS,
+    confBoost: confBoost ?? DEFAULT_MOMENTUM_CONF_BOOST,
+  });
+}
+
+/** TP-ladder spread for an ENTER decision (undefined when no ladder). */
+function resolveTpLadderSpread(
+  tpLadder: ReturnType<typeof buildTpLadder> | null,
+):
+  | { readonly tpLadderJson: string | undefined; readonly invalidationStopPrice: number }
+  | undefined {
+  if (tpLadder === null) return undefined;
+  return {
+    tpLadderJson: serializeTpLadder(tpLadder.ladder) ?? undefined,
+    invalidationStopPrice: tpLadder.invalidationPrice,
+  };
+}
+
+/** Net-daily-yield after churn/IL/swap costs for a candidate position size. */
+function computePositionNetDailyPct(
+  fees24hUsd: number,
+  poolTvlUsd: number,
+  positionSizeUsd: number,
+  halfWidthBins: number,
+  binStep: number,
+  volatilityStddev: number,
+  swapCostPct: number | undefined,
+  harvestCostUsd: number | undefined,
+  scanIntervalMs: number | undefined,
+): number {
+  return runnerNetDailyPctAfterCosts({
+    fees24hUsd,
+    poolTvlUsd,
+    positionSizeUsd,
+    rangeHalfWidthBins: halfWidthBins,
+    binStep,
+    volatilityStddev,
+    swapCostPct: swapCostPct ?? 0.005,
+    harvestCostUsd: harvestCostUsd ?? 0.01,
+    timeInRangePct: 1,
+    maxExitsPerDay: 86_400_000 / (scanIntervalMs ?? 600_000),
+  });
+}
+
+/** Hard-risk reason for one token leg (null = clean). */
+function resolveLegRiskReason(
+  risks: ReadonlyMap<string, TokenRiskSignal>,
+  mint: string,
+  symbol: string,
+): string | null {
+  const signal = risks.get(mint);
+  if (signal === undefined) return null;
+  if (signal.isSus) {
+    return `${symbol} (${mint}): Jupiter audit flags suspicious (isSus)`;
+  }
+  if (signal.goPlusHardRisk != null) {
+    return `${symbol} (${mint}): GoPlus ${signal.goPlusHardRisk}`;
+  }
+  if (signal.organicScoreLabel === "low") {
+    return `${symbol} (${mint}): Jupiter organic score is low`;
+  }
+  return null;
+}
+
+/** Rotation comparison costs with operator defaults. */
+function resolveRotationCosts(
+  launchPositionMaxSizeUsd: number | undefined,
+  harvestCostUsd: number | undefined,
+  conversionCostPct: number | undefined,
+  minYieldExitAgeMs: number | undefined,
+) {
+  return {
+    runnerSizeUsd: launchPositionMaxSizeUsd ?? 100,
+    harvestCostUsd: harvestCostUsd ?? 0.01,
+    conversionCostPct: conversionCostPct ?? 0.05,
+    minAgeMs: minYieldExitAgeMs ?? 14_400_000,
+  };
+}
+
+/** Incumbent position size for rotation comparison (100 default when unknown). */
+function resolveIncumbentSizeUsd(incumbentPos: PositionRecord | undefined): number {
+  return incumbentPos?.currentValueUsd ?? incumbentPos?.depositedUsd ?? 100;
+}
+
+/** Rotation superiority multiple (doubled on euphoria-damper spikes). */
+function resolveRotationAprMult(
+  runnerAprOutlier: boolean,
+  rotationAprMult: number | undefined,
+): number | undefined {
+  return runnerAprOutlier ? (rotationAprMult ?? DEFAULT_ROTATION_APR_MULT) * 2 : rotationAprMult;
+}
+
+/** Measured-only ENTER candidate conditions (modeled fee/IL never votes). */
+function passesMeasuredCandidateGates(
+  feeIlRatioKnown: boolean,
+  feeIlRatio: number,
+  minFeeIlRatio: number,
+  volumeAuthKnown: boolean,
+  volumeAuth: number,
+  binUtilKnown: boolean,
+  binUtilization: number,
+  tvlUsd: number,
+  minPoolTvlUsd: number,
+): boolean {
+  const feeIlGate = feeIlRatioKnown ? feeIlRatio > minFeeIlRatio * 1.5 : true;
+  return (
+    feeIlGate &&
+    volumeAuthKnown &&
+    volumeAuth > 0.8 &&
+    binUtilKnown &&
+    binUtilization > 0.4 &&
+    tvlUsd > minPoolTvlUsd * 2
+  );
+}
+
+/** Momentum-score tuning with operator defaults. */
+function resolveMomentumScoreArgs(
+  referenceBins: number | undefined,
+  scoreWeight: number | undefined,
+) {
+  return {
+    referenceBins: referenceBins ?? DEFAULT_MOMENTUM_REFERENCE_BINS,
+    scoreWeight: scoreWeight ?? DEFAULT_MOMENTUM_SCORE_WEIGHT,
+  };
+}
+
+/** Fallen-angel TP ladder with operator defaults. */
+function resolveFallenAngelLadder(
+  currentPrice: number,
+  tpRungs: ReadonlyArray<number> | undefined,
+  tpFractions: ReadonlyArray<number> | undefined,
+  invalidationStopPct: number | undefined,
+): ReturnType<typeof buildTpLadder> {
+  return buildTpLadder(currentPrice, {
+    rungs: tpRungs ?? [0.15, 0.3, 0.5],
+    fractions: tpFractions ?? [0.4, 0.3, 0.3],
+    invalidationStopPct: invalidationStopPct ?? 0.25,
+  });
+}
+
+/** Position share of pool TVL, capped at 100% (0 when unmeasurable). */
+function resolvePositionSharePct(tvlUsd: number, currentValueUsd: number): number {
+  return tvlUsd > 0 && currentValueUsd > 0 ? Math.min(currentValueUsd / tvlUsd, 1) : 0;
+}
+
+/** Tracked position targeted by a REBALANCE capital-gate re-check. */
+function resolveRebalanceGatePosition(
+  adjustedPositionId: string | undefined,
+  decisionPositionId: string | undefined,
+  trackedPositions: ReadonlyMap<string, PositionRecord>,
+): PositionRecord | undefined {
+  const gatePosId = adjustedPositionId ?? decisionPositionId;
+  return gatePosId !== undefined ? trackedPositions.get(gatePosId) : undefined;
+}
+
+/** Preserve the launch lane marker across an advisor echo/resize. */
+function preserveLaunchMarker(
+  deterministic: AgentDecision,
+  adjusted: AgentDecision,
+): AgentDecision {
+  if (deterministic.positionMode !== undefined && deterministic.action === "ENTER") {
+    return { ...deterministic, positionMode: deterministic.positionMode };
+  }
+  return adjusted;
+}
+
+/** Preserve deterministic EXIT reasoning across an advisor echo. */
+function preserveExitReasoning(
+  originalAction: ActionType,
+  decisionAction: ActionType,
+  deterministicReasoning: string,
+  decision: AgentDecision,
+): AgentDecision {
+  if (originalAction === "EXIT" && decisionAction === "EXIT" && deterministicReasoning.length > 0) {
+    return { ...decision, reasoning: deterministicReasoning };
+  }
+  return decision;
+}
+
+/** Fee/IL leg of the proposal hard floor (null = pass). */
+function feeIlHardFloorReason(
+  ilProtectionEnabled: boolean | undefined,
+  feeIlRatioKnown: boolean,
+  feeIlRatio: number,
+  minFeeIlRatio: number,
+): string | null {
+  if (ilProtectionEnabled === true && feeIlRatioKnown && feeIlRatio < minFeeIlRatio) {
+    return `[fee-il-gate] Fee/IL ${feeIlRatio.toFixed(2)} below ${minFeeIlRatio}`;
+  }
+  return null;
+}
+
+/** Drift leg of the proposal hard floor (null = pass). */
+function driftHardFloorReason(
+  inLaunchScan: boolean,
+  runner: boolean,
+  netDriftBins: number,
+  maxNegativeDriftBins: number | undefined,
+): string | null {
+  if (
+    !inLaunchScan &&
+    !runner &&
+    driftGateRejected(netDriftBins, maxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS)
+  ) {
+    return `[drift-gate] net drift ${netDriftBins} < ${maxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS}`;
+  }
+  return null;
+}
+
+/** Launch-drift leg of the proposal hard floor (null = pass). */
+function launchDriftHardFloorReason(
+  launchScanEnabled: boolean | undefined,
+  netDriftBins: number,
+  minDriftBins: number | undefined,
+): string | null {
+  if (
+    launchScanEnabled === true &&
+    netDriftBins < (minDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS)
+  ) {
+    return `[launch-drift-gate] net drift ${netDriftBins} < ${minDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`;
+  }
+  return null;
+}
+
+/** Queued proposal id carried by an applied queue proposal (undefined otherwise). */
+function resolveRedeployAppliedProposalId(
+  proposalSource: "queue" | "sync" | undefined,
+  proposalId: string | undefined,
+): string | undefined {
+  return proposalSource === "queue" && proposalId ? proposalId : undefined;
+}
+
+/** Proposal with deterministic originals backfilled for validation. */
+function buildProposalToEvaluate(
+  agentProposal: AgentProposal,
+  decisionAction: ActionType,
+  decisionConfidence: number,
+): AgentProposal {
+  return {
+    ...agentProposal,
+    ...(agentProposal.originalAction === undefined
+      ? { originalAction: decisionAction }
+      : undefined),
+    ...(agentProposal.originalConfidence === undefined
+      ? { originalConfidence: decisionConfidence }
+      : undefined),
+  };
+}
+
+/** Runner-lane entry shape: dip-anchored below-market ladder for LAUNCH entries. */
+function isRunnerLaunchEntry(
+  launchRunnerModeEnabled: boolean | undefined,
+  positionMode: AgentDecision["positionMode"],
+  inLaunchScan: boolean,
+  runner: boolean,
+): boolean {
+  return launchRunnerModeEnabled === true && positionMode === "launch" && (inLaunchScan || runner);
+}
+
+/** Eligible autonomous candidate id for a pool (entered or eligible). */
+function findEligibleAutonomousCandidateId(
+  candidates: ReadonlyMap<string, TokenCandidateRecord>,
+  poolAddress: string,
+): string | undefined {
+  return [...candidates.values()].find(
+    (candidate) =>
+      candidate.poolAddress === poolAddress &&
+      (candidate.state === "eligible" || candidate.state === "entered"),
+  )?.id;
+}
+
+/** Dip offset below the active bin for a runner-lane entry. */
+function resolveRunnerDipOffset(binStep: number, dipPct: number | undefined): number {
+  return dipOffsetBinsForPct(binStep, dipPct ?? 0.12);
+}
+
+/** Runner half-width within the operator risk cap and below the active bin. */
+function clampRunnerHalfWidth(
+  dipOffsetBins: number,
+  halfWidthBins: number | undefined,
+  maxRebalanceRangeBins: number | undefined,
+): number {
+  return Math.max(
+    1,
+    Math.min(
+      halfWidthBins ?? 5,
+      Math.abs(dipOffsetBins) - 1,
+      Math.floor((maxRebalanceRangeBins ?? 100) / 2),
+    ),
+  );
+}
+
+/** SOL-funded ENTER failing on a funding condition: capacity, not an error. */
+function isCapacityExecutionFailure(
+  action: ActionType,
+  solFunded: boolean,
+  executionError: string | undefined,
+): boolean {
+  return action === "ENTER" && solFunded && isInsufficientTokenBalanceError(executionError);
+}
+
+/** Post-execution check-in trigger for executed ENTER/EXIT/REBALANCE. */
+function shouldSendPostExecutionCheckin(executed: boolean, action: ActionType): boolean {
+  return executed && (action === "ENTER" || action === "EXIT" || action === "REBALANCE");
+}
+
+/** True when a fee claim carries a platform/operator split worth reporting. */
+function hasPlatformFeeSplit(claim: Effect.Success<ReturnType<AdapterApi["claimFees"]>>): boolean {
+  return (
+    claim.platformFeeX > 0 ||
+    claim.platformFeeY > 0 ||
+    (claim.operatorFeeX ?? 0) > 0 ||
+    (claim.operatorFeeY ?? 0) > 0
+  );
+}
+
+/** Fee-claim ledger row shared by the pre-rebalance and periodic claim paths. */
+function buildFeeClaimRow(
+  poolAddress: string,
+  positionPubKey: string,
+  claim: Effect.Success<ReturnType<AdapterApi["claimFees"]>>,
+): Parameters<DbApi["saveFeeClaim"]>[0] {
+  return {
+    id: randomUUID(),
+    poolAddress,
+    positionPubkey: positionPubKey,
+    feeX: claim.feeX,
+    feeY: claim.feeY,
+    platformFeeX: claim.platformFeeX,
+    platformFeeY: claim.platformFeeY,
+    netFeeX: claim.netFeeX,
+    netFeeY: claim.netFeeY,
+    operatorFeeX: claim.operatorFeeX ?? 0,
+    operatorFeeY: claim.operatorFeeY ?? 0,
+    txSignature: claim.txSignature,
+    feeTransferTxSignature: claim.feeTransferTxSignature ?? null,
+    createdAt: Date.now(),
+    reportedToApi: false,
+  };
+}
+
+/** True when the claim interval elapsed since the last claim for a position. */
+function isClaimIntervalElapsed(
+  lastFeeClaimAt: number,
+  nowMs: number,
+  feeClaimIntervalMs: number,
+): boolean {
+  return nowMs - lastFeeClaimAt > feeClaimIntervalMs;
+}
+
+/** True when a claimFees outcome holds nonzero legs worth booking. */
+function hasClaimableFees(
+  result: Effect.Success<ReturnType<AdapterApi["claimFees"]>> | null,
+): result is Effect.Success<ReturnType<AdapterApi["claimFees"]>> {
+  return result !== null && (result.feeX !== 0 || result.feeY !== 0);
+}
+
+/** True when a fee claim carries a platform/operator split worth reporting. */
+function hasReportablePlatformFees(
+  claimResult: Effect.Success<ReturnType<AdapterApi["claimFees"]>>,
+): boolean {
+  return (
+    claimResult.platformFeeX > 0 ||
+    claimResult.platformFeeY > 0 ||
+    (claimResult.operatorFeeX ?? 0) > 0 ||
+    (claimResult.operatorFeeY ?? 0) > 0
+  );
+}
 /** Pre-rebalance fee claim behind the G4 harvest gate (rebalance always completes). */
 /** Book a pre-rebalance claim: fee row, CLAIM event, platform-fee report. */
+
 function bookPreRebalanceClaim(
   deps: LiveExecDeps,
   decision: AgentDecision,
@@ -2830,23 +4208,7 @@ function bookPreRebalanceClaim(
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
     yield* deps.db
-      .saveFeeClaim({
-        id: randomUUID(),
-        poolAddress: decision.poolAddress,
-        positionPubkey: positionPubKey,
-        feeX: claimResult.feeX,
-        feeY: claimResult.feeY,
-        platformFeeX: claimResult.platformFeeX,
-        platformFeeY: claimResult.platformFeeY,
-        netFeeX: claimResult.netFeeX,
-        netFeeY: claimResult.netFeeY,
-        operatorFeeX: claimResult.operatorFeeX ?? 0,
-        operatorFeeY: claimResult.operatorFeeY ?? 0,
-        txSignature: claimResult.txSignature,
-        feeTransferTxSignature: claimResult.feeTransferTxSignature ?? null,
-        reportedToApi: false,
-        createdAt: Date.now(),
-      })
+      .saveFeeClaim(buildFeeClaimRow(decision.poolAddress, positionPubKey, claimResult))
       .pipe(Effect.catch(() => Effect.void));
     // Mint-based net-fee USD priced inside the adapter (mirrors
     // simulateRebalance). Null → 0 fails closed so an unpriceable claim
@@ -2867,12 +4229,7 @@ function bookPreRebalanceClaim(
         createdAt: Date.now(),
       })
       .pipe(Effect.catch(() => Effect.void));
-    if (
-      claimResult.platformFeeX > 0 ||
-      claimResult.platformFeeY > 0 ||
-      (claimResult.operatorFeeX ?? 0) > 0 ||
-      (claimResult.operatorFeeY ?? 0) > 0
-    ) {
+    if (hasReportablePlatformFees(claimResult)) {
       yield* Effect.forkChild(
         deps.adapter
           .reportFeeCollection({
@@ -2906,6 +4263,102 @@ function bookPreRebalanceClaim(
   });
 }
 
+/**
+ * G4 harvest-gate read for the pre-rebalance claim (rule: never spend $0.80
+ * to realize $1.00). Fail open on unknown pending — null means no gate.
+ */
+function readRebalanceHarvestGate(deps: LiveExecDeps, poolAddress: string, positionPubKey: string) {
+  if (!deps.adapter.getClaimableFeesUsd) return Effect.succeed(null);
+  return deps.adapter.getClaimableFeesUsd(poolAddress, positionPubKey).pipe(
+    Effect.map((netUsd) => evaluateHarvestGate(netUsd, harvestGateOverrides(deps))),
+    Effect.catch(() =>
+      Effect.succeed({
+        approved: true,
+        reason: "[harvest-gate] pending read failed — fail open (claim anyway)",
+      }),
+    ),
+  );
+}
+
+/** Adapter atomic-rebalance attempt with success/error settlement (never throws). */
+function attemptAtomicRebalance(
+  deps: LiveExecDeps,
+  decision: AgentDecision,
+  positionPubKey: string,
+  rebalanceParams: NonNullable<AgentDecision["rebalanceParams"]>,
+) {
+  return deps.adapter
+    .rebalancePosition(
+      decision.poolAddress,
+      positionPubKey,
+      rebalanceParams.newLowerBinId,
+      rebalanceParams.newUpperBinId,
+      rebalanceParams.topUp,
+    )
+    .pipe(
+      Effect.tap((r) =>
+        Effect.sync(() =>
+          console.info("Live position rebalanced atomically", {
+            pool: decision.poolAddress,
+            position: r.positionPubKey,
+            txSignatures: r.txSignatures.length,
+          }),
+        ),
+      ),
+      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+      Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
+      Effect.catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("Live atomic REBALANCE failed", {
+          pool: decision.poolAddress,
+          err: msg,
+        });
+        return Effect.succeed({ result: null, error: msg });
+      }),
+    );
+}
+
+/**
+ * Post-rebalance record: the top-up is FRESH capital — grow the cost basis
+ * and the mark in lockstep (currentValue + topUp = the post-rebalance
+ * on-chain value; depositedUsd tracks the added capital so PnL never treats
+ * it as profit), credit the X basis and advance the band anchor + step count.
+ * Atomic rebalance preserves the position account: the pubkey, entry basis
+ * and cumulative fee accounting all survive.
+ */
+function buildRebalancedRecord(
+  pos: PositionRecord,
+  currentPrice: number,
+  rebalanceParams: NonNullable<AgentDecision["rebalanceParams"]>,
+  resultPubkey: string,
+): PositionRecord {
+  const topUpUsd = rebalanceParams.topUpUsd ?? 0;
+  const scaled = applyCompoundToCostBasis({
+    depositedUsd: pos.depositedUsd,
+    currentValueUsd: pos.currentValueUsd,
+    highestValueUsd: pos.highestValueUsd,
+    compoundedFeesUsd: topUpUsd,
+  });
+  return {
+    ...pos,
+    ...scaled,
+    entryAmountXUsd:
+      pos.launchRunner === true ? (pos.entryAmountXUsd ?? 0) + topUpUsd : pos.entryAmountXUsd,
+    positionId: resultPubkey,
+    positionPubKey: resultPubkey,
+    lowerBinId: rebalanceParams.newLowerBinId,
+    upperBinId: rebalanceParams.newUpperBinId,
+    ...(rebalanceParams.topUp !== undefined
+      ? {
+          launchRunnerAnchorPrice: currentPrice,
+          launchRunnerSteps: (pos.launchRunnerSteps ?? 0) + 1,
+        }
+      : undefined),
+    lastFeeClaimAt: Date.now(),
+    lastRebalanceAt: Date.now(),
+  };
+}
+
 function claimPreRebalanceFees(
   deps: LiveExecDeps,
   decision: AgentDecision,
@@ -2921,17 +4374,11 @@ function claimPreRebalanceFees(
     // always completes — only the fee claim is skipped (it rides the
     // normal cadence path next scan). Fail open on unknown pending.
     let claimResult: Effect.Success<ReturnType<AdapterApi["claimFees"]>> | null = null;
-    const rebalanceHarvestGate = deps.adapter.getClaimableFeesUsd
-      ? yield* deps.adapter.getClaimableFeesUsd(decision.poolAddress, positionPubKey).pipe(
-          Effect.map((netUsd) => evaluateHarvestGate(netUsd, harvestGateOverrides(deps))),
-          Effect.catch(() =>
-            Effect.succeed({
-              approved: true,
-              reason: "[harvest-gate] pending read failed — fail open (claim anyway)",
-            }),
-          ),
-        )
-      : null;
+    const rebalanceHarvestGate = yield* readRebalanceHarvestGate(
+      deps,
+      decision.poolAddress,
+      positionPubKey,
+    );
     if (rebalanceHarvestGate && !rebalanceHarvestGate.approved) {
       console.warn(
         `[harvest-gate] pre-rebalance claim skipped on ${decision.poolAddress}: ${rebalanceHarvestGate.reason}`,
@@ -2975,69 +4422,19 @@ function executeLiveRebalance(
       return { executed: false, error: "REBALANCE requires an existing live position" };
     }
     yield* claimPreRebalanceFees(deps, decision, pool, pos, pos.positionPubKey);
-    const rebalanceResult = yield* deps.adapter
-      .rebalancePosition(
-        decision.poolAddress,
-        pos.positionPubKey,
-        rebalanceParams.newLowerBinId,
-        rebalanceParams.newUpperBinId,
-        rebalanceParams.topUp,
-      )
-      .pipe(
-        Effect.tap((r) =>
-          Effect.sync(() =>
-            console.info("Live position rebalanced atomically", {
-              pool: decision.poolAddress,
-              position: r.positionPubKey,
-              txSignatures: r.txSignatures.length,
-            }),
-          ),
-        ),
-        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-        Effect.map((r) => ({ result: r, error: undefined as string | undefined })),
-        Effect.catch((err) => {
-          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-          const msg = (err as { message?: string }).message ?? String(err);
-          console.error("Live atomic REBALANCE failed", {
-            pool: decision.poolAddress,
-            err: msg,
-          });
-          return Effect.succeed({ result: null, error: msg });
-        }),
-      );
+    const rebalanceResult = yield* attemptAtomicRebalance(
+      deps,
+      decision,
+      pos.positionPubKey,
+      rebalanceParams,
+    );
     if (rebalanceResult.result) {
-      // Runner scale-in: the top-up is FRESH capital — grow the cost
-      // basis and the mark in lockstep (currentValue + topUp = the
-      // post-rebalance on-chain value; depositedUsd tracks the added
-      // capital so PnL never treats it as profit), credit the X basis and
-      // advance the band anchor + step count.
-      const topUpUsd = rebalanceParams.topUpUsd ?? 0;
-      const scaled = applyCompoundToCostBasis({
-        depositedUsd: pos.depositedUsd,
-        currentValueUsd: pos.currentValueUsd,
-        highestValueUsd: pos.highestValueUsd,
-        compoundedFeesUsd: topUpUsd,
-      });
-      const updated: PositionRecord = {
-        ...pos,
-        ...scaled,
-        entryAmountXUsd:
-          pos.launchRunner === true ? (pos.entryAmountXUsd ?? 0) + topUpUsd : pos.entryAmountXUsd,
-        // Atomic rebalance preserves the position account: the pubkey,
-        // entry basis and cumulative fee accounting all survive.
-        positionId: rebalanceResult.result.positionPubKey,
-        positionPubKey: rebalanceResult.result.positionPubKey,
-        lowerBinId: rebalanceParams.newLowerBinId,
-        upperBinId: rebalanceParams.newUpperBinId,
-        ...(rebalanceParams.topUp !== undefined
-          ? {
-              launchRunnerAnchorPrice: pool.currentPrice,
-              launchRunnerSteps: (pos.launchRunnerSteps ?? 0) + 1,
-            }
-          : undefined),
-        lastFeeClaimAt: Date.now(),
-        lastRebalanceAt: Date.now(),
-      };
+      const updated = buildRebalancedRecord(
+        pos,
+        pool.currentPrice,
+        rebalanceParams,
+        rebalanceResult.result.positionPubKey,
+      );
       if (updated.positionId !== pos.positionId) {
         // Defensive re-key: the SDK preserves the account, but if the
         // pubkey ever changed, the identity and its row must move with it
@@ -3080,6 +4477,49 @@ function executeLiveRebalance(
   });
 }
 
+/**
+ * Run the on-chain close when a live pubkey exists; a position without one
+ * is already gone, so the EXIT marks done with no chain action.
+ */
+function runExitOrMarkExited(
+  deps: LiveExecDeps,
+  decision: AgentDecision,
+  pos: PositionRecord | undefined,
+  exitOperation: ExecutionOperationRecord | null,
+) {
+  if (!pos?.positionPubKey) {
+    return Effect.succeed({ exited: true, exitError: undefined, exitResultData: null });
+  }
+  return runLiveExitPosition(deps, decision, pos, pos.positionPubKey, exitOperation);
+}
+
+/** Validated attribution inputs: every leg present, chain attribution owns the EXIT. */
+interface LiveAttributionInputs {
+  readonly autonomous: AutonomousExecutionContext;
+  readonly pos: PositionRecord;
+  readonly exitResultData: LiveExitResultData;
+  readonly tokenX: string;
+  readonly tokenY: string;
+}
+function liveAttributionInputs(
+  autonomous: AutonomousExecutionContext | null | undefined,
+  pos: PositionRecord | undefined,
+  exitResultData: LiveExitResultData | null,
+  tokenX: string | undefined,
+  tokenY: string | undefined,
+): LiveAttributionInputs | null {
+  if (
+    autonomous == null ||
+    pos === undefined ||
+    exitResultData === null ||
+    tokenX === undefined ||
+    tokenY === undefined
+  ) {
+    return null;
+  }
+  return { autonomous, pos, exitResultData, tokenX, tokenY };
+}
+
 /** Live EXIT: rotation-arm gate, planned op, on-chain close, settlement/ledger paths. */
 function executeLiveExit(
   deps: LiveExecDeps,
@@ -3087,54 +4527,40 @@ function executeLiveExit(
   pool: LiveExecPool,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never> {
   return Effect.gen(function* () {
-    if (decision.reasoning.startsWith("Rotation:")) {
-      const armValid = yield* checkRotationArm(deps, decision);
-      if (!armValid) {
-        return { executed: false, error: "rotation canceled — incumbent preserved" };
-      }
+    const rotationBlocked = yield* isExitRotationBlocked(deps, decision);
+    if (rotationBlocked) {
+      return { executed: false, error: "rotation canceled — incumbent preserved" };
     }
     const pos = resolveTargetPosition(deps.trackedPositions, decision);
     const planned = yield* planLiveExitOperation(deps, decision, pool, pos);
     if (planned.fatalError) {
       return { executed: false, error: planned.fatalError };
     }
-    let exited = false;
-    let exitError: string | undefined = undefined;
-    let exitResultData: LiveExitResultData | null = null;
-    if (pos?.positionPubKey) {
-      const run = yield* runLiveExitPosition(
-        deps,
-        decision,
-        pos,
-        pos.positionPubKey,
-        planned.exitOperation,
-      );
-      exited = run.exited;
-      exitError = run.exitError;
-      exitResultData = run.exitResultData;
-    } else {
-      exited = true;
-    }
+    const exitRun = yield* runExitOrMarkExited(deps, decision, pos, planned.exitOperation);
+    const exited = exitRun.exited;
+    const exitError = exitRun.exitError;
+    const exitResultData = exitRun.exitResultData;
     if (!exited) {
       return { executed: false, error: exitError };
     }
     const autonomous = deps.autonomous;
-    if (
-      autonomous &&
-      pos &&
-      exitResultData &&
-      pool.tokenX !== undefined &&
-      pool.tokenY !== undefined
-    ) {
+    const attribution = liveAttributionInputs(
+      autonomous,
+      pos,
+      exitResultData,
+      pool.tokenX,
+      pool.tokenY,
+    );
+    if (attribution) {
       const settled = yield* settleLiveExitAttribution(
         deps,
         decision,
         pool,
-        pos,
-        exitResultData,
-        pool.tokenX,
-        pool.tokenY,
-        autonomous,
+        attribution.pos,
+        attribution.exitResultData,
+        attribution.tokenX,
+        attribution.tokenY,
+        attribution.autonomous,
       );
       if (settled.fatal) {
         return { executed: false, error: settled.fatal };
@@ -3155,6 +4581,51 @@ function executeLiveExit(
       );
     }
     return { executed: true, error: undefined };
+  });
+}
+
+/**
+ * Live ENTER pipeline: plan → SOL gate → fund → execute, fail-fast on the
+ * first fatal gate (the planned row is failed-closed inside each gate).
+ */
+function executeLiveEnterPipeline(
+  deps: LiveExecDeps,
+  decision: AgentDecision,
+  pool: LiveExecPool,
+  signalTimestamp: number | undefined,
+  signalSnapshotId: number | undefined,
+): Effect.Effect<{ executed: boolean; error: string | undefined }, never> {
+  return Effect.gen(function* () {
+    const planned = yield* planLiveEntryOperation(deps, decision, pool.tokenX);
+    if (planned.fatalError) {
+      return { executed: false, error: planned.fatalError };
+    }
+    const gated = yield* checkLiveEntrySolGate(deps, decision, deps.solPriceUsd, planned.operation);
+    if (gated.fatalError) {
+      return { executed: false, error: gated.fatalError };
+    }
+    const funded = yield* prepareLiveEntryTokens(
+      deps,
+      decision,
+      deps.runnerSingleSidedX,
+      planned.operation,
+    );
+    if (funded.fatalError) {
+      return { executed: false, error: funded.fatalError };
+    }
+    return yield* executeLiveEnterPosition(
+      deps,
+      decision,
+      pool,
+      deps.entryStrategySpec,
+      deps.entryRangeHalfWidth,
+      deps.entryDipOffsetBins,
+      deps.runnerSingleSidedX,
+      signalTimestamp,
+      signalSnapshotId,
+      funded.preparation,
+      planned.operation,
+    );
   });
 }
 
@@ -3209,40 +4680,12 @@ export function executeLive(
       return { executed: false, error: "Live trading enabled but no wallet configured" };
     }
     if (decision.action === "ENTER" && decision.positionSizeUsd) {
-      const planned = yield* planLiveEntryOperation(deps, decision, pool.tokenX);
-      if (planned.fatalError) {
-        return { executed: false, error: planned.fatalError };
-      }
-      const gated = yield* checkLiveEntrySolGate(
-        deps,
-        decision,
-        deps.solPriceUsd,
-        planned.operation,
-      );
-      if (gated.fatalError) {
-        return { executed: false, error: gated.fatalError };
-      }
-      const funded = yield* prepareLiveEntryTokens(
-        deps,
-        decision,
-        deps.runnerSingleSidedX,
-        planned.operation,
-      );
-      if (funded.fatalError) {
-        return { executed: false, error: funded.fatalError };
-      }
-      return yield* executeLiveEnterPosition(
+      return yield* executeLiveEnterPipeline(
         deps,
         decision,
         pool,
-        deps.entryStrategySpec,
-        deps.entryRangeHalfWidth,
-        deps.entryDipOffsetBins,
-        deps.runnerSingleSidedX,
         signalTimestamp,
         signalSnapshotId,
-        funded.preparation,
-        planned.operation,
       );
     }
     if (decision.action === "ENTER") {
@@ -3307,11 +4750,7 @@ function runPriceScaleBackfill(db: DbApi, adapter: AdapterApi): Effect.Effect<vo
 
     const positions = yield* db.getAllPositions();
     const snapshotPools = yield* db.getSnapshotPools();
-    const pools = new Set<string>();
-    for (const pos of positions) {
-      if (pos.entryPriceUsd != null) pools.add(pos.poolAddress);
-    }
-    for (const pool of snapshotPools) pools.add(pool);
+    const pools = collectBackfillPools(positions, snapshotPools);
 
     // Resolve each pool's scale factor, reusing the persistent per-pool cache so
     // a transient RPC failure on one pool never discards the factors already
@@ -3319,23 +4758,10 @@ function runPriceScaleBackfill(db: DbApi, adapter: AdapterApi): Effect.Effect<vo
     // per-pool constant (token decimals), so caching it is exact.
     const updates: Array<{ poolAddress: string; factor: number }> = [];
     for (const pool of pools) {
-      const key = priceScaleFactorKey(pool);
-      const cached = yield* db.getMetadata(key).pipe(Effect.catch(() => Effect.succeed(null)));
-      if (cached != null) {
-        const cachedFactor = Number(cached);
-        if (Number.isFinite(cachedFactor) && cachedFactor > 0) {
-          updates.push({ poolAddress: pool, factor: cachedFactor });
-          continue;
-        }
-      }
-      const factor = adapter.getPriceScale ? yield* adapter.getPriceScale(pool) : 1;
-      if (!Number.isFinite(factor) || factor <= 0) {
-        return yield* Effect.fail(
-          new Error(`Price-scale backfill: invalid factor ${factor} for ${pool}`),
-        );
-      }
-      yield* db.setMetadata(key, String(factor)).pipe(Effect.catch(() => Effect.void));
-      updates.push({ poolAddress: pool, factor });
+      updates.push({
+        poolAddress: pool,
+        factor: yield* resolveBackfillFactor(db, adapter, pool),
+      });
     }
 
     const result = db.applyPriceScaleMigration
@@ -3525,16 +4951,10 @@ export const program = Effect.gen(function* () {
   const config = yield* ConfigService;
   const adapter = yield* AdapterService;
   const executionWalletAddress = adapter.getWalletAddress();
-  const autonomousExecution: AutonomousExecutionContext | null =
-    config.autonomousTokenMode !== "off" && executionWalletAddress !== null
-      ? {
-          mode: config.autonomousTokenMode,
-          walletAddress: executionWalletAddress,
-          agentInstanceId: config.agentInstanceId,
-          settlementMaxPendingMs: config.settlementMaxPendingMs,
-          settlementDustUsd: config.settlementDustUsd,
-        }
-      : null;
+  const autonomousExecution: AutonomousExecutionContext | null = resolveAutonomousExecution(
+    config,
+    executionWalletAddress,
+  );
   const strategy = yield* StrategyService;
   const memory = yield* MemoryService;
   const risk = yield* RiskService;
@@ -3591,7 +5011,7 @@ export const program = Effect.gen(function* () {
   // function). Advisory-only — see the runScanCycle block for semantics.
   let cycleHerdingBlock = false;
   const dailyBaselineScope = {
-    walletAddress: executionWalletAddress ?? "paper",
+    walletAddress: resolveCandidateWallet(executionWalletAddress),
     agentInstanceId: config.agentInstanceId,
   };
   const dailyBaseline = yield* loadDailyEquityBaseline(db, dailyBaselineScope);
@@ -3631,8 +5051,7 @@ export const program = Effect.gen(function* () {
   // SOL swaps; plain live entries are USDC-funded and only need SOL for gas,
   // which the top-up mechanism handles per entry. The batch reserve gate
   // applies only to the SOL-funded mode (the issue #170 drain scenario).
-  const solFundedEntryMode =
-    config.autonomousTokenMode === "canary" || config.autonomousTokenMode === "live";
+  const solFundedEntryMode = isSolFundedEntryMode(config.autonomousTokenMode);
   const recordExecutionOutcome = (executed: boolean): void => {
     consecutiveExecutionFailures = executed ? 0 : consecutiveExecutionFailures + 1;
     if (!executed) executionFailuresThisCycle++;
@@ -3857,7 +5276,7 @@ export const program = Effect.gen(function* () {
   // ─── Pool discovery ────────────────────────────────────────────────────────
 
   let poolsToScan = [...config.watchlistPools];
-  const autonomousCandidateWallet = executionWalletAddress ?? "paper";
+  const autonomousCandidateWallet = resolveCandidateWallet(executionWalletAddress);
   const autonomousCandidates = new Map<string, TokenCandidateRecord>();
   const autonomousCandidatePools = new Set<string>();
   // Fallen-angel candidates (Wave 19): pools that cleared the fallen-angel
@@ -4040,22 +5459,30 @@ export const program = Effect.gen(function* () {
               }),
             );
       const now = Date.now();
-      for (const candidate of autonomousCandidates.values()) {
-        if (candidate.state === "cooling_down" && candidate.cooldownUntil !== null) {
-          const advancedCandidate = transitionCandidate(
-            candidate,
-            { kind: "cooldown_elapsed", occurredAt: now },
-            {
-              minHealthyScans: config.candidateMinHealthyScans,
-              minObservationMs: config.candidateMinObservationMs,
-            },
-          );
-          if (advancedCandidate !== candidate) {
-            autonomousCandidates.set(advancedCandidate.id, advancedCandidate);
-            yield* db.saveTokenCandidate(advancedCandidate).pipe(Effect.catch(() => Effect.void));
+      function settleCoolingCandidates(now: number): Effect.Effect<void, never> {
+        return Effect.gen(function* () {
+          for (const candidate of autonomousCandidates.values()) {
+            if (candidate.state === "cooling_down" && candidate.cooldownUntil !== null) {
+              const advancedCandidate = transitionCandidate(
+                candidate,
+                { kind: "cooldown_elapsed", occurredAt: now },
+                {
+                  minHealthyScans: config.candidateMinHealthyScans,
+                  minObservationMs: config.candidateMinObservationMs,
+                },
+              );
+              if (advancedCandidate !== candidate) {
+                autonomousCandidates.set(advancedCandidate.id, advancedCandidate);
+                yield* db
+                  .saveTokenCandidate(advancedCandidate)
+                  .pipe(Effect.catch(() => Effect.void));
+              }
+            }
           }
-        }
+        });
       }
+
+      yield* settleCoolingCandidates(now);
       const candidatePools = screened
         .filter(
           (pool) =>
@@ -4071,24 +5498,37 @@ export const program = Effect.gen(function* () {
           : yield* adapter
               .getTokenPriceEvidence(mints)
               .pipe(Effect.catch(() => Effect.succeed([])));
-      const routeAvailableMints = new Set<string>();
+      function fetchSolPriceUsd(): Effect.Effect<number, never> {
+        return Effect.gen(function* () {
+          const prices = yield* adapter
+            .getTokenPrices([SOL_MINT], { useFallback: false })
+            .pipe(Effect.catch(() => Effect.succeed<Record<string, number>>({})));
+          return prices[SOL_MINT] ?? 0;
+        });
+      }
+
+      function fetchProbeDecimals(nonSolMints: ReadonlyArray<string>) {
+        return Effect.gen(function* () {
+          const decimalsByMint = new Map<string, number>();
+          for (const mint of nonSolMints) {
+            const decimals = yield* adapter
+              .getTokenDecimals(mint)
+              .pipe(Effect.catch(() => Effect.succeed(null)));
+            if (decimals !== null) decimalsByMint.set(mint, decimals);
+          }
+          return decimalsByMint;
+        });
+      }
+
+      let routeAvailableMints = new Set<string>();
       if (adapter.quoteSwap !== undefined) {
         const quoteSwap = adapter.quoteSwap;
         const nonSolMints = mints.filter((mint) => mint !== SOL_MINT);
-        const prices = yield* adapter
-          .getTokenPrices([SOL_MINT], { useFallback: false })
-          .pipe(Effect.catch(() => Effect.succeed<Record<string, number>>({})));
-        const solPrice = prices[SOL_MINT] ?? 0;
+        const solPrice = yield* fetchSolPriceUsd();
         const tokenPrices = new Map(
           priceEvidence.map((evidence) => [evidence.mint, evidence.priceUsd]),
         );
-        const decimalsByMint = new Map<string, number>();
-        for (const mint of nonSolMints) {
-          const decimals = yield* adapter
-            .getTokenDecimals(mint)
-            .pipe(Effect.catch(() => Effect.succeed(null)));
-          if (decimals !== null) decimalsByMint.set(mint, decimals);
-        }
+        const decimalsByMint = yield* fetchProbeDecimals(nonSolMints);
         // Sweep expired route-probe cache entries once per refresh: discovery
         // keeps finding new mints, so without pruning expired keys would
         // accumulate for the process lifetime.
@@ -4141,10 +5581,7 @@ export const program = Effect.gen(function* () {
           ).pipe(Effect.map(([solToToken, tokenToSol]) => solToToken && tokenToSol));
         });
         const routeAvailableResults = yield* Effect.all(routeProbes, { concurrency: 4 });
-        for (let i = 0; i < nonSolMints.length; i++) {
-          const mint = nonSolMints[i];
-          if (mint && routeAvailableResults[i]) routeAvailableMints.add(mint);
-        }
+        routeAvailableMints = collectRoutableMints(nonSolMints, routeAvailableResults);
       }
       const advanced = advanceScreenedCandidates({
         walletAddress: autonomousCandidateWallet,
@@ -4613,15 +6050,20 @@ export const program = Effect.gen(function* () {
       // suggest | supervised | full — resolve a queued proposal first
       // (supervised NEVER syncs, mirroring the tail's `!== "supervised"` guard).
       const snapshot = yield* agentState.getSnapshot();
-      let agentProposal: AgentProposal | null =
-        findPendingProposal(
-          snapshot.pendingProposals,
-          overlayPoolAddress,
-          proposalMode,
-          config.agentProposalStaleMs,
-          now,
-        ) ?? null;
-      let proposalSource: "queue" | "sync" | undefined = agentProposal ? "queue" : undefined;
+      function resolveQueuedRedeployProposal(): AgentProposal | null {
+        return (
+          findPendingProposal(
+            snapshot.pendingProposals,
+            overlayPoolAddress,
+            proposalMode,
+            config.agentProposalStaleMs,
+            now,
+          ) ?? null
+        );
+      }
+      let agentProposal: AgentProposal | null = resolveQueuedRedeployProposal();
+      let proposalSource: "queue" | "sync" | undefined =
+        resolveRedeployProposalSource(agentProposal);
       if (!agentProposal && proposalMode !== "supervised") {
         const agentStatus = yield* agent.getStatus().pipe(
           Effect.catch(() =>
@@ -4635,10 +6077,12 @@ export const program = Effect.gen(function* () {
         );
         const latencySkipped = yield* agent.shouldSkipSyncProposal();
         if (
-          hasSyncProposalTransport(agentStatus) &&
-          getPoolCircuitBreaker(overlayPoolAddress).canTry(now) &&
-          !isProposalBackoffActive(proposalBackoff.get(overlayPoolAddress), now) &&
-          !latencySkipped
+          isSyncProposalEligible(
+            hasSyncProposalTransport(agentStatus),
+            getPoolCircuitBreaker(overlayPoolAddress).canTry(now),
+            isProposalBackoffActive(proposalBackoff.get(overlayPoolAddress), now),
+            latencySkipped,
+          )
         ) {
           const syncProposal = yield* agent
             .enhanceDecision(current, {
@@ -4695,15 +6139,11 @@ export const program = Effect.gen(function* () {
     return Effect.gen(function* () {
       const proposalMode = config.agentProposalMode;
       const now = Date.now();
-      const proposalToEvaluate: AgentProposal = {
-        ...agentProposal,
-        ...(agentProposal.originalAction === undefined
-          ? { originalAction: decision.action }
-          : undefined),
-        ...(agentProposal.originalConfidence === undefined
-          ? { originalConfidence: decision.confidence }
-          : undefined),
-      };
+      const proposalToEvaluate: AgentProposal = buildProposalToEvaluate(
+        agentProposal,
+        decision.action,
+        decision.confidence,
+      );
       const validation = evaluateAgentProposal(
         proposalToEvaluate,
         {
@@ -4732,24 +6172,21 @@ export const program = Effect.gen(function* () {
           // rejections. Re-run the same predicates the in-slot tail enforces.
           const candidateMetrics = candidate.metrics;
           const candidateDrift = candidate.netDriftBins;
-          const hardRejectReason: string | null = (() => {
-            if (
-              config.ilProtectionEnabled === true &&
-              candidateMetrics.feeIlRatioKnown &&
-              candidateMetrics.feeIlRatio < config.minFeeIlRatio
-            ) {
-              return `[fee-il-gate] Fee/IL ${candidateMetrics.feeIlRatio.toFixed(2)} below ${config.minFeeIlRatio}`;
-            }
-            if (
-              driftGateRejected(
-                candidateDrift,
-                config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS,
-              )
-            ) {
-              return `[drift-gate] net drift ${candidateDrift} < ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS}`;
-            }
-            return null;
-          })();
+          const hardRejectReason: string | null =
+            feeIlHardFloorReason(
+              config.ilProtectionEnabled,
+              candidateMetrics.feeIlRatioKnown,
+              candidateMetrics.feeIlRatio,
+              config.minFeeIlRatio,
+            ) ??
+            // No lane exemptions on the redeploy floor: the drift gate fires
+            // unconditionally, mirroring the in-slot tail's hard rejections.
+            driftHardFloorReason(
+              false,
+              false,
+              candidateDrift,
+              config.marketScanMaxNegativeDriftBins,
+            );
           if (hardRejectReason !== null) {
             idleRedeployLogger.warn("Agent proposal ENTER blocked by hard floor on idle-redeploy", {
               pool: overlayPoolAddress,
@@ -4780,10 +6217,10 @@ export const program = Effect.gen(function* () {
           return {
             decision: applied,
             overlaySkip: false,
-            appliedProposalId:
-              proposalSource === "queue" && agentProposal.proposalId
-                ? agentProposal.proposalId
-                : undefined,
+            appliedProposalId: resolveRedeployAppliedProposalId(
+              proposalSource,
+              agentProposal.proposalId,
+            ),
             preApplyDecision: decision,
             appliedAgentProposal: changed,
             proposalValidated: true,
@@ -5242,117 +6679,132 @@ export const program = Effect.gen(function* () {
         );
         return { verdict: "next", executed: false, executionError: undefined };
       } else {
-        // The live path runs the unchanged paper-validation gate first.
-        const paperDays = yield* readPaperDays;
-        const validation = evaluatePaperValidation({
-          paperTrading: false,
-          paperDaysAccumulated: paperDays,
-          minDays: config.paperValidationMinDays,
-          enforce: config.paperValidationEnforce,
-        });
-        if (!validation.approved) {
-          idleRedeployLogger.warn("Idle redeploy blocked by paper-validation gate", {
-            pool: candidate.poolAddress,
-            reason: validation.reason,
-          });
-          yield* recordRedeploySkip(
-            candidate,
-            ctx.cycleId,
-            `[idle-redeploy] [paper-validation] ${validation.reason}`,
-            validation.reason,
-          );
-          return { verdict: "done", executed: false, executionError: undefined };
-        }
-        // Issue #170: the same batch wallet-reserve gate as the in-slot ENTER
-        // path — skip capacity-limited; the next cycle re-evaluates.
-        if (solFundedEntryMode) {
-          const redeploySizeUsd = decision.positionSizeUsd;
-          if (redeploySizeUsd !== undefined) {
-            const neededLamports = estimateEntrySolLamports({
-              positionSizeUsd: redeploySizeUsd,
-              solPriceUsd: entrySolPriceUsd,
-              poolHasSolLeg: hasNativeSolLeg(candidate.pool),
-              solFunded: true,
+        // The live path runs the unchanged paper-validation gate first, then
+        // the batch SOL reserve gate, execution, and post-tx refresh.
+        function dispatchRedeployLive(): Effect.Effect<
+          RedeployDispatchOutcome,
+          never,
+          EntryPrepService
+        > {
+          return Effect.gen(function* () {
+            let executed = false;
+            let executionError: string | undefined = undefined;
+            // The live path runs the unchanged paper-validation gate first.
+            const paperDays = yield* readPaperDays;
+            const validation = evaluatePaperValidation({
+              paperTrading: false,
+              paperDaysAccumulated: paperDays,
+              minDays: config.paperValidationMinDays,
+              enforce: config.paperValidationEnforce,
             });
-            if (!entrySolBudgetKnown || neededLamports > entrySolBudgetLamports) {
-              const budgetHuman = entrySolBudgetKnown
-                ? (Number(entrySolBudgetLamports) / 1e9).toFixed(4)
-                : "unknown";
-              const neededHuman = (Number(neededLamports) / 1e9).toFixed(4);
-              idleRedeployLogger.info(
-                "Idle redeploy skipped — free SOL below entry estimate (wallet reserve)",
-                {
-                  pool: candidate.poolAddress,
-                  freeSol: budgetHuman,
-                  neededSol: neededHuman,
-                },
-              );
+            if (!validation.approved) {
+              idleRedeployLogger.warn("Idle redeploy blocked by paper-validation gate", {
+                pool: candidate.poolAddress,
+                reason: validation.reason,
+              });
               yield* recordRedeploySkip(
                 candidate,
                 ctx.cycleId,
-                `[idle-redeploy] skipped — free SOL ${budgetHuman} < needed ${neededHuman} (wallet-reserve gate, capacity-limited)`,
-                "[idle-redeploy] wallet SOL reserve insufficient",
+                `[idle-redeploy] [paper-validation] ${validation.reason}`,
+                validation.reason,
               );
-              yield* finalizeAppliedProposal(agentState, undefined, false, decision.action);
-              return { verdict: "next", executed: false, executionError: undefined };
+              return { verdict: "done", executed: false, executionError: undefined };
             }
-            entrySolBudgetLamports -= neededLamports;
-          }
-        }
-        const entryPrep = yield* EntryPrepService;
-        const liveResult = yield* executeLive(
-          {
-            adapter,
-            strategy,
-            db,
-            revenueConfigSvc,
-            trackedPositions,
-            entryPrep,
-            solPriceUsd: config.solPriceUsd,
-            entryStrategySpec: plan.entryStrategySpec,
-            entryRangeHalfWidth: plan.effectiveEntryHalfWidth,
-            entryDipOffsetBins: plan.entryDipOffsetBins,
-            runnerSingleSidedX: plan.entryDipOffsetBins !== 0,
-            reconcileRequestedPools,
-            memory,
-            unpricedExitWarnedPools,
-            ...runnerDispatchDeps(decision.poolAddress),
-            ...harvestDispatchDeps(),
-            ...rugDispatchDeps(),
-            ...(autonomousExecution ? { autonomous: autonomousExecution } : undefined),
-          },
-          decision,
-          candidate.pool,
-          signalTimestamp,
-          snapshotId,
-        );
-        executed = liveResult.executed;
-        executionError = liveResult.error;
-        // A live redeploy moved funds out of the wallet: re-read so the rest
-        // of the engine sees the post-transaction balance (mirrors the in-slot
-        // tail). A failed re-read blocks further entries this cycle.
-        if (executed) {
-          lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
-            Effect.catch(() => {
-              liveEntriesBlockedRestOfCycle = true;
-              idleRedeployLogger.warn(
-                "Wallet balance refresh failed after live idle-redeploy entry — blocking further entries this cycle",
-                { pool: candidate.poolAddress },
+            // Issue #170: the same batch wallet-reserve gate as the in-slot ENTER
+            // path — skip capacity-limited; the next cycle re-evaluates.
+            if (solFundedEntryMode) {
+              const redeploySizeUsd = decision.positionSizeUsd;
+              if (redeploySizeUsd !== undefined) {
+                const neededLamports = estimateEntrySolLamports({
+                  positionSizeUsd: redeploySizeUsd,
+                  solPriceUsd: entrySolPriceUsd,
+                  poolHasSolLeg: hasNativeSolLeg(candidate.pool),
+                  solFunded: true,
+                });
+                if (!entrySolBudgetKnown || neededLamports > entrySolBudgetLamports) {
+                  const budgetHuman = entrySolBudgetKnown
+                    ? (Number(entrySolBudgetLamports) / 1e9).toFixed(4)
+                    : "unknown";
+                  const neededHuman = (Number(neededLamports) / 1e9).toFixed(4);
+                  idleRedeployLogger.info(
+                    "Idle redeploy skipped — free SOL below entry estimate (wallet reserve)",
+                    {
+                      pool: candidate.poolAddress,
+                      freeSol: budgetHuman,
+                      neededSol: neededHuman,
+                    },
+                  );
+                  yield* recordRedeploySkip(
+                    candidate,
+                    ctx.cycleId,
+                    `[idle-redeploy] skipped — free SOL ${budgetHuman} < needed ${neededHuman} (wallet-reserve gate, capacity-limited)`,
+                    "[idle-redeploy] wallet SOL reserve insufficient",
+                  );
+                  yield* finalizeAppliedProposal(agentState, undefined, false, decision.action);
+                  return { verdict: "next", executed: false, executionError: undefined };
+                }
+                entrySolBudgetLamports -= neededLamports;
+              }
+            }
+            const entryPrep = yield* EntryPrepService;
+            const liveResult = yield* executeLive(
+              {
+                adapter,
+                strategy,
+                db,
+                revenueConfigSvc,
+                trackedPositions,
+                entryPrep,
+                solPriceUsd: config.solPriceUsd,
+                entryStrategySpec: plan.entryStrategySpec,
+                entryRangeHalfWidth: plan.effectiveEntryHalfWidth,
+                entryDipOffsetBins: plan.entryDipOffsetBins,
+                runnerSingleSidedX: plan.entryDipOffsetBins !== 0,
+                reconcileRequestedPools,
+                memory,
+                unpricedExitWarnedPools,
+                ...runnerDispatchDeps(decision.poolAddress),
+                ...harvestDispatchDeps(),
+                ...rugDispatchDeps(),
+                ...(autonomousExecution ? { autonomous: autonomousExecution } : undefined),
+              },
+              decision,
+              candidate.pool,
+              signalTimestamp,
+              snapshotId,
+            );
+            executed = liveResult.executed;
+            executionError = liveResult.error;
+            // A live redeploy moved funds out of the wallet: re-read so the rest
+            // of the engine sees the post-transaction balance (mirrors the in-slot
+            // tail). A failed re-read blocks further entries this cycle.
+            if (executed) {
+              lastWalletBalanceUsd = yield* adapter.getWalletBalanceUsd().pipe(
+                Effect.catch(() => {
+                  liveEntriesBlockedRestOfCycle = true;
+                  idleRedeployLogger.warn(
+                    "Wallet balance refresh failed after live idle-redeploy entry — blocking further entries this cycle",
+                    { pool: candidate.poolAddress },
+                  );
+                  return Effect.succeed(lastWalletBalanceUsd);
+                }),
               );
-              return Effect.succeed(lastWalletBalanceUsd);
-            }),
-          );
+            }
+            // Issue #170: refresh the batch SOL budget after the live redeploy
+            // attempt (executed or failed — a partial prep swap may have spent
+            // SOL). Fail closed on read failure.
+            if (solFundedEntryMode) {
+              entrySolBudgetLamports = yield* adapter.getNativeSolBalance().pipe(
+                Effect.map((lamports) => freeEntrySolLamports(lamports)),
+                Effect.catch(() => Effect.succeed(0n)),
+              );
+              entrySolBudgetKnown = true;
+            }
+            return { verdict: "go", executed, executionError };
+          });
         }
-        // Issue #170: refresh the batch SOL budget after the live redeploy
-        // attempt (executed or failed — a partial prep swap may have spent
-        // SOL). Fail closed on read failure.
-        if (solFundedEntryMode) {
-          entrySolBudgetLamports = yield* adapter.getNativeSolBalance().pipe(
-            Effect.map((lamports) => freeEntrySolLamports(lamports)),
-            Effect.catch(() => Effect.succeed(0n)),
-          );
-          entrySolBudgetKnown = true;
-        }
+
+        return yield* dispatchRedeployLive();
       }
       return { verdict: "go", executed, executionError } as const;
     });
@@ -5451,27 +6903,35 @@ export const program = Effect.gen(function* () {
         (sum, pos) => sum + pos.currentValueUsd,
         0,
       );
-      let idleCapitalUsd: number;
-      if (config.paperTrading || !adapter.hasWallet()) {
-        idleCapitalUsd = Math.max(config.paperPortfolioUsd - deployedUsd, 0);
-      } else {
-        const holdings = yield* adapter.getWalletHoldings().pipe(
-          Effect.catch((err) => {
-            idleRedeployLogger.warn(
-              "Wallet holdings read failed — idle redeploy skipped this cycle",
-              { error: String(err) },
-            );
-            return Effect.succeed(
-              new Map<string, { readonly amountAtomic: bigint; readonly decimals: number }>(),
-            );
-          }),
-        );
-        const usdcHolding = holdings.get(USDC_MINT);
-        idleCapitalUsd =
-          usdcHolding === undefined
+      // Idle capital: live = USDC wallet holdings at par (the adapter read
+      // shares the balance cache — no extra RPC); paper = the portfolio seed
+      // minus deployed value. A failed live holdings read degrades to "no
+      // idle detected" (fail-open — the cycle never fails and never deploys
+      // on stale data).
+      function readIdleCapitalUsd(deployedUsd: number): Effect.Effect<number, never> {
+        return Effect.gen(function* () {
+          if (config.paperTrading || !adapter.hasWallet()) {
+            return Math.max(config.paperPortfolioUsd - deployedUsd, 0);
+          }
+          const holdings = yield* adapter.getWalletHoldings().pipe(
+            Effect.catch((err) => {
+              idleRedeployLogger.warn(
+                "Wallet holdings read failed — idle redeploy skipped this cycle",
+                { error: String(err) },
+              );
+              return Effect.succeed(
+                new Map<string, { readonly amountAtomic: bigint; readonly decimals: number }>(),
+              );
+            }),
+          );
+          const usdcHolding = holdings.get(USDC_MINT);
+          return usdcHolding === undefined
             ? 0
             : Number(usdcHolding.amountAtomic) / 10 ** usdcHolding.decimals;
+        });
       }
+
+      const idleCapitalUsd = yield* readIdleCapitalUsd(deployedUsd);
 
       if (idleCapitalUsd <= config.idleRedeployThresholdUsd) {
         idleRedeployLogger.debug("Idle capital below redeploy threshold", {
@@ -5494,10 +6954,13 @@ export const program = Effect.gen(function* () {
       // itself — consistent with the idleCapitalUsd calc above, which treats the
       // seed as the total (seed − deployed). Live keeps wallet + positions
       // (the wallet read genuinely shrinks as capital deploys).
-      const portfolioValueUsd =
-        config.paperTrading || !adapter.hasWallet()
-          ? config.paperPortfolioUsd
-          : lastWalletBalanceUsd + openPositions.reduce((sum, pos) => sum + pos.currentValueUsd, 0);
+      const portfolioValueUsd = resolveRedeployPortfolioValueUsd(
+        config.paperTrading,
+        adapter.hasWallet(),
+        config.paperPortfolioUsd,
+        lastWalletBalanceUsd,
+        openPositions,
+      );
       const recentPnlUsd = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnlUsd, 0);
 
       // Follow-up 3655288395: walk candidates in score order and dispatch the
@@ -5507,53 +6970,59 @@ export const program = Effect.gen(function* () {
       // (max open positions, size floor, live paper-validation) or a dispatched
       // execution `return`s. At most one redeploy ENTER per cycle.
       const sortedCandidates = [...candidates].sort((a, b) => b.entryScore - a.entryScore);
-      for (const candidate of sortedCandidates) {
-        const cctx: RedeployCandidateContext = {
-          candidate,
-          cycleId,
-          executedExitPools,
-          idleCapitalUsd,
-          portfolioValueUsd,
-          openPositions,
-          recentPnlUsd,
-          rollingRealizedPnlHalted: cycle.rollingRealizedPnlHalted,
-        };
-        const eligibility = yield* checkRedeployEligibility(cctx);
-        if (eligibility.verdict !== "go") {
-          if (eligibility.verdict === "done") return;
-          continue;
-        }
-        const overlay = yield* applyRedeployOverlay(
-          cctx,
-          buildRedeployDecision(cctx, eligibility.allocation),
-        );
-        if (overlay.overlaySkip) continue;
-        const boosted = yield* applyRedeployCopyBoost(cctx, overlay.decision);
-        const gated = yield* evaluateRedeployRisk(cctx, { ...overlay, decision: boosted });
-        if (gated.verdict !== "go") continue;
-        const sized = yield* checkRedeploySizeAndSnapshot(cctx, gated.decision);
-        if (sized.verdict !== "go") continue;
-        const outcome = yield* dispatchRedeployExecution(
-          cctx,
-          gated.decision,
-          sized.signalTimestamp,
-          sized.signalSnapshotId,
-        );
-        if (outcome.verdict !== "go") continue;
-        yield* finalizeRedeployOutcome(
-          cctx,
-          cycle,
-          gated.decision,
-          gated.riskResult,
-          overlay.appliedProposalId,
-          outcome.executed,
-          outcome.executionError,
-        );
-        // This candidate survived every fresh gate and was dispatched (whether or
-        // not the tx landed) — the walk stops here. At most one redeploy ENTER per
-        // cycle; a failed execution retries next cycle, not against a sibling.
-        return;
+      function walkRedeployCandidates(): Effect.Effect<void, never, EntryPrepService> {
+        return Effect.gen(function* () {
+          for (const candidate of sortedCandidates) {
+            const cctx: RedeployCandidateContext = {
+              candidate,
+              cycleId,
+              executedExitPools,
+              idleCapitalUsd,
+              portfolioValueUsd,
+              openPositions,
+              recentPnlUsd,
+              rollingRealizedPnlHalted: cycle.rollingRealizedPnlHalted,
+            };
+            const eligibility = yield* checkRedeployEligibility(cctx);
+            if (eligibility.verdict !== "go") {
+              if (eligibility.verdict === "done") return;
+              continue;
+            }
+            const overlay = yield* applyRedeployOverlay(
+              cctx,
+              buildRedeployDecision(cctx, eligibility.allocation),
+            );
+            if (overlay.overlaySkip) continue;
+            const boosted = yield* applyRedeployCopyBoost(cctx, overlay.decision);
+            const gated = yield* evaluateRedeployRisk(cctx, { ...overlay, decision: boosted });
+            if (gated.verdict !== "go") continue;
+            const sized = yield* checkRedeploySizeAndSnapshot(cctx, gated.decision);
+            if (sized.verdict !== "go") continue;
+            const outcome = yield* dispatchRedeployExecution(
+              cctx,
+              gated.decision,
+              sized.signalTimestamp,
+              sized.signalSnapshotId,
+            );
+            if (outcome.verdict !== "go") continue;
+            yield* finalizeRedeployOutcome(
+              cctx,
+              cycle,
+              gated.decision,
+              gated.riskResult,
+              overlay.appliedProposalId,
+              outcome.executed,
+              outcome.executionError,
+            );
+            // This candidate survived every fresh gate and was dispatched (whether or
+            // not the tx landed) — the walk stops here. At most one redeploy ENTER per
+            // cycle; a failed execution retries next cycle, not against a sibling.
+            return;
+          }
+        });
       }
+
+      yield* walkRedeployCandidates();
     });
 
   // ─── Market-scan universe refresh ─────────────────────────────────────────
@@ -5582,24 +7051,14 @@ export const program = Effect.gen(function* () {
         logger.warn("Market scan: universe fetch returned nothing — keeping last ranked set");
         return;
       }
-      const marketCfg = {
-        minTvlUsd: config.marketScanMinTvlUsd ?? 250_000,
-        minFeeApr: config.marketScanMinFeeApr ?? 25,
-        minFees24hUsd: config.marketScanMinFees24hUsd,
-        minVolume24hUsd: config.marketScanMinVolume24hUsd,
-        minHolders: config.marketScanMinHolders ?? 1000,
-        minPoolAgeHours: config.marketScanMinPoolAgeHours ?? 24,
-        minBinStep: config.marketScanMinBinStep ?? 2,
-        maxBinStep: config.marketScanMaxBinStep ?? 200,
-        stablecoinMints: config.stablecoinMints ?? new Set<string>(),
-      };
+      const marketCfg = resolveMarketScanConfig(config);
       const { ranked } = gateAndRankMarketPools(discovered, {
         ...marketCfg,
         minVolumeTurnover: 0.02,
         maxVolumeTurnover: 50,
       });
       marketRankedPools = ranked;
-      const activeCount = Math.min(config.marketScanTopK ?? 30, config.marketScanMaxPools ?? 60);
+      const activeCount = resolveMarketActiveCount(config);
       marketScanPools.clear();
       for (const rank of ranked.slice(0, activeCount)) {
         marketScanPools.add(rank.pool.address);
@@ -5638,7 +7097,7 @@ export const program = Effect.gen(function* () {
       if (now - lastLaunchScanAt < intervalMs) return;
       lastLaunchScanAt = now;
       const discovered = yield* adapter.discoverHotPools(config.launchScanUniverseSize ?? 500);
-      if (discovered.length === 0) {
+      function handleEmptyLaunchUniverse(): void {
         logger.warn("Launch radar: hot-pool fetch returned nothing");
         // Fail closed for new launch entries (issue #201 review P2): the
         // executable snapshot could not be refreshed — a stale set must not
@@ -5648,6 +7107,10 @@ export const program = Effect.gen(function* () {
         if (config.launchExecutionEnabled === true) {
           launchScanPools.clear();
         }
+      }
+
+      if (discovered.length === 0) {
+        handleEmptyLaunchUniverse();
         return;
       }
       const gateResult = gateAndRankLaunchPools(discovered, launchGateConfig(config, now));
@@ -5668,37 +7131,18 @@ export const program = Effect.gen(function* () {
       // RPC/decision cost stays proportional to LAUNCH_SCAN_TOP_K, not the
       // full admitted universe. Only when BOTH flags are on — the v1
       // radar-only path leaves launchScanPools empty and behavior-identical.
-      if (config.launchExecutionEnabled === true) {
+      function admitLaunchExecutionPools(
+        ranked: ReadonlyArray<{ readonly pool: { readonly address: string } }>,
+      ): void {
+        if (config.launchExecutionEnabled !== true) return;
         launchScanPools.clear();
-        for (const r of gateResult.ranked.slice(0, config.launchScanTopK ?? 30)) {
+        for (const r of ranked.slice(0, config.launchScanTopK ?? 30)) {
           launchScanPools.add(r.pool.address);
         }
       }
-      if (config.launchWashForensicsEnabled === true && adapter.getPoolWashEvidence) {
-        // Stale evidence must not outlive its pool: a pool that left the
-        // top-K, or a refresh whose fetch failed (null), drops its entry —
-        // otherwise an old suspicious flag would gate ENTER forever.
-        washEvidenceByPool.clear();
-        // Bound both the fetch WIDTH (top-30 by fee yield — the pools most
-        // likely to reach ENTER; evidence for the rest fails open) and the
-        // CONCURRENCY (5): 200 pools at unbounded concurrency would burst
-        // the Helius rate tier and 429 everything to null.
-        const topK = gateResult.ranked.slice(0, Math.min(config.launchScanTopK ?? 30, 30));
-        const evidences = yield* Effect.forEach(
-          topK,
-          (r) =>
-            adapter.getPoolWashEvidence!(r.pool.address).pipe(
-              Effect.catch(() => Effect.succeed(null)),
-            ),
-          { concurrency: 5 },
-        );
-        for (let i = 0; i < topK.length; i++) {
-          const evidence = evidences[i];
-          if (evidence !== null && evidence !== undefined) {
-            washEvidenceByPool.set(topK[i]!.pool.address, evidence);
-          }
-        }
-      }
+
+      admitLaunchExecutionPools(gateResult.ranked);
+      yield* refreshWashEvidence(config, adapter, gateResult.ranked, washEvidenceByPool);
       logger.info("Launch radar", {
         universe: discovered.length,
         admitted: gateResult.ranked.length,
@@ -5854,18 +7298,17 @@ export const program = Effect.gen(function* () {
         // Do not re-arm forever from an unchanged trailing window after the
         // cooldown expires. A newer close changes the marker and can trip it
         // again with fresh evidence.
-        if (existing?.reason.startsWith(observationMarker)) continue;
         const desiredUntil = now + (config.poolPnlKillSwitchCooldownMs ?? 48 * 60 * 60 * 1000);
-        if (existing && existing.cooldownUntil >= desiredUntil) continue;
-        const cooldown = {
-          poolAddress: trip.poolAddress,
-          cooldownUntil: Math.max(existing?.cooldownUntil ?? 0, desiredUntil),
-          reason:
-            `${observationMarker} trailing ${trip.positionIds.length} known closes ` +
-            `net $${trip.realizedPnlUsd.toFixed(2)} below ` +
-            `$${(config.poolPnlKillSwitchThresholdUsd ?? -15).toFixed(2)}`,
-          consecutiveOorExits: existing?.consecutiveOorExits ?? 0,
-        };
+        if (shouldSkipKillSwitchRearm(existing, observationMarker, desiredUntil)) continue;
+        const cooldown = buildKillSwitchCooldown(
+          trip.poolAddress,
+          trip.positionIds.length,
+          trip.realizedPnlUsd,
+          existing,
+          desiredUntil,
+          config.poolPnlKillSwitchThresholdUsd,
+          observationMarker,
+        );
         yield* db.setPoolCooldown(cooldown).pipe(Effect.catch(() => Effect.void));
         console.warn(
           `[pool-pnl-kill-switch] Pool ${trip.poolAddress} cooled down until ${new Date(cooldown.cooldownUntil).toISOString()} — trailing realized PnL $${trip.realizedPnlUsd.toFixed(2)} across ${trip.positionIds.length} closes`,
@@ -6178,16 +7621,19 @@ export const program = Effect.gen(function* () {
       // (failed post-tx wallet re-read earlier this cycle) skips the pass so
       // allocation math never runs on a stale balance.
       if (
-        config.idleRedeployEnabled &&
-        idleRedeployCandidates.length > 0 &&
-        !liveEntriesBlockedRestOfCycle
+        shouldRunIdleRedeploy(
+          config.idleRedeployEnabled,
+          idleRedeployCandidates.length,
+          liveEntriesBlockedRestOfCycle,
+        )
       ) {
         yield* runIdleRedeployPass(idleRedeployCandidates, cycle, executedExitPools);
       }
-      consecutiveCoreDataFailures =
-        cycle.poolsScanned > 0 && coreDataFailuresThisCycle >= cycle.poolsScanned
-          ? consecutiveCoreDataFailures + 1
-          : 0;
+      consecutiveCoreDataFailures = updateCoreDataFailureCounter(
+        consecutiveCoreDataFailures,
+        cycle.poolsScanned,
+        coreDataFailuresThisCycle,
+      );
       // Issue #182: quiet-cycle decay BEFORE the arm evaluates — a cycle with
       // no execution failures resets the consecutive counter, so a stale
       // breach from a previous spike can never re-arm the pause in the same
@@ -6197,7 +7643,7 @@ export const program = Effect.gen(function* () {
         consecutiveExecutionFailures,
         executionFailuresThisCycle,
       );
-      if (autonomousExecution && activeSafetyPause?.resolvedAt !== null) {
+      if (isSafetyPauseArmed(autonomousExecution, activeSafetyPause)) {
         const pauseReason = shouldTriggerSafetyPause({
           dailyDrawdownPct,
           maxDailyDrawdownPct: config.maxDailyDrawdownPct,
@@ -6258,14 +7704,7 @@ export const program = Effect.gen(function* () {
       // formula in engine/pnl.ts. Forked fire-and-forget so a transient report
       // never blocks the cycle.
       {
-        let pnl = 0;
-        for (const p of trackedPositions.values()) {
-          pnl +=
-            p.currentValueUsd +
-            p.cumulativeFeesClaimedUsd +
-            p.cumulativeRewardsClaimedUsd -
-            p.depositedUsd;
-        }
+        const pnl = computeCycleUnrealizedPnl(trackedPositions);
         yield* Effect.forkChild(postEngineStatus("running", trackedPositions.size, pnl)).pipe(
           Effect.asVoid,
         );
@@ -6591,23 +8030,29 @@ export const program = Effect.gen(function* () {
       pushBinHistory(poolAddress, rawPool.activeBinId);
       binStepByAddress.set(poolAddress, rawPool.binStep);
       const datapiStats = yield* meteoraDatapi.getPoolData(poolAddress);
+      function fetchSecondaryPoolStats(priceFeeRate: number) {
+        return Effect.gen(function* () {
+          const geckoStats =
+            datapiStats === null && config.geckoTerminalEnabled !== false
+              ? yield* gecko.getPoolStats(poolAddress, priceFeeRate)
+              : null;
+          const dexscreenerStats =
+            datapiStats === null &&
+            geckoStats === null &&
+            config.dexscreenerEnabled !== false &&
+            dexscreenerOption._tag === "Some"
+              ? yield* dexscreenerOption.value.getPoolStats(poolAddress, priceFeeRate)
+              : null;
+          return { geckoStats, dexscreenerStats };
+        });
+      }
+
       // Gecko remains the preferred secondary source (dexscreener is only tried
       // when gecko itself is unavailable) so the two keyless reserves never
       // compete for the same quota.
-      const geckoStats =
-        datapiStats === null && config.geckoTerminalEnabled !== false
-          ? yield* gecko.getPoolStats(poolAddress, 0.0025 + rawPool.binStep / 10_000)
-          : null;
-      const dexscreenerStats =
-        datapiStats === null &&
-        geckoStats === null &&
-        config.dexscreenerEnabled !== false &&
-        dexscreenerOption._tag === "Some"
-          ? yield* dexscreenerOption.value.getPoolStats(
-              poolAddress,
-              0.0025 + rawPool.binStep / 10_000,
-            )
-          : null;
+      const { geckoStats, dexscreenerStats } = yield* fetchSecondaryPoolStats(
+        0.0025 + rawPool.binStep / 10_000,
+      );
       // The gecko* fee rate is the pool's binStep-derived base fee applied to
       // REAL volume (gecko's own pool_fee_percentage is null for every CL pool,
       // and DexScreener exposes no fee field at all). DexScreener carries
@@ -6640,13 +8085,12 @@ export const program = Effect.gen(function* () {
       // admission and rotation superiority. A cold-start pool (<3 prior obs)
       // fail-opens. When the spike proves durable the self-rank falls as
       // history catches up and the pool classifies again.
-      const runnerAprOutlier =
-        config.runnerAprOutlierEnabled === true &&
-        isAprSelfOutlier({
-          priorAprs: runnerAprObservation.priorAprs,
-          currentApr: poolFeeAprPct,
-          outlierPercentile: config.runnerAprOutlierPercentile,
-        });
+      const runnerAprOutlier = resolveRunnerAprOutlier(
+        config.runnerAprOutlierEnabled,
+        runnerAprObservation.priorAprs,
+        poolFeeAprPct,
+        config.runnerAprOutlierPercentile,
+      );
       if (runnerAprOutlier) {
         console.info(
           `[regime-gate] runner APR self-outlier ${poolAddress} — ${poolFeeAprPct.toFixed(0)}% sits at the top of its own recent history; runner classification suppressed`,
@@ -6738,19 +8182,23 @@ export const program = Effect.gen(function* () {
     authX: Effect.Success<ReturnType<typeof adapter.getMintAuthorities>> | null,
     authY: Effect.Success<ReturnType<typeof adapter.getMintAuthorities>> | null,
   ): FreezeTrustClassification {
-    const freezeEnabledX =
-      datapiStats?.tokenXFreezeAuthorityDisabled === false || authX?.freezeAuthority != null;
-    const freezeEnabledY =
-      datapiStats?.tokenYFreezeAuthorityDisabled === false || authY?.freezeAuthority != null;
-    const trustedX = config.stablecoinMints?.has(pool.tokenX) === true;
-    const trustedY = config.stablecoinMints?.has(pool.tokenY) === true;
+    const freezeEnabledX = isFreezeAuthorityEnabled(
+      datapiStats?.tokenXFreezeAuthorityDisabled,
+      authX?.freezeAuthority,
+    );
+    const freezeEnabledY = isFreezeAuthorityEnabled(
+      datapiStats?.tokenYFreezeAuthorityDisabled,
+      authY?.freezeAuthority,
+    );
+    const trustedX = isTrustedMint(config.stablecoinMints, pool.tokenX);
+    const trustedY = isTrustedMint(config.stablecoinMints, pool.tokenY);
     return {
       freezeEnabledX,
       freezeEnabledY,
       trustedX,
       trustedY,
-      untrustedFreezeX: freezeEnabledX && !trustedX,
-      untrustedFreezeY: freezeEnabledY && !trustedY,
+      untrustedFreezeX: hasUntrustedFreeze(freezeEnabledX, trustedX),
+      untrustedFreezeY: hasUntrustedFreeze(freezeEnabledY, trustedY),
     };
   }
   type FreezeLegStatus = "datapiVerified" | "sus" | "goPlusRisk" | "jupiterVerified" | "unknown";
@@ -6811,46 +8259,54 @@ export const program = Effect.gen(function* () {
       ]);
       // G5 transfer-tax screen (rule: abnormal transfer taxes are
       // inadmissible — high fees never override a failed safety gate).
-      if (config.allowTransferFeeTokens !== true) {
+      function checkTransferFeeLegs(): Effect.Effect<string | null, never> {
+        if (config.allowTransferFeeTokens === true) return Effect.succeed(null);
         const feeLegs = [
           { mint: pool.tokenX, symbol: pool.tokenXSymbol, auth: authX },
           { mint: pool.tokenY, symbol: pool.tokenYSymbol, auth: authY },
         ];
         const feeChargingLegs = feeLegs.filter((leg) => leg.auth?.transferFeeEnabled === true);
-        if (feeChargingLegs.length > 0) {
-          return yield* rejectForSafety(
-            `leg ${feeChargingLegs
-              .map((leg) => leg.symbol)
-              .join(", ")} charges a transfer fee (ALLOW_TRANSFER_FEE_TOKENS not enabled)`,
-          );
-        }
+        if (feeChargingLegs.length === 0) return Effect.succeed(null);
+        return Effect.succeed(
+          `leg ${feeChargingLegs
+            .map((leg) => leg.symbol)
+            .join(", ")} charges a transfer fee (ALLOW_TRANSFER_FEE_TOKENS not enabled)`,
+        );
       }
+
+      const feeReject = yield* checkTransferFeeLegs();
+      if (feeReject) return yield* rejectForSafety(feeReject);
       // ─── Hot-lane rug precondition — mint authority (market-scan/runner) ──
       // A non-trusted leg with a live mint authority (not renounced) lets the
       // dev mint+dump. Trusted legs (stables + SOL) are exempt.
-      if (marketScanPools.has(poolAddress)) {
-        const mintReject = mintAuthorityRejectReason(
-          [
-            {
-              symbol: pool.tokenXSymbol,
-              mint: pool.tokenX,
-              mintAuthority: authX?.mintAuthority,
-              verified: datapiStats?.tokenXVerified ?? undefined,
-            },
-            {
-              symbol: pool.tokenYSymbol,
-              mint: pool.tokenY,
-              mintAuthority: authY?.mintAuthority,
-              verified: datapiStats?.tokenYVerified ?? undefined,
-            },
-          ],
-          config.stablecoinMints ?? new Set<string>(),
-          config.marketScanRequireRenouncedMint,
-          config.marketScanVerifiedExemptMinTvlUsd,
-          pool.tvlUsd,
+      function checkMintAuthorityGate(): Effect.Effect<string | null, never> {
+        if (!marketScanPools.has(poolAddress)) return Effect.succeed(null);
+        return Effect.succeed(
+          mintAuthorityRejectReason(
+            [
+              {
+                symbol: pool.tokenXSymbol,
+                mint: pool.tokenX,
+                mintAuthority: authX?.mintAuthority,
+                verified: datapiStats?.tokenXVerified ?? undefined,
+              },
+              {
+                symbol: pool.tokenYSymbol,
+                mint: pool.tokenY,
+                mintAuthority: authY?.mintAuthority,
+                verified: datapiStats?.tokenYVerified ?? undefined,
+              },
+            ],
+            config.stablecoinMints ?? new Set<string>(),
+            config.marketScanRequireRenouncedMint,
+            config.marketScanVerifiedExemptMinTvlUsd,
+            pool.tvlUsd,
+          ),
         );
-        if (mintReject !== null) return yield* rejectForSafety(mintReject);
       }
+
+      const mintReject = yield* checkMintAuthorityGate();
+      if (mintReject) return yield* rejectForSafety(mintReject);
       // Deterministic local rejection precedes any network lookup: a pool
       // whose token or deployer is already in the loaded blacklist rejects
       // here, without consuming the token-risk overlay's fetch budget/timeout.
@@ -6859,8 +8315,8 @@ export const program = Effect.gen(function* () {
           poolAddress,
           pool.tokenX,
           pool.tokenY,
-          authX?.mintAuthority ?? undefined,
-          authY?.mintAuthority ?? undefined,
+          resolveMintAuthority(authX),
+          resolveMintAuthority(authY),
         )
         .pipe(
           // SAFETY: The preceding branch or fixture establishes the asserted contract before this operation.
@@ -6934,12 +8390,13 @@ export const program = Effect.gen(function* () {
       if (!(freezeEnabledX || freezeEnabledY)) return null;
       if (!untrustedFreezeX && !untrustedFreezeY) {
         // Every freeze-enabled leg is a trusted stablecoin — exempt.
-        const exempted = [
-          freezeEnabledX && trustedX ? `${pool.tokenXSymbol} (${pool.tokenX})` : null,
-          freezeEnabledY && trustedY ? `${pool.tokenYSymbol} (${pool.tokenY})` : null,
-        ]
-          .filter((s) => s !== null)
-          .join(" and ");
+        const exempted = describeExemptedFreezeLegs(
+          pool,
+          freezeEnabledX,
+          trustedX,
+          freezeEnabledY,
+          trustedY,
+        );
         logger.info("Freeze authority exempted via trusted stablecoin allowlist", {
           pool: poolAddress,
           exempted,
@@ -6949,10 +8406,17 @@ export const program = Effect.gen(function* () {
       // Token-risk overlay (Wave 18): smart detection for UNTRUSTED
       // freeze-enabled legs. LAZY — Jupiter is consulted only when the
       // overlay is enabled AND an untrusted leg is freeze-enabled.
-      const riskByMint: ReadonlyMap<string, TokenRiskSignal> =
-        config.jupiterTokenRiskEnabled !== false
-          ? yield* Effect.promise(() => consultTokenRisks([pool.tokenX, pool.tokenY], config))
-          : new Map<string, TokenRiskSignal>();
+      function consultFreezeRiskOverlay(): Effect.Effect<
+        ReadonlyMap<string, TokenRiskSignal>,
+        never
+      > {
+        if (config.jupiterTokenRiskEnabled === false) {
+          return Effect.succeed(new Map<string, TokenRiskSignal>());
+        }
+        return Effect.promise(() => consultTokenRisks([pool.tokenX, pool.tokenY], config));
+      }
+
+      const riskByMint = yield* consultFreezeRiskOverlay();
       const flaggedLegs = classifyFreezeLegs(
         pool,
         datapiStats,
@@ -7239,35 +8703,48 @@ export const program = Effect.gen(function* () {
       // Measured stats only (datapi/gecko rows); modeled heuristic volume
       // never classifies. Fail-open: thin history or unmeasured source →
       // no verdict → trigger A rules alone.
-      let volumeSpikeVerdict: VolumeSpikeResult | null = null;
-      let measuredVolume24h: number | null = null;
-      if (
-        hotCfg.volumeSpike !== undefined &&
-        (pool.statsSource === "datapi" || pool.statsSource === "geckoterminal")
-      ) {
-        const volWindowMs = Math.max(
-          30 * 60_000,
-          (hotCfg.volumeSpike.baselineWindow + 3) * (config.scanIntervalMs ?? 600_000),
-        );
-        const volSnaps = yield* db.getSnapshots(poolAddress, nowMs - volWindowMs, nowMs).pipe(
-          Effect.catch(() =>
-            // SAFETY: The fallback literal satisfies the declared readonly array type.
-            Effect.succeed([] as ReadonlyArray<PoolSnapshot>),
-          ),
-        );
-        const measuredVols = volSnaps
-          .filter((s) => s.statsSource === "datapi" || s.statsSource === "geckoterminal")
-          .map((s) => s.volume24hUsd);
-        if (measuredVols.length > 0) {
-          volumeSpikeVerdict = detectVolumeSpike({
-            volumes: measuredVols,
-            baselineWindow: hotCfg.volumeSpike.baselineWindow,
-            spikeRatio: hotCfg.volumeSpike.spikeRatio,
-            minPoints: hotCfg.volumeSpike.minPoints,
-          });
-          measuredVolume24h = pool.volume24hUsd;
-        }
+      function detectHotVolumeBurst(): Effect.Effect<
+        { readonly verdict: VolumeSpikeResult | null; readonly measuredVolume24h: number | null },
+        never
+      > {
+        return Effect.gen(function* () {
+          if (
+            hotCfg.volumeSpike === undefined ||
+            (pool.statsSource !== "datapi" && pool.statsSource !== "geckoterminal")
+          ) {
+            return { verdict: null, measuredVolume24h: null };
+          }
+          const volWindowMs = Math.max(
+            30 * 60_000,
+            (hotCfg.volumeSpike.baselineWindow + 3) * (config.scanIntervalMs ?? 600_000),
+          );
+          const volSnaps = yield* db.getSnapshots(poolAddress, nowMs - volWindowMs, nowMs).pipe(
+            Effect.catch(() =>
+              // SAFETY: The fallback literal satisfies the declared readonly array type.
+              Effect.succeed([] as ReadonlyArray<PoolSnapshot>),
+            ),
+          );
+          const measuredVols = volSnaps
+            .filter((s) => s.statsSource === "datapi" || s.statsSource === "geckoterminal")
+            .map((s) => s.volume24hUsd);
+          if (measuredVols.length === 0) {
+            return { verdict: null, measuredVolume24h: null };
+          }
+          return {
+            verdict: detectVolumeSpike({
+              volumes: measuredVols,
+              baselineWindow: hotCfg.volumeSpike.baselineWindow,
+              spikeRatio: hotCfg.volumeSpike.spikeRatio,
+              minPoints: hotCfg.volumeSpike.minPoints,
+            }),
+            measuredVolume24h: pool.volume24hUsd,
+          };
+        });
       }
+
+      const burst = yield* detectHotVolumeBurst();
+      const volumeSpikeVerdict = burst.verdict;
+      const measuredVolume24h = burst.measuredVolume24h;
       const enterEval = evaluateHotWindowEnter({
         config: hotCfg,
         feeTvlRatio1h: datapiStats?.feeTvlRatio1h ?? null,
@@ -7276,16 +8753,25 @@ export const program = Effect.gen(function* () {
         volume24hUsd: measuredVolume24h,
       });
       if (enterEval.qualify) {
-        const burstEntry =
-          volumeSpikeVerdict !== null &&
-          volumeSpikeVerdict.isSpike &&
-          (datapiStats?.feeTvlRatio1h ?? 0) < hotCfg.printingRatio1h;
+        const burstEntry = isHotBurstEntry(
+          volumeSpikeVerdict,
+          datapiStats?.feeTvlRatio1h,
+          hotCfg.printingRatio1h,
+        );
         return {
           hotEnter: {
             action: "ENTER",
             poolAddress,
             confidence: 0.7,
-            reasoning: `[hot-window${burstEntry ? ":burst" : ""}] ${burstEntry ? `volume burst x${volumeSpikeVerdict!.ratio.toFixed(1)} vs baseline` : `pool printing (1h ratio ${(datapiStats?.feeTvlRatio1h ?? 0).toFixed(2)}%/h)`}, depth $${pool.tvlUsd.toFixed(0)}, size $${enterEval.sizeUsd.toFixed(0)}, trips ${tripsToday}/${hotCfg.maxTripsPerDay}`,
+            reasoning: buildHotEnterReasoning(
+              burstEntry,
+              volumeSpikeVerdict?.ratio ?? null,
+              datapiStats?.feeTvlRatio1h,
+              pool.tvlUsd,
+              enterEval.sizeUsd,
+              tripsToday,
+              hotCfg.maxTripsPerDay,
+            ),
             positionSizeUsd: enterEval.sizeUsd,
             positionMode: "hot-window",
           } as const,
@@ -7306,25 +8792,24 @@ export const program = Effect.gen(function* () {
   function buildHotWindowConfig(): HotWindowCycleConfig {
     return {
       enabled: true,
-      entrySizeUsd: config.hotWindowEntrySizeUsd ?? 30,
-      maxPoolTvlUsd: config.hotWindowMaxPoolTvlUsd ?? 25_000,
-      minPoolTvlUsd: config.hotWindowMinPoolTvlUsd ?? 500,
-      printingRatio1h: config.hotWindowPrintingRatio1h ?? 1,
+      ...resolveHotWindowSizeBand(
+        config.hotWindowEntrySizeUsd,
+        config.hotWindowMaxPoolTvlUsd,
+        config.hotWindowMinPoolTvlUsd,
+        config.hotWindowPrintingRatio1h,
+      ),
       minSharePct: config.hotWindowMinSharePct ?? 0.005,
       maxSharePct: config.hotWindowMaxSharePct ?? 0.05,
       holdMaxMs: config.hotWindowHoldMaxMs ?? 1_800_000,
       maxTripsPerDay: config.hotWindowMaxTripsPerDay ?? 30,
       dailyLossHaltUsd: config.hotWindowDailyLossHaltUsd ?? 3,
       maxOpen: config.hotWindowMaxOpen ?? 2,
-      volumeSpike:
-        config.flashVolumeTriggerEnabled === true
-          ? {
-              baselineWindow: config.flashBaselineWindow ?? 8,
-              spikeRatio: config.flashMinSpikeRatio ?? 2.5,
-              minPoints: 5,
-              minVolumeUsd: config.flashMinVolumeUsd ?? 10_000,
-            }
-          : undefined,
+      volumeSpike: buildHotWindowVolumeSpike(
+        config.flashVolumeTriggerEnabled,
+        config.flashBaselineWindow,
+        config.flashMinSpikeRatio,
+        config.flashMinVolumeUsd,
+      ),
     };
   }
 
@@ -7345,25 +8830,35 @@ export const program = Effect.gen(function* () {
       const hotDecisions = evaluateHotWindowExits(hotPositions, hotCfg, nowMs, dayState.halted);
       // ENTER a currently-printing, correctly-sized pool (only when this pool
       // holds no hot position and carries no non-hot position this cycle).
-      let hotEnter: AgentDecision | null = null;
-      // Per-cycle funnel counters — the lane's observable answer to "why did
-      // the hot window admit nothing". Logged once per pool.
-      let hotSkipReason: string | null = null;
-      if (hotPositions.length > 0) {
-        hotSkipReason = "already-holding-hot";
-      } else if (dayState.halted) {
-        hotSkipReason = "daily-loss-halt";
-      } else if (nonHotHeld) {
-        hotSkipReason = "non-hot-held";
-      } else {
-        const openHot = Array.from(trackedPositions.values()).filter(
-          (p) => p.positionMode === "hot-window",
-        ).length;
-        if (openHot >= hotCfg.maxOpen) {
-          hotSkipReason = "open-cap";
-        } else if (dayState.tripsToday >= hotCfg.maxTripsPerDay) {
-          hotSkipReason = "trip-budget";
-        } else {
+      function resolveHotEnter(
+        hotPositions: PositionRecord[],
+        nonHotHeld: boolean,
+        dayState: { readonly halted: boolean; readonly tripsToday: number },
+        hotCfg: HotWindowCycleConfig,
+        nowMs: number,
+      ): Effect.Effect<
+        { readonly hotEnter: AgentDecision | null; readonly hotSkipReason: string | null },
+        never
+      > {
+        return Effect.gen(function* () {
+          if (hotPositions.length > 0) {
+            return { hotEnter: null, hotSkipReason: "already-holding-hot" };
+          }
+          if (dayState.halted) {
+            return { hotEnter: null, hotSkipReason: "daily-loss-halt" };
+          }
+          if (nonHotHeld) {
+            return { hotEnter: null, hotSkipReason: "non-hot-held" };
+          }
+          const openHot = Array.from(trackedPositions.values()).filter(
+            (p) => p.positionMode === "hot-window",
+          ).length;
+          if (openHot >= hotCfg.maxOpen) {
+            return { hotEnter: null, hotSkipReason: "open-cap" };
+          }
+          if (dayState.tripsToday >= hotCfg.maxTripsPerDay) {
+            return { hotEnter: null, hotSkipReason: "trip-budget" };
+          }
           const entered = yield* qualifyHotWindowEnter(
             poolAddress,
             pool,
@@ -7372,10 +8867,22 @@ export const program = Effect.gen(function* () {
             nowMs,
             dayState.tripsToday,
           );
-          hotEnter = entered.hotEnter;
-          hotSkipReason = entered.hotEnter ? null : entered.hotSkipReason;
-        }
+          return {
+            hotEnter: entered.hotEnter,
+            hotSkipReason: entered.hotEnter ? null : entered.hotSkipReason,
+          };
+        });
       }
+
+      const hotEnterState = yield* resolveHotEnter(
+        hotPositions,
+        nonHotHeld,
+        dayState,
+        hotCfg,
+        nowMs,
+      );
+      const hotEnter = hotEnterState.hotEnter;
+      const hotSkipReason = hotEnterState.hotSkipReason;
       // Funnel audit: every pool the lane does not enter gets one
       // attributable skip line so the idle lane is never a silent black box.
       if (hotSkipReason !== null) {
@@ -7405,6 +8912,197 @@ export const program = Effect.gen(function* () {
         return hotDecisions;
       }
       return null;
+    });
+  }
+
+  /** Net active-bin drift + realized volatility over the recent-bin ring. */
+  interface PoolDriftMetrics {
+    readonly netDriftBins: number;
+    readonly volatilityStddev: number;
+    readonly volatilityBins: ReadonlyArray<number>;
+    readonly recentBins: ReadonlyArray<number>;
+  }
+  function resolvePoolDriftMetrics(
+    binHistory: ReadonlyMap<string, ReadonlyArray<number>>,
+    poolAddress: string,
+    volatilityLookbackSnapshots: number,
+  ): PoolDriftMetrics {
+    const recentBins = binHistory.get(poolAddress) ?? [];
+    // Net active-bin drift over the recent-bin ring — the momentum signal
+    // shared by the entry-shape resolution, the drift gate, and runner
+    // admission. Null when the pool has no bin history (cold start): runner
+    // admission fails OPEN on unknown drift (it cannot prove a decline).
+    const netDriftBins =
+      recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0;
+    const lookback = Math.max(2, volatilityLookbackSnapshots);
+    const volatilityBins =
+      recentBins.length > lookback ? recentBins.slice(recentBins.length - lookback) : recentBins;
+    return {
+      netDriftBins,
+      volatilityStddev: computeBinVolatilityStddev(volatilityBins),
+      volatilityBins,
+      recentBins,
+    };
+  }
+  /** Deposit distribution for entries: configured shape as-is; auto picks from volatility regime. */
+  function resolveEntryStrategySpec(
+    entryStrategyType: EntryStrategyType,
+    volatilityStddev: number,
+    highVolThreshold: number,
+    netDriftBins: number,
+  ): EntryStrategySpec {
+    if (entryStrategyType !== "auto") return entryStrategyType;
+    return recommendStrategy({ volatilityStddev, highVolThreshold, netDriftBins });
+  }
+
+  /** Tail target: the decision's position plus pool-level open state. */
+  interface TailPosition {
+    readonly pos: PositionRecord | undefined;
+    readonly hasOpenPosition: boolean;
+  }
+  function resolveTailPosition(
+    trackedPositions: Map<string, PositionRecord>,
+    decision: AgentDecision,
+    poolAddress: string,
+  ): TailPosition {
+    return {
+      pos:
+        decision.positionId !== undefined ? trackedPositions.get(decision.positionId) : undefined,
+      hasOpenPosition: positionsForPool(trackedPositions, poolAddress).length > 0,
+    };
+  }
+
+  /**
+   * Per-decision tail: overlay → supervised → risk → execution → audit.
+   * Decisions run sequentially so a queued proposal consumed by one decision
+   * is gone for the next, and executions mutate tracking deterministically
+   * (per-position decisions first, ENTER last). An empty hold short-circuits.
+   */
+  function processDecisionTail(
+    rawDecisions: ReadonlyArray<AgentDecision>,
+    poolAddress: string,
+    trackedPositions: Map<string, PositionRecord>,
+    finalDecisions: Array<AgentDecision>,
+    proposalBackoff: Map<string, ProposalBackoff>,
+    getPoolCircuitBreaker: (poolAddress: string) => ProposalCircuitBreaker,
+    runDecisionPreRisk: (
+      decision: AgentDecision,
+      pos: PositionRecord | undefined,
+      hasOpenPosition: boolean,
+    ) => Effect.Effect<
+      {
+        decision: AgentDecision;
+        appliedQueuedProposalId: string | undefined;
+        appliedAgentProposal: boolean;
+        proposalValidated: boolean;
+        preApplyDecision: AgentDecision | undefined;
+      },
+      Error
+    >,
+    evaluateDecisionRisk: (
+      decision: AgentDecision,
+      pos: PositionRecord | undefined,
+      appliedAgentProposal: boolean,
+      preApplyDecision: AgentDecision | undefined,
+      appliedQueuedProposalId: string | undefined,
+    ) => Effect.Effect<{ decision: AgentDecision; riskResult: RiskResult; denied: boolean }, Error>,
+    executeDecisionTail: (
+      decision: AgentDecision,
+      riskResult: RiskResult,
+      pos: PositionRecord | undefined,
+      appliedQueuedProposalId: string | undefined,
+    ) => Effect.Effect<
+      {
+        done: boolean;
+        executed: boolean;
+        executionError: string | undefined;
+        executionSkipped: boolean;
+        movedLiveFunds: boolean;
+        movedLiveFundsFromEnter: boolean;
+      },
+      Error
+    >,
+    refreshPostExecutionWallet: (
+      decision: AgentDecision,
+      executed: boolean,
+      movedLiveFunds: boolean,
+      movedLiveFundsFromEnter: boolean,
+    ) => Effect.Effect<void, Error>,
+    recordPostExecutionAudit: (
+      decision: AgentDecision,
+      executed: boolean,
+      executionError: string | undefined,
+      executionSkipped: boolean,
+    ) => Effect.Effect<void, Error>,
+    updatePostExecutionBookkeeping: (
+      decision: AgentDecision,
+      executed: boolean,
+      executionError: string | undefined,
+      pos: PositionRecord | undefined,
+      appliedQueuedProposalId: string | undefined,
+      riskResult: RiskResult,
+    ) => Effect.Effect<void, Error>,
+  ): Effect.Effect<void, Error> {
+    return Effect.gen(function* () {
+      for (const rawDecision of rawDecisions) {
+        let decision = rawDecision;
+        // The position this decision targets (EXIT/REBALANCE/HOLD). ENTER and
+        // the default positionless HOLD have none. Re-resolved against the
+        // live map so executions always act on current state.
+        const { pos, hasOpenPosition } = resolveTailPosition(
+          trackedPositions,
+          decision,
+          poolAddress,
+        );
+        const preRisk = yield* runDecisionPreRisk(decision, pos, hasOpenPosition);
+        decision = preRisk.decision;
+        const riskOutcome = yield* evaluateDecisionRisk(
+          decision,
+          pos,
+          preRisk.appliedAgentProposal,
+          preRisk.preApplyDecision,
+          preRisk.appliedQueuedProposalId,
+        );
+        decision = riskOutcome.decision;
+        const riskResult = riskOutcome.riskResult;
+        if (riskOutcome.denied) continue;
+        // Any validated proposal that survives risk is a usable advisor response:
+        // clear per-pool backoff and reset the breaker, including no-op echoes.
+        recordAppliedProposalRiskApproval({
+          proposalValidated: preRisk.proposalValidated,
+          proposalBackoff,
+          recordCircuitSuccess: () => getPoolCircuitBreaker(poolAddress).recordSuccess(),
+          poolAddress,
+        });
+        const execResult = yield* executeDecisionTail(
+          decision,
+          riskResult,
+          pos,
+          preRisk.appliedQueuedProposalId,
+        );
+        if (execResult.done) continue;
+        yield* refreshPostExecutionWallet(
+          decision,
+          execResult.executed,
+          execResult.movedLiveFunds,
+          execResult.movedLiveFundsFromEnter,
+        );
+        yield* recordPostExecutionAudit(
+          decision,
+          execResult.executed,
+          execResult.executionError,
+          execResult.executionSkipped,
+        );
+        yield* updatePostExecutionBookkeeping(
+          decision,
+          execResult.executed,
+          execResult.executionError,
+          pos,
+          preRisk.appliedQueuedProposalId,
+          riskResult,
+        );
+        finalDecisions.push(decision);
+      }
     });
   }
 
@@ -7580,22 +9278,32 @@ export const program = Effect.gen(function* () {
           // pool's real 24h fees while the active bin sits in range. Do NOT
           // touch currentValueUsd: unrealized PnL already sums claimed fees
           // (pnl.ts), so crediting the value column too would double-add.
-          if (config.paperTrading && pos.positionPubKey == null && pool.statsSource === "datapi") {
-            const now = Date.now();
-            const lastAccrualAt = paperFeeAccrualAt.get(pos.positionId);
-            paperFeeAccrualAt.set(pos.positionId, now);
-            const deltaFeesUsd = computePaperFeeAccrualUsd({
-              fees24hUsd: pool.fees24hUsd,
-              tvlUsd: pool.tvlUsd,
-              depositedUsd: pos.depositedUsd,
-              activeBinId: pool.activeBinId,
-              lowerBinId: pos.lowerBinId,
-              upperBinId: pos.upperBinId,
-              firstCycle: lastAccrualAt == null,
-              elapsedMs: lastAccrualAt == null ? 0 : now - lastAccrualAt,
-              scanIntervalMs: config.scanIntervalMs,
-            });
-            if (deltaFeesUsd > 0) {
+          function accruePaperPositionFees(): Effect.Effect<void, never> {
+            return Effect.gen(function* () {
+              if (
+                !(
+                  config.paperTrading &&
+                  pos.positionPubKey == null &&
+                  pool.statsSource === "datapi"
+                )
+              ) {
+                return;
+              }
+              const now = Date.now();
+              const lastAccrualAt = paperFeeAccrualAt.get(pos.positionId);
+              paperFeeAccrualAt.set(pos.positionId, now);
+              const deltaFeesUsd = computePaperFeeAccrualUsd({
+                fees24hUsd: pool.fees24hUsd,
+                tvlUsd: pool.tvlUsd,
+                depositedUsd: pos.depositedUsd,
+                activeBinId: pool.activeBinId,
+                lowerBinId: pos.lowerBinId,
+                upperBinId: pos.upperBinId,
+                firstCycle: lastAccrualAt == null,
+                elapsedMs: lastAccrualAt == null ? 0 : now - lastAccrualAt,
+                scanIntervalMs: config.scanIntervalMs,
+              });
+              if (deltaFeesUsd <= 0) return;
               pos.cumulativeFeesClaimedUsd += deltaFeesUsd;
               yield* db
                 .savePositionEvent({
@@ -7611,8 +9319,10 @@ export const program = Effect.gen(function* () {
                   createdAt: now,
                 })
                 .pipe(Effect.catch(() => Effect.void));
-            }
+            });
           }
+
+          yield* accruePaperPositionFees();
           yield* persist(`savePosition ${pos.positionId}`, db.savePosition(pos));
         });
       }
@@ -7656,9 +9366,12 @@ export const program = Effect.gen(function* () {
             const ilUsd = hodlValueUsd - pos.currentValueUsd;
             const feesClaimedUsd = pos.cumulativeFeesClaimedUsd;
             if (
-              ilUsd > 0 &&
-              ilUsd > feesClaimedUsd * (config.ilDominanceExitFactor ?? 2) &&
-              ilUsd > (config.ilDominanceMinUsd ?? 5)
+              isIlDominant(
+                ilUsd,
+                feesClaimedUsd,
+                config.ilDominanceExitFactor,
+                config.ilDominanceMinUsd,
+              )
             ) {
               return { ilUsd, hodlValueUsd, feesClaimedUsd };
             }
@@ -7727,14 +9440,11 @@ export const program = Effect.gen(function* () {
       // volume-decay gate. A non-datapi source degrades the gate with a bounded
       // per-position warning; datapi-up-but-window-missing is routine debug.
       function measureLaunchFees1h(pos: PositionRecord): LaunchFees1h {
-        const currentFees1hUsd =
-          pool.statsSource === "datapi" &&
-          datapiStats !== null &&
-          datapiStats.feeTvlRatio1h !== null &&
-          Number.isFinite(datapiStats.feeTvlRatio1h) &&
-          pool.tvlUsd > 0
-            ? (datapiStats.feeTvlRatio1h / 100) * pool.tvlUsd
-            : null;
+        const currentFees1hUsd = measureCurrentLaunchFees1h(
+          pool.statsSource,
+          datapiStats?.feeTvlRatio1h ?? null,
+          pool.tvlUsd,
+        );
         if (currentFees1hUsd === null) {
           if (pool.statsSource !== "datapi") {
             logger.warn("Launch position: 1h fees unmeasured — volume-decay gate degraded", {
@@ -7749,11 +9459,12 @@ export const program = Effect.gen(function* () {
             });
           }
         }
-        const prevPeak = launchPeakFees1h.get(pos.positionId);
-        if (currentFees1hUsd !== null && (prevPeak === undefined || currentFees1hUsd > prevPeak)) {
-          launchPeakFees1h.set(pos.positionId, currentFees1hUsd);
-        }
-        return { currentFees1hUsd, peakFees1hUsd: launchPeakFees1h.get(pos.positionId) ?? null };
+        const peakFees1hUsd = trackLaunchFeePeak(
+          launchPeakFees1h,
+          pos.positionId,
+          currentFees1hUsd,
+        );
+        return { currentFees1hUsd, peakFees1hUsd };
       }
 
       // Launch lifecycle (Launch Mode v2): time-box, 1h-fee volume-decay,
@@ -7766,13 +9477,25 @@ export const program = Effect.gen(function* () {
         fees: LaunchFees1h,
       ): string {
         if (launchReason === "timebox") {
-          return `age ${((Date.now() - pos.timestamp) / 3.6e6).toFixed(1)}h >= ${config.launchTimeboxHours ?? 6}h`;
+          return describeLaunchTimeboxExit(pos.timestamp, config.launchTimeboxHours);
         }
         if (launchReason === "volume-decay") {
-          return `1h fees $${(fees.currentFees1hUsd ?? 0).toFixed(2)} < ${(config.launchVolumeDecayExitPct ?? 0.1) * 100}% of peak $${(fees.peakFees1hUsd ?? 0).toFixed(2)}`;
+          return describeLaunchVolumeDecayExit(
+            fees.currentFees1hUsd,
+            config.launchVolumeDecayExitPct,
+            fees.peakFees1hUsd,
+          );
         }
         if (launchReason === "drawdown") {
-          return `value $${pos.currentValueUsd.toFixed(2)} <= ${(1 - (pos.launchRunner === true ? (config.launchRunnerDrawdownPct ?? 0.25) : (config.launchExitDrawdownPct ?? 0.25))) * 100}% of peak $${(pos.highestValueUsd ?? 0).toFixed(2)}`;
+          return describeLaunchDrawdownExit(
+            pos.currentValueUsd,
+            resolveLaunchDrawdownPct(
+              pos.launchRunner,
+              config.launchRunnerDrawdownPct,
+              config.launchExitDrawdownPct,
+            ),
+            pos.highestValueUsd,
+          );
         }
         if (launchReason === "fee-il") {
           return `fee/IL ${metrics.feeIlRatio.toFixed(2)} < 0.5`;
@@ -7789,10 +9512,11 @@ export const program = Effect.gen(function* () {
           volumeDecayExitPct: config.launchVolumeDecayExitPct ?? 0.1,
           // Runner mode uses the shakeout-tolerant drawdown; otherwise the crash
           // calibration applies.
-          drawdownPct:
-            pos.launchRunner === true
-              ? (config.launchRunnerDrawdownPct ?? 0.25)
-              : (config.launchExitDrawdownPct ?? 0.25),
+          drawdownPct: resolveLaunchDrawdownPct(
+            pos.launchRunner,
+            config.launchRunnerDrawdownPct,
+            config.launchExitDrawdownPct,
+          ),
           currentFees1hUsd: fees.currentFees1hUsd,
           peakFees1hUsd: fees.peakFees1hUsd,
           currentValueUsd: pos.currentValueUsd,
@@ -7850,30 +9574,30 @@ export const program = Effect.gen(function* () {
           // Reserve the SOL the top-up costs (autonomous canary/live
           // swaps SOL for a non-SOL quote leg): skip — never force —
           // when the batch budget cannot cover it, exactly like ENTER.
-          const solCostLamports = solFundedEntryMode
-            ? estimateEntrySolLamports({
-                positionSizeUsd: topUpUsd,
-                solPriceUsd: config.solPriceUsd,
-                poolHasSolLeg: pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT,
-                solFunded: true,
-              })
-            : 0n;
-          if (solCostLamports > 0n && entrySolBudgetLamports < solCostLamports) {
+          const solCostLamports = resolveScaleInSolCost(
+            solFundedEntryMode,
+            topUpUsd,
+            config.solPriceUsd,
+            pool.tokenX === SOL_MINT || pool.tokenY === SOL_MINT,
+          );
+          function reserveScaleInSol(solCostLamports: bigint): boolean {
+            if (solCostLamports <= 0n) return true;
+            if (entrySolBudgetLamports < solCostLamports) return false;
+            entrySolBudgetLamports -= solCostLamports;
+            return true;
+          }
+          if (!reserveScaleInSol(solCostLamports)) {
             logger.info("Runner scale-in skipped — SOL budget insufficient", {
               pool: poolAddress,
               position: pos.positionId,
             });
             return null;
           }
-          if (solCostLamports > 0n) entrySolBudgetLamports -= solCostLamports;
-          const dipOffset = dipOffsetBinsForPct(pool.binStep, config.launchRunnerDipPct ?? 0.12);
-          const runnerWidth = Math.max(
-            1,
-            Math.min(
-              config.launchRunnerHalfWidthBins ?? 5,
-              Math.abs(dipOffset) - 1,
-              Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
-            ),
+          const dipOffset = resolveRunnerDipOffset(pool.binStep, config.launchRunnerDipPct);
+          const runnerWidth = clampRunnerHalfWidth(
+            dipOffset,
+            config.launchRunnerHalfWidthBins,
+            config.maxRebalanceRangeBins,
           );
           // EMIT a position-targeted REBALANCE decision: the normal
           // executor runs it through risk.evaluate (safety pause),
@@ -7904,34 +9628,40 @@ export const program = Effect.gen(function* () {
         if (!(pos.launchRunner === true && config.launchRunnerScaleInEnabled !== false)) {
           return Effect.succeed(null);
         }
-        return Effect.gen(function* () {
-          const scaleInDecision = shouldScaleInRunner({
-            anchorPrice: pos.launchRunnerAnchorPrice ?? 0,
-            currentPrice: pool.currentPrice,
-            stepPct: config.launchRunnerScaleInStepPct ?? 0.05,
-            steps: pos.launchRunnerSteps ?? 0,
-            maxSteps: config.launchRunnerScaleInMaxSteps ?? 3,
+        function sizeRunnerTopUp(): number {
+          // Per-pool allocation headroom: a scale-in ADDS new capital to
+          // the pool's aggregate exposure — the same cap the risk tail
+          // applies to entries.
+          const poolExposureUsd = Array.from(trackedPositions.values())
+            .filter((p) => p.poolAddress === poolAddress)
+            .reduce((sum, p) => sum + p.currentValueUsd, 0);
+          const portfolioValueUsd =
+            lastWalletBalanceUsd +
+            Array.from(trackedPositions.values()).reduce((sum, p) => sum + p.currentValueUsd, 0);
+          const poolCapUsd = Math.max(
+            0,
+            (config.maxPerPoolAllocationPct ?? 0.4) * portfolioValueUsd - poolExposureUsd,
+          );
+          return scaleInTopUpUsd({
+            walletUsd: lastWalletBalanceUsd,
+            sizePct: config.launchRunnerScaleInSizePct ?? 0.25,
+            poolCapUsd,
+            maxTopUpUsd: config.launchPositionMaxSizeUsd ?? 100,
           });
+        }
+
+        return Effect.gen(function* () {
+          const scaleInDecision = shouldScaleInRunner(
+            resolveScaleInTrigger(
+              pos.launchRunnerAnchorPrice,
+              pool.currentPrice,
+              config.launchRunnerScaleInStepPct,
+              pos.launchRunnerSteps,
+              config.launchRunnerScaleInMaxSteps,
+            ),
+          );
           if (scaleInDecision.scale && pos.positionPubKey !== null) {
-            // Per-pool allocation headroom: a scale-in ADDS new capital to
-            // the pool's aggregate exposure — the same cap the risk tail
-            // applies to entries.
-            const poolExposureUsd = Array.from(trackedPositions.values())
-              .filter((p) => p.poolAddress === poolAddress)
-              .reduce((sum, p) => sum + p.currentValueUsd, 0);
-            const portfolioValueUsd =
-              lastWalletBalanceUsd +
-              Array.from(trackedPositions.values()).reduce((sum, p) => sum + p.currentValueUsd, 0);
-            const poolCapUsd = Math.max(
-              0,
-              (config.maxPerPoolAllocationPct ?? 0.4) * portfolioValueUsd - poolExposureUsd,
-            );
-            const topUpUsd = scaleInTopUpUsd({
-              walletUsd: lastWalletBalanceUsd,
-              sizePct: config.launchRunnerScaleInSizePct ?? 0.25,
-              poolCapUsd,
-              maxTopUpUsd: config.launchPositionMaxSizeUsd ?? 100,
-            });
+            const topUpUsd = sizeRunnerTopUp();
             const topUpAtomicX = yield* sizeScaleInTopUp(topUpUsd);
             if (topUpUsd >= 5 && topUpAtomicX > 0n) {
               return yield* emitScaleInDecision(
@@ -7988,36 +9718,37 @@ export const program = Effect.gen(function* () {
               poolAddress,
               positionId: pos.positionId,
               confidence: 1,
-              reasoning: `W15 fast EXIT: ${[
-                w15Signals.depeg ? "stablecoin depeg" : null,
-                w15Signals.liquidityDrain ? "liquidity drain" : null,
-              ]
-                .filter(Boolean)
-                .join(" + ")}`,
+              reasoning: buildW15ExitReasoning(w15Signals.depeg, w15Signals.liquidityDrain),
             } as const;
           }
-          if (ilDominance) {
-            yield* alertSvc.sendAlert({
-              type: "il_dominance",
-              severity: "critical",
-              message: `IL dominance EXIT on ${pool.tokenXSymbol}/${pool.tokenYSymbol} position ${pos.positionId}: IL $${ilDominance.ilUsd.toFixed(2)} exceeds ${config.ilDominanceExitFactor ?? 2}× fees ($${ilDominance.feesClaimedUsd.toFixed(2)})`,
-              poolAddress,
-              positionId: pos.positionId,
-              data: {
-                ilUsd: ilDominance.ilUsd,
-                hodlValueUsd: ilDominance.hodlValueUsd,
-                feesClaimedUsd: ilDominance.feesClaimedUsd,
-              },
+          function checkIlDominanceExit(): Effect.Effect<AgentDecision | null, Error> {
+            return Effect.gen(function* () {
+              if (!ilDominance) return null;
+              yield* alertSvc.sendAlert({
+                type: "il_dominance",
+                severity: "critical",
+                message: `IL dominance EXIT on ${pool.tokenXSymbol}/${pool.tokenYSymbol} position ${pos.positionId}: IL $${ilDominance.ilUsd.toFixed(2)} exceeds ${config.ilDominanceExitFactor ?? 2}× fees ($${ilDominance.feesClaimedUsd.toFixed(2)})`,
+                poolAddress,
+                positionId: pos.positionId,
+                data: {
+                  ilUsd: ilDominance.ilUsd,
+                  hodlValueUsd: ilDominance.hodlValueUsd,
+                  feesClaimedUsd: ilDominance.feesClaimedUsd,
+                },
+              });
+              return {
+                action: "EXIT",
+                poolAddress,
+                positionId: pos.positionId,
+                confidence: 1,
+                reasoning: `IL dominance: $${ilDominance.ilUsd.toFixed(2)} IL exceeds ${config.ilDominanceExitFactor ?? 2}× cumulative fees ($${ilDominance.feesClaimedUsd.toFixed(2)}) while out of range`,
+              } as const;
             });
-            return {
-              action: "EXIT",
-              poolAddress,
-              positionId: pos.positionId,
-              confidence: 1,
-              reasoning: `IL dominance: $${ilDominance.ilUsd.toFixed(2)} IL exceeds ${config.ilDominanceExitFactor ?? 2}× cumulative fees ($${ilDominance.feesClaimedUsd.toFixed(2)}) while out of range`,
-            } as const;
           }
-          if ((config.dustExitUsd ?? 0) > 0 && pos.currentValueUsd < (config.dustExitUsd ?? 0)) {
+
+          const ilExit = yield* checkIlDominanceExit();
+          if (ilExit) return ilExit;
+          if (isDustExit(config.dustExitUsd, pos.currentValueUsd)) {
             // Dust cleanup: a position whose REAL mark fell below the dust
             // threshold is dead capital — reclaim the slot for a real position.
             // Shadow mode records it; live mode closes it.
@@ -8026,33 +9757,39 @@ export const program = Effect.gen(function* () {
               poolAddress,
               positionId: pos.positionId,
               confidence: 1,
-              reasoning: `[dust-cleanup] Position value $${pos.currentValueUsd.toFixed(2)} below $${(config.dustExitUsd ?? 0).toFixed(2)} dust threshold — reclaiming slot`,
+              reasoning: buildDustExitReasoning(pos.currentValueUsd, config.dustExitUsd),
             } as const;
           }
-          if (tvlVelocity < -config.tvlDropExitPct) {
-            if (!poolExitFired) {
-              yield* memory
-                .upsert({
-                  category: "warning",
-                  content: `Pool ${poolAddress} TVL dropped sharply. Exit triggered.`,
-                  poolAddress,
-                })
-                .pipe(Effect.catch(() => Effect.void));
-            }
-            yield* sendAgentAlert(
-              "critical",
-              "tvl_drop",
-              `TVL dropped ${(Math.abs(tvlVelocity) * 100).toFixed(1)}% on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — capital protection EXIT triggered`,
-              { pool, metrics, position: pos },
-            );
-            return {
-              action: "EXIT",
-              poolAddress,
-              positionId: pos.positionId,
-              confidence: 0.85,
-              reasoning: `TVL dropped ${(Math.abs(tvlVelocity) * 100).toFixed(1)}% — capital protection exit`,
-            } as const;
+          function checkTvlDropExit(): Effect.Effect<AgentDecision | null, Error> {
+            return Effect.gen(function* () {
+              if (!(tvlVelocity < -config.tvlDropExitPct)) return null;
+              if (!poolExitFired) {
+                yield* memory
+                  .upsert({
+                    category: "warning",
+                    content: `Pool ${poolAddress} TVL dropped sharply. Exit triggered.`,
+                    poolAddress,
+                  })
+                  .pipe(Effect.catch(() => Effect.void));
+              }
+              yield* sendAgentAlert(
+                "critical",
+                "tvl_drop",
+                `TVL dropped ${(Math.abs(tvlVelocity) * 100).toFixed(1)}% on ${pool.tokenXSymbol}/${pool.tokenYSymbol} — capital protection EXIT triggered`,
+                { pool, metrics, position: pos },
+              );
+              return {
+                action: "EXIT",
+                poolAddress,
+                positionId: pos.positionId,
+                confidence: 0.85,
+                reasoning: `TVL dropped ${(Math.abs(tvlVelocity) * 100).toFixed(1)}% — capital protection exit`,
+              } as const;
+            });
           }
+
+          const tvlExit = yield* checkTvlDropExit();
+          if (tvlExit) return tvlExit;
           return null;
         });
       }
@@ -8200,14 +9937,25 @@ export const program = Effect.gen(function* () {
       function checkTrailingStopExit(
         pos: PositionRecord,
       ): Effect.Effect<AgentDecision | null, Error> {
+        function trackTrailingBreach(breached: boolean): number {
+          if (!breached) {
+            trailingStopBreachCount.delete(pos.positionId);
+            return 0;
+          }
+          const breaches = (trailingStopBreachCount.get(pos.positionId) ?? 0) + 1;
+          trailingStopBreachCount.set(pos.positionId, breaches);
+          return breaches;
+        }
+
         return Effect.gen(function* () {
           const estimatedValue = pos.currentValueUsd;
-          const highest = pos.highestValueUsd ?? pos.depositedUsd;
-          const drawdown = highest > 0 ? (highest - estimatedValue) / highest : 0;
+          const { highest, drawdown } = computeTrailingDrawdown(
+            pos.currentValueUsd,
+            pos.highestValueUsd,
+            pos.depositedUsd,
+          );
           const breached = drawdown > config.trailingStopPct;
-          const breaches = breached ? (trailingStopBreachCount.get(pos.positionId) ?? 0) + 1 : 0;
-          if (breached) trailingStopBreachCount.set(pos.positionId, breaches);
-          else trailingStopBreachCount.delete(pos.positionId);
+          const breaches = trackTrailingBreach(breached);
           if (breached && breaches >= config.trailingStopConfirmCycles) {
             return {
               action: "EXIT",
@@ -8221,8 +9969,7 @@ export const program = Effect.gen(function* () {
             // Only a genuinely non-breaching cycle emits the large-pnl warning;
             // a breached-but-unconfirmed cycle is on the path to a trailing-stop
             // EXIT and the confirmed critical alert — no warning spam first.
-            const pnlPct =
-              pos.depositedUsd > 0 ? (estimatedValue - pos.depositedUsd) / pos.depositedUsd : 0;
+            const pnlPct = computeUnrealizedPnlPct(pos.depositedUsd, estimatedValue);
             if (pnlPct < -0.15) {
               yield* sendAgentAlert(
                 "warning",
@@ -8308,19 +10055,8 @@ export const program = Effect.gen(function* () {
       // removes its own record.
       poolPositions = yield* reconcileExternalCloses(poolPositions);
 
-      const recentBins = binHistory.get(poolAddress) ?? [];
-      // Net active-bin drift over the recent-bin ring — the momentum signal
-      // shared by the entry-shape resolution, the drift gate, and runner
-      // admission. Null when the pool has no bin history (cold start): runner
-      // admission fails OPEN on unknown drift (it cannot prove a decline).
-      const netDriftBins =
-        recentBins.length >= 2 ? recentBins[recentBins.length - 1]! - recentBins[0]! : 0;
-      const volatilityLookback = Math.max(2, config.volatilityLookbackSnapshots);
-      const volatilityBins =
-        recentBins.length > volatilityLookback
-          ? recentBins.slice(recentBins.length - volatilityLookback)
-          : recentBins;
-      const volatilityStddev = computeBinVolatilityStddev(volatilityBins);
+      const { netDriftBins, volatilityStddev, volatilityBins, recentBins } =
+        resolvePoolDriftMetrics(binHistory, poolAddress, config.volatilityLookbackSnapshots);
 
       // Wave 9: resolve the entry/rebalance range half-width once per
       // pool-cycle — static baseline (ENTRY_RANGE_HALF_WIDTH_BINS or the
@@ -8387,16 +10123,13 @@ export const program = Effect.gen(function* () {
             .getPoolCooldown(poolAddress)
             .pipe(Effect.catch(() => Effect.succeed(null)));
           const existingOorCount = existingCooldown?.consecutiveOorExits ?? 0;
-          const isOorExit =
-            exitDecision.reasoning.includes("volatility") ||
-            (position &&
-              position.oorCycleCount >= config.oorGracePeriodCycles &&
-              position.oorCycleCount > 0);
-          const isLowYieldExit =
-            exitDecision.reasoning.includes("Fee/IL ratio") ||
-            exitDecision.reasoning.includes("Volume authenticity");
+          const cooldownTrigger = classifyExitCooldownTrigger(
+            exitDecision.reasoning,
+            position,
+            config.oorGracePeriodCycles,
+          );
 
-          if (isOorExit) {
+          if (cooldownTrigger === "oor") {
             const newOorCount = existingOorCount + 1;
             const cooldownDuration = computeCooldownForExit({
               trigger: "oor",
@@ -8415,7 +10148,7 @@ export const program = Effect.gen(function* () {
               reason: `OOR exit (#${newOorCount})`,
               consecutiveOorExits: newOorCount,
             };
-          } else if (isLowYieldExit) {
+          } else if (cooldownTrigger === "low-yield") {
             // Fee density is trusted ONLY from the Data API (the only source
             // of measured per-pool fees — same precedent as the paper fee
             // accrual gate above). Gecko fees are a binStep base-rate MODEL
@@ -8424,13 +10157,11 @@ export const program = Effect.gen(function* () {
             // datapi feeds the density scaling, everything else passes null
             // and keeps the static legacy duration. Deliberately NOT
             // isMeasuredStatsSource(), which would admit gecko.
-            const feeDensityPerDay =
-              pool.statsSource === "datapi" &&
-              pool.tvlUsd > 0 &&
-              Number.isFinite(pool.fees24hUsd) &&
-              pool.fees24hUsd >= 0
-                ? pool.fees24hUsd / pool.tvlUsd
-                : null;
+            const feeDensityPerDay = resolveFeeDensityPerDay(
+              pool.statsSource,
+              pool.tvlUsd,
+              pool.fees24hUsd,
+            );
             const cooldownDuration = computeCooldownForExit({
               trigger: "low-yield",
               consecutiveOorExits: existingOorCount,
@@ -8524,31 +10255,33 @@ export const program = Effect.gen(function* () {
         // IL are charged. When a launched runner no longer clears its
         // net-daily-yield floor after churn/IL/swap costs, exit it rather than
         // keep bleeding. Measured fees only; unmeasured size fails closed.
-        const isRunnerPosition = pos.launchRunner === true && pos.positionMode === "launch";
         if (
-          isRunnerPosition &&
-          config.marketScanRunnerEnabled === true &&
-          metrics.feeIlRatioKnown &&
-          (pos.currentValueUsd ?? pos.depositedUsd ?? 0) > 0
+          !isNetBleedCandidate(
+            pos.launchRunner,
+            pos.positionMode,
+            config.marketScanRunnerEnabled,
+            metrics.feeIlRatioKnown,
+            pos.currentValueUsd,
+            pos.depositedUsd,
+          )
         ) {
-          const sizeUsd = pos.currentValueUsd ?? pos.depositedUsd ?? 0;
-          const posHalfWidth =
-            Number.isFinite(positionHalfWidth) && positionHalfWidth > 0
-              ? positionHalfWidth
-              : rangeHalfWidth;
+          return { bleed: false, reason: "" };
+        }
+        {
+          const sizeUsd = resolveRunnerSizeUsd(pos.currentValueUsd, pos.depositedUsd);
+          const posHalfWidth = resolveRunnerHalfWidth(positionHalfWidth, rangeHalfWidth);
           const floorPct = config.runnerNetFloorPct ?? 1;
-          const netPct = runnerNetDailyPctAfterCosts({
-            fees24hUsd: pool.fees24hUsd,
-            poolTvlUsd: pool.tvlUsd,
-            positionSizeUsd: sizeUsd,
-            rangeHalfWidthBins: posHalfWidth,
-            binStep: pool.binStep,
+          const netPct = computePositionNetDailyPct(
+            pool.fees24hUsd,
+            pool.tvlUsd,
+            sizeUsd,
+            posHalfWidth,
+            pool.binStep,
             volatilityStddev,
-            swapCostPct: config.runnerSwapCostPct ?? 0.005,
-            harvestCostUsd: config.feeCaptureHarvestCostUsd ?? 0.01,
-            timeInRangePct: 1,
-            maxExitsPerDay: 86_400_000 / (config.scanIntervalMs ?? 600_000),
-          });
+            config.runnerSwapCostPct,
+            config.feeCaptureHarvestCostUsd,
+            config.scanIntervalMs,
+          );
           if (netPct < floorPct) {
             return {
               bleed: true,
@@ -8639,49 +10372,61 @@ export const program = Effect.gen(function* () {
         return Effect.gen(function* () {
           // Wave 9: adaptive mode replaces the binary high-vol widening with
           // the continuous σ-scaled width; disabled keeps the legacy behavior.
-          const recommended = config.volatilityAdaptiveRanges
-            ? strategy.recommendBinRange(pool.activeBinId, pool.binStep, rangeHalfWidth)
-            : highVol
-              ? recommendBinRangeForVolatility(
-                  pool.activeBinId,
-                  pool.binStep,
-                  true,
-                  config.volatilityWideHalfWidthBins,
-                  config.entryRangeHalfWidthBins > 0 ? config.entryRangeHalfWidthBins : undefined,
-                )
-              : strategy.recommendBinRange(pool.activeBinId, pool.binStep, rangeHalfWidth);
+          function recommendRebalanceRange() {
+            if (config.volatilityAdaptiveRanges) {
+              return strategy.recommendBinRange(pool.activeBinId, pool.binStep, rangeHalfWidth);
+            }
+            if (!highVol) {
+              return strategy.recommendBinRange(pool.activeBinId, pool.binStep, rangeHalfWidth);
+            }
+            return recommendBinRangeForVolatility(
+              pool.activeBinId,
+              pool.binStep,
+              true,
+              config.volatilityWideHalfWidthBins,
+              config.entryRangeHalfWidthBins > 0 ? config.entryRangeHalfWidthBins : undefined,
+            );
+          }
+
+          const recommended = recommendRebalanceRange();
           // Simulation-first: live mode runs the SDK's atomic-rebalance
           // simulation against the real position; on any simulation/transport
           // failure the gate fails closed (no rebalance this cycle).
-          const sim = config.paperTrading
-            ? estimatePaperRebalanceBenefit({
-                fees24hUsd: pool.fees24hUsd,
-                newLowerBinId: recommended.lowerBinId,
-                newUpperBinId: recommended.upperBinId,
-              })
-            : pos.positionPubKey
-              ? yield* adapter
-                  .simulateRebalance(
-                    poolAddress,
-                    pos.positionPubKey,
-                    recommended.lowerBinId,
-                    recommended.upperBinId,
-                  )
-                  .pipe(
-                    Effect.catch((err) =>
-                      Effect.sync(() => {
-                        logger.warn(
-                          "Rebalance simulation failed — holding position (fail-closed)",
-                          {
-                            pool: poolAddress,
-                            error: err instanceof Error ? err.message : String(err),
-                          },
-                        );
-                        return null;
-                      }),
-                    ),
-                  )
-              : null;
+          function simulateRebalanceOutcome(recommended: {
+            readonly lowerBinId: number;
+            readonly upperBinId: number;
+          }) {
+            if (config.paperTrading) {
+              return Effect.succeed(
+                estimatePaperRebalanceBenefit({
+                  fees24hUsd: pool.fees24hUsd,
+                  newLowerBinId: recommended.lowerBinId,
+                  newUpperBinId: recommended.upperBinId,
+                }),
+              );
+            }
+            if (!pos.positionPubKey) return Effect.succeed(null);
+            return adapter
+              .simulateRebalance(
+                poolAddress,
+                pos.positionPubKey,
+                recommended.lowerBinId,
+                recommended.upperBinId,
+              )
+              .pipe(
+                Effect.catch((err) =>
+                  Effect.sync(() => {
+                    logger.warn("Rebalance simulation failed — holding position (fail-closed)", {
+                      pool: poolAddress,
+                      error: err instanceof Error ? err.message : String(err),
+                    });
+                    return null;
+                  }),
+                ),
+              );
+          }
+
+          const sim = yield* simulateRebalanceOutcome(recommended);
           if (sim === null) {
             yield* memory
               .upsert({
@@ -8699,10 +10444,7 @@ export const program = Effect.gen(function* () {
           // Use currentValueUsd (not depositedUsd) so the share reflects the
           // position's present value. Unknown value falls back to 0 which
           // makes the gas gate reject — a conservative default.
-          const positionSharePct =
-            pool.tvlUsd > 0 && pos.currentValueUsd > 0
-              ? Math.min(pos.currentValueUsd / pool.tvlUsd, 1)
-              : 0;
+          const positionSharePct = resolvePositionSharePct(pool.tvlUsd, pos.currentValueUsd);
           const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
           const gasGate = evaluateGasGate({
             rebalanceGasCostSol: config.rebalanceGasCostSol,
@@ -8778,10 +10520,16 @@ export const program = Effect.gen(function* () {
               .pipe(Effect.catch(() => Effect.void));
             return null;
           }
-          if (
-            sim.netBenefitUsd > config.minRebalanceNetBenefitUsd ||
-            recoveryProb <= config.oorRecoveryForceRebalanceThreshold
-          ) {
+          function buildPhase2RebalanceDecision(
+            recoveryProb: number,
+            netBenefitUsd: number,
+          ): AgentDecision | null {
+            if (
+              netBenefitUsd <= config.minRebalanceNetBenefitUsd &&
+              recoveryProb > config.oorRecoveryForceRebalanceThreshold
+            ) {
+              return null;
+            }
             const forceRebalance = recoveryProb <= config.oorRecoveryForceRebalanceThreshold;
             return {
               action: "REBALANCE",
@@ -8790,7 +10538,7 @@ export const program = Effect.gen(function* () {
               confidence: Math.min(0.7 + feeIlRatio * 0.1, 0.9),
               reasoning: forceRebalance
                 ? `[recovery-gate] force-rebalance — probability ${recoveryProb.toFixed(2)} <= ${config.oorRecoveryForceRebalanceThreshold}. Drift ${(driftPct * 100).toFixed(0)}%`
-                : `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${sim.netBenefitUsd.toFixed(2)}`,
+                : `Drift ${(driftPct * 100).toFixed(0)}%. Net benefit: $${netBenefitUsd.toFixed(2)}`,
               rebalanceParams: {
                 newLowerBinId: recommended.lowerBinId,
                 newUpperBinId: recommended.upperBinId,
@@ -8798,7 +10546,8 @@ export const program = Effect.gen(function* () {
               },
             } as const;
           }
-          return null;
+
+          return buildPhase2RebalanceDecision(recoveryProb, sim.netBenefitUsd);
         });
       }
 
@@ -8897,17 +10646,26 @@ export const program = Effect.gen(function* () {
       // and re-reject verbatim), so no gate they guard can be bypassed.
       const evaluateIdleRedeployCandidate = (): IdleRedeployCandidate | null => {
         if (
-          (metrics.feeIlRatioKnown ? feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 : true) &&
-          metrics.volumeAuthenticityKnown &&
-          volumeAuth > 0.8 &&
-          metrics.binUtilizationKnown &&
-          binUtilization > 0.4 &&
-          pool.tvlUsd > config.minPoolTvlUsd * 2
+          passesMeasuredCandidateGates(
+            metrics.feeIlRatioKnown,
+            feeIlRatio,
+            evolvedThresholds.minFeeIlRatio,
+            metrics.volumeAuthenticityKnown,
+            volumeAuth,
+            metrics.binUtilizationKnown,
+            binUtilization,
+            pool.tvlUsd,
+            config.minPoolTvlUsd,
+          )
         ) {
-          const entryScore = weightedEntryScore(momentumMetrics, signalWeights, {
-            referenceBins: config.entryMomentumReferenceBins ?? DEFAULT_MOMENTUM_REFERENCE_BINS,
-            scoreWeight: config.entryMomentumScoreWeight ?? DEFAULT_MOMENTUM_SCORE_WEIGHT,
-          });
+          const entryScore = weightedEntryScore(
+            momentumMetrics,
+            signalWeights,
+            resolveMomentumScoreArgs(
+              config.entryMomentumReferenceBins,
+              config.entryMomentumScoreWeight,
+            ),
+          );
           if (entryScore > config.weightedEntryScoreThreshold) {
             return {
               poolAddress,
@@ -9275,11 +11033,12 @@ export const program = Effect.gen(function* () {
           ) {
             return false;
           }
-          const faLadder = buildTpLadder(pool.currentPrice, {
-            rungs: config.fallenAngelTpRungs ?? [0.15, 0.3, 0.5],
-            fractions: config.fallenAngelTpFractions ?? [0.4, 0.3, 0.3],
-            invalidationStopPct: config.fallenAngelInvalidationStopPct ?? 0.25,
-          });
+          const faLadder = resolveFallenAngelLadder(
+            pool.currentPrice,
+            config.fallenAngelTpRungs,
+            config.fallenAngelTpFractions,
+            config.fallenAngelInvalidationStopPct,
+          );
           const faProposedSizeUsd = computeEntrySizeUsd({
             walletBalanceUsd,
             tvlUsd: pool.tvlUsd,
@@ -9343,32 +11102,42 @@ export const program = Effect.gen(function* () {
           // hours. This mirrors the normal-lane drift gate's signal so the
           // rejection is attributable instead of the pool silently falling
           // through to the generic gate.
-          if (
-            isMarketRunner(poolAddress) &&
-            netDriftBins < (config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS)
-          ) {
-            console.info(
-              `[runner-drift-gate] Rejecting runner ENTER ${poolAddress} — net drift ${netDriftBins} bins < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
-            );
-            yield* audit
-              .recordDecision({
-                timestamp: Date.now(),
-                cycleId,
-                poolAddress,
-                action: "ENTER",
-                confidence: 0,
-                reasoning: `[runner-drift-gate] runner net drift ${netDriftBins} bins below ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS} — sustained decliner, not a dip`,
-                metrics,
-                riskResult: {
-                  approved: false,
-                  reason: `[runner-drift-gate] drift ${netDriftBins} < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
-                },
-                executed: false,
-                paperTrading: config.paperTrading,
-              })
-              .pipe(Effect.catch(() => Effect.void));
-            return true;
+          function checkRunnerDriftGate(): Effect.Effect<boolean, never> {
+            return Effect.gen(function* () {
+              if (
+                !(
+                  isMarketRunner(poolAddress) &&
+                  netDriftBins <
+                    (config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS)
+                )
+              ) {
+                return false;
+              }
+              console.info(
+                `[runner-drift-gate] Rejecting runner ENTER ${poolAddress} — net drift ${netDriftBins} bins < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
+              );
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: 0,
+                  reasoning: `[runner-drift-gate] runner net drift ${netDriftBins} bins below ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS} — sustained decliner, not a dip`,
+                  metrics,
+                  riskResult: {
+                    approved: false,
+                    reason: `[runner-drift-gate] drift ${netDriftBins} < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
+                  },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              return true;
+            });
           }
+
+          if (yield* checkRunnerDriftGate()) return true;
 
           // [regime-gate] herding ENTER damper — ORCA's crash signature:
           // scanned pools moving in lockstep (high pairwise correlation /
@@ -9377,30 +11146,35 @@ export const program = Effect.gen(function* () {
           // THIS cycle only, every lane (a rotation executed under herding
           // churns capital twice inside the danger window); EXIT/REBALANCE
           // are untouched. Fail-open: unknown regime never blocks.
-          if (cycleHerdingBlock) {
-            console.info(
-              `[regime-gate] Blocking ENTER ${poolAddress} — cross-pool herding above threshold`,
-            );
-            yield* audit
-              .recordDecision({
-                timestamp: Date.now(),
-                cycleId,
-                poolAddress,
-                action: "ENTER",
-                confidence: 0,
-                reasoning:
-                  "[regime-gate] cross-pool herding above threshold — systemic-stress window, no new capital",
-                metrics,
-                riskResult: {
-                  approved: false,
-                  reason: "[regime-gate] herding",
-                },
-                executed: false,
-                paperTrading: config.paperTrading,
-              })
-              .pipe(Effect.catch(() => Effect.void));
-            return true;
+          function checkRegimeEnterGate(): Effect.Effect<boolean, never> {
+            return Effect.gen(function* () {
+              if (!cycleHerdingBlock) return false;
+              console.info(
+                `[regime-gate] Blocking ENTER ${poolAddress} — cross-pool herding above threshold`,
+              );
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: 0,
+                  reasoning:
+                    "[regime-gate] cross-pool herding above threshold — systemic-stress window, no new capital",
+                  metrics,
+                  riskResult: {
+                    approved: false,
+                    reason: "[regime-gate] herding",
+                  },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              return true;
+            });
           }
+
+          if (yield* checkRegimeEnterGate()) return true;
 
           // [drift-gate] negative-drift ENTER rejection — a pool trending DOWN
           // hard (net active-bin drift below MARKET_SCAN_MAX_NEGATIVE_DRIFT_BINS
@@ -9414,77 +11188,85 @@ export const program = Effect.gen(function* () {
           // to this gate. Launch-lane entries (young pools have no bin history
           // to drift) stay exempt; fallen-angel consumed the slot above — its
           // thesis IS post-drawdown entry. Applies to the NORMAL/market lane only.
-          if (
-            !isMarketRunner(poolAddress) &&
-            !launchScanPools.has(poolAddress) &&
-            driftGateRejected(
-              netDriftBins,
-              config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS,
-            )
-          ) {
-            console.info(
-              `[drift-gate] Rejecting ENTER ${poolAddress} — net drift ${netDriftBins} bins < ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS}`,
-            );
-            yield* audit
-              .recordDecision({
-                timestamp: Date.now(),
-                cycleId,
-                poolAddress,
-                action: "ENTER",
-                confidence: 0,
-                reasoning: `[drift-gate] net drift ${netDriftBins} bins below ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS} — falling price, no momentum entry`,
-                metrics,
-                riskResult: {
-                  approved: false,
-                  reason: `[drift-gate] drift ${netDriftBins} < ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS}`,
-                },
-                executed: false,
-                paperTrading: config.paperTrading,
-              })
-              .pipe(Effect.catch(() => Effect.void));
-            return true;
+          function checkDriftEnterGate(): Effect.Effect<boolean, never> {
+            return Effect.gen(function* () {
+              if (
+                !(
+                  !isMarketRunner(poolAddress) &&
+                  !launchScanPools.has(poolAddress) &&
+                  driftGateRejected(
+                    netDriftBins,
+                    config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS,
+                  )
+                )
+              ) {
+                return false;
+              }
+              console.info(
+                `[drift-gate] Rejecting ENTER ${poolAddress} — net drift ${netDriftBins} bins < ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS}`,
+              );
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: 0,
+                  reasoning: `[drift-gate] net drift ${netDriftBins} bins below ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS} — falling price, no momentum entry`,
+                  metrics,
+                  riskResult: {
+                    approved: false,
+                    reason: `[drift-gate] drift ${netDriftBins} < ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS}`,
+                  },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              return true;
+            });
           }
+
+          if (yield* checkDriftEnterGate()) return true;
 
           // [fee-il-gate] hard ENTER floor — expected fees must beat IL. Active
           // only when IL protection is enabled. feeIlRatio is never null
           // (0-20, strategy-service.ts) so the numeric compare is fail-closed
           // on 0 for REAL stats; a pool whose fees cannot cover estimated IL
           // never enters. FULL PRINCIPLE — modeled/fabricated fee/IL is EXCLUDED
-          // from EVERY ENTER gate when feeIlRatioKnown=false (datapi-only): this
-          // hard floor, the ×1.5 candidate requirement below, and the
-          // weightedEntryScore fee term all SKIP the modeled ratio. Exclusion,
-          // not directional trust: gecko fees are a generic `0.0025 + binStep/1e4`
-          // base-rate MODEL (pool_fee_percentage is null for every CL pool) and
-          // the Data API exposes per-pool baseFeePct, so the generic model can
-          // OVERSTATE a pool's real base fee — the modeled ratio can OVERSTATE
-          // economics, so it must not vote in either direction. A gecko pool can
-          // still ENTER via the measured candidate conditions below (its volume
-          // IS real → volumeAuthenticityKnown=true). A heuristic pool still cannot
-          // enter (volume-unknown blocks the candidate gate).
-          if (
-            config.ilProtectionEnabled === true &&
-            metrics.feeIlRatioKnown &&
-            feeIlRatio < config.minFeeIlRatio
-          ) {
-            yield* audit
-              .recordDecision({
-                timestamp: Date.now(),
-                cycleId,
-                poolAddress,
-                action: "ENTER",
-                confidence: 0,
-                reasoning: `[fee-il-gate] Fee/IL ratio ${feeIlRatio.toFixed(2)} below minimum ${config.minFeeIlRatio} — would-be conf ${normalEntryConfidence(feeIlRatio, netDriftBins, { referenceBins: config.entryMomentumReferenceBins ?? 20, confBoost: config.entryMomentumConfBoost ?? 0.05 }).toFixed(2)}`,
-                metrics,
-                riskResult: {
-                  approved: false,
-                  reason: `[fee-il-gate] Fee/IL ${feeIlRatio.toFixed(2)} < ${config.minFeeIlRatio}`,
-                },
-                executed: false,
-                paperTrading: config.paperTrading,
-              })
-              .pipe(Effect.catch(() => Effect.void));
-            return true;
+          // from EVERY ENTER gate when feeIlRatioKnown=false (datapi-only).
+          function checkFeeIlEnterGate(): Effect.Effect<boolean, never> {
+            return Effect.gen(function* () {
+              if (
+                !(
+                  config.ilProtectionEnabled === true &&
+                  metrics.feeIlRatioKnown &&
+                  feeIlRatio < config.minFeeIlRatio
+                )
+              ) {
+                return false;
+              }
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: 0,
+                  reasoning: `[fee-il-gate] Fee/IL ratio ${feeIlRatio.toFixed(2)} below minimum ${config.minFeeIlRatio} — would-be conf ${normalEntryConfidence(feeIlRatio, netDriftBins, { referenceBins: config.entryMomentumReferenceBins ?? 20, confBoost: config.entryMomentumConfBoost ?? 0.05 }).toFixed(2)}`,
+                  metrics,
+                  riskResult: {
+                    approved: false,
+                    reason: `[fee-il-gate] Fee/IL ${feeIlRatio.toFixed(2)} < ${config.minFeeIlRatio}`,
+                  },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              return true;
+            });
           }
+
+          if (yield* checkFeeIlEnterGate()) return true;
           return false;
         });
       }
@@ -9514,37 +11296,52 @@ export const program = Effect.gen(function* () {
       > {
         if (enterGateRejected)
           return Effect.succeed({ rejected: true, qualified: false, entryScore: null });
+        function recordWeightedScoreRejection(entryScore: number): Effect.Effect<void, never> {
+          return Effect.gen(function* () {
+            yield* audit
+              .recordDecision({
+                timestamp: Date.now(),
+                cycleId,
+                poolAddress,
+                action: "ENTER",
+                confidence: 0,
+                reasoning: `[weighted-score] score ${entryScore.toFixed(3)} <= threshold ${config.weightedEntryScoreThreshold} (would-be conf ${normalEntryConfidence(feeIlRatio, netDriftBins, { referenceBins: config.entryMomentumReferenceBins ?? 20, confBoost: config.entryMomentumConfBoost ?? 0.05 }).toFixed(2)})`,
+                metrics,
+                riskResult: {
+                  approved: false,
+                  reason: `[weighted-score] ${entryScore.toFixed(3)} <= ${config.weightedEntryScoreThreshold}`,
+                },
+                executed: false,
+                paperTrading: config.paperTrading,
+              })
+              .pipe(Effect.catch(() => Effect.void));
+          });
+        }
+
         return Effect.gen(function* () {
           if (
-            (metrics.feeIlRatioKnown ? feeIlRatio > evolvedThresholds.minFeeIlRatio * 1.5 : true) &&
-            metrics.volumeAuthenticityKnown &&
-            volumeAuth > 0.8 &&
-            metrics.binUtilizationKnown &&
-            binUtilization > 0.4 &&
-            pool.tvlUsd > config.minPoolTvlUsd * 2
+            passesMeasuredCandidateGates(
+              metrics.feeIlRatioKnown,
+              feeIlRatio,
+              evolvedThresholds.minFeeIlRatio,
+              metrics.volumeAuthenticityKnown,
+              volumeAuth,
+              metrics.binUtilizationKnown,
+              binUtilization,
+              pool.tvlUsd,
+              config.minPoolTvlUsd,
+            )
           ) {
-            const entryScore = weightedEntryScore(momentumMetrics, signalWeights, {
-              referenceBins: config.entryMomentumReferenceBins ?? DEFAULT_MOMENTUM_REFERENCE_BINS,
-              scoreWeight: config.entryMomentumScoreWeight ?? DEFAULT_MOMENTUM_SCORE_WEIGHT,
-            });
+            const entryScore = weightedEntryScore(
+              momentumMetrics,
+              signalWeights,
+              resolveMomentumScoreArgs(
+                config.entryMomentumReferenceBins,
+                config.entryMomentumScoreWeight,
+              ),
+            );
             if (entryScore <= config.weightedEntryScoreThreshold) {
-              yield* audit
-                .recordDecision({
-                  timestamp: Date.now(),
-                  cycleId,
-                  poolAddress,
-                  action: "ENTER",
-                  confidence: 0,
-                  reasoning: `[weighted-score] score ${entryScore.toFixed(3)} <= threshold ${config.weightedEntryScoreThreshold} (would-be conf ${normalEntryConfidence(feeIlRatio, netDriftBins, { referenceBins: config.entryMomentumReferenceBins ?? 20, confBoost: config.entryMomentumConfBoost ?? 0.05 }).toFixed(2)})`,
-                  metrics,
-                  riskResult: {
-                    approved: false,
-                    reason: `[weighted-score] ${entryScore.toFixed(3)} <= ${config.weightedEntryScoreThreshold}`,
-                  },
-                  executed: false,
-                  paperTrading: config.paperTrading,
-                })
-                .pipe(Effect.catch(() => Effect.void));
+              yield* recordWeightedScoreRejection(entryScore);
               return { rejected: true, qualified: false, entryScore: null };
             }
             return { rejected: false, qualified: true, entryScore };
@@ -9574,6 +11371,12 @@ export const program = Effect.gen(function* () {
               config.marketScanRotationEnabled === true &&
               isMarketRunner(poolAddress)
             ) {
+              const rotationCosts = resolveRotationCosts(
+                config.launchPositionMaxSizeUsd,
+                config.feeCaptureHarvestCostUsd,
+                config.feeCaptureConversionCostPct,
+                config.minYieldExitAgeMs,
+              );
               const worst = lowestAprHeldPosition(
                 Array.from(trackedPositions.values(), (p) => ({
                   poolAddress: p.poolAddress,
@@ -9584,7 +11387,7 @@ export const program = Effect.gen(function* () {
                 // Economic-exit maturity gate: a minutes-old entry is
                 // never a rotation target (same MIN_YIELD_EXIT_AGE_MS
                 // class as the yield-regression exit).
-                { minAgeMs: config.minYieldExitAgeMs ?? 14_400_000, nowMs: Date.now() },
+                { minAgeMs: rotationCosts.minAgeMs, nowMs: Date.now() },
               );
               if (worst) {
                 // G3 net-fee comparison (rule: measure practical
@@ -9599,13 +11402,12 @@ export const program = Effect.gen(function* () {
                 const incumbentPos = Array.from(trackedPositions.values()).find(
                   (p) => p.poolAddress === worst.poolAddress,
                 );
-                const incumbentSizeUsd =
-                  incumbentPos?.currentValueUsd ?? incumbentPos?.depositedUsd ?? 100;
-                const runnerSizeUsd = config.launchPositionMaxSizeUsd ?? 100;
+                const incumbentSizeUsd = resolveIncumbentSizeUsd(incumbentPos);
+                const runnerSizeUsd = rotationCosts.runnerSizeUsd;
                 const shareFor = (sizeUsd: number, tvlUsd: number): number =>
                   tvlUsd > 0 && sizeUsd > 0 ? Math.min(sizeUsd / tvlUsd, 1) : 0;
-                const harvestCostUsd = config.feeCaptureHarvestCostUsd ?? 0.01;
-                const conversionCostPct = config.feeCaptureConversionCostPct ?? 0.05;
+                const harvestCostUsd = rotationCosts.harvestCostUsd;
+                const conversionCostPct = rotationCosts.conversionCostPct;
                 const runnerNetApr = runnerNetAprPct({
                   grossAprPct: poolFeeAprPct,
                   shareEstimate: shareFor(runnerSizeUsd, pool.tvlUsd),
@@ -9634,9 +11436,7 @@ export const program = Effect.gen(function* () {
                     // is a self-history spike, demanding double the
                     // superiority keeps a blow-off top from buying an
                     // exit of a durable incumbent at the top tick.
-                    runnerAprOutlier
-                      ? (config.marketScanRotationAprMult ?? DEFAULT_ROTATION_APR_MULT) * 2
-                      : config.marketScanRotationAprMult,
+                    resolveRotationAprMult(runnerAprOutlier, config.marketScanRotationAprMult),
                   )
                 ) {
                   rawDecisions.push({
@@ -9683,32 +11483,42 @@ export const program = Effect.gen(function* () {
             // and the launch timebox is not a momentum filter. Unknown
             // drift (cold start, <2 bin snapshots) fails OPEN — a young
             // pool with no history cannot prove a decline.
-            if (
-              config.launchScanEnabled === true &&
-              netDriftBins < (config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS)
-            ) {
-              console.info(
-                `[launch-drift-gate] Rejecting launch ENTER ${poolAddress} — net drift ${netDriftBins} bins < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
-              );
-              yield* audit
-                .recordDecision({
-                  timestamp: Date.now(),
-                  cycleId,
-                  poolAddress,
-                  action: "ENTER",
-                  confidence: 0,
-                  reasoning: `[launch-drift-gate] launch net drift ${netDriftBins} bins below ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS} — sustained decliner, not a dip`,
-                  metrics,
-                  riskResult: {
-                    approved: false,
-                    reason: `[launch-drift-gate] drift ${netDriftBins} < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
-                  },
-                  executed: false,
-                  paperTrading: config.paperTrading,
-                })
-                .pipe(Effect.catch(() => Effect.void));
-              return true;
+            function checkLaunchDriftGate(): Effect.Effect<boolean, never> {
+              return Effect.gen(function* () {
+                if (
+                  !(
+                    config.launchScanEnabled === true &&
+                    netDriftBins <
+                      (config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS)
+                  )
+                ) {
+                  return false;
+                }
+                console.info(
+                  `[launch-drift-gate] Rejecting launch ENTER ${poolAddress} — net drift ${netDriftBins} bins < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
+                );
+                yield* audit
+                  .recordDecision({
+                    timestamp: Date.now(),
+                    cycleId,
+                    poolAddress,
+                    action: "ENTER",
+                    confidence: 0,
+                    reasoning: `[launch-drift-gate] launch net drift ${netDriftBins} bins below ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS} — sustained decliner, not a dip`,
+                    metrics,
+                    riskResult: {
+                      approved: false,
+                      reason: `[launch-drift-gate] drift ${netDriftBins} < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`,
+                    },
+                    executed: false,
+                    paperTrading: config.paperTrading,
+                  })
+                  .pipe(Effect.catch(() => Effect.void));
+                return true;
+              });
             }
+
+            if (yield* checkLaunchDriftGate()) return true;
             if (openLaunchPositions >= launchMaxOpenPositions || portfolioFull) {
               // Two triggers share this branch: the launch cap being full,
               // or the portfolio-wide cap being full. The audit row below
@@ -9827,24 +11637,31 @@ export const program = Effect.gen(function* () {
                 // via `statsSource === "datapi"`); fails open does not
                 // block when the fees are unmeasured or the runner lane is
                 // off, so legacy/non-runner entries are unaffected.
-                if (
-                  config.marketScanRunnerEnabled === true &&
-                  metrics.feeIlRatioKnown &&
-                  launchSizeUsd > 0
-                ) {
-                  const entryNetPct = runnerNetDailyPctAfterCosts({
-                    fees24hUsd: pool.fees24hUsd,
-                    poolTvlUsd: pool.tvlUsd,
-                    positionSizeUsd: launchSizeUsd,
-                    rangeHalfWidthBins: rangeHalfWidth,
-                    binStep: pool.binStep,
-                    volatilityStddev,
-                    swapCostPct: config.runnerSwapCostPct ?? 0.005,
-                    harvestCostUsd: config.feeCaptureHarvestCostUsd ?? 0.01,
-                    timeInRangePct: 1,
-                    maxExitsPerDay: 86_400_000 / (config.scanIntervalMs ?? 600_000),
-                  });
-                  if (entryNetPct < (config.runnerNetFloorPct ?? 1)) {
+                function checkLaunchEntryNetGate(
+                  launchSizeUsd: number,
+                ): Effect.Effect<boolean, never> {
+                  return Effect.gen(function* () {
+                    if (
+                      !(
+                        config.marketScanRunnerEnabled === true &&
+                        metrics.feeIlRatioKnown &&
+                        launchSizeUsd > 0
+                      )
+                    ) {
+                      return false;
+                    }
+                    const entryNetPct = computePositionNetDailyPct(
+                      pool.fees24hUsd,
+                      pool.tvlUsd,
+                      launchSizeUsd,
+                      rangeHalfWidth,
+                      pool.binStep,
+                      volatilityStddev,
+                      config.runnerSwapCostPct,
+                      config.feeCaptureHarvestCostUsd,
+                      config.scanIntervalMs,
+                    );
+                    if (entryNetPct >= (config.runnerNetFloorPct ?? 1)) return false;
                     yield* audit
                       .recordDecision({
                         timestamp: Date.now(),
@@ -9863,35 +11680,25 @@ export const program = Effect.gen(function* () {
                       })
                       .pipe(Effect.catch(() => Effect.void));
                     return true;
-                  }
+                  });
                 }
+
+                if (yield* checkLaunchEntryNetGate(launchSizeUsd)) return true;
 
                 // [token-risk] launch ENTER gate — the same advisory overlay
                 // as the normal lane: blocks when either leg carries a hard
                 // risk signal; unknown/disabled/failed signals never block.
-                if (config.jupiterTokenRiskEnabled !== false) {
-                  const launchRisk = yield* Effect.promise(() =>
-                    consultTokenRisks([pool.tokenX, pool.tokenY], config),
-                  );
-                  const launchLegRiskReason = (mint: string, symbol: string): string | null => {
-                    const signal = launchRisk.get(mint);
-                    if (signal === undefined) return null;
-                    if (signal.isSus) {
-                      return `${symbol} (${mint}): Jupiter audit flags suspicious (isSus)`;
-                    }
-                    if (signal.goPlusHardRisk != null) {
-                      return `${symbol} (${mint}): GoPlus ${signal.goPlusHardRisk}`;
-                    }
-                    if (signal.organicScoreLabel === "low") {
-                      return `${symbol} (${mint}): Jupiter organic score is low`;
-                    }
-                    return null;
-                  };
-                  const launchRiskReasons = [
-                    launchLegRiskReason(pool.tokenX, pool.tokenXSymbol),
-                    launchLegRiskReason(pool.tokenY, pool.tokenYSymbol),
-                  ].filter((reason): reason is string => reason !== null);
-                  if (launchRiskReasons.length > 0) {
+                function checkLaunchTokenRisk(): Effect.Effect<boolean, never> {
+                  return Effect.gen(function* () {
+                    if (config.jupiterTokenRiskEnabled === false) return false;
+                    const launchRisk = yield* Effect.promise(() =>
+                      consultTokenRisks([pool.tokenX, pool.tokenY], config),
+                    );
+                    const launchRiskReasons = [
+                      resolveLegRiskReason(launchRisk, pool.tokenX, pool.tokenXSymbol),
+                      resolveLegRiskReason(launchRisk, pool.tokenY, pool.tokenYSymbol),
+                    ].filter((reason): reason is string => reason !== null);
+                    if (launchRiskReasons.length === 0) return false;
                     yield* audit
                       .recordDecision({
                         timestamp: Date.now(),
@@ -9910,8 +11717,10 @@ export const program = Effect.gen(function* () {
                       })
                       .pipe(Effect.catch(() => Effect.void));
                     return true;
-                  }
+                  });
                 }
+
+                if (yield* checkLaunchTokenRisk()) return true;
                 rawDecisions.push({
                   action: "ENTER",
                   poolAddress,
@@ -10047,29 +11856,17 @@ export const program = Effect.gen(function* () {
               // gate. Reuses the per-cycle token-risk cache, so a second
               // consult costs no network call when the screening seam already
               // fetched these mints.
-              if (config.jupiterTokenRiskEnabled !== false) {
-                const enterRisk = yield* Effect.promise(() =>
-                  consultTokenRisks([pool.tokenX, pool.tokenY], config),
-                );
-                const legRiskReason = (mint: string, symbol: string): string | null => {
-                  const signal = enterRisk.get(mint);
-                  if (signal === undefined) return null;
-                  if (signal.isSus) {
-                    return `${symbol} (${mint}): Jupiter audit flags suspicious (isSus)`;
-                  }
-                  if (signal.goPlusHardRisk != null) {
-                    return `${symbol} (${mint}): GoPlus ${signal.goPlusHardRisk}`;
-                  }
-                  if (signal.organicScoreLabel === "low") {
-                    return `${symbol} (${mint}): Jupiter organic score is low`;
-                  }
-                  return null;
-                };
-                const riskReasons = [
-                  legRiskReason(pool.tokenX, pool.tokenXSymbol),
-                  legRiskReason(pool.tokenY, pool.tokenYSymbol),
-                ].filter((reason): reason is string => reason !== null);
-                if (riskReasons.length > 0) {
+              function checkNormalEnterTokenRisk(): Effect.Effect<boolean, never> {
+                return Effect.gen(function* () {
+                  if (config.jupiterTokenRiskEnabled === false) return false;
+                  const enterRisk = yield* Effect.promise(() =>
+                    consultTokenRisks([pool.tokenX, pool.tokenY], config),
+                  );
+                  const riskReasons = [
+                    resolveLegRiskReason(enterRisk, pool.tokenX, pool.tokenXSymbol),
+                    resolveLegRiskReason(enterRisk, pool.tokenY, pool.tokenYSymbol),
+                  ].filter((reason): reason is string => reason !== null);
+                  if (riskReasons.length === 0) return false;
                   yield* audit
                     .recordDecision({
                       timestamp: Date.now(),
@@ -10088,22 +11885,22 @@ export const program = Effect.gen(function* () {
                     })
                     .pipe(Effect.catch(() => Effect.void));
                   return true;
-                }
+                });
               }
+
+              if (yield* checkNormalEnterTokenRisk()) return true;
 
               const positionSizeUsd = allocation.adjustedDepositUsd;
               // Normal-lane take-profit (winrate fix): when enabled, every
               // normal ENTER carries a single-rung TP ladder at
               // TAKE_PROFIT_PCT above entry; the invalidation leg uses the
               // existing trailing-stop pct (the normal lane's downside rule).
-              const tpLadder =
-                (config.takeProfitEnabled ?? false) === true
-                  ? buildTpLadder(pool.currentPrice, {
-                      rungs: [config.takeProfitPct ?? 0.15],
-                      fractions: [1],
-                      invalidationStopPct: config.trailingStopPct ?? 0.1,
-                    })
-                  : null;
+              const tpLadder = resolveNormalEnterTpLadder(
+                pool.currentPrice,
+                config.takeProfitEnabled,
+                config.takeProfitPct,
+                config.trailingStopPct,
+              );
               rawDecisions.push({
                 action: "ENTER",
                 poolAddress,
@@ -10111,19 +11908,15 @@ export const program = Effect.gen(function* () {
                 // ENTRY_MOMENTUM_CONF_BOOST on the static base confidence
                 // (negative → 0), still capped at 0.85. Runner/launch lanes
                 // keep the static formula — this is the normal lane only.
-                confidence: normalEntryConfidence(feeIlRatio, netDriftBins, {
-                  referenceBins:
-                    config.entryMomentumReferenceBins ?? DEFAULT_MOMENTUM_REFERENCE_BINS,
-                  confBoost: config.entryMomentumConfBoost ?? DEFAULT_MOMENTUM_CONF_BOOST,
-                }),
+                confidence: resolveNormalEntryConfidence(
+                  feeIlRatio,
+                  netDriftBins,
+                  config.entryMomentumReferenceBins,
+                  config.entryMomentumConfBoost,
+                ),
                 reasoning: `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL $${pool.tvlUsd.toFixed(0)}`,
                 positionSizeUsd,
-                ...(tpLadder !== null
-                  ? {
-                      tpLadderJson: serializeTpLadder(tpLadder.ladder) ?? undefined,
-                      invalidationStopPrice: tpLadder.invalidationPrice,
-                    }
-                  : undefined),
+                ...resolveTpLadderSpread(tpLadder),
               });
               // Idle-redeploy capture: the pool passed every in-slot gate
               // (conditions, score, allocation, token-risk), so it is a
@@ -10176,28 +11969,26 @@ export const program = Effect.gen(function* () {
 
       yield* runIdleRedeploySite();
 
-      const holdOutcome = yield* pushDefaultHold(enterGateRejected);
-      if (holdOutcome.empty) return [];
+      // An empty hold needs no short-circuit: the tail below iterates
+      // rawDecisions and yields [] when there is nothing to decide.
+      yield* pushDefaultHold(enterGateRejected);
 
       // ── Per-decision tail: overlay → supervised → risk → execution → audit.
       // Decisions run sequentially so a queued proposal consumed by one
       // decision is gone for the next, and so executions mutate tracking in
       // a deterministic order (per-position decisions first, ENTER last).
+      const finalDecisions: AgentDecision[] = [];
       const entryPrep = yield* EntryPrepService;
 
       // Resolve the deposit distribution for entries: a concrete configured
       // shape is used as-is; `auto` picks per pool from the recent volatility
       // regime (see recommendStrategy). `spot` is the default.
-      const entryStrategySpec: EntryStrategySpec =
-        config.entryStrategyType === "auto"
-          ? recommendStrategy({
-              volatilityStddev,
-              highVolThreshold: config.volatilityExitStddev,
-              netDriftBins,
-            })
-          : config.entryStrategyType;
-
-      const finalDecisions: AgentDecision[] = [];
+      const entryStrategySpec: EntryStrategySpec = resolveEntryStrategySpec(
+        config.entryStrategyType,
+        volatilityStddev,
+        config.volatilityExitStddev,
+        netDriftBins,
+      );
 
       // Veto safety overlay: fail-open enhanceDecision with throttled warnings.
       // Returns the (possibly overridden) decision.
@@ -10317,6 +12108,113 @@ export const program = Effect.gen(function* () {
         },
         never
       > {
+        function fetchSyncDecisionProposal(
+          decision: AgentDecision,
+          poolCircuitBreaker: ReturnType<typeof getPoolCircuitBreaker>,
+          pos: PositionRecord | undefined,
+          hasOpenPosition: boolean,
+          now: number,
+        ): Effect.Effect<
+          {
+            agentProposal: AgentProposal | null;
+            proposalSource: "queue" | "sync" | undefined;
+            syncFetchFailed: boolean;
+          } | null,
+          never
+        > {
+          return Effect.gen(function* () {
+            const agentStatus = yield* agent.getStatus().pipe(
+              Effect.catch(() =>
+                Effect.succeed({
+                  connected: false,
+                  transport: null,
+                  lastPromptAt: null,
+                  errorCount: 0,
+                }),
+              ),
+            );
+            if (!hasSyncProposalTransport(agentStatus)) {
+              // No local runtime / AgentNoOp: skip sync without recording failure.
+              return null;
+            }
+            if (!poolCircuitBreaker.canTry(now)) {
+              logger.info("Agent proposal circuit breaker open — skipping sync", {
+                pool: poolAddress,
+              });
+              return null;
+            }
+            if (isProposalBackoffActive(proposalBackoff.get(poolAddress), now)) {
+              logger.info("Agent proposal sync skipped — backoff active", {
+                pool: poolAddress,
+              });
+              return null;
+            }
+            // Latency skip mirrors the veto path: when the rolling p95 of
+            // proposal latencies exceeds the proposal budget, skip the
+            // round trip fail-open WITHOUT arming backoff/circuit failure
+            // (a slow model is not a bad advisor).
+            const latencySkipped = yield* agent.shouldSkipSyncProposal();
+            if (latencySkipped) {
+              logger.info(
+                "Agent proposal sync skipped — rolling p95 latency exceeds proposal budget",
+                { pool: poolAddress },
+              );
+              return null;
+            }
+            let syncFetchFailed = false;
+            const syncProposal = yield* agent
+              .enhanceDecision(decision, {
+                decision,
+                pool,
+                metrics,
+                warnings,
+                recentDecisions: yield* audit
+                  .getRecentDecisions(10)
+                  .pipe(Effect.catch(() => Effect.succeed([]))),
+                hasOpenPosition,
+                ...(pos !== undefined
+                  ? { position: toAgentPositionState(pos, Date.now()) }
+                  : undefined),
+              })
+              .pipe(
+                // Outer deadline mirrors the veto path: sendPrompt's own
+                // timer starts only AFTER transport (re)connect, so a
+                // stalled reconnect must not hold the decision loop past
+                // the proposal budget.
+                Effect.timeoutOrElse({
+                  duration: `${config.agentProposalTimeoutMs} millis`,
+                  orElse: () =>
+                    Effect.fail(
+                      new Error(
+                        `Agent proposal sync timed out after ${config.agentProposalTimeoutMs}ms`,
+                      ),
+                    ),
+                }),
+                Effect.catch((err) => {
+                  syncFetchFailed = true;
+                  logger.warn("Agent proposal fetch failed", {
+                    pool: poolAddress,
+                    error: String(err),
+                  });
+                  return Effect.succeed(null);
+                }),
+              );
+            if (syncProposal && isAgentProposal(syncProposal)) {
+              return {
+                agentProposal: syncProposal,
+                proposalSource: "sync",
+                syncFetchFailed,
+              } as const;
+            }
+            // Real transport attempt returned null (parse/timeout/etc.).
+            return {
+              agentProposal: null,
+              proposalSource: undefined,
+              syncFetchFailed: syncFetchFailed || syncProposal === null,
+            };
+          });
+        }
+
         return Effect.gen(function* () {
           let agentProposal: AgentProposal | null = null;
           let proposalSource: "queue" | "sync" | undefined;
@@ -10336,83 +12234,17 @@ export const program = Effect.gen(function* () {
           }
 
           if (!agentProposal && proposalMode !== "supervised") {
-            const agentStatus = yield* agent.getStatus().pipe(
-              Effect.catch(() =>
-                Effect.succeed({
-                  connected: false,
-                  transport: null,
-                  lastPromptAt: null,
-                  errorCount: 0,
-                }),
-              ),
+            const synced = yield* fetchSyncDecisionProposal(
+              decision,
+              poolCircuitBreaker,
+              pos,
+              hasOpenPosition,
+              now,
             );
-            if (!hasSyncProposalTransport(agentStatus)) {
-              // No local runtime / AgentNoOp: skip sync without recording failure.
-            } else if (!poolCircuitBreaker.canTry(now)) {
-              logger.info("Agent proposal circuit breaker open — skipping sync", {
-                pool: poolAddress,
-              });
-            } else if (isProposalBackoffActive(proposalBackoff.get(poolAddress), now)) {
-              logger.info("Agent proposal sync skipped — backoff active", {
-                pool: poolAddress,
-              });
-            } else {
-              // Latency skip mirrors the veto path: when the rolling p95 of
-              // proposal latencies exceeds the proposal budget, skip the
-              // round trip fail-open WITHOUT arming backoff/circuit failure
-              // (a slow model is not a bad advisor).
-              const latencySkipped = yield* agent.shouldSkipSyncProposal();
-              if (latencySkipped) {
-                logger.info(
-                  "Agent proposal sync skipped — rolling p95 latency exceeds proposal budget",
-                  { pool: poolAddress },
-                );
-              } else {
-                const syncProposal = yield* agent
-                  .enhanceDecision(decision, {
-                    decision,
-                    pool,
-                    metrics,
-                    warnings,
-                    recentDecisions: yield* audit
-                      .getRecentDecisions(10)
-                      .pipe(Effect.catch(() => Effect.succeed([]))),
-                    hasOpenPosition,
-                    ...(pos !== undefined
-                      ? { position: toAgentPositionState(pos, Date.now()) }
-                      : undefined),
-                  })
-                  .pipe(
-                    // Outer deadline mirrors the veto path: sendPrompt's own
-                    // timer starts only AFTER transport (re)connect, so a
-                    // stalled reconnect must not hold the decision loop past
-                    // the proposal budget.
-                    Effect.timeoutOrElse({
-                      duration: `${config.agentProposalTimeoutMs} millis`,
-                      orElse: () =>
-                        Effect.fail(
-                          new Error(
-                            `Agent proposal sync timed out after ${config.agentProposalTimeoutMs}ms`,
-                          ),
-                        ),
-                    }),
-                    Effect.catch((err) => {
-                      syncFetchFailed = true;
-                      logger.warn("Agent proposal fetch failed", {
-                        pool: poolAddress,
-                        error: String(err),
-                      });
-                      return Effect.succeed(null);
-                    }),
-                  );
-                if (syncProposal && isAgentProposal(syncProposal)) {
-                  agentProposal = syncProposal;
-                  proposalSource = "sync";
-                } else if (syncProposal === null) {
-                  // Real transport attempt returned null (parse/timeout/etc.).
-                  syncFetchFailed = true;
-                }
-              }
+            if (synced) {
+              agentProposal = synced.agentProposal;
+              proposalSource = synced.proposalSource;
+              syncFetchFailed = synced.syncFetchFailed;
             }
           }
           return { agentProposal, proposalSource, syncFetchFailed };
@@ -10466,9 +12298,13 @@ export const program = Effect.gen(function* () {
               proposalBackoff.delete(poolAddress);
               poolCircuitBreaker.recordSuccess();
 
-              if (proposalSource === "queue" && agentProposal.proposalId) {
+              const queuedProposalId = resolveRedeployAppliedProposalId(
+                proposalSource,
+                agentProposal.proposalId,
+              );
+              if (queuedProposalId !== undefined) {
                 yield* agentState
-                  .dequeueProposals([agentProposal.proposalId])
+                  .dequeueProposals([queuedProposalId])
                   .pipe(Effect.catch(() => Effect.void));
               }
             });
@@ -10488,20 +12324,16 @@ export const program = Effect.gen(function* () {
               preApplyDecision = decision;
               const originalAction = decision.action;
               const deterministicReasoning = decision.reasoning;
-              current = adjustedDecision;
               // Preserve the launch lane marker: an advisor that echoes or
               // resizes a launch ENTER must not silently drop positionMode
               // — the launch timebox/decay/drawdown exits key off it.
-              if (preApplyDecision.positionMode !== undefined && decision.action === "ENTER") {
-                current = { ...decision, positionMode: preApplyDecision.positionMode };
-              }
-              if (
-                originalAction === "EXIT" &&
-                decision.action === "EXIT" &&
-                deterministicReasoning.length > 0
-              ) {
-                current = { ...decision, reasoning: deterministicReasoning };
-              }
+              current = preserveLaunchMarker(decision, adjustedDecision);
+              current = preserveExitReasoning(
+                originalAction,
+                decision.action,
+                deterministicReasoning,
+                current,
+              );
               // Proposal hard-floor (0.2.27): a proposal-applied ENTER must
               // not bypass the engine's deterministic hard rejections. The
               // harness (full/supervised) may only operate WITHIN the same
@@ -10511,33 +12343,24 @@ export const program = Effect.gen(function* () {
               // Re-run the same predicates against the ADJUSTED decision;
               // any hit forces HOLD with an audited reason.
               if (decision.action === "ENTER") {
-                const hardRejectReason: string | null = (() => {
-                  if (
-                    config.ilProtectionEnabled === true &&
-                    metrics.feeIlRatioKnown &&
-                    feeIlRatio < config.minFeeIlRatio
-                  ) {
-                    return `[fee-il-gate] Fee/IL ${feeIlRatio.toFixed(2)} below ${config.minFeeIlRatio}`;
-                  }
-                  if (
-                    !launchScanPools.has(poolAddress) &&
-                    !isMarketRunner(poolAddress) &&
-                    driftGateRejected(
-                      netDriftBins,
-                      config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS,
-                    )
-                  ) {
-                    return `[drift-gate] net drift ${netDriftBins} < ${config.marketScanMaxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS}`;
-                  }
-                  if (
-                    config.launchScanEnabled === true &&
-                    netDriftBins <
-                      (config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS)
-                  ) {
-                    return `[launch-drift-gate] net drift ${netDriftBins} < ${config.marketScanRunnerMinDriftBins ?? DEFAULT_RUNNER_MIN_DRIFT_BINS}`;
-                  }
-                  return null;
-                })();
+                const hardRejectReason =
+                  feeIlHardFloorReason(
+                    config.ilProtectionEnabled,
+                    metrics.feeIlRatioKnown,
+                    feeIlRatio,
+                    config.minFeeIlRatio,
+                  ) ??
+                  driftHardFloorReason(
+                    launchScanPools.has(poolAddress),
+                    isMarketRunner(poolAddress),
+                    netDriftBins,
+                    config.marketScanMaxNegativeDriftBins,
+                  ) ??
+                  launchDriftHardFloorReason(
+                    config.launchScanEnabled,
+                    netDriftBins,
+                    config.marketScanRunnerMinDriftBins,
+                  );
                 if (hardRejectReason !== null) {
                   logger.warn("Agent proposal ENTER blocked by hard floor — forcing HOLD", {
                     pool: poolAddress,
@@ -10589,22 +12412,18 @@ export const program = Effect.gen(function* () {
               // transient failure can be retried on the next cycle.
               // Deterministic risk denials reject/drop the proposal earlier.
               // No-op echoes still set the id so the queue entry is consumed.
-              if (proposalSource === "queue" && agentProposal.proposalId) {
-                appliedQueuedProposalId = agentProposal.proposalId;
-              }
+              appliedQueuedProposalId =
+                resolveRedeployAppliedProposalId(proposalSource, agentProposal.proposalId) ??
+                appliedQueuedProposalId;
             });
           }
 
           const poolBackoff = proposalBackoff.get(poolAddress);
-          const proposalToEvaluate = {
-            ...agentProposal,
-            ...(agentProposal.originalAction === undefined
-              ? { originalAction: decision.action }
-              : undefined),
-            ...(agentProposal.originalConfidence === undefined
-              ? { originalConfidence: decision.confidence }
-              : undefined),
-          };
+          const proposalToEvaluate = buildProposalToEvaluate(
+            agentProposal,
+            decision.action,
+            decision.confidence,
+          );
           let validation = evaluateAgentProposal(
             proposalToEvaluate,
             {
@@ -10622,41 +12441,93 @@ export const program = Effect.gen(function* () {
           // so advisors cannot skip min-interval / gas / recovery policy.
           // The gated position is the adjusted decision's target (inherited
           // from the deterministic decision by proposal validation).
-          const gatePosId = validation.adjustedDecision?.positionId ?? decision.positionId;
-          const gatePos = gatePosId !== undefined ? trackedPositions.get(gatePosId) : undefined;
-          if (
-            validation.valid &&
-            validation.adjustedDecision?.action === "REBALANCE" &&
-            gatePos !== undefined
-          ) {
-            const currentLowerBinId = gatePos.lowerBinId;
-            const currentUpperBinId = gatePos.upperBinId;
-            const positionCenter = (currentLowerBinId + currentUpperBinId) / 2;
-            const oorGraceExpired = gatePos.oorCycleCount >= config.oorGracePeriodCycles;
-            const recoveryProb = estimateRecoveryProbability(
-              recoveryBins,
-              Math.abs(pool.activeBinId - positionCenter),
-            );
-            const positionSharePct =
-              pool.tvlUsd > 0 && gatePos.currentValueUsd > 0
-                ? Math.min(gatePos.currentValueUsd / pool.tvlUsd, 1)
-                : 0;
-            const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
-            const capitalGate = evaluateAgentRebalanceCapitalGates({
-              now,
-              lastRebalanceAt: gatePos.lastRebalanceAt ?? 0,
-              minRebalanceIntervalMs: config.minRebalanceIntervalMs,
-              oorGraceExpired,
-              rebalanceGasCostSol: config.rebalanceGasCostSol,
-              solPriceUsd: config.solPriceUsd,
-              positionDailyFeesUsd,
-              minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
-              recoveryProbability: recoveryProb,
-              oorRecoveryHoldThreshold: config.oorRecoveryHoldThreshold,
+          validation = yield* checkProposalRebalanceGates(validation, decision, now);
+
+          function checkProposalRebalanceGates(
+            validation: ReturnType<typeof evaluateAgentProposal>,
+            decision: AgentDecision,
+            now: number,
+          ): Effect.Effect<ReturnType<typeof evaluateAgentProposal>, never> {
+            return Effect.gen(function* () {
+              const gatePos = resolveRebalanceGatePosition(
+                validation.adjustedDecision?.positionId,
+                decision.positionId,
+                trackedPositions,
+              );
+              if (
+                !(
+                  validation.valid &&
+                  validation.adjustedDecision?.action === "REBALANCE" &&
+                  gatePos !== undefined
+                )
+              ) {
+                return validation;
+              }
+              const positionCenter = (gatePos.lowerBinId + gatePos.upperBinId) / 2;
+              const oorGraceExpired = gatePos.oorCycleCount >= config.oorGracePeriodCycles;
+              const recoveryProb = estimateRecoveryProbability(
+                recoveryBins,
+                Math.abs(pool.activeBinId - positionCenter),
+              );
+              const positionSharePct = resolvePositionSharePct(
+                pool.tvlUsd,
+                gatePos.currentValueUsd,
+              );
+              const positionDailyFeesUsd = pool.fees24hUsd * positionSharePct;
+              const capitalGate = evaluateAgentRebalanceCapitalGates({
+                now,
+                lastRebalanceAt: gatePos.lastRebalanceAt ?? 0,
+                minRebalanceIntervalMs: config.minRebalanceIntervalMs,
+                oorGraceExpired,
+                rebalanceGasCostSol: config.rebalanceGasCostSol,
+                solPriceUsd: config.solPriceUsd,
+                positionDailyFeesUsd,
+                minDaysOfFeesPaidAhead: config.gasAwareMinDaysOfFeesPaidAhead,
+                recoveryProbability: recoveryProb,
+                oorRecoveryHoldThreshold: config.oorRecoveryHoldThreshold,
+              });
+              if (!capitalGate.approved) {
+                return { valid: false, reason: capitalGate.reason };
+              }
+              return validation;
             });
-            if (!capitalGate.approved) {
-              validation = { valid: false, reason: capitalGate.reason };
-            }
+          }
+
+          function recordProposalRejection(reason: string | undefined): Effect.Effect<void, never> {
+            return Effect.gen(function* () {
+              logger.warn("Agent proposal rejected", {
+                source: proposalSource,
+                pool: poolAddress,
+                reason,
+              });
+              proposalBackoff.set(
+                poolAddress,
+                nextProposalBackoff(poolBackoff, now, {
+                  baseMs: config.agentProposalBackoffBaseMs,
+                  maxMs: config.agentProposalBackoffMaxMs,
+                }),
+              );
+              poolCircuitBreaker.recordFailure(now);
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Agent proposal rejected for ${poolAddress}: ${reason}`,
+                  poolAddress,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              const queuedProposalId = resolveRedeployAppliedProposalId(
+                proposalSource,
+                agentProposal.proposalId,
+              );
+              if (queuedProposalId !== undefined) {
+                yield* agentState
+                  .rejectProposal(queuedProposalId)
+                  .pipe(Effect.catch(() => Effect.void));
+              }
+              yield* agentState
+                .setAgentPolicy({ lastProposalAt: now })
+                .pipe(Effect.catch(() => Effect.void));
+            });
           }
 
           if (validation.valid && validation.adjustedDecision) {
@@ -10669,35 +12540,7 @@ export const program = Effect.gen(function* () {
                 .pipe(Effect.catch(() => Effect.void));
             }
           } else {
-            logger.warn("Agent proposal rejected", {
-              source: proposalSource,
-              pool: poolAddress,
-              reason: validation.reason,
-            });
-            proposalBackoff.set(
-              poolAddress,
-              nextProposalBackoff(poolBackoff, now, {
-                baseMs: config.agentProposalBackoffBaseMs,
-                maxMs: config.agentProposalBackoffMaxMs,
-              }),
-            );
-            poolCircuitBreaker.recordFailure(now);
-            yield* memory
-              .upsert({
-                category: "warning",
-                content: `Agent proposal rejected for ${poolAddress}: ${validation.reason}`,
-                poolAddress,
-              })
-              .pipe(Effect.catch(() => Effect.void));
-
-            if (proposalSource === "queue" && agentProposal.proposalId) {
-              yield* agentState
-                .rejectProposal(agentProposal.proposalId)
-                .pipe(Effect.catch(() => Effect.void));
-            }
-            yield* agentState
-              .setAgentPolicy({ lastProposalAt: now })
-              .pipe(Effect.catch(() => Effect.void));
+            yield* recordProposalRejection(validation.reason);
           }
           return {
             decision: current,
@@ -10923,18 +12766,20 @@ export const program = Effect.gen(function* () {
         appliedQueuedProposalId: string | undefined,
       ): Effect.Effect<{ done: boolean }, never> {
         return Effect.gen(function* () {
-          if (!config.paperTrading && decision.action === "ENTER") {
-            const paperDays = yield* readPaperDays;
-            const validation = evaluatePaperValidation({
-              paperTrading: false,
-              paperDaysAccumulated: paperDays,
-              minDays: config.paperValidationMinDays,
-              enforce: config.paperValidationEnforce,
-            });
-            if (validation.warning) {
-              console.warn(`[paper-validation] ${validation.warning}`);
-            }
-            if (!validation.approved) {
+          function checkPaperValidationEnter(): Effect.Effect<{ done: boolean } | null, never> {
+            return Effect.gen(function* () {
+              if (config.paperTrading || decision.action !== "ENTER") return null;
+              const paperDays = yield* readPaperDays;
+              const validation = evaluatePaperValidation({
+                paperTrading: false,
+                paperDaysAccumulated: paperDays,
+                minDays: config.paperValidationMinDays,
+                enforce: config.paperValidationEnforce,
+              });
+              if (validation.warning) {
+                console.warn(`[paper-validation] ${validation.warning}`);
+              }
+              if (validation.approved) return null;
               console.warn(
                 `[paper-validation] Blocking live ENTER on ${poolAddress} — ${validation.reason}`,
               );
@@ -10961,22 +12806,32 @@ export const program = Effect.gen(function* () {
                 .pipe(Effect.catch(() => Effect.void));
               finalDecisions.push(decision);
               return { done: true };
+            });
+          }
+
+          const paperGate = yield* checkPaperValidationEnter();
+          if (paperGate) return paperGate;
+
+          function logEnterTelemetry(): void {
+            if (decision.action === "ENTER" && config.entryStrategyType === "auto") {
+              console.info(
+                `[strategy-shape] auto resolved ${entryStrategySpec} for ${poolAddress}`,
+                {
+                  volatilityStddev,
+                  netDriftBins,
+                },
+              );
+            }
+            if (decision.action === "ENTER" && config.volatilityAdaptiveRanges) {
+              logger.info(`[adaptive-range] ${poolAddress} halfWidth=${rangeHalfWidth}`, {
+                volatilityStddev,
+                binStep: pool.binStep,
+                configuredBaseHalfWidth: config.entryRangeHalfWidthBins,
+              });
             }
           }
 
-          if (decision.action === "ENTER" && config.entryStrategyType === "auto") {
-            console.info(`[strategy-shape] auto resolved ${entryStrategySpec} for ${poolAddress}`, {
-              volatilityStddev,
-              netDriftBins,
-            });
-          }
-          if (decision.action === "ENTER" && config.volatilityAdaptiveRanges) {
-            logger.info(`[adaptive-range] ${poolAddress} halfWidth=${rangeHalfWidth}`, {
-              volatilityStddev,
-              binStep: pool.binStep,
-              configuredBaseHalfWidth: config.entryRangeHalfWidthBins,
-            });
-          }
+          logEnterTelemetry();
 
           // Issue #170: batch wallet-reserve gate. In SOL-funded (autonomous
           // canary/live) mode the entry spends native SOL for its legs, and
@@ -10990,59 +12845,67 @@ export const program = Effect.gen(function* () {
           // execution failures), and the pool re-qualifies next cycle. Pools
           // are scanned in fee-APR-ranked order in market-scan mode, so the
           // budget funds the highest-APR qualifiers first.
-          if (!config.paperTrading && solFundedEntryMode && decision.action === "ENTER") {
-            const entrySizeUsd = decision.positionSizeUsd;
-            if (entrySizeUsd !== undefined) {
+          function checkEnterSolReserve(): Effect.Effect<{ done: boolean } | null, never> {
+            return Effect.gen(function* () {
+              if (config.paperTrading || !solFundedEntryMode || decision.action !== "ENTER") {
+                return null;
+              }
+              const entrySizeUsd = decision.positionSizeUsd;
+              if (entrySizeUsd === undefined) return null;
               const neededLamports = estimateEntrySolLamports({
                 positionSizeUsd: entrySizeUsd,
                 solPriceUsd: entrySolPriceUsd,
                 poolHasSolLeg: hasNativeSolLeg(pool),
                 solFunded: true,
               });
-              if (!entrySolBudgetKnown || neededLamports > entrySolBudgetLamports) {
-                const budgetHuman = entrySolBudgetKnown
-                  ? (Number(entrySolBudgetLamports) / 1e9).toFixed(4)
-                  : "unknown";
-                const neededHuman = (Number(neededLamports) / 1e9).toFixed(4);
-                const reason = `[wallet-reserve] free SOL ${budgetHuman} < needed ${neededHuman} — entry skipped (capacity-limited, not an error)`;
-                yield* audit
-                  .recordDecision({
-                    timestamp: Date.now(),
-                    cycleId,
-                    poolAddress,
-                    action: "ENTER",
-                    confidence: decision.confidence,
-                    reasoning: reason,
-                    metrics,
-                    riskResult: { approved: false, reason },
-                    executed: false,
-                    paperTrading: config.paperTrading,
-                  })
-                  .pipe(Effect.catch(() => Effect.void));
-                yield* memory
-                  .upsert({
-                    category: "warning",
-                    content: `Entry skipped for ${poolAddress}: free SOL ${budgetHuman} < needed ${neededHuman} — wallet cannot fund the batch; skipped without retry backoff.`,
-                    poolAddress,
-                  })
-                  .pipe(Effect.catch(() => Effect.void));
-                // An applied queued proposal follows the failed-execution
-                // contract: retained (executed=false) for retry next cycle —
-                // capacity may free up (EXIT, fee accrual, top-up).
-                yield* finalizeAppliedProposal(
-                  agentState,
-                  appliedQueuedProposalId,
-                  false,
-                  decision.action,
-                );
-                finalDecisions.push(decision);
-                return { done: true };
+              if (entrySolBudgetKnown && neededLamports <= entrySolBudgetLamports) {
+                // Commit the estimate; the budget refreshes from chain after the
+                // live mutation (or fails closed on read failure).
+                entrySolBudgetLamports -= neededLamports;
+                return null;
               }
-              // Commit the estimate; the budget refreshes from chain after the
-              // live mutation (or fails closed on read failure).
-              entrySolBudgetLamports -= neededLamports;
-            }
+              const budgetHuman = entrySolBudgetKnown
+                ? (Number(entrySolBudgetLamports) / 1e9).toFixed(4)
+                : "unknown";
+              const neededHuman = (Number(neededLamports) / 1e9).toFixed(4);
+              const reason = `[wallet-reserve] free SOL ${budgetHuman} < needed ${neededHuman} — entry skipped (capacity-limited, not an error)`;
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: decision.confidence,
+                  reasoning: reason,
+                  metrics,
+                  riskResult: { approved: false, reason },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Entry skipped for ${poolAddress}: free SOL ${budgetHuman} < needed ${neededHuman} — wallet cannot fund the batch; skipped without retry backoff.`,
+                  poolAddress,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              // An applied queued proposal follows the failed-execution
+              // contract: retained (executed=false) for retry next cycle —
+              // capacity may free up (EXIT, fee accrual, top-up).
+              yield* finalizeAppliedProposal(
+                agentState,
+                appliedQueuedProposalId,
+                false,
+                decision.action,
+              );
+              finalDecisions.push(decision);
+              return { done: true };
+            });
           }
+
+          const solGate = yield* checkEnterSolReserve();
+          if (solGate) return solGate;
           return { done: false };
         });
       }
@@ -11248,11 +13111,7 @@ export const program = Effect.gen(function* () {
           // Dispatch derived values: candidate id + runner-lane entry shape.
           function resolveDispatchDerived() {
             const autonomousCandidateId = autonomousExecution
-              ? [...autonomousCandidates.values()].find(
-                  (candidate) =>
-                    candidate.poolAddress === poolAddress &&
-                    (candidate.state === "eligible" || candidate.state === "entered"),
-                )?.id
+              ? findEligibleAutonomousCandidateId(autonomousCandidates, poolAddress)
               : undefined;
 
             // Runner mode (Heart Attack): LAUNCH-lane ENTERs anchor the range
@@ -11260,21 +13119,20 @@ export const program = Effect.gen(function* () {
             // shakeouts) with a tight half-width band, clamped to the same
             // full-range cap as the normal entry. Zero offset when off or the
             // decision is not a launch entry — the conservative lane is unchanged.
-            const isRunnerLaunchEntry =
-              config.launchRunnerModeEnabled === true &&
-              decision.positionMode === "launch" &&
-              (launchScanPools.has(poolAddress) || isMarketRunner(poolAddress));
-            const entryDipOffsetBins = isRunnerLaunchEntry
-              ? dipOffsetBinsForPct(pool.binStep, config.launchRunnerDipPct ?? 0.12)
+            const runnerLaunchEntry = isRunnerLaunchEntry(
+              config.launchRunnerModeEnabled,
+              decision.positionMode,
+              launchScanPools.has(poolAddress),
+              isMarketRunner(poolAddress),
+            );
+            const entryDipOffsetBins = runnerLaunchEntry
+              ? resolveRunnerDipOffset(pool.binStep, config.launchRunnerDipPct)
               : 0;
-            const effectiveEntryHalfWidth = isRunnerLaunchEntry
-              ? Math.max(
-                  1,
-                  Math.min(
-                    config.launchRunnerHalfWidthBins ?? 5,
-                    Math.abs(entryDipOffsetBins) - 1,
-                    Math.floor((config.maxRebalanceRangeBins ?? 100) / 2),
-                  ),
+            const effectiveEntryHalfWidth = runnerLaunchEntry
+              ? clampRunnerHalfWidth(
+                  entryDipOffsetBins,
+                  config.launchRunnerHalfWidthBins,
+                  config.maxRebalanceRangeBins,
                 )
               : rangeHalfWidth;
             return {
@@ -11284,15 +13142,21 @@ export const program = Effect.gen(function* () {
             };
           }
 
-          if (paperExitShouldGoLive) {
-            yield* runPaperExitLive();
-          } else if (config.paperTrading) {
-            yield* runPaperExecution();
-          } else if (config.autonomousTokenMode === "shadow" && decision.action !== "HOLD") {
-            executionSkipped = true;
-          } else {
-            yield* runLiveExecution();
+          function dispatchDecisionExecution(): Effect.Effect<void, Error> {
+            return Effect.gen(function* () {
+              if (paperExitShouldGoLive) {
+                yield* runPaperExitLive();
+              } else if (config.paperTrading) {
+                yield* runPaperExecution();
+              } else if (config.autonomousTokenMode === "shadow" && decision.action !== "HOLD") {
+                executionSkipped = true;
+              } else {
+                yield* runLiveExecution();
+              }
+            });
           }
+
+          yield* dispatchDecisionExecution();
           return {
             done: false,
             executed,
@@ -11377,11 +13241,13 @@ export const program = Effect.gen(function* () {
         executionSkipped: boolean,
       ): Effect.Effect<void, Error> {
         return Effect.gen(function* () {
-          if (executed && decision.action === "ENTER" && autonomousExecution) {
-            const candidate = [...autonomousCandidates.values()].find(
-              (item) => item.poolAddress === poolAddress && item.state === "eligible",
-            );
-            if (candidate) {
+          function confirmEnteredCandidate(): Effect.Effect<void, Error> {
+            return Effect.gen(function* () {
+              if (!(executed && decision.action === "ENTER" && autonomousExecution)) return;
+              const candidate = [...autonomousCandidates.values()].find(
+                (item) => item.poolAddress === poolAddress && item.state === "eligible",
+              );
+              if (!candidate) return;
               const enteredCandidate = transitionCandidate(
                 candidate,
                 { kind: "entry_confirmed", occurredAt: Date.now() },
@@ -11392,7 +13258,30 @@ export const program = Effect.gen(function* () {
               );
               autonomousCandidates.set(enteredCandidate.id, enteredCandidate);
               yield* db.saveTokenCandidate(enteredCandidate).pipe(Effect.catch(() => Effect.void));
-            }
+            });
+          }
+
+          yield* confirmEnteredCandidate();
+          // Token-level execution-failure breaker (Robinhood rule 12): arm
+          // `token_block:<mint>` for both legs after a genuine live EXIT failure.
+          function armTokenFailureBlock(): Effect.Effect<void, Error> {
+            return Effect.gen(function* () {
+              if (decision.action !== "EXIT" || config.paperTrading) return;
+              const expiresAt = Date.now() + (config.tokenFailureBlockMs ?? 3_600_000);
+              for (const mint of [pool.tokenX, pool.tokenY]) {
+                yield* db.setMetadata(`token_block:${mint}`, String(expiresAt)).pipe(
+                  Effect.catch((err) =>
+                    Effect.sync(() =>
+                      logger.warn("Failed to record token execution-failure block", {
+                        pool: poolAddress,
+                        mint,
+                        error: String(err),
+                      }),
+                    ),
+                  ),
+                );
+              }
+            });
           }
 
           if (decision.action !== "HOLD" && !executionSkipped) {
@@ -11414,11 +13303,7 @@ export const program = Effect.gen(function* () {
               // retried for 30min-6h. Scoped to solFundedEntryMode: in plain
               // live (USDC-funded) mode the batch gate does not run, so funding
               // failures there keep their pause-breaker teeth.
-              !(
-                decision.action === "ENTER" &&
-                solFundedEntryMode &&
-                isInsufficientTokenBalanceError(executionError)
-              )
+              !isCapacityExecutionFailure(decision.action, solFundedEntryMode, executionError)
             ) {
               cycle.poolsFailed++;
               recordExecutionOutcome(false);
@@ -11431,22 +13316,7 @@ export const program = Effect.gen(function* () {
               // risk/capacity outcomes never reach this branch; only the same
               // classification that arms the execution_failures pause. A
               // metadata write failure fails open (warn) — never breaks a cycle.
-              if (decision.action === "EXIT" && !config.paperTrading) {
-                const expiresAt = Date.now() + (config.tokenFailureBlockMs ?? 3_600_000);
-                for (const mint of [pool.tokenX, pool.tokenY]) {
-                  yield* db.setMetadata(`token_block:${mint}`, String(expiresAt)).pipe(
-                    Effect.catch((err) =>
-                      Effect.sync(() =>
-                        logger.warn("Failed to record token execution-failure block", {
-                          pool: poolAddress,
-                          mint,
-                          error: String(err),
-                        }),
-                      ),
-                    ),
-                  );
-                }
-              }
+              yield* armTokenFailureBlock();
             }
           }
         });
@@ -11462,62 +13332,75 @@ export const program = Effect.gen(function* () {
         riskResult: RiskResult,
       ): Effect.Effect<void, Error> {
         return Effect.gen(function* () {
-          if (executed && decision.action === "EXIT") {
-            const candidate = [...autonomousCandidates.values()].find(
-              (item) => item.poolAddress === poolAddress && item.state === "entered",
-            );
-            if (candidate) {
-              const coolingCandidate = transitionCandidate(
-                candidate,
-                {
-                  kind: "cooldown_started",
-                  occurredAt: Date.now(),
-                  cooldownUntil: Date.now() + config.oorCooldownMs,
-                },
-                {
-                  minHealthyScans: config.candidateMinHealthyScans,
-                  minObservationMs: config.candidateMinObservationMs,
-                },
+          function coolExitCandidate(): Effect.Effect<void, Error> {
+            return Effect.gen(function* () {
+              if (!(executed && decision.action === "EXIT")) return;
+              const candidate = [...autonomousCandidates.values()].find(
+                (item) => item.poolAddress === poolAddress && item.state === "entered",
               );
-              autonomousCandidates.set(coolingCandidate.id, coolingCandidate);
-              yield* db.saveTokenCandidate(coolingCandidate).pipe(Effect.catch(() => Effect.void));
-            }
-            // Follow-up 3655404926: record every executed EXIT (deterministic or
-            // agent-adjusted) so the redeploy pass cannot re-enter this pool the
-            // same cycle once the freed slot re-passes the position-count checks.
-            executedExitPools.add(poolAddress);
-            yield* alertSvc.sendAlert({
-              type: "exit_executed",
-              severity: "critical",
-              message: `EXIT executed on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${decision.reasoning}`,
-              poolAddress,
-              ...(pos !== undefined ? { positionId: pos.positionId } : undefined),
-              data: { reasoning: decision.reasoning, paperTrading: config.paperTrading },
+              if (candidate) {
+                const coolingCandidate = transitionCandidate(
+                  candidate,
+                  {
+                    kind: "cooldown_started",
+                    occurredAt: Date.now(),
+                    cooldownUntil: Date.now() + config.oorCooldownMs,
+                  },
+                  {
+                    minHealthyScans: config.candidateMinHealthyScans,
+                    minObservationMs: config.candidateMinObservationMs,
+                  },
+                );
+                autonomousCandidates.set(coolingCandidate.id, coolingCandidate);
+                yield* db
+                  .saveTokenCandidate(coolingCandidate)
+                  .pipe(Effect.catch(() => Effect.void));
+              }
+              // Follow-up 3655404926: record every executed EXIT (deterministic or
+              // agent-adjusted) so the redeploy pass cannot re-enter this pool the
+              // same cycle once the freed slot re-passes the position-count checks.
+              executedExitPools.add(poolAddress);
+              yield* alertSvc.sendAlert({
+                type: "exit_executed",
+                severity: "critical",
+                message: `EXIT executed on ${pool.tokenXSymbol}/${pool.tokenYSymbol}: ${decision.reasoning}`,
+                poolAddress,
+                ...(pos !== undefined ? { positionId: pos.positionId } : undefined),
+                data: { reasoning: decision.reasoning, paperTrading: config.paperTrading },
+              });
             });
           }
-          if (decision.action === "ENTER" && isInsufficientTokenBalanceError(executionError)) {
-            const backoff = nextEntryFailureBackoff(entryFailureBackoff.get(poolAddress));
-            entryFailureBackoff.set(poolAddress, backoff);
-            logger.warn("Entry suppressed after insufficient token balance", {
-              pool: poolAddress,
-              retryAfterMs: backoff.nextAttemptAt - Date.now(),
-              failures: backoff.failures,
-            });
-          } else if (decision.action === "ENTER" && executed) {
-            entryFailureBackoff.delete(poolAddress);
-            // Follow-up 3655404934: the candidate captured this pool's normal entry
-            // size BEFORE the overlay; `full` mode can enlarge and execute it. Sync
-            // the FINAL executed size (post-overlay, post-risk-cap) back onto the
-            // candidate so the redeploy widened-size guard compares against the
-            // position really opened, not a stale pre-overlay figure.
-            const executedSizeUsd = decision.positionSizeUsd;
-            if (executedSizeUsd !== undefined) {
+
+          yield* coolExitCandidate();
+          function syncEntryPostExecution(): Effect.Effect<void, Error> {
+            return Effect.gen(function* () {
+              if (decision.action === "ENTER" && isInsufficientTokenBalanceError(executionError)) {
+                const backoff = nextEntryFailureBackoff(entryFailureBackoff.get(poolAddress));
+                entryFailureBackoff.set(poolAddress, backoff);
+                logger.warn("Entry suppressed after insufficient token balance", {
+                  pool: poolAddress,
+                  retryAfterMs: backoff.nextAttemptAt - Date.now(),
+                  failures: backoff.failures,
+                });
+                return;
+              }
+              if (!(decision.action === "ENTER" && executed)) return;
+              entryFailureBackoff.delete(poolAddress);
+              // Follow-up 3655404934: the candidate captured this pool's normal entry
+              // size BEFORE the overlay; `full` mode can enlarge and execute it. Sync
+              // the FINAL executed size (post-overlay, post-risk-cap) back onto the
+              // candidate so the redeploy widened-size guard compares against the
+              // position really opened, not a stale pre-overlay figure.
+              const executedSizeUsd = decision.positionSizeUsd;
+              if (executedSizeUsd === undefined) return;
               const redeployCandidate = idleRedeployCandidates.find(
                 (c) => c.poolAddress === poolAddress,
               );
               if (redeployCandidate) redeployCandidate.normalEntrySizeUsd = executedSizeUsd;
-            }
+            });
           }
+
+          yield* syncEntryPostExecution();
 
           // Risk-rejected paths reject/drop the proposal before this point.
           // Paper-validation-blocked and failed executions retain for retry.
@@ -11551,12 +13434,7 @@ export const program = Effect.gen(function* () {
             yield* tryEvolveThresholds.pipe(Effect.catch(() => Effect.void));
           }
 
-          if (
-            executed &&
-            (decision.action === "ENTER" ||
-              decision.action === "EXIT" ||
-              decision.action === "REBALANCE")
-          ) {
+          if (shouldSendPostExecutionCheckin(executed, decision.action)) {
             // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
             const trigger = decision.action.toLowerCase() as AgentRuntimeCheckin["trigger"];
             yield* maybeSendAgentCheckin(trigger).pipe(Effect.catch(() => Effect.void));
@@ -11660,47 +13538,58 @@ export const program = Effect.gen(function* () {
               equityUsd: dailyBaselineEquityUsd,
             });
           }
-          const dailyEquityUsd = portfolioValueUsd;
-          dailyDrawdownPct =
-            dailyBaselineEquityUsd > 0 && dailyEquityUsd < dailyBaselineEquityUsd
-              ? ((dailyBaselineEquityUsd - dailyEquityUsd) / dailyBaselineEquityUsd) * 100
-              : 0;
+          dailyDrawdownPct = computeDailyDrawdownPct(dailyBaselineEquityUsd, portfolioValueUsd);
           // Issue #148: a latched daily_drawdown pause must not outlive the
           // condition that raised it. The daily baseline re-seeds on rollover but
           // the pause itself only cleared via `prism resume` — auto-resolve it
           // mode-aware so a fresh-day baseline (or a recovered drawdown) does not
           // leave the agent silently paused. The trigger block below re-arms it
           // when the recomputed drawdown still breaches the threshold.
-          if (
-            autonomousExecution &&
-            activeSafetyPause !== null &&
-            activeSafetyPause.resolvedAt === null &&
-            activeSafetyPause.reason === "daily_drawdown" &&
-            shouldAutoResolveDailyDrawdownPause({
-              mode: autonomousExecution.mode,
-              dailyDrawdownPct,
-              maxDailyDrawdownPct: config.maxDailyDrawdownPct,
-              dayRolledOver,
-            })
-          ) {
-            activeSafetyPause = { ...activeSafetyPause, resolvedAt: Date.now() };
-            yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
+          function resolveDailyDrawdownPause(dayRolledOver: boolean): Effect.Effect<void, Error> {
+            return Effect.gen(function* () {
+              if (
+                autonomousExecution &&
+                activeSafetyPause !== null &&
+                activeSafetyPause.resolvedAt === null &&
+                activeSafetyPause.reason === "daily_drawdown" &&
+                shouldAutoResolveDailyDrawdownPause({
+                  mode: autonomousExecution.mode,
+                  dailyDrawdownPct,
+                  maxDailyDrawdownPct: config.maxDailyDrawdownPct,
+                  dayRolledOver,
+                })
+              ) {
+                activeSafetyPause = { ...activeSafetyPause, resolvedAt: Date.now() };
+                yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
+              }
+            });
           }
-          if (
-            autonomousExecution &&
-            activeSafetyPause?.resolvedAt !== null &&
-            config.maxDailyDrawdownPct > 0 &&
-            dailyDrawdownPct >= config.maxDailyDrawdownPct
-          ) {
-            activeSafetyPause = {
-              walletAddress: autonomousExecution.walletAddress,
-              agentInstanceId: autonomousExecution.agentInstanceId,
-              reason: "daily_drawdown",
-              triggeredAt: Date.now(),
-              resolvedAt: null,
-            };
-            yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
+
+          function armDailyDrawdownPause(): Effect.Effect<void, Error> {
+            return Effect.gen(function* () {
+              if (
+                !(
+                  autonomousExecution &&
+                  activeSafetyPause?.resolvedAt !== null &&
+                  config.maxDailyDrawdownPct > 0 &&
+                  dailyDrawdownPct >= config.maxDailyDrawdownPct
+                )
+              ) {
+                return;
+              }
+              activeSafetyPause = {
+                walletAddress: autonomousExecution.walletAddress,
+                agentInstanceId: autonomousExecution.agentInstanceId,
+                reason: "daily_drawdown",
+                triggeredAt: Date.now(),
+                resolvedAt: null,
+              };
+              yield* db.saveSafetyPause(activeSafetyPause).pipe(Effect.catch(() => Effect.void));
+            });
           }
+
+          yield* resolveDailyDrawdownPause(dayRolledOver);
+          yield* armDailyDrawdownPause();
           return { dailyDrawdownPct };
         });
       }
@@ -11714,22 +13603,27 @@ export const program = Effect.gen(function* () {
           // impossible this cycle (the cap did not move — allocation gate and risk
           // gate 3a re-run and re-reject verbatim), so no skipped gate can bite.
           if (
-            config.idleRedeployEnabled &&
-            !poolExitFired &&
-            poolPositions.length >= config.maxPositionsPerPool &&
-            !unresolvedPoolAddresses.has(poolAddress) &&
-            (approvedPoolAddresses.includes(poolAddress) || marketScanPools.has(poolAddress))
+            !isRedeployCaptureSite(
+              config.idleRedeployEnabled,
+              poolExitFired,
+              poolPositions.length,
+              config.maxPositionsPerPool,
+              unresolvedPoolAddresses.has(poolAddress),
+              approvedPoolAddresses.includes(poolAddress) || marketScanPools.has(poolAddress),
+            )
           ) {
-            // isLaunchPool is scoped to the ENTER branch above — recompute the
-            // launch-lane membership for this capture site.
-            const redeployPoolIsLaunch =
-              config.launchScanEnabled === true &&
-              config.launchExecutionEnabled === true &&
-              launchScanPools.has(poolAddress);
-            const redeployCandidate = evaluateIdleRedeployCandidate();
-            if (redeployCandidate && !redeployPoolIsLaunch) {
-              idleRedeployCandidates.push(redeployCandidate);
-            }
+            return;
+          }
+          // isLaunchPool is scoped to the ENTER branch above — recompute the
+          // launch-lane membership for this capture site.
+          const redeployPoolIsLaunch = isRedeployLaunchPool(
+            config.launchScanEnabled,
+            config.launchExecutionEnabled,
+            launchScanPools.has(poolAddress),
+          );
+          const redeployCandidate = evaluateIdleRedeployCandidate();
+          if (redeployCandidate && !redeployPoolIsLaunch) {
+            idleRedeployCandidates.push(redeployCandidate);
           }
         });
       }
@@ -11894,82 +13788,20 @@ export const program = Effect.gen(function* () {
         });
       }
 
-      for (const rawDecision of rawDecisions) {
-        let decision = rawDecision;
-        // The position this decision targets (EXIT/REBALANCE/HOLD). ENTER and
-        // the default positionless HOLD have none. Re-resolved against the
-        // live map so executions always act on current state.
-        const pos =
-          decision.positionId !== undefined ? trackedPositions.get(decision.positionId) : undefined;
-        const hasOpenPosition = positionsForPool(trackedPositions, poolAddress).length > 0;
-        let appliedQueuedProposalId: string | undefined;
-        /** True when a full/supervised proposal replaced the deterministic decision. */
-        let appliedAgentProposal = false;
-        /** True when any proposal (echo or behavior-changing) was validated and applied. */
-        let proposalValidated = false;
-        /** The deterministic decision before an applied proposal replaced it. */
-        let preApplyDecision: AgentDecision | undefined;
-
-        const preRisk = yield* runDecisionPreRisk(decision, pos, hasOpenPosition);
-        decision = preRisk.decision;
-        appliedQueuedProposalId = preRisk.appliedQueuedProposalId;
-        appliedAgentProposal = preRisk.appliedAgentProposal;
-        proposalValidated = preRisk.proposalValidated;
-        preApplyDecision = preRisk.preApplyDecision;
-
-        const riskOutcome = yield* evaluateDecisionRisk(
-          decision,
-          pos,
-          appliedAgentProposal,
-          preApplyDecision,
-          appliedQueuedProposalId,
-        );
-        decision = riskOutcome.decision;
-        const riskResult = riskOutcome.riskResult;
-        if (riskOutcome.denied) continue;
-
-        // Any validated proposal that survives risk is a usable advisor response:
-        // clear per-pool backoff and reset the breaker, including no-op echoes.
-        recordAppliedProposalRiskApproval({
-          proposalValidated,
-          proposalBackoff,
-          recordCircuitSuccess: () => getPoolCircuitBreaker(poolAddress).recordSuccess(),
-          poolAddress,
-        });
-
-        const execResult = yield* executeDecisionTail(
-          decision,
-          riskResult,
-          pos,
-          appliedQueuedProposalId,
-        );
-        if (execResult.done) continue;
-        const executed = execResult.executed;
-        const executionError = execResult.executionError;
-        const executionSkipped = execResult.executionSkipped;
-        const movedLiveFunds = execResult.movedLiveFunds;
-        const movedLiveFundsFromEnter = execResult.movedLiveFundsFromEnter;
-
-        yield* refreshPostExecutionWallet(
-          decision,
-          executed,
-          movedLiveFunds,
-          movedLiveFundsFromEnter,
-        );
-
-        yield* recordPostExecutionAudit(decision, executed, executionError, executionSkipped);
-        yield* updatePostExecutionBookkeeping(
-          decision,
-          executed,
-          executionError,
-          pos,
-          appliedQueuedProposalId,
-          riskResult,
-        );
-
-        finalDecisions.push(decision);
-      }
-
+      yield* processDecisionTail(
+        rawDecisions,
+        poolAddress,
+        trackedPositions,
+        finalDecisions,
+        proposalBackoff,
+        getPoolCircuitBreaker,
+        runDecisionPreRisk,
+        evaluateDecisionRisk,
+        executeDecisionTail,
+        refreshPostExecutionWallet,
+        recordPostExecutionAudit,
+        updatePostExecutionBookkeeping,
+      );
       return finalDecisions;
     });
 
@@ -12077,43 +13909,81 @@ export const program = Effect.gen(function* () {
           poolAddress: string,
           result: ClaimFeesResult,
         ): Effect.Effect<void, never> {
-          if (
-            result.platformFeeX > 0 ||
-            result.platformFeeY > 0 ||
-            (result.operatorFeeX ?? 0) > 0 ||
-            (result.operatorFeeY ?? 0) > 0
-          ) {
-            return Effect.forkChild(
-              adapter
-                .reportFeeCollection({
-                  poolAddress,
-                  ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
-                  feeX: result.feeX,
-                  feeY: result.feeY,
-                  platformFeeX: result.platformFeeX,
-                  platformFeeY: result.platformFeeY,
-                  tier,
-                  txSignature: result.txSignature,
-                  ...(result.feeTransferTxSignature != null && {
-                    feeTransferTxSignature: result.feeTransferTxSignature,
-                  }),
-                  ...(result.operatorFeeX != null && {
-                    operatorFeeX: result.operatorFeeX,
-                  }),
-                  ...(result.operatorFeeY != null && {
-                    operatorFeeY: result.operatorFeeY,
-                  }),
-                })
-                .pipe(
-                  Effect.catchCause((cause) =>
-                    Effect.sync(() =>
-                      console.error("reportFeeCollection failed", { cause: String(cause) }),
-                    ),
+          if (!hasPlatformFeeSplit(result)) return Effect.void;
+          return Effect.forkChild(
+            adapter
+              .reportFeeCollection({
+                poolAddress,
+                ...(pos.positionPubKey != null && { positionPubkey: pos.positionPubKey }),
+                feeX: result.feeX,
+                feeY: result.feeY,
+                platformFeeX: result.platformFeeX,
+                platformFeeY: result.platformFeeY,
+                tier,
+                txSignature: result.txSignature,
+                ...(result.feeTransferTxSignature != null && {
+                  feeTransferTxSignature: result.feeTransferTxSignature,
+                }),
+                ...(result.operatorFeeX != null && {
+                  operatorFeeX: result.operatorFeeX,
+                }),
+                ...(result.operatorFeeY != null && {
+                  operatorFeeY: result.operatorFeeY,
+                }),
+              })
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.sync(() =>
+                    console.error("reportFeeCollection failed", { cause: String(cause) }),
                   ),
                 ),
-            ).pipe(Effect.asVoid);
-          }
-          return Effect.void;
+              ),
+          ).pipe(Effect.asVoid);
+        }
+
+        function convertClaimedFees(
+          poolAddress: string,
+          result: ClaimFeesResult,
+          feeDestination: "accumulate-quote" | "accumulate-sol",
+        ): Effect.Effect<void, never> {
+          return Effect.gen(function* () {
+            const liveConversion = adapter.convertClaimedFees
+              ? adapter
+                  .convertClaimedFees(poolAddress, feeDestination, result.netFeeX, result.netFeeY)
+                  .pipe(Effect.catch(() => Effect.succeed(null)))
+              : Effect.succeed(null);
+            const conversion = config.paperTrading
+              ? Effect.succeed({
+                  destination: feeDestination,
+                  outputAtomic: 0n,
+                  outputUsd: null,
+                  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+                  txSignatures: [] as ReadonlyArray<string>,
+                })
+              : liveConversion;
+            const converted = yield* conversion;
+            if (converted) {
+              yield* db
+                .savePositionEvent({
+                  id: randomUUID(),
+                  poolAddress,
+                  positionPubKey: pos.positionPubKey,
+                  positionId: pos.positionId,
+                  event: "CLAIM",
+                  valueUsd: converted.outputUsd,
+                  feesUsd: null,
+                  price: null,
+                  metadata: {
+                    kind: "fee_accumulation",
+                    destination: converted.destination,
+                    outputAtomic: converted.outputAtomic.toString(),
+                    txSignatures: converted.txSignatures,
+                  },
+                  createdAt: Date.now(),
+                })
+                .pipe(Effect.catch(() => Effect.void));
+            }
+          });
         }
 
         // F3: fee compounding — if AUTO_COMPOUND_FEES is on and the net
@@ -12169,8 +14039,7 @@ export const program = Effect.gen(function* () {
                           Effect.catch((err) => {
                             console.warn("Compound rebalance failed", {
                               pool: poolAddress,
-                              // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-                              err: (err as { message?: string }).message ?? String(err),
+                              err: err instanceof Error ? err.message : String(err),
                             });
                             return Effect.succeed(null);
                           }),
@@ -12231,7 +14100,10 @@ export const program = Effect.gen(function* () {
 
         return Effect.gen(function* () {
           const poolAddress = pos.poolAddress;
-          if (pos.positionPubKey && Date.now() - pos.lastFeeClaimAt > config.feeClaimIntervalMs) {
+          if (
+            pos.positionPubKey &&
+            isClaimIntervalElapsed(pos.lastFeeClaimAt, Date.now(), config.feeClaimIntervalMs)
+          ) {
             yield* settlePositionRewards(pos);
             const proceed = yield* checkHarvestGate(pos);
             if (!proceed) return;
@@ -12262,30 +14134,14 @@ export const program = Effect.gen(function* () {
                 ),
                 Effect.catch(() => Effect.succeed(null)),
               );
-            if (!result || (result.feeX === 0 && result.feeY === 0)) {
+            if (!hasClaimableFees(result)) {
               return;
             }
             // Mint-based net-fee USD from the adapter; null → 0 fails the
             // compound gate closed (see convertClaimFeesToUsd deprecation).
             const netFeesUsd = result.netFeesUsd ?? 0;
             yield* db
-              .saveFeeClaim({
-                id: randomUUID(),
-                poolAddress,
-                positionPubkey: pos.positionPubKey,
-                feeX: result.feeX,
-                feeY: result.feeY,
-                platformFeeX: result.platformFeeX,
-                platformFeeY: result.platformFeeY,
-                netFeeX: result.netFeeX,
-                netFeeY: result.netFeeY,
-                operatorFeeX: result.operatorFeeX ?? 0,
-                operatorFeeY: result.operatorFeeY ?? 0,
-                txSignature: result.txSignature,
-                feeTransferTxSignature: result.feeTransferTxSignature ?? null,
-                createdAt: Date.now(),
-                reportedToApi: false,
-              })
+              .saveFeeClaim(buildFeeClaimRow(poolAddress, pos.positionPubKey, result))
               .pipe(Effect.catch(() => Effect.void));
             pos.lastFeeClaimAt = Date.now();
             pos.cumulativeFeesClaimedUsd += netFeesUsd;
@@ -12310,42 +14166,7 @@ export const program = Effect.gen(function* () {
             yield* alertSvc.recordFeeClaim(poolAddress, netFeesUsd);
             const feeDestination = config.feeDestination ?? "compound";
             if (feeDestination !== "compound") {
-              const liveConversion = adapter.convertClaimedFees
-                ? adapter
-                    .convertClaimedFees(poolAddress, feeDestination, result.netFeeX, result.netFeeY)
-                    .pipe(Effect.catch(() => Effect.succeed(null)))
-                : Effect.succeed(null);
-              const conversion = config.paperTrading
-                ? Effect.succeed({
-                    destination: feeDestination,
-                    outputAtomic: 0n,
-                    outputUsd: null,
-                    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-                    txSignatures: [] as ReadonlyArray<string>,
-                  })
-                : liveConversion;
-              const converted = yield* conversion;
-              if (converted) {
-                yield* db
-                  .savePositionEvent({
-                    id: randomUUID(),
-                    poolAddress,
-                    positionPubKey: pos.positionPubKey,
-                    positionId: pos.positionId,
-                    event: "CLAIM",
-                    valueUsd: converted.outputUsd,
-                    feesUsd: null,
-                    price: null,
-                    metadata: {
-                      kind: "fee_accumulation",
-                      destination: converted.destination,
-                      outputAtomic: converted.outputAtomic.toString(),
-                      txSignatures: converted.txSignatures,
-                    },
-                    createdAt: Date.now(),
-                  })
-                  .pipe(Effect.catch(() => Effect.void));
-              }
+              yield* convertClaimedFees(poolAddress, result, feeDestination);
               return;
             }
             yield* compoundPositionFees(poolAddress, netFeesUsd, result.netFeeX, result.netFeeY);
@@ -12405,14 +14226,7 @@ export const program = Effect.gen(function* () {
     // a stale "running" until the 30-minute KV TTL expires. Awaited inline (with a
     // hard timeout) BEFORE process.exit so the fetch is not killed mid-flight; the
     // per-cycle "running" report stays fire-and-forget.
-    let pnl = 0;
-    for (const p of trackedPositions.values()) {
-      pnl +=
-        p.currentValueUsd +
-        p.cumulativeFeesClaimedUsd +
-        p.cumulativeRewardsClaimedUsd -
-        p.depositedUsd;
-    }
+    const pnl = computeCycleUnrealizedPnl(trackedPositions);
     Effect.runFork(
       Fiber.interrupt(schedulerFiber).pipe(
         Effect.andThen(agent.disconnect()),

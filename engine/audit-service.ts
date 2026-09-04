@@ -11,8 +11,21 @@ interface RiskResult {
   adjustedSizeUsd?: number;
 }
 
+function unknownRiskResult(): RiskResult {
+  return { approved: false, reason: "unknown" };
+}
+
+function toRiskResult(raw: { approved?: unknown; reason?: unknown } | null): RiskResult {
+  if (raw === null) return unknownRiskResult();
+  const approved = readBoolean(raw.approved);
+  if (approved === null) return unknownRiskResult();
+  const reason = readString(raw.reason);
+  if (reason === null && raw.reason !== undefined) return unknownRiskResult();
+  return { approved, reason: reason ?? "unknown" };
+}
+
 function parseRiskResult(json: string | null): RiskResult {
-  if (!json) return { approved: false, reason: "unknown" };
+  if (!json) return unknownRiskResult();
   try {
     const parsed: unknown = JSON.parse(json);
     // DB-sourced riskResultJson is untrusted: validate the shape instead of
@@ -25,16 +38,11 @@ function parseRiskResult(json: string | null): RiskResult {
           // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
           (parsed as { approved?: unknown; reason?: unknown })
         : null;
-    const approved = readBoolean(raw?.approved);
-    const reason = readString(raw?.reason);
-    if (approved !== null && (reason !== null || raw?.reason === undefined)) {
-      return { approved, reason: reason ?? "unknown" };
-    }
-    return { approved: false, reason: "unknown" };
+    return toRiskResult(raw);
   } catch {
     // DB-sourced riskResultJson may be malformed (older rows, partial writes);
     // a bad parse must never fail the whole getRecentDecisions call.
-    return { approved: false, reason: "unknown" };
+    return unknownRiskResult();
   }
 }
 

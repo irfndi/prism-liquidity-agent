@@ -51,33 +51,47 @@ const HOUR_MS = 3.6e6;
  * Unknown values (null peak/fees) never fire their rule — the timebox stays
  * the backstop for data-starved positions.
  */
+function isTimeboxExpired(now: number, createdAtMs: number, timeboxHours: number): boolean {
+  return (now - createdAtMs) / HOUR_MS >= timeboxHours;
+}
+
+function hasVolumeDecayed(
+  peakFees1hUsd: number | null,
+  currentFees1hUsd: number | null,
+  volumeDecayExitPct: number,
+): boolean {
+  if (peakFees1hUsd === null || currentFees1hUsd === null) return false;
+  if (peakFees1hUsd <= 0) return false;
+  return currentFees1hUsd < peakFees1hUsd * volumeDecayExitPct;
+}
+
+function hasDrawdownHit(
+  drawdownPct: number,
+  peakValueUsd: number | null,
+  currentValueUsd: number,
+): boolean {
+  if (drawdownPct <= 0 || peakValueUsd === null) return false;
+  return currentValueUsd <= peakValueUsd * (1 - drawdownPct);
+}
+
+function isFeeIlBreached(feeIlRatio: number | null): boolean {
+  if (feeIlRatio === null) return false;
+  return feeIlRatio < 0.5;
+}
+
 export function launchPositionExit(input: LaunchPositionExitInput): LaunchPositionExitResult {
-  const ageHours = (input.now - input.createdAtMs) / HOUR_MS;
-  if (ageHours >= input.timeboxHours) {
+  if (isTimeboxExpired(input.now, input.createdAtMs, input.timeboxHours)) {
     return { exit: true, reason: "timebox" };
   }
-
-  if (
-    input.peakFees1hUsd !== null &&
-    input.currentFees1hUsd !== null &&
-    input.peakFees1hUsd > 0 &&
-    input.currentFees1hUsd < input.peakFees1hUsd * input.volumeDecayExitPct
-  ) {
+  if (hasVolumeDecayed(input.peakFees1hUsd, input.currentFees1hUsd, input.volumeDecayExitPct)) {
     return { exit: true, reason: "volume-decay" };
   }
-
-  if (
-    input.drawdownPct > 0 &&
-    input.peakValueUsd !== null &&
-    input.currentValueUsd <= input.peakValueUsd * (1 - input.drawdownPct)
-  ) {
+  if (hasDrawdownHit(input.drawdownPct, input.peakValueUsd, input.currentValueUsd)) {
     return { exit: true, reason: "drawdown" };
   }
-
-  if (input.feeIlRatio !== null && input.feeIlRatio < 0.5) {
+  if (isFeeIlBreached(input.feeIlRatio)) {
     return { exit: true, reason: "fee-il" };
   }
-
   return { exit: false, reason: null };
 }
 

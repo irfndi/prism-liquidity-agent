@@ -35,6 +35,43 @@ function rugBlockMints(input: {
   );
 }
 
+function computeClosePnl(
+  withdrawnUsd: number | null,
+  isEmptyReap: boolean | undefined,
+  pos: PositionRecord,
+): number | null {
+  // An empty-reap (zero-liquidity on-chain account) realizes 0: there is
+  // nothing to withdraw and the heuristic mark was phantom, so no loss
+  // against the (suspect) deposited basis and no rug-block is booked.
+  if (isEmptyReap) return 0;
+  if (withdrawnUsd === null) return null;
+  return computeRealizedPnlUsd(
+    withdrawnUsd,
+    pos.cumulativeFeesClaimedUsd,
+    pos.depositedUsd,
+    pos.cumulativeRewardsClaimedUsd,
+  );
+}
+
+function recordEmptyReap(db: DbApi, positionPubKey: string) {
+  // Mirror the engine's reaped-empty tombstone (same key + 24h TTL as
+  // engine/program.ts): stop reconcile from re-discovering the lingering
+  // ghost account when rent reclaim failed, avoiding EXIT->reap churn.
+  return db
+    .setMetadata(`reaped_empty:${positionPubKey}`, String(Date.now() + 24 * 60 * 60 * 1000))
+    .pipe(Effect.catch(() => Effect.void));
+}
+
+function blockRugMints(db: DbApi, mints: ReadonlyArray<string>, expiresAt: number) {
+  return Effect.gen(function* () {
+    for (const mint of mints) {
+      yield* db
+        .setMetadata(`token_rug_block:${mint}`, String(expiresAt))
+        .pipe(Effect.catch(() => Effect.void));
+    }
+  });
+}
+
 function buildProgram(): Layer.Layer<DbService | AdapterService | ConfigService, Error, never> {
   const dbPath = process.env.SQLITE_DB_PATH ?? getPrismDbPath();
   const dbLayer = DbLive(dbPath);
@@ -91,36 +128,15 @@ closeCommand.action(async function (this: Command, positionId: string) {
       console.log(
         `Closing ${pos.tokenXSymbol}/${pos.tokenYSymbol} (${pos.poolAddress}) position ${pos.positionId} (${pos.positionPubKey})…`,
       );
-
       const result = yield* adapter.exitPosition(pos.poolAddress, pos.positionPubKey);
 
       const withdrawnUsd = result.withdrawnUsd ?? null;
-      // An empty-reap (zero-liquidity on-chain account) realizes 0: there is
-      // nothing to withdraw and the heuristic mark was phantom, so no loss
-      // against the (suspect) deposited basis and no rug-block is booked.
-      const realizedPnlUsd = result.isEmptyReap
-        ? 0
-        : withdrawnUsd === null
-          ? null
-          : computeRealizedPnlUsd(
-              withdrawnUsd,
-              pos.cumulativeFeesClaimedUsd,
-              pos.depositedUsd,
-              pos.cumulativeRewardsClaimedUsd,
-            );
+      const realizedPnlUsd = computeClosePnl(withdrawnUsd, result.isEmptyReap, pos);
 
       yield* db.closePosition(pos.positionId, realizedPnlUsd);
 
       if (result.isEmptyReap && pos.positionPubKey != null) {
-        // Mirror the engine's reaped-empty tombstone (same key + 24h TTL as
-        // engine/program.ts): stop reconcile from re-discovering the lingering
-        // ghost account when rent reclaim failed, avoiding EXIT->reap churn.
-        yield* db
-          .setMetadata(
-            `reaped_empty:${pos.positionPubKey}`,
-            String(Date.now() + 24 * 60 * 60 * 1000),
-          )
-          .pipe(Effect.catch(() => Effect.void));
+        yield* recordEmptyReap(db, pos.positionPubKey);
       }
 
       // Rug-block the non-stable legs when the close realized a catastrophic
@@ -140,12 +156,11 @@ closeCommand.action(async function (this: Command, positionId: string) {
           tokenY: poolState.tokenY,
         });
         if (rugBlockedMints.length > 0) {
-          const expiresAt = Date.now() + (config.rugTokenBlockMs ?? 604_800_000);
-          for (const mint of rugBlockedMints) {
-            yield* db
-              .setMetadata(`token_rug_block:${mint}`, String(expiresAt))
-              .pipe(Effect.catch(() => Effect.void));
-          }
+          yield* blockRugMints(
+            db,
+            rugBlockedMints,
+            Date.now() + (config.rugTokenBlockMs ?? 604_800_000),
+          );
         }
       }
 

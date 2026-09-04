@@ -145,6 +145,45 @@ function parseFeePercentageFraction<T>(value: T): number | null {
   return num / 100;
 }
 
+/** Read the pool attributes envelope, or null when the shape is off. */
+function readGeckoAttributes<T>(raw: T): RawGeckoAttributes | null {
+  if (!isNonNullObject(raw)) return null;
+  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+  const data = (raw as RawGeckoResponse).data;
+  if (!isNonNullObject(data)) return null;
+  const attrs = data.attributes;
+  if (!isNonNullObject(attrs)) return null;
+  return attrs;
+}
+
+/** Read 24h volume; null when missing or non-positive (unusable downstream). */
+function readGeckoVolume24h(attrs: RawGeckoAttributes): number | null {
+  const volumeUsd = attrs.volume_usd;
+  const volume = isNonNullObject(volumeUsd) ? readFiniteNumber(volumeUsd.h24) : null;
+  if (volume === null || volume <= 0) return null;
+  return volume;
+}
+
+/** Read a reserve figure; non-positive values degrade to null (unavailable). */
+function readUsableReserve<T>(value: T): number | null {
+  const reserve = readFiniteNumber(value);
+  if (reserve !== null && reserve <= 0) return null;
+  return reserve;
+}
+
+/** Resolve an optional base-URL override (env, then default) to a clean endpoint. */
+function resolveGeckoBaseUrl(configured: string | undefined, envUrl: string | undefined): string {
+  const base = (configured ?? envUrl ?? DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
+  return base.length > 0 ? base : DEFAULT_BASE_URL;
+}
+
+/** Reserve the next pacing slot; returns the millis the caller must wait. */
+function claimGeckoRequestSlot(nowMs: number): number {
+  const delayMs = Math.max(0, nextGeckoRequestAt - nowMs);
+  nextGeckoRequestAt = Math.max(nowMs, nextGeckoRequestAt) + requestIntervalMs;
+  return delayMs;
+}
+
 /**
  * Parse one `GET /networks/solana/pools/{address}` response. Returns null when
  * the payload is not a usable pool object or 24h volume cannot be read (the one
@@ -155,34 +194,14 @@ function parseFeePercentageFraction<T>(value: T): number | null {
  * real volume into fees when `pool_fee_percentage` is null (always, for DLMM).
  */
 export function parseGeckoPoolStats<T>(raw: T, baseFeeRate: number): GeckoPoolStats | null {
-  if (!isNonNullObject(raw)) return null;
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  const response = raw as RawGeckoResponse;
-  const data = response.data;
-  if (!isNonNullObject(data)) return null;
-  const attrs = data.attributes;
-  if (!isNonNullObject(attrs)) return null;
-
-  const volumeUsd = attrs.volume_usd;
-  const volume24hUsd = isNonNullObject(volumeUsd) ? readFiniteNumber(volumeUsd.h24) : null;
-  // Volume is the one field every downstream gate (authenticity, fee/IL) needs;
-  // non-positive volume is malformed data (a live pool never reports ≤0 24h
-  // volume) — reject the stats ENTIRELY rather than marking garbage measured.
-  if (volume24hUsd === null || volume24hUsd <= 0) return null;
-
-  const feePercentage = parseFeePercentageFraction(attrs.pool_fee_percentage);
-  const effectiveFeeRate = feePercentage ?? baseFeeRate;
-
-  // Non-positive reserves are equally malformed; null them so the caller treats
-  // the stats as unavailable (getGeckoPoolStats → null → heuristic + unknown
-  // flags, the most conservative outcome). A ZERO reserve with positive volume
-  // is dead/wash data — enriching with it would substitute the fallback TVL yet
-  // still tag the pool "geckoterminal", flipping volumeAuthenticityKnown true on
-  // a TVL gecko never measured. Only a strictly positive reserve is usable.
-  const reserveUsd = readFiniteNumber(attrs.reserve_in_usd);
+  const attrs = readGeckoAttributes(raw);
+  if (attrs === null) return null;
+  const volume24hUsd = readGeckoVolume24h(attrs);
+  if (volume24hUsd === null) return null;
+  const effectiveFeeRate = parseFeePercentageFraction(attrs.pool_fee_percentage) ?? baseFeeRate;
 
   return {
-    tvlUsd: reserveUsd !== null && reserveUsd <= 0 ? null : reserveUsd,
+    tvlUsd: readUsableReserve(attrs.reserve_in_usd),
     volume24hUsd,
     fees24hUsd: volume24hUsd * effectiveFeeRate,
     basePriceUsd: readFiniteNumber(attrs.base_token_price_usd),
@@ -241,19 +260,14 @@ export async function getGeckoPoolStats(
 ): Promise<GeckoPoolStats | null> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
-  const base = (options.baseUrl ?? process.env.GECKO_TERMINAL_API_URL ?? DEFAULT_BASE_URL)
-    .trim()
-    .replace(/\/+$/, "");
-  const effectiveBase = base.length > 0 ? base : DEFAULT_BASE_URL;
+  const effectiveBase = resolveGeckoBaseUrl(options.baseUrl, process.env.GECKO_TERMINAL_API_URL);
   const url = `${effectiveBase}/networks/solana/pools/${poolAddress}`;
 
   // Pace toward the 30 req/min keyless limit (see the pacing constants above).
   // JS is single-threaded: reserving the next slot is a synchronous
   // read-modify-write before any await, so concurrent callers each advance
   // nextGeckoRequestAt exactly once and can never observe the same free slot.
-  const now = Date.now();
-  const delayMs = Math.max(0, nextGeckoRequestAt - now);
-  nextGeckoRequestAt = Math.max(now, nextGeckoRequestAt) + requestIntervalMs;
+  const delayMs = claimGeckoRequestSlot(Date.now());
   if (delayMs > 0) {
     await sleep(delayMs);
   }

@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 import type { AppConfig } from "./config-service.js";
 import type { DbApi } from "./services.js";
-import { fetchLatestRelease, compareVersions } from "./update-utils.js";
+import { fetchLatestRelease, compareVersions, type ReleaseInfo } from "./update-utils.js";
 import { getCurrentVersion } from "./version.js";
 import { createLogger } from "./logger.js";
 import { readFileSync } from "fs";
@@ -23,6 +23,85 @@ function getVersionInstalledAtFromFile(): number | null {
   }
 }
 
+/** Named predicate: the check path runs when either auto-update flag is on. */
+function isAutoUpdateDisabled(autoUpdate: boolean, forceUpdateEnabled: boolean): boolean {
+  return !autoUpdate && !forceUpdateEnabled;
+}
+
+/** Resolve the install timestamp, syncing file/db sources and repairing bad values. */
+function resolveInstalledAtMs(
+  db: DbApi,
+  stored: string | null,
+  fileTimestamp: number | null,
+  now: number,
+): Effect.Effect<number, Error> {
+  return Effect.gen(function* () {
+    let effective = stored;
+    if (fileTimestamp !== null) {
+      effective = String(fileTimestamp);
+      yield* db.setMetadata("versionInstalledAt", effective);
+    }
+    if (effective === null) {
+      const text = String(now);
+      yield* db.setMetadata("versionInstalledAt", text);
+      return now;
+    }
+    const ms = Number(effective);
+    if (!Number.isFinite(ms) || ms <= 0) {
+      log.warn("Invalid versionInstalledAt timestamp, resetting to now", {
+        versionInstalledAt: effective,
+      });
+      const text = String(now);
+      yield* db.setMetadata("versionInstalledAt", text);
+      return now;
+    }
+    return ms;
+  });
+}
+
+/** Type guard: a newer release exists beyond the current version. */
+function isNewerReleaseAvailable(
+  release: ReleaseInfo | null,
+  currentVersion: string,
+): release is ReleaseInfo {
+  if (release === null) {
+    return false;
+  }
+  return compareVersions(release.version, currentVersion) > 0;
+}
+
+/** Log force-update urgency; shuts down past the threshold. Returns true when shutting down. */
+function reportForceUpdateStatus(
+  daysSinceInstall: number,
+  daysUntilForce: number,
+  thresholdDays: number,
+  version: string,
+): Effect.Effect<boolean, never> {
+  if (daysUntilForce <= 0) {
+    log.error(
+      `[FORCE UPDATE] Version ${version} is available and your install ` +
+        `is ${daysSinceInstall} days old (threshold: ${thresholdDays} days). ` +
+        `Shutting down to enforce update. Run "prism update" to apply.`,
+    );
+    return Effect.sync(() => {
+      process.exit(1);
+      return true;
+    });
+  }
+  if (daysUntilForce <= 1) {
+    log.warn(
+      `[FORCE UPDATE URGENCY] Update to ${version} required within ` +
+        `${daysUntilForce} day(s). After that, the agent will shut down.`,
+    );
+  } else if (daysUntilForce <= 2) {
+    log.warn(
+      `[FORCE UPDATE] Update to ${version} recommended. ` +
+        `${daysUntilForce} day(s) until forced shutdown.`,
+    );
+  }
+  return Effect.succeed(false);
+}
+
 export function checkForAutoUpdate(config: AppConfig, db: DbApi): Effect.Effect<void, never> {
   return Effect.gen(function* () {
     const now = Date.now();
@@ -33,30 +112,18 @@ export function checkForAutoUpdate(config: AppConfig, db: DbApi): Effect.Effect<
       return;
     }
 
-    if (!config.autoUpdate && !config.forceUpdateEnabled) {
+    if (isAutoUpdateDisabled(config.autoUpdate, config.forceUpdateEnabled)) {
       yield* db.setMetadata("lastUpdateCheckAt", String(now));
       return;
     }
 
-    let versionInstalledAt = yield* db.getMetadata("versionInstalledAt");
-    const fileTimestamp = getVersionInstalledAtFromFile();
-    if (fileTimestamp !== null) {
-      const fileTimestampString = String(fileTimestamp);
-      versionInstalledAt = fileTimestampString;
-      yield* db.setMetadata("versionInstalledAt", fileTimestampString);
-    }
-    if (versionInstalledAt === null) {
-      versionInstalledAt = String(now);
-      yield* db.setMetadata("versionInstalledAt", versionInstalledAt);
-    }
-
-    let installedAtMs = Number(versionInstalledAt);
-    if (!Number.isFinite(installedAtMs) || installedAtMs <= 0) {
-      log.warn("Invalid versionInstalledAt timestamp, resetting to now", { versionInstalledAt });
-      versionInstalledAt = String(now);
-      yield* db.setMetadata("versionInstalledAt", versionInstalledAt);
-      installedAtMs = now;
-    }
+    const storedInstalledAt = yield* db.getMetadata("versionInstalledAt");
+    const installedAtMs = yield* resolveInstalledAtMs(
+      db,
+      storedInstalledAt,
+      getVersionInstalledAtFromFile(),
+      now,
+    );
 
     const currentVersion = getCurrentVersion();
 
@@ -67,13 +134,7 @@ export function checkForAutoUpdate(config: AppConfig, db: DbApi): Effect.Effect<
       config.githubToken || undefined,
     );
 
-    if (release === null) {
-      yield* db.setMetadata("lastUpdateCheckAt", String(now));
-      return;
-    }
-
-    const cmp = compareVersions(release.version, currentVersion);
-    if (cmp <= 0) {
+    if (!isNewerReleaseAvailable(release, currentVersion)) {
       yield* db.setMetadata("lastUpdateCheckAt", String(now));
       return;
     }
@@ -85,25 +146,16 @@ export function checkForAutoUpdate(config: AppConfig, db: DbApi): Effect.Effect<
       source: release.source,
     });
 
-    if (config.forceUpdateEnabled && daysUntilForce <= 0) {
-      log.error(
-        `[FORCE UPDATE] Version ${release.version} is available and your install ` +
-          `is ${daysSinceInstall} days old (threshold: ${config.forceUpdateAfterDays} days). ` +
-          `Shutting down to enforce update. Run "prism update" to apply.`,
+    if (config.forceUpdateEnabled) {
+      const shuttingDown = yield* reportForceUpdateStatus(
+        daysSinceInstall,
+        daysUntilForce,
+        config.forceUpdateAfterDays,
+        release.version,
       );
-      return yield* Effect.sync(() => {
-        process.exit(1);
-      });
-    } else if (config.forceUpdateEnabled && daysUntilForce <= 1) {
-      log.warn(
-        `[FORCE UPDATE URGENCY] Update to ${release.version} required within ` +
-          `${daysUntilForce} day(s). After that, the agent will shut down.`,
-      );
-    } else if (config.forceUpdateEnabled && daysUntilForce <= 2) {
-      log.warn(
-        `[FORCE UPDATE] Update to ${release.version} recommended. ` +
-          `${daysUntilForce} day(s) until forced shutdown.`,
-      );
+      if (shuttingDown) {
+        return;
+      }
     }
 
     yield* db.setMetadata("lastUpdateCheckAt", String(now));

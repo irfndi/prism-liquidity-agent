@@ -88,23 +88,77 @@ export function makeDecision(overrides: Partial<AgentDecision> = {}): AgentDecis
 
 // Per-field defaulting split out of makePosition to stay under the complexity cap;
 // each helper returns a partial of the same defaulted values makePosition always produced.
+function positionCapitalDefaults(
+  depositedUsd: number | undefined,
+  currentValueUsd: number | undefined,
+  highestValueUsd: number | null | undefined,
+  trailingStopThreshold: number | null | undefined,
+) {
+  return {
+    depositedUsd: depositedUsd ?? 1000,
+    currentValueUsd: currentValueUsd ?? 1000,
+    highestValueUsd: highestValueUsd ?? null,
+    trailingStopThreshold: trailingStopThreshold ?? null,
+  };
+}
+
+function positionTimingDefaults(
+  timestamp: number | undefined,
+  lastFeeClaimAt: number | undefined,
+  lastRebalanceAt: number | undefined,
+  paperExitedAt: number | null | undefined,
+) {
+  return {
+    timestamp: timestamp ?? Date.now(),
+    lastFeeClaimAt: lastFeeClaimAt ?? Date.now(),
+    lastRebalanceAt: lastRebalanceAt ?? 0,
+    paperExitedAt: paperExitedAt ?? null,
+  };
+}
+
+function positionEntryDefaults(
+  entrySignalTimestamp: number | null | undefined,
+  entrySignalSnapshotId: number | null | undefined,
+  entryPriceUsd: number | null | undefined,
+  entryAmountXUsd: number | null | undefined,
+  entryAmountYUsd: number | null | undefined,
+  cumulativeFeesClaimedUsd: number | undefined,
+  cumulativeRewardsClaimedUsd: number | undefined,
+) {
+  return {
+    entrySignalTimestamp: entrySignalTimestamp ?? null,
+    entrySignalSnapshotId: entrySignalSnapshotId ?? null,
+    entryPriceUsd: entryPriceUsd ?? null,
+    entryAmountXUsd: entryAmountXUsd ?? null,
+    entryAmountYUsd: entryAmountYUsd ?? null,
+    cumulativeFeesClaimedUsd: cumulativeFeesClaimedUsd ?? 0,
+    cumulativeRewardsClaimedUsd: cumulativeRewardsClaimedUsd ?? 0,
+  };
+}
+
 function positionValueDefaults(overrides: Partial<PositionRecord>) {
   return {
-    depositedUsd: overrides.depositedUsd ?? 1000,
-    currentValueUsd: overrides.currentValueUsd ?? 1000,
-    timestamp: overrides.timestamp ?? Date.now(),
-    lastFeeClaimAt: overrides.lastFeeClaimAt ?? Date.now(),
-    trailingStopThreshold: overrides.trailingStopThreshold ?? null,
-    highestValueUsd: overrides.highestValueUsd ?? null,
-    lastRebalanceAt: overrides.lastRebalanceAt ?? 0,
-    paperExitedAt: overrides.paperExitedAt ?? null,
-    entrySignalTimestamp: overrides.entrySignalTimestamp ?? null,
-    entrySignalSnapshotId: overrides.entrySignalSnapshotId ?? null,
-    entryPriceUsd: overrides.entryPriceUsd ?? null,
-    entryAmountXUsd: overrides.entryAmountXUsd ?? null,
-    entryAmountYUsd: overrides.entryAmountYUsd ?? null,
-    cumulativeFeesClaimedUsd: overrides.cumulativeFeesClaimedUsd ?? 0,
-    cumulativeRewardsClaimedUsd: overrides.cumulativeRewardsClaimedUsd ?? 0,
+    ...positionCapitalDefaults(
+      overrides.depositedUsd,
+      overrides.currentValueUsd,
+      overrides.highestValueUsd,
+      overrides.trailingStopThreshold,
+    ),
+    ...positionTimingDefaults(
+      overrides.timestamp,
+      overrides.lastFeeClaimAt,
+      overrides.lastRebalanceAt,
+      overrides.paperExitedAt,
+    ),
+    ...positionEntryDefaults(
+      overrides.entrySignalTimestamp,
+      overrides.entrySignalSnapshotId,
+      overrides.entryPriceUsd,
+      overrides.entryAmountXUsd,
+      overrides.entryAmountYUsd,
+      overrides.cumulativeFeesClaimedUsd,
+      overrides.cumulativeRewardsClaimedUsd,
+    ),
   };
 }
 

@@ -153,6 +153,50 @@ export function parseTokenRiskEntry<T>(raw: T): ParsedTokenRiskEntry | null {
 
 // ─── Fetcher ─────────────────────────────────────────────────────────────────
 
+/** ONLY send the key when a non-empty value is configured — an empty
+ *  `x-api-key` header can be treated as an invalid key and 401; its absence
+ *  is the supported keyless path. */
+function tokenRiskHeaders(apiKey: string | undefined) {
+  const headers: Record<string, string> = {};
+  if (apiKey !== undefined && apiKey.length > 0) {
+    headers["x-api-key"] = apiKey;
+  }
+  return headers;
+}
+
+/** Fetch one mint chunk and store its entries into `result`. A 200 with a
+ *  non-array body (a CDN/intermediary error object or HTML) is a FAILURE,
+ *  not an empty success: treating it as success would negative-cache every
+ *  requested mint — dropping cached isSus flags and silently stopping
+ *  hard-reject enforcement for the whole TTL. Throwing routes the entire
+ *  consult into the fail-open catch instead, which serves stale signals and
+ *  never negative-caches. */
+async function fetchTokenRiskChunk(
+  fetchImpl: FetchLike,
+  chunk: ReadonlyArray<string>,
+  headers: Record<string, string>,
+  timeoutMs: number,
+  result: Map<string, TokenRiskSignal>,
+): Promise<void> {
+  const query = chunk.map((mint) => encodeURIComponent(mint)).join(",");
+  const url = `${JUPITER_TOKENS_SEARCH_BASE_URL}?query=${query}`;
+  const res = await fetchImpl(url, {
+    headers,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    throw new Error(`Jupiter tokens API HTTP ${res.status}`);
+  }
+  const body: unknown = await res.json();
+  if (!Array.isArray(body)) {
+    throw new Error(`Jupiter tokens API returned a non-array body (${res.status})`);
+  }
+  for (const entry of body) {
+    const parsed = parseTokenRiskEntry(entry);
+    if (parsed !== null) result.set(parsed.mint, parsed.signal);
+  }
+}
+
 export async function fetchTokenRisks(
   mints: ReadonlyArray<string>,
   options: {
@@ -169,40 +213,12 @@ export async function fetchTokenRisks(
     options.fetchImpl ??
     ((url: string | URL | Request, init?: RequestInit) => jupiterFetch(url, init));
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const headers: Record<string, string> = {};
-  // ONLY send the key when a non-empty value is configured — an empty
-  // `x-api-key` header can be treated as an invalid key and 401; its absence
-  // is the supported keyless path.
-  if (options.apiKey !== undefined && options.apiKey.length > 0) {
-    headers["x-api-key"] = options.apiKey;
-  }
+  const headers = tokenRiskHeaders(options.apiKey);
 
   const result = new Map<string, TokenRiskSignal>();
   for (let start = 0; start < mints.length; start += MAX_MINTS_PER_REQUEST) {
     const chunk = mints.slice(start, start + MAX_MINTS_PER_REQUEST);
-    const query = chunk.map((mint) => encodeURIComponent(mint)).join(",");
-    const url = `${JUPITER_TOKENS_SEARCH_BASE_URL}?query=${query}`;
-    const res = await fetchImpl(url, {
-      headers,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!res.ok) {
-      throw new Error(`Jupiter tokens API HTTP ${res.status}`);
-    }
-    const body: unknown = await res.json();
-    if (!Array.isArray(body)) {
-      // A 200 with a non-array body (a CDN/intermediary error object or HTML)
-      // is a FAILURE, not an empty success: treating it as success would
-      // negative-cache every requested mint — dropping cached isSus flags and
-      // silently stopping hard-reject enforcement for the whole TTL. Throwing
-      // routes the entire consult into the fail-open catch instead, which
-      // serves stale signals and never negative-caches.
-      throw new Error(`Jupiter tokens API returned a non-array body (${res.status})`);
-    }
-    for (const entry of body) {
-      const parsed = parseTokenRiskEntry(entry);
-      if (parsed !== null) result.set(parsed.mint, parsed.signal);
-    }
+    await fetchTokenRiskChunk(fetchImpl, chunk, headers, timeoutMs, result);
   }
   return result;
 }
