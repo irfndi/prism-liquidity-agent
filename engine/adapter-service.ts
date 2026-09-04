@@ -70,6 +70,27 @@ import { computeRequiredAtomic } from "./entry-prep-service.js";
 import type { ClaimedReward } from "./rewards.js";
 import { validateLimitOrderRequest, type LimitOrderRequest } from "./limit-orders.js";
 import { buildMeteoraDiscoveryPageUrl, selectRecurringDiscoveryPage } from "./discovery-policy.js";
+/** Resolve the configured page_size from a discovery URL; null when absent or malformed. */
+function safeMeteoraPageSize(baseUrl: string): number | null {
+  try {
+    const configured = Number(new URL(baseUrl).searchParams.get("page_size") ?? 1000);
+    return Number.isSafeInteger(configured) && configured > 0 ? configured : null;
+  } catch {
+    return null;
+  }
+}
+function buildMarketScanPageUrl(baseUrl: string, page: number, sortByFee: boolean): string | null {
+  try {
+    const url = new URL(baseUrl);
+    url.searchParams.set("page", String(page));
+    url.searchParams.set("page_size", "1000");
+    if (sortByFee) url.searchParams.set("sort_by", "fee_tvl_ratio_24h:desc");
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 import { scoreWashEvidence, type WashTradeRow } from "./wash-forensics.js";
 
 const DEFAULT_PUBLIC_KEY = "11111111111111111111111111111111";
@@ -295,6 +316,103 @@ export function buildAtomicRebalancePlan(args: {
 
 function formatTokenAmount(amount: bigint, decimals: number): string {
   return (Number(amount) / 10 ** decimals).toFixed(Math.min(decimals, 6));
+}
+interface EntryDepositPlan {
+  readonly depositXAtomic: bigint;
+  readonly depositYAtomic: bigint;
+  readonly depositMode: EntryDepositMode;
+  readonly singleSidedX?: boolean;
+  readonly amountXUsd: number;
+  readonly amountYUsd: number;
+}
+
+interface EntryDepositInput {
+  readonly poolAddress: string;
+  readonly tokenX: string;
+  readonly tokenY: string;
+  readonly positionSizeUsd: number;
+  readonly priceX: number;
+  readonly priceY: number;
+  readonly tokenXDecimals: number;
+  readonly tokenYDecimals: number;
+  readonly requestedXAmount: bigint;
+  readonly requestedYAmount: bigint;
+  readonly maxX: bigint;
+  readonly maxY: bigint;
+  readonly xShort: boolean;
+  readonly yShort: boolean;
+  readonly shortageX: string;
+  readonly shortageY: string;
+  readonly forceSingleSidedX: boolean;
+}
+
+function resolveEntryDeposit(
+  input: EntryDepositInput,
+): Effect.Effect<EntryDepositPlan, AdapterError> {
+  const halfUsd = input.positionSizeUsd / 2;
+  if (input.forceSingleSidedX) {
+    const fullSizeXAtomic = computeRequiredAtomic(
+      input.positionSizeUsd,
+      input.priceX,
+      input.tokenXDecimals,
+    );
+    if (fullSizeXAtomic === 0n || fullSizeXAtomic > input.maxX) {
+      return Effect.fail(
+        new AdapterError({
+          message: `Runner single-sided-X entry impossible: available ${formatTokenAmount(input.maxX, input.tokenXDecimals)} is below the full-size requirement ${formatTokenAmount(fullSizeXAtomic, input.tokenXDecimals)} for a $${input.positionSizeUsd} deposit in ${input.tokenX}. Fund the quote leg up to the full position size.`,
+          poolAddress: input.poolAddress,
+        }),
+      );
+    }
+    return Effect.succeed({
+      depositXAtomic: fullSizeXAtomic,
+      depositYAtomic: 0n,
+      singleSidedX: true,
+      depositMode: "single-sided-x",
+      amountXUsd: input.positionSizeUsd,
+      amountYUsd: 0,
+    });
+  }
+  if (input.xShort && input.yShort) {
+    return Effect.fail(
+      new AdapterError({
+        message: `Insufficient token balance: ${input.shortageX}; ${input.shortageY}. Neither pool token can fund the entry — fund one pool token up to the full position size for a single-sided deposit, or enable AUTO_SWAP_ENTRY with a USDC balance.`,
+        poolAddress: input.poolAddress,
+      }),
+    );
+  }
+  if (input.xShort || input.yShort) {
+    const heldIsX = input.yShort;
+    const heldMint = heldIsX ? input.tokenX : input.tokenY;
+    const heldDecimals = heldIsX ? input.tokenXDecimals : input.tokenYDecimals;
+    const heldPrice = heldIsX ? input.priceX : input.priceY;
+    const heldAvailable = heldIsX ? input.maxX : input.maxY;
+    const missingShortage = heldIsX ? input.shortageY : input.shortageX;
+    const fullSizeAtomic = computeRequiredAtomic(input.positionSizeUsd, heldPrice, heldDecimals);
+    if (fullSizeAtomic === 0n || fullSizeAtomic > heldAvailable) {
+      return Effect.fail(
+        new AdapterError({
+          message: `Single-sided entry impossible for ${heldMint}: available ${formatTokenAmount(heldAvailable, heldDecimals)} is below the full-size requirement ${formatTokenAmount(fullSizeAtomic, heldDecimals)} for a $${input.positionSizeUsd} single-sided deposit (${missingShortage}). Fund the held token up to the full position size or enable AUTO_SWAP_ENTRY.`,
+          poolAddress: input.poolAddress,
+        }),
+      );
+    }
+    return Effect.succeed({
+      depositXAtomic: heldIsX ? fullSizeAtomic : 0n,
+      depositYAtomic: heldIsX ? 0n : fullSizeAtomic,
+      singleSidedX: heldIsX,
+      depositMode: heldIsX ? "single-sided-x" : "single-sided-y",
+      amountXUsd: heldIsX ? input.positionSizeUsd : 0,
+      amountYUsd: heldIsX ? 0 : input.positionSizeUsd,
+    });
+  }
+  return Effect.succeed({
+    depositXAtomic: input.requestedXAmount,
+    depositYAtomic: input.requestedYAmount,
+    depositMode: "two-sided",
+    amountXUsd: halfUsd,
+    amountYUsd: halfUsd,
+  });
 }
 
 /** Convert atomic token amounts to decimal units without Number() precision
@@ -543,6 +661,18 @@ function isNumberValue(v: JsonValue | undefined): v is number {
 function isStringValue(v: JsonValue | undefined): v is string {
   return v !== undefined && Object.prototype.toString.call(v) === STRING_TAG;
 }
+function readApiKey(): string {
+  try {
+    const parsed: unknown = JSON.parse(
+      fs.readFileSync(path.join(getPrismUserConfigDir(), "credentials.json"), "utf-8"),
+    );
+    if (!isObject(parsed)) return "";
+    const credentials = parsed;
+    return isStringValue(credentials.apiKey) ? credentials.apiKey : "";
+  } catch {
+    return "";
+  }
+}
 
 /** Decode a JSON value to a number, or undefined when it is not a number. */
 function asNumber(v: JsonValue | undefined): number | undefined {
@@ -636,6 +766,70 @@ function isPoolsEnvelope(v: JsonValue): v is MeteoraPoolsEnvelope & JsonObject {
   if (!isNumberValue(v["page_size"])) return false;
   if (!Array.isArray(v["data"])) return false;
   return true;
+}
+interface ParsedDiscoveryPage {
+  readonly pools: ReadonlyArray<DiscoveredPool>;
+  readonly pages: number;
+}
+
+function parseDiscoveryResponse(
+  parsed: JsonValue,
+  url: string,
+  requestedPage: number | null,
+  pageSize: number,
+): Effect.Effect<ParsedDiscoveryPage, DiscoverPoolsError> {
+  if (!isPoolsEnvelope(parsed)) {
+    return Effect.fail(
+      new DiscoverPoolsError({
+        message: `Meteora API returned non-envelope payload (${describe(parsed)}) from ${url}`,
+        url,
+      }),
+    );
+  }
+  const { data, total, pages, current_page: currentPage, page_size: responsePageSize } = parsed;
+  const paginationValid =
+    Number.isSafeInteger(total) &&
+    total >= 0 &&
+    Number.isSafeInteger(pages) &&
+    pages >= 0 &&
+    Number.isSafeInteger(currentPage) &&
+    currentPage >= 1 &&
+    Number.isSafeInteger(responsePageSize) &&
+    responsePageSize >= 0 &&
+    (total === 0 || (pages >= 1 && responsePageSize >= 1 && currentPage <= pages)) &&
+    (requestedPage === null || (currentPage === requestedPage && responsePageSize === pageSize));
+  if (!paginationValid) {
+    return Effect.fail(
+      new DiscoverPoolsError({
+        message: `Meteora API returned malformed pagination metadata from ${url}`,
+        url,
+      }),
+    );
+  }
+  const valid = data.filter(isValidPoolState);
+  if (data.length > 0 && valid.length === 0) {
+    logger.warn("Pool discovery: ALL pool objects had invalid shape; treating as a schema error", {
+      dropped: data.length,
+      kept: 0,
+      total,
+      pages,
+    });
+    return Effect.fail(
+      new DiscoverPoolsError({
+        message: `Meteora API returned ${data.length} pool rows but none matched the expected shape. Likely a schema change. Pool discovery disabled for this cycle.`,
+        url,
+      }),
+    );
+  }
+  if (valid.length < data.length) {
+    logger.warn("Pool discovery: some pool objects had invalid shape and were dropped", {
+      dropped: data.length - valid.length,
+      kept: valid.length,
+      total,
+      pages,
+    });
+  }
+  return Effect.succeed({ pools: valid.filter((p) => !p.launchpad).map(toDiscoveredPool), pages });
 }
 
 function isValidPoolState(v: MeteoraPool): v is MeteoraPool & JsonObject {
@@ -1329,6 +1523,25 @@ export const makeAdapterLive = (
         JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: { symbol: "JUP", decimals: 6 },
       };
 
+      function parseHeliusTokenMeta(
+        mint: string,
+        json: HeliusAssetResponse | null,
+      ): TokenMeta | null {
+        const d = json?.result?.token_info?.decimals;
+        if (!isNumberValue(d)) return null;
+        const priceUsd = json ? readHeliusPrice(json) : undefined;
+        type MutableTokenMeta = { -readonly [K in keyof TokenMeta]: TokenMeta[K] };
+        const meta: MutableTokenMeta = {
+          symbol: json?.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
+          decimals: d,
+        };
+        if (priceUsd !== undefined) {
+          meta.priceUsd = priceUsd;
+          meta.priceFetchedAt = Date.now();
+        }
+        return meta;
+      }
+
       function getTokenMeta(mint: string): Effect.Effect<TokenMeta, Error> {
         return Effect.gen(function* () {
           const cachedEntry = tokenMetaCache.get(mint);
@@ -1380,18 +1593,8 @@ export const makeAdapterLive = (
             const json = yield* fetchHeliusAsset(mint).pipe(
               Effect.catch(() => Effect.succeed(null)),
             );
-            const d = json?.result?.token_info?.decimals;
-            if (isNumberValue(d)) {
-              const priceUsd = json ? readHeliusPrice(json) : undefined;
-              type MutableTokenMeta = { -readonly [K in keyof TokenMeta]: TokenMeta[K] };
-              const meta: MutableTokenMeta = {
-                symbol: json?.result?.content?.metadata?.symbol ?? mint.slice(0, 4),
-                decimals: d,
-              };
-              if (priceUsd !== undefined) {
-                meta.priceUsd = priceUsd;
-                meta.priceFetchedAt = Date.now();
-              }
+            const meta = parseHeliusTokenMeta(mint, json);
+            if (meta) {
               yield* setMeta(meta);
               return meta;
             }
@@ -1552,6 +1755,95 @@ export const makeAdapterLive = (
         }).pipe(Effect.catch(() => Effect.succeed({})));
       }
 
+      /** Resolves the cached price layers (price cache, token metadata price,
+       * negative cache) for the requested mints; returns the populated map and
+       * the mints that still need a provider fetch. */
+      function resolveCachedPrices(
+        mints: ReadonlyArray<string>,
+        useFallback: boolean,
+        provenanceOut: Map<string, string> | undefined,
+      ) {
+        const prices: Record<string, number> = {};
+        const missing: string[] = [];
+        for (const mint of new Set(mints)) {
+          const cached = getCachedPrice(mint);
+          if (cached !== undefined) {
+            prices[mint] = cached;
+            continue;
+          }
+          const metaEntry = tokenMetaCache.get(mint);
+          const metadataPrice = metaEntry?.meta.priceUsd;
+          if (metadataPrice !== undefined && Number.isFinite(metadataPrice) && metadataPrice > 0) {
+            const metadataFetchedAt = metaEntry?.meta.priceFetchedAt;
+            if (
+              metadataFetchedAt === undefined ||
+              Date.now() - metadataFetchedAt <= PRICE_CACHE_TTL_MS
+            ) {
+              setCachedPrice(mint, metadataPrice);
+              prices[mint] = metadataPrice;
+              continue;
+            }
+            tokenMetaCache.delete(mint);
+          }
+          const missFetchedAt = negativePriceCache.get(mint);
+          if (missFetchedAt !== undefined) {
+            if (Date.now() - missFetchedAt < PRICE_MISS_CACHE_TTL_MS) {
+              prices[mint] = useFallback ? (fallbackPrices[mint] ?? 0) : 0;
+              if (provenanceOut && !useFallback && prices[mint] === 0) {
+                provenanceOut.set(mint, "negative-cache");
+              }
+              continue;
+            }
+            negativePriceCache.delete(mint);
+          }
+          missing.push(mint);
+        }
+        return { prices, missing };
+      }
+
+      /** Merges one provider's resolved prices into `prices` (with provenance)
+       * and returns the mints the provider did not resolve. */
+      function mergeProviderPrices(
+        mints: ReadonlyArray<string>,
+        fetched: Readonly<Record<string, number>>,
+        prices: Record<string, number>,
+        provenanceOut: Map<string, string> | undefined,
+        useFallback: boolean,
+        sourcesAttempted: string[],
+      ): string[] {
+        const missing: string[] = [];
+        for (const mint of mints) {
+          const price = fetched[mint];
+          if (price !== undefined) {
+            prices[mint] = price;
+            if (provenanceOut && !useFallback) {
+              provenanceOut.set(mint, sourcesAttempted.join(","));
+            }
+          } else {
+            missing.push(mint);
+          }
+        }
+        return missing;
+      }
+
+      /** Books still-unresolved mints: negative-cache them and apply the
+       * fallback (or 0) price with provenance. */
+      function applyFallbackForUnresolved(
+        mints: ReadonlyArray<string>,
+        prices: Record<string, number>,
+        useFallback: boolean,
+        provenanceOut: Map<string, string> | undefined,
+        sourcesAttempted: string[],
+      ): void {
+        for (const mint of mints) {
+          negativePriceCache.set(mint, Date.now());
+          prices[mint] = useFallback ? (fallbackPrices[mint] ?? 0) : 0;
+          if (provenanceOut && !useFallback) {
+            provenanceOut.set(mint, sourcesAttempted.join(","));
+          }
+        }
+      }
+
       function fetchTokenPrices(
         mints: ReadonlyArray<string>,
         opts?: {
@@ -1567,47 +1859,7 @@ export const makeAdapterLive = (
         const useFallback = opts?.useFallback ?? true;
         const provenanceOut = opts?.provenanceOut;
         return Effect.gen(function* () {
-          const prices: Record<string, number> = {};
-          const missing: string[] = [];
-
-          for (const mint of new Set(mints)) {
-            const cached = getCachedPrice(mint);
-            if (cached !== undefined) {
-              prices[mint] = cached;
-              continue;
-            }
-            const metaEntry = tokenMetaCache.get(mint);
-            const metadataPrice = metaEntry?.meta.priceUsd;
-            if (
-              metadataPrice !== undefined &&
-              Number.isFinite(metadataPrice) &&
-              metadataPrice > 0
-            ) {
-              const metadataFetchedAt = metaEntry?.meta.priceFetchedAt;
-              if (
-                metadataFetchedAt === undefined ||
-                Date.now() - metadataFetchedAt <= PRICE_CACHE_TTL_MS
-              ) {
-                setCachedPrice(mint, metadataPrice);
-                prices[mint] = metadataPrice;
-                continue;
-              }
-              tokenMetaCache.delete(mint);
-            }
-            const missFetchedAt = negativePriceCache.get(mint);
-            if (missFetchedAt !== undefined) {
-              if (Date.now() - missFetchedAt < PRICE_MISS_CACHE_TTL_MS) {
-                prices[mint] = useFallback ? (fallbackPrices[mint] ?? 0) : 0;
-                if (provenanceOut && !useFallback && prices[mint] === 0) {
-                  provenanceOut.set(mint, "negative-cache");
-                }
-                continue;
-              }
-              negativePriceCache.delete(mint);
-            }
-            missing.push(mint);
-          }
-
+          const { prices, missing } = resolveCachedPrices(mints, useFallback, provenanceOut);
           if (missing.length === 0) return prices;
 
           const sourcesAttempted: string[] = [];
@@ -1621,66 +1873,47 @@ export const makeAdapterLive = (
           // CoinGecko prices are what the keyless fallback already served.
           sourcesAttempted.push("jupiter");
           const jupiterPrices = yield* fetchJupiterPrices(missing);
-          const coinGeckoMissing: string[] = [];
-          for (const mint of missing) {
-            const price = jupiterPrices[mint];
-            if (price !== undefined) {
-              prices[mint] = price;
-              if (provenanceOut && !useFallback) {
-                provenanceOut.set(mint, sourcesAttempted.join(","));
-              }
-            } else {
-              coinGeckoMissing.push(mint);
-            }
-          }
-
-          if (coinGeckoMissing.length === 0) {
-            return prices;
-          }
+          const coinGeckoMissing = mergeProviderPrices(
+            missing,
+            jupiterPrices,
+            prices,
+            provenanceOut,
+            useFallback,
+            sourcesAttempted,
+          );
+          if (coinGeckoMissing.length === 0) return prices;
 
           sourcesAttempted.push("coingecko");
           const cgPrices = yield* fetchCoinGeckoPrices(coinGeckoMissing);
-          const heliusMissing: string[] = [];
-          for (const mint of coinGeckoMissing) {
-            const cgPrice = cgPrices[mint];
-            if (cgPrice !== undefined) {
-              prices[mint] = cgPrice;
-              if (provenanceOut && !useFallback) {
-                provenanceOut.set(mint, sourcesAttempted.join(","));
-              }
-            } else {
-              heliusMissing.push(mint);
-            }
-          }
-
-          if (heliusMissing.length === 0) {
-            return prices;
-          }
+          const heliusMissing = mergeProviderPrices(
+            coinGeckoMissing,
+            cgPrices,
+            prices,
+            provenanceOut,
+            useFallback,
+            sourcesAttempted,
+          );
+          if (heliusMissing.length === 0) return prices;
 
           // Helius is the last-resort price source: only for mints neither
           // keyless provider resolved. Never attempted when no key is configured.
           if (config.heliusApiKey) sourcesAttempted.push("helius");
           const heliusPrices = yield* fetchHeliusPrices(heliusMissing);
-          const unresolved: string[] = [];
-          for (const mint of heliusMissing) {
-            const price = heliusPrices[mint];
-            if (price !== undefined) {
-              prices[mint] = price;
-              if (provenanceOut && !useFallback) {
-                provenanceOut.set(mint, sourcesAttempted.join(","));
-              }
-            } else {
-              unresolved.push(mint);
-            }
-          }
-
-          for (const mint of unresolved) {
-            negativePriceCache.set(mint, Date.now());
-            prices[mint] = useFallback ? (fallbackPrices[mint] ?? 0) : 0;
-            if (provenanceOut && !useFallback) {
-              provenanceOut.set(mint, sourcesAttempted.join(","));
-            }
-          }
+          const unresolved = mergeProviderPrices(
+            heliusMissing,
+            heliusPrices,
+            prices,
+            provenanceOut,
+            useFallback,
+            sourcesAttempted,
+          );
+          applyFallbackForUnresolved(
+            unresolved,
+            prices,
+            useFallback,
+            provenanceOut,
+            sourcesAttempted,
+          );
 
           return prices;
         });
@@ -1946,16 +2179,12 @@ export const makeAdapterLive = (
         return new SwapValidationError({ stage, reason, message, cause });
       }
 
-      function validateQuotePayload(
+      type QuoteRouteStep = { readonly inputMint: string; readonly outputMint: string };
+
+      function validateQuoteMatchesRequest(
         request: SwapRequest,
-        payload: JsonValue,
-        quotedAt: number,
-      ): Effect.Effect<SwapQuote, SwapValidationError> {
-        if (!isObject(payload)) {
-          return Effect.fail(
-            swapValidationError("quote", "malformed_payload", "Jupiter quote is not an object"),
-          );
-        }
+        payload: JsonObject,
+      ): Effect.Effect<void, SwapValidationError> {
         if (payload.inputMint !== request.inputMint || payload.outputMint !== request.outputMint) {
           return Effect.fail(
             swapValidationError(
@@ -1974,6 +2203,13 @@ export const makeAdapterLive = (
             ),
           );
         }
+        return Effect.void;
+      }
+
+      function validateQuoteSlippage(
+        request: SwapRequest,
+        payload: JsonObject,
+      ): Effect.Effect<void, SwapValidationError> {
         if (payload.slippageBps !== request.slippageBps) {
           return Effect.fail(
             swapValidationError(
@@ -2000,10 +2236,19 @@ export const makeAdapterLive = (
             ),
           );
         }
+        return Effect.void;
+      }
+
+      function parseQuotePriceImpactBps(payload: JsonObject): number {
         const priceImpactPct = isStringValue(payload.priceImpactPct)
           ? Number(payload.priceImpactPct)
           : Number.NaN;
-        const priceImpactBps = priceImpactPct * 10_000;
+        return priceImpactPct * 10_000;
+      }
+
+      function validateQuotePriceImpact(
+        priceImpactBps: number,
+      ): Effect.Effect<void, SwapValidationError> {
         const configuredImpactCap = Math.min(
           config.maxSwapPriceImpactBps ?? HARD_MAX_SWAP_PRICE_IMPACT_BPS,
           HARD_MAX_SWAP_PRICE_IMPACT_BPS,
@@ -2021,19 +2266,10 @@ export const makeAdapterLive = (
             ),
           );
         }
-        const outAmountAtomic = parseAtomicString(payload.outAmount);
-        const minimumOutAmountAtomic = parseAtomicString(payload.otherAmountThreshold);
-        if (
-          outAmountAtomic === null ||
-          outAmountAtomic <= 0n ||
-          minimumOutAmountAtomic === null ||
-          minimumOutAmountAtomic <= 0n ||
-          minimumOutAmountAtomic > outAmountAtomic
-        ) {
-          return Effect.fail(
-            swapValidationError("quote", "malformed_payload", "Jupiter quote amounts are invalid"),
-          );
-        }
+        return Effect.void;
+      }
+
+      function parseQuoteRoute(payload: JsonObject) {
         if (!Array.isArray(payload.routePlan) || payload.routePlan.length === 0) {
           return Effect.fail(
             swapValidationError(
@@ -2043,7 +2279,7 @@ export const makeAdapterLive = (
             ),
           );
         }
-        const route: Array<{ readonly inputMint: string; readonly outputMint: string }> = [];
+        const route: QuoteRouteStep[] = [];
         for (const step of payload.routePlan) {
           if (!isObject(step) || !isObject(step.swapInfo)) {
             return Effect.fail(
@@ -2063,6 +2299,13 @@ export const makeAdapterLive = (
           }
           route.push({ inputMint: routeInputMint, outputMint: routeOutputMint });
         }
+        return Effect.succeed(route);
+      }
+
+      function validateQuoteRouteContinuity(
+        request: SwapRequest,
+        route: ReadonlyArray<QuoteRouteStep>,
+      ): Effect.Effect<void, SwapValidationError> {
         const firstStep = route[0];
         const lastStep = route.at(-1);
         if (
@@ -2076,14 +2319,52 @@ export const makeAdapterLive = (
             swapValidationError("quote", "route_mismatch", "Jupiter route does not match request"),
           );
         }
-        return Effect.succeed({
-          request,
-          outAmountAtomic,
-          minimumOutAmountAtomic,
-          priceImpactBps,
-          quotedAt,
-          route,
-          rawQuote: payload,
+        return Effect.void;
+      }
+
+      function validateQuotePayload(
+        request: SwapRequest,
+        payload: JsonValue,
+        quotedAt: number,
+      ): Effect.Effect<SwapQuote, SwapValidationError> {
+        return Effect.gen(function* () {
+          if (!isObject(payload)) {
+            return yield* Effect.fail(
+              swapValidationError("quote", "malformed_payload", "Jupiter quote is not an object"),
+            );
+          }
+          yield* validateQuoteMatchesRequest(request, payload);
+          yield* validateQuoteSlippage(request, payload);
+          const priceImpactBps = parseQuotePriceImpactBps(payload);
+          yield* validateQuotePriceImpact(priceImpactBps);
+          const outAmountAtomic = parseAtomicString(payload.outAmount);
+          const minimumOutAmountAtomic = parseAtomicString(payload.otherAmountThreshold);
+          if (
+            outAmountAtomic === null ||
+            outAmountAtomic <= 0n ||
+            minimumOutAmountAtomic === null ||
+            minimumOutAmountAtomic <= 0n ||
+            minimumOutAmountAtomic > outAmountAtomic
+          ) {
+            return yield* Effect.fail(
+              swapValidationError(
+                "quote",
+                "malformed_payload",
+                "Jupiter quote amounts are invalid",
+              ),
+            );
+          }
+          const route = yield* parseQuoteRoute(payload);
+          yield* validateQuoteRouteContinuity(request, route);
+          return {
+            request,
+            outAmountAtomic,
+            minimumOutAmountAtomic,
+            priceImpactBps,
+            quotedAt,
+            route,
+            rawQuote: payload,
+          };
         });
       }
 
@@ -2614,6 +2895,108 @@ export const makeAdapterLive = (
         );
       }
 
+      /** Fetch and validate entry-leg prices (single-sided-X skips the Y leg). */
+      function fetchEntryPrices(
+        poolAddress: string,
+        tokenX: string,
+        tokenY: string,
+        forceSingleSidedX: boolean,
+      ): Effect.Effect<{ priceX: number; priceY: number }, Error> {
+        return Effect.gen(function* () {
+          const prices = yield* fetchTokenPrices(forceSingleSidedX ? [tokenX] : [tokenX, tokenY]);
+          const priceX = prices[tokenX] ?? 0;
+          const priceY = forceSingleSidedX ? 0 : (prices[tokenY] ?? 0);
+          if (!priceX || (!forceSingleSidedX && !priceY)) {
+            return yield* Effect.fail(
+              new AdapterError({
+                message: `Could not fetch token prices for ${tokenX} and ${tokenY}`,
+                poolAddress,
+              }),
+            );
+          }
+          return { priceX, priceY };
+        });
+      }
+
+      /** Read entry-leg balances plus native SOL when a leg needs it. */
+      function readEntryBalances(
+        tokenX: string,
+        tokenY: string,
+        forceSingleSidedX: boolean,
+      ): Effect.Effect<
+        { balanceX: bigint; balanceY: bigint; nativeSolBalance: bigint | undefined },
+        Error
+      > {
+        return Effect.gen(function* () {
+          const balanceX = yield* readTokenBalance(tokenX);
+          const balanceY = forceSingleSidedX ? 0n : yield* readTokenBalance(tokenY);
+          const nativeSolBalance =
+            tokenX === SOL_MINT || (!forceSingleSidedX && tokenY === SOL_MINT)
+              ? yield* readNativeSolBalance()
+              : undefined;
+          return { balanceX, balanceY, nativeSolBalance };
+        });
+      }
+
+      /** Cap a SOL leg at the spendable balance (anything at/below the gas reserve is unfundable). */
+      function capSolLegForGas(
+        balance: bigint,
+        isSolLeg: boolean,
+        nativeSolBalance: bigint | undefined,
+      ): bigint {
+        if (!isSolLeg) return balance;
+        return nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
+          ? nativeSolBalance - GAS_RESERVE_LAMPORTS
+          : 0n;
+      }
+
+      /** Announce which deposit path the entry takes (runner/single-sided vs two-sided). */
+      function logEntryDepositMode(
+        poolAddress: string,
+        poolTokenX: string,
+        depositMode: EntryDepositMode,
+        depositXAtomic: bigint,
+        positionSizeUsd: number,
+        forceSingleSidedX: boolean,
+      ): void {
+        if (forceSingleSidedX) {
+          logger.info("Runner single-sided entry: full size in the quote leg", {
+            pool: poolAddress,
+            mint: poolTokenX,
+            amountAtomic: depositXAtomic.toString(),
+          });
+        } else if (depositMode !== "two-sided") {
+          logger.info("Single-sided entry: depositing the full size in the held leg", {
+            pool: poolAddress,
+            depositMode,
+            amountUsd: positionSizeUsd,
+          });
+        }
+      }
+
+      /**
+       * Build the SDK deposit strategy. The decision loop resolves `auto`
+       * per pool and passes a concrete shape; a bare `auto` config reaches
+       * the adapter only from direct calls without volatility context,
+       * where spot is the safe default.
+       */
+      function buildEntryStrategy(
+        lowerBinId: number,
+        upperBinId: number,
+        strategySpecOption: EntryStrategySpec | undefined,
+        singleSidedX: boolean | undefined,
+      ): StrategyParameters {
+        const strategySpec =
+          strategySpecOption ??
+          (config.entryStrategyType === "auto" ? "spot" : config.entryStrategyType);
+        return {
+          minBinId: lowerBinId,
+          maxBinId: upperBinId,
+          strategyType: toSdkStrategyType(strategySpec),
+          ...(singleSidedX !== undefined ? { singleSidedX } : undefined),
+        };
+      }
+
       // ─── API implementation ────────────────────────────────────────────────
 
       let discoveryPageCount = 1;
@@ -3141,37 +3524,26 @@ export const makeAdapterLive = (
             const dlmm = yield* getDlmm(poolAddress);
             const pool = yield* api.getPoolState(poolAddress);
 
-            const prices = yield* fetchTokenPrices(
-              options?.forceSingleSidedX === true ? [pool.tokenX] : [pool.tokenX, pool.tokenY],
+            const forceSingleSidedX = options?.forceSingleSidedX === true;
+            const { priceX, priceY } = yield* fetchEntryPrices(
+              poolAddress,
+              pool.tokenX,
+              pool.tokenY,
+              forceSingleSidedX,
             );
-            const priceX = prices[pool.tokenX] ?? 0;
-            const priceY = options?.forceSingleSidedX === true ? 0 : (prices[pool.tokenY] ?? 0);
-
-            if (!priceX || (options?.forceSingleSidedX !== true && !priceY)) {
-              return yield* Effect.fail(
-                new AdapterError({
-                  message: `Could not fetch token prices for ${pool.tokenX} and ${pool.tokenY}`,
-                  poolAddress,
-                }),
-              );
-            }
 
             const halfUsd = positionSizeUsd / 2;
             const tokenXDecimals = yield* getTokenMeta(pool.tokenX).pipe(
               Effect.map((m) => m.decimals),
             );
-            const tokenYDecimals =
-              options?.forceSingleSidedX === true
-                ? 0
-                : yield* getTokenMeta(pool.tokenY).pipe(Effect.map((m) => m.decimals));
+            const tokenYDecimals = forceSingleSidedX
+              ? 0
+              : yield* getTokenMeta(pool.tokenY).pipe(Effect.map((m) => m.decimals));
 
             const requestedXAmount = computeRequiredAtomic(halfUsd, priceX, tokenXDecimals);
             const requestedYAmount = computeRequiredAtomic(halfUsd, priceY, tokenYDecimals);
 
-            if (
-              options?.forceSingleSidedX !== true &&
-              (requestedXAmount === 0n || requestedYAmount === 0n)
-            ) {
+            if (!forceSingleSidedX && (requestedXAmount === 0n || requestedYAmount === 0n)) {
               return yield* Effect.fail(
                 new AdapterError({
                   message: "Cannot enter a position with a zero-sized token leg",
@@ -3181,30 +3553,15 @@ export const makeAdapterLive = (
             }
 
             // Check balances
-            const balanceX = yield* readTokenBalance(pool.tokenX);
-            const balanceY =
-              options?.forceSingleSidedX === true ? 0n : yield* readTokenBalance(pool.tokenY);
-            const nativeSolBalance =
-              pool.tokenX === SOL_MINT ||
-              (options?.forceSingleSidedX !== true && pool.tokenY === SOL_MINT)
-                ? yield* readNativeSolBalance()
-                : undefined;
-
-            const maxX =
-              pool.tokenX === SOL_MINT
-                ? nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
-                  ? nativeSolBalance - GAS_RESERVE_LAMPORTS
-                  : 0n
-                : balanceX;
-
-            const maxY =
-              options?.forceSingleSidedX === true
-                ? 0n
-                : pool.tokenY === SOL_MINT
-                  ? nativeSolBalance !== undefined && nativeSolBalance > GAS_RESERVE_LAMPORTS
-                    ? nativeSolBalance - GAS_RESERVE_LAMPORTS
-                    : 0n
-                  : balanceY;
+            const { balanceX, balanceY, nativeSolBalance } = yield* readEntryBalances(
+              pool.tokenX,
+              pool.tokenY,
+              forceSingleSidedX,
+            );
+            const maxX = capSolLegForGas(balanceX, pool.tokenX === SOL_MINT, nativeSolBalance);
+            const maxY = forceSingleSidedX
+              ? 0n
+              : capSolLegForGas(balanceY, pool.tokenY === SOL_MINT, nativeSolBalance);
 
             // Funding classification: two-sided when both legs cover their half
             // of the position; otherwise the SDK single-sided deposit path with
@@ -3217,111 +3574,51 @@ export const makeAdapterLive = (
             const shortageX = `${pool.tokenX} required ${formatTokenAmount(requestedXAmount, tokenXDecimals)}, available ${formatTokenAmount(maxX, tokenXDecimals)}${pool.tokenX === SOL_MINT ? " after gas reserve" : ""}`;
             const shortageY = `${pool.tokenY} required ${formatTokenAmount(requestedYAmount, tokenYDecimals)}, available ${formatTokenAmount(maxY, tokenYDecimals)}${pool.tokenY === SOL_MINT ? " after gas reserve" : ""}`;
 
-            let depositXAtomic = requestedXAmount;
-            let depositYAtomic = requestedYAmount;
-            let depositMode: EntryDepositMode = "two-sided";
-            let singleSidedX: boolean | undefined;
-            let amountXUsd = halfUsd;
-            let amountYUsd = halfUsd;
-
-            // Runner mode (Heart Attack) forces the single-sided-X path by
-            // DESIGN, not shortfall: a dip-anchored range (wholly below the
-            // active bin) deploys QUOTE-leg liquidity — the X that converts to
-            // the base token when the dip fills. Depositing half-Y into a
-            // below-market band misstates the entry split; the full size goes
-            // in X.
-            if (options?.forceSingleSidedX === true) {
-              const fullSizeXAtomic = computeRequiredAtomic(
-                positionSizeUsd,
-                priceX,
-                tokenXDecimals,
-              );
-              if (fullSizeXAtomic === 0n || fullSizeXAtomic > maxX) {
-                return yield* Effect.fail(
-                  new AdapterError({
-                    message: `Runner single-sided-X entry impossible: available ${formatTokenAmount(maxX, tokenXDecimals)} is below the full-size requirement ${formatTokenAmount(fullSizeXAtomic, tokenXDecimals)} for a $${positionSizeUsd} deposit in ${pool.tokenX}. Fund the quote leg up to the full position size.`,
-                    poolAddress,
-                  }),
-                );
-              }
-              depositXAtomic = fullSizeXAtomic;
-              depositYAtomic = 0n;
-              singleSidedX = true;
-              depositMode = "single-sided-x";
-              amountXUsd = positionSizeUsd;
-              amountYUsd = 0;
-              logger.info("Runner single-sided entry: full size in the quote leg", {
-                pool: poolAddress,
-                mint: pool.tokenX,
-                amountAtomic: fullSizeXAtomic.toString(),
-              });
-            } else if (xShort && yShort) {
-              return yield* Effect.fail(
-                new AdapterError({
-                  message: `Insufficient token balance: ${shortageX}; ${shortageY}. Neither pool token can fund the entry — fund one pool token up to the full position size for a single-sided deposit, or enable AUTO_SWAP_ENTRY with a USDC balance.`,
-                  poolAddress,
-                }),
-              );
-            } else if (xShort || yShort) {
-              const heldIsX = yShort;
-              const heldMint = heldIsX ? pool.tokenX : pool.tokenY;
-              const heldDecimals = heldIsX ? tokenXDecimals : tokenYDecimals;
-              const heldPrice = heldIsX ? priceX : priceY;
-              const heldAvailable = heldIsX ? maxX : maxY;
-              const missingShortage = heldIsX ? shortageY : shortageX;
-              // Single-sided deposits place the entire position in the held
-              // token — never silently downsized to the available half.
-              const fullSizeAtomic = computeRequiredAtomic(
-                positionSizeUsd,
-                heldPrice,
-                heldDecimals,
-              );
-              if (fullSizeAtomic === 0n || fullSizeAtomic > heldAvailable) {
-                return yield* Effect.fail(
-                  new AdapterError({
-                    message: `Single-sided entry impossible for ${heldMint}: available ${formatTokenAmount(heldAvailable, heldDecimals)} is below the full-size requirement ${formatTokenAmount(fullSizeAtomic, heldDecimals)} for a $${positionSizeUsd} single-sided deposit (${missingShortage}). Fund the held token up to the full position size or enable AUTO_SWAP_ENTRY.`,
-                    poolAddress,
-                  }),
-                );
-              }
-              if (heldIsX) {
-                depositXAtomic = fullSizeAtomic;
-                depositYAtomic = 0n;
-                singleSidedX = true;
-                depositMode = "single-sided-x";
-                amountXUsd = positionSizeUsd;
-                amountYUsd = 0;
-              } else {
-                depositXAtomic = 0n;
-                depositYAtomic = fullSizeAtomic;
-                singleSidedX = false;
-                depositMode = "single-sided-y";
-                amountXUsd = 0;
-                amountYUsd = positionSizeUsd;
-              }
-              logger.info("Single-sided entry: depositing the full size in the held leg", {
-                pool: poolAddress,
-                heldMint,
-                depositMode,
-                amountUsd: positionSizeUsd,
-              });
-            }
+            const deposit = yield* resolveEntryDeposit({
+              poolAddress,
+              tokenX: pool.tokenX,
+              tokenY: pool.tokenY,
+              positionSizeUsd,
+              priceX,
+              priceY,
+              tokenXDecimals,
+              tokenYDecimals,
+              requestedXAmount,
+              requestedYAmount,
+              maxX,
+              maxY,
+              xShort,
+              yShort,
+              shortageX,
+              shortageY,
+              forceSingleSidedX,
+            });
+            const {
+              depositXAtomic,
+              depositYAtomic,
+              depositMode,
+              singleSidedX,
+              amountXUsd,
+              amountYUsd,
+            } = deposit;
+            logEntryDepositMode(
+              poolAddress,
+              pool.tokenX,
+              depositMode,
+              depositXAtomic,
+              positionSizeUsd,
+              forceSingleSidedX,
+            );
 
             const totalXAmount = new BN(depositXAtomic.toString());
             const totalYAmount = new BN(depositYAtomic.toString());
 
-            // The decision loop resolves `auto` per pool and passes a concrete
-            // shape; a bare `auto` config reaches the adapter only from direct
-            // calls without volatility context, where spot is the safe default.
-            const strategySpec =
-              options?.strategySpec ??
-              (config.entryStrategyType === "auto" ? "spot" : config.entryStrategyType);
-            const strategy: StrategyParameters = {
-              minBinId: lowerBinId,
-              maxBinId: upperBinId,
-              strategyType: toSdkStrategyType(strategySpec),
-              ...(singleSidedX !== undefined ? { singleSidedX } : undefined),
-            };
+            const strategy = buildEntryStrategy(
+              lowerBinId,
+              upperBinId,
+              options?.strategySpec,
+              singleSidedX,
+            );
 
             const positionKeypair = new Keypair();
 
@@ -4354,17 +4651,7 @@ export const makeAdapterLive = (
           if (config.feedbackOptOut) return Effect.void;
           return Effect.gen(function* () {
             const installId = yield* getOrCreateInstallId();
-            const apiKey = yield* Effect.try({
-              try: () => {
-                const credsPath = path.join(getPrismUserConfigDir(), "credentials.json");
-                // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-                const creds = JSON.parse(fs.readFileSync(credsPath, "utf-8")) as {
-                  apiKey?: JsonValue;
-                };
-                return isStringValue(creds.apiKey) ? creds.apiKey : "";
-              },
-              catch: () => "",
-            });
+            const apiKey = readApiKey();
             const headers: RequestHeaders = { "Content-Type": "application/json" };
             if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
             const res = yield* Effect.tryPromise({
@@ -4405,11 +4692,7 @@ export const makeAdapterLive = (
                 }),
               );
             }
-            let pageSize = 1000;
-            try {
-              const configured = Number(new URL(baseUrl).searchParams.get("page_size") ?? 1000);
-              if (Number.isSafeInteger(configured) && configured > 0) pageSize = configured;
-            } catch {}
+            const pageSize = safeMeteoraPageSize(baseUrl) ?? 1000;
             const url =
               requestedPage === null
                 ? baseUrl
@@ -4458,69 +4741,10 @@ export const makeAdapterLive = (
                   cause,
                 }),
             });
-            if (!isPoolsEnvelope(parsed)) {
-              return yield* Effect.fail(
-                new DiscoverPoolsError({
-                  message: `Meteora API returned non-envelope payload (${describe(parsed)}) from ${url}`,
-                  url,
-                }),
-              );
-            }
-            const {
-              data,
-              total,
-              pages,
-              current_page: currentPage,
-              page_size: responsePageSize,
-            } = parsed;
-            const paginationValid =
-              Number.isSafeInteger(total) &&
-              total >= 0 &&
-              Number.isSafeInteger(pages) &&
-              pages >= 0 &&
-              Number.isSafeInteger(currentPage) &&
-              currentPage >= 1 &&
-              Number.isSafeInteger(responsePageSize) &&
-              responsePageSize >= 0 &&
-              (total === 0 || (pages >= 1 && responsePageSize >= 1 && currentPage <= pages)) &&
-              (requestedPage === null ||
-                (currentPage === requestedPage && responsePageSize === pageSize));
-            if (!paginationValid) {
-              return yield* Effect.fail(
-                new DiscoverPoolsError({
-                  message: `Meteora API returned malformed pagination metadata from ${url}`,
-                  url,
-                }),
-              );
-            }
-            discoveryPageCount = Math.max(pages, 1);
-            const valid = data.filter(isValidPoolState);
-            if (data.length > 0 && valid.length === 0) {
-              // Every row failed shape validation: almost always a schema change
-              // upstream, not random data noise. Fail loud so the regression is
-              // visible instead of silently masking it as an empty result.
-              logger.warn(
-                "Pool discovery: ALL pool objects had invalid shape; treating as a schema error",
-                { dropped: data.length, kept: 0, total, pages },
-              );
-              return yield* Effect.fail(
-                new DiscoverPoolsError({
-                  message: `Meteora API returned ${data.length} pool rows but none matched the expected shape. Likely a schema change. Pool discovery disabled for this cycle.`,
-                  url,
-                }),
-              );
-            }
-            if (valid.length < data.length) {
-              logger.warn("Pool discovery: some pool objects had invalid shape and were dropped", {
-                dropped: data.length - valid.length,
-                kept: valid.length,
-                total,
-                pages,
-              });
-            }
-            return valid
-              .filter((p) => p.tvl >= config.discoveryMinTvlUsd && !p.launchpad)
-              .map(toDiscoveredPool)
+            const discovery = yield* parseDiscoveryResponse(parsed, url, requestedPage, pageSize);
+            discoveryPageCount = Math.max(discovery.pages, 1);
+            return discovery.pools
+              .filter((p) => p.tvlUsd >= config.discoveryMinTvlUsd)
               .slice(0, 50);
           }),
 
@@ -4537,17 +4761,12 @@ export const makeAdapterLive = (
             const pageCount = Math.min(Math.max(Math.floor(pages), 1), 10);
             const fetchPage = (page: number): Effect.Effect<ReadonlyArray<DiscoveredPool>, Error> =>
               Effect.gen(function* () {
-                const url = new URL(baseUrl);
-                url.searchParams.set("page", String(page));
-                url.searchParams.set("page_size", "1000");
-                // Fee-ranked universe (MARKET_SCAN_UNIVERSE_SORT=fee) surfaces the
-                // hot yield pools in the first pages, aligning the fetch with the
-                // market gate's fee-APR ranking. TVL-ranked (default) keeps the
-                // large pools first. Honored here so the Data API's server-side
-                // sort matches the gate's rank — no local re-ranking needed.
-                if (config.marketScanUniverseSort === "fee") {
-                  url.searchParams.set("sort_by", "fee_tvl_ratio_24h:desc");
-                }
+                const url = buildMarketScanPageUrl(
+                  baseUrl,
+                  page,
+                  config.marketScanUniverseSort === "fee",
+                );
+                if (url === null) return [];
                 const res = yield* Effect.tryPromise({
                   try: () => fetch(url.toString(), { signal: AbortSignal.timeout(15_000) }),
                   // SAFETY: This branch normalizes the caught cause to the Error contract before propagation.

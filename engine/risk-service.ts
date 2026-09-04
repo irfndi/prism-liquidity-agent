@@ -31,8 +31,39 @@ export function evaluateRisk(
     return { approved: true, reason: "EXIT approved: capital protection" };
   }
 
-  // 2. Confidence gate — a non-finite confidence (NaN/Infinity) must not pass
-  // the comparison (NaN < x is false), so reject it explicitly first.
+  // 2-7. Numbered gates run in order; the first rejection wins. Each gate
+  // lives in its own checkXxxGate helper returning the rejection or null.
+  const confidenceRejection = checkConfidenceGate(riskConfig, decision);
+  if (confidenceRejection !== null) return confidenceRejection;
+
+  const haltRejection = checkRollingPnlHaltGate(decision, ctx);
+  if (haltRejection !== null) return haltRejection;
+
+  const poolCapRejection = checkPerPoolPositionCapGate(riskConfig, decision, ctx);
+  if (poolCapRejection !== null) return poolCapRejection;
+
+  const drawdownRejection = checkDrawdownGate(decision, ctx);
+  if (drawdownRejection !== null) return drawdownRejection;
+
+  const stopLossRejection = checkStopLossGate(riskConfig, decision, ctx);
+  if (stopLossRejection !== null) return stopLossRejection;
+
+  const sizeRejection = checkPositionSizeGate(riskConfig, decision, ctx);
+  if (sizeRejection !== null) return sizeRejection;
+
+  const rangeRejection = checkRebalanceRangeGate(riskConfig, decision, ctx);
+  if (rangeRejection !== null) return rangeRejection;
+
+  return { approved: true, reason: "All risk checks passed" };
+}
+
+// ─── Numbered risk gates (evaluateRisk) ─────────────────────────────────────
+// Each helper returns the gate's rejection, or null when the gate passes.
+// Rejection order in evaluateRisk must stay: 2 → 2a → 3a → 4 → 5 → 6 → 7.
+
+// 2. Confidence gate — a non-finite confidence (NaN/Infinity) must not pass
+// the comparison (NaN < x is false), so reject it explicitly first.
+function checkConfidenceGate(riskConfig: RiskConfig, decision: AgentDecision): RiskResult | null {
   if (!Number.isFinite(decision.confidence)) {
     return {
       approved: false,
@@ -45,21 +76,24 @@ export function evaluateRisk(
       reason: `Confidence ${decision.confidence.toFixed(2)} below threshold ${riskConfig.confidenceThreshold}`,
     };
   }
+  return null;
+}
 
-  // 2a. Rolling realized-PnL loss halt — REALIZED_PNL_HALT_*. When the engine's
-  // trailing realized PnL over the last N closed positions nets below the
-  // configured threshold (computed once per cycle; REALIZED_PNL_HALT_ENABLED),
-  // stop DEPLOYING NEW CAPITAL everywhere: every new-capital ENTER across every
-  // lane (normal, market, runner, launch, idle-redeploy, fallen-angel, agent
-  // proposals) funnels through risk.evaluate, so this single gate covers them
-  // all. It is the anti-bleed breaker for high-frequency churn lanes that burn
-  // swap/spread cost + IL faster than fee capture (live: 50% win rate at -2.7%
-  // ROI on a pool churned hundreds of times/day). EXIT already returned at gate
-  // 1, and REBALANCE (position management, no new exposure) is left free, so
-  // capital protection and position reshaping are never blocked. The boolean is
-  // recomputed each cycle from the DB and auto-lifts when the strategy recovers.
-  // Fail-open: absent/false (env disabled or legacy backtest callers) never
-  // halts.
+// 2a. Rolling realized-PnL loss halt — REALIZED_PNL_HALT_*. When the engine's
+// trailing realized PnL over the last N closed positions nets below the
+// configured threshold (computed once per cycle; REALIZED_PNL_HALT_ENABLED),
+// stop DEPLOYING NEW CAPITAL everywhere: every new-capital ENTER across every
+// lane (normal, market, runner, launch, idle-redeploy, fallen-angel, agent
+// proposals) funnels through risk.evaluate, so this single gate covers them
+// all. It is the anti-bleed breaker for high-frequency churn lanes that burn
+// swap/spread cost + IL faster than fee capture (live: 50% win rate at -2.7%
+// ROI on a pool churned hundreds of times/day). EXIT already returned at gate
+// 1, and REBALANCE (position management, no new exposure) is left free, so
+// capital protection and position reshaping are never blocked. The boolean is
+// recomputed each cycle from the DB and auto-lifts when the strategy recovers.
+// Fail-open: absent/false (env disabled or legacy backtest callers) never
+// halts.
+function checkRollingPnlHaltGate(decision: AgentDecision, ctx: RiskContext): RiskResult | null {
   if (decision.action === "ENTER" && ctx.rollingRealizedPnlHalted === true) {
     return {
       approved: false,
@@ -67,162 +101,197 @@ export function evaluateRisk(
         "[rolling-pnl-halt] trailing realized PnL below REALIZED_PNL_HALT_THRESHOLD_USD — pausing new entries until the strategy nets back up",
     };
   }
+  return null;
+}
 
-  // 3. Concurrent positions cap is enforced upstream by evaluatePerPoolAllocation.
+// 3. Concurrent positions cap is enforced upstream by evaluatePerPoolAllocation.
 
-  // 3a. Per-pool position cap (Wave 10): DLMM natively supports multiple
-  // positions per pool (tight+wide pairs), so the old duplicate-pool guard is
-  // now a count cap. Aggregate exposure stays bounded by gate 6 below.
-  if (decision.action === "ENTER" && decision.poolAddress) {
-    const poolPositionCount = ctx.openPositions.filter(
-      (p) => p.poolAddress === decision.poolAddress,
-    ).length;
-    if (poolPositionCount >= riskConfig.maxPositionsPerPool) {
+// 3a. Per-pool position cap (Wave 10): DLMM natively supports multiple
+// positions per pool (tight+wide pairs), so the old duplicate-pool guard is
+// now a count cap. Aggregate exposure stays bounded by gate 6.
+function checkPerPoolPositionCapGate(
+  riskConfig: RiskConfig,
+  decision: AgentDecision,
+  ctx: RiskContext,
+): RiskResult | null {
+  const poolAddress = decision.poolAddress;
+  if (decision.action !== "ENTER" || !poolAddress) {
+    return null;
+  }
+  const poolPositionCount = ctx.openPositions.filter((p) => p.poolAddress === poolAddress).length;
+  if (poolPositionCount >= riskConfig.maxPositionsPerPool) {
+    return {
+      approved: false,
+      reason:
+        `Per-pool position cap reached (${poolPositionCount}/${riskConfig.maxPositionsPerPool}) ` +
+        `for pool ${poolAddress}`,
+    };
+  }
+  return null;
+}
+
+// 4. Drawdown check
+function checkDrawdownGate(decision: AgentDecision, ctx: RiskContext): RiskResult | null {
+  if (decision.action !== "ENTER") {
+    return null;
+  }
+  if (!Number.isFinite(ctx.portfolioValueUsd) || !Number.isFinite(ctx.recentPnlUsd)) {
+    return {
+      approved: false,
+      reason: "Portfolio drawdown data is not finite — pausing new entries",
+    };
+  }
+  if (ctx.portfolioValueUsd > 0) {
+    const drawdownPct = Math.abs(ctx.recentPnlUsd) / ctx.portfolioValueUsd;
+    if (ctx.recentPnlUsd < 0 && drawdownPct > 0.1) {
       return {
         approved: false,
-        reason:
-          `Per-pool position cap reached (${poolPositionCount}/${riskConfig.maxPositionsPerPool}) ` +
-          `for pool ${decision.poolAddress}`,
+        reason: `Portfolio drawdown ${(drawdownPct * 100).toFixed(1)}% exceeds 10% — pausing new entries`,
       };
     }
   }
+  return null;
+}
 
-  // 4. Drawdown check
-  if (decision.action === "ENTER") {
-    if (!Number.isFinite(ctx.portfolioValueUsd) || !Number.isFinite(ctx.recentPnlUsd)) {
-      return {
-        approved: false,
-        reason: "Portfolio drawdown data is not finite — pausing new entries",
-      };
-    }
-    if (ctx.portfolioValueUsd > 0) {
-      const drawdownPct = Math.abs(ctx.recentPnlUsd) / ctx.portfolioValueUsd;
-      if (ctx.recentPnlUsd < 0 && drawdownPct > 0.1) {
-        return {
-          approved: false,
-          reason: `Portfolio drawdown ${(drawdownPct * 100).toFixed(1)}% exceeds 10% — pausing new entries`,
-        };
-      }
-    }
+// 5. Stop-loss check — targets the decision's own position when identified
+// (a pool may hold several positions with independent PnL). The decision's
+// positionId is authoritative (deterministic decisions and agent proposals
+// both carry it); ctx.positionId is only the legacy alias callers set.
+function checkStopLossGate(
+  riskConfig: RiskConfig,
+  decision: AgentDecision,
+  ctx: RiskContext,
+): RiskResult | null {
+  if (decision.action !== "HOLD" && decision.action !== "REBALANCE") {
+    return null;
   }
-
-  // 5. Stop-loss check — targets the decision's own position when identified
-  // (a pool may hold several positions with independent PnL). The decision's
-  // positionId is authoritative (deterministic decisions and agent proposals
-  // both carry it); ctx.positionId is only the legacy alias callers set.
-  if (decision.action === "HOLD" || decision.action === "REBALANCE") {
-    const targetId = decision.positionId ?? ctx.positionId;
-    const pos =
-      targetId !== undefined
-        ? ctx.openPositions.find((p) => p.id === targetId)
-        : ctx.openPositions.find((p) => p.poolAddress === decision.poolAddress);
-    if (pos && pos.depositedUsd > 0) {
-      const lossPct = (pos.currentValueUsd - pos.depositedUsd) / pos.depositedUsd;
-      if (lossPct < -riskConfig.stopLossPct) {
-        return {
-          approved: false,
-          reason: `Stop-loss triggered: position loss ${(Math.abs(lossPct) * 100).toFixed(1)}% exceeds ${(riskConfig.stopLossPct * 100).toFixed(0)}%`,
-        };
-      }
-    }
+  const targetId = decision.positionId ?? ctx.positionId;
+  const pos =
+    targetId !== undefined
+      ? ctx.openPositions.find((p) => p.id === targetId)
+      : ctx.openPositions.find((p) => p.poolAddress === decision.poolAddress);
+  if (!pos || pos.depositedUsd <= 0) {
+    return null;
   }
-
-  // 6. Position size validation — the cap is the configured per-pool
-  // allocation (single source of truth: MAX_PER_POOL_ALLOCATION_PCT) minus
-  // the pool's existing aggregate exposure across all its positions.
-  if (decision.action === "ENTER" && decision.positionSizeUsd !== undefined) {
-    // Absolute floor first: any ENTER below the minimum entry size is dust
-    // (covers agent proposals and any future sizing path, not just the
-    // headroom clamp below).
-    if (decision.positionSizeUsd < ENTRY_SIZE_FLOOR_USD) {
-      return {
-        approved: false,
-        reason:
-          `Entry size $${decision.positionSizeUsd.toFixed(2)} is below the ` +
-          `$${ENTRY_SIZE_FLOOR_USD.toFixed(0)} minimum entry size`,
-      };
-    }
-    const capPct = riskConfig.maxPerPoolAllocationPct;
-    const existingPoolExposureUsd = ctx.openPositions
-      .filter((p) => p.poolAddress === decision.poolAddress)
-      .reduce((sum, p) => sum + p.currentValueUsd, 0);
-    if (
-      !Number.isFinite(decision.positionSizeUsd) ||
-      !Number.isFinite(ctx.portfolioValueUsd) ||
-      !Number.isFinite(existingPoolExposureUsd)
-    ) {
-      return {
-        approved: false,
-        reason: "Position size or portfolio data is not finite — refusing entry",
-      };
-    }
-    const maxSize = Math.max(ctx.portfolioValueUsd * capPct - existingPoolExposureUsd, 0);
-    if (decision.positionSizeUsd > maxSize) {
-      if (maxSize <= 0) {
-        return {
-          approved: false,
-          reason:
-            `Pool exposure $${existingPoolExposureUsd.toFixed(0)} already fills the ` +
-            `${(capPct * 100).toFixed(0)}% per-pool allocation cap`,
-        };
-      }
-      const adjustedSizeUsd = maxSize;
-      // A clamped-to-headroom size below the entry floor is dust, not an
-      // entry: approving it creates a position that can never pay its way
-      // (and previously produced $0.26 residual positions that churned the
-      // trailing stop and occupied per-pool slots). Reject instead of
-      // approving a sub-floor clamp.
-      if (adjustedSizeUsd < ENTRY_SIZE_FLOOR_USD) {
-        return {
-          approved: false,
-          reason:
-            `Remaining per-pool headroom $${adjustedSizeUsd.toFixed(2)} is below the ` +
-            `$${ENTRY_SIZE_FLOOR_USD.toFixed(0)} minimum entry size — skipping dust entry`,
-        };
-      }
-      return {
-        approved: true,
-        reason: `Size capped to ${(capPct * 100).toFixed(0)}% of portfolio ($${adjustedSizeUsd.toFixed(0)})`,
-        adjustedSizeUsd,
-      };
-    }
+  const lossPct = (pos.currentValueUsd - pos.depositedUsd) / pos.depositedUsd;
+  if (lossPct < -riskConfig.stopLossPct) {
+    return {
+      approved: false,
+      reason: `Stop-loss triggered: position loss ${(Math.abs(lossPct) * 100).toFixed(1)}% exceeds ${(riskConfig.stopLossPct * 100).toFixed(0)}%`,
+    };
   }
+  return null;
+}
 
-  // 7. REBALANCE: validate bin range
-  if (decision.action === "REBALANCE" && decision.rebalanceParams) {
-    const { newLowerBinId, newUpperBinId } = decision.rebalanceParams;
-    if (newUpperBinId <= newLowerBinId) {
-      return {
-        approved: false,
-        reason: "Invalid rebalance range: upperBinId must be > lowerBinId",
-      };
-    }
-    const rangeWidth = newUpperBinId - newLowerBinId;
-    if (rangeWidth > riskConfig.maxRebalanceRangeBins) {
-      return {
-        approved: false,
-        reason: `Rebalance range ${rangeWidth} bins exceeds max ${riskConfig.maxRebalanceRangeBins}`,
-      };
-    }
-    // A runner scale-in (topUp present) re-anchors the band BELOW the active
-    // bin by design — the below-market dip ladder is the point. The
-    // containment check applies only to ordinary rebalances.
-    if (
-      decision.rebalanceParams.topUp === undefined &&
-      ctx.activeBinId !== undefined &&
-      Number.isFinite(ctx.activeBinId) &&
-      (ctx.activeBinId < newLowerBinId || ctx.activeBinId > newUpperBinId)
-    ) {
-      return {
-        approved: false,
-        reason:
-          `Rebalance range [${newLowerBinId}, ${newUpperBinId}] does not contain ` +
-          `active bin ${ctx.activeBinId}`,
-      };
-    }
+// 6. Position size validation — the cap is the configured per-pool
+// allocation (single source of truth: MAX_PER_POOL_ALLOCATION_PCT) minus
+// the pool's existing aggregate exposure across all its positions.
+function checkPositionSizeGate(
+  riskConfig: RiskConfig,
+  decision: AgentDecision,
+  ctx: RiskContext,
+): RiskResult | null {
+  if (decision.action !== "ENTER" || decision.positionSizeUsd === undefined) {
+    return null;
   }
+  // Absolute floor first: any ENTER below the minimum entry size is dust
+  // (covers agent proposals and any future sizing path, not just the
+  // headroom clamp below).
+  if (decision.positionSizeUsd < ENTRY_SIZE_FLOOR_USD) {
+    return {
+      approved: false,
+      reason:
+        `Entry size $${decision.positionSizeUsd.toFixed(2)} is below the ` +
+        `$${ENTRY_SIZE_FLOOR_USD.toFixed(0)} minimum entry size`,
+    };
+  }
+  const capPct = riskConfig.maxPerPoolAllocationPct;
+  const existingPoolExposureUsd = ctx.openPositions
+    .filter((p) => p.poolAddress === decision.poolAddress)
+    .reduce((sum, p) => sum + p.currentValueUsd, 0);
+  if (
+    !Number.isFinite(decision.positionSizeUsd) ||
+    !Number.isFinite(ctx.portfolioValueUsd) ||
+    !Number.isFinite(existingPoolExposureUsd)
+  ) {
+    return {
+      approved: false,
+      reason: "Position size or portfolio data is not finite — refusing entry",
+    };
+  }
+  const maxSize = Math.max(ctx.portfolioValueUsd * capPct - existingPoolExposureUsd, 0);
+  if (decision.positionSizeUsd <= maxSize) {
+    return null;
+  }
+  if (maxSize <= 0) {
+    return {
+      approved: false,
+      reason:
+        `Pool exposure $${existingPoolExposureUsd.toFixed(0)} already fills the ` +
+        `${(capPct * 100).toFixed(0)}% per-pool allocation cap`,
+    };
+  }
+  const adjustedSizeUsd = maxSize;
+  // A clamped-to-headroom size below the entry floor is dust, not an
+  // entry: approving it creates a position that can never pay its way
+  // (and previously produced $0.26 residual positions that churned the
+  // trailing stop and occupied per-pool slots). Reject instead of
+  // approving a sub-floor clamp.
+  if (adjustedSizeUsd < ENTRY_SIZE_FLOOR_USD) {
+    return {
+      approved: false,
+      reason:
+        `Remaining per-pool headroom $${adjustedSizeUsd.toFixed(2)} is below the ` +
+        `$${ENTRY_SIZE_FLOOR_USD.toFixed(0)} minimum entry size — skipping dust entry`,
+    };
+  }
+  return {
+    approved: true,
+    reason: `Size capped to ${(capPct * 100).toFixed(0)}% of portfolio ($${adjustedSizeUsd.toFixed(0)})`,
+    adjustedSizeUsd,
+  };
+}
 
-  return { approved: true, reason: "All risk checks passed" };
+// 7. REBALANCE: validate bin range
+function checkRebalanceRangeGate(
+  riskConfig: RiskConfig,
+  decision: AgentDecision,
+  ctx: RiskContext,
+): RiskResult | null {
+  if (decision.action !== "REBALANCE" || decision.rebalanceParams === undefined) {
+    return null;
+  }
+  const { newLowerBinId, newUpperBinId } = decision.rebalanceParams;
+  if (newUpperBinId <= newLowerBinId) {
+    return {
+      approved: false,
+      reason: "Invalid rebalance range: upperBinId must be > lowerBinId",
+    };
+  }
+  const rangeWidth = newUpperBinId - newLowerBinId;
+  if (rangeWidth > riskConfig.maxRebalanceRangeBins) {
+    return {
+      approved: false,
+      reason: `Rebalance range ${rangeWidth} bins exceeds max ${riskConfig.maxRebalanceRangeBins}`,
+    };
+  }
+  // A runner scale-in (topUp present) re-anchors the band BELOW the active
+  // bin by design — the below-market dip ladder is the point. The
+  // containment check applies only to ordinary rebalances.
+  if (
+    decision.rebalanceParams.topUp === undefined &&
+    ctx.activeBinId !== undefined &&
+    Number.isFinite(ctx.activeBinId) &&
+    (ctx.activeBinId < newLowerBinId || ctx.activeBinId > newUpperBinId)
+  ) {
+    return {
+      approved: false,
+      reason:
+        `Rebalance range [${newLowerBinId}, ${newUpperBinId}] does not contain ` +
+        `active bin ${ctx.activeBinId}`,
+    };
+  }
+  return null;
 }
 
 const VALID_ACTIONS: ReadonlyArray<ActionType> = ["HOLD", "REBALANCE", "EXIT", "ENTER"];
@@ -258,226 +327,22 @@ export function evaluateAgentProposal(
   ctx: RiskContext,
   config: AppConfig,
 ): ProposalValidationResult {
-  // 1. Action must be a known decision action.
-  if (!VALID_ACTIONS.includes(proposal.action)) {
-    return { valid: false, reason: `Invalid action: ${proposal.action}` };
-  }
+  // Gates run in order; the first rejection wins.
+  const structural = checkProposalStructuralGates(proposal, ctx);
+  if (structural !== null) return { valid: false, reason: structural };
 
-  // 2. Proposal must target the pool currently being evaluated.
-  if (proposal.poolAddress !== ctx.poolAddress) {
-    return {
-      valid: false,
-      reason: `Proposal poolAddress ${proposal.poolAddress} does not match evaluated pool ${ctx.poolAddress}`,
-    };
-  }
+  const confidence = checkProposalConfidenceGate(proposal, ctx, config);
+  if (confidence !== null) return { valid: false, reason: confidence };
 
-  // 3. Safety EXIT cannot be downgraded to a less-defensive action.
-  if (proposal.originalAction === "EXIT" && proposal.action !== "EXIT") {
-    return {
-      valid: false,
-      reason: "Cannot downgrade a safety EXIT to a non-EXIT action",
-    };
-  }
+  const sizing = resolveProposalPositionSize(proposal, ctx, config);
+  if (!sizing.approved) return { valid: false, reason: sizing.reason };
 
-  // 4. Non-ENTER actions may not be promoted to ENTER.
-  // HOLD→REBALANCE and HOLD→EXIT are intentionally allowed when a position
-  // exists (checked below). Callers in `full`/`supervised` must still re-run
-  // capital-protection gates (min interval, gas, recovery) before applying
-  // agent-originated REBALANCE — see evaluateAgentRebalanceCapitalGates.
-  if (
-    proposal.originalAction !== undefined &&
-    proposal.originalAction !== "ENTER" &&
-    proposal.action === "ENTER"
-  ) {
-    return {
-      valid: false,
-      reason: `Cannot promote ${proposal.originalAction} to ENTER`,
-    };
-  }
+  const rebalance = checkProposalRebalanceRangeGate(proposal, ctx, config);
+  if (rebalance !== null) return { valid: false, reason: rebalance };
 
-  // 5. Confidence must be finite and within [minConfidence, 1], unless the proposal
-  //    preserves the original low-confidence decision unchanged — verified against
-  //    the trusted original decision (same action, same confidence, same
-  //    executable parameters). Without one, the waiver does not apply.
-  //    A DEFENSIVE downgrade is also exempt from the floor: a proposal that
-  //    makes the decision strictly LESS aggressive than the deterministic
-  //    original (ENTER -> HOLD/EXIT/REBALANCE, REBALANCE -> HOLD/EXIT, EXIT ->
-  //    EXIT-echo) is a veto, and vetoing at low confidence is the harness's
-  //    legitimate conservative signal — rejecting it because confidence < 0.65
-  //    silenced the very safety vote the overlay exists for (observed in the
-  //    field: the OpenClaw harness voted HOLD @ 0.55 on a falling pool and was
-  //    rejected with "must be between 0.65 and 1", so the ENTER was not
-  //    vetoed). An AGGRESSIVE proposal (ENTER, or any confidence above the
-  //    original) still requires the floor.
-  const original = ctx.originalDecision;
-  const preservesOriginalDecision =
-    original !== undefined &&
-    proposal.action === original.action &&
-    Math.abs(proposal.confidence - original.confidence) < 0.005 &&
-    (proposal.positionSizeUsd === undefined ||
-      proposal.positionSizeUsd === original.positionSizeUsd) &&
-    (proposal.rebalanceParams === undefined ||
-      (original.rebalanceParams !== undefined &&
-        rebalanceParamsEqual(proposal.rebalanceParams, original.rebalanceParams)));
-
-  const isDefensiveDowngrade =
-    original !== undefined &&
-    isDefensiveProposalAction(original.action, proposal.action) &&
-    // The harness's own claimed originalAction must match the trusted
-    // original — a spoofed originalAction cannot manufacture a downgrade waiver.
-    (proposal.originalAction === undefined || proposal.originalAction === original.action);
-  const confidenceNeedsFloor = !preservesOriginalDecision && !isDefensiveDowngrade;
-  if (
-    confidenceNeedsFloor &&
-    (!Number.isFinite(proposal.confidence) ||
-      proposal.confidence < config.agentProposalMinConfidence ||
-      proposal.confidence > 1)
-  ) {
-    return {
-      valid: false,
-      reason:
-        `Confidence ${proposal.confidence} must be finite and between ` +
-        `${config.agentProposalMinConfidence} and 1`,
-    };
-  }
-
-  // 7. Position size must be non-negative and capped to the stricter of the
-  //    agent proposal limit and the existing per-pool allocation cap.
-  let adjustedPositionSizeUsd = proposal.positionSizeUsd;
-
-  if (proposal.action === "ENTER" && proposal.positionSizeUsd === undefined) {
-    return { valid: false, reason: "ENTER proposals must include positionSizeUsd" };
-  }
-
-  if (proposal.action === "ENTER") {
-    if (
-      proposal.positionSizeUsd === undefined ||
-      !Number.isFinite(proposal.positionSizeUsd) ||
-      proposal.positionSizeUsd <= 0
-    ) {
-      return { valid: false, reason: "positionSizeUsd must be a positive finite number for ENTER" };
-    }
-  }
-
-  if (proposal.action === "REBALANCE") {
-    if (proposal.rebalanceParams === undefined) {
-      return { valid: false, reason: "REBALANCE proposals must include rebalanceParams" };
-    }
-    const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
-    if (!hasPosition) {
-      return {
-        valid: false,
-        reason: `Cannot REBALANCE pool ${proposal.poolAddress} — no open position`,
-      };
-    }
-  }
-
-  if (proposal.action === "EXIT") {
-    const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
-    // An echoed deterministic EXIT on an unheld pool is a no-op, not a bad
-    // proposal — only reject advisor-initiated exits with no position.
-    if (!hasPosition && proposal.originalAction !== "EXIT") {
-      return {
-        valid: false,
-        reason: `Cannot EXIT pool ${proposal.poolAddress} — no open position`,
-      };
-    }
-  }
-
-  if (proposal.positionSizeUsd !== undefined) {
-    if (!Number.isFinite(proposal.positionSizeUsd) || proposal.positionSizeUsd < 0) {
-      return { valid: false, reason: "positionSizeUsd must be a finite non-negative number" };
-    }
-
-    const agentMaxSizeUsd = ctx.portfolioValueUsd * config.agentProposalMaxPositionSizePct;
-    const perPoolCapUsd = ctx.portfolioValueUsd * config.maxPerPoolAllocationPct;
-    let cappedSizeUsd = Math.min(proposal.positionSizeUsd, agentMaxSizeUsd, perPoolCapUsd);
-
-    if (proposal.action === "ENTER") {
-      const allocationResult = evaluatePerPoolAllocation({
-        proposedDepositUsd: cappedSizeUsd,
-        portfolioValueUsd: ctx.portfolioValueUsd,
-        openPositions: ctx.openPositions,
-        maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
-        maxOpenPositions: ctx.maxOpenPositions ?? config.maxOpenPositions,
-        poolAddress: proposal.poolAddress,
-        maxPositionsPerPool: config.maxPositionsPerPool,
-      });
-
-      if (!allocationResult.approved) {
-        return { valid: false, reason: allocationResult.reason };
-      }
-
-      cappedSizeUsd = allocationResult.adjustedDepositUsd;
-    }
-
-    if (cappedSizeUsd !== proposal.positionSizeUsd) {
-      adjustedPositionSizeUsd = cappedSizeUsd;
-    }
-  }
-
-  // 8. REBALANCE parameters must form a valid, bounded bin range with integer IDs
-  //    that contains the pool's current active bin when known — otherwise the
-  //    advisor can move liquidity completely out of range.
-  if (proposal.rebalanceParams !== undefined) {
-    const { newLowerBinId, newUpperBinId } = proposal.rebalanceParams;
-    if (!Number.isInteger(newLowerBinId) || !Number.isInteger(newUpperBinId)) {
-      return {
-        valid: false,
-        reason: "Rebalance bin IDs must be integers",
-      };
-    }
-    if (newUpperBinId <= newLowerBinId) {
-      return {
-        valid: false,
-        reason: "Invalid rebalance range: upperBinId must be > lowerBinId",
-      };
-    }
-    const rangeWidth = newUpperBinId - newLowerBinId;
-    if (rangeWidth > config.maxRebalanceRangeBins) {
-      return {
-        valid: false,
-        reason: `Rebalance range ${rangeWidth} bins exceeds max ${config.maxRebalanceRangeBins}`,
-      };
-    }
-    if (
-      ctx.activeBinId !== undefined &&
-      Number.isFinite(ctx.activeBinId) &&
-      (ctx.activeBinId < newLowerBinId || ctx.activeBinId > newUpperBinId)
-    ) {
-      return {
-        valid: false,
-        reason:
-          `Rebalance range [${newLowerBinId}, ${newUpperBinId}] does not contain ` +
-          `active bin ${ctx.activeBinId}`,
-      };
-    }
-  }
-
-  // Position targeting (Wave 10): position-bound actions must land on a
-  // specific position row when a pool holds several. The advisor may name one
-  // explicitly; otherwise inherit the deterministic decision's target; a pool
-  // with exactly one open position resolves to it. Anything else stays
-  // untargeted and fails closed at execution.
-  let positionId = proposal.positionId ?? ctx.originalDecision?.positionId;
-  if (positionId !== undefined) {
-    // A named position must resolve to an open position on the proposal's pool
-    // (gate 2 already pinned poolAddress to the evaluated pool) — an advisor
-    // must not be able to route execution at a position on a different pool
-    // than the proposal claims. Fail closed when the id is unknown or foreign.
-    const target = ctx.openPositions.find((p) => p.id === positionId);
-    if (target === undefined || target.poolAddress !== proposal.poolAddress) {
-      return {
-        valid: false,
-        reason: `Position ${positionId} does not belong to pool ${proposal.poolAddress}`,
-      };
-    }
-  } else if (proposal.action === "EXIT" || proposal.action === "REBALANCE") {
-    const poolPositions = ctx.openPositions.filter((p) => p.poolAddress === proposal.poolAddress);
-    if (poolPositions.length === 1) {
-      positionId = poolPositions[0]!.id;
-    }
-  }
+  const target = resolveProposalPositionTarget(proposal, ctx);
+  if (target.rejection !== undefined) return { valid: false, reason: target.rejection };
+  const positionId = target.positionId;
 
   const adjustedDecision: AgentDecision = {
     action: proposal.action,
@@ -485,9 +350,13 @@ export function evaluateAgentProposal(
     // A preserve-original waiver keeps the trusted original confidence so a
     // rounded prompt echo cannot promote a sub-threshold decision into an
     // execution-approved one.
-    confidence: preservesOriginalDecision ? original.confidence : proposal.confidence,
+    confidence:
+      preservesOriginalDecision(proposal, ctx.originalDecision) &&
+      ctx.originalDecision !== undefined
+        ? ctx.originalDecision.confidence
+        : proposal.confidence,
     reasoning: proposal.reasoning,
-    ...(adjustedPositionSizeUsd !== undefined && { positionSizeUsd: adjustedPositionSizeUsd }),
+    ...(sizing.approved && sizing.size !== undefined && { positionSizeUsd: sizing.size }),
     ...(proposal.rebalanceParams !== undefined && { rebalanceParams: proposal.rebalanceParams }),
     ...(positionId !== undefined && { positionId }),
   };
@@ -497,6 +366,246 @@ export function evaluateAgentProposal(
     reason: "Agent proposal validated",
     adjustedDecision,
   };
+}
+
+// ─── Agent-proposal validation gates (evaluateAgentProposal) ─────────────────
+// Each gate helper returns its rejection reason (string) or null when it
+// passes; value-producing helpers return the value or the rejection reason.
+// Rejection order must stay: 1-4 → 5 → 7 → 8 → targeting.
+
+// 1-4. Structural gates: known action, evaluated pool, EXIT downgrade and
+// ENTER promotion bans.
+function checkProposalStructuralGates(proposal: AgentProposal, ctx: RiskContext): string | null {
+  if (!VALID_ACTIONS.includes(proposal.action)) {
+    return `Invalid action: ${proposal.action}`;
+  }
+  if (proposal.poolAddress !== ctx.poolAddress) {
+    return `Proposal poolAddress ${proposal.poolAddress} does not match evaluated pool ${ctx.poolAddress}`;
+  }
+  if (proposal.originalAction === "EXIT" && proposal.action !== "EXIT") {
+    return "Cannot downgrade a safety EXIT to a non-EXIT action";
+  }
+  // Non-ENTER actions may not be promoted to ENTER. HOLD→REBALANCE and
+  // HOLD→EXIT are intentionally allowed when a position exists (checked below).
+  // Callers in `full`/`supervised` must still re-run capital-protection gates
+  // (min interval, gas, recovery) before applying agent-originated REBALANCE —
+  // see evaluateAgentRebalanceCapitalGates.
+  if (
+    proposal.originalAction !== undefined &&
+    proposal.originalAction !== "ENTER" &&
+    proposal.action === "ENTER"
+  ) {
+    return `Cannot promote ${proposal.originalAction} to ENTER`;
+  }
+  return null;
+}
+
+// True when the proposal preserves the original low-confidence decision
+// unchanged — verified against the trusted original decision (same action,
+// same confidence, same executable parameters). Without one, the waiver does
+// not apply.
+function preservesOriginalDecision(
+  proposal: AgentProposal,
+  original: AgentDecision | undefined,
+): boolean {
+  return (
+    original !== undefined &&
+    proposal.action === original.action &&
+    Math.abs(proposal.confidence - original.confidence) < 0.005 &&
+    (proposal.positionSizeUsd === undefined ||
+      proposal.positionSizeUsd === original.positionSizeUsd) &&
+    (proposal.rebalanceParams === undefined ||
+      (original.rebalanceParams !== undefined &&
+        rebalanceParamsEqual(proposal.rebalanceParams, original.rebalanceParams)))
+  );
+}
+
+function isDefensiveDowngrade(
+  proposal: AgentProposal,
+  original: AgentDecision | undefined,
+): boolean {
+  return (
+    original !== undefined &&
+    isDefensiveProposalAction(original.action, proposal.action) &&
+    // The harness's own claimed originalAction must match the trusted
+    // original — a spoofed originalAction cannot manufacture a downgrade waiver.
+    (proposal.originalAction === undefined || proposal.originalAction === original.action)
+  );
+}
+
+// 5. Confidence must be finite and within [minConfidence, 1], unless the
+//    proposal preserves the original low-confidence decision unchanged or is a
+//    DEFENSIVE downgrade. A downgrade never requires the floor — vetoing at
+//    low confidence is the harness's legitimate conservative signal (observed
+//    in the field: the OpenClaw harness voted HOLD @ 0.55 on a falling pool
+//    and was rejected with "must be between 0.65 and 1", so the ENTER was not
+//    vetoed). An AGGRESSIVE proposal still requires the floor.
+function checkProposalConfidenceGate(
+  proposal: AgentProposal,
+  ctx: RiskContext,
+  config: AppConfig,
+): string | null {
+  const original = ctx.originalDecision;
+  const needsFloor =
+    !preservesOriginalDecision(proposal, original) && !isDefensiveDowngrade(proposal, original);
+  if (
+    needsFloor &&
+    (!Number.isFinite(proposal.confidence) ||
+      proposal.confidence < config.agentProposalMinConfidence ||
+      proposal.confidence > 1)
+  ) {
+    return (
+      `Confidence ${proposal.confidence} must be finite and between ` +
+      `${config.agentProposalMinConfidence} and 1`
+    );
+  }
+  return null;
+}
+
+// Sizing verdict: either a rejection reason or the (possibly capped) size.
+// `size` stays undefined for actions that carry no position size.
+type ProposalSizeResult =
+  | { readonly approved: false; readonly reason: string }
+  | { readonly approved: true; readonly size?: number };
+
+// 7. Position size must be non-negative and capped to the stricter of the
+//    agent proposal limit and the existing per-pool allocation cap.
+function resolveProposalPositionSize(
+  proposal: AgentProposal,
+  ctx: RiskContext,
+  config: AppConfig,
+): ProposalSizeResult {
+  if (proposal.action === "ENTER" && proposal.positionSizeUsd === undefined) {
+    return { approved: false, reason: "ENTER proposals must include positionSizeUsd" };
+  }
+  if (proposal.action === "ENTER") {
+    if (
+      proposal.positionSizeUsd === undefined ||
+      !Number.isFinite(proposal.positionSizeUsd) ||
+      proposal.positionSizeUsd <= 0
+    ) {
+      return {
+        approved: false,
+        reason: "positionSizeUsd must be a positive finite number for ENTER",
+      };
+    }
+  }
+  if (proposal.action === "REBALANCE") {
+    if (proposal.rebalanceParams === undefined) {
+      return { approved: false, reason: "REBALANCE proposals must include rebalanceParams" };
+    }
+    const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
+    if (!hasPosition) {
+      return {
+        approved: false,
+        reason: `Cannot REBALANCE pool ${proposal.poolAddress} — no open position`,
+      };
+    }
+  }
+  if (proposal.action === "EXIT") {
+    const hasPosition = ctx.openPositions.some((p) => p.poolAddress === proposal.poolAddress);
+    // An echoed deterministic EXIT on an unheld pool is a no-op, not a bad
+    // proposal — only reject advisor-initiated exits with no position.
+    if (!hasPosition && proposal.originalAction !== "EXIT") {
+      return {
+        approved: false,
+        reason: `Cannot EXIT pool ${proposal.poolAddress} — no open position`,
+      };
+    }
+  }
+  if (proposal.positionSizeUsd === undefined) return { approved: true };
+  if (!Number.isFinite(proposal.positionSizeUsd) || proposal.positionSizeUsd < 0) {
+    return { approved: false, reason: "positionSizeUsd must be a finite non-negative number" };
+  }
+  const agentMaxSizeUsd = ctx.portfolioValueUsd * config.agentProposalMaxPositionSizePct;
+  const perPoolCapUsd = ctx.portfolioValueUsd * config.maxPerPoolAllocationPct;
+  let cappedSizeUsd = Math.min(proposal.positionSizeUsd, agentMaxSizeUsd, perPoolCapUsd);
+  if (proposal.action === "ENTER") {
+    const allocationResult = evaluatePerPoolAllocation({
+      proposedDepositUsd: cappedSizeUsd,
+      portfolioValueUsd: ctx.portfolioValueUsd,
+      openPositions: ctx.openPositions,
+      maxPerPoolAllocationPct: config.maxPerPoolAllocationPct,
+      maxOpenPositions: ctx.maxOpenPositions ?? config.maxOpenPositions,
+      poolAddress: proposal.poolAddress,
+      maxPositionsPerPool: config.maxPositionsPerPool,
+    });
+    if (!allocationResult.approved) {
+      return { approved: false, reason: allocationResult.reason };
+    }
+    cappedSizeUsd = allocationResult.adjustedDepositUsd;
+  }
+  return { approved: true, size: cappedSizeUsd };
+}
+
+// 8. REBALANCE parameters must form a valid, bounded bin range with integer IDs
+//    that contains the pool's current active bin when known — otherwise the
+//    advisor can move liquidity completely out of range.
+function checkProposalRebalanceRangeGate(
+  proposal: AgentProposal,
+  ctx: RiskContext,
+  config: AppConfig,
+): string | null {
+  if (proposal.rebalanceParams === undefined) return null;
+  const { newLowerBinId, newUpperBinId } = proposal.rebalanceParams;
+  if (!Number.isInteger(newLowerBinId) || !Number.isInteger(newUpperBinId)) {
+    return "Rebalance bin IDs must be integers";
+  }
+  if (newUpperBinId <= newLowerBinId) {
+    return "Invalid rebalance range: upperBinId must be > lowerBinId";
+  }
+  const rangeWidth = newUpperBinId - newLowerBinId;
+  if (rangeWidth > config.maxRebalanceRangeBins) {
+    return `Rebalance range ${rangeWidth} bins exceeds max ${config.maxRebalanceRangeBins}`;
+  }
+  if (
+    ctx.activeBinId !== undefined &&
+    Number.isFinite(ctx.activeBinId) &&
+    (ctx.activeBinId < newLowerBinId || ctx.activeBinId > newUpperBinId)
+  ) {
+    return (
+      `Rebalance range [${newLowerBinId}, ${newUpperBinId}] does not contain ` +
+      `active bin ${ctx.activeBinId}`
+    );
+  }
+  return null;
+}
+
+// Position targeting (Wave 10): position-bound actions must land on a
+// specific position row when a pool holds several. The advisor may name one
+// explicitly; otherwise inherit the deterministic decision's target; a pool
+// with exactly one open position resolves to it. Anything else stays
+// untargeted and fails closed at execution.
+interface ProposalPositionTarget {
+  readonly positionId?: string;
+  readonly rejection?: string;
+}
+
+function resolveProposalPositionTarget(
+  proposal: AgentProposal,
+  ctx: RiskContext,
+): ProposalPositionTarget {
+  const positionId = proposal.positionId ?? ctx.originalDecision?.positionId;
+  if (positionId !== undefined) {
+    // A named position must resolve to an open position on the proposal's pool
+    // (gate 2 already pinned poolAddress to the evaluated pool) — an advisor
+    // must not be able to route execution at a position on a different pool
+    // than the proposal claims. Fail closed when the id is unknown or foreign.
+    const target = ctx.openPositions.find((p) => p.id === positionId);
+    if (target === undefined || target.poolAddress !== proposal.poolAddress) {
+      return {
+        rejection: `Position ${positionId} does not belong to pool ${proposal.poolAddress}`,
+      };
+    }
+    return { positionId };
+  }
+  if (proposal.action === "EXIT" || proposal.action === "REBALANCE") {
+    const poolPositions = ctx.openPositions.filter((p) => p.poolAddress === proposal.poolAddress);
+    if (poolPositions.length === 1) {
+      return { positionId: poolPositions[0]!.id };
+    }
+  }
+  return {};
 }
 
 export const RiskLive = (riskConfig: RiskConfig) =>

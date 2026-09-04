@@ -310,6 +310,11 @@ export interface AppConfig {
    *  Advisory in the standalone token-risk overlay; here it is a hard reject
    *  for the market/runner lane. Default true. */
   readonly marketScanRequireRenouncedMint?: boolean;
+  /** Verified-scale exemption for the renounce gate: a live-mint-authority leg
+   *  is exempt when Data-API-verified AND pool TVL clears this (tokenized
+   *  equities and bridged majors retain mint authority by design). 0 disables
+   *  (strict binary). Default 100000. */
+  readonly marketScanVerifiedExemptMinTvlUsd?: number;
   /** Hot-lane hard gate: reject a market candidate younger than this many
    *  hours (rug-factory filter — brand-new pools are the ruin tail; the runner
    *  lane should trade proven-age pools only). 0 disables. Default 24. */
@@ -861,6 +866,152 @@ function validatedNumber(name: string, min: number, fallback: number, max?: numb
   );
 }
 
+/**
+ * Coerce a raw string env value into one of an allowed literal union, falling
+ * back when the value is not a member. Centralizes the includes-then-assert
+ * pattern (agent runtime, proposal mode, entry strategy, update channel).
+ */
+function coerceOneOf<T extends string>(raw: string, allowed: ReadonlyArray<T>, fallback: T): T {
+  // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
+  if (allowed.includes(raw as T)) {
+    // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+    return raw as T;
+  }
+  return fallback;
+}
+
+/** Defect when an env value that must be an integer is set to anything else. */
+function dieIfNotIntegerEnv(name: string, raw: string): Effect.Effect<void> {
+  if (raw === "" || Number.isInteger(Number(raw))) {
+    return Effect.void;
+  }
+  return Effect.die(
+    new ConfigError({
+      message: `${name} must be an integer`,
+      issues: [{ path: name, message: `Expected integer, got ${raw}` }],
+    }),
+  );
+}
+
+/** Parse a comma-separated env list of Solana public keys; defect with a
+ *  per-entry issue when any entry fails PublicKey validation. */
+function parsePublicKeyList(raw: string, envName: string): Effect.Effect<Array<string>> {
+  const list = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const invalid = list.filter((candidate) => {
+    try {
+      new PublicKey(candidate);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (invalid.length === 0) {
+    return Effect.succeed(list);
+  }
+  return Effect.die(
+    new ConfigError({
+      message: `${envName} contains invalid Solana public keys: ${invalid.join(", ")}`,
+      issues: invalid.map((candidate) => ({
+        path: envName,
+        message: `Invalid public key: ${candidate}`,
+      })),
+    }),
+  );
+}
+
+/** Prefer the operator's Helius key over the public Solana RPC when no explicit
+ *  RPC URL is configured outside test mode. */
+function resolvePrimaryRpcUrl(rawUrl: string, isTest: boolean, heliusApiKey: string): string {
+  if (!isTest && !process.env.SOLANA_RPC_URL && heliusApiKey.length > 0) {
+    return `https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}`;
+  }
+  return rawUrl;
+}
+
+/** Validate FEE_DESTINATION against the supported literal union. */
+function parseFeeDestination(value: string): Effect.Effect<string, ConfigError> {
+  if (value === "compound" || value === "accumulate-quote" || value === "accumulate-sol") {
+    return Effect.succeed(value);
+  }
+  return Effect.fail(
+    new ConfigError({
+      message: `FEE_DESTINATION must be compound, accumulate-quote, or accumulate-sol; got ${value}`,
+    }),
+  );
+}
+
+/** AUTONOMOUS_TOKEN_MODE gate: defect on an unknown mode. */
+function parseAutonomousTokenMode(raw: string): Effect.Effect<AutonomousTokenMode> {
+  switch (raw) {
+    case "off":
+    case "shadow":
+    case "canary":
+    case "live":
+      return Effect.succeed(raw);
+    default:
+      return Effect.die(
+        new ConfigError({
+          message: "AUTONOMOUS_TOKEN_MODE must be one of: off, shadow, canary, live",
+          issues: [{ path: "AUTONOMOUS_TOKEN_MODE", message: `Unknown mode: ${raw}` }],
+        }),
+      );
+  }
+}
+
+/** The fee-density cooldown floor must sit strictly below the static duration.
+ *  An inverted relationship (min >= static) would swap the settings' meanings —
+ *  high-density exits getting the static duration and thin pools the larger
+ *  "minimum" — so clamp the floor just under the static value (same warn
+ *  channel as validatedNumber / the band guard below). OOR_COOLDOWN_MS
+ *  itself is left untouched; when the static duration is 0 the floor is
+ *  pinned at 0 (cooldown.ts's guard then returns the static duration for
+ *  every density in that degenerate case). */
+function resolveFeeDensityCooldownMinMs(raw: number, oorCooldownMs: number): number {
+  const inverted = raw >= oorCooldownMs;
+  if (!inverted) {
+    return raw;
+  }
+  logger.warn(
+    "FEE_DENSITY_COOLDOWN_MIN_MS must be below OOR_COOLDOWN_MS; clamping the floor just under the static value",
+    {
+      feeDensityCooldownMinMs: raw,
+      oorCooldownMs,
+      fallback: Math.min(raw, Math.max(oorCooldownMs - 1, 0)),
+    },
+  );
+  return Math.min(raw, Math.max(oorCooldownMs - 1, 0));
+}
+
+/** An inverted (or collapsed) fee-density band breaks the interpolation; fall
+ *  back to defaults for BOTH so the pair stays sane (same warn channel as
+ *  validatedNumber). This also catches high == 0, since low >= 0. */
+/** Owner contract for the validated fee-density band pair. */
+interface FeeDensityBand {
+  readonly high: number;
+  readonly low: number;
+}
+
+function resolveFeeDensityBand(highRaw: number, lowRaw: number): FeeDensityBand {
+  const DEFAULT_FEE_DENSITY_HIGH_PCT = 0.005;
+  const DEFAULT_FEE_DENSITY_LOW_PCT = 0.0005;
+  const inverted = lowRaw >= highRaw;
+  if (!inverted) {
+    return { high: highRaw, low: lowRaw };
+  }
+  logger.warn("FEE_DENSITY_LOW_PCT must be below FEE_DENSITY_HIGH_PCT; using defaults for both", {
+    feeDensityHighPct: highRaw,
+    feeDensityLowPct: lowRaw,
+    fallback: {
+      feeDensityHighPct: DEFAULT_FEE_DENSITY_HIGH_PCT,
+      feeDensityLowPct: DEFAULT_FEE_DENSITY_LOW_PCT,
+    },
+  });
+  return { high: DEFAULT_FEE_DENSITY_HIGH_PCT, low: DEFAULT_FEE_DENSITY_LOW_PCT };
+}
+
 const loadConfig = Effect.gen(function* () {
   const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 
@@ -876,7 +1027,7 @@ const loadConfig = Effect.gen(function* () {
   const heliusDasDisabled = yield* Config.boolean("HELIUS_DAS_DISABLED").pipe(
     Effect.orElseSucceed(() => false),
   );
-  let solanaRpcUrl = yield* Config.string("SOLANA_RPC_URL").pipe(
+  const solanaRpcUrlRaw = yield* Config.string("SOLANA_RPC_URL").pipe(
     Effect.orElseSucceed(() =>
       isTest ? "https://example.com" : "https://api.mainnet-beta.solana.com",
     ),
@@ -887,12 +1038,10 @@ const loadConfig = Effect.gen(function* () {
 
   // If no SOLANA_RPC_URL is configured but a Helius key is present, prefer
   // Helius over the public Solana RPC for reliability.
-  if (!isTest && !process.env.SOLANA_RPC_URL && heliusApiKey.length > 0) {
-    solanaRpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}`;
-  }
-
-  const solanaRpcUrlNormalized = normalizeHeliusUrl(solanaRpcUrl, heliusApiKey);
-  solanaRpcUrl = solanaRpcUrlNormalized.url;
+  const solanaRpcUrl = normalizeHeliusUrl(
+    resolvePrimaryRpcUrl(solanaRpcUrlRaw, isTest, heliusApiKey),
+    heliusApiKey,
+  ).url;
 
   // Default the RPC fallback to the keyless public Solana RPC when the operator
   // left it empty (see resolveRpcFallbackUrl). The operator's shared Helius key
@@ -913,27 +1062,7 @@ const loadConfig = Effect.gen(function* () {
   const autonomousTokenModeRaw = yield* Config.string("AUTONOMOUS_TOKEN_MODE").pipe(
     Effect.orElseSucceed(() => AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.autonomousTokenMode),
   );
-  let autonomousTokenMode: AutonomousTokenMode;
-  switch (autonomousTokenModeRaw) {
-    case "off":
-    case "shadow":
-    case "canary":
-    case "live":
-      autonomousTokenMode = autonomousTokenModeRaw;
-      break;
-    default:
-      return yield* Effect.die(
-        new ConfigError({
-          message: "AUTONOMOUS_TOKEN_MODE must be one of: off, shadow, canary, live",
-          issues: [
-            {
-              path: "AUTONOMOUS_TOKEN_MODE",
-              message: `Unknown mode: ${autonomousTokenModeRaw}`,
-            },
-          ],
-        }),
-      );
-  }
+  const autonomousTokenMode = yield* parseAutonomousTokenMode(autonomousTokenModeRaw);
   const settlementAssetRaw = yield* Config.string("SETTLEMENT_ASSET").pipe(
     Effect.orElseSucceed(() => AUTONOMOUS_TOKEN_CONFIG_DEFAULTS.settlementAsset),
   );
@@ -978,19 +1107,7 @@ const loadConfig = Effect.gen(function* () {
   const maxSwapSlippageBpsRaw = yield* Config.string("MAX_SWAP_SLIPPAGE_BPS").pipe(
     Effect.orElseSucceed(() => ""),
   );
-  if (maxSwapSlippageBpsRaw && !Number.isInteger(Number(maxSwapSlippageBpsRaw))) {
-    return yield* Effect.die(
-      new ConfigError({
-        message: "MAX_SWAP_SLIPPAGE_BPS must be an integer",
-        issues: [
-          {
-            path: "MAX_SWAP_SLIPPAGE_BPS",
-            message: `Expected integer, got ${maxSwapSlippageBpsRaw}`,
-          },
-        ],
-      }),
-    );
-  }
+  yield* dieIfNotIntegerEnv("MAX_SWAP_SLIPPAGE_BPS", maxSwapSlippageBpsRaw);
   const configuredMaxSwapSlippageBps = yield* validatedNumber(
     "MAX_SWAP_SLIPPAGE_BPS",
     0,
@@ -1812,7 +1929,9 @@ const loadConfig = Effect.gen(function* () {
   // Laddering: tight+wide split for fee capture vs buffer. Default OFF — when ON an ENTER
   // is executed as two positions (half size each) with scaled half-widths, reusing the
   // existing MAX_POSITIONS_PER_POOL=2 capacity. Tight leg harvests fees, wide leg survives chop.
-  const ladderEnabled = yield* Config.boolean("LADDER_ENABLED").pipe(Effect.orElseSucceed(() => false));
+  const ladderEnabled = yield* Config.boolean("LADDER_ENABLED").pipe(
+    Effect.orElseSucceed(() => false),
+  );
   const ladderTightMult = yield* validatedNumber("LADDER_TIGHT_MULT", 0.1, 0.6, 2);
   const ladderWideMult = yield* validatedNumber("LADDER_WIDE_MULT", 0.1, 1.6, 3);
   // Volume+fees focus: absolute activity floors keep the scan universe on
@@ -1891,6 +2010,11 @@ const loadConfig = Effect.gen(function* () {
   const marketScanRequireRenouncedMint = yield* Config.boolean(
     "MARKET_SCAN_REQUIRE_RENOUNCED_MINT",
   ).pipe(Effect.orElseSucceed(() => true));
+  const marketScanVerifiedExemptMinTvlUsd = yield* validatedNumber(
+    "MARKET_SCAN_VERIFIED_EXEMPT_MIN_TVL_USD",
+    0,
+    100_000,
+  );
   const marketScanMinPoolAgeHours = yield* validatedNumber(
     "MARKET_SCAN_MIN_POOL_AGE_HOURS",
     0,
@@ -2246,6 +2370,7 @@ const loadConfig = Effect.gen(function* () {
     marketScanMaxPools,
     marketScanMinHolders,
     marketScanRequireRenouncedMint,
+    marketScanVerifiedExemptMinTvlUsd,
     marketScanMinPoolAgeHours,
     marketScanMinBinStep,
     marketScanMaxBinStep,

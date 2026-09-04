@@ -90,6 +90,58 @@ const toRiskPosition = (position: ReplayPosition): Position => ({
   openedAt: 0,
 });
 
+/** W15 IL-dominance seam: reason string when cumulative fees no longer cover
+ *  the out-of-range bleed, null otherwise (fail-open on missing inputs). */
+function resolveIlDominanceReason(
+  position: ReplayPosition | undefined,
+  ilEnabled: boolean,
+  factor: number,
+  minUsd: number,
+): string | null {
+  if (
+    !ilEnabled ||
+    position === undefined ||
+    position.outOfRange !== true ||
+    position.hodlValueUsd === undefined ||
+    position.currentValueUsd < 0
+  ) {
+    return null;
+  }
+  const ilUsd = position.hodlValueUsd - position.currentValueUsd;
+  const feesUsd = position.cumulativeFeesClaimedUsd ?? 0;
+  if (ilUsd > 0 && ilUsd > feesUsd * factor && ilUsd > minUsd) {
+    return `IL dominance: $${ilUsd.toFixed(2)} IL exceeds ${factor}× cumulative fees ($${feesUsd.toFixed(2)}) while out of range`;
+  }
+  return null;
+}
+
+/** Trailing-stop exit beats HOLD beats ENTER; IL dominance exits first. */
+function resolveReplayAction(
+  position: ReplayPosition | undefined,
+  drawdown: number,
+  trailingStopPct: number,
+  ilDominanceReason: string | null,
+): ActionType {
+  if (ilDominanceReason !== null) return "EXIT";
+  if (position !== undefined && drawdown > trailingStopPct) return "EXIT";
+  if (position !== undefined) return "HOLD";
+  return "ENTER";
+}
+
+/** Human-readable reasoning mirroring the live engine's decision vocabulary. */
+function describeReplayDecision(
+  action: ActionType,
+  ilDominanceReason: string | null,
+  drawdown: number,
+): string {
+  if (ilDominanceReason !== null) return ilDominanceReason;
+  if (action === "EXIT") {
+    return `Trailing stop: value dropped ${(drawdown * 100).toFixed(1)}% from peak`;
+  }
+  if (action === "ENTER") return "Replay entry passed strategy gates";
+  return "Replay position remains within trailing-stop limit";
+}
+
 export function evaluateReplayPool(input: ReplayEvaluationInput): ReplayEvaluation {
   const position = input.position;
 
@@ -102,32 +154,12 @@ export function evaluateReplayPool(input: ReplayEvaluationInput): ReplayEvaluati
   const ilEnabled = input.ilProtectionEnabled === true;
   const factor = input.ilDominanceExitFactor ?? 2;
   const minUsd = input.ilDominanceMinUsd ?? 5;
-  let ilDominanceReason: string | null = null;
-  if (
-    ilEnabled &&
-    position &&
-    position.outOfRange === true &&
-    position.hodlValueUsd !== undefined &&
-    position.currentValueUsd >= 0
-  ) {
-    const ilUsd = position.hodlValueUsd - position.currentValueUsd;
-    const feesUsd = position.cumulativeFeesClaimedUsd ?? 0;
-    if (ilUsd > 0 && ilUsd > feesUsd * factor && ilUsd > minUsd) {
-      ilDominanceReason = `IL dominance: $${ilUsd.toFixed(2)} IL exceeds ${factor}× cumulative fees ($${feesUsd.toFixed(2)}) while out of range`;
-    }
-  }
+  const ilDominanceReason = resolveIlDominanceReason(position, ilEnabled, factor, minUsd);
 
   const drawdown = position
     ? Math.max(0, (position.highestValueUsd - position.currentValueUsd) / position.highestValueUsd)
     : 0;
-  const action: ActionType =
-    ilDominanceReason !== null
-      ? "EXIT"
-      : position && drawdown > input.trailingStopPct
-        ? "EXIT"
-        : position
-          ? "HOLD"
-          : "ENTER";
+  const action = resolveReplayAction(position, drawdown, input.trailingStopPct, ilDominanceReason);
   const confidence = Math.max(
     0,
     Math.min(1, 0.75 - input.memoryWarningCount * 0.05 + (input.metrics.farmAprPct ?? 0) / 1000),
@@ -136,14 +168,7 @@ export function evaluateReplayPool(input: ReplayEvaluationInput): ReplayEvaluati
     action,
     poolAddress: input.poolAddress,
     confidence,
-    reasoning:
-      ilDominanceReason !== null
-        ? ilDominanceReason
-        : action === "EXIT"
-          ? `Trailing stop: value dropped ${(drawdown * 100).toFixed(1)}% from peak`
-          : action === "ENTER"
-            ? "Replay entry passed strategy gates"
-            : "Replay position remains within trailing-stop limit",
+    reasoning: describeReplayDecision(action, ilDominanceReason, drawdown),
     ...(action === "ENTER" && { positionSizeUsd: input.proposedSizeUsd }),
   };
   const openPositions = input.openPositions.map(toRiskPosition);

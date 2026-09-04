@@ -259,91 +259,99 @@ export function clearTokenRiskCache(): void {
   cache.clear();
 }
 
-/**
- * Resolve signals for a set of mints. NEVER throws and NEVER blocks the scan
- * cycle: fresh cache hits are served without fetching; on any fetch failure the
- * last known (possibly stale) signals are served — unknown mints fall through
- * as absent so callers fail-open. Disabled config (`jupiterTokenRiskEnabled ===
- * false`) returns an empty map without touching the network. Signals are never
- * fabricated. Logs ONE warning per failing consult, not per mint.
- */
-export async function consultTokenRisks(
+/** Serve fresh cache hits into `result` and return the mints that need a
+ *  network fetch. Expired REAL signals are served as resilience in case the
+ *  refresh fails; expired negative entries stay omitted. */
+function collectCachedSignals(
   mints: ReadonlyArray<string>,
-  config: TokenRiskConfigLike,
-  options: { readonly fetchImpl?: FetchLike; readonly goPlusFetchImpl?: FetchLike } = {},
-): Promise<Map<string, TokenRiskSignal>> {
-  const jupiterEnabled = config.jupiterTokenRiskEnabled !== false;
-  const ttlMs = (config.jupiterTokenRiskCacheTtlMin ?? DEFAULT_CACHE_TTL_MIN) * 60_000;
-  const now = Date.now();
-
-  const result = new Map<string, TokenRiskSignal>();
-  if (jupiterEnabled) {
-    const toFetch: string[] = [];
-    for (const mint of mints) {
-      const entry = cache.get(mint);
-      if (entry === undefined) {
-        toFetch.push(mint);
-      } else if (now - entry.fetchedAt >= ttlMs) {
-        // Expired: re-fetch. A stale REAL signal is served as resilience in case
-        // the refresh fails; a stale negative entry stays omitted.
-        if (entry.signal !== UNKNOWN_TOKEN_RISK_SIGNAL) result.set(mint, entry.signal);
-        toFetch.push(mint);
-      } else if (entry.signal !== UNKNOWN_TOKEN_RISK_SIGNAL) {
-        // Fresh real signal: serve from cache, no network call. A fresh negative
-        // entry is cached only to stop re-query spam — it is intentionally NOT
-        // served, so a revoked verification stops exempting the pool.
-        result.set(mint, entry.signal);
-      }
-    }
-
-    if (toFetch.length > 0) {
-      // Build the request options without ever assigning `undefined` to an
-      // optional field (exactOptionalPropertyTypes): an empty JUPITER_API_KEY is
-      // omitted, never sent as an empty header.
-      const request: FetchTokenRisksOptions = {};
-      const apiKey = process.env.JUPITER_API_KEY?.trim();
-      if (apiKey) request.apiKey = apiKey;
-      if (options.fetchImpl !== undefined) request.fetchImpl = options.fetchImpl;
-      try {
-        const fetched = await fetchTokenRisks(toFetch, request);
-        const fetchedAt = Date.now();
-        for (const mint of toFetch) {
-          const signal = fetched.get(mint);
-          if (signal !== undefined) {
-            setCacheEntry(mint, { signal, fetchedAt });
-            result.set(mint, signal);
-          } else {
-            // Omitted by a SUCCESSFUL refresh: NEGATIVE cache with a fresh
-            // timestamp (stops per-cycle re-query) and NOT served — revoked
-            // verification must not keep exempting the pool.
-            setCacheEntry(mint, { signal: UNKNOWN_TOKEN_RISK_SIGNAL, fetchedAt });
-            result.delete(mint);
-          }
-        }
-      } catch (err) {
-        // Fail-open: expired real signals keep their stale value in result;
-        // never-fetched mints stay absent. One warn per failing consult.
-        logger.warn("Jupiter token risk fetch failed — serving cached signals (fail-open)", {
-          mints: toFetch.length,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    // Prune TTL-expired entries so the cache cannot grow without bound across
-    // scan cycles. Runs after the fetch/resolve pass so a stale signal served
-    // for this consult (fail-open) is not removed mid-flight.
-    for (const [mint, entry] of cache) {
-      if (now - entry.fetchedAt >= ttlMs) cache.delete(mint);
+  ttlMs: number,
+  now: number,
+  result: Map<string, TokenRiskSignal>,
+): string[] {
+  const toFetch: string[] = [];
+  for (const mint of mints) {
+    const entry = cache.get(mint);
+    if (entry === undefined) {
+      toFetch.push(mint);
+    } else if (now - entry.fetchedAt >= ttlMs) {
+      // Expired: re-fetch. A stale REAL signal is served as resilience in case
+      // the refresh fails; a stale negative entry stays omitted.
+      if (entry.signal !== UNKNOWN_TOKEN_RISK_SIGNAL) result.set(mint, entry.signal);
+      toFetch.push(mint);
+    } else if (entry.signal !== UNKNOWN_TOKEN_RISK_SIGNAL) {
+      // Fresh real signal: serve from cache, no network call. A fresh negative
+      // entry is cached only to stop re-query spam — it is intentionally NOT
+      // served, so a revoked verification stops exempting the pool.
+      result.set(mint, entry.signal);
     }
   }
+  return toFetch;
+}
 
-  // Merge GoPlus contract-level hard-risk (Wave 20). GoPlus runs independently
-  // of the Jupiter switch/result — a mint Jupiter omits but GoPlus hard-flags
-  // still gets a signal, so a contract-level rug signal can never be masked by
-  // a Jupiter miss. Unknown/failed GoPlus consults return empty (fail-open).
-  const goPlusOptions =
-    options.goPlusFetchImpl === undefined ? {} : { fetchImpl: options.goPlusFetchImpl };
+/** Build the request options without ever assigning `undefined` to an
+ *  optional field (exactOptionalPropertyTypes): an empty JUPITER_API_KEY is
+ *  omitted, never sent as an empty header. */
+function buildJupiterFetchOptions(options: {
+  readonly fetchImpl?: FetchLike;
+}): FetchTokenRisksOptions {
+  const request: FetchTokenRisksOptions = {};
+  const apiKey = process.env.JUPITER_API_KEY?.trim();
+  if (apiKey) request.apiKey = apiKey;
+  if (options.fetchImpl !== undefined) request.fetchImpl = options.fetchImpl;
+  return request;
+}
+
+/** Fetch the missing/expired mints and refresh the cache + result. Fail-open:
+ *  on any fetch failure expired REAL signals keep their stale value in
+ *  result, never-fetched mints stay absent — one warn per failing consult. */
+async function refreshTokens(
+  toFetch: readonly string[],
+  request: FetchTokenRisksOptions,
+  result: Map<string, TokenRiskSignal>,
+): Promise<void> {
+  try {
+    const fetched = await fetchTokenRisks(toFetch, request);
+    const fetchedAt = Date.now();
+    for (const mint of toFetch) {
+      const signal = fetched.get(mint);
+      if (signal !== undefined) {
+        setCacheEntry(mint, { signal, fetchedAt });
+        result.set(mint, signal);
+      } else {
+        // Omitted by a SUCCESSFUL refresh: NEGATIVE cache with a fresh
+        // timestamp (stops per-cycle re-query) and NOT served — revoked
+        // verification must not keep exempting the pool.
+        setCacheEntry(mint, { signal: UNKNOWN_TOKEN_RISK_SIGNAL, fetchedAt });
+        result.delete(mint);
+      }
+    }
+  } catch (err) {
+    logger.warn("Jupiter token risk fetch failed — serving cached signals (fail-open)", {
+      mints: toFetch.length,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/** Prune TTL-expired entries so the cache cannot grow without bound across
+ *  scan cycles. Runs after the fetch/resolve pass so a stale signal served
+ *  for this consult (fail-open) is not removed mid-flight. */
+function pruneExpiredCacheEntries(ttlMs: number, now: number): void {
+  for (const [mint, entry] of cache) {
+    if (now - entry.fetchedAt >= ttlMs) cache.delete(mint);
+  }
+}
+
+/** Merge GoPlus contract-level hard-risk (Wave 20). GoPlus runs independently
+ *  of the Jupiter switch/result — a mint Jupiter omits but GoPlus hard-flags
+ *  still gets a signal, so a contract-level rug signal can never be masked by
+ *  a Jupiter miss. Unknown/failed GoPlus consults return empty (fail-open). */
+async function mergeGoPlusHardRisk(
+  mints: ReadonlyArray<string>,
+  config: TokenRiskConfigLike,
+  goPlusOptions: { readonly fetchImpl?: FetchLike },
+  result: Map<string, TokenRiskSignal>,
+): Promise<void> {
   const goPlusSignals = await consultGoPlusTokenSecurity(mints, config, goPlusOptions);
   for (const [mint, goPlusSignal] of goPlusSignals) {
     const reasons = goPlusHardRiskReasons(goPlusSignal);
@@ -366,6 +374,40 @@ export async function consultTokenRisks(
       });
     }
   }
+}
+
+/**
+ * Resolve signals for a set of mints. NEVER throws and NEVER blocks the scan
+ * cycle: fresh cache hits are served without fetching; on any fetch failure the
+ * last known (possibly stale) signals are served — unknown mints fall through
+ * as absent so callers fail-open. Disabled config (`jupiterTokenRiskEnabled ===
+ * false`) returns an empty map without touching the network. Signals are never
+ * fabricated. Logs ONE warning per failing consult, not per mint.
+ */
+export async function consultTokenRisks(
+  mints: ReadonlyArray<string>,
+  config: TokenRiskConfigLike,
+  options: { readonly fetchImpl?: FetchLike; readonly goPlusFetchImpl?: FetchLike } = {},
+): Promise<Map<string, TokenRiskSignal>> {
+  const jupiterEnabled = config.jupiterTokenRiskEnabled !== false;
+  const ttlMs = (config.jupiterTokenRiskCacheTtlMin ?? DEFAULT_CACHE_TTL_MIN) * 60_000;
+  const now = Date.now();
+
+  const result = new Map<string, TokenRiskSignal>();
+  if (jupiterEnabled) {
+    const toFetch = collectCachedSignals(mints, ttlMs, now, result);
+    if (toFetch.length > 0) {
+      await refreshTokens(toFetch, buildJupiterFetchOptions(options), result);
+    }
+    pruneExpiredCacheEntries(ttlMs, now);
+  }
+
+  await mergeGoPlusHardRisk(
+    mints,
+    config,
+    options.goPlusFetchImpl === undefined ? {} : { fetchImpl: options.goPlusFetchImpl },
+    result,
+  );
 
   return result;
 }

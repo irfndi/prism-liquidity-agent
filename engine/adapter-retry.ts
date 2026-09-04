@@ -164,55 +164,70 @@ const NETWORK_ERROR_CODES = new Set([
   "EAI_AGAIN",
 ]);
 
-export function isRpcNetworkError<T>(err: T): boolean {
-  if (
+/** Rate-limit phrasing surfaced in error messages (order = match priority). */
+const RATE_LIMIT_MESSAGE_PHRASES: readonly string[] = ["429", "rate limit", "too many requests"];
+
+/** Fetch/network failure phrases surfacing in TypeError messages. */
+const FETCH_FAILURE_PHRASES: readonly string[] = [
+  "fetch failed",
+  "network",
+  "econnrefused",
+  "enotfound",
+];
+
+// web3.js surfaces a non-OK fetch as either "400 Bad Request: ..." (bare
+// status) or "HTTP 502 Bad Gateway"; both are endpoint-level failures.
+const HTTP_STATUS_MESSAGE_PATTERN = /(?:^|\s)(?:HTTP\s+)?[45]\d{2}\b/;
+
+function isCircuitBreakerOpenError<T>(err: T): boolean {
+  return (
     isObject(err) &&
     (err["tag"] === "CircuitBreakerOpenError" || err["name"] === "CircuitBreakerOpenError")
-  ) {
-    return true;
-  }
+  );
+}
 
+function hasNetworkErrorCode<T>(err: T): boolean {
   // Node.js system errors with a code like ECONNREFUSED, ETIMEDOUT, etc.
-  if (isObject(err) && isStringLike(err.code) && NETWORK_ERROR_CODES.has(err.code)) {
-    return true;
-  }
+  return isObject(err) && isStringLike(err.code) && NETWORK_ERROR_CODES.has(err.code);
+}
 
-  // HTTP-level: 429 (rate limit), any other 4xx client error (a provider
-  // rejecting the request — e.g. DRPC's "chain is not available on free plan"
-  // 400), and 5xx server errors. All of these mean the ENDPOINT cannot serve
-  // the request, so the pool should rotate to the next endpoint rather than
-  // fail the call on the first dead endpoint.
-  if (
-    hasCode(err) &&
-    (err.code === 429 || err.code === -32005 || (err.code >= 400 && err.code < 600))
-  ) {
-    return true;
-  }
-  if (hasMessage(err)) {
-    const msg = err.message.toLowerCase();
-    if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests")) {
-      return true;
-    }
-    if (msg.includes("rpc request timeout")) return true;
-    // web3.js surfaces a non-OK fetch as either "400 Bad Request: ..." (bare
-    // status) or "HTTP 502 Bad Gateway"; both are endpoint-level failures.
-    if (/(?:^|\s)(?:HTTP\s+)?[45]\d{2}\b/.test(err.message)) return true;
-  }
+/** HTTP-level: 429 (rate limit), any other 4xx client error (a provider
+ * rejecting the request — e.g. DRPC's "chain is not available on free plan"
+ * 400), and 5xx server errors. All of these mean the ENDPOINT cannot serve
+ * the request, so the pool should rotate to the next endpoint rather than
+ * fail the call on the first dead endpoint. */
+function isEndpointHttpError<T>(err: T): boolean {
+  return (
+    hasCode(err) && (err.code === 429 || err.code === -32005 || (err.code >= 400 && err.code < 600))
+  );
+}
 
-  // TypeError from fetch when the network request itself fails (no connection)
-  if (err instanceof TypeError) {
-    const msg = err.message.toLowerCase();
-    if (
-      msg.includes("fetch failed") ||
-      msg.includes("network") ||
-      msg.includes("econnrefused") ||
-      msg.includes("enotfound")
-    ) {
-      return true;
-    }
-  }
+function messageIndicatesEndpointFailure<T>(err: T): boolean {
+  if (!hasMessage(err)) return false;
+  const msg = err.message.toLowerCase();
+  return (
+    RATE_LIMIT_MESSAGE_PHRASES.some((phrase) => msg.includes(phrase)) ||
+    msg.includes("rpc request timeout") ||
+    HTTP_STATUS_MESSAGE_PATTERN.test(err.message)
+  );
+}
 
-  return false;
+/** TypeError from fetch when the network request itself fails (no connection). */
+function isFetchNetworkTypeError<T>(err: T): boolean {
+  return (
+    err instanceof TypeError &&
+    FETCH_FAILURE_PHRASES.some((phrase) => err.message.toLowerCase().includes(phrase))
+  );
+}
+
+export function isRpcNetworkError<T>(err: T): boolean {
+  return (
+    isCircuitBreakerOpenError(err) ||
+    hasNetworkErrorCode(err) ||
+    isEndpointHttpError(err) ||
+    messageIndicatesEndpointFailure(err) ||
+    isFetchNetworkTypeError(err)
+  );
 }
 
 export interface RetryOptions {

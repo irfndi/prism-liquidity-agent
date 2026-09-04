@@ -76,22 +76,39 @@ export function isStableOrSol(mint: string, stablecoinMints: ReadonlySet<string>
  * authorities, which are absent from the Data API list payload, so the per-pool
  * screen passes them in. Trusted legs (stables + SOL) are exempt.
  * `requireRenounced === false` disables the gate (OpenClaw/test parity).
+ *
+ * Verified-scale exemption: a live mint authority is also how legitimate
+ * issuers operate (tokenized equities, bridged majors — mint/burn against
+ * real-world creations/redemptions REQUIRES the authority), so a minted leg
+ * is exempt when it is Data-API-verified AND the pool clears
+ * `exemptMinTvlUsd` (corroborated scale a dust rug cannot fake). Absent
+ * bounds (or 0) restore the strict binary — verification-blind, as before.
  */
 export function mintAuthorityRejectReason(
   legs: ReadonlyArray<{
     readonly symbol: string;
     readonly mint: string;
     readonly mintAuthority: string | null | undefined;
+    readonly verified?: boolean | null | undefined;
   }>,
   stablecoinMints: ReadonlySet<string>,
   requireRenounced: boolean | undefined,
+  exemptMinTvlUsd: number | undefined,
+  poolTvlUsd: number | undefined,
 ): string | null {
   if (requireRenounced === false) return null;
   const mintedLegs = legs.filter(
     (leg) => leg.mintAuthority != null && !isStableOrSol(leg.mint, stablecoinMints),
   );
   if (mintedLegs.length === 0) return null;
-  return `leg(s) ${mintedLegs
+  const scaleOk =
+    exemptMinTvlUsd !== undefined &&
+    exemptMinTvlUsd > 0 &&
+    poolTvlUsd !== undefined &&
+    poolTvlUsd >= exemptMinTvlUsd;
+  const untrusted = scaleOk ? mintedLegs.filter((leg) => leg.verified !== true) : mintedLegs;
+  if (untrusted.length === 0) return null;
+  return `leg(s) ${untrusted
     .map((leg) => leg.symbol)
     .join(", ")} have a live mint authority (not renounced) — dev can mint+dump`;
 }
@@ -144,6 +161,164 @@ export function marketLegPasses(
   return leg.holders === undefined || leg.holders >= minHolders;
 }
 
+/** Ordered market admission checks — rejection order and reason strings are
+ *  contractual (screens/tests assert them). Returns the first rejection
+ *  reason, or null when the pool is admitted. */
+function marketAdmissionReject(pool: DiscoveredPool, config: MarketGateConfig): string | null {
+  if (isBelowMarketTvlFloor(pool, config)) {
+    return `tvl ${pool.tvlUsd} < ${config.minTvlUsd}`;
+  }
+  const ageReason = marketAgeRejectReason(pool, config);
+  if (ageReason !== null) {
+    return ageReason;
+  }
+  const holderReason = marketThinHoldersRejectReason(pool, config);
+  if (holderReason !== null) {
+    return holderReason;
+  }
+  if (hasNo24hFees(pool)) {
+    return "no 24h fees";
+  }
+  // Absolute activity floors (volume+fees focus): percentage ratios alone
+  // admit micro-pools with spectacular percentages but trivial dollars.
+  // Real sustained volume doubles as the honeypot counter-signal.
+  const minFees = config.minFees24hUsd ?? 0;
+  if (minFees > 0 && pool.fees24hUsd < minFees) {
+    return `fees24h $${pool.fees24hUsd.toFixed(0)} < $${minFees.toFixed(0)} (absolute floor)`;
+  }
+  const feeAprPct = (pool.fees24hUsd * 365 * 100) / pool.tvlUsd;
+  if (feeAprPct < config.minFeeApr) {
+    return `fee APR ${feeAprPct.toFixed(1)}% < ${config.minFeeApr}%`;
+  }
+  if (hasNo24hVolume(pool)) {
+    return "no 24h volume";
+  }
+  const minVol = config.minVolume24hUsd ?? 0;
+  if (minVol > 0 && pool.volume24hUsd < minVol) {
+    return `volume24h $${pool.volume24hUsd.toFixed(0)} < $${minVol.toFixed(0)} (absolute floor)`;
+  }
+  const volumeTurnover = pool.volume24hUsd / pool.tvlUsd;
+  if (volumeTurnover < config.minVolumeTurnover) {
+    return `volume turnover ${volumeTurnover.toFixed(2)} < ${config.minVolumeTurnover}`;
+  }
+  if (volumeTurnover > config.maxVolumeTurnover) {
+    return `volume turnover ${volumeTurnover.toFixed(1)} > ${config.maxVolumeTurnover} (wash)`;
+  }
+  if (isUltraFineBinStep(pool, config)) {
+    return `binStep ${pool.binStep} < ${config.minBinStep} (ultra-fine churn)`;
+  }
+  if (pool.binStep > config.maxBinStep) {
+    return `binStep ${pool.binStep} > ${config.maxBinStep}`;
+  }
+  const legReason = marketLegRejectReason(pool, config);
+  if (legReason !== null) {
+    return legReason;
+  }
+  return null;
+}
+
+function isBelowMarketTvlFloor(pool: DiscoveredPool, config: MarketGateConfig): boolean {
+  return !Number.isFinite(pool.tvlUsd) || pool.tvlUsd < config.minTvlUsd;
+}
+
+function hasNo24hFees(pool: DiscoveredPool): boolean {
+  return !Number.isFinite(pool.fees24hUsd) || pool.fees24hUsd <= 0;
+}
+
+function hasNo24hVolume(pool: DiscoveredPool): boolean {
+  return !Number.isFinite(pool.volume24hUsd) || pool.volume24hUsd <= 0;
+}
+
+function isUltraFineBinStep(pool: DiscoveredPool, config: MarketGateConfig): boolean {
+  return !Number.isInteger(pool.binStep) || pool.binStep < config.minBinStep;
+}
+
+/** Rug-factory age floor: brand-new pools are the ruin tail. Fail-open on
+ *  unknown age (missing metadata never blocks a legit pool), reject when
+ *  the age is known and too young. */
+function marketAgeRejectReason(pool: DiscoveredPool, config: MarketGateConfig): string | null {
+  if (config.minPoolAgeHours > 0 && pool.createdAtMs != null && pool.createdAtMs > 0) {
+    const ageHours = (Date.now() - pool.createdAtMs) / 3_600_000;
+    if (ageHours < config.minPoolAgeHours) {
+      return `pool age ${ageHours.toFixed(1)}h < ${config.minPoolAgeHours}h (rug-factory)`;
+    }
+  }
+  return null;
+}
+
+/** Holder floor, HARD and independent of verification: a non-stable, non-SOL
+ *  leg with dust holders is a single-cluster rug setup even when Meteora
+ *  "verified" it. Fail-open on unknown holder count (the per-pool screen
+ *  still gates ENTER on live data). */
+function marketThinHoldersRejectReason(
+  pool: DiscoveredPool,
+  config: MarketGateConfig,
+): string | null {
+  const thinLegs = [pool.tokenX, pool.tokenY]
+    .map((mint) => ({
+      mint,
+      holders: mint === pool.tokenX ? pool.tokenXHolders : pool.tokenYHolders,
+      symbol: mint === pool.tokenX ? pool.tokenXSymbol : pool.tokenYSymbol,
+    }))
+    .filter((leg) => !isStableOrSol(leg.mint, config.stablecoinMints))
+    .filter(
+      (leg) => config.minHolders > 0 && leg.holders != null && leg.holders < config.minHolders,
+    );
+  if (thinLegs.length === 0) return null;
+  return `leg ${thinLegs
+    .map((l) => `${l.symbol ?? l.mint} (${l.holders} holders)`)
+    .join(", ")} below ${config.minHolders} holders`;
+}
+
+/** Token-leg safety for BOTH legs in original order (X then Y): the
+ *  transfer-fee screen first, then the shared token-safety policy. Returns
+ *  the first rejection reason, or null when both legs pass. */
+function marketLegRejectReason(pool: DiscoveredPool, config: MarketGateConfig): string | null {
+  const xFeeReason = transferFeeRejectionReason(
+    pool.tokenXSymbol,
+    pool.tokenXTransferFeeEnabled,
+    config.allowTransferFeeTokens,
+  );
+  if (xFeeReason) {
+    return xFeeReason;
+  }
+  const xPasses = marketLegPasses(
+    {
+      isStableOrSol: isStableOrSol(pool.tokenX, config.stablecoinMints),
+      verified: pool.tokenXVerified,
+      freezeDisabled: pool.tokenXFreezeDisabled,
+      holders: pool.tokenXHolders,
+    },
+    config.minHolders,
+    { allowTransferFeeTokens: config.allowTransferFeeTokens },
+  );
+  if (!xPasses) {
+    return `leg ${pool.tokenXSymbol ?? pool.tokenX} fails token safety (verified=${pool.tokenXVerified}, freezeDisabled=${pool.tokenXFreezeDisabled}, holders=${pool.tokenXHolders})`;
+  }
+  const yFeeReason = transferFeeRejectionReason(
+    pool.tokenYSymbol,
+    pool.tokenYTransferFeeEnabled,
+    config.allowTransferFeeTokens,
+  );
+  if (yFeeReason) {
+    return yFeeReason;
+  }
+  const yPasses = marketLegPasses(
+    {
+      isStableOrSol: isStableOrSol(pool.tokenY, config.stablecoinMints),
+      verified: pool.tokenYVerified,
+      freezeDisabled: pool.tokenYFreezeDisabled,
+      holders: pool.tokenYHolders,
+    },
+    config.minHolders,
+    { allowTransferFeeTokens: config.allowTransferFeeTokens },
+  );
+  if (!yPasses) {
+    return `leg ${pool.tokenYSymbol ?? pool.tokenY} fails token safety (verified=${pool.tokenYVerified}, freezeDisabled=${pool.tokenYFreezeDisabled}, holders=${pool.tokenYHolders})`;
+  }
+  return null;
+}
+
 /** Gates and ranks one universe snapshot. Pure; callers feed it the adapter's
  *  `discoverPoolsTopPages` output. */
 export function gateAndRankMarketPools(
@@ -154,143 +329,17 @@ export function gateAndRankMarketPools(
   const rejected: Array<{ readonly address: string; readonly reason: string }> = [];
 
   for (const pool of pools) {
-    const reject = (reason: string): void => {
-      rejected.push({ address: pool.address, reason });
-    };
-
-    if (!Number.isFinite(pool.tvlUsd) || pool.tvlUsd < config.minTvlUsd) {
-      reject(`tvl ${pool.tvlUsd} < ${config.minTvlUsd}`);
-      continue;
-    }
-    // Rug-factory age floor: brand-new pools are the ruin tail. Fail-open on
-    // unknown age (missing metadata never blocks a legit pool), reject when
-    // the age is known and too young.
-    if (config.minPoolAgeHours > 0 && pool.createdAtMs != null && pool.createdAtMs > 0) {
-      const ageHours = (Date.now() - pool.createdAtMs) / 3_600_000;
-      if (ageHours < config.minPoolAgeHours) {
-        reject(`pool age ${ageHours.toFixed(1)}h < ${config.minPoolAgeHours}h (rug-factory)`);
-        continue;
-      }
-    }
-    // Holder floor, HARD and independent of verification: a non-stable, non-SOL
-    // leg with dust holders is a single-cluster rug setup even when Meteora
-    // "verified" it. Fail-open on unknown holder count (the per-pool screen
-    // still gates ENTER on live data).
-    const thinLegs = [pool.tokenX, pool.tokenY]
-      .map((mint) => ({
-        mint,
-        holders: mint === pool.tokenX ? pool.tokenXHolders : pool.tokenYHolders,
-        symbol: mint === pool.tokenX ? pool.tokenXSymbol : pool.tokenYSymbol,
-      }))
-      .filter((leg) => !isStableOrSol(leg.mint, config.stablecoinMints))
-      .filter(
-        (leg) => config.minHolders > 0 && leg.holders != null && leg.holders < config.minHolders,
-      );
-    if (thinLegs.length > 0) {
-      reject(
-        `leg ${thinLegs
-          .map((l) => `${l.symbol ?? l.mint} (${l.holders} holders)`)
-          .join(", ")} below ${config.minHolders} holders`,
-      );
-      continue;
-    }
-    if (!Number.isFinite(pool.fees24hUsd) || pool.fees24hUsd <= 0) {
-      reject("no 24h fees");
-      continue;
-    }
-    // Absolute activity floors (volume+fees focus): percentage ratios alone
-    // admit micro-pools with spectacular percentages but trivial dollars.
-    // Real sustained volume doubles as the honeypot counter-signal.
-    const minFees = config.minFees24hUsd ?? 0;
-    if (minFees > 0 && pool.fees24hUsd < minFees) {
-      reject(`fees24h $${pool.fees24hUsd.toFixed(0)} < $${minFees.toFixed(0)} (absolute floor)`);
-      continue;
-    }
-    const feeAprPct = (pool.fees24hUsd * 365 * 100) / pool.tvlUsd;
-    if (feeAprPct < config.minFeeApr) {
-      reject(`fee APR ${feeAprPct.toFixed(1)}% < ${config.minFeeApr}%`);
-      continue;
-    }
-    if (!Number.isFinite(pool.volume24hUsd) || pool.volume24hUsd <= 0) {
-      reject("no 24h volume");
-      continue;
-    }
-    const minVol = config.minVolume24hUsd ?? 0;
-    if (minVol > 0 && pool.volume24hUsd < minVol) {
-      reject(`volume24h $${pool.volume24hUsd.toFixed(0)} < $${minVol.toFixed(0)} (absolute floor)`);
-      continue;
-    }
-    const volumeTurnover = pool.volume24hUsd / pool.tvlUsd;
-    if (volumeTurnover < config.minVolumeTurnover) {
-      reject(`volume turnover ${volumeTurnover.toFixed(2)} < ${config.minVolumeTurnover}`);
-      continue;
-    }
-    if (volumeTurnover > config.maxVolumeTurnover) {
-      reject(`volume turnover ${volumeTurnover.toFixed(1)} > ${config.maxVolumeTurnover} (wash)`);
-      continue;
-    }
-    if (!Number.isInteger(pool.binStep) || pool.binStep < config.minBinStep) {
-      reject(`binStep ${pool.binStep} < ${config.minBinStep} (ultra-fine churn)`);
-      continue;
-    }
-    if (pool.binStep > config.maxBinStep) {
-      reject(`binStep ${pool.binStep} > ${config.maxBinStep}`);
-      continue;
-    }
-    const xFeeReason = transferFeeRejectionReason(
-      pool.tokenXSymbol,
-      pool.tokenXTransferFeeEnabled,
-      config.allowTransferFeeTokens,
-    );
-    if (xFeeReason) {
-      reject(xFeeReason);
-      continue;
-    }
-    const xPasses = marketLegPasses(
-      {
-        isStableOrSol: isStableOrSol(pool.tokenX, config.stablecoinMints),
-        verified: pool.tokenXVerified,
-        freezeDisabled: pool.tokenXFreezeDisabled,
-        holders: pool.tokenXHolders,
-      },
-      config.minHolders,
-      { allowTransferFeeTokens: config.allowTransferFeeTokens },
-    );
-    if (!xPasses) {
-      reject(
-        `leg ${pool.tokenXSymbol ?? pool.tokenX} fails token safety (verified=${pool.tokenXVerified}, freezeDisabled=${pool.tokenXFreezeDisabled}, holders=${pool.tokenXHolders})`,
-      );
-      continue;
-    }
-    const yFeeReason = transferFeeRejectionReason(
-      pool.tokenYSymbol,
-      pool.tokenYTransferFeeEnabled,
-      config.allowTransferFeeTokens,
-    );
-    if (yFeeReason) {
-      reject(yFeeReason);
-      continue;
-    }
-    const yPasses = marketLegPasses(
-      {
-        isStableOrSol: isStableOrSol(pool.tokenY, config.stablecoinMints),
-        verified: pool.tokenYVerified,
-        freezeDisabled: pool.tokenYFreezeDisabled,
-        holders: pool.tokenYHolders,
-      },
-      config.minHolders,
-      { allowTransferFeeTokens: config.allowTransferFeeTokens },
-    );
-    if (!yPasses) {
-      reject(
-        `leg ${pool.tokenYSymbol ?? pool.tokenY} fails token safety (verified=${pool.tokenYVerified}, freezeDisabled=${pool.tokenYFreezeDisabled}, holders=${pool.tokenYHolders})`,
-      );
+    const rejectReason = marketAdmissionReject(pool, config);
+    if (rejectReason !== null) {
+      rejected.push({ address: pool.address, reason: rejectReason });
       continue;
     }
 
     // Composite rank: fee APR is the profit engine; TVL adds a liquidity
     // factor (deeper pools → less IL per dollar and more stable fees), capped
     // so a 5×-APR small pool still outranks a deep slow pool.
+    const feeAprPct = (pool.fees24hUsd * 365 * 100) / pool.tvlUsd;
+    const volumeTurnover = pool.volume24hUsd / pool.tvlUsd;
     const liquidityFactor = Math.min(Math.max(Math.log10(pool.tvlUsd) / 6, 0.6), 1.4);
     const score = feeAprPct * liquidityFactor;
     const notes: string[] = [

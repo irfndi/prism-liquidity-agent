@@ -141,70 +141,70 @@ export interface HotWindowEnterResult {
  *    so a tiny entry captures a meaningful share without whaling the pool;
  *  - fail-closed: no qualifying measured signal or out-of-band depth => no entry.
  */
+/** Type predicate: the 1h fee ratio is a measured, sane, non-negative number. */
+function isKnownRatio(ratio: number | null): ratio is number {
+  return ratio !== null && Number.isFinite(ratio) && ratio >= 0;
+}
+
+/** Trigger A: measured printing-now fee ratio at or above its floor. */
+function isPrintingNow(ratio: number | null, printingRatio1h: number): boolean {
+  return isKnownRatio(ratio) && ratio >= printingRatio1h;
+}
+
+/** Trigger B: measured volume burst vs the pool's own baseline, above the
+ *  absolute volume floor. Disabled when the spike trigger is not configured. */
+function isVolumeBursting(input: HotWindowEnterInput): boolean {
+  const spikeConfig = input.config.volumeSpike;
+  if (spikeConfig === undefined) return false;
+  const spike = input.volumeSpike;
+  if (spike === null || spike === undefined || !spike.isSpike) return false;
+  const volume24hUsd = input.volume24hUsd;
+  if (volume24hUsd === null || volume24hUsd === undefined) return false;
+  if (!Number.isFinite(volume24hUsd)) return false;
+  return volume24hUsd >= spikeConfig.minVolumeUsd;
+}
+
+/** Why no printing/burst signal qualifies: unmeasured vs below floor. */
+function describeMissingSignal(input: HotWindowEnterInput): string {
+  if (!isKnownRatio(input.feeTvlRatio1h)) {
+    return "no measured 1h printing signal";
+  }
+  return `1h fee ratio ${input.feeTvlRatio1h.toFixed(2)} < floor ${input.config.printingRatio1h}`;
+}
+
+/** Share-economic depth band [minPoolTvl, min(maxPoolTvl, maxShareTvl)] and the
+ *  min-share floor; null when the pool's TVL fits the band. */
+function findDepthRejection(config: HotWindowConfig, tvl: number): string | null {
+  const minShareTvl = config.entrySizeUsd / config.maxSharePct; // below => we'd dominate
+  const maxShareTvl = config.entrySizeUsd / config.minSharePct; // above => share too thin
+  const depthCap = Math.min(config.maxPoolTvlUsd, maxShareTvl);
+  if (tvl < config.minPoolTvlUsd) {
+    return `tvl ${tvl.toFixed(0)} < min ${config.minPoolTvlUsd}`;
+  }
+  if (tvl > depthCap) {
+    return `tvl ${tvl.toFixed(0)} > depth cap ${depthCap.toFixed(0)} (share < min ${(config.minSharePct * 100).toFixed(1)}%)`;
+  }
+  if (tvl < minShareTvl) {
+    return `tvl ${tvl.toFixed(0)} < ${minShareTvl.toFixed(0)} (entry would exceed ${(config.maxSharePct * 100).toFixed(0)}% of depth)`;
+  }
+  return null;
+}
+
 export function evaluateHotWindowEnter(input: HotWindowEnterInput): HotWindowEnterResult {
   const c = input.config;
   if (!c.enabled) {
     return { qualify: false, sizeUsd: 0, rejectReason: "hot-window disabled" };
   }
 
-  // Trigger A: measured printing-now fee ratio.
-  const ratioKnown =
-    input.feeTvlRatio1h !== null &&
-    Number.isFinite(input.feeTvlRatio1h) &&
-    (input.feeTvlRatio1h ?? 0) >= 0;
-  const printing = ratioKnown && input.feeTvlRatio1h! >= c.printingRatio1h;
-
-  // Trigger B: measured volume burst vs own baseline (early signal).
-  let bursting = false;
-  if (c.volumeSpike !== undefined) {
-    const spike = input.volumeSpike;
-    const volKnown = input.volume24hUsd !== null && Number.isFinite(input.volume24hUsd);
-    bursting =
-      spike !== null &&
-      spike !== undefined &&
-      spike.isSpike &&
-      volKnown &&
-      (input.volume24hUsd ?? 0) >= c.volumeSpike.minVolumeUsd;
-  }
-
-  if (!printing && !bursting) {
-    if (!ratioKnown) {
-      return { qualify: false, sizeUsd: 0, rejectReason: "no measured 1h printing signal" };
-    }
-    return {
-      qualify: false,
-      sizeUsd: 0,
-      rejectReason: `1h fee ratio ${input.feeTvlRatio1h?.toFixed(2)} < floor ${c.printingRatio1h}`,
-    };
+  if (!isPrintingNow(input.feeTvlRatio1h, c.printingRatio1h) && !isVolumeBursting(input)) {
+    return { qualify: false, sizeUsd: 0, rejectReason: describeMissingSignal(input) };
   }
   if (c.entrySizeUsd <= 0 || input.tvlUsd <= 0) {
     return { qualify: false, sizeUsd: 0, rejectReason: "non-positive tvl or entry size" };
   }
-  const tvl = input.tvlUsd;
-  // Share-economic depth band.
-  const minShareTvl = c.entrySizeUsd / c.maxSharePct; // below => we'd dominate
-  const maxShareTvl = c.entrySizeUsd / c.minSharePct; // above => share too thin
-  const depthCap = Math.min(c.maxPoolTvlUsd, maxShareTvl);
-  if (tvl < c.minPoolTvlUsd) {
-    return {
-      qualify: false,
-      sizeUsd: 0,
-      rejectReason: `tvl ${tvl.toFixed(0)} < min ${c.minPoolTvlUsd}`,
-    };
-  }
-  if (tvl > depthCap) {
-    return {
-      qualify: false,
-      sizeUsd: 0,
-      rejectReason: `tvl ${tvl.toFixed(0)} > depth cap ${depthCap.toFixed(0)} (share < min ${(c.minSharePct * 100).toFixed(1)}%)`,
-    };
-  }
-  if (tvl < minShareTvl) {
-    return {
-      qualify: false,
-      sizeUsd: 0,
-      rejectReason: `tvl ${tvl.toFixed(0)} < ${minShareTvl.toFixed(0)} (entry would exceed ${(c.maxSharePct * 100).toFixed(0)}% of depth)`,
-    };
+  const depthRejection = findDepthRejection(c, input.tvlUsd);
+  if (depthRejection !== null) {
+    return { qualify: false, sizeUsd: 0, rejectReason: depthRejection };
   }
   return { qualify: true, sizeUsd: c.entrySizeUsd };
 }

@@ -15,11 +15,20 @@
  */
 import { Effect } from "effect";
 import { createLogger } from "../engine/logger.js";
-import { DLMMStrategy, halfWidthForPriceCoveragePct } from "../engine/strategy-service.js";
+import {
+  DLMMStrategy,
+  halfWidthForPriceCoveragePct,
+  type VolumeAuthResult,
+} from "../engine/strategy-service.js";
+import type { PoolMetrics } from "../engine/types.js";
 import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 import type { BacktestResult, BinArray, PoolSnapshot, PoolState } from "../engine/types.js";
-import { evaluateReplayPool } from "../engine/cycle/evaluate-pool.js";
+import {
+  evaluateReplayPool,
+  type ReplayEvaluation,
+  type ReplayPosition,
+} from "../engine/cycle/evaluate-pool.js";
 
 const log = createLogger("Backtest");
 
@@ -179,6 +188,116 @@ export function parseSeedList(value: string): number[] {
   return seeds;
 }
 
+function parseDays(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 3650) {
+    throw new Error(`Invalid --days value: ${value}. Must be a finite number between 1 and 3650.`);
+  }
+  return parsed;
+}
+
+function splitPoolList(value: string): ReadonlyArray<string> {
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** The four bounded-cost flags share this value-presence guard and message. */
+function requireCostValue(next: string | undefined, flag: string): string {
+  if (!next || next.startsWith("--")) {
+    throw new Error(`Invalid ${flag} value: expected a finite nonnegative number.`);
+  }
+  return next;
+}
+
+/** Consume-count handler for one CLI flag; returns 0 when the flag did not match. */
+type ArgHandler = (out: CliArgs, next: string | undefined) => number;
+
+/** Owner contract: every backtest CLI flag maps to exactly one handler. */
+interface ArgHandlerTable {
+  [flag: string]: ArgHandler;
+}
+
+const ARG_HANDLERS: ArgHandlerTable = {
+  "--days": (out, next) => {
+    if (!next) return 0;
+    out.days = parseDays(next);
+    return 1;
+  },
+  "--pools": (out, next) => {
+    if (!next) return 0;
+    out.pools = splitPoolList(next);
+    return 1;
+  },
+  "--source": (out, next) => {
+    if (next !== "synthetic" && next !== "replay") return 0;
+    out.source = next;
+    return 1;
+  },
+  "--db": (out, next) => {
+    if (!next) return 0;
+    out.dbPath = next;
+    return 1;
+  },
+  "--seed": (out, next) => {
+    if (!next) return 0;
+    if (out.seeds !== undefined) {
+      throw new Error("The --seed and --seeds options are mutually exclusive.");
+    }
+    out.seed = parseUnsignedSeed(next, "--seed");
+    return 1;
+  },
+  "--seeds": (out, next) => {
+    if (!next || next.startsWith("--")) {
+      throw new Error(
+        "Invalid --seeds value: expected a comma-separated list of unsigned 32-bit integers.",
+      );
+    }
+    if (out.seed !== undefined) {
+      throw new Error("The --seed and --seeds options are mutually exclusive.");
+    }
+    out.seeds = parseSeedList(next);
+    return 1;
+  },
+  "--entry-cost-bps": (out, next) => {
+    out.entryCostBps = parseBoundedNonnegative(
+      requireCostValue(next, "--entry-cost-bps"),
+      "--entry-cost-bps",
+      MAX_EXECUTION_COST_BPS,
+      "bps",
+    );
+    return 1;
+  },
+  "--exit-cost-bps": (out, next) => {
+    out.exitCostBps = parseBoundedNonnegative(
+      requireCostValue(next, "--exit-cost-bps"),
+      "--exit-cost-bps",
+      MAX_EXECUTION_COST_BPS,
+      "bps",
+    );
+    return 1;
+  },
+  "--fixed-action-cost-usd": (out, next) => {
+    out.fixedActionCostUsd = parseBoundedNonnegative(
+      requireCostValue(next, "--fixed-action-cost-usd"),
+      "--fixed-action-cost-usd",
+      MAX_FIXED_ACTION_COST_USD,
+      "USD",
+    );
+    return 1;
+  },
+  "--fee-share-ref-width": (out, next) => {
+    out.feeShareDilutionRefWidth = parseBoundedNonnegative(
+      requireCostValue(next, "--fee-share-ref-width"),
+      "--fee-share-ref-width",
+      10_000,
+      "bins",
+    );
+    return 1;
+  },
+};
+
 export function parseArgs(argv: ReadonlyArray<string>): CliArgs {
   const out: CliArgs = {
     days: 7,
@@ -190,94 +309,9 @@ export function parseArgs(argv: ReadonlyArray<string>): CliArgs {
     fixedActionCostUsd: 0,
   };
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    const next = argv[i + 1];
-    if (a === "--days" && next) {
-      const parsed = Number(next);
-      if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 3650) {
-        throw new Error(
-          `Invalid --days value: ${next}. Must be a finite number between 1 and 3650.`,
-        );
-      }
-      out.days = parsed;
-      i++;
-    } else if (a === "--pools" && next) {
-      out.pools = next
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      i++;
-    } else if (a === "--source" && (next === "synthetic" || next === "replay")) {
-      out.source = next;
-      i++;
-    } else if (a === "--db" && next) {
-      out.dbPath = next;
-      i++;
-    } else if (a === "--seed" && next) {
-      if (out.seeds !== undefined) {
-        throw new Error("The --seed and --seeds options are mutually exclusive.");
-      }
-      out.seed = parseUnsignedSeed(next, "--seed");
-      i++;
-    } else if (a === "--seeds") {
-      if (!next || next.startsWith("--")) {
-        throw new Error(
-          "Invalid --seeds value: expected a comma-separated list of unsigned 32-bit integers.",
-        );
-      }
-      if (out.seed !== undefined) {
-        throw new Error("The --seed and --seeds options are mutually exclusive.");
-      }
-      out.seeds = parseSeedList(next);
-      i++;
-    } else if (a === "--entry-cost-bps") {
-      if (!next || next.startsWith("--")) {
-        throw new Error("Invalid --entry-cost-bps value: expected a finite nonnegative number.");
-      }
-      out.entryCostBps = parseBoundedNonnegative(
-        next,
-        "--entry-cost-bps",
-        MAX_EXECUTION_COST_BPS,
-        "bps",
-      );
-      i++;
-    } else if (a === "--exit-cost-bps") {
-      if (!next || next.startsWith("--")) {
-        throw new Error("Invalid --exit-cost-bps value: expected a finite nonnegative number.");
-      }
-      out.exitCostBps = parseBoundedNonnegative(
-        next,
-        "--exit-cost-bps",
-        MAX_EXECUTION_COST_BPS,
-        "bps",
-      );
-      i++;
-    } else if (a === "--fixed-action-cost-usd") {
-      if (!next || next.startsWith("--")) {
-        throw new Error(
-          "Invalid --fixed-action-cost-usd value: expected a finite nonnegative number.",
-        );
-      }
-      out.fixedActionCostUsd = parseBoundedNonnegative(
-        next,
-        "--fixed-action-cost-usd",
-        MAX_FIXED_ACTION_COST_USD,
-        "USD",
-      );
-      i++;
-    } else if (a === "--fee-share-ref-width") {
-      if (!next || next.startsWith("--")) {
-        throw new Error(
-          "Invalid --fee-share-ref-width value: expected a finite nonnegative number.",
-        );
-      }
-      out.feeShareDilutionRefWidth = parseBoundedNonnegative(
-        next,
-        "--fee-share-ref-width",
-        10_000,
-        "bins",
-      );
-      i++;
+    const flag = argv[i];
+    if (flag !== undefined && Object.hasOwn(ARG_HANDLERS, flag)) {
+      i += ARG_HANDLERS[flag]!(out, argv[i + 1]);
     }
   }
   if (out.seeds !== undefined && out.source !== "synthetic") {
@@ -581,6 +615,29 @@ export function rankBacktestResults(
   });
 }
 
+/** Detect data frequency for Sharpe annualization: first positive adjacent
+ *  timestamp diff (duplicate/out-of-order timestamps guarded); 10-minute
+ *  default when none is found. */
+function inferTickIntervalMs(ticks: ReadonlyArray<HistoryTick>): number {
+  for (let i = 1; i < ticks.length; i++) {
+    const diff = ticks[i]!.pool.timestamp - ticks[i - 1]!.pool.timestamp;
+    if (diff > 0) return diff;
+  }
+  return 10 * 60 * 1000;
+}
+
+/** Price-coverage floor (MIN_RANGE_HALF_WIDTH_PCT): when set, the effective
+ *  half-width is never narrower than the bins needed to span that percent of
+ *  price each side on this pool's binStep. For a fine-binStep pool (SOL/USDC
+ *  binStep 4) this lifts a fixed halfWidth of 25 (~±1%) up to a range that
+ *  actually holds the price path, curbing out-of-range IL. 0 = fixed bin-count. */
+function resolveEffectiveHalfWidth(binStep: number, cfg: BacktestConfig): number {
+  if (cfg.minPriceCoveragePct === undefined || cfg.minPriceCoveragePct <= 0) {
+    return cfg.halfWidth;
+  }
+  return Math.max(cfg.halfWidth, halfWidthForPriceCoveragePct(binStep, cfg.minPriceCoveragePct));
+}
+
 export function runBacktestFromTicks(
   ticks: ReadonlyArray<HistoryTick>,
   cfg: BacktestConfig,
@@ -597,33 +654,10 @@ export function runBacktestFromTicks(
     throw new Error("Empty history");
   }
 
-  // Detect data frequency from first two ticks for Sharpe annualization.
-  // Guard against non-positive intervals (duplicate or out-of-order
-  // timestamps) by scanning for the first positive adjacent diff;
-  // fall back to a 10-minute default if none is found.
-  let inferredIntervalMs = 10 * 60 * 1000;
-  for (let i = 1; i < ticks.length; i++) {
-    const diff = ticks[i]!.pool.timestamp - ticks[i - 1]!.pool.timestamp;
-    if (diff > 0) {
-      inferredIntervalMs = diff;
-      break;
-    }
-  }
-  const tickIntervalMs = inferredIntervalMs;
+  const tickIntervalMs = inferTickIntervalMs(ticks);
   const ticksPerYear = (365 * 24 * 60 * 60 * 1000) / tickIntervalMs;
 
-  // Price-coverage floor (MIN_RANGE_HALF_WIDTH_PCT): when set, the effective
-  // half-width is never narrower than the bins needed to span that percent of
-  // price each side on this pool's binStep. For a fine-binStep pool (SOL/USDC
-  // binStep 4) this lifts a fixed halfWidth of 25 (~±1%) up to a range that
-  // actually holds the price path, curbing out-of-range IL. 0 = fixed bin-count.
-  const effectiveHalfWidth =
-    cfg.minPriceCoveragePct && cfg.minPriceCoveragePct > 0
-      ? Math.max(
-          cfg.halfWidth,
-          halfWidthForPriceCoveragePct(ticks[0]!.pool.binStep, cfg.minPriceCoveragePct),
-        )
-      : cfg.halfWidth;
+  const effectiveHalfWidth = resolveEffectiveHalfWidth(ticks[0]!.pool.binStep, cfg);
 
   let previousTvl = ticks[0]!.pool.tvlUsd;
   let currentLowerBinId = ticks[0]!.pool.activeBinId - effectiveHalfWidth;
@@ -648,6 +682,21 @@ export function runBacktestFromTicks(
   let referencePrice = ticks[0]?.pool.currentPrice ?? 1;
   let referenceBinId = ticks[0]?.pool.activeBinId ?? 0;
   let emptyBinBypassNoted = false;
+
+  // Rejected tick: flatten the return and advance the TVL baseline.
+  function skipTick(tick: HistoryTick): void {
+    previousTvl = tick.pool.tvlUsd;
+    strategyReturns.push(0);
+  }
+
+  // Admit/reject census: every no-position tick is exactly one of
+  // {pre-filter reject, risk reject, admit}; enterAttempts never counts
+  // ticks while a position is held.
+  function recordRejection(tag: string): void {
+    if (hasPosition) return;
+    enterAttempts++;
+    rejections[tag] = (rejections[tag] ?? 0) + 1;
+  }
 
   function recordExit(reason: string, atTick: number, realizedValueUsd: number): void {
     exitCounts[reason] = (exitCounts[reason] ?? 0) + 1;
@@ -676,55 +725,13 @@ export function runBacktestFromTicks(
   const strategyReturns: number[] = [0];
   let prevPortfolioValue = initialValue;
 
-  // Helper: compute position's share of pool fees for this tick.
-  // fees24hUsd is a 24h aggregate; scale it by the actual elapsed time since
-  // the preceding snapshot, then apply the position share of pool TVL.
-  function feesForTick(tickIndex: number): number {
-    const tick = ticks[tickIndex]!;
-    const tvl = tick.pool.tvlUsd;
-    if (tvl <= 0) return 0;
-    const elapsedMs =
-      tickIndex > 0 ? ticks[tickIndex]!.pool.timestamp - ticks[tickIndex - 1]!.pool.timestamp : 0;
-    const intervalMs = elapsedMs > 0 ? elapsedMs : tickIntervalMs;
-    const ticksPerYearForInterval = (365 * 24 * 60 * 60 * 1000) / intervalMs;
-    // Fee share is the deployed position size, not the whole portfolio; fall
-    // back to the portfolio value when no position size is recorded yet.
-    const size = positionSizeUsd > 0 ? positionSizeUsd : portfolioValue;
-    const positionShare = Math.min(size / tvl, 1);
-    // Concentration-aware dilution: a position spread over `effectiveHalfWidth`
-    // bins captures ~(refWidth ÷ effectiveWidth) of the fee income the
-    // width-independent model assigns, because the same capital is thinned
-    // across more bins and only bins near the active market earn fees. Only
-    // applies when the caller opts in with a (narrow) reference width.
-    const dilution =
-      cfg.feeShareDilutionRefWidth && cfg.feeShareDilutionRefWidth > 0 && effectiveHalfWidth > 0
-        ? Math.min(1, cfg.feeShareDilutionRefWidth / effectiveHalfWidth)
-        : 1;
-    return (tick.pool.fees24hUsd / ticksPerYearForInterval) * 365 * positionShare * dilution;
-  }
-
-  // Mark the open position to the current DLMM value (correct range-aware IL,
-  // includes token depreciation — NOT a flat floor). Falls back to full size
-  // when the anchor is unknown.
-  function markPositionValue(tick: HistoryTick): number {
-    return clmmPositionValue({
-      sizeUsd: positionSizeUsd,
-      anchorPrice: referencePrice,
-      anchorBinId: referenceBinId,
-      currentPrice: tick.pool.currentPrice,
-      lowerBinId: currentLowerBinId,
-      upperBinId: currentUpperBinId,
-      binStep: tick.pool.binStep,
-    }).lpValueUsd;
-  }
-
-  for (let i = 0; i < ticks.length; i++) {
-    const tick = ticks[i]!;
-    const metrics = strategy.computeMetrics(tick.pool, tick.binArray, previousTvl);
-    // Match computeMetrics' wiring so this standalone auth score stays consistent
-    // with metrics.volumeAuthenticity: fees are measured only under the Data API.
-    const auth = strategy.checkVolumeAuthenticity(tick.pool, tick.pool.statsSource === "datapi");
-
+  // Pre-filter evaluation for one tick: bin-util unknown handling (empty-bin
+  // tolerance) plus the strategy gate. Returns the rejection tag or null.
+  function evaluateTickPreFilter(
+    tick: HistoryTick,
+    metrics: ReturnType<typeof strategy.computeMetrics>,
+    auth: ReturnType<typeof strategy.checkVolumeAuthenticity>,
+  ): string | null {
     // Empty bin array => bin utilization is UNKNOWN, not 0. The paper DB stores
     // bins:[] for every snapshot row, so treating it as 0 rejects every tick
     // and the replay measures nothing. Tolerate by default (mirrors the live
@@ -752,69 +759,113 @@ export function runBacktestFromTicks(
       metrics.volumeAuthenticityKnown,
       binUtilKnown,
     );
-    if (!preFilterPass) {
-      if (!hasPosition) {
-        enterAttempts++;
-        // Tag the rejection so the census can separate data-quality gates
-        // (branch order mirrors passesPreFilter's && chain).
-        const tag =
-          tick.pool.tvlUsd < 50_000
-            ? "[tvl-gate]"
-            : metrics.volumeAuthenticityKnown && auth.score < 0.7
-              ? "[auth-gate]"
-              : "[bin-util-gate]";
-        rejections[tag] = (rejections[tag] ?? 0) + 1;
-      }
-      previousTvl = tick.pool.tvlUsd;
-      strategyReturns.push(0);
-      continue;
-    }
+    if (preFilterPass) return null;
+    // Tag the rejection so the census can separate data-quality gates
+    // (branch order mirrors passesPreFilter's && chain).
+    return tick.pool.tvlUsd < 50_000
+      ? "[tvl-gate]"
+      : metrics.volumeAuthenticityKnown && auth.score < 0.7
+        ? "[auth-gate]"
+        : "[bin-util-gate]";
+  }
 
-    const inRange =
-      tick.pool.activeBinId >= currentLowerBinId && tick.pool.activeBinId <= currentUpperBinId;
-    const feesThisTick = hasPosition && inRange ? feesForTick(i) : 0;
+  // Helper: compute position's share of pool fees for this tick.
+  // fees24hUsd is a 24h aggregate; scale it by the actual elapsed time since
+  // the preceding snapshot, then apply the position share of pool TVL.
+  function feesForTick(tickIndex: number): number {
+    const tick = ticks[tickIndex]!;
+    const tvl = tick.pool.tvlUsd;
+    if (tvl <= 0) return 0;
+    const elapsedMs =
+      tickIndex > 0 ? ticks[tickIndex]!.pool.timestamp - ticks[tickIndex - 1]!.pool.timestamp : 0;
+    const intervalMs = elapsedMs > 0 ? elapsedMs : tickIntervalMs;
+    const ticksPerYearForInterval = (365 * 24 * 60 * 60 * 1000) / intervalMs;
+    // Fee share is the deployed position size, not the whole portfolio; fall
+    // back to the portfolio value when no position size is recorded yet.
+    const size = positionSizeUsd > 0 ? positionSizeUsd : portfolioValue;
+    const positionShare = Math.min(size / tvl, 1);
+    // Concentration-aware dilution: a position spread over `effectiveHalfWidth`
+    // bins captures ~(refWidth ÷ effectiveWidth) of the fee income the
+    // width-independent model assigns, because the same capital is thinned
+    // across more bins and only bins near the active market earn fees. Only
+    // applies when the caller opts in with a (narrow) reference width.
+    const dilution =
+      cfg.feeShareDilutionRefWidth && cfg.feeShareDilutionRefWidth > 0 && effectiveHalfWidth > 0
+        ? Math.min(1, cfg.feeShareDilutionRefWidth / effectiveHalfWidth)
+        : 1;
+    return (tick.pool.fees24hUsd / ticksPerYearForInterval) * 365 * positionShare * dilution;
+  }
+
+  // In-range fee accrual for the tick: portfolio + held-position fees.
+  function accrueFees(tickIndex: number, inRange: boolean): number {
+    const feesThisTick = hasPosition && inRange ? feesForTick(tickIndex) : 0;
     totalFees += feesThisTick;
     portfolioValue += feesThisTick;
     if (hasPosition) positionFeesUsd += feesThisTick;
+    return feesThisTick;
+  }
 
-    const replayPosition = hasPosition
-      ? (() => {
-          // Range-aware CLMM valuation (LP value + the HODL benchmark buried in
-          // the same model) so the IL-dominance fast EXIT can mark real IL.
-          const val = clmmPositionValue({
-            sizeUsd: positionSizeUsd,
-            anchorPrice: referencePrice,
-            anchorBinId: referenceBinId,
-            currentPrice: tick.pool.currentPrice,
-            lowerBinId: currentLowerBinId,
-            upperBinId: currentUpperBinId,
-            binStep: tick.pool.binStep,
-          });
-          return {
-            poolAddress: tick.pool.address,
-            positionPubKey: `replay-${tick.pool.address}`,
-            lowerBinId: currentLowerBinId,
-            upperBinId: currentUpperBinId,
-            depositedUsd: positionSizeUsd,
-            currentValueUsd: val.lpValueUsd,
-            highestValueUsd: positionPeakUsd,
-            // IL-dominance inputs (the live engine's W15 seam): the position is
-            // OOR once the active bin leaves the range, HODL comes from the same
-            // CLMM model, and fees accrued reflect what fees would dominate.
-            outOfRange: !inRange,
-            hodlValueUsd: val.hodlValueUsd,
-            cumulativeFeesClaimedUsd: positionFeesUsd,
-          };
-        })()
-      : undefined;
-    const replay = evaluateReplayPool({
+  // Mark the open position to the current DLMM value (correct range-aware IL,
+  // includes token depreciation — NOT a flat floor). Falls back to full size
+  // when the anchor is unknown.
+  function markPositionValue(tick: HistoryTick): number {
+    return clmmPositionValue({
+      sizeUsd: positionSizeUsd,
+      anchorPrice: referencePrice,
+      anchorBinId: referenceBinId,
+      currentPrice: tick.pool.currentPrice,
+      lowerBinId: currentLowerBinId,
+      upperBinId: currentUpperBinId,
+      binStep: tick.pool.binStep,
+    }).lpValueUsd;
+  }
+
+  // Build the replay kernel's view of the open position: range-aware CLMM
+  // valuation (LP value + the HODL benchmark buried in the same model) so the
+  // IL-dominance fast EXIT can mark real IL. Undefined when no position.
+  function buildReplayPosition(tick: HistoryTick, inRange: boolean) {
+    if (!hasPosition) return undefined;
+    const val = clmmPositionValue({
+      sizeUsd: positionSizeUsd,
+      anchorPrice: referencePrice,
+      anchorBinId: referenceBinId,
+      currentPrice: tick.pool.currentPrice,
+      lowerBinId: currentLowerBinId,
+      upperBinId: currentUpperBinId,
+      binStep: tick.pool.binStep,
+    });
+    return {
+      poolAddress: tick.pool.address,
+      positionPubKey: `replay-${tick.pool.address}`,
+      lowerBinId: currentLowerBinId,
+      upperBinId: currentUpperBinId,
+      depositedUsd: positionSizeUsd,
+      currentValueUsd: val.lpValueUsd,
+      highestValueUsd: positionPeakUsd,
+      // IL-dominance inputs (the live engine's W15 seam): the position is
+      // OOR once the active bin leaves the range, HODL comes from the same
+      // CLMM model, and fees accrued reflect what fees would dominate.
+      outOfRange: !inRange,
+      hodlValueUsd: val.hodlValueUsd,
+      cumulativeFeesClaimedUsd: positionFeesUsd,
+    };
+  }
+
+  // Feed one tick through the shared decision/risk kernel.
+  function runReplayKernel(
+    tick: HistoryTick,
+    metrics: ReturnType<typeof strategy.computeMetrics>,
+    replayPosition: ReturnType<typeof buildReplayPosition>,
+    portfolioValueUsd: number,
+  ) {
+    return evaluateReplayPool({
       poolAddress: tick.pool.address,
       activeBinId: tick.pool.activeBinId,
       metrics,
       position: replayPosition,
       openPositions: replayPosition ? [replayPosition] : [],
-      portfolioValueUsd: portfolioValue,
-      recentPnlUsd: portfolioValue - initialValue,
+      portfolioValueUsd,
+      recentPnlUsd: portfolioValueUsd - initialValue,
       memoryWarningCount: 0,
       confidenceThreshold: 0.65,
       trailingStopPct: 0.1,
@@ -825,27 +876,67 @@ export function runBacktestFromTicks(
         maxPerPoolAllocationPct: 0.4,
         maxPositionsPerPool: cfg.maxPositionsPerPool,
       },
-      proposedSizeUsd: Math.min(portfolioValue * 0.2, 2_000),
+      proposedSizeUsd: Math.min(portfolioValueUsd * 0.2, 2_000),
       ilProtectionEnabled: cfg.ilProtectionEnabled ?? true,
       ilDominanceExitFactor: cfg.ilDominanceExitFactor ?? 2,
       ilDominanceMinUsd: cfg.ilDominanceMinUsd ?? 5,
     });
-    if (!replay.riskApproved) {
-      if (!hasPosition) {
-        enterAttempts++;
-        const tag = replay.rejectTag ?? "[risk-gate]";
-        rejections[tag] = (rejections[tag] ?? 0) + 1;
-      }
-      previousTvl = tick.pool.tvlUsd;
-      strategyReturns.push(0);
+  }
+
+  for (let i = 0; i < ticks.length; i++) {
+    const tick = ticks[i]!;
+    const metrics = strategy.computeMetrics(tick.pool, tick.binArray, previousTvl);
+    // Match computeMetrics' wiring so this standalone auth score stays consistent
+    // with metrics.volumeAuthenticity: fees are measured only under the Data API.
+    const auth = strategy.checkVolumeAuthenticity(tick.pool, tick.pool.statsSource === "datapi");
+
+    const rejectionTag = evaluateTickPreFilter(tick, metrics, auth);
+    if (rejectionTag !== null) {
+      recordRejection(rejectionTag);
+      skipTick(tick);
       continue;
     }
+
+    const inRange =
+      tick.pool.activeBinId >= currentLowerBinId && tick.pool.activeBinId <= currentUpperBinId;
+    const feesThisTick = accrueFees(i, inRange);
+
+    const replayPosition = buildReplayPosition(tick, inRange);
+    const replay = runReplayKernel(tick, metrics, replayPosition, portfolioValue);
+    if (!replay.riskApproved) {
+      recordRejection(replay.rejectTag ?? "[risk-gate]");
+      skipTick(tick);
+      continue;
+    }
+    portfolioValue = applyReplayDecision(replay, replayPosition, tick, i, portfolioValue);
+
+    portfolioValue = applyRebalanceDriftOrReenter(tick, i, feesThisTick, portfolioValue);
+
+    previousTvl = tick.pool.tvlUsd;
+    strategyReturns.push(
+      prevPortfolioValue > 0 ? (portfolioValue - prevPortfolioValue) / prevPortfolioValue : 0,
+    );
+    prevPortfolioValue = portfolioValue;
+  }
+
+  // Replay decision application: ENTER opens the position (paying the entry
+  // cost), EXIT realizes it (the IL-dominance exit ALSO realizes the IL it
+  // capped — mirroring the live engine, where closing an out-of-range
+  // position converts its IL into a realized loss), HOLD tracks the peak.
+  function applyReplayDecision(
+    replay: ReturnType<typeof runReplayKernel>,
+    replayPosition: ReturnType<typeof buildReplayPosition>,
+    tick: HistoryTick,
+    tickIndex: number,
+    portfolioValueUsd: number,
+  ): number {
+    let value = portfolioValueUsd;
     if (replay.decision.action === "ENTER") {
       hasPosition = true;
       positionSizeUsd = replay.adjustedSizeUsd;
       positionPeakUsd = positionSizeUsd;
       const entryCostUsd = executionCostUsd(positionSizeUsd, cfg.entryCostBps);
-      portfolioValue -= entryCostUsd;
+      value -= entryCostUsd;
       admitted++;
       enterAttempts++;
       entryTimestamp = tick.pool.timestamp;
@@ -853,14 +944,11 @@ export function runBacktestFromTicks(
       positionFeesUsd = 0;
       referencePrice = tick.pool.currentPrice;
       referenceBinId = tick.pool.activeBinId;
-    } else if (replay.decision.action === "EXIT") {
-      // The replay kernel may EXIT either via the trailing stop or the
-      // IL-dominance fast EXIT (W15 seam). Both realize the position at its
-      // current marked (range-aware) value, but the IL-dominance exit ALSO
-      // realizes the IL it capped — mirroring the live engine, where closing
-      // an out-of-range position converts its IL into a realized loss. The
-      // IL-dominance exit fires EARLIER than the trail stop, so it caps the
-      // unbounded OOR bleed instead of waiting for a drawn-down breach.
+      return value;
+    }
+    if (replay.decision.action === "EXIT") {
+      // The IL-dominance exit fires EARLIER than the trail stop, so it caps
+      // the unbounded OOR bleed instead of waiting for a drawn-down breach.
       const isIlDominance = replay.decision.reasoning.startsWith("IL dominance");
       const realizedLoss =
         isIlDominance && replayPosition !== undefined
@@ -869,24 +957,37 @@ export function runBacktestFromTicks(
       const exitNotionalUsd = replayPosition?.currentValueUsd ?? positionSizeUsd;
       const exitCostUsd = executionCostUsd(exitNotionalUsd, cfg.exitCostBps);
       totalIl += realizedLoss;
-      portfolioValue -= realizedLoss + exitCostUsd;
+      value -= realizedLoss + exitCostUsd;
       recordExit(
         isIlDominance ? "il-dominance" : "trailing-stop",
-        i,
+        tickIndex,
         exitNotionalUsd + positionFeesUsd - exitCostUsd,
       );
       hasPosition = false;
       positionSizeUsd = 0;
       positionPeakUsd = 0;
-    } else if (hasPosition) {
+      return value;
+    }
+    if (hasPosition) {
       positionPeakUsd = Math.max(positionPeakUsd, replayPosition?.currentValueUsd ?? 0);
     }
+    return value;
+  }
 
+  // Post-decision drift handling: economic rebalance (IL + swap cost vs
+  // expected fees), drift exit, or automatic re-entry on a calm pool.
+  function applyRebalanceDriftOrReenter(
+    tick: HistoryTick,
+    tickIndex: number,
+    feesThisTick: number,
+    portfolioValueUsd: number,
+  ): number {
+    let value = portfolioValueUsd;
     const positionCenter = (currentLowerBinId + currentUpperBinId) / 2;
     const positionHalfWidth = (currentUpperBinId - currentLowerBinId) / 2 || 1;
     const binDrift = Math.abs(tick.pool.activeBinId - positionCenter) / positionHalfWidth;
 
-    const ticksSinceRebalance = i - lastRebalanceTick;
+    const ticksSinceRebalance = tickIndex - lastRebalanceTick;
     const canRebalance =
       hasPosition && rebalances < cfg.maxRebalances && ticksSinceRebalance >= cfg.minHoldTicks;
 
@@ -904,7 +1005,7 @@ export function runBacktestFromTicks(
         binStep: tick.pool.binStep,
       });
       const ilCost = Math.max(0, val.hodlValueUsd - val.lpValueUsd);
-      const swapCost = portfolioValue * 0.0005;
+      const swapCost = value * 0.0005;
       const totalCost = ilCost + swapCost;
       const expectedFeesAhead = feesThisTick * cfg.minHoldTicks * 0.7;
       const netBenefit = expectedFeesAhead - totalCost;
@@ -912,14 +1013,14 @@ export function runBacktestFromTicks(
       if (netBenefit > cfg.minNetBenefitUsd) {
         rebalances++;
         totalIl += totalCost;
-        portfolioValue -= totalCost;
+        value -= totalCost;
         currentLowerBinId = tick.pool.activeBinId - effectiveHalfWidth;
         currentUpperBinId = tick.pool.activeBinId + effectiveHalfWidth;
         referencePrice = tick.pool.currentPrice;
         referenceBinId = tick.pool.activeBinId;
-        lastRebalanceTick = i;
+        lastRebalanceTick = tickIndex;
         let feesInNextWindow = 0;
-        for (let j = i + 1; j < Math.min(i + cfg.minHoldTicks, ticks.length); j++) {
+        for (let j = tickIndex + 1; j < Math.min(tickIndex + cfg.minHoldTicks, ticks.length); j++) {
           const nextTick = ticks[j]!;
           const nextInRange =
             nextTick.pool.activeBinId >= currentLowerBinId &&
@@ -928,7 +1029,9 @@ export function runBacktestFromTicks(
         }
         if (feesInNextWindow > totalCost) wins++;
       }
-    } else if (binDrift > 0.9 && hasPosition) {
+      return value;
+    }
+    if (binDrift > 0.9 && hasPosition) {
       // Drift exit realizes the same range-aware IL vs HODL, plus a small exit
       // cost — apply it BEFORE classifying the win so an at-cost exit never
       // records as a win.
@@ -942,9 +1045,9 @@ export function runBacktestFromTicks(
         binStep: tick.pool.binStep,
       });
       const driftIlUsd = Math.max(0, val.hodlValueUsd - val.lpValueUsd);
-      const driftExitNotionalUsd = replayPosition?.currentValueUsd ?? positionSizeUsd;
+      const driftExitNotionalUsd = hasPosition ? markPositionValue(tick) : positionSizeUsd;
       const configuredExitCostUsd = executionCostUsd(driftExitNotionalUsd, cfg.exitCostBps);
-      const existingDriftExitCostUsd = portfolioValue * 0.0005;
+      const existingDriftExitCostUsd = value * 0.0005;
       const driftExitRealizedUsd =
         driftExitNotionalUsd +
         positionFeesUsd -
@@ -952,36 +1055,33 @@ export function runBacktestFromTicks(
         existingDriftExitCostUsd -
         configuredExitCostUsd;
       totalIl += driftIlUsd;
-      portfolioValue -= driftIlUsd + existingDriftExitCostUsd + configuredExitCostUsd;
-      recordExit("drift", i, driftExitRealizedUsd);
+      value -= driftIlUsd + existingDriftExitCostUsd + configuredExitCostUsd;
+      recordExit("drift", tickIndex, driftExitRealizedUsd);
       hasPosition = false;
       positionSizeUsd = 0;
       positionPeakUsd = 0;
-    } else if (!hasPosition && binDrift < 0.3) {
+      return value;
+    }
+    if (!hasPosition && binDrift < 0.3) {
       hasPosition = true;
       // Same proposed size the replay ENTER path uses, so position value and
       // fee accrual stay consistent after an automatic re-entry.
-      positionSizeUsd = Math.min(portfolioValue * 0.2, 2_000);
+      positionSizeUsd = Math.min(value * 0.2, 2_000);
       positionPeakUsd = positionSizeUsd;
       currentLowerBinId = tick.pool.activeBinId - effectiveHalfWidth;
       currentUpperBinId = tick.pool.activeBinId + effectiveHalfWidth;
-      lastRebalanceTick = i;
+      lastRebalanceTick = tickIndex;
       // ponytail: unreachable while the replay ENTER admits every no-position
       // tick, but keep the census hold-trackers correct if that ever changes.
       entryTimestamp = tick.pool.timestamp;
       const entryCostUsd = executionCostUsd(positionSizeUsd, cfg.entryCostBps);
-      portfolioValue -= entryCostUsd;
+      value -= entryCostUsd;
       entryDepositedUsd = positionSizeUsd + entryCostUsd;
       positionFeesUsd = 0;
       referencePrice = tick.pool.currentPrice;
       referenceBinId = tick.pool.activeBinId;
     }
-
-    previousTvl = tick.pool.tvlUsd;
-    strategyReturns.push(
-      prevPortfolioValue > 0 ? (portfolioValue - prevPortfolioValue) / prevPortfolioValue : 0,
-    );
-    prevPortfolioValue = portfolioValue;
+    return value;
   }
 
   const mean = strategyReturns.reduce((a, b) => a + b, 0) / strategyReturns.length;

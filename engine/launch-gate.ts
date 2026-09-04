@@ -100,6 +100,178 @@ export function summarizeLaunchRejections(
     .map(([category, { count, example }]) => ({ category, count, example }));
 }
 
+/** Per-pool launch admission outcome. Pass carries the derived metrics the
+ *  rank notes need; fail carries the first rejection (reason + category). */
+type LaunchAdmissionOutcome =
+  | { readonly passed: true; readonly ageHours: number; readonly volumeTurnover: number }
+  | {
+      readonly passed: false;
+      readonly reason: string;
+      readonly category: LaunchRejectCategory;
+    };
+
+function isUnknownFeeYield(pool: DiscoveredPool): boolean {
+  return pool.feeYield1hPct === undefined || !Number.isFinite(pool.feeYield1hPct);
+}
+
+function isFutureCreatedAt(createdAtMs: number, now: number): boolean {
+  return !Number.isFinite(createdAtMs) || createdAtMs > now + CLOCK_SKEW_MS;
+}
+
+function isBelowLaunchTvlFloor(pool: DiscoveredPool, config: LaunchGateConfig): boolean {
+  return !Number.isFinite(pool.tvlUsd) || pool.tvlUsd < config.minTvlUsd;
+}
+
+function isThin1hVolume(pool: DiscoveredPool, config: LaunchGateConfig): boolean {
+  return (
+    pool.volume1hUsd === undefined ||
+    !Number.isFinite(pool.volume1hUsd) ||
+    pool.volume1hUsd < config.minVolume1hUsd
+  );
+}
+
+function isThinBaseFee(pool: DiscoveredPool, config: LaunchGateConfig): boolean {
+  return (
+    pool.baseFeePct === undefined ||
+    !Number.isFinite(pool.baseFeePct) ||
+    pool.baseFeePct < config.minBaseFeePct
+  );
+}
+
+function isBinStepOutsideLaunchBand(pool: DiscoveredPool, config: LaunchGateConfig): boolean {
+  return (
+    !Number.isInteger(pool.binStep) ||
+    pool.binStep < config.minBinStep ||
+    pool.binStep > config.maxBinStep
+  );
+}
+
+function hasNo24hVolume(pool: DiscoveredPool): boolean {
+  return !Number.isFinite(pool.volume24hUsd) || pool.volume24hUsd <= 0;
+}
+
+/** Token-leg safety, same policy as the market gate. Returns the rejection
+ *  reason of the first failing leg, or null when both legs pass. */
+function launchLegRejectReason(pool: DiscoveredPool, config: LaunchGateConfig): string | null {
+  const legs = [
+    {
+      mint: pool.tokenX,
+      symbol: pool.tokenXSymbol,
+      verified: pool.tokenXVerified,
+      freezeDisabled: pool.tokenXFreezeDisabled,
+      holders: pool.tokenXHolders,
+    },
+    {
+      mint: pool.tokenY,
+      symbol: pool.tokenYSymbol,
+      verified: pool.tokenYVerified,
+      freezeDisabled: pool.tokenYFreezeDisabled,
+      holders: pool.tokenYHolders,
+    },
+  ];
+  for (const leg of legs) {
+    if (
+      !marketLegPasses(
+        {
+          isStableOrSol: isStableOrSol(leg.mint, config.stablecoinMints),
+          verified: leg.verified,
+          freezeDisabled: leg.freezeDisabled,
+          holders: leg.holders,
+        },
+        config.minHolders,
+      )
+    ) {
+      return `leg ${leg.symbol ?? leg.mint} fails token safety`;
+    }
+  }
+  return null;
+}
+
+/** Ordered launch admission checks — rejection order, reason strings and
+ *  stable categories are contractual (radar histograms bucket on category). */
+function launchAdmission(pool: DiscoveredPool, config: LaunchGateConfig): LaunchAdmissionOutcome {
+  // Fail closed on missing data — hotness is the point.
+  if (isUnknownFeeYield(pool)) {
+    return { passed: false, reason: "missing 1h fee yield", category: "missing-data" };
+  }
+  if (pool.createdAtMs === undefined) {
+    return { passed: false, reason: "missing createdAt", category: "missing-data" };
+  }
+  if (isFutureCreatedAt(pool.createdAtMs, config.now)) {
+    return {
+      passed: false,
+      reason: `createdAt ${pool.createdAtMs} in the future`,
+      category: "created-at",
+    };
+  }
+  const ageHours = Math.max(0, config.now - pool.createdAtMs) / HOUR_MS;
+  if (ageHours > config.maxAgeHours) {
+    return {
+      passed: false,
+      reason: `age ${ageHours.toFixed(1)}h > ${config.maxAgeHours}h`,
+      category: "age",
+    };
+  }
+  if (isBelowLaunchTvlFloor(pool, config)) {
+    return { passed: false, reason: `tvl ${pool.tvlUsd} < ${config.minTvlUsd}`, category: "tvl" };
+  }
+  if (pool.tvlUsd > config.maxTvlUsd) {
+    return {
+      passed: false,
+      reason: `tvl ${pool.tvlUsd} > ${config.maxTvlUsd} (established, not a launch)`,
+      category: "tvl",
+    };
+  }
+  if (isThin1hVolume(pool, config)) {
+    return {
+      passed: false,
+      reason: `1h volume ${pool.volume1hUsd} < ${config.minVolume1hUsd}`,
+      category: "volume-1h",
+    };
+  }
+  if (isThinBaseFee(pool, config)) {
+    return {
+      passed: false,
+      reason: `base fee ${pool.baseFeePct} < ${config.minBaseFeePct}%`,
+      category: "base-fee",
+    };
+  }
+  if (isBinStepOutsideLaunchBand(pool, config)) {
+    return {
+      passed: false,
+      reason: `binStep ${pool.binStep} outside [${config.minBinStep}, ${config.maxBinStep}]`,
+      category: "bin-step",
+    };
+  }
+  // Wash-turnover guard: 24h volume/TVL must land in (0, max].
+  if (hasNo24hVolume(pool)) {
+    return {
+      passed: false,
+      reason: "no 24h volume (cannot compute turnover)",
+      category: "turnover",
+    };
+  }
+  const volumeTurnover = pool.volume24hUsd / pool.tvlUsd;
+  if (volumeTurnover > config.maxVolumeTurnover) {
+    return {
+      passed: false,
+      reason: `volume turnover ${volumeTurnover.toFixed(1)} > ${config.maxVolumeTurnover} (wash)`,
+      category: "turnover",
+    };
+  }
+  const legReason = launchLegRejectReason(pool, config);
+  if (legReason !== null) {
+    return { passed: false, reason: legReason, category: "token-safety" };
+  }
+  return { passed: true, ageHours, volumeTurnover };
+}
+
+/** Admission already rejected pools missing these metrics; a fail-closed 0
+ *  backstop only satisfies the rank contract if that invariant ever breaks. */
+function admissionSafe(value: number | undefined): number {
+  return value !== undefined && Number.isFinite(value) ? value : 0;
+}
+
 /** Gates and ranks one launch-radar snapshot. Pure; callers feed it the
  *  adapter's `discoverHotPools` output. */
 export function gateAndRankLaunchPools(
@@ -114,123 +286,26 @@ export function gateAndRankLaunchPools(
   }> = [];
 
   for (const pool of pools) {
-    const reject = (reason: string, category: LaunchRejectCategory): void => {
-      rejected.push({ address: pool.address, reason, category });
-    };
-
-    // Fail closed on missing data — hotness is the point.
-    if (pool.feeYield1hPct === undefined || !Number.isFinite(pool.feeYield1hPct)) {
-      reject("missing 1h fee yield", "missing-data");
+    const admission = launchAdmission(pool, config);
+    if (!admission.passed) {
+      rejected.push({
+        address: pool.address,
+        reason: admission.reason,
+        category: admission.category,
+      });
       continue;
     }
-    if (pool.createdAtMs === undefined) {
-      reject("missing createdAt", "missing-data");
-      continue;
-    }
-    if (!Number.isFinite(pool.createdAtMs) || pool.createdAtMs > config.now + CLOCK_SKEW_MS) {
-      reject(`createdAt ${pool.createdAtMs} in the future`, "created-at");
-      continue;
-    }
-    const ageHours = Math.max(0, config.now - pool.createdAtMs) / HOUR_MS;
-    if (ageHours > config.maxAgeHours) {
-      reject(`age ${ageHours.toFixed(1)}h > ${config.maxAgeHours}h`, "age");
-      continue;
-    }
-    if (!Number.isFinite(pool.tvlUsd) || pool.tvlUsd < config.minTvlUsd) {
-      reject(`tvl ${pool.tvlUsd} < ${config.minTvlUsd}`, "tvl");
-      continue;
-    }
-    if (pool.tvlUsd > config.maxTvlUsd) {
-      reject(`tvl ${pool.tvlUsd} > ${config.maxTvlUsd} (established, not a launch)`, "tvl");
-      continue;
-    }
-    if (
-      pool.volume1hUsd === undefined ||
-      !Number.isFinite(pool.volume1hUsd) ||
-      pool.volume1hUsd < config.minVolume1hUsd
-    ) {
-      reject(`1h volume ${pool.volume1hUsd} < ${config.minVolume1hUsd}`, "volume-1h");
-      continue;
-    }
-    if (
-      pool.baseFeePct === undefined ||
-      !Number.isFinite(pool.baseFeePct) ||
-      pool.baseFeePct < config.minBaseFeePct
-    ) {
-      reject(`base fee ${pool.baseFeePct} < ${config.minBaseFeePct}%`, "base-fee");
-      continue;
-    }
-    if (
-      !Number.isInteger(pool.binStep) ||
-      pool.binStep < config.minBinStep ||
-      pool.binStep > config.maxBinStep
-    ) {
-      reject(
-        `binStep ${pool.binStep} outside [${config.minBinStep}, ${config.maxBinStep}]`,
-        "bin-step",
-      );
-      continue;
-    }
-    // Wash-turnover guard: 24h volume/TVL must land in (0, max].
-    if (!Number.isFinite(pool.volume24hUsd) || pool.volume24hUsd <= 0) {
-      reject("no 24h volume (cannot compute turnover)", "turnover");
-      continue;
-    }
-    const volumeTurnover = pool.volume24hUsd / pool.tvlUsd;
-    if (volumeTurnover > config.maxVolumeTurnover) {
-      reject(
-        `volume turnover ${volumeTurnover.toFixed(1)} > ${config.maxVolumeTurnover} (wash)`,
-        "turnover",
-      );
-      continue;
-    }
-    // Token-leg safety, same policy as the market gate.
-    const legs = [
-      {
-        mint: pool.tokenX,
-        symbol: pool.tokenXSymbol,
-        verified: pool.tokenXVerified,
-        freezeDisabled: pool.tokenXFreezeDisabled,
-        holders: pool.tokenXHolders,
-      },
-      {
-        mint: pool.tokenY,
-        symbol: pool.tokenYSymbol,
-        verified: pool.tokenYVerified,
-        freezeDisabled: pool.tokenYFreezeDisabled,
-        holders: pool.tokenYHolders,
-      },
-    ];
-    let legRejected = false;
-    for (const leg of legs) {
-      if (
-        !marketLegPasses(
-          {
-            isStableOrSol: isStableOrSol(leg.mint, config.stablecoinMints),
-            verified: leg.verified,
-            freezeDisabled: leg.freezeDisabled,
-            holders: leg.holders,
-          },
-          config.minHolders,
-        )
-      ) {
-        reject(`leg ${leg.symbol ?? leg.mint} fails token safety`, "token-safety");
-        legRejected = true;
-        break;
-      }
-    }
-    if (legRejected) continue;
-
-    const notes: string[] = [
-      `age ${ageHours.toFixed(1)}h`,
-      `turnover ${volumeTurnover.toFixed(2)}`,
-    ];
     ranked.push({
       pool,
-      feeYield1hPct: pool.feeYield1hPct,
-      volume1hUsd: pool.volume1hUsd,
-      score: pool.feeYield1hPct,
-      notes,
+      // Unreachable in practice: launchAdmission rejects pools with missing
+      // fee yield / 1h volume (missing-data category) before rank
+      feeYield1hPct: admissionSafe(pool.feeYield1hPct),
+      volume1hUsd: admissionSafe(pool.volume1hUsd),
+      score: admissionSafe(pool.feeYield1hPct),
+      notes: [
+        `age ${admission.ageHours.toFixed(1)}h`,
+        `turnover ${admission.volumeTurnover.toFixed(2)}`,
+      ],
     });
   }
 

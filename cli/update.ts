@@ -40,6 +40,15 @@ if (!globalThis.Bun) {
 
 const logger = createLogger("update");
 
+/** Parsed flags of the update command (commander supplies the option bag). */
+interface UpdateOptions {
+  checkOnly?: boolean;
+  channel?: string;
+  canary?: boolean;
+  r2Url?: string;
+  skipSmokeTest?: boolean;
+}
+
 const SMOKE_TIMEOUT_MS = 60_000;
 const BUILD_TIMEOUT_MS = 600_000;
 
@@ -310,7 +319,9 @@ function resolveInstallRoot(): string {
       logger.debug(`Detected source install via wrapper: ${candidate}`);
       return candidate;
     }
-  } catch {}
+  } catch {
+    // Best-effort wrapper probe — fall through to the entry-script probe.
+  }
 
   try {
     const main = globalThis.Bun ? Bun.main : (process.argv[1] ?? "");
@@ -322,7 +333,9 @@ function resolveInstallRoot(): string {
         return mainCandidate;
       }
     }
-  } catch {}
+  } catch {
+    // Best-effort entry-script probe — fall through to the bundle install dir.
+  }
 
   const installDir = resolveInstallDir();
   logger.debug(`Falling back to bundle install dir: ${installDir}`);
@@ -646,6 +659,87 @@ async function updateFromBundle(
   }
 }
 
+/** Validate --canary/--channel combination and narrow the channel value. */
+function resolveReleaseChannel(options: UpdateOptions): "stable" | "beta" | "dev" | "canary" {
+  const channelValue = String(options.channel);
+  if (options.canary && channelValue !== "stable") {
+    throw new UpdateAbort("--canary cannot be combined with --channel");
+  }
+  if (
+    channelValue !== "stable" &&
+    channelValue !== "beta" &&
+    channelValue !== "dev" &&
+    channelValue !== "canary"
+  ) {
+    throw new UpdateAbort(
+      `Invalid release channel '${channelValue}'. Use stable, beta, dev, or canary.`,
+    );
+  }
+  return options.canary ? "canary" : channelValue;
+}
+
+function printReleaseSummary(release: ReleaseInfo): void {
+  if (release.channel === "canary") {
+    const commitSuffix = release.commit ? ` (commit ${release.commit.slice(0, 8)})` : "";
+    console.log(`Canary build: ${release.version}${commitSuffix}`);
+  }
+  console.log(`Source: ${release.source === "r2" ? "Cloudflare R2" : "GitHub Releases"}`);
+  if (release.bundleUrl) {
+    console.log(`Download: ${release.bundleUrl}`);
+  }
+}
+
+/**
+ * Issue #184: `prism update` replaces the bundle on disk, but the
+ * running agent keeps executing the OLD build in memory — there is no
+ * restart logic, and the success output used to give no hint that the
+ * fix is not live yet (an operator watching a broken release believed
+ * the update fixed it while the old code kept running for hours).
+ * Detect the running agent (dev lockfile or process scan) and surface
+ * a prominent restart-required notice; exit non-zero (2, distinct from
+ * update-failure's 1) so scripts/cron can tell "updated, restart
+ * needed" apart from "update failed".
+ */
+function reportRestartRequired(): void {
+  const lock = readLockfile();
+  const runningEngine = findRunningEngineProcess();
+  // Prefer the process-scan result: it verifies the command line, so it
+  // can never name a stale-lock PID that the OS reused for an unrelated
+  // process (the lockfile is only liveness-checked). The lockfile is the
+  // fallback for `prism dev` runs the scan misses.
+  const runningPid =
+    runningEngine?.pid ?? (lock !== null && isProcessAlive(lock.pid) ? lock.pid : null) ?? null;
+  if (runningPid === null) return;
+  console.log("");
+  console.log(
+    `RESTART REQUIRED — the running Prism agent (PID ${runningPid}) is still executing the OLD build.`,
+  );
+  console.log("  The new version is installed, verified, and will go live on the next restart.");
+  console.log("  Restart it with:");
+  console.log("    systemctl --user restart prism-agent.service   (systemd user service)");
+  console.log(`    kill ${runningPid} && prism dev                 (manual/foreground run)`);
+  process.exitCode = 2;
+}
+
+/** Reset version install timestamp for force-update tracking. */
+function markVersionInstallTimestamp(): void {
+  try {
+    const prismDir = join(homedir(), ".config", "prism");
+    if (!existsSync(prismDir)) mkdirSync(prismDir, { recursive: true, mode: 0o700 });
+    const timestampFile = join(prismDir, "version-installed-at");
+    writeFileSync(timestampFile, String(Date.now()), { mode: 0o600 });
+  } catch {
+    // non-fatal: timestamp reset failure doesn't block update
+  }
+}
+
+function cleanupWorkDir(workDir: string | null): void {
+  // Always clean up the work directory, regardless of how we exit.
+  if (workDir && existsSync(workDir)) {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
 export const updateCommand = new Command("update")
   .description("Check for and apply updates")
   .option("--check-only", "Only check for updates, don't apply")
@@ -653,28 +747,16 @@ export const updateCommand = new Command("update")
   .option("--canary", "Update to the latest canary build (latest main-branch build that passed CI)")
   .option("--r2-url <url>", "R2 public URL for release bundles", R2_PUBLIC_URL)
   .option("--skip-smoke-test", "Skip post-install smoke test")
-  .action(async (options) => {
+  .action(async (rawOptions) => {
+    // SAFETY: Commander parsed these flags at the CLI boundary; the option bag matches the declared UpdateOptions shape.
+    const options = rawOptions as UpdateOptions;
     const current = getCurrentVersion();
     console.log(`Current version: ${current}`);
 
     let workDir: string | null = null;
     try {
       const repo = "irfndi/prism-liquidity-agent";
-      const channelValue = String(options.channel);
-      if (options.canary && channelValue !== "stable") {
-        throw new UpdateAbort("--canary cannot be combined with --channel");
-      }
-      if (
-        channelValue !== "stable" &&
-        channelValue !== "beta" &&
-        channelValue !== "dev" &&
-        channelValue !== "canary"
-      ) {
-        throw new UpdateAbort(
-          `Invalid release channel '${channelValue}'. Use stable, beta, dev, or canary.`,
-        );
-      }
-      const channel = options.canary ? "canary" : channelValue;
+      const channel = resolveReleaseChannel(options);
       // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
       const r2Url = options.r2Url as string;
 
@@ -697,14 +779,7 @@ export const updateCommand = new Command("update")
       }
 
       console.log(`Update available: ${current} → ${latest}`);
-      if (release.channel === "canary") {
-        const commitSuffix = release.commit ? ` (commit ${release.commit.slice(0, 8)})` : "";
-        console.log(`Canary build: ${release.version}${commitSuffix}`);
-      }
-      console.log(`Source: ${release.source === "r2" ? "Cloudflare R2" : "GitHub Releases"}`);
-      if (release.bundleUrl) {
-        console.log(`Download: ${release.bundleUrl}`);
-      }
+      printReleaseSummary(release);
 
       if (options.checkOnly) {
         return;
@@ -725,46 +800,8 @@ export const updateCommand = new Command("update")
       logger.info(`Updated to ${latest} from ${release.source}`);
       console.log(`✓ Updated to ${latest}`);
 
-      // Issue #184: `prism update` replaces the bundle on disk, but the
-      // running agent keeps executing the OLD build in memory — there is no
-      // restart logic, and the success output used to give no hint that the
-      // fix is not live yet (an operator watching a broken release believed
-      // the update fixed it while the old code kept running for hours).
-      // Detect the running agent (dev lockfile or process scan) and surface
-      // a prominent restart-required notice; exit non-zero (2, distinct from
-      // update-failure's 1) so scripts/cron can tell "updated, restart
-      // needed" apart from "update failed".
-      const lock = readLockfile();
-      const runningEngine = findRunningEngineProcess();
-      // Prefer the process-scan result: it verifies the command line, so it
-      // can never name a stale-lock PID that the OS reused for an unrelated
-      // process (the lockfile is only liveness-checked). The lockfile is the
-      // fallback for `prism dev` runs the scan misses.
-      const runningPid =
-        runningEngine?.pid ?? (lock !== null && isProcessAlive(lock.pid) ? lock.pid : null) ?? null;
-      if (runningPid !== null) {
-        console.log("");
-        console.log(
-          `RESTART REQUIRED — the running Prism agent (PID ${runningPid}) is still executing the OLD build.`,
-        );
-        console.log(
-          "  The new version is installed, verified, and will go live on the next restart.",
-        );
-        console.log("  Restart it with:");
-        console.log("    systemctl --user restart prism-agent.service   (systemd user service)");
-        console.log(`    kill ${runningPid} && prism dev                 (manual/foreground run)`);
-        process.exitCode = 2;
-      }
-
-      // Reset version install timestamp for force-update tracking
-      try {
-        const prismDir = join(homedir(), ".config", "prism");
-        if (!existsSync(prismDir)) mkdirSync(prismDir, { recursive: true, mode: 0o700 });
-        const timestampFile = join(prismDir, "version-installed-at");
-        writeFileSync(timestampFile, String(Date.now()), { mode: 0o600 });
-      } catch {
-        // non-fatal: timestamp reset failure doesn't block update
-      }
+      reportRestartRequired();
+      markVersionInstallTimestamp();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const exitCode = err instanceof UpdateAbort ? err.exitCode : 1;
@@ -776,9 +813,6 @@ export const updateCommand = new Command("update")
       }
       process.exit(exitCode);
     } finally {
-      // Always clean up the work directory, regardless of how we exit.
-      if (workDir && existsSync(workDir)) {
-        rmSync(workDir, { recursive: true, force: true });
-      }
+      cleanupWorkDir(workDir);
     }
   });

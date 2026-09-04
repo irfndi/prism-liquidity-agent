@@ -2,6 +2,15 @@ import { Effect } from "effect";
 import semver from "semver";
 import path from "path";
 
+/** Parse a URL and return its origin; null when malformed. */
+function safeUrlOrigin(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
 export function getVersionAgnosticInstallDir(installDir: string): string {
   const normalized = path.normalize(installDir);
   const name = path.basename(normalized);
@@ -18,6 +27,41 @@ function tryNetwork<T>(promise: () => Promise<T>, description: string): Effect.E
         cause: error,
       }),
   });
+}
+
+/** GitHub API request headers; Bearer auth only when a token is configured. */
+function buildGithubHeaders(token?: string): FetchHeaders {
+  const headers: FetchHeaders = {
+    "User-Agent": "prism-liquidity-agent",
+    Accept: "application/vnd.github.v3+json",
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+/** Extract the `rel="next"` URL from a GitHub Link header (null when absent). */
+function parseNextLink(linkHeader: string | null): string | null {
+  const match = linkHeader ? linkHeader.match(/<([^>]+)>;\s*rel="next"/) : null;
+  return match?.[1] ?? null;
+}
+
+/** Fail when GitHub rate-limits this client (403 with exhausted quota, or 429).
+ *  A 403 without exhausted quota falls through to the generic !ok handling. */
+function failOnGithubRateLimit(response: Response): Effect.Effect<void, Error> {
+  if (response.status !== 403 && response.status !== 429) {
+    return Effect.void;
+  }
+  const rateLimitRemaining = response.headers.get("x-ratelimit-remaining");
+  const retryAfter = response.headers.get("retry-after");
+  if (rateLimitRemaining !== "0" && response.status !== 429) {
+    return Effect.void;
+  }
+  const msg = retryAfter
+    ? `GitHub API rate limit exceeded. Retry after ${retryAfter}s.`
+    : "GitHub API rate limit exceeded. Try again later.";
+  return Effect.fail(new Error(msg));
 }
 
 export function compareVersions(a: string, b: string): number {
@@ -133,29 +177,11 @@ export function fetchGitHubRelease(
         ? `https://api.github.com/repos/${repo}/releases/latest`
         : `https://api.github.com/repos/${repo}/releases`;
 
-    const headers: FetchHeaders = {
-      "User-Agent": "prism-liquidity-agent",
-      Accept: "application/vnd.github.v3+json",
-    };
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-
     const response = yield* tryNetwork(
-      () => fetch(url, { headers }),
+      () => fetch(url, { headers: buildGithubHeaders(token) }),
       `Failed to fetch GitHub release from ${url}`,
     );
-
-    if (response.status === 403 || response.status === 429) {
-      const rateLimitRemaining = response.headers.get("x-ratelimit-remaining");
-      const retryAfter = response.headers.get("retry-after");
-      if (rateLimitRemaining === "0" || response.status === 429) {
-        const msg = retryAfter
-          ? `GitHub API rate limit exceeded. Retry after ${retryAfter}s.`
-          : "GitHub API rate limit exceeded. Try again later.";
-        return yield* Effect.fail(new Error(msg));
-      }
-    }
+    yield* failOnGithubRateLimit(response);
 
     if (!response.ok) {
       return yield* Effect.fail(
@@ -177,37 +203,46 @@ export function fetchGitHubRelease(
       () => response.json(),
       "Failed to parse GitHub releases JSON",
     )) as GitHubRelease[];
-
-    const allReleases: GitHubRelease[] = Array.isArray(firstPageReleases)
+    const firstPage: GitHubRelease[] = Array.isArray(firstPageReleases)
       ? [...firstPageReleases]
       : [];
 
-    const linkHeader = response.headers.get("link");
-    const nextMatch = linkHeader ? linkHeader.match(/<([^>]+)>;\s*rel="next"/) : null;
-    let pageUrl: string | null = nextMatch?.[1] ?? null;
-    let pageCount = 1;
+    const allReleases = yield* fetchAllReleasePages(
+      firstPage,
+      parseNextLink(response.headers.get("link")),
+      token,
+    );
+
+    const filtered = channel === "beta" ? allReleases.filter((r) => r.prerelease) : allReleases;
+    return filtered[0] ?? null;
+  });
+}
+
+/** Follow GitHub's Link-header pagination up to 3 pages total, collecting
+ *  releases. Fails on any non-ok page; stops on an empty/invalid page or a
+ *  next-URL pointing outside api.github.com (Link-header spoofing guard). */
+function fetchAllReleasePages(
+  firstPage: ReadonlyArray<GitHubRelease>,
+  nextLink: string | null,
+  token?: string,
+): Effect.Effect<GitHubRelease[], Error> {
+  return Effect.gen(function* () {
+    const allReleases: GitHubRelease[] = [...firstPage];
     const maxPages = 3;
+    let pageCount = 1;
+    let pageUrl = nextLink;
 
     while (pageUrl !== null && pageCount < maxPages) {
       // Never forward credentials to non-GitHub origins (Link header spoofing).
-      const pageOrigin = new URL(pageUrl).origin;
-      if (pageOrigin !== "https://api.github.com") {
+      const pageOrigin = safeUrlOrigin(pageUrl);
+      if (pageOrigin === null || pageOrigin !== "https://api.github.com") {
         break;
       }
-
       pageCount++;
-      const pageHeaders: FetchHeaders = {
-        "User-Agent": "prism-liquidity-agent",
-        Accept: "application/vnd.github.v3+json",
-      };
-      if (token) {
-        pageHeaders.Authorization = `Bearer ${token}`;
-      }
       const pageResponse = yield* tryNetwork(
-        () => fetch(pageUrl!, { headers: pageHeaders }),
+        () => fetch(pageUrl!, { headers: buildGithubHeaders(token) }),
         "Failed to fetch GitHub releases page",
       );
-
       if (!pageResponse.ok) {
         return yield* Effect.fail(
           new Error(`GitHub API error: ${pageResponse.status} ${pageResponse.statusText}`),
@@ -223,25 +258,11 @@ export function fetchGitHubRelease(
       if (!Array.isArray(releases) || releases.length === 0) {
         break;
       }
-
       allReleases.push(...releases);
-
-      const nextLink = pageResponse.headers.get("link");
-      const nextPageMatch = nextLink ? nextLink.match(/<([^>]+)>;\s*rel="next"/) : null;
-      pageUrl = nextPageMatch?.[1] ?? null;
+      pageUrl = parseNextLink(pageResponse.headers.get("link"));
     }
 
-    if (allReleases.length === 0) {
-      return null;
-    }
-
-    const filtered = channel === "beta" ? allReleases.filter((r) => r.prerelease) : allReleases;
-
-    if (filtered.length === 0) {
-      return null;
-    }
-
-    return filtered[0]!;
+    return allReleases;
   });
 }
 

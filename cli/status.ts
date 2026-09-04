@@ -25,6 +25,9 @@ const logger = createLogger("status-cli");
  *  operator checks status. */
 export type StrandedLookupState = "ok" | "unavailable" | "unpriceable";
 
+/** Result of one per-mint price/decimals lookup channel. */
+type StrandedLookup = { state: StrandedLookupState; value: number };
+
 export type StrandedSettlementClassification =
   | { readonly kind: "stranded"; readonly valueUsd: number }
   | { readonly kind: "dust"; readonly valueUsd: number }
@@ -163,6 +166,21 @@ function buildProgram(): Layer.Layer<
   return Layer.mergeAll(dbLayer, auditLayer, configLayer, adapterLayer);
 }
 
+/** Decide the "running" flag from all three liveness signals. */
+function isEngineRunning(
+  lock: ReturnType<typeof readLockfile>,
+  runningProcess: ReturnType<typeof findRunningEngineProcess>,
+  hasDb: boolean,
+  lastActivityAt: number,
+  scanIntervalMs: number,
+): boolean {
+  return (
+    (lock !== null && isProcessAlive(lock.pid)) ||
+    runningProcess !== null ||
+    (hasDb && Date.now() - lastActivityAt < scanIntervalMs * 2)
+  );
+}
+
 export const statusCommand = new Command("status")
   .description("Show current agent status for humans and agent runtimes")
   .option("-j, --json", "Output as JSON for agent consumption")
@@ -213,25 +231,36 @@ network; with no stranded settlements it is fully offline.`,
           };
 
           const activePositions = positions.filter((p) => p.paperExitedAt === null);
-          const prices = new Map<string, number>();
-          for (const pos of activePositions) {
-            const price = yield* db
-              .getLatestSnapshotPrice(pos.poolAddress)
-              .pipe(Effect.catch(() => Effect.succeed(null)));
-            if (price != null) prices.set(pos.poolAddress, price);
+
+          function loadSnapshotPrices(): Effect.Effect<Map<string, number>> {
+            return Effect.gen(function* () {
+              const prices = new Map<string, number>();
+              for (const pos of activePositions) {
+                const price = yield* db
+                  .getLatestSnapshotPrice(pos.poolAddress)
+                  .pipe(Effect.catch(() => Effect.succeed(null)));
+                if (price != null) prices.set(pos.poolAddress, price);
+              }
+              return prices;
+            });
           }
+          const prices = yield* loadSnapshotPrices();
+
           const hasDb = positions.length > 0 || recentAudit.length > 0;
           const lastActivityAt = recentAudit[0]?.timestamp ?? 0;
           const lock = readLockfile();
           const runningProcess = findRunningEngineProcess();
-          const running =
-            (lock !== null && isProcessAlive(lock.pid)) ||
-            runningProcess !== null ||
-            (hasDb && Date.now() - lastActivityAt < config.scanIntervalMs * 2);
+          const running = isEngineRunning(
+            lock,
+            runningProcess,
+            hasDb,
+            lastActivityAt,
+            config.scanIntervalMs,
+          );
 
-          if (opts.json) {
+          function buildStatusJson(runningFlag: boolean): StatusJsonOutput {
             const json: StatusJsonOutput = {
-              running: running,
+              running: runningFlag,
               dbPath: process.env.SQLITE_DB_PATH ?? getPrismDbPath(),
               timestamp: new Date().toISOString(),
               agentRuntime: {
@@ -309,11 +338,15 @@ network; with no stranded settlements it is fully offline.`,
                       },
               },
             };
-            console.log(JSON.stringify(json, null, 2));
+            return json;
+          }
+
+          if (opts.json) {
+            console.log(JSON.stringify(buildStatusJson(running), null, 2));
             return;
           }
 
-          if (opts.message) {
+          function buildMessageSummary(): string {
             const pnlEmoji = summary.totalUnrealizedPnlUsd >= 0 ? "🟢" : "🔴";
             const positionLines =
               activePositions.length === 0
@@ -355,39 +388,41 @@ network; with no stranded settlements it is fully offline.`,
             if (config.agentiveMode) {
               lines.push("", `Agent overlay: ${config.agentRuntime}`);
             }
-            console.log(lines.join("\n"));
+            return lines.join("\n");
+          }
+
+          if (opts.message) {
+            console.log(buildMessageSummary());
             return;
           }
 
-          const pnlText = `${summary.totalUnrealizedPnlUsd >= 0 ? "+" : ""}$${summary.totalUnrealizedPnlUsd.toFixed(2)} (${summary.totalUnrealizedPnlPct.toFixed(2)}%)`;
-          const agentStatus = config.agentiveMode
-            ? `agent overlay: ${config.agentRuntime}`
-            : "agent overlay: off";
+          const adapter = yield* AdapterService;
+
           // Issue #166: surface terminal settlements whose swap never
           // recovered the token so stranded capital stays visible until
           // the orphan sweep re-queues it. A terminal record is historical
           // only when a CONFIRMED settlement for the same mint is newer than
           // it (the sweep sold the token) — a terminal record NEWER than any
           // confirmed one is a recurring stranding and must stay visible.
-          // Issue #183: classify against the sweep's dust policy — a
-          // sub-dust terminal is intentionally never re-queued (not stranded
-          // capital, so it is excluded), an unpriceable terminal cannot be
-          // valued (stays visible, labeled unpriceable), and only priceable
-          // value at/above the dust cutoff is real stranded capital.
-          const newestConfirmedAt = new Map<string, number>();
-          for (const settlement of autonomous.settlements) {
-            if (settlement.status !== "confirmed") continue;
-            const previous = newestConfirmedAt.get(settlement.tokenMint);
-            if (previous === undefined || settlement.createdAt > previous) {
-              newestConfirmedAt.set(settlement.tokenMint, settlement.createdAt);
+          function collectNewestConfirmedAt(): Map<string, number> {
+            const newestConfirmedAt = new Map<string, number>();
+            for (const settlement of autonomous.settlements) {
+              if (settlement.status !== "confirmed") continue;
+              const previous = newestConfirmedAt.get(settlement.tokenMint);
+              if (previous === undefined || settlement.createdAt > previous) {
+                newestConfirmedAt.set(settlement.tokenMint, settlement.createdAt);
+              }
             }
+            return newestConfirmedAt;
           }
+          const newestConfirmedAt = collectNewestConfirmedAt();
           const strandedCandidates = autonomous.settlements.filter(
             (settlement) =>
               settlement.status === "terminal" &&
               settlement.confirmedOutputAtomic === null &&
               (newestConfirmedAt.get(settlement.tokenMint) ?? -1) < settlement.createdAt,
           );
+
           // Issue #183: classify against the sweep's dust policy. Prices are
           // batched into ONE call (all candidates known upfront); decimals
           // run with bounded concurrency so a stranded-token burst cannot
@@ -402,8 +437,8 @@ network; with no stranded settlements it is fully offline.`,
           // - unavailable — the decimals/RPC lookup failed with an outage
           //   error: distinct from unpriceable so an outage never mislabels
           //   real stranded capital as worthless dust.
-          const adapter = yield* AdapterService;
           const candidateMints = [...new Set(strandedCandidates.map((s) => s.tokenMint))];
+
           // Price channel: fetchTokenPrices NEVER fails — every source
           // (Helius/Jupiter/CoinGecko) catches its own errors and returns {},
           // and unresolved mints come back as price 0 — so a total
@@ -417,27 +452,26 @@ network; with no stranded settlements it is fully offline.`,
           // a total outage, which would report stranded capital at
           // FABRICATED values (the wallet-reconciliation path avoids them
           // for the same reason).
-          const resolvePriceForMint = (mint: string) =>
-            adapter.getTokenPrices([mint], { useFallback: false }).pipe(
-              Effect.map((p) => {
-                const price = p[mint] ?? 0;
-                return {
-                  mint,
-                  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-                  state: (price > 0 ? "ok" : "unpriceable") as StrandedLookupState,
-                  value: price,
-                };
-              }),
-              Effect.catchCause(() =>
-                Effect.succeed({ mint, state: "unpriceable" as const, value: 0 }),
-              ),
-            );
-          const priceLookup = yield* adapter
-            .getTokenPrices(candidateMints, { useFallback: false })
-            .pipe(
-              Effect.map((prices) => {
+          function lookupStrandedPrices(): Effect.Effect<Map<string, StrandedLookup>> {
+            const resolvePriceForMint = (mint: string) =>
+              adapter.getTokenPrices([mint], { useFallback: false }).pipe(
+                Effect.map((p) => {
+                  const price = p[mint] ?? 0;
+                  return {
+                    mint,
+                    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+                    state: (price > 0 ? "ok" : "unpriceable") as StrandedLookupState,
+                    value: price,
+                  };
+                }),
+                Effect.catchCause(() =>
+                  Effect.succeed({ mint, state: "unpriceable" as const, value: 0 }),
+                ),
+              );
+            return adapter.getTokenPrices(candidateMints, { useFallback: false }).pipe(
+              Effect.map((fetched) => {
                 const entries = candidateMints.map((mint) => {
-                  const price = prices[mint] ?? 0;
+                  const price = fetched[mint] ?? 0;
                   return [
                     mint,
                     {
@@ -458,40 +492,55 @@ network; with no stranded settlements it is fully offline.`,
                 ),
               ),
             );
+          }
+          const priceLookup = yield* lookupStrandedPrices();
+
           // Decimals channel: getTokenDecimals DOES fail typed, and the error
           // message distinguishes an RPC outage (→ Unavailable) from the
           // adapter's "Cannot resolve decimals for mint X" unresolvable case
           // (→ Unpriceable — a retry can never succeed). Deduplicated per
           // unique mint, bounded concurrency.
-          const decimalsLookup = new Map<string, { state: StrandedLookupState; value: number }>();
-          yield* Effect.all(
-            candidateMints
-              .filter((mint) => priceLookup.get(mint)?.state === "ok")
-              .map((mint) =>
-                adapter.getTokenDecimals(mint).pipe(
-                  Effect.map((decimals) => {
-                    const state: StrandedLookupState = decimals > 0 ? "ok" : "unpriceable";
-                    return { mint, state, value: decimals };
-                  }),
-                  Effect.catch((err) =>
-                    Effect.succeed({
-                      mint,
-                      state: decimalsFailureState(err),
-                      value: 0,
-                    }),
+          function lookupStrandedDecimals(
+            mints: ReadonlyArray<string>,
+          ): Effect.Effect<Map<string, StrandedLookup>> {
+            return Effect.gen(function* () {
+              const decimalsLookup = new Map<string, StrandedLookup>();
+              yield* Effect.all(
+                mints
+                  .filter((mint) => priceLookup.get(mint)?.state === "ok")
+                  .map((mint) =>
+                    adapter.getTokenDecimals(mint).pipe(
+                      Effect.map((decimals) => {
+                        const state: StrandedLookupState = decimals > 0 ? "ok" : "unpriceable";
+                        return { mint, state, value: decimals };
+                      }),
+                      Effect.catch((err) =>
+                        Effect.succeed({
+                          mint,
+                          state: decimalsFailureState(err),
+                          value: 0,
+                        }),
+                      ),
+                      Effect.catchCause(() =>
+                        Effect.succeed({ mint, state: "unpriceable" as const, value: 0 }),
+                      ),
+                    ),
                   ),
-                  Effect.catchCause(() =>
-                    Effect.succeed({ mint, state: "unpriceable" as const, value: 0 }),
-                  ),
-                ),
-              ),
-            { concurrency: 4 },
-          ).pipe(
-            Effect.map((results) => {
-              for (const r of results) decimalsLookup.set(r.mint, r);
-            }),
+                { concurrency: 4 },
+              ).pipe(
+                Effect.map((results) => {
+                  for (const r of results) decimalsLookup.set(r.mint, r);
+                  return results;
+                }),
+              );
+              return decimalsLookup;
+            });
+          }
+          const decimalsLookup = yield* lookupStrandedDecimals(
+            candidateMints.filter((mint) => priceLookup.get(mint)?.state === "ok"),
           );
-          const strandedClassification = strandedCandidates.map((settlement) => {
+
+          function classifySettlement(settlement: (typeof autonomous.settlements)[number]) {
             const price = priceLookup.get(settlement.tokenMint) ?? {
               state: "unpriceable" as const,
               value: 0,
@@ -511,7 +560,8 @@ network; with no stranded settlements it is fully offline.`,
                 dustUsd: config.settlementDustUsd,
               }),
             };
-          });
+          }
+          const strandedClassification = strandedCandidates.map(classifySettlement);
           const strandedSettlements = strandedClassification.filter(
             (entry): entry is typeof entry & { valueUsd: number } => entry.kind === "stranded",
           );
@@ -542,7 +592,7 @@ network; with no stranded settlements it is fully offline.`,
 
           // Acceptance for issue #167: an active settlement_overdue pause
           // names the non-terminal jobs keeping it latched (oldest first).
-          const latchedBySettlements = (() => {
+          function buildLatchedByLine(): string | null {
             if (
               autonomous.safetyPause === null ||
               autonomous.safetyPause.resolvedAt !== null ||
@@ -562,10 +612,15 @@ network; with no stranded settlements it is fully offline.`,
                   `${job.id.slice(0, 8)}… ${job.status} ${((now - job.createdAt) / 3_600_000).toFixed(1)}h${job.error ? ` (${job.error})` : ""}`,
               )
               .join(", ")}`;
-          })();
+          }
+          const latchedBySettlements = buildLatchedByLine();
 
-          console.log(
-            [
+          function buildHumanStatusOutput(): string {
+            const pnlText = `${summary.totalUnrealizedPnlUsd >= 0 ? "+" : ""}$${summary.totalUnrealizedPnlUsd.toFixed(2)} (${summary.totalUnrealizedPnlPct.toFixed(2)}%)`;
+            const agentStatus = config.agentiveMode
+              ? `agent overlay: ${config.agentRuntime}`
+              : "agent overlay: off";
+            return [
               "Prism Status",
               "============",
               `  Database:    ${process.env.SQLITE_DB_PATH ?? getPrismDbPath()}`,
@@ -644,8 +699,10 @@ network; with no stranded settlements it is fully offline.`,
                   (d) =>
                     `    ${d.action} ${d.poolAddress.slice(0, 16)}... (${d.confidence.toFixed(2)})`,
                 ),
-            ].join("\n"),
-          );
+            ].join("\n");
+          }
+
+          console.log(buildHumanStatusOutput());
         }).pipe(Effect.provide(program)),
       );
     } catch (err: unknown) {

@@ -34,6 +34,38 @@ function sanitizeConfig(cfg: AppConfig, snapshot: PrismStateSnapshot): JsonValue
   };
 }
 
+type SkippedProposal = {
+  readonly poolAddress: string;
+  readonly proposalId: string;
+  readonly reason: "approved_exists";
+};
+
+type UnscannableProposal = {
+  readonly poolAddress: string;
+  readonly proposalId: string;
+};
+
+/** Enqueue-outcome of one batch: an early failure Response, or the per-pool
+ *  classification arrays the final response body needs. */
+type EnqueueBatchOutcome =
+  | {
+      readonly done: true;
+      readonly acceptedIds: string[];
+      readonly replacedIds: string[];
+      readonly skipped: SkippedProposal[];
+      readonly unscannable: UnscannableProposal[];
+    }
+  | { readonly done: false; readonly response: Response };
+
+/** Parse the Bun.serve request URL; null when malformed (caller returns 400). */
+function parseRequestUrl(requestUrl: string): URL | null {
+  try {
+    return new URL(requestUrl);
+  } catch {
+    return null;
+  }
+}
+
 export class HttpStatusServer {
   private server: ReturnType<typeof Bun.serve> | null = null;
 
@@ -52,6 +84,181 @@ export class HttpStatusServer {
     const actualBuf = Buffer.from(providedToken);
     return (
       actualBuf.length === expectedBuf.length && crypto.timingSafeEqual(actualBuf, expectedBuf)
+    );
+  }
+
+  /** Parse and validate every batch item. Fails with ProposalParseError on the
+   *  first invalid item (the caller's catchTag turns that into a 400 with the
+   *  same "Invalid proposal body" body the inline check produced). */
+  private parseBatchProposals(
+    items: readonly unknown[],
+  ): Effect.Effect<AgentProposal[], ProposalParseError> {
+    return Effect.gen({ self: this }, function* () {
+      const proposals: AgentProposal[] = [];
+      for (const [index, item] of items.entries()) {
+        if (item === null || Object.prototype.toString.call(item) !== "[object Object]") {
+          return yield* Effect.fail(new ProposalParseError({ message: "Invalid proposal body" }));
+        }
+        const raw = JSON.stringify(item);
+        const proposal = yield* parseHttpQueueProposal(
+          raw,
+          crypto.randomUUID(),
+          "http-queue",
+          this.config.agentProposalStaleMs,
+        ).pipe(
+          Effect.mapError(
+            (err) =>
+              new ProposalParseError({
+                message: `Invalid proposal at index ${index}: ${err.message}`,
+              }),
+          ),
+        );
+        proposals.push(proposal);
+      }
+      return proposals;
+    });
+  }
+
+  /** Last-wins per pool within a single batch so we never advertise IDs that
+   *  were immediately superseded by a later item in the same request. */
+  private dedupeLastPerPool(proposals: readonly AgentProposal[]): AgentProposal[] {
+    const lastIndexByPool = new Map<string, number>();
+    for (let i = 0; i < proposals.length; i++) {
+      const pool = proposals[i]?.poolAddress;
+      if (pool !== undefined) lastIndexByPool.set(pool, i);
+    }
+    return proposals.filter((p, i) => lastIndexByPool.get(p.poolAddress) === i);
+  }
+
+  /** Enqueue every scannable proposal, classifying per-item outcomes. A global
+   *  `queue_full` (or an unhandled rejection reason) fails the whole batch
+   *  with the partial-state Response; otherwise the classification arrays are
+   *  returned for the final response. */
+  private enqueueBatch(
+    proposals: readonly AgentProposal[],
+    scannableSet: ReadonlySet<string>,
+  ): Effect.Effect<EnqueueBatchOutcome> {
+    return Effect.gen({ self: this }, function* () {
+      const acceptedIds: string[] = [];
+      const replacedIds: string[] = [];
+      const skipped: SkippedProposal[] = [];
+      const unscannable: UnscannableProposal[] = [];
+      for (const proposal of proposals) {
+        if (!scannableSet.has(proposal.poolAddress)) {
+          unscannable.push({ poolAddress: proposal.poolAddress, proposalId: proposal.proposalId });
+          continue;
+        }
+        const result = yield* this.state.enqueueProposal(proposal);
+        if (result.status === "rejected") {
+          // Exhaustive on EnqueueProposalResult["reason"] so new reasons fail
+          // closed (and TypeScript errors) instead of being silently dropped.
+          switch (result.reason) {
+            case "queue_full":
+              // Global — fail closed for the rest of the batch.
+              return {
+                done: false,
+                response: Response.json(
+                  {
+                    accepted: acceptedIds.length,
+                    proposalIds: acceptedIds,
+                    ...(replacedIds.length > 0 && { replacedIds }),
+                    ...(skipped.length > 0 && { skipped }),
+                    error: "queue_full",
+                    message:
+                      `Proposal queue full (max ${this.config.agentProposalMaxQueueSize})` +
+                      (acceptedIds.length > 0
+                        ? ` after accepting ${acceptedIds.length} of ${proposals.length}`
+                        : ""),
+                  },
+                  { status: 503 },
+                ),
+              };
+            case "approved_exists":
+              // Pool-specific: skip this item and continue so healthy pools
+              // in the same batch still enqueue.
+              skipped.push({
+                poolAddress: proposal.poolAddress,
+                proposalId: proposal.proposalId,
+                reason: "approved_exists",
+              });
+              continue;
+            default: {
+              const unexpected: never = result.reason;
+              return {
+                done: false,
+                response: Response.json(
+                  {
+                    accepted: acceptedIds.length,
+                    proposalIds: acceptedIds,
+                    ...(replacedIds.length > 0 && { replacedIds }),
+                    ...(skipped.length > 0 && { skipped }),
+                    error: "enqueue_rejected",
+                    message: `Unhandled enqueue rejection: ${String(unexpected)}`,
+                  },
+                  { status: 500 },
+                ),
+              };
+            }
+          }
+        }
+        if (result.status === "replaced") {
+          replacedIds.push(...result.replacedIds);
+        }
+        if (result.status === "enqueued" || result.status === "replaced") {
+          acceptedIds.push(proposal.proposalId);
+        }
+      }
+      return { done: true, acceptedIds, replacedIds, skipped, unscannable };
+    });
+  }
+
+  /** Final /propose response after a fully-processed batch. The two error
+   *  shapes fire only when NOTHING was accepted — a healthy partial batch
+   *  always ends in the 202 with its per-item classifications. */
+  private enqueueResultResponse(outcome: {
+    readonly acceptedIds: string[];
+    readonly replacedIds: string[];
+    readonly skipped: SkippedProposal[];
+    readonly unscannable: UnscannableProposal[];
+  }): Response {
+    const { acceptedIds, replacedIds, skipped, unscannable } = outcome;
+    if (acceptedIds.length === 0 && skipped.length === 0 && unscannable.length > 0) {
+      return Response.json(
+        {
+          accepted: 0,
+          proposalIds: [],
+          unscannable,
+          error: "unscannable_pool",
+          message:
+            "Proposals target pool(s) not in the watchlist or held positions; add them to WATCHLIST_POOLS or hold a position in the pool",
+        },
+        { status: 400 },
+      );
+    }
+    if (acceptedIds.length === 0 && skipped.length > 0) {
+      return Response.json(
+        {
+          accepted: 0,
+          proposalIds: [],
+          skipped,
+          ...(unscannable.length > 0 && { unscannable }),
+          error: "approved_exists",
+          poolAddresses: skipped.map((s) => s.poolAddress),
+          message:
+            "An approved proposal already exists for the requested pool(s); wait for it to execute or expire before re-proposing",
+        },
+        { status: 409 },
+      );
+    }
+    return Response.json(
+      {
+        accepted: acceptedIds.length,
+        proposalIds: acceptedIds,
+        ...(replacedIds.length > 0 && { replacedIds }),
+        ...(skipped.length > 0 && { skipped }),
+        ...(unscannable.length > 0 && { unscannable }),
+      },
+      { status: 202 },
     );
   }
 
@@ -103,150 +310,19 @@ export class HttpStatusServer {
     }
 
     const effect = Effect.gen({ self: this }, function* () {
-      const proposals: AgentProposal[] = [];
-      for (const [index, item] of items.entries()) {
-        if (item === null || Object.prototype.toString.call(item) !== "[object Object]") {
-          return new Response("Invalid proposal body", { status: 400 });
-        }
-        const raw = JSON.stringify(item);
-        const proposal = yield* parseHttpQueueProposal(
-          raw,
-          crypto.randomUUID(),
-          "http-queue",
-          this.config.agentProposalStaleMs,
-        ).pipe(
-          Effect.mapError(
-            (err) =>
-              new ProposalParseError({
-                message: `Invalid proposal at index ${index}: ${err.message}`,
-              }),
-          ),
-        );
-        proposals.push(proposal);
-      }
-
-      // Last-wins per pool within a single batch so we never advertise IDs that
-      // were immediately superseded by a later item in the same request.
-      const lastIndexByPool = new Map<string, number>();
-      for (let i = 0; i < proposals.length; i++) {
-        const pool = proposals[i]?.poolAddress;
-        if (pool !== undefined) lastIndexByPool.set(pool, i);
-      }
-      const deduped = proposals.filter((p, i) => lastIndexByPool.get(p.poolAddress) === i);
+      const proposals = yield* this.parseBatchProposals(items);
+      const deduped = this.dedupeLastPerPool(proposals);
 
       const snapshot = yield* this.state.getSnapshot();
       const scannableSet = new Set([
         ...this.config.watchlistPools,
         ...snapshot.positions.map((p) => p.poolAddress),
       ]);
-      const acceptedIds: string[] = [];
-      const replacedIds: string[] = [];
-      const skipped: Array<{
-        readonly poolAddress: string;
-        readonly proposalId: string;
-        readonly reason: "approved_exists";
-      }> = [];
-      const unscannable: Array<{ readonly poolAddress: string; readonly proposalId: string }> = [];
-      for (const proposal of deduped) {
-        if (!scannableSet.has(proposal.poolAddress)) {
-          unscannable.push({ poolAddress: proposal.poolAddress, proposalId: proposal.proposalId });
-          continue;
-        }
-        const result = yield* this.state.enqueueProposal(proposal);
-        if (result.status === "rejected") {
-          // Exhaustive on EnqueueProposalResult["reason"] so new reasons fail
-          // closed (and TypeScript errors) instead of being silently dropped.
-          switch (result.reason) {
-            case "queue_full":
-              // Global — fail closed for the rest of the batch.
-              return Response.json(
-                {
-                  accepted: acceptedIds.length,
-                  proposalIds: acceptedIds,
-                  ...(replacedIds.length > 0 && { replacedIds }),
-                  ...(skipped.length > 0 && { skipped }),
-                  error: "queue_full",
-                  message:
-                    `Proposal queue full (max ${this.config.agentProposalMaxQueueSize})` +
-                    (acceptedIds.length > 0
-                      ? ` after accepting ${acceptedIds.length} of ${deduped.length}`
-                      : ""),
-                },
-                { status: 503 },
-              );
-            case "approved_exists":
-              // Pool-specific: skip this item and continue so healthy pools
-              // in the same batch still enqueue.
-              skipped.push({
-                poolAddress: proposal.poolAddress,
-                proposalId: proposal.proposalId,
-                reason: "approved_exists",
-              });
-              continue;
-            default: {
-              const unexpected: never = result.reason;
-              return Response.json(
-                {
-                  accepted: acceptedIds.length,
-                  proposalIds: acceptedIds,
-                  ...(replacedIds.length > 0 && { replacedIds }),
-                  ...(skipped.length > 0 && { skipped }),
-                  error: "enqueue_rejected",
-                  message: `Unhandled enqueue rejection: ${String(unexpected)}`,
-                },
-                { status: 500 },
-              );
-            }
-          }
-        }
-        if (result.status === "replaced") {
-          replacedIds.push(...result.replacedIds);
-        }
-        if (result.status === "enqueued" || result.status === "replaced") {
-          acceptedIds.push(proposal.proposalId);
-        }
+      const batch = yield* this.enqueueBatch(deduped, scannableSet);
+      if (!batch.done) {
+        return batch.response;
       }
-
-      if (acceptedIds.length === 0 && skipped.length === 0 && unscannable.length > 0) {
-        return Response.json(
-          {
-            accepted: 0,
-            proposalIds: [],
-            unscannable,
-            error: "unscannable_pool",
-            message:
-              "Proposals target pool(s) not in the watchlist or held positions; add them to WATCHLIST_POOLS or hold a position in the pool",
-          },
-          { status: 400 },
-        );
-      }
-
-      if (acceptedIds.length === 0 && skipped.length > 0) {
-        return Response.json(
-          {
-            accepted: 0,
-            proposalIds: [],
-            skipped,
-            ...(unscannable.length > 0 && { unscannable }),
-            error: "approved_exists",
-            poolAddresses: skipped.map((s) => s.poolAddress),
-            message:
-              "An approved proposal already exists for the requested pool(s); wait for it to execute or expire before re-proposing",
-          },
-          { status: 409 },
-        );
-      }
-
-      return Response.json(
-        {
-          accepted: acceptedIds.length,
-          proposalIds: acceptedIds,
-          ...(replacedIds.length > 0 && { replacedIds }),
-          ...(skipped.length > 0 && { skipped }),
-          ...(unscannable.length > 0 && { unscannable }),
-        },
-        { status: 202 },
-      );
+      return this.enqueueResultResponse(batch);
     }).pipe(
       Effect.catchTag("ProposalParseError", (err) =>
         Effect.succeed(new Response(err.message, { status: 400 })),
@@ -316,6 +392,62 @@ export class HttpStatusServer {
     return Response.json({ approved: ids.length }, { status: 200 });
   }
 
+  /** Loopback read endpoints (GET-style JSON views). Returns null when the
+   *  pathname is not a read endpoint. */
+  private readEndpointResponse(url: URL, snapshot: PrismStateSnapshot): Response | null {
+    if (url.pathname === "/status") {
+      return Response.json({
+        uptimeMs: Date.now() - snapshot.programStartTime,
+        scanCount: snapshot.scanCount,
+        lastCycleAt: snapshot.lastCycleAt,
+        portfolio: snapshot.portfolio,
+      });
+    }
+
+    if (url.pathname === "/positions") {
+      const pool = url.searchParams.get("pool");
+      const positions = pool
+        ? snapshot.positions.filter((p) => p.poolAddress === pool)
+        : snapshot.positions;
+      return Response.json({ positions });
+    }
+
+    if (url.pathname === "/decisions") {
+      const limitParam = parseInt(url.searchParams.get("limit") ?? "10", 10);
+      const limit = Math.min(
+        Math.max(0, Number.isFinite(limitParam) && limitParam >= 0 ? limitParam : 10),
+        100,
+      );
+      const pool = url.searchParams.get("pool");
+      let decisions = snapshot.recentDecisions;
+      if (pool) {
+        decisions = decisions.filter((d) => d.poolAddress === pool);
+      }
+      return Response.json({ decisions: decisions.slice(0, limit) });
+    }
+
+    if (url.pathname === "/config") {
+      return Response.json(sanitizeConfig(this.config, snapshot));
+    }
+
+    if (url.pathname === "/agent-policy") {
+      return Response.json(snapshot.agentPolicy);
+    }
+
+    return null;
+  }
+
+  /** POST endpoints. Returns null when the pathname is not a POST endpoint. */
+  private async postEndpointResponse(request: Request, url: URL): Promise<Response | null> {
+    if (url.pathname === "/propose") {
+      return this.handlePropose(request);
+    }
+    if (url.pathname === "/approve") {
+      return this.handleApprove(request);
+    }
+    return null;
+  }
+
   start(): Effect.Effect<void, Error> {
     return Effect.gen({ self: this }, function* () {
       if (this.server) return;
@@ -326,7 +458,10 @@ export class HttpStatusServer {
         port,
         hostname: "127.0.0.1",
         fetch: async (request) => {
-          const url = new URL(request.url);
+          const url = parseRequestUrl(request.url);
+          if (url === null) {
+            return new Response("Bad request", { status: 400 });
+          }
           const snapshot = await Effect.runPromise(this.state.getSnapshot());
 
           if (url.pathname === "/health") {
@@ -352,53 +487,14 @@ export class HttpStatusServer {
             }
           }
 
-          if (url.pathname === "/status") {
-            return Response.json({
-              uptimeMs: Date.now() - snapshot.programStartTime,
-              scanCount: snapshot.scanCount,
-              lastCycleAt: snapshot.lastCycleAt,
-              portfolio: snapshot.portfolio,
-            });
+          const readResponse = this.readEndpointResponse(url, snapshot);
+          if (readResponse !== null) {
+            return readResponse;
           }
-
-          if (url.pathname === "/positions") {
-            const pool = url.searchParams.get("pool");
-            const positions = pool
-              ? snapshot.positions.filter((p) => p.poolAddress === pool)
-              : snapshot.positions;
-            return Response.json({ positions });
+          const postResponse = await this.postEndpointResponse(request, url);
+          if (postResponse !== null) {
+            return postResponse;
           }
-
-          if (url.pathname === "/decisions") {
-            const limitParam = parseInt(url.searchParams.get("limit") ?? "10", 10);
-            const limit = Math.min(
-              Math.max(0, Number.isFinite(limitParam) && limitParam >= 0 ? limitParam : 10),
-              100,
-            );
-            const pool = url.searchParams.get("pool");
-            let decisions = snapshot.recentDecisions;
-            if (pool) {
-              decisions = decisions.filter((d) => d.poolAddress === pool);
-            }
-            return Response.json({ decisions: decisions.slice(0, limit) });
-          }
-
-          if (url.pathname === "/config") {
-            return Response.json(sanitizeConfig(this.config, snapshot));
-          }
-
-          if (url.pathname === "/agent-policy") {
-            return Response.json(snapshot.agentPolicy);
-          }
-
-          if (url.pathname === "/propose") {
-            return this.handlePropose(request);
-          }
-
-          if (url.pathname === "/approve") {
-            return this.handleApprove(request);
-          }
-
           return new Response("Not found", { status: 404 });
         },
       });

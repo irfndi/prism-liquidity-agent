@@ -2,6 +2,7 @@ import { Effect, Layer } from "effect";
 import crypto from "node:crypto";
 import { createLogger } from "./logger.js";
 import type { AgentStateApi } from "./services.js";
+import type { PrismStateSnapshot } from "./state-service.js";
 import { AgentStateService, McpServerService } from "./services.js";
 import type { JsonValue } from "./services.js";
 import type { AppConfig } from "./config-service.js";
@@ -172,6 +173,164 @@ export class McpServer {
     return { tools };
   }
 
+  private statusToolResult(snapshot: PrismStateSnapshot): McpResponse["result"] {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            uptimeMs: Date.now() - snapshot.programStartTime,
+            scanCount: snapshot.scanCount,
+            lastCycleAt: snapshot.lastCycleAt,
+            portfolio: snapshot.portfolio,
+          }),
+        },
+      ],
+    };
+  }
+
+  private positionsToolResult(
+    snapshot: PrismStateSnapshot,
+    arguments_: McpToolArguments,
+  ): McpResponse["result"] {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+    const pool = arguments_.pool as string | undefined;
+    const positions = pool
+      ? snapshot.positions.filter((p) => p.poolAddress === pool)
+      : snapshot.positions;
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ positions }),
+        },
+      ],
+    };
+  }
+
+  private decisionsToolResult(
+    snapshot: PrismStateSnapshot,
+    arguments_: McpToolArguments,
+  ): McpResponse["result"] {
+    // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
+    const limit =
+      Object.prototype.toString.call(arguments_.limit) === "[object Number]"
+        ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+          // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+          (arguments_.limit as number)
+        : 10;
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+    const pool = arguments_.pool as string | undefined;
+    let decisions = snapshot.recentDecisions;
+    if (pool) {
+      decisions = decisions.filter((d) => d.poolAddress === pool);
+    }
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ decisions: decisions.slice(0, limit) }),
+        },
+      ],
+    };
+  }
+
+  private configToolResult(): McpResponse["result"] {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(sanitizeConfig(this.config)),
+        },
+      ],
+    };
+  }
+
+  private policyToolResult(snapshot: PrismStateSnapshot): McpResponse["result"] {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(snapshot.agentPolicy),
+        },
+      ],
+    };
+  }
+
+  private pendingProposalsToolResult(
+    snapshot: PrismStateSnapshot,
+    arguments_: McpToolArguments,
+  ): McpResponse["result"] {
+    // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+    const pool = arguments_.pool as string | undefined;
+    const proposals = pool
+      ? snapshot.pendingProposals.filter((p) => p.poolAddress === pool)
+      : snapshot.pendingProposals;
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ proposals }),
+        },
+      ],
+    };
+  }
+
+  private async approveProposalsToolResult(
+    arguments_: McpToolArguments,
+  ): Promise<McpResponse["result"]> {
+    // Approvals are the human boundary of supervised mode: require the
+    // same credential as the HTTP /approve endpoint so an MCP-capable
+    // advisor cannot approve its own proposals. Fail-closed: no fallback
+    // to the proposal enqueue token.
+    const expectedToken = this.config.agentApprovalToken;
+    // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
+    const providedToken =
+      Object.prototype.toString.call(arguments_.token) === "[object String]"
+        ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
+          // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
+          (arguments_.token as string)
+        : "";
+    const expectedBuf = Buffer.from(expectedToken);
+    const actualBuf = Buffer.from(providedToken);
+    if (
+      expectedToken.length === 0 ||
+      actualBuf.length !== expectedBuf.length ||
+      !crypto.timingSafeEqual(actualBuf, expectedBuf)
+    ) {
+      throw new Error("Unauthorized: invalid approval token");
+    }
+    const proposalIds = Array.isArray(arguments_.proposalIds)
+      ? arguments_.proposalIds.filter(
+          (id): id is string => Object.prototype.toString.call(id) === "[object String]",
+        )
+      : [];
+    if (proposalIds.length === 0) {
+      throw new Error("proposalIds must be a non-empty array of strings");
+    }
+    const maxBatchSize = this.config.agentProposalMaxBatchSize;
+    if (proposalIds.length > maxBatchSize) {
+      throw new Error(`Batch size ${proposalIds.length} exceeds limit ${maxBatchSize}`);
+    }
+    const snapshot = await Effect.runPromise(this.state.getSnapshot());
+    const pendingIds = new Set(snapshot.pendingProposals.map((p) => p.proposalId));
+    const missing = proposalIds.filter((id) => !pendingIds.has(id));
+    if (missing.length > 0) {
+      throw new Error(`Proposal IDs not found: ${missing.join(", ")}`);
+    }
+    for (const proposalId of proposalIds) {
+      await Effect.runPromise(this.state.approveProposal(proposalId));
+    }
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ approved: proposalIds.length }),
+        },
+      ],
+    };
+  }
+
   private async handleToolsCall(params: McpCallParams): Promise<McpResponse["result"]> {
     const name = params.name;
     // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
@@ -185,149 +344,22 @@ export class McpServer {
     const snapshot = await Effect.runPromise(this.state.getSnapshot());
 
     switch (name) {
-      case "prism_status": {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                uptimeMs: Date.now() - snapshot.programStartTime,
-                scanCount: snapshot.scanCount,
-                lastCycleAt: snapshot.lastCycleAt,
-                portfolio: snapshot.portfolio,
-              }),
-            },
-          ],
-        };
-      }
-      case "prism_positions": {
-        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-        const pool = arguments_.pool as string | undefined;
-        const positions = pool
-          ? snapshot.positions.filter((p) => p.poolAddress === pool)
-          : snapshot.positions;
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ positions }),
-            },
-          ],
-        };
-      }
-      case "prism_decisions": {
-        // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
-        const limit =
-          Object.prototype.toString.call(arguments_.limit) === "[object Number]"
-            ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
-              // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-              (arguments_.limit as number)
-            : 10;
-        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-        const pool = arguments_.pool as string | undefined;
-        let decisions = snapshot.recentDecisions;
-        if (pool) {
-          decisions = decisions.filter((d) => d.poolAddress === pool);
-        }
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ decisions: decisions.slice(0, limit) }),
-            },
-          ],
-        };
-      }
-      case "prism_config": {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(sanitizeConfig(this.config)),
-            },
-          ],
-        };
-      }
-      case "prism_agent_policy": {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(snapshot.agentPolicy),
-            },
-          ],
-        };
-      }
-      case "prism_pending_proposals": {
-        // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-        const pool = arguments_.pool as string | undefined;
-        const proposals = pool
-          ? snapshot.pendingProposals.filter((p) => p.poolAddress === pool)
-          : snapshot.pendingProposals;
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ proposals }),
-            },
-          ],
-        };
-      }
-      case "prism_approve_proposals": {
-        // Approvals are the human boundary of supervised mode: require the
-        // same credential as the HTTP /approve endpoint so an MCP-capable
-        // advisor cannot approve its own proposals. Fail-closed: no fallback
-        // to the proposal enqueue token.
-        const expectedToken = this.config.agentApprovalToken;
-        // SAFETY: The enclosing statement has validated or constructed the asserted contract before this value is consumed.
-        const providedToken =
-          Object.prototype.toString.call(arguments_.token) === "[object String]"
-            ? // SAFETY: The runtime guard or typed fixture immediately above this assertion establishes the required invariant.
-              // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-              (arguments_.token as string)
-            : "";
-        const expectedBuf = Buffer.from(expectedToken);
-        const actualBuf = Buffer.from(providedToken);
-        if (
-          expectedToken.length === 0 ||
-          actualBuf.length !== expectedBuf.length ||
-          !crypto.timingSafeEqual(actualBuf, expectedBuf)
-        ) {
-          throw new Error("Unauthorized: invalid approval token");
-        }
-        const proposalIds = Array.isArray(arguments_.proposalIds)
-          ? arguments_.proposalIds.filter(
-              (id): id is string => Object.prototype.toString.call(id) === "[object String]",
-            )
-          : [];
-        if (proposalIds.length === 0) {
-          throw new Error("proposalIds must be a non-empty array of strings");
-        }
-        const maxBatchSize = this.config.agentProposalMaxBatchSize;
-        if (proposalIds.length > maxBatchSize) {
-          throw new Error(`Batch size ${proposalIds.length} exceeds limit ${maxBatchSize}`);
-        }
-        const snapshot = await Effect.runPromise(this.state.getSnapshot());
-        const pendingIds = new Set(snapshot.pendingProposals.map((p) => p.proposalId));
-        const missing = proposalIds.filter((id) => !pendingIds.has(id));
-        if (missing.length > 0) {
-          throw new Error(`Proposal IDs not found: ${missing.join(", ")}`);
-        }
-        for (const proposalId of proposalIds) {
-          await Effect.runPromise(this.state.approveProposal(proposalId));
-        }
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ approved: proposalIds.length }),
-            },
-          ],
-        };
-      }
-      default: {
+      case "prism_status":
+        return this.statusToolResult(snapshot);
+      case "prism_positions":
+        return this.positionsToolResult(snapshot, arguments_);
+      case "prism_decisions":
+        return this.decisionsToolResult(snapshot, arguments_);
+      case "prism_config":
+        return this.configToolResult();
+      case "prism_agent_policy":
+        return this.policyToolResult(snapshot);
+      case "prism_pending_proposals":
+        return this.pendingProposalsToolResult(snapshot, arguments_);
+      case "prism_approve_proposals":
+        return this.approveProposalsToolResult(arguments_);
+      default:
         throw new Error(`Unknown tool: ${String(name)}`);
-      }
     }
   }
 

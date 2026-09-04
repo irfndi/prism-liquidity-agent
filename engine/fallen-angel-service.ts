@@ -55,6 +55,81 @@ export function hasDangerRisks(report: RugCheckReport): boolean {
   return report.dangerRiskCount > 0;
 }
 
+/** RugCheck sub-gate: every reason the token's security profile disqualifies it. */
+function collectRugcheckReasons(
+  report: RugCheckReport,
+  config: FallenAngelGateConfig,
+  reasons: string[],
+): void {
+  if (report.rugged) {
+    reasons.push("RugCheck flags token as rugged");
+  }
+  if (hasDangerRisks(report)) {
+    const dangerNames = report.risks
+      .filter((r) => r.level === "danger")
+      .map((r) => r.name)
+      .join(", ");
+    reasons.push(`RugCheck danger risks present: ${dangerNames}`);
+  }
+  if (report.scoreNormalised === null) {
+    reasons.push("RugCheck score unknown — fail closed");
+  } else if (report.scoreNormalised > config.maxRugcheckScore) {
+    reasons.push(
+      `RugCheck risk score ${report.scoreNormalised} exceeds max ${config.maxRugcheckScore}`,
+    );
+  }
+  if (report.mintAuthority !== null) {
+    reasons.push("Token mint authority is still enabled");
+  }
+  if (report.freezeAuthority !== null) {
+    reasons.push("Token freeze authority is still enabled");
+  }
+  if (report.totalHolders === null) {
+    reasons.push("RugCheck holder count unknown — fail closed");
+  } else if (report.totalHolders < config.minHolders) {
+    reasons.push(`Holder count ${report.totalHolders} below minimum ${config.minHolders}`);
+  }
+  // Holder concentration fails OPEN (API returns null topHolders for majors).
+  // top10HolderPct is a percent (0..100); config.maxTop10HolderPct is a fraction
+  // (0..1) — normalize to fractions before comparing.
+  if (report.top10HolderPct !== null && report.top10HolderPct / 100 > config.maxTop10HolderPct) {
+    reasons.push(
+      `Top-10 holder concentration ${report.top10HolderPct.toFixed(1)}% exceeds max ${(config.maxTop10HolderPct * 100).toFixed(0)}%`,
+    );
+  }
+}
+
+/** OHLCV sub-gate: every reason the price history disqualifies the candidate. */
+function collectOhlcvReasons(
+  ohlcv: GeckoOhlcvSignals,
+  config: FallenAngelGateConfig,
+  reasons: string[],
+): void {
+  if (ohlcv.barCount < 2) {
+    reasons.push(`OHLCV window too shallow (${ohlcv.barCount} bar(s))`);
+  }
+  if (ohlcv.drawdownFromAth < config.minDrawdownPct) {
+    reasons.push(
+      `Drawdown from ATH ${(ohlcv.drawdownFromAth * 100).toFixed(1)}% below minimum ${(config.minDrawdownPct * 100).toFixed(0)}%`,
+    );
+  }
+  if (ohlcv.drawdownFromAth > config.maxDrawdownPct) {
+    reasons.push(
+      `Drawdown from ATH ${(ohlcv.drawdownFromAth * 100).toFixed(1)}% exceeds maximum ${(config.maxDrawdownPct * 100).toFixed(0)}% (dead token)`,
+    );
+  }
+  if (ohlcv.dailyReturnStddev < config.volBaselineMin) {
+    reasons.push(
+      `Daily-return stddev ${ohlcv.dailyReturnStddev.toFixed(4)} below volatility floor ${config.volBaselineMin}`,
+    );
+  }
+  if (ohlcv.dailyReturnStddev > config.volBaselineMax) {
+    reasons.push(
+      `Daily-return stddev ${ohlcv.dailyReturnStddev.toFixed(4)} above volatility ceiling ${config.volBaselineMax} (lunatic token)`,
+    );
+  }
+}
+
 export function evaluateFallenAngelGate(input: FallenAngelGateInput): FallenAngelGateResult {
   const reasons: string[] = [];
 
@@ -65,79 +140,17 @@ export function evaluateFallenAngelGate(input: FallenAngelGateInput): FallenAnge
   }
 
   // ── Security gate (RugCheck) — fail-closed on missing data ────────────────
-  const report = input.rugcheck;
-  if (report === null) {
+  if (input.rugcheck === null) {
     reasons.push("RugCheck report unavailable — security unknown");
   } else {
-    if (report.rugged) {
-      reasons.push("RugCheck flags token as rugged");
-    }
-    if (hasDangerRisks(report)) {
-      const dangerNames = report.risks
-        .filter((r) => r.level === "danger")
-        .map((r) => r.name)
-        .join(", ");
-      reasons.push(`RugCheck danger risks present: ${dangerNames}`);
-    }
-    if (report.scoreNormalised === null) {
-      reasons.push("RugCheck score unknown — fail closed");
-    } else if (report.scoreNormalised > input.config.maxRugcheckScore) {
-      reasons.push(
-        `RugCheck risk score ${report.scoreNormalised} exceeds max ${input.config.maxRugcheckScore}`,
-      );
-    }
-    if (report.mintAuthority !== null) {
-      reasons.push("Token mint authority is still enabled");
-    }
-    if (report.freezeAuthority !== null) {
-      reasons.push("Token freeze authority is still enabled");
-    }
-    if (report.totalHolders === null) {
-      reasons.push("RugCheck holder count unknown — fail closed");
-    } else if (report.totalHolders < input.config.minHolders) {
-      reasons.push(`Holder count ${report.totalHolders} below minimum ${input.config.minHolders}`);
-    }
-    // Holder concentration fails OPEN (API returns null topHolders for majors).
-    // top10HolderPct is a percent (0..100); config.maxTop10HolderPct is a fraction
-    // (0..1) — normalize to fractions before comparing.
-    if (
-      report.top10HolderPct !== null &&
-      report.top10HolderPct / 100 > input.config.maxTop10HolderPct
-    ) {
-      reasons.push(
-        `Top-10 holder concentration ${report.top10HolderPct.toFixed(1)}% exceeds max ${(input.config.maxTop10HolderPct * 100).toFixed(0)}%`,
-      );
-    }
+    collectRugcheckReasons(input.rugcheck, input.config, reasons);
   }
 
   // ── History gate (GeckoTerminal OHLCV) — fail-closed on missing data ──────
-  const ohlcv = input.ohlcv;
-  if (ohlcv === null) {
+  if (input.ohlcv === null) {
     reasons.push("OHLCV history unavailable — drawdown unknown");
   } else {
-    if (ohlcv.barCount < 2) {
-      reasons.push(`OHLCV window too shallow (${ohlcv.barCount} bar(s))`);
-    }
-    if (ohlcv.drawdownFromAth < input.config.minDrawdownPct) {
-      reasons.push(
-        `Drawdown from ATH ${(ohlcv.drawdownFromAth * 100).toFixed(1)}% below minimum ${(input.config.minDrawdownPct * 100).toFixed(0)}%`,
-      );
-    }
-    if (ohlcv.drawdownFromAth > input.config.maxDrawdownPct) {
-      reasons.push(
-        `Drawdown from ATH ${(ohlcv.drawdownFromAth * 100).toFixed(1)}% exceeds maximum ${(input.config.maxDrawdownPct * 100).toFixed(0)}% (dead token)`,
-      );
-    }
-    if (ohlcv.dailyReturnStddev < input.config.volBaselineMin) {
-      reasons.push(
-        `Daily-return stddev ${ohlcv.dailyReturnStddev.toFixed(4)} below volatility floor ${input.config.volBaselineMin}`,
-      );
-    }
-    if (ohlcv.dailyReturnStddev > input.config.volBaselineMax) {
-      reasons.push(
-        `Daily-return stddev ${ohlcv.dailyReturnStddev.toFixed(4)} above volatility ceiling ${input.config.volBaselineMax} (lunatic token)`,
-      );
-    }
+    collectOhlcvReasons(input.ohlcv, input.config, reasons);
   }
 
   return { qualified: reasons.length === 0, reasons };

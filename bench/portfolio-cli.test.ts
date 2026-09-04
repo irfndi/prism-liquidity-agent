@@ -19,13 +19,10 @@ import {
 } from "../cli/portfolio.js";
 import type { PositionRecord } from "../engine/db-service.js";
 
-function makePosition(overrides: Partial<PositionRecord> = {}): PositionRecord {
-  const poolAddress = overrides.poolAddress ?? "Pool111111111111111111111111111111111111111";
-  const positionPubKey = overrides.positionPubKey ?? null;
+// Per-field defaulting split out of makePosition to stay under the complexity cap;
+// each helper returns a partial of the same defaulted values makePosition always produced.
+function positionMarketDefaults(overrides: Partial<PositionRecord>) {
   return {
-    positionId: overrides.positionId ?? positionPubKey ?? `paper-${poolAddress}`,
-    poolAddress,
-    positionPubKey,
     depositedUsd: overrides.depositedUsd ?? 1000,
     currentValueUsd: overrides.currentValueUsd ?? 1000,
     tokenXSymbol: overrides.tokenXSymbol ?? "SOL",
@@ -37,6 +34,11 @@ function makePosition(overrides: Partial<PositionRecord> = {}): PositionRecord {
     outOfRangeSince: overrides.outOfRangeSince ?? null,
     oorCycleCount: overrides.oorCycleCount ?? 0,
     lastFeeClaimAt: overrides.lastFeeClaimAt ?? Date.now(),
+  };
+}
+
+function positionLifecycleDefaults(overrides: Partial<PositionRecord>) {
+  return {
     trailingStopThreshold: overrides.trailingStopThreshold ?? null,
     highestValueUsd: overrides.highestValueUsd ?? null,
     lastRebalanceAt: overrides.lastRebalanceAt ?? 0,
@@ -50,6 +52,18 @@ function makePosition(overrides: Partial<PositionRecord> = {}): PositionRecord {
     cumulativeRewardsClaimedUsd: overrides.cumulativeRewardsClaimedUsd ?? 0,
     closedAt: overrides.closedAt ?? null,
     realizedPnlUsd: overrides.realizedPnlUsd ?? null,
+  };
+}
+
+function makePosition(overrides: Partial<PositionRecord> = {}): PositionRecord {
+  const poolAddress = overrides.poolAddress ?? "Pool111111111111111111111111111111111111111";
+  const positionPubKey = overrides.positionPubKey ?? null;
+  return {
+    positionId: overrides.positionId ?? positionPubKey ?? `paper-${poolAddress}`,
+    poolAddress,
+    positionPubKey,
+    ...positionMarketDefaults(overrides),
+    ...positionLifecycleDefaults(overrides),
   };
 }
 

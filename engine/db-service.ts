@@ -166,16 +166,35 @@ interface ParsedBinData {
   liquiditySupply: string;
 }
 
+/** Parse stored bin-array JSON at the DB boundary; null when malformed. */
+function parseBinData(json: string): {
+  lowerBinId: number;
+  upperBinId: number;
+  activeBinId: number;
+  binStep?: number;
+  reservesKnown?: boolean;
+  bins: ParsedBinData[];
+} | null {
+  try {
+    // SAFETY: The parse is wrapped; the asserted contract is established by the caller's schema.
+    return JSON.parse(json) as {
+      lowerBinId: number;
+      upperBinId: number;
+      activeBinId: number;
+      binStep?: number;
+      reservesKnown?: boolean;
+      bins: ParsedBinData[];
+    };
+  } catch {
+    return null;
+  }
+}
+
 function deserializeBinArray(json: string): BinArray {
-  // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-  const raw = JSON.parse(json) as {
-    lowerBinId: number;
-    upperBinId: number;
-    activeBinId: number;
-    binStep?: number;
-    reservesKnown?: boolean;
-    bins: ParsedBinData[];
-  };
+  const raw = parseBinData(json);
+  if (raw === null) {
+    throw new Error("Invalid bin-array JSON in database — cannot deserialize");
+  }
   const binStep = raw.binStep != null ? Number(raw.binStep) : undefined;
   const reservesKnown = raw.reservesKnown;
   const result: BinArray = {
@@ -1644,51 +1663,75 @@ function rowToSafetyPause(row: DbRow): SafetyPauseRecord {
   };
 }
 
+/** Numeric column with a fallback for NULL/absent — mirrors `Number(row.x ?? fallback)`. */
+function numberColumn(value: SqlValue | undefined, fallback: number): number {
+  return Number(value ?? fallback);
+}
+
+/** Nullable numeric column — NULL/absent stays null, anything else is Number(). */
+function nullableNumberColumn(value: SqlValue | undefined): number | null {
+  return value != null ? Number(value) : null;
+}
+
+/** Text column with a fallback for NULL/absent — mirrors `String(row.x ?? fallback)`. */
+function textColumn(value: SqlValue | undefined, fallback: string): string {
+  // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
+  return String((value ?? fallback) as unknown);
+}
+
+/** Nullable text column — NULL/absent stays null, anything else is String(). */
+function nullableTextColumn(value: SqlValue | undefined): string | null {
+  // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
+  return value != null ? String(value as unknown) : null;
+}
+
+/** Text column kept only when truthy ("" collapses to null) — the legacy
+ *  position_pubkey read, shared with position-event rows. */
+function presentTextColumn(value: SqlValue | undefined): string | null {
+  // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
+  return value ? String(value as unknown) : null;
+}
+
+/** Nullable 0/1 boolean column — NULL/absent stays null, nonzero is true. */
+function nullableBooleanColumn(value: SqlValue | undefined): boolean | null {
+  return value != null ? value !== 0 : null;
+}
+
 function rowToPosition(row: DbRow): PositionRecord {
   return {
     positionId: String(row.position_id),
     poolAddress: String(row.pool_address),
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    positionPubKey: row.position_pubkey ? String(row.position_pubkey as unknown) : null,
-    depositedUsd: Number(row.deposited_usd ?? 0),
-    currentValueUsd: Number(row.current_value_usd ?? 0),
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    tokenXSymbol: String((row.token_x_symbol ?? "") as unknown),
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    tokenYSymbol: String((row.token_y_symbol ?? "") as unknown),
-    activeBinId: Number(row.active_bin_id ?? 0),
-    lowerBinId: Number(row.lower_bin_id ?? 0),
-    upperBinId: Number(row.upper_bin_id ?? 0),
-    timestamp: Number(row.timestamp ?? 0),
-    outOfRangeSince: row.out_of_range_since != null ? Number(row.out_of_range_since) : null,
-    oorCycleCount: Number(row.oor_cycle_count ?? 0),
-    lastFeeClaimAt: Number(row.last_fee_claim_at ?? 0),
-    trailingStopThreshold:
-      row.trailing_stop_threshold != null ? Number(row.trailing_stop_threshold) : null,
-    highestValueUsd: row.highest_value_usd != null ? Number(row.highest_value_usd) : null,
-    lastRebalanceAt: Number(row.last_rebalance_at ?? 0),
-    paperExitedAt: row.paper_exited_at != null ? Number(row.paper_exited_at) : null,
-    entrySignalTimestamp:
-      row.entry_signal_timestamp != null ? Number(row.entry_signal_timestamp) : null,
-    entrySignalSnapshotId:
-      row.entry_signal_snapshot_id != null ? Number(row.entry_signal_snapshot_id) : null,
-    entryPriceUsd: row.entry_price_usd != null ? Number(row.entry_price_usd) : null,
-    entryAmountXUsd: row.entry_amount_x_usd != null ? Number(row.entry_amount_x_usd) : null,
-    entryAmountYUsd: row.entry_amount_y_usd != null ? Number(row.entry_amount_y_usd) : null,
-    cumulativeFeesClaimedUsd: Number(row.cumulative_fees_claimed_usd ?? 0),
-    cumulativeRewardsClaimedUsd: Number(row.cumulative_rewards_claimed_usd ?? 0),
-    closedAt: row.closed_at != null ? Number(row.closed_at) : null,
-    realizedPnlUsd: row.realized_pnl_usd != null ? Number(row.realized_pnl_usd) : null,
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    positionMode: row.position_mode != null ? String(row.position_mode as unknown) : null,
-    launchRunner: row.launch_runner != null ? row.launch_runner !== 0 : null,
-    launchRunnerSteps: row.launch_runner_steps != null ? Number(row.launch_runner_steps) : null,
-    launchRunnerAnchorPrice:
-      row.launch_runner_anchor_price != null ? Number(row.launch_runner_anchor_price) : null,
-    // SAFETY: The value is intentionally opaque at this boundary and is validated by the enclosing parser or schema before domain use.
-    tpLadderJson: row.tp_ladder_json != null ? String(row.tp_ladder_json as unknown) : null,
-    invalidationStopPrice:
-      row.invalidation_stop_price != null ? Number(row.invalidation_stop_price) : null,
+    positionPubKey: presentTextColumn(row.position_pubkey),
+    depositedUsd: numberColumn(row.deposited_usd, 0),
+    currentValueUsd: numberColumn(row.current_value_usd, 0),
+    tokenXSymbol: textColumn(row.token_x_symbol, ""),
+    tokenYSymbol: textColumn(row.token_y_symbol, ""),
+    activeBinId: numberColumn(row.active_bin_id, 0),
+    lowerBinId: numberColumn(row.lower_bin_id, 0),
+    upperBinId: numberColumn(row.upper_bin_id, 0),
+    timestamp: numberColumn(row.timestamp, 0),
+    outOfRangeSince: nullableNumberColumn(row.out_of_range_since),
+    oorCycleCount: numberColumn(row.oor_cycle_count, 0),
+    lastFeeClaimAt: numberColumn(row.last_fee_claim_at, 0),
+    trailingStopThreshold: nullableNumberColumn(row.trailing_stop_threshold),
+    highestValueUsd: nullableNumberColumn(row.highest_value_usd),
+    lastRebalanceAt: numberColumn(row.last_rebalance_at, 0),
+    paperExitedAt: nullableNumberColumn(row.paper_exited_at),
+    entrySignalTimestamp: nullableNumberColumn(row.entry_signal_timestamp),
+    entrySignalSnapshotId: nullableNumberColumn(row.entry_signal_snapshot_id),
+    entryPriceUsd: nullableNumberColumn(row.entry_price_usd),
+    entryAmountXUsd: nullableNumberColumn(row.entry_amount_x_usd),
+    entryAmountYUsd: nullableNumberColumn(row.entry_amount_y_usd),
+    cumulativeFeesClaimedUsd: numberColumn(row.cumulative_fees_claimed_usd, 0),
+    cumulativeRewardsClaimedUsd: numberColumn(row.cumulative_rewards_claimed_usd, 0),
+    closedAt: nullableNumberColumn(row.closed_at),
+    realizedPnlUsd: nullableNumberColumn(row.realized_pnl_usd),
+    positionMode: nullableTextColumn(row.position_mode),
+    launchRunner: nullableBooleanColumn(row.launch_runner),
+    launchRunnerSteps: nullableNumberColumn(row.launch_runner_steps),
+    launchRunnerAnchorPrice: nullableNumberColumn(row.launch_runner_anchor_price),
+    tpLadderJson: nullableTextColumn(row.tp_ladder_json),
+    invalidationStopPrice: nullableNumberColumn(row.invalidation_stop_price),
   };
 }
 

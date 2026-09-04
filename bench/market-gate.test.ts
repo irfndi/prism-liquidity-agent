@@ -294,6 +294,8 @@ describe("rug-prevention: mint-authority-renounced gate", () => {
       [{ symbol: "MEME", mint: MEME, mintAuthority: "dev-pubkey" }],
       STABLES,
       true,
+      undefined,
+      undefined,
     );
     expect(reason).not.toBeNull();
     expect(reason).toContain("live mint authority");
@@ -305,6 +307,8 @@ describe("rug-prevention: mint-authority-renounced gate", () => {
         [{ symbol: "MEME", mint: MEME, mintAuthority: null }],
         STABLES,
         true,
+        undefined,
+        undefined,
       ),
     ).toBeNull();
     expect(
@@ -312,6 +316,8 @@ describe("rug-prevention: mint-authority-renounced gate", () => {
         [{ symbol: "MEME", mint: MEME, mintAuthority: undefined }],
         STABLES,
         true,
+        undefined,
+        undefined,
       ),
     ).toBeNull();
   });
@@ -324,6 +330,8 @@ describe("rug-prevention: mint-authority-renounced gate", () => {
       ],
       STABLES,
       true,
+      undefined,
+      undefined,
     );
     expect(reason).toBeNull();
   });
@@ -334,7 +342,50 @@ describe("rug-prevention: mint-authority-renounced gate", () => {
         [{ symbol: "MEME", mint: MEME, mintAuthority: "x" }],
         STABLES,
         false,
+        undefined,
+        undefined,
       ),
     ).toBeNull();
+  });
+
+  it("exempts a verified leg when the pool clears the scale floor", () => {
+    const reason = mintAuthorityRejectReason(
+      [{ symbol: "MU", mint: MEME, mintAuthority: "issuer", verified: true }],
+      STABLES,
+      true,
+      100_000,
+      4_069_238,
+    );
+    expect(reason).toBeNull();
+  });
+
+  it("rejects a verified leg below the scale floor", () => {
+    const reason = mintAuthorityRejectReason(
+      [{ symbol: "MU", mint: MEME, mintAuthority: "issuer", verified: true }],
+      STABLES,
+      true,
+      100_000,
+      50_000,
+    );
+    expect(reason).not.toBeNull();
+    expect(reason).toContain("live mint authority");
+  });
+
+  it("rejects an unverified leg at scale", () => {
+    const reason = mintAuthorityRejectReason(
+      [{ symbol: "MEME", mint: MEME, mintAuthority: "dev" }],
+      STABLES,
+      true,
+      100_000,
+      4_069_238,
+    );
+    expect(reason).not.toBeNull();
+  });
+
+  it("restores the strict binary when the scale floor is absent or 0", () => {
+    const leg = [{ symbol: "MU", mint: MEME, mintAuthority: "issuer", verified: true }];
+    expect(mintAuthorityRejectReason(leg, STABLES, true, undefined, undefined)).not.toBeNull();
+    expect(mintAuthorityRejectReason(leg, STABLES, true, 0, 4_069_238)).not.toBeNull();
+    expect(mintAuthorityRejectReason(leg, STABLES, true, 100_000, undefined)).not.toBeNull();
   });
 });

@@ -17,9 +17,12 @@
     ".windsurf/**",
     "tools/oxlint/anti-slop/**"
   ],
-  "plugins": ["effecttsgo", "typescript", "unicorn", "oxc"],
+  "plugins": ["effecttsgo", "typescript", "unicorn", "oxc", "eslint"],
   "jsPlugins": [
-    { "name": "anti-slop", "specifier": "./tools/oxlint/anti-slop/index.mjs" },
+    {
+      "name": "anti-slop",
+      "specifier": "./tools/oxlint/anti-slop/index.mjs"
+    },
     {
       "name": "anti-slop-effect",
       "specifier": "./tools/oxlint/anti-slop/effect/index.mjs"
@@ -30,6 +33,7 @@
   },
   "rules": {
     "no-unused-vars": "off",
+    "complexity": "error",
     "require-yield": "off",
     "effecttsgo/any-unknown-in-error-context": "error",
     "typescript/no-base-to-string": "error",

@@ -379,6 +379,246 @@ function reconciliationJob<T>(
   };
 }
 
+/** Narrowed swap operations for the settlement fresh-submit path. */
+interface SettlementSwapOps {
+  readonly quoteSwap: NonNullable<AdapterApi["quoteSwap"]>;
+  readonly prepareSwap: NonNullable<AdapterApi["prepareSwap"]>;
+  readonly simulateSwap: NonNullable<AdapterApi["simulateSwap"]>;
+  readonly submitSwap: NonNullable<AdapterApi["submitSwap"]>;
+}
+
+/**
+ * Retains a broadcast settlement that reads `not_found` on chain.
+ * A broadcast settlement recovered after a confirmation/RPC failure
+ * can transiently read `not_found` before the original signature
+ * becomes visible. Treating that like a definitive failure re-quotes
+ * and resubmits the FULL token amount — if the first transaction
+ * later lands (and the wallet has pre-existing balance), the tokens
+ * are sold twice. Retain the submitted state with the signature so
+ * the next retry re-queries the status instead of rearming
+ * submission. Once the job's max-pending window is definitively
+ * past, the transaction can no longer land: terminalize it like any
+ * other unrecoverable settlement so it stops retrying.
+ */
+function retainSubmittedSettlement(
+  input: SettlementProcessorInput,
+  job: SettlementJobRecord,
+): SettlementJobRecord {
+  const attempts = job.attempts + 1;
+  const expired = input.now >= job.expiresAt;
+  return {
+    ...job,
+    status: expired ? ("terminal" as const) : ("submitted" as const),
+    attempts,
+    nextRetryAt: expired ? null : nextSettlementRetryAt(input.now, attempts),
+    error: expired
+      ? "Swap signature not found until expiry — requires operator reconciliation"
+      : job.error,
+    updatedAt: input.now,
+  };
+}
+
+/** Confirms a broadcast settlement from on-chain swap-output evidence. */
+function confirmFromSwapEvidence(
+  input: SettlementProcessorInput,
+  job: SettlementJobRecord,
+  txSignature: string,
+): Effect.Effect<SettlementJobRecord | null, Error> {
+  const getOutput = input.adapter.getConfirmedSwapOutput;
+  if (!getOutput) return Effect.succeed(null);
+  return Effect.gen(function* () {
+    const evidence = yield* getOutput(txSignature);
+    if (!evidence || evidence.outputAtomic <= 0n) return null;
+    const prices = yield* input.adapter.getTokenPrices([SOL_MINT]);
+    const solPriceUsd = prices[SOL_MINT] ?? 0;
+    if (!(solPriceUsd > 0)) {
+      return reconciliationJob(
+        job,
+        input.now,
+        new Error("Confirmed swap output found but SOL price unavailable for USD conversion"),
+      );
+    }
+    return {
+      ...job,
+      status: "confirmed" as const,
+      confirmedOutputAtomic: evidence.outputAtomic.toString(),
+      outputUsd: atomicUsd(evidence.outputAtomic, 9, solPriceUsd),
+      executionCostUsd: atomicUsd(evidence.feeAtomic, 9, solPriceUsd),
+      nextRetryAt: null,
+      error: null,
+      updatedAt: input.now,
+    };
+  });
+}
+
+/** Confirms a finalized broadcast settlement, via stored fields or fresh evidence. */
+function confirmBroadcastSettlement(
+  input: SettlementProcessorInput,
+  job: SettlementJobRecord,
+  txSignature: string,
+): Effect.Effect<SettlementJobRecord, Error> {
+  return Effect.gen(function* () {
+    if (
+      job.confirmedOutputAtomic !== null &&
+      job.outputUsd !== null &&
+      job.executionCostUsd !== null
+    ) {
+      return {
+        ...job,
+        status: "confirmed" as const,
+        nextRetryAt: null,
+        error: null,
+        updatedAt: input.now,
+      };
+    }
+    const confirmed = yield* confirmFromSwapEvidence(input, job, txSignature);
+    if (confirmed) return confirmed;
+    return reconciliationJob(
+      job,
+      input.now,
+      new Error("Confirmed swap output evidence unavailable"),
+    );
+  });
+}
+
+/**
+ * Resolves an already-broadcast settlement swap via its on-chain status.
+ * Returns the updated job when the status is decisive, or null when a fresh
+ * swap must be submitted (the transaction definitively failed on chain).
+ */
+function resolveBroadcastSettlement(
+  input: SettlementProcessorInput,
+  job: SettlementJobRecord,
+): Effect.Effect<SettlementJobRecord | null, Error> {
+  if (!job.txSignature) return Effect.succeed(null);
+  const getStatus = input.adapter.getSwapStatus;
+  if (!getStatus) return Effect.succeed(null);
+  return Effect.gen(function* () {
+    const txSignature = job.txSignature;
+    if (!txSignature) return null;
+    const status = yield* getStatus(txSignature);
+    if (status.state === "confirmed" || status.state === "finalized") {
+      return yield* confirmBroadcastSettlement(input, job, txSignature);
+    }
+    if (status.state === "processed") {
+      return {
+        ...job,
+        status: "submitted" as const,
+        nextRetryAt: nextSettlementRetryAt(input.now, job.attempts + 1),
+        updatedAt: input.now,
+      };
+    }
+    if (status.state === "not_found") return retainSubmittedSettlement(input, job);
+    // status.state === "failed": the transaction definitively failed on
+    // chain — fall through and submit a fresh swap.
+    return null;
+  });
+}
+
+/**
+ * Reconciles the sell amount with the LIVE wallet balance.
+ * The job amount is fixed at creation, but a concurrent entry can consume
+ * part of the wallet — quoting the stale amount makes the swap simulation
+ * fail with insufficient balance. Clamps to what the wallet actually holds;
+ * a failed balance read fails open (keeps the job amount — the simulation
+ * still catches genuine insufficiency).
+ */
+function clampSettlementToWalletBalance(
+  input: SettlementProcessorInput,
+  job: SettlementJobRecord,
+  amountAtomic: bigint,
+): Effect.Effect<bigint, never> {
+  const reader =
+    job.tokenMint === SOL_MINT ? input.adapter.getNativeSolBalance : input.adapter.getTokenBalance;
+  // Guard for partial adapters (mirrors the sweep's optional-method
+  // checks): a missing balance reader fails open — keep the job
+  // amount; the simulation still catches genuine insufficiency.
+  if (Object.prototype.toString.call(reader) !== "[object Function]") {
+    return Effect.succeed(amountAtomic);
+  }
+  return reader.call(input.adapter, job.tokenMint).pipe(
+    Effect.catch(() => Effect.succeed(null)),
+    Effect.map((balance) => (balance === null || balance >= amountAtomic ? amountAtomic : balance)),
+  );
+}
+
+/**
+ * Dust settlement shortcut. Returns the dust-confirmed job when the amount
+ * is below the sweep cutoff (or unpriceable inside a synthetic group),
+ * or null when the job must proceed to the quote path.
+ */
+function dustSettlementRecord(
+  input: SettlementProcessorInput,
+  job: SettlementJobRecord,
+  amountAtomic: bigint,
+  inputDecimals: number,
+  inputPriceUsd: number,
+): SettlementJobRecord | null {
+  const settlementDustUsd = input.settlementDustUsd ?? 0;
+  // Priceable sub-dust stays put (pre-existing policy): the value is
+  // known and below the sweep cutoff, so it is recorded as recovered.
+  if (settlementDustUsd > 0 && inputPriceUsd > 0) {
+    const inputUsd = atomicUsd(amountAtomic, inputDecimals, inputPriceUsd);
+    if (inputUsd < settlementDustUsd) {
+      return {
+        ...job,
+        status: "confirmed" as const,
+        attempts: job.attempts + 1,
+        nextRetryAt: null,
+        confirmedOutputAtomic: amountAtomic.toString(),
+        outputUsd: inputUsd,
+        executionCostUsd: 0,
+        error: "settlement dust skipped",
+        updatedAt: input.now,
+      };
+    }
+  }
+  // Issue #183: the dust skip covers unpriceable tokens too (value
+  // unknown ⇒ $0) — quoting an unquotable mint returns a definitive 400
+  // (no route) and previously re-queued the job forever. Confirmed ONLY
+  // for synthetic settlement groups (orphan:/rollback: — no position row
+  // to finalize): a real position's sweep job (EXIT residues/rewards)
+  // must not be dust-confirmed, because finalizing its group would book
+  // a full PnL loss while the tokens still sit in the wallet.
+  const syntheticSettlementGroup =
+    job.positionId.startsWith("orphan:") || job.positionId.startsWith("rollback:");
+  if (settlementDustUsd > 0 && syntheticSettlementGroup && inputPriceUsd <= 0) {
+    return {
+      ...job,
+      status: "confirmed" as const,
+      attempts: job.attempts + 1,
+      nextRetryAt: null,
+      confirmedOutputAtomic: amountAtomic.toString(),
+      outputUsd: atomicUsd(amountAtomic, inputDecimals, inputPriceUsd),
+      executionCostUsd: 0,
+      error: "settlement dust skipped (no USD price)",
+      updatedAt: input.now,
+    };
+  }
+  return null;
+}
+
+/** Fresh-submit path prerequisites: all four generic swap operations must exist. */
+function requireSettlementSwapOps(
+  adapter: SettlementProcessorInput["adapter"],
+): Effect.Effect<SettlementSwapOps, Error> {
+  return Effect.gen(function* () {
+    const ops: SettlementSwapOps | null =
+      adapter.quoteSwap && adapter.prepareSwap && adapter.simulateSwap && adapter.submitSwap
+        ? {
+            quoteSwap: adapter.quoteSwap,
+            prepareSwap: adapter.prepareSwap,
+            simulateSwap: adapter.simulateSwap,
+            submitSwap: adapter.submitSwap,
+          }
+        : null;
+    if (!ops) {
+      return yield* Effect.fail(new Error("Generic settlement swap operations unavailable"));
+    }
+    return ops;
+  });
+}
+
 /** Processes due settlement jobs and finalizes positions whose settlements completed. */
 export function processSettlementJobs(
   input: SettlementProcessorInput,
@@ -404,93 +644,8 @@ export function processSettlementJobs(
       let capturedSignature: string | null = null;
       let capturedConfirmedOutputAtomic: bigint = 0n;
       const result = yield* Effect.gen(function* () {
-        if (job.txSignature && input.adapter.getSwapStatus) {
-          const status = yield* input.adapter.getSwapStatus(job.txSignature);
-          if (status.state === "confirmed" || status.state === "finalized") {
-            if (
-              job.confirmedOutputAtomic !== null &&
-              job.outputUsd !== null &&
-              job.executionCostUsd !== null
-            ) {
-              return {
-                ...job,
-                status: "confirmed" as const,
-                nextRetryAt: null,
-                error: null,
-                updatedAt: input.now,
-              };
-            }
-
-            if (input.adapter.getConfirmedSwapOutput) {
-              const evidence = yield* input.adapter.getConfirmedSwapOutput(job.txSignature);
-              if (evidence && evidence.outputAtomic > 0n) {
-                const prices = yield* input.adapter.getTokenPrices([SOL_MINT]);
-                const solPriceUsd = prices[SOL_MINT] ?? 0;
-                if (solPriceUsd > 0) {
-                  const outputUsd = atomicUsd(evidence.outputAtomic, 9, solPriceUsd);
-                  const executionCostUsd = atomicUsd(evidence.feeAtomic, 9, solPriceUsd);
-                  return {
-                    ...job,
-                    status: "confirmed" as const,
-                    confirmedOutputAtomic: evidence.outputAtomic.toString(),
-                    outputUsd,
-                    executionCostUsd,
-                    nextRetryAt: null,
-                    error: null,
-                    updatedAt: input.now,
-                  };
-                }
-                return reconciliationJob(
-                  job,
-                  input.now,
-                  new Error(
-                    "Confirmed swap output found but SOL price unavailable for USD conversion",
-                  ),
-                );
-              }
-            }
-
-            return reconciliationJob(
-              job,
-              input.now,
-              new Error("Confirmed swap output evidence unavailable"),
-            );
-          }
-          if (status.state === "processed") {
-            return {
-              ...job,
-              status: "submitted" as const,
-              nextRetryAt: nextSettlementRetryAt(input.now, job.attempts + 1),
-              updatedAt: input.now,
-            };
-          }
-          if (status.state === "not_found") {
-            // A broadcast settlement recovered after a confirmation/RPC failure
-            // can transiently read `not_found` before the original signature
-            // becomes visible. Treating that like a definitive failure re-quotes
-            // and resubmits the FULL token amount — if the first transaction
-            // later lands (and the wallet has pre-existing balance), the tokens
-            // are sold twice. Retain the submitted state with the signature so
-            // the next retry re-queries the status instead of rearming
-            // submission. Once the job's max-pending window is definitively
-            // past, the transaction can no longer land: terminalize it like any
-            // other unrecoverable settlement so it stops retrying.
-            const attempts = job.attempts + 1;
-            const expired = input.now >= job.expiresAt;
-            return {
-              ...job,
-              status: expired ? ("terminal" as const) : ("submitted" as const),
-              attempts,
-              nextRetryAt: expired ? null : nextSettlementRetryAt(input.now, attempts),
-              error: expired
-                ? "Swap signature not found until expiry — requires operator reconciliation"
-                : job.error,
-              updatedAt: input.now,
-            };
-          }
-          // status.state === "failed": the transaction definitively failed on
-          // chain — fall through and submit a fresh swap.
-        }
+        const broadcast = yield* resolveBroadcastSettlement(input, job);
+        if (broadcast) return broadcast;
         if (job.status === "prepared" && job.txSignature === null) {
           return yield* Effect.fail(
             new Error("Prepared settlement requires operator reconciliation"),
@@ -510,24 +665,7 @@ export function processSettlementJobs(
         // amount — the simulation still catches genuine insufficiency).
         // When the wallet holds nothing of the mint, the funds were consumed
         // elsewhere — terminalize with a clear error instead of looping.
-        const readWalletBalance = (): Effect.Effect<bigint | null, never> => {
-          const reader =
-            job.tokenMint === SOL_MINT
-              ? input.adapter.getNativeSolBalance
-              : input.adapter.getTokenBalance;
-          // Guard for partial adapters (mirrors the sweep's optional-method
-          // checks): a missing balance reader fails open — keep the job
-          // amount; the simulation still catches genuine insufficiency.
-          return Object.prototype.toString.call(reader) === "[object Function]"
-            ? reader
-                .call(input.adapter, job.tokenMint)
-                .pipe(Effect.catch(() => Effect.succeed(null)))
-            : Effect.succeed(null);
-        };
-        const walletBalance = yield* readWalletBalance();
-        if (walletBalance !== null && walletBalance < amountAtomic) {
-          amountAtomic = walletBalance;
-        }
+        amountAtomic = yield* clampSettlementToWalletBalance(input, job, amountAtomic);
         if (amountAtomic <= 0n) {
           return {
             ...job,
@@ -554,63 +692,17 @@ export function processSettlementJobs(
         }
         const inputDecimals = yield* input.adapter.getTokenDecimals(job.tokenMint);
         const inputPriceUsd = prices[job.tokenMint] ?? 0;
-        const inputUsd = atomicUsd(amountAtomic, inputDecimals, inputPriceUsd);
-        const settlementDustUsd = input.settlementDustUsd ?? 0;
-        // Priceable sub-dust stays put (pre-existing policy): the value is
-        // known and below the sweep cutoff, so it is recorded as recovered.
-        if (settlementDustUsd > 0 && inputPriceUsd > 0 && inputUsd < settlementDustUsd) {
-          return {
-            ...job,
-            status: "confirmed" as const,
-            attempts: job.attempts + 1,
-            nextRetryAt: null,
-            confirmedOutputAtomic: amountAtomic.toString(),
-            outputUsd: inputUsd,
-            executionCostUsd: 0,
-            error: "settlement dust skipped",
-            updatedAt: input.now,
-          };
-        }
-        // Issue #183: the dust skip covers unpriceable tokens too (value
-        // unknown ⇒ $0) — quoting an unquotable mint returns a definitive 400
-        // (no route) and previously re-queued the job forever. Confirmed ONLY
-        // for synthetic settlement groups (orphan:/rollback: — no position row
-        // to finalize): a real position's sweep job (EXIT residues/rewards)
-        // must not be dust-confirmed, because finalizing its group would book
-        // a full PnL loss while the tokens still sit in the wallet. Real
-        // positions fall through to the quote path (bounded retries, then
-        // terminal on expiry — operator-visible via prism status), and the
-        // orphan sweep skips unpriceable holdings, so the 400 loop stays dead.
-        const syntheticSettlementGroup =
-          job.positionId.startsWith("orphan:") || job.positionId.startsWith("rollback:");
-        if (syntheticSettlementGroup && settlementDustUsd > 0 && inputPriceUsd <= 0) {
-          return {
-            ...job,
-            status: "confirmed" as const,
-            attempts: job.attempts + 1,
-            nextRetryAt: null,
-            confirmedOutputAtomic: amountAtomic.toString(),
-            outputUsd: inputUsd,
-            executionCostUsd: 0,
-            error: "settlement dust skipped (no USD price)",
-            updatedAt: input.now,
-          };
-        }
-        const quoteSwap = input.adapter.quoteSwap;
-        const prepareSwap = input.adapter.prepareSwap;
-        const simulateSwap = input.adapter.simulateSwap;
-        const submitSwap = input.adapter.submitSwap;
-        if (!quoteSwap || !prepareSwap || !simulateSwap || !submitSwap) {
-          return yield* Effect.fail(new Error("Generic settlement swap operations unavailable"));
-        }
-        const quote = yield* quoteSwap({
+        const dust = dustSettlementRecord(input, job, amountAtomic, inputDecimals, inputPriceUsd);
+        if (dust) return dust;
+        const ops = yield* requireSettlementSwapOps(input.adapter);
+        const quote = yield* ops.quoteSwap({
           inputMint: job.tokenMint,
           outputMint: SOL_MINT,
           amountAtomic,
           slippageBps: input.maxSwapSlippageBps,
         });
-        const prepared = yield* prepareSwap(quote);
-        yield* simulateSwap(prepared);
+        const prepared = yield* ops.prepareSwap(quote);
+        yield* ops.simulateSwap(prepared);
         const nativeBefore = yield* input.adapter.getNativeSolBalance();
         yield* input.db.saveSettlementJob({
           ...job,
@@ -621,7 +713,7 @@ export function processSettlementJobs(
           executionCostUsd: null,
           updatedAt: input.now,
         });
-        const signature = yield* submitSwap(prepared, (broadcastSignature) => {
+        const signature = yield* ops.submitSwap(prepared, (broadcastSignature) => {
           submitted = true;
           capturedSignature = broadcastSignature;
           return input.db.saveSettlementJob({

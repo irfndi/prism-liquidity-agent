@@ -147,6 +147,54 @@ function readFiniteNumber<T>(value: T): number | null {
   return null;
 }
 
+/** readString that also rejects the empty string — the shape mint/authority
+ *  fields arrive in (present-but-empty means "no authority"). */
+function readNonEmptyString<T>(value: T): string | null {
+  const s = readString(value);
+  return s !== null && s.length > 0 ? s : null;
+}
+
+/** Parse the raw `risks` array; non-object entries are skipped. */
+function parseRugCheckRisks<T>(raw: T): RugCheckRisk[] {
+  const risks: RugCheckRisk[] = [];
+  if (!Array.isArray(raw)) return risks;
+  for (const risk of raw) {
+    if (!isNonNullObject(risk)) continue;
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+    const r = risk as RawRisk;
+    risks.push({
+      name: readString(r.name) ?? "unknown risk",
+      value: readString(r.value),
+      description: readString(r.description),
+      level: readString(r.level),
+    });
+  }
+  return risks;
+}
+
+/** Parse the raw `topHolders` array; entries without a usable address or pct
+ *  are skipped (the top10HolderPct sum only counts parseable holders). */
+function parseRugCheckTopHolders<T>(raw: T): RugCheckTopHolder[] {
+  const topHolders: RugCheckTopHolder[] = [];
+  if (!Array.isArray(raw)) return topHolders;
+  for (const holder of raw) {
+    if (!isNonNullObject(holder)) continue;
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+    const h = holder as RawHolder;
+    const address = readString(h.address);
+    if (address === null || address.length === 0) continue;
+    const pct = readFiniteNumber(h.pct);
+    if (pct === null) continue;
+    topHolders.push({
+      address,
+      owner: readString(h.owner),
+      pct,
+      insider: readBoolean(h.insider),
+    });
+  }
+  return topHolders;
+}
+
 /**
  * Parse a raw RugCheck report payload. Returns null when the payload is not a
  * usable report object. Individual fields degrade to null / empty lists — the
@@ -156,8 +204,8 @@ export function parseRugCheckReport<T>(raw: T): RugCheckReport | null {
   if (!isNonNullObject(raw)) return null;
   // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const report = raw as RawRugCheckReport;
-  const mint = readString(report.mint);
-  if (mint === null || mint.length === 0) return null;
+  const mint = readNonEmptyString(report.mint);
+  if (mint === null) return null;
 
   // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
   const token = isNonNullObject(report.token) ? (report.token as RawTokenFields) : null;
@@ -168,43 +216,8 @@ export function parseRugCheckReport<T>(raw: T): RugCheckReport | null {
       (report.tokenMeta as RawTokenMetaFields)
     : null;
 
-  const mintAuthority = readString(token?.mintAuthority);
-  const freezeAuthority = readString(token?.freezeAuthority);
-  const tokenMetaMutable = readBoolean(tokenMeta?.mutable);
-
-  const risks: RugCheckRisk[] = [];
-  if (Array.isArray(report.risks)) {
-    for (const risk of report.risks) {
-      if (!isNonNullObject(risk)) continue;
-      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-      const r = risk as RawRisk;
-      risks.push({
-        name: readString(r.name) ?? "unknown risk",
-        value: readString(r.value),
-        description: readString(r.description),
-        level: readString(r.level),
-      });
-    }
-  }
-
-  const topHolders: RugCheckTopHolder[] = [];
-  if (Array.isArray(report.topHolders)) {
-    for (const holder of report.topHolders) {
-      if (!isNonNullObject(holder)) continue;
-      // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-      const h = holder as RawHolder;
-      const address = readString(h.address);
-      if (address === null || address.length === 0) continue;
-      const pct = readFiniteNumber(h.pct);
-      if (pct === null) continue;
-      topHolders.push({
-        address,
-        owner: readString(h.owner),
-        pct,
-        insider: readBoolean(h.insider),
-      });
-    }
-  }
+  const risks = parseRugCheckRisks(report.risks);
+  const topHolders = parseRugCheckTopHolders(report.topHolders);
   const top10HolderPct =
     topHolders.length > 0 ? topHolders.slice(0, 10).reduce((sum, h) => sum + h.pct, 0) : null;
 
@@ -212,10 +225,9 @@ export function parseRugCheckReport<T>(raw: T): RugCheckReport | null {
     mint,
     scoreNormalised: readFiniteNumber(report.score_normalised),
     rugged: report.rugged === true,
-    mintAuthority: mintAuthority !== null && mintAuthority.length > 0 ? mintAuthority : null,
-    freezeAuthority:
-      freezeAuthority !== null && freezeAuthority.length > 0 ? freezeAuthority : null,
-    tokenMetaMutable,
+    mintAuthority: readNonEmptyString(token?.mintAuthority),
+    freezeAuthority: readNonEmptyString(token?.freezeAuthority),
+    tokenMetaMutable: readBoolean(tokenMeta?.mutable),
     totalHolders: readFiniteNumber(report.totalHolders),
     topHolders,
     risks,

@@ -86,23 +86,13 @@ export function makeDecision(overrides: Partial<AgentDecision> = {}): AgentDecis
 
 // ─── Position (DB record) ────────────────────────────────────────────────────
 
-export function makePosition(overrides: Partial<PositionRecord> = {}): PositionRecord {
-  const poolAddress = overrides.poolAddress ?? "Pool111111111111111111111111111111111111111";
-  const positionPubKey = overrides.positionPubKey ?? null;
+// Per-field defaulting split out of makePosition to stay under the complexity cap;
+// each helper returns a partial of the same defaulted values makePosition always produced.
+function positionValueDefaults(overrides: Partial<PositionRecord>) {
   return {
-    positionId: overrides.positionId ?? positionPubKey ?? `paper-${poolAddress}`,
-    poolAddress,
-    positionPubKey,
     depositedUsd: overrides.depositedUsd ?? 1000,
     currentValueUsd: overrides.currentValueUsd ?? 1000,
-    tokenXSymbol: "SOL",
-    tokenYSymbol: "USDC",
-    activeBinId: 5000,
-    lowerBinId: 4980,
-    upperBinId: 5020,
     timestamp: overrides.timestamp ?? Date.now(),
-    outOfRangeSince: null,
-    oorCycleCount: 0,
     lastFeeClaimAt: overrides.lastFeeClaimAt ?? Date.now(),
     trailingStopThreshold: overrides.trailingStopThreshold ?? null,
     highestValueUsd: overrides.highestValueUsd ?? null,
@@ -115,6 +105,11 @@ export function makePosition(overrides: Partial<PositionRecord> = {}): PositionR
     entryAmountYUsd: overrides.entryAmountYUsd ?? null,
     cumulativeFeesClaimedUsd: overrides.cumulativeFeesClaimedUsd ?? 0,
     cumulativeRewardsClaimedUsd: overrides.cumulativeRewardsClaimedUsd ?? 0,
+  };
+}
+
+function positionExitDefaults(overrides: Partial<PositionRecord>) {
+  return {
     closedAt: overrides.closedAt ?? null,
     realizedPnlUsd: overrides.realizedPnlUsd ?? null,
     positionMode: overrides.positionMode ?? null,
@@ -123,6 +118,25 @@ export function makePosition(overrides: Partial<PositionRecord> = {}): PositionR
     launchRunner: overrides.launchRunner ?? null,
     launchRunnerSteps: overrides.launchRunnerSteps ?? null,
     launchRunnerAnchorPrice: overrides.launchRunnerAnchorPrice ?? null,
+  };
+}
+
+export function makePosition(overrides: Partial<PositionRecord> = {}): PositionRecord {
+  const poolAddress = overrides.poolAddress ?? "Pool111111111111111111111111111111111111111";
+  const positionPubKey = overrides.positionPubKey ?? null;
+  return {
+    positionId: overrides.positionId ?? positionPubKey ?? `paper-${poolAddress}`,
+    poolAddress,
+    positionPubKey,
+    ...positionValueDefaults(overrides),
+    tokenXSymbol: "SOL",
+    tokenYSymbol: "USDC",
+    activeBinId: 5000,
+    lowerBinId: 4980,
+    upperBinId: 5020,
+    outOfRangeSince: null,
+    oorCycleCount: 0,
+    ...positionExitDefaults(overrides),
   };
 }
 

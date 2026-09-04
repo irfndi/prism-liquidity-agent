@@ -191,6 +191,17 @@ interface ReplayConfig {
   maxRebalances: number;
 }
 
+// Initial replay state from the first snapshot (or safe zeros for an empty stream);
+// extracted from replaySnapshots to stay under the complexity cap.
+function replayStartState(snaps: ReadonlyArray<PoolSnapshot>, cfg: ReplayConfig) {
+  return {
+    previousTvl: snaps[0]?.tvlUsd ?? 0,
+    lower: (snaps[0]?.activeBinId ?? 0) - cfg.halfWidth,
+    upper: (snaps[0]?.activeBinId ?? 0) + cfg.halfWidth,
+    lastRebalance: -cfg.minHoldTicks,
+  };
+}
+
 function replaySnapshots(snaps: ReadonlyArray<PoolSnapshot>, cfg: ReplayConfig): BacktestResult {
   const initialValue = 10_000;
   let portfolioValue = initialValue;
@@ -198,10 +209,11 @@ function replaySnapshots(snaps: ReadonlyArray<PoolSnapshot>, cfg: ReplayConfig):
   let wins = 0;
   let totalFees = 0;
   let totalIl = 0;
-  let previousTvl = snaps[0]?.tvlUsd ?? 0;
-  let lower = (snaps[0]?.activeBinId ?? 0) - cfg.halfWidth;
-  let upper = (snaps[0]?.activeBinId ?? 0) + cfg.halfWidth;
-  let lastRebalance = -cfg.minHoldTicks;
+  const start = replayStartState(snaps, cfg);
+  let previousTvl = start.previousTvl;
+  let lower = start.lower;
+  let upper = start.upper;
+  let lastRebalance = start.lastRebalance;
 
   for (let i = 0; i < snaps.length; i++) {
     const s = snaps[i]!;
