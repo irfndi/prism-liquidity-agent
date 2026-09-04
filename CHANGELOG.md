@@ -2,6 +2,13 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.36] — 2026-09-04
+
+### Added
+
+- **Verified-scale mint-authority exemption** (`MARKET_SCAN_VERIFIED_EXEMPT_MIN_TVL_USD`, default $100k). The hot-lane renounce gate now exempts a minted leg when Data-API-verified AND pool TVL clears the floor — tokenized equities and bridged majors retain mint authority by design. `0` restores the strict verification-blind binary. Unverified/dust/small pools reject exactly as before; blacklist, transfer-fee, freeze, token-risk and all ENTER quality gates unchanged downstream. Paper-first: gate passage proven on MU/ZEC/HYPE/SKR legs (safety reject → merit HOLD); execution proof pending first merit ENTER.
+- **Safety-screen refactor and dead-code removal** across program/risk/entry-prep/adapter paths (no behavior change beyond the exemption; tsc + oxlint + 2064/2064 tests green).
+
 ## [0.2.35] — 2026-08-25
 
 ### Added

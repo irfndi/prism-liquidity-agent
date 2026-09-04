@@ -1,6 +1,6 @@
 {
   "name": "prism-liquidity-agent",
-  "version": "0.2.35",
+  "version": "0.2.36",
   "description": "Autonomous liquidity agent for Solana pools (currently Meteora DLMM)",
   "keywords": [
     "ai-agent",
