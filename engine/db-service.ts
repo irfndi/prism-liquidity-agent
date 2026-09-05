@@ -78,6 +78,14 @@ export interface PositionRecord {
    *  anchor price. Persisted so a restart cannot re-scale a filled position. */
   launchRunnerSteps?: number | null;
   launchRunnerAnchorPrice?: number | null;
+  /**
+   * CLMM valuation anchor (paper marks): price, bin and position value at
+   * the last range-establishing event (ENTER, or REBALANCE which moves the
+   * range). NULL on legacy rows → fall back to the entry anchor.
+   */
+  valuationAnchorPriceUsd?: number | null;
+  valuationAnchorBinId?: number | null;
+  valuationAnchorValueUsd?: number | null;
 }
 
 export type PositionEventType = "ENTER" | "EXIT" | "REBALANCE" | "CLAIM" | "COMPOUND";
@@ -238,8 +246,9 @@ export const DbLive = (dbPath?: string) =>
               cumulative_fees_claimed_usd, cumulative_rewards_claimed_usd,
               closed_at, realized_pnl_usd,
               position_mode, tp_ladder_json, invalidation_stop_price, launch_runner,
-              launch_runner_steps, launch_runner_anchor_price
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              launch_runner_steps, launch_runner_anchor_price,
+              valuation_anchor_price_usd, valuation_anchor_bin_id, valuation_anchor_value_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(position_id) DO UPDATE SET
               pool_address = excluded.pool_address,
               position_pubkey = COALESCE(excluded.position_pubkey, positions.position_pubkey),
@@ -278,6 +287,18 @@ export const DbLive = (dbPath?: string) =>
               launch_runner_anchor_price = COALESCE(
                 excluded.launch_runner_anchor_price,
                 positions.launch_runner_anchor_price
+              ),
+              valuation_anchor_price_usd = COALESCE(
+                excluded.valuation_anchor_price_usd,
+                positions.valuation_anchor_price_usd
+              ),
+              valuation_anchor_bin_id = COALESCE(
+                excluded.valuation_anchor_bin_id,
+                positions.valuation_anchor_bin_id
+              ),
+              valuation_anchor_value_usd = COALESCE(
+                excluded.valuation_anchor_value_usd,
+                positions.valuation_anchor_value_usd
               )`,
               pos.positionId,
               pos.poolAddress,
@@ -306,12 +327,15 @@ export const DbLive = (dbPath?: string) =>
               pos.cumulativeRewardsClaimedUsd,
               pos.closedAt,
               pos.realizedPnlUsd,
-              pos.positionMode ?? null,
-              pos.tpLadderJson ?? null,
-              pos.invalidationStopPrice ?? null,
-              pos.launchRunner == null ? null : pos.launchRunner ? 1 : 0,
-              pos.launchRunnerSteps ?? null,
-              pos.launchRunnerAnchorPrice ?? null,
+              orNull(pos.positionMode),
+              orNull(pos.tpLadderJson),
+              orNull(pos.invalidationStopPrice),
+              writeBooleanColumn(pos.launchRunner),
+              orNull(pos.launchRunnerSteps),
+              orNull(pos.launchRunnerAnchorPrice),
+              orNull(pos.valuationAnchorPriceUsd),
+              orNull(pos.valuationAnchorBinId),
+              orNull(pos.valuationAnchorValueUsd),
             );
           }),
 
@@ -1697,6 +1721,17 @@ function nullableBooleanColumn(value: SqlValue | undefined): boolean | null {
   return value != null ? value !== 0 : null;
 }
 
+/** Write-side null normalizer: undefined → null (keeps writers branch-free). */
+function orNull<T>(value: T | null | undefined): T | null {
+  return value ?? null;
+}
+
+/** Write-side boolean column: null stays null, else 1/0. */
+function writeBooleanColumn(value: boolean | null | undefined): number | null {
+  if (value == null) return null;
+  return value ? 1 : 0;
+}
+
 function rowToPosition(row: DbRow): PositionRecord {
   return {
     positionId: String(row.position_id),
@@ -1730,6 +1765,9 @@ function rowToPosition(row: DbRow): PositionRecord {
     launchRunner: nullableBooleanColumn(row.launch_runner),
     launchRunnerSteps: nullableNumberColumn(row.launch_runner_steps),
     launchRunnerAnchorPrice: nullableNumberColumn(row.launch_runner_anchor_price),
+    valuationAnchorPriceUsd: nullableNumberColumn(row.valuation_anchor_price_usd),
+    valuationAnchorBinId: nullableNumberColumn(row.valuation_anchor_bin_id),
+    valuationAnchorValueUsd: nullableNumberColumn(row.valuation_anchor_value_usd),
     tpLadderJson: nullableTextColumn(row.tp_ladder_json),
     invalidationStopPrice: nullableNumberColumn(row.invalidation_stop_price),
   };

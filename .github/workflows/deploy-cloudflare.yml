@@ -42,7 +42,7 @@ on:
 # cloudflare/bunfig.toml enables Bun 1.4's isolated linker and shared global
 # store for the Worker and Alchemy workspace.
 env:
-  BUN_VERSION: 1.4.0
+  BUN_VERSION: 1.4.2
 
 # Serialize production deploys: back-to-back pushes must not run two
 # simultaneous `alchemy deploy --stage prod` jobs against the shared stack.

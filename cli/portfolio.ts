@@ -277,23 +277,60 @@ function realizedPnlFor(pos: PositionRecord): PnlResult {
 // ledger + position events so paper staging and production report the same
 // evidence shape before any strategy change is promoted.
 
-/** First `[bracket]` tag of an EXIT reasoning string, or "unknown" for legacy rows. */
+/**
+ * First `[bracket]` tag of an EXIT reasoning string, or the known untagged
+ * EXIT shape it opens with (several deterministic exits predate bracket
+ * tags — staging's first close recorded "High volatility ..." verbatim).
+ * "unknown" only when neither matches (genuinely unclassifiable rows).
+ */
 export function exitReasonTag(reason: string | null | undefined): string {
   if (reason == null) return "unknown";
   const match = reason.match(/\[([^\]]+)\]/);
-  return match?.[1] != null && match[1].length > 0 ? match[1] : "unknown";
+  if (match?.[1] != null && match[1].length > 0) return match[1];
+  for (const [prefix, tag] of UNTAGGED_EXIT_REASONS) {
+    if (reason.startsWith(prefix)) return tag;
+  }
+  return "unknown";
+}
+
+/** Untagged deterministic-EXIT reasoning prefixes, longest first. */
+const UNTAGGED_EXIT_REASONS: ReadonlyArray<readonly [string, string]> = [
+  ["High volatility", "volatility"],
+  ["Trailing stop", "trailing-stop"],
+  ["IL dominance", "il-dominance"],
+  ["TVL dropped", "tvl-drop"],
+  ["Volume authenticity", "volume-authenticity"],
+  ["Fee/IL ratio", "fee-il"],
+  ["Rotation:", "rotation"],
+];
+
+/** Entry evidence from an ENTER event's metadata JSON (ladder leg + pair id). */
+export interface EnterEvidence {
+  readonly cohort: string;
+  readonly pairId: string | null;
 }
 
 /** Split-vs-single cohort from an ENTER event's metadata JSON (ladder leg or single). */
 export function enterCohortLabel(metadataJson: string | null | undefined): string {
-  if (metadataJson == null) return "unknown";
+  return enterEvidenceFromMetadata(metadataJson).cohort;
+}
+
+/** Cohort + pair id from an ENTER event's metadata JSON ("unknown"/null on legacy rows). */
+export function enterEvidenceFromMetadata(metadataJson: string | null | undefined): EnterEvidence {
+  if (metadataJson == null) return { cohort: "unknown", pairId: null };
   try {
     // SAFETY: position-event metadata is written by the engine's ENTER path as a JSON object; the shape is re-validated below before use.
-    const metadata = JSON.parse(metadataJson) as { ladder?: unknown };
-    if (metadata.ladder === "tight" || metadata.ladder === "wide") return metadata.ladder;
-    return "single";
+    const metadata = JSON.parse(metadataJson) as { ladder?: unknown; pairId?: unknown };
+    const cohort =
+      metadata.ladder === "tight" || metadata.ladder === "wide" ? metadata.ladder : "single";
+    // SAFETY: the toString tag check establishes the asserted primitive type before this operation.
+    const pairId =
+      Object.prototype.toString.call(metadata.pairId) === "[object String]"
+        ? (metadata.pairId as string)
+        : null;
+    return { cohort, pairId };
   } catch {
-    return "unknown";
+    return { cohort: "unknown", pairId: null };
   }
 }
 
@@ -386,43 +423,70 @@ export function computeClosedTradeStats(
   };
 }
 
-/** Net expectancy per cohort (split-vs-single at equal capital: compare expectancyPct). */
-export function groupClosedTradeExpectancy(
-  positions: ReadonlyArray<PositionRecord>,
-  cohortByPositionId: ReadonlyMap<string, string>,
-): ReadonlyArray<{
-  readonly cohort: string;
-  readonly count: number;
+/**
+ * One closed-trade unit for the split-vs-single comparison: a ladder pair
+ * (tight+wide legs sharing a pairId — one $10+$10 split unit) or a lone
+ * position. Dollar averages mislead across sizes ($10 legs vs $20 singles),
+ * so every unit reports capital-normalized expectancyPct (net / deployed).
+ */
+export interface ClosedTradeUnit {
+  readonly unitId: string;
+  /** "split" for a paired tight+wide unit, else the leg cohort (or "unknown"). */
+  readonly kind: string;
+  readonly legs: number;
+  readonly deployedUsd: number;
   readonly netPnlUsd: number;
-  readonly expectancyUsd: number | null;
-  readonly winRatePct: number | null;
-}> {
-  const groups = new Map<string, PositionRecord[]>();
+  /** Net return on deployed capital, percent (null when undeployed). */
+  readonly expectancyPct: number | null;
+}
+
+/**
+ * Group closed positions into paired units (pairId from the ENTER event;
+ * legacy rows without one stand alone). Units with NULL realized (unpriced
+ * exits) contribute no PnL and do not dilute the denominator — same rule as
+ * computeClosedTradeStats.
+ */
+export function groupClosedTradeUnits(
+  positions: ReadonlyArray<PositionRecord>,
+  enterByPositionId: ReadonlyMap<string, EnterEvidence>,
+): ReadonlyArray<ClosedTradeUnit> {
+  const legsByUnit = new Map<string, PositionRecord[]>();
   for (const pos of positions) {
-    const cohort = cohortByPositionId.get(pos.positionId) ?? "unknown";
-    const group = groups.get(cohort) ?? [];
-    group.push(pos);
-    groups.set(cohort, group);
+    const key = enterByPositionId.get(pos.positionId)?.pairId ?? pos.positionId;
+    const legs = legsByUnit.get(key) ?? [];
+    legs.push(pos);
+    legsByUnit.set(key, legs);
   }
-  return [...groups.entries()]
-    .map(([cohort, group]) => {
-      const stats = computeClosedTradeStats(group);
-      return {
-        cohort,
-        count: stats.count,
-        netPnlUsd: stats.netPnlUsd,
-        expectancyUsd: stats.expectancyUsd,
-        winRatePct: stats.winRatePct,
-      };
-    })
-    .sort((a, b) => a.cohort.localeCompare(b.cohort));
+  const units: ClosedTradeUnit[] = [];
+  for (const [unitId, legs] of legsByUnit) {
+    const cohorts = new Set(
+      legs.map((leg) => enterByPositionId.get(leg.positionId)?.cohort ?? "unknown"),
+    );
+    const priced = legs.filter(
+      (leg): leg is PositionRecord & { realizedPnlUsd: number } =>
+        leg.realizedPnlUsd !== null && Number.isFinite(leg.realizedPnlUsd),
+    );
+    const deployedUsd = legs.reduce(
+      (sum, leg) => (Number.isFinite(leg.depositedUsd) ? sum + leg.depositedUsd : sum),
+      0,
+    );
+    const netPnlUsd = priced.reduce((sum, leg) => sum + leg.realizedPnlUsd, 0);
+    units.push({
+      unitId,
+      kind: legs.length > 1 ? "split" : ([...cohorts][0] ?? "unknown"),
+      legs: legs.length,
+      deployedUsd,
+      netPnlUsd,
+      expectancyPct: deployedUsd > 0 ? (netPnlUsd / deployedUsd) * 100 : null,
+    });
+  }
+  return units.sort((a, b) => a.unitId.localeCompare(b.unitId));
 }
 
 export interface HistoryEvidenceContext {
-  readonly cohortByPositionId?: ReadonlyMap<string, string>;
+  readonly enterByPositionId?: ReadonlyMap<string, EnterEvidence>;
   readonly exitReasonByPositionId?: ReadonlyMap<string, string>;
 }
-
 function formatStatsLine(stats: ClosedTradeStats): string {
   const winRate = stats.winRatePct != null ? `${stats.winRatePct.toFixed(1)}%` : "n/a";
   const expectancy = stats.expectancyUsd != null ? formatCurrency(stats.expectancyUsd) : "n/a";
@@ -469,10 +533,7 @@ function formatClosedPosition(pos: PositionRecord, evidence: HistoryEvidenceCont
     `    Pool:       ${pos.poolAddress}`,
     `    Position:   ${pos.positionId}`,
   ];
-  const cohort = evidence.cohortByPositionId?.get(pos.positionId);
-  if (cohort !== undefined) lines.push(`    Cohort:     ${cohort}`);
-  const exitReason = evidence.exitReasonByPositionId?.get(pos.positionId);
-  if (exitReason !== undefined) lines.push(`    Exit:       ${exitReason}`);
+  lines.push(...formatClosedPositionEvidence(pos, evidence));
   lines.push(
     `    Deposited:  ${formatCurrency(pos.depositedUsd)}`,
     `    Exit Value: ${formatCurrency(pos.currentValueUsd)}`,
@@ -489,7 +550,7 @@ function formatClosedPosition(pos: PositionRecord, evidence: HistoryEvidenceCont
   return lines;
 }
 
-/** Evidence tail: overall stats plus cohort and exit-reason breakdowns. */
+/** Evidence tail: overall stats plus unit and exit-reason breakdowns. */
 function formatEvidenceTail(
   positions: ReadonlyArray<PositionRecord>,
   evidence: HistoryEvidenceContext,
@@ -497,10 +558,11 @@ function formatEvidenceTail(
   const lines = [
     `  ${formatStatsLine(computeClosedTradeStats(positions)).replaceAll("\n", "\n  ")}`,
   ];
-  if (evidence.cohortByPositionId !== undefined) {
-    lines.push("  By cohort (split-vs-single: compare expectancy at equal capital)");
-    for (const group of groupClosedTradeExpectancy(positions, evidence.cohortByPositionId)) {
-      lines.push(`    ${formatCohortLine(group)}`);
+
+  if (evidence.enterByPositionId !== undefined) {
+    lines.push("  By unit (split-vs-single at equal capital: compare expectancy %)");
+    for (const unit of groupClosedTradeUnits(positions, evidence.enterByPositionId)) {
+      lines.push(`    ${formatUnitLine(unit)}`);
     }
   }
   if (evidence.exitReasonByPositionId !== undefined) {
@@ -508,18 +570,28 @@ function formatEvidenceTail(
   }
   return lines;
 }
+/** Cohort/pair/exit-reason evidence lines for one closed position. */
+function formatClosedPositionEvidence(
+  pos: PositionRecord,
+  evidence: HistoryEvidenceContext,
+): string[] {
+  const lines: string[] = [];
+  const enter = evidence.enterByPositionId?.get(pos.positionId);
+  if (enter !== undefined) {
+    lines.push(`    Cohort:     ${enter.cohort}`);
+    if (enter.pairId !== null && enter.pairId !== pos.positionId) {
+      lines.push(`    Pair:       ${enter.pairId}`);
+    }
+  }
+  const exitReason = evidence.exitReasonByPositionId?.get(pos.positionId);
+  if (exitReason !== undefined) lines.push(`    Exit:       ${exitReason}`);
+  return lines;
+}
 
-/** One cohort summary line (count, net, expectancy, win rate). */
-function formatCohortLine(group: {
-  readonly cohort: string;
-  readonly count: number;
-  readonly netPnlUsd: number;
-  readonly expectancyUsd: number | null;
-  readonly winRatePct: number | null;
-}): string {
-  const winRate = group.winRatePct != null ? `${group.winRatePct.toFixed(1)}%` : "n/a";
-  const expectancy = group.expectancyUsd != null ? formatCurrency(group.expectancyUsd) : "n/a";
-  return `${group.cohort}: n=${group.count}, net ${formatCurrency(group.netPnlUsd)}, expectancy ${expectancy}, win rate ${winRate}`;
+/** One unit summary line (legs, deployed, net, capital-normalized expectancy). */
+function formatUnitLine(unit: ClosedTradeUnit): string {
+  const expectancy = unit.expectancyPct != null ? `${unit.expectancyPct.toFixed(2)}%` : "n/a";
+  return `${unit.kind}: legs=${unit.legs}, deployed ${formatCurrency(unit.deployedUsd)}, net ${formatCurrency(unit.netPnlUsd)}, expectancy ${expectancy}`;
 }
 
 /** Exit-reason breakdown lines (net per reason tag, alphabetical). */
@@ -561,13 +633,7 @@ export interface HistoryJsonOutput {
   }>;
   summary: PortfolioSummary;
   stats: ClosedTradeStats;
-  cohorts?: ReadonlyArray<{
-    readonly cohort: string;
-    readonly count: number;
-    readonly netPnlUsd: number;
-    readonly expectancyUsd: number | null;
-    readonly winRatePct: number | null;
-  }>;
+  units?: ReadonlyArray<ClosedTradeUnit>;
 }
 
 export function toHistoryJsonOutput(
@@ -579,8 +645,8 @@ export function toHistoryJsonOutput(
     summary: computeSummary(positions),
     stats: computeClosedTradeStats(positions),
   };
-  if (evidence.cohortByPositionId !== undefined) {
-    output.cohorts = groupClosedTradeExpectancy(positions, evidence.cohortByPositionId);
+  if (evidence.enterByPositionId !== undefined) {
+    output.units = groupClosedTradeUnits(positions, evidence.enterByPositionId);
   }
   return output;
 }
@@ -604,8 +670,8 @@ function historyPositionRow(
     closedAt: pos.closedAt,
     paperExitedAt: pos.paperExitedAt,
   };
-  const cohort = evidence.cohortByPositionId?.get(pos.positionId);
-  if (cohort !== undefined) row.cohort = cohort;
+  const enter = evidence.enterByPositionId?.get(pos.positionId);
+  if (enter !== undefined) row.cohort = enter.cohort;
   const exitReason = evidence.exitReasonByPositionId?.get(pos.positionId);
   if (exitReason !== undefined) row.exitReason = exitReason;
   return row;
@@ -789,7 +855,7 @@ function readHistoryEvidence(
   positions: ReadonlyArray<PositionRecord>,
 ): Effect.Effect<HistoryEvidenceContext, never, never> {
   return Effect.gen(function* () {
-    const cohortByPositionId = new Map<string, string>();
+    const enterByPositionId = new Map<string, EnterEvidence>();
     const exitReasonByPositionId = new Map<string, string>();
     for (const poolAddress of new Set(positions.map((p) => p.poolAddress))) {
       const events = yield* db
@@ -797,15 +863,15 @@ function readHistoryEvidence(
         .pipe(Effect.catch(() => Effect.succeed([])));
       for (const e of events) {
         if (e.positionId == null) continue;
-        if (e.event === "ENTER" && !cohortByPositionId.has(e.positionId)) {
-          cohortByPositionId.set(e.positionId, enterCohortLabel(e.metadata));
+        if (e.event === "ENTER" && !enterByPositionId.has(e.positionId)) {
+          enterByPositionId.set(e.positionId, enterEvidenceFromMetadata(e.metadata));
         }
         if (e.event === "EXIT" && !exitReasonByPositionId.has(e.positionId)) {
           exitReasonByPositionId.set(e.positionId, exitReasonFromMetadata(e.metadata));
         }
       }
     }
-    return { cohortByPositionId, exitReasonByPositionId };
+    return { enterByPositionId, exitReasonByPositionId };
   });
 }
 

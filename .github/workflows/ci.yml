@@ -18,7 +18,7 @@ permissions:
 # every setup-bun and manifest step below references these. The repository's
 # bunfig.toml enables Bun 1.4's isolated linker and shared global store.
 env:
-  BUN_VERSION: 1.4.0
+  BUN_VERSION: 1.4.2
   R2_PUBLIC_URL: https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev
 
 jobs:

@@ -157,4 +157,35 @@ describe("paperClmmMarkUsd", () => {
     expect(paperClmmMarkUsd({ ...base, anchorBinId: 4900 })).toBeNull();
     expect(paperClmmMarkUsd({ ...base, anchorBinId: 5100 })).toBeNull();
   });
+
+  it("prefers the valuation anchor over the entry anchor when stamped", () => {
+    // Rebalanced at 165 with value 900: the mark prices the 900 forward
+    // from 165, not the original 1000 from 150.
+    const mark = paperClmmMarkUsd({
+      ...base,
+      currentPrice: 165,
+      valuationAnchorPriceUsd: 165,
+      valuationAnchorBinId: 5000,
+      valuationAnchorValueUsd: 900,
+    });
+    expect(mark).toBeCloseTo(900, 6);
+  });
+
+  it("stays continuous across a re-centered range (no fabrication jump)", () => {
+    // Entry 1000 @150 (range 4980-5020); price 150 → 142, mark ~947;
+    // rebalance re-centers to 4960-5000 and re-stamps the anchor at the
+    // live print: the mark equals the anchor value exactly — no $332 jump.
+    const before = paperClmmMarkUsd({ ...base, currentPrice: 142 });
+    expect(before).not.toBeNull();
+    const after = paperClmmMarkUsd({
+      ...base,
+      currentPrice: 142,
+      lowerBinId: 4960,
+      upperBinId: 5000,
+      valuationAnchorPriceUsd: 142,
+      valuationAnchorBinId: 4980,
+      valuationAnchorValueUsd: before!,
+    });
+    expect(after).toBeCloseTo(before!, 6);
+  });
 });

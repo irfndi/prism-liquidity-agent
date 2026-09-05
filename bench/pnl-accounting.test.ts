@@ -24,6 +24,7 @@ import {
   computePositionAnalytics,
   computeRealizedPnlUsd,
   computeTimeInRangePct,
+  paperClmmMarkUsd,
 } from "../engine/pnl.js";
 import { makePosition } from "./helpers.js";
 
@@ -376,6 +377,150 @@ describe("migration v16 — pnl_accounting", () => {
     expect(row!.realized_pnl_usd).toBeNull();
     db.close();
   });
+
+  it("migration v25 adds valuation anchor columns; legacy rows read NULL and round-trip", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "prism-anchor-migration-"));
+    tmpDirs.push(dir);
+    const dbPath = join(dir, "old.db");
+
+    // Pre-v16 database (same hand-built shape as the v16 test): migrations
+    // 16..25 replay naturally, including v25's anchor columns.
+    const old = new Database(dbPath);
+    old.exec(`
+      CREATE TABLE positions (
+        pool_address TEXT PRIMARY KEY,
+        position_pubkey TEXT,
+        deposited_usd REAL,
+        current_value_usd REAL,
+        token_x_symbol TEXT,
+        token_y_symbol TEXT,
+        active_bin_id INTEGER,
+        lower_bin_id INTEGER,
+        upper_bin_id INTEGER,
+        timestamp INTEGER,
+        out_of_range_since INTEGER,
+        oor_cycle_count INTEGER DEFAULT 0,
+        last_fee_claim_at INTEGER DEFAULT 0,
+        last_rebalance_at INTEGER DEFAULT 0,
+        trailing_stop_threshold REAL,
+        highest_value_usd REAL,
+        paper_exited_at INTEGER,
+        entry_signal_timestamp INTEGER,
+        entry_signal_snapshot_id INTEGER
+      );
+    `);
+    old.exec(`
+      CREATE TABLE _migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at INTEGER NOT NULL
+      );
+    `);
+    for (let v = 1; v <= 15; v++) {
+      old.run("INSERT INTO _migrations (version, name, applied_at) VALUES (?, ?, ?)", [
+        v,
+        `legacy_v${v}`,
+        Date.now(),
+      ]);
+    }
+    old.run(
+      `INSERT INTO positions (
+        pool_address, position_pubkey, deposited_usd, current_value_usd,
+        token_x_symbol, token_y_symbol, active_bin_id, lower_bin_id, upper_bin_id,
+        timestamp, out_of_range_since, oor_cycle_count, last_fee_claim_at,
+        last_rebalance_at, trailing_stop_threshold, highest_value_usd,
+        paper_exited_at, entry_signal_timestamp, entry_signal_snapshot_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "LegacyPool111",
+        null,
+        1000,
+        1000,
+        "SOL",
+        "USDC",
+        5000,
+        4980,
+        5020,
+        1700000000000,
+        null,
+        0,
+        0,
+        0,
+        null,
+        1000,
+        null,
+        null,
+        null,
+      ],
+    );
+    old.close();
+
+    // Opening via createDatabase must run migrations 16..25.
+    const db = createDatabase(dbPath);
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
+    const columns = (db.query("PRAGMA table_info(positions)").all() as Array<{ name: string }>).map(
+      (r) => r.name,
+    );
+    for (const col of [
+      "valuation_anchor_price_usd",
+      "valuation_anchor_bin_id",
+      "valuation_anchor_value_usd",
+    ]) {
+      expect(columns).toContain(col);
+    }
+    db.close();
+
+    // Legacy row reads NULL anchors (entry-anchor fallback) and a stamped
+    // savePosition round-trips the anchor (validates the 36 placeholders).
+    // Note: v18 re-keys legacy paper rows to `paper-<pool>` synthetic ids.
+    const layer = DbLive(dbPath);
+    const result = await runDb(
+      Effect.gen(function* () {
+        const svc = yield* DbService;
+        const legacy = yield* svc.getPosition("paper-LegacyPool111");
+        yield* svc.savePosition({
+          positionId: "paper-anchored",
+          poolAddress: "pool1",
+          positionPubKey: null,
+          depositedUsd: 1000,
+          currentValueUsd: 1000,
+          tokenXSymbol: "SOL",
+          tokenYSymbol: "USDC",
+          activeBinId: 5000,
+          lowerBinId: 4980,
+          upperBinId: 5020,
+          timestamp: Date.now(),
+          outOfRangeSince: null,
+          oorCycleCount: 0,
+          lastFeeClaimAt: 0,
+          trailingStopThreshold: null,
+          highestValueUsd: null,
+          lastRebalanceAt: 0,
+          paperExitedAt: null,
+          entrySignalTimestamp: null,
+          entrySignalSnapshotId: null,
+          entryPriceUsd: 100,
+          entryAmountXUsd: 500,
+          entryAmountYUsd: 500,
+          cumulativeFeesClaimedUsd: 0,
+          cumulativeRewardsClaimedUsd: 0,
+          closedAt: null,
+          realizedPnlUsd: null,
+          valuationAnchorPriceUsd: 100,
+          valuationAnchorBinId: 5000,
+          valuationAnchorValueUsd: 1000,
+        });
+        return { legacy, reread: yield* svc.getPosition("paper-anchored") };
+      }),
+      layer,
+    );
+    expect(result.legacy?.valuationAnchorPriceUsd).toBeNull();
+    expect(result.legacy?.valuationAnchorBinId).toBeNull();
+    expect(result.legacy?.valuationAnchorValueUsd).toBeNull();
+    expect(result.reread?.valuationAnchorPriceUsd).toBe(100);
+    expect(result.reread?.valuationAnchorBinId).toBe(5000);
+    expect(result.reread?.valuationAnchorValueUsd).toBe(1000);
+  });
 });
 
 // ─── DB record keeping ───────────────────────────────────────────────────────
@@ -552,6 +697,10 @@ describe("paper lifecycle PnL accounting", () => {
     expect(outcome.pos!.entryPriceUsd).toBe(100);
     expect(outcome.pos!.entryAmountXUsd).toBeCloseTo(500, 8);
     expect(outcome.pos!.entryAmountYUsd).toBeCloseTo(500, 8);
+    // CLMM valuation anchor seeds from the entry print (price, bin, value).
+    expect(outcome.pos!.valuationAnchorPriceUsd).toBe(100);
+    expect(outcome.pos!.valuationAnchorBinId).toBe(5000);
+    expect(outcome.pos!.valuationAnchorValueUsd).toBe(1000);
     expect(outcome.pos!.cumulativeFeesClaimedUsd).toBe(0);
     expect(outcome.pos!.closedAt).toBeNull();
     expect(outcome.pos!.realizedPnlUsd).toBeNull();
@@ -625,8 +774,10 @@ describe("paper lifecycle PnL accounting", () => {
     expect(outcome.closed).toHaveLength(1);
 
     const closed = outcome.closed[0]!;
-    // realized = final value 1100 + fees 25 − basis 1000 = 125
-    expect(closed.realizedPnlUsd).toBeCloseTo(125, 8);
+    // Net realized = gross (1100 + 25 − 1000 = 125) minus modeled lifetime
+    // costs: round trip 2×0.005×1000 + 2×0.005 = 10.01, harvest ~0 (seconds
+    // old), conversion 0.05×25 = 1.25 → 125 − 11.26 = 113.74.
+    expect(closed.realizedPnlUsd).toBeCloseTo(113.74, 2);
     expect(closed.closedAt).not.toBeNull();
 
     expect(outcome.events.map((e) => e.event)).toEqual(["ENTER", "CLAIM", "EXIT"]);
@@ -652,6 +803,83 @@ describe("paper lifecycle PnL accounting", () => {
     );
     expect(analytics.hodlValueUsd).toBeCloseTo(1050, 6);
     expect(analytics.ilVsHodlUsd).toBeCloseTo(50, 6);
+  });
+
+  it("REBALANCE re-stamps the valuation anchor: no fabricated mark jump", async () => {
+    // The P1 fabrication: re-centering the range kept the entry anchor, so
+    // the CLMM math re-priced the original deposit across new bins (a $332
+    // jump on a $1000 position with no price move). Re-stamping the anchor
+    // at the live print keeps the mark continuous.
+    const layer = DbLive(":memory:");
+    const trackedPositions = new Map<string, PositionRecord>();
+    const entryPool = {
+      activeBinId: 5000,
+      binStep: 10,
+      tokenXSymbol: "SOL",
+      tokenYSymbol: "USDC",
+      currentPrice: 100,
+    };
+
+    const outcome = await runDb(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        yield* executePaper(
+          { db, trackedPositions, strategy: paperStrategy, entryStrategySpec: "spot" },
+          {
+            action: "ENTER",
+            poolAddress: "pool1",
+            confidence: 0.8,
+            reasoning: "test entry",
+            positionSizeUsd: 1000,
+          },
+          entryPool,
+        );
+        const pos = [...trackedPositions.values()][0]!;
+        // Price drifts 100 → 110 with the old range; mark moves with it.
+        pos.currentValueUsd = 1050;
+        yield* db.savePosition(pos);
+        const rebalanced = yield* executePaper(
+          { db, trackedPositions, strategy: paperStrategy, entryStrategySpec: "spot" },
+          {
+            action: "REBALANCE",
+            poolAddress: "pool1",
+            confidence: 0.8,
+            reasoning: "test rebalance",
+            rebalanceParams: { newLowerBinId: 4990, newUpperBinId: 5030, slippageBps: 50 },
+          },
+          { ...entryPool, activeBinId: 5010, currentPrice: 110 },
+        );
+        const updated = yield* db.getPosition(pos.positionId);
+        return { rebalanced, updated };
+      }),
+      layer,
+    );
+
+    expect(outcome.rebalanced.executed).toBe(true);
+    expect(outcome.updated).not.toBeNull();
+    // Anchor re-stamped at the live print; entry economics untouched.
+    expect(outcome.updated!.valuationAnchorPriceUsd).toBe(110);
+    expect(outcome.updated!.valuationAnchorBinId).toBe(5010);
+    expect(outcome.updated!.valuationAnchorValueUsd).toBe(1050);
+    expect(outcome.updated!.entryPriceUsd).toBe(100);
+    expect(outcome.updated!.depositedUsd).toBe(1000);
+    expect(outcome.updated!.lowerBinId).toBe(4990);
+    expect(outcome.updated!.upperBinId).toBe(5030);
+    // Mark at the anchor print equals the anchor value: continuous, no jump.
+    expect(
+      paperClmmMarkUsd({
+        depositedUsd: outcome.updated!.depositedUsd,
+        entryPriceUsd: outcome.updated!.entryPriceUsd,
+        anchorBinId: outcome.updated!.activeBinId,
+        currentPrice: 110,
+        lowerBinId: outcome.updated!.lowerBinId,
+        upperBinId: outcome.updated!.upperBinId,
+        binStep: 10,
+        valuationAnchorPriceUsd: outcome.updated!.valuationAnchorPriceUsd,
+        valuationAnchorBinId: outcome.updated!.valuationAnchorBinId,
+        valuationAnchorValueUsd: outcome.updated!.valuationAnchorValueUsd,
+      }),
+    ).toBeCloseTo(1050, 6);
   });
 });
 
@@ -1261,16 +1489,11 @@ describe("computePaperFeeAccrualUsd", () => {
     expect(wide).toBeGreaterThan(0);
   });
 
-  it("applies conversion and harvest costs (floored at zero, never negative)", () => {
+  it("accrues gross fees: costs debit once at close, never netted per cycle", () => {
+    // Per-cycle netting let floored costs disappear; the close-time model
+    // (paperCloseCostsUsd) prices the full load instead. Accrual stays gross.
     const gross = computePaperFeeAccrualUsd({ ...base });
-    const net = computePaperFeeAccrualUsd({
-      ...base,
-      conversionCostPct: 0.05,
-      harvestCostUsd: 0.01,
-    });
-    expect(net).toBeLessThan(gross);
-    expect(net).toBeGreaterThanOrEqual(0);
-    const wiped = computePaperFeeAccrualUsd({ ...base, depositedUsd: 1, harvestCostUsd: 10_000 });
-    expect(wiped).toBe(0);
+    expect(gross).toBeGreaterThan(0);
+    expect(gross).toBeCloseTo(300 * 0.008 * (600_000 / 86_400_000), 12);
   });
 });

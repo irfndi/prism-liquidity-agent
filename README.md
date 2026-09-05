@@ -82,7 +82,7 @@ bun install
 bun run dev          # during development; uses the local source, no wrapper needed
 ```
 
-Development requires Bun 1.4.0. The checked-in `bunfig.toml` files use Bun's
+Development requires Bun 1.4.2. The checked-in `bunfig.toml` files use Bun's
 isolated linker and shared global virtual store, reducing duplicated dependency
 materialization across the root, Cloudflare workspace, and worktrees.
 
@@ -332,7 +332,7 @@ HOLD executes nothing, so it skips risk evaluation entirely. Deterministic EXIT 
 
 ## Stack
 
-- **Runtime**: Bun 1.4.0
+- **Runtime**: Bun 1.4.2
 - **Strategy**: Rule-based engine with DLMM probes
 - **Memory**: SQLite + sqlite-vec, 30-day recency decay
 - **On-chain**: `@meteora-ag/dlmm` SDK, Helius RPC

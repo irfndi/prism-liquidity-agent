@@ -444,14 +444,17 @@ export interface ExpectedProfitParams {
  * Expected net USD over the intended holding period: concentrated gross fees
  * (net of churn/IL/harvest via netFeeVelocityUsdWithCosts) minus one full
  * round trip (two swaps on the full size + two txs). Null on invalid inputs
- * (non-positive fees/size/holding, non-finite costs) — unknown, never zero
- * masquerading as breakeven. A positive result means estimated fees cover
- * entry/exit costs with room to spare; zero or negative rejects the ENTER.
+ * (missing/non-finite/negative fees, non-positive size/holding, non-finite
+ * costs) — unknown, never zero masquerading as breakeven. A MEASURED zero
+ * fee print is valid input, not missing data: with no income the round trip
+ * cannot be covered, so it prices negative and rejects the ENTER. A positive
+ * result means estimated fees cover entry/exit costs with room to spare.
  */
 export function expectedNetProfitUsd(params: ExpectedProfitParams): number | null {
   const { dailyFeesUsd, positionSizeUsd, holdingDays, swapCostPct, txCostUsd } = params;
   if (
-    !finitePositive(dailyFeesUsd) ||
+    !Number.isFinite(dailyFeesUsd) ||
+    dailyFeesUsd < 0 ||
     !finitePositive(positionSizeUsd) ||
     !finitePositive(holdingDays) ||
     !Number.isFinite(swapCostPct) ||
@@ -473,4 +476,47 @@ export function expectedNetProfitUsd(params: ExpectedProfitParams): number | nul
   });
   const roundTrip = 2 * clamp01(swapCostPct) * positionSizeUsd + 2 * Math.max(txCostUsd, 0);
   return velocity * positionSizeUsd * holdingDays - roundTrip;
+}
+
+export interface PaperCloseCostsParams {
+  /** Deployed position size, USD (round-trip swaps scale with it). */
+  readonly positionSizeUsd: number;
+  /** Position age, in days (harvest cost accrues with time held). */
+  readonly ageDays: number;
+  /** Lifetime gross fees accrued (conversion cost scales with it). */
+  readonly cumulativeGrossFeesUsd: number;
+  /** Per-swap cost as a fraction (0.005 = 0.5%). */
+  readonly swapCostPct: number;
+  /** Daily harvest (claim) cost, USD. */
+  readonly harvestCostUsd: number;
+  /** Conversion haircut as a fraction (0.05 = 5%). */
+  readonly conversionCostPct: number;
+  /** Per-transaction gas cost, USD (entry + exit = 2 txs). */
+  readonly txCostUsd: number;
+}
+
+/**
+ * Modeled lifetime costs debited from paper realized PnL at close: one full
+ * round trip (two swaps on the full size + two txs) plus harvest cost over
+ * the holding period plus conversion on gross fees. Unlike the per-cycle
+ * accrual floor, nothing disappears here — costs that exceeded fee income
+ * still debit, so thin positions can realize below their gross. Floored at
+ * 0; 0 on non-positive size (unmeasurable, never negative costs).
+ */
+export function paperCloseCostsUsd(params: PaperCloseCostsParams): number {
+  if (!finitePositive(params.positionSizeUsd)) return 0;
+  const swap = Number.isFinite(params.swapCostPct) ? clamp01(params.swapCostPct) : 0;
+  const tx = Number.isFinite(params.txCostUsd) ? Math.max(params.txCostUsd, 0) : 0;
+  const harvestRate = Number.isFinite(params.harvestCostUsd)
+    ? Math.max(params.harvestCostUsd, 0)
+    : 0;
+  const conversion = Number.isFinite(params.conversionCostPct)
+    ? clamp01(params.conversionCostPct)
+    : 0;
+  const ageDays = Number.isFinite(params.ageDays) ? Math.max(params.ageDays, 0) : 0;
+  const grossFees = Number.isFinite(params.cumulativeGrossFeesUsd)
+    ? Math.max(params.cumulativeGrossFeesUsd, 0)
+    : 0;
+  const roundTrip = 2 * swap * params.positionSizeUsd + 2 * tx;
+  return Math.max(roundTrip + harvestRate * ageDays + conversion * grossFees, 0);
 }

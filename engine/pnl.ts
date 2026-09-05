@@ -405,13 +405,18 @@ export function clmmPositionValue(args: {
 }
 
 /**
- * Paper position mark: the CLMM LP value for a position whose entry anchor is
- * known, or null when it is not (pre-v16 rows with NULL entry fields, unknown
- * binStep). Null means "keep the caller's fallback" — never fabricate.
- * Paper positions have no on-chain account, so without this their mark is the
- * HODL revaluation and out-of-range IL never appears in unrealized PnL.
- * The 50/50-at-anchor derivation only prices ranges containing the anchor:
- * an anchor outside [lower, upper] is a single-sided entry shape (e.g. a
+ * Paper position mark: the CLMM LP value for a position whose valuation
+ * anchor is known, or null when it is not (pre-v16 rows with NULL entry
+ * fields, unknown binStep). Null means "keep the caller's fallback" — never
+ * fabricate. Paper positions have no on-chain account, so without this their
+ * mark is the HODL revaluation and out-of-range IL never appears in
+ * unrealized PnL.
+ * The anchor tracks the last range-establishing event: ENTER seeds it from
+ * the entry print, REBALANCE re-stamps it at the live print — re-centering a
+ * range without re-stamping would re-price the original deposit across new
+ * bins and fabricate P&L. Rows predating the anchor fall back to the entry
+ * anchor. The 50/50-at-anchor derivation only prices ranges containing the
+ * anchor: an anchor outside [lower, upper] is a single-sided shape (e.g. a
  * dip-anchored leg) that needs its own deposit model — fail open to HODL
  * rather than price it with the wrong shape.
  */
@@ -423,15 +428,30 @@ export interface PaperClmmMarkInput {
   readonly lowerBinId: number;
   readonly upperBinId: number;
   readonly binStep: number;
+  /** Last range-establishing print (ENTER, or REBALANCE); absent → entry anchor. */
+  readonly valuationAnchorPriceUsd?: number | null | undefined;
+  readonly valuationAnchorBinId?: number | null | undefined;
+  readonly valuationAnchorValueUsd?: number | null | undefined;
 }
 export function paperClmmMarkUsd(args: PaperClmmMarkInput): number | null {
-  const entryPriceUsd = args.entryPriceUsd;
-  const anchorBinId = args.anchorBinId;
-  if (entryPriceUsd == null || anchorBinId == null) return null;
-  if (!hasClmmEntryAnchor(args) || !isClmmMarketPriced(args)) return null;
+  const anchorPriceUsd = args.valuationAnchorPriceUsd ?? args.entryPriceUsd;
+  const anchorBinId = args.valuationAnchorBinId ?? args.anchorBinId;
+  const anchorValueUsd = args.valuationAnchorValueUsd ?? args.depositedUsd;
+  if (anchorPriceUsd == null || anchorBinId == null) return null;
+  if (
+    !hasClmmEntryAnchor({
+      entryPriceUsd: anchorPriceUsd,
+      anchorBinId,
+      lowerBinId: args.lowerBinId,
+      upperBinId: args.upperBinId,
+    }) ||
+    !isClmmMarketPriced({ ...args, depositedUsd: anchorValueUsd })
+  ) {
+    return null;
+  }
   const { lpValueUsd } = clmmPositionValue({
-    sizeUsd: args.depositedUsd,
-    anchorPrice: entryPriceUsd,
+    sizeUsd: anchorValueUsd,
+    anchorPrice: anchorPriceUsd,
     anchorBinId,
     currentPrice: args.currentPrice,
     lowerBinId: args.lowerBinId,

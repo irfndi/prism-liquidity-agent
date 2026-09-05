@@ -2,7 +2,7 @@
   "name": "@prism-liquidity-agent/cloudflare",
   "version": "1.0.0",
   "description": "Cloudflare Workers for Prism DLMM platform",
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "workspaces": [
     "infra"
   ],

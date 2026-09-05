@@ -938,6 +938,9 @@ export interface DbApi {
     /** Runner scale-in state; optional so legacy callers compile. */
     launchRunnerSteps?: number | null;
     launchRunnerAnchorPrice?: number | null;
+    valuationAnchorPriceUsd?: number | null;
+    valuationAnchorBinId?: number | null;
+    valuationAnchorValueUsd?: number | null;
   }) => Effect.Effect<void, Error>;
   readonly getPosition: (positionId: string) => Effect.Effect<
     {
@@ -974,6 +977,9 @@ export interface DbApi {
       launchRunner?: boolean | null;
       launchRunnerSteps?: number | null;
       launchRunnerAnchorPrice?: number | null;
+      valuationAnchorPriceUsd?: number | null;
+      valuationAnchorBinId?: number | null;
+      valuationAnchorValueUsd?: number | null;
     } | null,
     Error
   >;
@@ -1012,6 +1018,9 @@ export interface DbApi {
       launchRunner?: boolean | null;
       launchRunnerSteps?: number | null;
       launchRunnerAnchorPrice?: number | null;
+      valuationAnchorPriceUsd?: number | null;
+      valuationAnchorBinId?: number | null;
+      valuationAnchorValueUsd?: number | null;
     }>,
     Error
   >;
@@ -1050,6 +1059,9 @@ export interface DbApi {
       launchRunner?: boolean | null;
       launchRunnerSteps?: number | null;
       launchRunnerAnchorPrice?: number | null;
+      valuationAnchorPriceUsd?: number | null;
+      valuationAnchorBinId?: number | null;
+      valuationAnchorValueUsd?: number | null;
     }>,
     Error
   >;
@@ -1101,6 +1113,9 @@ export interface DbApi {
       launchRunner?: boolean | null;
       launchRunnerSteps?: number | null;
       launchRunnerAnchorPrice?: number | null;
+      valuationAnchorPriceUsd?: number | null;
+      valuationAnchorBinId?: number | null;
+      valuationAnchorValueUsd?: number | null;
     }>,
     Error
   >;

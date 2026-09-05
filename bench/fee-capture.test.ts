@@ -4,6 +4,7 @@ import {
   bandWidthPctFromBins,
   expectedIlCapturedPerExitUsd,
   expectedNetProfitUsd,
+  paperCloseCostsUsd,
   expectedOorExitsPerDay,
   FEE_CAPTURE_REFERENCE_SPAN_PCT,
   netFeeVelocityUsd,
@@ -569,9 +570,43 @@ describe("expectedNetProfitUsd", () => {
   });
 
   it("returns null (unknown) on invalid inputs — never a fabricated zero", () => {
-    expect(expectedNetProfitUsd({ ...base, dailyFeesUsd: 0 })).toBeNull();
+    expect(expectedNetProfitUsd({ ...base, dailyFeesUsd: -1 })).toBeNull();
+    expect(expectedNetProfitUsd({ ...base, dailyFeesUsd: Number.NaN })).toBeNull();
     expect(expectedNetProfitUsd({ ...base, positionSizeUsd: 0 })).toBeNull();
     expect(expectedNetProfitUsd({ ...base, holdingDays: 0 })).toBeNull();
     expect(expectedNetProfitUsd({ ...base, swapCostPct: Number.NaN })).toBeNull();
+  });
+
+  it("prices a measured zero as negative (round trip uncovered) — rejects", () => {
+    expect(expectedNetProfitUsd({ ...base, dailyFeesUsd: 0 })).toBeLessThan(0);
+  });
+});
+
+describe("paperCloseCostsUsd", () => {
+  const base = {
+    positionSizeUsd: 1000,
+    ageDays: 2,
+    cumulativeGrossFeesUsd: 25,
+    swapCostPct: 0.005,
+    harvestCostUsd: 0.01,
+    conversionCostPct: 0.05,
+    txCostUsd: 0.005,
+  };
+
+  it("sums round trip, harvest over age, and conversion on gross fees", () => {
+    // 2×0.005×1000 + 2×0.005 = 10.01 round trip; 0.01×2 harvest; 0.05×25 conversion.
+    expect(paperCloseCostsUsd(base)).toBeCloseTo(10.01 + 0.02 + 1.25, 10);
+  });
+
+  it("charges the full load even when fees are zero (nothing disappears)", () => {
+    expect(paperCloseCostsUsd({ ...base, cumulativeGrossFeesUsd: 0, ageDays: 0 })).toBeCloseTo(
+      10.01,
+      10,
+    );
+  });
+
+  it("floors at zero and fails closed on unmeasurable size", () => {
+    expect(paperCloseCostsUsd({ ...base, positionSizeUsd: 0 })).toBe(0);
+    expect(paperCloseCostsUsd({ ...base, positionSizeUsd: -5 })).toBe(0);
   });
 });

@@ -62,6 +62,7 @@ import {
 import {
   activeShareEstimate,
   expectedNetProfitUsd,
+  paperCloseCostsUsd,
   runnerNetAprPct,
   runnerNetDailyPctAfterCosts,
   stableDailyFeesUsd,
@@ -603,8 +604,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * a lump of fees into a single cycle. `inRange` is a binary gate (active bin
  * inside [lower, upper]), not a partial weight. Time out of range accrues
  * nothing; the separate churn/IL cost belongs to the position mark, not here.
- * Conversion/harvest costs are amortized over the same window and the result
- * is floored at 0 — costs can erase a thin accrual, never invert it.
+ * Gross by design: conversion/harvest/round-trip costs are debited ONCE at
+ * close (paperCloseCostsUsd) so floored per-cycle netting can never make
+ * excess costs disappear — reported expectancy prices the full cost load.
  */
 export function computePaperFeeAccrualUsd(input: {
   readonly fees24hUsd: number | null | undefined;
@@ -620,10 +622,6 @@ export function computePaperFeeAccrualUsd(input: {
   readonly rangeHalfWidthBins?: number | undefined;
   /** DLMM bin step in basis points. Absent → flat TVL slice (legacy). */
   readonly binStep?: number | undefined;
-  /** Swap/conversion haircut as a fraction (0.05 = 5%). Absent → 0. */
-  readonly conversionCostPct?: number | undefined;
-  /** Daily harvest (claim) cost, USD. Absent → 0. Amortized by dt/DAY. */
-  readonly harvestCostUsd?: number | undefined;
 }): number {
   const fees24hUsd = input.fees24hUsd;
   if (
@@ -639,9 +637,7 @@ export function computePaperFeeAccrualUsd(input: {
   if (!(windowMs > 0)) return 0;
   const share = resolvePaperFeeShare(input);
   if (!(share > 0)) return 0;
-  const windowDays = windowMs / DAY_MS;
-  const gross = fees24hUsd * share * windowDays;
-  return applyPaperFeeCosts(gross, input.conversionCostPct, input.harvestCostUsd, windowDays);
+  return fees24hUsd * share * (windowMs / DAY_MS);
 }
 
 /** Accrual window: one scan interval on the first cycle, capped at 2× after (0 when invalid). */
@@ -679,24 +675,6 @@ function resolvePaperFeeShare(input: {
     });
   }
   return Math.min(input.depositedUsd / input.tvlUsd, 1);
-}
-
-/** Net a gross accrual of conversion/harvest costs over the same window (floored at 0). */
-function applyPaperFeeCosts(
-  gross: number,
-  conversionCostPct: number | null | undefined,
-  harvestCostUsd: number | null | undefined,
-  windowDays: number,
-): number {
-  const conversion =
-    conversionCostPct != null && Number.isFinite(conversionCostPct)
-      ? Math.min(Math.max(conversionCostPct, 0), 1)
-      : 0;
-  const harvest =
-    harvestCostUsd != null && Number.isFinite(harvestCostUsd)
-      ? Math.max(harvestCostUsd, 0) * windowDays
-      : 0;
-  return Math.max(gross * (1 - conversion) - harvest, 0);
 }
 
 export interface RebalanceBenefitEstimate {
@@ -1447,6 +1425,12 @@ function makePaperPositionRecord(input: PaperPositionInput): PositionRecord {
     launchRunner: runnerSeed.runner,
     launchRunnerSteps: runnerSeed.steps,
     launchRunnerAnchorPrice: runnerSeed.anchorPrice,
+    // CLMM valuation anchor starts at the entry print: price, bin and value.
+    // REBALANCE re-stamps it (executePaperRebalance) so re-centering a range
+    // never re-prices the original deposit across new bins.
+    valuationAnchorPriceUsd: pool.currentPrice,
+    valuationAnchorBinId: input.activeBinId,
+    valuationAnchorValueUsd: input.depositedUsd,
   };
 }
 
@@ -1512,6 +1496,7 @@ function savePaperLadderLeg(
   upperBinId: number,
   halfSize: number,
   label: "tight" | "wide",
+  pairId: string,
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
     const pos = makePaperPositionRecord({
@@ -1549,10 +1534,11 @@ function savePaperLadderLeg(
         feesUsd: null,
         price: pool.currentPrice,
         metadata: {
-          lowerBinId: pos.lowerBinId,
           upperBinId: pos.upperBinId,
+          lowerBinId: pos.lowerBinId,
           strategySpec: entryStrategySpec,
           ladder: label,
+          pairId,
         },
         createdAt: Date.now(),
       })
@@ -1581,6 +1567,9 @@ function executePaperEnter(
     const ladderPlan = paperLadderPlan(deps, decision, liveExited);
     if (ladderPlan) {
       const { halfSize } = ladderPlan;
+      // Shared pair id: the tight+wide legs are ONE split unit for the
+      // equal-capital cohort comparison (a $10+$10 pair vs a $20 single).
+      const pairId = `paper-${decision.poolAddress}-${randomUUID()}`;
       const tightRange = deps.strategy.recommendBinRange(
         pool.activeBinId,
         pool.binStep,
@@ -1605,6 +1594,7 @@ function executePaperEnter(
           range.upperBinId,
           halfSize,
           label,
+          pairId,
         );
       }
       return { executed: true, error: undefined };
@@ -1659,6 +1649,7 @@ function executePaperEnter(
           lowerBinId: pos.lowerBinId,
           upperBinId: pos.upperBinId,
           strategySpec: entryStrategySpec,
+          pairId: pos.positionId,
         },
         createdAt: Date.now(),
       })
@@ -1699,6 +1690,47 @@ function checkRotationArm(
   });
 }
 
+/**
+ * Paper close settlement: gross realized PnL minus the modeled lifetime
+ * costs (round-trip swaps + txs, harvest over age, conversion on gross
+ * fees). Paper settlement has no on-chain receipts, so costs debit here —
+ * the same knobs the expected-profit gate assumes, so the gate and the
+ * ledger agree. Reported net expectancy prices the full cost load instead
+ * of gross-minus-nothing.
+ */
+/** Paper close settlement: net realized PnL plus the modeled cost load. */
+interface PaperExitSettlement {
+  realizedPnlUsd: number;
+  modeledCostsUsd: number;
+}
+function resolvePaperExitSettlement(
+  pos: PositionRecord,
+  deps: Pick<
+    PaperExecDeps,
+    | "runnerSwapCostPct"
+    | "feeCaptureHarvestCostUsd"
+    | "feeCaptureConversionCostPct"
+    | "harvestTxCostUsdEst"
+  >,
+): PaperExitSettlement {
+  const grossRealizedPnlUsd = computeRealizedPnlUsd(
+    pos.currentValueUsd,
+    pos.cumulativeFeesClaimedUsd,
+    pos.depositedUsd,
+    pos.cumulativeRewardsClaimedUsd,
+  );
+  const modeledCostsUsd = paperCloseCostsUsd({
+    positionSizeUsd: pos.depositedUsd,
+    ageDays: Math.max(Date.now() - pos.timestamp, 0) / DAY_MS,
+    cumulativeGrossFeesUsd: pos.cumulativeFeesClaimedUsd,
+    swapCostPct: deps.runnerSwapCostPct ?? 0.005,
+    harvestCostUsd: deps.feeCaptureHarvestCostUsd ?? 0.01,
+    conversionCostPct: deps.feeCaptureConversionCostPct ?? 0.05,
+    txCostUsd: deps.harvestTxCostUsdEst ?? 0.005,
+  });
+  return { realizedPnlUsd: grossRealizedPnlUsd - modeledCostsUsd, modeledCostsUsd };
+}
+
 /** Paper EXIT: rotation-arm gate, live-position guard, ledger close + rug arm. */
 function executePaperExit(
   deps: PaperExecDeps,
@@ -1724,12 +1756,7 @@ function executePaperExit(
       };
     }
     if (pos) {
-      const realizedPnlUsd = computeRealizedPnlUsd(
-        pos.currentValueUsd,
-        pos.cumulativeFeesClaimedUsd,
-        pos.depositedUsd,
-        pos.cumulativeRewardsClaimedUsd,
-      );
+      const { realizedPnlUsd, modeledCostsUsd } = resolvePaperExitSettlement(pos, deps);
       yield* deps.db
         .savePositionEvent({
           id: randomUUID(),
@@ -1740,7 +1767,7 @@ function executePaperExit(
           valueUsd: pos.currentValueUsd,
           feesUsd: pos.cumulativeFeesClaimedUsd,
           price: pool.currentPrice,
-          metadata: { realizedPnlUsd, exitReason: decision.reasoning },
+          metadata: { realizedPnlUsd, modeledCostsUsd, exitReason: decision.reasoning },
           createdAt: Date.now(),
         })
         .pipe(Effect.catch(() => Effect.void));
@@ -1813,6 +1840,14 @@ function executePaperRebalance(
               launchRunnerSteps: (current.launchRunnerSteps ?? 0) + 1,
             }
           : undefined),
+        // Re-stamp the CLMM valuation anchor at the live print: the range
+        // moved, so the mark re-bases to the current (post-top-up) value
+        // instead of re-pricing the original deposit across new bins (which
+        // fabricates P&L). Entry fields stay untouched — cost basis and
+        // HODL survive.
+        valuationAnchorPriceUsd: pool.currentPrice,
+        valuationAnchorBinId: pool.activeBinId,
+        valuationAnchorValueUsd: scaled.currentValueUsd,
         lastRebalanceAt: Date.now(),
       };
       deps.trackedPositions.set(updated.positionId, updated);
@@ -1863,6 +1898,12 @@ export function executePaper(
     harvestMinNetUsd?: number;
     harvestMaxCostPct?: number;
     harvestTxCostUsdEst?: number;
+    /** Paper close-time cost model (paperCloseCostsUsd): round-trip swaps,
+     *  harvest rate, conversion haircut and tx cost. Absent → the same
+     *  defaults the expected-profit gate assumes (never silent zero). */
+    runnerSwapCostPct?: number;
+    feeCaptureHarvestCostUsd?: number;
+    feeCaptureConversionCostPct?: number;
     /** Rug detection: arm `token_rug_block` on a catastrophic realized loss. */
     rugExitLossPct?: number;
     rugTokenBlockMs?: number;
@@ -5544,6 +5585,20 @@ export const program = Effect.gen(function* () {
   // when both launchScanEnabled AND launchExecutionEnabled are on (the default
   // path never fills it, so the scan loop and ENTER gates below stay
   // behavior-identical). Launch pools ride the FULL existing gate chain —
+  // Paper close-time cost wiring (paperCloseCostsUsd): the same cost knobs
+  // the expected-profit ENTER gate assumes, so the ledger and the gate
+  // agree. Shared by the in-slot tail and the idle-redeploy pass.
+  const paperCostDispatchDeps = () => ({
+    ...(config.runnerSwapCostPct !== undefined
+      ? { runnerSwapCostPct: config.runnerSwapCostPct }
+      : undefined),
+    ...(config.feeCaptureHarvestCostUsd !== undefined
+      ? { feeCaptureHarvestCostUsd: config.feeCaptureHarvestCostUsd }
+      : undefined),
+    ...(config.feeCaptureConversionCostPct !== undefined
+      ? { feeCaptureConversionCostPct: config.feeCaptureConversionCostPct }
+      : undefined),
+  });
   // blacklist/freeze/token-risk, metrics, pre-filter, risk tail — plus the
   // launch-specific ENTER criteria.
   const launchScanPools = new Set<string>();
@@ -6824,6 +6879,7 @@ export const program = Effect.gen(function* () {
             maxOpenPositions: config.maxOpenPositions,
             maxPositionsPerPool: config.maxPositionsPerPool,
             ...runnerDispatchDeps(decision.poolAddress),
+            ...paperCostDispatchDeps(),
             ...rugDispatchDeps(),
           },
           decision,
@@ -9451,6 +9507,9 @@ export const program = Effect.gen(function* () {
                   lowerBinId: pos.lowerBinId,
                   upperBinId: pos.upperBinId,
                   binStep: pool.binStep,
+                  valuationAnchorPriceUsd: pos.valuationAnchorPriceUsd,
+                  valuationAnchorBinId: pos.valuationAnchorBinId,
+                  valuationAnchorValueUsd: pos.valuationAnchorValueUsd,
                 })
               : null;
           const fallbackMark = paperMark ?? estimatePositionValue(pos, pool);
@@ -9461,11 +9520,12 @@ export const program = Effect.gen(function* () {
             pos.highestValueUsd = estimatedValue;
           }
           // Paper notional-fee accrual (parity with live): a paper position
-          // never claims on-chain, so accrue its concentration-aware share of
-          // the pool's real 24h fees while the active bin sits in range, net
-          // of conversion/harvest costs. Do NOT touch currentValueUsd:
-          // unrealized PnL already sums claimed fees (pnl.ts), so crediting
-          // the value column too would double-add.
+          // never claims on-chain, so accrue its concentration-aware GROSS
+          // share of the pool's real 24h fees while the active bin sits in
+          // range. Costs debit once at close (paperCloseCostsUsd) — never
+          // netted per cycle, so excess costs cannot disappear into a floor.
+          // Do NOT touch currentValueUsd: unrealized PnL already sums claimed
+          // fees (pnl.ts), so crediting the value column too would double-add.
           function accruePaperPositionFees(): Effect.Effect<void, never> {
             return Effect.gen(function* () {
               if (
@@ -9492,8 +9552,6 @@ export const program = Effect.gen(function* () {
                 scanIntervalMs: config.scanIntervalMs,
                 rangeHalfWidthBins: Math.max((pos.upperBinId - pos.lowerBinId) / 2, 0),
                 binStep: pool.binStep,
-                conversionCostPct: config.feeCaptureConversionCostPct,
-                harvestCostUsd: config.feeCaptureHarvestCostUsd,
               });
               if (deltaFeesUsd <= 0) return;
               pos.cumulativeFeesClaimedUsd += deltaFeesUsd;
@@ -12107,7 +12165,6 @@ export const program = Effect.gen(function* () {
                 });
               }
               if (yield* checkNormalEnterTokenRisk()) return true;
-
               // [expected-profit] normal-lane ENTER must cover a full round
               // trip (entry + exit swaps and txs) over the intended holding
               // period out of STABLE fees — the minimum across Data API
@@ -12115,6 +12172,8 @@ export const program = Effect.gen(function* () {
               // the same churn/IL/harvest costs the runner lane charges.
               // Measured fees only; fail open when unmeasurable so heuristic
               // pools keep their existing gates.
+              // A measured zero is rejectable (zero income never covers
+              // costs); only unmeasurable fees fail open.
               function checkExpectedProfit(positionSizeUsd: number): Effect.Effect<boolean, never> {
                 return Effect.gen(function* () {
                   if (!(positionSizeUsd > 0)) return false;
@@ -12124,7 +12183,7 @@ export const program = Effect.gen(function* () {
                     pool.statsSource,
                     pool.fees24hUsd,
                   );
-                  if (dailyFeesUsd == null || !(dailyFeesUsd > 0)) return false;
+                  if (dailyFeesUsd == null) return false;
                   // Intended holding period: no earlier than the first
                   // planned reshape (rebalance interval) or economic-exit
                   // maturity — whichever is later. Positions are built to
@@ -13336,6 +13395,7 @@ export const program = Effect.gen(function* () {
                   maxOpenPositions: config.maxOpenPositions,
                   maxPositionsPerPool: config.maxPositionsPerPool,
                   ...runnerDispatchDeps(decision.poolAddress),
+                  ...paperCostDispatchDeps(),
                   ...rugDispatchDeps(),
                 },
                 decision,

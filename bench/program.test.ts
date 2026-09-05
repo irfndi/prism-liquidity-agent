@@ -14,6 +14,7 @@ import {
   hasSyncProposalTransport,
   isProposalStale,
   decisionChangesExecutableBehavior,
+  resolveEnterDailyFeesUsd,
   recordAppliedProposalRiskApproval,
   recordAppliedProposalRiskDenial,
   shouldHoldForSupervisedApproval,
@@ -1313,5 +1314,43 @@ describe("buildPositionSnapshots", () => {
 
   it("returns an empty array when no positions are tracked", () => {
     expect(buildPositionSnapshots([])).toEqual([]);
+  });
+});
+
+describe("resolveEnterDailyFeesUsd", () => {
+  it("returns the minimum across windows (a measured zero flows through)", () => {
+    // A measured zero in any window is known-negative economics, not
+    // missing data — the gate must see the 0, never a null bypass.
+    expect(
+      resolveEnterDailyFeesUsd(
+        { feeTvlRatio1h: 0, feeTvlRatio12h: 0.01, feeTvlRatio24h: 0.02 },
+        100_000,
+        "datapi",
+        300,
+      ),
+    ).toBe(0);
+  });
+
+  it("falls back to datapi fees24h when windows are absent", () => {
+    expect(
+      resolveEnterDailyFeesUsd(
+        { feeTvlRatio1h: null, feeTvlRatio12h: null, feeTvlRatio24h: null },
+        100_000,
+        "datapi",
+        300,
+      ),
+    ).toBe(300);
+  });
+
+  it("fails open (null) for non-datapi sources without windows", () => {
+    expect(
+      resolveEnterDailyFeesUsd(
+        { feeTvlRatio1h: null, feeTvlRatio12h: null, feeTvlRatio24h: null },
+        100_000,
+        "heuristic",
+        300,
+      ),
+    ).toBeNull();
+    expect(resolveEnterDailyFeesUsd(null, 100_000, "datapi", 300)).toBe(300);
   });
 });

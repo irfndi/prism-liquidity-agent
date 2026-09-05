@@ -1022,6 +1022,27 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
       }
     },
   },
+  {
+    version: 25,
+    name: "position_valuation_anchor",
+    up(db) {
+      // CLMM valuation anchor (paper marks): the price, bin and position
+      // value at the last range-establishing event (ENTER, or REBALANCE which
+      // moves the range but keeps the entry anchor). Without it, re-centering
+      // a range re-prices the ORIGINAL deposit across new bins and fabricates
+      // P&L from thin air. Additive; legacy rows stay NULL and fall back to
+      // the entry anchor (entryPriceUsd/activeBinId/depositedUsd).
+      if (hasTable(db, "positions") && !hasColumn(db, "positions", "valuation_anchor_price_usd")) {
+        db.exec("ALTER TABLE positions ADD COLUMN valuation_anchor_price_usd REAL");
+      }
+      if (hasTable(db, "positions") && !hasColumn(db, "positions", "valuation_anchor_bin_id")) {
+        db.exec("ALTER TABLE positions ADD COLUMN valuation_anchor_bin_id INTEGER");
+      }
+      if (hasTable(db, "positions") && !hasColumn(db, "positions", "valuation_anchor_value_usd")) {
+        db.exec("ALTER TABLE positions ADD COLUMN valuation_anchor_value_usd REAL");
+      }
+    },
+  },
 ];
 
 function runMigrations(db: Database) {

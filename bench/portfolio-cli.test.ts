@@ -18,7 +18,7 @@ import {
   exitReasonTag,
   formatAge,
   formatPosition,
-  groupClosedTradeExpectancy,
+  groupClosedTradeUnits,
   toJsonOutput,
   toHistoryJsonOutput,
 } from "../cli/portfolio.js";
@@ -619,6 +619,15 @@ describe("closed-trade evidence", () => {
     expect(exitReasonTag("[trailing-stop] peak breached")).toBe("trailing-stop");
     expect(exitReasonTag("no bracket here")).toBe("unknown");
     expect(exitReasonTag(null)).toBe("unknown");
+    // Untagged deterministic exits (bracket tags win when present).
+    expect(exitReasonTag("High volatility (σ=3.10) + 5% drift — exit")).toBe("volatility");
+    expect(exitReasonTag("Trailing stop: value dropped 12% from peak")).toBe("trailing-stop");
+    expect(exitReasonTag("IL dominance: $9.10 IL exceeds 2× cumulative fees")).toBe("il-dominance");
+    expect(exitReasonTag("TVL dropped 40.0% — capital protection exit")).toBe("tvl-drop");
+    expect(exitReasonTag("Volume authenticity 0.10 below threshold")).toBe("volume-authenticity");
+    expect(exitReasonTag("Fee/IL ratio 0.20 below 0.5")).toBe("fee-il");
+    expect(exitReasonTag("Rotation: runner net 5000% APR >= 5x held net")).toBe("rotation");
+    expect(exitReasonTag("[oor] High volatility aftershock")).toBe("oor");
     expect(enterCohortLabel(JSON.stringify({ ladder: "tight" }))).toBe("tight");
     expect(enterCohortLabel(JSON.stringify({ ladder: "wide" }))).toBe("wide");
     expect(enterCohortLabel(JSON.stringify({ strategySpec: "spot" }))).toBe("single");
@@ -629,34 +638,48 @@ describe("closed-trade evidence", () => {
     expect(exitReasonFromMetadata(null)).toBe("unknown");
   });
 
-  it("groups expectancy by cohort for the split-vs-single comparison", () => {
+  it("pairs ladder legs into split units with capital-normalized expectancy", () => {
+    // A $10+$10 tight pair vs a $20 single: dollar averages would call the
+    // pair worse-or-better on size alone; expectancyPct compares like capital.
     const positions = [
-      { ...closed(10, 1), positionId: "tight-1" },
-      { ...closed(-4, 2), positionId: "tight-2" },
-      { ...closed(2, 3), positionId: "single-1" },
+      { ...closed(10, 1), positionId: "tight-1", depositedUsd: 10 },
+      { ...closed(-4, 2), positionId: "tight-2", depositedUsd: 10 },
+      { ...closed(2, 3), positionId: "single-1", depositedUsd: 20 },
     ];
-    const groups = groupClosedTradeExpectancy(
-      positions,
-      new Map([
-        ["tight-1", "tight"],
-        ["tight-2", "tight"],
-        ["single-1", "single"],
-      ]),
-    );
-    expect(groups.map((g) => g.cohort)).toEqual(["single", "tight"]);
-    expect(groups.find((g) => g.cohort === "tight")?.expectancyUsd).toBeCloseTo(3, 10);
-    expect(groups.find((g) => g.cohort === "single")?.expectancyUsd).toBe(2);
+    const enter = new Map([
+      ["tight-1", { cohort: "tight", pairId: "pair-A" }],
+      ["tight-2", { cohort: "tight", pairId: "pair-A" }],
+      ["single-1", { cohort: "single", pairId: "single-1" }],
+    ]);
+    const units = groupClosedTradeUnits(positions, enter);
+    expect(units).toHaveLength(2);
+    const split = units.find((u) => u.kind === "split")!;
+    expect(split.legs).toBe(2);
+    expect(split.deployedUsd).toBe(20);
+    expect(split.netPnlUsd).toBe(6);
+    expect(split.expectancyPct).toBeCloseTo(30, 10);
+    const single = units.find((u) => u.kind === "single")!;
+    expect(single.expectancyPct).toBeCloseTo(10, 10);
   });
 
-  it("toHistoryJsonOutput carries stats and cohorts", () => {
+  it("leaves legacy legs without a pair id as lone unknown units", () => {
+    const positions = [{ ...closed(5, 1), positionId: "old-1" }];
+    const units = groupClosedTradeUnits(positions, new Map());
+    expect(units).toHaveLength(1);
+    expect(units[0]!.kind).toBe("unknown");
+    expect(units[0]!.expectancyPct).toBeCloseTo(5, 10);
+  });
+
+  it("toHistoryJsonOutput carries stats and units", () => {
     const positions = [{ ...closed(10, 1), positionId: "tight-1" }];
     const json = toHistoryJsonOutput(positions, {
-      cohortByPositionId: new Map([["tight-1", "tight"]]),
+      enterByPositionId: new Map([["tight-1", { cohort: "tight", pairId: "pair-A" }]]),
     });
     expect(json.stats.count).toBe(1);
     expect(json.stats.expectancyUsd).toBe(10);
-    expect(json.cohorts).toHaveLength(1);
-    expect(json.cohorts?.[0]?.cohort).toBe("tight");
+    expect(json.units).toHaveLength(1);
+    expect(json.units?.[0]?.kind).toBe("tight");
+    expect(json.units?.[0]?.expectancyPct).toBeCloseTo(10, 10);
     expect(json.positions[0]?.cohort).toBe("tight");
   });
 });
