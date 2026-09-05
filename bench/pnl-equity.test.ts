@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { computePortfolioEquity } from "../engine/pnl.js";
+import {
+  computePortfolioEquity,
+  paperClmmMarkUsd,
+  type PaperClmmMarkInput,
+} from "../engine/pnl.js";
 
 describe("computePortfolioEquity (issue #149)", () => {
   const pos = (overrides: Partial<{ v: number; d: number; f: number; r: number }> = {}) => ({
@@ -108,5 +112,49 @@ describe("computePortfolioEquity (issue #149)", () => {
     expect(result.unrealizedPnlUsd).toBe(0);
     expect(result.unrealizedPnlPct).toBe(0);
     expect(result.walletKnown).toBe(true);
+  });
+});
+
+describe("paperClmmMarkUsd", () => {
+  const base = {
+    depositedUsd: 1000,
+    entryPriceUsd: 150,
+    anchorBinId: 5000,
+    currentPrice: 150,
+    lowerBinId: 4980,
+    upperBinId: 5020,
+    binStep: 10,
+  } satisfies PaperClmmMarkInput;
+
+  it("marks cost basis at the anchor price (no phantom IL)", () => {
+    expect(paperClmmMarkUsd(base)).toBeCloseTo(1000, 6);
+  });
+
+  it("shows IL on a price move (mark below HODL)", () => {
+    // HODL at +10% would be 1050; the concentrated LP mark must be lower.
+    const mark = paperClmmMarkUsd({ ...base, currentPrice: 165 });
+    expect(mark).not.toBeNull();
+    expect(mark!).toBeLessThan(1050);
+    expect(mark!).toBeGreaterThan(0);
+  });
+
+  it("goes flat when price exits above the range (HODL keeps appreciating)", () => {
+    const edge = paperClmmMarkUsd({ ...base, currentPrice: 160 });
+    const far = paperClmmMarkUsd({ ...base, currentPrice: 300 });
+    expect(edge).not.toBeNull();
+    expect(far).not.toBeNull();
+    // Fully in one token above the range: doubling the price again adds nothing.
+    expect(far!).toBeCloseTo(edge!, 6);
+  });
+
+  it("fails open (null) when the entry anchor is unknown", () => {
+    expect(paperClmmMarkUsd({ ...base, entryPriceUsd: null })).toBeNull();
+    expect(paperClmmMarkUsd({ ...base, anchorBinId: null })).toBeNull();
+    expect(paperClmmMarkUsd({ ...base, binStep: 0 })).toBeNull();
+  });
+
+  it("fails open (null) when the anchor sits outside the range (single-sided shape)", () => {
+    expect(paperClmmMarkUsd({ ...base, anchorBinId: 4900 })).toBeNull();
+    expect(paperClmmMarkUsd({ ...base, anchorBinId: 5100 })).toBeNull();
   });
 });

@@ -1241,4 +1241,36 @@ describe("computePaperFeeAccrualUsd", () => {
     const first = computePaperFeeAccrualUsd({ ...base, firstCycle: true, elapsedMs: 999_999_999 });
     expect(first).toBeCloseTo(computePaperFeeAccrualUsd(base), 12);
   });
+
+  it("accrues more per dollar for a narrow range than a wide one (same size, pool, cycle)", () => {
+    // The staging incident: two $10 legs (tight + wide) on one pool booked
+    // identical fees. Concentration must separate them.
+    const narrow = computePaperFeeAccrualUsd({
+      ...base,
+      depositedUsd: 10,
+      rangeHalfWidthBins: 5,
+      binStep: 20,
+    });
+    const wide = computePaperFeeAccrualUsd({
+      ...base,
+      depositedUsd: 10,
+      rangeHalfWidthBins: 50,
+      binStep: 20,
+    });
+    expect(narrow).toBeGreaterThan(wide);
+    expect(wide).toBeGreaterThan(0);
+  });
+
+  it("applies conversion and harvest costs (floored at zero, never negative)", () => {
+    const gross = computePaperFeeAccrualUsd({ ...base });
+    const net = computePaperFeeAccrualUsd({
+      ...base,
+      conversionCostPct: 0.05,
+      harvestCostUsd: 0.01,
+    });
+    expect(net).toBeLessThan(gross);
+    expect(net).toBeGreaterThanOrEqual(0);
+    const wiped = computePaperFeeAccrualUsd({ ...base, depositedUsd: 1, harvestCostUsd: 10_000 });
+    expect(wiped).toBe(0);
+  });
 });

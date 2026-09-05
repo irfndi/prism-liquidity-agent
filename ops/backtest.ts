@@ -25,107 +25,21 @@ import { DbLive } from "../engine/db-service.js";
 import { DbService } from "../engine/services.js";
 import type { BacktestResult, BinArray, PoolSnapshot, PoolState } from "../engine/types.js";
 import {
+  binRangePrices,
+  clmmPositionValue,
+  type BinRangePrices,
+  type ClmmPositionValue,
+} from "../engine/pnl.js";
+import {
   evaluateReplayPool,
   type ReplayEvaluation,
   type ReplayPosition,
 } from "../engine/cycle/evaluate-pool.js";
 
+export { binRangePrices, clmmPositionValue, type BinRangePrices, type ClmmPositionValue };
+
 const log = createLogger("Backtest");
 
-/** Range edges of a DLMM position expressed as bin prices. */
-interface BinRangePrices {
-  readonly pa: number;
-  readonly pb: number;
-}
-
-/** Mark-to-market and HODL-benchmark values of a CLMM position. */
-interface PositionValue {
-  readonly lpValueUsd: number;
-  readonly hodlValueUsd: number;
-}
-
-/** Range edges of a DLMM position expressed as bin prices. Bin i has price
- * P_i = P_anchor·(1+s)^(i−anchorBin), so the position's [lower, upper] bin
- * range maps to a CLMM price range [P_a, P_b]. */
-export function binRangePrices(args: {
-  anchorPrice: number;
-  anchorBinId: number;
-  lowerBinId: number;
-  upperBinId: number;
-  binStep: number;
-}): BinRangePrices {
-  const s = 1 + args.binStep / 10_000;
-  const pa = args.anchorPrice * Math.pow(s, args.lowerBinId - args.anchorBinId);
-  const pb = args.anchorPrice * Math.pow(s, args.upperBinId - args.anchorBinId);
-  return { pa: pa > 0 ? pa : 1, pb: pb > 0 ? pb : 1 };
-}
-
-/**
- * Correct DLMM/CLMM position valuation (NOT the V2 full-range curve).
- *
- * A DLMM position spanning bins [lower, upper] behaves as a concentrated
- * liquidity position over the price range [P_a, P_b]. Given the deposited USD
- * value split 50/50 at the anchor price, this returns the position's
- * mark-to-market value at P1 and the HODL benchmark value (the same capital
- * never deposited), so IL = 1 − V_LP/V_HODL.
- *
- * Piecewise (a=√P_a, b=√P_b, s=√P1):
- *   P1 ≤ P_a : x = L(1/a − 1/b),           y = 0
- *   P_a<P1<P_b: x = L(1/s − 1/b),           y = L(s − a)
- *   P1 ≥ P_b : x = 0,                       y = L(b − a)
- *   V_LP = x·P1 + y
- *   V_HODL = X0·P1 + Y0   (X0,Y0 = initial 50/50 amounts)
- *
- * Crucially this does NOT stop growing once price exits the range: when P1>P_b
- * the position is fully in token1 (V_LP flat) while V_HODL keeps appreciating,
- * so IL grows without bound — the exact behavior the V2 2√r/(1+r) curve
- * wrongly asymptotes away.
- */
-export function clmmPositionValue(args: {
-  sizeUsd: number;
-  anchorPrice: number;
-  anchorBinId: number;
-  currentPrice: number;
-  lowerBinId: number;
-  upperBinId: number;
-  binStep: number;
-}): PositionValue {
-  const { pa, pb } = binRangePrices(args);
-  const p0 = args.anchorPrice;
-  const p1 = args.currentPrice;
-  if (!(p0 > 0) || !(p1 > 0) || !(pb > pa)) {
-    return { lpValueUsd: args.sizeUsd, hodlValueUsd: args.sizeUsd };
-  }
-  // 50/50 deposit at anchor: X tokens and Y tokens.
-  const x0 = args.sizeUsd / 2 / p0;
-  const y0 = args.sizeUsd / 2;
-  const a = Math.sqrt(pa);
-  const b = Math.sqrt(pb);
-  // Liquidity L is a CONSTANT of the position, fixed at deposit: it is
-  // recovered from the X leg at the ANCHOR price p0, never the live price.
-  // Deriving it from the live price while reusing the initial x0 is a bug — it
-  // inflates in-range LP value and overstates downside IL by an order of
-  // magnitude.
-  const s0 = Math.sqrt(p0);
-  const L = x0 / (1 / s0 - 1 / b) || 0;
-  if (!(L > 0)) return { lpValueUsd: args.sizeUsd, hodlValueUsd: x0 * p1 + y0 };
-  const sp = Math.sqrt(p1);
-  let x: number;
-  let y: number;
-  if (p1 <= pa) {
-    x = L * (1 / a - 1 / b);
-    y = 0;
-  } else if (p1 >= pb) {
-    x = 0;
-    y = L * (b - a);
-  } else {
-    x = L * (1 / sp - 1 / b);
-    y = L * (sp - a);
-  }
-  const lpValueUsd = x * p1 + y;
-  const hodlValueUsd = x0 * p1 + y0;
-  return { lpValueUsd, hodlValueUsd };
-}
 // ─── CLI parsing ─────────────────────────────────────────────────────────────
 
 interface CliArgs {

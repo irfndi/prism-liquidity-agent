@@ -59,7 +59,13 @@ import {
   isAprSelfOutlier,
   type ReturnSeries,
 } from "./regime-gate.js";
-import { runnerNetAprPct, runnerNetDailyPctAfterCosts } from "./fee-capture.js";
+import {
+  activeShareEstimate,
+  expectedNetProfitUsd,
+  runnerNetAprPct,
+  runnerNetDailyPctAfterCosts,
+  stableDailyFeesUsd,
+} from "./fee-capture.js";
 import { advanceScreenedCandidates } from "./candidate-discovery.js";
 import {
   gateAndRankMarketPools,
@@ -80,7 +86,12 @@ import { checkForAutoUpdate } from "./update-check.js";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import type { PositionRecord } from "./db-service.js";
-import { applyCompoundToCostBasis, computeHodlValueUsd, computeRealizedPnlUsd } from "./pnl.js";
+import {
+  applyCompoundToCostBasis,
+  computeHodlValueUsd,
+  computeRealizedPnlUsd,
+  paperClmmMarkUsd,
+} from "./pnl.js";
 import { rollingRealizedPnlHalted as rollingRealizedPnlHaltSignal } from "./pnl-halt.js";
 import { findPoolPnlKillSwitchTrips } from "./pool-pnl-kill-switch.js";
 import { buildRewardClaimMetadata, summarizeRewardClaim } from "./rewards.js";
@@ -582,13 +593,18 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Paper notional-fee accrual for one cycle (A4 paper/live parity). A paper
- * position never claims on-chain, so it accrues its proportional share of the
- * pool's REAL 24h fees while the active bin sits in range. Pure and guard-first:
- * heuristic pools (fees24h null/NaN/<=0) and dead TVL accrue 0 — never
- * fabricate. The elapsed window resolves to one scan interval on the first
- * cycle for a position, and is capped at 2× the scan interval afterwards so a
- * long downtime cannot dump a lump of fees into a single cycle. `inRange` is a
- * binary gate (active bin inside [lower, upper]), not a partial weight.
+ * position never claims on-chain, so it accrues its concentration-aware share
+ * of the pool's REAL 24h fees while the active bin sits in range — a narrow
+ * $10 leg earns more per cycle than a wide $10 leg on the same pool, matching
+ * live concentrated-liquidity behavior. Pure and guard-first: heuristic pools
+ * (fees24h null/NaN/<=0) and dead TVL accrue 0 — never fabricate. The elapsed
+ * window resolves to one scan interval on the first cycle for a position, and
+ * is capped at 2× the scan interval afterwards so a long downtime cannot dump
+ * a lump of fees into a single cycle. `inRange` is a binary gate (active bin
+ * inside [lower, upper]), not a partial weight. Time out of range accrues
+ * nothing; the separate churn/IL cost belongs to the position mark, not here.
+ * Conversion/harvest costs are amortized over the same window and the result
+ * is floored at 0 — costs can erase a thin accrual, never invert it.
  */
 export function computePaperFeeAccrualUsd(input: {
   readonly fees24hUsd: number | null | undefined;
@@ -600,18 +616,87 @@ export function computePaperFeeAccrualUsd(input: {
   readonly firstCycle: boolean;
   readonly elapsedMs: number;
   readonly scanIntervalMs: number;
+  /** Half-width of the position's bin range, in bins. Absent → flat TVL slice (legacy). */
+  readonly rangeHalfWidthBins?: number | undefined;
+  /** DLMM bin step in basis points. Absent → flat TVL slice (legacy). */
+  readonly binStep?: number | undefined;
+  /** Swap/conversion haircut as a fraction (0.05 = 5%). Absent → 0. */
+  readonly conversionCostPct?: number | undefined;
+  /** Daily harvest (claim) cost, USD. Absent → 0. Amortized by dt/DAY. */
+  readonly harvestCostUsd?: number | undefined;
 }): number {
   const fees24hUsd = input.fees24hUsd;
-  if (!(input.tvlUsd > 0)) return 0;
-  if (fees24hUsd == null || !Number.isFinite(fees24hUsd) || fees24hUsd <= 0) return 0;
+  if (
+    fees24hUsd == null ||
+    !Number.isFinite(fees24hUsd) ||
+    fees24hUsd <= 0 ||
+    !(input.tvlUsd > 0) ||
+    !(input.depositedUsd > 0)
+  ) {
+    return 0;
+  }
+  const windowMs = resolvePaperAccrualWindowMs(input);
+  if (!(windowMs > 0)) return 0;
+  const share = resolvePaperFeeShare(input);
+  if (!(share > 0)) return 0;
+  const windowDays = windowMs / DAY_MS;
+  const gross = fees24hUsd * share * windowDays;
+  return applyPaperFeeCosts(gross, input.conversionCostPct, input.harvestCostUsd, windowDays);
+}
+
+/** Accrual window: one scan interval on the first cycle, capped at 2× after (0 when invalid). */
+function resolvePaperAccrualWindowMs(input: {
+  readonly firstCycle: boolean;
+  readonly elapsedMs: number;
+  readonly scanIntervalMs: number;
+}): number {
   const dtMs = input.firstCycle
     ? input.scanIntervalMs
     : Math.min(Math.max(input.elapsedMs, 0), 2 * input.scanIntervalMs);
-  if (!(dtMs > 0)) return 0;
-  const tvlShare = Math.min(input.depositedUsd / input.tvlUsd, 1);
-  const inRange =
-    input.activeBinId >= input.lowerBinId && input.activeBinId <= input.upperBinId ? 1 : 0;
-  return fees24hUsd * tvlShare * inRange * (dtMs / DAY_MS);
+  return dtMs > 0 ? dtMs : 0;
+}
+
+/**
+ * Concentration-aware fee share (0 when out of range or unmeasurable).
+ * Absent range/binStep falls back to the flat TVL slice (legacy callers).
+ */
+function resolvePaperFeeShare(input: {
+  readonly tvlUsd: number;
+  readonly depositedUsd: number;
+  readonly activeBinId: number;
+  readonly lowerBinId: number;
+  readonly upperBinId: number;
+  readonly rangeHalfWidthBins?: number | undefined;
+  readonly binStep?: number | undefined;
+}): number {
+  if (input.activeBinId < input.lowerBinId || input.activeBinId > input.upperBinId) return 0;
+  if (input.rangeHalfWidthBins != null && input.binStep != null) {
+    return activeShareEstimate({
+      positionSizeUsd: input.depositedUsd,
+      poolTvlUsd: input.tvlUsd,
+      rangeHalfWidthBins: input.rangeHalfWidthBins,
+      binStep: input.binStep,
+    });
+  }
+  return Math.min(input.depositedUsd / input.tvlUsd, 1);
+}
+
+/** Net a gross accrual of conversion/harvest costs over the same window (floored at 0). */
+function applyPaperFeeCosts(
+  gross: number,
+  conversionCostPct: number | null | undefined,
+  harvestCostUsd: number | null | undefined,
+  windowDays: number,
+): number {
+  const conversion =
+    conversionCostPct != null && Number.isFinite(conversionCostPct)
+      ? Math.min(Math.max(conversionCostPct, 0), 1)
+      : 0;
+  const harvest =
+    harvestCostUsd != null && Number.isFinite(harvestCostUsd)
+      ? Math.max(harvestCostUsd, 0) * windowDays
+      : 0;
+  return Math.max(gross * (1 - conversion) - harvest, 0);
 }
 
 export interface RebalanceBenefitEstimate {
@@ -1655,7 +1740,7 @@ function executePaperExit(
           valueUsd: pos.currentValueUsd,
           feesUsd: pos.cumulativeFeesClaimedUsd,
           price: pool.currentPrice,
-          metadata: { realizedPnlUsd },
+          metadata: { realizedPnlUsd, exitReason: decision.reasoning },
           createdAt: Date.now(),
         })
         .pipe(Effect.catch(() => Effect.void));
@@ -2866,6 +2951,7 @@ function settleLiveExitAttribution(
         metadata: {
           settlementPending: attributable.length,
           txSignature: exitResultData.txSignature,
+          exitReason: decision.reasoning,
         },
         createdAt: now,
       })
@@ -3111,12 +3197,35 @@ function buildExitMetadata(
   pricingUnresolved: boolean,
   currentValueUsd: number,
   exitResultData: LiveExitResultData | null,
+  exitReason?: string,
 ) {
-  if (!pricingUnresolved) return { realizedPnlUsd };
+  const reason = exitReasonField(exitReason);
+  if (!pricingUnresolved) return { realizedPnlUsd, ...reason };
   return {
     realizedPnlUsd,
     pricing: "unresolved",
     lastMarkUsd: currentValueUsd,
+    ...reason,
+    ...unresolvedExitRaw(exitResultData),
+  };
+}
+
+/** `{ exitReason }` when present, else null (spreads cleanly either way). */
+function exitReasonField(exitReason: string | undefined): { exitReason: string } | null {
+  return exitReason !== undefined && exitReason.length > 0 ? { exitReason } : null;
+}
+
+/** Raw atomic amounts for an unpriced exit (never blocks the close). */
+interface UnresolvedExitRaw {
+  raw: {
+    withdrawnXAtomic: string | null;
+    withdrawnYAtomic: string | null;
+    pendingFeeXAtomic: string | null;
+    pendingFeeYAtomic: string | null;
+  };
+}
+function unresolvedExitRaw(exitResultData: LiveExitResultData | null): UnresolvedExitRaw {
+  return {
     raw: {
       withdrawnXAtomic: exitResultData?.withdrawnXAtomic ?? null,
       withdrawnYAtomic: exitResultData?.withdrawnYAtomic ?? null,
@@ -3178,6 +3287,7 @@ function finalizeLiveExitLedger(
       pricingUnresolved,
       pos.currentValueUsd,
       exitResultData,
+      decision.reasoning,
     );
     yield* deps.db
       .savePositionEvent({
@@ -3867,6 +3977,64 @@ function computePositionNetDailyPct(
     harvestCostUsd: harvestCostUsd ?? 0.01,
     timeInRangePct: 1,
     maxExitsPerDay: 86_400_000 / (scanIntervalMs ?? 600_000),
+  });
+}
+
+/**
+ * Stable daily fees for the normal-lane [expected-profit] ENTER gate:
+ * minimum across Data API fee/TVL windows (a lone 24h spike never
+ * qualifies), falling back to datapi fees24h when windows are absent.
+ * Null when unmeasurable (non-datapi source) — callers fail open.
+ */
+export function resolveEnterDailyFeesUsd(
+  feeWindows:
+    | Pick<MeteoraPoolStats, "feeTvlRatio1h" | "feeTvlRatio12h" | "feeTvlRatio24h">
+    | null
+    | undefined,
+  poolTvlUsd: number,
+  statsSource: PoolState["statsSource"],
+  fees24hUsd: number,
+): number | null {
+  const stable = stableDailyFeesUsd(
+    {
+      "1h": feeWindows?.feeTvlRatio1h ?? undefined,
+      "12h": feeWindows?.feeTvlRatio12h ?? undefined,
+      "24h": feeWindows?.feeTvlRatio24h ?? undefined,
+    },
+    poolTvlUsd,
+  );
+  if (stable != null) return stable;
+  return statsSource === "datapi" ? fees24hUsd : null;
+}
+
+/**
+ * Expected net USD for a normal-lane ENTER over its holding period
+ * (null = unmeasurable → fail open). Operator cost options fall back to
+ * the runner lane's defaults so an unset knob never fabricates a pass.
+ */
+export function expectedEnterProfitUsd(input: {
+  readonly dailyFeesUsd: number;
+  readonly positionSizeUsd: number;
+  readonly poolTvlUsd: number;
+  readonly rangeHalfWidthBins: number;
+  readonly binStep: number;
+  readonly volatilityStddev: number;
+  readonly holdingDays: number;
+  readonly swapCostPct: number | undefined;
+  readonly harvestCostUsd: number | undefined;
+  readonly txCostUsd: number | undefined;
+}): number | null {
+  return expectedNetProfitUsd({
+    dailyFeesUsd: input.dailyFeesUsd,
+    positionSizeUsd: input.positionSizeUsd,
+    poolTvlUsd: input.poolTvlUsd,
+    rangeHalfWidthBins: input.rangeHalfWidthBins,
+    binStep: input.binStep,
+    volatilityStddev: input.volatilityStddev,
+    holdingDays: input.holdingDays,
+    swapCostPct: input.swapCostPct ?? 0.005,
+    harvestCostUsd: input.harvestCostUsd ?? 0.01,
+    txCostUsd: input.txCostUsd ?? 0.005,
   });
 }
 
@@ -8563,26 +8731,33 @@ export const program = Effect.gen(function* () {
     });
   }
 
-  /** Pre-filter + memory recall (null = pre-filtered, pool skipped). Metrics
+  /** Entry pre-filter + memory recall (null = positionless pool skipped). Metrics
    * are computed inline by the caller so the hot-window lane keeps its
    * original position between the metric warning and the pre-filter. */
-  function gatePoolQuality(poolAddress: string, pool: PoolState, metrics: PoolMetrics) {
+  function gatePoolQuality(
+    poolAddress: string,
+    pool: PoolState,
+    metrics: PoolMetrics,
+    hotLaneOwnsPool: boolean,
+  ) {
     return Effect.gen(function* () {
-      // Pre-filter
-      if (
-        !strategy.passesPreFilter(
-          pool,
-          metrics.volumeAuthenticity,
-          metrics.binUtilization,
-          config.minPoolTvlUsd,
-          evolvedThresholds.volumeAuthThreshold,
-          evolvedThresholds.minBinUtilization,
-          metrics.volumeAuthenticityKnown,
-          metrics.binUtilizationKnown,
-        )
-      ) {
-        console.debug("Pool failed pre-filter", { pool: poolAddress });
-        return null;
+      const entryEligible = strategy.passesPreFilter(
+        pool,
+        metrics.volumeAuthenticity,
+        metrics.binUtilization,
+        config.minPoolTvlUsd,
+        evolvedThresholds.volumeAuthThreshold,
+        evolvedThresholds.minBinUtilization,
+        metrics.volumeAuthenticityKnown,
+        metrics.binUtilizationKnown,
+      );
+      if (!entryEligible) {
+        logger.debug("Pool failed entry pre-filter", { pool: poolAddress });
+        // Deteriorating liquidity/volume must not suppress the very exits
+        // that protect positions from that deterioration.
+        if (!hotLaneOwnsPool && positionsForPool(trackedPositions, poolAddress).length === 0) {
+          return null;
+        }
       }
       // Check memory for warnings
       const warnings = yield* memory
@@ -8591,7 +8766,7 @@ export const program = Effect.gen(function* () {
       const hasRecentWarning = warnings.some(
         (w) => w.category === "warning" && w.createdAt > Date.now() - 7 * 24 * 60 * 60 * 1000,
       );
-      return { metrics, warnings, hasRecentWarning };
+      return { metrics, warnings, hasRecentWarning, entryEligible };
     });
   }
 
@@ -8897,16 +9072,10 @@ export const program = Effect.gen(function* () {
           ).length,
         });
       }
-      // The hot lane fully owns any pool it holds a hot position on or is
-      // about to enter — return its decisions and skip the generic loop so a
-      // hot pool cannot also be traded by the normal run (double-entry/double
-      // decision). Pools that also hold a non-hot position fall through to the
-      // generic loop (rare; the hot EXIT above is still emitted).
-      if (nonHotHeld === false && (hotPositions.length > 0 || hotEnter !== null)) {
+      // Return hot decisions to the shared execution tail. Generic lifecycle
+      // rules continue managing any non-hot positions on the same pool.
+      if (hotPositions.length > 0 || hotEnter !== null) {
         if (hotEnter !== null) {
-          yield* db
-            .setMetadata(`hot_trips:${hotWindowDayKey(nowMs)}`, String(dayState.tripsToday + 1))
-            .pipe(Effect.catch(() => Effect.void));
           hotDecisions.push(hotEnter);
         }
         return hotDecisions;
@@ -9117,7 +9286,8 @@ export const program = Effect.gen(function* () {
       const entryGates = yield* runPoolEntryGates();
       if (entryGates.halt) return entryGates.halt;
       const metrics = entryGates.metrics;
-      const { warnings, hasRecentWarning } = entryGates.quality;
+      const { warnings, hasRecentWarning, entryEligible } = entryGates.quality;
+      const hotLane = entryGates.hotLane;
       const pool = entryGates.pool;
       const binArray = entryGates.binArray;
       const datapiStats = entryGates.datapiStats;
@@ -9252,9 +9422,10 @@ export const program = Effect.gen(function* () {
 
       // Value estimation per position (feeds the trailing stop and the
       // REBALANCE gas gate). PRIMARY mark: the real on-chain position value;
-      // FALLBACK: the HODL-anchored mark (or cost basis when entry legs are
-      // unknown). Paper notional-fee accrual books Data-API-measured CLAIM
-      // income only — never modeled or fabricated fees.
+      // FALLBACK: the range-aware CLMM mark for paper positions (or cost basis
+      // when entry legs are unknown), HODL-anchored for live. Paper
+      // notional-fee accrual books Data-API-measured CLAIM income only — never
+      // modeled or fabricated fees.
       function refreshPositionValue(pos: PositionRecord): Effect.Effect<void, never> {
         return Effect.gen(function* () {
           const realMark =
@@ -9266,18 +9437,35 @@ export const program = Effect.gen(function* () {
           // Explicit null check (not `??`): the adapter contract returns null
           // when the mark is unavailable, never 0 — a genuine 0-valued position
           // is real data (dust) and must not silently fall back to the
-          // price-anchored mark.
-          const estimatedValue = realMark !== null ? realMark : estimatePositionValue(pos, pool);
+          // price-anchored mark. Paper positions have no on-chain account, so
+          // mark them with the range-aware CLMM value (out-of-range IL shows
+          // up in unrealized PnL instead of hiding behind the HODL flat);
+          // live fallback stays HODL-anchored.
+          const paperMark =
+            pos.positionPubKey == null
+              ? paperClmmMarkUsd({
+                  depositedUsd: pos.depositedUsd,
+                  entryPriceUsd: pos.entryPriceUsd,
+                  anchorBinId: pos.activeBinId,
+                  currentPrice: pool.currentPrice,
+                  lowerBinId: pos.lowerBinId,
+                  upperBinId: pos.upperBinId,
+                  binStep: pool.binStep,
+                })
+              : null;
+          const fallbackMark = paperMark ?? estimatePositionValue(pos, pool);
+          const estimatedValue = realMark !== null ? realMark : fallbackMark;
           pos.currentValueUsd = estimatedValue;
           const highest = pos.highestValueUsd ?? pos.depositedUsd;
           if (estimatedValue > highest) {
             pos.highestValueUsd = estimatedValue;
           }
           // Paper notional-fee accrual (parity with live): a paper position
-          // never claims on-chain, so accrue its proportional share of the
-          // pool's real 24h fees while the active bin sits in range. Do NOT
-          // touch currentValueUsd: unrealized PnL already sums claimed fees
-          // (pnl.ts), so crediting the value column too would double-add.
+          // never claims on-chain, so accrue its concentration-aware share of
+          // the pool's real 24h fees while the active bin sits in range, net
+          // of conversion/harvest costs. Do NOT touch currentValueUsd:
+          // unrealized PnL already sums claimed fees (pnl.ts), so crediting
+          // the value column too would double-add.
           function accruePaperPositionFees(): Effect.Effect<void, never> {
             return Effect.gen(function* () {
               if (
@@ -9302,6 +9490,10 @@ export const program = Effect.gen(function* () {
                 firstCycle: lastAccrualAt == null,
                 elapsedMs: lastAccrualAt == null ? 0 : now - lastAccrualAt,
                 scanIntervalMs: config.scanIntervalMs,
+                rangeHalfWidthBins: Math.max((pos.upperBinId - pos.lowerBinId) / 2, 0),
+                binStep: pool.binStep,
+                conversionCostPct: config.feeCaptureConversionCostPct,
+                harvestCostUsd: config.feeCaptureHarvestCostUsd,
               });
               if (deltaFeesUsd <= 0) return;
               pos.cumulativeFeesClaimedUsd += deltaFeesUsd;
@@ -10091,8 +10283,8 @@ export const program = Effect.gen(function* () {
       // ── Phase 1: EXIT evaluation per position ───────────────────────────
       // Pool-level degradation (TVL drop, fake volume, low fee/IL) exits
       // every position on the pool; the trailing stop is per position.
-      const rawDecisions: AgentDecision[] = [];
-      let poolExitFired = false;
+      const rawDecisions: AgentDecision[] = [...entryGates.hotDecisions];
+      let poolExitFired = rawDecisions.some((decision) => decision.action === "EXIT");
 
       yield* alertW15Signals();
 
@@ -10645,6 +10837,7 @@ export const program = Effect.gen(function* () {
       // a pool AT the per-pool cap (risk gate 3a and allocation gate 2 re-run
       // and re-reject verbatim), so no gate they guard can be bypassed.
       const evaluateIdleRedeployCandidate = (): IdleRedeployCandidate | null => {
+        if (!entryEligible || hotLane !== null) return null;
         if (
           passesMeasuredCandidateGates(
             metrics.feeIlRatioKnown,
@@ -10687,7 +10880,12 @@ export const program = Effect.gen(function* () {
       };
 
       /** ENTER-slot pool eligibility: no same-cycle exit, cap headroom, managed pool. */
-      function checkEnterPoolEligibility(): boolean {
+      function normalLaneEntryEligible(): boolean {
+        return entryEligible && hotLane === null;
+      }
+
+      function checkEnterPoolEligibility(hotEntry: boolean): boolean {
+        if (!hotEntry && !normalLaneEntryEligible()) return false;
         // A pool already exiting this cycle never re-enters in the same cycle;
         // the count cap (MAX_POSITIONS_PER_POOL) bounds stacked positions while
         // the allocation gate bounds their aggregate exposure.
@@ -11001,7 +11199,28 @@ export const program = Effect.gen(function* () {
       // A pool already exiting this cycle never re-enters in the same cycle;
       // the count cap (MAX_POSITIONS_PER_POOL) bounds stacked positions while
       // the allocation gate bounds their aggregate exposure.
-      let enterGateRejected = !checkEnterPoolEligibility();
+      // The hot lane uses its own fee/depth admission, but must share wallet,
+      // cooldown and token failure guards before it can reach execution.
+      function gateHotWindowEntry(): Effect.Effect<void, never> {
+        return Effect.gen(function* () {
+          if (!hotLane?.some((decision) => decision.action === "ENTER")) return;
+          let rejected = !checkEnterPoolEligibility(true);
+          rejected = yield* checkEnterWalletReadGate(rejected);
+          rejected = yield* checkEnterWalletRefreshGate(rejected);
+          rejected = yield* checkEnterBackoffGate(rejected);
+          rejected = yield* checkEnterCooldownGate(rejected);
+          rejected = yield* checkEnterTokenBlockGate(rejected);
+          rejected = yield* checkEnterWashGate(rejected);
+          if (rejected) {
+            for (let i = rawDecisions.length - 1; i >= 0; i--) {
+              if (rawDecisions[i]?.action === "ENTER") rawDecisions.splice(i, 1);
+            }
+          }
+        });
+      }
+      yield* gateHotWindowEntry();
+
+      let enterGateRejected = !checkEnterPoolEligibility(false);
       enterGateRejected = yield* checkEnterWalletReadGate(enterGateRejected);
       enterGateRejected = yield* checkEnterWalletRefreshGate(enterGateRejected);
       enterGateRejected = yield* checkEnterBackoffGate(enterGateRejected);
@@ -11392,9 +11611,7 @@ export const program = Effect.gen(function* () {
               if (worst) {
                 // G3 net-fee comparison (rule: measure practical
                 // position output, not raw APR): both sides are
-                // discounted by their capture share (position size vs
-                // pool TVL — small entries on deep pools collect a
-                // fraction of the headline APR), conversion cost and
+                // attributed their share of total pool fees, conversion cost and
                 // harvest cost. Uniform share model on both sides (the
                 // activeShareEstimate range/concentration model is
                 // reserved for entry sizing); the comparison stays
@@ -11410,6 +11627,7 @@ export const program = Effect.gen(function* () {
                 const conversionCostPct = rotationCosts.conversionCostPct;
                 const runnerNetApr = runnerNetAprPct({
                   grossAprPct: poolFeeAprPct,
+                  poolTvlUsd: pool.tvlUsd,
                   shareEstimate: shareFor(runnerSizeUsd, pool.tvlUsd),
                   harvestCostUsd,
                   conversionCostPct,
@@ -11418,6 +11636,7 @@ export const program = Effect.gen(function* () {
                 });
                 const incumbentNetApr = runnerNetAprPct({
                   grossAprPct: worst.feeAprPct,
+                  poolTvlUsd: worst.tvlUsd,
                   shareEstimate: shareFor(incumbentSizeUsd, worst.tvlUsd),
                   harvestCostUsd,
                   conversionCostPct,
@@ -11887,10 +12106,70 @@ export const program = Effect.gen(function* () {
                   return true;
                 });
               }
-
               if (yield* checkNormalEnterTokenRisk()) return true;
 
+              // [expected-profit] normal-lane ENTER must cover a full round
+              // trip (entry + exit swaps and txs) over the intended holding
+              // period out of STABLE fees — the minimum across Data API
+              // fee/TVL windows, so a lone 24h spike never qualifies — after
+              // the same churn/IL/harvest costs the runner lane charges.
+              // Measured fees only; fail open when unmeasurable so heuristic
+              // pools keep their existing gates.
+              function checkExpectedProfit(positionSizeUsd: number): Effect.Effect<boolean, never> {
+                return Effect.gen(function* () {
+                  if (!(positionSizeUsd > 0)) return false;
+                  const dailyFeesUsd = resolveEnterDailyFeesUsd(
+                    datapiStats,
+                    pool.tvlUsd,
+                    pool.statsSource,
+                    pool.fees24hUsd,
+                  );
+                  if (dailyFeesUsd == null || !(dailyFeesUsd > 0)) return false;
+                  // Intended holding period: no earlier than the first
+                  // planned reshape (rebalance interval) or economic-exit
+                  // maturity — whichever is later. Positions are built to
+                  // hold days; a 4h-minimum hold can never amortize a trip.
+                  const holdingDays =
+                    Math.max(
+                      config.minYieldExitAgeMs ?? 14_400_000,
+                      config.minRebalanceIntervalMs ?? 86_400_000,
+                    ) / DAY_MS;
+                  const expected = expectedEnterProfitUsd({
+                    dailyFeesUsd,
+                    positionSizeUsd,
+                    poolTvlUsd: pool.tvlUsd,
+                    rangeHalfWidthBins: rangeHalfWidth,
+                    binStep: pool.binStep,
+                    volatilityStddev,
+                    holdingDays,
+                    swapCostPct: config.runnerSwapCostPct,
+                    harvestCostUsd: config.feeCaptureHarvestCostUsd,
+                    txCostUsd: config.harvestTxCostUsdEst,
+                  });
+                  if (expected == null || expected > 0) return false;
+                  yield* audit
+                    .recordDecision({
+                      timestamp: Date.now(),
+                      cycleId,
+                      poolAddress,
+                      action: "ENTER",
+                      confidence: 0,
+                      reasoning: `[expected-profit] expected net $${expected.toFixed(2)} over ${(holdingDays * 24).toFixed(1)}h holding period (stable fees $${dailyFeesUsd.toFixed(2)}/day, size $${positionSizeUsd.toFixed(0)}) — fees do not cover entry/exit costs`,
+                      metrics,
+                      riskResult: {
+                        approved: false,
+                        reason: `[expected-profit] net $${expected.toFixed(2)} <= $0 over holding period`,
+                      },
+                      executed: false,
+                      paperTrading: config.paperTrading,
+                    })
+                    .pipe(Effect.catch(() => Effect.void));
+                  return true;
+                });
+              }
+
               const positionSizeUsd = allocation.adjustedDepositUsd;
+              if (yield* checkExpectedProfit(positionSizeUsd)) return true;
               // Normal-lane take-profit (winrate fix): when enabled, every
               // normal ENTER carries a single-rung TP ladder at
               // TAKE_PROFIT_PCT above entry; the invalidation leg uses the
@@ -13386,6 +13665,15 @@ export const program = Effect.gen(function* () {
               }
               if (!(decision.action === "ENTER" && executed)) return;
               entryFailureBackoff.delete(poolAddress);
+              if (decision.positionMode === "hot-window") {
+                const tripKey = `hot_trips:${hotWindowDayKey(Date.now())}`;
+                const previousTrips = yield* db
+                  .getMetadata(tripKey)
+                  .pipe(Effect.catch(() => Effect.succeed(null)));
+                yield* db
+                  .setMetadata(tripKey, String((Number(previousTrips) || 0) + 1))
+                  .pipe(Effect.catch(() => Effect.void));
+              }
               // Follow-up 3655404934: the candidate captured this pool's normal entry
               // size BEFORE the overlay; `full` mode can enlarge and execute it. Sync
               // the FINAL executed size (post-overlay, post-risk-cap) back onto the
@@ -13706,9 +13994,7 @@ export const program = Effect.gen(function* () {
           // execution, and is OFF unless HOT_WINDOW_ENABLED=true. It fully owns
           // any pool it holds a hot position on or is about to enter.
           const hotLane = yield* runHotWindowLane(poolAddress, pool, datapiStats);
-          if (hotLane) return { halt: hotLane };
-
-          const quality = yield* gatePoolQuality(poolAddress, pool, metrics);
+          const quality = yield* gatePoolQuality(poolAddress, pool, metrics, hotLane !== null);
           if (!quality) {
             const halt: AgentDecision[] = [];
             return { halt };
@@ -13717,6 +14003,8 @@ export const program = Effect.gen(function* () {
             halt: null,
             metrics,
             quality,
+            hotLane,
+            hotDecisions: hotLane ?? [],
             pool,
             binArray,
             datapiStats,
@@ -13732,6 +14020,7 @@ export const program = Effect.gen(function* () {
       function runPhase1ExitEvaluation(): Effect.Effect<void, Error> {
         return Effect.gen(function* () {
           for (const pos of poolPositions) {
+            if (hotLane !== null && pos.positionMode === "hot-window") continue;
             const ilDominance = computeIlDominance(pos);
             const faLifecycle = evaluateFallenAngelExit(pos);
             const launchFees = measureLaunchFees1h(pos);
@@ -13756,6 +14045,7 @@ export const program = Effect.gen(function* () {
       function runPhase2Evaluation(): Effect.Effect<void, Error> {
         return Effect.gen(function* () {
           for (const pos of poolPositions) {
+            if (hotLane !== null && pos.positionMode === "hot-window") continue;
             if (decidedPositionIds.has(pos.positionId)) continue;
             const decision = yield* decidePhase2Position(pos);
             if (decision) {

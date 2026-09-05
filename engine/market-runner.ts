@@ -144,7 +144,11 @@ export function shouldRotate(
   aprMult?: number,
 ): boolean {
   if (!worst) return false;
-  return candidateAprPct >= worst.feeAprPct * (aprMult ?? DEFAULT_ROTATION_APR_MULT);
+  if (!Number.isFinite(candidateAprPct) || candidateAprPct <= 0) return false;
+  if (!Number.isFinite(worst.feeAprPct) || worst.feeAprPct < 0) return false;
+  const multiplier = aprMult ?? DEFAULT_ROTATION_APR_MULT;
+  if (!Number.isFinite(multiplier) || multiplier < 1) return false;
+  return candidateAprPct > worst.feeAprPct && candidateAprPct >= worst.feeAprPct * multiplier;
 }
 
 /** Trailing consecutive above-floor APR observations (newest-first). Breaks

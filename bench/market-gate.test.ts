@@ -389,3 +389,34 @@ describe("rug-prevention: mint-authority-renounced gate", () => {
     expect(mintAuthorityRejectReason(leg, STABLES, true, 100_000, undefined)).not.toBeNull();
   });
 });
+
+describe("fee-window spike guard", () => {
+  it("rejects a 24h spike unconfirmed by longer windows", () => {
+    // 24h APR 54.75% clears the 25% floor, but the 12h/24h windows print thin.
+    const spike = makePool({
+      address: "spike",
+      feeYieldWindows: { "1h": 2, "12h": 0.01, "24h": 0.02 },
+    });
+    const result = gateAndRankMarketPools([spike], config);
+    expect(result.ranked).toHaveLength(0);
+    expect(result.rejected[0]!.reason).toMatch(/spike unconfirmed/);
+  });
+
+  it("admits sustained production across windows", () => {
+    // 1h 0.2%/h → 4.8%/day, 12h 2%/12h → 4%/day, 24h 3.6%/day: min 3.6%/day
+    // → 1314% APR, clears the floor.
+    const hot = makePool({
+      address: "hot",
+      feeYieldWindows: { "1h": 0.2, "12h": 2, "24h": 3.6 },
+    });
+    const result = gateAndRankMarketPools([hot], config);
+    expect(result.ranked).toHaveLength(1);
+  });
+
+  it("fails open when windows are absent or singular", () => {
+    const noWindows = makePool({ address: "plain" });
+    const single = makePool({ address: "single", feeYieldWindows: { "1h": 50 } });
+    const result = gateAndRankMarketPools([noWindows, single], config);
+    expect(result.ranked).toHaveLength(2);
+  });
+});

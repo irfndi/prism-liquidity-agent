@@ -203,6 +203,19 @@ describe("consecutiveAboveFloorObservations (persistence gate)", () => {
 });
 
 describe("shouldRotate (APR multiplier gate)", () => {
+  it("does not churn when both net APRs are zero", () => {
+    expect(shouldRotate(0, { poolAddress: FLAT, feeAprPct: 0, tvlUsd: 100_000 }, 5)).toBe(false);
+  });
+
+  it("requires a finite positive challenger and valid comparison inputs", () => {
+    const held = { poolAddress: FLAT, feeAprPct: 25, tvlUsd: 100_000 };
+    expect(shouldRotate(Infinity, held, 5)).toBe(false);
+    expect(shouldRotate(500, { ...held, feeAprPct: -1 }, 5)).toBe(false);
+    expect(shouldRotate(500, held, 0)).toBe(false);
+    expect(shouldRotate(500, held, 0.5)).toBe(false);
+    expect(shouldRotate(500, { ...held, feeAprPct: 0 }, 5)).toBe(true);
+  });
+
   it("5000% runner vs 25% held with 5x mult -> rotate", () => {
     expect(shouldRotate(5_000, { poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 }, 5)).toBe(
       true,

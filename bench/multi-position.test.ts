@@ -1586,10 +1586,15 @@ describe("program — multiple positions per pool", () => {
   it("honors MAX_ENTRY_SIZE_USD on the normal ENTER path (raised cap reaches execution)", async () => {
     // Default $500 cap would bind (wallet half 5000, tvl fraction 5000);
     // with the cap raised to $2000 the executed paper position must be $2000.
+    // Fees are strong ($4000/day on $1M TVL) so the [expected-profit] ENTER
+    // gate — round-trip coverage over the holding period — lets it through.
     const layer = makeProgramLayer({
       adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 1_000_000 }) }),
       datapi: {
-        getPoolData: () => Effect.succeed(makeDatapiStats({ tvlUsd: 1_000_000 })),
+        getPoolData: () =>
+          Effect.succeed(
+            makeDatapiStats({ tvlUsd: 1_000_000, fees24hUsd: 4_000, volume24hUsd: 400_000 }),
+          ),
       },
       configOverrides: {
         watchlistPools: [POOL],
@@ -1617,10 +1622,10 @@ describe("program — multiple positions per pool", () => {
   }, 15_000);
 
   it("runs an independent lifecycle per position: OOR + trailing-stop EXIT on A leaves B intact", async () => {
-    // Pool price halves to $75: with the price-anchored HODL mark (the old
-    // bin-drift heuristic is gone), A's value genuinely collapses (400 X-leg
-    // at 150 → 200 at 75, plus 400 Y = 600 → 40% drawdown) while B's
-    // Y-heavy mix (100 X + 700 Y) only dips 6.25% (750 vs 800) — no breach.
+    // Pool price dips to $142 (−5.3%): A is out of range by bin with a HODL
+    // mark of 778.7 (−22% vs basis → trailing-stop breach) while B's
+    // range-aware CLMM mark only dips to ~757 (−5.4%, above the 10%
+    // trailing stop). Bin-based OOR still separates them: A OOR, B in.
     const seededA = makePos({
       positionId: "seeded-A",
       lowerBinId: 4900,
@@ -1643,7 +1648,7 @@ describe("program — multiple positions per pool", () => {
     });
 
     const layer = makeProgramLayer({
-      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 75 }) }),
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 142 }) }),
       datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
       configOverrides: {
         watchlistPools: [POOL],
@@ -1699,11 +1704,11 @@ describe("program — multiple positions per pool", () => {
 
     const closedA = closed[0]!;
     expect(closedA.closedAt).not.toBeNull();
-    // Realized PnL = final value (600: the HODL mark after the price halved
+    // Realized PnL = final value (778.7: the HODL mark after the dip scaled
     // the X leg) − basis. A4 paper fee accrual is active for this pool
     // (fees24h 300 > 0) but A is OUT of range (inRange = 0) so it accrued
-    // nothing — this −400 realized pin is unaffected by the accrual.
-    expect(closedA.realizedPnlUsd).toBeCloseTo(-400, 0);
+    // nothing — this −221 realized pin is unaffected by the accrual.
+    expect(closedA.realizedPnlUsd).toBeCloseTo(-221, 0);
     // A's OOR cycles accumulated independently; B never left range.
     expect(closedA.oorCycleCount).toBeGreaterThanOrEqual(1);
     expect(active[0]!.oorCycleCount).toBe(0);
@@ -1730,8 +1735,8 @@ describe("program — multiple positions per pool", () => {
   }, 15_000);
 
   it("does NOT exit on a single-cycle trailing-stop breach (#153 confirmation)", async () => {
-    // A breaches hard (400 X-leg at 150 → 200 at $75 pool price → 40%
-    // drawdown); B's Y-heavy mix (100 X + 900 Y) only dips 5% — no breach.
+    // A breaches hard (HODL 778.7 at the $142 pool price → −22% drawdown);
+    // B's CLMM mark only dips ~−5% — no breach. One cycle is not enough.
     const seededA = makePos({
       positionId: "seeded-A",
       lowerBinId: 4900,
@@ -1750,7 +1755,7 @@ describe("program — multiple positions per pool", () => {
     });
 
     const layer = makeProgramLayer({
-      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 75 }) }),
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 142 }) }),
       datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
       configOverrides: {
         watchlistPools: [POOL],
@@ -1787,7 +1792,7 @@ describe("program — multiple positions per pool", () => {
       >(Effect.provide(test, layer)),
     );
 
-    // A's estimate collapsed (~50% drawdown) on cycle 1, but the breach must
+    // A's estimate collapsed (−22% drawdown) on cycle 1, but the breach must
     // persist for 2 consecutive cycles — one noisy snapshot cannot fire EXIT.
     expect(active.map((p) => p.positionId)).toEqual(["seeded-A", "seeded-B"]);
     expect(closed).toHaveLength(0);
@@ -1795,7 +1800,7 @@ describe("program — multiple positions per pool", () => {
   }, 15_000);
 
   it("exits only after the trailing-stop breach persists across cycles (#153)", async () => {
-    // Same seeds as the single-cycle test: A breaches 40%, B stays at −5%.
+    // Same shape as the lifecycle test: A breaches −22% (HODL), B sits at −5.3% (CLMM).
     const seededA = makePos({
       positionId: "seeded-A",
       lowerBinId: 4900,
@@ -1814,7 +1819,7 @@ describe("program — multiple positions per pool", () => {
     });
 
     const layer = makeProgramLayer({
-      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 75 }) }),
+      adapter: makeProgramAdapter({ [POOL]: makePool({ address: POOL, currentPrice: 142 }) }),
       datapi: { getPoolData: () => Effect.succeed(makeDatapiStats()) },
       configOverrides: {
         watchlistPools: [POOL],

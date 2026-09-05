@@ -84,6 +84,90 @@ describe("phantom EXIT gating (Wave 2)", () => {
     };
   }
 
+  it("executes hot-window timebox decisions through the risk and execution tail", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 10_000 }) }),
+      configOverrides: {
+        watchlistPools: [POOL],
+        hotWindowEnabled: true,
+        hotWindowHoldMaxMs: 60_000,
+        minPoolTvlUsd: 50_000,
+      },
+    });
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(
+        makePosition({
+          poolAddress: POOL,
+          positionMode: "hot-window",
+          timestamp: Date.now() - 120_000,
+        }),
+      );
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const audit = yield* AuditService;
+      return yield* audit.getRecentDecisions(50);
+    });
+    const decisions = await Effect.runPromise(
+      asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
+    );
+    const exits = decisions.filter((d) => d.action === "EXIT" && d.executed);
+    expect(exits).toHaveLength(1);
+    expect(exits[0]?.reasoning).toContain("[hot-window:");
+    expect(decisions.some((d) => d.action === "ENTER" && d.executed)).toBe(false);
+  }, 15_000);
+
+  it.each([false, true])(
+    "routes a hot-window entry through execution and respects cooldown=%s",
+    async (cooldown) => {
+      const layer = makeTestLayer({
+        adapter: makeAdapter({ [POOL]: makePool({ address: POOL }) }),
+        datapi: {
+          getPoolData: () =>
+            Effect.succeed(
+              makeDatapiStats({
+                address: POOL,
+                tvlUsd: 5_000,
+                feeTvlRatio1h: 2,
+              }),
+            ),
+        },
+        configOverrides: {
+          watchlistPools: [POOL],
+          hotWindowEnabled: true,
+          hotWindowEntrySizeUsd: 30,
+          minPoolTvlUsd: 50_000,
+          paperPortfolioUsd: 10_000,
+        },
+      });
+      const test = Effect.gen(function* () {
+        const db = yield* DbService;
+        if (cooldown)
+          yield* db.setPoolCooldown({
+            poolAddress: POOL,
+            cooldownUntil: Date.now() + 3_600_000,
+            reason: "pool-pnl-kill-switch",
+            consecutiveOorExits: 0,
+          });
+        yield* Effect.raceFirst(program, Effect.sleep(2_000));
+        const trips = yield* db.getMetadata(`hot_trips:${new Date().toISOString().slice(0, 10)}`);
+        expect(Number(trips)).toBe(cooldown ? 0 : 1);
+        const audit = yield* AuditService;
+        return yield* audit.getRecentDecisions(50);
+      });
+      const decisions = await Effect.runPromise(
+        asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(
+          Effect.provide(test, layer),
+        ),
+      );
+      expect(decisions.filter((d) => d.action === "ENTER" && d.executed)).toHaveLength(
+        cooldown ? 0 : 1,
+      );
+      if (cooldown)
+        expect(decisions.some((d) => d.reasoning.includes("[cooldown-gate]"))).toBe(true);
+    },
+    15_000,
+  );
+
   it("does NOT record an EXIT for a positionless pool whose TVL dropped", async () => {
     const layer = makeTestLayer({
       adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 60_000 }) }),
@@ -143,6 +227,26 @@ describe("phantom EXIT gating (Wave 2)", () => {
       (d) => d.poolAddress === POOL && d.action === "EXIT" && d.reasoning.includes("TVL dropped"),
     );
     expect(tvlExit, "held pool with a TVL drop must still EXIT").toBeDefined();
+  }, 15_000);
+
+  it("executes a protective EXIT when TVL falls below the entry pre-filter", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter({ [POOL]: makePool({ address: POOL, tvlUsd: 10_000 }) }),
+      configOverrides: { watchlistPools: [POOL], tvlDropExitPct: 0.3, minPoolTvlUsd: 50_000 },
+    });
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(makePosition({ poolAddress: POOL }));
+      yield* db.saveSnapshot(previousSnapshot());
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const audit = yield* AuditService;
+      return yield* audit.getRecentDecisions(50);
+    });
+    const decisions = await Effect.runPromise(
+      asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
+    );
+    expect(decisions.some((d) => d.action === "EXIT" && d.executed)).toBe(true);
+    expect(decisions.some((d) => d.action === "ENTER" && d.executed)).toBe(false);
   }, 15_000);
 
   it("does NOT set a pool cooldown for a low-yield phantom EXIT (no position)", async () => {

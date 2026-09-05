@@ -3,6 +3,7 @@ import {
   activeShareEstimate,
   bandWidthPctFromBins,
   expectedIlCapturedPerExitUsd,
+  expectedNetProfitUsd,
   expectedOorExitsPerDay,
   FEE_CAPTURE_REFERENCE_SPAN_PCT,
   netFeeVelocityUsd,
@@ -10,6 +11,7 @@ import {
   profitableRunner,
   runnerNetAprPct,
   runnerNetDailyPctAfterCosts,
+  stableDailyFeesUsd,
 } from "../engine/fee-capture.js";
 
 describe("activeShareEstimate", () => {
@@ -46,7 +48,7 @@ describe("activeShareEstimate", () => {
 
   it("computes the reference-span concentration model by hand", () => {
     // spanPct = 2 * 5 * 40 * 0.0001 = 0.04 -> concentration = 2 / 0.04 = 50
-    // share = 1000 / (1_000_000 * 50) = 2e-5
+    // share = (1000 / 1_000_000) * 50 = 0.05
     expect(
       activeShareEstimate({
         positionSizeUsd: 1000,
@@ -54,7 +56,7 @@ describe("activeShareEstimate", () => {
         rangeHalfWidthBins: 5,
         binStep: 40,
       }),
-    ).toBeCloseTo(0.00002, 12);
+    ).toBeCloseTo(0.05, 12);
   });
 
   it("uses the full-range reference span as concentration 1 (share = size / tvl)", () => {
@@ -90,9 +92,10 @@ describe("activeShareEstimate", () => {
     expect(share).toBeLessThanOrEqual(1);
   });
 
-  it("wider ranges concentrate less (share strictly grows with rangeHalfWidthBins)", () => {
-    // Wider range -> larger spanPct -> lower concentration -> larger share of
-    // pool fees (time-in-range is the de-risker downstream).
+  it("narrower ranges concentrate more (share strictly shrinks with rangeHalfWidthBins)", () => {
+    // Narrow range -> smaller spanPct -> higher concentration -> larger share
+    // of pool fees per dollar while in range (time-in-range downstream is the
+    // de-risker for narrow churn — share must not pre-discount it).
     const narrow = activeShareEstimate({
       positionSizeUsd: 1000,
       poolTvlUsd: 1_000_000,
@@ -105,7 +108,7 @@ describe("activeShareEstimate", () => {
       rangeHalfWidthBins: 100,
       binStep: 40,
     });
-    expect(narrow).toBeLessThan(wide);
+    expect(narrow).toBeGreaterThan(wide);
     expect(FEE_CAPTURE_REFERENCE_SPAN_PCT).toBe(2);
   });
 });
@@ -231,9 +234,26 @@ describe("netFeeVelocityUsd", () => {
 });
 
 describe("runnerNetAprPct", () => {
+  it("preserves pool APR for a proportional position instead of applying its TVL share twice", () => {
+    for (const poolTvlUsd of [100_000, 1_000_000]) {
+      expect(
+        runnerNetAprPct({
+          grossAprPct: 500,
+          poolTvlUsd,
+          shareEstimate: 20 / poolTvlUsd,
+          positionSizeUsd: 20,
+          harvestCostUsd: 0,
+          conversionCostPct: 0,
+          timeInRangePct: 1,
+        }),
+      ).toBeCloseTo(500, 10);
+    }
+  });
+
   it("is deterministic across repeated calls with identical inputs", () => {
     const params = {
       grossAprPct: 200,
+      poolTvlUsd: 500_000,
       shareEstimate: 0.02,
       harvestCostUsd: 0.5,
       conversionCostPct: 0.05,
@@ -248,6 +268,7 @@ describe("runnerNetAprPct", () => {
   it("fails closed on degenerate inputs (grossAprPct / size / timeInRange)", () => {
     const base = {
       grossAprPct: 200,
+      poolTvlUsd: 500_000,
       shareEstimate: 0.02,
       harvestCostUsd: 0.5,
       conversionCostPct: 0.05,
@@ -260,11 +281,14 @@ describe("runnerNetAprPct", () => {
     expect(runnerNetAprPct({ ...base, timeInRangePct: 0 })).toBe(0);
     expect(runnerNetAprPct({ ...base, grossAprPct: Number.NaN })).toBe(0);
     expect(runnerNetAprPct({ ...base, shareEstimate: Number.NaN })).toBe(0);
+    expect(runnerNetAprPct({ ...base, poolTvlUsd: Number.NaN })).toBe(0);
+    expect(runnerNetAprPct({ ...base, poolTvlUsd: 0 })).toBe(0);
   });
 
   it("matches netFeeVelocityUsd annualized (same floored math)", () => {
     const params = {
       grossAprPct: 200,
+      poolTvlUsd: 500_000,
       shareEstimate: 0.02,
       harvestCostUsd: 0.5,
       conversionCostPct: 0.05,
@@ -272,7 +296,7 @@ describe("runnerNetAprPct", () => {
       timeInRangePct: 1,
     };
     const dailyPerDollar = netFeeVelocityUsd({
-      fees24hUsd: (10_000 * 200) / 100 / 365,
+      fees24hUsd: (params.poolTvlUsd * 200) / 100 / 365,
       shareEstimate: params.shareEstimate,
       harvestCostUsd: params.harvestCostUsd,
       conversionCostPct: params.conversionCostPct,
@@ -283,26 +307,26 @@ describe("runnerNetAprPct", () => {
   });
 
   it("computes a hand-verified worked example", () => {
-    // daily gross = 10_000 * 200/100 / 365 = 20000/365
-    // gross share  = 20000/365 * 0.02 * 1.0 = 400/365
-    // net          = (400/365 - 0.5) * (1 - 0.05) = 0.5660958904109589
-    // per $        = net / 10_000
-    // APR          = per $ * 365 * 100 = 2.06625
+    // Pool daily fees = 500_000 * 2 / 365; 2% belongs to the position.
+    // Annual position fees = (20_000 - 0.5 * 365) * 0.95 = 18_826.625.
+    // APR = 18_826.625 / 10_000 * 100 = 188.26625%.
     expect(
       runnerNetAprPct({
         grossAprPct: 200,
+        poolTvlUsd: 500_000,
         shareEstimate: 0.02,
         harvestCostUsd: 0.5,
         conversionCostPct: 0.05,
         positionSizeUsd: 10_000,
         timeInRangePct: 1,
       }),
-    ).toBeCloseTo(2.06625, 10);
+    ).toBeCloseTo(188.26625, 10);
   });
 
   it("keeps net APR below gross APR (the consistency sanity property)", () => {
     const apr = runnerNetAprPct({
       grossAprPct: 500,
+      poolTvlUsd: 20_000,
       shareEstimate: 0.5,
       harvestCostUsd: 0.1,
       conversionCostPct: 0.1,
@@ -316,6 +340,7 @@ describe("runnerNetAprPct", () => {
   it("scales linearly with grossAprPct when costs are zero (anchor-only input)", () => {
     const base = {
       grossAprPct: 100,
+      poolTvlUsd: 10_000,
       shareEstimate: 1,
       harvestCostUsd: 0,
       conversionCostPct: 0,
@@ -331,14 +356,14 @@ describe("runnerNetAprPct", () => {
 
 describe("pipeline", () => {
   it("composes activeShareEstimate into netFeeVelocityUsd (a share from rank-time inputs)", () => {
-    // share = 5000 / (500_000 * 50) = 2e-4 (halfWidth 5 @ binStep 40)
+    // share = (5000 / 500_000) * 50 = 0.5 (halfWidth 5 @ binStep 40 concentrates 50x)
     const share = activeShareEstimate({
       positionSizeUsd: 5000,
       poolTvlUsd: 500_000,
       rangeHalfWidthBins: 5,
       binStep: 40,
     });
-    expect(share).toBeCloseTo(2e-4, 12);
+    expect(share).toBeCloseTo(0.5, 12);
     const velocity = netFeeVelocityUsd({
       fees24hUsd: 1200,
       shareEstimate: share,
@@ -347,8 +372,8 @@ describe("pipeline", () => {
       positionSizeUsd: 5000,
       timeInRangePct: 0.95,
     });
-    // gross = 1200 * 2e-4 * 0.95 = 0.228; net = (0.228 - 0.05) * 0.95 = 0.1691; /5000
-    expect(velocity).toBeCloseTo(0.1691 / 5000, 12);
+    // gross = 1200 * 0.5 * 0.95 = 570; net = (570 - 0.05) * 0.95 = 541.4525; /5000
+    expect(velocity).toBeCloseTo(541.4525 / 5000, 12);
     expect(velocity).toBeGreaterThan(0);
   });
 
@@ -490,5 +515,63 @@ describe("runner churn / IL / swap cost model (no-bleed gate)", () => {
     // floor (that's why the gate floor must be > 0 to bind on profitability).
     expect(profitableRunner({ ...healthy, fees24hUsd: 0 }, 0)).toBe(true);
     expect(profitableRunner({ ...healthy, fees24hUsd: 0 }, 0.0001)).toBe(false);
+  });
+});
+
+describe("stableDailyFeesUsd", () => {
+  it("takes the minimum across windows (a lone 1h spike cannot pass)", () => {
+    // tvl 100k: 1h 2%/h → 48k/day, 12h 0.1%/12h → 200/day, 24h 0.3%/day → 300/day.
+    expect(stableDailyFeesUsd({ "1h": 2, "12h": 0.1, "24h": 0.3 }, 100_000)).toBeCloseTo(200, 10);
+  });
+
+  it("normalizes sub-day windows to daily dollars", () => {
+    // 30m 0.05% → 0.05/100 × 10k × 48 = 240/day.
+    expect(stableDailyFeesUsd({ "30m": 0.05 }, 10_000)).toBeCloseTo(240, 10);
+  });
+
+  it("fails open (null) when no window is usable", () => {
+    expect(stableDailyFeesUsd(null, 100_000)).toBeNull();
+    expect(stableDailyFeesUsd(undefined, 100_000)).toBeNull();
+    expect(stableDailyFeesUsd({}, 100_000)).toBeNull();
+    expect(stableDailyFeesUsd({ "1h": Number.NaN }, 100_000)).toBeNull();
+    expect(stableDailyFeesUsd({ "1h": -1 }, 100_000)).toBeNull();
+    expect(stableDailyFeesUsd({ "24h": 0.3 }, 0)).toBeNull();
+  });
+});
+
+describe("expectedNetProfitUsd", () => {
+  const base = {
+    dailyFeesUsd: 300,
+    positionSizeUsd: 100,
+    poolTvlUsd: 100_000,
+    rangeHalfWidthBins: 20,
+    binStep: 20,
+    volatilityStddev: 2,
+    swapCostPct: 0.005,
+    harvestCostUsd: 0.01,
+    holdingDays: 1,
+    txCostUsd: 0.005,
+  };
+
+  it("is positive for a healthy pool and negative below cost coverage", () => {
+    expect(expectedNetProfitUsd(base)).toBeGreaterThan(0);
+    // A $1 position over a 4h holding horizon cannot amortize the round trip.
+    expect(
+      expectedNetProfitUsd({ ...base, positionSizeUsd: 1, holdingDays: 1 / 6 }),
+    ).toBeLessThanOrEqual(0);
+  });
+
+  it("charges the round trip explicitly (bigger tx cost lowers profit)", () => {
+    const cheap = expectedNetProfitUsd(base);
+    const pricey = expectedNetProfitUsd({ ...base, txCostUsd: 1 });
+    expect(cheap).not.toBeNull();
+    expect(pricey).toBeCloseTo(cheap! - 2 * (1 - 0.005), 10);
+  });
+
+  it("returns null (unknown) on invalid inputs — never a fabricated zero", () => {
+    expect(expectedNetProfitUsd({ ...base, dailyFeesUsd: 0 })).toBeNull();
+    expect(expectedNetProfitUsd({ ...base, positionSizeUsd: 0 })).toBeNull();
+    expect(expectedNetProfitUsd({ ...base, holdingDays: 0 })).toBeNull();
+    expect(expectedNetProfitUsd({ ...base, swapCostPct: Number.NaN })).toBeNull();
   });
 });

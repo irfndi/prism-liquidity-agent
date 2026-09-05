@@ -9,6 +9,7 @@
  */
 
 import type { DiscoveredPool } from "./services.js";
+import { stableDailyFeesUsd } from "./fee-capture.js";
 import { transferFeeRejectionReason } from "./transfer-fee.js";
 
 export interface MarketGateConfig {
@@ -179,7 +180,29 @@ function marketFeeRejectReason(pool: DiscoveredPool, config: MarketGateConfig): 
   if (feeAprPct < config.minFeeApr) {
     return `fee APR ${feeAprPct.toFixed(1)}% < ${config.minFeeApr}%`;
   }
+  // Spike guard: a hot 24h print must be confirmed by the longer windows —
+  // the minimum across usable fee/TVL windows (normalized to daily) must
+  // also clear the floor, so a one-hour blow-off top cannot buy admission.
+  // Fewer than 2 usable windows → unassessable → fail open (the per-pool
+  // ENTER gates still apply).
+  const stable = stableDailyFeesUsd(pool.feeYieldWindows, pool.tvlUsd);
+  if (stable !== null && usableFeeWindows(pool.feeYieldWindows) >= 2) {
+    const stableAprPct = (stable * 365 * 100) / pool.tvlUsd;
+    if (stableAprPct < config.minFeeApr) {
+      return `stable fee APR ${stableAprPct.toFixed(1)}% (min across windows) < ${config.minFeeApr}% — 24h spike unconfirmed`;
+    }
+  }
   return null;
+}
+
+/** Count of usable (finite, non-negative) fee/TVL windows. */
+function usableFeeWindows(windows: DiscoveredPool["feeYieldWindows"]): number {
+  if (windows == null) return 0;
+  let count = 0;
+  for (const value of Object.values(windows)) {
+    if (value != null && Number.isFinite(value) && value >= 0) count++;
+  }
+  return count;
 }
 
 function marketVolumeRejectReason(pool: DiscoveredPool, config: MarketGateConfig): string | null {

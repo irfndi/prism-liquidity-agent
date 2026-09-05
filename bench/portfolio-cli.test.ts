@@ -10,15 +10,19 @@ async function runAsync<T, E>(
   return Effect.runPromise(Effect.provide(effect, layer));
 }
 import {
+  computeClosedTradeStats,
   computeSummary,
   computePnl,
+  enterCohortLabel,
+  exitReasonFromMetadata,
+  exitReasonTag,
   formatAge,
   formatPosition,
+  groupClosedTradeExpectancy,
   toJsonOutput,
   toHistoryJsonOutput,
 } from "../cli/portfolio.js";
 import type { PositionRecord } from "../engine/db-service.js";
-
 // Per-field defaulting split out of makePosition to stay under the complexity cap;
 // each helper returns a partial of the same defaulted values makePosition always produced.
 function marketIdentityDefaults(
@@ -566,5 +570,93 @@ describe("reward reporting (Wave 8)", () => {
     ]);
     // 1100 + 25 + 40 − 1000 (no stored realizedPnlUsd → fallback)
     expect(json.positions[0]?.realizedPnlUsd).toBe(165);
+  });
+});
+
+describe("closed-trade evidence", () => {
+  const closed = (realizedPnlUsd: number | null, at: number) =>
+    makePosition({
+      poolAddress: "pool1",
+      depositedUsd: 100,
+      currentValueUsd: 100,
+      realizedPnlUsd,
+      closedAt: at,
+    });
+
+  it("computes expectancy, profit factor and drawdown (win rate alone misleads)", () => {
+    // +10, +10, −15: 66.7% win rate but net +5, expectancy +1.67.
+    const stats = computeClosedTradeStats([closed(10, 3), closed(10, 1), closed(-15, 2)]);
+    expect(stats.count).toBe(3);
+    expect(stats.wins).toBe(2);
+    expect(stats.losses).toBe(1);
+    expect(stats.winRatePct).toBeCloseTo(66.6667, 3);
+    expect(stats.netPnlUsd).toBe(5);
+    expect(stats.expectancyUsd).toBeCloseTo(5 / 3, 10);
+    expect(stats.avgWinUsd).toBe(10);
+    expect(stats.avgLossUsd).toBe(-15);
+    expect(stats.profitFactor).toBeCloseTo(20 / 15, 10);
+    // Curve 10 → −5 → 5: peak 10, trough −5 → drawdown 15.
+    expect(stats.maxDrawdownUsd).toBe(15);
+  });
+
+  it("skips NULL realized rows (unpriced exits are unknown, never breakeven)", () => {
+    const stats = computeClosedTradeStats([closed(null, 1), closed(10, 2)]);
+    expect(stats.count).toBe(1);
+    expect(stats.netPnlUsd).toBe(10);
+    expect(stats.profitFactor).toBeNull();
+  });
+
+  it("returns nulls (not zeros) on an empty ledger", () => {
+    const stats = computeClosedTradeStats([]);
+    expect(stats.count).toBe(0);
+    expect(stats.winRatePct).toBeNull();
+    expect(stats.expectancyUsd).toBeNull();
+    expect(stats.profitFactor).toBeNull();
+    expect(stats.maxDrawdownUsd).toBe(0);
+  });
+
+  it("tags exit reasons and entry cohorts from event metadata", () => {
+    expect(exitReasonTag("[trailing-stop] peak breached")).toBe("trailing-stop");
+    expect(exitReasonTag("no bracket here")).toBe("unknown");
+    expect(exitReasonTag(null)).toBe("unknown");
+    expect(enterCohortLabel(JSON.stringify({ ladder: "tight" }))).toBe("tight");
+    expect(enterCohortLabel(JSON.stringify({ ladder: "wide" }))).toBe("wide");
+    expect(enterCohortLabel(JSON.stringify({ strategySpec: "spot" }))).toBe("single");
+    expect(enterCohortLabel(null)).toBe("unknown");
+    expect(enterCohortLabel("not-json")).toBe("unknown");
+    expect(exitReasonFromMetadata(JSON.stringify({ exitReason: "[oor] out" }))).toBe("oor");
+    expect(exitReasonFromMetadata(JSON.stringify({}))).toBe("unknown");
+    expect(exitReasonFromMetadata(null)).toBe("unknown");
+  });
+
+  it("groups expectancy by cohort for the split-vs-single comparison", () => {
+    const positions = [
+      { ...closed(10, 1), positionId: "tight-1" },
+      { ...closed(-4, 2), positionId: "tight-2" },
+      { ...closed(2, 3), positionId: "single-1" },
+    ];
+    const groups = groupClosedTradeExpectancy(
+      positions,
+      new Map([
+        ["tight-1", "tight"],
+        ["tight-2", "tight"],
+        ["single-1", "single"],
+      ]),
+    );
+    expect(groups.map((g) => g.cohort)).toEqual(["single", "tight"]);
+    expect(groups.find((g) => g.cohort === "tight")?.expectancyUsd).toBeCloseTo(3, 10);
+    expect(groups.find((g) => g.cohort === "single")?.expectancyUsd).toBe(2);
+  });
+
+  it("toHistoryJsonOutput carries stats and cohorts", () => {
+    const positions = [{ ...closed(10, 1), positionId: "tight-1" }];
+    const json = toHistoryJsonOutput(positions, {
+      cohortByPositionId: new Map([["tight-1", "tight"]]),
+    });
+    expect(json.stats.count).toBe(1);
+    expect(json.stats.expectancyUsd).toBe(10);
+    expect(json.cohorts).toHaveLength(1);
+    expect(json.cohorts?.[0]?.cohort).toBe("tight");
+    expect(json.positions[0]?.cohort).toBe("tight");
   });
 });

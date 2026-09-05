@@ -301,3 +301,171 @@ export function computePortfolioEquity(input: PortfolioEquityInput): PortfolioEq
     walletKnown,
   };
 }
+
+// ─── Concentrated-liquidity position valuation ───────────────────────────────
+//
+// A DLMM position spanning bins [lower, upper] behaves as a concentrated
+// liquidity position over the price range [P_a, P_b]. Paper positions have no
+// on-chain account to read, so the engine marks them with this instead of the
+// HODL revaluation (which understates IL: it prices the entry legs as if they
+// were never deposited). IL = hodlValueUsd − lpValueUsd. Single source of
+// truth — ops/backtest.ts re-exports these rather than keeping a copy.
+
+/** Range edges of a DLMM position expressed as bin prices. */
+export interface BinRangePrices {
+  readonly pa: number;
+  readonly pb: number;
+}
+
+/** Mark-to-market and HODL-benchmark values of a CLMM position. */
+export interface ClmmPositionValue {
+  readonly lpValueUsd: number;
+  readonly hodlValueUsd: number;
+}
+
+/** Range edges of a DLMM position expressed as bin prices. Bin i has price
+ * P_i = P_anchor·(1+s)^(i−anchorBin), so the position's [lower, upper] bin
+ * range maps to a CLMM price range [P_a, P_b]. */
+export function binRangePrices(args: {
+  anchorPrice: number;
+  anchorBinId: number;
+  lowerBinId: number;
+  upperBinId: number;
+  binStep: number;
+}): BinRangePrices {
+  const s = 1 + args.binStep / 10_000;
+  const pa = args.anchorPrice * Math.pow(s, args.lowerBinId - args.anchorBinId);
+  const pb = args.anchorPrice * Math.pow(s, args.upperBinId - args.anchorBinId);
+  return { pa: pa > 0 ? pa : 1, pb: pb > 0 ? pb : 1 };
+}
+
+/**
+ * Correct DLMM/CLMM position valuation (NOT the V2 full-range curve).
+ *
+ * Given the deposited USD value split 50/50 at the anchor price, returns the
+ * position's mark-to-market value at P1 and the HODL benchmark value (the same
+ * capital never deposited), so IL = 1 − V_LP/V_HODL.
+ *
+ * Piecewise (a=√P_a, b=√P_b, s=√P1):
+ *   P1 ≤ P_a : x = L(1/a − 1/b),           y = 0
+ *   P_a<P1<P_b: x = L(1/s − 1/b),           y = L(s − a)
+ *   P1 ≥ P_b : x = 0,                       y = L(b − a)
+ *   V_LP = x·P1 + y
+ *   V_HODL = X0·P1 + Y0   (X0,Y0 = initial 50/50 amounts)
+ *
+ * Crucially this does NOT stop growing once price exits the range: when P1>P_b
+ * the position is fully in token1 (V_LP flat) while V_HODL keeps appreciating,
+ * so IL grows without bound — the exact behavior the V2 2√r/(1+r) curve
+ * wrongly asymptotes away.
+ */
+export function clmmPositionValue(args: {
+  sizeUsd: number;
+  anchorPrice: number;
+  anchorBinId: number;
+  currentPrice: number;
+  lowerBinId: number;
+  upperBinId: number;
+  binStep: number;
+}): ClmmPositionValue {
+  const { pa, pb } = binRangePrices(args);
+  const p0 = args.anchorPrice;
+  const p1 = args.currentPrice;
+  if (!(p0 > 0) || !(p1 > 0) || !(pb > pa)) {
+    return { lpValueUsd: args.sizeUsd, hodlValueUsd: args.sizeUsd };
+  }
+  // 50/50 deposit at anchor: X tokens and Y tokens.
+  const x0 = args.sizeUsd / 2 / p0;
+  const y0 = args.sizeUsd / 2;
+  const a = Math.sqrt(pa);
+  const b = Math.sqrt(pb);
+  // Liquidity L is a CONSTANT of the position, fixed at deposit: it is
+  // recovered from the X leg at the ANCHOR price p0, never the live price.
+  // Deriving it from the live price while reusing the initial x0 is a bug — it
+  // inflates in-range LP value and overstates downside IL by an order of
+  // magnitude.
+  const s0 = Math.sqrt(p0);
+  const L = x0 / (1 / s0 - 1 / b) || 0;
+  if (!(L > 0)) return { lpValueUsd: args.sizeUsd, hodlValueUsd: x0 * p1 + y0 };
+  const sp = Math.sqrt(p1);
+  let x: number;
+  let y: number;
+  if (p1 <= pa) {
+    x = L * (1 / a - 1 / b);
+    y = 0;
+  } else if (p1 >= pb) {
+    x = 0;
+    y = L * (b - a);
+  } else {
+    x = L * (1 / sp - 1 / b);
+    y = L * (sp - a);
+  }
+  const lpValueUsd = x * p1 + y;
+  const hodlValueUsd = x0 * p1 + y0;
+  return { lpValueUsd, hodlValueUsd };
+}
+
+/**
+ * Paper position mark: the CLMM LP value for a position whose entry anchor is
+ * known, or null when it is not (pre-v16 rows with NULL entry fields, unknown
+ * binStep). Null means "keep the caller's fallback" — never fabricate.
+ * Paper positions have no on-chain account, so without this their mark is the
+ * HODL revaluation and out-of-range IL never appears in unrealized PnL.
+ * The 50/50-at-anchor derivation only prices ranges containing the anchor:
+ * an anchor outside [lower, upper] is a single-sided entry shape (e.g. a
+ * dip-anchored leg) that needs its own deposit model — fail open to HODL
+ * rather than price it with the wrong shape.
+ */
+export interface PaperClmmMarkInput {
+  readonly depositedUsd: number;
+  readonly entryPriceUsd: number | null;
+  readonly anchorBinId: number | null;
+  readonly currentPrice: number;
+  readonly lowerBinId: number;
+  readonly upperBinId: number;
+  readonly binStep: number;
+}
+export function paperClmmMarkUsd(args: PaperClmmMarkInput): number | null {
+  const entryPriceUsd = args.entryPriceUsd;
+  const anchorBinId = args.anchorBinId;
+  if (entryPriceUsd == null || anchorBinId == null) return null;
+  if (!hasClmmEntryAnchor(args) || !isClmmMarketPriced(args)) return null;
+  const { lpValueUsd } = clmmPositionValue({
+    sizeUsd: args.depositedUsd,
+    anchorPrice: entryPriceUsd,
+    anchorBinId,
+    currentPrice: args.currentPrice,
+    lowerBinId: args.lowerBinId,
+    upperBinId: args.upperBinId,
+    binStep: args.binStep,
+  });
+  return Number.isFinite(lpValueUsd) && lpValueUsd >= 0 ? lpValueUsd : null;
+}
+
+/**
+ * Entry anchor usable for CLMM pricing: known price/bin with the anchor bin
+ * inside the range (a 50/50-at-anchor deposit). An outside anchor is a
+ * single-sided shape this model must not price — fail open instead.
+ */
+function hasClmmEntryAnchor(args: {
+  readonly entryPriceUsd: number | null;
+  readonly anchorBinId: number | null;
+  readonly lowerBinId: number;
+  readonly upperBinId: number;
+}): boolean {
+  if (args.entryPriceUsd == null || args.anchorBinId == null) return false;
+  if (!(args.entryPriceUsd > 0) || !Number.isFinite(args.anchorBinId)) return false;
+  return args.anchorBinId >= args.lowerBinId && args.anchorBinId <= args.upperBinId;
+}
+
+/** Live market inputs usable for CLMM pricing (positive size/price/step, ordered range). */
+function isClmmMarketPriced(args: {
+  readonly depositedUsd: number;
+  readonly currentPrice: number;
+  readonly binStep: number;
+  readonly lowerBinId: number;
+  readonly upperBinId: number;
+}): boolean {
+  if (!(args.depositedUsd > 0) || !(args.currentPrice > 0)) return false;
+  if (!Number.isFinite(args.currentPrice) || !(args.binStep > 0)) return false;
+  return args.upperBinId > args.lowerBinId;
+}

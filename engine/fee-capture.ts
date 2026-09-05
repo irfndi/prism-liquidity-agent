@@ -42,8 +42,9 @@ export interface NetFeeVelocityParams {
 }
 
 export interface RunnerNetAprParams {
-  /** Gross annual APR, percent (e.g. 120 = 120% APR). Sanity anchor only. */
+  /** Measured pool fees / TVL, annualized percent (e.g. 120 = 120% APR). */
   readonly grossAprPct: number;
+  readonly poolTvlUsd: number;
   readonly shareEstimate: number;
   readonly harvestCostUsd: number;
   readonly conversionCostPct: number;
@@ -74,15 +75,18 @@ function clamp01(n: number): number {
  * Expected share of pool fees captured by a position, from rank-time inputs
  * only.
  *
- * Model: share = clamp(positionSizeUsd / (poolTvlUsd * concentration), 0, 1),
+ * Model: share = clamp(positionSizeUsd / poolTvlUsd * concentration, 0, 1),
  * where
  *
  *   spanPct = 2 * rangeHalfWidthBins * binStep * 0.0001   (range width, pct)
  *   concentration = max(FEE_CAPTURE_REFERENCE_SPAN_PCT / spanPct, 1)
  *
- * A wider range → larger spanPct → lower concentration → smaller share; the
- * concentration floor of 1 ensures a range wider than the ±100% reference
- * never claims a share beyond the position's proportional slice of TVL.
+ * A narrower range → smaller spanPct → higher concentration → larger share of
+ * pool fees per deployed dollar while in range (concentrated liquidity sits
+ * in the traded bins); a range wider than the ±100% reference has
+ * concentration 1 and captures exactly its proportional TVL slice. Time in
+ * range is the de-risker downstream (narrow churns OOR more often) — share
+ * must not pre-discount it, or wide positions win twice.
  *
  * // ponytail: uniform-liquidity model — share is linear in size and width,
  * // and TVL is treated as uniformly distributed across bins. Real per-bin
@@ -105,7 +109,7 @@ export function activeShareEstimate(params: ActiveShareParams): number {
   }
   const spanPct = 2 * rangeHalfWidthBins * binStep * BIN_STEP_BPS_TO_PCT;
   const concentration = Math.max(FEE_CAPTURE_REFERENCE_SPAN_PCT / spanPct, 1);
-  return Math.min(positionSizeUsd / (poolTvlUsd * concentration), 1);
+  return Math.min((positionSizeUsd / poolTvlUsd) * concentration, 1);
 }
 
 /**
@@ -163,15 +167,14 @@ export function netFeeVelocityUsd(params: NetFeeVelocityParams): number {
  *
  * The runner's params carry no fees24hUsd, so the gross source is the
  * annualized grossAprPct, converted back to the daily USD equivalent
- * (positionSizeUsd * grossAprPct / 100 / 365) and fed through the same
+ * (poolTvlUsd * grossAprPct / 100 / 365) and fed through the same
  * share / harvest / conversion / time-in-range haircuts.
  *
- * grossAprPct is a sanity anchor, not the rank signal: raw APR is exactly
- * what this model replaces. It never enters the computation directly — the
- * function derives entirely from the shared terms, and the floored net is by
- * construction ≤ grossAprPct (share, timeInRangePct, and conversionCostPct
- * are all ≤ 1 and harvestCostUsd ≥ 0), which is the consistency property
- * callers can rely on when cross-checking the two.
+ * Apply the pool-fee share exactly once. Using position size to reconstruct
+ * pool fees would discount by size / TVL twice and spuriously favor shallow
+ * pools. For proportional liquidity and zero costs, position APR equals
+ * pool APR regardless of pool depth; fixed harvest costs still penalize
+ * small positions. This remains an estimate, not a per-bin fee quote.
  *
  * // ponytail: 365-day annualization, no compounding. Add daily compounding
  * // (or a 365.25 anchor) when the APR feeds a TVM calculation.
@@ -180,9 +183,10 @@ export function netFeeVelocityUsd(params: NetFeeVelocityParams): number {
  * gross 0 → net 0; non-positive size / timeInRange → 0).
  */
 export function runnerNetAprPct(params: RunnerNetAprParams): number {
+  if (!finitePositive(params.poolTvlUsd)) return 0;
   const { shareEstimate, harvestCostUsd, conversionCostPct, positionSizeUsd, timeInRangePct } =
     params;
-  const dailyGrossUsd = (positionSizeUsd * (params.grossAprPct / 100)) / 365;
+  const dailyGrossUsd = (params.poolTvlUsd * (params.grossAprPct / 100)) / 365;
   return (
     netFeeVelocityUsd({
       fees24hUsd: dailyGrossUsd,
@@ -366,4 +370,107 @@ export function runnerNetDailyPctAfterCosts(params: NetFeeWithCostsParams): numb
 export function profitableRunner(params: NetFeeWithCostsParams, minNetDailyPct: number): boolean {
   const floor = Number.isFinite(minNetDailyPct) ? Math.max(0, minNetDailyPct) : 0;
   return runnerNetDailyPctAfterCosts(params) >= floor;
+}
+
+// ─── Fee-window stability + holding-period profit (normal-lane ENTER) ─────────
+// A 24h fee print alone chases spikes: a pool printing hot for one hour looks
+// identical to one producing all day. The Data API ships fee/TVL windows
+// (fee_tvl_ratio per window, percent-per-window) — the conservative daily
+// estimate is the MINIMUM across usable windows, so a lone 1h spike can never
+// admit a pool its 12h/24h windows would reject. An ENTER must then cover a
+// full round trip (entry + exit swaps and txs) over the intended holding
+// period out of that stable estimate, after the same churn/IL/harvest costs
+// the runner lane already charges.
+
+/** Fee/TVL ratio windows (percent-per-window) the stability estimate reads. */
+export type FeeWindowLabel = "30m" | "1h" | "2h" | "4h" | "12h" | "24h";
+
+/** Annualization of one window's percent-per-window ratio to daily fee dollars. */
+const FEE_WINDOW_DAY_FACTORS = {
+  "30m": 48,
+  "1h": 24,
+  "2h": 12,
+  "4h": 6,
+  "12h": 2,
+  "24h": 1,
+} satisfies Record<FeeWindowLabel, number>;
+
+/**
+ * Conservative daily fee USD: the minimum across usable windows, each
+ * normalized to daily dollars (ratioPct/100 × tvl × windowFactor). Null when
+ * no window is usable (absent/non-finite/negative ratio or non-positive TVL)
+ * — callers fail open to their legacy source rather than fabricate.
+ */
+export function stableDailyFeesUsd(
+  windows: Readonly<Record<string, number | null | undefined>> | null | undefined,
+  tvlUsd: number,
+): number | null {
+  if (windows == null || !(tvlUsd > 0)) return null;
+  let stable: number | null = null;
+  // SAFETY: FEE_WINDOW_DAY_FACTORS is a literal keyed by every FeeWindowLabel, so Object.keys returns exactly those labels.
+  for (const label of Object.keys(FEE_WINDOW_DAY_FACTORS) as ReadonlyArray<FeeWindowLabel>) {
+    const ratio = windows[label];
+    if (ratio == null || !Number.isFinite(ratio) || ratio < 0) continue;
+    const daily = (ratio / 100) * tvlUsd * FEE_WINDOW_DAY_FACTORS[label];
+    if (!Number.isFinite(daily)) continue;
+    stable = stable == null ? daily : Math.min(stable, daily);
+  }
+  return stable;
+}
+
+export interface ExpectedProfitParams {
+  /** Conservative daily pool fees, USD (stableDailyFeesUsd output). */
+  readonly dailyFeesUsd: number;
+  readonly positionSizeUsd: number;
+  readonly poolTvlUsd: number;
+  readonly rangeHalfWidthBins: number;
+  readonly binStep: number;
+  readonly volatilityStddev: number;
+  /** Per-swap cost as a fraction (0.005 = 0.5%). */
+  readonly swapCostPct: number;
+  /** Daily harvest (claim) cost, USD. */
+  readonly harvestCostUsd: number;
+  /** Intended holding period, in days. */
+  readonly holdingDays: number;
+  /** Per-transaction gas cost, USD (entry + exit = 2 txs). */
+  readonly txCostUsd: number;
+  /** Expected fraction of time in range, in [0, 1]. */
+  readonly timeInRangePct?: number;
+  /** Upper bound on exits/day, from the scan cadence. */
+  readonly maxExitsPerDay?: number;
+}
+
+/**
+ * Expected net USD over the intended holding period: concentrated gross fees
+ * (net of churn/IL/harvest via netFeeVelocityUsdWithCosts) minus one full
+ * round trip (two swaps on the full size + two txs). Null on invalid inputs
+ * (non-positive fees/size/holding, non-finite costs) — unknown, never zero
+ * masquerading as breakeven. A positive result means estimated fees cover
+ * entry/exit costs with room to spare; zero or negative rejects the ENTER.
+ */
+export function expectedNetProfitUsd(params: ExpectedProfitParams): number | null {
+  const { dailyFeesUsd, positionSizeUsd, holdingDays, swapCostPct, txCostUsd } = params;
+  if (
+    !finitePositive(dailyFeesUsd) ||
+    !finitePositive(positionSizeUsd) ||
+    !finitePositive(holdingDays) ||
+    !Number.isFinite(swapCostPct) ||
+    !Number.isFinite(txCostUsd)
+  ) {
+    return null;
+  }
+  const velocity = netFeeVelocityUsdWithCosts({
+    fees24hUsd: dailyFeesUsd,
+    poolTvlUsd: params.poolTvlUsd,
+    positionSizeUsd,
+    rangeHalfWidthBins: params.rangeHalfWidthBins,
+    binStep: params.binStep,
+    volatilityStddev: params.volatilityStddev,
+    swapCostPct,
+    harvestCostUsd: params.harvestCostUsd,
+    timeInRangePct: params.timeInRangePct ?? 1,
+    maxExitsPerDay: params.maxExitsPerDay ?? 86_400_000 / 600_000,
+  });
+  const roundTrip = 2 * clamp01(swapCostPct) * positionSizeUsd + 2 * Math.max(txCostUsd, 0);
+  return velocity * positionSizeUsd * holdingDays - roundTrip;
 }
