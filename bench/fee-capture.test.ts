@@ -219,8 +219,8 @@ describe("netFeeVelocityUsd", () => {
 
   it("computes a hand-verified worked example", () => {
     // gross = 1000 * 0.01 * 0.9 = 9
-    // net   = (9 - 1) * (1 - 0.1) = 7.2
-    // per $ = 7.2 / 1000 = 0.0072
+    // net   = 9 * (1 - 0.1) - 1 = 7.1
+    // per $ = 7.1 / 1000 = 0.0071
     expect(
       netFeeVelocityUsd({
         fees24hUsd: 1000,
@@ -230,7 +230,7 @@ describe("netFeeVelocityUsd", () => {
         positionSizeUsd: 1000,
         timeInRangePct: 0.9,
       }),
-    ).toBeCloseTo(0.0072, 10);
+    ).toBeCloseTo(0.0071, 10);
   });
 });
 
@@ -309,8 +309,8 @@ describe("runnerNetAprPct", () => {
 
   it("computes a hand-verified worked example", () => {
     // Pool daily fees = 500_000 * 2 / 365; 2% belongs to the position.
-    // Annual position fees = (20_000 - 0.5 * 365) * 0.95 = 18_826.625.
-    // APR = 18_826.625 / 10_000 * 100 = 188.26625%.
+    // Annual position fees = 20_000 * 0.95 - 0.5 * 365 = 18,817.5.
+    // APR = 18,817.5 / 10,000 * 100 = 188.175%.
     expect(
       runnerNetAprPct({
         grossAprPct: 200,
@@ -321,7 +321,7 @@ describe("runnerNetAprPct", () => {
         positionSizeUsd: 10_000,
         timeInRangePct: 1,
       }),
-    ).toBeCloseTo(188.26625, 10);
+    ).toBeCloseTo(188.175, 10);
   });
 
   it("keeps net APR below gross APR (the consistency sanity property)", () => {
@@ -373,8 +373,8 @@ describe("pipeline", () => {
       positionSizeUsd: 5000,
       timeInRangePct: 0.95,
     });
-    // gross = 1200 * 0.5 * 0.95 = 570; net = (570 - 0.05) * 0.95 = 541.4525; /5000
-    expect(velocity).toBeCloseTo(541.4525 / 5000, 12);
+    // gross = 1200 * 0.5 * 0.95 = 570; net = 570 * 0.95 - 0.05 = 541.45; /5000
+    expect(velocity).toBeCloseTo(541.45 / 5000, 12);
     expect(velocity).toBeGreaterThan(0);
   });
 
@@ -550,6 +550,7 @@ describe("expectedNetProfitUsd", () => {
     volatilityStddev: 2,
     swapCostPct: 0.005,
     harvestCostUsd: 0.01,
+    conversionCostPct: 0.05,
     holdingDays: 1,
     txCostUsd: 0.005,
   };

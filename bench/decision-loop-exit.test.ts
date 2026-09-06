@@ -288,10 +288,10 @@ describe("portfolio value math (Wave 2)", () => {
   const POOL_NEW = "PoolNew1111111111111111111111111111111111";
 
   it("computes the ENTER drawdown gate against wallet + open positions", async () => {
-    // Wallet: $100. Open position: deposited $950, now worth ~$902 (drifted 2
-    // bins off center) → unrealized PnL ≈ -$47.50. Against a wallet-only
-    // "portfolio" of $100 that is a 47% drawdown (ENTER blocked); against the
-    // real portfolio of ~$1002 it is ~4.7% (ENTER allowed).
+    // Paper seed: $1,050 initial equity, with $950 already deployed → $100
+    // liquid cash. The open position is now worth ~$902 (drifted 2 bins off
+    // center) → unrealized PnL ≈ -$47.50. Against cash-only "$100" that is a
+    // 47% drawdown (ENTER blocked); against cash + position value it is ~4.7%.
     const adapter = makeAdapter({
       [POOL_HELD]: makePool({ address: POOL_HELD, activeBinId: 5002, fees24hUsd: 100 }),
       [POOL_NEW]: makePool({ address: POOL_NEW }),
@@ -305,7 +305,7 @@ describe("portfolio value math (Wave 2)", () => {
       datapi,
       configOverrides: {
         watchlistPools: [POOL_HELD, POOL_NEW],
-        paperPortfolioUsd: 100,
+        paperPortfolioUsd: 1_050,
       },
     });
 

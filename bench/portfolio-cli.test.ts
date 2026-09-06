@@ -346,8 +346,8 @@ describe("toHistoryJsonOutput", () => {
       expect(json.positions[0].poolName).toBe("SOL/USDC");
       expect(json.positions[0].depositedUsd).toBe(1000);
       expect(json.positions[0].exitValueUsd).toBe(900);
-      expect(json.positions[0].realizedPnlUsd).toBe(-100);
-      expect(json.positions[0].realizedPnlPct).toBe(-10);
+      expect(json.positions[0].realizedPnlUsd).toBeNull();
+      expect(json.positions[0].realizedPnlPct).toBeNull();
       expect(json.positions[0].paperExitedAt).toBe(1700000000000);
     }
     expect(json.summary.totalDepositedUsd).toBe(1000);
@@ -557,7 +557,7 @@ describe("reward reporting (Wave 8)", () => {
     expect(json.positions[0]?.feesClaimedUsd).toBe(25);
   });
 
-  it("(v) legacy fallback realized PnL includes rewards", () => {
+  it("(v) keeps unresolved realized PnL null in history output", () => {
     const json = toHistoryJsonOutput([
       makePosition({
         poolAddress: "pool1",
@@ -568,8 +568,9 @@ describe("reward reporting (Wave 8)", () => {
         paperExitedAt: 1700000000000,
       }),
     ]);
-    // 1100 + 25 + 40 − 1000 (no stored realizedPnlUsd → fallback)
-    expect(json.positions[0]?.realizedPnlUsd).toBe(165);
+    expect(json.positions[0]?.realizedPnlUsd).toBeNull();
+    expect(json.positions[0]?.realizedPnlPct).toBeNull();
+    expect(json.stats.missingOutcomes).toBe(1);
   });
 });
 
@@ -586,6 +587,8 @@ describe("closed-trade evidence", () => {
   it("computes expectancy, profit factor and drawdown (win rate alone misleads)", () => {
     // +10, +10, −15: 66.7% win rate but net +5, expectancy +1.67.
     const stats = computeClosedTradeStats([closed(10, 3), closed(10, 1), closed(-15, 2)]);
+    expect(stats.totalRows).toBe(3);
+    expect(stats.missingOutcomes).toBe(0);
     expect(stats.count).toBe(3);
     expect(stats.wins).toBe(2);
     expect(stats.losses).toBe(1);
@@ -601,6 +604,8 @@ describe("closed-trade evidence", () => {
 
   it("skips NULL realized rows (unpriced exits are unknown, never breakeven)", () => {
     const stats = computeClosedTradeStats([closed(null, 1), closed(10, 2)]);
+    expect(stats.totalRows).toBe(2);
+    expect(stats.missingOutcomes).toBe(1);
     expect(stats.count).toBe(1);
     expect(stats.netPnlUsd).toBe(10);
     expect(stats.profitFactor).toBeNull();
@@ -608,11 +613,14 @@ describe("closed-trade evidence", () => {
 
   it("returns nulls (not zeros) on an empty ledger", () => {
     const stats = computeClosedTradeStats([]);
+    expect(stats.totalRows).toBe(0);
+    expect(stats.missingOutcomes).toBe(0);
     expect(stats.count).toBe(0);
     expect(stats.winRatePct).toBeNull();
+    expect(stats.netPnlUsd).toBeNull();
     expect(stats.expectancyUsd).toBeNull();
     expect(stats.profitFactor).toBeNull();
-    expect(stats.maxDrawdownUsd).toBe(0);
+    expect(stats.maxDrawdownUsd).toBeNull();
   });
 
   it("tags exit reasons and entry cohorts from event metadata", () => {
@@ -648,7 +656,7 @@ describe("closed-trade evidence", () => {
     ];
     const enter = new Map([
       ["tight-1", { cohort: "tight", pairId: "pair-A" }],
-      ["tight-2", { cohort: "tight", pairId: "pair-A" }],
+      ["tight-2", { cohort: "wide", pairId: "pair-A" }],
       ["single-1", { cohort: "single", pairId: "single-1" }],
     ]);
     const units = groupClosedTradeUnits(positions, enter);
@@ -656,10 +664,43 @@ describe("closed-trade evidence", () => {
     const split = units.find((u) => u.kind === "split")!;
     expect(split.legs).toBe(2);
     expect(split.deployedUsd).toBe(20);
+    expect(split.complete).toBe(true);
+    expect(split.missingOutcomes).toBe(0);
     expect(split.netPnlUsd).toBe(6);
     expect(split.expectancyPct).toBeCloseTo(30, 10);
     const single = units.find((u) => u.kind === "single")!;
     expect(single.expectancyPct).toBeCloseTo(10, 10);
+  });
+
+  it("keeps partial pairs unpriced and reports completed-unit exposure", () => {
+    const dayMs = 24 * 60 * 60 * 1000;
+    const partial = {
+      ...closed(10, dayMs),
+      positionId: "partial-tight",
+      timestamp: 0,
+    };
+    const partialUnit = groupClosedTradeUnits(
+      [partial],
+      new Map([["partial-tight", { cohort: "tight", pairId: "partial-pair" }]]),
+    )[0]!;
+    expect(partialUnit.complete).toBe(false);
+    expect(partialUnit.missingOutcomes).toBe(1);
+    expect(partialUnit.netPnlUsd).toBeNull();
+    expect(partialUnit.expectancyPct).toBeNull();
+    expect(partialUnit.exposureTimeDays).toBeNull();
+
+    const completeUnits = groupClosedTradeUnits(
+      [
+        { ...closed(10, dayMs), positionId: "complete-tight", timestamp: 0 },
+        { ...closed(-4, 2 * dayMs), positionId: "complete-wide", timestamp: 0 },
+      ],
+      new Map([
+        ["complete-tight", { cohort: "tight", pairId: "complete-pair" }],
+        ["complete-wide", { cohort: "wide", pairId: "complete-pair" }],
+      ]),
+    );
+    expect(completeUnits[0]?.complete).toBe(true);
+    expect(completeUnits[0]?.exposureTimeDays).toBe(2);
   });
 
   it("leaves legacy legs without a pair id as lone unknown units", () => {
@@ -673,7 +714,7 @@ describe("closed-trade evidence", () => {
   it("toHistoryJsonOutput carries stats and units", () => {
     const positions = [{ ...closed(10, 1), positionId: "tight-1" }];
     const json = toHistoryJsonOutput(positions, {
-      enterByPositionId: new Map([["tight-1", { cohort: "tight", pairId: "pair-A" }]]),
+      enterByPositionId: new Map([["tight-1", { cohort: "tight", pairId: "tight-1" }]]),
     });
     expect(json.stats.count).toBe(1);
     expect(json.stats.expectancyUsd).toBe(10);

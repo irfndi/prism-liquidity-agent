@@ -1058,6 +1058,50 @@ describe("executeLive — two positions on one pool", () => {
     expect(dbCalls.closed).toHaveLength(1);
     expect(dbCalls.closed[0]!.id).toBe("live-pos-A");
   });
+  it("skips an EXIT whose explicit target is not tracked", () => {
+    const { adapter, calls } = makeLiveAdapter();
+    const { db } = makePaperDb();
+    const trackedPositions = new Map<string, PositionRecord>();
+    const revenueConfigSvc = {
+      getConfig: () =>
+        Effect.succeed({
+          tier: "free",
+          platformFeeRate: 0,
+          revenueShareEnabled: false,
+          revenueShareOperatorPct: 0,
+          feeWalletAddress: "",
+        }),
+      refreshConfig: () => Effect.void,
+    };
+    const result = Effect.runSync(
+      executeLive(
+        {
+          adapter,
+          strategy: makePaperStrategy(),
+          // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
+          db: db as never,
+          // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
+          revenueConfigSvc: revenueConfigSvc as never,
+          trackedPositions,
+          // SAFETY: This test intentionally supplies an impossible error channel to exercise the failure branch; production control flow cannot reach it.
+          entryPrep: { prepareEntryTokens: () => Effect.succeed(undefined) } as never,
+          solPriceUsd: 150,
+          entryStrategySpec: "spot" as const,
+        },
+        {
+          action: "EXIT",
+          poolAddress: POOL,
+          positionId: "missing-position",
+          confidence: 1,
+          reasoning: "missing target",
+        },
+        paperPool,
+      ),
+    );
+    expect(result.executed).toBe(false);
+    expect(result.error).toContain("no tracked position");
+    expect(calls.exits).toEqual([]);
+  });
 });
 
 // ─── Reconcile: match on-chain positions to rows by pubkey ───────────────────

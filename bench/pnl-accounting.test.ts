@@ -662,6 +662,7 @@ describe("paper lifecycle PnL accounting", () => {
   it("ENTER snapshots entry price/legs and writes an ENTER event", async () => {
     const layer = DbLive(":memory:");
     const trackedPositions = new Map<string, PositionRecord>();
+    const cashFlows: number[] = [];
     const pool = {
       activeBinId: 5000,
       binStep: 10,
@@ -674,7 +675,13 @@ describe("paper lifecycle PnL accounting", () => {
       Effect.gen(function* () {
         const db = yield* DbService;
         const result = yield* executePaper(
-          { db, trackedPositions, strategy: paperStrategy, entryStrategySpec: "spot" },
+          {
+            db,
+            trackedPositions,
+            strategy: paperStrategy,
+            entryStrategySpec: "spot",
+            debitPaperCash: (sizeUsd) => cashFlows.push(-sizeUsd),
+          },
           {
             action: "ENTER",
             poolAddress: "pool1",
@@ -687,12 +694,13 @@ describe("paper lifecycle PnL accounting", () => {
         const tracked = [...trackedPositions.values()][0]!;
         const pos = yield* db.getPosition(tracked.positionId);
         const events = yield* db.getPositionEvents("pool1");
-        return { result, pos, events };
+        return { result, pos, events, cashFlows };
       }),
       layer,
     );
 
     expect(outcome.result.executed).toBe(true);
+    expect(outcome.cashFlows).toEqual([-1000]);
     expect(outcome.pos).not.toBeNull();
     expect(outcome.pos!.entryPriceUsd).toBe(100);
     expect(outcome.pos!.entryAmountXUsd).toBeCloseTo(500, 8);
@@ -712,6 +720,7 @@ describe("paper lifecycle PnL accounting", () => {
   it("EXIT computes realized PnL (value + fees − basis), writes EXIT event, soft-closes", async () => {
     const layer = DbLive(":memory:");
     const trackedPositions = new Map<string, PositionRecord>();
+    const cashFlows: number[] = [];
     const pool = {
       activeBinId: 5000,
       binStep: 10,
@@ -723,8 +732,20 @@ describe("paper lifecycle PnL accounting", () => {
     const outcome = await runDb(
       Effect.gen(function* () {
         const db = yield* DbService;
+        const paperDeps = {
+          db,
+          trackedPositions,
+          strategy: paperStrategy,
+          entryStrategySpec: "spot" as const,
+          debitPaperCash: (sizeUsd: number): void => {
+            cashFlows.push(-sizeUsd);
+          },
+          creditPaperCash: (netCreditUsd: number): void => {
+            cashFlows.push(netCreditUsd);
+          },
+        };
         yield* executePaper(
-          { db, trackedPositions, strategy: paperStrategy, entryStrategySpec: "spot" },
+          paperDeps,
           {
             action: "ENTER",
             poolAddress: "pool1",
@@ -756,7 +777,7 @@ describe("paper lifecycle PnL accounting", () => {
         yield* db.savePosition(pos);
 
         const exitResult = yield* executePaper(
-          { db, trackedPositions, strategy: paperStrategy, entryStrategySpec: "spot" },
+          paperDeps,
           { action: "EXIT", poolAddress: "pool1", confidence: 0.9, reasoning: "test exit" },
           { ...pool, currentPrice: 110 },
         );
@@ -764,12 +785,16 @@ describe("paper lifecycle PnL accounting", () => {
         const closed = yield* db.getClosedPositions();
         const active = yield* db.getAllPositions();
         const events = yield* db.getPositionEvents("pool1");
-        return { exitResult, closed, active, events };
+        return { exitResult, closed, active, events, cashFlows };
       }),
       layer,
     );
 
     expect(outcome.exitResult.executed).toBe(true);
+    expect(outcome.cashFlows[0]).toBe(-1000);
+    // Cash returns the marked principal, accrued paper fees/rewards, and
+    // subtracts the same modeled lifetime costs used by realized PnL.
+    expect(outcome.cashFlows[1]).toBeCloseTo(1113.74, 2);
     expect(outcome.active).toHaveLength(0);
     expect(outcome.closed).toHaveLength(1);
 
@@ -880,6 +905,312 @@ describe("paper lifecycle PnL accounting", () => {
         valuationAnchorValueUsd: outcome.updated!.valuationAnchorValueUsd,
       }),
     ).toBeCloseTo(1050, 6);
+  });
+  it("skips an EXIT that has no tracked target position", async () => {
+    const layer = DbLive(":memory:");
+    const trackedPositions = new Map<string, PositionRecord>();
+    const outcome = await runDb(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const result = yield* executePaper(
+          { db, trackedPositions, strategy: paperStrategy, entryStrategySpec: "spot" },
+          {
+            action: "EXIT",
+            poolAddress: "pool-without-position",
+            confidence: 1,
+            reasoning: "missing target",
+          },
+          {
+            activeBinId: 5000,
+            binStep: 10,
+            tokenXSymbol: "SOL",
+            tokenYSymbol: "USDC",
+            currentPrice: 100,
+          },
+        );
+        return { result, events: yield* db.getPositionEvents("pool-without-position") };
+      }),
+      layer,
+    );
+    expect(outcome.result.executed).toBe(false);
+    expect(outcome.result.error).toContain("no tracked position");
+    expect(outcome.events).toHaveLength(0);
+  });
+  it("charges rebalance costs immediately and deducts them once from paper PnL", async () => {
+    const layer = DbLive(":memory:");
+    const trackedPositions = new Map<string, PositionRecord>();
+    const cashFlows: number[] = [];
+    const pool = {
+      activeBinId: 5000,
+      binStep: 10,
+      tokenXSymbol: "SOL",
+      tokenYSymbol: "USDC",
+      currentPrice: 100,
+    };
+    const outcome = await runDb(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const deps = {
+          db,
+          trackedPositions,
+          strategy: paperStrategy,
+          entryStrategySpec: "spot" as const,
+          rebalanceCostUsd: 7,
+          runnerSwapCostPct: 0,
+          feeCaptureHarvestCostUsd: 0,
+          feeCaptureConversionCostPct: 0,
+          harvestTxCostUsdEst: 0,
+          debitPaperCash: (sizeUsd: number): void => {
+            cashFlows.push(-sizeUsd);
+          },
+          creditPaperCash: (creditUsd: number): void => {
+            cashFlows.push(creditUsd);
+          },
+        };
+        yield* executePaper(
+          deps,
+          {
+            action: "ENTER",
+            poolAddress: "pool1",
+            confidence: 0.8,
+            reasoning: "test entry",
+            positionSizeUsd: 1000,
+          },
+          pool,
+        );
+        const pos = [...trackedPositions.values()][0]!;
+        const rebalance = yield* executePaper(
+          deps,
+          {
+            action: "REBALANCE",
+            poolAddress: "pool1",
+            positionId: pos.positionId,
+            confidence: 0.8,
+            reasoning: "test rebalance",
+            rebalanceParams: { newLowerBinId: 4990, newUpperBinId: 5030, slippageBps: 50 },
+          },
+          pool,
+        );
+        const marked = trackedPositions.get(pos.positionId)!;
+        marked.currentValueUsd = 1050;
+        yield* db.savePosition(marked);
+        const exit = yield* executePaper(
+          deps,
+          {
+            action: "EXIT",
+            poolAddress: "pool1",
+            positionId: pos.positionId,
+            confidence: 1,
+            reasoning: "test exit",
+          },
+          pool,
+        );
+        return {
+          rebalance,
+          exit,
+          closed: yield* db.getClosedPositions(),
+          events: yield* db.getPositionEvents("pool1"),
+          cashFlows,
+        };
+      }),
+      layer,
+    );
+    expect(outcome.rebalance.executed).toBe(true);
+    expect(outcome.exit.executed).toBe(true);
+    expect(outcome.cashFlows).toEqual([-1000, -7, 1050]);
+    expect(outcome.closed[0]?.realizedPnlUsd).toBeCloseTo(43, 8);
+    const rebalanceEvent = outcome.events.find((event) => event.event === "REBALANCE");
+    expect(rebalanceEvent?.metadata).toContain('"modeledCostUsd":7');
+  });
+
+  it("credits compounded fees once when the paper position closes", async () => {
+    const layer = DbLive(":memory:");
+    const trackedPositions = new Map<string, PositionRecord>();
+    const cashFlows: number[] = [];
+    const pool = {
+      activeBinId: 5000,
+      binStep: 10,
+      tokenXSymbol: "SOL",
+      tokenYSymbol: "USDC",
+      currentPrice: 100,
+    };
+    const outcome = await runDb(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const deps = {
+          db,
+          trackedPositions,
+          strategy: paperStrategy,
+          entryStrategySpec: "spot" as const,
+          runnerSwapCostPct: 0,
+          feeCaptureHarvestCostUsd: 0,
+          feeCaptureConversionCostPct: 0,
+          harvestTxCostUsdEst: 0,
+          debitPaperCash: (sizeUsd: number): void => {
+            cashFlows.push(-sizeUsd);
+          },
+          creditPaperCash: (creditUsd: number): void => {
+            cashFlows.push(creditUsd);
+          },
+        };
+        yield* executePaper(
+          deps,
+          {
+            action: "ENTER",
+            poolAddress: "pool1",
+            confidence: 0.8,
+            reasoning: "test entry",
+            positionSizeUsd: 1000,
+          },
+          pool,
+        );
+        const pos = [...trackedPositions.values()][0]!;
+        pos.cumulativeFeesClaimedUsd = 10;
+        yield* db.savePosition(pos);
+        yield* executePaper(
+          deps,
+          {
+            action: "REBALANCE",
+            poolAddress: "pool1",
+            positionId: pos.positionId,
+            confidence: 0.8,
+            reasoning: "compound fees",
+            rebalanceParams: {
+              newLowerBinId: 4990,
+              newUpperBinId: 5030,
+              slippageBps: 50,
+              topUp: { amountXAtomic: 0n, amountYAtomic: 0n },
+              topUpUsd: 10,
+            },
+          },
+          pool,
+        );
+        const closed = yield* executePaper(
+          deps,
+          {
+            action: "EXIT",
+            poolAddress: "pool1",
+            positionId: pos.positionId,
+            confidence: 1,
+            reasoning: "test exit",
+          },
+          pool,
+        );
+        return {
+          closed,
+          position: (yield* db.getClosedPositions())[0],
+          events: yield* db.getPositionEvents("pool1"),
+          cashFlows,
+        };
+      }),
+      layer,
+    );
+    expect(outcome.closed.executed).toBe(true);
+    expect(outcome.cashFlows).toEqual([-1000, 1010]);
+    expect(outcome.position?.realizedPnlUsd).toBeCloseTo(10, 8);
+    const rebalanceEvent = outcome.events.find((event) => event.event === "REBALANCE");
+    expect(rebalanceEvent?.metadata).toContain('"compounded":true');
+  });
+
+  it("skips a REBALANCE that has no tracked target position", async () => {
+    const layer = DbLive(":memory:");
+    const trackedPositions = new Map<string, PositionRecord>();
+    const outcome = await runDb(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const result = yield* executePaper(
+          { db, trackedPositions, strategy: paperStrategy, entryStrategySpec: "spot" },
+          {
+            action: "REBALANCE",
+            poolAddress: "pool-without-position",
+            confidence: 1,
+            reasoning: "missing target",
+            rebalanceParams: { newLowerBinId: 4990, newUpperBinId: 5030, slippageBps: 50 },
+          },
+          {
+            activeBinId: 5000,
+            binStep: 10,
+            tokenXSymbol: "SOL",
+            tokenYSymbol: "USDC",
+            currentPrice: 100,
+          },
+        );
+        return { result, events: yield* db.getPositionEvents("pool-without-position") };
+      }),
+      layer,
+    );
+    expect(outcome.result.executed).toBe(false);
+    expect(outcome.result.error).toContain("no tracked position");
+    expect(outcome.events).toHaveLength(0);
+  });
+
+  it("targets one of multiple same-pool positions by positionId", async () => {
+    const layer = DbLive(":memory:");
+    const trackedPositions = new Map<string, PositionRecord>();
+    const pool = {
+      activeBinId: 5000,
+      binStep: 10,
+      tokenXSymbol: "SOL",
+      tokenYSymbol: "USDC",
+      currentPrice: 100,
+    };
+    const outcome = await runDb(
+      Effect.gen(function* () {
+        const db = yield* DbService;
+        const deps = {
+          db,
+          trackedPositions,
+          strategy: paperStrategy,
+          entryStrategySpec: "spot" as const,
+        };
+        yield* executePaper(
+          deps,
+          {
+            action: "ENTER",
+            poolAddress: "pool1",
+            confidence: 1,
+            reasoning: "first",
+            positionSizeUsd: 100,
+          },
+          pool,
+        );
+        yield* executePaper(
+          deps,
+          {
+            action: "ENTER",
+            poolAddress: "pool1",
+            confidence: 1,
+            reasoning: "second",
+            positionSizeUsd: 200,
+          },
+          pool,
+        );
+        const positions = [...trackedPositions.values()];
+        const target = positions[1]!;
+        const exit = yield* executePaper(
+          deps,
+          {
+            action: "EXIT",
+            poolAddress: "pool1",
+            positionId: target.positionId,
+            confidence: 1,
+            reasoning: "targeted exit",
+          },
+          pool,
+        );
+        return {
+          exit,
+          active: yield* db.getAllPositions(),
+          closed: yield* db.getClosedPositions(),
+        };
+      }),
+      layer,
+    );
+    expect(outcome.exit.executed).toBe(true);
+    expect(outcome.active).toHaveLength(1);
+    expect(outcome.closed).toHaveLength(1);
+    expect(outcome.closed[0]?.positionId).not.toBe(outcome.active[0]?.positionId);
+    expect(outcome.closed[0]?.positionId).toBeDefined();
   });
 });
 

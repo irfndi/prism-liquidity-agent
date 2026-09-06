@@ -50,12 +50,15 @@ export function isMarketRunnerPool(params: {
   if (!params.enabled) return false;
   if (!params.marketScanPools.has(params.poolAddress)) return false;
   if (params.statsSource !== "datapi") return false;
+  if (!Number.isFinite(params.feeAprPct) || params.feeAprPct <= 0) return false;
   if (params.feeAprPct < (params.runnerMinFeeApr ?? DEFAULT_RUNNER_MIN_FEE_APR)) return false;
   if (!passesRunnerDriftFloor(params.netDriftBins, params.runnerMinDriftBins)) return false;
   return true;
 }
 
 export interface HeldPositionApr {
+  /** Stable position identity; pool address is not unique with multi-position pools. */
+  readonly positionId: string;
   readonly poolAddress: string;
   readonly feeAprPct: number;
   /** Pool TVL at the last evaluation — the net-fee capture model needs it to
@@ -75,11 +78,17 @@ export interface RotationTargetFilter {
   readonly minAgeMs?: number | undefined;
   /** Clock override for tests. */
   readonly nowMs?: number | undefined;
+  /**
+   * Optional per-position selection score. When supplied, the lowest finite
+   * non-negative score is selected while the returned `feeAprPct` carries
+   * that score. The program uses this for net APR; the legacy fallback uses
+   * the pool APR.
+   */
+  readonly selectionScoreByPositionId?: ReadonlyMap<string, number> | undefined;
 }
 
 function resolveRotationNowMs(nowMs: number | undefined): number {
-  if (nowMs === undefined) return Date.now();
-  return nowMs;
+  return nowMs === undefined ? Date.now() : nowMs;
 }
 
 function rotationPositionSkipped(
@@ -96,40 +105,87 @@ function rotationPositionSkipped(
 }
 
 function rotationCandidateApr(feeAprPct: number | undefined): number | null {
-  if (feeAprPct === undefined) return null;
-  if (feeAprPct <= 0) return null;
+  if (feeAprPct === undefined || !Number.isFinite(feeAprPct) || feeAprPct <= 0) return null;
   return feeAprPct;
 }
 
-/** The lowest-APR held position, or null when every eligible held position's
- *  APR is unknown/zero (nothing to rotate out of). Unmeasured held pools never
- *  rotate — fail-closed, a made-up-low APR must not sell a real position.
- *  `excludePoolAddress` (the candidate runner) is never a rotation target —
- *  a held position on the runner pool must not be exited while the same pool
- *  re-enters in the same cycle. Positions failing `filter` (too young) are
- *  skipped; if every held position is filtered out the result is null and no
- *  rotation fires this cycle. */
+function selectedRotationApr(
+  grossApr: number,
+  positionId: string,
+  selectionScores: ReadonlyMap<string, number> | undefined,
+): number | null {
+  if (selectionScores === undefined) return grossApr;
+  const selected = selectionScores.get(positionId);
+  return selected !== undefined && Number.isFinite(selected) && selected >= 0 ? selected : null;
+}
+
+function rotationCandidateForPosition(
+  pos: {
+    readonly positionId: string;
+    readonly poolAddress: string;
+    readonly openedAt?: number;
+  },
+  poolAprByAddress: ReadonlyMap<
+    string,
+    { feeAprPct: number; tvlUsd: number; measured?: boolean | undefined }
+  >,
+  excludePoolAddress: string | undefined,
+  nowMs: number,
+  minAgeMs: number | undefined,
+  selectionScores: ReadonlyMap<string, number> | undefined,
+): HeldPositionApr | null {
+  if (rotationPositionSkipped(pos.poolAddress, pos.openedAt, excludePoolAddress, nowMs, minAgeMs)) {
+    return null;
+  }
+  const entry = poolAprByAddress.get(pos.poolAddress);
+  if (entry === undefined || entry.measured === false) return null;
+  const grossApr = rotationCandidateApr(entry.feeAprPct);
+  if (grossApr === null) return null;
+  const apr = selectedRotationApr(grossApr, pos.positionId, selectionScores);
+  if (apr === null) return null;
+  return {
+    positionId: pos.positionId,
+    poolAddress: pos.poolAddress,
+    feeAprPct: apr,
+    tvlUsd: entry.tvlUsd,
+  };
+}
+
+function isLowerRotationApr(candidate: HeldPositionApr, worst: HeldPositionApr | null): boolean {
+  return worst === null || candidate.feeAprPct < worst.feeAprPct;
+}
+
+/** The lowest eligible rotation score, or null when no measured APR exists.
+ * Unmeasured map entries are ignored when callers mark them explicitly; test
+ * fixtures without `measured` retain the pure helper's pool-APR behavior. */
 export function lowestAprHeldPosition(
-  positions: Iterable<{ readonly poolAddress: string; readonly openedAt?: number }>,
-  poolAprByAddress: ReadonlyMap<string, { feeAprPct: number; tvlUsd: number }>,
+  positions: Iterable<{
+    readonly positionId: string;
+    readonly poolAddress: string;
+    readonly openedAt?: number;
+  }>,
+  poolAprByAddress: ReadonlyMap<
+    string,
+    { feeAprPct: number; tvlUsd: number; measured?: boolean | undefined }
+  >,
   excludePoolAddress?: string,
   filter?: RotationTargetFilter,
 ): HeldPositionApr | null {
   const nowMs = resolveRotationNowMs(filter?.nowMs);
   const minAgeMs = filter?.minAgeMs;
+  const selectionScores = filter?.selectionScoreByPositionId;
   let worst: HeldPositionApr | null = null;
   for (const pos of positions) {
-    if (
-      rotationPositionSkipped(pos.poolAddress, pos.openedAt, excludePoolAddress, nowMs, minAgeMs)
-    ) {
-      continue;
-    }
-    const entry = poolAprByAddress.get(pos.poolAddress);
-    if (entry === undefined) continue;
-    const apr = rotationCandidateApr(entry.feeAprPct);
-    if (apr === null) continue;
-    if (worst === null || apr < worst.feeAprPct) {
-      worst = { poolAddress: pos.poolAddress, feeAprPct: apr, tvlUsd: entry.tvlUsd };
+    const candidate = rotationCandidateForPosition(
+      pos,
+      poolAprByAddress,
+      excludePoolAddress,
+      nowMs,
+      minAgeMs,
+      selectionScores,
+    );
+    if (candidate !== null && isLowerRotationApr(candidate, worst)) {
+      worst = candidate;
     }
   }
   return worst;

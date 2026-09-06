@@ -66,6 +66,9 @@ const BIN_STEP_BPS_TO_PCT = 0.0001;
 function finitePositive(n: number): boolean {
   return Number.isFinite(n) && n > 0;
 }
+function allFinite(values: ReadonlyArray<number | undefined>): boolean {
+  return values.every((value) => value === undefined || Number.isFinite(value));
+}
 
 function clamp01(n: number): number {
   return Math.min(Math.max(n, 0), 1);
@@ -118,11 +121,14 @@ export function activeShareEstimate(params: ActiveShareParams): number {
  * Model:
  *
  *   gross  = fees24hUsd * shareEstimate * timeInRangePct
- *   net    = max(0, (gross - harvestCostUsd) * (1 - conversionCostPct))
+ *   net    = gross * (1 - conversionCostPct) - harvestCostUsd
  *   result = net / positionSizeUsd
  *
- * Floored at 0: a harvest cost exceeding the position's gross capture yields
- * 0, never a negative rank signal. timeInRangePct and conversionCostPct are
+ * Conversion is charged on captured fees only; harvest is a separate fixed
+ * USD cost. This is the same order used by the cost-aware runner model and
+ * paper close settlement.
+ * Floored at 0: a harvest cost exceeding the converted gross capture yields 0,
+ * never a negative rank signal. timeInRangePct and conversionCostPct are
  * fractions in [0, 1] and are clamped defensively (values outside are treated
  * as their nearest valid bound, so 1.5 time-in-range behaves as 100%).
  *
@@ -157,7 +163,8 @@ export function netFeeVelocityUsd(params: NetFeeVelocityParams): number {
     return 0;
   }
   const gross = fees24hUsd * clamp01(shareEstimate) * clamp01(timeInRangePct);
-  const net = (gross - Math.max(harvestCostUsd, 0)) * (1 - clamp01(conversionCostPct));
+  const capturedAfterConversion = gross * (1 - clamp01(conversionCostPct));
+  const net = capturedAfterConversion - Math.max(harvestCostUsd, 0);
   return Math.max(net / positionSizeUsd, 0);
 }
 
@@ -317,19 +324,34 @@ export interface NetFeeWithCostsParams {
   readonly volatilityStddev: number;
   readonly swapCostPct: number;
   readonly harvestCostUsd: number;
+  /** Conversion haircut on captured fees, in [0, 1]. Defaults to 0. */
+  readonly conversionCostPct?: number | undefined;
   readonly timeInRangePct: number;
   readonly maxExitsPerDay: number;
 }
 
 /**
  * Net expected daily fee velocity per deployed dollar, after every cost the
- * churn model can name: capture share (concentration) → gross, minus the
- * daily harvest cost and the churn cost (swap + IL per OOR exit). Floored at
- * 0 — a position whose churn cost exceeds its gross capture signals 0, never
- * a fabricated positive edge. This is the runner's "no bleeds" gate input.
+ * churn model can name: capture share (concentration) → gross, conversion
+ * haircut, minus daily harvest and churn costs (swap + IL per OOR exit).
+ * Floored at 0 — a position whose churn cost exceeds its gross capture signals
+ * 0, never a fabricated positive edge. This is the runner's "no bleeds" gate.
  */
 export function netFeeVelocityUsdWithCosts(params: NetFeeWithCostsParams): number {
-  if (!finitePositive(params.fees24hUsd) || !finitePositive(params.positionSizeUsd)) return 0;
+  if (
+    !finitePositive(params.fees24hUsd) ||
+    !finitePositive(params.positionSizeUsd) ||
+    !finitePositive(params.timeInRangePct) ||
+    !allFinite([
+      params.harvestCostUsd,
+      params.swapCostPct,
+      params.volatilityStddev,
+      params.maxExitsPerDay,
+      params.conversionCostPct,
+    ])
+  ) {
+    return 0;
+  }
   const share = activeShareEstimate({
     positionSizeUsd: params.positionSizeUsd,
     poolTvlUsd: params.poolTvlUsd,
@@ -337,6 +359,7 @@ export function netFeeVelocityUsdWithCosts(params: NetFeeWithCostsParams): numbe
     binStep: params.binStep,
   });
   const gross = params.fees24hUsd * share * clamp01(params.timeInRangePct);
+  const capturedAfterConversion = gross * (1 - clamp01(params.conversionCostPct ?? 0));
   const harvest = Math.max(params.harvestCostUsd, 0);
   const churn = churnCostDailyUsd({
     positionSizeUsd: params.positionSizeUsd,
@@ -346,8 +369,8 @@ export function netFeeVelocityUsdWithCosts(params: NetFeeWithCostsParams): numbe
     swapCostPct: params.swapCostPct,
     maxExitsPerDay: params.maxExitsPerDay,
   });
-  const net = gross - harvest - churn;
-  return Math.max(net / params.positionSizeUsd, 0);
+  const net = capturedAfterConversion - harvest - churn;
+  return Number.isFinite(net) ? Math.max(net / params.positionSizeUsd, 0) : 0;
 }
 
 /**
@@ -430,6 +453,8 @@ export interface ExpectedProfitParams {
   readonly swapCostPct: number;
   /** Daily harvest (claim) cost, USD. */
   readonly harvestCostUsd: number;
+  /** Conversion haircut as a fraction (0.05 = 5%) — matches settlement. */
+  readonly conversionCostPct: number;
   /** Intended holding period, in days. */
   readonly holdingDays: number;
   /** Per-transaction gas cost, USD (entry + exit = 2 txs). */
@@ -440,28 +465,35 @@ export interface ExpectedProfitParams {
   readonly maxExitsPerDay?: number;
 }
 
+function validExpectedProfitInputs(params: ExpectedProfitParams): boolean {
+  return (
+    Number.isFinite(params.dailyFeesUsd) &&
+    params.dailyFeesUsd >= 0 &&
+    finitePositive(params.positionSizeUsd) &&
+    finitePositive(params.holdingDays) &&
+    allFinite([
+      params.swapCostPct,
+      params.txCostUsd,
+      params.harvestCostUsd,
+      params.conversionCostPct,
+      params.timeInRangePct,
+      params.maxExitsPerDay,
+    ])
+  );
+}
+
 /**
  * Expected net USD over the intended holding period: concentrated gross fees
- * (net of churn/IL/harvest via netFeeVelocityUsdWithCosts) minus one full
+ * after the conversion haircut, minus daily harvest/churn costs and one full
  * round trip (two swaps on the full size + two txs). Null on invalid inputs
  * (missing/non-finite/negative fees, non-positive size/holding, non-finite
  * costs) — unknown, never zero masquerading as breakeven. A MEASURED zero
- * fee print is valid input, not missing data: with no income the round trip
- * cannot be covered, so it prices negative and rejects the ENTER. A positive
- * result means estimated fees cover entry/exit costs with room to spare.
+ * fee print is valid input: with no income the round trip cannot be covered,
+ * so it prices negative and rejects the ENTER.
  */
 export function expectedNetProfitUsd(params: ExpectedProfitParams): number | null {
+  if (!validExpectedProfitInputs(params)) return null;
   const { dailyFeesUsd, positionSizeUsd, holdingDays, swapCostPct, txCostUsd } = params;
-  if (
-    !Number.isFinite(dailyFeesUsd) ||
-    dailyFeesUsd < 0 ||
-    !finitePositive(positionSizeUsd) ||
-    !finitePositive(holdingDays) ||
-    !Number.isFinite(swapCostPct) ||
-    !Number.isFinite(txCostUsd)
-  ) {
-    return null;
-  }
   const velocity = netFeeVelocityUsdWithCosts({
     fees24hUsd: dailyFeesUsd,
     poolTvlUsd: params.poolTvlUsd,
@@ -471,13 +503,13 @@ export function expectedNetProfitUsd(params: ExpectedProfitParams): number | nul
     volatilityStddev: params.volatilityStddev,
     swapCostPct,
     harvestCostUsd: params.harvestCostUsd,
+    conversionCostPct: params.conversionCostPct,
     timeInRangePct: params.timeInRangePct ?? 1,
     maxExitsPerDay: params.maxExitsPerDay ?? 86_400_000 / 600_000,
   });
   const roundTrip = 2 * clamp01(swapCostPct) * positionSizeUsd + 2 * Math.max(txCostUsd, 0);
   return velocity * positionSizeUsd * holdingDays - roundTrip;
 }
-
 export interface PaperCloseCostsParams {
   /** Deployed position size, USD (round-trip swaps scale with it). */
   readonly positionSizeUsd: number;

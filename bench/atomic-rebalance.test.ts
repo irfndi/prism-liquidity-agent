@@ -40,23 +40,41 @@ import { stringifySafe } from "../engine/bigint-json.js";
 // ─── Paper heuristic (decision-layer estimate for simulated mode) ────────────
 
 describe("estimatePaperRebalanceBenefit", () => {
-  it("scales pool fees by range capture ratio and reports a pool-heuristic source", () => {
+  it("estimates incremental position fees over the rebalance horizon", () => {
     const est = estimatePaperRebalanceBenefit({
       fees24hUsd: 300,
+      poolTvlUsd: 10_000,
+      positionSizeUsd: 100,
+      activeBinId: 5000,
+      currentLowerBinId: 4950,
+      currentUpperBinId: 5050,
       newLowerBinId: 4980,
       newUpperBinId: 5020,
+      binStep: 10,
+      holdingDays: 1,
+      rebalanceCostUsd: 0.5,
     });
     expect(est.source).toBe("pool-heuristic");
-    expect(est.estimatedFeesUsd).toBeCloseTo(300 * 0.4, 8);
+    expect(est.currentEstimatedFeesUsd).toBeCloseTo(60, 8);
+    expect(est.estimatedFeesUsd).toBeCloseTo(150, 8);
     expect(est.estimatedCostUsd).toBeCloseTo(0.5, 8);
-    expect(est.netBenefitUsd).toBeCloseTo(300 * 0.4 - 0.5, 8);
+    expect(est.netBenefitUsd).toBeCloseTo(89.5, 8);
+    expect(est.holdingDays).toBe(1);
   });
 
-  it("caps the capture ratio at the full pool for wide ranges", () => {
+  it("caps the position share at the full pool", () => {
     const est = estimatePaperRebalanceBenefit({
       fees24hUsd: 300,
+      poolTvlUsd: 100,
+      positionSizeUsd: 100,
+      activeBinId: 5000,
+      currentLowerBinId: 4900,
+      currentUpperBinId: 5100,
       newLowerBinId: 4900,
       newUpperBinId: 5100,
+      binStep: 10,
+      holdingDays: 1,
+      rebalanceCostUsd: 0,
     });
     expect(est.estimatedFeesUsd).toBeCloseTo(300, 8);
   });

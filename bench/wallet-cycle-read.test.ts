@@ -390,9 +390,13 @@ describe("mid-cycle position close excludes the row from the portfolio sum", () 
       (d) => d.action === "EXIT" && d.reasoning.includes("TVL dropped"),
     );
     expect(exited, "the seeded position must exit on the TVL drop").toBe(true);
-    expect(snapshot.portfolio.totalValueUsd, "closed row must be excluded from the sum").toBe(
-      PAPER,
-    );
+    // Paper EXIT returns the marked value to cash, less the unified round-trip
+    // costs; the closed position itself must not remain in the sum.
+    const expectedPaperCash = PAPER - (2 * 0.005 * POSITION_VALUE + 2 * 0.005);
+    expect(
+      snapshot.portfolio.totalValueUsd,
+      "closed row must be excluded from the sum",
+    ).toBeCloseTo(expectedPaperCash, 6);
     expect(snapshot.portfolio.totalValueUsd).not.toBe(PAPER + POSITION_VALUE);
   }, 15_000);
 });

@@ -679,43 +679,113 @@ function resolvePaperFeeShare(input: {
 
 export interface RebalanceBenefitEstimate {
   readonly estimatedFeesUsd: number;
+  readonly currentEstimatedFeesUsd: number;
   readonly estimatedCostUsd: number;
   readonly netBenefitUsd: number;
   readonly source: "sdk-simulation" | "pool-heuristic";
+  readonly holdingDays: number;
 }
 
 /**
- * Paper-mode rebalance benefit. There is no on-chain position to simulate in
- * paper mode, so the gate uses a pool-level fee-share heuristic; it shapes
- * simulated decisions only and never moves capital. Live mode instead runs
- * the SDK's atomic-rebalance simulation (see adapter.simulateRebalance).
+ * Number predicate used at JSON/config boundaries. `Number.isFinite` rejects
+ * strings and other JSON values without coercion.
  */
-export function estimatePaperRebalanceBenefit(args: {
-  fees24hUsd: number;
-  newLowerBinId: number;
-  newUpperBinId: number;
-}): RebalanceBenefitEstimate {
-  const rangeWidth = Math.max(args.newUpperBinId - args.newLowerBinId, 0);
-  const feeCaptureRatio = Math.min(rangeWidth / 100, 1.0);
-  const estimatedFeesUsd = args.fees24hUsd * feeCaptureRatio;
-  const estimatedCostUsd = 0.5; // nominal simulated tx cost — paper pays no real gas/rent
+function finiteNonNegativeNumber(value: number): boolean {
+  return Number.isFinite(value) && value >= 0;
+}
+
+function finitePositiveNumber(value: number): boolean {
+  return Number.isFinite(value) && value > 0;
+}
+
+function resolvePaperRebalanceCostUsd(value: number | undefined): number {
+  const costUsd = value ?? 0;
+  return finiteNonNegativeNumber(costUsd) ? costUsd : 0;
+}
+
+interface PaperRebalanceBenefitInput {
+  readonly fees24hUsd: number;
+  readonly poolTvlUsd: number;
+  readonly positionSizeUsd: number;
+  readonly activeBinId: number;
+  readonly currentLowerBinId: number;
+  readonly currentUpperBinId: number;
+  readonly newLowerBinId: number;
+  readonly newUpperBinId: number;
+  readonly binStep: number;
+  readonly holdingDays: number;
+  readonly rebalanceCostUsd: number;
+}
+
+function validPaperRebalanceInput(args: PaperRebalanceBenefitInput): boolean {
+  return (
+    finiteNonNegativeNumber(args.fees24hUsd) &&
+    finitePositiveNumber(args.poolTvlUsd) &&
+    finitePositiveNumber(args.positionSizeUsd) &&
+    Number.isFinite(args.activeBinId) &&
+    finitePositiveNumber(args.binStep) &&
+    finitePositiveNumber(args.holdingDays)
+  );
+}
+
+/**
+ * Paper-mode rebalance benefit. Estimate the position's incremental fees over
+ * the same stated horizon used by the gas gate, then subtract the configured
+ * rebalance cost. A range does not earn the whole pool's fees: its share is
+ * position size / TVL with the existing concentration model.
+ */
+export function estimatePaperRebalanceBenefit(
+  args: PaperRebalanceBenefitInput,
+): RebalanceBenefitEstimate {
+  const estimatedCostUsd = finiteNonNegativeNumber(args.rebalanceCostUsd)
+    ? args.rebalanceCostUsd
+    : Number.MAX_SAFE_INTEGER;
+  if (!validPaperRebalanceInput(args)) {
+    return {
+      estimatedFeesUsd: 0,
+      currentEstimatedFeesUsd: 0,
+      estimatedCostUsd,
+      netBenefitUsd: -estimatedCostUsd,
+      source: "pool-heuristic",
+      holdingDays: finitePositiveNumber(args.holdingDays) ? args.holdingDays : 0,
+    };
+  }
+  const feeShareForRange = (lowerBinId: number, upperBinId: number): number =>
+    resolvePaperFeeShare({
+      tvlUsd: args.poolTvlUsd,
+      depositedUsd: args.positionSizeUsd,
+      activeBinId: args.activeBinId,
+      lowerBinId,
+      upperBinId,
+      rangeHalfWidthBins: (upperBinId - lowerBinId) / 2,
+      binStep: args.binStep,
+    });
+  const estimatedFeesUsd =
+    args.fees24hUsd * feeShareForRange(args.newLowerBinId, args.newUpperBinId) * args.holdingDays;
+  const currentEstimatedFeesUsd =
+    args.fees24hUsd *
+    feeShareForRange(args.currentLowerBinId, args.currentUpperBinId) *
+    args.holdingDays;
+  if (!Number.isFinite(estimatedFeesUsd) || !Number.isFinite(currentEstimatedFeesUsd)) {
+    return {
+      estimatedFeesUsd: 0,
+      currentEstimatedFeesUsd: 0,
+      estimatedCostUsd,
+      netBenefitUsd: -estimatedCostUsd,
+      source: "pool-heuristic",
+      holdingDays: args.holdingDays,
+    };
+  }
   return {
     estimatedFeesUsd,
+    currentEstimatedFeesUsd,
     estimatedCostUsd,
-    netBenefitUsd: estimatedFeesUsd - estimatedCostUsd,
+    netBenefitUsd: estimatedFeesUsd - currentEstimatedFeesUsd - estimatedCostUsd,
     source: "pool-heuristic",
+    holdingDays: args.holdingDays,
   };
 }
 
-/**
- * Economic harvest gate (Robinhood rule 10): never spend $0.80 to realize
- * $1.00. Decides whether a pending fee claim clears the cost floor before any
- * on-chain claim tx executes. A `netUsd` of null means the pending amount is
- * genuinely unavailable (no adapter support, unpriceable legs, read failure)
- * — the gate FAILS OPEN and the claim proceeds (fee capture is protective).
- * Skip semantics mirror the zero-fee claim: the caller does NOT re-arm the
- * claim interval, so a skipped claim retries next scan.
- */
 /** Metadata writes from the executor paths: some test mocks omit
  * setMetadata, so guard before calling — a metadata write must never fail an
  * ENTER/EXIT. */
@@ -893,7 +963,8 @@ function resolveTargetPosition(
   decision: AgentDecision,
 ): PositionRecord | undefined {
   if (decision.positionId !== undefined) {
-    return trackedPositions.get(decision.positionId);
+    const position = trackedPositions.get(decision.positionId);
+    return position?.poolAddress === decision.poolAddress ? position : undefined;
   }
   const poolPositions = positionsForPool(trackedPositions, decision.poolAddress);
   return poolPositions.length === 1 ? poolPositions[0] : undefined;
@@ -1516,6 +1587,7 @@ function savePaperLadderLeg(
     });
     deps.trackedPositions.set(pos.positionId, pos);
     yield* persist(`savePosition ${pos.positionId}`, deps.db.savePosition(pos));
+    deps.debitPaperCash?.(halfSize);
     if (pos.positionMode !== "launch") {
       yield* persistMetadataIfSupported(
         deps.db,
@@ -1628,6 +1700,7 @@ function executePaperEnter(
     });
     deps.trackedPositions.set(pos.positionId, pos);
     yield* persist(`savePosition ${pos.positionId}`, deps.db.savePosition(pos));
+    deps.debitPaperCash?.(positionSizeUsd);
     if (pos.positionMode !== "launch") {
       yield* persistMetadataIfSupported(
         deps.db,
@@ -1660,6 +1733,36 @@ function executePaperEnter(
 
 /** G2 rotation-arm re-check: a Rotation EXIT executes only while its arm is
  * fresh and the runner still qualifies — cancel-and-preserve otherwise. */
+interface RotationArmMetadata {
+  readonly runner: string;
+  readonly at: number;
+}
+
+function parseRotationArm(raw: string): RotationArmMetadata | null {
+  try {
+    // SAFETY: Rotation metadata is written by the engine; primitive fields are checked before use.
+    const arm = JSON.parse(raw) as RotationArmMetadata;
+    if (
+      Object.prototype.toString.call(arm.runner) !== "[object String]" ||
+      !Number.isFinite(arm.at)
+    ) {
+      return null;
+    }
+    return arm;
+  } catch {
+    return null;
+  }
+}
+
+function rotationArmIsValid(raw: string, deps: RotationArmDeps): boolean {
+  const arm = parseRotationArm(raw);
+  if (arm === null) return false;
+  const armFresh = Date.now() - arm.at < (deps.rotationArmMs ?? 1_800_000);
+  const runnerStats = deps.poolAprByAddress?.get(arm.runner);
+  const runnerApr = runnerStats?.feeAprPct ?? 0;
+  return armFresh && runnerStats?.measured !== false && runnerApr >= (deps.runnerMinFeeApr ?? 500);
+}
+
 function checkRotationArm(
   deps: RotationArmDeps,
   decision: AgentDecision,
@@ -1668,18 +1771,7 @@ function checkRotationArm(
     const armRaw = yield* deps.db
       .getMetadata(`rotarm:${decision.poolAddress}`)
       .pipe(Effect.catch(() => Effect.succeed(null)));
-    let armValid = false;
-    if (armRaw) {
-      try {
-        // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-        const arm = JSON.parse(armRaw) as { runner: string; at: number };
-        const armFresh = Date.now() - arm.at < (deps.rotationArmMs ?? 1_800_000);
-        const runnerApr = deps.poolAprByAddress?.get(arm.runner)?.feeAprPct ?? 0;
-        armValid = armFresh && runnerApr >= (deps.runnerMinFeeApr ?? 500);
-      } catch {
-        armValid = false;
-      }
-    }
+    const armValid = armRaw !== null && rotationArmIsValid(armRaw, deps);
     yield* persistMetadataIfSupported(deps.db, `rotarm:${decision.poolAddress}`, "");
     if (!armValid) {
       console.warn(
@@ -1691,18 +1783,100 @@ function checkRotationArm(
 }
 
 /**
- * Paper close settlement: gross realized PnL minus the modeled lifetime
- * costs (round-trip swaps + txs, harvest over age, conversion on gross
- * fees). Paper settlement has no on-chain receipts, so costs debit here —
- * the same knobs the expected-profit gate assumes, so the gate and the
- * ledger agree. Reported net expectancy prices the full cost load instead
- * of gross-minus-nothing.
+ * Paper close settlement: close-time costs plus modeled rebalance costs
+ * persisted in REBALANCE event metadata. Rebalance costs are charged to paper
+ * cash when the rebalance succeeds; the close path only credits close-time
+ * costs again.
  */
-/** Paper close settlement: net realized PnL plus the modeled cost load. */
 interface PaperExitSettlement {
   realizedPnlUsd: number;
+  /** All modeled costs included in realized PnL. */
   modeledCostsUsd: number;
+  /** Close-only costs still due from paper cash at EXIT. */
+  closeCostsUsd: number;
 }
+
+interface PaperRebalanceMetadata {
+  readonly modeledCostUsd?: number;
+  readonly topUpUsd?: number;
+  readonly compounded?: boolean;
+  readonly scaleIn?: boolean;
+}
+
+interface PaperPositionEvent {
+  readonly event: string;
+  readonly positionId: string | null;
+  readonly valueUsd?: number | null;
+  readonly metadata: string | null;
+}
+
+function parsePaperRebalanceMetadata(raw: string): PaperRebalanceMetadata | null {
+  try {
+    // SAFETY: Metadata is written by the paper executor; numeric consumers validate finite non-negative values before arithmetic.
+    return JSON.parse(raw) as PaperRebalanceMetadata;
+  } catch {
+    return null;
+  }
+}
+
+function paperRebalanceMetadataFor(
+  event: PaperPositionEvent,
+  positionId: string,
+): PaperRebalanceMetadata | null {
+  if (event.event !== "REBALANCE" || event.positionId !== positionId || event.metadata === null) {
+    return null;
+  }
+  return parsePaperRebalanceMetadata(event.metadata);
+}
+
+function paperRebalanceCostsUsd(
+  events: ReadonlyArray<PaperPositionEvent>,
+  positionId: string,
+): number {
+  let total = 0;
+  for (const event of events) {
+    const modeledCostUsd = paperRebalanceMetadataFor(event, positionId)?.modeledCostUsd;
+    if (modeledCostUsd === undefined || !finiteNonNegativeNumber(modeledCostUsd)) continue;
+    total += modeledCostUsd;
+  }
+  return total;
+}
+
+function paperCompoundedFeesUsd(
+  events: ReadonlyArray<PaperPositionEvent>,
+  positionId: string,
+  launchRunner: boolean,
+): number {
+  let total = 0;
+  for (const event of events) {
+    const metadata = paperRebalanceMetadataFor(event, positionId);
+    if (metadata === null) continue;
+    const compounded =
+      metadata.compounded === true || (metadata.scaleIn === true && launchRunner === false);
+    const topUpUsd = metadata.topUpUsd;
+    if (!compounded || topUpUsd === undefined || !finiteNonNegativeNumber(topUpUsd)) continue;
+    total += topUpUsd;
+  }
+  return total;
+}
+
+function paperLiquidFeesUsd(
+  position: PositionRecord,
+  events: ReadonlyArray<{
+    readonly event: string;
+    readonly positionId: string | null;
+    readonly metadata: string | null;
+  }>,
+): number {
+  const claimed = finiteNonNegativeNumber(position.cumulativeFeesClaimedUsd)
+    ? position.cumulativeFeesClaimedUsd
+    : 0;
+  return Math.max(
+    claimed - paperCompoundedFeesUsd(events, position.positionId, position.launchRunner === true),
+    0,
+  );
+}
+
 function resolvePaperExitSettlement(
   pos: PositionRecord,
   deps: Pick<
@@ -1712,6 +1886,7 @@ function resolvePaperExitSettlement(
     | "feeCaptureConversionCostPct"
     | "harvestTxCostUsdEst"
   >,
+  rebalanceCostsUsd = 0,
 ): PaperExitSettlement {
   const grossRealizedPnlUsd = computeRealizedPnlUsd(
     pos.currentValueUsd,
@@ -1719,7 +1894,7 @@ function resolvePaperExitSettlement(
     pos.depositedUsd,
     pos.cumulativeRewardsClaimedUsd,
   );
-  const modeledCostsUsd = paperCloseCostsUsd({
+  const closeCostsUsd = paperCloseCostsUsd({
     positionSizeUsd: pos.depositedUsd,
     ageDays: Math.max(Date.now() - pos.timestamp, 0) / DAY_MS,
     cumulativeGrossFeesUsd: pos.cumulativeFeesClaimedUsd,
@@ -1728,7 +1903,12 @@ function resolvePaperExitSettlement(
     conversionCostPct: deps.feeCaptureConversionCostPct ?? 0.05,
     txCostUsd: deps.harvestTxCostUsdEst ?? 0.005,
   });
-  return { realizedPnlUsd: grossRealizedPnlUsd - modeledCostsUsd, modeledCostsUsd };
+  const modeledCostsUsd = closeCostsUsd + Math.max(rebalanceCostsUsd, 0);
+  return {
+    realizedPnlUsd: grossRealizedPnlUsd - modeledCostsUsd,
+    modeledCostsUsd,
+    closeCostsUsd,
+  };
 }
 
 /** Paper EXIT: rotation-arm gate, live-position guard, ledger close + rug arm. */
@@ -1738,12 +1918,21 @@ function executePaperExit(
   pool: PaperExecPool,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never> {
   return Effect.gen(function* () {
+    const pos = resolveTargetPosition(deps.trackedPositions, decision);
+    if (!pos) {
+      console.warn(
+        `[PAPER] Skipping EXIT for ${decision.poolAddress} — no tracked target position`,
+      );
+      return {
+        executed: false,
+        error: `Skipping EXIT with no tracked position for ${decision.poolAddress}`,
+      };
+    }
     const rotationBlocked = yield* isExitRotationBlocked(deps, decision);
     if (rotationBlocked) {
       return { executed: false, error: "rotation canceled — incumbent preserved" };
     }
-    const pos = resolveTargetPosition(deps.trackedPositions, decision);
-    if (pos?.positionPubKey) {
+    if (pos.positionPubKey) {
       // Live position — paper trading must not "exit" it without an on-chain tx.
       // Skip and warn so the user can switch to live mode to actually close it.
       console.warn(
@@ -1755,53 +1944,110 @@ function executePaperExit(
         error: `Skipping EXIT for live position in paper mode: ${pos.positionId}`,
       };
     }
-    if (pos) {
-      const { realizedPnlUsd, modeledCostsUsd } = resolvePaperExitSettlement(pos, deps);
+    const positionEvents = deps.db.getPositionEvents
+      ? yield* deps.db
+          .getPositionEvents(decision.poolAddress)
+          .pipe(Effect.catch(() => Effect.succeed([])))
+      : [];
+    const rebalanceCostsUsd = paperRebalanceCostsUsd(positionEvents, pos.positionId);
+    const settlement = resolvePaperExitSettlement(pos, deps, rebalanceCostsUsd);
+    const { realizedPnlUsd, modeledCostsUsd } = settlement;
+    const liquidFeesUsd = paperLiquidFeesUsd(pos, positionEvents);
+    const cashCostsUsd =
+      settlement.closeCostsUsd + (deps.debitPaperCash === undefined ? rebalanceCostsUsd : 0);
+    yield* deps.db
+      .savePositionEvent({
+        id: randomUUID(),
+        poolAddress: decision.poolAddress,
+        positionPubKey: pos.positionPubKey,
+        positionId: pos.positionId,
+        event: "EXIT",
+        valueUsd: pos.currentValueUsd,
+        feesUsd: pos.cumulativeFeesClaimedUsd,
+        price: pool.currentPrice,
+        metadata: { realizedPnlUsd, modeledCostsUsd, exitReason: decision.reasoning },
+        createdAt: Date.now(),
+      })
+      .pipe(Effect.catch(() => Effect.void));
+    yield* persist(
+      `closePosition ${pos.positionId}`,
+      deps.db.closePosition(pos.positionId, realizedPnlUsd),
+    );
+    // Rug detection: a paper position closed at a catastrophic loss arms
+    // `token_rug_block` for its non-stable legs so the engine never
+    // re-enters a drained token (mirrors the live executor's gate).
+    const rugMints = rugBlockMints({
+      realizedPnlUsd,
+      depositedUsd: pos.depositedUsd,
+      rugExitLossPct: deps.rugExitLossPct ?? 0.5,
+      stablecoinMints: deps.stablecoinMints,
+      tokenX: pool.tokenX,
+      tokenY: pool.tokenY,
+    });
+    yield* persistPaperExitRugBlocks(deps.db, decision.poolAddress, rugMints, deps.rugTokenBlockMs);
+    if (pos.entrySignalSnapshotId != null) {
       yield* deps.db
-        .savePositionEvent({
-          id: randomUUID(),
-          poolAddress: decision.poolAddress,
-          positionPubKey: pos.positionPubKey,
-          positionId: pos.positionId,
-          event: "EXIT",
-          valueUsd: pos.currentValueUsd,
-          feesUsd: pos.cumulativeFeesClaimedUsd,
-          price: pool.currentPrice,
-          metadata: { realizedPnlUsd, modeledCostsUsd, exitReason: decision.reasoning },
-          createdAt: Date.now(),
-        })
+        .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
         .pipe(Effect.catch(() => Effect.void));
-      yield* persist(
-        `closePosition ${pos.positionId}`,
-        deps.db.closePosition(pos.positionId, realizedPnlUsd),
-      );
-      // Rug detection: a paper position closed at a catastrophic loss arms
-      // `token_rug_block` for its non-stable legs so the engine never
-      // re-enters a drained token (mirrors the live executor's gate).
-      const rugMints = rugBlockMints({
-        realizedPnlUsd,
-        depositedUsd: pos.depositedUsd,
-        rugExitLossPct: deps.rugExitLossPct ?? 0.5,
-        stablecoinMints: deps.stablecoinMints,
-        tokenX: pool.tokenX,
-        tokenY: pool.tokenY,
-      });
-      yield* persistPaperExitRugBlocks(
-        deps.db,
-        decision.poolAddress,
-        rugMints,
-        deps.rugTokenBlockMs,
-      );
-      if (pos.entrySignalSnapshotId != null) {
-        yield* deps.db
-          .recordSignalOutcome(pos.entrySignalSnapshotId, realizedPnlUsd)
-          .pipe(Effect.catch(() => Effect.void));
-      }
-      yield* persist(`markPaperExited ${pos.positionId}`, deps.db.markPaperExited(pos.positionId));
-      deps.trackedPositions.delete(pos.positionId);
     }
+    yield* persist(`markPaperExited ${pos.positionId}`, deps.db.markPaperExited(pos.positionId));
+    deps.trackedPositions.delete(pos.positionId);
+    deps.creditPaperCash?.(
+      pos.currentValueUsd +
+        liquidFeesUsd +
+        (finiteNonNegativeNumber(pos.cumulativeRewardsClaimedUsd)
+          ? pos.cumulativeRewardsClaimedUsd
+          : 0) -
+        cashCostsUsd,
+    );
     return { executed: true, error: undefined };
   });
+}
+
+function isPaperRunnerScaleIn(
+  position: PositionRecord,
+  params: RebalanceParams,
+  topUpUsd: number,
+): boolean {
+  return position.launchRunner === true && params.topUp !== undefined && topUpUsd > 0;
+}
+
+function buildPaperRebalancedPosition(
+  current: PositionRecord,
+  scaled: {
+    readonly depositedUsd: number;
+    readonly currentValueUsd: number;
+    readonly highestValueUsd: number;
+  },
+  params: RebalanceParams,
+  pool: PaperExecPool,
+  topUpUsd: number,
+): PositionRecord {
+  return {
+    ...current,
+    ...scaled,
+    entryAmountXUsd:
+      current.launchRunner === true
+        ? (current.entryAmountXUsd ?? 0) + topUpUsd
+        : current.entryAmountXUsd,
+    lowerBinId: params.newLowerBinId,
+    upperBinId: params.newUpperBinId,
+    ...(current.launchRunner === true && params.topUp !== undefined
+      ? {
+          launchRunnerAnchorPrice: pool.currentPrice,
+          launchRunnerSteps: (current.launchRunnerSteps ?? 0) + 1,
+        }
+      : undefined),
+    // Re-stamp the CLMM valuation anchor at the live print: the range
+    // moved, so the mark re-bases to the current (post-top-up) value
+    // instead of re-pricing the original deposit across new bins (which
+    // fabricates P&L). Entry fields stay untouched — cost basis and HODL
+    // survive.
+    valuationAnchorPriceUsd: pool.currentPrice,
+    valuationAnchorBinId: pool.activeBinId,
+    valuationAnchorValueUsd: scaled.currentValueUsd,
+    lastRebalanceAt: Date.now(),
+  };
 }
 
 /** Paper REBALANCE: reshape the tracked row (runner scale-in grows the basis). */
@@ -1811,66 +2057,65 @@ function executePaperRebalance(
   pool: PaperExecPool,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never> {
   const params = decision.rebalanceParams;
-  if (!params) return Effect.succeed({ executed: true, error: undefined });
+  if (!params) {
+    return Effect.succeed({
+      executed: false,
+      error: `Skipping REBALANCE without rebalance params for ${decision.poolAddress}`,
+    });
+  }
   return Effect.gen(function* () {
     const current = resolveTargetPosition(deps.trackedPositions, decision);
-    if (current) {
-      // Runner scale-in: the top-up is FRESH capital — grow the cost basis
-      // and the mark in lockstep (same invariant the live executor applies)
-      // and advance the band anchor + step count.
-      const topUpUsd = params.topUpUsd ?? 0;
-      const scaled = applyCompoundToCostBasis({
-        depositedUsd: current.depositedUsd,
-        currentValueUsd: current.currentValueUsd,
-        highestValueUsd: current.highestValueUsd,
-        compoundedFeesUsd: topUpUsd,
-      });
-      const updated: PositionRecord = {
-        ...current,
-        ...scaled,
-        entryAmountXUsd:
-          current.launchRunner === true
-            ? (current.entryAmountXUsd ?? 0) + topUpUsd
-            : current.entryAmountXUsd,
-        lowerBinId: params.newLowerBinId,
-        upperBinId: params.newUpperBinId,
-        ...(current.launchRunner === true && params.topUp !== undefined
-          ? {
-              launchRunnerAnchorPrice: pool.currentPrice,
-              launchRunnerSteps: (current.launchRunnerSteps ?? 0) + 1,
-            }
-          : undefined),
-        // Re-stamp the CLMM valuation anchor at the live print: the range
-        // moved, so the mark re-bases to the current (post-top-up) value
-        // instead of re-pricing the original deposit across new bins (which
-        // fabricates P&L). Entry fields stay untouched — cost basis and
-        // HODL survive.
-        valuationAnchorPriceUsd: pool.currentPrice,
-        valuationAnchorBinId: pool.activeBinId,
-        valuationAnchorValueUsd: scaled.currentValueUsd,
-        lastRebalanceAt: Date.now(),
+    if (!current) {
+      return {
+        executed: false,
+        error: `Skipping REBALANCE with no tracked position for ${decision.poolAddress}`,
       };
-      deps.trackedPositions.set(updated.positionId, updated);
-      yield* persist(`savePosition ${updated.positionId}`, deps.db.savePosition(updated));
-      yield* deps.db
-        .savePositionEvent({
-          id: randomUUID(),
-          poolAddress: decision.poolAddress,
-          positionPubKey: updated.positionPubKey,
-          positionId: updated.positionId,
-          event: "REBALANCE",
-          valueUsd: updated.currentValueUsd,
-          feesUsd: null,
-          price: pool.currentPrice,
-          metadata: {
-            newLowerBinId: params.newLowerBinId,
-            newUpperBinId: params.newUpperBinId,
-            ...(params.topUp !== undefined ? { scaleIn: true, topUpUsd } : undefined),
-          },
-          createdAt: Date.now(),
-        })
-        .pipe(Effect.catch(() => Effect.void));
     }
+    // Runner scale-in: the top-up is FRESH capital — grow the cost basis
+    // and the mark in lockstep (same invariant the live executor applies)
+    // and advance the band anchor + step count.
+    const topUpUsd = params.topUpUsd ?? 0;
+    const scaled = applyCompoundToCostBasis({
+      depositedUsd: current.depositedUsd,
+      currentValueUsd: current.currentValueUsd,
+      highestValueUsd: current.highestValueUsd,
+      compoundedFeesUsd: topUpUsd,
+    });
+    const updated = buildPaperRebalancedPosition(current, scaled, params, pool, topUpUsd);
+    deps.trackedPositions.set(updated.positionId, updated);
+    yield* persist(`savePosition ${updated.positionId}`, deps.db.savePosition(updated));
+    if (isPaperRunnerScaleIn(current, params, topUpUsd)) {
+      deps.debitPaperCash?.(topUpUsd);
+    }
+    const modeledCostUsd = resolvePaperRebalanceCostUsd(deps.rebalanceCostUsd);
+    if (modeledCostUsd > 0) {
+      // Rebalance gas/rent is paid now in paper cash; realized PnL still
+      // records it from the persisted event history at EXIT.
+      deps.debitPaperCash?.(modeledCostUsd);
+    }
+    yield* deps.db
+      .savePositionEvent({
+        id: randomUUID(),
+        poolAddress: decision.poolAddress,
+        positionPubKey: updated.positionPubKey,
+        positionId: updated.positionId,
+        event: "REBALANCE",
+        valueUsd: updated.currentValueUsd,
+        feesUsd: null,
+        price: pool.currentPrice,
+        metadata: {
+          modeledCostUsd,
+          newLowerBinId: params.newLowerBinId,
+          newUpperBinId: params.newUpperBinId,
+          ...(params.topUp !== undefined
+            ? isPaperRunnerScaleIn(current, params, topUpUsd)
+              ? { scaleIn: true, topUpUsd }
+              : { compounded: true, topUpUsd }
+            : undefined),
+        },
+        createdAt: Date.now(),
+      })
+      .pipe(Effect.catch(() => Effect.void));
     return { executed: true, error: undefined };
   });
 }
@@ -1904,7 +2149,14 @@ export function executePaper(
     runnerSwapCostPct?: number;
     feeCaptureHarvestCostUsd?: number;
     feeCaptureConversionCostPct?: number;
-    /** Rug detection: arm `token_rug_block` on a catastrophic realized loss. */
+    /** Paper-mode modeled gas/rent cost per successful rebalance. */
+    rebalanceCostUsd?: number;
+    /**
+     * Paper-cash ledger hooks (program scope owns the balance; executors
+     * report flows). Absent → tests and legacy callers run without a ledger.
+     */
+    debitPaperCash?: ((sizeUsd: number) => void) | undefined;
+    creditPaperCash?: ((netCreditUsd: number) => void) | undefined;
     rugExitLossPct?: number;
     rugTokenBlockMs?: number;
     stablecoinMints?: ReadonlySet<string>;
@@ -1936,10 +2188,10 @@ export function executePaper(
     if (decision.action === "EXIT") {
       return yield* executePaperExit(deps, decision, pool);
     }
-    if (decision.action === "REBALANCE" && decision.rebalanceParams) {
+    if (decision.action === "REBALANCE") {
       return yield* executePaperRebalance(deps, decision, pool);
     }
-    return { executed: true, error: undefined };
+    return { executed: false, error: `No paper execution path for action: ${decision.action}` };
   });
 }
 
@@ -2031,7 +2283,9 @@ type LiveExecPool = Parameters<typeof executeLive>[2];
 interface RotationArmDeps {
   readonly db: LiveExecDeps["db"];
   readonly rotationArmMs?: number | undefined;
-  readonly poolAprByAddress?: ReadonlyMap<string, { feeAprPct: number }> | undefined;
+  readonly poolAprByAddress?:
+    | ReadonlyMap<string, { feeAprPct: number; measured?: boolean | undefined }>
+    | undefined;
   readonly runnerMinFeeApr?: number | undefined;
 }
 
@@ -3524,16 +3778,18 @@ function resolveMarketActiveCount(config: AppConfig): number {
   return Math.min(config.marketScanTopK ?? 30, config.marketScanMaxPools ?? 60);
 }
 
-/** Redeploy portfolio value (paper seed vs wallet + positions). */
+/** Redeploy portfolio value: paper cash + open marks, or wallet + positions. */
 function resolveRedeployPortfolioValueUsd(
   paperTrading: boolean,
   hasWallet: boolean,
-  paperPortfolioUsd: number,
+  paperCashUsd: number,
   lastWalletBalanceUsd: number,
-  openPositions: ReadonlyArray<Position>,
+  openPositions: ReadonlyArray<{ readonly currentValueUsd: number }>,
 ): number {
-  if (paperTrading || !hasWallet) return paperPortfolioUsd;
-  return lastWalletBalanceUsd + openPositions.reduce((sum, pos) => sum + pos.currentValueUsd, 0);
+  const openValueUsd = openPositions.reduce((sum, pos) => sum + pos.currentValueUsd, 0);
+  if (paperTrading) return paperCashUsd + openValueUsd;
+  if (!hasWallet) return paperCashUsd;
+  return lastWalletBalanceUsd + openValueUsd;
 }
 
 /** Queue/sync source for an adopted redeploy proposal. */
@@ -3995,7 +4251,7 @@ function resolveTpLadderSpread(
   };
 }
 
-/** Net-daily-yield after churn/IL/swap costs for a candidate position size. */
+/** Net-daily-yield after churn/IL/swap/conversion costs for a candidate size. */
 function computePositionNetDailyPct(
   fees24hUsd: number,
   poolTvlUsd: number,
@@ -4005,6 +4261,7 @@ function computePositionNetDailyPct(
   volatilityStddev: number,
   swapCostPct: number | undefined,
   harvestCostUsd: number | undefined,
+  conversionCostPct: number | undefined,
   scanIntervalMs: number | undefined,
 ): number {
   return runnerNetDailyPctAfterCosts({
@@ -4016,6 +4273,7 @@ function computePositionNetDailyPct(
     volatilityStddev,
     swapCostPct: swapCostPct ?? 0.005,
     harvestCostUsd: harvestCostUsd ?? 0.01,
+    conversionCostPct: conversionCostPct ?? 0.05,
     timeInRangePct: 1,
     maxExitsPerDay: 86_400_000 / (scanIntervalMs ?? 600_000),
   });
@@ -4063,6 +4321,7 @@ export function expectedEnterProfitUsd(input: {
   readonly holdingDays: number;
   readonly swapCostPct: number | undefined;
   readonly harvestCostUsd: number | undefined;
+  readonly conversionCostPct: number | undefined;
   readonly txCostUsd: number | undefined;
 }): number | null {
   return expectedNetProfitUsd({
@@ -4075,6 +4334,7 @@ export function expectedEnterProfitUsd(input: {
     holdingDays: input.holdingDays,
     swapCostPct: input.swapCostPct ?? 0.005,
     harvestCostUsd: input.harvestCostUsd ?? 0.01,
+    conversionCostPct: input.conversionCostPct ?? 0.05,
     txCostUsd: input.txCostUsd ?? 0.005,
   });
 }
@@ -4117,6 +4377,41 @@ function resolveRotationCosts(
 /** Incumbent position size for rotation comparison (100 default when unknown). */
 function resolveIncumbentSizeUsd(incumbentPos: PositionRecord | undefined): number {
   return incumbentPos?.currentValueUsd ?? incumbentPos?.depositedUsd ?? 100;
+}
+function incumbentNetAprByPositionId(
+  positions: Iterable<PositionRecord>,
+  candidatePoolAddress: string,
+  poolFeeAprByAddress: ReadonlyMap<
+    string,
+    { feeAprPct: number; tvlUsd: number; measured: boolean }
+  >,
+  harvestCostUsd: number,
+  conversionCostPct: number,
+): Map<string, number> {
+  const result = new Map<string, number>();
+  for (const incumbent of positions) {
+    if (incumbent.poolAddress === candidatePoolAddress) continue;
+    const observed = poolFeeAprByAddress.get(incumbent.poolAddress);
+    if (observed === undefined || observed.measured !== true) continue;
+    const incumbentSizeUsd = resolveIncumbentSizeUsd(incumbent);
+    const shareEstimate =
+      observed.tvlUsd > 0 && incumbentSizeUsd > 0
+        ? Math.min(incumbentSizeUsd / observed.tvlUsd, 1)
+        : 0;
+    const netApr = runnerNetAprPct({
+      grossAprPct: observed.feeAprPct,
+      poolTvlUsd: observed.tvlUsd,
+      shareEstimate,
+      harvestCostUsd,
+      conversionCostPct,
+      positionSizeUsd: incumbentSizeUsd,
+      timeInRangePct: 1,
+    });
+    if (Number.isFinite(netApr) && netApr >= 0) {
+      result.set(incumbent.positionId, netApr);
+    }
+  }
+  return result;
 }
 
 /** Rotation superiority multiple (doubled on euphoria-damper spikes). */
@@ -4687,8 +4982,8 @@ function executeLiveRebalance(
 }
 
 /**
- * Run the on-chain close when a live pubkey exists; a position without one
- * is already gone, so the EXIT marks done with no chain action.
+ * Run the on-chain close when a live pubkey exists. A missing target is a
+ * skipped no-op; a tracked row without a pubkey is already gone on-chain.
  */
 function runExitOrMarkExited(
   deps: LiveExecDeps,
@@ -4696,7 +4991,14 @@ function runExitOrMarkExited(
   pos: PositionRecord | undefined,
   exitOperation: ExecutionOperationRecord | null,
 ) {
-  if (!pos?.positionPubKey) {
+  if (!pos) {
+    return Effect.succeed({
+      exited: false,
+      exitError: `Skipping EXIT with no tracked position for ${decision.poolAddress}`,
+      exitResultData: null,
+    });
+  }
+  if (!pos.positionPubKey) {
     return Effect.succeed({ exited: true, exitError: undefined, exitResultData: null });
   }
   return runLiveExitPosition(deps, decision, pos, pos.positionPubKey, exitOperation);
@@ -4736,11 +5038,17 @@ function executeLiveExit(
   pool: LiveExecPool,
 ): Effect.Effect<{ executed: boolean; error: string | undefined }, never> {
   return Effect.gen(function* () {
+    const pos = resolveTargetPosition(deps.trackedPositions, decision);
+    if (!pos) {
+      return {
+        executed: false,
+        error: `Skipping EXIT with no tracked position for ${decision.poolAddress}`,
+      };
+    }
     const rotationBlocked = yield* isExitRotationBlocked(deps, decision);
     if (rotationBlocked) {
       return { executed: false, error: "rotation canceled — incumbent preserved" };
     }
-    const pos = resolveTargetPosition(deps.trackedPositions, decision);
     const planned = yield* planLiveExitOperation(deps, decision, pool, pos);
     if (planned.fatalError) {
       return { executed: false, error: planned.fatalError };
@@ -4776,19 +5084,17 @@ function executeLiveExit(
       }
       return { executed: true, error: undefined };
     }
-    if (pos) {
-      const computed = computeLedgerExitRealized(pos, exitResultData);
-      yield* creditExitSweep(deps, decision, pool, pos, exitResultData);
-      yield* finalizeLiveExitLedger(
-        deps,
-        decision,
-        pool,
-        pos,
-        exitResultData,
-        computed.realizedPnlUsd,
-        computed.pricingUnresolved,
-      );
-    }
+    const computed = computeLedgerExitRealized(pos, exitResultData);
+    yield* creditExitSweep(deps, decision, pool, pos, exitResultData);
+    yield* finalizeLiveExitLedger(
+      deps,
+      decision,
+      pool,
+      pos,
+      exitResultData,
+      computed.realizedPnlUsd,
+      computed.pricingUnresolved,
+    );
     return { executed: true, error: undefined };
   });
 }
@@ -5156,6 +5462,137 @@ function refreshWashEvidence(
   });
 }
 
+interface PaperLedgerCapital {
+  entryUsd: number;
+  scaleInUsd: number;
+  rebalanceCostUsd: number;
+  hasEntry: boolean;
+}
+
+function finiteValue(value: number | null | undefined): number | null {
+  return value !== null && value !== undefined && Number.isFinite(value) ? value : null;
+}
+
+function finiteNonNegativeValue(value: number | null | undefined): number | null {
+  return value !== null && value !== undefined && finiteNonNegativeNumber(value) ? value : null;
+}
+
+function paperClosedRealizedUsd(positions: ReadonlyArray<PositionRecord>): number {
+  return positions.reduce(
+    (sum, pos) =>
+      pos.positionPubKey === null ? sum + (finiteValue(pos.realizedPnlUsd) ?? 0) : sum,
+    0,
+  );
+}
+
+function paperFreshScaleInUsd(
+  metadata: PaperRebalanceMetadata | null,
+  position: PositionRecord | undefined,
+): number {
+  const topUpUsd = finiteNonNegativeValue(metadata?.topUpUsd);
+  return metadata?.scaleIn === true &&
+    metadata.compounded !== true &&
+    position?.launchRunner === true
+    ? (topUpUsd ?? 0)
+    : 0;
+}
+
+function applyPaperCapitalEvent(
+  capital: PaperLedgerCapital,
+  event: PaperPositionEvent,
+  position: PositionRecord | undefined,
+): void {
+  if (event.event === "ENTER") {
+    const entryUsd = finiteNonNegativeValue(event.valueUsd);
+    if (entryUsd !== null) {
+      capital.entryUsd += entryUsd;
+      capital.hasEntry = true;
+    }
+    return;
+  }
+  if (event.event !== "REBALANCE" || event.metadata === null) return;
+  const metadata = parsePaperRebalanceMetadata(event.metadata);
+  if (metadata === null) return;
+  const modeledCostUsd = finiteNonNegativeValue(metadata.modeledCostUsd);
+  if (modeledCostUsd !== null) capital.rebalanceCostUsd += modeledCostUsd;
+  capital.scaleInUsd += paperFreshScaleInUsd(metadata, position);
+}
+
+function replayPaperCapitalEvents(
+  events: ReadonlyArray<PaperPositionEvent>,
+  openPaperIds: ReadonlySet<string>,
+  openPaperById: ReadonlyMap<string, PositionRecord>,
+  capitalByPosition: Map<string, PaperLedgerCapital>,
+): void {
+  for (const event of events) {
+    const positionId = event.positionId;
+    if (positionId === null || !openPaperIds.has(positionId)) continue;
+    const capital = capitalByPosition.get(positionId) ?? {
+      entryUsd: 0,
+      scaleInUsd: 0,
+      rebalanceCostUsd: 0,
+      hasEntry: false,
+    };
+    applyPaperCapitalEvent(capital, event, openPaperById.get(positionId));
+    capitalByPosition.set(positionId, capital);
+  }
+}
+
+function committedPaperCapitalUsd(
+  position: PositionRecord,
+  capital: PaperLedgerCapital | undefined,
+): number {
+  if (!Number.isFinite(position.depositedUsd)) return 0;
+  const committedUsd =
+    capital?.hasEntry === true ? capital.entryUsd + capital.scaleInUsd : position.depositedUsd;
+  return Number.isFinite(committedUsd) ? committedUsd : position.depositedUsd;
+}
+
+function paperRebalanceCostForPosition(
+  position: PositionRecord,
+  capital: PaperLedgerCapital | undefined,
+): number {
+  const costUsd = capital?.rebalanceCostUsd ?? 0;
+  return finiteNonNegativeNumber(costUsd) ? costUsd : 0;
+}
+
+function loadPaperCashLedger(
+  db: DbApi,
+  seedUsd: number,
+  allPositions: ReadonlyArray<PositionRecord>,
+): Effect.Effect<number, never, never> {
+  return Effect.gen(function* () {
+    const closedPaperPositions = yield* db
+      .getClosedPositions()
+      .pipe(Effect.catch(() => Effect.succeed([])));
+    const openPaperPositions = allPositions.filter((pos) => pos.positionPubKey === null);
+    const openPaperIds = new Set(openPaperPositions.map((pos) => pos.positionId));
+    const openPaperById = new Map(openPaperPositions.map((pos) => [pos.positionId, pos]));
+    const capitalByPosition = new Map<string, PaperLedgerCapital>();
+    for (const poolAddress of new Set(openPaperPositions.map((pos) => pos.poolAddress))) {
+      const events = yield* db
+        .getPositionEvents(poolAddress)
+        .pipe(Effect.catch(() => Effect.succeed([])));
+      replayPaperCapitalEvents(events, openPaperIds, openPaperById, capitalByPosition);
+    }
+    const openPaperCapitalUsd = openPaperPositions.reduce(
+      (sum, pos) => sum + committedPaperCapitalUsd(pos, capitalByPosition.get(pos.positionId)),
+      0,
+    );
+    const openPaperRebalanceCostsUsd = openPaperPositions.reduce(
+      (sum, pos) => sum + paperRebalanceCostForPosition(pos, capitalByPosition.get(pos.positionId)),
+      0,
+    );
+    return Math.max(
+      seedUsd +
+        paperClosedRealizedUsd(closedPaperPositions) -
+        openPaperCapitalUsd -
+        openPaperRebalanceCostsUsd,
+      0,
+    );
+  });
+}
+
 export const program = Effect.gen(function* () {
   const config = yield* ConfigService;
   const adapter = yield* AdapterService;
@@ -5233,6 +5670,15 @@ export const program = Effect.gen(function* () {
   let scanCount = 0;
   let lastAgentCheckinAt = 0;
   let lastWalletBalanceUsd = config.paperPortfolioUsd;
+  // Paper-cash ledger: the single paper equity source. Seeded from
+  // config.paperPortfolioUsd, then debited per paper ENTER and credited per
+  // paper EXIT settlement via the executor hooks below. Sizing,
+  // idle-capital, allocation and drawdown read cash + open marks — never
+  // seed + open marks (the old double-count inflated a 40% cap to 52%).
+  let paperCashUsd = config.paperPortfolioUsd;
+  if (config.paperTrading) {
+    paperCashUsd = yield* loadPaperCashLedger(db, config.paperPortfolioUsd, allPositions);
+  }
   // False until the first SUCCESSFUL live chain wallet read. The session-local
   // seed (config.paperPortfolioUsd, default $10,000) is fictional for live mode;
   // this flag keeps it from ever authorizing a live entry during an RPC outage
@@ -5537,10 +5983,12 @@ export const program = Effect.gen(function* () {
   let marketRankedPools: ReadonlyArray<MarketPoolRank> = [];
   let lastMarketRefreshAt = 0;
   const marketScanPools = new Set<string>();
-  // Per-cycle fee APR (fees24h × 365 / tvl) keyed by pool address, populated
-  // during each pool's evaluation. The market-runner rotation compares a
-  // candidate runner's APR against the LOWEST-APR held position's APR.
-  const poolFeeAprByAddress = new Map<string, { feeAprPct: number; tvlUsd: number }>();
+  // Per-cycle fee APR observations keyed by pool. Rotation uses the current
+  // cycle's values; `measured` keeps modeled gecko/heuristic fees out.
+  const poolFeeAprByAddress = new Map<
+    string,
+    { feeAprPct: number; tvlUsd: number; measured: boolean }
+  >();
   // Dispatch-deps builders shared by the in-slot tail and the idle-redeploy
   // pass: the executor wiring (entry APR, rotation arm, runner floor, harvest
   // values) must not drift between lanes. exactOptionalPropertyTypes-safe.
@@ -5584,10 +6032,9 @@ export const program = Effect.gen(function* () {
   // The launch radar's admitted pool set, populated by refreshLaunchScan ONLY
   // when both launchScanEnabled AND launchExecutionEnabled are on (the default
   // path never fills it, so the scan loop and ENTER gates below stay
-  // behavior-identical). Launch pools ride the FULL existing gate chain —
-  // Paper close-time cost wiring (paperCloseCostsUsd): the same cost knobs
-  // the expected-profit ENTER gate assumes, so the ledger and the gate
-  // agree. Shared by the in-slot tail and the idle-redeploy pass.
+  // behavior-identical).
+  // Paper close-time cost wiring (paperCloseCostsUsd): the same cost knobs the
+  // expected-profit ENTER gate assumes, so the ledger and the gate agree.
   const paperCostDispatchDeps = () => ({
     ...(config.runnerSwapCostPct !== undefined
       ? { runnerSwapCostPct: config.runnerSwapCostPct }
@@ -5598,6 +6045,13 @@ export const program = Effect.gen(function* () {
     ...(config.feeCaptureConversionCostPct !== undefined
       ? { feeCaptureConversionCostPct: config.feeCaptureConversionCostPct }
       : undefined),
+    rebalanceCostUsd: config.rebalanceGasCostSol * config.solPriceUsd,
+    debitPaperCash: (sizeUsd: number): void => {
+      if (finiteNonNegativeNumber(sizeUsd)) paperCashUsd -= sizeUsd;
+    },
+    creditPaperCash: (netCreditUsd: number): void => {
+      if (Number.isFinite(netCreditUsd)) paperCashUsd += netCreditUsd;
+    },
   });
   // blacklist/freeze/token-risk, metrics, pre-filter, risk tail — plus the
   // launch-specific ENTER criteria.
@@ -5989,16 +6443,20 @@ export const program = Effect.gen(function* () {
         }
       }
 
+      const reportedWalletBalanceUsd = config.paperTrading
+        ? Math.max(paperCashUsd, 0)
+        : lastWalletBalanceUsd;
+
       yield* agentState.updateSnapshot({
         scanCount,
         lastCycleAt: now,
         portfolio: {
-          totalValueUsd: lastWalletBalanceUsd + positionsValueUsd,
+          totalValueUsd: reportedWalletBalanceUsd + positionsValueUsd,
           unrealizedPnlUsd,
           realizedPnlUsd: 0,
           openPositions: trackedPositions.size,
           maxPositions: config.maxOpenPositions,
-          walletBalanceUsd: lastWalletBalanceUsd,
+          walletBalanceUsd: reportedWalletBalanceUsd,
         },
         positions,
         recentDecisions: recentDecisions.map((d) => ({
@@ -6751,6 +7209,18 @@ export const program = Effect.gen(function* () {
         );
         return { verdict: "next" } as const;
       }
+      if (config.paperTrading && finalRedeploySizeUsd > Math.max(paperCashUsd, 0)) {
+        const availableCashUsd = Math.max(paperCashUsd, 0);
+        const reason = `[idle-redeploy] entry $${finalRedeploySizeUsd.toFixed(2)} exceeds available paper cash $${availableCashUsd.toFixed(2)} — skipped`;
+        yield* recordRedeploySkip(
+          candidate,
+          ctx.cycleId,
+          reason,
+          "[idle-redeploy] paper cash reserve insufficient",
+        );
+        return { verdict: "next" } as const;
+      }
+
       const signalTimestamp = Date.now();
       const signalSnapshotId = yield* db
         .saveSignalSnapshot({
@@ -7119,23 +7589,14 @@ export const program = Effect.gen(function* () {
       const cycleId = cycle.cycleId;
 
       // Idle capital: live = USDC wallet holdings at par (the adapter read
-      // shares the balance cache — no extra RPC); paper = the portfolio seed
-      // minus deployed value. A failed live holdings read degrades to "no
-      // idle detected" (fail-open — the cycle never fails and never deploys
-      // on stale data).
-      const deployedUsd = Array.from(trackedPositions.values()).reduce(
-        (sum, pos) => sum + pos.currentValueUsd,
-        0,
-      );
-      // Idle capital: live = USDC wallet holdings at par (the adapter read
-      // shares the balance cache — no extra RPC); paper = the portfolio seed
-      // minus deployed value. A failed live holdings read degrades to "no
-      // idle detected" (fail-open — the cycle never fails and never deploys
-      // on stale data).
-      function readIdleCapitalUsd(deployedUsd: number): Effect.Effect<number, never> {
+      // shares the balance cache — no extra RPC); paper = the cash ledger
+      // after entry debits and exit credits. A failed live holdings read
+      // degrades to "no idle detected" (fail-open — the cycle never fails and
+      // never deploys on stale data).
+      function readIdleCapitalUsd(): Effect.Effect<number, never> {
         return Effect.gen(function* () {
           if (config.paperTrading || !adapter.hasWallet()) {
-            return Math.max(config.paperPortfolioUsd - deployedUsd, 0);
+            return Math.max(paperCashUsd, 0);
           }
           const holdings = yield* adapter.getWalletHoldings().pipe(
             Effect.catch((err) => {
@@ -7155,7 +7616,7 @@ export const program = Effect.gen(function* () {
         });
       }
 
-      const idleCapitalUsd = yield* readIdleCapitalUsd(deployedUsd);
+      const idleCapitalUsd = yield* readIdleCapitalUsd();
 
       if (idleCapitalUsd <= config.idleRedeployThresholdUsd) {
         idleRedeployLogger.debug("Idle capital below redeploy threshold", {
@@ -7167,21 +7628,15 @@ export const program = Effect.gen(function* () {
       }
 
       // Fresh portfolio context — positions moved during the pools loop, so
-      // the gates measure current state, not the cycle-top capture.
+      // the gates measure current state, not the cycle-top capture. Paper
+      // equity is liquid cash plus open marks; live equity is the reconciled
+      // wallet plus open marks. The cash ledger prevents deployed paper
+      // capital from being counted twice.
       const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
-      // Follow-up 3655288389: in paper mode (and walletless live) the paper seed
-      // IS the modeled total portfolio — paper never decrements the wallet when
-      // capital deploys (see AGENTS.md §wallet-balance), so `lastWalletBalanceUsd
-      // === config.paperPortfolioUsd` is a STATIC seed. Adding deployed positions
-      // onto it double-counts: a $10k seed with $3k deployed would evaluate as
-      // $13k, growing a 40% cap to 52% of the real paper portfolio. Use the seed
-      // itself — consistent with the idleCapitalUsd calc above, which treats the
-      // seed as the total (seed − deployed). Live keeps wallet + positions
-      // (the wallet read genuinely shrinks as capital deploys).
       const portfolioValueUsd = resolveRedeployPortfolioValueUsd(
         config.paperTrading,
         adapter.hasWallet(),
-        config.paperPortfolioUsd,
+        paperCashUsd,
         lastWalletBalanceUsd,
         openPositions,
       );
@@ -7674,7 +8129,9 @@ export const program = Effect.gen(function* () {
           }),
         );
       } else {
-        lastWalletBalanceUsd = config.paperPortfolioUsd;
+        lastWalletBalanceUsd = config.paperTrading
+          ? Math.max(paperCashUsd, 0)
+          : config.paperPortfolioUsd;
       }
       // Throughput-throttle surface: unpriced wallet tokens silently shrink
       // portfolioValueUsd (fail-closed), so every ENTER is sized smaller and
@@ -8040,7 +8497,11 @@ export const program = Effect.gen(function* () {
         (sum, p) => sum + (p.currentValueUsd - p.depositedUsd),
         0,
       );
-      const totalValueUsd = lastWalletBalanceUsd + positionsValueUsd;
+      const reportedWalletBalanceUsd = config.paperTrading
+        ? Math.max(paperCashUsd, 0)
+        : lastWalletBalanceUsd;
+
+      const totalValueUsd = reportedWalletBalanceUsd + positionsValueUsd;
       const now = Date.now();
       return {
         type: "checkin" as const,
@@ -8302,7 +8763,11 @@ export const program = Effect.gen(function* () {
         runnerFloorApr,
       );
       const runnerConsecutiveCount = runnerAprObservation.consecutiveCount;
-      poolFeeAprByAddress.set(poolAddress, { feeAprPct: poolFeeAprPct, tvlUsd: pool.tvlUsd });
+      poolFeeAprByAddress.set(poolAddress, {
+        feeAprPct: poolFeeAprPct,
+        tvlUsd: pool.tvlUsd,
+        measured: pool.statsSource === "datapi",
+      });
       // Euphoria damper (ORCA's strongest sell signal — confidence-at-extreme
       // marks tops, not continuation): a runner whose CURRENT measured APR is
       // a vertical spike vs its OWN recent history is suppressed from BOTH
@@ -9190,9 +9655,10 @@ export const program = Effect.gen(function* () {
     decision: AgentDecision,
     poolAddress: string,
   ): TailPosition {
+    const targeted =
+      decision.positionId === undefined ? undefined : trackedPositions.get(decision.positionId);
     return {
-      pos:
-        decision.positionId !== undefined ? trackedPositions.get(decision.positionId) : undefined,
+      pos: targeted?.poolAddress === poolAddress ? targeted : undefined,
       hasOpenPosition: positionsForPool(trackedPositions, poolAddress).length > 0,
     };
   }
@@ -9337,13 +9803,14 @@ export const program = Effect.gen(function* () {
     idleRedeployCandidates: IdleRedeployCandidate[],
     executedExitPools: Set<string>,
   ): Effect.Effect<ReadonlyArray<AgentDecision>, Error, EntryPrepService> =>
+    // oxlint-disable-next-line complexity -- decision-loop orchestration intentionally keeps all gates in one ordered effect.
     Effect.gen(function* () {
       const cycleId = cycle.cycleId;
       const entryGates = yield* runPoolEntryGates();
       if (entryGates.halt) return entryGates.halt;
       const metrics = entryGates.metrics;
       const { warnings, hasRecentWarning, entryEligible } = entryGates.quality;
-      const hotLane = entryGates.hotLane;
+      const safetyRejected = entryGates.safetyRejected;
       const pool = entryGates.pool;
       const binArray = entryGates.binArray;
       const datapiStats = entryGates.datapiStats;
@@ -9507,6 +9974,8 @@ export const program = Effect.gen(function* () {
                   lowerBinId: pos.lowerBinId,
                   upperBinId: pos.upperBinId,
                   binStep: pool.binStep,
+                  entryAmountXUsd: pos.entryAmountXUsd,
+                  entryAmountYUsd: pos.entryAmountYUsd,
                   valuationAnchorPriceUsd: pos.valuationAnchorPriceUsd,
                   valuationAnchorBinId: pos.valuationAnchorBinId,
                   valuationAnchorValueUsd: pos.valuationAnchorValueUsd,
@@ -10337,11 +10806,17 @@ export const program = Effect.gen(function* () {
       for (const pos of poolPositions) {
         yield* refreshPositionValue(pos);
       }
+      // Hot-window exits must see the range/value state refreshed above. The
+      // earlier gate pass only admits the lane; evaluating it before refresh
+      // let a newly out-of-range position wait one extra cycle.
+      const hotLane = safetyRejected
+        ? null
+        : yield* runHotWindowLane(poolAddress, pool, datapiStats);
 
       // ── Phase 1: EXIT evaluation per position ───────────────────────────
       // Pool-level degradation (TVL drop, fake volume, low fee/IL) exits
       // every position on the pool; the trailing stop is per position.
-      const rawDecisions: AgentDecision[] = [...entryGates.hotDecisions];
+      const rawDecisions: AgentDecision[] = [...(hotLane ?? [])];
       let poolExitFired = rawDecisions.some((decision) => decision.action === "EXIT");
 
       yield* alertW15Signals();
@@ -10367,7 +10842,7 @@ export const program = Effect.gen(function* () {
         Error
       > =>
         Effect.gen(function* () {
-          if (exitDecision.action !== "EXIT") return null;
+          if (exitDecision.action !== "EXIT" || position === undefined) return null;
 
           const existingCooldown = yield* db
             .getPoolCooldown(poolAddress)
@@ -10457,19 +10932,23 @@ export const program = Effect.gen(function* () {
           return null;
         });
 
-      // Single persist point happened per position above (OOR + value updates).
-      // The wallet value was reconciled once at the top of this cycle; reuse it
-      // here so every pool in the cycle shares one consistent figure for the
-      // risk/sizing context (a transient read already degraded at cycle top and
-      // never fails an individual pool).
-      const walletBalanceUsd = lastWalletBalanceUsd;
+      // Paper entries spend the same liquid cash that backs portfolio equity;
+      // otherwise the original seed can size new entries after it has already
+      // been deployed. Live entries keep the reconciled chain balance.
+      const walletBalanceUsd = config.paperTrading
+        ? Math.max(paperCashUsd, 0)
+        : lastWalletBalanceUsd;
 
-      // Portfolio value = wallet + open positions (mirrors refreshAgentState).
-      // Using the wallet alone shrinks the drawdown/allocation/size gates as
-      // positions grow, tightening risk limits exactly when capital is deployed.
+      // Paper portfolio value = cash ledger + open marks. Live portfolio
+      // value = reconciled wallet + open marks.
       const openPositions = Array.from(trackedPositions.values()).map(toRiskPosition);
-      const portfolioValueUsd =
-        walletBalanceUsd + openPositions.reduce((sum, p) => sum + p.currentValueUsd, 0);
+      const portfolioValueUsd = resolveRedeployPortfolioValueUsd(
+        config.paperTrading,
+        adapter.hasWallet(),
+        paperCashUsd,
+        walletBalanceUsd,
+        openPositions,
+      );
       const dayStart = new Date(Date.now()).setUTCHours(0, 0, 0, 0);
       const dayKey = new Date(dayStart).toISOString().slice(0, 10);
       const closedToday = yield* db
@@ -10530,12 +11009,13 @@ export const program = Effect.gen(function* () {
             volatilityStddev,
             config.runnerSwapCostPct,
             config.feeCaptureHarvestCostUsd,
+            config.feeCaptureConversionCostPct,
             config.scanIntervalMs,
           );
           if (netPct < floorPct) {
             return {
               bleed: true,
-              reason: `[net-bleed] runner net ${netPct.toFixed(2)}%/day < floor ${floorPct}%/day after churn/IL/swap cost — exiting to stop the bleed`,
+              reason: `[net-bleed] runner net ${netPct.toFixed(2)}%/day < floor ${floorPct}%/day after churn/IL/swap/conversion cost — exiting to stop the bleed`,
             };
           }
         }
@@ -10650,8 +11130,16 @@ export const program = Effect.gen(function* () {
               return Effect.succeed(
                 estimatePaperRebalanceBenefit({
                   fees24hUsd: pool.fees24hUsd,
+                  poolTvlUsd: pool.tvlUsd,
+                  positionSizeUsd: pos.currentValueUsd,
+                  activeBinId: pool.activeBinId,
+                  currentLowerBinId: pos.lowerBinId,
+                  currentUpperBinId: pos.upperBinId,
                   newLowerBinId: recommended.lowerBinId,
                   newUpperBinId: recommended.upperBinId,
+                  binStep: pool.binStep,
+                  holdingDays: Math.max(config.gasAwareMinDaysOfFeesPaidAhead, 1),
+                  rebalanceCostUsd: config.rebalanceGasCostSol * config.solPriceUsd,
                 }),
               );
             }
@@ -11278,7 +11766,7 @@ export const program = Effect.gen(function* () {
       }
       yield* gateHotWindowEntry();
 
-      let enterGateRejected = !checkEnterPoolEligibility(false);
+      let enterGateRejected = safetyRejected || !checkEnterPoolEligibility(false);
       enterGateRejected = yield* checkEnterWalletReadGate(enterGateRejected);
       enterGateRejected = yield* checkEnterWalletRefreshGate(enterGateRejected);
       enterGateRejected = yield* checkEnterBackoffGate(enterGateRejected);
@@ -11632,10 +12120,6 @@ export const program = Effect.gen(function* () {
       if (enterCandidate.qualified) {
         // ── Launch ENTER (Launch Mode v2) ─────────────────────────────
         // Moved intact from the ENTER slot; motivates in code comments below.
-        // ── Launch ENTER (Launch Mode v2) ─────────────────────────────
-        // Moved intact from the ENTER slot; motivates in code comments below.
-        // ── Launch ENTER (Launch Mode v2) ─────────────────────────────
-        // Moved intact from the ENTER slot; motivates in code comments below.
         // Rotation (market-runner lane only): the portfolio is full and a much
         // hotter runner is available — exit the LOWEST-APR held position so the
         // freed slot admits the runner next cycle. Fire-and-forget: the ENTER
@@ -11654,8 +12138,27 @@ export const program = Effect.gen(function* () {
                 config.feeCaptureConversionCostPct,
                 config.minYieldExitAgeMs,
               );
+              const runnerSizeUsd = rotationCosts.runnerSizeUsd;
+              const harvestCostUsd = rotationCosts.harvestCostUsd;
+              const conversionCostPct = rotationCosts.conversionCostPct;
+              const shareFor = (sizeUsd: number, tvlUsd: number): number =>
+                tvlUsd > 0 && sizeUsd > 0 ? Math.min(sizeUsd / tvlUsd, 1) : 0;
+
+              // Select the incumbent by the same NET fee APR used in the
+              // superiority comparison. Gross pool APR can pick the wrong
+              // position when fixed harvest costs make a small position's
+              // net return worse than a larger position with a higher headline
+              // APR. Only Data-API-measured incumbent APRs are eligible.
+              const incumbentNetAprs = incumbentNetAprByPositionId(
+                trackedPositions.values(),
+                poolAddress,
+                poolFeeAprByAddress,
+                harvestCostUsd,
+                conversionCostPct,
+              );
               const worst = lowestAprHeldPosition(
                 Array.from(trackedPositions.values(), (p) => ({
+                  positionId: p.positionId,
                   poolAddress: p.poolAddress,
                   openedAt: p.timestamp,
                 })),
@@ -11664,25 +12167,17 @@ export const program = Effect.gen(function* () {
                 // Economic-exit maturity gate: a minutes-old entry is
                 // never a rotation target (same MIN_YIELD_EXIT_AGE_MS
                 // class as the yield-regression exit).
-                { minAgeMs: rotationCosts.minAgeMs, nowMs: Date.now() },
+                {
+                  minAgeMs: rotationCosts.minAgeMs,
+                  nowMs: Date.now(),
+                  selectionScoreByPositionId: incumbentNetAprs,
+                },
               );
               if (worst) {
-                // G3 net-fee comparison (rule: measure practical
-                // position output, not raw APR): both sides are
-                // attributed their share of total pool fees, conversion cost and
-                // harvest cost. Uniform share model on both sides (the
-                // activeShareEstimate range/concentration model is
-                // reserved for entry sizing); the comparison stays
-                // size-aware and deliberately conservative.
-                const incumbentPos = Array.from(trackedPositions.values()).find(
-                  (p) => p.poolAddress === worst.poolAddress,
-                );
-                const incumbentSizeUsd = resolveIncumbentSizeUsd(incumbentPos);
-                const runnerSizeUsd = rotationCosts.runnerSizeUsd;
-                const shareFor = (sizeUsd: number, tvlUsd: number): number =>
-                  tvlUsd > 0 && sizeUsd > 0 ? Math.min(sizeUsd / tvlUsd, 1) : 0;
-                const harvestCostUsd = rotationCosts.harvestCostUsd;
-                const conversionCostPct = rotationCosts.conversionCostPct;
+                // G3 net-fee comparison: candidate and incumbent both use
+                // pool TVL, one proportional capture share, conversion cost
+                // and harvest cost. The selection above and this comparison
+                // now share exactly the same units.
                 const runnerNetApr = runnerNetAprPct({
                   grossAprPct: poolFeeAprPct,
                   poolTvlUsd: pool.tvlUsd,
@@ -11692,35 +12187,29 @@ export const program = Effect.gen(function* () {
                   positionSizeUsd: runnerSizeUsd,
                   timeInRangePct: 1,
                 });
-                const incumbentNetApr = runnerNetAprPct({
-                  grossAprPct: worst.feeAprPct,
-                  poolTvlUsd: worst.tvlUsd,
-                  shareEstimate: shareFor(incumbentSizeUsd, worst.tvlUsd),
-                  harvestCostUsd,
-                  conversionCostPct,
-                  positionSizeUsd: incumbentSizeUsd,
-                  timeInRangePct: 1,
-                });
+                const incumbentNetApr = worst.feeAprPct;
+                const rotationAprMult = resolveRotationAprMult(
+                  runnerAprOutlier,
+                  config.marketScanRotationAprMult,
+                );
                 if (
                   shouldRotate(
                     runnerNetApr,
                     {
+                      positionId: worst.positionId,
                       poolAddress: worst.poolAddress,
                       feeAprPct: incumbentNetApr,
                       tvlUsd: worst.tvlUsd,
                     },
-                    // Euphoria damper: when the challenger's headline APR
-                    // is a self-history spike, demanding double the
-                    // superiority keeps a blow-off top from buying an
-                    // exit of a durable incumbent at the top tick.
-                    resolveRotationAprMult(runnerAprOutlier, config.marketScanRotationAprMult),
+                    rotationAprMult,
                   )
                 ) {
                   rawDecisions.push({
                     action: "EXIT",
                     poolAddress: worst.poolAddress,
+                    positionId: worst.positionId,
                     confidence: 1,
-                    reasoning: `Rotation: runner net ${runnerNetApr.toFixed(0)}% APR >= ${config.marketScanRotationAprMult ?? 5}x held net ${incumbentNetApr.toFixed(0)}%`,
+                    reasoning: `Rotation: runner net ${runnerNetApr.toFixed(0)}% APR >= ${(rotationAprMult ?? DEFAULT_ROTATION_APR_MULT).toFixed(0)}x held net ${incumbentNetApr.toFixed(0)}%`,
                   });
                   // G2 rotation arm (TTL): the EXIT executes only while
                   // the arm is fresh and the runner still qualifies —
@@ -11936,6 +12425,7 @@ export const program = Effect.gen(function* () {
                       volatilityStddev,
                       config.runnerSwapCostPct,
                       config.feeCaptureHarvestCostUsd,
+                      config.feeCaptureConversionCostPct,
                       config.scanIntervalMs,
                     );
                     if (entryNetPct >= (config.runnerNetFloorPct ?? 1)) return false;
@@ -11946,7 +12436,7 @@ export const program = Effect.gen(function* () {
                         poolAddress,
                         action: "ENTER",
                         confidence: 0,
-                        reasoning: `[entry-net-gate] runner net ${entryNetPct.toFixed(2)}%/day < floor ${config.runnerNetFloorPct ?? 1}%/day after churn/IL/swap cost — entering would not be economical`,
+                        reasoning: `[entry-net-gate] runner net ${entryNetPct.toFixed(2)}%/day < floor ${config.runnerNetFloorPct ?? 1}%/day after churn/IL/swap/conversion cost — entering would not be economical`,
                         metrics,
                         riskResult: {
                           approved: false,
@@ -12203,6 +12693,7 @@ export const program = Effect.gen(function* () {
                     holdingDays,
                     swapCostPct: config.runnerSwapCostPct,
                     harvestCostUsd: config.feeCaptureHarvestCostUsd,
+                    conversionCostPct: config.feeCaptureConversionCostPct,
                     txCostUsd: config.harvestTxCostUsdEst,
                   });
                   if (expected == null || expected > 0) return false;
@@ -13128,6 +13619,7 @@ export const program = Effect.gen(function* () {
                   poolAddress,
                 })
                 .pipe(Effect.catch(() => Effect.void));
+
               yield* audit
                 .recordDecision({
                   timestamp: Date.now(),
@@ -13148,6 +13640,53 @@ export const program = Effect.gen(function* () {
           }
 
           const paperGate = yield* checkPaperValidationEnter();
+          function checkPaperCashReserve(): Effect.Effect<{ done: boolean } | null, never> {
+            return Effect.gen(function* () {
+              if (
+                !config.paperTrading ||
+                decision.action !== "ENTER" ||
+                decision.positionSizeUsd === undefined
+              ) {
+                return null;
+              }
+              const availableCashUsd = Math.max(paperCashUsd, 0);
+              if (decision.positionSizeUsd <= availableCashUsd) return null;
+              const reason = `[paper-cash] entry $${decision.positionSizeUsd.toFixed(2)} exceeds available paper cash $${availableCashUsd.toFixed(2)} — skipped`;
+              yield* audit
+                .recordDecision({
+                  timestamp: Date.now(),
+                  cycleId,
+                  poolAddress,
+                  action: "ENTER",
+                  confidence: decision.confidence,
+                  reasoning: reason,
+                  metrics,
+                  riskResult: { approved: false, reason },
+                  executed: false,
+                  paperTrading: config.paperTrading,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              yield* memory
+                .upsert({
+                  category: "warning",
+                  content: `Entry skipped for ${poolAddress}: ${reason}`,
+                  poolAddress,
+                })
+                .pipe(Effect.catch(() => Effect.void));
+              yield* finalizeAppliedProposal(
+                agentState,
+                appliedQueuedProposalId,
+                false,
+                decision.action,
+              );
+              finalDecisions.push(decision);
+              return { done: true };
+            });
+          }
+
+          const paperCashGate = yield* checkPaperCashReserve();
+          if (paperCashGate) return paperCashGate;
+
           if (paperGate) return paperGate;
 
           function logEnterTelemetry(): void {
@@ -14005,19 +14544,12 @@ export const program = Effect.gen(function* () {
 
           const snap = yield* capturePoolSnapshot(poolAddress, pool, binArray);
           const { previousSnapshot, w15Signals } = snap;
-          // Safety screening (fail-closed on positive signals, fail-open on
-          // transport errors):
-          // 1. Meteora Data API flags: is_blacklisted, freeze_authority_disabled.
-          // 2. On-chain mint accounts: mint authority doubles as the documented
-          //    deployer fallback for the deployer blacklist.
-          // 3. Token + deployer blacklist (deterministic local gate): a loaded
-          //    blacklist hit rejects the pool BEFORE the network-dependent
-          //    token-risk overlay consult; only unexpected transport/IO errors
-          //    are swallowed.
-          // 4. Freeze authority screening: a freeze-enabled untrusted leg is
-          //    adjudicated by the lazy Jupiter/Data-API token-risk overlay.
+          // Safety screening records a rejected ENTER gate but does not stop
+          // management of an already-held position. A positive blacklist,
+          // freeze, transfer-tax or mint-authority signal must block new
+          // capital; the existing position still needs its protective exits.
           const safetyRejection = yield* screenPoolSafety(poolAddress, cycleId, pool, datapiStats);
-          if (safetyRejection) return { halt: safetyRejection };
+          const safetyRejected = safetyRejection !== null;
 
           const metrics = strategy.computeMetrics(
             pool,
@@ -14044,27 +14576,25 @@ export const program = Effect.gen(function* () {
             });
           }
 
-          // ── Hot-window capture lane ──────────────────────────────────────────
-          // A config-gated high-frequency lane that ONLY enters a pool currently
-          // printing fees (measured 1h Data-API fee ratio) within a depth band so
-          // a tiny entry captures a meaningful share, holds at most a short
-          // timebox, and exits — bounded by a daily trip budget and a daily loss
-          // halt. It runs on pools that already cleared the safety screen above
-          // (rug/mint-renounce/age/holder gates), reuses the full risk tail for
-          // execution, and is OFF unless HOT_WINDOW_ENABLED=true. It fully owns
-          // any pool it holds a hot position on or is about to enter.
-          const hotLane = yield* runHotWindowLane(poolAddress, pool, datapiStats);
-          const quality = yield* gatePoolQuality(poolAddress, pool, metrics, hotLane !== null);
+          // Hot-window decisions are evaluated after range/value refresh below.
+          // Keep the quality record alive for the lane even when the normal
+          // entry pre-filter fails; the final ENTER gate still sees
+          // `entryEligible=false`.
+          const quality = yield* gatePoolQuality(
+            poolAddress,
+            pool,
+            metrics,
+            config.hotWindowEnabled === true && !safetyRejected,
+          );
           if (!quality) {
             const halt: AgentDecision[] = [];
-            return { halt };
+            return { halt, safetyRejected };
           }
           return {
             halt: null,
+            safetyRejected,
             metrics,
             quality,
-            hotLane,
-            hotDecisions: hotLane ?? [],
             pool,
             binArray,
             datapiStats,

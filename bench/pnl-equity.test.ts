@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  clmmPositionValue,
   computePortfolioEquity,
   paperClmmMarkUsd,
   type PaperClmmMarkInput,
@@ -125,6 +126,31 @@ describe("paperClmmMarkUsd", () => {
     upperBinId: 5020,
     binStep: 10,
   } satisfies PaperClmmMarkInput;
+
+  it("uses the actual asymmetric entry legs for the HODL benchmark", () => {
+    const result = clmmPositionValue({
+      ...base,
+      anchorPrice: 150,
+      sizeUsd: 1000,
+      currentPrice: 180,
+      entryAmountXUsd: 250,
+      entryAmountYUsd: 750,
+    });
+    // 250 USD of X appreciates by 20%; the 750 USD Y leg is flat.
+    expect(result.hodlValueUsd).toBeCloseTo(1050, 6);
+  });
+
+  it("preserves a single-sided entry instead of inventing the missing leg", () => {
+    const result = clmmPositionValue({
+      ...base,
+      anchorPrice: 150,
+      sizeUsd: 1000,
+      currentPrice: 180,
+      entryAmountXUsd: 0,
+      entryAmountYUsd: 1000,
+    });
+    expect(result.hodlValueUsd).toBeCloseTo(1000, 6);
+  });
 
   it("marks cost basis at the anchor price (no phantom IL)", () => {
     expect(paperClmmMarkUsd(base)).toBeCloseTo(1000, 6);

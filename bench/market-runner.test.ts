@@ -53,6 +53,11 @@ describe("isMarketRunnerPool (high-yield classification)", () => {
   it("exactly at the floor -> runner", () => {
     expect(classify({ feeAprPct: 500 })).toBe(true);
   });
+  it("rejects a non-finite or non-positive measured APR", () => {
+    expect(classify({ feeAprPct: Number.NaN })).toBe(false);
+    expect(classify({ feeAprPct: Number.POSITIVE_INFINITY })).toBe(false);
+    expect(classify({ feeAprPct: 0 })).toBe(false);
+  });
 });
 
 describe("isMarketRunnerPool (drift-aware admission)", () => {
@@ -93,7 +98,16 @@ describe("lowestAprHeldPosition (rotation target)", () => {
       [RUNNER, { feeAprPct: 5_000, tvlUsd: 200_000 }],
       [FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }],
     ]);
-    expect(lowestAprHeldPosition([{ poolAddress: RUNNER }, { poolAddress: FLAT }], aprs)).toEqual({
+    expect(
+      lowestAprHeldPosition(
+        [
+          { positionId: "runner-position", poolAddress: RUNNER },
+          { positionId: "flat-position", poolAddress: FLAT },
+        ],
+        aprs,
+      ),
+    ).toEqual({
+      positionId: "flat-position",
       poolAddress: FLAT,
       feeAprPct: 25,
       tvlUsd: 1_000_000,
@@ -102,7 +116,35 @@ describe("lowestAprHeldPosition (rotation target)", () => {
 
   it("never rotates out of an unmeasured/zero-APR position (fail-closed)", () => {
     const aprs = new Map([[FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }]]);
-    expect(lowestAprHeldPosition([{ poolAddress: RUNNER }], aprs)).toBeNull();
+    expect(
+      lowestAprHeldPosition([{ positionId: "runner-position", poolAddress: RUNNER }], aprs),
+    ).toBeNull();
+  });
+  it("selects the lowest supplied net score, not the lowest gross pool APR", () => {
+    const aprs = new Map([
+      ["pool-a", { feeAprPct: 100, tvlUsd: 100_000, measured: true }],
+      ["pool-b", { feeAprPct: 50, tvlUsd: 100_000, measured: true }],
+    ]);
+    const selected = lowestAprHeldPosition(
+      [
+        { positionId: "position-a", poolAddress: "pool-a" },
+        { positionId: "position-b", poolAddress: "pool-b" },
+      ],
+      aprs,
+      undefined,
+      {
+        selectionScoreByPositionId: new Map([
+          ["position-a", 1],
+          ["position-b", 10],
+        ]),
+      },
+    );
+    expect(selected).toEqual({
+      positionId: "position-a",
+      poolAddress: "pool-a",
+      feeAprPct: 1,
+      tvlUsd: 100_000,
+    });
   });
 
   it("never rotates out of the candidate runner itself (no exit-and-reenter)", () => {
@@ -113,10 +155,24 @@ describe("lowestAprHeldPosition (rotation target)", () => {
       [FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }],
     ]);
     expect(
-      lowestAprHeldPosition([{ poolAddress: RUNNER }, { poolAddress: FLAT }], aprs, RUNNER),
-    ).toEqual({ poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 });
+      lowestAprHeldPosition(
+        [
+          { positionId: "runner-position", poolAddress: RUNNER },
+          { positionId: "flat-position", poolAddress: FLAT },
+        ],
+        aprs,
+        RUNNER,
+      ),
+    ).toEqual({
+      positionId: "flat-position",
+      poolAddress: FLAT,
+      feeAprPct: 25,
+      tvlUsd: 1_000_000,
+    });
     // Runner is the ONLY held position -> nothing to rotate into it.
-    expect(lowestAprHeldPosition([{ poolAddress: RUNNER }], aprs, RUNNER)).toBeNull();
+    expect(
+      lowestAprHeldPosition([{ positionId: "runner-position", poolAddress: RUNNER }], aprs, RUNNER),
+    ).toBeNull();
   });
 
   it("empty positions -> null", () => {
@@ -128,7 +184,7 @@ describe("lowestAprHeldPosition (rotation target)", () => {
     // rotation-exited at 14:37 for −$0.01. Young entries are never targets.
     const aprs = new Map([[FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }]]);
     const now = 1_800_000_000_000;
-    const young = { poolAddress: FLAT, openedAt: now - 6 * 60_000 };
+    const young = { positionId: "young", poolAddress: FLAT, openedAt: now - 6 * 60_000 };
     expect(
       lowestAprHeldPosition([young], aprs, undefined, { minAgeMs: 14_400_000, nowMs: now }),
     ).toBeNull();
@@ -137,10 +193,15 @@ describe("lowestAprHeldPosition (rotation target)", () => {
   it("maturity gate: an old-enough position stays a target", () => {
     const aprs = new Map([[FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }]]);
     const now = 1_800_000_000_000;
-    const old = { poolAddress: FLAT, openedAt: now - 14_400_000 };
+    const old = { positionId: "old", poolAddress: FLAT, openedAt: now - 14_400_000 };
     expect(
       lowestAprHeldPosition([old], aprs, undefined, { minAgeMs: 14_400_000, nowMs: now }),
-    ).toEqual({ poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 });
+    ).toEqual({
+      positionId: "old",
+      poolAddress: FLAT,
+      feeAprPct: 25,
+      tvlUsd: 1_000_000,
+    });
   });
 
   it("maturity gate: all-young portfolio -> no rotation (fail-closed)", () => {
@@ -150,8 +211,8 @@ describe("lowestAprHeldPosition (rotation target)", () => {
     ]);
     const now = 1_800_000_000_000;
     const positions = [
-      { poolAddress: RUNNER, openedAt: now - 60_000 },
-      { poolAddress: FLAT, openedAt: now - 120_000 },
+      { positionId: "runner-position", poolAddress: RUNNER, openedAt: now - 60_000 },
+      { positionId: "flat-position", poolAddress: FLAT, openedAt: now - 120_000 },
     ];
     expect(
       lowestAprHeldPosition(positions, aprs, RUNNER, { minAgeMs: 14_400_000, nowMs: now }),
@@ -162,11 +223,16 @@ describe("lowestAprHeldPosition (rotation target)", () => {
     const aprs = new Map([[FLAT, { feeAprPct: 25, tvlUsd: 1_000_000 }]]);
     const now = 1_800_000_000_000;
     expect(
-      lowestAprHeldPosition([{ poolAddress: FLAT }], aprs, undefined, {
+      lowestAprHeldPosition([{ positionId: "legacy", poolAddress: FLAT }], aprs, undefined, {
         minAgeMs: 14_400_000,
         nowMs: now,
       }),
-    ).toEqual({ poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 });
+    ).toEqual({
+      positionId: "legacy",
+      poolAddress: FLAT,
+      feeAprPct: 25,
+      tvlUsd: 1_000_000,
+    });
   });
 });
 
@@ -204,11 +270,17 @@ describe("consecutiveAboveFloorObservations (persistence gate)", () => {
 
 describe("shouldRotate (APR multiplier gate)", () => {
   it("does not churn when both net APRs are zero", () => {
-    expect(shouldRotate(0, { poolAddress: FLAT, feeAprPct: 0, tvlUsd: 100_000 }, 5)).toBe(false);
+    expect(
+      shouldRotate(
+        0,
+        { positionId: "flat-position", poolAddress: FLAT, feeAprPct: 0, tvlUsd: 100_000 },
+        5,
+      ),
+    ).toBe(false);
   });
 
   it("requires a finite positive challenger and valid comparison inputs", () => {
-    const held = { poolAddress: FLAT, feeAprPct: 25, tvlUsd: 100_000 };
+    const held = { positionId: "flat-position", poolAddress: FLAT, feeAprPct: 25, tvlUsd: 100_000 };
     expect(shouldRotate(Infinity, held, 5)).toBe(false);
     expect(shouldRotate(500, { ...held, feeAprPct: -1 }, 5)).toBe(false);
     expect(shouldRotate(500, held, 0)).toBe(false);
@@ -217,15 +289,23 @@ describe("shouldRotate (APR multiplier gate)", () => {
   });
 
   it("5000% runner vs 25% held with 5x mult -> rotate", () => {
-    expect(shouldRotate(5_000, { poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 }, 5)).toBe(
-      true,
-    );
+    expect(
+      shouldRotate(
+        5_000,
+        { positionId: "flat-position", poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 },
+        5,
+      ),
+    ).toBe(true);
   });
 
   it("marginal 100% candidate vs 25% held -> no rotation", () => {
-    expect(shouldRotate(100, { poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 }, 5)).toBe(
-      false,
-    );
+    expect(
+      shouldRotate(
+        100,
+        { positionId: "flat-position", poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 },
+        5,
+      ),
+    ).toBe(false);
   });
 
   it("no worst position -> no rotation", () => {
@@ -234,10 +314,18 @@ describe("shouldRotate (APR multiplier gate)", () => {
 
   it("defaults to 5x when the multiplier is unset", () => {
     expect(
-      shouldRotate(126, { poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 }, undefined),
+      shouldRotate(
+        126,
+        { positionId: "flat-position", poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 },
+        undefined,
+      ),
     ).toBe(true);
     expect(
-      shouldRotate(124, { poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 }, undefined),
+      shouldRotate(
+        124,
+        { positionId: "flat-position", poolAddress: FLAT, feeAprPct: 25, tvlUsd: 1_000_000 },
+        undefined,
+      ),
     ).toBe(false);
   });
 });

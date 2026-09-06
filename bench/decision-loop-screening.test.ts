@@ -28,13 +28,21 @@ import {
   GeckoTerminalService,
   AlertService,
   MemoryService,
+  DbService,
   type AdapterApi,
   type BlacklistApi,
   type MeteoraDatapiApi,
   type MeteoraPoolStats,
   type MemoryApi,
 } from "../engine/services.js";
-import { defaultAppConfig, makePool, makeBinArray, mockFetch, asOwner } from "./helpers.js";
+import {
+  defaultAppConfig,
+  makePool,
+  makeBinArray,
+  makePosition,
+  mockFetch,
+  asOwner,
+} from "./helpers.js";
 import { stringifySafe } from "../engine/bigint-json.js";
 import { clearTokenRiskCache } from "../engine/token-risk-service.js";
 
@@ -377,6 +385,54 @@ describe("safety screening + blacklist enforcement (Wave 2)", () => {
     ).toHaveLength(1);
     expect(forPool[0]!.riskResult.approved).toBe(false);
     expect(forPool[0]!.reasoning.toLowerCase()).toContain("blacklist");
+  }, 15_000);
+  it("keeps protective exits running for held positions after safety rejection", async () => {
+    writeBlacklistFiles([], [TOKEN_Y]);
+    const layer = makeTestLayer({
+      adapter: makeAdapter({}),
+      blacklist: Effect.runSync(
+        Effect.provide(
+          Effect.gen(function* () {
+            return yield* BlacklistService;
+          }),
+          BlacklistLive({ deployerBlacklistPath: deployerPath, tokenBlacklistPath: tokenPath }),
+        ),
+      ),
+      configOverrides: { trailingStopConfirmCycles: 1 },
+    });
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(
+        makePosition({
+          poolAddress: POOL,
+          depositedUsd: 1_000,
+          currentValueUsd: 1_000,
+          highestValueUsd: 2_000,
+          entryPriceUsd: 150,
+          entryAmountXUsd: 500,
+          entryAmountYUsd: 500,
+          timestamp: Date.now() - 86_400_000,
+        }),
+      );
+      yield* Effect.raceFirst(program, Effect.sleep(2_000));
+      const audit = yield* AuditService;
+      return yield* audit.getRecentDecisions(50);
+    });
+    const decisions = await Effect.runPromise(
+      asOwner<
+        Effect.Effect<
+          ReadonlyArray<{
+            action: string;
+            reasoning: string;
+            executed: boolean;
+          }>,
+          Error,
+          never
+        >
+      >(Effect.provide(test, layer)),
+    );
+    expect(decisions.some((d) => d.reasoning.includes("[safety]"))).toBe(true);
+    expect(decisions.filter((d) => d.action === "EXIT" && d.executed)).toHaveLength(1);
   }, 15_000);
 
   it("rejects a pool whose token has freeze authority enabled per the Data API", async () => {

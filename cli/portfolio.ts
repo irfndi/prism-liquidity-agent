@@ -10,6 +10,7 @@ import { createLogger } from "../engine/logger.js";
 import { getPrismDbPath } from "../engine/paths.js";
 
 const logger = createLogger("portfolio-cli");
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // On-chain token symbols are attacker-controlled; strip ANSI escape sequences
 // and terminal control characters before printing so a crafted symbol cannot
@@ -259,15 +260,17 @@ function formatPositionsList(
   return lines.join("\n");
 }
 
-function realizedPnlFor(pos: PositionRecord): PnlResult {
-  const pnlUsd =
-    pos.realizedPnlUsd ??
-    pos.currentValueUsd +
-      pos.cumulativeFeesClaimedUsd +
-      pos.cumulativeRewardsClaimedUsd -
-      pos.depositedUsd;
-  const pnlPct = pos.depositedUsd > 0 ? (pnlUsd / pos.depositedUsd) * 100 : 0;
-  return { pnlUsd, pnlPct };
+interface ClosedPnlResult {
+  readonly pnlUsd: number | null;
+  readonly pnlPct: number | null;
+}
+
+function realizedPnlFor(pos: PositionRecord): ClosedPnlResult {
+  if (pos.realizedPnlUsd == null || !Number.isFinite(pos.realizedPnlUsd)) {
+    return { pnlUsd: null, pnlPct: null };
+  }
+  const pnlPct = pos.depositedUsd > 0 ? (pos.realizedPnlUsd / pos.depositedUsd) * 100 : 0;
+  return { pnlUsd: pos.realizedPnlUsd, pnlPct };
 }
 
 // ─── Closed-trade evidence (net expectancy, profit factor, drawdown, exit
@@ -351,19 +354,25 @@ export function exitReasonFromMetadata(metadataJson: string | null | undefined):
 }
 
 export interface ClosedTradeStats {
+  /** Number of closed rows with a finite realized outcome. */
   readonly count: number;
+  /** Number of rows in the closed-position ledger. */
+  readonly totalRows: number;
+  /** Closed rows whose realized outcome is unknown/unpriced. */
+  readonly missingOutcomes: number;
   readonly wins: number;
   readonly losses: number;
   readonly winRatePct: number | null;
-  readonly netPnlUsd: number;
-  /** Mean realized PnL per closed trade (null when no closes). */
+  /** Net realized PnL across priced rows; null when none are priced. */
+  readonly netPnlUsd: number | null;
+  /** Mean realized PnL per priced closed trade (null when no closes). */
   readonly expectancyUsd: number | null;
   readonly avgWinUsd: number | null;
   readonly avgLossUsd: number | null;
   /** Gross wins / gross losses; null when there are no losses (never divide by zero). */
   readonly profitFactor: number | null;
-  /** Peak-to-trough decline of the cumulative realized curve in close-time order. */
-  readonly maxDrawdownUsd: number;
+  /** Peak-to-trough decline; null when no realized outcome is priced. */
+  readonly maxDrawdownUsd: number | null;
 }
 
 /**
@@ -378,18 +387,22 @@ export function computeClosedTradeStats(
     (p): p is typeof p & { realizedPnlUsd: number } =>
       p.realizedPnlUsd !== null && Number.isFinite(p.realizedPnlUsd),
   );
+  const totalRows = positions.length;
+  const missingOutcomes = totalRows - closes.length;
   if (closes.length === 0) {
     return {
       count: 0,
+      totalRows,
+      missingOutcomes,
       wins: 0,
       losses: 0,
       winRatePct: null,
-      netPnlUsd: 0,
+      netPnlUsd: null,
       expectancyUsd: null,
       avgWinUsd: null,
       avgLossUsd: null,
       profitFactor: null,
-      maxDrawdownUsd: 0,
+      maxDrawdownUsd: null,
     };
   }
   const pnls = closes.map((p) => p.realizedPnlUsd);
@@ -411,6 +424,8 @@ export function computeClosedTradeStats(
   }
   return {
     count: closes.length,
+    totalRows,
+    missingOutcomes,
     wins: wins.length,
     losses: losses.length,
     winRatePct: (wins.length / closes.length) * 100,
@@ -435,16 +450,117 @@ export interface ClosedTradeUnit {
   readonly kind: string;
   readonly legs: number;
   readonly deployedUsd: number;
-  readonly netPnlUsd: number;
-  /** Net return on deployed capital, percent (null when undeployed). */
+  /** Net PnL is null until every expected leg has a priced outcome. */
+  readonly netPnlUsd: number | null;
+  /** Net return on deployed capital, percent (null when incomplete or undeployed). */
   readonly expectancyPct: number | null;
+  /** False for a partial pair or any unit with an unknown outcome. */
+  readonly complete: boolean;
+  /** Expected leg outcomes that are missing or unpriced. */
+  readonly missingOutcomes: number;
+  /** Maximum leg exposure duration, null until the unit is complete. */
+  readonly exposureTimeDays: number | null;
+}
+
+function closedTradeUnitKey(
+  pos: PositionRecord,
+  enterByPositionId: ReadonlyMap<string, EnterEvidence>,
+): string {
+  const pairId = enterByPositionId.get(pos.positionId)?.pairId;
+  return pairId != null && pairId !== pos.positionId ? pairId : pos.positionId;
+}
+
+function closedTradeUnitIsPair(
+  unitId: string,
+  legs: ReadonlyArray<PositionRecord>,
+  enterByPositionId: ReadonlyMap<string, EnterEvidence>,
+): boolean {
+  return legs.some((leg) => {
+    const pairId = enterByPositionId.get(leg.positionId)?.pairId;
+    return pairId === unitId && pairId !== leg.positionId;
+  });
+}
+
+function closedTradeUnitExposureTimeDays(legs: ReadonlyArray<PositionRecord>): number | null {
+  let maxAgeMs = 0;
+  for (const leg of legs) {
+    const exitedAt = leg.closedAt ?? leg.paperExitedAt;
+    if (
+      exitedAt == null ||
+      !Number.isFinite(exitedAt) ||
+      !Number.isFinite(leg.timestamp) ||
+      exitedAt < leg.timestamp
+    ) {
+      return null;
+    }
+    maxAgeMs = Math.max(maxAgeMs, exitedAt - leg.timestamp);
+  }
+  return maxAgeMs / DAY_MS;
+}
+
+function hasKnownClosedPnl(
+  pos: PositionRecord,
+): pos is PositionRecord & { realizedPnlUsd: number } {
+  return pos.realizedPnlUsd !== null && Number.isFinite(pos.realizedPnlUsd);
+}
+
+function closedTradeUnitHasExpectedLegs(
+  legs: ReadonlyArray<PositionRecord>,
+  cohorts: ReadonlySet<string>,
+  paired: boolean,
+): boolean {
+  if (!paired) return legs.length === 1;
+  return legs.length === 2 && cohorts.has("tight") && cohorts.has("wide");
+}
+
+function closedTradeUnitPnl(
+  priced: ReadonlyArray<PositionRecord & { realizedPnlUsd: number }>,
+  complete: boolean,
+  deployedUsd: number,
+) {
+  if (!complete) return { netPnlUsd: null, expectancyPct: null };
+  const netPnlUsd = priced.reduce((sum, leg) => sum + leg.realizedPnlUsd, 0);
+  return {
+    netPnlUsd,
+    expectancyPct: deployedUsd > 0 ? (netPnlUsd / deployedUsd) * 100 : null,
+  };
+}
+
+function buildClosedTradeUnit(
+  unitId: string,
+  legs: ReadonlyArray<PositionRecord>,
+  enterByPositionId: ReadonlyMap<string, EnterEvidence>,
+): ClosedTradeUnit {
+  const paired = closedTradeUnitIsPair(unitId, legs, enterByPositionId);
+  const cohorts = new Set(
+    legs.map((leg) => enterByPositionId.get(leg.positionId)?.cohort ?? "unknown"),
+  );
+  const priced = legs.filter(hasKnownClosedPnl);
+  const deployedUsd = legs.reduce(
+    (sum, leg) => (Number.isFinite(leg.depositedUsd) ? sum + leg.depositedUsd : sum),
+    0,
+  );
+  const expectedLegs = paired ? 2 : 1;
+  const complete =
+    closedTradeUnitHasExpectedLegs(legs, cohorts, paired) && priced.length === legs.length;
+  const pnl = closedTradeUnitPnl(priced, complete, deployedUsd);
+  return {
+    unitId,
+    kind: paired ? "split" : ([...cohorts][0] ?? "unknown"),
+    legs: legs.length,
+    deployedUsd,
+    ...pnl,
+    complete,
+    missingOutcomes: Math.max(expectedLegs - priced.length, 0),
+    exposureTimeDays: complete ? closedTradeUnitExposureTimeDays(legs) : null,
+  };
 }
 
 /**
  * Group closed positions into paired units (pairId from the ENTER event;
- * legacy rows without one stand alone). Units with NULL realized (unpriced
- * exits) contribute no PnL and do not dilute the denominator — same rule as
- * computeClosedTradeStats.
+ * legacy rows without one stand alone). Units with NULL realized outcomes are
+ * explicitly incomplete and expose null PnL/expectancy instead of treating an
+ * unpriced exit as breakeven.
  */
 export function groupClosedTradeUnits(
   positions: ReadonlyArray<PositionRecord>,
@@ -452,33 +568,14 @@ export function groupClosedTradeUnits(
 ): ReadonlyArray<ClosedTradeUnit> {
   const legsByUnit = new Map<string, PositionRecord[]>();
   for (const pos of positions) {
-    const key = enterByPositionId.get(pos.positionId)?.pairId ?? pos.positionId;
+    const key = closedTradeUnitKey(pos, enterByPositionId);
     const legs = legsByUnit.get(key) ?? [];
     legs.push(pos);
     legsByUnit.set(key, legs);
   }
   const units: ClosedTradeUnit[] = [];
   for (const [unitId, legs] of legsByUnit) {
-    const cohorts = new Set(
-      legs.map((leg) => enterByPositionId.get(leg.positionId)?.cohort ?? "unknown"),
-    );
-    const priced = legs.filter(
-      (leg): leg is PositionRecord & { realizedPnlUsd: number } =>
-        leg.realizedPnlUsd !== null && Number.isFinite(leg.realizedPnlUsd),
-    );
-    const deployedUsd = legs.reduce(
-      (sum, leg) => (Number.isFinite(leg.depositedUsd) ? sum + leg.depositedUsd : sum),
-      0,
-    );
-    const netPnlUsd = priced.reduce((sum, leg) => sum + leg.realizedPnlUsd, 0);
-    units.push({
-      unitId,
-      kind: legs.length > 1 ? "split" : ([...cohorts][0] ?? "unknown"),
-      legs: legs.length,
-      deployedUsd,
-      netPnlUsd,
-      expectancyPct: deployedUsd > 0 ? (netPnlUsd / deployedUsd) * 100 : null,
-    });
+    units.push(buildClosedTradeUnit(unitId, legs, enterByPositionId));
   }
   return units.sort((a, b) => a.unitId.localeCompare(b.unitId));
 }
@@ -491,13 +588,14 @@ function formatStatsLine(stats: ClosedTradeStats): string {
   const winRate = stats.winRatePct != null ? `${stats.winRatePct.toFixed(1)}%` : "n/a";
   const expectancy = stats.expectancyUsd != null ? formatCurrency(stats.expectancyUsd) : "n/a";
   const profitFactor = stats.profitFactor != null ? stats.profitFactor.toFixed(3) : "n/a";
+  const net = stats.netPnlUsd != null ? formatCurrency(stats.netPnlUsd) : "n/a";
+  const maxDrawdown = stats.maxDrawdownUsd != null ? formatCurrency(stats.maxDrawdownUsd) : "n/a";
   return [
-    `Closed: ${stats.count} (W ${stats.wins} / L ${stats.losses}, win rate ${winRate})`,
-    `Net: ${formatCurrency(stats.netPnlUsd)}, expectancy/trade: ${expectancy}`,
-    `Profit factor: ${profitFactor}, max drawdown: ${formatCurrency(stats.maxDrawdownUsd)}`,
+    `Closed: ${stats.count}/${stats.totalRows} priced (unknown ${stats.missingOutcomes}; W ${stats.wins} / L ${stats.losses}, win rate ${winRate})`,
+    `Net: ${net}, expectancy/trade: ${expectancy}`,
+    `Profit factor: ${profitFactor}, max drawdown: ${maxDrawdown}`,
   ].join("\n  ");
 }
-
 function formatHistoryList(
   positions: ReadonlyArray<PositionRecord>,
   evidence: HistoryEvidenceContext = {},
@@ -525,8 +623,10 @@ function formatHistoryList(
 /** One closed position block (identity, cohort, exit reason, realized PnL). */
 function formatClosedPosition(pos: PositionRecord, evidence: HistoryEvidenceContext): string[] {
   const { pnlUsd, pnlPct } = realizedPnlFor(pos);
-  const pnlText = `${formatCurrency(pnlUsd)} (${formatPct(pnlPct)})`;
-  const coloredPnl = colorize(pnlText, pnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m");
+  const pnlText =
+    pnlUsd != null && pnlPct != null ? `${formatCurrency(pnlUsd)} (${formatPct(pnlPct)})` : "n/a";
+  const coloredPnl =
+    pnlUsd != null ? colorize(pnlText, pnlUsd >= 0 ? "\x1b[32m" : "\x1b[31m") : pnlText;
   const exitedAt = pos.closedAt ?? pos.paperExitedAt;
   const lines = [
     `  ${sanitizeSymbol(pos.tokenXSymbol)}/${sanitizeSymbol(pos.tokenYSymbol)}`,
@@ -590,8 +690,11 @@ function formatClosedPositionEvidence(
 
 /** One unit summary line (legs, deployed, net, capital-normalized expectancy). */
 function formatUnitLine(unit: ClosedTradeUnit): string {
+  const net = unit.netPnlUsd != null ? formatCurrency(unit.netPnlUsd) : "n/a";
   const expectancy = unit.expectancyPct != null ? `${unit.expectancyPct.toFixed(2)}%` : "n/a";
-  return `${unit.kind}: legs=${unit.legs}, deployed ${formatCurrency(unit.deployedUsd)}, net ${formatCurrency(unit.netPnlUsd)}, expectancy ${expectancy}`;
+  const exposure = unit.exposureTimeDays != null ? `${unit.exposureTimeDays.toFixed(2)}d` : "n/a";
+  const status = unit.complete ? "complete" : `incomplete (missing ${unit.missingOutcomes})`;
+  return `${unit.kind}: ${status}, legs=${unit.legs}, deployed ${formatCurrency(unit.deployedUsd)}, net ${net}, expectancy ${expectancy}, exposure ${exposure}`;
 }
 
 /** Exit-reason breakdown lines (net per reason tag, alphabetical). */
@@ -610,7 +713,10 @@ function formatExitReasonLines(
   const sorted = [...byReason.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   for (const [reason, group] of sorted) {
     const stats = computeClosedTradeStats(group);
-    lines.push(`    ${reason}: n=${stats.count}, net ${formatCurrency(stats.netPnlUsd)}`);
+    const net = stats.netPnlUsd != null ? formatCurrency(stats.netPnlUsd) : "n/a";
+    lines.push(
+      `    ${reason}: n=${stats.count}/${stats.totalRows} priced (unknown ${stats.missingOutcomes}), net ${net}`,
+    );
   }
   return lines;
 }
@@ -624,8 +730,8 @@ export interface HistoryJsonOutput {
     exitValueUsd: number;
     feesClaimedUsd: number;
     rewardsClaimedUsd: number;
-    realizedPnlUsd: number;
-    realizedPnlPct: number;
+    realizedPnlUsd: number | null;
+    realizedPnlPct: number | null;
     closedAt: number | null;
     paperExitedAt: number | null;
     cohort?: string;
