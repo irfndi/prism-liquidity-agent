@@ -8,6 +8,7 @@ import type { PositionRecord } from "../engine/db-service.js";
 import { computePositionAnalytics, computePortfolioEquity } from "../engine/pnl.js";
 import { createLogger } from "../engine/logger.js";
 import { getPrismDbPath } from "../engine/paths.js";
+import { exitReasonTag as engineExitReasonTag } from "../engine/exit-reason.js";
 
 const logger = createLogger("portfolio-cli");
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -287,25 +288,13 @@ function realizedPnlFor(pos: PositionRecord): ClosedPnlResult {
  * "unknown" only when neither matches (genuinely unclassifiable rows).
  */
 export function exitReasonTag(reason: string | null | undefined): string {
+  const tagged = engineExitReasonTag(reason);
+  if (tagged !== "unknown") return tagged;
   if (reason == null) return "unknown";
-  const match = reason.match(/\[([^\]]+)\]/);
-  if (match?.[1] != null && match[1].length > 0) return match[1];
-  for (const [prefix, tag] of UNTAGGED_EXIT_REASONS) {
-    if (reason.startsWith(prefix)) return tag;
-  }
+  // Legacy dust tag alias from pre-taxonomy builds (same tag today).
+  if (reason.startsWith("[dust-cleanup]")) return "dust-cleanup";
   return "unknown";
 }
-
-/** Untagged deterministic-EXIT reasoning prefixes, longest first. */
-const UNTAGGED_EXIT_REASONS: ReadonlyArray<readonly [string, string]> = [
-  ["High volatility", "volatility"],
-  ["Trailing stop", "trailing-stop"],
-  ["IL dominance", "il-dominance"],
-  ["TVL dropped", "tvl-drop"],
-  ["Volume authenticity", "volume-authenticity"],
-  ["Fee/IL ratio", "fee-il"],
-  ["Rotation:", "rotation"],
-];
 
 /** Entry evidence from an ENTER event's metadata JSON (ladder leg + pair id). */
 export interface EnterEvidence {

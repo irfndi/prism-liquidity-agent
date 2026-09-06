@@ -104,11 +104,12 @@ describe("economic-exit maturity gate", () => {
     expect(feeIlExit, "fee/IL exit must not fire before fees can accrue").toBeUndefined();
   }, 15_000);
 
-  it("a mature position (5h hold) with fee/IL < 0.5 DOES exit", async () => {
-    const decisions = await runCycle({ positionAgeMs: 5 * 3_600_000 });
+  it("a mature position (13h hold) with fee/IL < 0.5 DOES exit", async () => {
+    const decisions = await runCycle({ positionAgeMs: 13 * 3_600_000 });
     const feeIlExit = decisions.find((d) => d.reasoning.includes("Fee/IL ratio"));
     expect(feeIlExit, "a mature low-yield position should exit").toBeDefined();
     expect(feeIlExit?.confidence).toBe(0.75);
+    expect(feeIlExit?.reasoning.startsWith("[fee-il]")).toBe(true);
   }, 15_000);
 
   it("a config override can keep the gate open (minYieldExitAgeMs=0)", async () => {
@@ -176,7 +177,7 @@ describe("economic-exit maturity gate", () => {
     const decisions = (await Effect.runPromise(
       asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
     )) as ReadonlyArray<DecisionRow>;
-    const trailing = decisions.find((d) => d.reasoning.includes("Trailing stop"));
+    const trailing = decisions.find((d) => d.reasoning.includes("[trailing-stop]"));
     expect(
       trailing,
       "trailing stop must fire on an immature position — capital protection is age-free",
@@ -185,4 +186,55 @@ describe("economic-exit maturity gate", () => {
     const feeIlExit = decisions.find((d) => d.reasoning.includes("Fee/IL ratio"));
     expect(feeIlExit).toBeUndefined();
   }, 30_000);
+
+  it("position-loss-cap EXIT fires age-free when mark PnL breaches the floor", async () => {
+    const layer = makeTestLayer({
+      adapter: makeAdapter(
+        { [POOL]: makePool({ address: POOL, tvlUsd: 100_000, fees24hUsd: 300 }) },
+        {
+          getAllWalletPositions: () =>
+            Effect.succeed([
+              { positionPubKey: POS_ID, poolAddress: POOL, lowerBinId: 4990, upperBinId: 5010 },
+            ]),
+          // Live mark after refresh — keep the −50% drawdown the loss cap needs.
+          getPositionValueUsd: () => Effect.succeed(50),
+        },
+      ),
+      configOverrides: {
+        paperTrading: false,
+        scanIntervalMs: 300,
+        watchlistPools: [POOL],
+        maxPositionLossPct: 0.35,
+        trailingStopConfirmCycles: 99,
+      },
+      datapi: {
+        getPoolData: () => Effect.succeed(makeDatapiStats({ address: POOL, fees24hUsd: 300 })),
+      },
+    });
+    const test = Effect.gen(function* () {
+      const db = yield* DbService;
+      yield* db.savePosition(
+        makePosition({
+          poolAddress: POOL,
+          positionPubKey: POS_ID,
+          timestamp: Date.now() - 60_000,
+          depositedUsd: 100,
+          currentValueUsd: 50,
+          highestValueUsd: 50,
+          cumulativeFeesClaimedUsd: 0,
+        }),
+      );
+      yield* Effect.raceFirst(program, Effect.sleep(2_500));
+      const audit = yield* AuditService;
+      return yield* audit.getRecentDecisions(200);
+    });
+    // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
+    const decisions = (await Effect.runPromise(
+      asOwner<Effect.Effect<ReadonlyArray<DecisionRow>, Error, never>>(Effect.provide(test, layer)),
+    )) as ReadonlyArray<DecisionRow>;
+    const lossCap = decisions.find((d) => d.reasoning.includes("[position-loss-cap]"));
+    expect(lossCap, "left-tail hard stop must fire age-free").toBeDefined();
+    expect(lossCap?.action).toBe("EXIT");
+    expect(lossCap?.confidence).toBe(1);
+  }, 15_000);
 });

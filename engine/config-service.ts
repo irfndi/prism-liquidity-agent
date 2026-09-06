@@ -215,6 +215,11 @@ export interface AppConfig {
   /** Minimum annualized fee/TVL percent for the market gate (fees24h × 365 /
    *  tvl × 100). Default 100 (only real-yield pools enter the active set). */
   readonly marketScanMinFeeApr?: number;
+  /**
+   * Extra market-gate fee-APR floor for major pairs (SOL/stable ↔ SOL/stable).
+   * Default 200. 0 disables. Flat majors historically dominated churn PnL.
+   */
+  readonly marketScanMajorMinFeeApr?: number;
   readonly marketScanRunnerEnabled?: boolean;
   readonly marketScanRunnerMinFeeApr?: number;
   /** Minimum net active-bin drift (bins) for runner admission. A runner whose
@@ -291,6 +296,11 @@ export interface AppConfig {
    *  drained token stays blocked far longer than a transient exit failure. */
   readonly rugTokenBlockMs?: number;
   readonly minYieldExitAgeMs?: number;
+  /**
+   * Left-tail hard stop: EXIT when mark PnL ≤ -(deposited × this). Default 0.35.
+   * 0 disables. Age-free capital protection (independent of trailing stop).
+   */
+  readonly maxPositionLossPct?: number;
   readonly marketScanMaxNegativeDriftBins?: number;
   readonly entryMomentumConfBoost?: number;
   readonly entryMomentumReferenceBins?: number;
@@ -1828,6 +1838,9 @@ const loadConfig = Effect.gen(function* () {
   );
   const marketScanMinTvlUsd = yield* validatedNumber("MARKET_SCAN_MIN_TVL_USD", 0, 50_000);
   const marketScanMinFeeApr = yield* validatedNumber("MARKET_SCAN_MIN_FEE_APR", 0, 100);
+  // Flat SOL/stable majors need a higher measured APR than the general market
+  // floor — historical ledger: two SOL/USDC pools ≈ −$217 all-time.
+  const marketScanMajorMinFeeApr = yield* validatedNumber("MARKET_SCAN_MAJOR_MIN_FEE_APR", 0, 200);
   // Market-runner lane: when enabled, market-scan pools whose fee APR clears
   // the runner floor enter with the LAUNCH posture (time-boxed, dip-anchored,
   // 0.25 drawdown, scale-in) instead of the flat normal posture — the engine
@@ -1993,12 +2006,18 @@ const loadConfig = Effect.gen(function* () {
     2_592_000_000,
   );
   // ── TA / filter-quality (forensics-driven, paper-first) ────────────────
-  // A: economic EXITs (fee/IL < 0.5, yield-regression, volume-auth) must NOT
-  // fire before fees can accrue — the 33-min median paper hold was the top
-  // winrate drag (locked in temporary IL that reversed, armed cooldowns that
-  // starved ENTERS). Capital-protection exits (trailing stop, TVL drop, W15,
-  // IL dominance, dust) stay age-free.
-  const minYieldExitAgeMs = yield* validatedNumber("MIN_YIELD_EXIT_AGE_MS", 0, 14_400_000);
+  // Economic EXITs (fee/IL < 0.5, yield-regression) must not fire before fees
+  // can accrue. Capital-protection exits (trailing stop, TVL drop, W15, IL
+  // dominance, dust, position-loss-cap) stay age-free. Default 12h (ledger:
+  // best expectancy in the 12–24h band; 4–12h was the weak zone).
+  const minYieldExitAgeMs = yield* validatedNumber(
+    "MIN_YIELD_EXIT_AGE_MS",
+    0,
+    43_200_000,
+    172_800_000,
+  );
+  // Left-tail hard stop: mark PnL ≤ -(deposited × pct) → EXIT. Default 35%.
+  const maxPositionLossPct = yield* validatedNumber("MAX_POSITION_LOSS_PCT", 0, 0.35, 1);
   // B: momentum/timing ENTER gate + confidence boost — the throughput fix.
   // ENTER rejected when the recent active-bin drift is strongly negative
   // (cascading price); positive drift boosts the confidence so a feeIl ~2
@@ -2300,6 +2319,7 @@ const loadConfig = Effect.gen(function* () {
     marketScanUniverseSort,
     marketScanMinTvlUsd,
     marketScanMinFeeApr,
+    marketScanMajorMinFeeApr,
     marketScanRunnerEnabled,
     marketScanRunnerMinFeeApr,
     marketScanRunnerMinDriftBins,
@@ -2336,6 +2356,7 @@ const loadConfig = Effect.gen(function* () {
     rugExitLossPct,
     rugTokenBlockMs,
     minYieldExitAgeMs,
+    maxPositionLossPct,
     marketScanMaxNegativeDriftBins,
     entryMomentumConfBoost,
     entryMomentumReferenceBins,

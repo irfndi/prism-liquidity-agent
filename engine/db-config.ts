@@ -210,6 +210,12 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
     min: 0,
   },
   {
+    envKey: "MARKET_SCAN_MAJOR_MIN_FEE_APR",
+    kind: "number",
+    field: "marketScanMajorMinFeeApr",
+    min: 0,
+  },
+  {
     envKey: "MARKET_SCAN_TOP_K",
     kind: "number",
     field: "marketScanTopK",
@@ -354,6 +360,13 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
     field: "minYieldExitAgeMs",
     min: 0,
   },
+  {
+    envKey: "MAX_POSITION_LOSS_PCT",
+    kind: "number",
+    field: "maxPositionLossPct",
+    min: 0,
+    max: 1,
+  },
   { envKey: "LADDER_ENABLED", kind: "boolean", field: "ladderEnabled" },
   { envKey: "LADDER_TIGHT_MULT", kind: "number", field: "ladderTightMult", min: 0.1, max: 2 },
   { envKey: "LADDER_WIDE_MULT", kind: "number", field: "ladderWideMult", min: 0.1, max: 3 },
@@ -379,11 +392,13 @@ const FORWARD_REFERENCE_FIELDS: ReadonlySet<string> = new Set([
   "marketScanUniversePages",
   "marketScanMinTvlUsd",
   "marketScanMinFeeApr",
+  "marketScanMajorMinFeeApr",
   "marketScanTopK",
   "marketScanMaxPools",
   "marketScanMinHolders",
   "marketScanMinBinStep",
   "marketScanMaxBinStep",
+  "maxPositionLossPct",
 ]);
 
 export function findDbConfigSpec(envKey: string): DbConfigSpec | undefined {

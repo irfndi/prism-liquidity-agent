@@ -1,7 +1,9 @@
 /** Market-scan gate unit tests: ranking, IL-safety pre-filter, cadence. */
 import { describe, it, expect } from "vitest";
 import {
+  effectiveMarketMinFeeApr,
   gateAndRankMarketPools,
+  isMajorPair,
   marketLegPasses,
   mintAuthorityRejectReason,
   type MarketGateConfig,
@@ -418,5 +420,35 @@ describe("fee-window spike guard", () => {
     const single = makePool({ address: "single", feeYieldWindows: { "1h": 50 } });
     const result = gateAndRankMarketPools([noWindows, single], config);
     expect(result.ranked).toHaveLength(2);
+  });
+
+  it("rejects flat major pairs below the major-pair fee-APR floor", () => {
+    // SOL/USDC at ~55% APR clears minFeeApr 25 but fails majorMinFeeApr 200.
+    const major = makePool({ address: "major-sol-usdc", fees24hUsd: 1_500 });
+    const meme = makePool({
+      address: "meme",
+      tokenX: "Meme111111111111111111111111111111111111111",
+      tokenY: SOL,
+      tokenXSymbol: "MEME",
+      tokenYSymbol: "SOL",
+      tokenXVerified: true,
+      tokenYVerified: true,
+      tokenXFreezeDisabled: true,
+      tokenYFreezeDisabled: true,
+      tokenXHolders: 5_000,
+      tokenYHolders: 3_000_000,
+      fees24hUsd: 1_500,
+    });
+    const withMajorFloor: MarketGateConfig = { ...config, majorMinFeeApr: 200 };
+    expect(isMajorPair(major.tokenX, major.tokenY, config.stablecoinMints)).toBe(true);
+    expect(isMajorPair(meme.tokenX, meme.tokenY, config.stablecoinMints)).toBe(false);
+    expect(effectiveMarketMinFeeApr(major, withMajorFloor)).toBe(200);
+    expect(effectiveMarketMinFeeApr(meme, withMajorFloor)).toBe(25);
+    const result = gateAndRankMarketPools([major, meme], withMajorFloor);
+    expect(result.ranked.map((r) => r.pool.address)).toEqual(["meme"]);
+    expect(result.rejected.some((r) => r.address === "major-sol-usdc")).toBe(true);
+    expect(result.rejected.find((r) => r.address === "major-sol-usdc")!.reason).toMatch(
+      /major-pair floor/,
+    );
   });
 });

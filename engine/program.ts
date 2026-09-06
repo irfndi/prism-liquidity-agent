@@ -73,6 +73,8 @@ import {
   mintAuthorityRejectReason,
   type MarketPoolRank,
 } from "./market-gate.js";
+import { isPositionLossCapBreached, positionLossCapReasoning } from "./position-loss-cap.js";
+import { taggedExitReason } from "./exit-reason.js";
 import {
   gateAndRankLaunchPools,
   summarizeLaunchRejections,
@@ -3763,6 +3765,7 @@ function resolveMarketScanConfig(config: AppConfig) {
   return {
     minTvlUsd: config.marketScanMinTvlUsd ?? 250_000,
     minFeeApr: config.marketScanMinFeeApr ?? 25,
+    majorMinFeeApr: config.marketScanMajorMinFeeApr ?? 200,
     minFees24hUsd: config.marketScanMinFees24hUsd,
     minVolume24hUsd: config.marketScanMinVolume24hUsd,
     minHolders: config.marketScanMinHolders ?? 1000,
@@ -4192,12 +4195,12 @@ function buildW15ExitReasoning(
   depeg: DepegLiquiditySignals["depeg"],
   liquidityDrain: DepegLiquiditySignals["liquidityDrain"],
 ): string {
-  return `W15 fast EXIT: ${[
-    depeg ? "stablecoin depeg" : null,
-    liquidityDrain ? "liquidity drain" : null,
-  ]
-    .filter(Boolean)
-    .join(" + ")}`;
+  return taggedExitReason(
+    "w15",
+    [depeg ? "stablecoin depeg" : null, liquidityDrain ? "liquidity drain" : null]
+      .filter(Boolean)
+      .join(" + "),
+  );
 }
 
 /** Dust-cleanup EXIT gate: REAL mark below the dust threshold. */
@@ -4207,7 +4210,10 @@ function isDustExit(dustExitUsd: number | undefined, currentValueUsd: number): b
 
 /** Dust-cleanup EXIT reasoning. */
 function buildDustExitReasoning(currentValueUsd: number, dustExitUsd: number | undefined): string {
-  return `[dust-cleanup] Position value $${currentValueUsd.toFixed(2)} below $${(dustExitUsd ?? 0).toFixed(2)} dust threshold — reclaiming slot`;
+  return taggedExitReason(
+    "dust-cleanup",
+    `Position value $${currentValueUsd.toFixed(2)} below $${(dustExitUsd ?? 0).toFixed(2)} dust threshold — reclaiming slot`,
+  );
 }
 
 /** Single-rung TP ladder for a normal ENTER (null when disabled). */
@@ -4370,7 +4376,7 @@ function resolveRotationCosts(
     runnerSizeUsd: launchPositionMaxSizeUsd ?? 100,
     harvestCostUsd: harvestCostUsd ?? 0.01,
     conversionCostPct: conversionCostPct ?? 0.05,
-    minAgeMs: minYieldExitAgeMs ?? 14_400_000,
+    minAgeMs: minYieldExitAgeMs ?? 43_200_000,
   };
 }
 
@@ -10395,7 +10401,29 @@ export const program = Effect.gen(function* () {
         });
       }
 
-      /** Lifecycle + pool-degradation EXIT gates (fa → launch → tp → W15 → IL → dust → TVL). */
+      /** Lifecycle + pool-degradation EXIT gates (fa → launch → tp → W15 → IL → loss-cap → dust → TVL). */
+      function conf1PositionExit(pos: PositionRecord, reasoning: string): AgentDecision {
+        return {
+          action: "EXIT",
+          poolAddress,
+          positionId: pos.positionId,
+          confidence: 1,
+          reasoning,
+        };
+      }
+
+      function maybePositionLossCapExit(pos: PositionRecord): AgentDecision | null {
+        const lossInput = {
+          depositedUsd: pos.depositedUsd,
+          currentValueUsd: pos.currentValueUsd,
+          cumulativeFeesClaimedUsd: pos.cumulativeFeesClaimedUsd,
+          cumulativeRewardsClaimedUsd: pos.cumulativeRewardsClaimedUsd,
+          maxLossPct: config.maxPositionLossPct ?? 0.35,
+        };
+        if (!isPositionLossCapBreached(lossInput)) return null;
+        return conf1PositionExit(pos, positionLossCapReasoning(lossInput));
+      }
+
       function checkDeterministicExits(
         pos: PositionRecord,
         faLifecycle: LifecycleExit | null,
@@ -10404,41 +10432,14 @@ export const program = Effect.gen(function* () {
         ilDominance: IlDominanceSignal | null,
       ): Effect.Effect<AgentDecision | null, Error> {
         return Effect.gen(function* () {
-          if (faLifecycle) {
-            return {
-              action: "EXIT",
-              poolAddress,
-              positionId: pos.positionId,
-              confidence: 1,
-              reasoning: faLifecycle.reasoning,
-            } as const;
-          }
-          if (launchLifecycle) {
-            return {
-              action: "EXIT",
-              poolAddress,
-              positionId: pos.positionId,
-              confidence: 1,
-              reasoning: launchLifecycle.reasoning,
-            } as const;
-          }
-          if (tpTargetLifecycle) {
-            return {
-              action: "EXIT",
-              poolAddress,
-              positionId: pos.positionId,
-              confidence: 1,
-              reasoning: tpTargetLifecycle.reasoning,
-            } as const;
-          }
+          if (faLifecycle) return conf1PositionExit(pos, faLifecycle.reasoning);
+          if (launchLifecycle) return conf1PositionExit(pos, launchLifecycle.reasoning);
+          if (tpTargetLifecycle) return conf1PositionExit(pos, tpTargetLifecycle.reasoning);
           if (w15Signals.depeg || w15Signals.liquidityDrain) {
-            return {
-              action: "EXIT",
-              poolAddress,
-              positionId: pos.positionId,
-              confidence: 1,
-              reasoning: buildW15ExitReasoning(w15Signals.depeg, w15Signals.liquidityDrain),
-            } as const;
+            return conf1PositionExit(
+              pos,
+              buildW15ExitReasoning(w15Signals.depeg, w15Signals.liquidityDrain),
+            );
           }
           function checkIlDominanceExit(): Effect.Effect<AgentDecision | null, Error> {
             return Effect.gen(function* () {
@@ -10455,29 +10456,28 @@ export const program = Effect.gen(function* () {
                   feesClaimedUsd: ilDominance.feesClaimedUsd,
                 },
               });
-              return {
-                action: "EXIT",
-                poolAddress,
-                positionId: pos.positionId,
-                confidence: 1,
-                reasoning: `IL dominance: $${ilDominance.ilUsd.toFixed(2)} IL exceeds ${config.ilDominanceExitFactor ?? 2}× cumulative fees ($${ilDominance.feesClaimedUsd.toFixed(2)}) while out of range`,
-              } as const;
+              return conf1PositionExit(
+                pos,
+                taggedExitReason(
+                  "il-dominance",
+                  `$${ilDominance.ilUsd.toFixed(2)} IL exceeds ${config.ilDominanceExitFactor ?? 2}× cumulative fees ($${ilDominance.feesClaimedUsd.toFixed(2)}) while out of range`,
+                ),
+              );
             });
           }
 
           const ilExit = yield* checkIlDominanceExit();
           if (ilExit) return ilExit;
+          const lossCapExit = maybePositionLossCapExit(pos);
+          if (lossCapExit) return lossCapExit;
           if (isDustExit(config.dustExitUsd, pos.currentValueUsd)) {
             // Dust cleanup: a position whose REAL mark fell below the dust
             // threshold is dead capital — reclaim the slot for a real position.
             // Shadow mode records it; live mode closes it.
-            return {
-              action: "EXIT",
-              poolAddress,
-              positionId: pos.positionId,
-              confidence: 1,
-              reasoning: buildDustExitReasoning(pos.currentValueUsd, config.dustExitUsd),
-            } as const;
+            return conf1PositionExit(
+              pos,
+              buildDustExitReasoning(pos.currentValueUsd, config.dustExitUsd),
+            );
           }
           function checkTvlDropExit(): Effect.Effect<AgentDecision | null, Error> {
             return Effect.gen(function* () {
@@ -10502,7 +10502,10 @@ export const program = Effect.gen(function* () {
                 poolAddress,
                 positionId: pos.positionId,
                 confidence: 0.85,
-                reasoning: `TVL dropped ${(Math.abs(tvlVelocity) * 100).toFixed(1)}% — capital protection exit`,
+                reasoning: taggedExitReason(
+                  "tvl-drop",
+                  `TVL dropped ${(Math.abs(tvlVelocity) * 100).toFixed(1)}% — capital protection exit`,
+                ),
               } as const;
             });
           }
@@ -10540,7 +10543,10 @@ export const program = Effect.gen(function* () {
               poolAddress,
               positionId: pos.positionId,
               confidence: 0.8,
-              reasoning: `Volume authenticity ${volumeAuth.toFixed(2)} below threshold`,
+              reasoning: taggedExitReason(
+                "volume-authenticity",
+                `Volume authenticity ${volumeAuth.toFixed(2)} below threshold`,
+              ),
             } as const;
           });
         }
@@ -10551,7 +10557,7 @@ export const program = Effect.gen(function* () {
       // fees accrue): hold-bias suppresses in-range wobbles above -10%.
       function checkFeeIlExit(pos: PositionRecord): Effect.Effect<AgentDecision | null, Error> {
         if (
-          Date.now() - pos.timestamp >= (config.minYieldExitAgeMs ?? 14_400_000) &&
+          Date.now() - pos.timestamp >= (config.minYieldExitAgeMs ?? 43_200_000) &&
           metrics.feeIlRatioKnown &&
           feeIlRatio < 0.5
         ) {
@@ -10581,7 +10587,10 @@ export const program = Effect.gen(function* () {
               poolAddress,
               positionId: pos.positionId,
               confidence: 0.75,
-              reasoning: `Fee/IL ratio ${feeIlRatio.toFixed(2)} below 0.5`,
+              reasoning: taggedExitReason(
+                "fee-il",
+                `Fee/IL ratio ${feeIlRatio.toFixed(2)} below 0.5`,
+              ),
             } as const;
           });
         }
@@ -10594,7 +10603,7 @@ export const program = Effect.gen(function* () {
         pos: PositionRecord,
       ): Effect.Effect<AgentDecision | null, Error> {
         const yieldWindowMature =
-          Date.now() - pos.timestamp >= (config.minYieldExitAgeMs ?? 14_400_000);
+          Date.now() - pos.timestamp >= (config.minYieldExitAgeMs ?? 43_200_000);
         if (
           !(
             yieldWindowMature &&
@@ -10681,7 +10690,10 @@ export const program = Effect.gen(function* () {
               poolAddress,
               positionId: pos.positionId,
               confidence: 0.8,
-              reasoning: `Trailing stop: value dropped ${(drawdown * 100).toFixed(1)}% from peak $${highest.toFixed(2)} (${breaches}/${config.trailingStopConfirmCycles} cycles)`,
+              reasoning: taggedExitReason(
+                "trailing-stop",
+                `value dropped ${(drawdown * 100).toFixed(1)}% from peak $${highest.toFixed(2)} (${breaches}/${config.trailingStopConfirmCycles} cycles)`,
+              ),
             } as const;
           }
           if (!breached) {
@@ -11084,7 +11096,10 @@ export const program = Effect.gen(function* () {
               poolAddress,
               positionId: pos.positionId,
               confidence: 0.8,
-              reasoning: `High volatility (σ=${volatilityStddev.toFixed(2)}) + ${(driftPct * 100).toFixed(0)}% drift — exit to wallet rather than rebalancing into new range`,
+              reasoning: taggedExitReason(
+                "volatility",
+                `High volatility (σ=${volatilityStddev.toFixed(2)}) + ${(driftPct * 100).toFixed(0)}% drift — exit to wallet rather than rebalancing into new range`,
+              ),
             } as const;
           }
           return null;
@@ -12209,7 +12224,10 @@ export const program = Effect.gen(function* () {
                     poolAddress: worst.poolAddress,
                     positionId: worst.positionId,
                     confidence: 1,
-                    reasoning: `Rotation: runner net ${runnerNetApr.toFixed(0)}% APR >= ${(rotationAprMult ?? DEFAULT_ROTATION_APR_MULT).toFixed(0)}x held net ${incumbentNetApr.toFixed(0)}%`,
+                    reasoning: taggedExitReason(
+                      "rotation",
+                      `runner net ${runnerNetApr.toFixed(0)}% APR >= ${(rotationAprMult ?? DEFAULT_ROTATION_APR_MULT).toFixed(0)}x held net ${incumbentNetApr.toFixed(0)}%`,
+                    ),
                   });
                   // G2 rotation arm (TTL): the EXIT executes only while
                   // the arm is fresh and the runner still qualifies —
@@ -12680,7 +12698,7 @@ export const program = Effect.gen(function* () {
                   // hold days; a 4h-minimum hold can never amortize a trip.
                   const holdingDays =
                     Math.max(
-                      config.minYieldExitAgeMs ?? 14_400_000,
+                      config.minYieldExitAgeMs ?? 43_200_000,
                       config.minRebalanceIntervalMs ?? 86_400_000,
                     ) / DAY_MS;
                   const expected = expectedEnterProfitUsd({

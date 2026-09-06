@@ -16,6 +16,12 @@ export interface MarketGateConfig {
   readonly minTvlUsd: number;
   /** Minimum annualized fee/TVL percent: fees24h × 365 / tvl × 100. */
   readonly minFeeApr: number;
+  /**
+   * Extra fee-APR floor for major pairs (both legs SOL or stablecoin).
+   * Flat SOL/USDC majors historically dominated churn losses; they must clear
+   * max(minFeeApr, majorMinFeeApr). 0 / absent disables the major uplift.
+   */
+  readonly majorMinFeeApr?: number | undefined;
   /** Absolute 24h fee floor (USD). Percentage APR alone admits micro-pools
    *  with spectacular ratios but trivial dollars; this floor keeps only pools
    *  with real fee dollars (default 0 = disabled). */
@@ -68,6 +74,27 @@ export interface MarketGateResult {
 
 export function isStableOrSol(mint: string, stablecoinMints: ReadonlySet<string>): boolean {
   return mint === SOL_MINT || stablecoinMints.has(mint);
+}
+
+/** Both legs are SOL or an allowlisted stable — flat majors, not memecoin runners. */
+export function isMajorPair(
+  tokenX: string,
+  tokenY: string,
+  stablecoinMints: ReadonlySet<string>,
+): boolean {
+  return isStableOrSol(tokenX, stablecoinMints) && isStableOrSol(tokenY, stablecoinMints);
+}
+
+/** Effective fee-APR floor: majors use max(minFeeApr, majorMinFeeApr). */
+export function effectiveMarketMinFeeApr(
+  pool: Pick<DiscoveredPool, "tokenX" | "tokenY">,
+  config: Pick<MarketGateConfig, "minFeeApr" | "majorMinFeeApr" | "stablecoinMints">,
+): number {
+  const base = config.minFeeApr;
+  const majorFloor = config.majorMinFeeApr ?? 0;
+  if (!(Number.isFinite(majorFloor) && majorFloor > 0)) return base;
+  if (!isMajorPair(pool.tokenX, pool.tokenY, config.stablecoinMints)) return base;
+  return Math.max(base, majorFloor);
 }
 
 /**
@@ -162,6 +189,21 @@ export function marketLegPasses(
   return leg.holders === undefined || leg.holders >= minHolders;
 }
 
+function formatFeeAprFloorReject(feeAprPct: number, minApr: number, majorUplift: boolean): string {
+  const base = `fee APR ${feeAprPct.toFixed(1)}% < ${minApr}%`;
+  return majorUplift ? `${base} (major-pair floor)` : base;
+}
+
+function formatStableAprFloorReject(
+  stableAprPct: number,
+  minApr: number,
+  majorUplift: boolean,
+): string {
+  const base = `stable fee APR ${stableAprPct.toFixed(1)}% (min across windows) < ${minApr}%`;
+  const suffix = " — 24h spike unconfirmed";
+  return majorUplift ? `${base} (major-pair floor)${suffix}` : `${base}${suffix}`;
+}
+
 /** Ordered market admission checks — rejection order and reason strings are
  *  contractual (screens/tests assert them). Returns the first rejection
  *  reason, or null when the pool is admitted. */
@@ -177,8 +219,11 @@ function marketFeeRejectReason(pool: DiscoveredPool, config: MarketGateConfig): 
     return `fees24h $${pool.fees24hUsd.toFixed(0)} < $${minFees.toFixed(0)} (absolute floor)`;
   }
   const feeAprPct = (pool.fees24hUsd * 365 * 100) / pool.tvlUsd;
-  if (feeAprPct < config.minFeeApr) {
-    return `fee APR ${feeAprPct.toFixed(1)}% < ${config.minFeeApr}%`;
+  const minApr = effectiveMarketMinFeeApr(pool, config);
+  const majorUplift =
+    minApr > config.minFeeApr && isMajorPair(pool.tokenX, pool.tokenY, config.stablecoinMints);
+  if (feeAprPct < minApr) {
+    return formatFeeAprFloorReject(feeAprPct, minApr, majorUplift);
   }
   // Spike guard: a hot 24h print must be confirmed by the longer windows —
   // the minimum across usable fee/TVL windows (normalized to daily) must
@@ -188,8 +233,8 @@ function marketFeeRejectReason(pool: DiscoveredPool, config: MarketGateConfig): 
   const stable = stableDailyFeesUsd(pool.feeYieldWindows, pool.tvlUsd);
   if (stable !== null && usableFeeWindows(pool.feeYieldWindows) >= 2) {
     const stableAprPct = (stable * 365 * 100) / pool.tvlUsd;
-    if (stableAprPct < config.minFeeApr) {
-      return `stable fee APR ${stableAprPct.toFixed(1)}% (min across windows) < ${config.minFeeApr}% — 24h spike unconfirmed`;
+    if (stableAprPct < minApr) {
+      return formatStableAprFloorReject(stableAprPct, minApr, majorUplift);
     }
   }
   return null;

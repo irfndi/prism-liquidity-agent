@@ -627,7 +627,9 @@ describe("closed-trade evidence", () => {
     expect(exitReasonTag("[trailing-stop] peak breached")).toBe("trailing-stop");
     expect(exitReasonTag("no bracket here")).toBe("unknown");
     expect(exitReasonTag(null)).toBe("unknown");
-    // Untagged deterministic exits (bracket tags win when present).
+    expect(exitReasonTag("[position-loss-cap] lost 40%")).toBe("position-loss-cap");
+    expect(exitReasonTag("[w15] depeg")).toBe("w15");
+    expect(exitReasonTag("[dust-cleanup] below floor")).toBe("dust-cleanup");
     expect(exitReasonTag("High volatility (σ=3.10) + 5% drift — exit")).toBe("volatility");
     expect(exitReasonTag("Trailing stop: value dropped 12% from peak")).toBe("trailing-stop");
     expect(exitReasonTag("IL dominance: $9.10 IL exceeds 2× cumulative fees")).toBe("il-dominance");
