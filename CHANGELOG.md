@@ -2,6 +2,19 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.37] — 2026-09-07
+
+### Added
+
+- **Position loss-cap EXIT** (`MAX_POSITION_LOSS_PCT`, default 0.35). Deterministic EXIT when mark PnL breaches −35% of deposit — capital protection ahead of dust-cleanup in the exit chain. Exit reasons now carry machine-readable tags (`taggedExitReason`: `[position-loss-cap]`, `[il-dominance]`, …).
+- **Yield-exit maturity** (`MIN_YIELD_EXIT_AGE_MS`, default 12h). Fee/IL and yield-regression EXITs wait for positions to mature; capital-protection exits stay age-free.
+- **Major-pair APR floor** (`MARKET_SCAN_MAJOR_MIN_FEE_APR`, default 200). Market-scan majors below the floor never reach the ENTER tail.
+- **Paper cash ledger + asymmetric CLMM marks** with valuation-anchor continuity, close-time costs, and null-safe portfolio stats. Paired ladder cohorts compare equal-capital units.
+
+### Fixed
+
+- **Exit-reason test expectations** updated for the tagged format (`[position-loss-cap]` owns the 0-mark, `[il-dominance]` matcher). Full suite 2125/2125 green, tsc + oxlint + oxfmt clean.
+
 ## [0.2.36] — 2026-09-04
 
 ### Added
