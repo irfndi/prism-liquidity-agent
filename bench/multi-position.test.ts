@@ -2023,17 +2023,17 @@ describe("program — multiple positions per pool", () => {
     // The real 0 mark is honored: any non-zero persisted value would mean the
     // fallback swallowed the genuine mark.
     expect(persisted?.currentValueUsd).toBe(0);
-    // The 0 mark lands below the dust threshold → deterministic [dust-cleanup]
-    // EXIT (the HODL fallback of 1000 would never exit).
+    // The 0 mark is a 100% loss → the [position-loss-cap] EXIT owns it ahead
+    // of [dust-cleanup] (the HODL fallback of 1000 would never exit either way).
     const dustExits = decisions.filter(
-      (d) => d.action === "EXIT" && (d.reasoning ?? "").includes("[dust-cleanup]"),
+      (d) => d.action === "EXIT" && (d.reasoning ?? "").includes("[position-loss-cap]"),
     );
     expect(
       dustExits,
-      `expected a [dust-cleanup] EXIT on the 0 mark, got: ${stringifySafe(decisions)}`,
+      `expected a [position-loss-cap] EXIT on the 0 mark, got: ${stringifySafe(decisions)}`,
     ).not.toHaveLength(0);
-    // The dust EXIT reasoned from the REAL 0 mark ($0.00), not a fallback.
-    expect(dustExits[0]?.reasoning).toContain("$0.00");
+    // The loss-cap EXIT reasoned from the REAL 0 mark (100.0% of deposit), not a fallback.
+    expect(dustExits[0]?.reasoning).toContain("100.0%");
   }, 15_000);
 
   it("market-scan mode trades with an EMPTY watchlist (universe-driven)", async () => {

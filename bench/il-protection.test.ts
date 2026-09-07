@@ -339,7 +339,8 @@ describe("IL protection — IL-dominance fast EXIT (Task 3b)", () => {
 
     const decisions = await runWithSeed(layer, [position]);
     const ilExits = decisions.filter(
-      (d) => d.poolAddress === POOL && d.action === "EXIT" && d.reasoning.includes("IL dominance"),
+      (d) =>
+        d.poolAddress === POOL && d.action === "EXIT" && d.reasoning.includes("[il-dominance]"),
     );
     expect(
       ilExits,
