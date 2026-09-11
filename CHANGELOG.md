@@ -2,6 +2,12 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.40] — 2026-09-11
+
+### Fixed
+
+- **Wallet equity blanked by Jupiter 429.** When keyless Jupiter price/v3 (and the shared tokens API) rate-limits, native SOL was negative-cached at $0 for 10 minutes and `prism status` reported Wallet $0 despite on-chain SOL — blocking ENTERs. Majors now fall through to CoinGecko `/simple/price` (and Jupiter lite-api once), with a 30s miss TTL for SOL/USDC/USDT/PYUSD. Exotics stay fail-closed; the hardcoded $165 SOL fallback is still never used on the wallet path.
+
 ## [0.2.39] — 2026-09-07
 
 ### Changed

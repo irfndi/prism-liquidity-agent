@@ -1396,12 +1396,82 @@ function buildJupiterPriceRequest(missing: ReadonlyArray<string>): PriceProvider
   return { url: `https://api.jup.ag/price/v3?ids=${ids}`, requestInit };
 }
 
+/** Keyless lite host — same v3 schema; tried when the primary Jupiter host is
+ *  429/5xx so a shared rate-limit ban does not blank SOL for the whole cycle. */
+function buildJupiterLitePriceRequest(missing: ReadonlyArray<string>): PriceProviderRequest {
+  const ids = encodeURIComponent(missing.join(","));
+  return {
+    url: `https://lite-api.jup.ag/price/v3?ids=${ids}`,
+    requestInit: { signal: AbortSignal.timeout(10_000) },
+  };
+}
+
 function parseJupiterMintPrice(json: JupiterPricePayload, mint: string): number | undefined {
   const direct = json[mint]?.usdPrice;
   if (isNumberValue(direct)) return direct;
   const nested = json.data?.[mint]?.price;
   if (isNumberValue(nested)) return nested;
   return undefined;
+}
+
+/**
+ * Known-liquid majors priced via CoinGecko `/simple/price` (by coin id), not the
+ * token-contract endpoint. Used when Jupiter is rate-limited and the mint-based
+ * CoinGecko/Helius crawl also misses — without this, a Jupiter 429 + 10-minute
+ * negative cache zeroes the whole wallet (native SOL unpriced → equity $0 →
+ * no ENTERs). Still a LIVE quote, never the hardcoded $165 fallback.
+ */
+export const MAJOR_SPOT_COINGECKO_IDS: Readonly<Record<string, string>> = {
+  [SOL_MINT]: "solana",
+  [USDC_MINT]: "usd-coin",
+  Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: "tether",
+  "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo": "paypal-usd",
+};
+
+/** Miss-cache TTL for majors: short so a transient Jupiter 429 cannot latch
+ *  SOL at $0 for the full 10-minute exotic TTL. */
+export const MAJOR_PRICE_MISS_CACHE_TTL_MS = 30_000;
+
+export function priceMissTtlForMint(mint: string, exoticTtlMs: number): number {
+  return mint in MAJOR_SPOT_COINGECKO_IDS ? MAJOR_PRICE_MISS_CACHE_TTL_MS : exoticTtlMs;
+}
+
+export function buildMajorSpotPriceRequest(
+  mints: ReadonlyArray<string>,
+  apiKey: string,
+): PriceProviderRequest | null {
+  const ids = [
+    ...new Set(
+      mints
+        .map((mint) => MAJOR_SPOT_COINGECKO_IDS[mint])
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  ];
+  if (ids.length === 0) return null;
+  const requestInit: RequestInit = { signal: AbortSignal.timeout(10_000) };
+  if (apiKey) requestInit.headers = { "x-cg-pro-api-key": apiKey };
+  const baseUrl = apiKey ? "https://pro-api.coingecko.com" : "https://api.coingecko.com";
+  return {
+    url: `${baseUrl}/api/v3/simple/price?ids=${encodeURIComponent(ids.join(","))}&vs_currencies=usd`,
+    requestInit,
+  };
+}
+
+type CoinGeckoSimplePricePayload = Record<string, { readonly usd?: number } | undefined>;
+
+export function parseMajorSpotPrices(
+  json: CoinGeckoSimplePricePayload,
+  mints: ReadonlyArray<string>,
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const mint of mints) {
+    const coinId = MAJOR_SPOT_COINGECKO_IDS[mint];
+    if (coinId === undefined) continue;
+    const price = json[coinId]?.usd;
+    if (!isQuotablePrice(price)) continue;
+    result[mint] = price;
+  }
+  return result;
 }
 
 function buildCoinGeckoBatchRequest(
@@ -2430,25 +2500,66 @@ export const makeAdapterLive = (
         });
       }
 
+      function parseJupiterPriceResponse(
+        json: JupiterPricePayload,
+        missing: ReadonlyArray<string>,
+      ): Record<string, number> {
+        const result: Record<string, number> = {};
+        for (const mint of missing) {
+          const price = parseJupiterMintPrice(json, mint);
+          if (isQuotablePrice(price)) {
+            result[mint] = price;
+            setCachedPrice(mint, price);
+          }
+        }
+        return result;
+      }
+
       function fetchJupiterPrices(
         missing: ReadonlyArray<string>,
       ): Effect.Effect<Record<string, number>, never> {
         if (missing.length === 0) return Effect.succeed({});
         return Effect.gen(function* () {
-          const { url, requestInit } = buildJupiterPriceRequest(missing);
-          const res = yield* Effect.tryPromise(() => jupiterFetch(url, requestInit));
+          const primary = buildJupiterPriceRequest(missing);
+          const primaryRes = yield* Effect.tryPromise(() =>
+            jupiterFetch(primary.url, primary.requestInit),
+          );
+          if (primaryRes.ok) {
+            // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+            const json = (yield* Effect.tryPromise(() => primaryRes.json())) as JupiterPricePayload;
+            const parsed = parseJupiterPriceResponse(json, missing);
+            if (Object.keys(parsed).length > 0) return parsed;
+          }
+          // Primary blank/429/5xx → try the keyless lite host once (same schema).
+          const lite = buildJupiterLitePriceRequest(missing);
+          const liteRes = yield* Effect.tryPromise(() => fetch(lite.url, lite.requestInit));
+          if (!liteRes.ok) return {};
+          // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+          const liteJson = (yield* Effect.tryPromise(() => liteRes.json())) as JupiterPricePayload;
+          return parseJupiterPriceResponse(liteJson, missing);
+        }).pipe(Effect.catch(() => Effect.succeed({})));
+      }
+
+      /** CoinGecko `/simple/price` for SOL/USDC/USDT/PYUSD when mint-based
+       *  providers miss — keeps wallet equity online through Jupiter bans. */
+      function fetchMajorSpotPrices(
+        missing: ReadonlyArray<string>,
+      ): Effect.Effect<Record<string, number>, never> {
+        const majors = missing.filter((mint) => mint in MAJOR_SPOT_COINGECKO_IDS);
+        if (majors.length === 0) return Effect.succeed({});
+        return Effect.gen(function* () {
+          const coinGeckoApiKey = process.env.COINGECKO_API_KEY?.trim() ?? "";
+          const request = buildMajorSpotPriceRequest(majors, coinGeckoApiKey);
+          if (request === null) return {};
+          const res = yield* Effect.tryPromise(() => fetch(request.url, request.requestInit));
           if (!res.ok) return {};
           // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-          const json = (yield* Effect.tryPromise(() => res.json())) as JupiterPricePayload;
-          const result: Record<string, number> = {};
-          for (const mint of missing) {
-            const price = parseJupiterMintPrice(json, mint);
-            if (isQuotablePrice(price)) {
-              result[mint] = price;
-              setCachedPrice(mint, price);
-            }
+          const json = (yield* Effect.tryPromise(() => res.json())) as CoinGeckoSimplePricePayload;
+          const parsed = parseMajorSpotPrices(json, majors);
+          for (const [mint, price] of Object.entries(parsed)) {
+            setCachedPrice(mint, price);
           }
-          return result;
+          return parsed;
         }).pipe(Effect.catch(() => Effect.succeed({})));
       }
 
@@ -2524,7 +2635,7 @@ export const makeAdapterLive = (
               fallbackPrices,
               provenanceOut,
               negativePriceCache,
-              PRICE_MISS_CACHE_TTL_MS,
+              priceMissTtlForMint(mint, PRICE_MISS_CACHE_TTL_MS),
             )
           ) {
             continue;
@@ -2632,9 +2743,23 @@ export const makeAdapterLive = (
           // keyless provider resolved. Never attempted when no key is configured.
           if (config.heliusApiKey) sourcesAttempted.push("helius");
           const heliusPrices = yield* fetchHeliusPrices(heliusMissing);
-          const unresolved = mergeProviderPrices(
+          const majorMissing = mergeProviderPrices(
             heliusMissing,
             heliusPrices,
+            prices,
+            provenanceOut,
+            useFallback,
+            sourcesAttempted,
+          );
+          if (majorMissing.length === 0) return prices;
+
+          // Last keyless resort for majors only: /simple/price by coin id.
+          // Does not price exotics — those stay fail-closed / negative-cached.
+          sourcesAttempted.push("coingecko-spot");
+          const majorSpotPrices = yield* fetchMajorSpotPrices(majorMissing);
+          const unresolved = mergeProviderPrices(
+            majorMissing,
+            majorSpotPrices,
             prices,
             provenanceOut,
             useFallback,

@@ -4,14 +4,18 @@ import { Connection, Keypair } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 import bs58 from "bs58";
 import { AdapterService } from "../engine/services.js";
-import { AdapterLive } from "../engine/adapter-service.js";
+import {
+  AdapterLive,
+  parseMajorSpotPrices,
+  priceMissTtlForMint,
+  MAJOR_PRICE_MISS_CACHE_TTL_MS,
+} from "../engine/adapter-service.js";
 import { ConfigService } from "../engine/config-service.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { defaultAppConfig, mockFetch, asOwner } from "./helpers.js";
+import { SOL_MINT, USDC_MINT } from "../engine/constants.js";
 
-const SOL_MINT = "So11111111111111111111111111111111111111112";
-const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGQkZwyADt1v";
 const EXOTIC_MINT = "ExoticToken1111111111111111111111111111111111";
 const TOKEN_2022 = TOKEN_2022_PROGRAM_ID.toBase58();
 
@@ -92,6 +96,24 @@ function buildAdapterLayerWithWallet(): Layer.Layer<AdapterService, never, never
   ) as Layer.Layer<AdapterService, never, never>;
 }
 
+describe("major spot price helpers", () => {
+  it("parses CoinGecko simple/price rows onto known mints", () => {
+    const prices = parseMajorSpotPrices({ solana: { usd: 100.5 }, "usd-coin": { usd: 1.0 } }, [
+      SOL_MINT,
+      USDC_MINT,
+      EXOTIC_MINT,
+    ]);
+    expect(prices[SOL_MINT]).toBe(100.5);
+    expect(prices[USDC_MINT]).toBe(1.0);
+    expect(prices[EXOTIC_MINT]).toBeUndefined();
+  });
+
+  it("uses a short miss TTL for majors and the exotic TTL otherwise", () => {
+    expect(priceMissTtlForMint(SOL_MINT, 600_000)).toBe(MAJOR_PRICE_MISS_CACHE_TTL_MS);
+    expect(priceMissTtlForMint(EXOTIC_MINT, 600_000)).toBe(600_000);
+  });
+});
+
 describe("AdapterService wallet balance reconciliation", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -162,6 +184,38 @@ describe("AdapterService wallet balance reconciliation", () => {
       const balance = await readWalletBalance();
       expect(balance).toBeCloseTo(3, 5);
       expect(balance).not.toBeCloseTo(168, 0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("prices SOL via CoinGecko spot when Jupiter is rate-limited (majors rescue)", async () => {
+    // Jupiter blank (429/empty) must not zero the wallet: CoinGecko /simple/price
+    // for solana still quotes a live USD price. Native 1 SOL @ $99 + 0 ATA = $99.
+    const restore = mockFetch(async (url: string | URL | Request) => {
+      const href = String(url as unknown);
+      if (href.includes("api.jup.ag/price/v3") || href.includes("lite-api.jup.ag/price/v3")) {
+        return new Response(JSON.stringify({ code: 429, message: "Too many requests" }), {
+          status: 429,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (href.includes("/simple/price") && href.includes("solana")) {
+        return new Response(JSON.stringify({ solana: { usd: 99 } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (href.includes("token_price/solana")) {
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+    vi.spyOn(Connection.prototype, "getBalance").mockResolvedValue(1_000_000_000);
+    mockTokenAccountsByProgram([]);
+
+    try {
+      expect(await readWalletBalance()).toBeCloseTo(99, 5);
     } finally {
       restore();
     }
