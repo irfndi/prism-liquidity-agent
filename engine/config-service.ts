@@ -297,6 +297,21 @@ export interface AppConfig {
   readonly rugTokenBlockMs?: number;
   readonly minYieldExitAgeMs?: number;
   /**
+   * Hard backstop: EXIT once a position has been open this long, regardless
+   * of measured-fee status. 0 disables. Every measured/unmeasured economic
+   * exit (fee/IL, yield-regression) skips when fee data is unmeasured
+   * (heuristic/gecko sources) — this is the only gate that still fires then,
+   * closing the gap that let three positions on one pool ride 12-13 days of
+   * slow bleed with no measured signal ever triggering. Cross-wallet field
+   * research (7 independent high-winrate Meteora LP wallets) unanimously
+   * flags <1 day holding as its own strongest band and 7-30d/30d+ as its
+   * weakest — default is deliberately looser than that sweet spot (this is a
+   * backstop against multi-day drift, not the primary hold-time discipline)
+   * so it never cuts a legitimate multi-day winner short. Launch-mode
+   * positions are exempt (own timebox lifecycle already bounds their age).
+   */
+  readonly maxPositionAgeMs?: number;
+  /**
    * Left-tail hard stop: EXIT when mark PnL ≤ -(deposited × this). Default 0.35.
    * 0 disables. Age-free capital protection (independent of trailing stop).
    */
@@ -2019,6 +2034,17 @@ const loadConfig = Effect.gen(function* () {
     43_200_000,
     172_800_000,
   );
+  // Hard age backstop, independent of measured-fee status. Default 7 days:
+  // looser than the cross-wallet-validated <1d sweet spot on purpose — this
+  // is the last-resort net for positions the economic exits can't see
+  // (unmeasured fee source), not the primary hold-time lever. Clamped
+  // [1h, 30 days]; 0 disables.
+  const maxPositionAgeMs = yield* validatedNumber(
+    "MAX_POSITION_AGE_MS",
+    0,
+    604_800_000,
+    2_592_000_000,
+  );
   // Left-tail hard stop: mark PnL ≤ -(deposited × pct) → EXIT. Default 35%.
   const maxPositionLossPct = yield* validatedNumber("MAX_POSITION_LOSS_PCT", 0, 0.35, 1);
   // B: momentum/timing ENTER gate + confidence boost — the throughput fix.
@@ -2360,6 +2386,7 @@ const loadConfig = Effect.gen(function* () {
     rugExitLossPct,
     rugTokenBlockMs,
     minYieldExitAgeMs,
+    maxPositionAgeMs,
     maxPositionLossPct,
     marketScanMaxNegativeDriftBins,
     entryMomentumConfBoost,

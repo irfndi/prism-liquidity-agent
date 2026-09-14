@@ -74,6 +74,7 @@ import {
   type MarketPoolRank,
 } from "./market-gate.js";
 import { isPositionLossCapBreached, positionLossCapReasoning } from "./position-loss-cap.js";
+import { isMaxPositionAgeBreached, maxPositionAgeReasoning } from "./max-position-age.js";
 import { taggedExitReason } from "./exit-reason.js";
 import {
   gateAndRankLaunchPools,
@@ -10471,6 +10472,16 @@ export const program = Effect.gen(function* () {
         return conf1PositionExit(pos, positionLossCapReasoning(lossInput));
       }
 
+      function maybeMaxPositionAgeExit(pos: PositionRecord): AgentDecision | null {
+        const ageInput = {
+          positionMode: pos.positionMode ?? null,
+          ageMs: Date.now() - pos.timestamp,
+          maxAgeMs: config.maxPositionAgeMs ?? 0,
+        };
+        if (!isMaxPositionAgeBreached(ageInput)) return null;
+        return conf1PositionExit(pos, maxPositionAgeReasoning(ageInput));
+      }
+
       function checkDeterministicExits(
         pos: PositionRecord,
         faLifecycle: LifecycleExit | null,
@@ -10515,9 +10526,16 @@ export const program = Effect.gen(function* () {
 
           const ilExit = yield* checkIlDominanceExit();
           if (ilExit) return ilExit;
-          const lossCapExit = maybePositionLossCapExit(pos);
-          if (lossCapExit) return lossCapExit;
-          if (isDustExit(config.dustExitUsd, pos.currentValueUsd)) {
+          // Grouped to keep this generator's branch count under the
+          // project's complexity ceiling (mirrors checkTvlDropExit /
+          // checkIlDominanceExit being pulled into their own closures).
+          // Both are simple synchronous checks with no alert/memory side
+          // effects, so combining them doesn't change externally-observable
+          // ordering vs the alerting exits (IL-dominance, TVL-drop) below.
+          function checkLossCapOrDustExit(): AgentDecision | null {
+            const lossCapExit = maybePositionLossCapExit(pos);
+            if (lossCapExit) return lossCapExit;
+            if (!isDustExit(config.dustExitUsd, pos.currentValueUsd)) return null;
             // Dust cleanup: a position whose REAL mark fell below the dust
             // threshold is dead capital — reclaim the slot for a real position.
             // Shadow mode records it; live mode closes it.
@@ -10526,6 +10544,8 @@ export const program = Effect.gen(function* () {
               buildDustExitReasoning(pos.currentValueUsd, config.dustExitUsd),
             );
           }
+          const lossCapOrDustExit = checkLossCapOrDustExit();
+          if (lossCapOrDustExit) return lossCapOrDustExit;
           function checkTvlDropExit(): Effect.Effect<AgentDecision | null, Error> {
             return Effect.gen(function* () {
               if (!(tvlVelocity < -config.tvlDropExitPct)) return null;
@@ -10559,6 +10579,8 @@ export const program = Effect.gen(function* () {
 
           const tvlExit = yield* checkTvlDropExit();
           if (tvlExit) return tvlExit;
+          const maxAgeExit = maybeMaxPositionAgeExit(pos);
+          if (maxAgeExit) return maxAgeExit;
           return null;
         });
       }
