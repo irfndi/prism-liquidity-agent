@@ -420,6 +420,40 @@ describe("adapter.enterPosition (strategy shapes + single-sided)", () => {
     }
   });
 
+  it("fails closed when forceSingleSidedX is requested but the wallet holds none of that leg", async () => {
+    setupFakeDlmm();
+    mockRpcAndBalances();
+    const restore = mockTokenPrices();
+    // Simulates a launch/runner entry into a token the wallet has never held:
+    // zero SOL (token X in this fixture) and zero of the Y leg too.
+    dlmmState.nativeLamports = 0n;
+    dlmmState.tokenBalances = new Map([[TOKEN_Y.toBase58(), 0n]]);
+
+    try {
+      const err = await Effect.runPromise(
+        asOwner<Effect.Effect<{ message: string }, Error, never>>(
+          Effect.provide(
+            Effect.gen(function* () {
+              const adapter = yield* AdapterService;
+              return yield* adapter
+                .enterPosition(POOL_ADDRESS, LOWER_BIN_ID, UPPER_BIN_ID, POSITION_SIZE_USD, {
+                  forceSingleSidedX: true,
+                })
+                .pipe(Effect.flip);
+            }),
+            makeAdapterLayer(),
+          ),
+        ),
+      );
+
+      expect(err.message).toContain("Failed to enter position");
+      expect(err.message).toContain("Runner single-sided-X entry impossible");
+      expect(dlmmState.current!.initializePositionAndAddLiquidityByStrategy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
   it("fails closed when the held leg cannot fund the full single-sided size", async () => {
     setupFakeDlmm();
     mockRpcAndBalances();

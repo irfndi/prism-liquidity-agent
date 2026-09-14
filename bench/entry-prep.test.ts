@@ -1401,6 +1401,81 @@ describe("EntryPrepService", () => {
     expect(swapSpy).not.toHaveBeenCalled();
   });
 
+  it("swaps SOL into the X leg for an xOnly (launch/runner) entry into a token never held", async () => {
+    // Reproduces the launch-mode entry: pool.tokenX is a brand-new memecoin
+    // the wallet has never held (0 balance), tokenY is SOL. xOnly funds the
+    // full position size in X only. In solFunded (live) mode this must
+    // actually swap SOL -> X before the adapter's forced single-sided
+    // deposit, not silently proceed with a zero X balance.
+    // $1000 at $0.0000429 with 6 decimals needs ~2.33e13 atomic units — the
+    // quote's guaranteed output must clear that deficit.
+    const SWAPPED_X_ATOMIC = 30_000_000_000_000n;
+    const tokenBalances: TokenBalanceMap = {};
+    const quoteSpy = vi.fn((request: SwapRequest) =>
+      Effect.succeed({
+        ...makeQuote(request),
+        outAmountAtomic: SWAPPED_X_ATOMIC,
+        minimumOutAmountAtomic: SWAPPED_X_ATOMIC,
+      }),
+    );
+    const prepareSpy = vi.fn((quote: SwapQuote) => Effect.succeed(makePrepared(quote)));
+    const simulateSpy = vi.fn(() =>
+      Effect.succeed({ successful: true as const, logs: [], unitsConsumed: 1 }),
+    );
+    const submitSpy = vi.fn((prepared: PreparedSwap) => {
+      // Mirrors every other SOL-funded test in this file: a submitted swap
+      // must land in the wallet balance the subsequent reconciliation reads.
+      tokenBalances[prepared.quote.request.outputMint] = SWAPPED_X_ATOMIC;
+      return Effect.succeed("sig-x-leg");
+    });
+    const layer = buildLayer(
+      {
+        getPoolState: () =>
+          Effect.succeed({
+            address: POOL_ADDRESS,
+            tokenX: TOKEN_Y, // the brand-new memecoin
+            tokenY: SOL_MINT,
+            tokenXSymbol: "NEWCOIN",
+            tokenYSymbol: "SOL",
+            tvlUsd: 100_000,
+            volume24hUsd: 30_000,
+            fees24hUsd: 300,
+            apr: 60,
+            activeBinId: 5000,
+            binStep: 10,
+            currentPrice: 0.000_042_9,
+            timestamp: Date.now(),
+          }),
+        getNativeSolBalance: () => Effect.succeed(10_000_000_000n), // 10 SOL, plenty
+        // Wallet has never held the new token until the swap lands.
+        getTokenBalance: (mint: string) => Effect.succeed(tokenBalances[mint] ?? 0n),
+        getTokenPrices: () => Effect.succeed({ [TOKEN_Y]: 0.000_042_9, [SOL_MINT]: 150 }),
+        getTokenDecimals: (mint: string) => Effect.succeed(mint === SOL_MINT ? 9 : 6),
+        quoteSwap: quoteSpy,
+        prepareSwap: prepareSpy,
+        simulateSwap: simulateSpy,
+        submitSwap: submitSpy,
+      },
+      false, // autoSwapEntry off — solFunded mode alone must still fund xOnly
+      "live",
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const prep = yield* EntryPrepService;
+        return yield* prep.prepareEntryTokens(POOL_ADDRESS, 1_000, { xOnly: true });
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(quoteSpy).toHaveBeenCalledTimes(1);
+    const [request] = quoteSpy.mock.calls[0]!;
+    expect(request.inputMint).toBe(SOL_MINT);
+    expect(request.outputMint).toBe(TOKEN_Y);
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
+    expect(simulateSpy).toHaveBeenCalledTimes(1);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("fails when native SOL drops below the live entry gate after swaps", async () => {
     const OTHER_TOKEN = "OtherToken1111111111111111111111111111111";
     const swapSpy = vi.fn().mockReturnValue(Effect.succeed("mock-swap-tx"));
