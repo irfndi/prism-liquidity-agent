@@ -343,6 +343,25 @@ export const ADAPTIVE_RANGE_MIN_MULTIPLIER = 0.5;
 export const ADAPTIVE_RANGE_MAX_MULTIPLIER = 2;
 /** Sane floor — narrower ranges churn out-of-range within a cycle or two. */
 export const MIN_ADAPTIVE_HALF_WIDTH_BINS = 5;
+/**
+ * Hard ceiling on total position width (bins), independent of every other
+ * clamp in resolveRangeHalfWidth. The Meteora DLMM program sizes a position
+ * account for its own DEFAULT_BIN_PER_POSITION (70 bins) at
+ * InitializePosition; a wider request forces the program to grow the account
+ * further within that SAME instruction, and that growth is bounded by
+ * Solana's per-instruction account-realloc limit.
+ *
+ * Live incident 2026-09-14: a resolved half-width of 75 (width 151, binStep
+ * 200, measured volatility pushing the adaptive multiplier to its ceiling)
+ * failed on-chain — "Account data size realloc limited to 10240 in inner
+ * instructions" during InitializePosition. Every position this engine has
+ * ever successfully opened live tops out at width 69, one bin under this
+ * ceiling; nothing wider has ever landed. The engine does not implement the
+ * SDK's extended/multi-account position path
+ * (chunkBinRangeIntoExtendedPositions et al.), so this is a hard cap, not a
+ * tunable — reaching wider ranges needs that separate capability.
+ */
+export const MAX_SINGLE_POSITION_WIDTH_BINS = 70;
 
 /**
  * Static baseline range half-width (bins each side) by bin step. Coarser pools
@@ -401,6 +420,11 @@ export function halfWidthForPriceCoveragePct(binStep: number, pct: number): numb
  *
  * Warmup: σ <= 0 means fewer than 2 bin snapshots (cold start) or a perfectly
  * flat pool — both return the bounded baseline, never a fabricated jump.
+ *
+ * On-chain safety: halfCap additionally never exceeds
+ * MAX_SINGLE_POSITION_WIDTH_BINS's half — no other clamp above (the risk cap,
+ * the price-coverage floor, an explicit env override) can push the result
+ * past what a single InitializePosition call can actually create.
  */
 export function resolveRangeHalfWidth(args: {
   readonly binStep: number;
@@ -414,7 +438,11 @@ export function resolveRangeHalfWidth(args: {
     args.configuredBaseHalfWidth > 0
       ? args.configuredBaseHalfWidth
       : baselineHalfWidthForBinStep(args.binStep);
-  const halfCap = Math.max(1, Math.floor(args.maxFullRangeBins / 2));
+  const maxSinglePositionHalfWidth = Math.floor((MAX_SINGLE_POSITION_WIDTH_BINS - 1) / 2);
+  const halfCap = Math.min(
+    Math.max(1, Math.floor(args.maxFullRangeBins / 2)),
+    maxSinglePositionHalfWidth,
+  );
   const effectiveMin = Math.min(MIN_ADAPTIVE_HALF_WIDTH_BINS, halfCap);
   // Price-coverage floor: the bins needed to span `minPriceCoveragePct`
   // percent each side, bounded by the half-cap. Never applies when the knob is

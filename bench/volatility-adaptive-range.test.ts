@@ -12,6 +12,7 @@ import {
   ADAPTIVE_RANGE_MIN_MULTIPLIER,
   ADAPTIVE_RANGE_MAX_MULTIPLIER,
   MIN_ADAPTIVE_HALF_WIDTH_BINS,
+  MAX_SINGLE_POSITION_WIDTH_BINS,
 } from "../engine/strategy-service.js";
 import { ConfigService, ConfigLive } from "../engine/config-service.js";
 import { executePaper } from "../engine/program.js";
@@ -84,19 +85,21 @@ describe("resolveRangeHalfWidth price-coverage floor", () => {
     expect(w).toBe(25); // binStep≤10 tier
   });
 
-  it("price floor lifts a fine-binStep pool out of the ±1% trap", () => {
+  it("price floor lifts a fine-binStep pool out of the ±1% trap, bounded by the on-chain cap", () => {
     // SOL/USDC binStep 4: the 25-bin baseline is only ~±1% price, so a 40% swing
     // spends nearly the whole window out of range. A 5% price-coverage floor
-    // widens the range to ~122 bins so it can actually hold the price path.
+    // wants to widen the range to ~122 bins to hold the price path, but the
+    // MAX_SINGLE_POSITION_WIDTH_BINS on-chain safety cap (34 half-width, see
+    // that constant's doc comment) wins — no single position can go wider.
     const w = resolveRangeHalfWidth({
       binStep: 4,
       configuredBaseHalfWidth: 0,
       adaptiveEnabled: false,
       volatilityStddev: 0,
-      maxFullRangeBins: 300, // half-cap 150 ≫ floor, so 122 is observable
+      maxFullRangeBins: 300, // half-cap 150 ≫ floor, but the on-chain cap (34) still wins
       minPriceCoveragePct: 5,
     });
-    expect(w).toBe(122);
+    expect(w).toBe(34);
   });
 
   it("coarse pools keep their bin-count baseline (floor is immaterial)", () => {
@@ -118,18 +121,21 @@ describe("resolveRangeHalfWidth price-coverage floor", () => {
       configuredBaseHalfWidth: 0,
       adaptiveEnabled: false,
       volatilityStddev: 0,
-      maxFullRangeBins: 100, // half-cap 50
+      maxFullRangeBins: 100, // half-cap 50, but the on-chain cap (34) is tighter here
       minPriceCoveragePct: 5, // raw floor would be 122
     });
-    expect(w).toBe(50);
+    expect(w).toBe(34);
     expect(w * 2).toBeLessThanOrEqual(100);
   });
 
-  it("at the default risk cap the floor still reaches the profitable width", () => {
+  it("at the default risk cap the floor is bounded by the on-chain single-position cap", () => {
     // With the live MAX_REBALANCE_RANGE_BINS=200 (half-cap 100), a 5% floor on
-    // SOL/USDC caps at 100 bins = (1.0004)^100 ≈ ±4% price — exactly the width
-    // that turned the pool positive in the honest backtest sweep, up from the
-    // old ±2% (50-bin) ceiling the max multiplier would have held.
+    // SOL/USDC would want 100 bins = (1.0004)^100 ≈ ±4% price for the width
+    // the honest backtest sweep found profitable — but the backtest never
+    // executes a real InitializePosition, so it never hit
+    // MAX_SINGLE_POSITION_WIDTH_BINS. That cap (34 half-width) wins live:
+    // reaching the backtest's ±4% width needs the (unimplemented)
+    // multi-position extended path, not a wider single position.
     const w = resolveRangeHalfWidth({
       binStep: 4,
       configuredBaseHalfWidth: 0,
@@ -138,13 +144,13 @@ describe("resolveRangeHalfWidth price-coverage floor", () => {
       maxFullRangeBins: 200,
       minPriceCoveragePct: 5,
     });
-    expect(w).toBe(100);
+    expect(w).toBe(34);
   });
 
-  it("floor composes with σ-scaling for high-vol fine-bin pools", () => {
-    // Unbounded σ would take a 122-bin floor to ×2 = 244, but the half-cap
-    // (maxFullRangeBins/2 = 100) clamps it. The floor prevents the multiplier
-    // from silently keeping a fine pool at 50 bins (the old ±2% ceiling).
+  it("floor composes with σ-scaling for high-vol fine-bin pools, bounded by the on-chain cap", () => {
+    // Unbounded σ would take a 122-bin floor to ×2 = 244, the half-cap
+    // (maxFullRangeBins/2 = 100) would clamp that to 100 — but the on-chain
+    // single-position cap (34 half-width) is tighter than both and wins.
     const w = resolveRangeHalfWidth({
       binStep: 4,
       configuredBaseHalfWidth: 0,
@@ -153,19 +159,19 @@ describe("resolveRangeHalfWidth price-coverage floor", () => {
       maxFullRangeBins: 200,
       minPriceCoveragePct: 5,
     });
-    expect(w).toBe(100);
+    expect(w).toBe(34);
   });
 
-  it("env override still wins as the base; floor only raises it", () => {
+  it("env override still wins as the base; the on-chain cap bounds the floor's raise", () => {
     const w = resolveRangeHalfWidth({
       binStep: 4,
       configuredBaseHalfWidth: 60, // explicit env baseline
       adaptiveEnabled: false,
       volatilityStddev: 0,
-      maxFullRangeBins: 300, // half-cap 150 ≫ floor 122
+      maxFullRangeBins: 300, // half-cap 150 ≫ floor 122, but on-chain cap (34) is tighter than both
       minPriceCoveragePct: 5, // floor 122 > 60
     });
-    expect(w).toBe(122);
+    expect(w).toBe(34);
   });
 });
 
@@ -202,7 +208,7 @@ describe("resolveRangeHalfWidth (Wave 9)", () => {
     expect(w).toBe(20);
   });
 
-  it("high volatility → wider than baseline", () => {
+  it("high volatility → wider than baseline, bounded by the on-chain cap", () => {
     const baseline = resolveRangeHalfWidth({
       ...base,
       configuredBaseHalfWidth: 0,
@@ -216,7 +222,9 @@ describe("resolveRangeHalfWidth (Wave 9)", () => {
       volatilityStddev: 2 * ADAPTIVE_RANGE_REFERENCE_STDDEV,
     });
     expect(highVol).toBeGreaterThan(baseline);
-    expect(highVol).toBe(40); // 20 × clamp(4/2, 0.5, 2) = 20 × 2
+    // 20 × clamp(4/2, 0.5, 2) = 20 × 2 = 40, but the on-chain single-position
+    // cap (34 half-width) is tighter and wins.
+    expect(highVol).toBe(34);
   });
 
   it("low volatility → narrower than baseline (fee concentration)", () => {
@@ -250,14 +258,16 @@ describe("resolveRangeHalfWidth (Wave 9)", () => {
     expect(w).toBe(Math.round(20 * ADAPTIVE_RANGE_MIN_MULTIPLIER)); // 10
   });
 
-  it("multiplier clamps at the max for extreme volatility", () => {
+  it("multiplier clamps at the max for extreme volatility, bounded by the on-chain cap", () => {
     const w = resolveRangeHalfWidth({
       ...base,
       configuredBaseHalfWidth: 0,
       adaptiveEnabled: true,
       volatilityStddev: 100 * ADAPTIVE_RANGE_REFERENCE_STDDEV,
     });
-    expect(w).toBe(Math.round(20 * ADAPTIVE_RANGE_MAX_MULTIPLIER)); // 40
+    // Math.round(20 × 2) = 40, but the on-chain single-position cap (34
+    // half-width) is tighter and wins.
+    expect(w).toBe(34);
   });
 
   it("widening stays bounded by MAX_REBALANCE_RANGE_BINS (full width ≤ cap)", () => {
@@ -294,7 +304,7 @@ describe("resolveRangeHalfWidth (Wave 9)", () => {
     expect(w).toBe(MIN_ADAPTIVE_HALF_WIDTH_BINS);
   });
 
-  it("env override combines with adaptation: env sets base, σ scales it", () => {
+  it("env override combines with adaptation: env sets base, σ scales it, on-chain cap bounds it", () => {
     const w = resolveRangeHalfWidth({
       binStep: 20,
       configuredBaseHalfWidth: 30,
@@ -302,7 +312,71 @@ describe("resolveRangeHalfWidth (Wave 9)", () => {
       volatilityStddev: 2 * ADAPTIVE_RANGE_REFERENCE_STDDEV,
       maxFullRangeBins: 200,
     });
-    expect(w).toBe(60); // 30 × 2
+    // 30 × 2 = 60, but the on-chain single-position cap (34 half-width) is
+    // tighter and wins.
+    expect(w).toBe(34);
+  });
+});
+
+describe("resolveRangeHalfWidth on-chain single-position safety cap", () => {
+  it("reproduces the live 2026-09-14 incident and stays under the cap", () => {
+    // binStep 200, ENTRY_RANGE_HALF_WIDTH_BINS=40, measured volatility
+    // 6.35 pushed the adaptive multiplier to its 2x ceiling. Unclamped this
+    // resolves to halfWidth 80 (width 161); the live attempt at the
+    // observed halfWidth 75 (width 151) already failed on-chain during
+    // InitializePosition. Either way the result must respect the SDK's
+    // single-position capacity.
+    const w = resolveRangeHalfWidth({
+      binStep: 200,
+      configuredBaseHalfWidth: 40,
+      adaptiveEnabled: true,
+      volatilityStddev: 6.3508529610858835,
+      maxFullRangeBins: 200,
+    });
+    expect(w * 2 + 1).toBeLessThanOrEqual(MAX_SINGLE_POSITION_WIDTH_BINS);
+  });
+
+  it("caps a wide price-coverage floor on a fine-binStep pool", () => {
+    // Without the cap this resolves to halfWidth 100 (width 201) — the
+    // price-coverage floor's own backtest never executed a real on-chain
+    // InitializePosition, so it was never checked against the SDK's
+    // single-position ceiling.
+    const w = resolveRangeHalfWidth({
+      binStep: 4,
+      configuredBaseHalfWidth: 0,
+      adaptiveEnabled: false,
+      volatilityStddev: 0,
+      maxFullRangeBins: 200,
+      minPriceCoveragePct: 5,
+    });
+    expect(w * 2 + 1).toBeLessThanOrEqual(MAX_SINGLE_POSITION_WIDTH_BINS);
+  });
+
+  it("never exceeds the cap across a spread of binStep/volatility combinations", () => {
+    for (const binStep of [1, 4, 10, 20, 50, 100, 200]) {
+      for (const volatilityStddev of [0, 1, 2, 6.35, 50]) {
+        const w = resolveRangeHalfWidth({
+          binStep,
+          configuredBaseHalfWidth: 0,
+          adaptiveEnabled: true,
+          volatilityStddev,
+          maxFullRangeBins: 200,
+          minPriceCoveragePct: 5,
+        });
+        expect(w * 2 + 1).toBeLessThanOrEqual(MAX_SINGLE_POSITION_WIDTH_BINS);
+      }
+    }
+  });
+
+  it("an oversized explicit env override is also capped", () => {
+    const w = resolveRangeHalfWidth({
+      binStep: 20,
+      configuredBaseHalfWidth: 500,
+      adaptiveEnabled: false,
+      volatilityStddev: 0,
+      maxFullRangeBins: 1000,
+    });
+    expect(w * 2 + 1).toBeLessThanOrEqual(MAX_SINGLE_POSITION_WIDTH_BINS);
   });
 });
 
@@ -348,7 +422,8 @@ describe("width is orthogonal to the W7 strategy shape (Wave 9)", () => {
       netDriftBins: 0,
     });
     expect(strategySpec).toBe("spot");
-    // Wave 9 width rule on the same σ: widened, bounded.
+    // Wave 9 width rule on the same σ: widened, bounded. 20 × 2 = 40, but the
+    // on-chain single-position cap (34 half-width) is tighter and wins.
     const width = resolveRangeHalfWidth({
       binStep: 20,
       configuredBaseHalfWidth: 0,
@@ -356,7 +431,7 @@ describe("width is orthogonal to the W7 strategy shape (Wave 9)", () => {
       volatilityStddev: highVolStddev,
       maxFullRangeBins: 200,
     });
-    expect(width).toBe(40);
+    expect(width).toBe(34);
     // Calm regime: W7 → curve, Wave 9 → narrower. Orthogonal knobs.
     const calmRange = recommendStrategy({
       volatilityStddev: 1,
