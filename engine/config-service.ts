@@ -547,6 +547,23 @@ export interface AppConfig {
   /** Hermes base URL. Default https://hermes.pyth.network. */
   readonly pythBaseUrl?: string;
 
+  // ─── Jev shadow judgments (TypeSafe System One) ──────────────────────────
+  // Optional so standalone test fixtures that omit new fields keep compiling;
+  // loadConfig always sets all five. SHADOW-ONLY: the consult runs alongside
+  // the deterministic gates and only logs Jev-vs-heuristic deltas — it never
+  // drives ENTER/EXIT. Guard contract: `jevEnabled === true` (default false;
+  // absent = disabled) AND a non-empty key, else the consult is skipped.
+  /** Master switch for the Jev shadow consult. Default false. */
+  readonly jevEnabled?: boolean;
+  /** TypeSafe API key (Authorization: Bearer). Empty = consult skipped. */
+  readonly jevApiKey?: string;
+  /** SystemOne base URL. Default https://api.typesafe.ai. */
+  readonly jevBaseUrl?: string;
+  /** Jev model. Default jev-latest. */
+  readonly jevModel?: string;
+  /** Per-attempt timeout (ms). Default 10000. */
+  readonly jevTimeoutMs?: number;
+
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
   /** Estimated SOL cost of a single rebalance tx (entry + close). */
   readonly rebalanceGasCostSol: number;
@@ -1088,6 +1105,46 @@ function applyDbOverridesIfPresent(cfg: AppConfig, isTest: boolean): AppConfig {
   return applyDbConfigOverrides(cfg, dbOverrides);
 }
 
+/** Owner contract for the Jev shadow-consult settings (see AppConfig). */
+interface JevSettings {
+  readonly jevEnabled: boolean;
+  readonly jevApiKey: string;
+  readonly jevBaseUrl: string;
+  readonly jevModel: string;
+  readonly jevTimeoutMs: number;
+}
+
+/**
+ * Load the Jev shadow-consult settings. Default OFF: shadow-only, needs a
+ * TYPESAFE_API_KEY to do anything. Canonical key TYPESAFE_API_KEY; legacy
+ * TYPESAFEAI_API alias honored.
+ */
+function loadJevSettings(): Effect.Effect<JevSettings> {
+  return Effect.gen(function* () {
+    const jevEnabled = yield* Config.boolean("JEV_ENABLED").pipe(Effect.orElseSucceed(() => false));
+    const jevApiKeyPrimary = yield* Config.string("TYPESAFE_API_KEY").pipe(
+      Effect.orElseSucceed(() => ""),
+    );
+    const jevApiKeyLegacy = yield* Config.string("TYPESAFEAI_API").pipe(
+      Effect.orElseSucceed(() => ""),
+    );
+    const jevBaseUrl = yield* Config.string("JEV_BASE_URL").pipe(
+      Effect.orElseSucceed(() => "https://api.typesafe.ai"),
+    );
+    const jevModel = yield* Config.string("JEV_MODEL").pipe(
+      Effect.orElseSucceed(() => "jev-latest"),
+    );
+    const jevTimeoutMs = yield* validatedNumber("JEV_TIMEOUT_MS", 1_000, 10_000, 60_000);
+    return {
+      jevEnabled,
+      jevApiKey: jevApiKeyPrimary.trim() || jevApiKeyLegacy.trim(),
+      jevBaseUrl,
+      jevModel,
+      jevTimeoutMs,
+    };
+  });
+}
+
 const loadConfig = Effect.gen(function* () {
   const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 
@@ -1289,6 +1346,9 @@ const loadConfig = Effect.gen(function* () {
   const dexscreenerEnabled = yield* Config.boolean("DEXSCREENER_ENABLED").pipe(
     Effect.orElseSucceed(() => true),
   );
+
+  // ─── Jev shadow judgments (TypeSafe System One) ──────────────────────────
+  const { jevEnabled, jevApiKey, jevBaseUrl, jevModel, jevTimeoutMs } = yield* loadJevSettings();
 
   // ─── Pyth Hermes price feeds ──────────────────────────────────────────────
   // Default OFF: Pyth's public keyless Hermes access ends 2026-08-18 (a key is
@@ -2477,6 +2537,12 @@ const loadConfig = Effect.gen(function* () {
     goPlusTokenRiskCacheTtlMin,
     geckoTerminalEnabled,
     dexscreenerEnabled,
+
+    jevEnabled,
+    jevApiKey,
+    jevBaseUrl,
+    jevModel,
+    jevTimeoutMs,
 
     pythEnabled,
     pythApiKey,

@@ -59,6 +59,7 @@ import {
   isAprSelfOutlier,
   type ReturnSeries,
 } from "./regime-gate.js";
+import { consultJevJudgments, type JevJudgments, type JevPoolState } from "./jev-service.js";
 import {
   activeShareEstimate,
   expectedNetProfitUsd,
@@ -406,6 +407,119 @@ export function toAgentPositionState(pos: PositionRecord, now: number): AgentPos
     highestValueUsd: pos.highestValueUsd,
     lastRebalanceAtMs: pos.lastRebalanceAt,
   };
+}
+
+// ─── Jev shadow consult (SHADOW-ONLY) ──────────────────────────────────────
+// Pure helpers for the per-pool shadow log: full live state build, heuristic
+// counterparts, and the disagreement predicate. The Effect wrapper at the
+// call site stays thin (guard → consult → log) so the decision loop keeps
+// its complexity budget. Never gates ENTER/EXIT — outcome-joined later.
+
+/** Owner contract for Jev shadow inputs (pool + metrics + drift context). */
+interface JevShadowInputs {
+  readonly poolAddress: string;
+  readonly pool: PoolState;
+  readonly metrics: PoolMetrics;
+  readonly volatilityStddev: number;
+  readonly netDriftBins: number;
+  readonly recentBinCount: number;
+}
+
+function buildJevShadowState(inputs: JevShadowInputs): JevPoolState {
+  return {
+    poolAddress: inputs.poolAddress,
+    tokenXSymbol: inputs.pool.tokenXSymbol,
+    tokenYSymbol: inputs.pool.tokenYSymbol,
+    tvlUsd: inputs.pool.tvlUsd,
+    volume24hUsd: inputs.pool.volume24hUsd,
+    fees24hUsd: inputs.pool.fees24hUsd,
+    statsSource: inputs.pool.statsSource,
+    volumeAuthenticityKnown: inputs.metrics.volumeAuthenticityKnown,
+    feeIlRatioKnown: inputs.metrics.feeIlRatioKnown,
+    binUtilizationKnown: inputs.metrics.binUtilizationKnown,
+    feeIlRatio: inputs.metrics.feeIlRatio,
+    volumeAuthenticity: inputs.metrics.volumeAuthenticity,
+    binUtilization: inputs.metrics.binUtilization,
+    volatilityStddev: inputs.volatilityStddev,
+    netDriftBins: inputs.recentBinCount >= 2 ? inputs.netDriftBins : null,
+    activeBinId: inputs.pool.activeBinId,
+    binStep: inputs.pool.binStep,
+  };
+}
+
+/** Owner contract for the heuristic side of the shadow comparison. */
+interface JevShadowHeuristic {
+  readonly deposit: EntryStrategySpec;
+  readonly driftReject: boolean;
+}
+
+/** Disagreement predicate: deposit mismatch or any risk flag. Thresholds
+ *  mirror the replay calibration (toxic>=0.2, stress>=0.23). */
+function jevShadowDisagrees(judgments: JevJudgments, heuristic: JevShadowHeuristic): boolean {
+  if (judgments.depositPick !== heuristic.deposit) return true;
+  if ((judgments.toxicFlowNoul ?? 0) >= 0.2) return true;
+  if ((judgments.regimeStressNoul ?? 0) >= 0.23) return true;
+  return heuristic.driftReject;
+}
+
+/** Owner contract for heuristic builder inputs (drift context + config). */
+interface JevShadowHeuristicInputs {
+  readonly entryStrategyType: EntryStrategyType;
+  readonly volatilityStddev: number;
+  readonly volatilityExitStddev: number;
+  readonly netDriftBins: number;
+  readonly maxNegativeDriftBins: number | undefined;
+}
+
+function buildJevShadowHeuristic(inputs: JevShadowHeuristicInputs): JevShadowHeuristic {
+  // Same regime pick as the in-slot tail (see resolveEntryStrategySpec):
+  // concrete shape as-is, auto from volatility/trend. Inlined — the tail
+  // helper lives inside runScanCycle and is out of reach at module scope.
+  const deposit: EntryStrategySpec =
+    inputs.entryStrategyType !== "auto"
+      ? inputs.entryStrategyType
+      : recommendStrategy({
+          volatilityStddev: inputs.volatilityStddev,
+          highVolThreshold: inputs.volatilityExitStddev,
+          netDriftBins: inputs.netDriftBins,
+        });
+  return {
+    deposit,
+    driftReject: driftGateRejected(
+      inputs.netDriftBins,
+      inputs.maxNegativeDriftBins ?? DEFAULT_MAX_NEGATIVE_DRIFT_BINS,
+    ),
+  };
+}
+interface JevShadowLogRow {
+  readonly feeIlRatio: number;
+  readonly volumeAuthenticity: number;
+  readonly binUtilization: number;
+}
+
+function logJevShadowVerdict(
+  poolAddress: string,
+  judgments: JevJudgments,
+  heuristic: JevShadowHeuristic,
+  metrics: JevShadowLogRow,
+  disagrees: boolean,
+): void {
+  logger.info("Jev shadow judgments", {
+    pool: poolAddress,
+    depositPick: judgments.depositPick,
+    depositConfidence: judgments.depositConfidence,
+    toxicFlowNoul: judgments.toxicFlowNoul,
+    recoveryHoldNoul: judgments.recoveryHoldNoul,
+    regimeStressNoul: judgments.regimeStressNoul,
+    heuristic: {
+      deposit: heuristic.deposit,
+      driftReject: heuristic.driftReject,
+      feeIlRatio: metrics.feeIlRatio,
+      volumeAuthenticity: metrics.volumeAuthenticity,
+      binUtilization: metrics.binUtilization,
+    },
+    agrees: !disagrees,
+  });
 }
 
 // Consume an applied queued proposal only once its outcome is final: after
@@ -10857,6 +10971,64 @@ export const program = Effect.gen(function* () {
 
       const { netDriftBins, volatilityStddev, volatilityBins, recentBins } =
         resolvePoolDriftMetrics(binHistory, poolAddress, config.volatilityLookbackSnapshots);
+      // Jev shadow consult (SHADOW-ONLY): ENTER-candidate pools only, AFTER
+      // Phase-1 EXITs + W15 alerts so advisory latency (~0.5-2.5s + pacing)
+      // never blocks capital protection. Never gates ENTER/EXIT —
+      // outcome-joined later for calibration. Fail-open: disabled without
+      // JEV_ENABLED + key; transport/parse failures return ok:false
+      // (paced via jevFetch, no retry). Memory logs disagreements only so
+      // vec_memory/audit-trail stay quiet on agreement.
+      function runJevShadowLog(): Effect.Effect<void, never> {
+        return Effect.gen(function* () {
+          if (config.jevEnabled !== true) return;
+          if (!config.jevApiKey) return;
+          if (!entryEligible) return;
+          if (poolExitFired) return;
+          const heuristic = buildJevShadowHeuristic({
+            entryStrategyType: config.entryStrategyType,
+            volatilityStddev,
+            volatilityExitStddev: config.volatilityExitStddev,
+            netDriftBins,
+            maxNegativeDriftBins: config.marketScanMaxNegativeDriftBins,
+          });
+          const judgments = yield* Effect.promise(() =>
+            consultJevJudgments(
+              buildJevShadowState({
+                poolAddress,
+                pool,
+                metrics,
+                volatilityStddev,
+                netDriftBins,
+                recentBinCount: recentBins.length,
+              }),
+              {
+                jevEnabled: config.jevEnabled,
+                jevApiKey: config.jevApiKey,
+                jevBaseUrl: config.jevBaseUrl,
+                jevModel: config.jevModel,
+                jevTimeoutMs: config.jevTimeoutMs,
+              },
+            ),
+          ).pipe(Effect.catch(() => Effect.succeed(null)));
+          if (judgments === null || !judgments.ok) {
+            logger.info("Jev shadow consult skipped/failed", {
+              pool: poolAddress,
+              failure: judgments?.failure ?? "error",
+            });
+            return;
+          }
+          const disagrees = jevShadowDisagrees(judgments, heuristic);
+          logJevShadowVerdict(poolAddress, judgments, heuristic, metrics, disagrees);
+          if (!disagrees) return;
+          yield* memory
+            .upsert({
+              category: "pattern",
+              content: `Jev shadow disagree ${poolAddress}: jev-deposit=${judgments.depositPick} heuristic-deposit=${heuristic.deposit} toxic=${judgments.toxicFlowNoul} stress=${judgments.regimeStressNoul}`,
+              poolAddress,
+            })
+            .pipe(Effect.catch(() => Effect.void));
+        });
+      }
 
       // Wave 9: resolve the entry/rebalance range half-width once per
       // pool-cycle — static baseline (ENTRY_RANGE_HALF_WIDTH_BINS or the
@@ -10909,6 +11081,11 @@ export const program = Effect.gen(function* () {
       pruneLaunchPeakFees();
 
       yield* runPhase1ExitEvaluation();
+
+      // Jev shadow consult AFTER capital-protecting EXITs: poolExitFired is
+      // now assigned (declared line ~10993), and advisory latency never
+      // delays an EXIT or W15 alert. ENTER-candidate pools only.
+      yield* runJevShadowLog();
 
       const resolveExitCooldown = (
         exitDecision: AgentDecision,

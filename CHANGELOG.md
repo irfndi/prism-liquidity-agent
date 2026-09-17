@@ -2,6 +2,24 @@
 
 All notable changes to Prism are documented here.
 
+## [0.2.43] — 2026-09-15
+
+### Fixed
+
+- **Position width capped to the DLMM single-position on-chain limit.** Live incident 2026-09-14: a resolved half-width of 75 (width 151 bins, binStep 200, volatility pushing the adaptive multiplier to its 2x ceiling) failed `InitializePosition` on-chain — account realloc limited to 10240 bytes in inner instructions. The DLMM program sizes a position for its own 70-bin default at creation; wider needs same-instruction growth Solana blocks. `resolveRangeHalfWidth` now bounds to `MAX_SINGLE_POSITION_WIDTH_BINS` (70) across every path (risk cap, price-coverage floor, explicit override, adaptive scaling). Every live-opened position tops out at width 69; wider ranges need the unimplemented multi-account extended-position path.
+
+## [0.2.42] — 2026-09-14
+
+### Added
+
+- **Hard max-position-age EXIT backstop** (`MAX_POSITION_AGE_MS`, default 7 days, 0 disables). Deterministic EXIT past the age regardless of measured-fee status — closes the gap where fee/IL and yield-regression exits skip on unmeasured (gecko/heuristic) data, letting slow bleeds ride 12-13 days. Cross-wallet field research flags <1d holds as the strongest band; the 7d default is a deliberately loose last resort, never cutting legitimate multi-day winners. Launch-mode positions exempt (own tighter timebox). Wired as the final deterministic check, after TVL-drop.
+
+## [0.2.41] — 2026-09-14
+
+### Added
+
+- **Single-sided entry regression coverage.** The `forceSingleSidedX`/`xOnly` entry path behind launch-mode positions had zero test coverage despite 8 historical positions closing at exactly $0.00 PnL. `adapter.enterPosition` rejection on missing-leg deposits and `EntryPrepService` SOL→X swap quoting in `solFunded` mode are now covered; both behave correctly today — no production change, the class can't silently recur.
+
 ## [0.2.40] — 2026-09-11
 
 ### Fixed
