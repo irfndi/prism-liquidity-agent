@@ -1129,7 +1129,7 @@ function loadJevSettings(): Effect.Effect<JevSettings> {
       Effect.orElseSucceed(() => ""),
     );
     const jevBaseUrl = yield* Config.string("JEV_BASE_URL").pipe(
-      Effect.orElseSucceed(() => "https://api.typesafe.ai"),
+      Effect.orElseSucceed(() => "https://api.typesafe.ai/v1/systemone"),
     );
     const jevModel = yield* Config.string("JEV_MODEL").pipe(
       Effect.orElseSucceed(() => "jev-latest"),
