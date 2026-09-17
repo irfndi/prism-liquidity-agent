@@ -549,10 +549,13 @@ export interface AppConfig {
 
   // ─── Jev shadow judgments (TypeSafe System One) ──────────────────────────
   // Optional so standalone test fixtures that omit new fields keep compiling;
-  // loadConfig always sets all five. SHADOW-ONLY: the consult runs alongside
+  // loadConfig always sets all seven. SHADOW-ONLY: the consult runs alongside
   // the deterministic gates and only logs Jev-vs-heuristic deltas — it never
   // drives ENTER/EXIT. Guard contract: `jevEnabled === true` (default false;
   // absent = disabled) AND a non-empty key, else the consult is skipped.
+  // Paper-only soft gate (JEV_STRESS_HALVE_*): when enabled, a normal-lane
+  // ENTER whose stress >= threshold halves its size — never vetoes, never
+  // touches runner/launch lanes, fail-open on !ok.
   /** Master switch for the Jev shadow consult. Default false. */
   readonly jevEnabled?: boolean;
   /** TypeSafe API key (Authorization: Bearer). Empty = consult skipped. */
@@ -563,6 +566,10 @@ export interface AppConfig {
   readonly jevModel?: string;
   /** Per-attempt timeout (ms). Default 10000. */
   readonly jevTimeoutMs?: number;
+  /** Paper-only soft gate: halve normal ENTER size on stress. Default false. */
+  readonly jevStressHalveEnabled?: boolean;
+  /** Stress threshold for the halve. Default 0.35 (A-tune→B-validate). */
+  readonly jevStressHalveThreshold?: number;
 
   // ─── F1: Gas-aware rebalancing ──────────────────────────────────────────────
   /** Estimated SOL cost of a single rebalance tx (entry + close). */
@@ -1112,12 +1119,15 @@ interface JevSettings {
   readonly jevBaseUrl: string;
   readonly jevModel: string;
   readonly jevTimeoutMs: number;
+  readonly jevStressHalveEnabled: boolean;
+  readonly jevStressHalveThreshold: number;
 }
 
 /**
  * Load the Jev shadow-consult settings. Default OFF: shadow-only, needs a
  * TYPESAFE_API_KEY to do anything. Canonical key TYPESAFE_API_KEY; legacy
- * TYPESAFEAI_API alias honored.
+ * TYPESAFEAI_API alias honored. Soft gate default OFF, threshold 0.35
+ * (A-tune→B-validate: kept PF 3.53 vs base 1.74 on split B).
  */
 function loadJevSettings(): Effect.Effect<JevSettings> {
   return Effect.gen(function* () {
@@ -1135,12 +1145,23 @@ function loadJevSettings(): Effect.Effect<JevSettings> {
       Effect.orElseSucceed(() => "jev-latest"),
     );
     const jevTimeoutMs = yield* validatedNumber("JEV_TIMEOUT_MS", 1_000, 10_000, 60_000);
+    const jevStressHalveEnabled = yield* Config.boolean("JEV_STRESS_HALVE_ENABLED").pipe(
+      Effect.orElseSucceed(() => false),
+    );
+    const jevStressHalveThreshold = yield* validatedNumber(
+      "JEV_STRESS_HALVE_THRESHOLD",
+      0,
+      0.35,
+      1,
+    );
     return {
       jevEnabled,
       jevApiKey: jevApiKeyPrimary.trim() || jevApiKeyLegacy.trim(),
       jevBaseUrl,
       jevModel,
       jevTimeoutMs,
+      jevStressHalveEnabled,
+      jevStressHalveThreshold,
     };
   });
 }
@@ -1348,7 +1369,15 @@ const loadConfig = Effect.gen(function* () {
   );
 
   // ─── Jev shadow judgments (TypeSafe System One) ──────────────────────────
-  const { jevEnabled, jevApiKey, jevBaseUrl, jevModel, jevTimeoutMs } = yield* loadJevSettings();
+  const {
+    jevEnabled,
+    jevApiKey,
+    jevBaseUrl,
+    jevModel,
+    jevTimeoutMs,
+    jevStressHalveEnabled,
+    jevStressHalveThreshold,
+  } = yield* loadJevSettings();
 
   // ─── Pyth Hermes price feeds ──────────────────────────────────────────────
   // Default OFF: Pyth's public keyless Hermes access ends 2026-08-18 (a key is
@@ -2543,6 +2572,8 @@ const loadConfig = Effect.gen(function* () {
     jevBaseUrl,
     jevModel,
     jevTimeoutMs,
+    jevStressHalveEnabled,
+    jevStressHalveThreshold,
 
     pythEnabled,
     pythApiKey,

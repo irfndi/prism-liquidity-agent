@@ -133,3 +133,20 @@ describe("consultJevJudgments", () => {
     expect(out.failure).toBe("error");
   });
 });
+
+describe("jevStressHalvesSize (paper-only soft gate)", () => {
+  it("halves on stress at/above threshold with ok:true", async () => {
+    const { jevStressHalvesSize } = await import("../engine/program.js");
+    expect(jevStressHalvesSize({ ok: true, regimeStressNoul: 0.35 }, 0.35)).toBe(true);
+    expect(jevStressHalvesSize({ ok: true, regimeStressNoul: 0.61 }, 0.35)).toBe(true);
+  });
+
+  it("fails open below threshold, on !ok, null, or NaN stress", async () => {
+    const { jevStressHalvesSize } = await import("../engine/program.js");
+    expect(jevStressHalvesSize({ ok: true, regimeStressNoul: 0.34 }, 0.35)).toBe(false);
+    expect(jevStressHalvesSize({ ok: false, regimeStressNoul: 0.9 }, 0.35)).toBe(false);
+    expect(jevStressHalvesSize({ ok: true, regimeStressNoul: null }, 0.35)).toBe(false);
+    expect(jevStressHalvesSize({ ok: true, regimeStressNoul: Number.NaN }, 0.35)).toBe(false);
+    expect(jevStressHalvesSize(null, 0.35)).toBe(false);
+  });
+});

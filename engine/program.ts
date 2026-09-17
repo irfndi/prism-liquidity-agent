@@ -462,6 +462,47 @@ function jevShadowDisagrees(judgments: JevJudgments, heuristic: JevShadowHeurist
   return heuristic.driftReject;
 }
 
+/** Paper-only soft gate: halve (never veto) on validated stress threshold.
+ *  A-tune→B-validate: stress>=0.35 kept PF 3.53 vs base 1.74 on split B.
+ *  Fail-open: !ok or null stress never halves. Pure — unit-tested directly. */
+export function jevStressHalvesSize(
+  judgments: Pick<JevJudgments, "ok" | "regimeStressNoul"> | null,
+  threshold: number,
+): boolean {
+  if (judgments === null || judgments.ok !== true) return false;
+  const stress = judgments.regimeStressNoul;
+  if (stress === null || !Number.isFinite(stress)) return false;
+  return stress >= threshold;
+}
+
+/** Owner contract for the halve-size inputs (flag + judgments + full size). */
+export interface JevStressHalveInput {
+  readonly paperTrading: boolean | undefined;
+  readonly halveEnabled: boolean | undefined;
+  readonly threshold: number;
+  readonly judgments: Pick<JevJudgments, "ok" | "regimeStressNoul"> | null;
+  readonly fullSizeUsd: number;
+}
+
+/** Owner contract for the halve-size verdict. */
+export interface JevStressHalveResult {
+  readonly halved: boolean;
+  readonly floored: boolean;
+  readonly positionSizeUsd: number;
+}
+
+/** Halve the full size on stress, floored at ENTRY_SIZE_FLOOR_USD. Pure. */
+export function resolveJevStressHalve(input: JevStressHalveInput): JevStressHalveResult {
+  const halved =
+    input.paperTrading === true &&
+    input.halveEnabled === true &&
+    jevStressHalvesSize(input.judgments, input.threshold);
+  if (!halved) return { halved: false, floored: false, positionSizeUsd: input.fullSizeUsd };
+  const halvedRaw = input.fullSizeUsd / 2;
+  const positionSizeUsd = Math.max(halvedRaw, ENTRY_SIZE_FLOOR_USD);
+  return { halved: true, floored: positionSizeUsd !== halvedRaw, positionSizeUsd };
+}
+
 /** Owner contract for heuristic builder inputs (drift context + config). */
 interface JevShadowHeuristicInputs {
   readonly entryStrategyType: EntryStrategyType;
@@ -10971,19 +11012,18 @@ export const program = Effect.gen(function* () {
 
       const { netDriftBins, volatilityStddev, volatilityBins, recentBins } =
         resolvePoolDriftMetrics(binHistory, poolAddress, config.volatilityLookbackSnapshots);
-      // Jev shadow consult (SHADOW-ONLY): ENTER-candidate pools only, AFTER
-      // Phase-1 EXITs + W15 alerts so advisory latency (~0.5-2.5s + pacing)
-      // never blocks capital protection. Never gates ENTER/EXIT —
-      // outcome-joined later for calibration. Fail-open: disabled without
-      // JEV_ENABLED + key; transport/parse failures return ok:false
-      // (paced via jevFetch, no retry). Memory logs disagreements only so
-      // vec_memory/audit-trail stay quiet on agreement.
-      function runJevShadowLog(): Effect.Effect<void, never> {
+      // Jev shadow consult + paper-only soft-gate judgments: ENTER-candidate
+      // pools only, AFTER Phase-1 EXITs + W15 alerts so advisory latency
+      // (~0.5-2.5s + pacing) never blocks capital protection. Fail-open:
+      // disabled without JEV_ENABLED + key; transport/parse failures return
+      // ok:false (paced via jevFetch, no retry). Returns judgments for the
+      // soft gate; memory logs disagreements only.
+      function runJevShadowLog(): Effect.Effect<JevJudgments | null, never> {
         return Effect.gen(function* () {
-          if (config.jevEnabled !== true) return;
-          if (!config.jevApiKey) return;
-          if (!entryEligible) return;
-          if (poolExitFired) return;
+          if (config.jevEnabled !== true) return null;
+          if (!config.jevApiKey) return null;
+          if (!entryEligible) return null;
+          if (poolExitFired) return null;
           const heuristic = buildJevShadowHeuristic({
             entryStrategyType: config.entryStrategyType,
             volatilityStddev,
@@ -11015,11 +11055,11 @@ export const program = Effect.gen(function* () {
               pool: poolAddress,
               failure: judgments?.failure ?? "error",
             });
-            return;
+            return null;
           }
           const disagrees = jevShadowDisagrees(judgments, heuristic);
           logJevShadowVerdict(poolAddress, judgments, heuristic, metrics, disagrees);
-          if (!disagrees) return;
+          if (!disagrees) return judgments;
           yield* memory
             .upsert({
               category: "pattern",
@@ -11027,6 +11067,7 @@ export const program = Effect.gen(function* () {
               poolAddress,
             })
             .pipe(Effect.catch(() => Effect.void));
+          return judgments;
         });
       }
 
@@ -11083,9 +11124,10 @@ export const program = Effect.gen(function* () {
       yield* runPhase1ExitEvaluation();
 
       // Jev shadow consult AFTER capital-protecting EXITs: poolExitFired is
-      // now assigned (declared line ~10993), and advisory latency never
-      // delays an EXIT or W15 alert. ENTER-candidate pools only.
-      yield* runJevShadowLog();
+      // now assigned, and advisory latency never delays an EXIT or W15
+      // alert. ENTER-candidate pools only. Judgments feed the paper-only
+      // stress soft gate at the normal ENTER slot below.
+      const jevJudgments = yield* runJevShadowLog();
 
       const resolveExitCooldown = (
         exitDecision: AgentDecision,
@@ -12982,8 +13024,26 @@ export const program = Effect.gen(function* () {
                 });
               }
 
-              const positionSizeUsd = allocation.adjustedDepositUsd;
-              if (yield* checkExpectedProfit(positionSizeUsd)) return true;
+              // Paper-only Jev stress soft gate: halve (never veto) the normal
+              // ENTER when stress >= threshold. Expected-profit runs on the
+              // FULL size first (profit math must not see a halved size that
+              // passes costs the full size would fail); the halve applies
+              // after, floored at ENTRY_SIZE_FLOOR_USD. Flag-gated, paper
+              // only, normal lane only; fail-open on !ok/null stress. A-tune→
+              // B-validate: stress>=0.35 kept PF 3.53 vs base 1.74 (split B).
+              const fullSizeUsd = allocation.adjustedDepositUsd;
+              if (yield* checkExpectedProfit(fullSizeUsd)) return true;
+              const jevHalveResult = resolveJevStressHalve({
+                paperTrading: config.paperTrading,
+                halveEnabled: config.jevStressHalveEnabled,
+                threshold: config.jevStressHalveThreshold ?? 0.35,
+                judgments: jevJudgments,
+                fullSizeUsd,
+              });
+              const positionSizeUsd = jevHalveResult.positionSizeUsd;
+              // Halved sizes carry the [jev-stress-halve] reasoning tag below —
+              // no separate log branch (keeps the generator under the
+              // complexity gate; the audit record is the observability).
               // Normal-lane take-profit (winrate fix): when enabled, every
               // normal ENTER carries a single-rung TP ladder at
               // TAKE_PROFIT_PCT above entry; the invalidation leg uses the
@@ -13007,7 +13067,9 @@ export const program = Effect.gen(function* () {
                   config.entryMomentumReferenceBins,
                   config.entryMomentumConfBoost,
                 ),
-                reasoning: `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL $${pool.tvlUsd.toFixed(0)}`,
+                reasoning: jevHalveResult.halved
+                  ? `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL $${pool.tvlUsd.toFixed(0)} [jev-stress-halve stress=${(jevJudgments?.regimeStressNoul ?? 0).toFixed(2)}]`
+                  : `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL $${pool.tvlUsd.toFixed(0)}`,
                 positionSizeUsd,
                 ...resolveTpLadderSpread(tpLadder),
               });

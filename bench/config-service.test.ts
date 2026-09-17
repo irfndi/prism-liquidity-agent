@@ -450,3 +450,30 @@ describe("resolveRpcFallbackUrl (public RPC fallback default)", () => {
     ).toBe("https://custom-rpc.example.com");
   });
 });
+
+describe("ConfigService JEV_STRESS_HALVE_* (paper-only soft gate)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults OFF with 0.35 threshold when unset", async () => {
+    const cfg = await loadConfig();
+    expect(cfg.jevStressHalveEnabled).toBe(false);
+    expect(cfg.jevStressHalveThreshold).toBe(0.35);
+  });
+
+  it("carries enabled + custom threshold", async () => {
+    vi.stubEnv("JEV_STRESS_HALVE_ENABLED", "true");
+    vi.stubEnv("JEV_STRESS_HALVE_THRESHOLD", "0.4");
+    const cfg = await loadConfig();
+    expect(cfg.jevStressHalveEnabled).toBe(true);
+    expect(cfg.jevStressHalveThreshold).toBe(0.4);
+  });
+
+  it("clamps threshold to [0, 1]", async () => {
+    vi.stubEnv("JEV_STRESS_HALVE_THRESHOLD", "-1");
+    expect((await loadConfig()).jevStressHalveThreshold).toBe(0);
+    vi.stubEnv("JEV_STRESS_HALVE_THRESHOLD", "5");
+    expect((await loadConfig()).jevStressHalveThreshold).toBe(1);
+  });
+});
