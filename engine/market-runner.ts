@@ -69,7 +69,7 @@ export interface HeldPositionApr {
 
 /** Rotation-target eligibility filters (all optional; absent = no filter). */
 export interface RotationTargetFilter {
-  /** Economic-exit maturity gate (MIN_YIELD_EXIT_AGE_MS, default 4h): a held
+  /** Economic-exit maturity gate (MIN_YIELD_EXIT_AGE_MS, default 12h): a held
    *  position younger than this is never a rotation target. Rotation is the
    *  same economic-exit class as the yield-regression exit — it must not
    *  churn a minutes-old entry (2026-08-21 field incident: a $20 position
