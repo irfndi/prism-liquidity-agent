@@ -53,7 +53,7 @@
   },
   "devDependencies": {
     "@effect/tsgo": "0.36.5",
-    "@oxlint/plugins": "1.79.0",
+    "@oxlint/plugins": "1.80.0",
     "@types/node": "^26.1.2",
     "@types/semver": "^7.8.0",
     "@vitest/coverage-istanbul": "^4.1.10",
