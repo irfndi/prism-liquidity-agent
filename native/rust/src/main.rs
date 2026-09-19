@@ -560,6 +560,16 @@ pub fn ta_macd_hist(closes_newest_first: &[f64]) -> Option<(f64, f64)> {
 /// Tighter-cap probe pct is inline at the tick (`max_position_loss_pct / 2.0`);
 /// no helper — `loss_cap_danger` called twice, live + tighter.
 
+/// Static `/status` triple for the loopback listener: (code, reason, body).
+/// Shape-only parity with the TS status surface (ok/service/mode); live
+/// counts ride the per-tick stdout lines, not this socket.
+fn status_json_body() -> (&'static str, &'static str, String) {
+    (
+        "200",
+        "OK",
+        r#"{"ok":true,"service":"prismd","mode":"shadow"}"#.to_string(),
+    )
+}
 /// Jev soft consult: fail-open. `Err` (or disabled) → `None` = "no opinion",
 pub fn jev_soft_gate(enabled: bool, fetched: Result<f64, &str>) -> Option<f64> {
     if !enabled {
@@ -944,6 +954,10 @@ mod config {
     pub const SCAN_INTERVAL_DEFAULT_MS: u64 = 600_000;
     pub const SCAN_INTERVAL_MIN_MS: u64 = 10_000;
     pub const SCAN_INTERVAL_MAX_MS: u64 = 3_600_000;
+    /// Mirrors engine/config-service.ts validatedNumber("AGENT_HTTP_PORT", 0, 0, 65535).
+    /// 0 = disabled (matches TS `if (port === 0) return`).
+    pub const AGENT_HTTP_PORT_DEFAULT: u16 = 0;
+    pub const AGENT_HTTP_PORT_MAX: u32 = 65_535;
     pub const PAPER_PORTFOLIO_DEFAULT_USD: f64 = 10_000.0;
     pub const PAPER_PORTFOLIO_MIN_USD: f64 = 1.0;
     pub const SQLITE_DEFAULT_PATH: &str = "prism.db";
@@ -1112,6 +1126,7 @@ mod config {
         pub oor_grace_period_cycles: i64,
         pub paper_validation_min_days: f64,
         pub paper_validation_enforce: bool,
+        pub agent_http_port: u16,
         pub ticks: Option<u64>,
     }
 
@@ -1133,6 +1148,24 @@ mod config {
         }
     }
 
+    /// Parse-or-default for `AGENT_HTTP_PORT`; `Err` on garbage/out-of-band.
+    /// Absent -> 0 (disabled, matching TS). Only feeds the local status listener.
+    pub fn parse_agent_http_port(raw: Option<&str>) -> Result<u16, String> {
+        let Some(s) = raw else {
+            return Ok(AGENT_HTTP_PORT_DEFAULT);
+        };
+        let v: u32 = s
+            .trim()
+            .parse()
+            .map_err(|_| format!("AGENT_HTTP_PORT={s:?} is not a number"))?;
+        if v <= AGENT_HTTP_PORT_MAX {
+            Ok(v as u16)
+        } else {
+            Err(format!(
+                "AGENT_HTTP_PORT={v} outside [0, {AGENT_HTTP_PORT_MAX}]"
+            ))
+        }
+    }
     /// Parse-or-default for `PAPER_PORTFOLIO_USD`; `Err` on garbage or < 1.
     pub fn parse_paper_portfolio_usd(raw: Option<&str>) -> Result<f64, String> {
         let Some(s) = raw else {
@@ -1835,6 +1868,9 @@ mod config {
                     env::var("PAPER_VALIDATION_MIN_DAYS").ok().as_deref(),
                 )?,
                 paper_validation_enforce: flag("PAPER_VALIDATION_ENFORCE"),
+                agent_http_port: parse_agent_http_port(
+                    env::var("AGENT_HTTP_PORT").ok().as_deref(),
+                )?,
                 ticks: None,
             })
         }
@@ -3050,6 +3086,52 @@ fn main() {
         cfg.bend_bin
     );
     bend_health_check(&cfg.bend_bin);
+    if cfg.agent_http_port != 0 {
+        let port = cfg.agent_http_port;
+        std::thread::Builder::new()
+            .name("prismd-status".into())
+            .spawn(move || {
+                let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("[prismd] status listener bind 127.0.0.1:{port} failed: {e}");
+                        return;
+                    }
+                };
+                eprintln!("[prismd] status listening on 127.0.0.1:{port} (loopback only)");
+                for stream in listener.incoming() {
+                    let mut stream = match stream {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    // ponytail: fixed 8KB peek, no httparse dep — path match only.
+                    let mut buf = [0u8; 8192];
+                    #[allow(clippy::needless_borrow)]
+                    let n = match std::io::Read::read(&mut stream, &mut buf) {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req.split_whitespace().nth(1).unwrap_or("/");
+                    let (code, reason, body) = if path == "/health" || path.starts_with("/health?") {
+                        ("200", "OK", r#"{"ok":true,"service":"prismd"}"#.to_string())
+                    } else if path == "/status" || path.starts_with("/status?") {
+                        (crate::status_json_body().0, crate::status_json_body().1, crate::status_json_body().2)
+                    } else {
+                        ("404", "Not Found", r#"{"ok":false,"error":"not found"}"#.to_string())
+                    };
+                    let _ = std::io::Write::write_all(
+                        &mut stream,
+                        format!(
+                            "HTTP/1.1 {code} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                }
+            })
+            .ok();
+    }
     let mut n = 0u64;
     loop {
         n += 1;
@@ -3972,6 +4054,7 @@ mod tests {
             oor_grace_period_cycles: 3,
             paper_validation_min_days: 7.0,
             paper_validation_enforce: false,
+            agent_http_port: 0,
             ticks: Some(1),
         };
         evolve_shadow(&cfg);
@@ -4359,6 +4442,12 @@ mod tests {
         assert_eq!(
             config::parse_volatility_exit_stddev(Some("-1")),
             Err("VOLATILITY_EXIT_STDDEV=-1 below min 0".to_string())
+        );
+        assert_eq!(config::parse_agent_http_port(None), Ok(0));
+        assert_eq!(config::parse_agent_http_port(Some("8080")), Ok(8080));
+        assert_eq!(
+            config::parse_agent_http_port(Some("99999")),
+            Err("AGENT_HTTP_PORT=99999 outside [0, 65535]".to_string())
         );
     }
     #[test]
