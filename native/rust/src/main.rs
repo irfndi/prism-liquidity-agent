@@ -766,8 +766,9 @@ mod bend {
     /// (TP-ladder → TA-exhaustion → loss-side → hold/scale-in,
     /// program.ts:10959-10970): 1n TP, 2n TA, 3n loss, 0n none. Takes branch
     /// verdicts precomputed — pure precedence, never wired into
-    /// `checkDeterministicExits` (soak-untouched). Unwired (kernel exercised
-    /// via `exit_order_precedence` + bend-parity exit-order `it`); no per-tick call until a tick shadow feeds real verdicts.
+    /// `checkDeterministicExits` (soak-untouched). DRY-RUN wired per-tick
+    /// with tp/TA stubbed false + stored loss legs (see tick); full wiring
+    /// waits on `ta-exhaustion.ts` for real TA verdicts.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn exit_order(bend_bin: &str, tp_hit: bool, ta_hit: bool, loss_hit: bool) -> Option<u64> {
         let expr = format!(
@@ -2371,6 +2372,7 @@ fn tick(cfg: &config::Config, n: u64) {
     let mut recovery_hold_shadow = 0i64;
     let mut interval_hold_shadow = 0i64;
     let mut vol_exit_shadow = 0i64;
+    let mut exit_order_loss_shadow = 0i64;
     let shadows = fee_il_shadows_capped(
         &cfg.sqlite_path,
         cfg.min_yield_exit_age_ms,
@@ -2543,8 +2545,16 @@ fn tick(cfg: &config::Config, n: u64) {
         let shape_drift = s.net_drift_bins.unwrap_or(0.0);
         let entry_shape =
             recommend_entry_strategy(vol_stddev, cfg.volatility_exit_stddev, shape_drift);
+        // Exit-order dry-run: proven `K.exit_order` fed with stored loss legs
+        // only — tp_hit=false + ta_hit=false are documented stubs (TP needs
+        // the live ladder evaluator, TA needs `ta-exhaustion.ts` price
+        // history; neither is stored). loss_hit reuses the already-computed
+        // loss legs. DRY-RUN: logs + counter, never acts; when TA lands the
+        // same line takes real bools with zero structural change.
+        let loss_hit = danger == Some(true) || stop_loss == Some(true);
+        let exit_order_pick = bend::exit_order(&cfg.bend_bin, false, false, loss_hit);
         println!(
-            "[prismd] shadow fee_il_exit position={} pool={} known={} bend_known={bend_known:?} mature={} ratio={:?} bend_fires={fires:?} accrual_allowed={accrual:?} enter_blocked={blocked:?} floor={floor} drift={drift} drift_rejects={drift_rejects:?} drift_floor={} loss_danger={danger:?} danger_tighter={danger_tighter:?} capital_exit={capital:?} stop_loss_veto={stop_loss:?} band_width_invalid={width_bad:?} band_contains_active={contained:?} band_width={:?} gas_cost_usd={gas_cost_usd:.4} daily_fees_usd={daily_fees_usd:?} gas_justified={gas_ok:?} rec_prob={rec_prob:?} rec_hold={rec_hold:?} rec_force={rec_force:?} interval_cooled={cooled:?} oor_grace={grace} last_rebal_ms={:?} vol_stddev={vol_stddev:.2} vol_drift_pct={vol_drift_pct:?} vol_thr={} vol_fires={vol_fires:?} entry_shape={entry_shape} shape_drift={shape_drift} (observational)",
+            "[prismd] shadow fee_il_exit position={} pool={} known={} bend_known={bend_known:?} mature={} ratio={:?} bend_fires={fires:?} accrual_allowed={accrual:?} enter_blocked={blocked:?} floor={floor} drift={drift} drift_rejects={drift_rejects:?} drift_floor={} loss_danger={danger:?} danger_tighter={danger_tighter:?} capital_exit={capital:?} stop_loss_veto={stop_loss:?} band_width_invalid={width_bad:?} band_contains_active={contained:?} band_width={:?} gas_cost_usd={gas_cost_usd:.4} daily_fees_usd={daily_fees_usd:?} gas_justified={gas_ok:?} rec_prob={rec_prob:?} rec_hold={rec_hold:?} rec_force={rec_force:?} interval_cooled={cooled:?} oor_grace={grace} last_rebal_ms={:?} vol_stddev={vol_stddev:.2} vol_drift_pct={vol_drift_pct:?} vol_thr={} vol_fires={vol_fires:?} entry_shape={entry_shape} shape_drift={shape_drift} loss_hit={loss_hit} exit_order={exit_order_pick:?} (observational)",
             s.position_id, s.pool_address, s.known, s.mature, s.ratio, cfg.max_negative_drift_bins, s.upper_bin_id.zip(s.lower_bin_id).map(|(hi, lo)| hi - lo), s.last_rebalance_at_ms, cfg.volatility_exit_stddev
         );
         if fires == Some(true) {
@@ -2581,6 +2591,9 @@ fn tick(cfg: &config::Config, n: u64) {
         if vol_fires == Some(true) {
             vol_exit_shadow += 1;
         }
+        if exit_order_pick == Some(3) {
+            exit_order_loss_shadow += 1;
+        }
     }
 
     // Book-level drawdown veto (gate 4): one verdict per tick over all opens.
@@ -2597,7 +2610,7 @@ fn tick(cfg: &config::Config, n: u64) {
         cfg.paper_validation_enforce,
     );
     println!(
-        "[prismd] decision open={open} exit_shadow={exit_shadow} enter_blocked_shadow={enter_blocked_shadow} danger_shadow={danger_shadow} drift_rejects_shadow={drift_rejects_shadow} capital_exits_shadow={capital_exits_shadow} stop_loss_shadow={stop_loss_shadow} band_health_shadow={band_health_shadow} gas_hold_shadow={gas_hold_shadow} recovery_hold_shadow={recovery_hold_shadow} interval_hold_shadow={interval_hold_shadow} vol_exit_shadow={vol_exit_shadow} paper_days={paper_days:?} paper_pass={paper_pass:?} cooldown_holds={cooldown_hold_shadow} drawdown_veto={drawdown:?} at_capacity={at_capacity} (observational)",
+        "[prismd] decision open={open} exit_shadow={exit_shadow} enter_blocked_shadow={enter_blocked_shadow} danger_shadow={danger_shadow} drift_rejects_shadow={drift_rejects_shadow} capital_exits_shadow={capital_exits_shadow} stop_loss_shadow={stop_loss_shadow} band_health_shadow={band_health_shadow} gas_hold_shadow={gas_hold_shadow} recovery_hold_shadow={recovery_hold_shadow} interval_hold_shadow={interval_hold_shadow} vol_exit_shadow={vol_exit_shadow} exit_order_loss_shadow={exit_order_loss_shadow} paper_days={paper_days:?} paper_pass={paper_pass:?} cooldown_holds={cooldown_hold_shadow} drawdown_veto={drawdown:?} at_capacity={at_capacity} (observational)",
     );
 
     // Evolution shadow: what WOULD one evolveThresholds round do to the live

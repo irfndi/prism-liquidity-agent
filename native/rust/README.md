@@ -51,7 +51,7 @@ CLI via `std::process`); Jev HTTP stays a `JevClient` trait + stub until reqwest
 (rustls) is justified.
 
 ## Bend kernel wiring (real, as of this wave)
-Twenty-one shadows (13 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit + 7 per-tick Bend + startup health-check) plus two unproven gates (`ta_exhausted` + `exit_order`, wrappers present but unwired-from-tick) in `src/main.rs` shell the `bend` CLI against
+Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape + 8 per-tick Bend (7 proven + 1 stub-fed exit-order dry-run, LAWS-pending) + startup health-check) plus one unproven gate (`ta_exhausted`, wrapper present but unwired-from-tick) in `src/main.rs` shell the `bend` CLI against
 binary needs no on-disk kernels file at runtime). Each mirrors
 `bench/bend-parity-harness.ts`: write a temp probe file importing the
 kernels, run `bend probe.bend`, parse the result off stdout. Every
@@ -68,7 +68,7 @@ Wired today (all shadow-only, observational, never acted on):
 - `open_positions_per_pool` + `MAX_POSITIONS_PER_POOL` (default 2, fail-closed) → per-tick `pool-capacity pools/capped/pool/open/max/at_capacity` shadow on the fullest pool (`pools` = distinct pools with opens, `capped` = pools at cap; open per pool, `closed_at IS NULL` only; never blocks ENTER).
 - `stop_loss_veto` + `STOP_LOSS_PCT` (default 0.15, fail-closed; exact TS `lossPct < -pct`, no disabled arm — pct 0 vetoes any loss) → per-position `stop_loss_veto` + `decision … stop_loss_shadow …` tally (breach predicate exact; TS also gates on HOLD/REBALANCE action, host counts breaches regardless — documented in fn doc; never vetoes).
 - `open_exposure_per_pool` + `MAX_PER_POOL_ALLOCATION_PCT` (default 0.4, fail-closed) + `MAX_ENTRY_SIZE_USD` (default 500, fail-closed) → per-tick `allocation pool/exposure_usd/share/cap_pct/cap_usd/headroom_usd/max_entry_usd` on the fullest pool (gate-6 `maxSize` mirror; never blocks).
-- `decision` summary → per-tick `decision open/exit_shadow/enter_blocked_shadow/danger_shadow/drift_rejects_shadow/capital_exits_shadow/stop_loss_shadow/band_health_shadow/gas_hold_shadow/recovery_hold_shadow/interval_hold_shadow/paper_days/paper_pass/cooldown_holds/drawdown_veto/at_capacity` counts over open positions + book-level halt/drawdown/paper/cooldown verdicts (option legs count Some(true), gas/interval/cooldown count Some(false)-holds, paper logs pass verdict; never blocks). `capital_exits_shadow` tallies the proven `K.capital_exit` kernel verdict — by LAWS it equals `danger_shadow` whenever Bend answers (kernel returns danger; `capital==danger` agreement is the check), and stays 0 with Bend absent while `danger_shadow` still counts natively.
+- `decision` summary → per-tick `decision open/exit_shadow/enter_blocked_shadow/danger_shadow/drift_rejects_shadow/capital_exits_shadow/stop_loss_shadow/band_health_shadow/gas_hold_shadow/recovery_hold_shadow/interval_hold_shadow/vol_exit_shadow/exit_order_loss_shadow/paper_days/paper_pass/cooldown_holds/drawdown_veto/at_capacity` counts over open positions + book-level halt/drawdown/paper/cooldown verdicts (option legs count Some(true), gas/interval/cooldown count Some(false)-holds, paper logs pass verdict; never blocks). `capital_exits_shadow` tallies the proven `K.capital_exit` kernel verdict — by LAWS it equals `danger_shadow` whenever Bend answers (kernel returns danger; `capital==danger` agreement is the check), and stays 0 with Bend absent while `danger_shadow` still counts natively.
 - Startup health-check → proven `K.clamp_thr` via `bend::clamp_fee_il` (band_runaway 13.92→3.0, once at boot; per-tick ENTER floor uses the native `clamp_fee_il`, not a kernel consult).
 - `bend::ta_exhausted` → `K.ta_exhausted` (thirteenth-wave confluence gate:
   RSI-overbought AND (BB-upper OR MACD-green); pure bool AND/OR, F32 indicator
@@ -78,8 +78,10 @@ Wired today (all shadow-only, observational, never acted on):
 - `bend::exit_order` → `K.exit_order` (precedence gate: TP→TA→loss→none as 1n/2n/3n/0n;
   pure bool order, `decidePositionExit` shape WITHOUT wiring into `checkDeterministicExits`;
   exercised by native `exit_order_precedence` + bend-parity exit-order `it`,
-  LAWS pending; test-only `cfg_attr` wrapper, no per-tick call until
-  `ta-exhaustion.ts` lands).
+  LAWS pending; DRY-RUN wired per-tick with tp/TA stubbed false + stored loss legs
+  (`loss_hit = danger==Some(true) || stop_loss==Some(true)` → per-position `loss_hit/exit_order`
+  + `decision … exit_order_loss_shadow` tally counting Some(3); full wiring waits on
+  `ta-exhaustion.ts` for real TA verdicts; never acts).
 - `bend::fee_known` → proven `K.fee_known`, per position per tick (pure bool
   passthrough of the host's own datapi comparison; mismatch-logged host-wins
   fail-open via `is_some_and`, silent when Bend is absent, never votes).
@@ -129,7 +131,7 @@ so no host wrapper — `computeFeeIlRatio` needs in-memory bin-array + drift).
    Grep-able per-tick lines (all `(observational)`, never acted on):
    `tick=` (total rows) → `capacity open/max/at_capacity` (portfolio ENTER
    headroom) → `pool-capacity pools/capped/pool/open/max/at_capacity` (fullest pool + aggregates) →
-   per-position `shadow fee_il_exit …` → `decision open/exit_shadow/enter_blocked_shadow/danger_shadow/drift_rejects_shadow/capital_exits_shadow/stop_loss_shadow/band_health_shadow/gas_hold_shadow/recovery_hold_shadow/interval_hold_shadow/vol_exit_shadow/paper_days/paper_pass/cooldown_holds/drawdown_veto/at_capacity` (one-line
+   per-position `shadow fee_il_exit …` → `decision open/exit_shadow/enter_blocked_shadow/danger_shadow/drift_rejects_shadow/capital_exits_shadow/stop_loss_shadow/band_health_shadow/gas_hold_shadow/recovery_hold_shadow/interval_hold_shadow/vol_exit_shadow/exit_order_loss_shadow/paper_days/paper_pass/cooldown_holds/drawdown_veto/at_capacity` (one-line
    verdict to diff against the TS `decided/executed/failed` cycle log).
 2. Pass bar for the N-cycle compare: `decision open` == TS open count;
    `exit_shadow` ⊆ TS exits (shadow never fires alone); `capacity` /
