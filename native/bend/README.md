@@ -31,7 +31,7 @@ here computes, so every law below is proved by reflexivity/case analysis.
 ## Checks (bend 2.0.5; CLI is `bend <file>`, there is no `bend check`)
 
 - `bend kernels.bend` → `300n` (green; observable runaway clamp).
-- `bend LAWS.bend` → `Error: 16 TODOs found. The code is incomplete, and not
+- `bend LAWS.bend` → `Error: 19 TODOs found. The code is incomplete, and not
   a valid proof yet.` (by design — open laws; PROOF.bend discharges them).
 - `bend PROOF.bend` → `300n`, no errors (green — all 19 laws proved).
 

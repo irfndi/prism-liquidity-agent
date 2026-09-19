@@ -2771,17 +2771,10 @@ fn tick(cfg: &config::Config, n: u64) {
             cfg.max_rebalance_range_bins,
             5.0,
         );
-        // Exit-order dry-run: proven `K.exit_order` fed with stored loss legs
-        // only — tp_hit=false + ta_hit=false are documented stubs (TP needs
-        // the live ladder evaluator, TA needs `ta-exhaustion.ts` price
-        // history; neither is stored). loss_hit reuses the already-computed
-        // loss legs. DRY-RUN: logs + counter, never acts; when TA lands the
-        // same line takes real bools with zero structural change.
+        // Exit-order dry-run: proven `K.exit_order` with tp stubbed + ta-live + stored loss legs
+        // (tp_hit=false: live ladder evaluator not stored; ta_hit=real native triple vote below;
+        // loss_hit = danger==Some(true) || stop_loss==Some(true)). DRY-RUN: logs + counter, never acts.
         let loss_hit = danger == Some(true) || stop_loss == Some(true);
-        // TA-exhaustion shadow: closes depth logged; bools stay stubbed
-        // false until the host ports RSI2/BB/MACD math (closes ARE stored —
-        // ta_closes_newest_first — but indicator computation lives TS-side).
-        // Fail-open: short history → None (no-vote, like TS MIN_POINTS).
         // TA-exhaustion shadow: native indicator triple over stored closes
         // (newest-first) → proven `K.ta_exhausted` confluence. Short/junk →
         // None (fail-open no-vote, mirrors TS TA_EXHAUSTION_MIN_POINTS).

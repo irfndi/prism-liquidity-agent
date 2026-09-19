@@ -51,7 +51,7 @@ CLI via `std::process`); Jev HTTP stays a `JevClient` trait + stub until reqwest
 (rustls) is justified.
 
 ## Bend kernel wiring (real, as of this wave)
-Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width + 8 per-tick Bend (7 proven + exit-order DRY-RUN with real TA vote, LAWS-pending) + startup health-check) plus TA-exhaustion live (`ta_exhausted` fed by native RSI2/BB/MACD triple over stored closes; LAWS triple proven) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
+Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width + 8 per-tick Bend (7 proven + ta-live + tp-stubbed exit_order dry-run) + startup health-check) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
 binary needs no on-disk kernels file at runtime). Each mirrors
 `bench/bend-parity-harness.ts`: write a temp probe file importing the
 kernels, run `bend probe.bend`, parse the result off stdout. Every
@@ -71,8 +71,8 @@ Wired today (all shadow-only, observational, never acted on):
 - `decision` summary → per-tick `decision open/exit_shadow/enter_blocked_shadow/danger_shadow/drift_rejects_shadow/capital_exits_shadow/stop_loss_shadow/band_health_shadow/gas_hold_shadow/recovery_hold_shadow/interval_hold_shadow/vol_exit_shadow/exit_order_loss_shadow/paper_days/paper_pass/cooldown_holds/drawdown_veto/at_capacity` counts over open positions + book-level halt/drawdown/paper/cooldown verdicts (option legs count Some(true), gas/interval/cooldown count Some(false)-holds, paper logs pass verdict; never blocks). `capital_exits_shadow` tallies the proven `K.capital_exit` kernel verdict — by LAWS it equals `danger_shadow` whenever Bend answers (kernel returns danger; `capital==danger` agreement is the check), and stays 0 with Bend absent while `danger_shadow` still counts natively.
 - Startup health-check → proven `K.clamp_thr` via `bend::clamp_fee_il` (band_runaway 13.92→3.0, once at boot; per-tick ENTER floor uses the native `clamp_fee_il`, not a kernel consult).
 - `bend::ta_exhausted` → `K.ta_exhausted` (thirteenth-wave confluence gate:
-  RSI-overbought AND (BB-upper OR MACD-green); pure bool AND/OR, F32 indicator
-  math stays TS-side; exercised by native `ta_exhausted_truth_table` + bend-parity
+  RSI-overbought AND (BB-upper OR MACD-green); pure bool AND/OR over the native RSI2/BB/MACD triple
+  (host-side, newest-first closes); exercised by native `ta_exhausted_truth_table` + bend-parity
   TA-exhaustion `it`, LAWS triple now proven (ta_overbought_fires /
   single_signal_quiet / cold_start_quiet); tick shadow live with native triple.
 - `bend::exit_order` → `K.exit_order` (precedence gate: TP→TA→loss→none as 1n/2n/3n/0n;
@@ -80,8 +80,7 @@ Wired today (all shadow-only, observational, never acted on):
   exercised by native `exit_order_precedence` + bend-parity exit-order `it`,
   LAWS pending; DRY-RUN wired per-tick with tp stubbed false + REAL TA vote (native triple) + stored loss legs
   (`loss_hit = danger==Some(true) || stop_loss==Some(true)` → per-position `loss_hit/exit_order`
-  + `decision … exit_order_loss_shadow` tally counting Some(3); full wiring waits on
-  `ta-exhaustion.ts` for real TA verdicts; never acts).
+  + `decision … exit_order_loss_shadow` tally counting Some(3); tp leg still stubbed false, TA vote live; never acts).
 - `bend::fee_known` → proven `K.fee_known`, per position per tick (pure bool
   passthrough of the host's own datapi comparison; mismatch-logged host-wins
   fail-open via `is_some_and`, silent when Bend is absent, never votes).
