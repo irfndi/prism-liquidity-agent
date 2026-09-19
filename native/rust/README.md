@@ -51,7 +51,7 @@ CLI via `std::process`); Jev HTTP stays a `JevClient` trait + stub until reqwest
 (rustls) is justified.
 
 ## Bend kernel wiring (real, as of this wave)
-Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width + 8 per-tick Bend (7 proven + ta-live + tp-stubbed exit_order dry-run) + startup health-check) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
+Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width + 8 per-tick Bend (7 proven incl. ta-live + tp-stubbed exit_order dry-run) + startup health-check) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
 binary needs no on-disk kernels file at runtime). Each mirrors
 `bench/bend-parity-harness.ts`: write a temp probe file importing the
 kernels, run `bend probe.bend`, parse the result off stdout. Every

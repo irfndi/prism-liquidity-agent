@@ -26,8 +26,18 @@ Setup and dev are local-first: no registration required. A registered API
 account only owns opt-in cloud features (telemetry, cloud feedback, account
 operations); Telegram remains optional.
 
-## Project overview
+## Native hybrid (direction)
 
+Design of record: `docs/plan/2026-09-18-rust-bend-hybrid.md` (+ follow-ups in `docs/plan/`).
+
+- **Rust host + Bend kernels + temporary TS engine** — TS (`engine/`, `cli/`, `bench/`) stays source of truth until parity is green. **No Cloudflare** compute; local-first product path.
+- **Local-first setup**: no register/cloud account required; Helius key (+ optional Jev key) in `.env`.
+- **Bend workflow**: `bend guide` for stdlib surface, encode invariants in `native/bend/LAWS.bend`, run `bend PROOF.bend` before commit, parallelize where safe.
+- **Jev (TypeSafe) is soft-only**: calibrated probabilistic gates; deepen only on measured expectancy lift; never overrides hard EXITs/LAWS.
+- **Box ops**: one binary, many profiles (`~/.config/prism-*`); measure CPU/RSS after every deploy.
+- **Cloudflare data (D1/KV/R2/Vectorize) stays** until exported and verified — never destroy in this wave.
+
+## Project overview
 Prism is an autonomous liquidity agent for Solana (currently Meteora DLMM). It scans a watchlist of pools on a configurable interval, evaluates each pool with a rule-based strategy, and decides to **HOLD**, **ENTER**, **REBALANCE** or **EXIT**. By default it runs in paper-trading mode; live on-chain execution requires an explicit wallet private key and `PAPER_TRADING=false`.
 
 The project has three independent layers:

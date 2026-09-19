@@ -56,13 +56,7 @@ cp paper-runner.env ~/.config/prism-paper-bin20/.env
 cp paper-aggressive.env ~/.config/prism-paper-growth/.env
 ```
 
-Release source note (`cli/update.ts`, `scripts/build-bundle.ts`): today
-`prism update` is R2-first (`--r2-url` defaults to `R2_PUBLIC_URL`,
-`source: "r2" | "github"` in `downloadAndVerify`). Direction per hybrid plan
-Phase 4 is **GitHub Releases + SHA-256 only** (R2 stays cold backup until the
-explicit data-delete follow-up). `scripts/build-bundle.ts` names the tarball
-`prism-v<version>-<platform>-<arch>.tar.gz` + `.sha256`. For box drops below,
-prefer the GitHub tarball hash, not R2.
+Release source note (`engine/update-utils.ts:432-439`, `scripts/build-bundle.ts`): `prism update` is GitHub-first with R2 fallback (canary stays R2-only, no GitHub representation). R2 `releases/v<version>/` is a cold mirror until the explicit data-delete follow-up. `scripts/build-bundle.ts` names the tarball `prism-v<version>-<platform>-<arch>.tar.gz` + `.sha256`. For box drops below (§3), prefer the GitHub asset hash, not R2.
 
 ## 2. systemd unit template (2 profiles, one binary)
 
