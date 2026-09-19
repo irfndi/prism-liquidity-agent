@@ -19,11 +19,13 @@ here computes, so every law below is proved by reflexivity/case analysis.
 
 ## Files
 
-- `kernels.bend` — kernels + `main` demo (prints `300n`: 13.92 pins to 3.0) + fee_known/ta_exhausted gates (latter LAWS-pending) + exit_order precedence gate (1n/2n/3n/0n, truth-table-probed, NOT wired into `checkDeterministicExits`).
-- `LAWS.bend` — 16 laws, human-owned: band closure (incl. runaway 1392→300),
+- `kernels.bend` — kernels + `main` demo (prints `300n`: 13.92 pins to 3.0) + fee_known/ta_exhausted gates (ta triple proven) + exit_order precedence gate (1n/2n/3n/0n, per-tick DRY-RUN wired with tp stubbed + real TA vote + stored loss legs).
+- `LAWS.bend` — 19 laws, human-owned: band closure (incl. runaway 1392→300),
   single-nudge ≤20 % (120→144), ceiling/floor pins, modeled fee/IL never
   blocks ENTER / never forces EXIT, capital EXIT confidence-free, paper
-  accrual datapi-only, strict drift floor; fee-known passthrough; ta_exhausted LAWS-pending; exit_order kernel-only (unproven).
+  accrual datapi-only, strict drift floor; fee-known passthrough; TA-exhaustion
+  triple proven (ta_overbought_fires / ta_single_signal_quiet / ta_cold_start_quiet);
+  exit_order kernel-only (unproven, per-tick DRY-RUN wired).
 - `PROOF.bend` — machine-checked proofs, one `def L.<name>` per law.
 
 ## Checks (bend 2.0.5; CLI is `bend <file>`, there is no `bend check`)
@@ -31,7 +33,7 @@ here computes, so every law below is proved by reflexivity/case analysis.
 - `bend kernels.bend` → `300n` (green; observable runaway clamp).
 - `bend LAWS.bend` → `Error: 16 TODOs found. The code is incomplete, and not
   a valid proof yet.` (by design — open laws; PROOF.bend discharges them).
-- `bend PROOF.bend` → `300n`, no errors (green — all 16 laws proved).
+- `bend PROOF.bend` → `300n`, no errors (green — all 19 laws proved).
 
 ## Scope notes
 
@@ -47,7 +49,7 @@ here computes, so every law below is proved by reflexivity/case analysis.
   vectors for every kernel above, skipped (not failed) when `bend` is absent.
 - `native/rust/src/main.rs` (`mod bend`): real subprocess wiring for
   all 8 proven tick kernels plus `bend::evolve_thr` (evolve shadow) and the
-  unproven `bend::ta_exhausted` + `bend::exit_order` gates (wrappers present,
-  unwired-from-tick), embedding this file at compile time
+  live `bend::ta_exhausted` (native RSI2/BB/MACD triple, LAWS triple proven) +
+  DRY-RUN `bend::exit_order` (tp stubbed, real TA vote), embedding this file at compile time
   via `include_str!`. Fail-open on any error; see `native/rust/README.md`
-  for the wiring contract (both LAWS pending strategy review).
+  for the wiring contract (exit_order LAWS pending strategy review; TA triple reviewed with TA file landing).

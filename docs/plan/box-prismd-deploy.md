@@ -123,10 +123,10 @@ match what exists, do not migrate unit scope as part of a binary drop.
 
 ## 3. Binary-drop sequence (one profile at a time, keep A/B)
 
-Preferred source: the `prismd-<version>-linux-x64` release asset (built by
+Preferred source: the `prismd-<version>-linux-x64` GitHub Release asset (built by
 `release.yml` `build-bundles` on linux-x64 alongside the TS tarballs, SHA-256
-checksummed, uploaded to R2 `releases/v<version>/` — same keys as the box's
-existing `prism update` path). Fallback, pre-release: the `prismd-linux-x64`
+checksummed, `gh release upload` — R2 `releases/v<version>/` is a cold mirror).
+This matches the `prism update` client, which is GitHub-first with R2 fallback. Fallback, pre-release: the `prismd-linux-x64`
 CI artifact from the latest green `prismd-binary` run (Actions → CI), or build
 from source ON the box (`cargo build --release --manifest-path
 native/rust/Cargo.toml`). All three are the same fail-open shadow binary with

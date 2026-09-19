@@ -4,15 +4,16 @@ Notes for AI agent harnesses (OpenClaw, Hermes, acpx, custom agents) and OpenCod
 
 ## TL;DR for agent harnesses
 
-You do **not** need to deploy Cloudflare resources — the API Worker, Telegram bot, D1, KV, R2 and Vectorize resources are already live. You **do** need a Helius API key.
+You do **not** need to deploy Cloudflare resources — API/Telegram Workers are undeployed (manual-only, no auto deploy). D1/KV/R2/Vectorize **data stays** until exported and verified. You **do** need a Helius API key.
 
 ```bash
 git clone https://github.com/irfndi/prism-liquidity-agent.git
 cd prism-liquidity-agent
 bun install
 
-# Required before setup and dev so telemetry, errors, and feedback have an owner
-prism register
+# Optional — only needed for opt-in cloud features (telemetry, D1 feedback, Telegram).
+# Setup and dev work without it (local-first).
+# prism register
 
 # Required — writes .env and configures the agent
 prism setup --non-interactive --helius-key=$HELIUS_KEY
@@ -21,8 +22,9 @@ prism setup --non-interactive --helius-key=$HELIUS_KEY
 prism dev
 ```
 
-Registration is required before setup and dev. The API account owns telemetry,
-errors, feedback, and cloud account operations; Telegram remains optional.
+Setup and dev are local-first: no registration required. A registered API
+account only owns opt-in cloud features (telemetry, cloud feedback, account
+operations); Telegram remains optional.
 
 ## Project overview
 
@@ -31,7 +33,7 @@ Prism is an autonomous liquidity agent for Solana (currently Meteora DLMM). It s
 The project has three independent layers:
 
 1. **CLI / engine** (local, required) — strategy, risk, memory, execution, backtesting, wallet management.
-2. **Cloudflare Workers** (cloud, required for setup/dev) — user accounts, API keys, subscriptions, Telegram linking, and authenticated D1 telemetry/feedback.
+2. **Cloudflare Workers** (cloud, sunset — opt-in only, undeployed) — user accounts, API keys, subscriptions, Telegram linking, and authenticated D1 telemetry/feedback.
 3. **Telegram bot** (chat, optional) — monitoring via `@prism_agent_bot`; requires the API layer.
 
 There are also optional peripheral subprojects:

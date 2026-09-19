@@ -51,7 +51,7 @@ CLI via `std::process`); Jev HTTP stays a `JevClient` trait + stub until reqwest
 (rustls) is justified.
 
 ## Bend kernel wiring (real, as of this wave)
-Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width + 8 per-tick Bend (7 proven + 1 stub-fed exit-order dry-run, LAWS-pending) + startup health-check) plus TA-exhaustion live (`ta_exhausted` fed by native RSI2/BB/MACD triple over stored closes; LAWS triple proven) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
+Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width + 8 per-tick Bend (7 proven + exit-order DRY-RUN with real TA vote, LAWS-pending) + startup health-check) plus TA-exhaustion live (`ta_exhausted` fed by native RSI2/BB/MACD triple over stored closes; LAWS triple proven) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
 binary needs no on-disk kernels file at runtime). Each mirrors
 `bench/bend-parity-harness.ts`: write a temp probe file importing the
 kernels, run `bend probe.bend`, parse the result off stdout. Every
