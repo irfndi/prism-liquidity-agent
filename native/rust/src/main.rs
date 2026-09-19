@@ -397,6 +397,26 @@ pub fn bin_volatility_stddev(bins: &[i64]) -> f64 {
         / (bins.len() - 1) as f64;
     var.sqrt()
 }
+/// Pure twin of the entry-shape regime pick: trend → bidask, high-vol chop →
+/// spot, calm → curve. Mirrors `recommendStrategy`
+/// (strategy-service.ts:483-492): `|drift| >= max(3, 2σ)` → bidask;
+/// else `σ >= thr` → spot; else curve (incl. cold start 0/0 → curve).
+/// Non-finite legs → curve (matches TS: NaN poisons both comparisons
+/// false → falls through to curve). No ENTRY_STRATEGY_TYPE leg on the host —
+/// TS `resolveEntryStrategySpec` returns non-auto shapes as-is, so this
+/// shadows the `auto` arm only (documented, never acts).
+pub fn recommend_entry_strategy(stddev: f64, threshold: f64, net_drift_bins: f64) -> &'static str {
+    if !(stddev.is_finite() && threshold.is_finite() && net_drift_bins.is_finite()) {
+        return "curve";
+    }
+    if net_drift_bins.abs() >= 3.0_f64.max(2.0 * stddev) {
+        return "bidask";
+    }
+    if stddev >= threshold {
+        return "spot";
+    }
+    "curve"
+}
 /// Tighter-cap probe pct is inline at the tick (`max_position_loss_pct / 2.0`);
 /// no helper — `loss_cap_danger` called twice, live + tighter.
 
@@ -2516,8 +2536,15 @@ fn tick(cfg: &config::Config, n: u64) {
             cooled,
             grace,
         );
+        // Entry-shape shadow: the `auto` regime pick from stored legs —
+        // σ over the vol window, drift = last−first over the same ring
+        // (TS `resolvePoolDriftMetrics` netDriftBins; cold start → 0).
+        // Non-auto ENTRY_STRATEGY_TYPE stays TS-owned (returned as-is).
+        let shape_drift = s.net_drift_bins.unwrap_or(0.0);
+        let entry_shape =
+            recommend_entry_strategy(vol_stddev, cfg.volatility_exit_stddev, shape_drift);
         println!(
-            "[prismd] shadow fee_il_exit position={} pool={} known={} bend_known={bend_known:?} mature={} ratio={:?} bend_fires={fires:?} accrual_allowed={accrual:?} enter_blocked={blocked:?} floor={floor} drift={drift} drift_rejects={drift_rejects:?} drift_floor={} loss_danger={danger:?} danger_tighter={danger_tighter:?} capital_exit={capital:?} stop_loss_veto={stop_loss:?} band_width_invalid={width_bad:?} band_contains_active={contained:?} band_width={:?} gas_cost_usd={gas_cost_usd:.4} daily_fees_usd={daily_fees_usd:?} gas_justified={gas_ok:?} rec_prob={rec_prob:?} rec_hold={rec_hold:?} rec_force={rec_force:?} interval_cooled={cooled:?} oor_grace={grace} last_rebal_ms={:?} vol_stddev={vol_stddev:.2} vol_drift_pct={vol_drift_pct:?} vol_thr={} vol_fires={vol_fires:?} (observational)",
+            "[prismd] shadow fee_il_exit position={} pool={} known={} bend_known={bend_known:?} mature={} ratio={:?} bend_fires={fires:?} accrual_allowed={accrual:?} enter_blocked={blocked:?} floor={floor} drift={drift} drift_rejects={drift_rejects:?} drift_floor={} loss_danger={danger:?} danger_tighter={danger_tighter:?} capital_exit={capital:?} stop_loss_veto={stop_loss:?} band_width_invalid={width_bad:?} band_contains_active={contained:?} band_width={:?} gas_cost_usd={gas_cost_usd:.4} daily_fees_usd={daily_fees_usd:?} gas_justified={gas_ok:?} rec_prob={rec_prob:?} rec_hold={rec_hold:?} rec_force={rec_force:?} interval_cooled={cooled:?} oor_grace={grace} last_rebal_ms={:?} vol_stddev={vol_stddev:.2} vol_drift_pct={vol_drift_pct:?} vol_thr={} vol_fires={vol_fires:?} entry_shape={entry_shape} shape_drift={shape_drift} (observational)",
             s.position_id, s.pool_address, s.known, s.mature, s.ratio, cfg.max_negative_drift_bins, s.upper_bin_id.zip(s.lower_bin_id).map(|(hi, lo)| hi - lo), s.last_rebalance_at_ms, cfg.volatility_exit_stddev
         );
         if fires == Some(true) {
@@ -4099,5 +4126,20 @@ mod tests {
             config::parse_volatility_exit_stddev(Some("-1")),
             Err("VOLATILITY_EXIT_STDDEV=-1 below min 0".to_string())
         );
+    }
+    #[test]
+    fn recommend_entry_strategy_guards() {
+        // Mirrors recommendStrategy (strategy-service.ts:483-492):
+        // |drift| >= max(3, 2σ) → bidask; else σ >= thr → spot; else curve.
+        // Non-finite → curve (TS falls through both comparisons to curve).
+        assert_eq!(recommend_entry_strategy(1.0, 5.0, 0.0), "curve");
+        assert_eq!(recommend_entry_strategy(0.0, 5.0, 0.0), "curve");
+        assert_eq!(recommend_entry_strategy(6.0, 5.0, 1.0), "spot");
+        assert_eq!(recommend_entry_strategy(5.0, 5.0, 1.0), "spot");
+        assert_eq!(recommend_entry_strategy(1.0, 5.0, 3.0), "bidask");
+        assert_eq!(recommend_entry_strategy(1.0, 5.0, -4.0), "bidask");
+        assert_eq!(recommend_entry_strategy(6.0, 5.0, 12.0), "bidask");
+        assert_eq!(recommend_entry_strategy(f64::NAN, 5.0, 0.0), "curve");
+        assert_eq!(recommend_entry_strategy(1.0, 5.0, f64::NAN), "curve");
     }
 }
