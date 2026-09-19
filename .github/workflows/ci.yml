@@ -72,11 +72,22 @@ jobs:
           scripts/prism.sh --version
           env -u HOME PATH="$PATH" scripts/prism.sh --version
 
+      # Compiled-binary gate: scripts/compile-binary.ts self-verifies every
+      # build it produces (fails loud on the oven-sh/bun#42664 startup crash
+      # instead of shipping a broken artifact). Runs on the linux-x64 runner
+      # (the only target it can smoke-test); skips cleanly elsewhere. Needs
+      # the CLI bundle first (tsdown.cli.config.ts) for the `prism` profile.
+      - name: Smoke test compiled binaries (informational — bun#42664 open)
+        continue-on-error: true
+        run: |
+          bunx --bun tsdown --config tsdown.cli.config.ts
+          bun scripts/compile-binary.ts prism
+          bun scripts/compile-binary.ts prismd
+
       # Coverage was local-only; this also enforces the istanbul thresholds
       # configured in vitest.config.ts so PRs can't silently regress them.
       - name: Run tests with coverage gate
         run: bun run coverage
-
   # Cloudflare worker suites (API route tests + Telegram bot) on
   # vitest-pool-workers, which simulates D1/KV/R2 locally — no Cloudflare
   # credentials needed. The root coverage gate only measures bench/** and
@@ -85,6 +96,7 @@ jobs:
   # Workers. Deliberately standalone (no `needs: build`) and limited to the
   # cloudflare/ subproject so it stays green independent of engine changes.
   cloudflare-tests:
+    if: false  # SUNSET (2026-09-18 rust-bend hybrid): Cloudflare compute undeployed — job gated off, not deleted.
     runs-on: ubuntu-latest
     # Split the worker suite across parallel shards (Vitest --shard). Each
     # shard runs a disjoint subset of the worker test files; the suite is only
@@ -455,3 +467,101 @@ jobs:
         run: |
           echo "Canary published: ${CANARY_VERSION} (commit ${FULL_SHA})"
           echo "Users can install with: prism update --canary"
+
+  # Host-side Rust tests for native/rust (rusqlite-backed store) on the
+  # stable toolchain. Standalone (no `needs:`) so a Rust regression fails CI
+  # even when the TS engine is green. Inherits the top-level `on:` like the
+  # engine jobs. Installs Bend too: the bend::clamp_fee_il subprocess-parity
+  # tests in src/main.rs skip (not fail) without it, so installing here is
+  # what turns them from a no-op into a real gate.
+  rust-host:
+    runs-on: ubuntu-latest
+    env:
+      BEND_NO_TELEMETRY: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install Bend
+        run: curl -fsSL https://bend-lang.com/install.sh | sh
+
+      - name: Check formatting
+        run: cargo +stable fmt --check --manifest-path native/rust/Cargo.toml
+
+      - name: Run Rust tests
+        run: |
+          export PATH="$HOME/.bend/bin:$PATH"
+          command -v bend
+          cargo +stable test --manifest-path native/rust/Cargo.toml
+
+  # prismd release binary: `cargo build --release` on linux-x64, uploaded as
+  # a CI artifact (no release, no deploy). Proves the host compiles clean on
+  # the deploy target every push and gives the box a known-good binary to
+  # pull by hand — the deploy itself stays manual (soak guard binds).
+  prismd-binary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Rust cache (release rebuilds stay fast)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/rust
+
+      - name: Check formatting
+        run: cargo +stable fmt --check --manifest-path native/rust/Cargo.toml
+
+      - name: Build prismd release
+        run: cargo +stable build --release --manifest-path native/rust/Cargo.toml
+
+      - name: Smoke test prismd (shadow tick, no keys)
+        run: |
+          SQLITE_DB_PATH=/tmp/prismd-ci-smoke.db SCAN_INTERVAL_MS=10000 BEND_BIN=false ./native/rust/target/release/prismd --ticks 1 2>&1 | tee /tmp/prismd-smoke.out
+          grep -q "tick=1.*exit_free=true" /tmp/prismd-smoke.out
+
+      - name: Upload prismd binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: prismd-linux-x64
+          path: native/rust/target/release/prismd
+          if-no-files-found: error
+
+  # Bend proof gate: `bend native/bend/PROOF.bend` fails while any law is open
+  # or false. Runs from the repo root (imports resolve relative to it) and
+  # asserts the 300n ceiling pin. BEND_NO_TELEMETRY=1 keeps the launcher
+  # quiet and offline-stable.
+  bend-proof:
+    runs-on: ubuntu-latest
+    env:
+      BEND_NO_TELEMETRY: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install Bend
+        run: curl -fsSL https://bend-lang.com/install.sh | sh
+
+      - name: Run proof (expect 300n)
+        run: |
+          export PATH="$HOME/.bend/bin:$PATH"
+          command -v bend
+          bend native/bend/PROOF.bend | tee /tmp/bend-proof.out
+          grep -q 300n /tmp/bend-proof.out

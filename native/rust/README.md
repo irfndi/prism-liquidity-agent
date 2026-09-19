@@ -39,11 +39,11 @@ reports set/unset, never values. Garbage numbers exit 2, never guess.
 cargo test
 ```
 
-39 tests (33 unconditional + 6 Bend-gated): fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
+40 tests (34 unconditional + 6 Bend-gated): fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
 Jev-fail-open, config defaults, config fail-closed, Jev-stub fail-open, real
 SQLite shadow read, drift ring-cap, evolve live-floors-and-lift, loss-cap breach,
 CLI flags, `signal_lift` edges (empty/one-sided/non-finite→None), loss-cap
-tighter-cap monotone superset, open-count excludes-closed, per-pool groups-open-only, stop-loss veto guards, exposure sums-open-only, halt edges, drawdown guards, rebalance-range guards, gas-justified guards, recovery-hold guards, interval-paper guards, cooldown-free guards, compound-parked guards, vol-exit/stddev guards, entry-shape guards, 4 unconditional bogus-binary fail-open/closed,
+tighter-cap monotone superset, open-count excludes-closed, per-pool groups-open-only, stop-loss veto guards, exposure sums-open-only, halt edges, drawdown guards, rebalance-range guards, gas-justified guards, recovery-hold guards, interval-paper guards, cooldown-free guards, compound-parked guards, vol-exit/stddev guards, entry-shape guards, range-width guards, 4 unconditional bogus-binary fail-open/closed,
 `K.clamp_thr` kernel, `evolve_thr` banded leg, `ta_exhausted` 6/6 confluence
 combos, `exit_order` 5/5 precedence picks, tick-match shadow surface —
 skipped, not failed, when `bend` is absent from `PATH`). Zero new deps (rusqlite only, Bend calls shell the `bend`
@@ -51,7 +51,7 @@ CLI via `std::process`); Jev HTTP stays a `JevClient` trait + stub until reqwest
 (rustls) is justified.
 
 ## Bend kernel wiring (real, as of this wave)
-Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape + 8 per-tick Bend (7 proven + 1 stub-fed exit-order dry-run, LAWS-pending) + startup health-check) plus one unproven gate (`ta_exhausted`, wrapper present but unwired-from-tick) in `src/main.rs` shell the `bend` CLI against
+Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width + 8 per-tick Bend (7 proven + 1 stub-fed exit-order dry-run, LAWS-pending) + startup health-check) plus one unproven gate (`ta_exhausted`, wrapper present but unwired-from-tick) in `src/main.rs` shell the `bend` CLI against
 binary needs no on-disk kernels file at runtime). Each mirrors
 `bench/bend-parity-harness.ts`: write a temp probe file importing the
 kernels, run `bend probe.bend`, parse the result off stdout. Every
@@ -123,6 +123,7 @@ so no host wrapper — `computeFeeIlRatio` needs in-memory bin-array + drift).
 - `pool_cooldown_free` + `read_pool_cooldowns` → per-pool `cooldown pool/until/reason/free` + `decision … cooldown_holds` tally (F7 mirror: no row or now>=until → free; active cooldown → hold; missing table → empty, never blocks).
 - `compound_approved` PARKED (unit-tested only, no tick call): exact F3 twin (net clears min+buffer+gas, fail-closed refuse arms, fail-open None) — needs the per-claim `netFeesUsd` leg (live claim result, program.ts:15218); `positions` cumulative is the wrong leg (false-approves), `fee_claims`/CLAIM events empty live. Wire only when a claim-time leg lands.
 - `vol_exit_fires` + `bin_volatility_stddev` + `VOLATILITY_EXIT_STDDEV` (5.0, [0,∞)) over a persisted `pool_snapshots` vol window sliced to max(2, `VOLATILITY_LOOKBACK_SNAPSHOTS`) + driftPct = |active−center|/halfWidth from stored band legs + reused interval `cooled`/grace → per-position `vol_stddev/vol_drift_pct/vol_thr/vol_fires` and `decision … vol_exit_shadow` tally (native twin of `decidePhase2Exit` vol arm: high-vol AND drifted AND cooled; runner exempt in the twin but unreachable — host has no runner flag yet, so all rows report as normal-lane; never exits).
+- `resolve_range_half_width` over stored `bin_step` + vol σ (tier 25/20/15 + coverage floor + σ-clamp(σ/2,0.5,2) + half-cap min(maxFull/2,34) + floor 5) → per-position `range_half_width/pool_bin_step/pool_current_price` (price provenance-only; never acts).
 - `recommend_entry_strategy` over the stored vol/drift legs (σ, `VOLATILITY_EXIT_STDDEV`, `net_drift_bins` cold→0) → per-position `entry_shape/shape_drift` (`|drift|>=max(3,2σ)`→bidask, `σ>=thr`→spot, else curve; non-finite→curve; `auto` arm only, non-auto stays TS-owned; never acts).
 ## Parity plan vs Bun shadow
 

@@ -47,8 +47,8 @@ There are also optional peripheral subprojects:
 - **Framework / DI:** [Effect-TS](https://effect.website) (`Context.Tag` + `Layer`). All side effects go through services.
 - **On-chain:** `@meteora-ag/dlmm` SDK + Helius RPC (`SOLANA_RPC_URL`).
 - **Local storage:** SQLite via `bun:sqlite` + `sqlite-vec` for vector memory.
-- **Cloud storage:** Cloudflare D1, KV, R2, Vectorize.
-- **Cloud API:** Hono 4.x inside Cloudflare Workers.
+- **Cloud storage:** Cloudflare D1, KV, R2, Vectorize (sunset — opt-in only, no new Cloudflare compute).
+- **Cloud API:** Hono 4.x inside Cloudflare Workers (sunset — opt-in only).
 - **Build:** `tsdown` (root engine entry → `dist/index.mjs`).
 - **Lint:** `oxlint` with `typescript`/`unicorn`/`oxc` plugins; config in `.oxlintrc.json`.
 - **Format:** `oxfmt`; config in `.oxfmtrc.json`.

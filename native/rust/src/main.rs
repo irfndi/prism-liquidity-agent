@@ -417,6 +417,50 @@ pub fn recommend_entry_strategy(stddev: f64, threshold: f64, net_drift_bins: f64
     }
     "curve"
 }
+/// Pure twin of `resolveRangeHalfWidth` (strategy-service.ts:429-467): base
+/// tier/binStep + price-coverage floor + sigma-scale clamp. Base 0 → tier
+/// 25/20/15; adaptive off / non-finite / σ<=0 → bounded base; else scale by
+/// clamp(σ/2, 0.5, 2). Half-cap = min(floor(maxFull/2), 34); floor = min(5,
+/// half-cap). Shadow-only, never acts.
+pub fn resolve_range_half_width(
+    bin_step: Option<i64>,
+    configured_base_half_width: i64,
+    adaptive_enabled: bool,
+    volatility_stddev: f64,
+    max_full_range_bins: i64,
+    min_price_coverage_pct: f64,
+) -> i64 {
+    let step = bin_step.unwrap_or(0);
+    let base = if configured_base_half_width > 0 {
+        configured_base_half_width
+    } else if step <= 10 {
+        25
+    } else if step <= 25 {
+        20
+    } else {
+        15
+    };
+    let half_cap = (max_full_range_bins.max(1) / 2).min(34).max(1);
+    let effective_min = 5.min(half_cap);
+    let coverage_width =
+        if min_price_coverage_pct > 0.0 && min_price_coverage_pct.is_finite() && step > 0 {
+            let unit = 1.0 + step as f64 / 10_000.0;
+            ((1.0 + min_price_coverage_pct / 100.0).ln() / unit.ln()).ceil() as i64
+        } else {
+            0
+        };
+    let coverage_floor = if coverage_width > 0 {
+        half_cap.min(coverage_width)
+    } else {
+        0
+    };
+    let effective_base = base.max(coverage_floor);
+    if !adaptive_enabled || !volatility_stddev.is_finite() || volatility_stddev <= 0.0 {
+        return half_cap.min(effective_min.max(effective_base));
+    }
+    let mult = (volatility_stddev / 2.0).clamp(0.5, 2.0);
+    half_cap.min(effective_min.max((effective_base as f64 * mult).round() as i64))
+}
 /// Tighter-cap probe pct is inline at the tick (`max_position_loss_pct / 2.0`);
 /// no helper — `loss_cap_danger` called twice, live + tighter.
 
@@ -769,7 +813,6 @@ mod bend {
     /// `checkDeterministicExits` (soak-untouched). DRY-RUN wired per-tick
     /// with tp/TA stubbed false + stored loss legs (see tick); full wiring
     /// waits on `ta-exhaustion.ts` for real TA verdicts.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn exit_order(bend_bin: &str, tp_hit: bool, ta_hit: bool, loss_hit: bool) -> Option<u64> {
         let expr = format!(
             "K.exit_order({}, {}, {})",
@@ -2065,6 +2108,12 @@ struct FeeIlShadow {
     /// fees = position daily fees, mirroring program.ts:11494-11500.
     pool_tvl_usd: Option<f64>,
     pool_fees_24h_usd: Option<f64>,
+    /// Range-width shadow inputs: latest `pool_snapshots.bin_step` /
+    /// `current_price` for the position's pool (`None` when no snapshot has
+    /// landed yet or the column is absent → tier/coverage fall back, never
+    /// acts). Same latest-row source as the TVL/fee legs.
+    pool_bin_step: Option<i64>,
+    pool_current_price: Option<f64>,
     /// Recovery-gate shadow input (F4): up to `oor_recovery_lookback` newest
     /// `active_bin_id`s for the position's pool, oldest-last → reversed to
     /// oldest-first at the tick (matches TS push order). `None`/short →
@@ -2163,6 +2212,15 @@ fn fee_il_shadows_capped(
                     |r| Ok((r.get(0).ok(), r.get(1).ok())),
                 )
                 .unwrap_or((None, None));
+            // ponytail: named columns, not SELECT * — old DBs without them fall
+            // back to None legs, never break the tick.
+            let (pool_bin_step, pool_current_price): (Option<i64>, Option<f64>) = conn
+                .query_row(
+                    "SELECT bin_step, current_price FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 1",
+                    [&pool_address],
+                    |r| Ok((r.get(0).ok(), r.get(1).ok())),
+                )
+                .unwrap_or((None, None));
             // Net drift over at most the `ring_cap` newest snapshots (TS: the
             // in-memory binHistory ring, last - first; snapshots are the
             // persisted ring). Cold start (<2 rows) -> None -> 0, never
@@ -2238,6 +2296,8 @@ fn fee_il_shadows_capped(
                 upper_bin_id,
                 pool_tvl_usd,
                 pool_fees_24h_usd,
+                pool_bin_step,
+                pool_current_price,
                 recovery_bins_newest_first,
                 vol_bins_newest_first,
                 last_rebalance_at_ms,
@@ -2545,6 +2605,19 @@ fn tick(cfg: &config::Config, n: u64) {
         let shape_drift = s.net_drift_bins.unwrap_or(0.0);
         let entry_shape =
             recommend_entry_strategy(vol_stddev, cfg.volatility_exit_stddev, shape_drift);
+        // Range-width shadow: twin of TS `resolveRangeHalfWidth` fed from the
+        // stored bin_step + vol-window σ legs (base 0 → tier, adaptive on,
+        // cap = MAX_REBALANCE_RANGE_BINS, floor 5). current_price logged for
+        // provenance only (the twin prices via binStep, not spot).
+        // Shadow-only: logs + legs, TS owns entries/rebalances.
+        let range_half_width = resolve_range_half_width(
+            s.pool_bin_step,
+            0,
+            true,
+            vol_stddev,
+            cfg.max_rebalance_range_bins,
+            5.0,
+        );
         // Exit-order dry-run: proven `K.exit_order` fed with stored loss legs
         // only — tp_hit=false + ta_hit=false are documented stubs (TP needs
         // the live ladder evaluator, TA needs `ta-exhaustion.ts` price
@@ -2554,8 +2627,8 @@ fn tick(cfg: &config::Config, n: u64) {
         let loss_hit = danger == Some(true) || stop_loss == Some(true);
         let exit_order_pick = bend::exit_order(&cfg.bend_bin, false, false, loss_hit);
         println!(
-            "[prismd] shadow fee_il_exit position={} pool={} known={} bend_known={bend_known:?} mature={} ratio={:?} bend_fires={fires:?} accrual_allowed={accrual:?} enter_blocked={blocked:?} floor={floor} drift={drift} drift_rejects={drift_rejects:?} drift_floor={} loss_danger={danger:?} danger_tighter={danger_tighter:?} capital_exit={capital:?} stop_loss_veto={stop_loss:?} band_width_invalid={width_bad:?} band_contains_active={contained:?} band_width={:?} gas_cost_usd={gas_cost_usd:.4} daily_fees_usd={daily_fees_usd:?} gas_justified={gas_ok:?} rec_prob={rec_prob:?} rec_hold={rec_hold:?} rec_force={rec_force:?} interval_cooled={cooled:?} oor_grace={grace} last_rebal_ms={:?} vol_stddev={vol_stddev:.2} vol_drift_pct={vol_drift_pct:?} vol_thr={} vol_fires={vol_fires:?} entry_shape={entry_shape} shape_drift={shape_drift} loss_hit={loss_hit} exit_order={exit_order_pick:?} (observational)",
-            s.position_id, s.pool_address, s.known, s.mature, s.ratio, cfg.max_negative_drift_bins, s.upper_bin_id.zip(s.lower_bin_id).map(|(hi, lo)| hi - lo), s.last_rebalance_at_ms, cfg.volatility_exit_stddev
+            "[prismd] shadow fee_il_exit position={} pool={} known={} bend_known={bend_known:?} mature={} ratio={:?} bend_fires={fires:?} accrual_allowed={accrual:?} enter_blocked={blocked:?} floor={floor} drift={drift} drift_rejects={drift_rejects:?} drift_floor={} loss_danger={danger:?} danger_tighter={danger_tighter:?} capital_exit={capital:?} stop_loss_veto={stop_loss:?} band_width_invalid={width_bad:?} band_contains_active={contained:?} band_width={:?} gas_cost_usd={gas_cost_usd:.4} daily_fees_usd={daily_fees_usd:?} gas_justified={gas_ok:?} rec_prob={rec_prob:?} rec_hold={rec_hold:?} rec_force={rec_force:?} interval_cooled={cooled:?} oor_grace={grace} last_rebal_ms={:?} vol_stddev={vol_stddev:.2} vol_drift_pct={vol_drift_pct:?} vol_thr={} vol_fires={vol_fires:?} entry_shape={entry_shape} shape_drift={shape_drift} range_half_width={range_half_width} pool_bin_step={:?} pool_current_price={:?} loss_hit={loss_hit} exit_order={exit_order_pick:?} (observational)",
+            s.position_id, s.pool_address, s.known, s.mature, s.ratio, cfg.max_negative_drift_bins, s.upper_bin_id.zip(s.lower_bin_id).map(|(hi, lo)| hi - lo), s.last_rebalance_at_ms, cfg.volatility_exit_stddev, s.pool_bin_step, s.pool_current_price
         );
         if fires == Some(true) {
             exit_shadow += 1;
@@ -4154,5 +4227,32 @@ mod tests {
         assert_eq!(recommend_entry_strategy(6.0, 5.0, 12.0), "bidask");
         assert_eq!(recommend_entry_strategy(f64::NAN, 5.0, 0.0), "curve");
         assert_eq!(recommend_entry_strategy(1.0, 5.0, f64::NAN), "curve");
+    }
+    #[test]
+    fn resolve_range_half_width_guards() {
+        // Mirrors resolveRangeHalfWidth (strategy-service.ts:429-467):
+        // tier base (None/0 → 25, 20 → 20, 100 → 15) + coverage floor +
+        // sigma clamp(σ/2, 0.5, 2) + half-cap min(maxFull/2, 34) + floor 5.
+        assert_eq!(resolve_range_half_width(None, 0, true, 0.0, 200, 5.0), 25);
+        assert_eq!(
+            resolve_range_half_width(Some(20), 0, false, 0.0, 200, 0.0),
+            20
+        );
+        assert_eq!(
+            resolve_range_half_width(Some(100), 0, false, 0.0, 200, 0.0),
+            15
+        );
+        assert_eq!(
+            resolve_range_half_width(Some(4), 0, true, 6.0, 200, 5.0),
+            34
+        );
+        assert_eq!(
+            resolve_range_half_width(Some(4), 0, true, 0.5, 200, 5.0),
+            17
+        );
+        assert_eq!(
+            resolve_range_half_width(Some(4), 0, true, f64::NAN, 200, 5.0),
+            34
+        );
     }
 }
