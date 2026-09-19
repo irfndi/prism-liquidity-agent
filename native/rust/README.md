@@ -39,11 +39,11 @@ reports set/unset, never values. Garbage numbers exit 2, never guess.
 cargo test
 ```
 
-40 tests (34 unconditional + 6 Bend-gated): fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
+41 tests (35 unconditional + 6 Bend-gated): fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
 Jev-fail-open, config defaults, config fail-closed, Jev-stub fail-open, real
 SQLite shadow read, drift ring-cap, evolve live-floors-and-lift, loss-cap breach,
 CLI flags, `signal_lift` edges (empty/one-sided/non-finite→None), loss-cap
-tighter-cap monotone superset, open-count excludes-closed, per-pool groups-open-only, stop-loss veto guards, exposure sums-open-only, halt edges, drawdown guards, rebalance-range guards, gas-justified guards, recovery-hold guards, interval-paper guards, cooldown-free guards, compound-parked guards, vol-exit/stddev guards, entry-shape guards, range-width guards, 4 unconditional bogus-binary fail-open/closed,
+tighter-cap monotone superset, open-count excludes-closed, per-pool groups-open-only, stop-loss veto guards, exposure sums-open-only, halt edges, drawdown guards, rebalance-range guards, gas-justified guards, recovery-hold guards, interval-paper guards, cooldown-free guards, compound-parked guards, vol-exit/stddev guards, entry-shape guards, range-width guards, TA-indicator guards, 4 unconditional bogus-binary fail-open/closed,
 `K.clamp_thr` kernel, `evolve_thr` banded leg, `ta_exhausted` 6/6 confluence
 combos, `exit_order` 5/5 precedence picks, tick-match shadow surface —
 skipped, not failed, when `bend` is absent from `PATH`). Zero new deps (rusqlite only, Bend calls shell the `bend`
@@ -51,7 +51,7 @@ CLI via `std::process`); Jev HTTP stays a `JevClient` trait + stub until reqwest
 (rustls) is justified.
 
 ## Bend kernel wiring (real, as of this wave)
-Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width + 8 per-tick Bend (7 proven + 1 stub-fed exit-order dry-run, LAWS-pending) + startup health-check) plus one unproven gate (`ta_exhausted`, wrapper present but unwired-from-tick) in `src/main.rs` shell the `bend` CLI against
+Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width + 8 per-tick Bend (7 proven + 1 stub-fed exit-order dry-run, LAWS-pending) + startup health-check) plus TA-exhaustion live (`ta_exhausted` fed by native RSI2/BB/MACD triple over stored closes; LAWS triple proven) in `src/main.rs` shell the `bend` CLI against
 binary needs no on-disk kernels file at runtime). Each mirrors
 `bench/bend-parity-harness.ts`: write a temp probe file importing the
 kernels, run `bend probe.bend`, parse the result off stdout. Every
@@ -73,12 +73,12 @@ Wired today (all shadow-only, observational, never acted on):
 - `bend::ta_exhausted` → `K.ta_exhausted` (thirteenth-wave confluence gate:
   RSI-overbought AND (BB-upper OR MACD-green); pure bool AND/OR, F32 indicator
   math stays TS-side; exercised by native `ta_exhausted_truth_table` + bend-parity
-  TA-exhaustion `it`, LAWS pending strategy review; test-only `cfg_attr`
-  until the TS side + tick shadow land).
+  TA-exhaustion `it`, LAWS triple now proven (ta_overbought_fires /
+  single_signal_quiet / cold_start_quiet); tick shadow live with native triple.
 - `bend::exit_order` → `K.exit_order` (precedence gate: TP→TA→loss→none as 1n/2n/3n/0n;
   pure bool order, `decidePositionExit` shape WITHOUT wiring into `checkDeterministicExits`;
   exercised by native `exit_order_precedence` + bend-parity exit-order `it`,
-  LAWS pending; DRY-RUN wired per-tick with tp/TA stubbed false + stored loss legs
+  LAWS pending; DRY-RUN wired per-tick with tp stubbed false + REAL TA vote (native triple) + stored loss legs
   (`loss_hit = danger==Some(true) || stop_loss==Some(true)` → per-position `loss_hit/exit_order`
   + `decision … exit_order_loss_shadow` tally counting Some(3); full wiring waits on
   `ta-exhaustion.ts` for real TA verdicts; never acts).

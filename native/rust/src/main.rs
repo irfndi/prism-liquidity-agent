@@ -461,6 +461,102 @@ pub fn resolve_range_half_width(
     let mult = (volatility_stddev / 2.0).clamp(0.5, 2.0);
     half_cap.min(effective_min.max((effective_base as f64 * mult).round() as i64))
 }
+/// Pure twins of the TA-exhaustion indicators (engine/ta-exhaustion.ts):
+/// Wilder RSI(2), Bollinger upper (20, 2sd), MACD(12,26,9) histogram.
+/// `None` on short history / non-finite junk (fail-open no-vote, like TS
+/// TA_EXHAUSTION_MIN_POINTS floor). Closes newest-first (host order) —
+/// each twin reverses to oldest-first internally. Shadow-only.
+pub fn ta_rsi2(closes_newest_first: &[f64]) -> Option<f64> {
+    if closes_newest_first.len() < 3 {
+        return None;
+    }
+    if !closes_newest_first.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let closes: Vec<f64> = closes_newest_first.iter().rev().copied().collect();
+    let period = 2usize;
+    let (mut gain_sum, mut loss_sum) = (0.0, 0.0);
+    for i in 1..=period {
+        let diff = closes[i] - closes[i - 1];
+        if diff > 0.0 {
+            gain_sum += diff;
+        } else {
+            loss_sum -= diff;
+        }
+    }
+    let (mut avg_gain, mut avg_loss) = (gain_sum / period as f64, loss_sum / period as f64);
+    for i in period + 1..closes.len() {
+        let diff = closes[i] - closes[i - 1];
+        avg_gain = (avg_gain * (period - 1) as f64 + diff.max(0.0)) / period as f64;
+        avg_loss = (avg_loss * (period - 1) as f64 + (-diff).max(0.0)) / period as f64;
+    }
+    if avg_loss == 0.0 {
+        return Some(if avg_gain == 0.0 { 50.0 } else { 100.0 });
+    }
+    if avg_gain == 0.0 {
+        return Some(0.0);
+    }
+    Some(100.0 - 100.0 / (1.0 + avg_gain / avg_loss))
+}
+/// Bollinger upper over the trailing 20 closes. `None` below 20 / on junk.
+pub fn ta_bb_upper(closes_newest_first: &[f64]) -> Option<f64> {
+    const N: usize = 20;
+    if closes_newest_first.len() < N {
+        return None;
+    }
+    // Newest-first storage → reverse to oldest-first, then take the
+    // TRAILING 20 (latest closes), matching TS closes.slice(-n).
+    let oldest: Vec<f64> = closes_newest_first.iter().rev().copied().collect();
+    let window = &oldest[oldest.len() - N..];
+    if !window.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let middle = window.iter().sum::<f64>() / N as f64;
+    let var = window
+        .iter()
+        .map(|v| (v - middle) * (v - middle))
+        .sum::<f64>()
+        / N as f64;
+    Some(middle + 2.0 * var.sqrt())
+}
+fn ta_ema(values: &[f64], period: usize) -> Vec<f64> {
+    let mut ema = values[..period].iter().sum::<f64>() / period as f64;
+    let mut out = vec![ema];
+    let k = 2.0 / (period as f64 + 1.0);
+    for v in &values[period..] {
+        ema += k * (*v - ema);
+        out.push(ema);
+    }
+    out
+}
+/// MACD histogram current + previous. `None` below 35 closes / on junk.
+/// "First green" = current > 0 with previous <= 0 (checked at the tick).
+pub fn ta_macd_hist(closes_newest_first: &[f64]) -> Option<(f64, f64)> {
+    if closes_newest_first.len() < 35 {
+        return None;
+    }
+    if !closes_newest_first.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let closes: Vec<f64> = closes_newest_first.iter().rev().copied().collect();
+    let fast = ta_ema(&closes, 12);
+    let slow = ta_ema(&closes, 26);
+    let macd: Vec<f64> = slow
+        .iter()
+        .enumerate()
+        .map(|(i, s)| fast[i + 14] - s)
+        .collect();
+    let signal = ta_ema(&macd, 9);
+    let hist: Vec<f64> = signal
+        .iter()
+        .enumerate()
+        .map(|(i, s)| macd[i + 8] - s)
+        .collect();
+    if hist.len() < 2 {
+        return None;
+    }
+    Some((hist[hist.len() - 1], hist[hist.len() - 2]))
+}
 /// Tighter-cap probe pct is inline at the tick (`max_position_loss_pct / 2.0`);
 /// no helper — `loss_cap_danger` called twice, live + tighter.
 
@@ -2114,6 +2210,11 @@ struct FeeIlShadow {
     /// acts). Same latest-row source as the TVL/fee legs.
     pool_bin_step: Option<i64>,
     pool_current_price: Option<f64>,
+    /// TA-exhaustion shadow input: up to 35 newest `current_price` closes
+    /// for the position's pool, newest-first (RSI/BB/MACD need ordered
+    /// history; short/empty → TA no-vote, fail-open like TS
+    /// TA_EXHAUSTION_MIN_POINTS floor). Same source as the bin ring.
+    ta_closes_newest_first: Option<Vec<f64>>,
     /// Recovery-gate shadow input (F4): up to `oor_recovery_lookback` newest
     /// `active_bin_id`s for the position's pool, oldest-last → reversed to
     /// oldest-first at the tick (matches TS push order). `None`/short →
@@ -2214,6 +2315,21 @@ fn fee_il_shadows_capped(
                 .unwrap_or((None, None));
             // ponytail: named columns, not SELECT * — old DBs without them fall
             // back to None legs, never break the tick.
+            // TA closes window: up to 35 newest closes, newest-first.
+            // Tolerant: empty on DB error → TA no-vote (fail-open).
+            let ta_closes_newest_first: Option<Vec<f64>> = (|| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT current_price FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 35",
+                    )
+                    .ok()?;
+                let closes: Vec<f64> = stmt
+                    .query_map(rusqlite::params![pool_address], |r| r.get(0))
+                    .ok()?
+                    .flatten()
+                    .collect();
+                if closes.is_empty() { None } else { Some(closes) }
+            })();
             let (pool_bin_step, pool_current_price): (Option<i64>, Option<f64>) = conn
                 .query_row(
                     "SELECT bin_step, current_price FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 1",
@@ -2298,6 +2414,7 @@ fn fee_il_shadows_capped(
                 pool_fees_24h_usd,
                 pool_bin_step,
                 pool_current_price,
+                ta_closes_newest_first,
                 recovery_bins_newest_first,
                 vol_bins_newest_first,
                 last_rebalance_at_ms,
@@ -2625,9 +2742,40 @@ fn tick(cfg: &config::Config, n: u64) {
         // loss legs. DRY-RUN: logs + counter, never acts; when TA lands the
         // same line takes real bools with zero structural change.
         let loss_hit = danger == Some(true) || stop_loss == Some(true);
-        let exit_order_pick = bend::exit_order(&cfg.bend_bin, false, false, loss_hit);
+        // TA-exhaustion shadow: closes depth logged; bools stay stubbed
+        // false until the host ports RSI2/BB/MACD math (closes ARE stored —
+        // ta_closes_newest_first — but indicator computation lives TS-side).
+        // Fail-open: short history → None (no-vote, like TS MIN_POINTS).
+        // TA-exhaustion shadow: native indicator triple over stored closes
+        // (newest-first) → proven `K.ta_exhausted` confluence. Short/junk →
+        // None (fail-open no-vote, mirrors TS TA_EXHAUSTION_MIN_POINTS).
+        // Shadow-only: logs + exit_order ta_hit, TS owns the EXIT.
+        let ta_depth = s
+            .ta_closes_newest_first
+            .as_ref()
+            .map(|c| c.len())
+            .unwrap_or(0);
+        let ta_bools: Option<(bool, bool, bool)> =
+            s.ta_closes_newest_first.as_ref().and_then(|closes| {
+                let rsi = ta_rsi2(closes)?;
+                let upper = ta_bb_upper(closes)?;
+                let (hist, prev) = ta_macd_hist(closes)?;
+                let close = *closes.first()?;
+                if !close.is_finite() {
+                    return None;
+                }
+                Some((rsi > 90.0, close > upper, hist > 0.0 && prev <= 0.0))
+            });
+        let ta_vote: Option<bool> = match ta_bools {
+            Some((rsi_ob, above_bb, first_green)) => {
+                bend::ta_exhausted(&cfg.bend_bin, rsi_ob, above_bb, first_green)
+            }
+            None => None,
+        };
+        let exit_order_pick =
+            bend::exit_order(&cfg.bend_bin, false, ta_vote.unwrap_or(false), loss_hit);
         println!(
-            "[prismd] shadow fee_il_exit position={} pool={} known={} bend_known={bend_known:?} mature={} ratio={:?} bend_fires={fires:?} accrual_allowed={accrual:?} enter_blocked={blocked:?} floor={floor} drift={drift} drift_rejects={drift_rejects:?} drift_floor={} loss_danger={danger:?} danger_tighter={danger_tighter:?} capital_exit={capital:?} stop_loss_veto={stop_loss:?} band_width_invalid={width_bad:?} band_contains_active={contained:?} band_width={:?} gas_cost_usd={gas_cost_usd:.4} daily_fees_usd={daily_fees_usd:?} gas_justified={gas_ok:?} rec_prob={rec_prob:?} rec_hold={rec_hold:?} rec_force={rec_force:?} interval_cooled={cooled:?} oor_grace={grace} last_rebal_ms={:?} vol_stddev={vol_stddev:.2} vol_drift_pct={vol_drift_pct:?} vol_thr={} vol_fires={vol_fires:?} entry_shape={entry_shape} shape_drift={shape_drift} range_half_width={range_half_width} pool_bin_step={:?} pool_current_price={:?} loss_hit={loss_hit} exit_order={exit_order_pick:?} (observational)",
+            "[prismd] shadow fee_il_exit position={} pool={} known={} bend_known={bend_known:?} mature={} ratio={:?} bend_fires={fires:?} accrual_allowed={accrual:?} enter_blocked={blocked:?} floor={floor} drift={drift} drift_rejects={drift_rejects:?} drift_floor={} loss_danger={danger:?} danger_tighter={danger_tighter:?} capital_exit={capital:?} stop_loss_veto={stop_loss:?} band_width_invalid={width_bad:?} band_contains_active={contained:?} band_width={:?} gas_cost_usd={gas_cost_usd:.4} daily_fees_usd={daily_fees_usd:?} gas_justified={gas_ok:?} rec_prob={rec_prob:?} rec_hold={rec_hold:?} rec_force={rec_force:?} interval_cooled={cooled:?} oor_grace={grace} last_rebal_ms={:?} vol_stddev={vol_stddev:.2} vol_drift_pct={vol_drift_pct:?} vol_thr={} vol_fires={vol_fires:?} entry_shape={entry_shape} shape_drift={shape_drift} range_half_width={range_half_width} pool_bin_step={:?} pool_current_price={:?} loss_hit={loss_hit} exit_order={exit_order_pick:?} ta_depth={ta_depth} ta_rsi_ob={ta_bools:?} ta_vote={ta_vote:?} (observational)",
             s.position_id, s.pool_address, s.known, s.mature, s.ratio, cfg.max_negative_drift_bins, s.upper_bin_id.zip(s.lower_bin_id).map(|(hi, lo)| hi - lo), s.last_rebalance_at_ms, cfg.volatility_exit_stddev, s.pool_bin_step, s.pool_current_price
         );
         if fires == Some(true) {
@@ -4227,6 +4375,37 @@ mod tests {
         assert_eq!(recommend_entry_strategy(6.0, 5.0, 12.0), "bidask");
         assert_eq!(recommend_entry_strategy(f64::NAN, 5.0, 0.0), "curve");
         assert_eq!(recommend_entry_strategy(1.0, 5.0, f64::NAN), "curve");
+    }
+    #[test]
+    fn ta_indicator_twins_guard() {
+        // Mirrors engine/ta-exhaustion.ts: RSI(2) Wilder, BB-upper (20,2sd),
+        // MACD(12,26,9) histogram. Short/junk → None (fail-open).
+        assert_eq!(ta_rsi2(&[]), None);
+        assert_eq!(ta_rsi2(&[1.0, 2.0]), None);
+        assert_eq!(ta_rsi2(&[f64::NAN, 2.0, 3.0]), None);
+        // Flat series → RSI 50 (no gain, no loss).
+        assert_eq!(ta_rsi2(&[5.0; 40]), Some(50.0));
+        // Monotone rise → RSI 100; monotone fall → RSI 0.
+        let up: Vec<f64> = (0..40).map(|i| i as f64).rev().collect();
+        assert_eq!(ta_rsi2(&up), Some(100.0));
+        let down: Vec<f64> = (0..40).map(|i| i as f64).collect();
+        assert_eq!(ta_rsi2(&down), Some(0.0));
+        // BB-upper: short → None; flat-20 → upper == close.
+        assert_eq!(ta_bb_upper(&[1.0; 10]), None);
+        assert_eq!(ta_bb_upper(&[7.0; 20]), Some(7.0));
+        // Ramp newest-first (20..=1): trailing window is the ascending ramp;
+        // upper must exceed the latest close (catches oldest-20 slicing).
+        let ramp_nf: Vec<f64> = (1..=20).rev().map(|i| i as f64).collect();
+        let upper = ta_bb_upper(&ramp_nf).unwrap();
+        assert!(upper > 20.0, "ramp upper {upper} must exceed close 20");
+        // MACD hist: short → None; junk → None.
+        assert_eq!(ta_macd_hist(&[1.0; 20]), None);
+        let mut junk = [1.0; 40];
+        junk[5] = f64::NAN;
+        assert_eq!(ta_macd_hist(&junk), None);
+        // Flat-40 → hist (0,0): no first-green.
+        let (h, pr) = ta_macd_hist(&[3.0; 40]).unwrap();
+        assert!((h.abs() < 1e-9) && (pr.abs() < 1e-9));
     }
     #[test]
     fn resolve_range_half_width_guards() {

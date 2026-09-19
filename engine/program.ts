@@ -2,6 +2,10 @@ import { Effect, Fiber, Layer } from "effect";
 import { ConfigService, ConfigLive, type AppConfig } from "./config-service.js";
 import { AdapterLive, getUnpricedWalletMintCount } from "./adapter-service.js";
 import { StrategyLive } from "./strategy-service.js";
+import { buildActiveScanSet, snapshotPriceDrift } from "./scan-set.js";
+// Re-exported so existing importers (bench/metrics-data-path.test.ts) keep
+// importing from program.js while the implementation lives in scan-set.js.
+export { snapshotPriceDrift } from "./scan-set.js";
 import { MemoryLive } from "./memory-service.js";
 import {
   RiskLive,
@@ -75,8 +79,14 @@ import {
   type MarketPoolRank,
 } from "./market-gate.js";
 import { isPositionLossCapBreached, positionLossCapReasoning } from "./position-loss-cap.js";
-import { isMaxPositionAgeBreached, maxPositionAgeReasoning } from "./max-position-age.js";
+import {
+  isMaxPositionAgeBreached,
+  maxPositionAgeReasoning,
+  isFeeStarved,
+  feeStarvationReasoning,
+} from "./max-position-age.js";
 import { taggedExitReason } from "./exit-reason.js";
+import { maybeTaExhaustionExit, TA_EXHAUSTION_MIN_POINTS } from "./ta-exhaustion.js";
 import {
   gateAndRankLaunchPools,
   summarizeLaunchRejections,
@@ -1029,17 +1039,6 @@ export function isSafetyBinsSkippable(
   safetyRejected: boolean,
 ): boolean {
   return safetyRejected && positionsForPool(trackedPositions, poolAddress).length === 0;
-}
-
-/** Price-drift context for fee/IL metrics from the previous snapshot (undefined on cold start). */
-export function snapshotPriceDrift(
-  previousSnapshot: PoolSnapshot | undefined,
-): { readonly previousPrice: number; readonly previousTimestamp: number } | undefined {
-  if (previousSnapshot === undefined) return undefined;
-  return {
-    previousPrice: previousSnapshot.currentPrice,
-    previousTimestamp: previousSnapshot.timestamp,
-  };
 }
 
 /** All tracked positions on a pool — a pool may hold several (tight+wide pairs). */
@@ -6253,43 +6252,32 @@ export const program = Effect.gen(function* () {
   // backstops the gap (contract: no persistence for the peak tracker).
   const launchPeakFees1h = new Map<string, number>();
 
-  // Rebuild the active scan set: the approved (watchlist) snapshot, the
-  // market-scan top-K (ranked by the freshest gate), eligible autonomous
-  // candidates and fallen-angel candidates. Called after every reconcile AND
-  // right after the market universe refresh so a fresh gate is never blocked
-  // by a stale set.
+  // Rebuild the active scan set via the pure buildActiveScanSet helper
+  // (engine/scan-set.ts): the approved (watchlist) snapshot, the market-scan
+  // top-K, eligible autonomous candidates, fallen-angel candidates and launch
+  // pools — plus every held pool. Held pools must survive every rebuild: a
+  // pool that drops out of the market top-K while a position is still open
+  // needs its protective exits (timebox/max-age/fee-il) evaluated until it
+  // actually closes. Previously only refreshPoolsToScan (reconcile path)
+  // added held pools and runScanCycle's rebuild wiped them, so survivors
+  // were never re-scanned. Several positions can share a pool, so the held
+  // set dedupes on the address.
   const rebuildPoolsToScan = (): void => {
-    poolsToScan = [...approvedPoolAddresses];
-    for (const poolAddress of marketScanPools) {
-      if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
-    }
-    for (const poolAddress of autonomousCandidatePools) {
-      if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
-    }
-    for (const poolAddress of fallenAngelCandidatePools) {
-      if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
-    }
-    // Launch pools (Launch Mode v2): empty unless BOTH launchScanEnabled and
-    // launchExecutionEnabled are on, so the default path is unchanged.
-    for (const poolAddress of launchScanPools) {
-      if (!poolsToScan.includes(poolAddress)) poolsToScan.push(poolAddress);
-    }
+    const heldPools = new Set<string>();
+    for (const pos of trackedPositions.values()) heldPools.add(pos.poolAddress);
+    poolsToScan = buildActiveScanSet({
+      approvedPoolAddresses,
+      marketScanPools,
+      autonomousCandidatePools,
+      fallenAngelCandidatePools,
+      launchScanPools,
+      heldPoolAddresses: heldPools,
+    });
   };
   const refreshPoolsToScan = (reconcileResult: PositionReconcileResult) => {
     unresolvedPoolAddresses = new Set(reconcileResult.unresolvedPoolAddresses);
     rebuildPoolsToScan();
-    if (!reconcileResult.succeeded) {
-      return;
-    }
-    // Held pools stay scanned even if they left the watchlist — positions are
-    // managed to exit. Iterate values: several positions can share a pool.
-    for (const pos of trackedPositions.values()) {
-      if (!poolsToScan.includes(pos.poolAddress)) {
-        poolsToScan.push(pos.poolAddress);
-      }
-    }
   };
-
   const refreshAutonomousCandidates = (scanOrdinal: number): Effect.Effect<void, never> =>
     Effect.gen(function* () {
       if (config.autonomousTokenMode === "off") return;
@@ -7896,7 +7884,7 @@ export const program = Effect.gen(function* () {
   // top-N pages of the TVL-ranked Meteora universe, gate by TVL / fee APR /
   // volume turnover / token safety / bin step, and rebuild the active
   // top-K set. Pools that stop qualifying drop out of the active set next
-  // cycle (held positions stay scanned via refreshPoolsToScan). Every
+  // cycle (held positions stay scanned via rebuildPoolsToScan). Every
   // failure path fails open: the last ranked set keeps serving.
   const refreshMarketUniverse = (now: number): Effect.Effect<void, never> =>
     Effect.gen(function* () {
@@ -10636,6 +10624,17 @@ export const program = Effect.gen(function* () {
         if (!isMaxPositionAgeBreached(ageInput)) return null;
         return conf1PositionExit(pos, maxPositionAgeReasoning(ageInput));
       }
+      function maybeFeeStarvationExit(pos: PositionRecord): AgentDecision | null {
+        const starveInput = {
+          ageMs: Date.now() - pos.timestamp,
+          cumulativeFeesUsd: pos.cumulativeFeesClaimedUsd,
+          cumulativeRewardsUsd: pos.cumulativeRewardsClaimedUsd,
+          starveAgeMs: config.feeStarvationAgeMs ?? 0,
+          starveFeesUsd: config.feeStarvationMinFeesUsd ?? 1,
+        };
+        if (!isFeeStarved(starveInput)) return null;
+        return conf1PositionExit(pos, feeStarvationReasoning(starveInput));
+      }
 
       function checkDeterministicExits(
         pos: PositionRecord,
@@ -10644,15 +10643,58 @@ export const program = Effect.gen(function* () {
         tpTargetLifecycle: LifecycleExit | null,
         ilDominance: IlDominanceSignal | null,
       ): Effect.Effect<AgentDecision | null, Error> {
-        return Effect.gen(function* () {
+        function readTaCloses(): Effect.Effect<readonly number[], Error> {
+          return Effect.gen(function* () {
+            // TA closes feed: current_price history over a window sized for
+            // TA_EXHAUSTION_MIN_POINTS closes with 2x slack for missed cycles;
+            // measured sources only (datapi/geckoterminal), fail-open [].
+            const taWindowMs = Math.max(
+              60 * 60_000,
+              TA_EXHAUSTION_MIN_POINTS * 2 * (config.scanIntervalMs ?? 600_000),
+            );
+            const taSnaps = yield* db
+              .getSnapshots(poolAddress, pool.timestamp - taWindowMs, pool.timestamp)
+              .pipe(
+                Effect.catch(() =>
+                  // SAFETY: The fallback literal satisfies the declared readonly array type.
+                  Effect.succeed([] as ReadonlyArray<PoolSnapshot>),
+                ),
+              );
+            return taSnaps
+              .filter((s) => s.statsSource === "datapi" || s.statsSource === "geckoterminal")
+              .map((s) => s.currentPrice);
+          });
+        }
+        function checkLifecycleExit(): AgentDecision | null {
           if (faLifecycle) return conf1PositionExit(pos, faLifecycle.reasoning);
           if (launchLifecycle) return conf1PositionExit(pos, launchLifecycle.reasoning);
           if (tpTargetLifecycle) return conf1PositionExit(pos, tpTargetLifecycle.reasoning);
+          return null;
+        }
+        return Effect.gen(function* () {
+          const taCloses = yield* readTaCloses();
+          const lifecycleExit = checkLifecycleExit();
+          if (lifecycleExit) return lifecycleExit;
+          // TA-exhaustion EXIT (profit-exhaustion before loss-side gates):
+          // RSI(2)>90 + BB-upper/MACD-green confluence over current_price
+          // history; fail-open null when cold/junk (never throws).
+          const taExit = checkTaExhaustionExit(taCloses, pos);
+          if (taExit) return taExit;
           if (w15Signals.depeg || w15Signals.liquidityDrain) {
             return conf1PositionExit(
               pos,
               buildW15ExitReasoning(w15Signals.depeg, w15Signals.liquidityDrain),
             );
+          }
+          function checkTaExhaustionExit(
+            closes: readonly number[],
+            position: PositionRecord,
+          ): AgentDecision | null {
+            return maybeTaExhaustionExit({
+              poolAddress,
+              positionId: position.positionId,
+              closes,
+            });
           }
           function checkIlDominanceExit(): Effect.Effect<AgentDecision | null, Error> {
             return Effect.gen(function* () {
@@ -10686,7 +10728,7 @@ export const program = Effect.gen(function* () {
           // checkIlDominanceExit being pulled into their own closures).
           // Both are simple synchronous checks with no alert/memory side
           // effects, so combining them doesn't change externally-observable
-          // ordering vs the alerting exits (IL-dominance, TVL-drop) below.
+          // ordering vs the alerting exits (IL-dominance above, TVL-drop below).
           function checkLossCapOrDustExit(): AgentDecision | null {
             const lossCapExit = maybePositionLossCapExit(pos);
             if (lossCapExit) return lossCapExit;
@@ -10701,6 +10743,14 @@ export const program = Effect.gen(function* () {
           }
           const lossCapOrDustExit = checkLossCapOrDustExit();
           if (lossCapOrDustExit) return lossCapOrDustExit;
+          // Age exits grouped (max-age → starvation) to keep the generator
+          // under the complexity ceiling; both are synchronous, order
+          // preserved: loss-cap → dust → tvl-drop → max-age → starvation.
+          function checkAgeExit(): AgentDecision | null {
+            const maxAgeExit = maybeMaxPositionAgeExit(pos);
+            if (maxAgeExit) return maxAgeExit;
+            return maybeFeeStarvationExit(pos);
+          }
           function checkTvlDropExit(): Effect.Effect<AgentDecision | null, Error> {
             return Effect.gen(function* () {
               if (!(tvlVelocity < -config.tvlDropExitPct)) return null;
@@ -10734,8 +10784,8 @@ export const program = Effect.gen(function* () {
 
           const tvlExit = yield* checkTvlDropExit();
           if (tvlExit) return tvlExit;
-          const maxAgeExit = maybeMaxPositionAgeExit(pos);
-          if (maxAgeExit) return maxAgeExit;
+          const ageExit = checkAgeExit();
+          if (ageExit) return ageExit;
           return null;
         });
       }
@@ -12906,11 +12956,12 @@ export const program = Effect.gen(function* () {
               // Idle-redeploy capture: candidate conditions + score passed
               // but allocation has no headroom (typically MAX_OPEN_POSITIONS
               // reached — a slot can free mid-cycle when a LATER pool exits).
-              // The pass could dispatch this pool, so consult token-risk
-              // first EXACTLY as the in-slot gate does: a hard-risk signal
-              // disqualifies the candidate. Reuses the per-cycle token-risk
-              // cache, so this costs no round-trip when the screening seam
-              // already fetched these mints.
+              // The redeploy pass does NOT re-run token-risk (pool screening
+              // stands as decided in-pool), so the capture-time consult inside
+              // captureIdleRedeployCandidate is the sole risk gate for redeploy
+              // candidates — it stays. Capture early-returns when
+              // IDLE_REDEPLOY_ENABLED is false (default), so alloc-gate skips
+              // consult nothing unless redeploy is explicitly enabled.
               yield* captureIdleRedeployCandidate(proposedSizeUsd);
               return true;
             } else {
@@ -14884,12 +14935,12 @@ export const program = Effect.gen(function* () {
             runnerConsecutiveCount >= (config.marketScanRunnerConfirmCycles ?? 2);
 
           const snap = yield* capturePoolSnapshot(poolAddress, pool, binArray);
-          const { previousSnapshot, w15Signals } = snap;
+          const { previousSnapshot, previousSnapshots, w15Signals } = snap;
           const metrics = strategy.computeMetrics(
             pool,
             binArray,
             previousSnapshot?.tvlUsd ?? 0,
-            snapshotPriceDrift(previousSnapshot),
+            snapshotPriceDrift(previousSnapshots, previousSnapshot),
           );
 
           if (
