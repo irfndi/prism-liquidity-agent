@@ -1,3 +1,5 @@
+# SUNSET (2026-09-18 rust-bend hybrid): Cloudflare compute undeployed — manual-only, no auto deploy. PR typecheck intent noted in job steps; see docs/plan/2026-09-18-rust-bend-hybrid.md.
+
 name: Deploy Cloudflare Workers
 
 # Infrastructure is managed as TypeScript by Alchemy
@@ -27,16 +29,7 @@ name: Deploy Cloudflare Workers
 # merge to main.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "cloudflare/**"
-      - ".github/workflows/deploy-cloudflare.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "cloudflare/**"
-      - ".github/workflows/deploy-cloudflare.yml"
+  workflow_dispatch:
 
 # Single source of truth for the Bun version used by setup-bun. The
 # cloudflare/bunfig.toml enables Bun 1.4's isolated linker and shared global

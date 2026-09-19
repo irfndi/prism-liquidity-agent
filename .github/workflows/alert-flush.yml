@@ -1,3 +1,5 @@
+# SUNSET (2026-09-18 rust-bend hybrid): Telegram bot worker undeployed — manual-only, no cron. PR typecheck intent noted; see docs/plan/2026-09-18-rust-bend-hybrid.md.
+
 # Flush undelivered Telegram alerts.
 #
 # The telegram-bot worker delivers alerts by polling D1 via its authenticated
@@ -12,8 +14,6 @@
 name: Alert Delivery Flush
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
