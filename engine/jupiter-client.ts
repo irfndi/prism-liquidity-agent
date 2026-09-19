@@ -15,11 +15,14 @@
 //      refreshed by retry loops.
 
 // 0.4 RPS sustained — comfortably under the 0.5 RPS keyless refill rate.
+// Keyed and keyless BOTH pace at this safe rate: field evidence 2026-09 shows
+// 64-204 token-risk 429s/24h per instance WITH a key configured, so the keyed
+// tier's assumed 1 RPS headroom does not exist on the shared bucket (all four
+// instances share one key + one bucket). One conservative rate for both tiers
+// until a keyed quota is documented. No new env knob: presence of
+// JUPITER_API_KEY is retained for future tiering but selects the same rate.
 const MIN_JUPITER_REQUEST_INTERVAL_MS = 2_500;
-// Keyed tier paces faster (1 RPS — conservative: exact keyed quota undocumented,
-// so this stays modest). Keyless keeps the 2500ms safe rate. No new env knob:
-// presence of JUPITER_API_KEY (already branched on at every call site) selects.
-const KEYED_JUPITER_REQUEST_INTERVAL_MS = 1_000;
+const KEYED_JUPITER_REQUEST_INTERVAL_MS = 2_500;
 // Ceiling on any single pacing wait: beyond this the slot is treated as
 // stale (clock anomaly / cross-isolation state) and reset.
 const MAX_JUPITER_SLOT_WAIT_MS = 5 * 60_000;

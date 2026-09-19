@@ -101,7 +101,11 @@ function checkFileAccess(name: string, filePath: string): DoctorCheck {
 async function checkRegistration(): Promise<DoctorCheck> {
   const credentials = readCredentials();
   if (!credentials?.apiKey || !credentials.userId) {
-    return check("registration", "fail", "No credentials found; run prism register");
+    return check(
+      "registration",
+      "warn",
+      "No credentials found; running local-first (run prism register to enable cloud features)",
+    );
   }
   const result = await prismApiPost(
     "/v1/login",
@@ -114,8 +118,8 @@ async function checkRegistration(): Promise<DoctorCheck> {
   if (!result.ok) {
     return check(
       "registration",
-      "fail",
-      `Stored credentials could not be validated against ${getApiBaseUrl()}`,
+      "warn",
+      `Stored credentials could not be validated against ${getApiBaseUrl()}; continuing local-first`,
     );
   }
   return check("registration", "pass", `Registered user ${credentials.userId}`);
@@ -408,10 +412,17 @@ function collectLocalChecks(fix: boolean, sourceInstall: boolean): DoctorCheck[]
 }
 
 function checkTelemetry(): DoctorCheck {
-  const telemetryEnabled =
-    process.env.PRISM_ERROR_REPORTING !== "false" && readTelemetryPreference().enabled;
+  // Local-first: error telemetry is off unless PRISM_ERROR_REPORTING=1/true/yes/on explicitly opts in.
+  const cloudOptIn = ["1", "true", "yes", "on"].includes(
+    (process.env.PRISM_ERROR_REPORTING ?? "").trim().toLowerCase(),
+  );
+  const telemetryEnabled = cloudOptIn && readTelemetryPreference().enabled;
   if (!telemetryEnabled) {
-    return check("error telemetry", "warn", "Disabled by explicit local or environment opt-out");
+    return check(
+      "error telemetry",
+      "warn",
+      "Disabled by default (local-first); set PRISM_ERROR_REPORTING=1 to opt in",
+    );
   }
   if (readCredentials() === null) {
     return check(
@@ -420,7 +431,7 @@ function checkTelemetry(): DoctorCheck {
       "Enabled but not registered — error reports are queued until an API key is available",
     );
   }
-  return check("error telemetry", "pass", "Enabled by default for registered agents");
+  return check("error telemetry", "pass", "Enabled for registered agents");
 }
 
 async function runDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {

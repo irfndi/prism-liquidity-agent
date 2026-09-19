@@ -165,8 +165,10 @@ export const AlertLive: Layer.Layer<AlertService, never, DbService | ConfigServi
 
         const apiKey = readPrismApiKey();
         if (!apiKey) {
-          // Unregistered install: alerts have nowhere to go. Not an error.
-          log.debug("Skipping alert — no Prism credentials registered", { type: alert.type });
+          // Local-first: unregistered installs keep alerts local (no network). Not an error.
+          log.debug("Skipping cloud alert — no Prism credentials registered (local-first mode)", {
+            type: alert.type,
+          });
           return;
         }
 

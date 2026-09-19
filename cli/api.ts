@@ -192,6 +192,13 @@ export function pingInstall(
 ): Promise<boolean> {
   return (async () => {
     try {
+      // ponytail: local-first — pings stay offline unless PRISM_TELEMETRY=1/true/yes/on explicitly opts back in
+      if (
+        !["1", "true", "yes", "on"].includes(
+          (process.env.PRISM_TELEMETRY ?? "").trim().toLowerCase(),
+        )
+      )
+        return false;
       const credentials = readCredentials();
       if (isPingSkipped(event, credentials?.apiKey, credentials?.userId, options.userId))
         return false;

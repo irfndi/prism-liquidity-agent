@@ -24,8 +24,11 @@ async function runCycle(opts: {
   positionAgeMs: number;
   maxPositionAgeMs: number;
   positionMode?: string | null;
+  cumulativeFeesClaimedUsd?: number;
+  feeStarvationAgeMs?: number;
+  feeStarvationMinFeesUsd?: number;
 }) {
-  const configOverrides: Partial<AppConfig> = {
+  const baseOverrides: Partial<AppConfig> = {
     paperTrading: false,
     scanIntervalMs: 300,
     watchlistPools: [POOL],
@@ -34,6 +37,14 @@ async function runCycle(opts: {
     minYieldExitAgeMs: 999_999_999_999,
     trailingStopConfirmCycles: 99,
   };
+  const configOverrides: Partial<AppConfig> =
+    opts.feeStarvationAgeMs === undefined && opts.feeStarvationMinFeesUsd === undefined
+      ? baseOverrides
+      : {
+          ...baseOverrides,
+          feeStarvationAgeMs: opts.feeStarvationAgeMs ?? 259_200_000,
+          feeStarvationMinFeesUsd: opts.feeStarvationMinFeesUsd ?? 1,
+        };
   const layer = makeTestLayer({
     adapter: makeAdapter(
       { [POOL]: makePool({ address: POOL, tvlUsd: 100_000, fees24hUsd: 300 }) },
@@ -60,6 +71,7 @@ async function runCycle(opts: {
         currentValueUsd: 1_000,
         highestValueUsd: 1_000,
         positionMode: opts.positionMode ?? null,
+        cumulativeFeesClaimedUsd: opts.cumulativeFeesClaimedUsd ?? 50,
       }),
     );
     yield* Effect.raceFirst(program, Effect.sleep(2_500));
@@ -76,7 +88,10 @@ describe("max-position-age backstop (wired into checkDeterministicExits)", () =>
   it("fires once a position ages past the backstop", async () => {
     const decisions = await runCycle({ positionAgeMs: 2 * HOUR_MS, maxPositionAgeMs: HOUR_MS });
     const ageExit = decisions.find((d) => d.reasoning.includes("[max-position-age]"));
-    expect(ageExit, "backstop must fire once the position is older than maxPositionAgeMs").toBeDefined();
+    expect(
+      ageExit,
+      "backstop must fire once the position is older than maxPositionAgeMs",
+    ).toBeDefined();
     expect(ageExit?.action).toBe("EXIT");
     expect(ageExit?.confidence).toBe(1);
   }, 15_000);
@@ -87,7 +102,10 @@ describe("max-position-age backstop (wired into checkDeterministicExits)", () =>
       maxPositionAgeMs: HOUR_MS,
     });
     const ageExit = decisions.find((d) => d.reasoning.includes("[max-position-age]"));
-    expect(ageExit, "backstop must not fire before the position reaches the max age").toBeUndefined();
+    expect(
+      ageExit,
+      "backstop must not fire before the position reaches the max age",
+    ).toBeUndefined();
   }, 15_000);
 
   it("exempts launch-mode positions", async () => {
@@ -97,12 +115,40 @@ describe("max-position-age backstop (wired into checkDeterministicExits)", () =>
       positionMode: "launch",
     });
     const ageExit = decisions.find((d) => d.reasoning.includes("[max-position-age]"));
-    expect(ageExit, "launch-mode positions own their age via the timebox lifecycle instead").toBeUndefined();
+    expect(
+      ageExit,
+      "launch-mode positions own their age via the timebox lifecycle instead",
+    ).toBeUndefined();
   }, 15_000);
 
   it("stays off when maxPositionAgeMs is 0 (disabled)", async () => {
     const decisions = await runCycle({ positionAgeMs: 30 * 24 * HOUR_MS, maxPositionAgeMs: 0 });
     const ageExit = decisions.find((d) => d.reasoning.includes("[max-position-age]"));
     expect(ageExit, "maxPositionAgeMs=0 must disable the backstop").toBeUndefined();
+  }, 15_000);
+});
+
+describe("fee-starvation exit (wired into checkDeterministicExits)", () => {
+  it("fires on old fee-starved positions", async () => {
+    const decisions = await runCycle({
+      positionAgeMs: 100 * HOUR_MS,
+      maxPositionAgeMs: 0,
+      cumulativeFeesClaimedUsd: 0.17,
+      feeStarvationAgeMs: 72 * HOUR_MS,
+      feeStarvationMinFeesUsd: 1,
+    });
+    const starveExit = decisions.find((d) => d.reasoning.includes("[fee-starvation]"));
+    expect(starveExit, "old position with $0.17 fees must exit as dead capital").toBeDefined();
+    expect(starveExit?.action).toBe("EXIT");
+  }, 15_000);
+  it("stays off for old earners", async () => {
+    const decisions = await runCycle({
+      positionAgeMs: 100 * HOUR_MS,
+      maxPositionAgeMs: 0,
+      cumulativeFeesClaimedUsd: 50,
+      feeStarvationAgeMs: 72 * HOUR_MS,
+      feeStarvationMinFeesUsd: 1,
+    });
+    expect(decisions.find((d) => d.reasoning.includes("[fee-starvation]"))).toBeUndefined();
   }, 15_000);
 });

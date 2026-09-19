@@ -365,8 +365,25 @@ export const FeedbackLive = Layer.effect(
           context,
         };
         const hash = hashFeedback(feedback.summary, feedback.details, feedback.category);
+        const reportedAt = Date.now();
         const apiKey = yield* readPrismApiKey();
         if (!apiKey) {
+          // ponytail: local-first — no account, no network: persist to SQLite, keep the error shape so callers know cloud sync didn't happen
+          yield* db.saveFeedback(
+            buildStoredFeedbackEntry(
+              `local-${reportedAt}-${Math.random().toString(36).slice(2, 8)}`,
+              agentId,
+              feedback.category,
+              feedback.severity,
+              feedback.summary,
+              feedback.details,
+              feedback.relatedFiles,
+              JSON.stringify(context),
+              reportedAt,
+              hash,
+            ),
+          );
+          logger.warn(`No Prism account — feedback stored locally: ${feedback.summary}`);
           return {
             kind: "error" as const,
             error: "Prism account required. Run 'prism register' first.",
@@ -388,7 +405,6 @@ export const FeedbackLive = Layer.effect(
           return limited;
         }
 
-        const reportedAt = Date.now();
         const cloudResult = yield* submitCloudFeedback(
           resolveCloudFeedbackUrl(process.env.PRISM_API_URL),
           buildCloudPayload(

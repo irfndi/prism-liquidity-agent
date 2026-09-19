@@ -1,6 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { nudgeThreshold, computeSignalLift, evolveThresholds } from "../engine/strategy-service.js";
+import {
+  nudgeThreshold,
+  computeSignalLift,
+  evolveThresholds,
+  clampThreshold,
+} from "../engine/strategy-service.js";
 import type { EvolvableThresholds, OutcomeRecord } from "../engine/strategy-service.js";
+import {
+  MIN_FEE_IL_EVOLVED_MIN,
+  MIN_FEE_IL_EVOLVED_MAX,
+  VOLUME_AUTH_EVOLVED_MIN,
+  VOLUME_AUTH_EVOLVED_MAX,
+} from "../engine/strategy-service.js";
 
 // ─── nudgeThreshold ─────────────────────────────────────────────────────────
 
@@ -466,5 +477,47 @@ describe("evolveThresholds", () => {
     ];
     const result = evolveThresholds(outcomes, current, { minOutcomes: 2 });
     expect(result.changed).toBe(true);
+  });
+});
+
+// ─── Absolute evolution bands (field incident 2026-09) ───────────────────────
+
+describe("evolution bands", () => {
+  it("clampThreshold pins to the band", () => {
+    expect(clampThreshold(13.92, MIN_FEE_IL_EVOLVED_MIN, MIN_FEE_IL_EVOLVED_MAX)).toBe(
+      MIN_FEE_IL_EVOLVED_MAX,
+    );
+    expect(clampThreshold(0.01, MIN_FEE_IL_EVOLVED_MIN, MIN_FEE_IL_EVOLVED_MAX)).toBe(
+      MIN_FEE_IL_EVOLVED_MIN,
+    );
+    expect(clampThreshold(Number.NaN, MIN_FEE_IL_EVOLVED_MIN, MIN_FEE_IL_EVOLVED_MAX)).toBe(
+      MIN_FEE_IL_EVOLVED_MIN,
+    );
+  });
+  it("caps runaway feeIl lift at the band ceiling (growth 1.2 → 13.92 incident)", () => {
+    const current = { minFeeIlRatio: 13.92, volumeAuthThreshold: 0.7, minBinUtilization: 0.3 };
+    const outcomes = Array.from({ length: 6 }, (_, i) => ({
+      feeIlRatio: 20,
+      volumeAuthenticity: 0.9,
+      binUtilization: 0.7,
+      pnlUsd: i % 2 === 0 ? 10 : -10,
+      outcomeRecordedAt: Date.now(),
+    }));
+    const result = evolveThresholds(outcomes, current);
+    expect(result.thresholds.minFeeIlRatio).toBeLessThanOrEqual(MIN_FEE_IL_EVOLVED_MAX);
+    expect(result.thresholds.minFeeIlRatio).toBeGreaterThanOrEqual(MIN_FEE_IL_EVOLVED_MIN);
+  });
+  it("keeps auth inside its score domain under extreme lift", () => {
+    const current = { minFeeIlRatio: 1.2, volumeAuthThreshold: 0.85, minBinUtilization: 0.3 };
+    const outcomes = Array.from({ length: 6 }, (_, i) => ({
+      feeIlRatio: 2,
+      volumeAuthenticity: i % 2 === 0 ? 1 : 0,
+      binUtilization: 0.7,
+      pnlUsd: i % 2 === 0 ? 10 : -10,
+      outcomeRecordedAt: Date.now(),
+    }));
+    const result = evolveThresholds(outcomes, current);
+    expect(result.thresholds.volumeAuthThreshold).toBeLessThanOrEqual(VOLUME_AUTH_EVOLVED_MAX);
+    expect(result.thresholds.volumeAuthThreshold).toBeGreaterThanOrEqual(VOLUME_AUTH_EVOLVED_MIN);
   });
 });

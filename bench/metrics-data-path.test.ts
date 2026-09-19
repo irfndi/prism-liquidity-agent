@@ -99,6 +99,40 @@ describe("computeFeeIlRatio with real drift data", () => {
   });
 });
 
+// NOTE: snapshotPriceDrift anchor tests live in bench/scan-set.test.ts
+// alongside the pure scan-set module (no program.js import weight).
+describe("24h-anchored drift discriminates WITHOUT per-cycle whipsaw", () => {
+  it("calm day passes, crash day fails, cycle wiggle stays quiet", () => {
+    // $800/day fees on $100k TVL (0.8%/day — median cohort territory).
+    const pool = makePool({
+      tvlUsd: 100_000,
+      fees24hUsd: 800,
+      currentPrice: 125,
+      timestamp: 86_400_000,
+    });
+    const binArray = makeConcentratedBinArray();
+    // Calm day (+2% over 24h): fees dominate → high ratio.
+    const calm = DLMMStrategy.computeFeeIlRatio(pool, binArray, {
+      previousPrice: 122.5,
+      previousTimestamp: 0,
+    });
+    // Crash day (+30% over 24h): IL eats fees → below the 1.2 floor.
+    const crashed = DLMMStrategy.computeFeeIlRatio({ ...pool, currentPrice: 159.25 }, binArray, {
+      previousPrice: 122.5,
+      previousTimestamp: 0,
+    });
+    expect(calm).toBeGreaterThan(1.8);
+    expect(crashed).toBeLessThan(1.2);
+    // And a 0.1% cycle wiggle must NOT move the 24h-anchored ratio: same
+    // window anchor, wiggle only at the endpoint.
+    const wiggle = DLMMStrategy.computeFeeIlRatio({ ...pool, currentPrice: 125.125 }, binArray, {
+      previousPrice: 122.5,
+      previousTimestamp: 0,
+    });
+    expect(Math.abs(wiggle - calm) / calm).toBeLessThan(0.1);
+  });
+});
+
 // ─── (iv) bin utilization must not be fabricated to 1.0 ──────────────────────
 
 describe("bin utilization with explicit unknown state", () => {

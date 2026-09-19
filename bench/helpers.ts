@@ -251,6 +251,8 @@ export function defaultAppConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     marketScanMaxBinStep: 200,
     minYieldExitAgeMs: 43_200_000,
     maxPositionAgeMs: 604_800_000,
+    feeStarvationAgeMs: 259_200_000,
+    feeStarvationMinFeesUsd: 1,
     maxPositionLossPct: 0.35,
     deployerBlacklistPath: "",
     tokenBlacklistPath: "",

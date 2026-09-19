@@ -16,15 +16,16 @@ export const devCommand = new Command("dev")
     false,
   )
   .action(async (options: DevCommandOptions) => {
-    let creds: PrismCredentials;
+    let creds: PrismCredentials | null = null;
     try {
       creds = await requireRegistered(true);
     } catch (err) {
-      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
+      console.warn(
+        `Continuing without a Prism account (${err instanceof Error ? err.message : String(err)}). Cloud features stay disabled; dev continues locally.`,
+      );
     }
 
-    await reportDevStartTelemetry(creds.userId);
+    await reportDevStartTelemetry(creds?.userId ?? "local");
 
     const lock = acquireLock();
     if (!lock.acquired) {

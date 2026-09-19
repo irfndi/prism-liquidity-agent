@@ -291,12 +291,13 @@ export const setupCommand = new Command("setup")
   .option("--paper-trading", "Enable paper trading (default: true)")
   .action(async (options) => {
     const isNonInteractive = options.nonInteractive;
-    let credentials: PrismCredentials;
+    let credentials: PrismCredentials | null = null;
     try {
       credentials = await requireRegistered(true);
     } catch (err) {
-      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
+      console.warn(
+        `Continuing without a Prism account (${err instanceof Error ? err.message : String(err)}). Cloud features stay disabled; setup continues locally.`,
+      );
     }
 
     const answers = isNonInteractive
@@ -304,6 +305,6 @@ export const setupCommand = new Command("setup")
       : await promptInteractiveSetup();
 
     writeEnvFile(buildEnvContent(answers));
-    await pingInstall("setup", { userId: credentials.userId });
+    await pingInstall("setup", credentials ? { userId: credentials.userId } : {});
     printSetupComplete(isNonInteractive);
   });

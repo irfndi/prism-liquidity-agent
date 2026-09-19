@@ -55,12 +55,15 @@ async function runCycle(opts: { positionAgeMs: number; minYieldExitAgeMs?: numbe
   const layer = makeLayer(opts);
   const test = Effect.gen(function* () {
     const db = yield* DbService;
-    // Seed a previous snapshot at a far price: the fee/IL estimate uses the
-    // price-drift path (previous 100 -> current 150 = 50% move), producing a
-    // large estimated IL and a fee/IL ratio well below 0.5 with fees at $1.
+    // Seed a previous snapshot at a far price AND an established window: the
+    // fee/IL estimate uses the price-drift path (previous 100 -> current 150
+    // = 50% move), producing a large estimated IL and a fee/IL ratio well
+    // below 0.5 with fees at $1. The seed sits 2h back so the window spans
+    // past MIN_FEE_WINDOW_SPAN_MS (1h) — a 5-min seed would fall through to
+    // the stable binStep proxy and the ratio would pin high, never exiting.
     yield* db.saveSnapshot({
       poolAddress: POOL,
-      timestamp: Date.now() - 300_000,
+      timestamp: Date.now() - 7_200_000,
       activeBinId: 4900,
       tvlUsd: 100_000,
       volume24hUsd: 30_000,

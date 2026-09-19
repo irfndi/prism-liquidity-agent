@@ -361,6 +361,20 @@ export const DB_CONFIG_KEYS: ReadonlyArray<DbConfigSpec> = [
     min: 0,
   },
   {
+    envKey: "FEE_STARVATION_AGE_MS",
+    kind: "number",
+    field: "feeStarvationAgeMs",
+    min: 0,
+    max: 2_592_000_000,
+  },
+  {
+    envKey: "FEE_STARVATION_MIN_FEES_USD",
+    kind: "number",
+    field: "feeStarvationMinFeesUsd",
+    min: 0,
+    max: 100,
+  },
+  {
     envKey: "MAX_POSITION_LOSS_PCT",
     kind: "number",
     field: "maxPositionLossPct",

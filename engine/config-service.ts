@@ -312,6 +312,15 @@ export interface AppConfig {
    */
   readonly maxPositionAgeMs?: number;
   /**
+   * Fee-starvation exit age: EXIT when a position is older than this AND has
+   * earned less than feeStarvationMinFeesUsd in combined swap fees + rewards.
+   * Default 72h: ledger-verified (zero closes exceed 53h, so no backtest churn;
+   * only survivors and future stuck capital). Clamped [1h, 30 days]; 0 disables.
+   */
+  readonly feeStarvationAgeMs?: number;
+  /** Fee floor below which an old position counts as starved. Default $1. */
+  readonly feeStarvationMinFeesUsd?: number;
+  /**
    * Left-tail hard stop: EXIT when mark PnL ≤ -(deposited × this). Default 0.35.
    * 0 disables. Age-free capital protection (independent of trailing stop).
    */
@@ -2134,6 +2143,14 @@ const loadConfig = Effect.gen(function* () {
     604_800_000,
     2_592_000_000,
   );
+  // Fee-starvation exit: old AND earning nothing is dead capital, not patience.
+  const feeStarvationAgeMs = yield* validatedNumber(
+    "FEE_STARVATION_AGE_MS",
+    0,
+    259_200_000,
+    2_592_000_000,
+  );
+  const feeStarvationMinFeesUsd = yield* validatedNumber("FEE_STARVATION_MIN_FEES_USD", 0, 1, 100);
   // Left-tail hard stop: mark PnL ≤ -(deposited × pct) → EXIT. Default 35%.
   const maxPositionLossPct = yield* validatedNumber("MAX_POSITION_LOSS_PCT", 0, 0.35, 1);
   // B: momentum/timing ENTER gate + confidence boost — the throughput fix.
@@ -2476,6 +2493,8 @@ const loadConfig = Effect.gen(function* () {
     rugTokenBlockMs,
     minYieldExitAgeMs,
     maxPositionAgeMs,
+    feeStarvationAgeMs,
+    feeStarvationMinFeesUsd,
     maxPositionLossPct,
     marketScanMaxNegativeDriftBins,
     entryMomentumConfBoost,

@@ -533,6 +533,27 @@ export interface ThresholdEvolutionResult {
 }
 
 /**
+ * Absolute evolution bands: evolution may nudge thresholds ±20%/round but
+ * must never leave these operating ranges. feeIl's recorded signal caps at
+ * MAX_FEE_IL_RATIO=20, so uncapped lift compounds +20%/round unbounded
+ * (field incident: growth 1.2 → 13.92, every ENTER blocked). The feeIl band
+ * ceiling (3.0) sits above any legitimate floor placement but below runaway;
+ * auth/util bands mirror their gate domains ([0.1, 0.9] and [0.05, 0.8]).
+ */
+export const MIN_FEE_IL_EVOLVED_MIN = 0.3;
+export const MIN_FEE_IL_EVOLVED_MAX = 3.0;
+export const VOLUME_AUTH_EVOLVED_MIN = 0.1;
+export const VOLUME_AUTH_EVOLVED_MAX = 0.9;
+export const MIN_BIN_UTIL_EVOLVED_MIN = 0.05;
+export const MIN_BIN_UTIL_EVOLVED_MAX = 0.8;
+
+/** Clamp an evolved threshold into its absolute band. */
+export function clampThreshold(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(Math.max(value, min), max);
+}
+
+/**
  * Clamp a threshold nudge to ±maxChangePct of the current value.
  * When target > current, nudge upward but never exceed current × (1 + maxChangePct).
  * When target < current, nudge downward but never go below current × (1 - maxChangePct).
@@ -580,6 +601,12 @@ export function computeSignalLift(
  *
  * Returns the (possibly updated) thresholds and whether any changed.
  * Defaults: evolutionInterval=5, maxChangePct=0.20, minOutcomes=5.
+ *
+ * Absolute bands (field incident 2026-09): the capped-20 feeIl signal lifts
+ * the floor +20%/round unbounded — growth ran 1.2 → 13.92 and blocked every
+ * ENTER. The bands keep evolution inside sane operating ranges no matter how
+ * skewed the recorded signal distribution is; a threshold at its band edge
+ * simply stops moving in that direction.
  */
 export function evolveThresholds(
   outcomes: ReadonlyArray<OutcomeRecord>,
@@ -607,9 +634,21 @@ export function evolveThresholds(
   const authTarget = current.volumeAuthThreshold * (1 + authLift);
   const utilTarget = current.minBinUtilization * (1 + utilLift);
 
-  const newFeeIl = nudgeThreshold(current.minFeeIlRatio, feeTarget, maxChangePct);
-  const newAuth = nudgeThreshold(current.volumeAuthThreshold, authTarget, maxChangePct);
-  const newUtil = nudgeThreshold(current.minBinUtilization, utilTarget, maxChangePct);
+  const newFeeIl = clampThreshold(
+    nudgeThreshold(current.minFeeIlRatio, feeTarget, maxChangePct),
+    MIN_FEE_IL_EVOLVED_MIN,
+    MIN_FEE_IL_EVOLVED_MAX,
+  );
+  const newAuth = clampThreshold(
+    nudgeThreshold(current.volumeAuthThreshold, authTarget, maxChangePct),
+    VOLUME_AUTH_EVOLVED_MIN,
+    VOLUME_AUTH_EVOLVED_MAX,
+  );
+  const newUtil = clampThreshold(
+    nudgeThreshold(current.minBinUtilization, utilTarget, maxChangePct),
+    MIN_BIN_UTIL_EVOLVED_MIN,
+    MIN_BIN_UTIL_EVOLVED_MAX,
+  );
 
   const changed =
     newFeeIl !== current.minFeeIlRatio ||

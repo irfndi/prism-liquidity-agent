@@ -209,7 +209,8 @@ function resolveReportingActive(
   if (reportingEnv === "false") return false;
   if (configOptOut ?? !readTelemetryPreference().enabled) return false;
   if (configEnabled !== undefined) return configEnabled;
-  return reportingEnv !== "false";
+  // ponytail: local-first — network reports need explicit opt-in (PRISM_ERROR_REPORTING=1/true/yes/on)
+  return ["1", "true", "yes", "on"].includes((reportingEnv ?? "").trim().toLowerCase());
 }
 
 function resolveReporterEndpoint(
@@ -293,11 +294,7 @@ export class ErrorReporter {
   setAppVersion(version: string): void {
     this.appVersion = version;
   }
-
   report(error: Error, context?: ReportContext): void {
-    if (!this.enabled || !this.endpoint) {
-      return;
-    }
     const report = buildErrorReport(
       this.agentId,
       error,
@@ -305,6 +302,11 @@ export class ErrorReporter {
       context?.cycleId,
       context?.poolAddress,
     );
+    if (!this.enabled || !this.endpoint) {
+      // Local-first: no network — the caller already logs pool failures to
+      // stderr; stay silent here to avoid doubling every log line.
+      return;
+    }
     this.enqueueReport(report);
   }
 
