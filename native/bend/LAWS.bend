@@ -78,3 +78,19 @@ law drift_strict_floor:
 law drift_uphill_passes:
   for m: Nat
   {K.drift_rejects(False{}, m, 8n) == False{} : Bool}
+
+# 5. TA-exhaustion confluence (strategy review: TA file landed + parity
+# green): overbought RSI fires with either confirm; without RSI nothing
+# fires; RSI alone (cold start, confirms unavailable) never fires.
+law ta_overbought_fires:
+  for b: Bool
+  for m: Bool
+  {K.ta_exhausted(True{}, b, m) == Bool.or(b, m) : Bool}
+
+law ta_single_signal_quiet:
+  for b: Bool
+  for m: Bool
+  {K.ta_exhausted(False{}, b, m) == False{} : Bool}
+
+law ta_cold_start_quiet:
+  {K.ta_exhausted(True{}, False{}, False{}) == False{} : Bool}

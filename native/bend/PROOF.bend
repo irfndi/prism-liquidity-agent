@@ -93,6 +93,31 @@ def L.drift_strict_floor(m):
 def L.drift_uphill_passes(m):
   {==}
 
+def L.ta_overbought_fires(b, m):
+  match b m:
+    case False{} False{}:
+      {==}
+    case False{} True{}:
+      {==}
+    case True{} False{}:
+      {==}
+    case True{} True{}:
+      {==}
+
+def L.ta_single_signal_quiet(b, m):
+  match b m:
+    case False{} False{}:
+      {==}
+    case False{} True{}:
+      {==}
+    case True{} False{}:
+      {==}
+    case True{} True{}:
+      {==}
+
+def L.ta_cold_start_quiet():
+  {==}
+
 # Observable: the runaway pins to the ceiling.
 def main() -> Nat:
   K.clamp_thr(1392n, 30n, 300n)
