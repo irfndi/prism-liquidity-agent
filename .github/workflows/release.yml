@@ -111,8 +111,14 @@ jobs:
       - name: Build bundle
         run: bun run scripts/build-bundle.ts
 
-      - name: List bundle artifacts
-        run: ls -lh prism-v*.tar.gz*
+      - name: Build prismd release binary (linux-x64 deploy target)
+        if: matrix.platform-key == 'linux-x64'
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo +stable build --release --manifest-path native/rust/Cargo.toml
+          cp native/rust/target/release/prismd ./prismd-linux-x64
+          sha256sum ./prismd-linux-x64 > ./prismd-linux-x64.sha256
+          cat ./prismd-linux-x64.sha256
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v7
@@ -121,6 +127,8 @@ jobs:
           path: |
             prism-v*.tar.gz
             prism-v*.tar.gz.sha256
+            prismd-linux-x64
+            prismd-linux-x64.sha256
           if-no-files-found: error
 
   release:
@@ -215,9 +223,13 @@ jobs:
             if [ -d "$dir" ]; then
               cp "$dir"/*.tar.gz release-assets/ 2>/dev/null || true
               cp "$dir"/*.tar.gz.sha256 release-assets/ 2>/dev/null || true
+              # prismd native host (linux-x64 only): version + checksum alongside bundles.
+              if [ -f "$dir/prismd-linux-x64" ]; then
+                cp "$dir/prismd-linux-x64" "release-assets/prismd-${VERSION}-linux-x64"
+                cp "$dir/prismd-linux-x64.sha256" "release-assets/prismd-${VERSION}-linux-x64.sha256" 2>/dev/null || true
+              fi
             fi
           done
-          ls -lh release-assets/
 
       - name: Generate release manifest
         env:
@@ -281,6 +293,16 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           for f in "release-assets/prism-v${VERSION}"-*.tar.gz.sha256; do
+            [ -e "$f" ] || continue
+            npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
+          done
+
+      - name: Upload prismd binary + checksum to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for f in "release-assets/prismd-${VERSION}-linux-x64" "release-assets/prismd-${VERSION}-linux-x64.sha256"; do
             [ -e "$f" ] || continue
             npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
           done

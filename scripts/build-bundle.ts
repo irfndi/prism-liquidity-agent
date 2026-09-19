@@ -76,18 +76,39 @@ if (fs.existsSync(vec0Path)) {
   fs.copyFileSync(vec0Path, path.join(libDir, `vec0.${extensionSuffix}`));
 }
 
+// Prefer compiled binaries when present (fresh `bun build --compile` outputs
+// from scripts/compile-binary.ts); never fail a release when absent.
+const binNames = ["prism", "prismd"];
+const binSrcs = binNames.map((n) => path.join(repoRoot, "dist", "bin", n));
+const binsStaged = binSrcs.every((p) => fs.existsSync(p));
+if (binsStaged) {
+  const binDir = path.join(stageDir, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  for (const n of binNames) {
+    fs.copyFileSync(path.join(repoRoot, "dist", "bin", n), path.join(binDir, n));
+  }
+} else {
+  console.warn("⚠ compiled binaries skipped (dist/bin/prism, dist/bin/prismd not both present)");
+}
+
 const tarballName = `prism-v${version}-${platformKey}.tar.gz`;
 const tarballPath = path.join(repoRoot, tarballName);
 
-execFileSync("tar", ["-czf", tarballName, "-C", stageDir, "dist", "lib"], {
-  cwd: repoRoot,
-  stdio: "inherit",
-});
-
-fs.writeFileSync(`${tarballPath}.sha256`, `${sha256(tarballPath)}  ${tarballName}\n`);
+execFileSync(
+  "tar",
+  ["-czf", tarballName, "-C", stageDir, "dist", "lib", ...(binsStaged ? ["bin"] : [])],
+  {
+    cwd: repoRoot,
+    stdio: "inherit",
+  },
+);
 
 console.log(`✓ Built ${tarballPath}`);
 console.log(`  SHA-256: ${sha256(tarballPath)}`);
+fs.writeFileSync(`${tarballPath}.sha256`, `${sha256(tarballPath)}  ${tarballName}\n`);
+for (const n of binsStaged ? binNames : []) {
+  console.log(`  SHA-256 (${n}): ${sha256(path.join(stageDir, "bin", n))}`);
+}
 
 // Clean up the staging directory.
 fs.rmSync(stageDir, { recursive: true, force: true });

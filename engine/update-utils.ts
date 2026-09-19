@@ -64,6 +64,23 @@ function failOnGithubRateLimit(response: Response): Effect.Effect<void, Error> {
   return Effect.fail(new Error(msg));
 }
 
+/** Release guard: a GitHub release payload must carry a string tag_name. Malformed shapes fail soft (Effect channel) so the caller falls back to R2 — a throw here would escape as an Effect defect and crash the update check. */
+function isGitHubRelease(value: GitHubRelease | null): value is GitHubRelease {
+  if (value === null || !("tag_name" in value)) return false;
+  return Object.prototype.toString.call(value.tag_name) === "[object String]";
+}
+
+/** Fail on malformed GitHub payloads so the caller falls back to R2; pass through null and valid releases. */
+function requireValidRelease(
+  candidate: GitHubRelease | null,
+  url: string,
+): Effect.Effect<GitHubRelease | null, Error> {
+  if (candidate !== null && !isGitHubRelease(candidate)) {
+    return Effect.fail(new Error(`Unexpected GitHub release shape from ${url}`));
+  }
+  return Effect.succeed(candidate);
+}
+
 export function compareVersions(a: string, b: string): number {
   const cleanA = semver.clean(a) || a;
   const cleanB = semver.clean(b) || b;
@@ -200,7 +217,7 @@ export function fetchGitHubRelease(
         () => response.json(),
         "Failed to parse GitHub release JSON",
       )) as GitHubRelease | undefined;
-      return release ?? null;
+      return yield* requireValidRelease(release ?? null, url);
     }
 
     // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
@@ -217,9 +234,8 @@ export function fetchGitHubRelease(
       parseNextLink(response.headers.get("link")),
       token,
     );
-
     const filtered = channel === "beta" ? allReleases.filter((r) => r.prerelease) : allReleases;
-    return filtered[0] ?? null;
+    return yield* requireValidRelease(filtered[0] ?? null, url);
   });
 }
 
@@ -372,6 +388,21 @@ export function r2ManifestToInfo(manifest: R2Manifest): ReleaseInfo {
   };
 }
 
+/** R2 fallback lookup: valid manifest → ReleaseInfo, absent/invalid → null. Fetch failures propagate. */
+function fetchR2Info(
+  channel: "stable" | "beta" | "dev" | "canary",
+  r2PublicUrl?: string,
+): Effect.Effect<ReleaseInfo | null, Error> {
+  return Effect.gen(function* () {
+    const result = yield* Effect.result(fetchR2Manifest(channel, r2PublicUrl));
+    if (result._tag === "Failure") return yield* Effect.fail(result.failure);
+    if (result.success && isValidVersion(result.success.version)) {
+      return r2ManifestToInfo(result.success);
+    }
+    return null;
+  });
+}
+
 export function fetchLatestRelease(
   repo: string,
   channel: "stable" | "beta" | "dev" | "canary",
@@ -379,21 +410,16 @@ export function fetchLatestRelease(
   token?: string,
 ): Effect.Effect<ReleaseInfo | null, Error> {
   return Effect.gen(function* () {
-    const r2Result = yield* Effect.result(fetchR2Manifest(channel, r2PublicUrl));
-
-    if (r2Result._tag === "Success" && r2Result.success) {
-      const manifest = r2Result.success;
-      if (isValidVersion(manifest.version)) {
-        return r2ManifestToInfo(manifest);
-      }
-    }
-    const r2Error = r2Result._tag === "Failure" ? r2Result.failure : null;
-
     // Canary builds are R2-only: they have no GitHub Releases representation,
     // so falling through to the "newest release" GitHub semantics would install
     // the wrong artifact. Fail with a clear, actionable message instead.
     if (channel === "canary") {
-      const detail = r2Error ? `: ${r2Error.message}` : " (no valid canary manifest found)";
+      const canaryResult = yield* Effect.result(fetchR2Info(channel, r2PublicUrl));
+      if (canaryResult._tag === "Success" && canaryResult.success) return canaryResult.success;
+      const detail =
+        canaryResult._tag === "Failure"
+          ? `: ${canaryResult.failure.message}`
+          : " (no valid canary manifest found)";
       return yield* Effect.fail(
         new Error(
           `Canary builds are served exclusively from R2 (releases/channel/canary.json). ` +
@@ -403,20 +429,22 @@ export function fetchLatestRelease(
       );
     }
 
+    // ponytail: GitHub Releases first, R2 only as fallback
     const ghResult = yield* Effect.result(fetchGitHubRelease(repo, channel, token));
     if (ghResult._tag === "Success") {
-      if (ghResult.success) {
-        return githubReleaseToInfo(ghResult.success, channel);
-      }
+      if (ghResult.success) return githubReleaseToInfo(ghResult.success, channel);
       return null;
     }
 
-    const ghError = ghResult.failure;
-    if (r2Error) {
+    const r2Result = yield* Effect.result(fetchR2Info(channel, r2PublicUrl));
+    if (r2Result._tag === "Success" && r2Result.success) return r2Result.success;
+    if (r2Result._tag === "Failure") {
       return yield* Effect.fail(
-        new Error(`Update check failed. R2: ${r2Error.message}; GitHub: ${ghError.message}`),
+        new Error(
+          `Update check failed. GitHub: ${ghResult.failure.message}; R2: ${r2Result.failure.message}`,
+        ),
       );
     }
-    return yield* Effect.fail(new Error(`Update check failed: ${ghError.message}`));
+    return yield* Effect.fail(new Error(`Update check failed: ${ghResult.failure.message}`));
   });
 }
