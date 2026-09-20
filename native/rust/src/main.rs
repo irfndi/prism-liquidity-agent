@@ -2386,6 +2386,46 @@ fn read_paper_days(sqlite_path: &str) -> Option<f64> {
 /// (winners pnl>0 vs losers pnl≤0; 0 when either side empty; range-normalized
 /// by max(|winMean|,|loseMean|,1e-9)). `None` on empty/non-finite — the Bend
 /// `evolve_thr up` flag simply stays false and the leg holds.
+
+/// WRITE SEAM (first non-shadow host capability): persist one shadow
+/// observation row so a `prismd` run leaves an auditable trace without
+/// touching any TS-owned table. Table is host-owned (`prismd_shadow_log`),
+/// created on demand, and NOTHING in the TS engine reads it — the cutover
+/// contract is that the host may accumulate its own ledger before it is
+/// allowed to write TS tables. Shadow-only: the tick calls this with its
+/// own computed verdicts; it never gates an ENTER/EXIT.
+/// Fail-open: any error is logged once and dropped (a shadow that cannot
+/// write must never fail the tick).
+fn write_shadow_observation(sqlite_path: &str, tick: u64, decision: &str) {
+    let conn = match rusqlite::Connection::open(Path::new(sqlite_path)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[prismd] shadow-log open failed: {e} (dropped)");
+            return;
+        }
+    };
+    if let Err(e) = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS prismd_shadow_log (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             tick INTEGER NOT NULL,
+             decision TEXT NOT NULL,
+             created_at INTEGER NOT NULL
+         );",
+    ) {
+        eprintln!("[prismd] shadow-log create failed: {e} (dropped)");
+        return;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    if let Err(e) = conn.execute(
+        "INSERT INTO prismd_shadow_log (tick, decision, created_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![tick as i64, decision, now_ms],
+    ) {
+        eprintln!("[prismd] shadow-log insert failed: {e} (dropped)");
+    }
+}
 fn signal_lift(signals: &[(f64, f64)]) -> Option<f64> {
     let (mut sw, mut nw, mut sl, mut nl) = (0.0, 0i64, 0.0, 0i64);
     for (v, pnl) in signals {
@@ -3193,6 +3233,19 @@ fn tick(cfg: &config::Config, n: u64) {
     // evolution until parity green). Skips quietly below evolutionInterval
     // outcomes, matching the TS early-return (program.ts:6032-6042).
     evolve_shadow(cfg);
+    // Write seam: persist this tick's verdict to the host-owned
+    // `prismd_shadow_log` table (TS never reads it). Shadow-only — the row is
+    // an audit trail for the cutover compare, not a decision input.
+    let shadow_decision = format!(
+        "open={open} exit_shadow={exit_shadow} enter_blocked_shadow={enter_blocked_shadow} \
+         danger_shadow={danger_shadow} drift_rejects_shadow={drift_rejects_shadow} \
+         capital_exits_shadow={capital_exits_shadow} stop_loss_shadow={stop_loss_shadow} \
+         band_health_shadow={band_health_shadow} gas_hold_shadow={gas_hold_shadow} \
+         recovery_hold_shadow={recovery_hold_shadow} interval_hold_shadow={interval_hold_shadow} \
+         vol_exit_shadow={vol_exit_shadow} exit_order_loss_shadow={exit_order_loss_shadow} \
+         il_dominance_shadow={il_dominance_shadow} at_capacity={at_capacity}"
+    );
+    write_shadow_observation(&cfg.sqlite_path, n, &shadow_decision);
 }
 
 /// One `tryEvolveThresholds` round as a shadow: current banded floors (live
@@ -4407,6 +4460,49 @@ mod tests {
         // consults and returns Some(true) (2000 loss > 1000 clamped floor),
         // so asserting None here would be environment-dependent — exactly the
         // flake the fail-open contract forbids.
+    }
+
+    #[test]
+    fn shadow_log_write_seam_roundtrips() {
+        // First non-shadow host capability: a tick verdict lands in the
+        // host-owned `prismd_shadow_log` table. Contract: table created on
+        // demand, row round-trips (tick + decision text), and the write is
+        // additive — it must not touch TS-owned tables. Uses a scratch DB.
+        let path = std::env::temp_dir().join(format!("prismd-shadowlog-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let path_str = path.to_str().unwrap().to_string();
+
+        write_shadow_observation(&path_str, 7, "open=3 exit_shadow=0 at_capacity=true");
+
+        let conn = rusqlite::Connection::open(&path).expect("reopen scratch db");
+        let (tick, decision): (i64, String) = conn
+            .query_row(
+                "SELECT tick, decision FROM prismd_shadow_log WHERE tick = 7",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row must round-trip");
+        assert_eq!(tick, 7);
+        assert_eq!(decision, "open=3 exit_shadow=0 at_capacity=true");
+
+        // Additive: a second write appends (AUTOINCREMENT), never replaces.
+        write_shadow_observation(&path_str, 8, "open=2 exit_shadow=1 at_capacity=false");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM prismd_shadow_log", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(n, 2, "second write must append, not replace");
+
+        // TS-owned tables must not exist in a host-only scratch DB.
+        let ts_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('positions','audit','metadata','position_events')",
+                [],
+                |r| r.get(0),
+            )
+            .expect("table count");
+        assert_eq!(ts_tables, 0, "write seam must not create TS-owned tables");
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
