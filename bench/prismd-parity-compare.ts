@@ -269,13 +269,15 @@ function main(): void {
   }
 
   // Twin copy: prismd writes to the ledger, the live book must stay untouched.
+  // Copy the DB (+ a non-empty WAL so committed-but-uncheckpointed rows come
+  // along); NEVER copy `-shm` — shared-memory files are per-connection
+  // transient state SQLite recreates on open, and a stale copy makes the open
+  // block (measured: 60s+ hang with it, 13s without).
   const dir = mkdtempSync(join(tmpdir(), "prismd-parity-"));
   const twin = join(dir, "twin.db");
   try {
     cpSync(dbPath, twin);
-    for (const suffix of ["-wal", "-shm"]) {
-      if (existsSync(dbPath + suffix)) cpSync(dbPath + suffix, twin + suffix);
-    }
+    if (existsSync(dbPath + "-wal")) cpSync(dbPath + "-wal", twin + "-wal");
 
     const bend = bendBin();
     // Interval comes from env like the host. Default is the HOST's fail-closed
