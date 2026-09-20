@@ -312,10 +312,12 @@ type Verdict = {
 
 /** Parse the last `decision` line and compare against the TS audit trail. */
 function verdict(stdout: string, ts: TsSide): Verdict {
-  // prismd prefixes every line with `[prismd] ` — strip it, keep the line.
+  // prismd prefixes every line with `[prismd] ` — trim first (stdout may carry
+  // trailing \r or leading blanks), then strip the prefix and keep the line.
   const logPrefix = "[prismd] ";
   const clean = stdout
     .split("\n")
+    .map((l) => l.trim())
     .map((l) => (l.startsWith(logPrefix) ? l.slice(logPrefix.length) : l))
     .join("\n");
   const decision = lastKvLine(clean, "decision ");
