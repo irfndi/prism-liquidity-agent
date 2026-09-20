@@ -53,6 +53,55 @@ pub fn loss_cap_danger(
     Some(c + f + r - d <= -(d * floor))
 }
 
+/// HODL benchmark: what the entry capital would be worth undeposited (X leg
+/// moves with price ratio, Y leg constant). Mirrors `engine/pnl.ts`
+/// `computeHodlValueUsd` (null on non-positive entry price). `None` on
+/// missing/non-finite legs too (never fires).
+pub fn hodl_value_usd(
+    entry_x_usd: Option<f64>,
+    entry_y_usd: Option<f64>,
+    entry_price_usd: Option<f64>,
+    current_price_usd: Option<f64>,
+) -> Option<f64> {
+    let (x, y, entry, current) = (
+        entry_x_usd?,
+        entry_y_usd?,
+        entry_price_usd?,
+        current_price_usd?,
+    );
+    if !(x.is_finite() && y.is_finite() && entry.is_finite() && current.is_finite()) {
+        return None;
+    }
+    if !(entry > 0.0) {
+        return None;
+    }
+    Some(x * (current / entry) + y)
+}
+
+/// SHADOW-only IL-dominance trigger: IL exceeds fees by factor and floor.
+/// Mirrors `engine/program.ts` `isIlDominant` (ilUsd > 0 && ilUsd >
+/// fees × factor && ilUsd > minUsd). Exact comparison, host-native floats
+/// (no Bend kernel — F32 compares are uninterpreted axioms per
+/// bend/README.md:15-17). `None` on missing/non-finite legs (never fires).
+/// DIVERGENCE (documented, shadow-only): TS also gates on protection-enabled
+/// + OOR + known entry legs at the computeIlDominance call site — the caller
+/// applies those gates, this fn is the pure trigger.
+pub fn il_dominant(
+    il_usd: Option<f64>,
+    fees_claimed_usd: Option<f64>,
+    exit_factor: f64,
+    min_usd: f64,
+) -> Option<bool> {
+    if !(exit_factor.is_finite() && min_usd.is_finite()) {
+        return None;
+    }
+    let (il, fees) = (il_usd?, fees_claimed_usd?);
+    if !(il.is_finite() && fees.is_finite()) {
+        return None;
+    }
+    Some(il > 0.0 && il > fees * exit_factor && il > min_usd)
+}
+
 /// SHADOW-only stop-loss veto: mirrors `checkStopLossGate`'s drawdown
 /// comparison (risk-service.ts:176-177) — vetoes when the position's mark
 /// drawdown `(current - deposited) / deposited` breaches `-stop_loss_pct`.
@@ -1025,6 +1074,13 @@ mod config {
     /// closed on garbage/non-finite instead (absent -> 0.35, same fallback).
     pub const MAX_POSITION_LOSS_DEFAULT_PCT: f64 = 0.35;
     pub const MAX_POSITION_LOSS_MAX_PCT: f64 = 1.0;
+    /// Mirrors engine/config-service.ts validatedNumber("IL_DOMINANCE_EXIT_FACTOR", 1, 2)
+    /// + validatedNumber("IL_DOMINANCE_MIN_USD", 0, 5). TS has no max arm (open
+    /// range above min); the host matches (min-only, fail-closed garbage).
+    pub const IL_DOMINANCE_EXIT_FACTOR_DEFAULT: f64 = 2.0;
+    pub const IL_DOMINANCE_EXIT_FACTOR_MIN: f64 = 1.0;
+    pub const IL_DOMINANCE_MIN_DEFAULT_USD: f64 = 5.0;
+    pub const IL_DOMINANCE_MIN_MIN_USD: f64 = 0.0;
     /// Mirrors validatedNumber("EVOLUTION_INTERVAL", 1, 5, 100) — min closed
     /// outcomes before the evolution shadow consults (TS tryEvolveThresholds
     /// returns early below interval; program.ts:6032-6042).
@@ -1126,6 +1182,8 @@ mod config {
         pub oor_grace_period_cycles: i64,
         pub paper_validation_min_days: f64,
         pub paper_validation_enforce: bool,
+        pub il_dominance_exit_factor: f64,
+        pub il_dominance_min_usd: f64,
         pub agent_http_port: u16,
         pub ticks: Option<u64>,
     }
@@ -1708,6 +1766,43 @@ mod config {
             ))
         }
     }
+    /// Parse-or-default for `IL_DOMINANCE_EXIT_FACTOR`; `Err` on garbage/below-min.
+    /// Absent -> 2, matching validatedNumber("IL_DOMINANCE_EXIT_FACTOR", 1, 2).
+    /// TS has no max arm (open range); the host matches (min-only).
+    pub fn parse_il_dominance_factor(raw: Option<&str>) -> Result<f64, String> {
+        let Some(s) = raw else {
+            return Ok(IL_DOMINANCE_EXIT_FACTOR_DEFAULT);
+        };
+        let v: f64 = s
+            .trim()
+            .parse()
+            .map_err(|_| format!("IL_DOMINANCE_EXIT_FACTOR={s:?} is not a number"))?;
+        if v.is_finite() && v >= IL_DOMINANCE_EXIT_FACTOR_MIN {
+            Ok(v)
+        } else {
+            Err(format!(
+                "IL_DOMINANCE_EXIT_FACTOR={v} must be finite and >= {IL_DOMINANCE_EXIT_FACTOR_MIN}"
+            ))
+        }
+    }
+    /// Parse-or-default for `IL_DOMINANCE_MIN_USD`; `Err` on garbage/below-min.
+    /// Absent -> 5, matching validatedNumber("IL_DOMINANCE_MIN_USD", 0, 5).
+    pub fn parse_il_dominance_min(raw: Option<&str>) -> Result<f64, String> {
+        let Some(s) = raw else {
+            return Ok(IL_DOMINANCE_MIN_DEFAULT_USD);
+        };
+        let v: f64 = s
+            .trim()
+            .parse()
+            .map_err(|_| format!("IL_DOMINANCE_MIN_USD={s:?} is not a number"))?;
+        if v.is_finite() && v >= IL_DOMINANCE_MIN_MIN_USD {
+            Ok(v)
+        } else {
+            Err(format!(
+                "IL_DOMINANCE_MIN_USD={v} must be finite and >= {IL_DOMINANCE_MIN_MIN_USD}"
+            ))
+        }
+    }
     /// Parse-or-default for `MIN_BIN_UTILIZATION`; `Err` on garbage/out-of-band.
     /// Absent -> 0.3, matching validatedNumber's fallback.
     pub fn parse_min_bin_utilization(raw: Option<&str>) -> Result<f64, String> {
@@ -1868,6 +1963,12 @@ mod config {
                     env::var("PAPER_VALIDATION_MIN_DAYS").ok().as_deref(),
                 )?,
                 paper_validation_enforce: flag("PAPER_VALIDATION_ENFORCE"),
+                il_dominance_exit_factor: parse_il_dominance_factor(
+                    env::var("IL_DOMINANCE_EXIT_FACTOR").ok().as_deref(),
+                )?,
+                il_dominance_min_usd: parse_il_dominance_min(
+                    env::var("IL_DOMINANCE_MIN_USD").ok().as_deref(),
+                )?,
                 agent_http_port: parse_agent_http_port(
                     env::var("AGENT_HTTP_PORT").ok().as_deref(),
                 )?,
@@ -2228,6 +2329,13 @@ struct FeeIlShadow {
     current_value_usd: Option<f64>,
     fees_claimed_usd: Option<f64>,
     rewards_claimed_usd: Option<f64>,
+    /// IL-dominance shadow inputs (program.ts:10264-10297): entry X/Y USD +
+    /// entry price (HODL benchmark legs) + OOR clock. `None` when the row
+    /// lacks them → skip (fail-open, never fires).
+    entry_amount_x_usd: Option<f64>,
+    entry_amount_y_usd: Option<f64>,
+    entry_price_usd: Option<f64>,
+    out_of_range_since: Option<i64>,
     /// Live band legs for the band-health shadow (gate-7 shape without a
     /// proposal): stored `active_bin_id` / `lower_bin_id` / `upper_bin_id`
     /// per open position (`None` when the row lacks them → skipped).
@@ -2349,9 +2457,28 @@ fn fee_il_shadows_capped(
                     |r| Ok((r.get(0).ok(), r.get(1).ok())),
                 )
                 .unwrap_or((None, None));
-            // ponytail: named columns, not SELECT * — old DBs without them fall
-            // back to None legs, never break the tick.
-            // TA closes window: up to 35 newest closes, newest-first.
+            // IL-dominance legs (program.ts:10264-10297): entry X/Y + entry
+            // price + OOR clock, tolerant side query — pre-v16 rows or old DBs
+            // without the columns read NULL → None legs, never break the tick.
+            let (entry_amount_x_usd, entry_amount_y_usd, entry_price_usd, out_of_range_since): (
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                Option<i64>,
+            ) = conn
+                .query_row(
+                    "SELECT entry_amount_x_usd, entry_amount_y_usd, entry_price_usd, out_of_range_since FROM positions WHERE position_id = ?1",
+                    [&position_id],
+                    |r| {
+                        Ok((
+                            r.get(0).ok(),
+                            r.get(1).ok(),
+                            r.get(2).ok(),
+                            r.get(3).ok(),
+                        ))
+                    },
+                )
+                .unwrap_or((None, None, None, None));
             // Tolerant: empty on DB error → TA no-vote (fail-open).
             let ta_closes_newest_first: Option<Vec<f64>> = (|| {
                 let mut stmt = conn
@@ -2443,6 +2570,10 @@ fn fee_il_shadows_capped(
                 current_value_usd,
                 fees_claimed_usd,
                 rewards_claimed_usd,
+                entry_amount_x_usd,
+                entry_amount_y_usd,
+                entry_price_usd,
+                out_of_range_since,
                 active_bin_id,
                 lower_bin_id,
                 upper_bin_id,
@@ -2586,6 +2717,7 @@ fn tick(cfg: &config::Config, n: u64) {
     let mut interval_hold_shadow = 0i64;
     let mut vol_exit_shadow = 0i64;
     let mut exit_order_loss_shadow = 0i64;
+    let mut il_dominance_shadow = 0i64;
     let shadows = fee_il_shadows_capped(
         &cfg.sqlite_path,
         cfg.min_yield_exit_age_ms,
@@ -2771,10 +2903,6 @@ fn tick(cfg: &config::Config, n: u64) {
             cfg.max_rebalance_range_bins,
             5.0,
         );
-        // Exit-order dry-run: proven `K.exit_order` with tp stubbed + ta-live + stored loss legs
-        // (tp_hit=false: live ladder evaluator not stored; ta_hit=real native triple vote below;
-        // loss_hit = danger==Some(true) || stop_loss==Some(true)). DRY-RUN: logs + counter, never acts.
-        let loss_hit = danger == Some(true) || stop_loss == Some(true);
         // TA-exhaustion shadow: native indicator triple over stored closes
         // (newest-first) → proven `K.ta_exhausted` confluence. Short/junk →
         // None (fail-open no-vote, mirrors TS TA_EXHAUSTION_MIN_POINTS).
@@ -2801,8 +2929,37 @@ fn tick(cfg: &config::Config, n: u64) {
             }
             None => None,
         };
+        // Exit-order dry-run: tp stubbed + ta-live + stored loss legs.
+        let loss_hit = danger == Some(true) || stop_loss == Some(true);
         let exit_order_pick =
             bend::exit_order(&cfg.bend_bin, false, ta_vote.unwrap_or(false), loss_hit);
+        // IL-dominance shadow (program.ts:10264-10297): fires only when IL
+        // protection is on AND the position is OOR (fees stopped → pure bleed)
+        // AND entry legs price a HODL benchmark AND il > fees × factor + floor.
+        // Host-native floats (no Bend F32 kernel). Fail-open None on any
+        // missing leg → never fires. Shadow-only: logs + counter, TS owns EXIT.
+        let il_gated = cfg.il_protection_enabled && s.out_of_range_since.is_some();
+        let hodl = hodl_value_usd(
+            s.entry_amount_x_usd,
+            s.entry_amount_y_usd,
+            s.entry_price_usd,
+            s.pool_current_price,
+        );
+        let il_usd = hodl.and_then(|h| s.current_value_usd.map(|c| h - c));
+        let il_fires = if il_gated {
+            il_dominant(
+                il_usd,
+                s.fees_claimed_usd,
+                cfg.il_dominance_exit_factor,
+                cfg.il_dominance_min_usd,
+            )
+        } else {
+            Some(false)
+        };
+        println!(
+            "[prismd] shadow il_dominance position={} pool={} gated={il_gated} hodl_usd={hodl:?} il_usd={il_usd:?} fees_usd={:?} factor={} min_usd={} fires={il_fires:?} (observational)",
+            s.position_id, s.pool_address, s.fees_claimed_usd, cfg.il_dominance_exit_factor, cfg.il_dominance_min_usd
+        );
         println!(
             "[prismd] shadow fee_il_exit position={} pool={} known={} bend_known={bend_known:?} mature={} ratio={:?} bend_fires={fires:?} accrual_allowed={accrual:?} enter_blocked={blocked:?} floor={floor} drift={drift} drift_rejects={drift_rejects:?} drift_floor={} loss_danger={danger:?} danger_tighter={danger_tighter:?} capital_exit={capital:?} stop_loss_veto={stop_loss:?} band_width_invalid={width_bad:?} band_contains_active={contained:?} band_width={:?} gas_cost_usd={gas_cost_usd:.4} daily_fees_usd={daily_fees_usd:?} gas_justified={gas_ok:?} rec_prob={rec_prob:?} rec_hold={rec_hold:?} rec_force={rec_force:?} interval_cooled={cooled:?} oor_grace={grace} last_rebal_ms={:?} vol_stddev={vol_stddev:.2} vol_drift_pct={vol_drift_pct:?} vol_thr={} vol_fires={vol_fires:?} entry_shape={entry_shape} shape_drift={shape_drift} range_half_width={range_half_width} pool_bin_step={:?} pool_current_price={:?} loss_hit={loss_hit} exit_order={exit_order_pick:?} ta_depth={ta_depth} ta_rsi_ob={ta_bools:?} ta_vote={ta_vote:?} (observational)",
             s.position_id, s.pool_address, s.known, s.mature, s.ratio, cfg.max_negative_drift_bins, s.upper_bin_id.zip(s.lower_bin_id).map(|(hi, lo)| hi - lo), s.last_rebalance_at_ms, cfg.volatility_exit_stddev, s.pool_bin_step, s.pool_current_price
@@ -2844,9 +3001,11 @@ fn tick(cfg: &config::Config, n: u64) {
         if exit_order_pick == Some(3) {
             exit_order_loss_shadow += 1;
         }
+        if il_fires == Some(true) {
+            il_dominance_shadow += 1;
+        }
     }
 
-    // Book-level drawdown veto (gate 4): one verdict per tick over all opens.
     // Observational only — never blocks ENTER (TS owns risk until parity).
     let drawdown = drawdown_veto(&drawdown_legs, cfg.paper_portfolio_usd);
     // F6 paper-validation shadow: live ENTER needs paper days (program.ts:7562).
@@ -2860,7 +3019,7 @@ fn tick(cfg: &config::Config, n: u64) {
         cfg.paper_validation_enforce,
     );
     println!(
-        "[prismd] decision open={open} exit_shadow={exit_shadow} enter_blocked_shadow={enter_blocked_shadow} danger_shadow={danger_shadow} drift_rejects_shadow={drift_rejects_shadow} capital_exits_shadow={capital_exits_shadow} stop_loss_shadow={stop_loss_shadow} band_health_shadow={band_health_shadow} gas_hold_shadow={gas_hold_shadow} recovery_hold_shadow={recovery_hold_shadow} interval_hold_shadow={interval_hold_shadow} vol_exit_shadow={vol_exit_shadow} exit_order_loss_shadow={exit_order_loss_shadow} paper_days={paper_days:?} paper_pass={paper_pass:?} cooldown_holds={cooldown_hold_shadow} drawdown_veto={drawdown:?} at_capacity={at_capacity} (observational)",
+        "[prismd] decision open={open} exit_shadow={exit_shadow} enter_blocked_shadow={enter_blocked_shadow} danger_shadow={danger_shadow} drift_rejects_shadow={drift_rejects_shadow} capital_exits_shadow={capital_exits_shadow} stop_loss_shadow={stop_loss_shadow} band_health_shadow={band_health_shadow} gas_hold_shadow={gas_hold_shadow} recovery_hold_shadow={recovery_hold_shadow} interval_hold_shadow={interval_hold_shadow} vol_exit_shadow={vol_exit_shadow} exit_order_loss_shadow={exit_order_loss_shadow} il_dominance_shadow={il_dominance_shadow} paper_days={paper_days:?} paper_pass={paper_pass:?} cooldown_holds={cooldown_hold_shadow} drawdown_veto={drawdown:?} at_capacity={at_capacity} (observational)",
     );
 
     // Evolution shadow: what WOULD one evolveThresholds round do to the live
@@ -3265,6 +3424,9 @@ mod tests {
         // REALIZED_PNL_HALT_*: boolean defaults false; window 100, threshold -20.
         assert_eq!(parse_realized_pnl_halt_window(None), Ok(100));
         assert_eq!(parse_realized_pnl_halt_threshold_usd(None), Ok(-20.0));
+        // Mirrors validatedNumber("IL_DOMINANCE_EXIT_FACTOR", 1, 2) + ("IL_DOMINANCE_MIN_USD", 0, 5).
+        assert_eq!(parse_il_dominance_factor(None), Ok(2.0));
+        assert_eq!(parse_il_dominance_min(None), Ok(5.0));
     }
 
     #[test]
@@ -3349,6 +3511,21 @@ mod tests {
                 "min-bin-util {bad:?} fails closed"
             );
         }
+        // IL-dominance: min-only (no max arm, matching TS open range).
+        for bad in ["", "abc", "0.9", "NaN", "inf"] {
+            assert!(
+                parse_il_dominance_factor(Some(bad)).is_err(),
+                "il-dominance-factor {bad:?} fails closed"
+            );
+        }
+        assert_eq!(parse_il_dominance_factor(Some("1")), Ok(1.0)); // min edge
+        for bad in ["", "abc", "-0.1", "NaN", "inf"] {
+            assert!(
+                parse_il_dominance_min(Some(bad)).is_err(),
+                "il-dominance-min {bad:?} fails closed"
+            );
+        }
+        assert_eq!(parse_il_dominance_min(Some("0")), Ok(0.0)); // min edge
         assert_eq!(parse_volume_auth_threshold(Some("0")), Ok(0.0)); // min edge
         assert_eq!(parse_min_bin_utilization(Some("1")), Ok(1.0)); // max edge
         assert_eq!(parse_max_position_loss_pct(None), Ok(0.35));
@@ -4047,6 +4224,8 @@ mod tests {
             oor_grace_period_cycles: 3,
             paper_validation_min_days: 7.0,
             paper_validation_enforce: false,
+            il_dominance_exit_factor: 2.0,
+            il_dominance_min_usd: 5.0,
             agent_http_port: 0,
             ticks: Some(1),
         };
@@ -4080,6 +4259,43 @@ mod tests {
             loss_cap_danger(Some(1000.0), Some(650.01), Some(0.0), Some(0.0), 0.35),
             Some(false)
         );
+    }
+
+    #[test]
+    fn il_dominance_guards() {
+        // Mirrors program.ts:4285-4292 `isIlDominant` + pnl.ts:71-79 HODL:
+        // X leg moves with price ratio, Y constant; null on entry<=0.
+        // Live case: 250/250 @ entry 10, now 9 → hodl 475; cur 460 → il 15
+        // > 0×2 + 5 floor → fires. Flat price → il 0 → holds.
+        let hodl = hodl_value_usd(Some(250.0), Some(250.0), Some(10.0), Some(9.0));
+        assert_eq!(hodl, Some(475.0));
+        let il = hodl.and_then(|h| Some(h - 460.0));
+        assert_eq!(il_dominant(il, Some(0.0), 2.0, 5.0), Some(true));
+        let flat = hodl_value_usd(Some(250.0), Some(250.0), Some(10.0), Some(10.0));
+        let il_flat = flat.and_then(|h| Some(h - 500.0));
+        assert_eq!(il_dominant(il_flat, Some(0.0), 2.0, 5.0), Some(false));
+        // Fees cushion: il 15 vs fees 10 × 2 = 20 → holds.
+        assert_eq!(il_dominant(Some(15.0), Some(10.0), 2.0, 5.0), Some(false));
+        // Below floor: il 4 > 0 but < 5 → holds.
+        assert_eq!(il_dominant(Some(4.0), Some(0.0), 2.0, 5.0), Some(false));
+        // Zero/negative IL → holds (profit or flat, not bleed).
+        assert_eq!(il_dominant(Some(0.0), Some(0.0), 2.0, 5.0), Some(false));
+        // Missing/non-finite legs → None (fail-open, never fires).
+        assert_eq!(il_dominant(None, Some(0.0), 2.0, 5.0), None);
+        assert_eq!(il_dominant(Some(15.0), Some(f64::NAN), 2.0, 5.0), None);
+        assert_eq!(
+            hodl_value_usd(Some(250.0), Some(250.0), Some(0.0), Some(9.0)),
+            None
+        );
+        assert_eq!(
+            hodl_value_usd(None, Some(250.0), Some(10.0), Some(9.0)),
+            None
+        );
+        // Parsers mirror validatedNumber fallbacks 2 / 5, fail-closed garbage.
+        assert_eq!(config::parse_il_dominance_factor(None), Ok(2.0));
+        assert_eq!(config::parse_il_dominance_min(None), Ok(5.0));
+        assert!(config::parse_il_dominance_factor(Some("garbage")).is_err());
+        assert!(config::parse_il_dominance_min(Some("-1")).is_err());
     }
 
     #[test]

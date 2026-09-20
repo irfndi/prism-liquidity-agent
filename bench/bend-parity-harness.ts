@@ -25,7 +25,7 @@ function bendEnv(): NodeJS.ProcessEnv {
 /** False when the `bend` binary is missing — callers must skip, not fail. */
 export function isBendAvailable(): boolean {
   try {
-    execFileSync("bend", ["--version"], { env: bendEnv(), stdio: "ignore" });
+    execFileSync("bend", ["--help"], { env: bendEnv(), stdio: "ignore" });
     return true;
   } catch {
     return false;
