@@ -9,6 +9,10 @@
 // Pass bar (native/rust/README.md, "Parity plan vs Bun shadow" step 2):
 //   decision open == TS open-position count (positions WHERE closed_at IS NULL)
 //   exit_shadow  <=  TS Exits   (shadow never fires alone)
+// Per-gate bar: each shadow leg that has a TS same-gate counterpart is
+// compared by gate name, keyed off `audit.reasoning` via the engine's own
+// exit taxonomy (`exitReasonTag`) — position_events EXIT metadata is
+// pnl-only, so reasoning is the only per-gate source.
 // When `bend` is absent from PATH, BEND_BIN=false is passed and the run says
 // so — Bend kernels are part of the shadow surface, so the output must
 // disclose that half was dark.
@@ -18,6 +22,9 @@ import { cpSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
+// The EXIT taxonomy is engine-owned: reuse it so the parity bar classifies TS
+// exits exactly like the engine does (one source of truth, no drift).
+import { exitReasonTag } from "../engine/exit-reason.js";
 
 function repoFile(rel: string): string {
   return new URL(`../${rel}`, import.meta.url).pathname;
@@ -44,6 +51,13 @@ const DECISION_KEYS = [
   "cooldown_holds",
   "drawdown_veto",
   "at_capacity",
+];
+
+/** Host decision key → the TS exit tag it mirrors (same gate, same book). */
+const SHADOW_TO_TS_TAG: ReadonlyArray<readonly [string, string]> = [
+  ["exit_shadow", "fee-il"],
+  ["il_dominance_shadow", "il-dominance"],
+  ["vol_exit_shadow", "volatility"],
 ];
 
 const USAGE = `prismd parity compare — Rust shadow host vs TS audit trail
@@ -157,14 +171,24 @@ type Cycle = {
 type OpenRow = { n: number };
 type CycleRow = { cycleId: string; at: number };
 type HistRow = { action: string; n: number; executed: number };
+type ExitRow = { reasoning: string | null };
 
-type TsSide = { open: number; cycles: Cycle[]; exits: number; decided: number };
+type TsSide = {
+  open: number;
+  cycles: Cycle[];
+  exits: number;
+  decided: number;
+  exitTags: Record<string, number>;
+};
 
-const EMPTY_TS: TsSide = { open: 0, cycles: [], exits: 0, decided: 0 };
+const EMPTY_TS: TsSide = { open: 0, cycles: [], exits: 0, decided: 0, exitTags: {} };
 
-/** Read the twin's book with bun:sqlite (readonly — nothing may write to it). */
+/** Read the twin's book with bun:sqlite. The twin is a scratch copy nothing
+ *  else touches, so it opens writable — bun:sqlite's readonly mode fails every
+ *  statement on a copied file (`unable to open database file`) even though the
+ *  sqlite3 CLI reads the same copy fine; writable open is the working path. */
 function readTsSide(twin: string, ticks: number): TsSide {
-  const db = new Database(twin, { readonly: true });
+  const db = new Database(twin);
   try {
     // SAFETY: the SELECT aliases the COUNT(*) column to `n`, a BIGINT in SQLite.
     const openRow = db.prepare("SELECT COUNT(*) AS n FROM positions WHERE closed_at IS NULL").get() as OpenRow;
@@ -183,6 +207,12 @@ function readTsSide(twin: string, ticks: number): TsSide {
       `SELECT action AS action, COUNT(*) AS n, COALESCE(SUM(executed), 0) AS executed
        FROM audit WHERE cycle_id IS ? GROUP BY action`,
     );
+    // Per-cycle EXIT reasoning: the gate name lives in `audit.reasoning`
+    // (position_events EXIT metadata is pnl-only), so the per-gate bar reads
+    // the same column the engine wrote its tagged reasons into.
+    const exitStmt = db.prepare(
+      `SELECT reasoning FROM audit WHERE cycle_id IS ? AND action = 'EXIT'`,
+    );
 
     const cycles: Cycle[] = cycleRows.map(({ cycleId, at }) => {
       const hist: Record<string, number> = {};
@@ -196,11 +226,22 @@ function readTsSide(twin: string, ticks: number): TsSide {
       return { cycleId, at, hist, executed };
     });
 
+    const exitTags: Record<string, number> = {};
+    for (const c of cycleRows) {
+      // SAFETY: the SELECT aliases reasoning with the ExitRow shape.
+      const rows = exitStmt.all(c.cycleId) as ExitRow[];
+      for (const r of rows) {
+        const tag = exitReasonTag(r.reasoning);
+        exitTags[tag] = (exitTags[tag] ?? 0) + 1;
+      }
+    }
+
     return {
       open,
       cycles,
       exits: cycles.reduce((acc, c) => acc + (c.hist["EXIT"] ?? 0), 0),
       decided: cycles.reduce((acc, c) => acc + c.executed, 0),
+      exitTags,
     };
   } catch (e) {
     console.error(`# ts audit read failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -237,9 +278,12 @@ function main(): void {
     }
 
     const bend = bendBin();
-    // Interval comes from env like the host (box runs 120000; default 600000).
-    // Invalid values are the host's fail-closed problem, surfaced below.
-    const interval = process.env.SCAN_INTERVAL_MS ?? "600000";
+    // Interval comes from env like the host. Default is the HOST's fail-closed
+    // floor (10s), not the TS 600000 default: prismd ticks are slow on real
+    // books (bend probes per position per tick), and a 10-minute inter-tick
+    // sleep would push multi-tick runs past the exec timeout for no gain —
+    // in `--ticks` mode the interval only bounds the sleep between ticks.
+    const interval = process.env.SCAN_INTERVAL_MS ?? "10000";
     const run = runPrismd(bin, twin, ticks, interval, bend);
     if (!run.ok) {
       console.error(`prismd exited ${run.status}:`);
@@ -301,6 +345,28 @@ function runPrismd(
       stderr: err.stderr,
     };
   }
+}
+
+type GateRow = { gate: string; prismd: number; ts: number; note: string };
+
+/**
+ * Per-gate compare for legs that have a TS counterpart. A shadow firing where
+ * TS's same gate did not is a real divergence (both read the same book). A
+ * shadow silent where TS fired is EXPECTED — the host has no candidate
+ * decisions, so hold-bias / age / maturity / confirm-cycle legs stay TS-only.
+ */
+function gateCompare(decision: Record<string, string>, ts: TsSide): GateRow[] {
+  return SHADOW_TO_TS_TAG.map(([key, tag]) => {
+    const shadow = Number(decision[key] ?? 0);
+    const tsCount = ts.exitTags[tag] ?? 0;
+    const note =
+      shadow > tsCount
+        ? "divergence: shadow exceeds TS same-gate exits"
+        : tsCount > 0
+          ? "coverage: TS fired, host silent (expected — no candidate decisions)"
+          : "both-zero";
+    return { gate: tag, prismd: shadow, ts: tsCount, note };
+  });
 }
 
 type Verdict = {
@@ -376,17 +442,30 @@ function printVerdict(
   for (const k of DECISION_KEYS) {
     console.log(`${k}: prismd=${decision[k] ?? "MISSING"} ts=${tsCompanion(k)}`);
   }
-  console.log(`PARITY open: prismd=${decision.open ?? "?"} ts=${v.ts.open}`);
-  const exitShadow = Number(decision.exit_shadow ?? 0);
-  const ilShadow = Number(decision.il_dominance_shadow ?? 0);
-  console.log(
-    `EXIT_SHADOWS: prismd exit_shadow=${exitShadow} il_dominance_shadow=${ilShadow} vs ts EXIT=${v.ts.exits}`,
-  );
+  printGateBar(decision, v.ts);
   if (v.failReason) {
     console.error(`PARITY: FAIL (${v.failReason})`);
     return;
   }
   console.log("PARITY: PASS (open matches, exit shadows within TS exits)");
+}
+
+/** Per-gate bar: open parity, exit-shadow totals, tag histogram, gate rows. */
+function printGateBar(decision: Record<string, string>, ts: TsSide): void {
+  console.log(`PARITY open: prismd=${decision.open ?? "?"} ts=${ts.open}`);
+  const exitShadow = Number(decision.exit_shadow ?? 0);
+  const ilShadow = Number(decision.il_dominance_shadow ?? 0);
+  console.log(
+    `EXIT_SHADOWS: prismd exit_shadow=${exitShadow} il_dominance_shadow=${ilShadow} vs ts EXIT=${ts.exits}`,
+  );
+  const tags = Object.entries(ts.exitTags)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, n]) => `${k}=${n}`)
+    .join(" ");
+  console.log(`TS_EXIT_TAGS: ${tags || "none"}`);
+  for (const g of gateCompare(decision, ts)) {
+    console.log(`GATE ${g.gate}: prismd=${g.prismd} ts=${g.ts} ${g.note}`);
+  }
 }
 
 main();
