@@ -2938,6 +2938,11 @@ fn tick(cfg: &config::Config, n: u64) {
         // AND entry legs price a HODL benchmark AND il > fees × factor + floor.
         // Host-native floats (no Bend F32 kernel). Fail-open None on any
         // missing leg → never fires. Shadow-only: logs + counter, TS owns EXIT.
+        // DIVERGENCE (documented): TS prices HODL off live pool.currentPrice
+        // (program.ts:10279) + heuristic currentValueUsd mark; the host uses
+        // the latest persisted pool_current_price snapshot + stored
+        // current_value_usd — same class as the vol_drift proxy, shape match
+        // not tick-exact.
         let il_gated = cfg.il_protection_enabled && s.out_of_range_since.is_some();
         let hodl = hodl_value_usd(
             s.entry_amount_x_usd,
@@ -3336,7 +3341,7 @@ mod tests {
     /// dev machine or a CI job that does not install it.
     fn bend_available() -> bool {
         std::process::Command::new("bend")
-            .arg("--version")
+            .arg("--help")
             .output()
             .is_ok_and(|o| o.status.success())
     }
@@ -4283,6 +4288,14 @@ mod tests {
         // Missing/non-finite legs → None (fail-open, never fires).
         assert_eq!(il_dominant(None, Some(0.0), 2.0, 5.0), None);
         assert_eq!(il_dominant(Some(15.0), Some(f64::NAN), 2.0, 5.0), None);
+        // Live close 2026-09-20 (CTMV/SOL SsJMY5): OOR $6.65 IL vs $0 fees
+        // fires at factor 2 / min $5 (the lane that named the 80th-wave gap).
+        // Live realized -$4.40 = withdrawn $25.60 − deposit $30 (both legs).
+        assert_eq!(il_dominant(Some(6.65), Some(0.0), 2.0, 5.0), Some(true));
+        // Strict > on all three arms: exact-boundary holds, never fires.
+        assert_eq!(il_dominant(Some(0.0), Some(0.0), 2.0, 5.0), Some(false)); // il>0
+        assert_eq!(il_dominant(Some(10.0), Some(5.0), 2.0, 5.0), Some(false)); // il>fees×2
+        assert_eq!(il_dominant(Some(5.0), Some(0.0), 2.0, 5.0), Some(false)); // il>min
         assert_eq!(
             hodl_value_usd(Some(250.0), Some(250.0), Some(0.0), Some(9.0)),
             None
@@ -4297,7 +4310,6 @@ mod tests {
         assert!(config::parse_il_dominance_factor(Some("garbage")).is_err());
         assert!(config::parse_il_dominance_min(Some("-1")).is_err());
     }
-
     #[test]
     fn stop_loss_veto_guards() {
         // Mirrors checkStopLossGate exactly: `lossPct < -pct`, no disabled

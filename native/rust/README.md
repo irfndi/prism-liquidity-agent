@@ -39,11 +39,12 @@ reports set/unset, never values. Garbage numbers exit 2, never guess.
 cargo test
 ```
 
-41 tests (35 unconditional + 6 Bend-gated): fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
+42 tests (36 unconditional + 6 Bend-gated): fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
 Jev-fail-open, config defaults, config fail-closed, Jev-stub fail-open, real
 SQLite shadow read, drift ring-cap, evolve live-floors-and-lift, loss-cap breach,
 CLI flags, `signal_lift` edges (empty/one-sided/non-finite→None), loss-cap
-tighter-cap monotone superset, open-count excludes-closed, per-pool groups-open-only, stop-loss veto guards, exposure sums-open-only, halt edges, drawdown guards, rebalance-range guards, gas-justified guards, recovery-hold guards, interval-paper guards, cooldown-free guards, compound-parked guards, vol-exit/stddev guards, entry-shape guards, range-width guards, TA-indicator guards, 4 unconditional bogus-binary fail-open/closed,
+tighter-cap monotone superset, open-count excludes-closed, per-pool groups-open-only, stop-loss veto guards, exposure sums-open-only, halt edges, drawdown guards, rebalance-range guards, gas-justified guards, recovery-hold guards, interval-paper guards, cooldown-free guards, compound-parked guards, vol-exit/stddev guards, entry-shape guards,
+range-width guards, il-dominance guards (live $6.65 fire + strict-> + None legs), TA-indicator guards, 4 unconditional bogus-binary fail-open/closed,
 `K.clamp_thr` kernel, `evolve_thr` banded leg, `ta_exhausted` 6/6 confluence
 combos, `exit_order` 5/5 precedence picks, tick-match shadow surface —
 skipped, not failed, when `bend` is absent from `PATH`). Zero new deps (rusqlite only, Bend calls shell the `bend`
@@ -51,7 +52,7 @@ CLI via `std::process`); Jev HTTP stays a `JevClient` trait + stub until reqwest
 (rustls) is justified.
 
 ## Bend kernel wiring (real, as of this wave)
-Twenty-three shadows (14 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width + 8 per-tick Bend (7 proven incl. ta-live + tp-stubbed exit_order dry-run) + startup health-check) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
+Twenty-four shadows (15 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width/il-dominance + 8 per-tick Bend (7 proven incl. ta-live + tp-stubbed exit_order dry-run) + startup health-check) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
 binary needs no on-disk kernels file at runtime). Each mirrors
 `bench/bend-parity-harness.ts`: write a temp probe file importing the
 kernels, run `bend probe.bend`, parse the result off stdout. Every
