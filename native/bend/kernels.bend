@@ -8,7 +8,9 @@ import Base
 # Fixed-point Nat encoding: every ratio/threshold is an integer in hundredths
 # (1.00 = 100n). Division floors. This keeps all kernels computable so LAWS
 # can be proved by reflexivity — F32 comparisons are uninterpreted axioms in
-# Bend 2.0.20 and closed F32 terms do not reduce (verified by probe).
+# Bend 2.0.20 and closed F32 comparisons do not reduce to Bool (verified by
+# probe: a bare F32 literal prints, a `{13.92 == 13.92 : Bool}` law errors
+# "expected: Bool, observed: F32").
 # TS mapping: feeIl [0.3,3.0] -> [30n,300n], auth [0.1,0.9] -> [10n,90n],
 # util [0.05,0.8] -> [5n,80n], MAX_FEE_IL_RATIO 20 -> 2000n, EXIT 0.5 -> 50n.
 
