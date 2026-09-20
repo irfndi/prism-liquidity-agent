@@ -46,13 +46,13 @@ CLI flags, `signal_lift` edges (empty/one-sided/non-finite→None), loss-cap
 tighter-cap monotone superset, open-count excludes-closed, per-pool groups-open-only, stop-loss veto guards, exposure sums-open-only, halt edges, drawdown guards, rebalance-range guards, gas-justified guards, recovery-hold guards, interval-paper guards, cooldown-free guards, compound-parked guards, vol-exit/stddev guards, entry-shape guards,
 range-width guards, il-dominance guards (live $6.65 fire + strict-> + None legs), TA-indicator guards, 4 unconditional bogus-binary fail-open/closed,
 `K.clamp_thr` kernel, `evolve_thr` banded leg, `ta_exhausted` 6/6 confluence
-combos, `exit_order` 5/5 precedence picks, tick-match shadow surface —
+combos, `exit_order` 5/5 precedence picks, loss-magnitude kernel legs (at-or-below fires / one-cent-above holds / profit-quiet / URANUS -$8.15-vs-$10.50 floor holds / pct>1 clamp / dust strict-below + at-floor + disabled-floor), tick-match shadow surface —
 skipped, not failed, when `bend` is absent from `PATH`). Zero new deps (rusqlite only, Bend calls shell the `bend`
 CLI via `std::process`); Jev HTTP stays a `JevClient` trait + stub until reqwest
 (rustls) is justified.
 
 ## Bend kernel wiring (real, as of this wave)
-Twenty-four shadows (15 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width/il-dominance + 8 per-tick Bend (7 proven incl. ta-live + tp-stubbed exit_order dry-run) + startup health-check) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
+Twenty-five shadows (16 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width/il-dominance/loss-magnitude + 9 per-tick Bend (7 proven incl. ta-live + tp-stubbed exit_order dry-run + loss-magnitude + dust) + startup health-check) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
 binary needs no on-disk kernels file at runtime). Each mirrors
 `bench/bend-parity-harness.ts`: write a temp probe file importing the
 kernels, run `bend probe.bend`, parse the result off stdout. Every
@@ -126,6 +126,8 @@ so no host wrapper — `computeFeeIlRatio` needs in-memory bin-array + drift).
 - `resolve_range_half_width` over stored `bin_step` + vol σ (tier 25/20/15 + coverage floor + σ-clamp(σ/2,0.5,2) + half-cap min(maxFull/2,34) + floor 5) → per-position `range_half_width/pool_bin_step/pool_current_price` (price provenance-only; never acts).
 - `recommend_entry_strategy` over the stored vol/drift legs (σ, `VOLATILITY_EXIT_STDDEV`, `net_drift_bins` cold→0) → per-position `entry_shape/shape_drift` (`|drift|>=max(3,2σ)`→bidask, `σ>=thr`→spot, else curve; non-finite→curve; `auto` arm only, non-auto stays TS-owned; never acts).
 - `hodl_value_usd` + `il_dominant` + `IL_DOMINANCE_EXIT_FACTOR` (2, min 1) + `IL_DOMINANCE_MIN_USD` (5, min 0) → per-position `shadow il_dominance gated/hodl_usd/il_usd/fees_usd/factor/min_usd/fires` + `decision … il_dominance_shadow` tally (computeIlDominance mirror: protection-on AND OOR AND HODL-priced AND il > fees × factor + floor; host-native floats, no Bend F32 kernel; missing legs → None, never fires; never exits).
+- `loss_magnitude_fires` kernel + `DUST_EXIT_USD` (5, min 0) → per-position `shadow loss_magnitude pnl_usd/deposited_usd/cap_pct/native_danger/kernel_fires/dust_mark_usd/dust_fires` line (loss-cap class twin: proven at-or-below comparison of the SAME native `loss_cap_danger` predicate the tick already logs; host wins on disagreement, fail-open like `bend_known`; floor arithmetic stays native f64 because Bend `Nat` is unary — a kernel `Nat.mul(100000n, 35n)` costs 20-50s per probe, measured; URANUS-SOL 2026-09-20 legs: $30 deposit / -$8.15 mark / 35% floor = $10.50 → holds, the trailing-stop breach owns that close, never exits).
+
 ## Parity plan vs Bun shadow
 
 1. Run `prismd --ticks N` alongside the TS paper loop for N cycles (loop proven: `--ticks 3` emits 3 `tick=` + 3 `decision` lines); compare
@@ -133,7 +135,7 @@ so no host wrapper — `computeFeeIlRatio` needs in-memory bin-array + drift).
    Grep-able per-tick lines (all `(observational)`, never acted on):
    `tick=` (total rows) → `capacity open/max/at_capacity` (portfolio ENTER
    headroom) → `pool-capacity pools/capped/pool/open/max/at_capacity` (fullest pool + aggregates) →
-   per-position `shadow fee_il_exit …` → `decision open/exit_shadow/enter_blocked_shadow/danger_shadow/drift_rejects_shadow/capital_exits_shadow/stop_loss_shadow/band_health_shadow/gas_hold_shadow/recovery_hold_shadow/interval_hold_shadow/vol_exit_shadow/exit_order_loss_shadow/paper_days/paper_pass/cooldown_holds/drawdown_veto/at_capacity` (one-line
+   per-position `shadow fee_il_exit …` → `shadow il_dominance …` → `shadow loss_magnitude …` → `decision open/exit_shadow/enter_blocked_shadow/danger_shadow/drift_rejects_shadow/capital_exits_shadow/stop_loss_shadow/band_health_shadow/gas_hold_shadow/recovery_hold_shadow/interval_hold_shadow/vol_exit_shadow/exit_order_loss_shadow/il_dominance_shadow/paper_days/paper_pass/cooldown_holds/drawdown_veto/at_capacity` (one-line
    verdict to diff against the TS `decided/executed/failed` cycle log).
 2. Pass bar for the N-cycle compare: `decision open` == TS open count;
    `exit_shadow` ⊆ TS exits (shadow never fires alone); `capacity` /

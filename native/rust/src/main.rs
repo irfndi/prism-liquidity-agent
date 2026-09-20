@@ -983,6 +983,86 @@ mod bend {
             }
         }
     }
+
+    /// SHADOW-only: does `K.loss_magnitude_fires` say the loss-cap class fires
+    /// for this mark-PnL projection? Native twin of
+    /// `engine/position-loss-cap.ts` `isPositionLossCapBreached` (mark PnL
+    /// = current + fees + rewards − deposited ≤ -(deposited × min(pct,1))) —
+    /// the SAME predicate `loss_cap_danger` computes natively; the kernel is
+    /// the proven COMPARISON (at-or-below direction) both the live cap and the
+    /// tighter-cap probe consult, with the direction pinned by law instead of
+    /// by two Rust call sites. The floor magnitude is computed HERE in native
+    /// f64 (deposited × min(pct,1)) because Bend's `Nat` is unary — a kernel
+    /// `Nat.mul(100000n, 35n)` costs 20-50s per probe (measured); the kernel
+    /// owns the comparison, not the arithmetic. USD legs → Nat cents (×100,
+    /// round); `pnl_neg` projects `pnl < 0` (magnitude = |pnl|). `None` on
+    /// non-finite/negative-floor legs (caller fail-open: the native
+    /// `loss_cap_danger` still votes). Observational only — never acted on.
+    pub fn loss_magnitude_fires(
+        bend_bin: &str,
+        pnl_usd: Option<f64>,
+        deposited_usd: Option<f64>,
+        max_loss_pct: f64,
+    ) -> Option<bool> {
+        let (pnl, dep) = (pnl_usd?, deposited_usd?);
+        if !pnl.is_finite() || !dep.is_finite() || !max_loss_pct.is_finite() {
+            return None;
+        }
+        // Floor computed natively: Bend `Nat` is unary, so multiplying inside
+        // the kernel (`Nat.mul(100000n, 35n)`) builds 3.5M successor nodes and
+        // a probe takes 20-50s (measured). The kernel owns the proven
+        // COMPARISON (at-or-below); arithmetic stays native f64 like
+        // `loss_cap_danger` (position-loss-cap.ts:22-40).
+        let floor_usd = dep * max_loss_pct.min(1.0);
+        if !floor_usd.is_finite() || floor_usd < 0.0 {
+            return None;
+        }
+        let neg = pnl < 0.0;
+        let mag = (pnl.abs() * 100.0).round().clamp(0.0, u64::MAX as f64) as u64;
+        let floor_cents = (floor_usd * 100.0).round().clamp(0.0, u64::MAX as f64) as u64;
+        let expr = format!(
+            "K.loss_magnitude_fires({}, {mag}n, {floor_cents}n)",
+            bool_lit(neg)
+        );
+        match run_bool(bend_bin, &expr) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("[prismd] bend loss_magnitude_fires unavailable: {e}");
+                None
+            }
+        }
+    }
+
+    /// SHADOW-only: does `K.dust_exit_fires` say the dust-cleanup arm fires?
+    /// Mirrors `engine/program.ts` `isDustExit` (program.ts:4384-4386):
+    /// threshold > 0 AND real mark STRICTLY below it. `floor_on` projects
+    /// `dustExitUsd > 0` (TS `(dustExitUsd ?? 0) > 0`), so a disabled floor
+    /// can never fire even with a $0 mark. `None` on non-finite legs
+    /// (caller fail-open: dust never blocks). Observational only.
+    pub fn dust_exit_fires(
+        bend_bin: &str,
+        floor_on: bool,
+        mark_usd: Option<f64>,
+        floor_usd: Option<f64>,
+    ) -> Option<bool> {
+        let (mark, floor) = (mark_usd?, floor_usd?);
+        if !mark.is_finite() || !floor.is_finite() {
+            return None;
+        }
+        let mark_cents = (mark * 100.0).round().clamp(0.0, u64::MAX as f64) as u64;
+        let floor_cents = (floor * 100.0).round().clamp(0.0, u64::MAX as f64) as u64;
+        let expr = format!(
+            "K.dust_exit_fires({}, {mark_cents}n, {floor_cents}n)",
+            bool_lit(floor_on)
+        );
+        match run_bool(bend_bin, &expr) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("[prismd] bend dust_exit_fires unavailable: {e}");
+                None
+            }
+        }
+    }
 }
 
 /// Env-driven host config. Names mirror `engine/config-service.ts`
@@ -1081,6 +1161,11 @@ mod config {
     pub const IL_DOMINANCE_EXIT_FACTOR_MIN: f64 = 1.0;
     pub const IL_DOMINANCE_MIN_DEFAULT_USD: f64 = 5.0;
     pub const IL_DOMINANCE_MIN_MIN_USD: f64 = 0.0;
+    /// Mirrors engine/config-service.ts validatedNumber("DUST_EXIT_USD", 0, 5).
+    /// Dust-cleanup EXIT arm (program.ts:4384-4386): real mark STRICTLY below
+    /// the threshold and the threshold itself > 0. 0 disables (TS `(x ?? 0) > 0`).
+    pub const DUST_EXIT_DEFAULT_USD: f64 = 5.0;
+    pub const DUST_EXIT_MIN_USD: f64 = 0.0;
     /// Mirrors validatedNumber("EVOLUTION_INTERVAL", 1, 5, 100) — min closed
     /// outcomes before the evolution shadow consults (TS tryEvolveThresholds
     /// returns early below interval; program.ts:6032-6042).
@@ -1184,6 +1269,7 @@ mod config {
         pub paper_validation_enforce: bool,
         pub il_dominance_exit_factor: f64,
         pub il_dominance_min_usd: f64,
+        pub dust_exit_usd: f64,
         pub agent_http_port: u16,
         pub ticks: Option<u64>,
     }
@@ -1803,6 +1889,25 @@ mod config {
             ))
         }
     }
+    /// Parse-or-default for `DUST_EXIT_USD`; `Err` on garbage/below-min.
+    /// Absent -> 5, matching validatedNumber("DUST_EXIT_USD", 0, 5). Feeds the
+    /// dust-cleanup shadow arm only.
+    pub fn parse_dust_exit_usd(raw: Option<&str>) -> Result<f64, String> {
+        let Some(s) = raw else {
+            return Ok(DUST_EXIT_DEFAULT_USD);
+        };
+        let v: f64 = s
+            .trim()
+            .parse()
+            .map_err(|_| format!("DUST_EXIT_USD={s:?} is not a number"))?;
+        if v.is_finite() && v >= DUST_EXIT_MIN_USD {
+            Ok(v)
+        } else {
+            Err(format!(
+                "DUST_EXIT_USD={v} must be finite and >= {DUST_EXIT_MIN_USD}"
+            ))
+        }
+    }
     /// Parse-or-default for `MIN_BIN_UTILIZATION`; `Err` on garbage/out-of-band.
     /// Absent -> 0.3, matching validatedNumber's fallback.
     pub fn parse_min_bin_utilization(raw: Option<&str>) -> Result<f64, String> {
@@ -1969,6 +2074,7 @@ mod config {
                 il_dominance_min_usd: parse_il_dominance_min(
                     env::var("IL_DOMINANCE_MIN_USD").ok().as_deref(),
                 )?,
+                dust_exit_usd: parse_dust_exit_usd(env::var("DUST_EXIT_USD").ok().as_deref())?,
                 agent_http_port: parse_agent_http_port(
                     env::var("AGENT_HTTP_PORT").ok().as_deref(),
                 )?,
@@ -2773,6 +2879,46 @@ fn tick(cfg: &config::Config, n: u64) {
         // Confidence 1.0 matches TS conf1PositionExit (program.ts:10595-10603);
         // the kernel drops it either way (LAWS capital_exit_free/quiet).
         let capital = danger.and_then(|d| bend::capital_exit(&cfg.bend_bin, d, 1.0));
+        // Proven loss-magnitude floor (2026-09-20 URANUS-SOL wave): the kernel
+        // twin of the SAME native predicate above (mark PnL ≤ -(deposited ×
+        // min(pct,1))), so the at-or-below direction is pinned by law rather
+        // than by two Rust call sites. Agreement check only — host `danger`
+        // stays the voter, exactly like `bend_known` below; a mismatch is
+        // logged and the host wins (fail-open), never acted on.
+        // PnL legs mirror positionMarkPnlUsd (position-loss-cap.ts:22-40);
+        // missing/non-finite legs → None (no consult).
+        let loss_mark_pnl = match (
+            s.deposited_usd,
+            s.current_value_usd,
+            s.fees_claimed_usd,
+            s.rewards_claimed_usd,
+        ) {
+            (Some(d), Some(c), Some(f), Some(r))
+                if d.is_finite()
+                    && d > 0.0
+                    && c.is_finite()
+                    && f.is_finite()
+                    && r.is_finite()
+                    && f >= 0.0
+                    && r >= 0.0 =>
+            {
+                Some(c + f + r - d)
+            }
+            _ => None,
+        };
+        let loss_magnitude_kernel = bend::loss_magnitude_fires(
+            &cfg.bend_bin,
+            loss_mark_pnl,
+            s.deposited_usd,
+            cfg.max_position_loss_pct,
+        );
+        if let (Some(native), Some(kernel)) = (danger, loss_magnitude_kernel) {
+            if native != kernel {
+                eprintln!(
+                    "[prismd] bend loss_magnitude_fires DISAGREES with native danger: native={native} kernel={kernel} (host wins, fail-open)"
+                );
+            }
+        }
         // Known-flag shadow: K.fee_known is a pure bool passthrough of the
         // host's own datapi comparison — the kernel call proves the wiring,
         // never votes. A mismatch would mean host/kernel disagree on the
@@ -2964,6 +3110,21 @@ fn tick(cfg: &config::Config, n: u64) {
         println!(
             "[prismd] shadow il_dominance position={} pool={} gated={il_gated} hodl_usd={hodl:?} il_usd={il_usd:?} fees_usd={:?} factor={} min_usd={} fires={il_fires:?} (observational)",
             s.position_id, s.pool_address, s.fees_claimed_usd, cfg.il_dominance_exit_factor, cfg.il_dominance_min_usd
+        );
+        // Dust-cleanup arm (program.ts:4384-4386): real mark strictly below
+        // the threshold, threshold > 0. Host kernel twin; observational only.
+        let dust_fires = bend::dust_exit_fires(
+            &cfg.bend_bin,
+            cfg.dust_exit_usd > 0.0,
+            s.current_value_usd,
+            Some(cfg.dust_exit_usd),
+        );
+        // Loss-magnitude kernel verdict + the dust arm it shares the ledger
+        // with — one grep-able line answering "would the proven floor have
+        // fired this tick, and does the host agree?" (observational).
+        println!(
+            "[prismd] shadow loss_magnitude position={} pool={} pnl_usd={loss_mark_pnl:?} deposited_usd={:?} cap_pct={} native_danger={danger:?} kernel_fires={loss_magnitude_kernel:?} dust_mark_usd={:?} dust_fires={:?} (observational)",
+            s.position_id, s.pool_address, s.deposited_usd, cfg.max_position_loss_pct, s.current_value_usd, dust_fires
         );
         println!(
             "[prismd] shadow fee_il_exit position={} pool={} known={} bend_known={bend_known:?} mature={} ratio={:?} bend_fires={fires:?} accrual_allowed={accrual:?} enter_blocked={blocked:?} floor={floor} drift={drift} drift_rejects={drift_rejects:?} drift_floor={} loss_danger={danger:?} danger_tighter={danger_tighter:?} capital_exit={capital:?} stop_loss_veto={stop_loss:?} band_width_invalid={width_bad:?} band_contains_active={contained:?} band_width={:?} gas_cost_usd={gas_cost_usd:.4} daily_fees_usd={daily_fees_usd:?} gas_justified={gas_ok:?} rec_prob={rec_prob:?} rec_hold={rec_hold:?} rec_force={rec_force:?} interval_cooled={cooled:?} oor_grace={grace} last_rebal_ms={:?} vol_stddev={vol_stddev:.2} vol_drift_pct={vol_drift_pct:?} vol_thr={} vol_fires={vol_fires:?} entry_shape={entry_shape} shape_drift={shape_drift} range_half_width={range_half_width} pool_bin_step={:?} pool_current_price={:?} loss_hit={loss_hit} exit_order={exit_order_pick:?} ta_depth={ta_depth} ta_rsi_ob={ta_bools:?} ta_vote={ta_vote:?} (observational)",
@@ -4117,6 +4278,54 @@ mod tests {
                 bend::accrual_allowed("bend", false, false, true),
                 Some(false)
             );
+            // Loss-magnitude floor (2026-09-20 URANUS wave): kernel must
+            // agree with the native `loss_cap_danger` vectors exactly —
+            // at-or-below fires (35.00 loss vs 1000×0.35 floor), one cent
+            // above holds, a profit never fires.
+            assert_eq!(
+                bend::loss_magnitude_fires("bend", Some(-350.0), Some(1000.0), 0.35),
+                Some(true)
+            );
+            assert_eq!(
+                bend::loss_magnitude_fires("bend", Some(-349.99), Some(1000.0), 0.35),
+                Some(false)
+            );
+            assert_eq!(
+                bend::loss_magnitude_fires("bend", Some(50.0), Some(1000.0), 0.35),
+                Some(false)
+            );
+            // URANUS-SOL legs: $30 deposit, -27.17% mark = -$8.15 → BELOW the
+            // 35% floor → the loss-cap class must NOT fire (trailing stop owns
+            // it). Guards against a kernel that fires the wrong direction.
+            assert_eq!(
+                bend::loss_magnitude_fires("bend", Some(-8.15), Some(30.0), 0.35),
+                Some(false)
+            );
+            // pct > 1 clamps like TS `min(pct, 1)`: a 2.0 pct behaves as 1.0,
+            // so a -$2000 loss on a $1000 deposit fires (full-wipe floor).
+            assert_eq!(
+                bend::loss_magnitude_fires("bend", Some(-2000.0), Some(1000.0), 2.0),
+                Some(true)
+            );
+            // A profit never fires even with a huge pct (sign projection).
+            assert_eq!(
+                bend::loss_magnitude_fires("bend", Some(500.0), Some(1000.0), 1.0),
+                Some(false)
+            );
+            // Dust arm: strictly-below fires, at-floor holds, disabled floor
+            // never fires even at a $0 mark.
+            assert_eq!(
+                bend::dust_exit_fires("bend", true, Some(4.99), Some(5.0)),
+                Some(true)
+            );
+            assert_eq!(
+                bend::dust_exit_fires("bend", true, Some(5.0), Some(5.0)),
+                Some(false)
+            );
+            assert_eq!(
+                bend::dust_exit_fires("bend", false, Some(0.0), Some(5.0)),
+                Some(false)
+            );
         }
     }
 
@@ -4157,7 +4366,9 @@ mod tests {
     fn bend_wrappers_none_on_missing_binary() {
         // Fail-open contract for every wrapper: a bogus binary path yields
         // None for fee_known/fee_exit/enter_blocked/capital_exit/ta/exit_order
-        // (extends bend_clamp_none_on_missing_binary to the full surface).
+        // /loss_magnitude/dust (extends bend_clamp_none_on_missing_binary to
+        // the full surface). Unconditional (no bend required): the bogus path
+        // proves the fail-open contract without a real probe.
         let bogus = "definitely-not-a-real-binary";
         assert_eq!(bend::fee_known(bogus, true), None);
         assert_eq!(bend::fee_exit_fires(bogus, true, true, 0.4), None);
@@ -4165,6 +4376,37 @@ mod tests {
         assert_eq!(bend::capital_exit(bogus, true, 1.0), None);
         assert_eq!(bend::ta_exhausted(bogus, true, true, false), None);
         assert_eq!(bend::exit_order(bogus, false, true, true), None);
+        assert_eq!(
+            bend::loss_magnitude_fires(bogus, Some(-350.0), Some(1000.0), 0.35),
+            None
+        );
+        assert_eq!(
+            bend::dust_exit_fires(bogus, true, Some(4.99), Some(5.0)),
+            None
+        );
+        // Non-finite/missing legs never spawn a probe either.
+        assert_eq!(
+            bend::loss_magnitude_fires(bogus, Some(f64::NAN), Some(1000.0), 0.35),
+            None
+        );
+        assert_eq!(
+            bend::loss_magnitude_fires(bogus, None, Some(1000.0), 0.35),
+            None
+        );
+        assert_eq!(
+            bend::loss_magnitude_fires(bogus, Some(-1.0), None, 0.35),
+            None
+        );
+        assert_eq!(bend::dust_exit_fires(bogus, true, None, Some(5.0)), None);
+        assert_eq!(
+            bend::dust_exit_fires(bogus, true, Some(f64::NAN), Some(5.0)),
+            None
+        );
+        // NOTE: the pct>1 clamp leg (`loss_magnitude_fires(..., 2.0)`) lives in
+        // the Bend-gated tick test, not here: with a real `bend` on PATH it
+        // consults and returns Some(true) (2000 loss > 1000 clamped floor),
+        // so asserting None here would be environment-dependent — exactly the
+        // flake the fail-open contract forbids.
     }
 
     #[test]
@@ -4231,6 +4473,7 @@ mod tests {
             paper_validation_enforce: false,
             il_dominance_exit_factor: 2.0,
             il_dominance_min_usd: 5.0,
+            dust_exit_usd: 5.0,
             agent_http_port: 0,
             ticks: Some(1),
         };

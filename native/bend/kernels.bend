@@ -8,7 +8,7 @@ import Base
 # Fixed-point Nat encoding: every ratio/threshold is an integer in hundredths
 # (1.00 = 100n). Division floors. This keeps all kernels computable so LAWS
 # can be proved by reflexivity — F32 comparisons are uninterpreted axioms in
-# Bend 2.0.5 and closed F32 terms do not reduce (verified by probe).
+# Bend 2.0.20 and closed F32 terms do not reduce (verified by probe).
 # TS mapping: feeIl [0.3,3.0] -> [30n,300n], auth [0.1,0.9] -> [10n,90n],
 # util [0.05,0.8] -> [5n,80n], MAX_FEE_IL_RATIO 20 -> 2000n, EXIT 0.5 -> 50n.
 
@@ -141,5 +141,36 @@ def exit_order(tp_hit: Bool, ta_hit: Bool, loss_hit: Bool) -> Nat:
 # argument is accepted and dropped, so no confidence value can block it.
 def capital_exit(danger: Bool, +conf: Nat) -> Bool:
   danger
+
+# URANUS-class loss-magnitude floor: mark PnL ≤ -(deposit × pct). All legs are
+# fixed-point Nat in hundredths of USD (cents-as-Nat: $30.00 = 3000n). `pnl`
+# is a (negative?, magnitude) pair like drift — (True{}, m) means -$m — so
+# the at-or-below direction keeps its meaning without signed ints.
+# The floor magnitude is PRECOMPUTED by the host (deposited × min(pct,1), in
+# cents, native f64) rather than multiplied here: Bend's Nat is unary, so
+# `Nat.mul(100000n, 35n)` builds 3.5M successor nodes and a probe takes
+# 20-50s (measured). The kernel owns the proven COMPARISON — the at-or-below
+# direction is what `loss_cap_danger` and its tighter-cap twin both consult,
+# so the law pins one predicate instead of two Rust call sites. Arithmetic
+# stays native f64, same as `loss_cap_danger` (position-loss-cap.ts:22-40).
+# Exact-boundary parity with loss_cap_danger_guards: deposit 1000.00,
+# pnl -35.00 → floor 35000n-cents → fires; pnl -34.99 → holds.
+# URANUS-SOL 2026-09-20 legs: deposit $30.00, realized -$8.15 = 27.17% mark
+# loss, floor at 35% = $10.50 → 815n < 1050n → HOLDS (the cap never should
+# have fired; the trailing-stop 10% breach owns that close).
+def loss_magnitude_fires(pnl_neg: Bool, +pnl_mag: Nat, +floor_mag: Nat) -> Bool:
+  match pnl_neg:
+    case True{}:
+      Nat.is_le(floor_mag, pnl_mag)
+    case False{}:
+      False{}
+
+# Dust-cleanup EXIT arm (program.ts isDustExit): REAL mark STRICTLY below the
+# dust threshold, threshold > 0. `mark`/`floor` are Nat cents; `floor_on`
+# projects `dustExitUsd > 0` at the call site. Zero-disabled arm lives here
+# (not at the call site) so the law can pin it: a disabled floor never fires.
+def dust_exit_fires(floor_on: Bool, +mark: Nat, +floor: Nat) -> Bool:
+  Bool.and(floor_on, Nat.is_lt(mark, floor))
+
 def main() -> Nat:
   clamp_thr(1392n, 30n, 300n)
