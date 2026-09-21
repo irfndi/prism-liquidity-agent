@@ -490,6 +490,17 @@ function printVerdict(
     `# prismd=${bin} bend=${bend ? bend : "ABSENT (BEND_BIN=false, kernels not consulted)"} scan_interval_ms=${interval}`,
   );
   console.log(`# prismd decision: ${fmt(v.decision)}`);
+  // Scope qualifier, printed BEFORE any verdict so a green bar cannot be
+  // quoted later as live parity. The TS side is read from whatever audit rows
+  // the book already holds: if the engine is not running concurrently (the
+  // normal case — this compare runs prismd alone against a static ledger),
+  // those rows are RECORDED HISTORY, not a same-cycle TS decision. Open-count
+  // agreement is still a real read-path check; exit agreement is not tested
+  // unless the book holds EXIT rows from a concurrent run.
+  console.log(
+    `# scope: TS side is RECORDED HISTORY from ${v.ts.cycles.length} cycle(s) in this book — ` +
+      `no concurrent TS run, so this validates the host read path, not live decision parity`,
+  );
   console.log(`# ts cycles (last ${ticks}):`);
   for (const c of v.ts.cycles) {
     const hist = Object.entries(c.hist)
@@ -513,7 +524,17 @@ function printVerdict(
     console.error(`PARITY: FAIL (${v.failReason})`);
     return;
   }
-  console.log("PARITY: PASS (open matches, exit shadows within TS exits)");
+  // The PASS text derives from what was actually measured. `ts.exits === 0`
+  // makes every exit-shadow comparison vacuous (prismd 0 ⊆ TS 0 proves
+  // nothing about the exit path), so the bar only demonstrated the
+  // open-count match — say that instead of asserting agreement that a
+  // book with no EXIT rows cannot test. A frozen/historical TS side has no
+  // concurrent cycles by construction, which is the same limitation.
+  const exitPath =
+    v.ts.exits === 0
+      ? "exit-path agreement UNTESTED — TS side has 0 EXIT rows"
+      : "exit shadows within TS exits";
+  console.log(`PARITY: PASS (open matches; ${exitPath})`);
 }
 
 /** Per-gate bar: open parity, exit-shadow totals, tag histogram, gate rows. */
