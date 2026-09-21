@@ -3560,10 +3560,331 @@ fn classify_args(args: &[String], ticks: Option<u64>) -> Result<Option<u64>, Str
     Ok(ticks)
 }
 
+/// Meteora Data API read tier — the FIRST of the three stats sources the TS
+/// engine tries, and the only one that supplies MEASURED per-pool fees
+/// (`fees24hUsd`). Mirrors `engine/meteora-datapi-service.ts`: one GET to
+/// `{base}/pools/{address}`, strict field typing, `null` on every failure
+/// class (transport, non-200, unparseable, schema drift) so callers fall
+/// through to geckoterminal then the heuristic exactly like TS does.
+///
+/// Deliberately NOT a Solana RPC client: the Data API is plain HTTPS JSON
+/// and carries every stat the shadows need (tvl/volume/fees/apr/price/
+/// base_fee_pct/has_farm/farm_apr/blacklist/freeze flags), so the read tier
+/// needs no borsh, no LbPair layout, and no wallet. Pool-state-on-chain
+/// (active bin, bin reserves) stays a later, separate wave.
+mod datapi {
+    use serde_json::Value;
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::{Duration, Instant};
+
+    pub const DEFAULT_BASE_URL: &str = "https://dlmm.datapi.meteora.ag";
+    /// Mirrors `POOL_STATS_CACHE_TTL_MS = 30_000` (meteora-datapi-service.ts:215):
+    /// the pool's TVL/volume/fees move on swap cadence, so a short TTL
+    /// collapses within-cycle duplicates without going stale across cycles.
+    /// A failed fetch is NOT cached (fail-open retries next read), and the
+    /// map is pruned on insert so dropped pools don't accumulate.
+    pub const CACHE_TTL: Duration = Duration::from_secs(30);
+    /// Mirrors `MAX_RETRIES = 2` (meteora-datapi-service.ts:11): up to two
+    /// extra attempts on retriable errors only.
+    pub const MAX_RETRIES: u32 = 2;
+    /// Exponential base mirroring `baseDelayMs: 1000` (adapter-retry.ts:244):
+    /// attempt n waits base × 2^n before retrying.
+    pub const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
+    /// Rate-limit base mirroring `rateLimitBaseDelayMs: 5_000`
+    /// (adapter-retry.ts:246): a 429 pays the longer base, everything else
+    /// the short one.
+    pub const RETRY_RATE_LIMIT_DELAY: Duration = Duration::from_secs(5);
+
+    static STATS_CACHE: LazyLock<Mutex<HashMap<String, (PoolStats, Instant)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn cache_len_for_test() -> usize {
+        STATS_CACHE.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    pub(crate) fn cache_clear_for_test() {
+        if let Ok(mut m) = STATS_CACHE.lock() {
+            m.clear();
+        }
+    }
+
+    /// Seed exactly what a successful fetch stores, for the memo test. The
+    /// production write leg lives inside `get_pool_stats`; this is only the
+    /// seam the test needs to prove a hit short-circuits without a fetch.
+    pub(crate) fn cache_insert_for_test(pool_address: String, stats: PoolStats) {
+        if let Ok(mut m) = STATS_CACHE.lock() {
+            m.insert(pool_address, (stats, Instant::now()));
+        }
+    }
+
+    /// TS `isRetriableError` (adapter-retry.ts:132-142) narrowed to what an
+    /// HTTP GET can actually surface: 429 / "rate limit" / "too many
+    /// requests" are always retriable, plus transport timeouts (the
+    /// "rpc request timeout" arm). Parse failures and non-429 statuses fail
+    /// immediately — retrying a 404 or a schema-drift payload is pure waste.
+    pub fn is_retriable_pub(msg: &str) -> bool {
+        is_retriable(msg)
+    }
+
+    fn is_retriable(msg: &str) -> bool {
+        let m = msg.to_lowercase();
+        m.contains("429")
+            || m.contains("rate limit")
+            || m.contains("too many requests")
+            || m.contains("timed out")
+            || m.contains("timeout")
+    }
+
+    fn is_rate_limited(msg: &str) -> bool {
+        let m = msg.to_lowercase();
+        m.contains("429") || m.contains("rate limit") || m.contains("too many requests")
+    }
+
+    /// Measured pool stats. Nullable legs match `MeteoraPoolStats` in
+    /// engine/services.ts: absent means "the API omitted it", which is NOT
+    /// the same as zero and must not be fabricated into one.
+    #[derive(Debug, Default, Clone, PartialEq)]
+    pub struct PoolStats {
+        pub address: String,
+        pub name: String,
+        pub tvl_usd: f64,
+        pub volume_24h_usd: f64,
+        pub fees_24h_usd: f64,
+        pub apr: f64,
+        pub apy: f64,
+        pub current_price: f64,
+        pub fee_tvl_ratio_24h: Option<f64>,
+        pub dynamic_fee_pct: Option<f64>,
+        pub base_fee_pct: Option<f64>,
+        pub has_farm: Option<bool>,
+        pub farm_apr: Option<f64>,
+        pub farm_apy: Option<f64>,
+        pub is_blacklisted: Option<bool>,
+        pub token_x_freeze_authority_disabled: Option<bool>,
+        pub token_y_freeze_authority_disabled: Option<bool>,
+    }
+
+    fn num(v: Option<&Value>) -> Option<f64> {
+        match v {
+            Some(Value::Number(n)) => n.as_f64().filter(|f| f.is_finite()),
+            _ => None,
+        }
+    }
+
+    fn boolean(v: Option<&Value>) -> Option<bool> {
+        match v {
+            Some(Value::Bool(b)) => Some(*b),
+            _ => None,
+        }
+    }
+
+    fn str(v: Option<&Value>) -> Option<String> {
+        match v {
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    /// Window map lookup (`"24h"` / `"12h"` / `"1h"`). Absent key or absent
+    /// window is `None` — TS treats a missing window as unknown, never 0.
+    fn window<'a>(map: Option<&'a Value>, key: &str) -> Option<&'a Value> {
+        map?.get(key)
+    }
+
+    /// Strict parse of one Data API pool payload. Returns `None` on any
+    /// schema drift so the caller falls through to the next stats tier —
+    /// the host never guesses a field TS would have rejected.
+    pub fn parse_pool_stats(raw: &str, expected_address: &str) -> Option<PoolStats> {
+        let v: Value = serde_json::from_str(raw).ok()?;
+        let obj = v.as_object()?;
+
+        let address = str(obj.get("address"))?;
+        // Address mismatch means we parsed a different pool's payload.
+        if address != expected_address {
+            return None;
+        }
+        let name = str(obj.get("name"))?;
+        let tvl_usd = num(obj.get("tvl"))?;
+        let volume_24h_usd = num(window(obj.get("volume"), "24h"))?;
+        let fees_24h_usd = num(window(obj.get("fees"), "24h"))?;
+        let apr = num(obj.get("apr"))?;
+        // TS requires only tvl/volume24h/fees24h/apr (meteora-datapi-service.ts:103)
+        // and falls back to 0 for apy/current_price (:154-155). Match that
+        // exactly: a host that required them would drop pools TS accepts.
+        let apy = num(obj.get("apy")).unwrap_or(0.0);
+        let current_price = num(obj.get("current_price")).unwrap_or(0.0);
+
+        let token_x = obj.get("token_x");
+        let token_y = obj.get("token_y");
+
+        Some(PoolStats {
+            address,
+            name,
+            tvl_usd,
+            volume_24h_usd,
+            fees_24h_usd,
+            apr,
+            apy,
+            current_price,
+            fee_tvl_ratio_24h: num(window(obj.get("fee_tvl_ratio"), "24h")),
+            dynamic_fee_pct: num(obj.get("dynamic_fee_pct")),
+            base_fee_pct: num(obj.get("pool_config").and_then(|c| c.get("base_fee_pct"))),
+            has_farm: boolean(obj.get("has_farm")),
+            farm_apr: num(obj.get("farm_apr")),
+            farm_apy: num(obj.get("farm_apy")),
+            is_blacklisted: boolean(obj.get("is_blacklisted")),
+            token_x_freeze_authority_disabled: boolean(
+                token_x.and_then(|t| t.get("freeze_authority_disabled")),
+            ),
+            token_y_freeze_authority_disabled: boolean(
+                token_y.and_then(|t| t.get("freeze_authority_disabled")),
+            ),
+        })
+    }
+
+    /// Cached read: prune-then-check the 30s memo, fall through to
+    /// `fetch_pool_stats` on a miss. Mirrors TS's `getPoolData` cache leg
+    /// (meteora-datapi-service.ts:224-228). Lock poisoning (a panicked tick
+    /// holding the mutex) degrades to a direct fetch, never a blocked cycle.
+    pub fn get_pool_stats(
+        base_url: &str,
+        pool_address: &str,
+        timeout: Duration,
+    ) -> Option<PoolStats> {
+        if let Ok(guard) = STATS_CACHE.lock() {
+            if let Some((stats, at)) = guard.get(pool_address) {
+                if at.elapsed() < CACHE_TTL {
+                    return Some(stats.clone());
+                }
+            }
+        }
+        let stats = fetch_pool_stats(base_url, pool_address, timeout)?;
+        if let Ok(mut guard) = STATS_CACHE.lock() {
+            let now = Instant::now();
+            guard.retain(|_, (_, at)| now.duration_since(*at) < CACHE_TTL);
+            guard.insert(pool_address.to_string(), (stats.clone(), Instant::now()));
+        }
+        Some(stats)
+    }
+
+    /// HTTP GET with up-to-`MAX_RETRIES` extra attempts on retriable errors
+    /// only. Approximates TS's `retryEffectWithBackoff({ maxRetries: 2 })` leg
+    /// (meteora-datapi-service.ts:231-246): exponential `base × 2^n` wait
+    /// (rate-limit errors pay the 5s base, everything else the 1s base), NOT
+    /// an exact port — TS also adds 0-50% jitter and floors at the Retry-After
+    /// header. Deferred deliberately: at one request per pool per tick the
+    /// burst shape that jitter protects against cannot occur, and the Data
+    /// API is keyless with no Retry-After convention. Revisit if the tier
+    /// ever fans out beyond one-pool-at-a-time.
+    /// non-retriable errors fail immediately. `None` on every failure class —
+    /// the host mirrors TS's fail-through-to-the-next-tier behaviour rather
+    /// than blocking a cycle.
+    pub fn fetch_pool_stats(
+        base_url: &str,
+        pool_address: &str,
+        timeout: Duration,
+    ) -> Option<PoolStats> {
+        match fetch_pool_stats_retry(base_url, pool_address, timeout) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[prismd] datapi fetch failed: {e}");
+                None
+            }
+        }
+    }
+
+    fn fetch_pool_stats_retry(
+        base_url: &str,
+        pool_address: &str,
+        timeout: Duration,
+    ) -> Result<Option<PoolStats>, String> {
+        let mut attempt: u32 = 0;
+        loop {
+            match fetch_pool_stats_err(base_url, pool_address, timeout) {
+                ok @ Ok(_) => return ok,
+                Err(e) if attempt < MAX_RETRIES && is_retriable(&e) => {
+                    let base = if is_rate_limited(&e) {
+                        RETRY_RATE_LIMIT_DELAY
+                    } else {
+                        RETRY_BASE_DELAY
+                    };
+                    std::thread::sleep(base.saturating_mul(1 << attempt.min(10)));
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    /// Same as `fetch_pool_stats` but keeps the failure reason so the probe
+    /// can print it. Callers that only need the fall-through signal should use
+    /// `fetch_pool_stats`.
+    pub fn fetch_pool_stats_err(
+        base_url: &str,
+        pool_address: &str,
+        timeout: Duration,
+    ) -> Result<Option<PoolStats>, String> {
+        let url = format!("{}/pools/{}", base_url.trim_end_matches('/'), pool_address);
+        // The provider must be installed before ANY Client build.
+        // `main()` installs it at startup, but unit tests reach this path
+        // without going through main — and `install_default()` is Err-safe
+        // when one is already installed, so this keeps every entry point
+        // correct by construction.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| format!("client build: {e}"))?;
+        let res = client.get(&url).send().map_err(|e| format!("{url}: {e}"))?;
+        if !res.status().is_success() {
+            if res.status().as_u16() == 429 {
+                // 429 text carries the rate-limit token so the retry leg
+                // pays the long base; other statuses fail immediately.
+                return Err(format!("{url}: rate limit 429"));
+            }
+            return Ok(None);
+        }
+        let body = res.text().map_err(|e| format!("{url}: body: {e}"))?;
+        Ok(parse_pool_stats(&body, pool_address))
+    }
+}
+
 fn main() {
+    // reqwest with `rustls-no-provider` has no default crypto provider: without
+    // this, the first `Client::builder().build()` PANICS (reqwest's own client
+    // construction asserts it). `install_default` returns Err if one is
+    // already installed — harmless here, main runs once per process.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     load_env_file(Path::new(".env"));
     // argv: [profile_env_path] [--ticks N]
     let args: Vec<String> = env::args().skip(1).collect();
+
+    // `--datapi-probe <pool>`: one-shot live read-tier smoke test. Prints the
+    // parsed measured legs or `none` (every failure class collapses to the
+    // same fall-through-to-next-tier signal, matching TS). Not a scan mode —
+    // it exists so the rustls/ring wiring can be verified against the real API
+    // rather than assumed.
+    if let Some(pos) = args.iter().position(|a| a == "--datapi-probe") {
+        let Some(pool) = args.get(pos + 1) else {
+            eprintln!("[prismd] --datapi-probe needs a pool address");
+            std::process::exit(2);
+        };
+        let base = env::var("METEORA_DATA_API_URL")
+            .unwrap_or_else(|_| datapi::DEFAULT_BASE_URL.to_string());
+        match datapi::fetch_pool_stats(&base, pool, Duration::from_secs(10)) {
+            Some(s) => println!(
+                "[prismd] datapi probe {} name={} tvl={:.0} vol24={:.0} fees24={:.2} apr={:.4} price={:.6} base_fee_pct={:?} has_farm={:?} farm_apr={:?} blacklisted={:?}",
+                s.address, s.name, s.tvl_usd, s.volume_24h_usd, s.fees_24h_usd,
+                s.apr, s.current_price, s.base_fee_pct, s.has_farm, s.farm_apr, s.is_blacklisted
+            ),
+            None => {
+                eprintln!("[prismd] datapi probe {pool}: none (transport/parse failure — falls through)");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let cli_ticks = match parse_cli_ticks(&args).and_then(|t| classify_args(&args, t)) {
         Ok(None) => {
             println!("prismd — paper-first Rust host (shadow only until parity green)");
@@ -3675,6 +3996,156 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::datapi::{parse_pool_stats, PoolStats};
+
+    /// Real captured payload for ZEC-SOL (8eybKAvjKJryVweQLg8SRgwUfdP7wHYJ5yyqgfE82DQA),
+    /// fetched 2026-09-21 from the live Data API. Numbers move, so the test
+    /// pins the SHAPE and the exact keys the shadows consume, not the values.
+    const DATAPI_ZEC_SOL: &str = include_str!("datapi_zec_sol.json");
+
+    fn zec_sol() -> PoolStats {
+        parse_pool_stats(
+            DATAPI_ZEC_SOL,
+            "8eybKAvjKJryVweQLg8SRgwUfdP7wHYJ5yyqgfE82DQA",
+        )
+        .expect("captured payload parses")
+    }
+
+    #[test]
+    fn datapi_parses_measured_legs() {
+        let s = zec_sol();
+        assert_eq!(s.name, "ZEC-SOL");
+        // The measured tier: tvl + volume + fees are all present and finite.
+        assert!(s.tvl_usd > 0.0);
+        assert!(s.volume_24h_usd > 0.0);
+        assert!(s.fees_24h_usd > 0.0);
+        // base_fee_pct lives under pool_config — the EP lane's fee leg.
+        assert_eq!(s.base_fee_pct, Some(0.2));
+        assert_eq!(s.has_farm, Some(false));
+        assert_eq!(s.farm_apr, Some(0.0));
+        assert_eq!(s.is_blacklisted, Some(false));
+        // Freeze flags come off token_x/token_y, not the pool root.
+        assert_eq!(s.token_x_freeze_authority_disabled, Some(true));
+        assert_eq!(s.token_y_freeze_authority_disabled, Some(true));
+    }
+
+    #[test]
+    fn datapi_matches_ts_required_leg_set() {
+        // TS requires only tvl/volume24h/fees24h/apr and defaults apy +
+        // current_price to 0 (meteora-datapi-service.ts:103,154-155). A pool
+        // with those four present and apy/price absent MUST still parse, or
+        // the host drops pools TS would accept.
+        let raw =
+            r#"{"address":"a","name":"x","tvl":1,"volume":{"24h":1},"fees":{"24h":1},"apr":1}"#;
+        let s = parse_pool_stats(raw, "a").expect("TS's four required legs suffice");
+        assert_eq!(s.apy, 0.0);
+        assert_eq!(s.current_price, 0.0);
+    }
+
+    #[test]
+    fn datapi_rejects_address_mismatch() {
+        // A different pool's payload must not be attributed to the caller.
+        assert!(
+            parse_pool_stats(DATAPI_ZEC_SOL, "SoMeOtHeRpOoLaddRess111111111111111111111").is_none()
+        );
+    }
+
+    #[test]
+    fn datapi_fails_closed_on_drift() {
+        // Missing a required leg -> None (fall through to the next tier),
+        // never a zero-filled struct.
+        for broken in [
+            r#"{"name":"x","tvl":1,"apr":1,"apy":1,"current_price":1}"#,
+            r#"{"address":"a","name":"x","tvl":1,"volume":{},"fees":{"24h":1},"apr":1,"apy":1,"current_price":1}"#,
+            "not json at all",
+            "",
+        ] {
+            assert!(
+                parse_pool_stats(broken, "a").is_none(),
+                "payload must fail closed: {broken}"
+            );
+        }
+    }
+
+    #[test]
+    fn datapi_cache_memo_avoids_second_fetch() {
+        use super::datapi::{
+            cache_clear_for_test, cache_insert_for_test, cache_len_for_test, get_pool_stats,
+            parse_pool_stats,
+        };
+        // Positive memo proof without network: seed exactly what a successful
+        // fetch would store, then assert `get_pool_stats` returns it WITHOUT
+        // touching the (unreachable) host. The memo is the whole point of
+        // this tier: at N tracked pools and a 10s scan interval, an uncached
+        // tier would issue 6× TS's request volume for identical data.
+        cache_clear_for_test();
+        let seeded = parse_pool_stats(
+            r#"{"address":"pool-A","name":"x","tvl":100,"volume":{"24h":10},"fees":{"24h":1},"apr":0.1}"#,
+            "pool-A",
+        )
+        .expect("fixture parses");
+        cache_insert_for_test("pool-A".to_string(), seeded.clone());
+        assert_eq!(cache_len_for_test(), 1);
+        let hit = get_pool_stats(
+            "http://127.0.0.1:9",
+            "pool-A",
+            std::time::Duration::from_millis(50),
+        );
+        assert_eq!(hit, Some(seeded), "cache hit must return without fetching");
+        // Negative leg: an unreachable host yields None and caches NOTHING —
+        // failures are never memoized, so fail-open retries next read.
+        let miss = get_pool_stats(
+            "http://127.0.0.1:9",
+            "pool-nonexistent",
+            std::time::Duration::from_millis(50),
+        );
+        assert!(miss.is_none(), "unreachable host must miss");
+        assert_eq!(cache_len_for_test(), 1, "failures are never cached");
+        cache_clear_for_test();
+    }
+
+    fn datapi_is_retriable_matches_ts_arms() {
+        use super::datapi::{CACHE_TTL, MAX_RETRIES};
+        // 429/rate-limit/too-many-requests always retriable; timeouts too.
+        for msg in [
+            "https://x/pools/a: rate limit 429",
+            "HTTP 429 Too Many Requests",
+            "rate limit exceeded",
+            "Too many requests",
+            "operation timed out",
+            "request timeout after 10s",
+        ] {
+            assert!(super::datapi::is_retriable_pub(msg), "retriable: {msg}");
+        }
+        // Parse drift, 404s, client-build failures fail immediately.
+        for msg in [
+            "https://x/pools/a: 404 Not Found",
+            "client build: no TLS provider",
+            "https://x/pools/a: body: invalid utf-8",
+        ] {
+            assert!(
+                !super::datapi::is_retriable_pub(msg),
+                "not retriable: {msg}"
+            );
+        }
+        assert_eq!(MAX_RETRIES, 2);
+        assert_eq!(CACHE_TTL, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn datapi_optional_legs_absent_not_zero() {
+        // A payload with the required legs but no optional ones keeps the
+        // optional legs None — an omitted window is unknown, never 0.
+        let raw = r#"{"address":"a","name":"x","tvl":1,"volume":{"24h":1},"fees":{"24h":1},"apr":1,"apy":1,"current_price":1}"#;
+        let s = parse_pool_stats(raw, "a").expect("required legs present");
+        assert_eq!(s.base_fee_pct, None);
+        assert_eq!(s.has_farm, None);
+        assert_eq!(s.farm_apr, None);
+        assert_eq!(s.is_blacklisted, None);
+        assert_eq!(s.token_x_freeze_authority_disabled, None);
+        assert_eq!(s.fee_tvl_ratio_24h, None);
+    }
+
     use super::*;
 
     #[test]
