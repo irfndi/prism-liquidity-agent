@@ -3236,16 +3236,23 @@ fn tick(cfg: &config::Config, n: u64) {
     // Write seam: persist this tick's verdict to the host-owned
     // `prismd_shadow_log` table (TS never reads it). Shadow-only — the row is
     // an audit trail for the cutover compare, not a decision input.
-    let shadow_decision = format!(
-        "open={open} exit_shadow={exit_shadow} enter_blocked_shadow={enter_blocked_shadow} \
-         danger_shadow={danger_shadow} drift_rejects_shadow={drift_rejects_shadow} \
-         capital_exits_shadow={capital_exits_shadow} stop_loss_shadow={stop_loss_shadow} \
-         band_health_shadow={band_health_shadow} gas_hold_shadow={gas_hold_shadow} \
-         recovery_hold_shadow={recovery_hold_shadow} interval_hold_shadow={interval_hold_shadow} \
-         vol_exit_shadow={vol_exit_shadow} exit_order_loss_shadow={exit_order_loss_shadow} \
-         il_dominance_shadow={il_dominance_shadow} at_capacity={at_capacity}"
-    );
-    write_shadow_observation(&cfg.sqlite_path, n, &shadow_decision);
+    // Gated on PRISMD_SHADOW_LOG (default OFF) so a plain `prismd --ticks N`
+    // against a live book stays byte-identical: every other host handle is
+    // READ_ONLY, and the twin-copy discipline only holds if direct invocation
+    // stays non-mutating. The parity hook already twin-copies, so it opts in
+    // explicitly on its own copy.
+    if env::var_os("PRISMD_SHADOW_LOG").is_some() {
+        let shadow_decision = format!(
+            "open={open} exit_shadow={exit_shadow} enter_blocked_shadow={enter_blocked_shadow} \
+             danger_shadow={danger_shadow} drift_rejects_shadow={drift_rejects_shadow} \
+             capital_exits_shadow={capital_exits_shadow} stop_loss_shadow={stop_loss_shadow} \
+             band_health_shadow={band_health_shadow} gas_hold_shadow={gas_hold_shadow} \
+             recovery_hold_shadow={recovery_hold_shadow} interval_hold_shadow={interval_hold_shadow} \
+             vol_exit_shadow={vol_exit_shadow} exit_order_loss_shadow={exit_order_loss_shadow} \
+             il_dominance_shadow={il_dominance_shadow} at_capacity={at_capacity}"
+        );
+        write_shadow_observation(&cfg.sqlite_path, n, &shadow_decision);
+    }
 }
 
 /// One `tryEvolveThresholds` round as a shadow: current banded floors (live
@@ -4503,6 +4510,26 @@ mod tests {
         assert_eq!(ts_tables, 0, "write seam must not create TS-owned tables");
         drop(conn);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shadow_log_write_failure_is_swallowed() {
+        // Fail-open contract: a shadow that cannot write must never fail the
+        // tick. Point the seam at a path that cannot be opened read-write
+        // (an existing DIRECTORY) and assert it returns normally rather than
+        // panicking — the happy-path row count above proves nothing here.
+        let dir = std::env::temp_dir().join(format!("prismd-shadowlog-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        write_shadow_observation(dir.to_str().unwrap(), 1, "open=1 at_capacity=false");
+        // Also a path under a nonexistent parent (open fails on the parent).
+        let missing = std::env::temp_dir()
+            .join(format!("prismd-nope-{}/twin.db", std::process::id()))
+            .to_str()
+            .unwrap()
+            .to_string();
+        write_shadow_observation(&missing, 2, "open=1 at_capacity=false");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
