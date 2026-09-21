@@ -189,15 +189,30 @@ type TsSide = {
   exitTags: Record<string, number>;
 };
 
-const EMPTY_TS: TsSide = { open: 0, cycles: [], exits: 0, decided: 0, exitTags: {} };
 
 /** Read the twin's book with bun:sqlite. The twin is a scratch copy nothing
  *  else touches, so it opens writable — bun:sqlite's readonly mode fails every
  *  statement on a copied file (`unable to open database file`) even though the
- *  sqlite3 CLI reads the same copy fine; writable open is the working path. */
+ *  sqlite3 CLI reads the same copy fine; writable open is the working path.
+ *
+ *  A missing `audit`/`positions` table is a HARD FAIL, not an empty TS side:
+ *  a slimmed or partial ledger copy would otherwise report "TS fired nothing"
+ *  and every gate would read `both-zero`, which looks like parity and is not. */
 function readTsSide(twin: string, ticks: number): TsSide {
   const db = new Database(twin);
+  const requireTable = (name: string): void => {
+    // SAFETY: sqlite_master COUNT(*) aliases to `n`, a BIGINT; the typed row
+    // shape is the count itself, not ledger content.
+    const row = db
+      .prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(name) as { n: number };
+    if (row.n === 0) {
+      throw new Error(`ledger ${twin} has no ${name} table — a slimmed/partial copy cannot be compared`);
+    }
+  };
   try {
+    requireTable("positions");
+    requireTable("audit");
     // SAFETY: the SELECT aliases the COUNT(*) column to `n`, a BIGINT in SQLite.
     const openRow = db.prepare("SELECT COUNT(*) AS n FROM positions WHERE closed_at IS NULL").get() as OpenRow;
     const open = openRow.n;
@@ -252,8 +267,9 @@ function readTsSide(twin: string, ticks: number): TsSide {
       exitTags,
     };
   } catch (e) {
-    console.error(`# ts audit read failed: ${e instanceof Error ? e.message : String(e)}`);
-    return EMPTY_TS;
+    throw new Error(
+      `ts audit read failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
   } finally {
     db.close();
   }
@@ -303,7 +319,16 @@ function main(): void {
       process.exit(1);
     }
 
-    const v = verdict(run.stdout, readTsSide(twin, ticks));
+    let ts: TsSide;
+    try {
+      ts = readTsSide(twin, ticks);
+    } catch (e) {
+      console.error(
+        `PARITY: FAIL (${e instanceof Error ? e.message : String(e)})`,
+      );
+      process.exit(1);
+    }
+    const v = verdict(run.stdout, ts);
     printVerdict(v, bin, bend, interval, ticks, dbPath);
     process.exit(v.pass ? 0 : 1);
   } finally {
