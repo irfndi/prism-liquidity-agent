@@ -275,6 +275,20 @@ function readTsSide(twin: string, ticks: number): TsSide {
   }
 }
 
+/** Read the TS side or exit with the same `PARITY: FAIL (...)` shape used
+ *  for every other hook failure. A ledger copy that cannot be read is a
+ *  broken compare, never an empty TS side. */
+function readTsSideOrFail(twin: string, ticks: number): TsSide {
+  try {
+    return readTsSide(twin, ticks);
+  } catch (e) {
+    console.error(
+      `PARITY: FAIL (${e instanceof Error ? e.message : String(e)})`,
+    );
+    process.exit(1);
+  }
+}
+
 function main(): void {
   const { db, ticks } = parseArgs(process.argv.slice(2));
   const dbPath = resolve(db);
@@ -319,16 +333,7 @@ function main(): void {
       process.exit(1);
     }
 
-    let ts: TsSide;
-    try {
-      ts = readTsSide(twin, ticks);
-    } catch (e) {
-      console.error(
-        `PARITY: FAIL (${e instanceof Error ? e.message : String(e)})`,
-      );
-      process.exit(1);
-    }
-    const v = verdict(run.stdout, ts);
+    const v = verdict(run.stdout, readTsSideOrFail(twin, ticks));
     printVerdict(v, bin, bend, interval, ticks, dbPath);
     process.exit(v.pass ? 0 : 1);
   } finally {
