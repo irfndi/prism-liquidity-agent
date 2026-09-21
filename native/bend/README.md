@@ -13,9 +13,10 @@ feeIl `[30n, 300n]`, auth `[10n, 90n]`, util `[5n, 80n]`, ratio cap `2000n`
 so strict-below-floor keeps its meaning without signed ints.
 
 Floats were avoided deliberately: in Bend 2.0.21 `F32` comparisons are
-uninterpreted axioms, so closed `F32` terms (e.g. `clamp(13.92)`) do not reduce
-and no `{==}` proof over them checks (verified by probe). Every `Nat` kernel
-here computes, so every law below is proved by reflexivity/case analysis.
+uninterpreted axioms, so closed `F32` comparisons do not reduce to `Bool`
+and no `{==}` proof over them checks (verified by probe: a bare literal
+prints, `{13.92 == 13.92 : Bool}` errors). Every `Nat` kernel here
+computes, so every law below is proved by reflexivity/case analysis.
 
 ## Files
 
