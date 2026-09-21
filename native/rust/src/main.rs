@@ -404,10 +404,18 @@ pub fn compound_approved(
 /// driftPct>0.6 && (cooled||grace)`. Stddev = sample stddev over persisted
 /// snapshot bins (same math as `computeBinVolatilityStddev`,
 /// strategy-service.ts:299-305); driftPct = |newest-snapshot-bin−center| /
-/// halfWidth (DIVERGENCE: TS uses live pool.activeBinId — host proxies with
-/// the newest persisted bin, shape-identical); cooled/grace reuse the
-/// interval legs with grace-first short-circuit (cooled=None+grace=true
-/// fires, matching TS `||`). `None` on missing/non-finite → never flags.
+/// halfWidth. Cooled/grace reuse the interval legs with grace-first
+/// short-circuit (cooled=None+grace=true fires, matching TS `||`).
+/// EXPECTED divergence vs TS, documented not debugged (wave 91): the drift
+/// leg reads the newest PERSISTED `pool_snapshots.active_bin_id`, while TS
+/// reads the LIVE `pool.activeBinId`. On sparsely-snapshotted pools the two
+/// differ — e.g. pool 8eybKA has exactly 2 snapshots 2 days apart (bins
+/// 2472 → 2450), so the host's proxy is always one cycle behind by
+/// construction. The parity bar flags this as `divergence` on every run and
+/// that is CORRECT: it proves the proxy is live, not that the kernel is
+/// wrong. The gate becomes decidable when the host reads live bins (the
+/// RPC read path); until then the flag is expected-with-reason.
+/// `None` on missing/non-finite legs (never flags without inputs).
 pub fn vol_exit_fires(
     is_runner: bool,
     stddev: Option<f64>,
@@ -643,8 +651,18 @@ pub fn supertrend_atr(closes_newest_first: &[f64], period: usize) -> Option<f64>
 /// Supertrend direction over the newest closes: `Some(true)` = price above
 /// the upper band (uptrend — EP's "break above" entry signal), `Some(false)`
 /// = below the lower band, `None` on short/junk (fail-open no-signal).
-/// Bands computed on the LAST close only (the host has no streaming bar),
-/// mirroring the indicator's current-state read.
+/// Closes are NEWEST-FIRST (host order).
+///
+/// PROXY, not indicator parity (vol_drift class): real Supertrend ratchets
+/// its band bar-to-bar, carrying the previous band forward as the new
+/// baseline. This reads ONE fixed-offset band — midline = the close
+/// `atr_period` bars back, upper/lower = midline ± multiplier × ATR — so it
+/// reports "price above a fixed-offset band" rather than tracking a
+/// ratcheting support/resistance. Directionally right for EP's
+/// dump-harvest entry (it wants a strong rally above a recent band), and it
+/// will fire on a sharp rally and stay silent in a slow grind. Documented
+/// divergence, never claimed as tick-exact.
+/// Shadow-only: TS owns entries until parity green.
 pub fn supertrend_break_above(
     closes_newest_first: &[f64],
     atr_period: usize,
@@ -667,26 +685,40 @@ pub fn supertrend_break_above(
 
 /// EP lane admission (screening): the two hard filters the bootcamp
 /// specifies for pool selection — volatility score at or above the floor
-/// AND base fee at or above the floor. Both legs must be present
-/// (`None` → not admitted, fail-closed: an unknown score never enters).
-/// `volatility_score` is the host's bin σ (`bin_volatility_stddev`);
-/// `base_fee_pct` is the pool's configured base fee percent.
+/// AND base fee at or above the floor. `volatility_score` is the host's
+/// bin σ (`bin_volatility_stddev`).
+///
+/// FAIL-OPEN on absent legs, matching the host's measured-vs-modeled
+/// exclusion rule: a PRESENT-but-below-floor leg blocks, an ABSENT leg
+/// never does. This direction is forced by the data, not preference —
+/// `base_fee_pct` is datapi-response-only and never persisted
+/// (`pool_snapshots` has no fee-pct column, only realized
+/// `fees_24h_usd`), so a ledger-only read can never supply it. A
+/// fail-closed fee leg would make this gate permanently `false` on every
+/// real book — a screen that screens nothing. When the datapi read path
+/// lands, the fee leg starts voting with no signature change.
 /// Shadow-only — TS owns ENTERs until parity green.
 pub fn ep_lane_admits(
     volatility_score: Option<f64>,
     vol_floor: f64,
     base_fee_pct: Option<f64>,
     fee_floor_pct: f64,
-) -> Option<bool> {
-    let score = volatility_score?;
-    let fee = base_fee_pct?;
-    if !score.is_finite() || !fee.is_finite() {
-        return None;
-    }
+) -> bool {
     if !vol_floor.is_finite() || !fee_floor_pct.is_finite() {
-        return None;
+        return false;
     }
-    Some(score >= vol_floor && fee >= fee_floor_pct)
+    // Present legs vote; absent legs abstain (fail-open).
+    if let Some(score) = volatility_score {
+        if !score.is_finite() || score < vol_floor {
+            return false;
+        }
+    }
+    if let Some(fee) = base_fee_pct {
+        if !fee.is_finite() || fee < fee_floor_pct {
+            return false;
+        }
+    }
+    true
 }
 
 /// EP exit bypass (bootcamp Part 3 + the user's "don't let PnL go negative
@@ -4661,17 +4693,22 @@ mod tests {
         // Non-positive multiplier → None.
         assert_eq!(supertrend_break_above(&ramp, 14, 0.0), None);
 
-        // EP lane: both legs must clear. Bootcamp floors: vol >= 1, fee >= 1%.
-        assert_eq!(ep_lane_admits(Some(2.5), 1.0, Some(1.0), 1.0), Some(true));
+        // EP lane: present legs must clear; bootcamp floors vol >= 1, fee >= 1%.
+        assert_eq!(ep_lane_admits(Some(2.5), 1.0, Some(1.0), 1.0), true);
         // Score below floor blocks (the "<1 volatility" rule).
-        assert_eq!(ep_lane_admits(Some(0.5), 1.0, Some(1.0), 1.0), Some(false));
+        assert_eq!(ep_lane_admits(Some(0.5), 1.0, Some(1.0), 1.0), false);
         // Fee below the 1% floor blocks.
-        assert_eq!(ep_lane_admits(Some(2.5), 1.0, Some(0.5), 1.0), Some(false));
-        // Missing leg → None (fail-closed: unknown never enters).
-        assert_eq!(ep_lane_admits(None, 1.0, Some(1.0), 1.0), None);
-        assert_eq!(ep_lane_admits(Some(2.5), 1.0, None, 1.0), None);
-        // Junk legs → None.
-        assert_eq!(ep_lane_admits(Some(f64::NAN), 1.0, Some(1.0), 1.0), None);
+        assert_eq!(ep_lane_admits(Some(2.5), 1.0, Some(0.5), 1.0), false);
+        // Absent legs never block (fail-open): the fee leg is permanently
+        // absent on a ledger-only read, so fail-closed would make this gate
+        // admit nothing on any real book. Present non-finite legs still block.
+        assert_eq!(ep_lane_admits(None, 1.0, Some(1.0), 1.0), true);
+        assert_eq!(ep_lane_admits(Some(2.5), 1.0, None, 1.0), true);
+        assert_eq!(ep_lane_admits(None, 1.0, None, 1.0), true);
+        assert_eq!(ep_lane_admits(Some(f64::NAN), 1.0, Some(1.0), 1.0), false);
+        assert_eq!(ep_lane_admits(Some(2.5), 1.0, Some(f64::NAN), 1.0), false);
+        // Junk floor → disabled (never admit on an unparseable gate).
+        assert_eq!(ep_lane_admits(Some(2.5), f64::NAN, Some(1.0), 1.0), false);
 
         // Exit bypass: confluence AND pnl above the -30% floor fires.
         assert_eq!(ep_exit_bypass(Some(true), Some(0.05), 0.30), Some(true));

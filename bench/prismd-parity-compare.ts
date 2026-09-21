@@ -364,6 +364,27 @@ function runPrismd(
 type GateRow = { gate: string; prismd: number; ts: number; note: string };
 
 /**
+ * Gates whose divergence is EXPECTED-with-reason rather than unexplained.
+ * `volatility`: the host's drift leg reads the newest PERSISTED
+ * `pool_snapshots.active_bin_id`, TS reads the live `pool.activeBinId` — on a
+ * sparsely-snapshotted pool (the live book's has 2 snapshots 48h apart) the
+ * two cannot agree by construction. The parity bar still flags it so the
+ * proxy stays visible; the label records that the mechanism is known.
+ * Snapshot sparsity is measurable per pool, so this is a ledger fact rather
+ * than a guess — see `vol_exit_fires`'s doc in native/rust/src/main.rs.
+ * Index signature so a tag with no entry (a future gate) reads as undefined
+ * and keeps the plain divergence label.
+ */
+function expectedDivergenceNote(tag: string): string | undefined {
+  switch (tag) {
+    case "volatility":
+      return "expected-divergence: host uses persisted active-bin proxy (see vol_exit_fires doc)";
+    default:
+      return undefined;
+  }
+}
+
+/**
  * Per-gate compare for legs that have a TS counterpart. A shadow firing where
  * TS's same gate did not is a real divergence (both read the same book). A
  * shadow silent where TS fired is EXPECTED — the host has no candidate
@@ -373,9 +394,10 @@ function gateCompare(decision: Record<string, string>, ts: TsSide): GateRow[] {
   return SHADOW_TO_TS_TAG.map(([key, tag]) => {
     const shadow = Number(decision[key] ?? 0);
     const tsCount = ts.exitTags[tag] ?? 0;
+    const expected = expectedDivergenceNote(tag);
     const note =
       shadow > tsCount
-        ? "divergence: shadow exceeds TS same-gate exits"
+        ? (expected ?? "divergence: shadow exceeds TS same-gate exits")
         : tsCount > 0
           ? "coverage: TS fired, host silent (expected — no candidate decisions)"
           : "both-zero";

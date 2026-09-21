@@ -12,7 +12,7 @@ feeIl `[30n, 300n]`, auth `[10n, 90n]`, util `[5n, 80n]`, ratio cap `2000n`
 (= 20.0), EXIT trip `50n` (= 0.5). Drift is a `(negative?, magnitude)` pair,
 so strict-below-floor keeps its meaning without signed ints.
 
-Floats were avoided deliberately: in Bend 2.0.20 `F32` comparisons are
+Floats were avoided deliberately: in Bend 2.0.21 `F32` comparisons are
 uninterpreted axioms, so closed `F32` terms (e.g. `clamp(13.92)`) do not reduce
 and no `{==}` proof over them checks (verified by probe). Every `Nat` kernel
 here computes, so every law below is proved by reflexivity/case analysis.
@@ -30,7 +30,7 @@ here computes, so every law below is proved by reflexivity/case analysis.
   strategy review).
 - `PROOF.bend` — machine-checked proofs, one `def L.<name>` per law.
 
-## Checks (bend 2.0.20; CLI is `bend <file>`, there is no `bend check`)
+## Checks (bend 2.0.21; CLI is `bend <file>`, there is no `bend check`)
 
 - `bend kernels.bend` → `300n` (green; observable runaway clamp).
 - `bend LAWS.bend` → `Error: 19 TODOs found. The code is incomplete, and not
