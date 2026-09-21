@@ -623,7 +623,10 @@ pub fn ta_macd_hist(closes_newest_first: &[f64]) -> Option<(f64, f64)> {
 /// no OHLC, only `current_price` — documented proxy, same class as
 /// vol_drift). `None` below `period + 1` closes or on junk (fail-open:
 /// no signal, never an invented entry).
-/// Shadow-only: TS owns entries until parity green.
+/// NO TS COUNTERPART: engine grep confirms zero `supertrend` surface, so there is
+/// no parity target to mirror (recorded in the plan). Unbaked candidate screen
+/// from a bootcamp spec — unit-tested only, no tick call yet (needs the closes
+/// read path).
 pub fn supertrend_atr(closes_newest_first: &[f64], period: usize) -> Option<f64> {
     if period == 0 || closes_newest_first.len() < period + 1 {
         return None;
@@ -662,7 +665,9 @@ pub fn supertrend_atr(closes_newest_first: &[f64], period: usize) -> Option<f64>
 /// dump-harvest entry (it wants a strong rally above a recent band), and it
 /// will fire on a sharp rally and stay silent in a slow grind. Documented
 /// divergence, never claimed as tick-exact.
-/// Shadow-only: TS owns entries until parity green.
+/// NO TS COUNTERPART — same as `supertrend_atr`: an unbaked candidate screen,
+/// unit-tested only, no tick call yet. When wired it emits a
+/// `decision ... supertrend_break_above` tally; nothing emits that today.
 pub fn supertrend_break_above(
     closes_newest_first: &[f64],
     atr_period: usize,
@@ -697,7 +702,11 @@ pub fn supertrend_break_above(
 /// fail-closed fee leg would make this gate permanently `false` on every
 /// real book — a screen that screens nothing. When the datapi read path
 /// lands, the fee leg starts voting with no signature change.
-/// Shadow-only — TS owns ENTERs until parity green.
+/// NO TS COUNTERPART: engine grep confirms no `ep_lane` / `entry_probe` surface;
+/// the only real fee-floor config is `launchScanMinBaseFeePct` (config-service.ts:383,
+/// consumed by launch-gate.ts). Unbaked candidate screen — unit-tested only, no tick
+/// call yet. When wired it emits a `decision ... ep_lane_admits` tally; nothing
+/// emits that today.
 pub fn ep_lane_admits(
     volatility_score: Option<f64>,
     vol_floor: f64,
@@ -732,7 +741,9 @@ pub fn ep_lane_admits(
 /// the user's adjustable SL, default 0.30). Fires iff confluence AND
 /// `pnl_pct > -max_drawdown_pct`. `None` on any missing/non-finite leg
 /// (fail-open: never fires without a verdict).
-/// Shadow-only — TS owns EXITs until parity green.
+/// NO TS COUNTERPART — unbaked candidate screen, unit-tested only, no tick call yet
+/// (needs the TA verdict + mark PnL legs, which the host does not read). When wired
+/// it emits a `decision ... ep_exit_bypass` tally; nothing emits that today.
 pub fn ep_exit_bypass(
     ta_exhausted: Option<bool>,
     pnl_pct: Option<f64>,

@@ -39,12 +39,12 @@ reports set/unset, never values. Garbage numbers exit 2, never guess.
 cargo test
 ```
 
-42 tests (36 unconditional + 6 Bend-gated): fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
+45 tests (39 unconditional + 6 Bend-gated): fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
 Jev-fail-open, config defaults, config fail-closed, Jev-stub fail-open, real
 SQLite shadow read, drift ring-cap, evolve live-floors-and-lift, loss-cap breach,
 CLI flags, `signal_lift` edges (empty/one-sided/non-finite→None), loss-cap
 tighter-cap monotone superset, open-count excludes-closed, per-pool groups-open-only, stop-loss veto guards, exposure sums-open-only, halt edges, drawdown guards, rebalance-range guards, gas-justified guards, recovery-hold guards, interval-paper guards, cooldown-free guards, compound-parked guards, vol-exit/stddev guards, entry-shape guards,
-range-width guards, il-dominance guards (live $6.65 fire + strict-> + None legs), TA-indicator guards, 4 unconditional bogus-binary fail-open/closed,
+range-width guards, il-dominance guards (live $6.65 fire + strict-> + None legs), TA-indicator guards, EP-lane + supertrend twins (present-leg blocks / absent-leg abstains / junk floor disables / falling-ramp silent), shadow-log write seam (roundtrip + failure swallowed, both bounded to the metadata table), 4 unconditional bogus-binary fail-open/closed,
 `K.clamp_thr` kernel, `evolve_thr` banded leg, `ta_exhausted` 6/6 confluence
 combos, `exit_order` 5/5 precedence picks, loss-magnitude kernel legs (at-or-below fires / one-cent-above holds / profit-quiet / URANUS -$8.15-vs-$10.50 floor holds / pct>1 clamp / dust strict-below + at-floor + disabled-floor), tick-match shadow surface —
 skipped, not failed, when `bend` is absent from `PATH`). Zero new deps (rusqlite only, Bend calls shell the `bend`
@@ -52,7 +52,7 @@ CLI via `std::process`); Jev HTTP stays a `JevClient` trait + stub until reqwest
 (rustls) is justified.
 
 ## Bend kernel wiring (real, as of this wave)
-Twenty-seven shadows (18 native capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width/il-dominance/loss-magnitude/ep-lane/supertrend + 9 per-tick Bend (7 proven incl. ta-live + tp-stubbed exit_order dry-run + loss-magnitude + dust) + startup health-check) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
+Sixteen wired shadows (capacity/decision/risk/sizing/halt/drawdown/band-health/gas/recovery/interval/paper/cooldown/vol-exit/entry-shape/range-width/il-dominance/loss-magnitude) + 12 per-tick Bend wrappers (drift_rejects, clamp_thr, evolve_thr, fee_known, fee_exit_fires, enter_blocked, capital_exit, ta_exhausted, accrual_allowed, exit_order dry-run, loss_magnitude_fires, dust_exit_fires) + startup health-check, PLUS four unit-tested-only twins with no tick call (`ep_lane_admits`, `supertrend_break_above`/`supertrend_atr`, `ep_exit_bypass` — see the bullet below) + loopback status (`AGENT_HTTP_PORT`, 0=disabled; `GET /health` open, `GET /status` static shape, loopback-only std listener, never blocks ticks) in `src/main.rs` shell the `bend` CLI against
 binary needs no on-disk kernels file at runtime). Each mirrors
 `bench/bend-parity-harness.ts`: write a temp probe file importing the
 kernels, run `bend probe.bend`, parse the result off stdout. Every
@@ -63,7 +63,9 @@ host's native value. `main()` runs a one-shot startup health check
 (`bend_health_check`) confirming the deployed `bend` agrees with the proven
 `band_runaway` law (1392n → 300n) before anything trusts it.
 
-Wired today (all shadow-only, observational, never acted on):
+Wired today — shadow-only, observational, never acted on. Tick call sites
+confirmed by grep; the four EP/Supertrend twins at the bottom of this list are
+the exception: unit-tested, NOT wired.
 
 - `open_positions_count` + `MAX_OPEN_POSITIONS` (default 3, fail-closed) → per-tick `capacity open/max/at_capacity` shadow (open = `closed_at IS NULL` only; never blocks ENTER).
 - `open_positions_per_pool` + `MAX_POSITIONS_PER_POOL` (default 2, fail-closed) → per-tick `pool-capacity pools/capped/pool/open/max/at_capacity` shadow on the fullest pool (`pools` = distinct pools with opens, `capped` = pools at cap; open per pool, `closed_at IS NULL` only; never blocks ENTER).
@@ -127,8 +129,7 @@ so no host wrapper — `computeFeeIlRatio` needs in-memory bin-array + drift).
 - `recommend_entry_strategy` over the stored vol/drift legs (σ, `VOLATILITY_EXIT_STDDEV`, `net_drift_bins` cold→0) → per-position `entry_shape/shape_drift` (`|drift|>=max(3,2σ)`→bidask, `σ>=thr`→spot, else curve; non-finite→curve; `auto` arm only, non-auto stays TS-owned; never acts).
 - `hodl_value_usd` + `il_dominant` + `IL_DOMINANCE_EXIT_FACTOR` (2, min 1) + `IL_DOMINANCE_MIN_USD` (5, min 0) → per-position `shadow il_dominance gated/hodl_usd/il_usd/fees_usd/factor/min_usd/fires` + `decision … il_dominance_shadow` tally (computeIlDominance mirror: protection-on AND OOR AND HODL-priced AND il > fees × factor + floor; host-native floats, no Bend F32 kernel; missing legs → None, never fires; never exits).
 - `loss_magnitude_fires` kernel + `DUST_EXIT_USD` (5, min 0) → per-position `shadow loss_magnitude pnl_usd/deposited_usd/cap_pct/native_danger/kernel_fires/dust_mark_usd/dust_fires` line (loss-cap class twin: proven at-or-below comparison of the SAME native `loss_cap_danger` predicate the tick already logs; host wins on disagreement, fail-open like `bend_known`; floor arithmetic stays native f64 because Bend `Nat` is unary — a kernel `Nat.mul(100000n, 35n)` costs 20-50s per probe, measured; URANUS-SOL 2026-09-20 legs: $30 deposit / -$8.15 mark / 35% floor = $10.50 → holds, the trailing-stop breach owns that close, never exits).
-- `ep_lane_admits(volatility_score, vol_floor, base_fee_pct, fee_floor_pct)` → `decision … ep_lane_admits` shadow (the bootcamp's two hard entry-probe filters: vol score AND base fee; `volatility_score` is the host's bin σ, `base_fee_pct` is datapi-response-only. Fail-OPEN on absent legs: present-but-below blocks, present-but-non-finite blocks, non-finite floor disables, absent abstains. The direction is forced by the data — `pool_snapshots` has no fee-pct column, so a ledger-only read can never supply the fee leg and fail-closed made the lane permanently dead on every real book. When the datapi read path lands the fee leg votes with no signature change; never enters).
-- `supertrend_break_above` + `supertrend_atr` over stored newest-first closes → `decision … supertrend_break_above` shadow (PROXY, not indicator parity: real Supertrend ratchets bar-to-bar carrying the prior band forward; this reads ONE fixed-offset band — midline = close `atr_period` bars back, upper/lower = midline ± multiplier × ATR — so it reports "price above a fixed-offset band". Directionally right for the dump-harvest entry, fires on a sharp rally, silent in a slow grind. Documented divergence, never claimed tick-exact; short/junk/non-positive-multiplier → `None`, never flags; never acts).
+- `ep_lane_admits` / `supertrend_break_above` / `supertrend_atr` / `ep_exit_bypass` — **unit-tested twins, NO tick call and NO `decision` output** (grep: definitions + asserts only). NO TS COUNTERPART: engine grep confirms zero `supertrend` / `ep_lane` / `entry_probe` surface, so there is no parity target — the only real fee-floor config is `launchScanMinBaseFeePct` (`engine/config-service.ts:383`, consumed by `engine/launch-gate.ts`), and `ENTRY_PROBE_VOL_FLOOR` / `TA_ENTRY_ATR_MULT` are invented names that appear nowhere. They are unbaked candidate screens from a bootcamp spec, not parity twins. Legs needed before wiring: `ep_lane_admits` the datapi `base_fee_pct` read; `supertrend_*` the closes read path; `ep_exit_bypass` the TA verdict + mark PnL. Fail-open shape is uniform: absent leg abstains, present-but-non-finite blocks, junk floor disables. When wired they emit `decision … ep_*` tallies — nothing emits that today.
 
 ## Parity plan vs Bun shadow
 
