@@ -128,9 +128,17 @@ function resolveCandidate(candidate: string): string | undefined {
   return undefined;
 }
 
-/** Bend kernels are part of the shadow surface — probe PATH + ~/.bend/bin. */
+/** Bend kernels are part of the shadow surface — probe PATH + the installer
+ *  layouts (both the legacy `~/.bend/bin/bend` and the current
+ *  `~/.bend/bend/bin/bend`, which the installer switched to in 2.0.21+). */
 function bendBin(): string | undefined {
-  for (const c of [process.env.BEND_BIN, "~/.bend/bin/bend", "bend"]) {
+  const candidates = [
+    process.env.BEND_BIN,
+    "~/.bend/bin/bend",
+    "~/.bend/bend/bin/bend",
+    "bend",
+  ];
+  for (const c of candidates) {
     if (!c) continue;
     const found = resolveCandidate(c);
     if (found) return found;
@@ -332,6 +340,10 @@ function runPrismd(
         SQLITE_DB_PATH: twin,
         SCAN_INTERVAL_MS: interval,
         BEND_BIN: bend ?? "false",
+        // Opt in to the host's write seam: this runs against a scratch twin,
+        // so persisting per-tick shadow rows here is both wanted (audit trail
+        // for the cutover compare) and harmless (the twin is discarded).
+        PRISMD_SHADOW_LOG: "1",
       },
       encoding: "utf8",
       timeout: 300_000,

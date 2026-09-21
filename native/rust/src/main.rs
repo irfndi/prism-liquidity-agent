@@ -609,6 +609,114 @@ pub fn ta_macd_hist(closes_newest_first: &[f64]) -> Option<(f64, f64)> {
 /// Tighter-cap probe pct is inline at the tick (`max_position_loss_pct / 2.0`);
 /// no helper — `loss_cap_danger` called twice, live + tighter.
 
+/// EP (Evil Panda) Supertrend twins — the entry gate's only indicator.
+/// ATR = Wilder-smoothed true range over `period`; bands = midline ±
+/// multiplier × ATR, midline = (high+low)/2 proxied by close (the host has
+/// no OHLC, only `current_price` — documented proxy, same class as
+/// vol_drift). `None` below `period + 1` closes or on junk (fail-open:
+/// no signal, never an invented entry).
+/// Shadow-only: TS owns entries until parity green.
+pub fn supertrend_atr(closes_newest_first: &[f64], period: usize) -> Option<f64> {
+    if period == 0 || closes_newest_first.len() < period + 1 {
+        return None;
+    }
+    if !closes_newest_first.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let closes: Vec<f64> = closes_newest_first.iter().rev().copied().collect();
+    // True range proxied by |Δclose| (no high/low series available).
+    let mut trs: Vec<f64> = Vec::with_capacity(closes.len() - 1);
+    for w in closes.windows(2) {
+        trs.push((w[1] - w[0]).abs());
+    }
+    if trs.len() < period {
+        return None;
+    }
+    // Wilder seed = SMA of the first `period` TRs, then RMA smoothing.
+    let mut atr = trs[..period].iter().sum::<f64>() / period as f64;
+    for tr in &trs[period..] {
+        atr = (atr * (period as f64 - 1.0) + tr) / period as f64;
+    }
+    Some(atr)
+}
+
+/// Supertrend direction over the newest closes: `Some(true)` = price above
+/// the upper band (uptrend — EP's "break above" entry signal), `Some(false)`
+/// = below the lower band, `None` on short/junk (fail-open no-signal).
+/// Bands computed on the LAST close only (the host has no streaming bar),
+/// mirroring the indicator's current-state read.
+pub fn supertrend_break_above(
+    closes_newest_first: &[f64],
+    atr_period: usize,
+    multiplier: f64,
+) -> Option<bool> {
+    let atr = supertrend_atr(closes_newest_first, atr_period)?;
+    if !multiplier.is_finite() || multiplier <= 0.0 {
+        return None;
+    }
+    let last = *closes_newest_first.first()?;
+    if !last.is_finite() {
+        return None;
+    }
+    // Midline proxy: the close one period back (rolling center).
+    let mid = *closes_newest_first.get(atr_period)?;
+    let upper = mid + multiplier * atr;
+    let lower = mid - multiplier * atr;
+    Some(last > upper && last > lower)
+}
+
+/// EP lane admission (screening): the two hard filters the bootcamp
+/// specifies for pool selection — volatility score at or above the floor
+/// AND base fee at or above the floor. Both legs must be present
+/// (`None` → not admitted, fail-closed: an unknown score never enters).
+/// `volatility_score` is the host's bin σ (`bin_volatility_stddev`);
+/// `base_fee_pct` is the pool's configured base fee percent.
+/// Shadow-only — TS owns ENTERs until parity green.
+pub fn ep_lane_admits(
+    volatility_score: Option<f64>,
+    vol_floor: f64,
+    base_fee_pct: Option<f64>,
+    fee_floor_pct: f64,
+) -> Option<bool> {
+    let score = volatility_score?;
+    let fee = base_fee_pct?;
+    if !score.is_finite() || !fee.is_finite() {
+        return None;
+    }
+    if !vol_floor.is_finite() || !fee_floor_pct.is_finite() {
+        return None;
+    }
+    Some(score >= vol_floor && fee >= fee_floor_pct)
+}
+
+/// EP exit bypass (bootcamp Part 3 + the user's "don't let PnL go negative
+/// before TP" rule): fire when the TA-exhaustion confluence is present AND
+/// the position is still in profit OR only marginally down — i.e. BEFORE the
+/// trailing stop's own threshold would trigger. The bypass exists so a
+/// position that has not yet reached the trailing threshold cannot round-trip
+/// a winner into a loser on an exhaustion signal.
+/// Legs: `ta_exhausted` (proven kernel verdict), `pnl_pct` (mark PnL as a
+/// fraction of deposit), `max_drawdown_pct` (the deepest tolerated dip —
+/// the user's adjustable SL, default 0.30). Fires iff confluence AND
+/// `pnl_pct > -max_drawdown_pct`. `None` on any missing/non-finite leg
+/// (fail-open: never fires without a verdict).
+/// Shadow-only — TS owns EXITs until parity green.
+pub fn ep_exit_bypass(
+    ta_exhausted: Option<bool>,
+    pnl_pct: Option<f64>,
+    max_drawdown_pct: f64,
+) -> Option<bool> {
+    if !max_drawdown_pct.is_finite() || max_drawdown_pct <= 0.0 {
+        return None;
+    }
+    let exhausted = ta_exhausted?;
+    let pnl = pnl_pct?;
+    if !pnl.is_finite() {
+        return None;
+    }
+    Some(exhausted && pnl > -max_drawdown_pct)
+}
+
 /// Static `/status` triple for the loopback listener: (code, reason, body).
 /// Shape-only parity with the TS status surface (ok/service/mode); live
 /// counts ride the per-tick stdout lines, not this socket.
@@ -3239,9 +3347,10 @@ fn tick(cfg: &config::Config, n: u64) {
     // Gated on PRISMD_SHADOW_LOG (default OFF) so a plain `prismd --ticks N`
     // against a live book stays byte-identical: every other host handle is
     // READ_ONLY, and the twin-copy discipline only holds if direct invocation
-    // stays non-mutating. The parity hook already twin-copies, so it opts in
-    // explicitly on its own copy.
-    if env::var_os("PRISMD_SHADOW_LOG").is_some() {
+    // stays non-mutating. Non-empty value required, so `PRISMD_SHADOW_LOG=""`
+    // does not silently enable writes (same fail-closed shape as the other
+    // env flags in this file).
+    if env::var_os("PRISMD_SHADOW_LOG").is_some_and(|v| !v.is_empty()) {
         let shadow_decision = format!(
             "open={open} exit_shadow={exit_shadow} enter_blocked_shadow={enter_blocked_shadow} \
              danger_shadow={danger_shadow} drift_rejects_shadow={drift_rejects_shadow} \
@@ -3560,11 +3669,26 @@ mod tests {
     /// Mirrors `bench/bend-parity-harness.ts`'s `isBendAvailable`: skip (do
     /// not fail) subprocess-dependent tests when `bend` is absent, e.g. on a
     /// dev machine or a CI job that does not install it.
-    fn bend_available() -> bool {
-        std::process::Command::new("bend")
-            .arg("--help")
-            .output()
-            .is_ok_and(|o| o.status.success())
+    /// Resolved `bend` binary path, or None. Installer moved the binary in
+    /// 2.0.21+: probe the current `~/.bend/bend/bin/bend` layout, the legacy
+    /// `~/.bend/bin/bend`, then PATH. Gated tests skip (never fail) when none
+    /// resolve. Returns the PATH so wrappers don't re-do PATH lookup (which
+    /// fails when the installer dir isn't on PATH).
+    fn bend_bin() -> Option<String> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let candidates = [
+            std::env::var("BEND_BIN").ok(),
+            Some(format!("{home}/.bend/bend/bin/bend")),
+            Some(format!("{home}/.bend/bin/bend")),
+            Some("bend".to_string()),
+        ];
+        candidates.into_iter().flatten().find(|c| {
+            !c.is_empty()
+                && std::process::Command::new(c)
+                    .arg("--help")
+                    .output()
+                    .is_ok_and(|o| o.status.success())
+        })
     }
 
     #[test]
@@ -3587,29 +3711,29 @@ mod tests {
 
     #[test]
     fn bend_clamp_matches_native_for_runaway_law() {
-        if !bend_available() {
+        let Some(bend_path) = bend_bin() else {
             eprintln!("skip: bend binary not on PATH");
             return;
-        }
+        };
         // Golden vector shared with native/bend/LAWS.bend `band_runaway` and
         // bench/bend-parity.test.ts: the 2026-09 evolution runaway (1.2 lift
         // to 13.92) pins to the 3.0 ceiling in both the Bend kernel and the
         // host's own clamp.
         let native = clamp_fee_il(13.92);
-        let bend_result = bend::clamp_fee_il("bend", 13.92);
+        let bend_result = bend::clamp_fee_il(&bend_path, 13.92);
         assert_eq!(bend_result, Some(native));
         assert_eq!(bend_result, Some(FEE_IL_MAX));
     }
 
     #[test]
     fn bend_clamp_matches_native_for_floor_and_passthrough() {
-        if !bend_available() {
+        let Some(bend_path) = bend_bin() else {
             eprintln!("skip: bend binary not on PATH");
             return;
-        }
+        };
         for v in [0.0, 0.01, 0.3, 1.5, 3.0, 3.01] {
             assert_eq!(
-                bend::clamp_fee_il("bend", v),
+                bend::clamp_fee_il(&bend_path, v),
                 Some(clamp_fee_il(v)),
                 "v={v}"
             );
@@ -4149,8 +4273,8 @@ mod tests {
             "winners-higher signal must lift positive, got {lift}"
         );
         // One full leg through the real kernel stays banded (LAWS-proven).
-        if bend_available() {
-            let next = bend::evolve_thr("bend", 1.5, true, lift.abs(), 1.0, 0.2, 0.3, 3.0);
+        if let Some(bend_path) = bend_bin() {
+            let next = bend::evolve_thr(&bend_path, 1.5, true, lift.abs(), 1.0, 0.2, 0.3, 3.0);
             let n = next.expect("bend kernel must answer");
             assert!(
                 (0.3..=3.0).contains(&n),
@@ -4239,13 +4363,28 @@ mod tests {
         );
         // Pure-bool confluence: RSI AND (BB OR MACD). Kernel probes only run
         // when `bend` is present (bend_available skip like the evolve test).
-        if bend_available() {
-            assert_eq!(bend::ta_exhausted("bend", true, true, true), Some(true));
-            assert_eq!(bend::ta_exhausted("bend", true, true, false), Some(true));
-            assert_eq!(bend::ta_exhausted("bend", true, false, true), Some(true));
-            assert_eq!(bend::ta_exhausted("bend", true, false, false), Some(false));
-            assert_eq!(bend::ta_exhausted("bend", false, true, true), Some(false));
-            assert_eq!(bend::ta_exhausted("bend", false, false, false), Some(false));
+        if let Some(bend_path) = bend_bin() {
+            assert_eq!(bend::ta_exhausted(&bend_path, true, true, true), Some(true));
+            assert_eq!(
+                bend::ta_exhausted(&bend_path, true, true, false),
+                Some(true)
+            );
+            assert_eq!(
+                bend::ta_exhausted(&bend_path, true, false, true),
+                Some(true)
+            );
+            assert_eq!(
+                bend::ta_exhausted(&bend_path, true, false, false),
+                Some(false)
+            );
+            assert_eq!(
+                bend::ta_exhausted(&bend_path, false, true, true),
+                Some(false)
+            );
+            assert_eq!(
+                bend::ta_exhausted(&bend_path, false, false, false),
+                Some(false)
+            );
         }
     }
 
@@ -4262,12 +4401,12 @@ mod tests {
         );
         // TP(1n) > TA(2n) > loss(3n) > none(0n). Kernel-only probes, skipped
         // without `bend` — no tick wiring until ta-exhaustion.ts lands.
-        if bend_available() {
-            assert_eq!(bend::exit_order("bend", true, true, true), Some(1));
-            assert_eq!(bend::exit_order("bend", false, true, true), Some(2));
-            assert_eq!(bend::exit_order("bend", false, false, true), Some(3));
-            assert_eq!(bend::exit_order("bend", false, false, false), Some(0));
-            assert_eq!(bend::exit_order("bend", true, false, false), Some(1));
+        if let Some(bend_path) = bend_bin() {
+            assert_eq!(bend::exit_order(&bend_path, true, true, true), Some(1));
+            assert_eq!(bend::exit_order(&bend_path, false, true, true), Some(2));
+            assert_eq!(bend::exit_order(&bend_path, false, false, true), Some(3));
+            assert_eq!(bend::exit_order(&bend_path, false, false, false), Some(0));
+            assert_eq!(bend::exit_order(&bend_path, true, false, false), Some(1));
         }
     }
 
@@ -4276,7 +4415,9 @@ mod tests {
         // Every float-taking wrapper collapses to None on non-finite input
         // without spawning a probe: fee_exit (ratio), enter_blocked
         // (ratio/floor), capital_exit (confidence). Mirrors the TS guards
-        // that never feed NaN/Infinity into a gate.
+        // that never feed NaN/Infinity into a gate. Bogus binary on purpose:
+        // if the guard regressed, the probe would spawn and this would fail
+        // on the missing binary instead of returning None.
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert_eq!(bend::fee_exit_fires("bend", true, true, bad), None);
             assert_eq!(bend::enter_blocked("bend", true, true, bad, 1.2), None);
@@ -4294,48 +4435,72 @@ mod tests {
         // accrual_allowed needs paper+datapi without on-chain key.
         // Skipped (not failed) without `bend`; fail-open asserts above cover
         // the absent-binary path unconditionally.
-        if bend_available() {
-            assert_eq!(bend::drift_rejects("bend", -9.0, -8.0), Some(true));
-            assert_eq!(bend::drift_rejects("bend", -8.0, -8.0), Some(false));
-            assert_eq!(bend::drift_rejects("bend", 5.0, -8.0), Some(false));
-            assert_eq!(bend::fee_exit_fires("bend", true, true, 0.4), Some(true));
-            assert_eq!(bend::fee_exit_fires("bend", true, true, 0.6), Some(false));
-            assert_eq!(bend::fee_exit_fires("bend", true, true, 0.5), Some(false));
-            assert_eq!(bend::fee_exit_fires("bend", true, true, 0.49), Some(true));
-            assert_eq!(bend::fee_exit_fires("bend", false, true, 0.4), Some(false));
-            assert_eq!(bend::fee_exit_fires("bend", true, false, 0.4), Some(false));
+        if let Some(bend_path) = bend_bin() {
+            assert_eq!(bend::drift_rejects(&bend_path, -9.0, -8.0), Some(true));
+            assert_eq!(bend::drift_rejects(&bend_path, -8.0, -8.0), Some(false));
+            assert_eq!(bend::drift_rejects(&bend_path, 5.0, -8.0), Some(false));
             assert_eq!(
-                bend::enter_blocked("bend", true, true, 0.2, 1.2),
+                bend::fee_exit_fires(&bend_path, true, true, 0.4),
                 Some(true)
             );
             assert_eq!(
-                bend::enter_blocked("bend", false, true, 0.2, 1.2),
+                bend::fee_exit_fires(&bend_path, true, true, 0.6),
                 Some(false)
             );
             assert_eq!(
-                bend::enter_blocked("bend", true, false, 0.2, 1.2),
+                bend::fee_exit_fires(&bend_path, true, true, 0.5),
                 Some(false)
             );
             assert_eq!(
-                bend::enter_blocked("bend", true, true, 2.0, 1.2),
+                bend::fee_exit_fires(&bend_path, true, true, 0.49),
+                Some(true)
+            );
+            assert_eq!(
+                bend::fee_exit_fires(&bend_path, false, true, 0.4),
                 Some(false)
             );
             assert_eq!(
-                bend::enter_blocked("bend", true, true, 1.2, 1.2),
+                bend::fee_exit_fires(&bend_path, true, false, 0.4),
                 Some(false)
             );
-            assert_eq!(bend::capital_exit("bend", true, 1.0), Some(true));
-            assert_eq!(bend::capital_exit("bend", false, 0.85), Some(false));
-            assert_eq!(bend::fee_known("bend", true), Some(true));
-            assert_eq!(bend::fee_known("bend", false), Some(false));
-            assert_eq!(bend::accrual_allowed("bend", true, false, true), Some(true));
             assert_eq!(
-                bend::accrual_allowed("bend", true, false, false),
+                bend::enter_blocked(&bend_path, true, true, 0.2, 1.2),
+                Some(true)
+            );
+            assert_eq!(
+                bend::enter_blocked(&bend_path, false, true, 0.2, 1.2),
                 Some(false)
             );
-            assert_eq!(bend::accrual_allowed("bend", true, true, true), Some(false));
             assert_eq!(
-                bend::accrual_allowed("bend", false, false, true),
+                bend::enter_blocked(&bend_path, true, false, 0.2, 1.2),
+                Some(false)
+            );
+            assert_eq!(
+                bend::enter_blocked(&bend_path, true, true, 2.0, 1.2),
+                Some(false)
+            );
+            assert_eq!(
+                bend::enter_blocked(&bend_path, true, true, 1.2, 1.2),
+                Some(false)
+            );
+            assert_eq!(bend::capital_exit(&bend_path, true, 1.0), Some(true));
+            assert_eq!(bend::capital_exit(&bend_path, false, 0.85), Some(false));
+            assert_eq!(bend::fee_known(&bend_path, true), Some(true));
+            assert_eq!(bend::fee_known(&bend_path, false), Some(false));
+            assert_eq!(
+                bend::accrual_allowed(&bend_path, true, false, true),
+                Some(true)
+            );
+            assert_eq!(
+                bend::accrual_allowed(&bend_path, true, false, false),
+                Some(false)
+            );
+            assert_eq!(
+                bend::accrual_allowed(&bend_path, true, true, true),
+                Some(false)
+            );
+            assert_eq!(
+                bend::accrual_allowed(&bend_path, false, false, true),
                 Some(false)
             );
             // Loss-magnitude floor (2026-09-20 URANUS wave): kernel must
@@ -4343,47 +4508,47 @@ mod tests {
             // at-or-below fires (35.00 loss vs 1000×0.35 floor), one cent
             // above holds, a profit never fires.
             assert_eq!(
-                bend::loss_magnitude_fires("bend", Some(-350.0), Some(1000.0), 0.35),
+                bend::loss_magnitude_fires(&bend_path, Some(-350.0), Some(1000.0), 0.35),
                 Some(true)
             );
             assert_eq!(
-                bend::loss_magnitude_fires("bend", Some(-349.99), Some(1000.0), 0.35),
+                bend::loss_magnitude_fires(&bend_path, Some(-349.99), Some(1000.0), 0.35),
                 Some(false)
             );
             assert_eq!(
-                bend::loss_magnitude_fires("bend", Some(50.0), Some(1000.0), 0.35),
+                bend::loss_magnitude_fires(&bend_path, Some(50.0), Some(1000.0), 0.35),
                 Some(false)
             );
             // URANUS-SOL legs: $30 deposit, -27.17% mark = -$8.15 → BELOW the
             // 35% floor → the loss-cap class must NOT fire (trailing stop owns
             // it). Guards against a kernel that fires the wrong direction.
             assert_eq!(
-                bend::loss_magnitude_fires("bend", Some(-8.15), Some(30.0), 0.35),
+                bend::loss_magnitude_fires(&bend_path, Some(-8.15), Some(30.0), 0.35),
                 Some(false)
             );
             // pct > 1 clamps like TS `min(pct, 1)`: a 2.0 pct behaves as 1.0,
             // so a -$2000 loss on a $1000 deposit fires (full-wipe floor).
             assert_eq!(
-                bend::loss_magnitude_fires("bend", Some(-2000.0), Some(1000.0), 2.0),
+                bend::loss_magnitude_fires(&bend_path, Some(-2000.0), Some(1000.0), 2.0),
                 Some(true)
             );
             // A profit never fires even with a huge pct (sign projection).
             assert_eq!(
-                bend::loss_magnitude_fires("bend", Some(500.0), Some(1000.0), 1.0),
+                bend::loss_magnitude_fires(&bend_path, Some(500.0), Some(1000.0), 1.0),
                 Some(false)
             );
             // Dust arm: strictly-below fires, at-floor holds, disabled floor
             // never fires even at a $0 mark.
             assert_eq!(
-                bend::dust_exit_fires("bend", true, Some(4.99), Some(5.0)),
+                bend::dust_exit_fires(&bend_path, true, Some(4.99), Some(5.0)),
                 Some(true)
             );
             assert_eq!(
-                bend::dust_exit_fires("bend", true, Some(5.0), Some(5.0)),
+                bend::dust_exit_fires(&bend_path, true, Some(5.0), Some(5.0)),
                 Some(false)
             );
             assert_eq!(
-                bend::dust_exit_fires("bend", false, Some(0.0), Some(5.0)),
+                bend::dust_exit_fires(&bend_path, false, Some(0.0), Some(5.0)),
                 Some(false)
             );
         }
@@ -4467,6 +4632,59 @@ mod tests {
         // consults and returns Some(true) (2000 loss > 1000 clamped floor),
         // so asserting None here would be environment-dependent — exactly the
         // flake the fail-open contract forbids.
+    }
+
+    #[test]
+    fn ep_supertrend_and_lane_twins_guard() {
+        // ATR: Wilder-smoothed |Δclose|. A flat series has TR 0 → ATR 0.
+        assert_eq!(supertrend_atr(&[5.0; 30], 14), Some(0.0));
+        // A constant-slope ramp has constant TR 1 → ATR converges to 1.
+        let ramp: Vec<f64> = (0..40).map(|i| 100.0 + i as f64).collect();
+        let atr = supertrend_atr(&ramp, 14).expect("ramp ATR");
+        assert!(
+            (atr - 1.0).abs() < 1e-9,
+            "ramp ATR must converge to TR, got {atr}"
+        );
+        // Short/junk → None (fail-open no-signal, never an invented entry).
+        assert_eq!(supertrend_atr(&[1.0, 2.0], 14), None);
+        assert_eq!(supertrend_atr(&[1.0, f64::NAN, 3.0], 2), None);
+        // Break-above: closes are NEWEST-FIRST (host order), so build the
+        // ramp reversed — oldest at the end, newest (100+39) at index 0.
+        // ATR ~1, mid = nf[14] = 125, upper ~128, last 139 → uptrend true.
+        let mut ramp: Vec<f64> = (0..40).map(|i| 100.0 + i as f64).collect();
+        ramp.reverse();
+        assert_eq!(supertrend_break_above(&ramp, 14, 3.0), Some(true));
+        // A falling ramp (newest is the lowest close) never breaks above.
+        let mut down: Vec<f64> = (0..40).rev().map(|i| 100.0 + i as f64).collect();
+        down.reverse();
+        assert_eq!(supertrend_break_above(&down, 14, 3.0), Some(false));
+        // Non-positive multiplier → None.
+        assert_eq!(supertrend_break_above(&ramp, 14, 0.0), None);
+
+        // EP lane: both legs must clear. Bootcamp floors: vol >= 1, fee >= 1%.
+        assert_eq!(ep_lane_admits(Some(2.5), 1.0, Some(1.0), 1.0), Some(true));
+        // Score below floor blocks (the "<1 volatility" rule).
+        assert_eq!(ep_lane_admits(Some(0.5), 1.0, Some(1.0), 1.0), Some(false));
+        // Fee below the 1% floor blocks.
+        assert_eq!(ep_lane_admits(Some(2.5), 1.0, Some(0.5), 1.0), Some(false));
+        // Missing leg → None (fail-closed: unknown never enters).
+        assert_eq!(ep_lane_admits(None, 1.0, Some(1.0), 1.0), None);
+        assert_eq!(ep_lane_admits(Some(2.5), 1.0, None, 1.0), None);
+        // Junk legs → None.
+        assert_eq!(ep_lane_admits(Some(f64::NAN), 1.0, Some(1.0), 1.0), None);
+
+        // Exit bypass: confluence AND pnl above the -30% floor fires.
+        assert_eq!(ep_exit_bypass(Some(true), Some(0.05), 0.30), Some(true));
+        assert_eq!(ep_exit_bypass(Some(true), Some(-0.25), 0.30), Some(true));
+        // Below the SL floor → holds (the SL arm owns it, not the bypass).
+        assert_eq!(ep_exit_bypass(Some(true), Some(-0.35), 0.30), Some(false));
+        // No confluence → never fires.
+        assert_eq!(ep_exit_bypass(Some(false), Some(0.50), 0.30), Some(false));
+        // Missing/non-finite legs or disabled SL → None (fail-open).
+        assert_eq!(ep_exit_bypass(None, Some(0.05), 0.30), None);
+        assert_eq!(ep_exit_bypass(Some(true), None, 0.30), None);
+        assert_eq!(ep_exit_bypass(Some(true), Some(f64::NAN), 0.30), None);
+        assert_eq!(ep_exit_bypass(Some(true), Some(0.05), 0.0), None);
     }
 
     #[test]
