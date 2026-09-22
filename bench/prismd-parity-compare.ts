@@ -68,6 +68,10 @@ Usage: bun run bench/prismd-parity-compare.ts <db.sqlite> [--ticks N]
   --ticks N     shadow ticks to run prismd with (default 3)
   --help        this text
 
+Inter-tick interval defaults to 10000ms (the host's fail-closed floor) and
+is NOT read from SCAN_INTERVAL_MS, which Bun preloads from .env. Override
+with PRISMD_PARITY_INTERVAL_MS.
+
 prismd is located at native/rust/target/release/prismd, else
 native/rust/target/debug/prismd. Missing prismd -> SKIP (exit 0).
 Exit 0 when decision open == TS open-position count, else 1.
@@ -320,10 +324,18 @@ function main(): void {
     const bend = bendBin();
     // Interval comes from env like the host. Default is the HOST's fail-closed
     // floor (10s), not the TS 600000 default: prismd ticks are slow on real
-    // books (bend probes per position per tick), and a 10-minute inter-tick
+    // books (bend probes per position per tick), and a multi-minute inter-tick
     // sleep would push multi-tick runs past the exec timeout for no gain —
     // in `--ticks` mode the interval only bounds the sleep between ticks.
-    const interval = process.env.SCAN_INTERVAL_MS ?? "10000";
+    // Deliberately NOT `process.env.SCAN_INTERVAL_MS`: Bun auto-loads the repo
+    // `.env` into `process.env`, so the harness inherited this repo's
+    // `SCAN_INTERVAL_MS=900000` and passed it to the child — ticks 2..N each
+    // slept 15 min, the 300s exec timeout killed prismd mid-run, and the
+    // compare reported a spurious `PARITY: FAIL (prismd errored)`. An ambient
+    // value must not be able to break the compare; opt in with
+    // `PRISMD_PARITY_INTERVAL_MS` instead, which is also stripped from the
+    // child env so the host reads only what the harness passes.
+    const interval = process.env.PRISMD_PARITY_INTERVAL_MS ?? "10000";
     const run = runPrismd(bin, twin, ticks, interval, bend);
     if (!run.ok) {
       console.error(`prismd exited ${run.status}:`);
@@ -362,11 +374,15 @@ function runPrismd(
   interval: string,
   bend: string | undefined,
 ): RunOutcome {
+  // Child env: the harness controls SCAN_INTERVAL_MS explicitly, so drop the
+  // override key (and anything else it might carry) rather than letting the
+  // inherited value leak through `...process.env`.
+  const { PRISMD_PARITY_INTERVAL_MS: _ignored, ...inherited } = process.env;
   try {
     // SAFETY: encoding "utf8" makes execFileSync return a string, never a Buffer.
     const stdout = execFileSync(bin, ["--ticks", String(ticks)], {
       env: {
-        ...process.env,
+        ...inherited,
         SQLITE_DB_PATH: twin,
         SCAN_INTERVAL_MS: interval,
         BEND_BIN: bend ?? "false",
