@@ -176,26 +176,72 @@ pub fn drawdown_veto(legs: &[(Option<f64>, Option<f64>)], portfolio_usd: f64) ->
     Some(pnl < 0.0 && pnl.abs() / portfolio_usd > 0.1)
 }
 
-/// Drawdown-gate portfolio denominator. `Some(lamports)` is a SUCCESSFUL live
-/// read — including `Some(0)`, a measured zero-balance wallet, which must be
-/// priced as $0 of native SOL rather than silently swapped for the configured
+/// Drawdown-gate portfolio denominator. `Some(wallet_usd)` is a MEASURED
+/// wallet value — native + SPL at skip-unpriced valuation (`wallet_total_usd`,
+/// TS `readWalletSnapshot`) — including `Some(0.0)` for an empty wallet or a
+/// price outage: both must price as measured, never swap for the configured
 /// paper portfolio (a fabricated $10k denominator masks a real drawdown and
-/// shrinks any measured one). `None` is a read FAILURE (or paper mode, which
-/// never touches the chain) and is the only case that keeps the config figure.
-/// DIVERGENCE from TS's failed-read contract (program.ts:8299): TS retains
+/// shrinks any measured one). `None` is a failed lamports read or paper mode —
+/// the only case that keeps the config figure. DIVERGENCE from
+/// TS's failed-read contract (program.ts:8299): TS retains
 /// `lastWalletBalanceUsd` (last-known, reused stale with a one-time warn); the
 /// host has no retained figure, so it substitutes `paper_portfolio_usd` —
 /// fail-safe direction (a known, bounded denominator, never a fabricated zero),
-/// but a real gap until the retained-balance tier lands.
+/// but a real gap until a retained-balance tier lands.
 pub fn drawdown_portfolio_usd(
-    wallet_lamports: Option<u64>,
-    sol_price_usd: f64,
+    wallet_value_usd: Option<f64>,
     open_value_usd: f64,
     paper_portfolio_usd: f64,
 ) -> f64 {
-    match wallet_lamports {
-        Some(l) => (l as f64 / rpc::LAMPORTS_PER_SOL) * sol_price_usd + open_value_usd,
+    match wallet_value_usd {
+        Some(v) => v + open_value_usd,
         None => paper_portfolio_usd,
+    }
+}
+
+/// TS `readWalletSnapshot` valuation (adapter-service.ts:2952-2980): native
+/// SOL + every SPL holding against ONE price map. An unpriced asset is
+/// SKIPPED — fail-closed under-report, never a fallback price — and reported
+/// in `skipped` so the tick can warn once per mint (TS
+/// `warnUnpricedWalletMintOnce`). Both token programs' rows pass through
+/// linearly: a mint held under both programs contributes its two amounts
+/// independently (same sum as a merge). Zero amounts cannot occur — the
+/// holdings parser drops them.
+pub fn wallet_total_usd(
+    lamports: u64,
+    holdings: &[rpc::Holding],
+    prices: &std::collections::HashMap<String, f64>,
+) -> (f64, Vec<String>) {
+    let mut total = 0.0;
+    let mut skipped = Vec::new();
+    if lamports > 0 {
+        match prices.get(rpc::SOL_MINT) {
+            Some(&p) => total += (lamports as f64 / rpc::LAMPORTS_PER_SOL) * p,
+            None => skipped.push(rpc::SOL_MINT.to_string()),
+        }
+    }
+    for h in holdings {
+        match prices.get(&h.mint) {
+            Some(&p) => {
+                total += (h.amount_atomic as f64) * p / 10f64.powi(i32::from(h.decimals));
+            }
+            None => skipped.push(h.mint.clone()),
+        }
+    }
+    (total, skipped)
+}
+
+/// Warn once per process per unpriced wallet mint (TS
+/// `warnUnpricedWalletMintOnce`): price gaps repeat every tick, the log must
+/// not. Lock poisoning silently drops the dedupe — worst case is a repeated
+/// line, never a failed tick.
+fn warn_unpriced_wallet_mint_once(mint: &str) {
+    static WARNED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    if let Ok(mut w) = WARNED.lock() {
+        if w.insert(mint.to_string()) {
+            eprintln!("[prismd] wallet mint unpriced — skipped fail-closed: {mint}");
+        }
     }
 }
 
@@ -1460,6 +1506,10 @@ mod config {
         /// address must fail closed at config time, not produce an RPC error
         /// every tick.
         pub wallet_pubkey: String,
+        /// Jupiter price API key — sent as `x-api-key` on the primary price
+        /// host; empty = keyless (the lite fallback needs no key). Passthrough:
+        /// startup reports set/unset, never the value.
+        pub jupiter_api_key: String,
         pub ticks: Option<u64>,
     }
 
@@ -2293,6 +2343,10 @@ mod config {
                 sol_price_usd: parse_sol_price_usd(env::var("SOL_PRICE_USD").ok().as_deref())?,
                 solana_rpc_url: parse_solana_rpc_url(env::var("SOLANA_RPC_URL").ok().as_deref()),
                 wallet_pubkey: parse_wallet_pubkey(env::var("WALLET_PUBKEY").ok().as_deref())?,
+                jupiter_api_key: env::var("JUPITER_API_KEY")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
                 gas_aware_min_days: parse_gas_aware_min_days(
                     env::var("GAS_AWARE_MIN_DAYS_OF_FEES_PAID_AHEAD")
                         .ok()
@@ -3125,13 +3179,20 @@ fn tick(cfg: &config::Config, n: u64) {
         .iter()
         .map(|s| (s.deposited_usd, s.current_value_usd))
         .collect();
-    // Live-mode wallet balance: native SOL lamports off the chain, once per
-    // tick (TS reads it once per cycle at the top of runScanCycle and reuses
-    // one consistent figure). Paper mode skips the RPC entirely — TS uses
-    // `paperPortfolioUsd` there and never touches the chain. Fail-closed:
-    // a failed read leaves `None` and the drawdown gate keeps its configured
-    // portfolio rather than a fabricated zero.
-    let wallet_lamports = if cfg.paper_trading {
+    // Live-mode wallet value: TS `readWalletSnapshot` semantics
+    // (adapter-service.ts:2890-2980), once per tick — native lamports + every
+    // SPL holding across BOTH token programs, valued in ONE Jupiter v3 batch.
+    // Paper mode skips the RPC entirely — TS uses `paperPortfolioUsd` there.
+    // Failure ladder mirrors TS modulo the host's no-retain divergence: a
+    // failed lamports read → `None` (config portfolio); SPL enumeration
+    // failure degrades to native-only + one warn per tick (TS :2921-2934 — a
+    // degraded read under-reports, never over-reports); a price outage yields
+    // an empty map → skip-everything → measured $0 (TS `catch → {}` :2549).
+    // `Some(0.0)` is therefore MEASURED in both the empty-wallet and
+    // price-outage cases — never the config figure. Walletless live skips the
+    // chain read exactly like paper mode (TS uses `paperPortfolioUsd` for both
+    // and never touches the chain — AGENTS "Wallet balance").
+    let wallet_value_usd: Option<f64> = if cfg.paper_trading || cfg.wallet_pubkey.is_empty() {
         None
     } else {
         match rpc::get_balance_lamports(
@@ -3139,11 +3200,52 @@ fn tick(cfg: &config::Config, n: u64) {
             &cfg.wallet_pubkey,
             Duration::from_secs(10),
         ) {
-            Ok(v) => Some(v),
+            Ok(lamports) => {
+                let holdings = match rpc::get_spl_holdings(
+                    &cfg.solana_rpc_url,
+                    &cfg.wallet_pubkey,
+                    rpc::TOKEN_PROGRAM_ID,
+                    Duration::from_secs(10),
+                )
+                .and_then(|legacy| {
+                    rpc::get_spl_holdings(
+                        &cfg.solana_rpc_url,
+                        &cfg.wallet_pubkey,
+                        rpc::TOKEN_2022_PROGRAM_ID,
+                        Duration::from_secs(10),
+                    )
+                    .map(|new| {
+                        let mut all = legacy;
+                        all.extend(new);
+                        all
+                    })
+                }) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        eprintln!(
+                            "[prismd] SPL enumeration failed — wallet degrades to native SOL only: {e}"
+                        );
+                        Vec::new()
+                    }
+                };
+                let mut mints: Vec<String> = holdings.iter().map(|h| h.mint.clone()).collect();
+                if lamports > 0 {
+                    mints.push(rpc::SOL_MINT.to_string());
+                }
+                mints.sort();
+                mints.dedup();
+                let prices =
+                    rpc::get_jupiter_prices(&cfg.jupiter_api_key, &mints, Duration::from_secs(10));
+                let (value, skipped) = wallet_total_usd(lamports, &holdings, &prices);
+                for mint in &skipped {
+                    warn_unpriced_wallet_mint_once(mint);
+                }
+                Some(value)
+            }
             Err(e) => {
-                // One warn per tick, same as the datapi tier. A stale/absent
-                // balance only shrinks the measured portfolio, which pauses
-                // new entries — EXITs stay free, so capital is protected.
+                // One warn per tick, same as the datapi tier. A failed read
+                // keeps the configured portfolio — an under-sized denominator
+                // pauses new entries; EXITs stay free, so capital is protected.
                 eprintln!("[prismd] wallet balance read failed: {e} (drawdown gate keeps config portfolio)");
                 None
             }
@@ -3490,19 +3592,15 @@ fn tick(cfg: &config::Config, n: u64) {
     // paper mode, so it shadows against `paper_portfolio_usd` (documented
     // DIVERGENCE, allocation bullet). In live mode the chain read feeds the
     // same formula when it succeeded.
-    // `Some(0)` semantics (measured zero, never config fallback) live on
-    // `drawdown_portfolio_usd` — see its doc.
+    // `Some(0.0)` semantics (measured — empty wallet or price outage, never
+    // config fallback) live on `drawdown_portfolio_usd` — see its doc.
     let open_value_usd: f64 = shadows
         .iter()
         .filter_map(|s| s.current_value_usd)
         .filter(|v| v.is_finite())
         .sum();
-    let portfolio_usd = drawdown_portfolio_usd(
-        wallet_lamports,
-        cfg.sol_price_usd,
-        open_value_usd,
-        cfg.paper_portfolio_usd,
-    );
+    let portfolio_usd =
+        drawdown_portfolio_usd(wallet_value_usd, open_value_usd, cfg.paper_portfolio_usd);
     let drawdown = drawdown_veto(&drawdown_legs, portfolio_usd);
     // F6 paper-validation shadow: live ENTER needs paper days (program.ts:7562).
     // Paper mode → pass; days>=min → pass; !enforce → warn-pass; else block.
@@ -3515,7 +3613,7 @@ fn tick(cfg: &config::Config, n: u64) {
         cfg.paper_validation_enforce,
     );
     println!(
-        "[prismd] decision open={open} exit_shadow={exit_shadow} enter_blocked_shadow={enter_blocked_shadow} danger_shadow={danger_shadow} drift_rejects_shadow={drift_rejects_shadow} capital_exits_shadow={capital_exits_shadow} stop_loss_shadow={stop_loss_shadow} band_health_shadow={band_health_shadow} gas_hold_shadow={gas_hold_shadow} recovery_hold_shadow={recovery_hold_shadow} interval_hold_shadow={interval_hold_shadow} vol_exit_shadow={vol_exit_shadow} exit_order_loss_shadow={exit_order_loss_shadow} il_dominance_shadow={il_dominance_shadow} paper_days={paper_days:?} paper_pass={paper_pass:?} cooldown_holds={cooldown_hold_shadow} drawdown_veto={drawdown:?} at_capacity={at_capacity} (observational)",
+        "[prismd] decision open={open} exit_shadow={exit_shadow} enter_blocked_shadow={enter_blocked_shadow} danger_shadow={danger_shadow} drift_rejects_shadow={drift_rejects_shadow} capital_exits_shadow={capital_exits_shadow} stop_loss_shadow={stop_loss_shadow} band_health_shadow={band_health_shadow} gas_hold_shadow={gas_hold_shadow} recovery_hold_shadow={recovery_hold_shadow} interval_hold_shadow={interval_hold_shadow} vol_exit_shadow={vol_exit_shadow} exit_order_loss_shadow={exit_order_loss_shadow} il_dominance_shadow={il_dominance_shadow} paper_days={paper_days:?} paper_pass={paper_pass:?} cooldown_holds={cooldown_hold_shadow} wallet_value_usd={wallet_value_usd:?} drawdown_veto={drawdown:?} at_capacity={at_capacity} (observational)",
     );
 
     // Evolution shadow: what WOULD one evolveThresholds round do to the live
@@ -4077,8 +4175,13 @@ fn main() {
         } else {
             "unset"
         };
+    let jup_key = if cfg.jupiter_api_key.is_empty() {
+        "unset"
+    } else {
+        "set"
+    };
     println!(
-        "[prismd] paper shadow: sqlite={} interval_ms={} paper_usd={} jev={} bend={} helius={helius} jev_key={jev_key}",
+        "[prismd] paper shadow: sqlite={} interval_ms={} paper_usd={} jev={} bend={} helius={helius} jev_key={jev_key} jup_key={jup_key}",
         cfg.sqlite_path,
         cfg.scan_interval_ms,
         cfg.paper_portfolio_usd,
@@ -4158,14 +4261,18 @@ fn main() {
 /// itself, because native SOL is real capital).
 mod rpc {
     use serde_json::{json, Value};
+    use std::collections::HashMap;
     use std::time::Duration;
 
-    /// PARKED with `get_spl_holdings`: the SPL-pricing tier's caller loops
-    /// both programs (one id per call) and does not exist yet.
-    #[allow(dead_code)]
+    /// Both token programs are enumerated by the wallet-valuation path (the
+    /// tick reads legacy first, Token-2022 second — TS `readWalletHoldingsRaw`
+    /// loop, adapter-service.ts:2866).
     pub const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-    #[allow(dead_code)]
     pub const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+    /// Wrapped-SOL mint — the price key for the native lamport leg in the
+    /// Jupiter batch (TS `SOL_MINT`; native and wSOL are distinct storage,
+    /// so the two legs never double-count).
+    pub const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
     pub const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
 
     /// A per-call request id. Not a session: the host is single-threaded per
@@ -4227,7 +4334,6 @@ mod rpc {
     /// `parseHoldingRow`). Zero-amount rent-only ATAs are skipped — the TS
     /// path skips them too (the `amount <= 0` guard in readWalletSnapshot).
     #[derive(Debug, Clone, PartialEq)]
-    #[allow(dead_code)] // PARKED with `get_spl_holdings` — SPL-pricing tier consumes it next.
     pub struct Holding {
         pub mint: String,
         pub amount_atomic: u128,
@@ -4236,12 +4342,15 @@ mod rpc {
 
     /// SPL holdings for `pubkey` under one token program. Mirrors
     /// `readWalletHoldingsRaw` (adapter-service.ts:2857-2882): unfiltered
-    /// `getParsedTokenAccountsByOwner`, accumulate per mint. A parse miss on
+    /// token-account enumeration (canonical `getTokenAccountsByOwner` +
+    /// `jsonParsed` — the `getParsedTokenAccountsByOwner` alias was dropped by
+    /// Agave 4.3, live-verified 2026-09-22: both Helius and mainnet-beta
+    /// answer it `-32601 Method not found`), accumulate per mint. A parse miss on
     /// one account skips that account (TS's `isObject` guards do the same) —
     /// it never fails the whole read.
-    /// PARKED (no caller): needs Jupiter pricing before it can feed
-    /// `walletBalanceUsd` — the last leg of the wallet-parity tier.
-    #[allow(dead_code)]
+    /// Consumed by the wallet valuation: the tick reads both programs and
+    /// prices the union (either call failing degrades to native-only, TS
+    /// `readWalletSnapshot` :2921-2934).
     pub fn get_spl_holdings(
         url: &str,
         pubkey: &str,
@@ -4251,7 +4360,7 @@ mod rpc {
         let body = json!({
             "jsonrpc": "2.0",
             "id": next_id(),
-            "method": "getParsedTokenAccountsByOwner",
+            "method": "getTokenAccountsByOwner",
             "params": [
                 pubkey,
                 { "programId": program_id },
@@ -4307,6 +4416,96 @@ mod rpc {
             }
         }
         Ok(out)
+    }
+
+    /// Jupiter price v3 row → USD map for exactly the requested mints. Mirrors
+    /// `parseJupiterMintPrice` (adapter-service.ts:1409-1415): direct
+    /// `usdPrice` first (live-verified numeric, 2026-09-22), else the
+    /// v2-shaped nested `data[mint].price`; `isNumberValue` parity — a string,
+    /// non-finite or non-positive row yields ABSENT, and the valuation skips
+    /// absent mints fail-closed (never a fabricated price).
+    pub fn parse_jupiter_prices(json: &Value, mints: &[String]) -> HashMap<String, f64> {
+        let mut out = HashMap::new();
+        for mint in mints {
+            let price = json
+                .get(mint.as_str())
+                .and_then(|row| row.get("usdPrice"))
+                .or_else(|| {
+                    json.get("data")
+                        .and_then(|d| d.get(mint.as_str()))
+                        .and_then(|row| row.get("price"))
+                })
+                .and_then(Value::as_f64)
+                .filter(|p| p.is_finite() && *p > 0.0);
+            if let Some(p) = price {
+                out.insert(mint.clone(), p);
+            }
+        }
+        out
+    }
+
+    /// GET JSON without a JSON-RPC envelope. Same rustls-install boundary as
+    /// `post`: unit tests reach a working Client without going through main().
+    fn get_json(url: &str, timeout: Duration, api_key: Option<&str>) -> Result<Value, String> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| format!("client build: {e}"))?;
+        let mut req = client.get(url);
+        if let Some(k) = api_key {
+            req = req.header("x-api-key", k);
+        }
+        let res = req.send().map_err(|e| format!("{url}: {e}"))?;
+        if !res.status().is_success() {
+            return Err(format!("{url}: HTTP {}", res.status().as_u16()));
+        }
+        let text = res.text().map_err(|e| format!("{url}: body: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("{url}: json: {e}"))
+    }
+
+    /// Mint → USD for the requested mints via Jupiter price v3. Mirrors
+    /// `fetchJupiterPrices` (adapter-service.ts:2530-2549): primary
+    /// `api.jup.ag` (optional `x-api-key`; live-verified keyless 200), then
+    /// the keyless lite host when the primary is non-2xx/unparseable or
+    /// priced nothing — same schema. NEVER fails: both hosts down or garbage
+    /// returns an EMPTY map, which the TS-faithful valuation turns into
+    /// skip-everything (wallet reads measured $0 → entries pause; EXITs stay
+    /// free), exactly like TS's `Effect.catch(() => ({}))`.
+    pub fn get_jupiter_prices(
+        api_key: &str,
+        mints: &[String],
+        timeout: Duration,
+    ) -> HashMap<String, f64> {
+        if mints.is_empty() {
+            return HashMap::new();
+        }
+        let ids = mints.join(",");
+        let key = (!api_key.is_empty()).then_some(api_key);
+        match get_json(
+            &format!("https://api.jup.ag/price/v3?ids={ids}"),
+            timeout,
+            key,
+        ) {
+            Ok(v) => {
+                let priced = parse_jupiter_prices(&v, mints);
+                if !priced.is_empty() {
+                    return priced;
+                }
+            }
+            Err(e) => eprintln!("[prismd] jupiter primary price read failed: {e} (trying lite)"),
+        }
+        match get_json(
+            &format!("https://lite-api.jup.ag/price/v3?ids={ids}"),
+            timeout,
+            None,
+        ) {
+            Ok(v) => parse_jupiter_prices(&v, mints),
+            Err(e) => {
+                eprintln!("[prismd] jupiter lite price read failed: {e} (unpriced mints skip)");
+                HashMap::new()
+            }
+        }
     }
 }
 
@@ -5643,6 +5842,7 @@ mod tests {
             sol_price_usd: 150.0,
             solana_rpc_url: "https://example.com".to_string(),
             wallet_pubkey: String::new(),
+            jupiter_api_key: String::new(),
             gas_aware_min_days: 3.0,
             oor_recovery_hold_threshold: 0.6,
             oor_recovery_force_threshold: 0.2,
@@ -5834,46 +6034,103 @@ mod tests {
 
     #[test]
     fn drawdown_portfolio_guards() {
-        // A SUCCESSFUL read of a zero-balance wallet is a MEASURED $0, not a
-        // failure: it must not fall back to the configured paper portfolio
-        // (a fabricated $10k denominator masks a real drawdown and shrinks
-        // any measured one). `None` — read failed, or paper mode — is the only
-        // case that keeps the config figure.
-        const SOL: u64 = 1_000_000_000;
+        // A MEASURED zero-balance wallet (`Some(0.0)`) must not fall back to
+        // the configured paper portfolio (a fabricated $10k denominator masks
+        // a real drawdown and shrinks any measured one). `None` — failed
+        // lamports read, or paper mode — is the only config-fallback case.
+        assert_eq!(drawdown_portfolio_usd(Some(0.0), 984.46, 10_000.0), 984.46); // measured zero → open legs only
+        assert_eq!(drawdown_portfolio_usd(Some(150.0), 0.0, 10_000.0), 150.0); // priced wallet-only value
         assert_eq!(
-            drawdown_portfolio_usd(Some(0), 150.0, 984.46, 10_000.0),
-            984.46
-        ); // Some(0) is priced, not fabricated
-        assert_eq!(
-            drawdown_portfolio_usd(Some(SOL), 150.0, 0.0, 10_000.0),
-            150.0
-        ); // 1 SOL × $150
-        assert_eq!(
-            drawdown_portfolio_usd(Some(SOL), 150.0, 984.46, 10_000.0),
+            drawdown_portfolio_usd(Some(150.0), 984.46, 10_000.0),
             1_134.46
         ); // wallet + open legs
-        assert_eq!(
-            drawdown_portfolio_usd(None, 150.0, 984.46, 10_000.0),
-            10_000.0
-        ); // read failed → config
+        assert_eq!(drawdown_portfolio_usd(None, 984.46, 10_000.0), 10_000.0); // read failed → config
 
-        // End-to-end: with Some(0) + a -20% book the veto MUST fire; under the
-        // old `Some(l) if l > 0` guard this read fell to the $10k config and
+        // End-to-end: with Some(0.0) + a -20% book the veto MUST fire; under
+        // the old lamport-mapping guard this read fell to the $10k config and
         // returned Some(false) — the regression this pins.
         assert_eq!(
             drawdown_veto(
                 &[(Some(984.46), Some(787.57))],
-                drawdown_portfolio_usd(Some(0), 150.0, 787.57, 10_000.0)
+                drawdown_portfolio_usd(Some(0.0), 787.57, 10_000.0)
             ),
             Some(true)
         );
         assert_eq!(
             drawdown_veto(
                 &[(Some(984.46), Some(787.57))],
-                drawdown_portfolio_usd(None, 150.0, 787.57, 10_000.0)
+                drawdown_portfolio_usd(None, 787.57, 10_000.0)
             ),
             Some(false)
         );
+    }
+
+    #[test]
+    fn wallet_total_usd_skips_unpriced_fail_closed() {
+        // One Jupiter price map values native SOL + both programs' rows; an
+        // unpriced asset contributes NOTHING and is reported (TS
+        // readWalletSnapshot :2952-2980 — under-report, never a fallback price).
+        use std::collections::HashMap;
+        let mut prices = HashMap::new();
+        prices.insert(rpc::SOL_MINT.to_string(), 150.0);
+        prices.insert("MintA".to_string(), 2.0);
+        let legacy = rpc::Holding {
+            mint: "MintA".to_string(),
+            amount_atomic: 1_500_000, // 1.5 tokens @ 6 decimals
+            decimals: 6,
+        };
+        let next = rpc::Holding {
+            mint: "MintB".to_string(),
+            amount_atomic: 7,
+            decimals: 0,
+        };
+        // 1 SOL × $150 + 1.5 MintA × $2 = $153; MintB unpriced → skipped.
+        let (total, skipped) = wallet_total_usd(1_000_000_000, &[legacy, next], &prices);
+        assert!((total - 153.0).abs() < 1e-9, "got {total}");
+        assert_eq!(skipped, ["MintB".to_string()]);
+
+        // Price outage (empty map): measured $0, every held asset reported —
+        // the TS `catch → {}` outcome the tick warns once per mint.
+        let empty = HashMap::new();
+        let holding = rpc::Holding {
+            mint: "MintA".to_string(),
+            amount_atomic: 1,
+            decimals: 0,
+        };
+        let (zero, skipped) = wallet_total_usd(1_000_000_000, &[holding], &empty);
+        assert_eq!(zero, 0.0);
+        assert_eq!(skipped, [rpc::SOL_MINT.to_string(), "MintA".to_string()]);
+
+        // Empty wallet with no price call: measured zero, nothing skipped
+        // (lamports == 0 must not demand a SOL price).
+        assert_eq!(
+            wallet_total_usd(0, &[], &prices),
+            (0.0, Vec::<String>::new())
+        );
+    }
+
+    #[test]
+    fn jupiter_price_parse_guards() {
+        // Live v3 shape (verified 2026-09-22): numeric `usdPrice` per mint.
+        // String rows, non-positive numbers, and absent mints are ABSENT —
+        // never parsed into a price (TS isNumberValue parity).
+        let mints: Vec<String> = ["A", "B", "C", "D"].iter().map(|s| s.to_string()).collect();
+        let v: serde_json::Value = serde_json::json!({
+            "A": { "usdPrice": 1.25 },
+            "B": { "usdPrice": "2.5" },
+            "C": { "usdPrice": -3.0 },
+            "data": { "D": { "price": 3.5 } }
+        });
+        let prices = rpc::parse_jupiter_prices(&v, &mints);
+        assert_eq!(prices.len(), 2);
+        assert_eq!(prices.get("A"), Some(&1.25)); // direct v3 field
+        assert_eq!(prices.get("D"), Some(&3.5)); // nested v2-compat field
+        assert!(!prices.contains_key("B")); // string → absent
+        assert!(!prices.contains_key("C")); // non-positive → absent
+                                            // Unrequested mint ignored; non-object payload → empty, no panic.
+        assert_eq!(prices.len(), 2);
+        let absent: Vec<String> = vec!["E".to_string()];
+        assert!(rpc::parse_jupiter_prices(&serde_json::Value::Null, &absent).is_empty());
     }
 
     #[test]

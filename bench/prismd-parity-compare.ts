@@ -49,6 +49,7 @@ const DECISION_KEYS = [
   "paper_days",
   "paper_pass",
   "cooldown_holds",
+  "wallet_value_usd",
   "drawdown_veto",
   "at_capacity",
 ];
@@ -385,6 +386,7 @@ const PRISMD_ENV_KEYS = [
   "IL_DOMINANCE_EXIT_FACTOR",
   "IL_DOMINANCE_MIN_USD",
   "IL_PROTECTION_ENABLED",
+  "JUPITER_API_KEY",
   "MARKET_SCAN_MAX_NEGATIVE_DRIFT_BINS",
   "MAX_ENTRY_SIZE_USD",
   "MAX_OPEN_POSITIONS",
