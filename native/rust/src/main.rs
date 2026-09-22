@@ -1298,6 +1298,9 @@ mod config {
     pub const SOL_PRICE_DEFAULT_USD: f64 = 150.0;
     pub const SOL_PRICE_MIN_USD: f64 = 0.0;
     pub const SOL_PRICE_MAX_USD: f64 = 10_000.0;
+    /// Mirrors `PUBLIC_SOLANA_RPC_URL` (config-service.ts:42) — the fallback
+    /// when `SOLANA_RPC_URL` is absent. Live mode should set Helius.
+    pub const PUBLIC_SOLANA_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
     pub const GAS_AWARE_MIN_DAYS_DEFAULT: f64 = 3.0;
     pub const GAS_AWARE_MIN_DAYS_MIN: f64 = 0.0;
     /// Mirrors engine/config-service.ts validatedNumber("MAX_POSITION_LOSS_PCT", 0, 0.35, 1).
@@ -1422,6 +1425,16 @@ mod config {
         pub il_dominance_min_usd: f64,
         pub dust_exit_usd: f64,
         pub agent_http_port: u16,
+        /// Solana JSON-RPC endpoint. Absent → public mainnet-beta (TS's
+        /// `PUBLIC_SOLANA_RPC_URL` fallback, config-service.ts:42). Live mode
+        /// should set `SOLANA_RPC_URL` (Helius); paper mode never uses it.
+        pub solana_rpc_url: String,
+        /// Wallet pubkey (base58, 32 bytes). Empty = walletless, exactly like
+        /// TS `adapter.hasWallet() === false`: live execution is a no-op and
+        /// the wallet balance read is skipped. Validated on load — a junk
+        /// address must fail closed at config time, not produce an RPC error
+        /// every tick.
+        pub wallet_pubkey: String,
         pub ticks: Option<u64>,
     }
 
@@ -1794,6 +1807,63 @@ mod config {
             ))
         }
     }
+    /// Parse-or-default for `SOLANA_RPC_URL`. Absent or whitespace-only ->
+    /// TS's public mainnet-beta fallback. No scheme validation: a wrong URL is
+    /// an ops-visible one-line RPC failure, not a silent misroute.
+    pub fn parse_solana_rpc_url(raw: Option<&str>) -> String {
+        match raw.map(str::trim) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => PUBLIC_SOLANA_RPC_URL.to_string(),
+        }
+    }
+
+    /// Parse-or-default for the wallet pubkey. Absent/empty -> "" = walletless
+    /// (TS `hasWallet()` false: live execution no-ops, balance read skipped).
+    /// Non-empty MUST be a valid base58 32-byte address — TS fails closed on an
+    /// invalid key at load, and a junk address would otherwise produce an RPC
+    /// error every single tick. Base58 alphabet excludes 0/O/I/l; the decoded
+    /// length must be exactly 32 bytes.
+    pub fn parse_wallet_pubkey(raw: Option<&str>) -> Result<String, String> {
+        let s = raw.map(str::trim).unwrap_or("");
+        if s.is_empty() {
+            return Ok(String::new());
+        }
+        if !is_base58_pubkey(s) {
+            return Err(format!(
+                "WALLET_PUBKEY={s:?} is not a valid base58 32-byte address"
+            ));
+        }
+        Ok(s.to_string())
+    }
+
+    /// Base58 decode + exact 32-byte length check. The alphabet check is the
+    /// cheap rejection; the length check is what rules out a well-formed but
+    /// wrong-size string (TS's `PublicKey` constructor throws for both).
+    fn is_base58_pubkey(s: &str) -> bool {
+        const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        if !s.bytes().all(|b| ALPHABET.contains(&b)) {
+            return false;
+        }
+        let mut bytes: Vec<u8> = Vec::with_capacity(64);
+        for c in s.bytes() {
+            let idx = ALPHABET.iter().position(|&a| a == c).unwrap_or(0) as u32;
+            let mut carry = idx;
+            for b in bytes.iter_mut() {
+                carry += (*b as u32) * 58;
+                *b = (carry & 0xff) as u8;
+                carry >>= 8;
+            }
+            while carry > 0 {
+                bytes.push((carry & 0xff) as u8);
+                carry >>= 8;
+            }
+        }
+        // Leading '1's are leading zero bytes in base58.
+        let leading_zeros = s.bytes().take_while(|&b| b == b'1').count();
+        bytes.reverse();
+        leading_zeros + bytes.len() == 32
+    }
+
     pub fn parse_gas_aware_min_days(raw: Option<&str>) -> Result<f64, String> {
         let Some(s) = raw else {
             return Ok(GAS_AWARE_MIN_DAYS_DEFAULT);
@@ -2196,6 +2266,8 @@ mod config {
                     env::var("REBALANCE_GAS_COST_SOL").ok().as_deref(),
                 )?,
                 sol_price_usd: parse_sol_price_usd(env::var("SOL_PRICE_USD").ok().as_deref())?,
+                solana_rpc_url: parse_solana_rpc_url(env::var("SOLANA_RPC_URL").ok().as_deref()),
+                wallet_pubkey: parse_wallet_pubkey(env::var("WALLET_PUBKEY").ok().as_deref())?,
                 gas_aware_min_days: parse_gas_aware_min_days(
                     env::var("GAS_AWARE_MIN_DAYS_OF_FEES_PAID_AHEAD")
                         .ok()
@@ -3029,6 +3101,31 @@ fn tick(cfg: &config::Config, n: u64) {
         .iter()
         .map(|s| (s.deposited_usd, s.current_value_usd))
         .collect();
+    // Live-mode wallet balance: native SOL lamports off the chain, once per
+    // tick (TS reads it once per cycle at the top of runScanCycle and reuses
+    // one consistent figure). Paper mode skips the RPC entirely — TS uses
+    // `paperPortfolioUsd` there and never touches the chain. Fail-closed:
+    // a failed read leaves `None` and the drawdown gate keeps its configured
+    // portfolio rather than a fabricated zero.
+    let wallet_lamports = if cfg.paper_trading {
+        None
+    } else {
+        match rpc::get_balance_lamports(
+            &cfg.solana_rpc_url,
+            &cfg.wallet_pubkey,
+            Duration::from_secs(10),
+        ) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                // One warn per tick, same as the datapi tier. A stale/absent
+                // balance only shrinks the measured portfolio, which pauses
+                // new entries — EXITs stay free, so capital is protected.
+                eprintln!("[prismd] wallet balance read failed: {e} (drawdown gate keeps config portfolio)");
+                None
+            }
+        }
+    };
+
     for s in &shadows {
         let fires = s
             .ratio
@@ -3364,7 +3461,21 @@ fn tick(cfg: &config::Config, n: u64) {
     }
 
     // Observational only — never blocks ENTER (TS owns risk until parity).
-    let drawdown = drawdown_veto(&drawdown_legs, cfg.paper_portfolio_usd);
+    // Portfolio leg: TS uses live `portfolioValueUsd = walletBalanceUsd + Σ
+    // openPositions.currentValueUsd`; the host has no live wallet value in
+    // paper mode, so it shadows against `paper_portfolio_usd` (documented
+    // DIVERGENCE, allocation bullet). In live mode the chain read feeds the
+    // same formula when it succeeded.
+    let open_value_usd: f64 = shadows
+        .iter()
+        .filter_map(|s| s.current_value_usd)
+        .filter(|v| v.is_finite())
+        .sum();
+    let portfolio_usd = match wallet_lamports {
+        Some(l) if l > 0 => (l as f64 / rpc::LAMPORTS_PER_SOL) * cfg.sol_price_usd + open_value_usd,
+        _ => cfg.paper_portfolio_usd,
+    };
+    let drawdown = drawdown_veto(&drawdown_legs, portfolio_usd);
     // F6 paper-validation shadow: live ENTER needs paper days (program.ts:7562).
     // Paper mode → pass; days>=min → pass; !enforce → warn-pass; else block.
     // Observational only — never blocks (TS owns ENTER until parity green).
@@ -3994,6 +4105,165 @@ fn main() {
     }
 }
 
+/// Solana JSON-RPC 2.0 client — the host's ONLY chain read surface.
+///
+/// Scope deliberately minimal: `getBalance` (native SOL lamports) +
+/// `getParsedTokenAccountsByOwner` (SPL holdings, parsed shape) are the two
+/// calls `readWalletSnapshot` (adapter-service.ts:2894-2963) needs before
+/// pricing. Pricing (Jupiter `fetchTokenPrices`) is a separate tier, and tx
+/// submission is Phase 3's LAST item — paper-first per the plan.
+///
+/// Fail-closed everywhere: a transport error, a non-2xx status, an RPC-level
+/// `error` object, or an unexpected result shape all yield `Err` with the
+/// reason. The caller decides how to degrade (TS's `readWalletSnapshot`
+/// degrades SPL enumeration to SOL-only; it never degrades the SOL read
+/// itself, because native SOL is real capital).
+mod rpc {
+    use serde_json::{json, Value};
+    use std::time::Duration;
+
+    pub const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+    pub const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+    pub const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
+
+    /// A per-call request id. Not a session: the host is single-threaded per
+    /// tick, and the id exists only so a mismatched response can be detected.
+    fn next_id() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(1);
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn post(url: &str, body: Value, timeout: Duration) -> Result<Value, String> {
+        // Same boundary rule as the datapi tier: install the rustls provider
+        // here so unit tests reach a working Client without going through
+        // main(). `install_default` is Err-safe when already installed.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| format!("client build: {e}"))?;
+        let res = client
+            .post(url)
+            .json(&body)
+            .send()
+            .map_err(|e| format!("{url}: {e}"))?;
+        if !res.status().is_success() {
+            return Err(format!("{url}: HTTP {}", res.status().as_u16()));
+        }
+        let text = res.text().map_err(|e| format!("{url}: body: {e}"))?;
+        let parsed: Value = serde_json::from_str(&text).map_err(|e| format!("{url}: json: {e}"))?;
+        // An RPC-level error object is a failure even under HTTP 200 — this is
+        // how "Method not found" / rate-limit / bad-params arrive.
+        if let Some(err) = parsed.get("error") {
+            return Err(format!("{url}: rpc error: {err}"));
+        }
+        Ok(parsed)
+    }
+
+    /// Native SOL lamports for `pubkey`. Mirrors `readNativeSolBalance`
+    /// (adapter-service.ts:2826-2845) minus the 30s cache (the host reads once
+    /// per tick and the cache is a per-process TS concern).
+    pub fn get_balance_lamports(url: &str, pubkey: &str, timeout: Duration) -> Result<u64, String> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": next_id(),
+            "method": "getBalance",
+            "params": [pubkey],
+        });
+        let res = post(url, body, timeout)?;
+        let value = res
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("{url}: getBalance: missing result.value"))?;
+        Ok(value)
+    }
+
+    /// One mint → atomic amount entry. `decimals` comes from the parsed
+    /// account (TS reads it from the same `tokenAmount` object,
+    /// `parseHoldingRow`). Zero-amount rent-only ATAs are skipped — the TS
+    /// path skips them too (the `amount <= 0` guard in readWalletSnapshot).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Holding {
+        pub mint: String,
+        pub amount_atomic: u128,
+        pub decimals: u8,
+    }
+
+    /// SPL holdings for `pubkey` under one token program. Mirrors
+    /// `readWalletHoldingsRaw` (adapter-service.ts:2857-2882): unfiltered
+    /// `getParsedTokenAccountsByOwner`, accumulate per mint. A parse miss on
+    /// one account skips that account (TS's `isObject` guards do the same) —
+    /// it never fails the whole read.
+    pub fn get_spl_holdings(
+        url: &str,
+        pubkey: &str,
+        program_id: &str,
+        timeout: Duration,
+    ) -> Result<Vec<Holding>, String> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": next_id(),
+            "method": "getParsedTokenAccountsByOwner",
+            "params": [
+                pubkey,
+                { "programId": program_id },
+                { "encoding": "jsonParsed" },
+            ],
+        });
+        let res = post(url, body, timeout)?;
+        let accounts = res
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{url}: getParsedTokenAccountsByOwner: missing result.value"))?;
+        let mut out: Vec<Holding> = Vec::new();
+        for account in accounts {
+            let Some(info) = account
+                .get("account")
+                .and_then(|a| a.get("data"))
+                .and_then(|d| d.get("parsed"))
+                .and_then(|p| p.get("info"))
+            else {
+                continue;
+            };
+            let Some(amount_obj) = info.get("tokenAmount") else {
+                continue;
+            };
+            // `amount` is a decimal STRING in the parsed shape — parse as u128
+            // rather than f64 so a large balance never loses precision.
+            let Some(amount_str) = amount_obj.get("amount").and_then(Value::as_str) else {
+                continue;
+            };
+            let Ok(amount_atomic) = amount_str.parse::<u128>() else {
+                continue;
+            };
+            if amount_atomic == 0 {
+                continue;
+            }
+            let Some(mint) = info.get("mint").and_then(Value::as_str) else {
+                continue;
+            };
+            let decimals = amount_obj
+                .get("decimals")
+                .and_then(Value::as_u64)
+                .and_then(|d| u8::try_from(d).ok())
+                .unwrap_or(0);
+            if let Some(existing) = out.iter_mut().find(|h| h.mint == mint) {
+                existing.amount_atomic += amount_atomic;
+            } else {
+                out.push(Holding {
+                    mint: mint.to_string(),
+                    amount_atomic,
+                    decimals,
+                });
+            }
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::datapi::{parse_pool_stats, PoolStats};
@@ -4104,6 +4374,7 @@ mod tests {
         cache_clear_for_test();
     }
 
+    #[test]
     fn datapi_is_retriable_matches_ts_arms() {
         use super::datapi::{CACHE_TTL, MAX_RETRIES};
         // 429/rate-limit/too-many-requests always retriable; timeouts too.
@@ -5324,6 +5595,8 @@ mod tests {
             max_rebalance_range_bins: 200,
             rebalance_gas_cost_sol: 0.01,
             sol_price_usd: 150.0,
+            solana_rpc_url: "https://example.com".to_string(),
+            wallet_pubkey: String::new(),
             gas_aware_min_days: 3.0,
             oor_recovery_hold_threshold: 0.6,
             oor_recovery_force_threshold: 0.2,
@@ -5413,6 +5686,50 @@ mod tests {
         assert!(config::parse_il_dominance_factor(Some("garbage")).is_err());
         assert!(config::parse_il_dominance_min(Some("-1")).is_err());
     }
+    #[test]
+    fn wallet_pubkey_and_rpc_url_guards() {
+        // Absent / empty / whitespace -> walletless + public mainnet fallback
+        // (TS hasWallet() false, PUBLIC_SOLANA_RPC_URL).
+        assert_eq!(config::parse_wallet_pubkey(None), Ok(String::new()));
+        assert_eq!(config::parse_wallet_pubkey(Some("")), Ok(String::new()));
+        assert_eq!(config::parse_wallet_pubkey(Some("   ")), Ok(String::new()));
+        assert_eq!(
+            config::parse_solana_rpc_url(None),
+            "https://api.mainnet-beta.solana.com"
+        );
+        assert_eq!(
+            config::parse_solana_rpc_url(Some("  ")),
+            "https://api.mainnet-beta.solana.com"
+        );
+        assert_eq!(
+            config::parse_solana_rpc_url(Some(" https://rpc.example/x ")),
+            "https://rpc.example/x"
+        );
+        // Valid base58 32-byte addresses round-trip unchanged.
+        for good in [
+            "11111111111111111111111111111111", // System Program (32 zero bytes)
+            "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", // random valid
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", // Token Program
+        ] {
+            assert_eq!(
+                config::parse_wallet_pubkey(Some(good)),
+                Ok(good.to_string())
+            );
+        }
+        // Rejections: bad alphabet (0/O/I/l), wrong decoded length, too short.
+        for bad in [
+            "0OIl",                                              // alphabet violations
+            "abc",                                               // decodes to < 32 bytes
+            "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWMextra", // too long
+            "not a pubkey at all!",                              // spaces/punctuation
+        ] {
+            assert!(
+                config::parse_wallet_pubkey(Some(bad)).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
     #[test]
     fn stop_loss_veto_guards() {
         // Mirrors checkStopLossGate exactly: `lossPct < -pct`, no disabled
