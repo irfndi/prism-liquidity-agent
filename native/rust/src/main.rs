@@ -1500,6 +1500,10 @@ mod config {
         /// `PUBLIC_SOLANA_RPC_URL` fallback, config-service.ts:42). Live mode
         /// should set `SOLANA_RPC_URL` (Helius); paper mode never uses it.
         pub solana_rpc_url: String,
+        /// Meteora Data API base URL (default `https://dlmm.datapi.meteora.ag`)
+        /// — feeds the tick's live statsSource tier; the `--datapi-probe` CLI
+        /// reads the same env var directly.
+        pub meteora_data_api_url: String,
         /// Wallet pubkey (base58, 32 bytes). Empty = walletless, exactly like
         /// TS `adapter.hasWallet() === false`: live execution is a no-op and
         /// the wallet balance read is skipped. Validated on load — a junk
@@ -1889,6 +1893,16 @@ mod config {
         match raw.map(str::trim) {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => PUBLIC_SOLANA_RPC_URL.to_string(),
+        }
+    }
+
+    /// Parse-or-default for `METEORA_DATA_API_URL` (absent or whitespace-only
+    /// → the TS default, same shape as the RPC URL). A bad URL surfaces as a
+    /// per-pool fetch failure → unknown measured flags, never a config exit.
+    pub fn parse_data_api_url(raw: Option<&str>) -> String {
+        match raw.map(str::trim) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => crate::datapi::DEFAULT_BASE_URL.to_string(),
         }
     }
 
@@ -2342,6 +2356,9 @@ mod config {
                 )?,
                 sol_price_usd: parse_sol_price_usd(env::var("SOL_PRICE_USD").ok().as_deref())?,
                 solana_rpc_url: parse_solana_rpc_url(env::var("SOLANA_RPC_URL").ok().as_deref()),
+                meteora_data_api_url: parse_data_api_url(
+                    env::var("METEORA_DATA_API_URL").ok().as_deref(),
+                ),
                 wallet_pubkey: parse_wallet_pubkey(env::var("WALLET_PUBKEY").ok().as_deref())?,
                 jupiter_api_key: env::var("JUPITER_API_KEY")
                     .unwrap_or_default()
@@ -2749,13 +2766,17 @@ fn signal_lift(signals: &[(f64, f64)]) -> Option<f64> {
 }
 
 /// predicate in `engine/program.ts` `checkFeeIlExit` (program.ts:10788-10792)
-/// — NOT its hold-bias override, which stays TS-only. `ratio`/`known` come
-/// from the most recent `signal_snapshots.fee_il_ratio` /
-/// `pool_snapshots.stats_source` row for the position's pool; either can be
-/// absent (`None`) if no snapshot has landed yet.
+/// — NOT its hold-bias override, which stays TS-only. `ratio` comes from the
+/// most recent `signal_snapshots.fee_il_ratio` row for the position's pool
+/// (`None` if no snapshot has landed yet); `known` comes from the tick's live
+/// datapi `known_by_pool` map — the host observes its own statsSource, never
+/// TS-persisted `pool_snapshots.stats_source` (wave 94).
 struct FeeIlShadow {
     position_id: String,
     pool_address: String,
+    /// "datapi answered for this pool THIS tick" — the measured-fee flag
+    /// (`feeIlRatioKnown`/the accrual gate are datapi-only in TS; absent
+    /// from the map → false, unknown).
     known: bool,
     mature: bool,
     ratio: Option<f64>,
@@ -2833,6 +2854,7 @@ fn fee_il_shadows_capped(
     ring_cap: Option<i64>,
     recovery_lookback: i64,
     vol_lookback: i64,
+    known_by_pool: &std::collections::HashMap<String, bool>,
 ) -> Vec<FeeIlShadow> {
     let conn = match rusqlite::Connection::open_with_flags(
         Path::new(sqlite_path),
@@ -2886,13 +2908,6 @@ fn fee_il_shadows_capped(
             let ratio: Option<f64> = conn
                 .query_row(
                     "SELECT fee_il_ratio FROM signal_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 1",
-                    [&pool_address],
-                    |r| r.get(0),
-                )
-                .ok();
-            let stats_source: Option<String> = conn
-                .query_row(
-                    "SELECT stats_source FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 1",
                     [&pool_address],
                     |r| r.get(0),
                 )
@@ -3005,10 +3020,13 @@ fn fee_il_shadows_capped(
                     .collect();
                 if bins.is_empty() { None } else { Some(bins) }
             })();
+            // Precomputed: field-init order would move `pool_address` into
+            // the struct before a `known` field could borrow it.
+            let known = known_by_pool.get(&pool_address).copied().unwrap_or(false);
             FeeIlShadow {
                 position_id,
                 pool_address,
-                known: stats_source.as_deref() == Some("datapi"),
+                known,
                 mature: now_ms - ts >= min_yield_exit_age_ms,
                 onchain: position_pubkey.is_some(),
                 ratio,
@@ -3165,12 +3183,52 @@ fn tick(cfg: &config::Config, n: u64) {
     let mut vol_exit_shadow = 0i64;
     let mut exit_order_loss_shadow = 0i64;
     let mut il_dominance_shadow = 0i64;
+    // StatsSource tier (wave 94): the host observes its OWN measured-stats
+    // flag per open pool through the memoized datapi read (30s cache, retry +
+    // backoff inside) instead of trusting TS-persisted
+    // `pool_snapshots.stats_source`. `known` = "datapi answered THIS tick" —
+    // exactly TS's datapi-only condition (geckoterminal/heuristic never set
+    // `feeIlRatioKnown` nor the accrual gate); outage → false, the same
+    // fall-through TS reports below datapi. One distinct-pool query + one
+    // HTTP per pool per tick; a pool absent from the map reads unknown.
+    let open_pools: Vec<String> = match rusqlite::Connection::open_with_flags(
+        Path::new(&cfg.sqlite_path),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(conn) => conn
+            .prepare("SELECT DISTINCT pool_address FROM positions WHERE closed_at IS NULL")
+            .and_then(|mut stmt| {
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap_or_else(|e| {
+                eprintln!("[prismd] open-pool query failed: {e}; measured flags unknown");
+                Vec::new()
+            }),
+        Err(e) => {
+            eprintln!(
+                "[prismd] sqlite open for statsSource tier failed: {e}; measured flags unknown"
+            );
+            Vec::new()
+        }
+    };
+    let known_by_pool: std::collections::HashMap<String, bool> = open_pools
+        .iter()
+        .map(|p| {
+            (
+                p.clone(),
+                datapi::get_pool_stats(&cfg.meteora_data_api_url, p, Duration::from_secs(10))
+                    .is_some(),
+            )
+        })
+        .collect();
     let shadows = fee_il_shadows_capped(
         &cfg.sqlite_path,
         cfg.min_yield_exit_age_ms,
         Some(bin_history_cap),
         cfg.oor_recovery_lookback_cycles,
         cfg.volatility_lookback_snapshots,
+        &known_by_pool,
     );
     // Drawdown inputs: spot legs per open position (deposited/current only —
     // `toRiskPosition` is spot-only). Collected up front so the book-level
@@ -3821,7 +3879,6 @@ mod datapi {
     /// collapses within-cycle duplicates without going stale across cycles.
     /// A failed fetch is NOT cached (fail-open retries next read), and the
     /// map is pruned on insert so dropped pools don't accumulate.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub const CACHE_TTL: Duration = Duration::from_secs(30);
     /// Mirrors `MAX_RETRIES = 2` (meteora-datapi-service.ts:11): up to two
     /// extra attempts on retriable errors only.
@@ -3834,7 +3891,6 @@ mod datapi {
     /// the short one.
     pub const RETRY_RATE_LIMIT_DELAY: Duration = Duration::from_secs(5);
 
-    #[cfg_attr(not(test), allow(dead_code))]
     static STATS_CACHE: LazyLock<Mutex<HashMap<String, (PoolStats, Instant)>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -3990,10 +4046,8 @@ mod datapi {
     /// `fetch_pool_stats` on a miss. Mirrors TS's `getPoolData` cache leg
     /// (meteora-datapi-service.ts:224-228). Lock poisoning (a panicked tick
     /// holding the mutex) degrades to a direct fetch, never a blocked cycle.
-    /// PARKED (unit-tested via the memo test, no tick caller yet): the tick
-    /// still consumes TS-persisted `pool_snapshots.stats_source`; this tier
-    /// wires in when the host fetches its own stats before the TS delete.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Consumed by the tick's live statsSource tier (wave 94): its `Some` is
+    /// the pool's `known` flag.
     pub fn get_pool_stats(
         base_url: &str,
         pool_address: &str,
@@ -5071,12 +5125,20 @@ mod tests {
             )
             .unwrap();
         }
+        // Wave 94: `known` is map-driven — poolA deliberately maps false
+        // despite its seeded 'datapi' row (map wins over TS-persisted
+        // stats_source), poolB true with no stats row at all.
+        let known: std::collections::HashMap<String, bool> =
+            [("poolA".to_string(), false), ("poolB".to_string(), true)]
+                .into_iter()
+                .collect();
         let mut shadows = fee_il_shadows_capped(
             &path_str,
             config::MIN_YIELD_EXIT_AGE_DEFAULT_MS,
             None,
             10,
             12,
+            &known,
         );
         shadows.sort_by(|a, b| a.position_id.cmp(&b.position_id));
         let _ = std::fs::remove_file(&path);
@@ -5087,7 +5149,10 @@ mod tests {
         assert_eq!(mature.position_id, "pos-mature");
         assert_eq!(mature.pool_address, "poolA");
         assert!(mature.mature, "14h old >= 12h default must be mature");
-        assert!(mature.known, "latest stats_source is 'datapi'");
+        assert!(
+            !mature.known,
+            "map false wins over the seeded stats_source row"
+        );
         assert_eq!(
             mature.ratio,
             Some(0.2),
@@ -5101,7 +5166,7 @@ mod tests {
         let fresh = &shadows[0]; // "pos-fresh"
         assert_eq!(fresh.position_id, "pos-fresh");
         assert!(!fresh.mature, "1h old < 12h default must not be mature");
-        assert!(!fresh.known, "no snapshot yet -> unknown");
+        assert!(fresh.known, "map true drives known without any stats row");
         assert_eq!(fresh.ratio, None, "no snapshot yet -> no ratio");
         assert!(fresh.onchain, "non-NULL position_pubkey -> onchain");
         assert_eq!(
@@ -5841,6 +5906,7 @@ mod tests {
             rebalance_gas_cost_sol: 0.01,
             sol_price_usd: 150.0,
             solana_rpc_url: "https://example.com".to_string(),
+            meteora_data_api_url: "https://datapi.example.test".to_string(),
             wallet_pubkey: String::new(),
             jupiter_api_key: String::new(),
             gas_aware_min_days: 3.0,
@@ -6134,6 +6200,24 @@ mod tests {
     }
 
     #[test]
+    fn data_api_url_defaults_like_the_rpc_url() {
+        assert_eq!(
+            config::parse_data_api_url(None),
+            datapi::DEFAULT_BASE_URL,
+            "absent -> TS default"
+        );
+        assert_eq!(
+            config::parse_data_api_url(Some("  ")),
+            datapi::DEFAULT_BASE_URL
+        );
+        assert_eq!(
+            config::parse_data_api_url(Some(" https://alt.example ")),
+            "https://alt.example",
+            "trimmed custom URL wins"
+        );
+    }
+
+    #[test]
     fn loss_cap_tighter_is_monotone_superset() {
         // Halving the cap can only add danger flags, never remove: tighter
         // is a monotone superset of live on every ledger point. Pure fn,
@@ -6208,13 +6292,27 @@ mod tests {
         }
         drop(conn);
         let path_str = path.to_str().unwrap().to_string();
-        let uncapped = fee_il_shadows_capped(&path_str, 0, None, 10, 12);
+        let uncapped = fee_il_shadows_capped(
+            &path_str,
+            0,
+            None,
+            10,
+            12,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(
             uncapped[0].net_drift_bins,
             Some(-30.0),
             "uncapped sees all 4"
         );
-        let capped = fee_il_shadows_capped(&path_str, 0, Some(2), 10, 12);
+        let capped = fee_il_shadows_capped(
+            &path_str,
+            0,
+            Some(2),
+            10,
+            12,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(
             capped[0].net_drift_bins,
             Some(-10.0),

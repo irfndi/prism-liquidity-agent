@@ -90,8 +90,11 @@ the exception: unit-tested, NOT wired.
   (`loss_hit = danger==Some(true) || stop_loss==Some(true)` → per-position `loss_hit/exit_order`
   + `decision … exit_order_loss_shadow` tally counting Some(3); tp leg still stubbed false, TA vote live; never acts).
 - `bend::fee_known` → proven `K.fee_known`, per position per tick (pure bool
-  passthrough of the host's own datapi comparison; mismatch-logged host-wins
-  fail-open via `is_some_and`, silent when Bend is absent, never votes).
+  passthrough of the host's OWN live datapi lookup — the wave-94 statsSource
+  tier memoizes one `get_pool_stats` per open pool per tick and drops the
+  TS-persisted `pool_snapshots.stats_source` dependency entirely;
+  mismatch-logged host-wins fail-open via `is_some_and`, silent when Bend is
+  absent, never votes).
 - `bend::fee_exit_fires` → proven `K.fee_exit_fires`, per open position per
   tick against real SQLite (`positions` + latest `signal_snapshots` /
   `pool_snapshots`; mirrors `checkFeeIlExit`'s core predicate, not its
