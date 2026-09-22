@@ -136,12 +136,7 @@ function resolveCandidate(candidate: string): string | undefined {
  *  layouts (both the legacy `~/.bend/bin/bend` and the current
  *  `~/.bend/bend/bin/bend`, which the installer switched to in 2.0.21+). */
 function bendBin(): string | undefined {
-  const candidates = [
-    process.env.BEND_BIN,
-    "~/.bend/bin/bend",
-    "~/.bend/bend/bin/bend",
-    "bend",
-  ];
+  const candidates = [process.env.BEND_BIN, "~/.bend/bin/bend", "~/.bend/bend/bin/bend", "bend"];
   for (const c of candidates) {
     if (!c) continue;
     const found = resolveCandidate(c);
@@ -193,7 +188,6 @@ type TsSide = {
   exitTags: Record<string, number>;
 };
 
-
 /** Read the twin's book with bun:sqlite. The twin is a scratch copy nothing
  *  else touches, so it opens writable — bun:sqlite's readonly mode fails every
  *  statement on a copied file (`unable to open database file`) even though the
@@ -211,14 +205,18 @@ function readTsSide(twin: string, ticks: number): TsSide {
       .prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?")
       .get(name) as { n: number };
     if (row.n === 0) {
-      throw new Error(`ledger ${twin} has no ${name} table — a slimmed/partial copy cannot be compared`);
+      throw new Error(
+        `ledger ${twin} has no ${name} table — a slimmed/partial copy cannot be compared`,
+      );
     }
   };
   try {
     requireTable("positions");
     requireTable("audit");
     // SAFETY: the SELECT aliases the COUNT(*) column to `n`, a BIGINT in SQLite.
-    const openRow = db.prepare("SELECT COUNT(*) AS n FROM positions WHERE closed_at IS NULL").get() as OpenRow;
+    const openRow = db
+      .prepare("SELECT COUNT(*) AS n FROM positions WHERE closed_at IS NULL")
+      .get() as OpenRow;
     const open = openRow.n;
 
     // SAFETY: aliases cycle_id->cycleId and MAX(timestamp)->at with the CycleRow shape.
@@ -271,9 +269,7 @@ function readTsSide(twin: string, ticks: number): TsSide {
       exitTags,
     };
   } catch (e) {
-    throw new Error(
-      `ts audit read failed: ${e instanceof Error ? e.message : String(e)}`,
-    );
+    throw new Error(`ts audit read failed: ${e instanceof Error ? e.message : String(e)}`);
   } finally {
     db.close();
   }
@@ -286,9 +282,7 @@ function readTsSideOrFail(twin: string, ticks: number): TsSide {
   try {
     return readTsSide(twin, ticks);
   } catch (e) {
-    console.error(
-      `PARITY: FAIL (${e instanceof Error ? e.message : String(e)})`,
-    );
+    console.error(`PARITY: FAIL (${e instanceof Error ? e.message : String(e)})`);
     process.exit(1);
   }
 }
@@ -336,9 +330,9 @@ function main(): void {
     // `PRISMD_PARITY_INTERVAL_MS` instead, which is also stripped from the
     // child env so the host reads only what the harness passes.
     const interval = process.env.PRISMD_PARITY_INTERVAL_MS ?? "10000";
-    const run = runPrismd(bin, twin, ticks, interval, bend);
+    const run = runPrismd(bin, twin, ticks, interval, bend, dir);
     if (!run.ok) {
-      console.error(`prismd exited ${run.status}:`);
+      console.error(`prismd ${run.status}:`);
       if (run.stdout) console.error(run.stdout);
       if (run.stderr) console.error(run.stderr);
       console.error("PARITY: FAIL (prismd errored — see output above)");
@@ -366,6 +360,56 @@ type RunOutcome =
   | { ok: true; stdout: string }
   | { ok: false; status: string; stdout?: string | undefined; stderr?: string | undefined };
 
+/**
+ * prismd's complete documented env surface, mirroring the Keys block in
+ * `native/rust/README.md`. Ambient `.env` vars are forwarded ONLY if they name
+ * a key on this list, so a stray repo-local setting cannot silently override a
+ * host default inside the parity run. Keep in sync with the `env::var` calls in
+ * `native/rust/src/main.rs` (config load + startup key checks).
+ */
+const PRISMD_ENV_KEYS = [
+  "AGENT_HTTP_PORT",
+  "BEND_BIN",
+  "DUST_EXIT_USD",
+  "EVOLUTION_INTERVAL",
+  "EVOLUTION_MAX_CHANGE_PCT",
+  "GAS_AWARE_MIN_DAYS_OF_FEES_PAID_AHEAD",
+  "IL_DOMINANCE_EXIT_FACTOR",
+  "IL_DOMINANCE_MIN_USD",
+  "IL_PROTECTION_ENABLED",
+  "MARKET_SCAN_MAX_NEGATIVE_DRIFT_BINS",
+  "MAX_ENTRY_SIZE_USD",
+  "MAX_OPEN_POSITIONS",
+  "MAX_PER_POOL_ALLOCATION_PCT",
+  "MAX_POSITIONS_PER_POOL",
+  "MAX_POSITION_LOSS_PCT",
+  "MAX_REBALANCE_RANGE_BINS",
+  "METEORA_DATA_API_URL",
+  "MIN_BIN_UTILIZATION",
+  "MIN_FEE_IL_RATIO",
+  "MIN_REBALANCE_INTERVAL_MS",
+  "MIN_YIELD_EXIT_AGE_MS",
+  "OOR_GRACE_PERIOD_CYCLES",
+  "OOR_RECOVERY_FORCE_REBALANCE_THRESHOLD",
+  "OOR_RECOVERY_HOLD_THRESHOLD",
+  "OOR_RECOVERY_LOOKBACK_CYCLES",
+  "PAPER_PORTFOLIO_USD",
+  "PAPER_TRADING",
+  "PAPER_VALIDATION_MIN_DAYS",
+  "REALIZED_PNL_HALT_THRESHOLD_USD",
+  "REALIZED_PNL_HALT_WINDOW",
+  "REBALANCE_GAS_COST_SOL",
+  "SOL_PRICE_USD",
+  "SOLANA_RPC_URL",
+  "SQLITE_DB_PATH",
+  "SQLITE_PATH",
+  "STOP_LOSS_PCT",
+  "VOLATILITY_EXIT_STDDEV",
+  "VOLATILITY_LOOKBACK_SNAPSHOTS",
+  "VOLUME_AUTH_THRESHOLD",
+  "WALLET_PUBKEY",
+] as const;
+
 /** One bounded prismd run against the twin (never the live book). */
 function runPrismd(
   bin: string,
@@ -373,16 +417,31 @@ function runPrismd(
   ticks: number,
   interval: string,
   bend: string | undefined,
+  cwd: string,
 ): RunOutcome {
-  // Child env: the harness controls SCAN_INTERVAL_MS explicitly, so drop the
-  // override key (and anything else it might carry) rather than letting the
-  // inherited value leak through `...process.env`.
-  const { PRISMD_PARITY_INTERVAL_MS: _ignored, ...inherited } = process.env;
+  // Child env: built from an EXPLICIT allowlist, never `...process.env`.
+  // Bun auto-loads the repo `.env` into `process.env`, so spreading it handed
+  // prismd this repo's `SQLITE_DB_PATH=./prism.db` (relative → cwd-dependent),
+  // `MIN_FEE_IL_RATIO`, `TRAILING_STOP_PCT`, `VOLUME_AUTH_THRESHOLD`,
+  // `ENABLE_POOL_DISCOVERY`, … — every one silently overriding the host's
+  // documented defaults, so the compare measured this `.env` rather than
+  // prismd's config semantics and its numbers were only reproducible with
+  // this exact file present. The list below is prismd's whole documented
+  // surface (`native/rust/README.md` Keys); an ambient var outside it cannot
+  // reach the child. Harness-owned keys (SQLITE_DB_PATH, SCAN_INTERVAL_MS,
+  // BEND_BIN, PRISMD_SHADOW_LOG) are set after the allowlist so they win.
+  const { PRISMD_PARITY_INTERVAL_MS: _intervalOverride, ...inherited } = process.env;
+  const child: Record<string, string> = {};
+  for (const key of PRISMD_ENV_KEYS) {
+    const v = inherited[key];
+    if (v !== undefined) child[key] = v;
+  }
+  const timeoutMs = 300_000;
   try {
     // SAFETY: encoding "utf8" makes execFileSync return a string, never a Buffer.
     const stdout = execFileSync(bin, ["--ticks", String(ticks)], {
       env: {
-        ...inherited,
+        ...child,
         SQLITE_DB_PATH: twin,
         SCAN_INTERVAL_MS: interval,
         BEND_BIN: bend ?? "false",
@@ -391,20 +450,52 @@ function runPrismd(
         // for the cutover compare) and harmless (the twin is discarded).
         PRISMD_SHADOW_LOG: "1",
       },
+      // Run from the scratch twin dir, NOT the repo: prismd's own
+      // `load_env_file(".env")` (main.rs:3970) would otherwise re-read THIS
+      // repo's `.env` and repopulate the very ambient values the allowlist
+      // just withheld. `dir` holds no `.env`, so the child sees only the
+      // allowlist plus the harness keys above.
+      cwd,
       encoding: "utf8",
-      timeout: 300_000,
+      timeout: timeoutMs,
     }) as string;
     return { ok: true, stdout };
   } catch (e) {
     // SAFETY: execFileSync failures are Error-shaped with optional string fields.
-    const err = e as { stdout?: string; stderr?: string; status?: number | null };
+    const err = e as {
+      stdout?: string;
+      stderr?: string;
+      status?: number | null;
+      code?: string;
+      signal?: string;
+    };
     return {
       ok: false,
-      status: err.status === null || err.status === undefined ? "nonzero" : String(err.status),
+      status: describeExecFailure(err, timeoutMs),
       stdout: err.stdout,
       stderr: err.stderr,
     };
   }
+}
+
+/**
+ * A timeout is NOT an exit: `execFileSync` kills the child and throws with
+ * `status: null` (and `code: "ETIMEDOUT"` / `signal` set). Mapping that to a
+ * bare "nonzero" is what made a 300s timeout print as `prismd exited nonzero`
+ * and sent the investigation after a phantom crash (measured:
+ * `interval_ms=900000`, wall 300.34s). Report the failure as itself.
+ */
+function describeExecFailure(
+  err: { status?: number | null; code?: string; signal?: string },
+  timeoutMs: number,
+): string {
+  if (err.code === "ETIMEDOUT" || (err.status == null && err.signal != null)) {
+    return `timed out after ${timeoutMs / 1000}s`;
+  }
+  if (err.status == null) {
+    return `exited (no status; signal=${err.signal ?? "unknown"})`;
+  }
+  return `exited ${err.status}`;
 }
 
 type GateRow = { gate: string; prismd: number; ts: number; note: string };
@@ -499,7 +590,11 @@ function printVerdict(
   dbPath: string,
 ): void {
   const fmt = (kvs: Record<string, string> | undefined): string =>
-    kvs ? Object.entries(kvs).map(([k, val]) => `${k}=${val}`).join(" ") : "none";
+    kvs
+      ? Object.entries(kvs)
+          .map(([k, val]) => `${k}=${val}`)
+          .join(" ")
+      : "none";
   const decision = v.decision ?? {};
   console.log(`# prismd parity compare — ticks=${ticks} db=${dbPath}`);
   console.log(
