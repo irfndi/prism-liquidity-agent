@@ -193,7 +193,7 @@ describe("AdapterService wallet balance reconciliation", () => {
     // Jupiter blank (429/empty) must not zero the wallet: CoinGecko /simple/price
     // for solana still quotes a live USD price. Native 1 SOL @ $99 + 0 ATA = $99.
     const restore = mockFetch(async (url: string | URL | Request) => {
-      const href = String(url as unknown);
+      const href = url instanceof Request ? url.url : url instanceof URL ? url.href : url;
       if (href.includes("api.jup.ag/price/v3") || href.includes("lite-api.jup.ag/price/v3")) {
         return new Response(JSON.stringify({ code: 429, message: "Too many requests" }), {
           status: 429,

@@ -361,14 +361,22 @@ type RunOutcome =
   | { ok: false; status: string; stdout?: string | undefined; stderr?: string | undefined };
 
 /**
- * prismd's complete documented env surface, mirroring the Keys block in
- * `native/rust/README.md`. Ambient `.env` vars are forwarded ONLY if they name
- * a key on this list, so a stray repo-local setting cannot silently override a
- * host default inside the parity run. Keep in sync with the `env::var` calls in
- * `native/rust/src/main.rs` (config load + startup key checks).
+ * prismd's documented env surface, mirroring the Keys block in
+ * `native/rust/README.md`, minus `AGENT_HTTP_PORT` (deliberately excluded —
+ * the loopback status listener must stay off in a compare; prismd's default
+ * 0 covers it). Exact scope, because "hermetic" would be false:
+ * - An ambient var OUTSIDE this list cannot reach the child — observable in
+ *   the startup report: `HELIUS_API_KEY`/`TYPESAFE_API_KEY` are set in this
+ *   repo's `.env` yet arrive `helius=unset jev_key=unset`.
+ * - An ON-list var that also lives in `.env` (`MIN_FEE_IL_RATIO`,
+ *   `VOLUME_AUTH_THRESHOLD`, `PAPER_TRADING`, `SOLANA_RPC_URL`, …) still
+ *   forwards: Bun preloads `.env` into `process.env`, and this list copies
+ *   from there. So gate numbers are reproducible-with-this-`.env`, and
+ *   `cwd: dir` only stops prismd's own `load_env_file` from repopulating
+ *   what the list withheld. Keep in sync with the `env::var` calls in
+ *   `native/rust/src/main.rs` (config load + startup key checks).
  */
 const PRISMD_ENV_KEYS = [
-  "AGENT_HTTP_PORT",
   "BEND_BIN",
   "DUST_EXIT_USD",
   "EVOLUTION_INTERVAL",
@@ -445,6 +453,14 @@ function runPrismd(
         SQLITE_DB_PATH: twin,
         SCAN_INTERVAL_MS: interval,
         BEND_BIN: bend ?? "false",
+        // Compare-safety pins (deliberately win over any ambient value):
+        // the run must stay paper + walletless. A live wallet read would
+        // fire a REAL RPC during a parity compare (main.rs wallet-read
+        // tier), and prismd's loopback status listener must stay off —
+        // AGENT_HTTP_PORT was dropped from the allowlist above so an
+        // operator-set port cannot reach the child (default 0 = disabled).
+        PAPER_TRADING: "true",
+        WALLET_PUBKEY: "",
         // Opt in to the host's write seam: this runs against a scratch twin,
         // so persisting per-tick shadow rows here is both wanted (audit trail
         // for the cutover compare) and harmless (the twin is discarded).

@@ -32,6 +32,8 @@ pub fn exit_approved() -> bool {
 /// (mark PnL = current + fees + rewards − deposited ≤ -(deposited ×
 /// min(pct,1))); `None` on missing/non-finite/non-positive-deposit inputs
 /// (never fires). Disabled at pct ≤ 0, matching TS.
+/// Called twice at the tick — live `max_position_loss_pct` and the tighter
+/// probe at `max_position_loss_pct / 2.0`, both inlined (no helper).
 pub fn loss_cap_danger(
     deposited: Option<f64>,
     current: Option<f64>,
@@ -72,7 +74,7 @@ pub fn hodl_value_usd(
     if !(x.is_finite() && y.is_finite() && entry.is_finite() && current.is_finite()) {
         return None;
     }
-    if !(entry > 0.0) {
+    if entry <= 0.0 {
         return None;
     }
     Some(x * (current / entry) + y)
@@ -83,9 +85,9 @@ pub fn hodl_value_usd(
 /// fees × factor && ilUsd > minUsd). Exact comparison, host-native floats
 /// (no Bend kernel — F32 compares are uninterpreted axioms per
 /// bend/README.md:15-17). `None` on missing/non-finite legs (never fires).
-/// DIVERGENCE (documented, shadow-only): TS also gates on protection-enabled
-/// + OOR + known entry legs at the computeIlDominance call site — the caller
-/// applies those gates, this fn is the pure trigger.
+/// DIVERGENCE (documented, shadow-only): TS also gates on protection-enabled,
+/// out-of-range, and known entry legs at the computeIlDominance call site —
+/// the caller applies those gates, this fn is the pure trigger.
 pub fn il_dominant(
     il_usd: Option<f64>,
     fees_claimed_usd: Option<f64>,
@@ -180,9 +182,11 @@ pub fn drawdown_veto(legs: &[(Option<f64>, Option<f64>)], portfolio_usd: f64) ->
 /// paper portfolio (a fabricated $10k denominator masks a real drawdown and
 /// shrinks any measured one). `None` is a read FAILURE (or paper mode, which
 /// never touches the chain) and is the only case that keeps the config figure.
-/// Mirrors TS's failed-read contract: reuse the last known value, never a
-/// paper number (AGENTS.md "Wallet balance" — the read fails, it does not
-/// become a different portfolio).
+/// DIVERGENCE from TS's failed-read contract (program.ts:8299): TS retains
+/// `lastWalletBalanceUsd` (last-known, reused stale with a one-time warn); the
+/// host has no retained figure, so it substitutes `paper_portfolio_usd` —
+/// fail-safe direction (a known, bounded denominator, never a fabricated zero),
+/// but a real gap until the retained-balance tier lands.
 pub fn drawdown_portfolio_usd(
     wallet_lamports: Option<u64>,
     sol_price_usd: f64,
@@ -519,7 +523,7 @@ pub fn resolve_range_half_width(
     } else {
         15
     };
-    let half_cap = (max_full_range_bins.max(1) / 2).min(34).max(1);
+    let half_cap = (max_full_range_bins.max(1) / 2).clamp(1, 34);
     let effective_min = 5.min(half_cap);
     let coverage_width =
         if min_price_coverage_pct > 0.0 && min_price_coverage_pct.is_finite() && step > 0 {
@@ -636,8 +640,6 @@ pub fn ta_macd_hist(closes_newest_first: &[f64]) -> Option<(f64, f64)> {
     }
     Some((hist[hist.len() - 1], hist[hist.len() - 2]))
 }
-/// Tighter-cap probe pct is inline at the tick (`max_position_loss_pct / 2.0`);
-/// no helper — `loss_cap_danger` called twice, live + tighter.
 
 /// EP (Evil Panda) Supertrend twins — the entry gate's only indicator.
 /// ATR = Wilder-smoothed true range over `period`; bands = midline ±
@@ -1274,9 +1276,10 @@ mod config {
     pub const OOR_RECOVERY_LOOKBACK_MIN: i64 = 3;
     /// Mirrors engine/config-service.ts validatedNumber("OOR_RECOVERY_HOLD_THRESHOLD", 0, 0.6)
     /// + validatedNumber("OOR_RECOVERY_FORCE_REBALANCE_THRESHOLD", 0, 0.2).
-    /// TS clamps out-of-band to min with a warn; host fails closed on
-    /// garbage/non-finite (absent -> fallback).
+    ///   TS clamps out-of-band to min with a warn; host fails closed on
+    ///   garbage/non-finite (absent -> fallback).
     /// + validatedNumber("COMPOUND_GAS_BUFFER_USD", 0, 0.05) — same clamp shape.
+    ///
     /// PARKED with `compound_approved` (no tick call — needs per-claim leg).
     #[cfg_attr(not(test), allow(dead_code))]
     pub const MIN_COMPOUND_FEES_DEFAULT_USD: f64 = 0.5;
@@ -1292,8 +1295,8 @@ mod config {
     pub const OOR_RECOVERY_FORCE_MIN: f64 = 0.0;
     /// + validatedNumber("OOR_GRACE_PERIOD_CYCLES", 0, 3)
     /// + validatedNumber("PAPER_VALIDATION_MIN_DAYS", 0, 7).
-    /// TS clamps out-of-band to min with a warn; host fails closed on
-    /// garbage/non-finite (absent -> fallback).
+    ///   TS clamps out-of-band to min with a warn; host fails closed on
+    ///   garbage/non-finite (absent -> fallback).
     pub const MIN_REBALANCE_INTERVAL_DEFAULT_MS: i64 = 86_400_000;
     pub const MIN_REBALANCE_INTERVAL_MIN_MS: i64 = 0;
     pub const OOR_GRACE_PERIOD_DEFAULT_CYCLES: i64 = 3;
@@ -1313,8 +1316,8 @@ mod config {
     /// Mirrors engine/config-service.ts validatedNumber("REBALANCE_GAS_COST_SOL", 0, 0.01)
     /// + validatedNumber("SOL_PRICE_USD", 0, 150, 10_000)
     /// + validatedNumber("GAS_AWARE_MIN_DAYS_OF_FEES_PAID_AHEAD", 0, 3).
-    /// TS clamps below-min to min and above-max to max with a warn (absent ->
-    /// fallback); the host fails closed on garbage/non-finite instead.
+    ///   TS clamps below-min to min and above-max to max with a warn (absent ->
+    ///   fallback); the host fails closed on garbage/non-finite instead.
     pub const REBALANCE_GAS_COST_DEFAULT_SOL: f64 = 0.01;
     pub const REBALANCE_GAS_COST_MIN_SOL: f64 = 0.0;
     pub const SOL_PRICE_DEFAULT_USD: f64 = 150.0;
@@ -1332,7 +1335,7 @@ mod config {
     pub const MAX_POSITION_LOSS_MAX_PCT: f64 = 1.0;
     /// Mirrors engine/config-service.ts validatedNumber("IL_DOMINANCE_EXIT_FACTOR", 1, 2)
     /// + validatedNumber("IL_DOMINANCE_MIN_USD", 0, 5). TS has no max arm (open
-    /// range above min); the host matches (min-only, fail-closed garbage).
+    ///   range above min); the host matches (min-only, fail-closed garbage).
     pub const IL_DOMINANCE_EXIT_FACTOR_DEFAULT: f64 = 2.0;
     pub const IL_DOMINANCE_EXIT_FACTOR_MIN: f64 = 1.0;
     pub const IL_DOMINANCE_MIN_DEFAULT_USD: f64 = 5.0;
@@ -1519,10 +1522,10 @@ mod config {
     /// in engine/config-service.ts — paper trading is the fail-safe default;
     /// absent or garbage both resolve to true, matching `orElseSucceed`.
     pub fn parse_paper_trading(raw: Option<&str>) -> bool {
-        match raw.map(str::trim).map(str::to_lowercase).as_deref() {
-            Some("false") | Some("0") | Some("no") => false,
-            _ => true,
-        }
+        !matches!(
+            raw.map(str::trim).map(str::to_lowercase).as_deref(),
+            Some("false") | Some("0") | Some("no")
+        )
     }
 
     /// Canonical `SQLITE_DB_PATH`, legacy `SQLITE_PATH` fallback, else default.
@@ -1542,10 +1545,10 @@ mod config {
     /// Effect.orElseSucceed(() => true))` — protection is the fail-safe
     /// default; absent or garbage both resolve to true.
     pub fn parse_il_protection_enabled(raw: Option<&str>) -> bool {
-        match raw.map(str::trim).map(str::to_lowercase).as_deref() {
-            Some("false") | Some("0") | Some("no") => false,
-            _ => true,
-        }
+        !matches!(
+            raw.map(str::trim).map(str::to_lowercase).as_deref(),
+            Some("false") | Some("0") | Some("no")
+        )
     }
 
     fn flag(k: &str) -> bool {
@@ -2626,12 +2629,6 @@ fn read_paper_days(sqlite_path: &str) -> Option<f64> {
     }
 }
 
-/// Native half of the evolution shadow: mean-normalized winner-vs-loser lift
-/// for one signal. Mirrors `engine/strategy-service.ts` `computeSignalLift`
-/// (winners pnl>0 vs losers pnl≤0; 0 when either side empty; range-normalized
-/// by max(|winMean|,|loseMean|,1e-9)). `None` on empty/non-finite — the Bend
-/// `evolve_thr up` flag simply stays false and the leg holds.
-
 /// WRITE SEAM (first non-shadow host capability): persist one shadow
 /// observation row so a `prismd` run leaves an auditable trace without
 /// touching any TS-owned table. Table is host-owned (`prismd_shadow_log`),
@@ -2671,6 +2668,11 @@ fn write_shadow_observation(sqlite_path: &str, tick: u64, decision: &str) {
         eprintln!("[prismd] shadow-log insert failed: {e} (dropped)");
     }
 }
+/// Native half of the evolution shadow: mean-normalized winner-vs-loser lift
+/// for one signal. Mirrors `engine/strategy-service.ts` `computeSignalLift`
+/// (winners pnl>0 vs losers pnl≤0; 0 when either side empty; range-normalized
+/// by max(|winMean|,|loseMean|,1e-9)). `None` on empty/non-finite — the Bend
+/// `evolve_thr up` flag simply stays false and the leg holds.
 fn signal_lift(signals: &[(f64, f64)]) -> Option<f64> {
     let (mut sw, mut nw, mut sl, mut nl) = (0.0, 0i64, 0.0, 0i64);
     for (v, pnl) in signals {
@@ -3488,16 +3490,8 @@ fn tick(cfg: &config::Config, n: u64) {
     // paper mode, so it shadows against `paper_portfolio_usd` (documented
     // DIVERGENCE, allocation bullet). In live mode the chain read feeds the
     // same formula when it succeeded.
-    //
-    // `Some(0)` is a MEASURED fact (read succeeded, wallet holds no native
-    // SOL), not a failure: it must NOT fall back to `paper_portfolio_usd`,
-    // which would fabricate a $10k portfolio for a wallet whose value sits
-    // entirely in SPL tokens (the host's `get_spl_holdings` leg is not yet
-    // consumed — pricing is the next tier). A fabricated denominator masks a
-    // real drawdown and shrinks any measured one, so the config portfolio is
-    // the READ-FAILED fallback only. Note the host's wallet leg is native
-    // SOL × `sol_price_usd` (static config price), not TS's batched live
-    // Jupiter pricing — a documented DIVERGENCE until that tier lands.
+    // `Some(0)` semantics (measured zero, never config fallback) live on
+    // `drawdown_portfolio_usd` — see its doc.
     let open_value_usd: f64 = shadows
         .iter()
         .filter_map(|s| s.current_value_usd)
@@ -3729,6 +3723,7 @@ mod datapi {
     /// collapses within-cycle duplicates without going stale across cycles.
     /// A failed fetch is NOT cached (fail-open retries next read), and the
     /// map is pruned on insert so dropped pools don't accumulate.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const CACHE_TTL: Duration = Duration::from_secs(30);
     /// Mirrors `MAX_RETRIES = 2` (meteora-datapi-service.ts:11): up to two
     /// extra attempts on retriable errors only.
@@ -3741,13 +3736,16 @@ mod datapi {
     /// the short one.
     pub const RETRY_RATE_LIMIT_DELAY: Duration = Duration::from_secs(5);
 
+    #[cfg_attr(not(test), allow(dead_code))]
     static STATS_CACHE: LazyLock<Mutex<HashMap<String, (PoolStats, Instant)>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn cache_len_for_test() -> usize {
         STATS_CACHE.lock().map(|m| m.len()).unwrap_or(0)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn cache_clear_for_test() {
         if let Ok(mut m) = STATS_CACHE.lock() {
             m.clear();
@@ -3757,6 +3755,7 @@ mod datapi {
     /// Seed exactly what a successful fetch stores, for the memo test. The
     /// production write leg lives inside `get_pool_stats`; this is only the
     /// seam the test needs to prove a hit short-circuits without a fetch.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn cache_insert_for_test(pool_address: String, stats: PoolStats) {
         if let Ok(mut m) = STATS_CACHE.lock() {
             m.insert(pool_address, (stats, Instant::now()));
@@ -3768,6 +3767,7 @@ mod datapi {
     /// requests" are always retriable, plus transport timeouts (the
     /// "rpc request timeout" arm). Parse failures and non-429 statuses fail
     /// immediately — retrying a 404 or a schema-drift payload is pure waste.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_retriable_pub(msg: &str) -> bool {
         is_retriable(msg)
     }
@@ -3892,6 +3892,10 @@ mod datapi {
     /// `fetch_pool_stats` on a miss. Mirrors TS's `getPoolData` cache leg
     /// (meteora-datapi-service.ts:224-228). Lock poisoning (a panicked tick
     /// holding the mutex) degrades to a direct fetch, never a blocked cycle.
+    /// PARKED (unit-tested via the memo test, no tick caller yet): the tick
+    /// still consumes TS-persisted `pool_snapshots.stats_source`; this tier
+    /// wires in when the host fetches its own stats before the TS delete.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn get_pool_stats(
         base_url: &str,
         pool_address: &str,
@@ -4156,7 +4160,11 @@ mod rpc {
     use serde_json::{json, Value};
     use std::time::Duration;
 
+    /// PARKED with `get_spl_holdings`: the SPL-pricing tier's caller loops
+    /// both programs (one id per call) and does not exist yet.
+    #[allow(dead_code)]
     pub const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+    #[allow(dead_code)]
     pub const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
     pub const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
 
@@ -4219,6 +4227,7 @@ mod rpc {
     /// `parseHoldingRow`). Zero-amount rent-only ATAs are skipped — the TS
     /// path skips them too (the `amount <= 0` guard in readWalletSnapshot).
     #[derive(Debug, Clone, PartialEq)]
+    #[allow(dead_code)] // PARKED with `get_spl_holdings` — SPL-pricing tier consumes it next.
     pub struct Holding {
         pub mint: String,
         pub amount_atomic: u128,
@@ -4230,6 +4239,9 @@ mod rpc {
     /// `getParsedTokenAccountsByOwner`, accumulate per mint. A parse miss on
     /// one account skips that account (TS's `isObject` guards do the same) —
     /// it never fails the whole read.
+    /// PARKED (no caller): needs Jupiter pricing before it can feed
+    /// `walletBalanceUsd` — the last leg of the wallet-parity tier.
+    #[allow(dead_code)]
     pub fn get_spl_holdings(
         url: &str,
         pubkey: &str,
@@ -5481,21 +5493,21 @@ mod tests {
         assert_eq!(supertrend_break_above(&ramp, 14, 0.0), None);
 
         // EP lane: present legs must clear; bootcamp floors vol >= 1, fee >= 1%.
-        assert_eq!(ep_lane_admits(Some(2.5), 1.0, Some(1.0), 1.0), true);
+        assert!(ep_lane_admits(Some(2.5), 1.0, Some(1.0), 1.0));
         // Score below floor blocks (the "<1 volatility" rule).
-        assert_eq!(ep_lane_admits(Some(0.5), 1.0, Some(1.0), 1.0), false);
+        assert!(!ep_lane_admits(Some(0.5), 1.0, Some(1.0), 1.0));
         // Fee below the 1% floor blocks.
-        assert_eq!(ep_lane_admits(Some(2.5), 1.0, Some(0.5), 1.0), false);
+        assert!(!ep_lane_admits(Some(2.5), 1.0, Some(0.5), 1.0));
         // Absent legs never block (fail-open): the fee leg is permanently
         // absent on a ledger-only read, so fail-closed would make this gate
         // admit nothing on any real book. Present non-finite legs still block.
-        assert_eq!(ep_lane_admits(None, 1.0, Some(1.0), 1.0), true);
-        assert_eq!(ep_lane_admits(Some(2.5), 1.0, None, 1.0), true);
-        assert_eq!(ep_lane_admits(None, 1.0, None, 1.0), true);
-        assert_eq!(ep_lane_admits(Some(f64::NAN), 1.0, Some(1.0), 1.0), false);
-        assert_eq!(ep_lane_admits(Some(2.5), 1.0, Some(f64::NAN), 1.0), false);
+        assert!(ep_lane_admits(None, 1.0, Some(1.0), 1.0));
+        assert!(ep_lane_admits(Some(2.5), 1.0, None, 1.0));
+        assert!(ep_lane_admits(None, 1.0, None, 1.0));
+        assert!(!ep_lane_admits(Some(f64::NAN), 1.0, Some(1.0), 1.0));
+        assert!(!ep_lane_admits(Some(2.5), 1.0, Some(f64::NAN), 1.0));
         // Junk floor → disabled (never admit on an unparseable gate).
-        assert_eq!(ep_lane_admits(Some(2.5), f64::NAN, Some(1.0), 1.0), false);
+        assert!(!ep_lane_admits(Some(2.5), f64::NAN, Some(1.0), 1.0));
 
         // Exit bypass: confluence AND pnl above the -30% floor fires.
         assert_eq!(ep_exit_bypass(Some(true), Some(0.05), 0.30), Some(true));
@@ -5684,10 +5696,10 @@ mod tests {
         // > 0×2 + 5 floor → fires. Flat price → il 0 → holds.
         let hodl = hodl_value_usd(Some(250.0), Some(250.0), Some(10.0), Some(9.0));
         assert_eq!(hodl, Some(475.0));
-        let il = hodl.and_then(|h| Some(h - 460.0));
+        let il = hodl.map(|h| h - 460.0);
         assert_eq!(il_dominant(il, Some(0.0), 2.0, 5.0), Some(true));
         let flat = hodl_value_usd(Some(250.0), Some(250.0), Some(10.0), Some(10.0));
-        let il_flat = flat.and_then(|h| Some(h - 500.0));
+        let il_flat = flat.map(|h| h - 500.0);
         assert_eq!(il_dominant(il_flat, Some(0.0), 2.0, 5.0), Some(false));
         // Fees cushion: il 15 vs fees 10 × 2 = 20 → holds.
         assert_eq!(il_dominant(Some(15.0), Some(10.0), 2.0, 5.0), Some(false));
@@ -5844,9 +5856,10 @@ mod tests {
             drawdown_portfolio_usd(None, 150.0, 984.46, 10_000.0),
             10_000.0
         ); // read failed → config
-           // End-to-end: with Some(0) + a -20% book the veto MUST fire; under the
-           // old `Some(l) if l > 0` guard this read fell to the $10k config and
-           // returned Some(false) — the regression this pins.
+
+        // End-to-end: with Some(0) + a -20% book the veto MUST fire; under the
+        // old `Some(l) if l > 0` guard this read fell to the $10k config and
+        // returned Some(false) — the regression this pins.
         assert_eq!(
             drawdown_veto(
                 &[(Some(984.46), Some(787.57))],

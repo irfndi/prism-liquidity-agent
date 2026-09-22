@@ -1414,19 +1414,28 @@ function parseJupiterMintPrice(json: JupiterPricePayload, mint: string): number 
   return undefined;
 }
 
-/**
- * Known-liquid majors priced via CoinGecko `/simple/price` (by coin id), not the
+/** Known-liquid majors priced via CoinGecko `/simple/price` (by coin id), not the
  * token-contract endpoint. Used when Jupiter is rate-limited and the mint-based
  * CoinGecko/Helius crawl also misses — without this, a Jupiter 429 + 10-minute
  * negative cache zeroes the whole wallet (native SOL unpriced → equity $0 →
  * no ENTERs). Still a LIVE quote, never the hardcoded $165 fallback.
+ * Open contract: any mint may index it (absent → undefined at the use site).
  */
-export const MAJOR_SPOT_COINGECKO_IDS: Readonly<Record<string, string>> = {
+export const MAJOR_SPOT_COINGECKO_IDS = {
   [SOL_MINT]: "solana",
   [USDC_MINT]: "usd-coin",
   Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: "tether",
   "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo": "paypal-usd",
-};
+} satisfies Readonly<Record<string, string>>;
+
+/** Open lookup over the closed literal map: any mint may ask; only the four
+ *  known majors answer — everything else (including prototype names) → undefined. */
+function majorSpotCoinGeckoId(mint: string): string | undefined {
+  if (!Object.hasOwn(MAJOR_SPOT_COINGECKO_IDS, mint)) return undefined;
+  // SAFETY: the hasOwn guard above proves `mint` is one of the map's own
+  // literal keys — exactly the keyof union; no prototype key can pass it.
+  return MAJOR_SPOT_COINGECKO_IDS[mint as keyof typeof MAJOR_SPOT_COINGECKO_IDS];
+}
 
 /** Miss-cache TTL for majors: short so a transient Jupiter 429 cannot latch
  *  SOL at $0 for the full 10-minute exotic TTL. */
@@ -1443,8 +1452,8 @@ export function buildMajorSpotPriceRequest(
   const ids = [
     ...new Set(
       mints
-        .map((mint) => MAJOR_SPOT_COINGECKO_IDS[mint])
-        .filter((id): id is string => typeof id === "string" && id.length > 0),
+        .map(majorSpotCoinGeckoId)
+        .filter((id): id is string => id !== undefined && id.length > 0),
     ),
   ];
   if (ids.length === 0) return null;
@@ -1462,10 +1471,10 @@ type CoinGeckoSimplePricePayload = Record<string, { readonly usd?: number } | un
 export function parseMajorSpotPrices(
   json: CoinGeckoSimplePricePayload,
   mints: ReadonlyArray<string>,
-): Record<string, number> {
+) {
   const result: Record<string, number> = {};
   for (const mint of mints) {
-    const coinId = MAJOR_SPOT_COINGECKO_IDS[mint];
+    const coinId = majorSpotCoinGeckoId(mint);
     if (coinId === undefined) continue;
     const price = json[coinId]?.usd;
     if (!isQuotablePrice(price)) continue;
@@ -2503,7 +2512,7 @@ export const makeAdapterLive = (
       function parseJupiterPriceResponse(
         json: JupiterPricePayload,
         missing: ReadonlyArray<string>,
-      ): Record<string, number> {
+      ) {
         const result: Record<string, number> = {};
         for (const mint of missing) {
           const price = parseJupiterMintPrice(json, mint);
