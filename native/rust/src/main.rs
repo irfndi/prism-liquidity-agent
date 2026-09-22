@@ -140,7 +140,7 @@ pub fn stop_loss_veto(
 /// negative and `|pnl| / portfolio` exceeds 10% (hardcoded in TS, no config).
 /// Exact TS semantics: non-finite portfolio/pnl → veto (fail-closed pause);
 /// portfolio <= 0 → no veto (guard); otherwise `pnl < 0 && |pnl|/portfolio >
-/// 0.1`. Portfolio here shadows against `paper_portfolio_usd` (TS uses live
+/// 0.1`. Portfolio comes from `drawdown_portfolio_usd` below (TS uses live
 /// portfolioValueUsd — documented in the allocation bullet); pnl sums open
 /// spot PnL `current − deposited` per position like `toRiskPosition`
 /// (program.ts:1016-1030 — spot-only; NOT the fees-included analytics shape).
@@ -173,6 +173,28 @@ pub fn drawdown_veto(legs: &[(Option<f64>, Option<f64>)], portfolio_usd: f64) ->
     }
     Some(pnl < 0.0 && pnl.abs() / portfolio_usd > 0.1)
 }
+
+/// Drawdown-gate portfolio denominator. `Some(lamports)` is a SUCCESSFUL live
+/// read — including `Some(0)`, a measured zero-balance wallet, which must be
+/// priced as $0 of native SOL rather than silently swapped for the configured
+/// paper portfolio (a fabricated $10k denominator masks a real drawdown and
+/// shrinks any measured one). `None` is a read FAILURE (or paper mode, which
+/// never touches the chain) and is the only case that keeps the config figure.
+/// Mirrors TS's failed-read contract: reuse the last known value, never a
+/// paper number (AGENTS.md "Wallet balance" — the read fails, it does not
+/// become a different portfolio).
+pub fn drawdown_portfolio_usd(
+    wallet_lamports: Option<u64>,
+    sol_price_usd: f64,
+    open_value_usd: f64,
+    paper_portfolio_usd: f64,
+) -> f64 {
+    match wallet_lamports {
+        Some(l) => (l as f64 / rpc::LAMPORTS_PER_SOL) * sol_price_usd + open_value_usd,
+        None => paper_portfolio_usd,
+    }
+}
+
 /// Pure twin of the F7 pool-cooldown ENTER gate: ENTER may proceed iff no
 /// cooldown row exists for the pool OR now >= cooldown_until. Mirrors
 /// `checkEnterCooldownGate` (program.ts:11870-11906): active cooldown →
@@ -3466,15 +3488,27 @@ fn tick(cfg: &config::Config, n: u64) {
     // paper mode, so it shadows against `paper_portfolio_usd` (documented
     // DIVERGENCE, allocation bullet). In live mode the chain read feeds the
     // same formula when it succeeded.
+    //
+    // `Some(0)` is a MEASURED fact (read succeeded, wallet holds no native
+    // SOL), not a failure: it must NOT fall back to `paper_portfolio_usd`,
+    // which would fabricate a $10k portfolio for a wallet whose value sits
+    // entirely in SPL tokens (the host's `get_spl_holdings` leg is not yet
+    // consumed — pricing is the next tier). A fabricated denominator masks a
+    // real drawdown and shrinks any measured one, so the config portfolio is
+    // the READ-FAILED fallback only. Note the host's wallet leg is native
+    // SOL × `sol_price_usd` (static config price), not TS's batched live
+    // Jupiter pricing — a documented DIVERGENCE until that tier lands.
     let open_value_usd: f64 = shadows
         .iter()
         .filter_map(|s| s.current_value_usd)
         .filter(|v| v.is_finite())
         .sum();
-    let portfolio_usd = match wallet_lamports {
-        Some(l) if l > 0 => (l as f64 / rpc::LAMPORTS_PER_SOL) * cfg.sol_price_usd + open_value_usd,
-        _ => cfg.paper_portfolio_usd,
-    };
+    let portfolio_usd = drawdown_portfolio_usd(
+        wallet_lamports,
+        cfg.sol_price_usd,
+        open_value_usd,
+        cfg.paper_portfolio_usd,
+    );
     let drawdown = drawdown_veto(&drawdown_legs, portfolio_usd);
     // F6 paper-validation shadow: live ENTER needs paper days (program.ts:7562).
     // Paper mode → pass; days>=min → pass; !enforce → warn-pass; else block.
@@ -5784,6 +5818,49 @@ mod tests {
             drawdown_veto(&[(Some(1000.0), Some(800.0))], 0.0),
             Some(false)
         ); // non-positive portfolio
+    }
+
+    #[test]
+    fn drawdown_portfolio_guards() {
+        // A SUCCESSFUL read of a zero-balance wallet is a MEASURED $0, not a
+        // failure: it must not fall back to the configured paper portfolio
+        // (a fabricated $10k denominator masks a real drawdown and shrinks
+        // any measured one). `None` — read failed, or paper mode — is the only
+        // case that keeps the config figure.
+        const SOL: u64 = 1_000_000_000;
+        assert_eq!(
+            drawdown_portfolio_usd(Some(0), 150.0, 984.46, 10_000.0),
+            984.46
+        ); // Some(0) is priced, not fabricated
+        assert_eq!(
+            drawdown_portfolio_usd(Some(SOL), 150.0, 0.0, 10_000.0),
+            150.0
+        ); // 1 SOL × $150
+        assert_eq!(
+            drawdown_portfolio_usd(Some(SOL), 150.0, 984.46, 10_000.0),
+            1_134.46
+        ); // wallet + open legs
+        assert_eq!(
+            drawdown_portfolio_usd(None, 150.0, 984.46, 10_000.0),
+            10_000.0
+        ); // read failed → config
+           // End-to-end: with Some(0) + a -20% book the veto MUST fire; under the
+           // old `Some(l) if l > 0` guard this read fell to the $10k config and
+           // returned Some(false) — the regression this pins.
+        assert_eq!(
+            drawdown_veto(
+                &[(Some(984.46), Some(787.57))],
+                drawdown_portfolio_usd(Some(0), 150.0, 787.57, 10_000.0)
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            drawdown_veto(
+                &[(Some(984.46), Some(787.57))],
+                drawdown_portfolio_usd(None, 150.0, 787.57, 10_000.0)
+            ),
+            Some(false)
+        );
     }
 
     #[test]
