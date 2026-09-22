@@ -29,7 +29,8 @@ Config: `.env` first, then optional profile env-file path arg (existing env wins
 Keys: `SQLITE_DB_PATH` (legacy `SQLITE_PATH` fallback; default `prism.db`),
 `SCAN_INTERVAL_MS` (default 600000, fail-closed outside [10000, 3600000]),
 `PAPER_PORTFOLIO_USD` (default 10000, fail-closed below 1),
-`JEV_ENABLED`, `BEND_BIN` (default `bend`). `HELIUS_API_KEY`,
+`JEV_ENABLED`, `BEND_BIN` (default `bend`), `SOLANA_RPC_URL` (default
+public mainnet-beta), `WALLET_PUBKEY` (empty = walletless). `HELIUS_API_KEY`,
 `TYPESAFE_API_KEY` (`TYPESAFEAI_API` alias) are passthrough only — startup
 reports set/unset, never values. Garbage numbers exit 2, never guess.
 
@@ -39,12 +40,12 @@ reports set/unset, never values. Garbage numbers exit 2, never guess.
 cargo test
 ```
 
-45 tests (39 unconditional + 6 Bend-gated): fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
+53 tests (47 unconditional + 6 Bend-gated): fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
 Jev-fail-open, config defaults, config fail-closed, Jev-stub fail-open, real
 SQLite shadow read, drift ring-cap, evolve live-floors-and-lift, loss-cap breach,
 CLI flags, `signal_lift` edges (empty/one-sided/non-finite→None), loss-cap
 tighter-cap monotone superset, open-count excludes-closed, per-pool groups-open-only, stop-loss veto guards, exposure sums-open-only, halt edges, drawdown guards, rebalance-range guards, gas-justified guards, recovery-hold guards, interval-paper guards, cooldown-free guards, compound-parked guards, vol-exit/stddev guards, entry-shape guards,
-range-width guards, il-dominance guards (live $6.65 fire + strict-> + None legs), TA-indicator guards, EP-lane + supertrend twins (present-leg blocks / absent-leg abstains / junk floor disables / falling-ramp silent), shadow-log write seam (roundtrip + failure swallowed, both bounded to the metadata table), 4 unconditional bogus-binary fail-open/closed,
+range-width guards, il-dominance guards (live $6.65 fire + strict-> + None legs), wallet-pubkey + rpc-url guards (absent/empty/whitespace defaults, valid base58 round-trips, alphabet/length/space rejections), TA-indicator guards, EP-lane + supertrend twins (present-leg blocks / absent-leg abstains / junk floor disables / falling-ramp silent), shadow-log write seam (roundtrip + failure swallowed, both bounded to the metadata table), 4 unconditional bogus-binary fail-open/closed,
 `K.clamp_thr` kernel, `evolve_thr` banded leg, `ta_exhausted` 6/6 confluence
 combos, `exit_order` 5/5 precedence picks, loss-magnitude kernel legs (at-or-below fires / one-cent-above holds / profit-quiet / URANUS -$8.15-vs-$10.50 floor holds / pct>1 clamp / dust strict-below + at-floor + disabled-floor), tick-match shadow surface —
 skipped, not failed, when `bend` is absent from `PATH`). Zero new deps (rusqlite only, Bend calls shell the `bend`
@@ -114,6 +115,7 @@ Twin; `K.ta_exhausted` + `K.exit_order` are truth-table-probed, LAWS pending str
 `K.fee_ratio` stays kernel-only (host lacks the IL estimator context,
 so no host wrapper — `computeFeeIlRatio` needs in-memory bin-array + drift).
 
+- `rpc::get_balance_lamports` (live mode only) → `portfolio_usd` fed to the book-level `drawdown_veto` (gate-4 portfolio leg: `walletBalanceUsd + Σ openPositions.currentValueUsd`, the exact TS formula — previously the host used `paper_portfolio_usd` in live mode too, i.e. a fabricated portfolio). Paper mode skips the RPC entirely (TS uses `paperPortfolioUsd` there). A failed read leaves `None` and the gate keeps its configured portfolio — never a fabricated zero. Fail-closed `rpc` module (JSON-RPC 2.0: transport error / non-2xx / RPC-level `error` object / unexpected shape → `Err`); `SOLANA_RPC_URL` absent → TS's public mainnet-beta fallback; `WALLET_PUBKEY` empty = walletless (live execution no-ops, read skipped), non-empty must be valid base58 32 bytes (alphabet + decoded-length check, fail-closed at config time). `rpc::get_spl_holdings` (`getParsedTokenAccountsByOwner`, Token + Token-2022, accumulated per mint, zero-amount rent-only ATAs skipped) is implemented but NOT yet consumed — pricing (Jupiter) is the next tier.
 - `halt` circuit-breaker → per-tick `halt enabled/window/threshold_usd/closed/halted` (gate-2a mirror: trailing realized PnL over last-N closed positions below threshold pauses ENTERs; disabled → false, cold start → false; never blocks).
 
 - `drawdown_veto` (gate-4 mirror: spot book-PnL vs `paper_portfolio_usd`, 10% hardcoded; book-level `drawdown_veto` verdict in `decision`; never blocks).
