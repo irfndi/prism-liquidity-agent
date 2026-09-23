@@ -464,8 +464,6 @@ export interface AppConfig {
   // Force auto-update settings
   readonly forceUpdateEnabled: boolean;
   readonly forceUpdateAfterDays: number;
-  // R2 release tarball source (GitHub-independent updates)
-  readonly updateR2PublicUrl: string;
   readonly githubToken: string;
   readonly githubRepo: string;
   readonly feedbackOptOut: boolean;
@@ -2326,9 +2324,6 @@ const loadConfig = Effect.gen(function* () {
     Effect.orElseSucceed(() => false),
   );
   const forceUpdateAfterDays = yield* validatedNumber("FORCE_UPDATE_AFTER_DAYS", 1, 14);
-  const updateR2PublicUrl = yield* Config.string("UPDATE_R2_PUBLIC_URL").pipe(
-    Effect.orElseSucceed(() => "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev"),
-  );
 
   const githubToken = yield* Config.string("GITHUB_TOKEN").pipe(Effect.orElseSucceed(() => ""));
   const githubRepo = yield* Config.string("GITHUB_REPO").pipe(
@@ -2560,7 +2555,6 @@ const loadConfig = Effect.gen(function* () {
     updateAllowDirty,
     forceUpdateEnabled,
     forceUpdateAfterDays,
-    updateR2PublicUrl,
     githubToken,
     githubRepo,
     feedbackOptOut,

@@ -1,4 +1,4 @@
-name: Release to R2
+name: Release
 
 on:
   push:
@@ -10,11 +10,11 @@ on:
 # to steps that need it. The boolean flag gates the `if:` checks below.
 env:
   HAS_GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY != '' }}
-  # Single source of truth for the Bun version and the R2 public bucket URL;
-  # every setup-bun and manifest step below references these. The repository's
-  # bunfig.toml enables Bun 1.4's isolated linker and shared global store.
+  # Single source of truth for the Bun version; every setup-bun step below
+  # references it. The repository's bunfig.toml enables Bun 1.4's isolated
+  # linker and shared global store. (Cloudflare R2 is deprecated for
+  # distribution — account billing; releases publish to GitHub only.)
   BUN_VERSION: 1.4.2
-  R2_PUBLIC_URL: https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev
 
 permissions:
   contents: write
@@ -231,26 +231,19 @@ jobs:
             fi
           done
 
-      - name: Generate release manifest
-        env:
-          R2_BASE_URL: ${{ env.R2_PUBLIC_URL }}
-          REQUIRE_ALL_BUNDLES: "true"
+      - name: Verify release bundles are complete
+        # Channel manifests went with R2 (deprecated for distribution — account
+        # billing); the updater reads GitHub Release assets directly, so gate
+        # on the files themselves. The explicit platform suffix keeps a
+        # prerelease source tarball (prism-v1.2.3-beta.1.tar.gz) from counting.
         run: |
-          cd release-assets
-          bun run ../scripts/generate-release-manifest.ts
-          cd ..
-          cp "release-assets/manifest.json" "manifest.json"
-          cat manifest.json
-
-      - name: Verify release manifest completeness
-        run: |
-          BUNDLE_COUNT=$(jq '.bundles | length' manifest.json)
+          BUNDLE_COUNT=$(ls release-assets/ | grep -cE '^prism-v[0-9].*-(linux|darwin)-(x64|arm64)\.tar\.gz$' || true)
           if [ "$BUNDLE_COUNT" -lt 4 ]; then
-            echo "::error::Manifest has only ${BUNDLE_COUNT} platform bundles; expected 4"
-            jq '.bundles | keys' manifest.json
+            echo "::error::release-assets has ${BUNDLE_COUNT} platform bundles; expected 4"
+            ls release-assets/
             exit 1
           fi
-          echo "✓ Manifest has ${BUNDLE_COUNT} platform bundles"
+          echo "✓ release-assets has ${BUNDLE_COUNT} platform bundles"
 
       - name: Sign tarball and bundles (GPG, optional)
         if: env.HAS_GPG_KEY == 'true'
@@ -262,83 +255,6 @@ jobs:
             [ -e "$f" ] || continue
             gpg --batch --yes --armor --detach-sign "$f"
           done
-
-      - name: Upload source tarball to R2
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz" --file "prism-v${VERSION}.tar.gz" --remote
-
-      - name: Upload source SHA-256 to R2
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          npx wrangler r2 object put "prism-backups/releases/v${VERSION}/prism-v${VERSION}.tar.gz.sha256" --file "prism-v${VERSION}.tar.gz.sha256" --remote
-
-      - name: Upload bundle tarballs to R2
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          for f in "release-assets/prism-v${VERSION}"-*.tar.gz; do
-            [ -e "$f" ] || continue
-            npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
-          done
-
-      - name: Upload bundle SHA-256 checksums to R2
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          for f in "release-assets/prism-v${VERSION}"-*.tar.gz.sha256; do
-            [ -e "$f" ] || continue
-            npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
-          done
-
-      - name: Upload prismd binary + checksum to R2
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          for f in "release-assets/prismd-${VERSION}-linux-x64" "release-assets/prismd-${VERSION}-linux-x64.sha256"; do
-            [ -e "$f" ] || continue
-            npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
-          done
-
-      - name: Upload GPG signatures to R2
-        if: env.HAS_GPG_KEY == 'true'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          for f in "release-assets/prism-v${VERSION}"*.tar.gz.asc; do
-            [ -e "$f" ] || continue
-            npx wrangler r2 object put "prism-backups/releases/v${VERSION}/$(basename "$f")" --file "$f" --remote
-          done
-
-      - name: Upload manifest to R2
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          case "${CHANNEL}" in
-            stable)
-              MANIFEST_PATH="prism-backups/releases/latest.json"
-              ;;
-            beta)
-              MANIFEST_PATH="prism-backups/releases/channel/beta.json"
-              ;;
-            dev)
-              MANIFEST_PATH="prism-backups/releases/channel/dev.json"
-              ;;
-            *)
-              echo "Unknown channel: ${CHANNEL}"
-              exit 1
-              ;;
-          esac
-          npx wrangler r2 object put "${MANIFEST_PATH}" --file manifest.json --remote
 
       - name: Create or update GitHub Release
         env:

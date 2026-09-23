@@ -25,7 +25,6 @@ import {
   compareVersions,
   isValidVersion,
   fetchLatestRelease,
-  R2_PUBLIC_URL,
   type ReleaseInfo,
   getVersionAgnosticInstallDir,
 } from "../engine/update-utils.js";
@@ -45,7 +44,6 @@ interface UpdateOptions {
   checkOnly?: boolean;
   channel?: string;
   canary?: boolean;
-  r2Url?: string;
   skipSmokeTest?: boolean;
 }
 
@@ -172,9 +170,8 @@ async function downloadAndVerify(
   url: string,
   sha256Url: string | undefined,
   bundlePath: string,
-  source: "r2" | "github",
 ): Promise<void> {
-  console.log(`Downloading from ${source === "r2" ? "R2" : "GitHub"}...`);
+  console.log("Downloading...");
   await downloadFile(url, bundlePath);
   console.log(`✓ Downloaded to ${bundlePath}`);
 
@@ -571,7 +568,7 @@ async function updateFromSource(
   const bundleName = `prism-v${release.version}.tar.gz`;
   const bundlePath = join(workDir, bundleName);
 
-  await downloadAndVerify(release.tarballUrl, release.sha256Url, bundlePath, release.source);
+  await downloadAndVerify(release.tarballUrl, release.sha256Url, bundlePath);
 
   console.log("Extracting source tarball...");
   const extractedDir = join(workDir, "extracted");
@@ -670,7 +667,7 @@ async function updateFromBundle(
   const bundleName = `prism-v${release.version}.tar.gz`;
   const bundlePath = join(workDir, bundleName);
 
-  await downloadAndVerify(release.bundleUrl, release.bundleSha256Url, bundlePath, release.source);
+  await downloadAndVerify(release.bundleUrl, release.bundleSha256Url, bundlePath);
 
   console.log("Extracting bundle...");
   const extractedDir = join(workDir, "extracted");
@@ -731,7 +728,6 @@ function printReleaseSummary(release: ReleaseInfo): void {
     const commitSuffix = release.commit ? ` (commit ${release.commit.slice(0, 8)})` : "";
     console.log(`Canary build: ${release.version}${commitSuffix}`);
   }
-  console.log(`Source: ${release.source === "r2" ? "Cloudflare R2" : "GitHub Releases"}`);
   if (release.bundleUrl) {
     console.log(`Download: ${release.bundleUrl}`);
   }
@@ -793,7 +789,6 @@ export const updateCommand = new Command("update")
   .option("--check-only", "Only check for updates, don't apply")
   .option("--channel <channel>", "Release channel (stable, beta, dev, canary)", "stable")
   .option("--canary", "Update to the latest canary build (latest main-branch build that passed CI)")
-  .option("--r2-url <url>", "R2 public URL for release bundles", R2_PUBLIC_URL)
   .option("--skip-smoke-test", "Skip post-install smoke test")
   .action(async (rawOptions) => {
     // SAFETY: Commander parsed these flags at the CLI boundary; the option bag matches the declared UpdateOptions shape.
@@ -805,10 +800,8 @@ export const updateCommand = new Command("update")
     try {
       const repo = "irfndi/prism-liquidity-agent";
       const channel = resolveReleaseChannel(options);
-      // SAFETY: The preceding branch or fixture establishes the asserted primitive type before this operation.
-      const r2Url = options.r2Url as string;
 
-      const release = await Effect.runPromise(fetchLatestRelease(repo, channel, r2Url));
+      const release = await Effect.runPromise(fetchLatestRelease(repo, channel));
 
       if (!release) {
         console.log("✓ Already up to date");
@@ -845,7 +838,7 @@ export const updateCommand = new Command("update")
         await updateFromBundle(release, workDir, options.skipSmokeTest as boolean);
       }
 
-      logger.info(`Updated to ${latest} from ${release.source}`);
+      logger.info(`Updated to ${latest} (channel ${channel})`);
       console.log(`✓ Updated to ${latest}`);
 
       reportRestartRequired();

@@ -53,7 +53,6 @@ function buildLayer(
     updateChannel: "stable" as const,
     updateGithubRepo: "",
     updateAllowDirty: false,
-    updateR2PublicUrl: "",
     forceUpdateEnabled: overrides.forceUpdateEnabled ?? false,
     forceUpdateAfterDays: overrides.forceUpdateAfterDays ?? 14,
     githubToken: "",

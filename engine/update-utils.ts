@@ -64,13 +64,13 @@ function failOnGithubRateLimit(response: Response): Effect.Effect<void, Error> {
   return Effect.fail(new Error(msg));
 }
 
-/** Release guard: a GitHub release payload must carry a string tag_name. Malformed shapes fail soft (Effect channel) so the caller falls back to R2 — a throw here would escape as an Effect defect and crash the update check. */
+/** Release guard: a GitHub release payload must carry a string tag_name. Malformed shapes fail soft (Effect channel) so the update check fails with a named cause — a throw here would escape as an Effect defect and crash the update check. */
 function isGitHubRelease(value: GitHubRelease | null): value is GitHubRelease {
   if (value === null || !("tag_name" in value)) return false;
   return Object.prototype.toString.call(value.tag_name) === "[object String]";
 }
 
-/** Fail on malformed GitHub payloads so the caller falls back to R2; pass through null and valid releases. */
+/** Fail on malformed GitHub payloads so the update check names the cause; pass through null and valid releases. */
 function requireValidRelease(
   candidate: GitHubRelease | null,
   url: string,
@@ -100,7 +100,6 @@ export interface ReleaseInfo {
   readonly signatureUrl: string;
   readonly publishedAt: string;
   readonly minCliVersion: string;
-  readonly source: "r2" | "github";
   readonly bundleUrl: string;
   readonly bundleSha256Url: string;
   readonly commit: string;
@@ -111,7 +110,10 @@ export interface BundleManifest {
   readonly sha256_url: string;
 }
 
-export interface R2Manifest {
+/** The `manifest.json` format the canary pipeline publishes as a GitHub
+ *  release asset. (Cloudflare R2 is deprecated for distribution as of
+ *  2026-09-23 — account billing; the bucket itself is untouched.) */
+export interface ChannelManifest {
   readonly version: string;
   readonly channel: "stable" | "beta" | "dev" | "canary";
   readonly tarball_url: string;
@@ -135,7 +137,6 @@ export interface GitHubRelease {
   }>;
 }
 
-export const R2_PUBLIC_URL = "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev";
 /** Outbound request headers (valid HeadersInit value form). */
 /** GitHub API headers: identity + version accept always sent; Bearer auth only when a token is configured. */
 type FetchHeaders = {
@@ -143,50 +144,10 @@ type FetchHeaders = {
   Accept: string;
   Authorization?: string;
 };
-export const R2_RELEASES_BUCKET = "prism-backups";
-export const R2_MANIFEST_PATHS = {
-  stable: "releases/latest.json",
-  beta: "releases/channel/beta.json",
-  dev: "releases/channel/dev.json",
-  canary: "releases/channel/canary.json",
-} as const;
-
-export function fetchR2Manifest(
-  channel: "stable" | "beta" | "dev" | "canary",
-  r2PublicUrl: string = R2_PUBLIC_URL,
-): Effect.Effect<R2Manifest | null, Error> {
-  return Effect.gen(function* () {
-    const path = R2_MANIFEST_PATHS[channel];
-    const url = `${r2PublicUrl}/${path}`;
-
-    const response = yield* tryNetwork(
-      () =>
-        fetch(url, {
-          headers: {
-            "User-Agent": "prism-liquidity-agent",
-            Accept: "application/json",
-          },
-        }),
-      `Failed to fetch R2 manifest from ${url}`,
-    );
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        return null;
-      }
-      return yield* Effect.fail(
-        new Error(`R2 manifest fetch error: ${response.status} ${response.statusText}`),
-      );
-    }
-
-    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
-    const manifest = (yield* tryNetwork(
-      () => response.json(),
-      "Failed to parse R2 manifest JSON",
-    )) as R2Manifest;
-    return manifest;
-  });
-}
+/** Rolling GitHub prerelease tag that hosts the canary build and its
+ *  `manifest.json` asset — CI publishes assets first and uploads the
+ *  manifest LAST, so the manifest's appearance IS the pointer flip. */
+export const CANARY_RELEASE_TAG = "canary";
 
 export function fetchGitHubRelease(
   repo: string,
@@ -339,7 +300,6 @@ export function githubReleaseToInfo(
     signatureUrl: assetUrl(sigAsset),
     publishedAt: release.published_at,
     minCliVersion: "1.0.0",
-    source: "github",
     bundleUrl: assetUrl(bundleAsset),
     bundleSha256Url: assetUrl(bundleSha256Asset),
     commit: "",
@@ -370,7 +330,7 @@ function findBundleSha256Asset(
   );
 }
 
-export function r2ManifestToInfo(manifest: R2Manifest): ReleaseInfo {
+export function channelManifestToInfo(manifest: ChannelManifest): ReleaseInfo {
   const platformKey = getPlatformKey();
   const bundle = manifest.bundles?.[platformKey];
   return {
@@ -381,40 +341,55 @@ export function r2ManifestToInfo(manifest: R2Manifest): ReleaseInfo {
     signatureUrl: manifest.signature_url ?? "",
     publishedAt: manifest.published_at,
     minCliVersion: manifest.min_cli_version,
-    source: "r2",
     bundleUrl: bundle?.url ?? "",
     bundleSha256Url: bundle?.sha256_url ?? "",
     commit: manifest.commit ?? "",
   };
 }
 
-/** R2 fallback lookup: valid manifest → ReleaseInfo, absent/invalid → null. Fetch failures propagate. */
-function fetchR2Info(
-  channel: "stable" | "beta" | "dev" | "canary",
-  r2PublicUrl?: string,
-): Effect.Effect<ReleaseInfo | null, Error> {
+/** Canary lookup: valid `manifest.json` on the rolling GitHub prerelease →
+ *  ReleaseInfo, absent/invalid → null. Fetch failures propagate. */
+export function fetchCanaryManifest(repo: string): Effect.Effect<ReleaseInfo | null, Error> {
   return Effect.gen(function* () {
-    const result = yield* Effect.result(fetchR2Manifest(channel, r2PublicUrl));
-    if (result._tag === "Failure") return yield* Effect.fail(result.failure);
-    if (result.success && isValidVersion(result.success.version)) {
-      return r2ManifestToInfo(result.success);
+    const url = `https://github.com/${repo}/releases/download/${CANARY_RELEASE_TAG}/manifest.json`;
+    const response = yield* tryNetwork(
+      () =>
+        fetch(url, {
+          headers: {
+            "User-Agent": "prism-liquidity-agent",
+            Accept: "application/json",
+          },
+        }),
+      `Failed to fetch canary manifest from ${url}`,
+    );
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      return yield* Effect.fail(
+        new Error(`Canary manifest fetch error: ${response.status} ${response.statusText}`),
+      );
     }
-    return null;
+    // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
+    const manifest = (yield* tryNetwork(
+      () => response.json(),
+      "Failed to parse canary manifest JSON",
+    )) as ChannelManifest;
+    if (!isValidVersion(manifest.version)) return null;
+    return channelManifestToInfo(manifest);
   });
 }
 
 export function fetchLatestRelease(
   repo: string,
   channel: "stable" | "beta" | "dev" | "canary",
-  r2PublicUrl?: string,
   token?: string,
 ): Effect.Effect<ReleaseInfo | null, Error> {
   return Effect.gen(function* () {
-    // Canary builds are R2-only: they have no GitHub Releases representation,
-    // so falling through to the "newest release" GitHub semantics would install
-    // the wrong artifact. Fail with a clear, actionable message instead.
+    // Canary ships as the rolling GitHub prerelease + manifest.json asset.
+    // Falling through to "newest release" GitHub semantics would install the
+    // wrong artifact (canary versions are prerelease builds of main), so the
+    // manifest IS the contract — fail with a clear, actionable message.
     if (channel === "canary") {
-      const canaryResult = yield* Effect.result(fetchR2Info(channel, r2PublicUrl));
+      const canaryResult = yield* Effect.result(fetchCanaryManifest(repo));
       if (canaryResult._tag === "Success" && canaryResult.success) return canaryResult.success;
       const detail =
         canaryResult._tag === "Failure"
@@ -422,28 +397,17 @@ export function fetchLatestRelease(
           : " (no valid canary manifest found)";
       return yield* Effect.fail(
         new Error(
-          `Canary builds are served exclusively from R2 (releases/channel/canary.json). ` +
+          `Canary builds are served from the rolling GitHub prerelease \`${CANARY_RELEASE_TAG}\` (manifest.json asset). ` +
             `Failed to resolve a canary build${detail}. ` +
-            `Check the R2 public URL and that the canary pipeline has published a build.`,
+            `Check that the canary pipeline has published a build.`,
         ),
       );
     }
 
-    // ponytail: GitHub Releases first, R2 only as fallback
     const ghResult = yield* Effect.result(fetchGitHubRelease(repo, channel, token));
     if (ghResult._tag === "Success") {
       if (ghResult.success) return githubReleaseToInfo(ghResult.success, channel);
       return null;
-    }
-
-    const r2Result = yield* Effect.result(fetchR2Info(channel, r2PublicUrl));
-    if (r2Result._tag === "Success" && r2Result.success) return r2Result.success;
-    if (r2Result._tag === "Failure") {
-      return yield* Effect.fail(
-        new Error(
-          `Update check failed. GitHub: ${ghResult.failure.message}; R2: ${r2Result.failure.message}`,
-        ),
-      );
     }
     return yield* Effect.fail(new Error(`Update check failed: ${ghResult.failure.message}`));
   });

@@ -25,7 +25,6 @@ function buildAdapterLayer(
       autoUpdate: false,
       updateCheckIntervalMs: 216_000_000,
       updateGithubRepo: "irfndi/prism-liquidity-agent",
-      updateR2PublicUrl: "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev",
       githubRepo: "irfndi/prism-liquidity-agent",
       ...overrides,
     }),

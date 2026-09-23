@@ -76,7 +76,6 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     updateAllowDirty: false,
     forceUpdateEnabled: false,
     forceUpdateAfterDays: 30,
-    updateR2PublicUrl: "",
     githubToken: "",
     githubRepo: "irfndi/prism-liquidity-agent",
     feedbackOptOut: false,

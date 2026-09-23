@@ -24,10 +24,15 @@ interface ReleaseManifest {
 const version = process.env.VERSION ?? "";
 // SAFETY: The surrounding runtime boundary establishes the asserted contract before this value is consumed.
 const channel = (process.env.CHANNEL ?? "stable") as ReleaseChannel;
-const r2Base = (
-  process.env.R2_BASE_URL ?? "https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev"
-).replace(/\/+$/, "");
-const keyPrefix = (process.env.R2_KEY_PREFIX ?? `releases/v${version}`).replace(/^\/+|\/+$/g, "");
+const releaseBase = (process.env.RELEASE_BASE_URL ?? "").replace(/\/+$/, "");
+const keyPrefix = (process.env.RELEASE_KEY_PREFIX ?? `releases/v${version}`).replace(
+  /^\/+|\/+$/g,
+  "",
+);
+if (!releaseBase) {
+  console.error("RELEASE_BASE_URL env is required (e.g. a GitHub releases/download base)");
+  process.exit(1);
+}
 const commit = process.env.COMMIT;
 const outFile = process.env.OUT_FILE ?? "manifest.json";
 const requireAllBundles = (process.env.REQUIRE_ALL_BUNDLES ?? "true") === "true";
@@ -61,7 +66,7 @@ for (const file of files) {
     console.warn(`Missing checksum for ${file}, skipping`);
     continue;
   }
-  const url = `${r2Base}/${keyPrefix}/${file}`;
+  const url = `${releaseBase}/${keyPrefix}/${file}`;
   bundles[platformKey] = { url, sha256_url: `${url}.sha256` };
 }
 
@@ -77,12 +82,12 @@ if (Object.keys(bundles).length === 0) {
   console.warn("No bundles found; manifest will have no per-platform bundles.");
 }
 
-const tarballUrl = `${r2Base}/${keyPrefix}/prism-v${version}.tar.gz`;
+const tarballUrl = `${releaseBase}/${keyPrefix}/prism-v${version}.tar.gz`;
 const signatureUrl = `${tarballUrl}.asc`;
 const requireSignature = (process.env.REQUIRE_SIGNATURE ?? "false") === "true";
 
 // The manifest advertises these artifacts, so they must exist before we write
-// it — a manifest full of dead R2 URLs is worse than a failed job. Same
+// it — a manifest full of dead asset URLs is worse than a failed job. Same
 // existsSync style as the per-bundle checksum gate above, but hard-failing:
 // the source tarball is not optional the way a per-platform bundle is. The
 // .asc is only asserted when a GPG signature is expected for this release

@@ -400,11 +400,10 @@ Required secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
 3. Builds platform bundles for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64` via `scripts/build-bundle.ts`.
 4. Builds a source tarball.
 5. Generates SHA-256 checksums and optional GPG signatures.
-6. Uploads assets to Cloudflare R2 (`prism-backups/releases/v{VERSION}/`).
-7. Updates `prism-backups/releases/latest.json` and per-channel manifests (`beta`, `dev`; the `canary` pointer is written by `ci.yml` on `main`, NOT by this workflow).
-8. Creates or updates a GitHub Release.
+6. Verifies all four platform bundles are present in `release-assets/`.
+7. Creates or updates a GitHub Release with every asset (bundles, source tarball, checksums, optional GPG signatures).
 
-`prism update` downloads from R2 and verifies SHA-256; it falls back to GitHub Releases if R2 is unreachable.
+`prism update` resolves from GitHub Releases (`stable`/`beta`/`dev` via the releases API; `canary` = the rolling prerelease tag `canary` plus its `manifest.json` asset, published by `ci.yml` on `main`) and verifies SHA-256. Cloudflare R2 is **deprecated for distribution** as of wave 96 (account billing) — the bucket itself is untouched.
 
 ### Docker
 
@@ -542,7 +541,6 @@ The `Dockerfile` builds the engine bundle with `oven/bun:1.4.2-slim`, using a se
 | `AGENT_PROPOSAL_MAX_QUEUE_SIZE` | `50`                                                             | Max pending proposals in the in-memory queue.                                                                      |
 | `AUTO_UPDATE`                 | `true`                                                             | Check for releases periodically.                                                                                   |
 | `UPDATE_CHANNEL`              | `stable`                                                           | `stable`, `beta`, `dev` or `canary`.                                                                               |
-| `UPDATE_R2_PUBLIC_URL`        | `https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev`              | Release CDN. `.env.example` contains a stale `r2.prism-agent.com` value; the code fallback is the source of truth. |
 | `PRISM_CONFIG_DIR`            | `~/.config/prism`                                                  | Override the shared credentials and config directory.                                                              |
 | `PRISM_FEEDBACK_OPT_OUT`      | `false`                                                            | Disable automatic feedback.                                                                                        |
 | `ALERTS_ENABLED`              | `true`                                                             | Master switch for proactive Telegram alerts (engine-side). Delivery still requires registration + Telegram link.   |
@@ -574,7 +572,7 @@ In test mode (`NODE_ENV=test` or `VITEST=true`), missing `HELIUS_API_KEY` defaul
 - **Backtest fidelity (Wave 11).** Replay uses the shared decision/risk kernel for position identity, per-pool and portfolio caps, trailing-stop behavior, memory inputs, and dynamic sizing. It remains an offline simulation: it does not submit live transactions, reproduce RPC/SDK transport timing, or forecast execution quality, slippage, or fills. Treat results as deterministic strategy regression and parity checks, not a performance forecast.
 - **Screener bin-utilization filter is bounded.** Discovery data comes from the Data API without per-bin data, so `minBinUtilization` is enforced only for the first 10 screened candidates via an on-chain `getBinArray` probe; the rest pass through and the per-pool scan loop re-applies the gate.
 - **Risk size cap follows `MAX_PER_POOL_ALLOCATION_PCT`.** The per-position cap in `risk-service.ts` is the configured allocation pct (default 40%), not a hardcoded constant.
-- **`.env.example` is stale in places.** For example, its `UPDATE_R2_PUBLIC_URL` default does not match the code fallback. Always verify against `engine/config-service.ts`.
+- **`.env.example` is stale in places.** Always verify env vars against `engine/config-service.ts`.
 
 ## Where to look first
 

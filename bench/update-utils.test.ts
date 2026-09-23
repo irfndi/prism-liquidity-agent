@@ -3,9 +3,8 @@ import {
   compareVersions,
   isValidVersion,
   githubReleaseToInfo,
-  r2ManifestToInfo,
+  channelManifestToInfo,
   getPlatformKey,
-  R2_MANIFEST_PATHS,
 } from "../engine/update-utils.js";
 
 describe("update-utils", () => {
@@ -62,12 +61,6 @@ describe("update-utils", () => {
     });
   });
 
-  describe("R2_MANIFEST_PATHS", () => {
-    it("exposes the canary channel manifest path", () => {
-      expect(R2_MANIFEST_PATHS.canary).toBe("releases/channel/canary.json");
-    });
-  });
-
   describe("githubReleaseToInfo", () => {
     it("maps GitHub release to ReleaseInfo correctly", () => {
       const release = {
@@ -98,7 +91,6 @@ describe("update-utils", () => {
       expect(info.tarballUrl).toBe("https://example.com/prism-v1.2.3.tar.gz");
       expect(info.sha256Url).toBe("https://example.com/prism-v1.2.3.tar.gz.sha256");
       expect(info.signatureUrl).toBe("https://example.com/prism-v1.2.3.tar.gz.asc");
-      expect(info.source).toBe("github");
     });
 
     it("handles missing assets gracefully", () => {
@@ -157,8 +149,8 @@ describe("update-utils", () => {
     });
   });
 
-  describe("r2ManifestToInfo", () => {
-    it("maps R2 manifest to ReleaseInfo correctly", () => {
+  describe("channelManifestToInfo", () => {
+    it("maps a channel manifest to ReleaseInfo correctly", () => {
       const platformKey = getPlatformKey();
       const manifest = {
         version: "1.2.3",
@@ -176,14 +168,13 @@ describe("update-utils", () => {
         },
       };
 
-      const info = r2ManifestToInfo(manifest);
+      const info = channelManifestToInfo(manifest);
       const bundle = manifest.bundles[platformKey]!;
       expect(info.version).toBe("1.2.3");
       expect(info.channel).toBe("stable");
       expect(info.tarballUrl).toBe("https://r2.example.com/prism-v1.2.3.tar.gz");
       expect(info.sha256Url).toBe("https://r2.example.com/prism-v1.2.3.tar.gz.sha256");
       expect(info.signatureUrl).toBe("https://r2.example.com/prism-v1.2.3.tar.gz.asc");
-      expect(info.source).toBe("r2");
       expect(info.minCliVersion).toBe("1.0.0");
       expect(info.bundleUrl).toBe(bundle.url);
       expect(info.bundleSha256Url).toBe(bundle.sha256_url);
@@ -206,7 +197,7 @@ describe("update-utils", () => {
         },
       };
 
-      const info = r2ManifestToInfo(manifest);
+      const info = channelManifestToInfo(manifest);
       const bundle = manifest.bundles[platformKey]!;
       expect(info.signatureUrl).toBe("");
       expect(info.channel).toBe("dev");
@@ -224,7 +215,7 @@ describe("update-utils", () => {
         commit: "abcdef0123456789abcdef0123456789abcdef01",
       };
 
-      const info = r2ManifestToInfo(manifest);
+      const info = channelManifestToInfo(manifest);
       expect(info.channel).toBe("canary");
       expect(info.commit).toBe("abcdef0123456789abcdef0123456789abcdef01");
     });
@@ -239,7 +230,7 @@ describe("update-utils", () => {
         min_cli_version: "1.0.0",
       };
 
-      const info = r2ManifestToInfo(manifest);
+      const info = channelManifestToInfo(manifest);
       expect(info.commit).toBe("");
     });
   });

@@ -14,12 +14,12 @@ on:
 permissions:
   contents: read
 
-# Single source of truth for the Bun version and the R2 public bucket URL;
-# every setup-bun and manifest step below references these. The repository's
-# bunfig.toml enables Bun 1.4's isolated linker and shared global store.
+# Single source of truth for the Bun version; every setup-bun step below
+# references it. The repository's bunfig.toml enables Bun 1.4's isolated
+# linker and shared global store. (Cloudflare R2 is deprecated for
+# distribution — account billing; releases publish to GitHub.)
 env:
   BUN_VERSION: 1.4.2
-  R2_PUBLIC_URL: https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev
 
 jobs:
   build:
@@ -143,7 +143,6 @@ jobs:
       cancel-in-progress: true
     outputs:
       canary_version: ${{ steps.meta.outputs.canary_version }}
-      build_dir: ${{ steps.meta.outputs.build_dir }}
       full_sha: ${{ steps.meta.outputs.full_sha }}
     steps:
       - name: Checkout
@@ -169,7 +168,6 @@ jobs:
           # Embed the short SHA in the version so two pushes within the same
           # second cannot collide on one canary version string.
           echo "canary_version=${NEXT}-canary.${TS}-${SHA8}" >> "$GITHUB_OUTPUT"
-          echo "build_dir=releases/canary/${TS}-${SHA8}" >> "$GITHUB_OUTPUT"
           echo "full_sha=${FULL_SHA}" >> "$GITHUB_OUTPUT"
 
   canary-build:
@@ -239,6 +237,11 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [build, canary-prepare, canary-build]
     runs-on: ubuntu-latest
+    # Rolling-canary publish writes the `canary` prerelease (gh release
+    # delete/create/upload) — the only write this workflow performs now that
+    # Cloudflare R2 is deprecated for distribution (account billing).
+    permissions:
+      contents: write
     concurrency:
       group: canary-publish
       cancel-in-progress: true
@@ -317,14 +320,15 @@ jobs:
           mv "${TARBALL_NAME}" "${TARBALL_NAME}.sha256" canary-assets/
           ls -lh canary-assets/
 
-      - name: Generate canary manifest
+      - name: Generate canary manifest (GitHub asset URLs)
         env:
           VERSION: ${{ needs.canary-prepare.outputs.canary_version }}
-          BUILD_DIR: ${{ needs.canary-prepare.outputs.build_dir }}
           FULL_SHA: ${{ needs.canary-prepare.outputs.full_sha }}
+          RELEASE_BASE_URL: https://github.com/${{ github.repository }}/releases/download
+          RELEASE_KEY_PREFIX: canary
         run: |
           cd canary-assets
-          VERSION="${VERSION}" CHANNEL=canary COMMIT="${FULL_SHA}" R2_BASE_URL="${{ env.R2_PUBLIC_URL }}" R2_KEY_PREFIX="${BUILD_DIR}" REQUIRE_ALL_BUNDLES=true bun run ../scripts/generate-release-manifest.ts
+          VERSION="${VERSION}" CHANNEL=canary COMMIT="${FULL_SHA}" RELEASE_BASE_URL="${RELEASE_BASE_URL}" RELEASE_KEY_PREFIX="${RELEASE_KEY_PREFIX}" REQUIRE_ALL_BUNDLES=true bun run ../scripts/generate-release-manifest.ts
           cd ..
           BUNDLE_COUNT=$(jq '.bundles | length' canary-assets/manifest.json)
           if [ "$BUNDLE_COUNT" -lt 4 ]; then
@@ -335,17 +339,26 @@ jobs:
           echo "→ Manifest has ${BUNDLE_COUNT} platform bundles"
           cat canary-assets/manifest.json
 
-      - name: Upload canary assets to R2 (before manifest)
+      - name: Publish rolling canary GitHub prerelease (assets first)
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          BUILD_DIR: ${{ needs.canary-prepare.outputs.build_dir }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.canary-prepare.outputs.canary_version }}
+          FULL_SHA: ${{ needs.canary-prepare.outputs.full_sha }}
         run: |
-          for f in canary-assets/*; do
-            [ -f "$f" ] || continue
-            [ "$(basename "$f")" = "manifest.json" ] && continue
-            npx wrangler r2 object put "prism-backups/${BUILD_DIR}/$(basename "$f")" --file "$f" --remote
-          done
+          # Recreate the rolling tag from THIS commit so it can never point at
+          # a stale SHA. Assets are uploaded WITHOUT manifest.json: a client
+          # may see bundles before the manifest, never a manifest before its
+          # bundles — the manifest upload below is the pointer flip.
+          gh release delete canary --cleanup-tag --yes || true
+          cd canary-assets
+          assets=$(ls | grep -v '^manifest\.json$')
+          gh release create canary \
+            --target "${GITHUB_SHA}" \
+            --prerelease \
+            --title "canary ${VERSION}" \
+            --notes "Rolling main-branch canary build ${VERSION} (commit ${FULL_SHA}). manifest.json is uploaded last; its appearance is the publish flip." \
+            ${assets}
+          cd ..
 
       - name: Validate canary bundles are reachable (HEAD)
         # The pointer flip below publishes the manifest to every `prism update
@@ -367,98 +380,11 @@ jobs:
           done < <(jq -r '.bundles[].url' canary-assets/manifest.json)
           echo "→ OK: all ${count} canary bundles reachable"
 
-      - name: Upload canary manifest pointer to R2 (atomic flip)
+      - name: Publish canary manifest (pointer flip)
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          npx wrangler r2 object put "prism-backups/releases/channel/canary.json" --file canary-assets/manifest.json --remote
-
-      - name: Garbage-collect old canary builds
-        continue-on-error: true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          BUILD_DIR: ${{ needs.canary-prepare.outputs.build_dir }}
-        run: |
-          set +e
-          FAILED=0
-          # wrangler v4 has no `r2 object list`, so list via the Cloudflare R2
-          # admin API and delete each key with `wrangler r2 object delete`.
-          # Keep the 5 newest canary build dirs; never delete the just-published
-          # ${BUILD_DIR}. Emit the keys-to-delete on stdout and the dir names on
-          # stderr, then delete them below.
-          node -e '
-            const token = process.env.CLOUDFLARE_API_TOKEN;
-            const account = process.env.CLOUDFLARE_ACCOUNT_ID;
-            const bucket = "prism-backups";
-            const keep = process.env.BUILD_DIR;
-            const re = /^[0-9]{8}T[0-9]{6}-[0-9a-f]{8}$/;
-            (async () => {
-              const keys = [];
-              let cursor = "";
-              do {
-                const q = new URLSearchParams();
-                q.set("prefix", "releases/canary/");
-                if (cursor) q.set("cursor", cursor);
-                const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/${bucket}/objects?${q.toString()}`, {
-                  headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-                });
-                const body = await res.json();
-                if (!body || body.success !== true) {
-                  console.error("R2 object list failed: " + JSON.stringify(body && body.errors));
-                  process.exit(1);
-                }
-                const result = body.result || {};
-                for (const o of result.objects || []) keys.push(o.key);
-                cursor = result.truncated ? (result.cursor || "") : "";
-              } while (cursor);
-
-              const byDir = new Map();
-              for (const key of keys) {
-                const parts = key.split("/");
-                if (parts.length < 4 || parts[0] !== "releases" || parts[1] !== "canary") continue;
-                const dir = parts[2];
-                if (!re.test(dir)) continue;
-                if (!byDir.has(dir)) byDir.set(dir, []);
-                byDir.get(dir).push(key);
-              }
-
-              const dirs = [...byDir.keys()].sort();
-              const keepDirs = new Set(dirs.slice(Math.max(0, dirs.length - 5)));
-              // BUILD_DIR is the full R2 path (releases/canary/<TS>-<sha8>); the
-              // parsed dir above is the bare <TS>-<sha8>. Normalize so the
-              // just-published dir is actually protected, and fail loudly if the
-              // listing doesn't contain it (the invariant would otherwise be
-              // silently dropped).
-              const keep = String(process.env.BUILD_DIR).split("/").pop();
-              keepDirs.add(keep);
-              if (!keepDirs.has(keep) || !byDir.has(keep)) {
-                console.error("Just-published canary dir missing from R2 listing: " + keep);
-                process.exit(1);
-              }
-
-              for (const dir of dirs) {
-                if (keepDirs.has(dir)) continue;
-                console.error("Deleting canary build dir: " + dir);
-                for (const key of byDir.get(dir)) console.log(key);
-              }
-            })().catch((err) => { console.error("R2 GC error: " + err); process.exit(1); });
-          ' > /tmp/canary-gc-keys.txt
-          if [ $? -ne 0 ]; then
-            echo "WARNING: failed to list canary R2 objects; skipping garbage collection."
-            FAILED=1
-          fi
-
-          while IFS= read -r key; do
-            [ -n "$key" ] || continue
-            npx wrangler r2 object delete "prism-backups/${key}" --remote || FAILED=1
-          done < /tmp/canary-gc-keys.txt
-
-          if [ "$FAILED" -ne 0 ]; then
-            echo "WARNING: canary garbage collection hit errors; the published canary is unaffected."
-          fi
-          exit "$FAILED"
+          gh release upload canary canary-assets/manifest.json --clobber
 
       - name: Canary summary
         env:

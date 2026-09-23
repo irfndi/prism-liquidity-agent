@@ -130,7 +130,6 @@ export function checkForAutoUpdate(config: AppConfig, db: DbApi): Effect.Effect<
     const release = yield* fetchLatestRelease(
       config.updateGithubRepo,
       config.updateChannel,
-      config.updateR2PublicUrl,
       config.githubToken || undefined,
     );
 
@@ -143,7 +142,7 @@ export function checkForAutoUpdate(config: AppConfig, db: DbApi): Effect.Effect<
     const daysUntilForce = config.forceUpdateAfterDays - daysSinceInstall;
 
     log.info(`New version available: ${release.version} (current: ${currentVersion})`, {
-      source: release.source,
+      channel: release.channel,
     });
 
     if (config.forceUpdateEnabled) {

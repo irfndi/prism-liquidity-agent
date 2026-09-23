@@ -86,7 +86,7 @@ What the installer does:
 
 1. Installs Bun if it's not already on `PATH`
 2. Detects your OS and architecture (`linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`)
-3. Downloads the matching compiled bundle (`dist/` engine + CLI, `lib/` native sqlite-vec extension) from Cloudflare R2
+3. Downloads the matching compiled bundle (`dist/` engine + CLI, `lib/` native sqlite-vec extension) from GitHub Releases
 4. Verifies the bundle's SHA-256 checksum
 5. Extracts it to `~/.prism` (override with `PRISM_INSTALL_DIR`)
 6. Writes a `prism` wrapper at `~/.local/bin/prism` that sets `PRISM_INSTALL_DIR` and `PRISM_VEC0_PATH`, then runs the bundle with Bun

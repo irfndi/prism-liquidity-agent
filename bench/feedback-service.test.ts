@@ -74,7 +74,6 @@ function buildLayer(
     updateAllowDirty: false,
     forceUpdateEnabled: false,
     forceUpdateAfterDays: 14,
-    updateR2PublicUrl: "",
     githubToken,
     githubRepo,
     feedbackOptOut: optOut,

@@ -69,7 +69,6 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     updateChannel: "stable",
     updateGithubRepo: "",
     updateAllowDirty: false,
-    updateR2PublicUrl: "",
     forceUpdateEnabled: false,
     forceUpdateAfterDays: 14,
     githubToken: "",
