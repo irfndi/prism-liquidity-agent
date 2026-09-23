@@ -57,7 +57,11 @@ set/unset, never values. Garbage numbers exit 2, never guess.
 cargo test
 ```
 
-54 tests (48 unconditional + 6 Bend-gated): fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
+74 tests (68 unconditional + 6 Bend-gated): discovery/screener gold parity (shared
+fixture: envelope + pagination messages/arms, the seven row-shape checks, launchpad
+truthiness, created_at ms/seconds/absent branches, gate boundaries incl. the exact
+1.5 fee / 0.7 auth ties, top-10 fetch bound + fetch-fail pass-through, ±20 bin-window
+core + `slot_active` OR legs, config parsers + `should_discover`), fee-IL clamp bands `[0.3, 3.0]`, EXIT-always-approved,
 Jev-fail-open, config defaults, config fail-closed, Jev-stub fail-open, real
 SQLite shadow read, drift ring-cap, evolve live-floors-and-lift, loss-cap breach,
 CLI flags, `signal_lift` edges (empty/one-sided/non-finite→None), loss-cap
@@ -65,7 +69,12 @@ tighter-cap monotone superset, open-count excludes-closed, per-pool groups-open-
 range-width guards, il-dominance guards (live $6.65 fire + strict-> + None legs), drawdown-portfolio guards (Some(0) priced as measured $0, None = read-failed keeps config, end-to-end veto flips), wallet-pubkey + rpc-url guards (absent/empty/whitespace defaults, valid base58 round-trips, alphabet/length/space rejections), TA-indicator guards, EP-lane + supertrend twins (present-leg blocks / absent-leg abstains / junk floor disables / falling-ramp silent), shadow-log write seam (roundtrip + failure swallowed, both bounded to the metadata table), 4 unconditional bogus-binary fail-open/closed,
 `K.clamp_thr` kernel, `evolve_thr` banded leg, `ta_exhausted` 6/6 confluence
 combos, `exit_order` 5/5 precedence picks, loss-magnitude kernel legs (at-or-below fires / one-cent-above holds / profit-quiet / URANUS -$8.15-vs-$10.50 floor holds / pct>1 clamp / dust strict-below + at-floor + disabled-floor), tick-match shadow surface —
-skipped, not failed, when `bend` is absent from `PATH`). Zero new deps (rusqlite only, Bend calls shell the `bend`
+skipped, not failed, when `bend` is absent from `PATH`). Deps: rusqlite
+(premade, bundled) + serde_json with the `preserve_order` + `float_roundtrip`
+features — the first pulls `indexmap` transitively (so `describe()`'s key order
+matches TS `JSON.parse` on the payload text), the second makes float parsing
+correctly-rounded like the engine (the wave-101 gold caught a 1-ulp default-parser
+divergence); Bend calls shell the `bend`
 CLI via `std::process`); Jev HTTP stays a `JevClient` trait + stub until reqwest
 (rustls) is justified.
 
@@ -169,6 +178,9 @@ kernel's contract stays covered by its bench parity vectors.
    Grep-able per-tick lines (all `(observational)`, never acted on):
    `tick=` (total rows) → `capacity open/max/at_capacity` (portfolio ENTER
    headroom) → `pool-capacity pools/capped/pool/open/max/at_capacity` (fullest pool + aggregates) →
+   `Discovered N candidate pools` + top-3 `  Candidate: <addr> (fee/IL: x.xx)`
+   (the host-built ENTER universe — TS's exact console lines, logged only;
+   the ENTER chain that consumes them is the next wave) →
    per-position `shadow fee_il_exit …` → `shadow il_dominance …` → `shadow loss_magnitude …` → `decision open/exit_shadow/enter_blocked_shadow/danger_shadow/drift_rejects_shadow/capital_exits_shadow/stop_loss_shadow/band_health_shadow/gas_hold_shadow/recovery_hold_shadow/interval_hold_shadow/vol_exit_shadow/exit_order_loss_shadow/il_dominance_shadow/paper_days/paper_pass/cooldown_holds/wallet_value_usd/drawdown_veto/at_capacity` (one-line
    verdict to diff against the TS `decided/executed/failed` cycle log).
 2. Pass bar for the N-cycle compare: `decision open` == TS open count;

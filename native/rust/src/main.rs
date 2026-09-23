@@ -1658,6 +1658,23 @@ mod config {
     pub const MIN_BIN_UTIL_DEFAULT: f64 = 0.3;
     pub const MIN_BIN_UTIL_MIN: f64 = 0.0;
     pub const MIN_BIN_UTIL_MAX: f64 = 1.0;
+    /// Mirrors engine/config-service.ts:1934 validatedNumber("DISCOVERY_MIN_TVL_USD", 0, 1_000_000)
+    /// — the screener/discovery TVL floor (NOT MIN_POOL_TVL_USD). TS clamps
+    /// below-min to 0 with a warn; the host fails closed on out-of-band
+    /// (house rule, same as VOLUME_AUTH above). Absent = 1,000,000.
+    pub const DISCOVERY_MIN_TVL_DEFAULT: f64 = 1_000_000.0;
+    pub const DISCOVERY_MIN_TVL_MIN: f64 = 0.0;
+    /// Mirrors engine/config-service.ts:1935 validatedNumber("DISCOVERY_MIN_FEE_RATIO", 0, 1.5)
+    /// — the annualized fee/TVL floor (`fees24h×365/tvl`) the screener
+    /// ranks/filters candidates on. No max arm in TS (open range). Absent = 1.5.
+    pub const DISCOVERY_MIN_FEE_RATIO_DEFAULT: f64 = 1.5;
+    pub const DISCOVERY_MIN_FEE_RATIO_MIN: f64 = 0.0;
+    /// Mirrors engine/config-service.ts:2338-2343 `METEORA_POOLS_URL`
+    /// (Config.string + default) — the discovery LIST endpoint. Kept
+    /// VERBATIM including empty (TS only defaults on absence; an empty
+    /// string makes the fetch fail → discovery falls back, exactly as TS).
+    pub const DEFAULT_METEORA_POOLS_URL: &str =
+        "https://dlmm.datapi.meteora.ag/pools?page=1&page_size=1000&filter_by=is_blacklisted=false&sort_by=tvl:desc";
     pub const MIN_YIELD_EXIT_AGE_DEFAULT_MS: i64 = 43_200_000;
     pub const MIN_YIELD_EXIT_AGE_MIN_MS: i64 = 0;
     pub const MIN_YIELD_EXIT_AGE_MAX_MS: i64 = 172_800_000;
@@ -1687,6 +1704,10 @@ mod config {
         pub evolution_max_change_pct: f64,
         pub volume_auth_threshold: f64,
         pub min_bin_utilization: f64,
+        pub enable_pool_discovery: bool,
+        pub discovery_min_tvl_usd: f64,
+        pub discovery_min_fee_ratio: f64,
+        pub meteora_pools_url: String,
         pub max_open_positions: i64,
         pub max_positions_per_pool: i64,
         pub stop_loss_pct: f64,
@@ -2424,6 +2445,52 @@ mod config {
             ))
         }
     }
+    /// Parse-or-default for `DISCOVERY_MIN_TVL_USD`; `Err` on garbage/below-min.
+    /// Absent -> 1,000,000, matching validatedNumber's fallback. NOTE: TS
+    /// clamps a negative to 0 with a warn; the host fails closed instead
+    /// (house rule — same substitution as the parsers above). No max arm
+    /// (TS: `validatedNumber(name, 0, 1_000_000)`), the host matches.
+    pub fn parse_discovery_min_tvl_usd(raw: Option<&str>) -> Result<f64, String> {
+        let Some(s) = raw else {
+            return Ok(DISCOVERY_MIN_TVL_DEFAULT);
+        };
+        let v: f64 = s
+            .trim()
+            .parse()
+            .map_err(|_| format!("DISCOVERY_MIN_TVL_USD={s:?} is not a number"))?;
+        if v.is_finite() && v >= DISCOVERY_MIN_TVL_MIN {
+            Ok(v)
+        } else {
+            Err(format!(
+                "DISCOVERY_MIN_TVL_USD={v} outside [{DISCOVERY_MIN_TVL_MIN}, ∞)"
+            ))
+        }
+    }
+    /// Parse-or-default for `DISCOVERY_MIN_FEE_RATIO`; `Err` on garbage/below-min.
+    /// Absent -> 1.5, matching validatedNumber's fallback; open range above
+    /// (TS has no max arm), the host matches.
+    pub fn parse_discovery_min_fee_ratio(raw: Option<&str>) -> Result<f64, String> {
+        let Some(s) = raw else {
+            return Ok(DISCOVERY_MIN_FEE_RATIO_DEFAULT);
+        };
+        let v: f64 = s
+            .trim()
+            .parse()
+            .map_err(|_| format!("DISCOVERY_MIN_FEE_RATIO={s:?} is not a number"))?;
+        if v.is_finite() && v >= DISCOVERY_MIN_FEE_RATIO_MIN {
+            Ok(v)
+        } else {
+            Err(format!(
+                "DISCOVERY_MIN_FEE_RATIO={v} outside [{DISCOVERY_MIN_FEE_RATIO_MIN}, ∞)"
+            ))
+        }
+    }
+    /// `METEORA_POOLS_URL` — verbatim, NO trim/default-on-empty (TS
+    /// `Config.string` only substitutes on absence; see the const doc).
+    pub fn parse_meteora_pools_url(raw: Option<&str>) -> String {
+        raw.map(str::to_string)
+            .unwrap_or_else(|| DEFAULT_METEORA_POOLS_URL.to_string())
+    }
     /// Parse-or-default for `IL_DOMINANCE_EXIT_FACTOR`; `Err` on garbage/below-min.
     /// Absent -> 2, matching validatedNumber("IL_DOMINANCE_EXIT_FACTOR", 1, 2).
     /// TS has no max arm (open range); the host matches (min-only).
@@ -2590,6 +2657,19 @@ mod config {
                 min_bin_utilization: parse_min_bin_utilization(
                     env::var("MIN_BIN_UTILIZATION").ok().as_deref(),
                 )?,
+                // House `flag()` accepts "1"|"true"; TS Config.boolean accepts
+                // only "true" — equivalent for every shipped .env (all use
+                // `true`), same contract as the existing flag() booleans.
+                enable_pool_discovery: flag("ENABLE_POOL_DISCOVERY"),
+                discovery_min_tvl_usd: parse_discovery_min_tvl_usd(
+                    env::var("DISCOVERY_MIN_TVL_USD").ok().as_deref(),
+                )?,
+                discovery_min_fee_ratio: parse_discovery_min_fee_ratio(
+                    env::var("DISCOVERY_MIN_FEE_RATIO").ok().as_deref(),
+                )?,
+                meteora_pools_url: parse_meteora_pools_url(
+                    env::var("METEORA_POOLS_URL").ok().as_deref(),
+                ),
                 max_open_positions: parse_max_open_positions(
                     env::var("MAX_OPEN_POSITIONS").ok().as_deref(),
                 )?,
@@ -3470,6 +3550,14 @@ fn tick(cfg: &config::Config, n: u64) {
         if free == Some(false) {
             cooldown_hold_shadow += 1;
         }
+    }
+    // Discovery/screener (wave 101): the host builds its OWN candidate
+    // universe per tick — TS `loadDiscoveryPools` runs once per cycle before
+    // the per-pool loop (program.ts:6140), same relative position here.
+    // Shadow-only: the top-3 candidates are logged (TS's exact console
+    // lines); the ENTER gate chain does not consume them yet (next wave).
+    if discovery::should_discover(cfg.enable_pool_discovery, cfg.paper_trading) {
+        discovery::run(cfg);
     }
     // Fee/IL EXIT + paper-accrual + ENTER-floor + drift shadows:
     // observational only, mirror checkFeeIlExit / accruePaperPositionFees /
@@ -4907,6 +4995,520 @@ mod gecko {
 /// reason. The caller decides how to degrade (TS's `readWalletSnapshot`
 /// degrades SPL enumeration to SOL-only; it never degrades the SOL read
 /// itself, because native SOL is real capital).
+// ─── Discovery + screener: the host builds the ENTER candidate universe ───
+// Port of TS adapter.discoverPools (adapter-service.ts:5605) + the private
+// envelope/row validators (:836-1016) + ScreenerLive (screener-service.ts)
+// + loadDiscoveryPools' top-3 consumption (program.ts:5549-5592). One wave,
+// exact chain: envelope + pagination validity → row-shape validity →
+// launchpad truthy-filter → mapper → adapter TVL floor + top-50 → four
+// screener gates (TVL re-check, volume authenticity feesMeasured=true,
+// annualized fee/TVL floor, bounded top-10 on-chain bin-utilization probe)
+// → STABLE fee/TVL DESC sort → enrichment split → top-3 candidates.
+// Shadow-only: the tick logs the candidates; consuming them (the ENTER
+// gate chain) is the next wave — TS still owns every decision.
+mod discovery {
+    use serde_json::Value;
+    use std::time::Duration;
+
+    /// TS `MAX_BIN_UTILIZATION_CHECKS` (screener-service.ts:24): only the
+    /// top 10 by fee/TVL get the on-chain bin probe; the rest pass through
+    /// unfiltered (the per-pool scan loop re-applies the gate with full data
+    /// before any ENTER).
+    pub const MAX_BIN_UTILIZATION_CHECKS: usize = 10;
+    /// TS adapter tail: `discovery.pools.filter(tvl >= min).slice(0, 50)`.
+    pub const ADAPTER_TOP_POOLS: usize = 50;
+    /// TS loadDiscoveryPools: `screened.slice(0, 3)` extend the scan set.
+    pub const TOP_CANDIDATES: usize = 3;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct DiscoveredPool {
+        pub address: String,
+        pub tvl_usd: f64,
+        pub volume24h_usd: f64,
+        pub fees24h_usd: f64,
+        pub apr: f64,
+        pub bin_step: f64,
+        pub token_x: String,
+        pub token_y: String,
+        pub created_at_ms: Option<f64>,
+    }
+
+    /// TS `ScreenedPool` (services.ts:877) — note: no binStep (TS drops it
+    /// at the gate seam too).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ScreenedPool {
+        pub address: String,
+        pub tvl_usd: f64,
+        pub volume24h_usd: f64,
+        pub fees24h_usd: f64,
+        pub apr: f64,
+        pub fee_il_ratio: f64,
+        pub volume_auth: f64,
+        pub bin_utilization: f64,
+        pub token_x: String,
+        pub token_y: String,
+        pub created_at_ms: Option<f64>,
+    }
+
+    /// `ScreenerConfig` (screener-service.ts:9) — built from the SAME config
+    /// values as TS's `screenerLayerConfig` (program.ts:1437).
+    #[derive(Debug, Clone, Copy)]
+    pub struct ScreenerCfg {
+        pub min_tvl_usd: f64,
+        pub min_fee_ratio: f64,
+        pub volume_auth_threshold: f64,
+        pub min_bin_utilization: f64,
+    }
+
+    // ── JSON predicates, exact ports of adapter-service.ts:723-740 ────────
+    // serde_json keeps payload text order (preserve_order feature), so
+    // `describe` matches TS `Object.keys().slice(0,5)` byte-for-byte.
+
+    fn is_number_value(v: &Value) -> bool {
+        // TS: typeof number && Number.isFinite — JSON carries no NaN/Inf,
+        // but an out-of-range literal (1e400) parses to a non-finite f64 in
+        // both languages, so the finiteness check is real.
+        v.is_number() && v.as_f64().is_some_and(f64::is_finite)
+    }
+
+    fn is_string_value(v: &Value) -> bool {
+        v.is_string()
+    }
+
+    fn describe(v: &Value) -> String {
+        match v {
+            Value::Null => "null".to_string(),
+            Value::Array(a) => format!("array(length={})", a.len()),
+            Value::Object(o) => format!(
+                "object(keys={})",
+                o.keys().take(5).cloned().collect::<Vec<_>>().join(",")
+            ),
+            Value::String(_) => "string".to_string(),
+            Value::Number(_) => "number".to_string(),
+            Value::Bool(_) => "boolean".to_string(),
+        }
+    }
+
+    fn is_ts_truthy(v: &Value) -> bool {
+        match v {
+            Value::Null | Value::Bool(false) => false,
+            Value::String(s) => !s.is_empty(),
+            Value::Number(n) => n.as_f64().is_some_and(|x| x != 0.0),
+            _ => true,
+        }
+    }
+
+    // ── Envelope + pagination (adapter-service.ts:836-897) ────────────────
+
+    fn envelope_parts(v: &Value) -> Option<(f64, f64, f64, f64, &Vec<Value>)> {
+        let o = v.as_object()?;
+        let total = o.get("total")?;
+        let pages = o.get("pages")?;
+        let current = o.get("current_page")?;
+        let page_size = o.get("page_size")?;
+        if !is_number_value(total)
+            || !is_number_value(pages)
+            || !is_number_value(current)
+            || !is_number_value(page_size)
+        {
+            return None;
+        }
+        let data = o.get("data")?.as_array()?;
+        Some((
+            total.as_f64()?,
+            pages.as_f64()?,
+            current.as_f64()?,
+            page_size.as_f64()?,
+            data,
+        ))
+    }
+
+    fn is_safe_int(n: f64) -> bool {
+        n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_991.0
+    }
+
+    fn pagination_numbers_valid(
+        total: f64,
+        pages: f64,
+        current: f64,
+        response_page_size: f64,
+    ) -> bool {
+        is_safe_int(total)
+            && total >= 0.0
+            && is_safe_int(pages)
+            && pages >= 0.0
+            && is_safe_int(current)
+            && current >= 1.0
+            && is_safe_int(response_page_size)
+            && response_page_size >= 0.0
+    }
+
+    fn pagination_range_valid(
+        total: f64,
+        pages: f64,
+        current: f64,
+        response_page_size: f64,
+        requested_page: Option<i64>,
+        page_size: i64,
+    ) -> bool {
+        if total == 0.0 {
+            return requested_page.is_none()
+                || requested_page.is_some_and(|r| {
+                    current == r as f64 && response_page_size == page_size as f64
+                });
+        }
+        if pages < 1.0 || response_page_size < 1.0 || current > pages {
+            return false;
+        }
+        let Some(r) = requested_page else {
+            return true;
+        };
+        current == r as f64 && response_page_size == page_size as f64
+    }
+
+    fn discovery_pagination_valid(
+        total: f64,
+        pages: f64,
+        current: f64,
+        response_page_size: f64,
+        requested_page: Option<i64>,
+        page_size: i64,
+    ) -> bool {
+        pagination_numbers_valid(total, pages, current, response_page_size)
+            && pagination_range_valid(
+                total,
+                pages,
+                current,
+                response_page_size,
+                requested_page,
+                page_size,
+            )
+    }
+
+    // ── Row validity (adapter-service.ts:978-1016) — the exact 7 checks ───
+
+    fn has_pool_scalars(o: &serde_json::Map<String, Value>) -> bool {
+        is_string_value(o.get("address").unwrap_or(&Value::Null))
+            && is_number_value(o.get("tvl").unwrap_or(&Value::Null))
+            && is_number_value(o.get("apr").unwrap_or(&Value::Null))
+    }
+
+    fn has_pool_token_leg(v: Option<&Value>) -> bool {
+        v.and_then(Value::as_object)
+            .is_some_and(|leg| is_string_value(leg.get("address").unwrap_or(&Value::Null)))
+    }
+
+    fn is_valid_pool_row(v: &Value) -> bool {
+        let Some(o) = v.as_object() else {
+            return false;
+        };
+        if !has_pool_scalars(o) {
+            return false;
+        }
+        if !has_pool_token_leg(o.get("token_x")) || !has_pool_token_leg(o.get("token_y")) {
+            return false;
+        }
+        let config_ok = o
+            .get("pool_config")
+            .and_then(Value::as_object)
+            .is_some_and(|c| is_number_value(c.get("bin_step").unwrap_or(&Value::Null)));
+        if !config_ok {
+            return false;
+        }
+        let volume_ok = o
+            .get("volume")
+            .and_then(Value::as_object)
+            .is_some_and(|vol| is_number_value(vol.get("24h").unwrap_or(&Value::Null)));
+        if !volume_ok {
+            return false;
+        }
+        o.get("fees")
+            .and_then(Value::as_object)
+            .is_some_and(|f| is_number_value(f.get("24h").unwrap_or(&Value::Null)))
+    }
+
+    // ── Mapper (adapter-service.ts:1092 `toDiscoveredPool`) ───────────────
+    // Only the fields the discovery→screener→candidate chain consumes are
+    // ported; the radar/launch extras (1h windows, curves, safety metadata)
+    // belong to the market-gate/launch paths, not yet ported (honest scope).
+
+    fn to_discovered_pool(row: &Value) -> Option<DiscoveredPool> {
+        let address = row.get("address")?.as_str()?.to_string();
+        let tvl_usd = row.get("tvl")?.as_f64()?;
+        let volume24h_usd = row.get("volume")?.get("24h")?.as_f64()?;
+        let fees24h_usd = row.get("fees")?.get("24h")?.as_f64()?;
+        let apr = row.get("apr")?.as_f64()?;
+        let bin_step = row.get("pool_config")?.get("bin_step")?.as_f64()?;
+        let token_x = row.get("token_x")?.get("address")?.as_str()?.to_string();
+        let token_y = row.get("token_y")?.get("address")?.as_str()?.to_string();
+        // applyPoolCreatedAt: non-finite or <= 0 leaves the field ABSENT;
+        // seconds-scale timestamps are promoted to ms.
+        let created_at_ms = row
+            .get("created_at")
+            .and_then(Value::as_f64)
+            .filter(|c| c.is_finite() && *c > 0.0)
+            .map(|c| {
+                if c > 1_000_000_000_000.0 {
+                    c
+                } else {
+                    c * 1000.0
+                }
+            });
+        Some(DiscoveredPool {
+            address,
+            tvl_usd,
+            volume24h_usd,
+            fees24h_usd,
+            apr,
+            bin_step,
+            token_x,
+            token_y,
+            created_at_ms,
+        })
+    }
+
+    // ── parseDiscoveryResponse (adapter-service.ts:940-976) ───────────────
+
+    pub fn parse_discovery_page(
+        v: &Value,
+        url: &str,
+        requested_page: Option<i64>,
+        page_size: i64,
+    ) -> Result<Vec<DiscoveredPool>, String> {
+        let Some((total, pages, current, response_page_size, data)) = envelope_parts(v) else {
+            return Err(format!(
+                "Meteora API returned non-envelope payload ({}) from {url}",
+                describe(v)
+            ));
+        };
+        if !discovery_pagination_valid(
+            total,
+            pages,
+            current,
+            response_page_size,
+            requested_page,
+            page_size,
+        ) {
+            return Err(format!(
+                "Meteora API returned malformed pagination metadata from {url}"
+            ));
+        }
+        let valid: Vec<&Value> = data.iter().filter(|r| is_valid_pool_row(r)).collect();
+        if !data.is_empty() && valid.is_empty() {
+            eprintln!(
+                "[prismd] Pool discovery: ALL pool objects had invalid shape; treating as a schema error"
+            );
+            return Err(format!(
+                "Meteora API returned {} pool rows but none matched the expected shape. Likely a schema change. Pool discovery disabled for this cycle.",
+                data.len()
+            ));
+        }
+        if valid.len() < data.len() {
+            eprintln!(
+                "[prismd] Pool discovery: some pool objects had invalid shape and were dropped dropped={} kept={} total={total} pages={pages}",
+                data.len() - valid.len(),
+                valid.len()
+            );
+        }
+        Ok(valid
+            .into_iter()
+            .filter(|row| !is_ts_truthy(&row["launchpad"]))
+            .filter_map(to_discovered_pool)
+            .collect())
+    }
+
+    /// TS `adapter.discoverPools` tail: TVL floor + `.slice(0, 50)`.
+    /// No-arg path: requestedPage is always null (the rotation paths belong
+    /// to autonomous/fallen-angel mode, not yet ported), which makes
+    /// page_size inert — both `pageSize` arms of TS's
+    /// isPaginationRangeValid are behind `requestedPage !== null`; TS still
+    /// computes `safeMeteoraPageSize(url) ?? 1000`, mirrored by the 1000.
+    pub fn adapter_discover(
+        v: &Value,
+        url: &str,
+        min_tvl_usd: f64,
+    ) -> Result<Vec<DiscoveredPool>, String> {
+        let mut pools = parse_discovery_page(v, url, None, 1000)?;
+        pools.retain(|p| p.tvl_usd >= min_tvl_usd);
+        pools.truncate(ADAPTER_TOP_POOLS);
+        Ok(pools)
+    }
+
+    // ── checkVolumeAuthenticity (strategy-service.ts:195-236), score-only ─
+    // feesMeasured=true is the screener's unconditional argument (its data
+    // is Data-API-sourced); the host ports the argument for exactness. The
+    // TS flag STRINGS are logs-only and not ported.
+
+    pub fn check_volume_authenticity(
+        tvl_usd: f64,
+        volume24h_usd: f64,
+        fees24h_usd: f64,
+        fees_measured: bool,
+    ) -> f64 {
+        if tvl_usd == 0.0 {
+            return 0.0;
+        }
+        let mut score: f64 = 1.0;
+        let vol_tvl_ratio = volume24h_usd / tvl_usd;
+        if vol_tvl_ratio > 10.0 {
+            score -= 0.3;
+        } else if vol_tvl_ratio > 5.0 {
+            score -= 0.15;
+        }
+        if fees_measured && volume24h_usd > 0.0 {
+            let fee_rate = fees24h_usd / volume24h_usd;
+            if fee_rate < 0.0002 || fee_rate > 0.02 {
+                score -= 0.2;
+            }
+        }
+        if tvl_usd < 5000.0 && volume24h_usd > 100000.0 {
+            score -= 0.5;
+        }
+        score.max(0.0)
+    }
+
+    // ── ScreenerLive.screenPools core (screener-service.ts:48-127) ────────
+
+    pub fn screen_gates(pools: Vec<DiscoveredPool>, cfg: &ScreenerCfg) -> Vec<ScreenedPool> {
+        let mut screened = Vec::new();
+        for pool in pools {
+            if pool.tvl_usd < cfg.min_tvl_usd {
+                continue;
+            }
+            let auth =
+                check_volume_authenticity(pool.tvl_usd, pool.volume24h_usd, pool.fees24h_usd, true);
+            if auth < cfg.volume_auth_threshold {
+                continue;
+            }
+            // Discovery data is Data-API-sourced → measured fees; the
+            // screening heuristic (NOT computeFeeIlRatio — no bin-drift IL
+            // here): annualized fee/TVL, 0 when either side is non-positive.
+            let fee_to_tvl = if pool.fees24h_usd > 0.0 && pool.tvl_usd > 0.0 {
+                (pool.fees24h_usd * 365.0) / pool.tvl_usd
+            } else {
+                0.0
+            };
+            if fee_to_tvl < cfg.min_fee_ratio {
+                continue;
+            }
+            screened.push(ScreenedPool {
+                fee_il_ratio: fee_to_tvl,
+                volume_auth: auth,
+                bin_utilization: 0.0,
+                address: pool.address,
+                tvl_usd: pool.tvl_usd,
+                volume24h_usd: pool.volume24h_usd,
+                fees24h_usd: pool.fees24h_usd,
+                apr: pool.apr,
+                token_x: pool.token_x,
+                token_y: pool.token_y,
+                created_at_ms: pool.created_at_ms,
+            });
+        }
+        // TS `Array.prototype.sort` is stable and the comparator never sees
+        // NaN (finite fees/tvl), so ties keep payload order — Rust's
+        // `sort_by` is stable; total_cmp keeps the descending arithmetic
+        // comparator's order for the ±inf corner (JS would leave it
+        // unspecified).
+        screened.sort_by(|a, b| b.fee_il_ratio.total_cmp(&a.fee_il_ratio));
+        screened
+    }
+
+    /// Gates + the bounded top-10 enrichment. `fetch_window` returns the
+    /// windowed bin utilization (Ok) or a fetch failure (None → pass-through
+    /// unfiltered, exactly TS's `binArray === null || !reservesKnown`
+    /// arm — the host collapses both TS shapes into one Err because
+    /// known=true + zero window bins is unreachable in production: the
+    /// SDK's window always contains the active bin's own account slots).
+    pub fn screen<F: FnMut(&str) -> Option<f64>>(
+        pools: Vec<DiscoveredPool>,
+        cfg: &ScreenerCfg,
+        mut fetch_window: F,
+    ) -> Vec<ScreenedPool> {
+        let mut enriched: Vec<ScreenedPool> = Vec::new();
+        for (i, candidate) in screen_gates(pools, cfg).into_iter().enumerate() {
+            if i >= MAX_BIN_UTILIZATION_CHECKS {
+                enriched.push(candidate);
+                continue;
+            }
+            match fetch_window(&candidate.address) {
+                None => enriched.push(candidate),
+                Some(utilization) if utilization < cfg.min_bin_utilization => {
+                    eprintln!(
+                        "[prismd] Candidate filtered by bin utilization pool={} utilization={utilization:.2} min={:.2}",
+                        candidate.address, cfg.min_bin_utilization
+                    );
+                }
+                Some(utilization) => {
+                    let mut annotated = candidate;
+                    annotated.bin_utilization = utilization;
+                    enriched.push(annotated);
+                }
+            }
+        }
+        enriched
+    }
+
+    /// TS net discovery gate (shouldDiscoverPools ∧ autonomous == "off"):
+    /// the host models no autonomous mode, so the net condition is exactly
+    /// enable ∧ paper — screenPools never runs in autonomous mode in TS
+    /// (program.ts:5564 returns first).
+    pub fn should_discover(enable_pool_discovery: bool, paper_trading: bool) -> bool {
+        enable_pool_discovery && paper_trading
+    }
+
+    /// One discovery pass per tick: fetch the LIST page, run the chain,
+    /// emit TS's own console lines. Any transport/parse/envelope failure
+    /// funnels into TS's single fallback warn (its DiscoverPoolsError
+    /// messages are byte-mirrored for the envelope/pagination/schema arms;
+    /// the transport arm carries the host's own reqwest wording — different
+    /// logger, same diagnostic, never asserted). The top-3 candidates are
+    /// NOT yet consumed by the host loop (next wave) — logged only.
+    pub fn run(cfg: &crate::config::Config) {
+        let timeout = Duration::from_secs(10);
+        let url = cfg.meteora_pools_url.as_str();
+        let pools = match crate::rpc::get_json(url, timeout, None)
+            .and_then(|v| adapter_discover(&v, url, cfg.discovery_min_tvl_usd))
+        {
+            Ok(p) => p,
+            Err(msg) => {
+                eprintln!(
+                    "[prismd] Pool discovery failed; falling back to watchlist-only mode: {msg}"
+                );
+                return;
+            }
+        };
+        let screener_cfg = ScreenerCfg {
+            min_tvl_usd: cfg.discovery_min_tvl_usd,
+            min_fee_ratio: cfg.discovery_min_fee_ratio,
+            volume_auth_threshold: cfg.volume_auth_threshold,
+            min_bin_utilization: cfg.min_bin_utilization,
+        };
+        let rpc_url = cfg.solana_rpc_url.as_str();
+        let screened = screen(pools, &screener_cfg, |address| {
+            match crate::rpc::bin_window_utilization(rpc_url, address, timeout) {
+                Ok(u) => Some(u),
+                Err(e) => {
+                    eprintln!("[prismd] Bin data unavailable for candidate — skipping utilization gate pool={address} error={e}");
+                    None
+                }
+            }
+        });
+        if screened.is_empty() {
+            return;
+        }
+        // TS's own console lines (program.ts:5583-5586), byte-mirrored:
+        // console.info → stdout, toFixed(2) → {:.2}.
+        println!("Discovered {} candidate pools", screened.len());
+        for candidate in screened.iter().take(TOP_CANDIDATES) {
+            println!(
+                "  Candidate: {} (fee/IL: {:.2})",
+                candidate.address, candidate.fee_il_ratio
+            );
+        }
+    }
+}
+
 mod rpc {
     use serde_json::{json, Value};
     use std::collections::HashMap;
@@ -5074,6 +5676,14 @@ mod rpc {
     /// `computeConcentrationMultiplier` reads.
     pub struct BinSlot {
         pub bin_id: i64,
+        /// IDL `Bin.amount_x` (u64 LE, slot bytes 0..8) — the SDK's
+        /// `reserveX` (strategy-service.ts:231 reads `b.xAmount`). Parsed
+        /// for the screener's bin-utilization OR (x || y || supply); the
+        /// concentration weight below is unchanged.
+        pub reserve_x: u64,
+        /// IDL `Bin.amount_y` (u64 LE, slot bytes 8..16) — the SDK's
+        /// `reserveY`.
+        pub reserve_y: u64,
         pub liquidity_supply: u128,
     }
 
@@ -5111,8 +5721,14 @@ mod rpc {
                 u64::from_le_bytes(data[base + 32..base + 40].try_into().expect("8-byte slice"));
             let liq_hi =
                 u64::from_le_bytes(data[base + 40..base + 48].try_into().expect("8-byte slice"));
+            let reserve_x =
+                u64::from_le_bytes(data[base..base + 8].try_into().expect("8-byte slice"));
+            let reserve_y =
+                u64::from_le_bytes(data[base + 8..base + 16].try_into().expect("8-byte slice"));
             slots.push(BinSlot {
                 bin_id,
+                reserve_x,
+                reserve_y,
                 liquidity_supply: u128::from(liq_lo) | (u128::from(liq_hi) << 64),
             });
         }
@@ -5136,12 +5752,15 @@ mod rpc {
     /// 24), then the SDK's containment test per result. Fail → None with a
     /// warn (the estimator falls to its concentration-1 / binStep-proxy
     /// arms, exactly TS's `reservesKnown: false` path).
-    pub fn get_bin_array(
+    /// Every `BinArray` account of the pool (the SDK's own memcmp filter),
+    /// parsed. Query/shape/parse failures print the diagnostic and Err —
+    /// `get_bin_array` maps that to its historical `None`, the screener's
+    /// window maps it to the pass-through.
+    pub fn gpa_bin_arrays(
         url: &str,
         lb_pair: &str,
-        active_id: i64,
         timeout: Duration,
-    ) -> Option<(i64, Vec<BinSlot>)> {
+    ) -> Result<Vec<(i64, Vec<BinSlot>)>, String> {
         use base64::Engine as _;
         let body = json!({
             "jsonrpc": "2.0",
@@ -5155,17 +5774,16 @@ mod rpc {
                 }
             ],
         });
-        let res = match post(url, body, timeout) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[prismd] bin-array query failed for {lb_pair}: {e}");
-                return None;
-            }
-        };
+        let res = post(url, body, timeout).map_err(|e| {
+            eprintln!("[prismd] bin-array query failed for {lb_pair}: {e}");
+            e
+        })?;
         let Some(accounts) = res.get("result").and_then(Value::as_array) else {
-            eprintln!("[prismd] bin-array query for {lb_pair}: unexpected result shape");
-            return None;
+            let e = "unexpected getProgramAccounts result shape".to_string();
+            eprintln!("[prismd] bin-array query for {lb_pair}: {e}");
+            return Err(e);
         };
+        let mut arrays = Vec::new();
         for acct in accounts {
             let Some(b64) = acct
                 .get("account")
@@ -5178,24 +5796,93 @@ mod rpc {
             let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(b64) else {
                 continue;
             };
-            // Parse FIRST (the account derives its own slot SIZE — advisory),
-            // then the shared containment test. A parse failure on a
-            // memcmp-matched account means a wrong program/layout: warn and
-            // fail open (concentration 1), never a wrong-positive pick.
             match parse_bin_array(&raw) {
-                Ok((idx, slots)) => {
-                    if bin_array_contains(idx, active_id, slots.len() as i64) {
-                        return Some((idx, slots));
-                    }
-                }
+                Ok((idx, slots)) => arrays.push((idx, slots)),
                 Err(e) => {
+                    // A parse failure on a memcmp-matched account means a
+                    // wrong program/layout: warn loudly and fail the fetch.
                     eprintln!("[prismd] bin-array parse failed: {e}");
-                    return None;
+                    return Err(e);
                 }
+            }
+        }
+        Ok(arrays)
+    }
+
+    pub fn get_bin_array(
+        url: &str,
+        lb_pair: &str,
+        active_id: i64,
+        timeout: Duration,
+    ) -> Option<(i64, Vec<BinSlot>)> {
+        let arrays = match gpa_bin_arrays(url, lb_pair, timeout) {
+            Ok(a) => a,
+            Err(_) => return None,
+        };
+        for (idx, slots) in arrays {
+            if bin_array_contains(idx, active_id, slots.len() as i64) {
+                return Some((idx, slots));
             }
         }
         eprintln!("[prismd] no BinArray contains active bin {active_id} for {lb_pair}");
         None
+    }
+
+    /// TS adapter `getBinArray` window: `getBinsAroundActiveBin(20, 20)`
+    /// filtered INCLUSIVE to `[active-20, active+20]` (adapter-service.ts
+    /// :4474 + :2297) — up to 41 ids. The denominator is the ids PRESENT in
+    /// the pool's own BinArrays within the span: accounts always carry all
+    /// their slots (the SDK's "zero placeholders" are those zero-liquidity
+    /// slots), and ids outside every array exist on neither side (the SDK
+    /// omits them too — known=true + zero bins is unreachable in TS
+    /// production). Err (no coverage / transport / parse) lands as the
+    /// screener's pass-through, exactly TS's null/!reservesKnown arm.
+    pub const BIN_WINDOW_HALF: i64 = 20;
+
+    /// TS `computeBinUtilization`'s per-bin OR (strategy-service.ts:239):
+    /// a bin is active when ANY leg holds value; unknown/empty report 0 and
+    /// are screened by the caller (see the window doc above).
+    pub fn slot_active(slot: &BinSlot) -> bool {
+        slot.reserve_x > 0 || slot.reserve_y > 0 || slot.liquidity_supply > 0
+    }
+
+    pub fn window_utilization(
+        arrays: &[(i64, Vec<BinSlot>)],
+        active_id: i64,
+    ) -> Result<f64, String> {
+        let lo = active_id - BIN_WINDOW_HALF;
+        let hi = active_id + BIN_WINDOW_HALF;
+        let mut present = 0usize;
+        let mut active = 0usize;
+        for (_, slots) in arrays {
+            for slot in slots {
+                if slot.bin_id >= lo && slot.bin_id <= hi {
+                    present += 1;
+                    if slot_active(slot) {
+                        active += 1;
+                    }
+                }
+            }
+        }
+        if present == 0 {
+            return Err(format!(
+                "no BinArray bins in window [{lo}, {hi}] for the active bin {active_id}"
+            ));
+        }
+        Ok(active as f64 / present as f64)
+    }
+
+    /// Live windowed utilization for a candidate pool: LbPair active id +
+    /// the pool's arrays → the ±20 window. The twin of TS's
+    /// `getBinArray(halfRange=20)` at the exact shape the screener needs.
+    pub fn bin_window_utilization(
+        url: &str,
+        lb_pair: &str,
+        timeout: Duration,
+    ) -> Result<f64, String> {
+        let (active_id, _bin_step) = get_lb_pair_state(url, lb_pair, timeout)?;
+        let arrays = gpa_bin_arrays(url, lb_pair, timeout)?;
+        window_utilization(&arrays, i64::from(active_id))
     }
 
     /// One mint → atomic amount entry. `decimals` comes from the parsed
@@ -6793,6 +7480,10 @@ mod tests {
             evolution_max_change_pct: 0.2,
             volume_auth_threshold: 0.7,
             min_bin_utilization: 0.3,
+            enable_pool_discovery: false,
+            discovery_min_tvl_usd: 1_000_000.0,
+            discovery_min_fee_ratio: 1.5,
+            meteora_pools_url: config::DEFAULT_METEORA_POOLS_URL.to_string(),
             max_open_positions: 3,
             max_positions_per_pool: 2,
             stop_loss_pct: 0.15,
@@ -7411,6 +8102,8 @@ mod tests {
                 let d = (bin_id - 5000).abs();
                 (d <= 1).then_some(rpc::BinSlot {
                     bin_id,
+                    reserve_x: 0,
+                    reserve_y: 0,
                     liquidity_supply: 1_000_000_000,
                 })
             })
@@ -8095,5 +8788,623 @@ mod tests {
             resolve_range_half_width(Some(4), 0, true, f64::NAN, 200, 5.0),
             34
         );
+    }
+
+    // ─── Wave 101: discovery + screener (cross-language gold) ─────────────
+    // The SAME fixture feeds bench/screener-discover.test.ts: the TS output
+    // persisted under `expected` is the gold these tests reproduce
+    // field-for-field (floats included — TS's own chains land on
+    // 0.19999999999999996-class doubles no hand-pin would guess).
+    // Regenerate: PRISM_WRITE_GOLD=1 bun run test -- bench/screener-discover.test.ts.
+
+    const SCREENER_GOLD: &str = include_str!("../fixtures/screener-page.json");
+    const MALFORMED_PAGINATION: &str =
+        "Meteora API returned malformed pagination metadata from https://x/pools";
+
+    fn screener_gold() -> serde_json::Value {
+        serde_json::from_str(SCREENER_GOLD).expect("fixture json parses")
+    }
+
+    fn gold_cfg(v: &serde_json::Value) -> super::discovery::ScreenerCfg {
+        let c = &v["config"];
+        super::discovery::ScreenerCfg {
+            min_tvl_usd: c["minTvlUsd"].as_f64().expect("minTvlUsd"),
+            min_fee_ratio: c["minFeeRatio"].as_f64().expect("minFeeRatio"),
+            volume_auth_threshold: c["volumeAuthThreshold"]
+                .as_f64()
+                .expect("volumeAuthThreshold"),
+            min_bin_utilization: c["minBinUtilization"].as_f64().expect("minBinUtilization"),
+        }
+    }
+
+    fn pool_row(address: &str, tvl: f64, volume: f64, fees: f64) -> serde_json::Value {
+        serde_json::json!({
+            "address": address, "tvl": tvl, "apr": 55.0,
+            "name": "SOX/SOY", "created_at": 1_700_000_000_000_u64,
+            "token_x": {"address": "X111111111111111111111111111111111111111", "symbol": "SOX"},
+            "token_y": {"address": "Y111111111111111111111111111111111111111", "symbol": "SOY"},
+            "pool_config": {"bin_step": 25, "base_fee_pct": 1.0},
+            "volume": {"24h": volume, "1h": volume / 24.0},
+            "fees": {"24h": fees, "1h": fees / 24.0},
+            "fee_tvl_ratio": {"24h": 0.02},
+        })
+    }
+
+    fn page(rows: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({
+            "current_page": 1, "page_size": 1000, "pages": 1,
+            "total": rows.len() as i64, "data": rows,
+        })
+    }
+
+    fn envelope_f(total: f64, pages: f64, current: f64, page_size: f64) -> serde_json::Value {
+        serde_json::json!({
+            "total": total, "pages": pages, "current_page": current,
+            "page_size": page_size, "data": [],
+        })
+    }
+
+    #[test]
+    fn discovery_envelope_and_pagination_errors_mirror_ts() {
+        use super::discovery::parse_discovery_page;
+        let url = "https://x/pools";
+        // describe() variants — serde's preserve_order keeps TS's key order.
+        let e = parse_discovery_page(&serde_json::json!({"foo": 1}), url, None, 1000)
+            .expect_err("bare object is not an envelope");
+        assert_eq!(
+            e,
+            format!("Meteora API returned non-envelope payload (object(keys=foo)) from {url}")
+        );
+        let e = parse_discovery_page(&serde_json::json!("hi"), url, None, 1000).unwrap_err();
+        assert_eq!(
+            e,
+            format!("Meteora API returned non-envelope payload (string) from {url}")
+        );
+        let e = parse_discovery_page(&serde_json::json!([1, 2]), url, None, 1000).unwrap_err();
+        assert_eq!(
+            e,
+            format!("Meteora API returned non-envelope payload (array(length=2)) from {url}")
+        );
+        let e = parse_discovery_page(
+            &serde_json::json!({"total": "7", "pages": 1, "current_page": 1, "page_size": 1000, "data": []}),
+            url,
+            None,
+            1000,
+        )
+        .unwrap_err();
+        assert!(
+            e.starts_with("Meteora API returned non-envelope payload"),
+            "{e}"
+        );
+        // Pagination numbers (isSafeInteger + sign bounds):
+        assert_eq!(
+            parse_discovery_page(&envelope_f(-1.0, 1.0, 1.0, 1000.0), url, None, 1000).unwrap_err(),
+            MALFORMED_PAGINATION
+        );
+        assert_eq!(
+            parse_discovery_page(&envelope_f(1.5, 1.0, 1.0, 1000.0), url, None, 1000).unwrap_err(),
+            MALFORMED_PAGINATION
+        );
+        assert_eq!(
+            parse_discovery_page(&envelope_f(0.0, 1.0, 0.0, 1000.0), url, None, 1000).unwrap_err(),
+            MALFORMED_PAGINATION
+        );
+        // Range arm (total > 0): current > pages, zero response size,
+        // requested-page mismatch (the rotation-path guards — ported even
+        // though the host's no-arg path always passes None).
+        assert_eq!(
+            parse_discovery_page(&envelope_f(1.0, 1.0, 2.0, 1000.0), url, None, 1000).unwrap_err(),
+            MALFORMED_PAGINATION
+        );
+        assert_eq!(
+            parse_discovery_page(&envelope_f(1.0, 1.0, 1.0, 0.0), url, None, 1000).unwrap_err(),
+            MALFORMED_PAGINATION
+        );
+        assert_eq!(
+            parse_discovery_page(&envelope_f(10.0, 2.0, 1.0, 1000.0), url, Some(2), 1000)
+                .unwrap_err(),
+            MALFORMED_PAGINATION
+        );
+        // Range arm (total == 0): requested page/size must still match.
+        assert_eq!(
+            parse_discovery_page(&envelope_f(0.0, 1.0, 1.0, 500.0), url, Some(1), 1000)
+                .unwrap_err(),
+            MALFORMED_PAGINATION
+        );
+        assert_eq!(
+            parse_discovery_page(&envelope_f(0.0, 1.0, 1.0, 1000.0), url, Some(2), 1000)
+                .unwrap_err(),
+            MALFORMED_PAGINATION
+        );
+        // Valid: no-arg empty page + total==0 without a requested page.
+        assert!(parse_discovery_page(&page(vec![]), url, None, 1000).is_ok());
+        assert!(parse_discovery_page(&envelope_f(0.0, 0.0, 1.0, 0.0), url, None, 1000).is_ok());
+    }
+
+    #[test]
+    fn discovery_row_validity_launchpad_and_created_at() {
+        use super::discovery::parse_discovery_page;
+        let url = "https://x/pools";
+        let good = "G111111111111111111111111111111111111111";
+        // Each of TS's seven shape checks drops exactly its row.
+        type Mutation = (&'static str, Box<dyn FnOnce(&mut serde_json::Value)>);
+        let mut mutations: Vec<Mutation> = Vec::new();
+        mutations.push((
+            "address missing",
+            Box::new(|r: &mut _| {
+                r.as_object_mut().unwrap().remove("address");
+            }),
+        ));
+        mutations.push((
+            "tvl is string",
+            Box::new(|r: &mut _| {
+                r["tvl"] = serde_json::json!("150000");
+            }),
+        ));
+        mutations.push((
+            "apr missing",
+            Box::new(|r: &mut _| {
+                r.as_object_mut().unwrap().remove("apr");
+            }),
+        ));
+        mutations.push((
+            "token_x has no address",
+            Box::new(|r: &mut _| {
+                r["token_x"] = serde_json::json!({});
+            }),
+        ));
+        mutations.push((
+            "token_y missing",
+            Box::new(|r: &mut _| {
+                r.as_object_mut().unwrap().remove("token_y");
+            }),
+        ));
+        mutations.push((
+            "pool_config has no bin_step",
+            Box::new(|r: &mut _| {
+                r["pool_config"] = serde_json::json!({});
+            }),
+        ));
+        mutations.push((
+            "volume has no 24h",
+            Box::new(|r: &mut _| {
+                r["volume"] = serde_json::json!({"1h": 1.0});
+            }),
+        ));
+        mutations.push((
+            "fees has no 24h",
+            Box::new(|r: &mut _| {
+                r["fees"] = serde_json::json!({"1h": 0.1});
+            }),
+        ));
+        for (label, mutate) in mutations {
+            let mut bad = pool_row(
+                "B111111111111111111111111111111111111111",
+                150_000.0,
+                300_000.0,
+                500.0,
+            );
+            mutate(&mut bad);
+            let pools = parse_discovery_page(
+                &page(vec![bad, pool_row(good, 150_000.0, 300_000.0, 500.0)]),
+                url,
+                None,
+                1000,
+            )
+            .unwrap_or_else(|e| panic!("{label}: unexpected err {e}"));
+            assert_eq!(pools.len(), 1, "{label}: invalid row must be dropped");
+            assert_eq!(pools[0].address, good, "{label}: valid row must survive");
+        }
+        // ALL rows invalid → the schema-change error (fail the cycle loudly).
+        let mut bad = pool_row(
+            "X111111111111111111111111111111111111111",
+            150_000.0,
+            300_000.0,
+            500.0,
+        );
+        bad.as_object_mut().expect("row").remove("fees");
+        let e = parse_discovery_page(&page(vec![bad]), url, None, 1000).expect_err("all-invalid");
+        assert_eq!(
+            e,
+            "Meteora API returned 1 pool rows but none matched the expected shape. Likely a schema change. Pool discovery disabled for this cycle."
+        );
+        // Launchpad truthiness (TS `!p.launchpad` filter).
+        for kept in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!(0),
+            serde_json::json!(false),
+        ] {
+            let mut row = pool_row(
+                "K111111111111111111111111111111111111111",
+                150_000.0,
+                300_000.0,
+                500.0,
+            );
+            row["launchpad"] = kept.clone();
+            let pools = parse_discovery_page(&page(vec![row]), url, None, 1000)
+                .unwrap_or_else(|e| panic!("launchpad {kept}: {e}"));
+            assert_eq!(pools.len(), 1, "launchpad {kept} must be kept");
+        }
+        for dropped in [
+            serde_json::json!("pump.fun"),
+            serde_json::json!(5),
+            serde_json::json!(true),
+        ] {
+            let mut row = pool_row(
+                "D111111111111111111111111111111111111111",
+                150_000.0,
+                300_000.0,
+                500.0,
+            );
+            row["launchpad"] = dropped.clone();
+            let pools = parse_discovery_page(&page(vec![row]), url, None, 1000).unwrap();
+            assert!(pools.is_empty(), "launchpad {dropped} must be dropped");
+        }
+        // created_at: ms verbatim, seconds ×1000, non-positive/non-number absent.
+        let ms = pool_row(
+            "M111111111111111111111111111111111111111",
+            150_000.0,
+            300_000.0,
+            500.0,
+        );
+        let secs = {
+            let mut r = pool_row(
+                "S111111111111111111111111111111111111111",
+                150_000.0,
+                300_000.0,
+                500.0,
+            );
+            r["created_at"] = serde_json::json!(1_730_000_000_u64);
+            r
+        };
+        let zero = {
+            let mut r = pool_row(
+                "Z111111111111111111111111111111111111111",
+                150_000.0,
+                300_000.0,
+                500.0,
+            );
+            r["created_at"] = serde_json::json!(0);
+            r
+        };
+        let stringy = {
+            let mut r = pool_row(
+                "T111111111111111111111111111111111111111",
+                150_000.0,
+                300_000.0,
+                500.0,
+            );
+            r["created_at"] = serde_json::json!("soon");
+            r
+        };
+        let pools =
+            parse_discovery_page(&page(vec![ms, secs, zero, stringy]), url, None, 1000).unwrap();
+        assert_eq!(pools.len(), 4);
+        assert_eq!(pools[0].created_at_ms, Some(1_700_000_000_000.0));
+        assert_eq!(pools[1].created_at_ms, Some(1_730_000_000_000.0));
+        assert_eq!(pools[2].created_at_ms, None);
+        assert_eq!(pools[3].created_at_ms, None);
+    }
+
+    #[test]
+    fn discovery_gold_parity() {
+        use super::discovery::{adapter_discover, screen};
+        let gold = screener_gold();
+        let cfg = gold_cfg(&gold);
+        let url = gold["url"].as_str().expect("url");
+
+        // 1) adapter chain: envelope + validity + launchpad + TVL floor + top-50.
+        let pools =
+            adapter_discover(&gold["payload"], url, cfg.min_tvl_usd).expect("fixture parses");
+        let expected_discovered: Vec<super::discovery::DiscoveredPool> = gold["expected"]
+            ["discovered"]
+            .as_array()
+            .expect("gold discovered")
+            .iter()
+            .map(|e| super::discovery::DiscoveredPool {
+                address: e["address"].as_str().expect("address").to_string(),
+                tvl_usd: e["tvlUsd"].as_f64().expect("tvlUsd"),
+                volume24h_usd: e["volume24hUsd"].as_f64().expect("volume24hUsd"),
+                fees24h_usd: e["fees24hUsd"].as_f64().expect("fees24hUsd"),
+                apr: e["apr"].as_f64().expect("apr"),
+                bin_step: e["binStep"].as_f64().expect("binStep"),
+                token_x: e["tokenX"].as_str().expect("tokenX").to_string(),
+                token_y: e["tokenY"].as_str().expect("tokenY").to_string(),
+                created_at_ms: e["createdAtMs"].as_f64(),
+            })
+            .collect();
+        assert_eq!(pools, expected_discovered, "adapter chain vs TS gold");
+
+        // 2) screener: gates + stable sort + top-10 enrichment (fixture windows).
+        let windows = gold["bin_windows"].as_object().expect("windows");
+        let mut fetches = 0usize;
+        let screened = screen(pools, &cfg, |address| {
+            fetches += 1;
+            let w = windows.get(address)?;
+            let parts = w.as_array()?;
+            if !parts[0].as_bool()? {
+                return None; // known=false → TS pass-through
+            }
+            Some(parts[1].as_f64()? / parts[2].as_f64()?)
+        });
+        assert_eq!(
+            fetches,
+            gold["fetch_count_expected"].as_u64().expect("count") as usize,
+            "bin-window fetches bounded to the top 10"
+        );
+        let expected_screened: Vec<super::discovery::ScreenedPool> = gold["expected"]["screened"]
+            .as_array()
+            .expect("gold screened")
+            .iter()
+            .map(|e| super::discovery::ScreenedPool {
+                address: e["address"].as_str().expect("address").to_string(),
+                tvl_usd: e["tvlUsd"].as_f64().expect("tvlUsd"),
+                volume24h_usd: e["volume24hUsd"].as_f64().expect("volume24hUsd"),
+                fees24h_usd: e["fees24hUsd"].as_f64().expect("fees24hUsd"),
+                apr: e["apr"].as_f64().expect("apr"),
+                fee_il_ratio: e["feeIlRatio"].as_f64().expect("feeIlRatio"),
+                volume_auth: e["volumeAuth"].as_f64().expect("volumeAuth"),
+                bin_utilization: e["binUtilization"].as_f64().expect("binUtilization"),
+                token_x: e["tokenX"].as_str().expect("tokenX").to_string(),
+                token_y: e["tokenY"].as_str().expect("tokenY").to_string(),
+                created_at_ms: e["createdAtMs"].as_f64(),
+            })
+            .collect();
+        assert_eq!(screened, expected_screened, "screen chain vs TS gold");
+
+        // 3) the top-3 candidate lines.
+        let candidates: Vec<&str> = screened
+            .iter()
+            .take(3)
+            .map(|p| p.address.as_str())
+            .collect();
+        let expected_candidates: Vec<&str> = gold["expected"]["candidates"]
+            .as_array()
+            .expect("candidates")
+            .iter()
+            .map(|c| c.as_str().expect("candidate"))
+            .collect();
+        assert_eq!(candidates, expected_candidates);
+
+        // 4) volume-authenticity gold: every leg, TS's own float chains.
+        for (i, expected) in gold["expected"]["auth"]
+            .as_array()
+            .expect("auth gold")
+            .iter()
+            .enumerate()
+        {
+            let v = &gold["auth_vectors"][i];
+            let score = super::discovery::check_volume_authenticity(
+                v["tvl"].as_f64().expect("tvl"),
+                v["volume"].as_f64().expect("volume"),
+                v["fees"].as_f64().expect("fees"),
+                v["measured"].as_bool().expect("measured"),
+            );
+            assert_eq!(
+                score,
+                expected["score"].as_f64().expect("score"),
+                "{}",
+                v["name"]
+            );
+        }
+
+        // 5) bin-utilization gold: TS computeBinUtilization over fixture bins
+        //    (the known-false/empty arms are structural: the host collapses
+        //    both into the fetch-Err pass-through pinned in top10 below).
+        for c in gold["util_vectors"].as_array().expect("util vectors") {
+            let slots: Vec<super::rpc::BinSlot> = c["bins"]
+                .as_array()
+                .expect("bins")
+                .iter()
+                .enumerate()
+                .map(|(i, b)| super::rpc::BinSlot {
+                    bin_id: i as i64,
+                    reserve_x: b[0].as_str().expect("rx").parse().expect("rx int"),
+                    reserve_y: b[1].as_str().expect("ry").parse().expect("ry int"),
+                    liquidity_supply: b[2].as_str().expect("liq").parse().expect("liq int"),
+                })
+                .collect();
+            let known = c["known"].as_bool().expect("known");
+            let active = slots.iter().filter(|s| super::rpc::slot_active(s)).count();
+            let util = if !known || slots.is_empty() {
+                0.0
+            } else {
+                active as f64 / slots.len() as f64
+            };
+            assert_eq!(util, c["expect"].as_f64().expect("expect"), "{}", c["name"]);
+        }
+    }
+
+    #[test]
+    fn screener_gate_boundaries() {
+        use super::discovery::{
+            check_volume_authenticity, screen_gates, DiscoveredPool, ScreenerCfg,
+        };
+        let pool = |address: &str, tvl: f64, volume: f64, fees: f64| DiscoveredPool {
+            address: address.to_string(),
+            tvl_usd: tvl,
+            volume24h_usd: volume,
+            fees24h_usd: fees,
+            apr: 55.0,
+            bin_step: 25.0,
+            token_x: "X".to_string(),
+            token_y: "Y".to_string(),
+            created_at_ms: Some(1_700_000_000_000.0),
+        };
+        let cfg = ScreenerCfg {
+            min_tvl_usd: 100_000.0,
+            min_fee_ratio: 1.5,
+            volume_auth_threshold: 0.7,
+            min_bin_utilization: 0.3,
+        };
+        // TVL floor is inclusive (TS: `pool.tvlUsd < minTvlUsd` → null).
+        assert_eq!(
+            screen_gates(vec![pool("T1", 100_000.0, 300_000.0, 600.0)], &cfg).len(),
+            1
+        );
+        assert!(screen_gates(vec![pool("T2", 99_999.99, 300_000.0, 600.0)], &cfg).is_empty());
+        // Auth boundary: vol/tvl 11× loses exactly 0.3 → score == threshold → KEPT.
+        let gated = screen_gates(vec![pool("A1", 1_000_000.0, 11_000_000.0, 11_000.0)], &cfg);
+        assert_eq!(gated.len(), 1, "auth == threshold must keep");
+        assert_eq!(gated[0].volume_auth, 0.7);
+        // One more penalty (fee-rate outlier below the band) → 0.5 → DROPPED.
+        assert!(screen_gates(vec![pool("A2", 1_000_000.0, 6_000_000.0, 300.0)], &cfg).is_empty());
+        // Fee/TVL floor is inclusive; the f64 chain is exact (1.5*365/365).
+        let loose = ScreenerCfg {
+            min_tvl_usd: 0.0,
+            ..cfg
+        };
+        let kept = screen_gates(vec![pool("F1", 365.0, 0.0, 1.5)], &loose);
+        assert_eq!(kept.len(), 1, "feeToTvl == minFeeRatio must keep");
+        assert_eq!(kept[0].fee_il_ratio, 1.5);
+        assert!(screen_gates(vec![pool("F2", 365.0, 0.0, 1.49)], &loose).is_empty());
+        // Non-positive fees → ratio 0 → dropped.
+        assert!(screen_gates(vec![pool("F3", 1_000_000.0, 300_000.0, 0.0)], &loose).is_empty());
+        // Zero TVL fails authenticity first (score 0), never a divide panic.
+        assert!(screen_gates(vec![pool("Z1", 0.0, 300_000.0, 500.0)], &loose).is_empty());
+        assert_eq!(check_volume_authenticity(0.0, 300_000.0, 500.0, true), 0.0);
+        // Stable ties: equal fee/TVL keeps payload order (TS Array.sort).
+        let ties = vec![
+            pool("C3", 1_000_000.0, 500_000.0, 100_000.0),
+            pool("A3", 1_000_000.0, 500_000.0, 100_000.0),
+            pool("B3", 1_000_000.0, 500_000.0, 100_000.0),
+        ];
+        let gated_ties = screen_gates(ties, &cfg);
+        let order: Vec<&str> = gated_ties.iter().map(|p| p.address.as_str()).collect();
+        assert_eq!(order, ["C3", "A3", "B3"]);
+    }
+
+    #[test]
+    fn screener_top10_bound_and_pass_through() {
+        use super::discovery::{screen, DiscoveredPool, ScreenerCfg, MAX_BIN_UTILIZATION_CHECKS};
+        let pools: Vec<DiscoveredPool> = (0..11)
+            .map(|i| DiscoveredPool {
+                address: format!("P{i}"),
+                tvl_usd: 1_000_000.0,
+                volume24h_usd: 500_000.0,
+                fees24h_usd: 100_000.0,
+                apr: 55.0,
+                bin_step: 25.0,
+                token_x: "X".to_string(),
+                token_y: "Y".to_string(),
+                created_at_ms: None,
+            })
+            .collect();
+        let cfg = ScreenerCfg {
+            min_tvl_usd: 100_000.0,
+            min_fee_ratio: 1.5,
+            volume_auth_threshold: 0.7,
+            min_bin_utilization: 0.3,
+        };
+        // Equal fee/TVL → payload order; probe outcomes by call index:
+        // 0 annotated (0.9), 1 fetch-fail → pass-through, 2 dropped (0.1),
+        // 3.. annotated (0.5); the 11th survivor must never be fetched.
+        let mut fetches = 0usize;
+        let screened = screen(pools, &cfg, |_address| {
+            let i = fetches;
+            fetches += 1;
+            match i {
+                0 => Some(0.9),
+                1 => None,
+                2 => Some(0.1),
+                _ => Some(0.5),
+            }
+        });
+        assert_eq!(fetches, MAX_BIN_UTILIZATION_CHECKS, "only the top 10 probe");
+        let addrs: Vec<&str> = screened.iter().map(|p| p.address.as_str()).collect();
+        assert_eq!(
+            addrs,
+            ["P0", "P1", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"],
+            "P2 dropped by the util gate; P10 appended unenriched"
+        );
+        assert_eq!(screened[0].bin_utilization, 0.9, "annotated");
+        assert_eq!(
+            screened[1].bin_utilization, 0.0,
+            "fetch fail → pass-through at 0"
+        );
+        assert_eq!(screened[2].bin_utilization, 0.5, "mid-range annotated");
+        assert_eq!(
+            screened.last().expect("rest").bin_utilization,
+            0.0,
+            "beyond the top 10 the candidate is appended untouched"
+        );
+    }
+
+    #[test]
+    fn bin_window_core_and_slot_active() {
+        use super::rpc::{slot_active, window_utilization, BinSlot};
+        let slot = |bin_id: i64, reserve_x: u64, reserve_y: u64, liquidity_supply: u128| BinSlot {
+            bin_id,
+            reserve_x,
+            reserve_y,
+            liquidity_supply,
+        };
+        // A covers 2450..=2519 (all liquid); B covers 2520..=2589 (only
+        // 2520..=2525 liquid). active 2515 → window [2495, 2535]:
+        // present 25+16 = 41 (inclusive both ends), active 25+6 = 31.
+        let make_a = || -> Vec<BinSlot> { (2450..=2519).map(|id| slot(id, 1, 0, 0)).collect() };
+        let b: Vec<BinSlot> = (2520..=2589)
+            .map(|id| slot(id, if id <= 2525 { 1 } else { 0 }, 0, 0))
+            .collect();
+        let arrays = vec![(35i64, make_a()), (36i64, b)];
+        assert_eq!(
+            window_utilization(&arrays, 2515).expect("crossing window"),
+            31.0 / 41.0,
+            "crossing-array window: inclusive ±20 span over both arrays"
+        );
+        // Coverage shrinks to what the pool's arrays hold (the SDK's
+        // account-derived bins — ids outside every array exist nowhere):
+        // only A here, active 2510 → [2490, 2530] ∩ A = 30 slots.
+        assert_eq!(
+            window_utilization(&[(35, make_a())], 2510).expect("single array"),
+            1.0
+        );
+        // No coverage at all → Err (the screener's pass-through arm).
+        assert!(window_utilization(&[(35, make_a())], 99_999).is_err());
+        assert!(window_utilization(&[], 2461).is_err());
+        // slot_active = TS's per-bin OR (reserveX || reserveY || supply).
+        assert!(slot_active(&slot(0, 1, 0, 0)), "reserve_x alone is active");
+        assert!(slot_active(&slot(0, 0, 1, 0)), "reserve_y alone is active");
+        assert!(slot_active(&slot(0, 0, 0, 1)), "supply alone is active");
+        assert!(!slot_active(&slot(0, 0, 0, 0)), "all-zero is inactive");
+        assert!(slot_active(&slot(0, u64::MAX, 0, 0)), "u64 max is active");
+    }
+
+    #[test]
+    fn discovery_config_parsers_mirror_ts() {
+        use super::config::{
+            parse_discovery_min_fee_ratio, parse_discovery_min_tvl_usd, parse_meteora_pools_url,
+            DEFAULT_METEORA_POOLS_URL,
+        };
+        use super::discovery::should_discover;
+        // DISCOVERY_MIN_TVL_USD: absent = 1,000,000; 0 is a legal floor;
+        // garbage/negative/∞ fail closed (the house divergence from TS's
+        // clamp-and-warn, documented at the consts).
+        assert_eq!(parse_discovery_min_tvl_usd(None), Ok(1_000_000.0));
+        assert_eq!(parse_discovery_min_tvl_usd(Some("0")), Ok(0.0));
+        assert_eq!(parse_discovery_min_tvl_usd(Some("250000")), Ok(250_000.0));
+        assert_eq!(parse_discovery_min_tvl_usd(Some("1e6")), Ok(1_000_000.0));
+        assert!(parse_discovery_min_tvl_usd(Some("-1")).is_err());
+        assert!(parse_discovery_min_tvl_usd(Some("abc")).is_err());
+        assert!(parse_discovery_min_tvl_usd(Some("inf")).is_err());
+        // DISCOVERY_MIN_FEE_RATIO: absent = 1.5, open range above.
+        assert_eq!(parse_discovery_min_fee_ratio(None), Ok(1.5));
+        assert_eq!(parse_discovery_min_fee_ratio(Some("0")), Ok(0.0));
+        assert_eq!(parse_discovery_min_fee_ratio(Some("0.5")), Ok(0.5));
+        assert!(parse_discovery_min_fee_ratio(Some("-0.1")).is_err());
+        assert!(parse_discovery_min_fee_ratio(Some("x")).is_err());
+        // METEORA_POOLS_URL: default only on absence; verbatim otherwise.
+        assert_eq!(parse_meteora_pools_url(None), DEFAULT_METEORA_POOLS_URL);
+        assert_eq!(parse_meteora_pools_url(Some("")), "");
+        assert_eq!(
+            parse_meteora_pools_url(Some("https://custom/pools?x=1")),
+            "https://custom/pools?x=1"
+        );
+        // Net TS gate: enable ∧ paper (autonomous mode is never on here).
+        assert!(should_discover(true, true));
+        assert!(!should_discover(true, false));
+        assert!(!should_discover(false, true));
+        assert!(!should_discover(false, false));
     }
 }

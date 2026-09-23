@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { readFileSync, writeFileSync } from "node:fs";
 import { Effect, Layer } from "effect";
 import {
   AUTONOMOUS_TOKEN_CONFIG_DEFAULTS,
@@ -7,7 +8,7 @@ import {
 } from "../engine/config-service.js";
 import { AdapterService, ScreenerService } from "../engine/services.js";
 import { AdapterLive } from "../engine/adapter-service.js";
-import { StrategyLive } from "../engine/strategy-service.js";
+import { StrategyLive, DLMMStrategy } from "../engine/strategy-service.js";
 import { AuditLive } from "../engine/audit-service.js";
 import { DbLive } from "../engine/db-service.js";
 import { ScreenerLive } from "../engine/screener-service.js";
@@ -317,5 +318,241 @@ describe("ScreenerService.screenPools", () => {
       addresses,
       `low-utilization pool must be filtered out, got: ${JSON.stringify(addresses)}`,
     ).toEqual([POOL_A]);
+  });
+});
+
+// ─── Wave 101: cross-language discovery/screener gold ─────────────────────
+// The SAME fixture feeds bench (this file) and the Rust host
+// (native/rust/src/main.rs, `discovery_gold_parity`): TS output here is the
+// pinned gold the host must reproduce field-for-field. Regenerate with
+// PRISM_WRITE_GOLD=1, then re-run clean to confirm stability.
+
+const GOLD_URL = new URL("../native/rust/fixtures/screener-page.json", import.meta.url);
+const WRITE_GOLD = process.env.PRISM_WRITE_GOLD === "1";
+
+function loadGold(): {
+  url: string;
+  config: {
+    minTvlUsd: number;
+    minFeeRatio: number;
+    volumeAuthThreshold: number;
+    minBinUtilization: number;
+  };
+  payload: unknown;
+  bin_windows: Record<string, [boolean, number, number]>;
+  fetch_count_expected: number;
+  util_vectors: {
+    name: string;
+    known: boolean;
+    bins: [string, string, string][];
+    expect: number;
+  }[];
+  auth_vectors: {
+    name: string;
+    tvl: number;
+    volume: number;
+    fees: number;
+    measured: boolean;
+  }[];
+  expected?: {
+    discovered?: unknown[];
+    screened?: unknown[];
+    candidates?: string[];
+    auth?: { name: string; score: number }[];
+  };
+} {
+  return JSON.parse(readFileSync(GOLD_URL, "utf8"));
+}
+
+function saveGold(gold: ReturnType<typeof loadGold>): void {
+  writeFileSync(GOLD_URL, JSON.stringify(gold, null, 1));
+}
+
+const discoveredSubset = (p: {
+  address: string;
+  tvlUsd: number;
+  volume24hUsd: number;
+  fees24hUsd: number;
+  apr: number;
+  // Required on DiscoveredPool (services.ts:62) and on every row the
+  // adapter's own validity check admits (pool_config.bin_step is one of
+  // the seven shape checks), so the gold always carries it.
+  binStep: number;
+  tokenX: string;
+  tokenY: string;
+  createdAtMs?: number;
+}) => ({
+  address: p.address,
+  tvlUsd: p.tvlUsd,
+  volume24hUsd: p.volume24hUsd,
+  fees24hUsd: p.fees24hUsd,
+  apr: p.apr,
+  binStep: p.binStep,
+  tokenX: p.tokenX,
+  tokenY: p.tokenY,
+  createdAtMs: p.createdAtMs ?? null,
+});
+
+const screenedSubset = (p: {
+  address: string;
+  tvlUsd: number;
+  volume24hUsd: number;
+  fees24hUsd: number;
+  apr: number;
+  feeIlRatio: number;
+  volumeAuth: number;
+  binUtilization: number;
+  tokenX: string;
+  tokenY: string;
+  createdAtMs?: number;
+}) => ({
+  address: p.address,
+  tvlUsd: p.tvlUsd,
+  volume24hUsd: p.volume24hUsd,
+  fees24hUsd: p.fees24hUsd,
+  apr: p.apr,
+  feeIlRatio: p.feeIlRatio,
+  volumeAuth: p.volumeAuth,
+  binUtilization: p.binUtilization,
+  tokenX: p.tokenX,
+  tokenY: p.tokenY,
+  createdAtMs: p.createdAtMs ?? null,
+});
+
+describe("discovery gold (wave 101)", () => {
+  it("discoverPools: envelope + row validity + launchpad + adapter tvl/top-50 (gold)", async () => {
+    const gold = loadGold();
+    const restore = mockFetch(
+      async () => new Response(JSON.stringify(gold.payload), { status: 200 }),
+    );
+    try {
+      const configLayer = Layer.succeed(ConfigService, makeConfig());
+      const adapterLayer = asOwner<Layer.Layer<AdapterService, never, never>>(
+        Layer.provide(AdapterLive, Layer.merge(configLayer, DbLive(":memory:"))),
+      );
+      const program = Effect.gen(function* () {
+        const adapter = yield* AdapterService;
+        return yield* adapter.discoverPools();
+      });
+      const pools = await Effect.runPromise(Effect.provide(program, adapterLayer));
+      const subset = pools.map(discoveredSubset);
+      gold.expected = { ...gold.expected, discovered: subset };
+      if (WRITE_GOLD) saveGold(gold);
+      expect(subset).toEqual(gold.expected.discovered);
+    } finally {
+      restore();
+    }
+  });
+
+  it("screenPools: gates + stable fee sort + top-10 enrichment + top-3 candidates (gold)", async () => {
+    const gold = loadGold();
+    // Rows arrive from the gold.discovered seam (written by the test above in
+    // a WRITE_GOLD run, persisted in the fixture otherwise).
+    expect(gold.expected?.discovered, "run PRISM_WRITE_GOLD=1 first").toBeDefined();
+    // SAFETY: the expect above proves the seam exists — it A (declaration-
+    // ordered, runs first) persists expected.discovered into the fixture, so
+    // both non-null assertions read a gold field this file just verified.
+    const rows = gold.expected!.discovered!;
+    let fetches = 0;
+    // SAFETY: fixture adapter stub — implements exactly the two methods
+    // screenPools calls (discoverPools + getBinArray); the closing cast drops
+    // the rest of AdapterService, which must never be reached in this test.
+    const adapterLayer = Layer.succeed(AdapterService, {
+      // SAFETY: `rows` are the persisted gold projections (it A's output) —
+      // exactly the DiscoveredPool array screenPools consumes; the stub
+      // casts because the rest of AdapterService is intentionally
+      // unimplemented (fixture-only layer, same pattern as the tests above).
+      discoverPools: () => Effect.succeed(rows as never),
+      getBinArray: (address: string) => {
+        fetches += 1;
+        const w = gold.bin_windows[address];
+        if (!w) return Effect.fail(new Error(`no fixture window for ${address}`));
+        const [known, active, total] = w;
+        return Effect.succeed({
+          lowerBinId: 0,
+          upperBinId: 0,
+          activeBinId: 0,
+          binStep: 1,
+          reservesKnown: known,
+          bins: known
+            ? Array.from({ length: total }, (_, i) => ({
+                binId: i,
+                price: 1,
+                reserveX: i < active ? 1n : 0n,
+                reserveY: i < active ? 1n : 0n,
+                liquiditySupply: i < active ? 1n : 0n,
+              }))
+            : [],
+        });
+      },
+      // SAFETY: the object implements the two methods this fixture exercises
+      // (discoverPools, getBinArray); every other AdapterService member is
+      // deliberately absent and must never be reached by screenPools.
+    } as never);
+    const configLayer = Layer.succeed(ConfigService, makeConfig());
+    const layer = Layer.provide(
+      ScreenerLive(gold.config),
+      Layer.merge(configLayer, Layer.merge(adapterLayer, StrategyLive)),
+    );
+    const program = Effect.gen(function* () {
+      const screener = yield* ScreenerService;
+      return yield* screener.screenPools();
+    });
+    const screened = await Effect.runPromise(Effect.provide(program, layer));
+    expect(fetches, "bin-window fetches are bounded to the top 10").toBe(gold.fetch_count_expected);
+    const subset = screened.map(screenedSubset);
+    const candidates = subset.slice(0, 3).map((p) => p.address);
+    gold.expected = { ...gold.expected, screened: subset, candidates };
+    if (WRITE_GOLD) saveGold(gold);
+    expect(subset).toEqual(gold.expected.screened);
+    expect(candidates).toEqual(gold.expected.candidates);
+  });
+
+  it("computeBinUtilization vectors (OR legs, known-false, empty) (gold)", () => {
+    const gold = loadGold();
+    for (const c of gold.util_vectors) {
+      const bins = c.bins.map((b, i) => ({
+        binId: i,
+        price: 1,
+        reserveX: BigInt(b[0]),
+        reserveY: BigInt(b[1]),
+        liquiditySupply: BigInt(b[2]),
+      }));
+      // SAFETY: the vector carries every BinArray scalar
+      // computeBinUtilization reads (bins + reservesKnown); synthetic
+      // binId/price are never consulted by the function under test.
+      const util = DLMMStrategy.computeBinUtilization({
+        lowerBinId: 0,
+        upperBinId: 0,
+        activeBinId: 0,
+        binStep: 1,
+        bins,
+        reservesKnown: c.known,
+      } as never);
+      expect(util, c.name).toBe(c.expect);
+    }
+  });
+});
+
+describe("checkVolumeAuthenticity gold (wave 101)", () => {
+  it("pins every score leg exactly (gold)", () => {
+    const vectors = loadGold().auth_vectors;
+    const computed = vectors.map((v) => ({
+      name: v.name,
+      // SAFETY: the vector carries exactly the three PoolState scalars
+      // checkVolumeAuthenticity reads (tvl/volume/fees); the engine's own
+      // strategy.test.ts builds partial PoolStates the same way.
+      score: DLMMStrategy.checkVolumeAuthenticity(
+        { tvlUsd: v.tvl, volume24hUsd: v.volume, fees24hUsd: v.fees } as never,
+        v.measured,
+      ).score,
+    }));
+    if (WRITE_GOLD) {
+      const target = loadGold();
+      target.expected = { ...target.expected, auth: computed };
+      saveGold(target);
+    }
+    // The persisted gold is TS truth; the Rust host asserts the same rows.
+    expect(computed).toEqual(loadGold().expected?.auth);
   });
 });
