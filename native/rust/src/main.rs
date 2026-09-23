@@ -7500,6 +7500,22 @@ mod tests {
             no_move, MAX_FEE_IL_RATIO,
             "zero price move + fees → MAX (the il <= 0 arm)"
         );
+        let no_move_no_fees = compute_fee_il_ratio(
+            100_000.0,
+            0.0,
+            150.0,
+            t,
+            10,
+            conc,
+            Some(PriceDrift {
+                previous_price: 150.0,
+                previous_timestamp_ms: t - 600_000,
+            }),
+        );
+        assert_eq!(
+            no_move_no_fees, 0.0,
+            "zero price move + no fees → 0 (the il <= 0, fees <= 0 arm)"
+        );
         assert_eq!(
             compute_fee_il_ratio(100_000.0, 0.0, 150.0, t, 10, conc, None),
             0.0,
