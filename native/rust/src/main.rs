@@ -2784,7 +2784,8 @@ fn signal_lift(signals: &[(f64, f64)]) -> Option<f64> {
 /// — NOT its hold-bias override, which stays TS-only. `ratio` comes from the
 /// most recent `signal_snapshots.fee_il_ratio` row for the position's pool
 /// (`None` if no snapshot has landed yet); `known` comes from the tick's live
-/// datapi `known_by_pool` map — the host observes its own statsSource, never
+/// datapi `stats_by_pool` map — presence = datapi answered this tick — and the
+/// host observes its own statsSource, never
 /// TS-persisted `pool_snapshots.stats_source` (wave 94).
 struct FeeIlShadow {
     position_id: String,
@@ -2827,22 +2828,23 @@ struct FeeIlShadow {
     /// `active_bin_id` was set once at entry/rebalance and never refreshed.
     lower_bin_id: Option<i64>,
     upper_bin_id: Option<i64>,
-    /// Gas-gate shadow inputs (F1): pool TVL + 24h fees from the latest
-    /// `pool_snapshots` row for the position's pool (`None` when no snapshot
-    /// has landed yet → `daily=None`, never flags). Position share × pool
-    /// fees = position daily fees, mirroring program.ts:11494-11500.
+    /// Gas-gate shadow inputs (F1): pool TVL + 24h fees from the tick's
+    /// datapi map (wave 97 — same measured read that drives `known`;
+    /// `None` when the fetch failed → `daily=None`, never flags; TS would
+    /// fall through to gecko here, wave 98). Position share × pool fees =
+    /// position daily fees, mirroring program.ts:11494-11500.
     pool_tvl_usd: Option<f64>,
     pool_fees_24h_usd: Option<f64>,
-    /// Range-width shadow inputs: latest `pool_snapshots.bin_step` /
-    /// `current_price` for the position's pool (`None` when no snapshot has
-    /// landed yet or the column is absent → tier/coverage fall back, never
-    /// acts). Same latest-row source as the TVL/fee legs.
+    /// Range-width shadow inputs: `pool_config.bin_step` + `current_price`
+    /// from the same datapi map (wave 97; `None`/absent → tier/coverage
+    /// fall back, never acts) — measured, not the persisted latest row.
     pool_bin_step: Option<i64>,
     pool_current_price: Option<f64>,
-    /// TA-exhaustion shadow input: up to 35 newest `current_price` closes
-    /// for the position's pool, newest-first (RSI/BB/MACD need ordered
-    /// history; short/empty → TA no-vote, fail-open like TS
-    /// TA_EXHAUSTION_MIN_POINTS floor). Same source as the bin ring.
+    /// TA-exhaustion shadow input: up to 35 newest persisted
+    /// `pool_snapshots.current_price` closes, newest-first (RSI/BB/MACD need
+    /// ordered history; short/empty → TA no-vote, fail-open like TS
+    /// TA_EXHAUSTION_MIN_POINTS floor). The ONE history leg that stays
+    /// TS-written until the host owns its snapshots (tier 1).
     ta_closes_newest_first: Option<Vec<f64>>,
     /// Recovery-gate shadow input (F4): up to `oor_recovery_lookback` newest
     /// chain-sampled bins for the position's pool, newest-first → reversed to
@@ -2875,7 +2877,7 @@ fn fee_il_shadows_capped(
     bin_rings: &std::collections::HashMap<String, Vec<i64>>,
     recovery_lookback: i64,
     vol_lookback: i64,
-    known_by_pool: &std::collections::HashMap<String, bool>,
+    stats_by_pool: &std::collections::HashMap<String, datapi::PoolStats>,
 ) -> Vec<FeeIlShadow> {
     let conn = match rusqlite::Connection::open_with_flags(
         Path::new(sqlite_path),
@@ -2932,13 +2934,6 @@ fn fee_il_shadows_capped(
                     |r| r.get(0),
                 )
                 .ok();
-            let (pool_tvl_usd, pool_fees_24h_usd): (Option<f64>, Option<f64>) = conn
-                .query_row(
-                    "SELECT tvl_usd, fees_24h_usd FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 1",
-                    [&pool_address],
-                    |r| Ok((r.get(0).ok(), r.get(1).ok())),
-                )
-                .unwrap_or((None, None));
             // IL-dominance legs (program.ts:10264-10297): entry X/Y + entry
             // price + OOR clock, tolerant side query — pre-v16 rows or old DBs
             // without the columns read NULL → None legs, never break the tick.
@@ -2975,13 +2970,6 @@ fn fee_il_shadows_capped(
                     .collect();
                 if closes.is_empty() { None } else { Some(closes) }
             })();
-            let (pool_bin_step, pool_current_price): (Option<i64>, Option<f64>) = conn
-                .query_row(
-                    "SELECT bin_step, current_price FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 1",
-                    [&pool_address],
-                    |r| Ok((r.get(0).ok(), r.get(1).ok())),
-                )
-                .unwrap_or((None, None));
             // Bin-history legs derive from the host's OWN chain-fed rings
             // (wave 95) — TS's in-memory binHistory mechanism, pre-capped at
             // push. Absent/short → None = cold start (TS matches: <2 points
@@ -3005,8 +2993,16 @@ fn fee_il_shadows_capped(
             let recovery_bins_newest_first = window(recovery_lookback);
             let vol_bins_newest_first = window(vol_lookback);
             // Precomputed: field-init order would move `pool_address` into
-            // the struct before a `known` field could borrow it.
-            let known = known_by_pool.get(&pool_address).copied().unwrap_or(false);
+            // the struct before later fields could borrow it. One map read
+            // feeds `known` (wave-94 presence semantics) AND every datapi
+            // stat leg (wave 97) — absent pool (fetch failed) → false/None,
+            // fail-open.
+            let stats = stats_by_pool.get(&pool_address);
+            let known = stats.is_some();
+            let pool_tvl_usd = stats.map(|s| s.tvl_usd);
+            let pool_fees_24h_usd = stats.map(|s| s.fees_24h_usd);
+            let pool_bin_step = stats.and_then(|s| s.bin_step);
+            let pool_current_price = stats.map(|s| s.current_price);
             FeeIlShadow {
                 position_id,
                 pool_address,
@@ -3195,14 +3191,18 @@ fn tick(cfg: &config::Config, n: u64) {
             Vec::new()
         }
     };
-    let known_by_pool: std::collections::HashMap<String, bool> = open_pools
+    // Wave 97: the fetch's FULL PoolStats flows to the builder — `known`
+    // stays presence (wave-94 semantics unchanged) and the gas/entry-shape
+    // legs (tvl, fees24h, bin_step, current price) come from the same
+    // measured read instead of TS-persisted pool_snapshots. One memoized GET
+    // feeds every datapi consumer; a failed fetch drops the pool (warned
+    // inside) → legs None = fail-open. TS's gecko fallback tier for these
+    // legs is wave 98 — until then a datapi outage means no gas verdict.
+    let stats_by_pool: std::collections::HashMap<String, datapi::PoolStats> = open_pools
         .iter()
-        .map(|p| {
-            (
-                p.clone(),
-                datapi::get_pool_stats(&cfg.meteora_data_api_url, p, Duration::from_secs(10))
-                    .is_some(),
-            )
+        .filter_map(|p| {
+            datapi::get_pool_stats(&cfg.meteora_data_api_url, p, Duration::from_secs(10))
+                .map(|s| (p.clone(), s))
         })
         .collect();
     // Live active bin per open pool (wave 95): one `getAccountInfo` →
@@ -3241,7 +3241,7 @@ fn tick(cfg: &config::Config, n: u64) {
         &bin_rings,
         cfg.oor_recovery_lookback_cycles,
         cfg.volatility_lookback_snapshots,
-        &known_by_pool,
+        &stats_by_pool,
     );
     // Drawdown inputs: spot legs per open position (deposited/current only —
     // `toRiskPosition` is spot-only). Collected up front so the book-level
@@ -3975,6 +3975,10 @@ mod datapi {
         pub fee_tvl_ratio_24h: Option<f64>,
         pub dynamic_fee_pct: Option<f64>,
         pub base_fee_pct: Option<f64>,
+        /// `pool_config.bin_step` — feeds the entry-shape/range-width legs
+        /// (wave 97), replacing the persisted pool_snapshots read. `None`
+        /// when the payload omits it → tier/coverage fall back.
+        pub bin_step: Option<i64>,
         pub has_farm: Option<bool>,
         pub farm_apr: Option<f64>,
         pub farm_apy: Option<f64>,
@@ -4048,6 +4052,10 @@ mod datapi {
             fee_tvl_ratio_24h: num(window(obj.get("fee_tvl_ratio"), "24h")),
             dynamic_fee_pct: num(obj.get("dynamic_fee_pct")),
             base_fee_pct: num(obj.get("pool_config").and_then(|c| c.get("base_fee_pct"))),
+            bin_step: obj
+                .get("pool_config")
+                .and_then(|c| c.get("bin_step"))
+                .and_then(Value::as_i64),
             has_farm: boolean(obj.get("has_farm")),
             farm_apr: num(obj.get("farm_apr")),
             farm_apy: num(obj.get("farm_apy")),
@@ -4065,8 +4073,9 @@ mod datapi {
     /// `fetch_pool_stats` on a miss. Mirrors TS's `getPoolData` cache leg
     /// (meteora-datapi-service.ts:224-228). Lock poisoning (a panicked tick
     /// holding the mutex) degrades to a direct fetch, never a blocked cycle.
-    /// Consumed by the tick's live statsSource tier (wave 94): its `Some` is
-    /// the pool's `known` flag.
+    /// Consumed by the tick's live stats tiers (waves 94 + 97): its `Some`
+    /// is the pool's `known` flag AND the source of the gas/entry-shape
+    /// stat legs (tvl, fees24h, bin_step, current price).
     pub fn get_pool_stats(
         base_url: &str,
         pool_address: &str,
@@ -4662,6 +4671,8 @@ mod tests {
         assert!(s.fees_24h_usd > 0.0);
         // base_fee_pct lives under pool_config — the EP lane's fee leg.
         assert_eq!(s.base_fee_pct, Some(0.2));
+        // pool_config.bin_step too (wave 97: feeds the shape/range legs).
+        assert_eq!(s.bin_step, Some(20));
         assert_eq!(s.has_farm, Some(false));
         assert_eq!(s.farm_apr, Some(0.0));
         assert_eq!(s.is_blacklisted, Some(false));
@@ -4681,6 +4692,10 @@ mod tests {
         let s = parse_pool_stats(raw, "a").expect("TS's four required legs suffice");
         assert_eq!(s.apy, 0.0);
         assert_eq!(s.current_price, 0.0);
+        assert_eq!(
+            s.bin_step, None,
+            "no pool_config → bin_step absent, never guessed"
+        );
     }
 
     #[test]
@@ -5147,6 +5162,31 @@ mod tests {
         .expect("create scratch schema");
     }
 
+    /// Minimal `PoolStats` for builder tests: the four stat legs the tick
+    /// now consumes (wave 97), everything else unknown/None.
+    fn stats_fixture(tvl: f64, fees_24h: f64, bin_step: i64, price: f64) -> datapi::PoolStats {
+        datapi::PoolStats {
+            address: "poolB".to_string(),
+            name: "FIXTURE".to_string(),
+            tvl_usd: tvl,
+            volume_24h_usd: 1.0,
+            fees_24h_usd: fees_24h,
+            apr: 0.0,
+            apy: 0.0,
+            current_price: price,
+            fee_tvl_ratio_24h: None,
+            dynamic_fee_pct: None,
+            base_fee_pct: None,
+            bin_step: Some(bin_step),
+            has_farm: None,
+            farm_apr: None,
+            farm_apy: None,
+            is_blacklisted: None,
+            token_x_freeze_authority_disabled: None,
+            token_y_freeze_authority_disabled: None,
+        }
+    }
+
     #[test]
     fn fee_il_shadows_reads_real_positions_and_latest_snapshots() {
         let path =
@@ -5209,15 +5249,18 @@ mod tests {
             )
             .unwrap();
         }
-        // Wave 94/95: `known` is map-driven — poolA deliberately maps false
-        // while its LATEST `pool_snapshots` row says `'datapi'` (the seeded
-        // precedence pin above: map wins over TS-persisted state), poolB
-        // true with no row at all. Bin history is the chain-fed RING:
-        // poolA gets [100, 90] (drift −10), poolB is absent → cold None.
-        let known: std::collections::HashMap<String, bool> =
-            [("poolA".to_string(), false), ("poolB".to_string(), true)]
-                .into_iter()
-                .collect();
+        // Wave 94/97: `known` is stats-map PRESENCE — poolA deliberately has
+        // NO entry while its LATEST `pool_snapshots` row says `'datapi'` (the
+        // seeded precedence pin: presence wins over TS-persisted state), and
+        // poolB carries full stats with no row. The stat legs read from the
+        // same map (wave 97). Bin history is the chain-fed RING: poolA gets
+        // [100, 90] (drift −10), poolB is absent → cold None.
+        let stats_by_pool: std::collections::HashMap<String, datapi::PoolStats> = [(
+            "poolB".to_string(),
+            stats_fixture(50_000.0, 250.0, 20, 1.23),
+        )]
+        .into_iter()
+        .collect();
         let rings: std::collections::HashMap<String, Vec<i64>> =
             [("poolA".to_string(), vec![100, 90])].into_iter().collect();
         let mut shadows = fee_il_shadows_capped(
@@ -5226,7 +5269,7 @@ mod tests {
             &rings,
             10,
             12,
-            &known,
+            &stats_by_pool,
         );
         shadows.sort_by(|a, b| a.position_id.cmp(&b.position_id));
         let _ = std::fs::remove_file(&path);
@@ -5239,7 +5282,7 @@ mod tests {
         assert!(mature.mature, "14h old >= 12h default must be mature");
         assert!(
             !mature.known,
-            "map false wins over the seeded stats_source row"
+            "stats-map absence wins over the seeded stats_source row"
         );
         assert_eq!(
             mature.ratio,
@@ -5254,7 +5297,28 @@ mod tests {
         let fresh = &shadows[0]; // "pos-fresh"
         assert_eq!(fresh.position_id, "pos-fresh");
         assert!(!fresh.mature, "1h old < 12h default must not be mature");
-        assert!(fresh.known, "map true drives known without any stats row");
+        assert!(
+            fresh.known,
+            "stats presence drives known without any DB row"
+        );
+        // Wave 97: the stat legs read from the SAME map as `known`.
+        assert_eq!(fresh.pool_tvl_usd, Some(50_000.0), "tvl from the stats map");
+        assert_eq!(
+            fresh.pool_fees_24h_usd,
+            Some(250.0),
+            "fees from the stats map"
+        );
+        assert_eq!(fresh.pool_bin_step, Some(20), "bin_step from pool_config");
+        assert_eq!(
+            fresh.pool_current_price,
+            Some(1.23),
+            "price from the stats map"
+        );
+        assert_eq!(
+            mature.pool_tvl_usd, None,
+            "absent pool → stat legs fail open (None)"
+        );
+        assert_eq!(mature.pool_bin_step, None, "absent pool → bin_step None");
         assert_eq!(fresh.ratio, None, "no snapshot yet -> no ratio");
         assert!(fresh.onchain, "non-NULL position_pubkey -> onchain");
         assert_eq!(
@@ -5264,7 +5328,7 @@ mod tests {
         );
         assert_eq!(
             fresh.net_drift_bins, None,
-            "no snapshots -> cold start, TS netDriftBins = 0"
+            "no ring -> cold start, TS netDriftBins = 0"
         );
     }
 

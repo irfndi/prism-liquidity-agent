@@ -106,8 +106,8 @@ the exception: unit-tested, NOT wired.
   predicate against the host-clamped floor).
 - `bend::drift_rejects` → proven `K.drift_rejects`, per position's pool per
   tick (mirrors `driftGateRejected`'s strict `<` + `driftHardFloorReason`'s
-  normal-lane-only semantics; drift = last − first `active_bin_id` over
-  persisted `pool_snapshots` capped to `binHistoryCap`, cold start → 0).
+  normal-lane-only semantics; drift = last − first over the chain-fed
+  binHistory ring (wave 95), cold start → 0).
 - `bend::capital_exit` → proven `K.capital_exit`, per open position per tick
   (danger computed natively from the ledger via `loss_cap_danger`, mirroring
   `position-loss-cap.ts`; confidence 1.0 matches TS `conf1PositionExit` —
@@ -129,8 +129,8 @@ so no host wrapper — `computeFeeIlRatio` needs in-memory bin-array + drift).
 - `drawdown_veto` (gate-4 mirror: spot book-PnL vs `paper_portfolio_usd`, 10% hardcoded; book-level `drawdown_veto` verdict in `decision`; never blocks).
 
 - `rebalance_range_invalid` + `MAX_REBALANCE_RANGE_BINS` (default = max = 200, fail-closed) → per-position `band_width_invalid/band_contains_active/band_width` + `decision … band_health_shadow` tally (gate-7 shape without a proposal: live-band width audit — upper<=lower or width>max flags unhealthy; containment logged separately since runner scale-ins anchor below active by design; never vetoes).
-- `gas_rebalance_justified` + `REBALANCE_GAS_COST_SOL` (0.01) + `SOL_PRICE_USD` (150, [0,10000]) + `GAS_AWARE_MIN_DAYS_OF_FEES_PAID_AHEAD` (3) → per-position `gas_cost_usd/daily_fees_usd/gas_justified` + `decision … gas_hold_shadow` tally (F1 mirror: gas <= N-days position fees, share-capped daily fees from latest pool snapshot × current/tvl; unknown → None, never flags; never holds).
-- `recovery_hold`/`recovery_probability` + `OOR_RECOVERY_HOLD_THRESHOLD` (0.6) + `OOR_RECOVERY_FORCE_REBALANCE_THRESHOLD` (0.2, logged-only) + `OOR_RECOVERY_LOOKBACK_CYCLES` window → per-position `rec_prob/rec_hold/rec_force` + `decision … recovery_hold_shadow` tally (F4 mirror: mean|Δ|/(mean|Δ|+drift) over persisted snapshot bins sliced to max(2, lookback), drift = |active−center|; cold start → 0.5, never holds alone; never holds).
+- `gas_rebalance_justified` + `REBALANCE_GAS_COST_SOL` (0.01) + `SOL_PRICE_USD` (150, [0,10000]) + `GAS_AWARE_MIN_DAYS_OF_FEES_PAID_AHEAD` (3) → per-position `gas_cost_usd/daily_fees_usd/gas_justified` + `decision … gas_hold_shadow` tally (F1 mirror: gas <= N-days position fees, share-capped daily fees from the tick's LIVE datapi read × current/tvl — wave 97, no more TS-persisted snapshot row; datapi outage → None, never flags — TS's gecko fallback tier is wave 98; never holds).
+- `recovery_hold`/`recovery_probability` + `OOR_RECOVERY_HOLD_THRESHOLD` (0.6) + `OOR_RECOVERY_FORCE_REBALANCE_THRESHOLD` (0.2, logged-only) + `OOR_RECOVERY_LOOKBACK_CYCLES` window → per-position `rec_prob/rec_hold/rec_force` + `decision … recovery_hold_shadow` tally (F4 mirror: mean|Δ|/(mean|Δ|+drift) over the chain-fed ring windowed to max(2, lookback) (wave 95), drift = |live-active−center|; cold start → 0.5, never holds alone; never holds).
 - `rebalance_interval_cooled` + `MIN_REBALANCE_INTERVAL_MS` (86400000) + `OOR_GRACE_PERIOD_CYCLES` (3) → per-position `interval_cooled/oor_grace/last_rebal_ms` + `decision … interval_hold_shadow` tally (capital-gate first arm: now-last >= min OR grace count>=cycles; cold last=0 → cooled; never blocks). `paper_validation_pass` + `PAPER_VALIDATION_MIN_DAYS` (7) + `PAPER_VALIDATION_ENFORCE` (false) → book-level `paper_days/paper_pass` in `decision` (F6 mirror over `metadata.paperTradingDaysAccumulated`; paper → pass; !enforce → warn-pass; never blocks).
 - `pool_cooldown_free` + `read_pool_cooldowns` → per-pool `cooldown pool/until/reason/free` + `decision … cooldown_holds` tally (F7 mirror: no row or now>=until → free; active cooldown → hold; missing table → empty, never blocks).
 - `compound_approved` PARKED (unit-tested only, no tick call): exact F3 twin (net clears min+buffer+gas, fail-closed refuse arms, fail-open None) — needs the per-claim `netFeesUsd` leg (live claim result, program.ts:15218); `positions` cumulative is the wrong leg (false-approves), `fee_claims`/CLAIM events empty live. Wire only when a claim-time leg lands.
