@@ -4982,19 +4982,6 @@ mod gecko {
     }
 }
 
-/// Solana JSON-RPC 2.0 client — the host's ONLY chain read surface.
-///
-/// Scope deliberately minimal: `getBalance` (native SOL lamports),
-/// `getParsedTokenAccountsByOwner` (SPL holdings) and `getAccountInfo`
-/// (the `LbPair` state read) are the calls the wallet and stats tiers need
-/// before pricing. Pricing (Jupiter `fetchTokenPrices`) is a separate tier,
-/// and tx submission is Phase 3's LAST item — paper-first per the plan.
-///
-/// Fail-closed everywhere: a transport error, a non-2xx status, an RPC-level
-/// `error` object, or an unexpected result shape all yield `Err` with the
-/// reason. The caller decides how to degrade (TS's `readWalletSnapshot`
-/// degrades SPL enumeration to SOL-only; it never degrades the SOL read
-/// itself, because native SOL is real capital).
 // ─── Discovery + screener: the host builds the ENTER candidate universe ───
 // Port of TS adapter.discoverPools (adapter-service.ts:5605) + the private
 // envelope/row validators (:836-1016) + ScreenerLive (screener-service.ts)
@@ -5509,6 +5496,19 @@ mod discovery {
     }
 }
 
+/// Solana JSON-RPC 2.0 client — the host's ONLY chain read surface.
+///
+/// Scope deliberately minimal: `getBalance` (native SOL lamports),
+/// `getParsedTokenAccountsByOwner` (SPL holdings) and `getAccountInfo`
+/// (the `LbPair` state read) are the calls the wallet and stats tiers need
+/// before pricing. Pricing (Jupiter `fetchTokenPrices`) is a separate tier,
+/// and tx submission is Phase 3's LAST item — paper-first per the plan.
+///
+/// Fail-closed everywhere: a transport error, a non-2xx status, an RPC-level
+/// `error` object, or an unexpected result shape all yield `Err` with the
+/// reason. The caller decides how to degrade (TS's `readWalletSnapshot`
+/// degrades SPL enumeration to SOL-only; it never degrades the SOL read
+/// itself, because native SOL is real capital).
 mod rpc {
     use serde_json::{json, Value};
     use std::collections::HashMap;

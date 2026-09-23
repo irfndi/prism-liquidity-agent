@@ -75,7 +75,7 @@ features — the first pulls `indexmap` transitively (so `describe()`'s key orde
 matches TS `JSON.parse` on the payload text), the second makes float parsing
 correctly-rounded like the engine (the wave-101 gold caught a 1-ulp default-parser
 divergence); Bend calls shell the `bend`
-CLI via `std::process`); Jev HTTP stays a `JevClient` trait + stub until reqwest
+CLI via `std::process`; Jev HTTP stays a `JevClient` trait + stub until reqwest
 (rustls) is justified.
 
 ## Bend kernel wiring (real, as of this wave)
