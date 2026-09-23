@@ -111,9 +111,12 @@ the exception: unit-tested, NOT wired.
   with `measured=false`; mismatch-logged host-wins fail-open via
   `is_some_and`, silent when Bend is absent, never votes).
 - `bend::fee_exit_fires` → proven `K.fee_exit_fires`, per open position per
-  tick against real SQLite (`positions` + latest `signal_snapshots` — the
-  ratio stays TS-written until the host can compute fee/IL from bin arrays;
-  mirrors `checkFeeIlExit`'s core predicate, not its hold-bias override).
+  tick against real SQLite (`positions` + a HOST-COMPUTED ratio since wave
+  100 — chain `BinArray` concentration + stats-map fees/TVL + the host's own
+  24h price-window drift anchor, `compute_fee_il_ratio`; TS-written
+  `signal_snapshots.fee_il_ratio` is no longer read. OUTCOME rows in
+  `signal_snapshots` remain TS-written for signal-lift/evolve; mirrors
+  `checkFeeIlExit`'s core predicate, not its hold-bias override).
 - `bend::accrual_allowed` → proven `K.accrual_allowed`, per position per
   tick (mirrors `accruePaperPositionFees`'s paper/no-pubkey/datapi guard).
 - `bend::enter_blocked` → proven `K.enter_blocked`, per position's latest
@@ -134,8 +137,11 @@ the exception: unit-tested, NOT wired.
 
 Still native-only (no Bend twin yet): none — all 7 per-tick Bend consults (6 per-position fee_exit/accrual/enter/drift/capital/fee_known + per-tick evolve_thr; `clamp_fee_il` at tick is the native ENTER-floor clamp, not a kernel consult) have a proven
 Twin; `K.ta_exhausted` + `K.exit_order` are truth-table-probed, LAWS pending strategy review (not proven);
-`K.fee_ratio` stays kernel-only (host lacks the IL estimator context,
-so no host wrapper — `computeFeeIlRatio` needs in-memory bin-array + drift).
+`K.fee_ratio` stays kernel-only: since wave 100 the host HAS the estimator
+context (chain bin array + drift) and computes the ratio natively, but the
+runtime agreement wrapper is deliberately unwired — honest USD magnitudes are
+million-node unary Nats (the measured 20-50s loss-magnitude lesson); the
+kernel's contract stays covered by its bench parity vectors.
 
 - `rpc::get_balance_lamports` + `rpc::get_spl_holdings` + `rpc::get_jupiter_prices` (live mode, wallet set) → `wallet_total_usd` → `drawdown_portfolio_usd` → book-level `drawdown_veto`. The wallet value is TS `readWalletSnapshot`-shaped: native SOL + every SPL holding across Token + Token-2022 (both programs enumerated, zero-amount rent-only ATAs skipped) valued in ONE Jupiter price v3 batch (`api.jup.ag` primary with optional `JUPITER_API_KEY`, keyless `lite-api.jup.ag` fallback — live-verified 2026-09-22) under TS's skip-unpriced rule: an unpriceable asset contributes $0 and warns once per process, never a fallback price. **Divergences, all fail-safe (under-report → smaller denominator → veto sooner, entries pause; EXITs stay free):** (1) pricing tiers — TS chains Jupiter → CoinGecko batch → Helius DAS → CoinGecko majors-spot, so a Jupiter outage there is rescued; the host is Jupiter-only, so a Jupiter+lite outage prices nothing → measured `$0.0` → entries pause; (2) failed lamports read → configured portfolio, where TS retains `lastWalletBalanceUsd` (last-known, stale reuse + one-time warn, program.ts:8299) — the host has no retained figure; (3) one URL — TS also carries `SOLANA_RPC_FALLBACK_URL` (public RPC as second tier), which the host does not model. Failure ladder: SPL enumeration failure degrades to NATIVE SOL ONLY + one warn per tick (TS-identical, adapter-service.ts:2921-2934); price outage → empty map → skip-all → measured `$0.0`; `Some(0.0)` (empty wallet OR price outage) is always measured, never the config figure (`drawdown_portfolio_guards` + `wallet_total_usd_skips_unpriced_fail_closed` pin it). Paper mode and walletless live skip the chain read entirely (TS uses `paperPortfolioUsd` for both); `WALLET_PUBKEY` non-empty must be valid base58 32 bytes (alphabet + decoded-length check, fail-closed at config time). `sol_price_usd` no longer prices the wallet — it feeds only the rebalance gas-cost math.
 - `rpc::get_lb_pair_state` (live mode, one `getAccountInfo` per open pool per tick) → the host's own binHistory ring AND the chain `bin_step`: base64 account + a pure `LbPair` parse — 8-byte discriminator `[33,11,49,98,181,101,177,13]`, `i32` active_id LE at offset **76**, `u16` bin_step at **80** (repr(C)/bytemuck walk: StaticParameters 32 + VariableParameters 32 + seeds/pair_type → 8+32+32+1+2+1). Validated EXACT against TWO independent sources: the TS SDK's `DLMM.getActiveBin().binId` live (2463 == 2463) and the Data API's `pool_config.bin_step` (20 == 20); a captured account fixture pins both offline (`lbpair_8eyb.bin`). Wave 95: drift / recovery windows / vol windows / band containment / recovery drift-dist all derive from this chain-fed ring (TS's in-memory binHistory mechanism) — the persisted `pool_snapshots.active_bin_id` proxy and the stored position-row bin are both retired; wave 98: the same read supplies `bin_step` to the stats tiers (modeled-fee base + TS's own binStep source); cold start per process matches a restarted TS engine.

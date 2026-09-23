@@ -173,6 +173,168 @@ impl PoolStatEntry {
     }
 }
 
+/// Fee/IL estimator stack — port of engine/strategy-service.ts (wave 100):
+/// constants, IL fraction, concentration, 24h-anchored drift, and the two
+/// public entry points. Every constant is the TS literal (MAX 20, ref half
+/// width 20, max concentration 10, drift proxy 10/day, min fee-window span
+/// 1h, ms/day). Together with the chain-fed `BinArray` these retire the
+/// ratio leg's dependency on TS-written `signal_snapshots.fee_il_ratio`.
+pub const MAX_FEE_IL_RATIO: f64 = 20.0;
+const MS_PER_DAY: f64 = 86_400_000.0;
+const CONCENTRATION_REFERENCE_HALF_WIDTH: f64 = 20.0;
+const MAX_CONCENTRATION_MULTIPLIER: f64 = 10.0;
+pub const BIN_STEP_DRIFT_PROXY_PER_DAY: f64 = 10.0;
+pub const MIN_FEE_WINDOW_SPAN_MS: i64 = 3_600_000;
+
+/// TS `PriceDriftContext` (types.ts:243): the fee-window's drift endpoint.
+pub struct PriceDrift {
+    pub previous_price: f64,
+    pub previous_timestamp_ms: i64,
+}
+
+/// IL fraction of a full-range LP after price moves by ratio `r`
+/// (strategy-service.ts:35): `|2√r/(1+r) − 1|`.
+fn impermanent_loss_fraction(price_ratio: f64) -> f64 {
+    ((2.0 * price_ratio.sqrt()) / (1.0 + price_ratio) - 1.0).abs()
+}
+
+/// TS `computeConcentrationMultiplier` (:44): liquidity-weighted mean
+/// distance of stocked bins from the active bin vs a 20-bin reference,
+/// clamped to [1, 10]. Empty/unknown bins (TS `reservesKnown: false` or no
+/// weight) → 1 — never fabricates amplification.
+pub fn concentration_multiplier(bins: &[rpc::BinSlot], active_bin_id: i64) -> f64 {
+    let (mut weight_sum, mut distance_sum) = (0.0f64, 0.0f64);
+    for b in bins {
+        let weight = b.liquidity_supply as f64; // TS Number(bigint): finite for any u128
+        if !(weight.is_finite() && weight > 0.0) {
+            continue;
+        }
+        weight_sum += weight;
+        distance_sum += weight * (b.bin_id - active_bin_id).abs() as f64;
+    }
+    if weight_sum <= 0.0 {
+        return 1.0;
+    }
+    let effective_half_width = (distance_sum / weight_sum).max(1.0);
+    (CONCENTRATION_REFERENCE_HALF_WIDTH / effective_half_width)
+        .clamp(1.0, MAX_CONCENTRATION_MULTIPLIER)
+}
+
+/// Port of TS `snapshotPriceDrift` (scan-set.ts:22) — the fee-window ANCHOR:
+/// oldest row of the caller's trailing-24h window; `None` on cold start AND
+/// when latest−anchor < 1h (the jitter guard that stopped per-cycle
+/// whipsawing — both fall through to the binStep proxy). `rows` ascending
+/// (oldest first), already windowed by SQL; latest = `rows.last()` (the
+/// previous cycle's row — the current tick's row is written AFTER this runs).
+pub fn snapshot_price_drift(rows: &[(f64, i64)]) -> Option<(f64, i64)> {
+    let anchor = *rows.first()?;
+    let latest = rows.last()?;
+    if latest.1 - anchor.1 < MIN_FEE_WINDOW_SPAN_MS {
+        return None;
+    }
+    Some(anchor)
+}
+
+/// The host's fee-window price history (`prismd_pool_history`, wave 99) is
+/// TS's `pool_snapshots` for the drift anchor. Trailing 24h, oldest-first.
+/// Fail-open → empty (cold start → binStep proxy).
+fn read_pool_price_window(sqlite_path: &str, pool_address: &str, now_ms: i64) -> Vec<(f64, i64)> {
+    let conn = match rusqlite::Connection::open_with_flags(
+        Path::new(sqlite_path),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[prismd] sqlite open {sqlite_path} failed: {e}; price window=[]");
+            return Vec::new();
+        }
+    };
+    let cutoff = now_ms.saturating_sub(MS_PER_DAY as i64);
+    let mut stmt = match conn.prepare(
+        "SELECT current_price, timestamp FROM prismd_pool_history WHERE pool_address = ?1 AND timestamp >= ?2 ORDER BY timestamp ASC",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[prismd] price-window query prep failed: {e}; window=[]");
+            return Vec::new();
+        }
+    };
+    // let-bound (not tail-match): the query_map temporary must drop before
+    // stmt/conn, or the borrowed MappedRows outlives them (E0597).
+    let out: Vec<(f64, i64)> = match stmt.query_map(rusqlite::params![pool_address, cutoff], |r| {
+        Ok((r.get::<_, f64>(0)?, r.get::<_, i64>(1)?))
+    }) {
+        Ok(rows) => rows.flatten().collect(),
+        Err(e) => {
+            eprintln!("[prismd] price-window query failed: {e}; window=[]");
+            Vec::new()
+        }
+    };
+    out
+}
+
+/// TS `estimateDailyIlUsd` (:79): drift path measures the fee window's real
+/// endpoint move (clamped [0.5, 2], annualized by elapsed cycles, amplified
+/// by concentration); no usable drift → the stable binStep proxy (10×binStep
+/// bps of assumed daily drift). Conservative upper-bound ranking signal.
+pub fn estimate_daily_il_usd(
+    tvl_usd: f64,
+    current_price: f64,
+    timestamp_ms: i64,
+    bin_step: i64,
+    concentration: f64,
+    drift: Option<PriceDrift>,
+) -> f64 {
+    if let Some(d) = drift.filter(|d| {
+        d.previous_price > 0.0 && d.previous_timestamp_ms < timestamp_ms && current_price > 0.0
+    }) {
+        let ratio = (current_price / d.previous_price).clamp(0.5, 2.0);
+        let elapsed_ms = (timestamp_ms - d.previous_timestamp_ms) as f64;
+        let cycles_per_day = MS_PER_DAY / elapsed_ms;
+        // Grouping mirrors TS exactly (frac × cycles × conc, then × tvl) —
+        // IEEE rounding is order-sensitive and the pinned vectors are exact.
+        let il_daily_fraction = impermanent_loss_fraction(ratio) * cycles_per_day * concentration;
+        return tvl_usd * il_daily_fraction;
+    }
+    let assumed_daily_drift = (bin_step as f64 / 10_000.0) * BIN_STEP_DRIFT_PROXY_PER_DAY;
+    let il_daily_fraction = impermanent_loss_fraction(1.0 + assumed_daily_drift) * concentration;
+    tvl_usd * il_daily_fraction
+}
+
+/// TS `computeFeeIlRatio` (:187): tvl 0 → 0; no IL → fees>0 ? MAX : 0;
+/// else min(fees24h / estimatedDailyIl, MAX=20) — the host's ratio is now
+/// COMPUTED (chain bin array + stats + own price history), never read from
+/// TS-written `signal_snapshots`.
+pub fn compute_fee_il_ratio(
+    tvl_usd: f64,
+    fees_24h_usd: f64,
+    current_price: f64,
+    timestamp_ms: i64,
+    bin_step: i64,
+    concentration: f64,
+    drift: Option<PriceDrift>,
+) -> f64 {
+    if tvl_usd == 0.0 {
+        return 0.0;
+    }
+    let estimated_il_daily_usd = estimate_daily_il_usd(
+        tvl_usd,
+        current_price,
+        timestamp_ms,
+        bin_step,
+        concentration,
+        drift,
+    );
+    if estimated_il_daily_usd <= 0.0 {
+        return if fees_24h_usd > 0.0 {
+            MAX_FEE_IL_RATIO
+        } else {
+            0.0
+        };
+    }
+    (fees_24h_usd / estimated_il_daily_usd).min(MAX_FEE_IL_RATIO)
+}
+
 /// SHADOW-only portfolio-drawdown veto: mirrors `checkDrawdownGate`
 /// (risk-service.ts:133-154) — ENTER vetoes when unrealized book PnL is
 /// negative and `|pnl| / portfolio` exceeds 10% (hardcoded in TS, no config).
@@ -2951,8 +3113,11 @@ fn signal_lift(signals: &[(f64, f64)]) -> Option<f64> {
 
 /// predicate in `engine/program.ts` `checkFeeIlExit` (program.ts:10788-10792)
 /// — NOT its hold-bias override, which stays TS-only. `ratio` comes from the
-/// most recent `signal_snapshots.fee_il_ratio` row for the position's pool
-/// (`None` if no snapshot has landed yet); `known` comes from the tick's live
+/// tick's HOST-COMPUTED `ratios` map (wave 100: chain BinArray concentration,
+/// stats-map fees/TVL, and the host's own price-history drift anchor via
+/// `compute_fee_il_ratio`; `None` when any input is cold, exactly TS's
+/// fall-throughs). TS-written `signal_snapshots.fee_il_ratio` is no longer
+/// read. `known` comes from the tick's live
 /// datapi `stats_by_pool` map — presence = datapi answered this tick — and the
 /// host observes its own statsSource, never
 /// TS-persisted `pool_snapshots.stats_source` (wave 94).
@@ -3048,6 +3213,7 @@ fn fee_il_shadows_capped(
     recovery_lookback: i64,
     vol_lookback: i64,
     stats_by_pool: &std::collections::HashMap<String, PoolStatEntry>,
+    ratios: &std::collections::HashMap<String, f64>,
 ) -> Vec<FeeIlShadow> {
     let conn = match rusqlite::Connection::open_with_flags(
         Path::new(sqlite_path),
@@ -3097,13 +3263,8 @@ fn fee_il_shadows_capped(
     rows.flatten()
         .map(
             |(position_id, pool_address, ts, position_pubkey, deposited_usd, current_value_usd, fees_claimed_usd, rewards_claimed_usd, lower_bin_id, upper_bin_id, last_rebalance_at_ms, oor_cycle_count)| {
-            let ratio: Option<f64> = conn
-                .query_row(
-                    "SELECT fee_il_ratio FROM signal_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 1",
-                    [&pool_address],
-                    |r| r.get(0),
-                )
-                .ok();
+            // Host-computed ratio (wave 100) — no signal_snapshots read.
+            let ratio = ratios.get(&pool_address).copied();
             // IL-dominance legs (program.ts:10264-10297): entry X/Y + entry
             // price + OOR clock, tolerant side query — pre-v16 rows or old DBs
             // without the columns read NULL → None legs, never break the tick.
@@ -3444,6 +3605,51 @@ fn tick(cfg: &config::Config, n: u64) {
             }
         })
         .collect();
+    // Fee/IL ratio is HOST-COMPUTED since wave 100 — chain BinArray
+    // (concentration) + stats map (tvl/fees/price) + the host's own price
+    // history (24h fee-window drift anchor). Runs BEFORE this tick's price
+    // row is written so the window ends at the PREVIOUS cycle, exactly TS's
+    // `previousSnapshot` (scan-set.ts:22). Cold inputs fall where TS does:
+    // no stats → no ratio; no bin array → concentration 1; window < 1h →
+    // binStep proxy. The builder's last `signal_snapshots.fee_il_ratio`
+    // read retires here (outcome rows stay TS-written for signal-lift).
+    let now_ms_tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut ratios: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for p in &open_pools {
+        let Some(entry) = stats_by_pool.get(p.as_str()) else {
+            continue;
+        };
+        let active_id = bin_rings.get(p.as_str()).and_then(|r| r.last().copied());
+        let slots = active_id.and_then(|a| {
+            rpc::get_bin_array(&cfg.solana_rpc_url, p, a, Duration::from_secs(10)).map(|(_, s)| s)
+        });
+        // Unknown array (TS reservesKnown=false) → empty → concentration 1.
+        let concentration =
+            concentration_multiplier(slots.as_deref().unwrap_or(&[]), active_id.unwrap_or(0));
+        let window = read_pool_price_window(&cfg.sqlite_path, p, now_ms_tick);
+        let drift = snapshot_price_drift(&window).map(|(price, ts)| PriceDrift {
+            previous_price: price,
+            previous_timestamp_ms: ts,
+        });
+        // TS: binArray.binStep ?? pool.binStep ?? 10; price 0 suppresses the
+        // drift arm (host None → 0.0 → same guard).
+        let bin_step = entry.bin_step.unwrap_or(10);
+        ratios.insert(
+            p.clone(),
+            compute_fee_il_ratio(
+                entry.tvl_usd,
+                entry.fees_24h_usd,
+                entry.current_price.unwrap_or(0.0),
+                now_ms_tick,
+                bin_step,
+                concentration,
+                drift,
+            ),
+        );
+    }
     // Host-ledger writes (wave 99, flag-gated): append this tick's price
     // rows BEFORE the builder reads them — the TA window's source since this
     // wave. Gated so direct `prismd --ticks` stays byte-identical; pools
@@ -3464,6 +3670,7 @@ fn tick(cfg: &config::Config, n: u64) {
         cfg.oor_recovery_lookback_cycles,
         cfg.volatility_lookback_snapshots,
         &stats_by_pool,
+        &ratios,
     );
     // Drawdown inputs: spot legs per open position (deposited/current only —
     // `toRiskPosition` is spot-only). Collected up front so the book-level
@@ -4835,6 +5042,142 @@ mod rpc {
         parse_lb_pair(&data)
     }
 
+    /// Meteora DLMM program — owner of every `LbPair` and `BinArray` account.
+    pub const DLMM_PROGRAM_ID: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
+    /// `MAX_BIN_PER_ARRAY` (SDK CONSTANTS table, live value "70").
+    pub const BIN_ARRAY_SIZE: i64 = 70;
+    /// Anchor discriminator of a `BinArray` account.
+    pub const BIN_ARRAY_DISCRIMINATOR: [u8; 8] = [92, 142, 92, 220, 5, 148, 70, 181];
+    /// `lb_pair` pubkey offset — the SDK's own `binArrayLbPairFilter` (8 + 16),
+    /// so the getProgramAccounts filter below mirrors the SDK path exactly.
+    pub const BIN_ARRAY_LB_PAIR_OFFSET: usize = 24;
+    const BIN_ARRAY_BINS_OFFSET: usize = 56; // disc8 + index i64 + version u8 + pad7 + lb_pair 32
+    /// One `Bin` slot: repr(C) with u128 fields → 16-byte aligned; on the
+    /// CI/host target (aarch64 + x86-64) u128 aligns to 16 → 144 bytes.
+    /// Validated against the captured fixture (see `parse_bin_array` tests).
+    const BIN_SLOT_SIZE: usize = 144;
+
+    /// One slot of a `BinArray`: `(bin_id, liquidity_supply)`. `bin_id`
+    /// derives from the array's index (lower = index × 70, k-th slot =
+    /// lower + k — the SDK's `getBinIdIndexInBinArray` inverts exactly
+    /// this); `liquidity_supply` is the concentration weight TS's
+    /// `computeConcentrationMultiplier` reads.
+    pub struct BinSlot {
+        pub bin_id: i64,
+        pub liquidity_supply: u128,
+    }
+
+    /// Pure parse of a raw `BinArray` account → `(index, slots)`. Fails
+    /// closed on a bad discriminator/short buffer; slots are parsed while
+    /// full 144-byte records fit (the caller picks the account whose
+    /// `[index×70, index×70+69]` range contains the active bin — the same
+    /// containment test the SDK's `isBinIdWithinBinArray` performs).
+    pub fn parse_bin_array(data: &[u8]) -> Result<(i64, Vec<BinSlot>), String> {
+        if data.len() < BIN_ARRAY_BINS_OFFSET + BIN_SLOT_SIZE {
+            return Err(format!("bin array account too short: {} bytes", data.len()));
+        }
+        if data[..8] != BIN_ARRAY_DISCRIMINATOR {
+            return Err("discriminator mismatch (not a DLMM BinArray account)".to_string());
+        }
+        let index = i64::from_le_bytes(data[8..16].try_into().expect("8-byte slice"));
+        let available = (data.len() - BIN_ARRAY_BINS_OFFSET) / BIN_SLOT_SIZE;
+        let n = available.min(BIN_ARRAY_SIZE as usize);
+        let mut slots = Vec::with_capacity(n);
+        for k in 0..n {
+            let base = BIN_ARRAY_BINS_OFFSET + k * BIN_SLOT_SIZE;
+            let bin_id = index
+                .checked_mul(BIN_ARRAY_SIZE)
+                .and_then(|lower| lower.checked_add(k as i64))
+                .ok_or_else(|| "bin id overflow".to_string())?;
+            let liq_lo =
+                u64::from_le_bytes(data[base + 32..base + 40].try_into().expect("8-byte slice"));
+            let liq_hi =
+                u64::from_le_bytes(data[base + 40..base + 48].try_into().expect("8-byte slice"));
+            slots.push(BinSlot {
+                bin_id,
+                liquidity_supply: u128::from(liq_lo) | (u128::from(liq_hi) << 64),
+            });
+        }
+        Ok((index, slots))
+    }
+
+    /// Does the array at `index` hold `active_id`? The SDK's
+    /// `isBinIdWithinBinArray` over `getBinArrayLowerUpperBinId` bounds
+    /// (index × 70 ..= index × 70 + 69) — one definition for the picker
+    /// below and the tests.
+    pub fn bin_array_contains(index: i64, active_id: i64) -> bool {
+        let lower = index.wrapping_mul(BIN_ARRAY_SIZE);
+        active_id >= lower && active_id < lower.wrapping_add(BIN_ARRAY_SIZE)
+    }
+
+    /// The pool's `BinArray` CONTAINING `active_id` — one
+    /// getProgramAccounts with the SDK's own lb_pair memcmp filter (offset
+    /// 24), then the SDK's containment test per result. Fail → None with a
+    /// warn (the estimator falls to its concentration-1 / binStep-proxy
+    /// arms, exactly TS's `reservesKnown: false` path).
+    pub fn get_bin_array(
+        url: &str,
+        lb_pair: &str,
+        active_id: i64,
+        timeout: Duration,
+    ) -> Option<(i64, Vec<BinSlot>)> {
+        use base64::Engine as _;
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": next_id(),
+            "method": "getProgramAccounts",
+            "params": [
+                DLMM_PROGRAM_ID,
+                {
+                    "encoding": "base64",
+                    "filters": [{"memcmp": {"offset": BIN_ARRAY_LB_PAIR_OFFSET, "bytes": lb_pair}}]
+                }
+            ],
+        });
+        let res = match post(url, body, timeout) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[prismd] bin-array query failed for {lb_pair}: {e}");
+                return None;
+            }
+        };
+        let Some(accounts) = res.get("result").and_then(Value::as_array) else {
+            eprintln!("[prismd] bin-array query for {lb_pair}: unexpected result shape");
+            return None;
+        };
+        for acct in accounts {
+            let Some(b64) = acct
+                .get("account")
+                .and_then(|a| a.get("data"))
+                .and_then(|d| d.get(0))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(b64) else {
+                continue;
+            };
+            // Containment BEFORE the full parse: read the index alone
+            // (offset 8) — one wrong-array hit per pair is normal.
+            if raw.len() < 16 {
+                continue;
+            }
+            let index = i64::from_le_bytes(raw[8..16].try_into().expect("8-byte slice"));
+            if !bin_array_contains(index, active_id) {
+                continue;
+            }
+            match parse_bin_array(&raw) {
+                Ok((idx, slots)) => return Some((idx, slots)),
+                Err(e) => {
+                    eprintln!("[prismd] bin-array parse failed: {e}");
+                    return None;
+                }
+            }
+        }
+        eprintln!("[prismd] no BinArray contains active bin {active_id} for {lb_pair}");
+        None
+    }
+
     /// One mint → atomic amount entry. `decimals` comes from the parsed
     /// account (TS reads it from the same `tokenAmount` object,
     /// `parseHoldingRow`). Zero-amount rent-only ATAs are skipped — the TS
@@ -5634,6 +5977,12 @@ mod tests {
         .collect();
         let rings: std::collections::HashMap<String, Vec<i64>> =
             [("poolA".to_string(), vec![100, 90])].into_iter().collect();
+        // Wave 100: ratio is HOST-COMPUTED and map-driven — poolA maps 1.7
+        // while its seeded signal rows say 0.2/5.0 (any regression back to
+        // the signal_snapshots SQL yields Some(0.2) and FAILS below); poolB
+        // has no ratio (cold → None).
+        let ratios: std::collections::HashMap<String, f64> =
+            [("poolA".to_string(), 1.7)].into_iter().collect();
         let mut shadows = fee_il_shadows_capped(
             &path_str,
             config::MIN_YIELD_EXIT_AGE_DEFAULT_MS,
@@ -5641,6 +5990,7 @@ mod tests {
             10,
             12,
             &stats_by_pool,
+            &ratios,
         );
         shadows.sort_by(|a, b| a.position_id.cmp(&b.position_id));
         let _ = std::fs::remove_file(&path);
@@ -5657,8 +6007,8 @@ mod tests {
         );
         assert_eq!(
             mature.ratio,
-            Some(0.2),
-            "must read the latest (not first) snapshot"
+            Some(1.7),
+            "ratio from the host-computed map (1.7), not the seeded 0.2 row"
         );
         assert!(
             !mature.onchain,
@@ -5690,7 +6040,7 @@ mod tests {
             "absent pool → stat legs fail open (None)"
         );
         assert_eq!(mature.pool_bin_step, None, "absent pool → bin_step None");
-        assert_eq!(fresh.ratio, None, "no snapshot yet -> no ratio");
+        assert_eq!(fresh.ratio, None, "no map entry → cold ratio None");
         assert!(fresh.onchain, "non-NULL position_pubkey -> onchain");
         // Wave 99: no host history table in this fixture → TA no-vote,
         // fail-open (the builder's TA source is prismd_pool_history now).
@@ -6884,6 +7234,7 @@ mod tests {
             10,
             12,
             &stats,
+            &std::collections::HashMap::new(),
         );
         let _ = std::fs::remove_file(&path);
         assert_eq!(shadows.len(), 1);
@@ -6946,6 +7297,7 @@ mod tests {
             &std::collections::HashMap::new(),
             10,
             12,
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
         );
         let _ = std::fs::remove_file(&path);
@@ -7024,6 +7376,190 @@ mod tests {
             assert_eq!(total_after, 4, "oversized retention pruned nothing");
         }
         let _ = std::fs::remove_file(&wpath);
+    }
+
+    #[test]
+    fn estimate_daily_il_and_fee_ratio_vectors() {
+        // Ported TS vectors (bench/metrics-data-path.test.ts) with reference
+        // values captured FROM THE TS ENGINE itself via bun (2026-09-23) —
+        // the host must land on the same doubles for the same inputs.
+        // Concentrated fixture: 41 bins (active±20), liquidity at |d| <= 1
+        // (1e9 each), binStep 10 — TS makeConcentratedBinArray.
+        let concentrated: Vec<rpc::BinSlot> = (0..=40)
+            .filter_map(|i| {
+                let bin_id: i64 = 4980 + i;
+                let d = (bin_id - 5000).abs();
+                (d <= 1).then_some(rpc::BinSlot {
+                    bin_id,
+                    liquidity_supply: 1_000_000_000,
+                })
+            })
+            .collect();
+        let conc = concentration_multiplier(&concentrated, 5000);
+        let t: i64 = 1_800_000_000_000;
+        let mk_drift = || {
+            Some(PriceDrift {
+                previous_price: 150.0,
+                previous_timestamp_ms: t - 600_000,
+            })
+        };
+
+        // (i) low-fee / high-drift < 1.2 floor (TS: not-999 + below-min).
+        let low = compute_fee_il_ratio(100_000.0, 50.0, 154.5, t, 10, conc, mk_drift());
+        assert!(low < 1.2, "low={low}");
+        assert!((low - 0.003_179_533_169_528_944).abs() < 1e-12, "low={low}");
+        // (ii) calm fees+small drift beats wild (TS engine exact):
+        let calm = compute_fee_il_ratio(100_000.0, 500.0, 150.3, t, 10, conc, mk_drift());
+        let wild = compute_fee_il_ratio(100_000.0, 50.0, 157.5, t, 10, conc, mk_drift());
+        assert!((calm - 6.958_338_543_726_566).abs() < 1e-12, "calm={calm}");
+        assert!(
+            (wild - 0.001_167_187_474_173_445).abs() < 1e-15,
+            "wild={wild}"
+        );
+        assert!(calm > wild, "high fees + low drift outranks the reverse");
+        // (iv) 24h anchored: calm day > 1.8, crash day < 1.2 (TS engine exact).
+        let calm24 = compute_fee_il_ratio(
+            100_000.0,
+            800.0,
+            125.0,
+            86_400_000,
+            10,
+            conc,
+            Some(PriceDrift {
+                previous_price: 122.5,
+                previous_timestamp_ms: 0,
+            }),
+        );
+        let crash24 = compute_fee_il_ratio(
+            100_000.0,
+            800.0,
+            159.25,
+            86_400_000,
+            10,
+            conc,
+            Some(PriceDrift {
+                previous_price: 122.5,
+                previous_timestamp_ms: 0,
+            }),
+        );
+        assert!(
+            (calm24 - 15.681_199_989_832_617).abs() < 1e-12,
+            "calm24={calm24}"
+        );
+        assert!(
+            (crash24 - 0.093_642_728_492_944_33).abs() < 1e-15,
+            "crash24={crash24}"
+        );
+        // No drift at all → binStep proxy path (TS ii-b: binStep changes the ratio).
+        let proxy_narrow = compute_fee_il_ratio(100_000.0, 100.0, 150.0, t, 10, conc, None);
+        let proxy_wide = compute_fee_il_ratio(100_000.0, 100.0, 150.0, t, 100, conc, None);
+        assert_ne!(proxy_narrow, proxy_wide, "proxy varies with binStep");
+        // Unknown reserves (TS reservesKnown=false → concentration 1).
+        assert_eq!(concentration_multiplier(&[], 5000), 1.0, "unknown → 1");
+        // tvl 0 → 0; no-IL + fees → MAX; no-IL + no-fees → 0.
+        assert_eq!(
+            compute_fee_il_ratio(0.0, 500.0, 150.0, t, 10, conc, None),
+            0.0
+        );
+        assert_eq!(
+            compute_fee_il_ratio(100_000.0, 0.0, 150.0, t, 10, conc, None),
+            if 0.0 > 0.0 { MAX_FEE_IL_RATIO } else { 0.0 }
+        );
+    }
+
+    #[test]
+    fn parse_bin_array_fixture_and_guards() {
+        // Real ZEC-SOL BinArray captured 2026-09-23 via the SDK's own
+        // lb_pair memcmp filter: index 35 → range [2450, 2519] contains the
+        // active bin 2461; 70/70 bins hold liquidity; disc exact.
+        let raw = include_bytes!("binarray_8eyb.bin");
+        let (index, slots) = rpc::parse_bin_array(raw).expect("fixture parses");
+        assert_eq!(index, 35, "index → lower = index × 70 = 2450");
+        assert_eq!(slots.len(), 70, "full BIN_ARRAY_SIZE slots");
+        assert_eq!(
+            slots[0].bin_id, 2450,
+            "lower + 0 (SDK getBinIdIndexInBinArray inverse)"
+        );
+        assert_eq!(slots[69].bin_id, 2519, "lower + 69");
+        assert!(
+            slots.iter().all(|s| s.liquidity_supply > 0),
+            "70/70 liquid on the live capture"
+        );
+        // Containment (the picker's test): 2461 ∈ [2450, 2519] ✓; a
+        // neighboring array's index 15 → [1050, 1119] does not contain it.
+        let lower = index * rpc::BIN_ARRAY_SIZE;
+        assert!(2461 >= lower && 2461 < lower + rpc::BIN_ARRAY_SIZE);
+        assert!(
+            rpc::bin_array_contains(index, 2461),
+            "captured array (index 35) holds the active bin"
+        );
+        assert!(
+            !rpc::bin_array_contains(15, 2461),
+            "neighbor array [1050, 1119] does not contain 2461"
+        );
+        // Guards: wrong discriminator, short buffer, overflow-safe ids.
+        let mut bad = raw.to_vec();
+        bad[0] ^= 0xff;
+        assert!(
+            rpc::parse_bin_array(&bad).is_err(),
+            "discriminator mismatch"
+        );
+        assert!(rpc::parse_bin_array(&raw[..10]).is_err(), "short buffer");
+        // Real-pool concentration: deep 70-bin liquidity sits near the
+        // reference width → multiplier in (1, 10], TS-engine ratio caps at 20
+        // for both the drift and proxy arms (cross-checked via bun).
+        let real_conc = concentration_multiplier(&slots, 2461);
+        assert!(
+            real_conc > 1.0 && real_conc <= 10.0,
+            "real_conc={real_conc}"
+        );
+        let t: i64 = 1_800_000_000_000;
+        let ratio_drift = compute_fee_il_ratio(
+            281889.5393,
+            2_164.232_204_510_240_5,
+            1_606.797_106_8,
+            t,
+            20,
+            real_conc,
+            Some(PriceDrift {
+                previous_price: 1_590.0,
+                previous_timestamp_ms: t - 86_400_000,
+            }),
+        );
+        assert_eq!(ratio_drift, MAX_FEE_IL_RATIO, "TS engine pins 20 (capped)");
+        let ratio_proxy = compute_fee_il_ratio(
+            281889.5393,
+            2_164.232_204_510_240_5,
+            1_606.797_106_8,
+            t,
+            20,
+            real_conc,
+            None,
+        );
+        assert_eq!(ratio_proxy, MAX_FEE_IL_RATIO, "proxy arm also caps at 20");
+    }
+
+    #[test]
+    fn snapshot_price_drift_anchor_vectors() {
+        // Ported TS vectors (bench/scan-set.test.ts): anchor = OLDEST row,
+        // None on cold start AND when span < 1h (jitter guard).
+        let rows: Vec<(f64, i64)> = vec![
+            (100.0, 1_000),
+            (101.0, 2_000),
+            (102.0, 3_000 + MIN_FEE_WINDOW_SPAN_MS),
+        ];
+        let drift = snapshot_price_drift(&rows).expect("window spans the floor");
+        assert_eq!(drift, (100.0, 1_000), "oldest in-window row anchors");
+        assert_eq!(
+            snapshot_price_drift(&[]),
+            None,
+            "cold start → binStep proxy"
+        );
+        assert_eq!(
+            snapshot_price_drift(&[(100.0, 1_000), (101.0, 2_000)]),
+            None,
+            "span < 1h → jitter guard → proxy"
+        );
     }
 
     #[test]
@@ -7157,6 +7693,7 @@ mod tests {
             10,
             12,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
         );
         assert_eq!(
             uncapped[0].net_drift_bins,
@@ -7173,6 +7710,7 @@ mod tests {
             &sliced,
             10,
             12,
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
         );
         assert_eq!(
