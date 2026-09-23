@@ -137,6 +137,42 @@ pub fn stop_loss_veto(
     Some((c - d) / d < -stop_loss_pct)
 }
 
+/// One pool's stat legs + provenance (waves 97-98). `measured` = the
+/// DATAPI tier answered — the ONLY source that may set `known`
+/// (`feeIlRatioKnown`/accrual are datapi-only in TS; the gecko overlay
+/// leaves farm/verification/freeze null and never counts). Legs survive
+/// the overlay; `bin_step` prefers the chain lbPair value (TS's source,
+/// adapter-service.ts:3729) with datapi `pool_config` as fallback.
+struct PoolStatEntry {
+    measured: bool,
+    tvl_usd: f64,
+    fees_24h_usd: f64,
+    bin_step: Option<i64>,
+    current_price: Option<f64>,
+}
+
+impl PoolStatEntry {
+    fn from_datapi(s: datapi::PoolStats, chain_bin_step: Option<i64>) -> Self {
+        Self {
+            measured: true,
+            tvl_usd: s.tvl_usd,
+            fees_24h_usd: s.fees_24h_usd,
+            bin_step: chain_bin_step.or(s.bin_step),
+            current_price: Some(s.current_price),
+        }
+    }
+
+    fn from_gecko(g: gecko::GeckoStats, chain_bin_step: Option<i64>) -> Self {
+        Self {
+            measured: false,
+            tvl_usd: g.tvl_usd,
+            fees_24h_usd: g.fees_24h_usd,
+            bin_step: chain_bin_step,
+            current_price: g.current_price,
+        }
+    }
+}
+
 /// SHADOW-only portfolio-drawdown veto: mirrors `checkDrawdownGate`
 /// (risk-service.ts:133-154) — ENTER vetoes when unrealized book PnL is
 /// negative and `|pnl| / portfolio` exceeds 10% (hardcoded in TS, no config).
@@ -1519,6 +1555,13 @@ mod config {
         /// — feeds the tick's live statsSource tier; the `--datapi-probe` CLI
         /// reads the same env var directly.
         pub meteora_data_api_url: String,
+        /// GeckoTerminal tier master switch (wave 98; default ON — TS's
+        /// `GECKO_TERMINAL_ENABLED !== false`). Off → a datapi miss falls
+        /// straight to legs-None (fail-open, no gas verdict).
+        pub gecko_terminal_enabled: bool,
+        /// GeckoTerminal API base (default `https://api.geckoterminal.com/api/v2`,
+        /// TS DEFAULT_BASE_URL). Keyless; paced to 28 req/min in `mod gecko`.
+        pub gecko_base_url: String,
         /// Wallet pubkey (base58, 32 bytes). Empty = walletless, exactly like
         /// TS `adapter.hasWallet() === false`: live execution is a no-op and
         /// the wallet balance read is skipped. Validated on load — a junk
@@ -1919,6 +1962,25 @@ mod config {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => crate::datapi::DEFAULT_BASE_URL.to_string(),
         }
+    }
+
+    /// Parse-or-default for `GECKO_TERMINAL_API_URL` (absent/whitespace →
+    /// the TS default `mod gecko::DEFAULT_BASE_URL`, same URL shape).
+    pub fn parse_gecko_base_url(raw: Option<&str>) -> String {
+        match raw.map(str::trim) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => crate::gecko::DEFAULT_BASE_URL.to_string(),
+        }
+    }
+
+    /// `GECKO_TERMINAL_ENABLED`: ON unless explicitly set to a recognized
+    /// false value — TS's `GECKO_TERMINAL_ENABLED !== false` (default-on
+    /// tier); absent/garbage both resolve to true.
+    pub fn parse_gecko_enabled(raw: Option<&str>) -> bool {
+        !matches!(
+            raw.map(str::trim).map(str::to_lowercase).as_deref(),
+            Some("false") | Some("0") | Some("no")
+        )
     }
 
     /// Parse-or-default for the wallet pubkey. Absent/empty -> "" = walletless
@@ -2373,6 +2435,12 @@ mod config {
                 solana_rpc_url: parse_solana_rpc_url(env::var("SOLANA_RPC_URL").ok().as_deref()),
                 meteora_data_api_url: parse_data_api_url(
                     env::var("METEORA_DATA_API_URL").ok().as_deref(),
+                ),
+                gecko_terminal_enabled: parse_gecko_enabled(
+                    env::var("GECKO_TERMINAL_ENABLED").ok().as_deref(),
+                ),
+                gecko_base_url: parse_gecko_base_url(
+                    env::var("GECKO_TERMINAL_API_URL").ok().as_deref(),
                 ),
                 wallet_pubkey: parse_wallet_pubkey(env::var("WALLET_PUBKEY").ok().as_deref())?,
                 jupiter_api_key: env::var("JUPITER_API_KEY")
@@ -2877,7 +2945,7 @@ fn fee_il_shadows_capped(
     bin_rings: &std::collections::HashMap<String, Vec<i64>>,
     recovery_lookback: i64,
     vol_lookback: i64,
-    stats_by_pool: &std::collections::HashMap<String, datapi::PoolStats>,
+    stats_by_pool: &std::collections::HashMap<String, PoolStatEntry>,
 ) -> Vec<FeeIlShadow> {
     let conn = match rusqlite::Connection::open_with_flags(
         Path::new(sqlite_path),
@@ -2994,15 +3062,16 @@ fn fee_il_shadows_capped(
             let vol_bins_newest_first = window(vol_lookback);
             // Precomputed: field-init order would move `pool_address` into
             // the struct before later fields could borrow it. One map read
-            // feeds `known` (wave-94 presence semantics) AND every datapi
-            // stat leg (wave 97) — absent pool (fetch failed) → false/None,
-            // fail-open.
+            // feeds EVERY stat leg — `known` requires `measured` (datapi
+            // presence ONLY: a gecko-overlay entry carries legs but must
+            // never set the datapi-only flag), legs fail open on absent
+            // pools. bin_step prefers the chain value (TS's source).
             let stats = stats_by_pool.get(&pool_address);
-            let known = stats.is_some();
+            let known = stats.is_some_and(|e| e.measured);
             let pool_tvl_usd = stats.map(|s| s.tvl_usd);
             let pool_fees_24h_usd = stats.map(|s| s.fees_24h_usd);
             let pool_bin_step = stats.and_then(|s| s.bin_step);
-            let pool_current_price = stats.map(|s| s.current_price);
+            let pool_current_price = stats.and_then(|s| s.current_price);
             FeeIlShadow {
                 position_id,
                 pool_address,
@@ -3191,39 +3260,34 @@ fn tick(cfg: &config::Config, n: u64) {
             Vec::new()
         }
     };
-    // Wave 97: the fetch's FULL PoolStats flows to the builder — `known`
-    // stays presence (wave-94 semantics unchanged) and the gas/entry-shape
-    // legs (tvl, fees24h, bin_step, current price) come from the same
-    // measured read instead of TS-persisted pool_snapshots. One memoized GET
-    // feeds every datapi consumer; a failed fetch drops the pool (warned
-    // inside) → legs None = fail-open. TS's gecko fallback tier for these
-    // legs is wave 98 — until then a datapi outage means no gas verdict.
-    let stats_by_pool: std::collections::HashMap<String, datapi::PoolStats> = open_pools
-        .iter()
-        .filter_map(|p| {
-            datapi::get_pool_stats(&cfg.meteora_data_api_url, p, Duration::from_secs(10))
-                .map(|s| (p.clone(), s))
-        })
-        .collect();
-    // Live active bin per open pool (wave 95): one `getAccountInfo` →
-    // `LbPair.active_id` pushed into the host's OWN binHistory ring — TS's
-    // in-memory Map mechanism (program.ts:5937/5973), same per-process
-    // semantics (cold start, never seeded from persisted rows). A failed
-    // read skips this tick's sample (warned) but keeps the pool's existing
-    // history. The snapshot handed to the builder covers open pools only.
+    // Chain state per open pool (waves 95 + 98): ONE `getAccountInfo` →
+    // `(active_id, bin_step)`. active_id feeds the host's OWN binHistory
+    // ring — TS's in-memory Map mechanism (program.ts:5937/5973), same
+    // per-process semantics (cold start, never seeded from persisted rows);
+    // bin_step is TS's actual binStep source (adapter-service.ts:3729) and
+    // the base of the gecko tier's modeled fee. A failed read skips this
+    // tick's sample (warned) but keeps the pool's prior history.
+    let mut chain_bin_steps: std::collections::HashMap<String, Option<i64>> =
+        std::collections::HashMap::new();
     let bin_rings: std::collections::HashMap<String, Vec<i64>> = {
         let mut out = std::collections::HashMap::new();
         match BIN_HISTORY.lock() {
             Ok(mut history) => {
                 for p in &open_pools {
-                    match rpc::get_active_id(&cfg.solana_rpc_url, p, Duration::from_secs(10)) {
-                        Ok(id) => push_bin_history(
-                            history.entry(p.clone()).or_default(),
-                            i64::from(id),
-                            bin_history_cap as usize,
-                        ),
+                    match rpc::get_lb_pair_state(&cfg.solana_rpc_url, p, Duration::from_secs(10)) {
+                        Ok((id, bin_step)) => {
+                            push_bin_history(
+                                history.entry(p.clone()).or_default(),
+                                i64::from(id),
+                                bin_history_cap as usize,
+                            );
+                            chain_bin_steps.insert(p.clone(), Some(i64::from(bin_step)));
+                        }
                         Err(e) => {
-                            eprintln!("[prismd] active-bin read failed for {p}: {e} (ring keeps prior samples)");
+                            eprintln!(
+                                "[prismd] lbPair read failed for {p}: {e} (ring keeps prior samples)"
+                            );
+                            chain_bin_steps.insert(p.clone(), None);
                         }
                     }
                     if let Some(r) = history.get(p.as_str()) {
@@ -3235,6 +3299,44 @@ fn tick(cfg: &config::Config, n: u64) {
         }
         out
     };
+    // Stats pipeline (waves 94/97/98): datapi → gecko → none, one memoized
+    // GET each (datapi 30s cache + retry; gecko 2.1s claim-slot paced).
+    // `PoolStatEntry.measured` is DATAPI PRESENCE ONLY — `known`/accrual are
+    // datapi-only in TS, so the gecko overlay feeds the gas/shape legs but
+    // can never set measured. Gecko needs the chain bin_step (fee model +
+    // TS's binStep source); a chain-failed pool gets no gecko either (both
+    // warned above). Total outage → legs None = fail-open (TS fabricates a
+    // heuristic here — documented divergence; never a fabricated verdict).
+    let stats_by_pool: std::collections::HashMap<String, PoolStatEntry> = open_pools
+        .iter()
+        .filter_map(|p| {
+            let chain_bs = chain_bin_steps.get(p).copied().flatten();
+            if let Some(s) =
+                datapi::get_pool_stats(&cfg.meteora_data_api_url, p, Duration::from_secs(10))
+            {
+                return Some((p.clone(), PoolStatEntry::from_datapi(s, chain_bs)));
+            }
+            if !cfg.gecko_terminal_enabled {
+                return None;
+            }
+            match chain_bs {
+                Some(bs) => {
+                    let base_fee_rate = 0.0025 + (bs as f64) / 10_000.0;
+                    gecko::get_pool_stats(
+                        &cfg.gecko_base_url,
+                        p,
+                        base_fee_rate,
+                        Duration::from_secs(10),
+                    )
+                    .map(|g| (p.clone(), PoolStatEntry::from_gecko(g, chain_bs)))
+                }
+                None => {
+                    eprintln!("[prismd] gecko skipped for {p}: chain bin_step unknown (fee model)");
+                    None
+                }
+            }
+        })
+        .collect();
     let shadows = fee_il_shadows_capped(
         &cfg.sqlite_path,
         cfg.min_yield_exit_age_ms,
@@ -4328,13 +4430,147 @@ fn main() {
     }
 }
 
+/// GeckoTerminal stats tier (wave 98): the TS pipeline's SECOND source —
+/// datapi miss falls through to here, gecko miss falls to heuristic (the
+/// host reads legs None = fail-open; TS fabricates — documented
+/// divergence). Mirrors engine/gecko-terminal-service.ts: the same 2.1s
+/// claim-slot pacing (30 req/min keyless), the same numeric tolerance (GT
+/// mixes JSON numbers and numeric strings), volume24 required > 0, reserve
+/// REQUIRED (null reserve → unavailable, :220), fees = volume ×
+/// (pool_fee_percentage/100 when present, else the binStep-modeled
+/// `0.0025 + binStep/1e4` base rate — CL pools report null, live-verified).
+/// NEVER a measured source: `feeIlRatioKnown`/accrual stay datapi-only
+/// (gecko overlay in TS leaves farm/verification/freeze null).
+mod gecko {
+    use serde_json::Value;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    pub const DEFAULT_BASE_URL: &str = "https://api.geckoterminal.com/api/v2";
+    /// 30 req/min keyless → ≥2.1s between requests (28/min) — TS
+    /// `DEFAULT_REQUEST_INTERVAL_MS` (gecko-terminal-service.ts:55).
+    const REQUEST_INTERVAL: Duration = Duration::from_millis(2_100);
+    /// Absolute instant the next request may start (TS nextGeckoRequestAt).
+    static NEXT_SLOT: Mutex<Option<Instant>> = Mutex::new(None);
+
+    /// Claim-slot arithmetic (TS claimGeckoRequestSlot, :182): wait until
+    /// the reserved slot (or now), then push the slot one interval past
+    /// max(now, slot). Pure so the test feeds (next, now) directly.
+    pub fn reserve_slot(next: Option<Instant>, now: Instant) -> (Instant, Instant) {
+        let start = match next {
+            Some(t) if t > now => t,
+            _ => now,
+        };
+        (start, start + REQUEST_INTERVAL)
+    }
+
+    /// Block until this request's slot arrives (tick is sync; sleeping under
+    /// the mutex serializes callers — the desired pacing behavior).
+    fn claim_slot() {
+        let mut next = NEXT_SLOT.lock().unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        let (start, new_next) = reserve_slot(*next, now);
+        *next = Some(new_next);
+        if start > now {
+            std::thread::sleep(start - now);
+        }
+    }
+
+    /// TS `readFiniteNumber` parity (:118): JSON number OR non-empty
+    /// numeric string → finite f64; everything else → None.
+    fn finite(v: Option<&Value>) -> Option<f64> {
+        let n = match v {
+            Some(Value::Number(n)) => n.as_f64(),
+            Some(Value::String(s)) => {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    t.parse::<f64>().ok()
+                }
+            }
+            _ => None,
+        };
+        n.filter(|f| f.is_finite())
+    }
+
+    /// Usable GeckoTerminal pool stats (TS GeckoPoolStats): reserve and
+    /// volume are non-null here because the parser rejects their absence.
+    pub struct GeckoStats {
+        pub tvl_usd: f64,
+        /// Carried for the fee-math proof in tests (fees derive from it);
+        /// the tick consumes only tvl/fees/price.
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub volume_24h_usd: f64,
+        pub fees_24h_usd: f64,
+        pub current_price: Option<f64>,
+    }
+
+    /// TS `parseGeckoPoolStats` (:196) plus `getPoolStats`'s reserve
+    /// rejection (:220): unusable shape / volume ≤ 0 / reserve missing →
+    /// None (the caller logs once). `base_fee_rate` is the binStep-modeled
+    /// base-fee fraction used only when the payload reports no fee.
+    pub fn parse_pool_stats(raw: &Value, base_fee_rate: f64) -> Option<GeckoStats> {
+        let attrs = raw.get("data")?.get("attributes")?;
+        let volume = finite(attrs.get("volume_usd").and_then(|v| v.get("h24")))?;
+        if volume <= 0.0 {
+            return None;
+        }
+        let reserve = finite(attrs.get("reserve_in_usd"))?;
+        if reserve <= 0.0 {
+            return None;
+        }
+        // TS parseFeePercentageFraction: finite, ≥0 → percent/100; null or
+        // junk → the binStep-modeled rate (CL pools: field is null).
+        let fee_rate = finite(attrs.get("pool_fee_percentage"))
+            .filter(|p| *p >= 0.0)
+            .map(|p| p / 100.0)
+            .unwrap_or(base_fee_rate);
+        Some(GeckoStats {
+            tvl_usd: reserve,
+            volume_24h_usd: volume,
+            fees_24h_usd: volume * fee_rate,
+            current_price: finite(attrs.get("base_token_price_usd")),
+        })
+    }
+
+    /// One paced GET. Any failure → None with a warn, never an error the
+    /// tick must handle — the fail-through shape of TS getGeckoPoolStats.
+    pub fn get_pool_stats(
+        base_url: &str,
+        pool: &str,
+        base_fee_rate: f64,
+        timeout: Duration,
+    ) -> Option<GeckoStats> {
+        claim_slot();
+        let url = format!(
+            "{}/networks/solana/pools/{}",
+            base_url.trim_end_matches('/'),
+            pool
+        );
+        match crate::rpc::get_json(&url, timeout, None) {
+            Ok(v) => {
+                let parsed = parse_pool_stats(&v, base_fee_rate);
+                if parsed.is_none() {
+                    eprintln!("[prismd] gecko payload unusable for {pool} (volume/reserve)");
+                }
+                parsed
+            }
+            Err(e) => {
+                eprintln!("[prismd] gecko fetch failed for {pool}: {e} (stats fall through)");
+                None
+            }
+        }
+    }
+}
+
 /// Solana JSON-RPC 2.0 client — the host's ONLY chain read surface.
 ///
-/// Scope deliberately minimal: `getBalance` (native SOL lamports) +
-/// `getParsedTokenAccountsByOwner` (SPL holdings, parsed shape) are the two
-/// calls `readWalletSnapshot` (adapter-service.ts:2894-2963) needs before
-/// pricing. Pricing (Jupiter `fetchTokenPrices`) is a separate tier, and tx
-/// submission is Phase 3's LAST item — paper-first per the plan.
+/// Scope deliberately minimal: `getBalance` (native SOL lamports),
+/// `getParsedTokenAccountsByOwner` (SPL holdings) and `getAccountInfo`
+/// (the `LbPair` state read) are the calls the wallet and stats tiers need
+/// before pricing. Pricing (Jupiter `fetchTokenPrices`) is a separate tier,
+/// and tx submission is Phase 3's LAST item — paper-first per the plan.
 ///
 /// Fail-closed everywhere: a transport error, a non-2xx status, an RPC-level
 /// `error` object, or an unexpected result shape all yield `Err` with the
@@ -4417,32 +4653,44 @@ mod rpc {
     /// Byte offset of `active_id` (i32 LE) inside a `LbPair` account:
     /// 8-byte discriminator + repr(C) walk of StaticParameters (size 32,
     /// align 4) + VariableParameters (size 32, align 8) + bump_seed [u8;1] +
-    /// bin_step_seed [u8;2] + pair_type u8 → 8+32+32+1+2+1 = 76. The IDL
-    /// marks the type `serialization: "bytemuck"` (repr(C) POD), so the
-    /// layout is fixed — validated EXACT against the TS SDK's
-    /// `DLMM.getActiveBin().binId` live (2463 == 2463, 2026-09-22).
+    /// bin_step_seed [u8;2] + pair_type u8 → 8+32+32+1+2+1 = 76. `bin_step`
+    /// (u16 LE) follows immediately at 80 — both live-validated: the same
+    /// account yielded activeId == the TS SDK's `getActiveBin().binId`
+    /// (2463 == 2463, 2026-09-22) and bin_step 20 == the Data API's
+    /// `pool_config.bin_step`. The IDL marks the type
+    /// `serialization: "bytemuck"` (repr(C) POD), so the layout is fixed.
     pub const ACTIVE_ID_OFFSET: usize = 76;
+    pub const BIN_STEP_OFFSET: usize = 80;
 
-    /// Pure parse of a raw `LbPair` account: discriminator check + i32 LE.
-    pub fn parse_active_id(data: &[u8]) -> Result<i32, String> {
-        if data.len() < ACTIVE_ID_OFFSET + 4 {
+    /// Pure parse of a raw `LbPair` account: discriminator check, then
+    /// `(active_id, bin_step)`. TS reads the same pair off `lbPair`
+    /// (adapter-service.ts:3729 for binStep).
+    pub fn parse_lb_pair(data: &[u8]) -> Result<(i32, u16), String> {
+        if data.len() < BIN_STEP_OFFSET + 2 {
             return Err(format!("lbPair account too short: {} bytes", data.len()));
         }
         if data[..8] != LB_PAIR_DISCRIMINATOR {
             return Err("discriminator mismatch (not a DLMM LbPair account)".to_string());
         }
-        Ok(i32::from_le_bytes([
+        let active_id = i32::from_le_bytes([
             data[ACTIVE_ID_OFFSET],
             data[ACTIVE_ID_OFFSET + 1],
             data[ACTIVE_ID_OFFSET + 2],
             data[ACTIVE_ID_OFFSET + 3],
-        ]))
+        ]);
+        let bin_step = u16::from_le_bytes([data[BIN_STEP_OFFSET], data[BIN_STEP_OFFSET + 1]]);
+        Ok((active_id, bin_step))
     }
 
-    /// LIVE active bin for the `lb_pair` account: `getAccountInfo` (base64)
-    /// then `parse_active_id`. Host twin of TS `DLMM.getActiveBin()`
-    /// (adapter-service.ts:2200): ONE RPC, no SDK.
-    pub fn get_active_id(url: &str, lb_pair: &str, timeout: Duration) -> Result<i32, String> {
+    /// LIVE `(active_id, bin_step)` for the `lb_pair` account —
+    /// `getAccountInfo` (base64) then `parse_lb_pair`. Host twin of TS
+    /// `dlmm.getActiveBin()` + `lbPair.binStep` (adapter-service.ts:2200,
+    /// :3729): ONE RPC, no SDK.
+    pub fn get_lb_pair_state(
+        url: &str,
+        lb_pair: &str,
+        timeout: Duration,
+    ) -> Result<(i32, u16), String> {
         let body = json!({
             "jsonrpc": "2.0",
             "id": next_id(),
@@ -4461,7 +4709,7 @@ mod rpc {
         let data = base64::engine::general_purpose::STANDARD
             .decode(b64)
             .map_err(|e| format!("{url}: base64: {e}"))?;
-        parse_active_id(&data)
+        parse_lb_pair(&data)
     }
 
     /// One mint → atomic amount entry. `decimals` comes from the parsed
@@ -4581,7 +4829,7 @@ mod rpc {
 
     /// GET JSON without a JSON-RPC envelope. Same rustls-install boundary as
     /// `post`: unit tests reach a working Client without going through main().
-    fn get_json(url: &str, timeout: Duration, api_key: Option<&str>) -> Result<Value, String> {
+    pub fn get_json(url: &str, timeout: Duration, api_key: Option<&str>) -> Result<Value, String> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)
@@ -5255,9 +5503,9 @@ mod tests {
         // poolB carries full stats with no row. The stat legs read from the
         // same map (wave 97). Bin history is the chain-fed RING: poolA gets
         // [100, 90] (drift −10), poolB is absent → cold None.
-        let stats_by_pool: std::collections::HashMap<String, datapi::PoolStats> = [(
+        let stats_by_pool: std::collections::HashMap<String, PoolStatEntry> = [(
             "poolB".to_string(),
-            stats_fixture(50_000.0, 250.0, 20, 1.23),
+            PoolStatEntry::from_datapi(stats_fixture(50_000.0, 250.0, 20, 1.23), None),
         )]
         .into_iter()
         .collect();
@@ -6059,6 +6307,8 @@ mod tests {
             sol_price_usd: 150.0,
             solana_rpc_url: "https://example.com".to_string(),
             meteora_data_api_url: "https://datapi.example.test".to_string(),
+            gecko_terminal_enabled: true,
+            gecko_base_url: "https://gecko.example.test".to_string(),
             wallet_pubkey: String::new(),
             jupiter_api_key: String::new(),
             gas_aware_min_days: 3.0,
@@ -6370,6 +6620,152 @@ mod tests {
     }
 
     #[test]
+    fn gecko_parse_fixture_and_guards() {
+        // Live-captured ZEC-SOL payload (2026-09-23): GT mixes JSON numbers
+        // and numeric STRINGS — the parser accepts both (TS readFiniteNumber).
+        // `pool_fee_percentage` is null for this CL pool (AGENTS live-verified
+        // class), so fees use the binStep-modeled rate: volume × 0.0045
+        // (0.0025 + 20/1e4).
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("gecko_zec_sol.json")).expect("fixture json");
+        assert!(v["data"]["attributes"]["pool_fee_percentage"].is_null());
+        let s = gecko::parse_pool_stats(&v, 0.0045).expect("fixture parses");
+        assert!(s.tvl_usd > 0.0, "reserve required");
+        assert!(s.volume_24h_usd > 0.0, "volume24 required");
+        let expected_fees = s.volume_24h_usd * 0.0045;
+        assert!(
+            (s.fees_24h_usd - expected_fees).abs() < 1e-9,
+            "modeled fee = volume × base rate"
+        );
+        assert!(s.current_price.is_some(), "base price parsed");
+
+        // An explicit percent fee WINS over the modeled rate (TS
+        // parseFeePercentageFraction: percent/100).
+        let mut custom = v.clone();
+        custom["data"]["attributes"]["pool_fee_percentage"] = serde_json::json!("0.5");
+        let s2 = gecko::parse_pool_stats(&custom, 0.0045).expect("parsed");
+        let expected2 = s2.volume_24h_usd * 0.005;
+        assert!((s2.fees_24h_usd - expected2).abs() < 1e-9, "percent → /100");
+
+        // Guards: null reserve → unavailable (TS get rejects), volume missing
+        // or non-positive → unusable, shape drift → None.
+        let mut no_reserve = v.clone();
+        no_reserve["data"]["attributes"]["reserve_in_usd"] = serde_json::Value::Null;
+        assert!(
+            gecko::parse_pool_stats(&no_reserve, 0.0045).is_none(),
+            "null reserve"
+        );
+        let mut zero_volume = v.clone();
+        zero_volume["data"]["attributes"]["volume_usd"] = serde_json::json!({ "h24": "0" });
+        assert!(
+            gecko::parse_pool_stats(&zero_volume, 0.0045).is_none(),
+            "zero volume"
+        );
+        assert!(
+            gecko::parse_pool_stats(&serde_json::Value::Null, 0.0045).is_none(),
+            "shape drift"
+        );
+    }
+
+    #[test]
+    fn gecko_reserve_slot_matches_ts_claim() {
+        // TS claimGeckoRequestSlot (gecko-terminal-service.ts:182): wait to
+        // the reserved slot (or now), then push one interval past max(now,slot).
+        let now = std::time::Instant::now();
+        // No slot yet → start now, next one interval out.
+        let (start, next) = gecko::reserve_slot(None, now);
+        assert_eq!(start, now);
+        assert_eq!(next, now + Duration::from_millis(2_100));
+        // Future slot → wait for it untouched.
+        let future = now + Duration::from_millis(500);
+        let (start2, next2) = gecko::reserve_slot(Some(future), now);
+        assert_eq!(start2, future);
+        assert_eq!(next2, future + Duration::from_millis(2_100));
+        // Stale (past) slot → restart from now, never sleep backwards.
+        let past = now - Duration::from_millis(9_000);
+        let (start3, next3) = gecko::reserve_slot(Some(past), now);
+        assert_eq!(start3, now);
+        assert_eq!(next3, now + Duration::from_millis(2_100));
+    }
+
+    #[test]
+    fn gecko_config_defaults_like_ts() {
+        assert_eq!(
+            config::parse_gecko_base_url(None),
+            gecko::DEFAULT_BASE_URL,
+            "absent -> TS default"
+        );
+        assert_eq!(
+            config::parse_gecko_base_url(Some("  ")),
+            gecko::DEFAULT_BASE_URL
+        );
+        assert_eq!(
+            config::parse_gecko_base_url(Some(" https://alt.example/v2/ ")),
+            "https://alt.example/v2/",
+            "trimmed custom URL wins"
+        );
+        // Default-ON tier (TS `GECKO_TERMINAL_ENABLED !== false`).
+        assert!(config::parse_gecko_enabled(None));
+        assert!(config::parse_gecko_enabled(Some("garbage")));
+        assert!(!config::parse_gecko_enabled(Some("false")));
+        assert!(!config::parse_gecko_enabled(Some("0")));
+        assert!(!config::parse_gecko_enabled(Some("NO")));
+    }
+
+    #[test]
+    fn gecko_entry_feeds_legs_but_never_known() {
+        // THE wave-98 semantic split: a geckoterminal overlay entry carries
+        // the gas/shape legs but `measured=false`, so `known` (datapi-only
+        // in TS — feeIlRatioKnown/accrual) stays FALSE. Absent entry →
+        // every leg None, known false.
+        let path =
+            std::env::temp_dir().join(format!("prismd-gecko-entry-test-{}.db", std::process::id()));
+        make_shadow_test_db(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+            conn.execute(
+                "INSERT INTO positions (position_id, pool_address, timestamp, closed_at, position_pubkey) VALUES ('pos-geo', 'poolGeo', ?1, NULL, NULL)",
+                [now],
+            )
+            .unwrap();
+            drop(conn);
+        }
+        let path_str = path.to_str().unwrap().to_string();
+        let gecko_stats = gecko::GeckoStats {
+            tvl_usd: 111_000.0,
+            volume_24h_usd: 5_000.0,
+            fees_24h_usd: 22.5,
+            current_price: Some(1.5),
+        };
+        let stats: std::collections::HashMap<String, PoolStatEntry> = [(
+            "poolGeo".to_string(),
+            PoolStatEntry::from_gecko(gecko_stats, Some(64)),
+        )]
+        .into_iter()
+        .collect();
+        let shadows = fee_il_shadows_capped(
+            &path_str,
+            0,
+            &std::collections::HashMap::new(),
+            10,
+            12,
+            &stats,
+        );
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(shadows.len(), 1);
+        let s = &shadows[0];
+        assert!(!s.known, "gecko NEVER sets the datapi-only flag");
+        assert_eq!(s.pool_tvl_usd, Some(111_000.0), "legs survive the overlay");
+        assert_eq!(s.pool_fees_24h_usd, Some(22.5));
+        assert_eq!(s.pool_bin_step, Some(64), "chain bin_step");
+        assert_eq!(s.pool_current_price, Some(1.5));
+    }
+
+    #[test]
     fn push_bin_history_cap_evicts_oldest() {
         // TS pushBinHistory (program.ts:5973-5976): chronological append,
         // evict beyond cap — the cap that used to live in the SQL LIMIT.
@@ -6392,30 +6788,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_active_id_guards_and_fixture() {
-        // Real ZEC-SOL `LbPair` account captured 2026-09-22 — the parse
+    fn parse_lb_pair_guards_and_fixture() {
+        // Real ZEC-SOL `LbPair` account captured 2026-09-22 — active_id
         // matched the TS SDK's `DLMM.getActiveBin().binId` EXACTLY in the
-        // same run (raw@76 == SDK binId == 2463; this file froze at 2461).
+        // same run (raw@76 == SDK binId == 2463; this file froze at 2461)
+        // and bin_step 20 matches the Data API's `pool_config.bin_step`
+        // (two independent sources, same value).
         let fixture = include_bytes!("lbpair_8eyb.bin");
         assert_eq!(
-            rpc::parse_active_id(fixture).expect("fixture parses"),
-            2461,
-            "fixture active_id (discriminator + offset 76)"
+            rpc::parse_lb_pair(fixture).expect("fixture parses"),
+            (2461, 20),
+            "fixture (active_id, bin_step) — offsets 76/80"
         );
-        // Synthetic: discriminator + a NEGATIVE i32 at the offset (signed leg).
-        let mut raw = vec![0u8; rpc::ACTIVE_ID_OFFSET + 4];
+        // Synthetic: discriminator + NEGATIVE i32 id + a distinct u16 step.
+        let mut raw = vec![0u8; rpc::BIN_STEP_OFFSET + 2];
         raw[..8].copy_from_slice(&rpc::LB_PAIR_DISCRIMINATOR);
         raw[rpc::ACTIVE_ID_OFFSET..][..4].copy_from_slice(&(-7i32).to_le_bytes());
-        assert_eq!(rpc::parse_active_id(&raw).unwrap(), -7);
+        raw[rpc::BIN_STEP_OFFSET..][..2].copy_from_slice(&250u16.to_le_bytes());
+        assert_eq!(rpc::parse_lb_pair(&raw).unwrap(), (-7, 250));
         // Guards: wrong discriminator and a short buffer both fail closed.
         let mut bad = raw.clone();
         bad[0] ^= 0xff;
+        assert!(rpc::parse_lb_pair(&bad).is_err(), "discriminator mismatch");
         assert!(
-            rpc::parse_active_id(&bad).is_err(),
-            "discriminator mismatch"
-        );
-        assert!(
-            rpc::parse_active_id(&fixture[..rpc::ACTIVE_ID_OFFSET]).is_err(),
+            rpc::parse_lb_pair(&fixture[..rpc::BIN_STEP_OFFSET + 1]).is_err(),
             "short buffer"
         );
     }
