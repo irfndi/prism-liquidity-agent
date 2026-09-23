@@ -263,8 +263,15 @@ function assetUrl(asset: ReleaseAsset | undefined): string {
 }
 
 function findTarballAsset(assets: GitHubRelease["assets"]): ReleaseAsset | undefined {
+  // Source tarball only: platform bundles also end in `.tar.gz` and sort
+  // BEFORE it (`-` < `.`), so a bare suffix match can hand a bundle to the
+  // source-install path. The platform triple is the discriminator.
   return assets.find(
-    (a) => a.name.endsWith(".tar.gz") && !a.name.endsWith(".sha256") && !a.name.endsWith(".asc"),
+    (a) =>
+      a.name.endsWith(".tar.gz") &&
+      !a.name.endsWith(".sha256") &&
+      !a.name.endsWith(".asc") &&
+      !/(linux|darwin|windows)-(x64|arm64)/.test(a.name),
   );
 }
 
@@ -277,7 +284,11 @@ function findSha256Asset(
     const expected = `${tarballName}.sha256`;
     return assets.find((a) => a.name === expected);
   }
-  return assets.find((a) => a.name.endsWith(".sha256"));
+  // Same platform-bundle exclusion as findTarballAsset: never pair a source
+  // tarball request with a platform bundle's checksum.
+  return assets.find(
+    (a) => a.name.endsWith(".sha256") && !/(linux|darwin|windows)-(x64|arm64)/.test(a.name),
+  );
 }
 
 export function githubReleaseToInfo(

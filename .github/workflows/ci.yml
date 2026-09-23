@@ -127,10 +127,10 @@ jobs:
         run: bun --bun vitest run --shard=${{ matrix.shard }}/${{ matrix.total }}
         working-directory: cloudflare
 
-  # Canary release channel: build + publish a per-merge canary bundle to R2
-  # whenever CI passes on main. Mirrors release.yml's bundle/manifest patterns
-  # but publishes to a canary-only R2 prefix and flips a single manifest
-  # pointer (releases/channel/canary.json) last. No GitHub Release, no GPG.
+  # Canary release channel: build + publish a per-merge canary bundle as the
+  # rolling GitHub prerelease `canary` whenever CI passes on main. Mirrors
+  # release.yml's bundle/manifest patterns; assets publish first and the
+  # manifest.json upload lands last — that upload is the pointer flip. No GPG.
   canary-prepare:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build

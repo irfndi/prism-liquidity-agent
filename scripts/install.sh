@@ -12,7 +12,7 @@ BIN_DIR="${PRISM_BIN_DIR:-$HOME/.local/bin}"
 INSTALL_DIR="${PRISM_INSTALL_DIR:-$HOME/.prism}"
 CONFIG_DIR="${PRISM_CONFIG_DIR:-$HOME/.config/prism}"
 DATA_DIR="${PRISM_DATA_DIR:-$HOME/.local/share/prism}"
-R2_BASE_URL="${PRISM_R2_URL:-https://pub-2f55c98709e74d1d900b89ec20f8f1fc.r2.dev}"
+RELEASES_BASE_URL="https://github.com/${REPO}/releases"
 VERSION="${PRISM_VERSION:-}"
 CHANNEL="${PRISM_CHANNEL:-stable}"
 SKIP_SETUP="${PRISM_SKIP_SETUP:-}"
@@ -284,13 +284,22 @@ EXT_SUFFIX="$(extension_suffix "$PLATFORM")"
 
 if [ -z "$VERSION" ]; then
   log_step "Detecting latest ${CHANNEL} release..."
-  LATEST_URL="${R2_BASE_URL}/releases/latest.json"
-  if [ "$CHANNEL" != "stable" ]; then
-    LATEST_URL="${R2_BASE_URL}/releases/channel/${CHANNEL}.json"
-  fi
-  VERSION="$(curl -fsSL "$LATEST_URL" 2>/dev/null | grep '"version":' | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)"
+  case "${CHANNEL}" in
+    canary)
+      # Canary = the rolling GitHub prerelease tag `canary`; its manifest.json
+      # carries the stamped version (the tag itself is not semver).
+      VERSION="$(curl -fsSL "${RELEASES_BASE_URL}/download/canary/manifest.json" 2>/dev/null | grep '"version":' | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)"
+      ;;
+    stable)
+      VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || true)"
+      ;;
+    *)
+      # beta/dev release tags carry their channel suffix (vX.Y.Z-beta.N / -dev.N).
+      VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" 2>/dev/null | grep '"tag_name":' | grep -- "-${CHANNEL}" | head -1 | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || true)"
+      ;;
+  esac
   if [ -z "$VERSION" ]; then
-    log_error "Could not detect latest version from ${LATEST_URL}"
+    log_error "Could not detect latest ${CHANNEL} release from GitHub"
     exit 1
   fi
   log_step "Latest ${CHANNEL}: v${VERSION}"
@@ -302,8 +311,15 @@ if [ -n "${VERSION:-}" ] && ! printf '%s' "$VERSION" | grep -qE '^[0-9][0-9a-zA-
   exit 1
 fi
 
+# Canary assets live on the rolling `canary` tag; every other channel uses
+# its own vX.Y.Z tag. GitHub serves both through the same download path.
+if [ "${CHANNEL}" = "canary" ]; then
+  RELEASE_TAG="canary"
+else
+  RELEASE_TAG="v${VERSION}"
+fi
 TARBALL_NAME="prism-v${VERSION}-${PLATFORM}.tar.gz"
-TARBALL_URL="${R2_BASE_URL}/releases/v${VERSION}/${TARBALL_NAME}"
+TARBALL_URL="${RELEASES_BASE_URL}/download/${RELEASE_TAG}/${TARBALL_NAME}"
 SHA256_URL="${TARBALL_URL}.sha256"
 
 TMP_DIR="$(mktemp -d -t prism-install-XXXXXX)"

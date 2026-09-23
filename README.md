@@ -109,7 +109,7 @@ Use `prism update --check-only` and `prism update` for upgrades. Do not edit the
 
 ### Canary builds
 
-Every merge to `main` that passes CI publishes a canary build -- the latest code, rebuilt and uploaded to R2 automatically, like Bun's own canary channel. A canary is versioned `<next patch>-canary.<UTC timestamp>` and the `releases/channel/canary.json` pointer always tracks the newest one.
+Every merge to `main` that passes CI publishes a canary build -- the latest code, rebuilt and pushed as the rolling GitHub prerelease `canary`, like Bun's own canary channel. A canary is versioned `<next patch>-canary.<UTC timestamp>-<sha8>`; the release's `manifest.json` asset is uploaded last and always tracks the newest build (Cloudflare R2 is deprecated for distribution -- account billing).
 
 ```bash
 prism update --canary       # move to the latest canary build
