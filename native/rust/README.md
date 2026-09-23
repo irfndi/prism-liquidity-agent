@@ -37,7 +37,15 @@ input; the wallet itself is Jupiter-priced, see the `rpc` bullet).
 `GECKO_TERMINAL_API_URL` (default `https://api.geckoterminal.com/api/v2`) name
 the two stats tiers; `GECKO_TERMINAL_ENABLED` (default on — TS's
 `!== false`) turns the GeckoTerminal fall-through off (a datapi miss then
-means legs-None, never a gas verdict). `JUPITER_API_KEY` (optional —
+means legs-None, never a gas verdict). `PRISMD_HOST_LEDGER` (default OFF;
+non-empty value required) is the write gate for EVERY host-owned ledger
+table — `prismd_shadow_log` decision rows and `prismd_pool_history` price
+rows (the TA window's source since wave 99); a plain `prismd --ticks N`
+stays byte-identical without it, and twin/compare runs set it to `1`.
+`SNAPSHOT_RETENTION_DAYS` (default 14, min 1 — mirror of TS's
+`validatedNumber(1, 14)`) bounds `prismd_pool_history`: the host prunes
+on every write (indexed no-op most ticks) where TS sweeps daily.
+`JUPITER_API_KEY` (optional —
 `x-api-key` on the primary price host; the
 keyless lite host is the fallback), `HELIUS_API_KEY`, `TYPESAFE_API_KEY`
 (`TYPESAFEAI_API` alias) are passthrough only — startup reports
@@ -103,9 +111,9 @@ the exception: unit-tested, NOT wired.
   with `measured=false`; mismatch-logged host-wins fail-open via
   `is_some_and`, silent when Bend is absent, never votes).
 - `bend::fee_exit_fires` → proven `K.fee_exit_fires`, per open position per
-  tick against real SQLite (`positions` + latest `signal_snapshots` /
-  `pool_snapshots`; mirrors `checkFeeIlExit`'s core predicate, not its
-  hold-bias override).
+  tick against real SQLite (`positions` + latest `signal_snapshots` — the
+  ratio stays TS-written until the host can compute fee/IL from bin arrays;
+  mirrors `checkFeeIlExit`'s core predicate, not its hold-bias override).
 - `bend::accrual_allowed` → proven `K.accrual_allowed`, per position per
   tick (mirrors `accruePaperPositionFees`'s paper/no-pubkey/datapi guard).
 - `bend::enter_blocked` → proven `K.enter_blocked`, per position's latest

@@ -1555,6 +1555,11 @@ mod config {
         /// — feeds the tick's live statsSource tier; the `--datapi-probe` CLI
         /// reads the same env var directly.
         pub meteora_data_api_url: String,
+        /// Days of `prismd_pool_history` rows to keep (host mirror of TS's
+        /// `SNAPSHOT_RETENTION_DAYS`, validatedNumber(1, 14): default 14,
+        /// min 1). The host prunes on every write — an indexed no-op delete
+        /// most ticks — where TS sweeps once per day; same cutoff, less state.
+        pub snapshot_retention_days: i64,
         /// GeckoTerminal tier master switch (wave 98; default ON — TS's
         /// `GECKO_TERMINAL_ENABLED !== false`). Off → a datapi miss falls
         /// straight to legs-None (fail-open, no gas verdict).
@@ -1962,6 +1967,24 @@ mod config {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => crate::datapi::DEFAULT_BASE_URL.to_string(),
         }
+    }
+
+    /// Parse-or-default for `SNAPSHOT_RETENTION_DAYS` — mirror of TS
+    /// `validatedNumber("SNAPSHOT_RETENTION_DAYS", 1, 14)`: default 14,
+    /// reject sub-1 and garbage (host fail-closed convention). No upper
+    /// bound — the writer's cutoff saturates, so an oversized value degrades
+    /// to pruning NOTHING, never everything (pinned by the writer test).
+    pub fn parse_snapshot_retention_days(raw: Option<&str>) -> Result<i64, String> {
+        let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(14);
+        };
+        let v: i64 = s
+            .parse()
+            .map_err(|_| format!("SNAPSHOT_RETENTION_DAYS={s:?} is not a number"))?;
+        if v < 1 {
+            return Err(format!("SNAPSHOT_RETENTION_DAYS={v} below min 1"));
+        }
+        Ok(v)
     }
 
     /// Parse-or-default for `GECKO_TERMINAL_API_URL` (absent/whitespace →
@@ -2436,6 +2459,9 @@ mod config {
                 meteora_data_api_url: parse_data_api_url(
                     env::var("METEORA_DATA_API_URL").ok().as_deref(),
                 ),
+                snapshot_retention_days: parse_snapshot_retention_days(
+                    env::var("SNAPSHOT_RETENTION_DAYS").ok().as_deref(),
+                )?,
                 gecko_terminal_enabled: parse_gecko_enabled(
                     env::var("GECKO_TERMINAL_ENABLED").ok().as_deref(),
                 ),
@@ -2783,6 +2809,81 @@ fn read_paper_days(sqlite_path: &str) -> Option<f64> {
     }
 }
 
+/// Host-owned ledger writes enabled? Default OFF so a plain
+/// `prismd --ticks N` against a live book stays byte-identical (the
+/// twin-copy discipline); twin runs opt in. Non-empty value required —
+/// `PRISMD_HOST_LEDGER=""` does not silently enable writes. Gates BOTH
+/// host-owned writers: `prismd_shadow_log` decision rows and
+/// `prismd_pool_history` price rows (wave 99).
+fn host_ledger_writes_enabled() -> bool {
+    env::var_os("PRISMD_HOST_LEDGER").is_some_and(|v| !v.is_empty())
+}
+
+/// Append one tick's per-pool price rows — the host-owned price history the
+/// TA-exhaustion window reads (wave 99; until this wave TS wrote
+/// `pool_snapshots` for it). Host-owned table, additive, nothing in the TS
+/// engine reads it — the wave-88 cutover contract. Gated at the call site by
+/// `host_ledger_writes_enabled()`; fail-open like the shadow seam (a history
+/// that cannot write never fails the tick). Pools without a price this tick
+/// are simply absent — the window tolerates gaps like any cold start.
+/// Bounded by `retention_days` (TS SNAPSHOT_RETENTION_DAYS, default 14):
+/// every write also prunes rows older than the cutoff — an indexed no-op on
+/// most ticks, where TS sweeps once per day; same retention, less state.
+fn write_pool_history(sqlite_path: &str, rows: &[(String, f64)], retention_days: i64) {
+    let conn = match rusqlite::Connection::open(Path::new(sqlite_path)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[prismd] pool-history open failed: {e} (dropped)");
+            return;
+        }
+    };
+    if let Err(e) = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS prismd_pool_history (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             pool_address TEXT NOT NULL,
+             timestamp INTEGER NOT NULL,
+             current_price REAL NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_prismd_pool_history_pool_ts
+             ON prismd_pool_history(pool_address, timestamp);",
+    ) {
+        eprintln!("[prismd] pool-history create failed: {e} (dropped)");
+        return;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut stmt = match conn.prepare(
+        "INSERT INTO prismd_pool_history (pool_address, timestamp, current_price) VALUES (?1, ?2, ?3)",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[prismd] pool-history prepare failed: {e} (dropped)");
+            return;
+        }
+    };
+    let mut warned = false;
+    for (pool, price) in rows {
+        if let Err(e) = stmt.execute(rusqlite::params![pool, now_ms, price]) {
+            if !warned {
+                eprintln!("[prismd] pool-history insert failed: {e} (remaining rows dropped)");
+                warned = true;
+            }
+        }
+    }
+    // Retention sweep: TS prunes pool_snapshots once per day; the host
+    // prunes on every write — indexed, a no-op on healthy ticks, no
+    // bookkeeping state to go stale (advisory-bounded mirror).
+    let cutoff = now_ms.saturating_sub(retention_days.max(1).saturating_mul(86_400_000));
+    if let Err(e) = conn.execute(
+        "DELETE FROM prismd_pool_history WHERE timestamp < ?1",
+        rusqlite::params![cutoff],
+    ) {
+        eprintln!("[prismd] pool-history prune failed: {e} (rows age one more day)");
+    }
+}
+
 /// WRITE SEAM (first non-shadow host capability): persist one shadow
 /// observation row so a `prismd` run leaves an auditable trace without
 /// touching any TS-owned table. Table is host-owned (`prismd_shadow_log`),
@@ -2908,11 +3009,12 @@ struct FeeIlShadow {
     /// fall back, never acts) — measured, not the persisted latest row.
     pool_bin_step: Option<i64>,
     pool_current_price: Option<f64>,
-    /// TA-exhaustion shadow input: up to 35 newest persisted
-    /// `pool_snapshots.current_price` closes, newest-first (RSI/BB/MACD need
-    /// ordered history; short/empty → TA no-vote, fail-open like TS
-    /// TA_EXHAUSTION_MIN_POINTS floor). The ONE history leg that stays
-    /// TS-written until the host owns its snapshots (tier 1).
+    /// TA-exhaustion shadow input: up to 35 newest HOST-history
+    /// `prismd_pool_history.current_price` closes, newest-first
+    /// (RSI/BB/MACD need ordered history; short/empty → TA no-vote,
+    /// fail-open like TS's TA_EXHAUSTION_MIN_POINTS floor). Host-owned
+    /// since wave 99 (PRISMD_HOST_LEDGER-gated writes) — the last builder
+    /// read of TS-written `pool_snapshots` retired here.
     ta_closes_newest_first: Option<Vec<f64>>,
     /// Recovery-gate shadow input (F4): up to `oor_recovery_lookback` newest
     /// chain-sampled bins for the position's pool, newest-first → reversed to
@@ -3025,10 +3127,15 @@ fn fee_il_shadows_capped(
                 )
                 .unwrap_or((None, None, None, None));
             // Tolerant: empty on DB error → TA no-vote (fail-open).
+            // TA closes: the HOST's own price history since wave 99 (written
+            // under the PRISMD_HOST_LEDGER gate; a direct/unflagged run has
+            // no rows → None → TA no-vote, fail-open like TS's short-floor).
+            // Retired the last builder read of TS-written `pool_snapshots` —
+            // the flag-gated host ledger is the cutover-contract source.
             let ta_closes_newest_first: Option<Vec<f64>> = (|| {
                 let mut stmt = conn
                     .prepare(
-                        "SELECT current_price FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 35",
+                        "SELECT current_price FROM prismd_pool_history WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 35",
                     )
                     .ok()?;
                 let closes: Vec<f64> = stmt
@@ -3337,6 +3444,19 @@ fn tick(cfg: &config::Config, n: u64) {
             }
         })
         .collect();
+    // Host-ledger writes (wave 99, flag-gated): append this tick's price
+    // rows BEFORE the builder reads them — the TA window's source since this
+    // wave. Gated so direct `prismd --ticks` stays byte-identical; pools
+    // without a price this tick produce no row (window tolerates gaps).
+    if host_ledger_writes_enabled() {
+        let price_rows: Vec<(String, f64)> = stats_by_pool
+            .iter()
+            .filter_map(|(p, e)| e.current_price.map(|price| (p.clone(), price)))
+            .collect();
+        if !price_rows.is_empty() {
+            write_pool_history(&cfg.sqlite_path, &price_rows, cfg.snapshot_retention_days);
+        }
+    }
     let shadows = fee_il_shadows_capped(
         &cfg.sqlite_path,
         cfg.min_yield_exit_age_ms,
@@ -3803,13 +3923,16 @@ fn tick(cfg: &config::Config, n: u64) {
     // Write seam: persist this tick's verdict to the host-owned
     // `prismd_shadow_log` table (TS never reads it). Shadow-only — the row is
     // an audit trail for the cutover compare, not a decision input.
-    // Gated on PRISMD_SHADOW_LOG (default OFF) so a plain `prismd --ticks N`
-    // against a live book stays byte-identical: every other host handle is
-    // READ_ONLY, and the twin-copy discipline only holds if direct invocation
-    // stays non-mutating. Non-empty value required, so `PRISMD_SHADOW_LOG=""`
+    // Gated on PRISMD_HOST_LEDGER (default OFF; renamed from
+    // PRISMD_SHADOW_LOG in wave 99 when the flag outgrew its first job — it
+    // now gates EVERY host-owned ledger write: decision rows + price
+    // history). A plain `prismd --ticks N` against a live book stays
+    // byte-identical: every other host handle is READ_ONLY, and the
+    // twin-copy discipline only holds if direct invocation stays
+    // non-mutating. Non-empty value required, so `PRISMD_HOST_LEDGER=""`
     // does not silently enable writes (same fail-closed shape as the other
     // env flags in this file).
-    if env::var_os("PRISMD_SHADOW_LOG").is_some_and(|v| !v.is_empty()) {
+    if host_ledger_writes_enabled() {
         let shadow_decision = format!(
             "open={open} exit_shadow={exit_shadow} enter_blocked_shadow={enter_blocked_shadow} \
              danger_shadow={danger_shadow} drift_rejects_shadow={drift_rejects_shadow} \
@@ -5569,6 +5692,12 @@ mod tests {
         assert_eq!(mature.pool_bin_step, None, "absent pool → bin_step None");
         assert_eq!(fresh.ratio, None, "no snapshot yet -> no ratio");
         assert!(fresh.onchain, "non-NULL position_pubkey -> onchain");
+        // Wave 99: no host history table in this fixture → TA no-vote,
+        // fail-open (the builder's TA source is prismd_pool_history now).
+        assert_eq!(
+            fresh.ta_closes_newest_first, None,
+            "host history table absent → TA window None"
+        );
         assert_eq!(
             mature.net_drift_bins,
             Some(-10.0),
@@ -6307,6 +6436,7 @@ mod tests {
             sol_price_usd: 150.0,
             solana_rpc_url: "https://example.com".to_string(),
             meteora_data_api_url: "https://datapi.example.test".to_string(),
+            snapshot_retention_days: 14,
             gecko_terminal_enabled: true,
             gecko_base_url: "https://gecko.example.test".to_string(),
             wallet_pubkey: String::new(),
@@ -6763,6 +6893,137 @@ mod tests {
         assert_eq!(s.pool_fees_24h_usd, Some(22.5));
         assert_eq!(s.pool_bin_step, Some(64), "chain bin_step");
         assert_eq!(s.pool_current_price, Some(1.5));
+    }
+
+    #[test]
+    fn pool_history_appends_and_windows_ta() {
+        // Wave 99: `write_pool_history` appends host-owned price rows (the
+        // cutover-contract table nothing in TS reads) and the builder's TA
+        // window reads 35 newest DESC from it — the retired pool_snapshots
+        // source. Direct inserts pin the window (one write call shares a
+        // single timestamp, so the window test needs distinct ones).
+        let path = std::env::temp_dir().join(format!(
+            "prismd-pool-history-test-{}.db",
+            std::process::id()
+        ));
+        make_shadow_test_db(&path);
+        let path_str = path.to_str().unwrap().to_string();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS prismd_pool_history (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     pool_address TEXT NOT NULL,
+                     timestamp INTEGER NOT NULL,
+                     current_price REAL NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_prismd_pool_history_pool_ts
+                     ON prismd_pool_history(pool_address, timestamp);",
+            )
+            .unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+            conn.execute(
+                "INSERT INTO positions (position_id, pool_address, timestamp, closed_at, position_pubkey) VALUES ('pos-ta', 'poolTA', ?1, NULL, NULL)",
+                [now],
+            )
+            .unwrap();
+            // 40 ascending prices → the window keeps the newest 35 DESC.
+            for (i, price) in (10..50).enumerate() {
+                conn.execute(
+                    "INSERT INTO prismd_pool_history (pool_address, timestamp, current_price) VALUES ('poolTA', ?1, ?2)",
+                    rusqlite::params![now - 40 + i as i64, price as f64],
+                )
+                .unwrap();
+            }
+            drop(conn);
+        }
+        let shadows = fee_il_shadows_capped(
+            &path_str,
+            0,
+            &std::collections::HashMap::new(),
+            10,
+            12,
+            &std::collections::HashMap::new(),
+        );
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(shadows.len(), 1);
+        let ta = shadows[0]
+            .ta_closes_newest_first
+            .clone()
+            .expect("35 closes");
+        assert_eq!(ta.len(), 35, "window caps at 35");
+        assert_eq!(ta.first(), Some(&49.0), "newest first");
+        assert_eq!(ta.last(), Some(&15.0), "35 newest = 49..=15");
+
+        // The writer itself: create + append + RETENTION semantics (two
+        // calls → rows accumulate, values round-trip; an ancient row is
+        // swept by the second call's prune — bounded mirror of TS
+        // SNAPSHOT_RETENTION_DAYS).
+        let wpath = std::env::temp_dir().join(format!(
+            "prismd-pool-history-writer-{}.db",
+            std::process::id()
+        ));
+        let wstr = wpath.to_str().unwrap().to_string();
+        write_pool_history(
+            &wstr,
+            &[("poolA".to_string(), 1.5), ("poolB".to_string(), 2.5)],
+            14,
+        );
+        {
+            let conn = rusqlite::Connection::open(&wpath).unwrap();
+            conn.execute(
+                "INSERT INTO prismd_pool_history (pool_address, timestamp, current_price) VALUES ('poolA', 1, 9.9)",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+        }
+        write_pool_history(&wstr, &[("poolA".to_string(), 3.5)], 14);
+        {
+            let conn = rusqlite::Connection::open(&wpath).unwrap();
+            let total: i64 = conn
+                .query_row("SELECT COUNT(*) FROM prismd_pool_history", [], |r| r.get(0))
+                .unwrap();
+            let pool_a: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM prismd_pool_history WHERE pool_address = 'poolA'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let ancient: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM prismd_pool_history WHERE current_price = 9.9",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let last: f64 = conn
+                .query_row(
+                    "SELECT current_price FROM prismd_pool_history WHERE pool_address = 'poolA' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(total, 3, "appends, never replaces");
+            assert_eq!(pool_a, 2, "per-pool rows accumulate");
+            assert_eq!(ancient, 0, "retention swept the pre-cutoff row");
+            assert_eq!(last, 3.5, "value round-trips");
+
+            // Absurd retention must DEGRADE TO PRUNE-NOTHING, never
+            // DELETE-ALL: the sweep saturates (`now − days·86_400_000` →
+            // i64::MIN), so `timestamp < cutoff` matches no row. A
+            // wrapping/wrong cutoff would wipe everything and fail HERE.
+            write_pool_history(&wstr, &[("poolC".to_string(), 4.5)], i64::MAX);
+            let total_after: i64 = conn
+                .query_row("SELECT COUNT(*) FROM prismd_pool_history", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(total_after, 4, "oversized retention pruned nothing");
+        }
+        let _ = std::fs::remove_file(&wpath);
     }
 
     #[test]

@@ -411,6 +411,7 @@ const PRISMD_ENV_KEYS = [
   "REALIZED_PNL_HALT_THRESHOLD_USD",
   "REALIZED_PNL_HALT_WINDOW",
   "REBALANCE_GAS_COST_SOL",
+  "SNAPSHOT_RETENTION_DAYS",
   "SOL_PRICE_USD",
   "SOLANA_RPC_URL",
   "SQLITE_DB_PATH",
@@ -441,7 +442,7 @@ function runPrismd(
   // this exact file present. The list below is prismd's whole documented
   // surface (`native/rust/README.md` Keys); an ambient var outside it cannot
   // reach the child. Harness-owned keys (SQLITE_DB_PATH, SCAN_INTERVAL_MS,
-  // BEND_BIN, PRISMD_SHADOW_LOG) are set after the allowlist so they win.
+  // BEND_BIN, PRISMD_HOST_LEDGER) are set after the allowlist so they win.
   const { PRISMD_PARITY_INTERVAL_MS: _intervalOverride, ...inherited } = process.env;
   const child: Record<string, string> = {};
   for (const key of PRISMD_ENV_KEYS) {
@@ -468,7 +469,7 @@ function runPrismd(
         // Opt in to the host's write seam: this runs against a scratch twin,
         // so persisting per-tick shadow rows here is both wanted (audit trail
         // for the cutover compare) and harmless (the twin is discarded).
-        PRISMD_SHADOW_LOG: "1",
+        PRISMD_HOST_LEDGER: "1",
       },
       // Run from the scratch twin dir, NOT the repo: prismd's own
       // `load_env_file(".env")` (main.rs:3970) would otherwise re-read THIS
