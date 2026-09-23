@@ -23,6 +23,9 @@ low-frequency reads.
 cargo build
 # paper shadow, 2 ticks then exit (profile env file optional):
 SCAN_INTERVAL_MS=10000 SQLITE_DB_PATH=prism.db ./target/debug/prismd [~/.config/prism-paper-bin20/env] --ticks 2
+# DAEMON (box shadow unit shape): profile path and NO --ticks = infinite
+# loop paced by SCAN_INTERVAL_MS (bare/--help still prints usage):
+./target/debug/prismd /root/.prismd/shadow.env
 ```
 
 Config: `.env` first, then optional profile env-file path arg (existing env wins).

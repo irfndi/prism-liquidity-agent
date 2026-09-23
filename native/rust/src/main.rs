@@ -4698,6 +4698,22 @@ mod datapi {
     }
 }
 
+/// Usage-vs-run decision for the `Ok(None)` CLI shapes (no `--ticks`):
+/// an explicit `--help`/`-h` ALWAYS prints usage (even alongside a profile),
+/// a bare invocation prints usage, and a profile env path with no `--ticks`
+/// is the DAEMON — the infinite shadow loop paced by `scan_interval_ms`
+/// (main sets `cfg.ticks = None` and the loop's `is_some_and` never breaks).
+/// Regression this pins: the profile-daemon shape used to fall into the same
+/// usage arm as `--help`, making daemon mode (and the box shadow unit)
+/// unreachable. `--bogus`/lone `--ticks` never reach here (classify fails
+/// closed with exit 2 first).
+fn wants_usage(args: &[String]) -> bool {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        return true;
+    }
+    !args.iter().any(|a| a != "--help" && a != "-h")
+}
+
 fn main() {
     // reqwest with `rustls-no-provider` has no default crypto provider: without
     // this, the first `Client::builder().build()` PANICS (reqwest's own client
@@ -4736,9 +4752,14 @@ fn main() {
     }
     let cli_ticks = match parse_cli_ticks(&args).and_then(|t| classify_args(&args, t)) {
         Ok(None) => {
-            println!("prismd — paper-first Rust host (shadow only until parity green)");
-            println!("usage: prismd [profile_env_path] [--ticks N]");
-            return;
+            if wants_usage(&args) {
+                println!("prismd — paper-first Rust host (shadow only until parity green)");
+                println!("usage: prismd [profile_env_path] [--ticks N]");
+                return;
+            }
+            // Profile path, no --ticks: daemon — cfg.ticks = None lets the
+            // scan loop below run forever at scan_interval.
+            None
         }
         Ok(t) => t,
         Err(e) => {
@@ -6976,6 +6997,24 @@ mod tests {
         );
         assert_eq!(classify_args(&s(&["--ticks", "3"]), Some(3)), Ok(Some(3)));
         assert_eq!(classify_args(&s(&["profile.env"]), None), Ok(None));
+        // Usage vs daemon: bare/help print usage; a profile path with no
+        // --ticks falls through to the infinite shadow loop (daemon mode —
+        // the box prismd-shadow unit's exact shape).
+        assert!(wants_usage(&s(&[])), "bare invocation = usage");
+        assert!(wants_usage(&s(&["--help"])), "--help = usage");
+        assert!(wants_usage(&s(&["-h"])), "-h = usage");
+        assert!(
+            wants_usage(&s(&["profile.env", "--help"])),
+            "help wins over a profile"
+        );
+        assert!(
+            !wants_usage(&s(&["profile.env"])),
+            "profile without --ticks = daemon"
+        );
+        assert!(
+            !wants_usage(&s(&["/root/.prismd/shadow.env"])),
+            "absolute profile path = daemon"
+        );
         // parse_cli_ticks: lone / unparsable --ticks fails closed (exit 2),
         // never collapses to None (which would loop forever).
         assert_eq!(
