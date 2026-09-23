@@ -245,10 +245,29 @@ fn warn_unpriced_wallet_mint_once(mint: &str) {
     }
 }
 
+/// Pure ring push — TS `pushBinHistory` (program.ts:5973-5976): append the
+/// newest bin, evict oldest beyond `cap`. Chronological (oldest→newest) is
+/// preserved, so drift is simply last − first and windows slice from the end.
+pub fn push_bin_history(ring: &mut Vec<i64>, active_id: i64, cap: usize) {
+    ring.push(active_id);
+    while ring.len() > cap {
+        ring.remove(0);
+    }
+}
+
+/// Process-lifetime host `binHistory` — the TS in-memory `Map<pool, bins>`
+/// (program.ts:5937) with the same per-process semantics: a fresh prismd
+/// cold-starts empty exactly like a restarted TS engine, never seeded from
+/// persisted rows. Mutex poisoning skips one tick's sample, never fails it.
+static BIN_HISTORY: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<i64>>>,
+> = std::sync::LazyLock::new(Default::default);
+
 /// Pure twin of the F7 pool-cooldown ENTER gate: ENTER may proceed iff no
 /// cooldown row exists for the pool OR now >= cooldown_until. Mirrors
 /// `checkEnterCooldownGate` (program.ts:11870-11906): active cooldown →
 /// skip ENTER (observational hold here). `None` on missing clock leg →
+/// proceed (fail-open).
 pub fn pool_cooldown_free(cooldown_until_ms: Option<i64>, now_ms: Option<i64>) -> Option<bool> {
     let until = cooldown_until_ms?;
     let now = now_ms?;
@@ -473,20 +492,16 @@ pub fn compound_approved(
 /// Pure twin of the volatility-gate EXIT predicate: EXIT iff high-vol AND
 /// drifted AND cooled. Mirrors `decidePhase2Exit` vol arm
 /// (program.ts:11364-11398): `!isRunner && highVol(stddev>=thr) &&
-/// driftPct>0.6 && (cooled||grace)`. Stddev = sample stddev over persisted
-/// snapshot bins (same math as `computeBinVolatilityStddev`,
-/// strategy-service.ts:299-305); driftPct = |newest-snapshot-bin−center| /
-/// halfWidth. Cooled/grace reuse the interval legs with grace-first
-/// short-circuit (cooled=None+grace=true fires, matching TS `||`).
-/// EXPECTED divergence vs TS, documented not debugged (wave 91): the drift
-/// leg reads the newest PERSISTED `pool_snapshots.active_bin_id`, while TS
-/// reads the LIVE `pool.activeBinId`. On sparsely-snapshotted pools the two
-/// differ — e.g. pool 8eybKA has exactly 2 snapshots 2 days apart (bins
-/// 2472 → 2450), so the host's proxy is always one cycle behind by
-/// construction. The parity bar flags this as `divergence` on every run and
-/// that is CORRECT: it proves the proxy is live, not that the kernel is
-/// wrong. The gate becomes decidable when the host reads live bins (the
-/// RPC read path); until then the flag is expected-with-reason.
+/// driftPct>0.6 && (cooled||grace)`. Stddev = sample stddev over the
+/// chain-fed binHistory ring (same math as `computeBinVolatilityStddev`,
+/// strategy-service.ts:299-305); driftPct = |live-active-bin−center| /
+/// halfWidth with `vol_bins[0]` = THIS tick's chain sample. Cooled/grace
+/// reuse the interval legs with grace-first short-circuit (cooled=None+
+/// grace=true fires, matching TS `||`). The wave-91 "expected divergence"
+/// (persisted proxy, always one cycle behind) is RESOLVED in wave 95: the
+/// host reads live bins through the same in-memory-ring mechanism as TS;
+/// the only remaining bar delta is ring AGE (a fresh prismd process
+/// cold-starts empty; a recorded TS side ran with a mature ring).
 /// `None` on missing/non-finite legs (never flags without inputs).
 pub fn vol_exit_fires(
     is_runner: bool,
@@ -2783,11 +2798,11 @@ struct FeeIlShadow {
     /// `position_pubkey IS NOT NULL` — mirrors `pos.positionPubKey != null`,
     /// the "onchain" leg of the paper-accrual guard (program.ts:10197-10202).
     onchain: bool,
-    /// Net active-bin drift in bins (last - first `active_bin_id` over the
-    /// recent `pool_snapshots` ring); `None` when fewer than 2 snapshots
-    /// exist (cold start → TS `netDriftBins = 0`, never rejects). Mirrors
-    /// `resolvePoolDriftMetrics` (program.ts:9811-9832) minus the in-memory
-    /// ring: snapshots ARE the persisted ring.
+    /// Net active-bin drift in bins (last − first over the pool's chain-fed
+    /// ring); `None` when the ring is absent or has fewer than 2 samples
+    /// (cold start → TS `netDriftBins = 0`, never rejects). Exact mirror of
+    /// `resolvePoolDriftMetrics` (program.ts:9811-9832): TS's in-memory
+    /// binHistory — wave 95 retired the persisted-snapshot proxy.
     net_drift_bins: Option<f64>,
     /// Ledger mark-PnL inputs for the loss-cap shadow (all `None` when the
     /// row lacks them → `danger=None`, never fires). Mirrors
@@ -2804,10 +2819,12 @@ struct FeeIlShadow {
     entry_amount_y_usd: Option<f64>,
     entry_price_usd: Option<f64>,
     out_of_range_since: Option<i64>,
-    /// Live band legs for the band-health shadow (gate-7 shape without a
-    /// proposal): stored `active_bin_id` / `lower_bin_id` / `upper_bin_id`
-    /// per open position (`None` when the row lacks them → skipped).
-    active_bin_id: Option<i64>,
+    /// Band legs for the band-health shadow (gate-7 shape without a
+    /// proposal): stored `lower_bin_id` / `upper_bin_id` per open position
+    /// (`None` when the row lacks them → skipped). The ACTIVE side of every
+    /// containment/drift check comes from the chain-fed ring at the tick
+    /// (TS `pool.activeBinId`), never from the position row — its stored
+    /// `active_bin_id` was set once at entry/rebalance and never refreshed.
     lower_bin_id: Option<i64>,
     upper_bin_id: Option<i64>,
     /// Gas-gate shadow inputs (F1): pool TVL + 24h fees from the latest
@@ -2828,30 +2845,34 @@ struct FeeIlShadow {
     /// TA_EXHAUSTION_MIN_POINTS floor). Same source as the bin ring.
     ta_closes_newest_first: Option<Vec<f64>>,
     /// Recovery-gate shadow input (F4): up to `oor_recovery_lookback` newest
-    /// `active_bin_id`s for the position's pool, oldest-last → reversed to
+    /// chain-sampled bins for the position's pool, newest-first → reversed to
     /// oldest-first at the tick (matches TS push order). `None`/short →
-    /// prob 0.5, never holds alone (fail-open). Same source as the drift
-    /// ring, sliced to the recovery window (program.ts:11670-11678).
+    /// prob 0.5, never holds alone (fail-open). Windowed from the same
+    /// chain-fed ring as drift (program.ts:11670-11678).
     recovery_bins_newest_first: Option<Vec<i64>>,
     /// Vol-window shadow input: up to the `volatilityLookback` newest
-    /// `active_bin_id`s for the position's pool, newest-first (stddev is
-    /// order-free; tick keeps stored order). `None`/short → stddev 0.0,
-    /// never fires alone (fail-open). Same source as drift, sliced to
-    /// max(2, volatilityLookback) like TS (program.ts:9824-9828).
+    /// chain-sampled bins for the position's pool, newest-first (stddev is
+    /// order-free; its FIRST element is also this tick's live active bin).
+    /// `None`/short → stddev 0.0, never fires alone (fail-open). Same ring
+    /// as drift, sliced to max(2, volatilityLookback) like TS
+    /// (program.ts:9824-9828).
     vol_bins_newest_first: Option<Vec<i64>>,
     /// per open position (grace = count >= OOR_GRACE_PERIOD_CYCLES, like TS
     /// program.ts:11628). `None`/0-clock → cold start, never blocks.
     last_rebalance_at_ms: Option<i64>,
     oor_cycle_count: Option<i64>,
 }
-/// `ring_cap`: TS `binHistoryCap = max(volatilityLookback, oorRecovery, 2)`
-/// (program.ts:5931-5935). `None` = uncapped (tests); `Some(c)` reads at most
-/// the `c` newest `pool_snapshots` rows per pool so drift converges to the TS
-/// ring once history exceeds the cap instead of diverging over all rows.
+/// `bin_rings`: the tick's chain-fed per-pool binHistory rings (chrono,
+/// pre-capped at TS `binHistoryCap = max(volatilityLookback, oorRecovery, 2)`
+/// — program.ts:5931-5935 — at push). Wave 95 replaced the three
+/// `pool_snapshots.active_bin_id` queries: every bin-history leg now derives
+/// from the host's OWN live samples, TS's in-memory mechanism. Absent pool /
+/// short ring → `None` = cold start (TS matches: <2 points → no drift,
+/// empty → no windows → fail-open defaults).
 fn fee_il_shadows_capped(
     sqlite_path: &str,
     min_yield_exit_age_ms: i64,
-    ring_cap: Option<i64>,
+    bin_rings: &std::collections::HashMap<String, Vec<i64>>,
     recovery_lookback: i64,
     vol_lookback: i64,
     known_by_pool: &std::collections::HashMap<String, bool>,
@@ -2871,7 +2892,7 @@ fn fee_il_shadows_capped(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let mut stmt = match conn.prepare(
-        "SELECT position_id, pool_address, timestamp, position_pubkey, deposited_usd, current_value_usd, cumulative_fees_claimed_usd, cumulative_rewards_claimed_usd, active_bin_id, lower_bin_id, upper_bin_id, last_rebalance_at, oor_cycle_count FROM positions WHERE closed_at IS NULL",
+        "SELECT position_id, pool_address, timestamp, position_pubkey, deposited_usd, current_value_usd, cumulative_fees_claimed_usd, cumulative_rewards_claimed_usd, lower_bin_id, upper_bin_id, last_rebalance_at, oor_cycle_count FROM positions WHERE closed_at IS NULL",
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -2893,7 +2914,6 @@ fn fee_il_shadows_capped(
             r.get::<_, Option<i64>>(9)?,
             r.get::<_, Option<i64>>(10)?,
             r.get::<_, Option<i64>>(11)?,
-            r.get::<_, Option<i64>>(12)?,
         ))
     }) {
         Ok(r) => r,
@@ -2904,7 +2924,7 @@ fn fee_il_shadows_capped(
     };
     rows.flatten()
         .map(
-            |(position_id, pool_address, ts, position_pubkey, deposited_usd, current_value_usd, fees_claimed_usd, rewards_claimed_usd, active_bin_id, lower_bin_id, upper_bin_id, last_rebalance_at_ms, oor_cycle_count)| {
+            |(position_id, pool_address, ts, position_pubkey, deposited_usd, current_value_usd, fees_claimed_usd, rewards_claimed_usd, lower_bin_id, upper_bin_id, last_rebalance_at_ms, oor_cycle_count)| {
             let ratio: Option<f64> = conn
                 .query_row(
                     "SELECT fee_il_ratio FROM signal_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 1",
@@ -2962,64 +2982,28 @@ fn fee_il_shadows_capped(
                     |r| Ok((r.get(0).ok(), r.get(1).ok())),
                 )
                 .unwrap_or((None, None));
-            // Net drift over at most the `ring_cap` newest snapshots (TS: the
-            // in-memory binHistory ring, last - first; snapshots are the
-            // persisted ring). Cold start (<2 rows) -> None -> 0, never
-            // rejects. Uncapped (`None`) only in tests; the live tick always
-            // passes `Some(bin_history_cap)`.
-            let net_drift_bins: Option<f64> = (|| {
-                let cap = ring_cap.unwrap_or(i64::MAX);
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT active_bin_id FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT ?2",
-                    )
-                    .ok()?;
-                let bins: Vec<i64> = stmt
-                    .query_map(rusqlite::params![pool_address, cap], |r| r.get(0))
-                    .ok()?
-                    .flatten()
-                    .collect();
-                if bins.len() >= 2 {
-                    Some((bins[0] - bins[bins.len() - 1]) as f64)
+            // Bin-history legs derive from the host's OWN chain-fed rings
+            // (wave 95) — TS's in-memory binHistory mechanism, pre-capped at
+            // push. Absent/short → None = cold start (TS matches: <2 points
+            // → no drift; empty → no windows → fail-open defaults).
+            let ring: Option<&Vec<i64>> = bin_rings.get(&pool_address);
+            let net_drift_bins: Option<f64> = ring.and_then(|r| {
+                if r.len() >= 2 {
+                    Some((r[r.len() - 1] - r[0]) as f64)
                 } else {
                     None
                 }
-            })();
-            // Recovery window: up to `recovery_lookback` newest bins, newest-
-            // first (reversed to oldest-first at the tick). Same source as
-            // drift, sliced to max(2, oorRecoveryLookback) like TS
-            // (program.ts:11670-11678). Empty on DB error → 0.5, never holds.
-            let recovery_bins_newest_first: Option<Vec<i64>> = (|| {
-                let lookback = recovery_lookback.max(2);
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT active_bin_id FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT ?2",
-                    )
-                    .ok()?;
-                let bins: Vec<i64> = stmt
-                    .query_map(rusqlite::params![pool_address, lookback], |r| r.get(0))
-                    .ok()?
-                    .flatten()
-                    .collect();
-                if bins.is_empty() { None } else { Some(bins) }
-            })();
-            // Vol window: up to `vol_lookback` newest bins, newest-first
-            // (stddev order-free). Same source as drift, sliced to
-            // max(2, volatilityLookback) like TS (program.ts:9824-9828).
-            let vol_bins_newest_first: Option<Vec<i64>> = (|| {
-                let lookback = vol_lookback.max(2);
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT active_bin_id FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT ?2",
-                    )
-                    .ok()?;
-                let bins: Vec<i64> = stmt
-                    .query_map(rusqlite::params![pool_address, lookback], |r| r.get(0))
-                    .ok()?
-                    .flatten()
-                    .collect();
-                if bins.is_empty() { None } else { Some(bins) }
-            })();
+            });
+            let window = |n: i64| -> Option<Vec<i64>> {
+                let r = ring?;
+                if r.is_empty() {
+                    return None;
+                }
+                let start = r.len().saturating_sub(n.max(2) as usize);
+                Some(r[start..].iter().rev().copied().collect())
+            };
+            let recovery_bins_newest_first = window(recovery_lookback);
+            let vol_bins_newest_first = window(vol_lookback);
             // Precomputed: field-init order would move `pool_address` into
             // the struct before a `known` field could borrow it.
             let known = known_by_pool.get(&pool_address).copied().unwrap_or(false);
@@ -3039,7 +3023,6 @@ fn fee_il_shadows_capped(
                 entry_amount_y_usd,
                 entry_price_usd,
                 out_of_range_since,
-                active_bin_id,
                 lower_bin_id,
                 upper_bin_id,
                 pool_tvl_usd,
@@ -3222,10 +3205,40 @@ fn tick(cfg: &config::Config, n: u64) {
             )
         })
         .collect();
+    // Live active bin per open pool (wave 95): one `getAccountInfo` →
+    // `LbPair.active_id` pushed into the host's OWN binHistory ring — TS's
+    // in-memory Map mechanism (program.ts:5937/5973), same per-process
+    // semantics (cold start, never seeded from persisted rows). A failed
+    // read skips this tick's sample (warned) but keeps the pool's existing
+    // history. The snapshot handed to the builder covers open pools only.
+    let bin_rings: std::collections::HashMap<String, Vec<i64>> = {
+        let mut out = std::collections::HashMap::new();
+        match BIN_HISTORY.lock() {
+            Ok(mut history) => {
+                for p in &open_pools {
+                    match rpc::get_active_id(&cfg.solana_rpc_url, p, Duration::from_secs(10)) {
+                        Ok(id) => push_bin_history(
+                            history.entry(p.clone()).or_default(),
+                            i64::from(id),
+                            bin_history_cap as usize,
+                        ),
+                        Err(e) => {
+                            eprintln!("[prismd] active-bin read failed for {p}: {e} (ring keeps prior samples)");
+                        }
+                    }
+                    if let Some(r) = history.get(p.as_str()) {
+                        out.insert(p.clone(), r.clone());
+                    }
+                }
+            }
+            Err(_) => eprintln!("[prismd] bin-history lock poisoned; rings unavailable"),
+        }
+        out
+    };
     let shadows = fee_il_shadows_capped(
         &cfg.sqlite_path,
         cfg.min_yield_exit_age_ms,
-        Some(bin_history_cap),
+        &bin_rings,
         cfg.oor_recovery_lookback_cycles,
         cfg.volatility_lookback_snapshots,
         &known_by_pool,
@@ -3411,7 +3424,14 @@ fn tick(cfg: &config::Config, n: u64) {
         // logs containment separately — never vetoes (TS owns REBALANCE).
         let width_bad =
             rebalance_range_invalid(s.lower_bin_id, s.upper_bin_id, cfg.max_rebalance_range_bins);
-        let contained = match (s.active_bin_id, s.lower_bin_id, s.upper_bin_id) {
+        // Live pool bin from the chain-fed ring (this tick's sample; TS
+        // `pool.activeBinId` at the same legs). Absent = cold ring or RPC
+        // miss → None → fail-open (never a stored-position fallback: that
+        // row's `active_bin_id` was set once at entry/rebalance).
+        let live_active: Option<i64> = bin_rings
+            .get(&s.pool_address)
+            .and_then(|r| r.last().copied());
+        let contained = match (live_active, s.lower_bin_id, s.upper_bin_id) {
             (Some(a), Some(lo), Some(hi)) => Some(a >= lo && a <= hi),
             _ => None,
         };
@@ -3437,7 +3457,7 @@ fn tick(cfg: &config::Config, n: u64) {
             (Some(lo), Some(hi)) => Some((lo + hi) as f64 / 2.0),
             _ => None,
         };
-        let drift_dist = match (s.active_bin_id, center) {
+        let drift_dist = match (live_active, center) {
             (Some(a), Some(c)) => Some((a as f64 - c).abs()),
             _ => None,
         };
@@ -3479,10 +3499,9 @@ fn tick(cfg: &config::Config, n: u64) {
         // Shadow-only: logs + counter, TS owns the EXIT.
         let vol_bins: Vec<i64> = s.vol_bins_newest_first.clone().unwrap_or_default();
         let vol_stddev = bin_volatility_stddev(&vol_bins);
-        // DIVERGENCE (documented): TS uses the LIVE pool.activeBinId
-        // (program.ts:11626); the host has no live pool feed, so the newest
-        // persisted snapshot bin (vol_bins[0], newest-first) proxies it.
-        // Shape matches TS exactly: |active−center| / (halfWidth || 1).
+        // Live pool bin: vol_bins[0] (newest-first) IS this tick's CHAIN
+        // sample since wave 95 — TS `pool.activeBinId` (program.ts:11626),
+        // same mechanism. Shape: |active−center| / (halfWidth || 1).
         let vol_drift_pct = match (vol_bins.first(), s.lower_bin_id, s.upper_bin_id) {
             (Some(&a), Some(lo), Some(hi)) => {
                 let half = (hi - lo) as f64 / 2.0;
@@ -4383,6 +4402,59 @@ mod rpc {
         Ok(value)
     }
 
+    /// Anchor discriminator of the DLMM `LbPair` account (sighash of
+    /// "account:LbPair", embedded in the IDL shipped with @meteora-ag/dlmm).
+    pub const LB_PAIR_DISCRIMINATOR: [u8; 8] = [33, 11, 49, 98, 181, 101, 177, 13];
+    /// Byte offset of `active_id` (i32 LE) inside a `LbPair` account:
+    /// 8-byte discriminator + repr(C) walk of StaticParameters (size 32,
+    /// align 4) + VariableParameters (size 32, align 8) + bump_seed [u8;1] +
+    /// bin_step_seed [u8;2] + pair_type u8 → 8+32+32+1+2+1 = 76. The IDL
+    /// marks the type `serialization: "bytemuck"` (repr(C) POD), so the
+    /// layout is fixed — validated EXACT against the TS SDK's
+    /// `DLMM.getActiveBin().binId` live (2463 == 2463, 2026-09-22).
+    pub const ACTIVE_ID_OFFSET: usize = 76;
+
+    /// Pure parse of a raw `LbPair` account: discriminator check + i32 LE.
+    pub fn parse_active_id(data: &[u8]) -> Result<i32, String> {
+        if data.len() < ACTIVE_ID_OFFSET + 4 {
+            return Err(format!("lbPair account too short: {} bytes", data.len()));
+        }
+        if data[..8] != LB_PAIR_DISCRIMINATOR {
+            return Err("discriminator mismatch (not a DLMM LbPair account)".to_string());
+        }
+        Ok(i32::from_le_bytes([
+            data[ACTIVE_ID_OFFSET],
+            data[ACTIVE_ID_OFFSET + 1],
+            data[ACTIVE_ID_OFFSET + 2],
+            data[ACTIVE_ID_OFFSET + 3],
+        ]))
+    }
+
+    /// LIVE active bin for the `lb_pair` account: `getAccountInfo` (base64)
+    /// then `parse_active_id`. Host twin of TS `DLMM.getActiveBin()`
+    /// (adapter-service.ts:2200): ONE RPC, no SDK.
+    pub fn get_active_id(url: &str, lb_pair: &str, timeout: Duration) -> Result<i32, String> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": next_id(),
+            "method": "getAccountInfo",
+            "params": [lb_pair, {"encoding": "base64", "commitment": "confirmed"}],
+        });
+        let res = post(url, body, timeout)?;
+        use base64::Engine as _;
+        let b64 = res
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.get("data"))
+            .and_then(|d| d.get(0))
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{url}: getAccountInfo: missing data[0]"))?;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("{url}: base64: {e}"))?;
+        parse_active_id(&data)
+    }
+
     /// One mint → atomic amount entry. `decimals` comes from the parsed
     /// account (TS reads it from the same `tokenAmount` object,
     /// `parseHoldingRow`). Zero-amount rent-only ATAs are skipped — the TS
@@ -5058,9 +5130,13 @@ mod tests {
     }
 
     /// Minimal schema of `positions`/`pool_snapshots`/`signal_snapshots`
-    /// (only the columns `fee_il_shadows` reads) in a real temp file — a
+    /// (only the tables `fee_il_shadows` touches) in a real temp file — a
     /// `:memory:` DB would not work here, since `fee_il_shadows` opens its
     /// own read-only connection and each `:memory:` connection is isolated.
+    /// `pool_snapshots` carries ONLY the wave-94 precedence pin (a seeded
+    /// `'datapi'` `stats_source` row that must never drive `known` again);
+    /// its bin history is ring-fed since wave 95 and its other columns are
+    /// absent on purpose (tolerant reads fall to None).
     fn make_shadow_test_db(path: &Path) {
         let conn = rusqlite::Connection::open(path).expect("open scratch db");
         conn.execute_batch(
@@ -5091,6 +5167,14 @@ mod tests {
                 [now - 14 * 3_600_000],
             )
             .unwrap();
+            // Two ratio snapshots so "latest" (ORDER BY timestamp DESC) is
+            // exercised, not just any row.
+            //
+            // The two `pool_snapshots` rows are the WAVE-94 PRECEDENCE PIN:
+            // the latest one says `'datapi'`, so any regression that
+            // re-introduces the old `stats_source` SQL flips
+            // `mature.known` to true and fails this test. Bin history is
+            // NOT read from here (wave 95: chain-fed ring parameter).
             conn.execute(
                 "INSERT INTO pool_snapshots (pool_address, timestamp, stats_source, active_bin_id) VALUES ('poolA', ?1, 'heuristic', 100)",
                 [now - 3_600_000],
@@ -5125,17 +5209,21 @@ mod tests {
             )
             .unwrap();
         }
-        // Wave 94: `known` is map-driven — poolA deliberately maps false
-        // despite its seeded 'datapi' row (map wins over TS-persisted
-        // stats_source), poolB true with no stats row at all.
+        // Wave 94/95: `known` is map-driven — poolA deliberately maps false
+        // while its LATEST `pool_snapshots` row says `'datapi'` (the seeded
+        // precedence pin above: map wins over TS-persisted state), poolB
+        // true with no row at all. Bin history is the chain-fed RING:
+        // poolA gets [100, 90] (drift −10), poolB is absent → cold None.
         let known: std::collections::HashMap<String, bool> =
             [("poolA".to_string(), false), ("poolB".to_string(), true)]
                 .into_iter()
                 .collect();
+        let rings: std::collections::HashMap<String, Vec<i64>> =
+            [("poolA".to_string(), vec![100, 90])].into_iter().collect();
         let mut shadows = fee_il_shadows_capped(
             &path_str,
             config::MIN_YIELD_EXIT_AGE_DEFAULT_MS,
-            None,
+            &rings,
             10,
             12,
             &known,
@@ -5172,7 +5260,7 @@ mod tests {
         assert_eq!(
             mature.net_drift_bins,
             Some(-10.0),
-            "drift = last(90) - first(100) active_bin_id"
+            "drift = ring last(90) - first(100)"
         );
         assert_eq!(
             fresh.net_drift_bins, None,
@@ -6218,6 +6306,57 @@ mod tests {
     }
 
     #[test]
+    fn push_bin_history_cap_evicts_oldest() {
+        // TS pushBinHistory (program.ts:5973-5976): chronological append,
+        // evict beyond cap — the cap that used to live in the SQL LIMIT.
+        let mut ring = Vec::new();
+        for id in [100, 90, 80, 70, 60] {
+            push_bin_history(&mut ring, id, 3);
+        }
+        assert_eq!(
+            ring,
+            vec![80, 70, 60],
+            "cap=3 keeps the 3 newest, oldest-first"
+        );
+        let mut cold = Vec::new();
+        push_bin_history(&mut cold, 7, 3);
+        assert_eq!(
+            cold,
+            vec![7],
+            "first sample lands; drift stays None until a second"
+        );
+    }
+
+    #[test]
+    fn parse_active_id_guards_and_fixture() {
+        // Real ZEC-SOL `LbPair` account captured 2026-09-22 — the parse
+        // matched the TS SDK's `DLMM.getActiveBin().binId` EXACTLY in the
+        // same run (raw@76 == SDK binId == 2463; this file froze at 2461).
+        let fixture = include_bytes!("lbpair_8eyb.bin");
+        assert_eq!(
+            rpc::parse_active_id(fixture).expect("fixture parses"),
+            2461,
+            "fixture active_id (discriminator + offset 76)"
+        );
+        // Synthetic: discriminator + a NEGATIVE i32 at the offset (signed leg).
+        let mut raw = vec![0u8; rpc::ACTIVE_ID_OFFSET + 4];
+        raw[..8].copy_from_slice(&rpc::LB_PAIR_DISCRIMINATOR);
+        raw[rpc::ACTIVE_ID_OFFSET..][..4].copy_from_slice(&(-7i32).to_le_bytes());
+        assert_eq!(rpc::parse_active_id(&raw).unwrap(), -7);
+        // Guards: wrong discriminator and a short buffer both fail closed.
+        let mut bad = raw.clone();
+        bad[0] ^= 0xff;
+        assert!(
+            rpc::parse_active_id(&bad).is_err(),
+            "discriminator mismatch"
+        );
+        assert!(
+            rpc::parse_active_id(&fixture[..rpc::ACTIVE_ID_OFFSET]).is_err(),
+            "short buffer"
+        );
+    }
+
+    #[test]
     fn loss_cap_tighter_is_monotone_superset() {
         // Halving the cap can only add danger flags, never remove: tighter
         // is a monotone superset of live on every ledger point. Pure fn,
@@ -6262,15 +6401,16 @@ mod tests {
     }
 
     #[test]
-    fn drift_shadow_honors_ring_cap() {
-        // 4 snapshots: bins 100, 90, 80, 70 (oldest->newest). Uncapped drift
-        // = 70-100 = -30; cap=2 sees only the 2 newest (70-80) = -10,
+    fn drift_shadow_reads_bin_ring() {
+        // Wave 95: drift derives from the chain-fed ring (chrono), NOT
+        // persisted snapshots. Full ring [100, 90, 80, 70] → 70-100 = -30;
+        // a cap-2 ring [90, 80] → 80-90 = -10 (the cap itself now applies
+        // at push — push_bin_history_cap_evicts_oldest pins that).
         let path =
             std::env::temp_dir().join(format!("prismd-drift-cap-test-{}.db", std::process::id()));
         let conn = rusqlite::Connection::open(&path).expect("open scratch db");
         conn.execute_batch(
             "CREATE TABLE positions (position_id TEXT, pool_address TEXT, timestamp INTEGER, closed_at INTEGER, position_pubkey TEXT, deposited_usd REAL, current_value_usd REAL, cumulative_fees_claimed_usd REAL, cumulative_rewards_claimed_usd REAL, active_bin_id INTEGER, lower_bin_id INTEGER, upper_bin_id INTEGER, last_rebalance_at INTEGER, oor_cycle_count INTEGER);
-             CREATE TABLE pool_snapshots (pool_address TEXT, timestamp INTEGER, stats_source TEXT, active_bin_id INTEGER);
              CREATE TABLE signal_snapshots (pool_address TEXT, timestamp INTEGER, fee_il_ratio REAL);",
         )
         .expect("create scratch schema");
@@ -6283,19 +6423,16 @@ mod tests {
             [now],
         )
         .unwrap();
-        for (i, bin) in [100, 90, 80, 70].into_iter().enumerate() {
-            conn.execute(
-                "INSERT INTO pool_snapshots (pool_address, timestamp, stats_source, active_bin_id) VALUES ('poolCap', ?1, 'datapi', ?2)",
-                [now - 300 + i as i64, bin],
-            )
-            .unwrap();
-        }
         drop(conn);
         let path_str = path.to_str().unwrap().to_string();
+        let full: std::collections::HashMap<String, Vec<i64>> =
+            [("poolCap".to_string(), vec![100, 90, 80, 70])]
+                .into_iter()
+                .collect();
         let uncapped = fee_il_shadows_capped(
             &path_str,
             0,
-            None,
+            &full,
             10,
             12,
             &std::collections::HashMap::new(),
@@ -6303,12 +6440,16 @@ mod tests {
         assert_eq!(
             uncapped[0].net_drift_bins,
             Some(-30.0),
-            "uncapped sees all 4"
+            "full ring sees all 4"
         );
+        let sliced: std::collections::HashMap<String, Vec<i64>> =
+            [("poolCap".to_string(), vec![90, 80])]
+                .into_iter()
+                .collect();
         let capped = fee_il_shadows_capped(
             &path_str,
             0,
-            Some(2),
+            &sliced,
             10,
             12,
             &std::collections::HashMap::new(),
@@ -6316,7 +6457,7 @@ mod tests {
         assert_eq!(
             capped[0].net_drift_bins,
             Some(-10.0),
-            "cap=2 sees 2 newest only"
+            "cap-2 ring sees 2 newest only"
         );
         let _ = std::fs::remove_file(&path);
     }

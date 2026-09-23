@@ -533,7 +533,10 @@ type GateRow = { gate: string; prismd: number; ts: number; note: string };
 function expectedDivergenceNote(tag: string): string | undefined {
   switch (tag) {
     case "volatility":
-      return "expected-divergence: host uses persisted active-bin proxy (see vol_exit_fires doc)";
+      // Both sides now use the SAME mechanism (chain-fed in-memory binHistory
+      // since wave 95); only ring AGE can differ — the recorded TS side ran
+      // with a mature ring, a fresh prismd process cold-starts empty.
+      return "expected: same chain-fed ring mechanism; ring-age mismatch (recorded TS side mature, host per-process)";
     default:
       return undefined;
   }
