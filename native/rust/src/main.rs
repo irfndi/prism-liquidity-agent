@@ -5043,8 +5043,18 @@ mod rpc {
     }
 
     /// Meteora DLMM program — owner of every `LbPair` and `BinArray` account.
+    /// LIVE-VALIDATED: a getProgramAccounts with this id returns 31
+    /// dataSize-10136 arrays for the captured pool (the look-alike
+    /// `LBUZKh…cCzhZhLSW1CzgNbcX` fails `-32602 WrongSize` — not a valid
+    /// pubkey). A wrong id degrades LOUDLY: zero arrays → the per-tick
+    /// "no BinArray" warn + concentration-1 fail-open, never a
+    /// wrong-positive ratio.
     pub const DLMM_PROGRAM_ID: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
     /// `MAX_BIN_PER_ARRAY` (SDK CONSTANTS table, live value "70").
+    /// Test-only since the parser derives SIZE from the account itself — its
+    /// remaining job is the fixture cross-check (advisory: CONSTANTS never
+    /// gate production parsing).
+    #[cfg(test)]
     pub const BIN_ARRAY_SIZE: i64 = 70;
     /// Anchor discriminator of a `BinArray` account.
     pub const BIN_ARRAY_DISCRIMINATOR: [u8; 8] = [92, 142, 92, 220, 5, 148, 70, 181];
@@ -5079,14 +5089,22 @@ mod rpc {
         if data[..8] != BIN_ARRAY_DISCRIMINATOR {
             return Err("discriminator mismatch (not a DLMM BinArray account)".to_string());
         }
+        // SIZE derived from the ACCOUNT, not the CONSTANTS table (advisory):
+        // version-proof and self-validating — exact division or reject. The
+        // SDK's MAX_BIN_PER_ARRAY cross-checks this in the fixture test.
+        let payload = data.len() - BIN_ARRAY_BINS_OFFSET;
+        if !payload.is_multiple_of(BIN_SLOT_SIZE) {
+            return Err(format!(
+                "bin payload {payload} is not a multiple of the {BIN_SLOT_SIZE}-byte slot"
+            ));
+        }
+        let size = payload / BIN_SLOT_SIZE;
         let index = i64::from_le_bytes(data[8..16].try_into().expect("8-byte slice"));
-        let available = (data.len() - BIN_ARRAY_BINS_OFFSET) / BIN_SLOT_SIZE;
-        let n = available.min(BIN_ARRAY_SIZE as usize);
-        let mut slots = Vec::with_capacity(n);
-        for k in 0..n {
+        let mut slots = Vec::with_capacity(size);
+        for k in 0..size {
             let base = BIN_ARRAY_BINS_OFFSET + k * BIN_SLOT_SIZE;
             let bin_id = index
-                .checked_mul(BIN_ARRAY_SIZE)
+                .checked_mul(size as i64)
                 .and_then(|lower| lower.checked_add(k as i64))
                 .ok_or_else(|| "bin id overflow".to_string())?;
             let liq_lo =
@@ -5101,13 +5119,16 @@ mod rpc {
         Ok((index, slots))
     }
 
-    /// Does the array at `index` hold `active_id`? The SDK's
-    /// `isBinIdWithinBinArray` over `getBinArrayLowerUpperBinId` bounds
-    /// (index × 70 ..= index × 70 + 69) — one definition for the picker
-    /// below and the tests.
-    pub fn bin_array_contains(index: i64, active_id: i64) -> bool {
-        let lower = index.wrapping_mul(BIN_ARRAY_SIZE);
-        active_id >= lower && active_id < lower.wrapping_add(BIN_ARRAY_SIZE)
+    /// Does the array at `index` with `size` slots hold `active_id`? The
+    /// SDK's `isBinIdWithinBinArray` over `getBinArrayLowerUpperBinId` bounds
+    /// (index×size ..= index×size+size−1) — pure comparison, NO division
+    /// (the signed-index floor hazard does not apply: the index arrives from
+    /// the account itself, never derived from activeId). One definition for
+    /// the picker below and the tests; negative indexes mirror the JS BN math
+    /// exactly (−1 covers −70..−1).
+    pub fn bin_array_contains(index: i64, active_id: i64, size: i64) -> bool {
+        let lower = index.wrapping_mul(size);
+        active_id >= lower && active_id < lower.wrapping_add(size)
     }
 
     /// The pool's `BinArray` CONTAINING `active_id` — one
@@ -5157,17 +5178,16 @@ mod rpc {
             let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(b64) else {
                 continue;
             };
-            // Containment BEFORE the full parse: read the index alone
-            // (offset 8) — one wrong-array hit per pair is normal.
-            if raw.len() < 16 {
-                continue;
-            }
-            let index = i64::from_le_bytes(raw[8..16].try_into().expect("8-byte slice"));
-            if !bin_array_contains(index, active_id) {
-                continue;
-            }
+            // Parse FIRST (the account derives its own slot SIZE — advisory),
+            // then the shared containment test. A parse failure on a
+            // memcmp-matched account means a wrong program/layout: warn and
+            // fail open (concentration 1), never a wrong-positive pick.
             match parse_bin_array(&raw) {
-                Ok((idx, slots)) => return Some((idx, slots)),
+                Ok((idx, slots)) => {
+                    if bin_array_contains(idx, active_id, slots.len() as i64) {
+                        return Some((idx, slots));
+                    }
+                }
                 Err(e) => {
                     eprintln!("[prismd] bin-array parse failed: {e}");
                     return None;
@@ -7456,14 +7476,34 @@ mod tests {
         assert_ne!(proxy_narrow, proxy_wide, "proxy varies with binStep");
         // Unknown reserves (TS reservesKnown=false → concentration 1).
         assert_eq!(concentration_multiplier(&[], 5000), 1.0, "unknown → 1");
-        // tvl 0 → 0; no-IL + fees → MAX; no-IL + no-fees → 0.
+        // tvl 0 → 0; NO price move (IL fraction exactly 0) + fees → MAX —
+        // the `il <= 0` arm, the only route to it (proxy IL is always > 0);
+        // proxy-path IL with no fees → 0.
         assert_eq!(
             compute_fee_il_ratio(0.0, 500.0, 150.0, t, 10, conc, None),
-            0.0
+            0.0,
+            "tvl 0 → 0"
+        );
+        let no_move = compute_fee_il_ratio(
+            100_000.0,
+            500.0,
+            150.0,
+            t,
+            10,
+            conc,
+            Some(PriceDrift {
+                previous_price: 150.0,
+                previous_timestamp_ms: t - 600_000,
+            }),
+        );
+        assert_eq!(
+            no_move, MAX_FEE_IL_RATIO,
+            "zero price move + fees → MAX (the il <= 0 arm)"
         );
         assert_eq!(
             compute_fee_il_ratio(100_000.0, 0.0, 150.0, t, 10, conc, None),
-            if 0.0 > 0.0 { MAX_FEE_IL_RATIO } else { 0.0 }
+            0.0,
+            "proxy-path IL with no fees → 0"
         );
     }
 
@@ -7485,18 +7525,49 @@ mod tests {
             slots.iter().all(|s| s.liquidity_supply > 0),
             "70/70 liquid on the live capture"
         );
-        // Containment (the picker's test): 2461 ∈ [2450, 2519] ✓; a
-        // neighboring array's index 15 → [1050, 1119] does not contain it.
-        let lower = index * rpc::BIN_ARRAY_SIZE;
-        assert!(2461 >= lower && 2461 < lower + rpc::BIN_ARRAY_SIZE);
+        // SIZE cross-check (advisory): the ACCOUNT-derived slot count equals
+        // the SDK CONSTANTS MAX_BIN_PER_ARRAY — the account is the truth,
+        // the constant only cross-pins it.
+        assert_eq!(
+            (raw.len() - 56) / 144,
+            rpc::BIN_ARRAY_SIZE as usize,
+            "CONSTANTS cross-check"
+        );
+        // Containment (the picker's test): 2461 ∈ [2450, 2519]; the neighbor
+        // array index 15 → [1050, 1119] does not contain it; and SIGNED index
+        // math mirrors the JS BN floor semantics — index −1 covers −70..−1
+        // (pure comparison, no division anywhere, so no truncation hazard).
         assert!(
-            rpc::bin_array_contains(index, 2461),
+            rpc::bin_array_contains(index, 2461, slots.len() as i64),
             "captured array (index 35) holds the active bin"
         );
         assert!(
-            !rpc::bin_array_contains(15, 2461),
+            !rpc::bin_array_contains(15, 2461, rpc::BIN_ARRAY_SIZE),
             "neighbor array [1050, 1119] does not contain 2461"
         );
+        assert!(
+            rpc::bin_array_contains(-1, -1, 70),
+            "negative: −1 ∈ [−70, −1] (JS floor semantics)"
+        );
+        assert!(
+            !rpc::bin_array_contains(-1, 0, 70),
+            "negative: 0 ∉ [−70, −1]"
+        );
+        assert!(
+            !rpc::bin_array_contains(0, -1, 70),
+            "negative: −1 ∉ [0, 69]"
+        );
+        // Synthetic NEGATIVE index through the full parser: a complete
+        // 70-slot account at index −1 floors bin ids exactly like the JS BN
+        // math (first bin −70), proving the signed id stride end-to-end.
+        let mut neg = vec![0u8; 56 + 70 * 144];
+        neg[..8].copy_from_slice(&rpc::BIN_ARRAY_DISCRIMINATOR);
+        neg[8..16].copy_from_slice(&(-1i64).to_le_bytes());
+        let (nidx, nslots) = rpc::parse_bin_array(&neg).expect("negative parses");
+        assert_eq!(nidx, -1);
+        assert_eq!(nslots.len(), 70);
+        assert_eq!(nslots[0].bin_id, -70, "index −1 × 70 + 0");
+        assert_eq!(nslots[69].bin_id, -1, "index −1 × 70 + 69");
         // Guards: wrong discriminator, short buffer, overflow-safe ids.
         let mut bad = raw.to_vec();
         bad[0] ^= 0xff;
