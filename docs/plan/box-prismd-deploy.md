@@ -126,8 +126,8 @@ from source ON the box (`cargo build --release --manifest-path
 native/rust/Cargo.toml`). All three are the same fail-open shadow binary with
 no Bun involved, so the `bun#42664` blocker below does NOT apply to this path.
 
-Copy to the box (run where your key works; from this host SSH currently
-fails — run ON the box or provide key):
+Copy to the box (run where your key works; SSH from this workstation works
+as of 2026-09-23 — `scp`/`ssh root@217.216.35.77` both verified):
 
 ```sh
 scp prismd-<version>-linux-x64 prismd-<version>-linux-x64.sha256 <user>@217.216.35.77:/tmp/
@@ -209,3 +209,59 @@ tarball + `.sha256` (`sha256sum -c` first), never from an unverified copy.
   soak invalidate the expectancy comparison (verify vs growth control).
 - NEVER delete live DBs/configs (`~/.local/share/prism/`, profile `.env`
   dirs) or Cloudflare data resources (D1/KV/R2/Vectorize) as part of a deploy.
+
+## 7. Parallel shadow (LIVE since 2026-09-23) — additive, §6 untouched
+
+The user go covered the SHADOW track only. Deployed and running beside the
+verify loop — this is NOT the §3 binary-drop (that cutover still needs its
+own explicit go):
+
+```text
+/root/.prismd/
+  bin/prismd                    # CI artifact prismd-linux-x64 (prismd-binary job)
+  shadow.env                    # mode 600 — the verify engine's EXACT env (recipe below)
+  compare/                      # bench harness tree for on-box parity runs
+/etc/systemd/system/prismd-shadow.service   # system unit, enabled
+```
+
+Unit guards: `MemoryMax=512M`, `CPUQuota=25%`, `Restart=on-failure`,
+`WorkingDirectory=/root/.prismd`, `ExecStart=…/prismd /root/.prismd/shadow.env`
+(profile path, NO `--ticks` → daemon; see `native/rust/README.md` Run).
+
+Env-mirror recipe (the only correct way — config files LIE on this box):
+
+1. Ground-truth each engine's book via `/proc/<pid>/fd`, never via
+   `SQLITE_DB_PATH` in a profile `.env` (growth's file names
+   `prism-paper-bin20/prism.db` — cold since Sep 5 — while the process
+   actually holds `prism-paper-growth/prism-growth.db`). The shadow targets
+   **verify**, whose open fd is `prism-review-20260905.db` (live WAL).
+2. `shadow.env` = verify's spawn env from `tr '\0' '\n' < /proc/<verify-pid>/environ`
+   MINUS session/system keys and MINUS `AGENT_HTTP_PORT` (verify owns
+   :18791; prismd would otherwise try to bind it), THEN verify's
+   `PRISM_CONFIG_DIR/.env` lines appended. prismd's positional loader is
+   first-wins, so spawn values beat file values — exactly the TS engine's
+   effective config. Winning `SQLITE_DB_PATH` = the fd-truth review book
+   (asserted at deploy: `winning_sqlite=…prism-review-20260905.db`).
+3. Secrets stay out of the unit file (spawn env includes WALLET/JUPITER);
+   the env file is `chmod 600` under `/root/.prismd/`.
+
+Results (2026-09-23, first soak hours): unit `active/running`, daemon
+cadence = config interval (120000 ms) — decision lines at 16:28:16 and
+16:30:21; first cycle prints the full surface (`decision open=8 …,
+paper_days=Some(19.0), known=true ratio=Some(8.07…)` live-datapi);
+**RSS ≈ 10 MB, CPU ≈ +1 s per 65 s between cycles (≈1.5%), first-tick burst
+~4%** — vs ~107–125 MB RSS per Bun engine. On-box N-cycle compare
+(`/root/.prismd/compare`, `PRISMD_PARITY_INTERVAL_MS=10000`, verify's
+`VOLUME_AUTH=0.55`/`MIN_POOL_TVL=10000` knobs sourced): **PARITY PASS**,
+`open 8 == 8`, gate rows fee-il/il-dominance/volatility all `both-zero`,
+honest disclosure "exit-path agreement UNTESTED — TS side has 0 EXIT rows".
+
+Binding notes: zero existing units/processes were restarted, stopped or
+masked (§6 soak guard intact; paper-watch's mask rules verified
+name-specific to `prism-paper-bin20`; verify/growth/main + polymarket + pm2
+untouched). Daemon mode was unreachable until `966126a` (profile-without-
+`--ticks` fell into the usage arm) — first start exited in 27 ms, fixed in
+Rust with a pinned test. The shadow emits ~60 journal lines per cycle
+(~43k/day); revisit the journald cap if the soak runs long. §3's binary-drop
+sequence, /opt/prism layout and bun#42664 TS-binary blocker are all
+UNCHANGED by this section.
