@@ -874,6 +874,9 @@ fn ta_ema(values: &[f64], period: usize) -> Vec<f64> {
     out
 }
 /// MACD histogram current + previous. `None` below 35 closes / on junk.
+/// TS `TA_EXHAUSTION_MIN_POINTS` (ta-exhaustion.ts:22) — also sizes the
+/// builder's trailing TA window (points × 2 scan intervals, 1h floor).
+pub const TA_EXHAUSTION_MIN_POINTS: i64 = 35;
 /// "First green" = current > 0 with previous <= 0 (checked at the tick).
 pub fn ta_macd_hist(closes_newest_first: &[f64]) -> Option<(f64, f64)> {
     if closes_newest_first.len() < 35 {
@@ -2137,9 +2140,26 @@ mod config {
     /// Parse-or-default for `SOLANA_RPC_URL`. Absent or whitespace-only ->
     /// TS's public mainnet-beta fallback. No scheme validation: a wrong URL is
     /// an ops-visible one-line RPC failure, not a silent misroute.
+    /// TS `resolvePrimaryRpcUrl` twin (config-service.ts:983): an explicit
+    /// `SOLANA_RPC_URL` wins; otherwise a present `HELIUS_API_KEY` derives the
+    /// Helius URL (verify's exact tier — its config file leaves the URL at
+    /// public while the key is set); neither → the public fallback.
     pub fn parse_solana_rpc_url(raw: Option<&str>) -> String {
-        match raw.map(str::trim) {
-            Some(s) if !s.is_empty() => s.to_string(),
+        resolve_solana_rpc_url(raw, std::env::var("HELIUS_API_KEY").ok().as_deref())
+    }
+
+    /// Pure core of `parse_solana_rpc_url` (explicit key → unit-testable
+    /// without env mutation; the wrapper passes the live process key).
+    pub fn resolve_solana_rpc_url(raw: Option<&str>, helius_key: Option<&str>) -> String {
+        if let Some(s) = raw.map(str::trim) {
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+        match helius_key.map(str::trim) {
+            Some(k) if !k.is_empty() => {
+                format!("https://mainnet.helius-rpc.com/?api-key={k}")
+            }
             _ => PUBLIC_SOLANA_RPC_URL.to_string(),
         }
     }
@@ -3287,6 +3307,7 @@ struct FeeIlShadow {
 /// from the host's OWN live samples, TS's in-memory mechanism. Absent pool /
 /// short ring → `None` = cold start (TS matches: <2 points → no drift,
 /// empty → no windows → fail-open defaults).
+#[allow(clippy::too_many_arguments)]
 fn fee_il_shadows_capped(
     sqlite_path: &str,
     min_yield_exit_age_ms: i64,
@@ -3295,6 +3316,7 @@ fn fee_il_shadows_capped(
     vol_lookback: i64,
     stats_by_pool: &std::collections::HashMap<String, PoolStatEntry>,
     ratios: &std::collections::HashMap<String, f64>,
+    scan_interval_ms: u64,
 ) -> Vec<FeeIlShadow> {
     let conn = match rusqlite::Connection::open_with_flags(
         Path::new(sqlite_path),
@@ -3370,16 +3392,27 @@ fn fee_il_shadows_capped(
                 .unwrap_or((None, None, None, None));
             // Tolerant: empty on DB error → TA no-vote (fail-open).
             // TA closes: TS's own `pool_snapshots.current_price` newest-first
-            // (program.ts:10646 `readTaCloses`: source-blind; short → None →
-            // TA no-vote, fail-open like TS's short-floor).
+            // — the `readTaCloses` twin (program.ts:10646): trailing window
+            // max(1h, 35×2 scan intervals) over MEASURED sources only
+            // (datapi/geckoterminal — heuristic rows never vote); stale async
+            // ticks are excluded by `timestamp >= cutoff`, so a frozen book
+            // no-votes exactly where TS's `taWindowMs` ends. Short/empty →
+            // None → TA no-vote, fail-open like TS's short-floor.
+            let ta_window_ms: i64 = TA_EXHAUSTION_MIN_POINTS
+                .saturating_mul(2)
+                .saturating_mul(scan_interval_ms as i64)
+                .max(3_600_000);
             let ta_closes_newest_first: Option<Vec<f64>> = (|| {
                 let mut stmt = conn
                     .prepare(
-                        "SELECT current_price FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 35",
+                        "SELECT current_price FROM pool_snapshots WHERE pool_address = ?1 AND timestamp >= ?2 AND stats_source IN ('datapi','geckoterminal') ORDER BY timestamp DESC LIMIT 35",
                     )
                     .ok()?;
                 let closes: Vec<f64> = stmt
-                    .query_map(rusqlite::params![pool_address], |r| r.get(0))
+                    .query_map(
+                        rusqlite::params![pool_address, now_ms.saturating_sub(ta_window_ms)],
+                        |r| r.get(0),
+                    )
                     .ok()?
                     .flatten()
                     .collect();
@@ -3759,6 +3792,7 @@ fn tick(cfg: &config::Config, n: u64) {
         cfg.volatility_lookback_snapshots,
         &stats_by_pool,
         &ratios,
+        cfg.scan_interval_ms,
     );
     // Drawdown inputs: spot legs per open position (deposited/current only —
     // `toRiskPosition` is spot-only). Collected up front so the book-level
@@ -6719,6 +6753,7 @@ mod tests {
             12,
             &stats_by_pool,
             &ratios,
+            600_000,
         );
         shadows.sort_by(|a, b| a.position_id.cmp(&b.position_id));
         let _ = std::fs::remove_file(&path);
@@ -7637,6 +7672,7 @@ mod tests {
         assert_eq!(config::parse_wallet_pubkey(None), Ok(String::new()));
         assert_eq!(config::parse_wallet_pubkey(Some("")), Ok(String::new()));
         assert_eq!(config::parse_wallet_pubkey(Some("   ")), Ok(String::new()));
+        // No key in this process env (CI never sets HELIUS_API_KEY) → public.
         assert_eq!(
             config::parse_solana_rpc_url(None),
             "https://api.mainnet-beta.solana.com"
@@ -7644,6 +7680,21 @@ mod tests {
         assert_eq!(
             config::parse_solana_rpc_url(Some("  ")),
             "https://api.mainnet-beta.solana.com"
+        );
+        // TS `resolvePrimaryRpcUrl` twin via the pure helper (no env
+        // mutation — race-free under the parallel harness): blank URL +
+        // key → derived Helius URL; whitespace key → public fallback.
+        assert_eq!(
+            config::resolve_solana_rpc_url(None, Some("probe-key-123")),
+            "https://mainnet.helius-rpc.com/?api-key=probe-key-123"
+        );
+        assert_eq!(
+            config::resolve_solana_rpc_url(Some("  "), Some("   ")),
+            "https://api.mainnet-beta.solana.com"
+        );
+        assert_eq!(
+            config::resolve_solana_rpc_url(Some(" https://rpc.example/x "), Some("k")),
+            "https://rpc.example/x"
         );
         assert_eq!(
             config::parse_solana_rpc_url(Some(" https://rpc.example/x ")),
@@ -7985,6 +8036,7 @@ mod tests {
             12,
             &stats,
             &std::collections::HashMap::new(),
+            600_000,
         );
         let _ = std::fs::remove_file(&path);
         assert_eq!(shadows.len(), 1);
@@ -8025,14 +8077,27 @@ mod tests {
                 [now],
             )
             .unwrap();
-            // 40 ascending prices → the window keeps the newest 35 DESC.
+            // 40 ascending prices, 60s apart → the window keeps the newest
+            // 35 DESC (cutoff = now − max(1h, 70 intervals) keeps all 40).
             for (i, price) in (10..50).enumerate() {
                 conn.execute(
                     "INSERT INTO pool_snapshots (pool_address, timestamp, stats_source, current_price) VALUES ('poolTA', ?1, 'datapi', ?2)",
-                    rusqlite::params![now - 40 + i as i64, price as f64],
+                    rusqlite::params![now - 39 * 60_000 + (i as i64) * 60_000, price as f64],
                 )
                 .unwrap();
             }
+            // Same shape, heuristic source → never votes (TS drops it); and a
+            // stale row outside the window → aged out like `taWindowMs`.
+            conn.execute(
+                "INSERT INTO pool_snapshots (pool_address, timestamp, stats_source, current_price) VALUES ('poolTA', ?1, 'heuristic', 999.0)",
+                [now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pool_snapshots (pool_address, timestamp, stats_source, current_price) VALUES ('poolTA', ?1, 'datapi', 0.01)",
+                [now - 4_200_000],
+            )
+            .unwrap();
             drop(conn);
         }
         let shadows = fee_il_shadows_capped(
@@ -8043,6 +8108,7 @@ mod tests {
             12,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
+            600_000,
         );
         let _ = std::fs::remove_file(&path);
         assert_eq!(shadows.len(), 1);
@@ -8507,6 +8573,7 @@ mod tests {
             12,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
+            600_000,
         );
         assert_eq!(
             uncapped[0].net_drift_bins,
@@ -8525,6 +8592,7 @@ mod tests {
             12,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
+            600_000,
         );
         assert_eq!(
             capped[0].net_drift_bins,
