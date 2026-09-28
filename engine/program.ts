@@ -613,7 +613,14 @@ export function fetchJevVerdict(input: JevFetchInput): Effect.Effect<JevJudgment
   ).pipe(
     Effect.catch(() => Effect.succeed(null)),
     Effect.map((judgments) => {
-      if (judgments === null || !judgments.ok) return null;
+      if (judgments === null) return null;
+      if (!judgments.ok) {
+        logger.info("Jev shadow consult skipped/failed", {
+          pool: input.poolAddress,
+          failure: judgments.failure ?? "error",
+        });
+        return null;
+      }
       jevStoreVerdict(
         jevCacheKey(
           input.poolAddress,
@@ -11237,10 +11244,7 @@ export const program = Effect.gen(function* () {
             jevModel: config.jevModel,
             jevTimeoutMs: config.jevTimeoutMs,
           });
-          if (judgments === null) {
-            logger.info("Jev shadow consult skipped/failed", { pool: poolAddress });
-            return { judgments: null, fromCache: false };
-          }
+          if (judgments === null) return { judgments: null, fromCache: false };
           const disagrees = jevShadowDisagrees(judgments, heuristic);
           logJevShadowVerdict(poolAddress, judgments, heuristic, metrics, disagrees);
           if (!disagrees) return { judgments, fromCache: false };

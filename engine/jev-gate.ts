@@ -20,6 +20,7 @@ let nextJevSlotAt = 0;
 let breakerCooldownUntil = 0;
 let breakerFailures = 0;
 // Under the test environment (NODE_ENV=test / VITEST=true — repo precedent in
+// config-service) the interval defaults to 0: the suite injects fetchImpl
 // and must not pay the pacing wait per call.
 const TEST_ENV = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 const DEFAULT_TEST_INTERVAL_MS = TEST_ENV ? 0 : undefined;
