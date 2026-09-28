@@ -1735,9 +1735,10 @@ mod config {
         pub il_dominance_min_usd: f64,
         pub dust_exit_usd: f64,
         pub agent_http_port: u16,
-        /// Solana JSON-RPC endpoint. Absent → public mainnet-beta (TS's
-        /// `PUBLIC_SOLANA_RPC_URL` fallback, config-service.ts:42). Live mode
-        /// should set `SOLANA_RPC_URL` (Helius); paper mode never uses it.
+        /// Solana JSON-RPC endpoint. Explicit `SOLANA_RPC_URL` wins; blank +
+        /// `HELIUS_API_KEY` derives the Helius URL (`resolve_solana_rpc_url`,
+        /// the TS `resolvePrimaryRpcUrl` twin); else public mainnet-beta.
+        /// Used every tick (bin arrays, wallet) in paper mode too.
         pub solana_rpc_url: String,
         /// Meteora Data API base URL (default `https://dlmm.datapi.meteora.ag`)
         /// — feeds the tick's live statsSource tier; the `--datapi-probe` CLI
