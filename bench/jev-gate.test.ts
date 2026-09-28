@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { jevFetch, resetJevGateForTest, setJevGateForTest } from "../engine/jev-gate.js";
+import { JEV_DISABLED } from "../engine/jev-service.js";
 import { asFetch } from "./helpers.js";
+import {
+  jevCacheKey,
+  jevCachedVerdict,
+  jevFetch,
+  resetJevGateForTest,
+  resetJevVerdictCacheForTest,
+  jevStoreVerdict,
+  setJevGateForTest,
+} from "../engine/jev-gate.js";
 
 function mockFetchOnce(
   impl: (url: string | URL | Request, init?: RequestInit) => Response | Promise<Response>,
@@ -79,5 +88,33 @@ describe("jevFetch traffic gate", () => {
     const second = await jevFetch("https://api.typesafe.ai/v1/systemone", { method: "POST" });
     expect(second.status).toBe(429);
     expect(fetchCount).toBe(1);
+  });
+});
+
+describe("jev verdict cache", () => {
+  beforeEach(() => {
+    resetJevVerdictCacheForTest();
+  });
+
+  afterEach(() => {
+    resetJevVerdictCacheForTest();
+  });
+
+  it("misses empty, hits stored, expires past TTL", () => {
+    const key = jevCacheKey("poolA", "datapi", 7, 5000);
+    expect(jevCachedVerdict(key, 1_000)).toBeNull();
+    jevStoreVerdict(key, JEV_DISABLED, 1_000);
+    expect(jevCachedVerdict(key, 1_000 + 44 * 60_000)).toBe(JEV_DISABLED);
+    expect(jevCachedVerdict(key, 1_000 + 46 * 60_000)).toBeNull();
+  });
+
+  it("buckets regimes: drift/active-bin/source moves re-consult", () => {
+    const base = jevCacheKey("poolA", "datapi", 7, 5000);
+    expect(jevCacheKey("poolA", "datapi", 9, 5000)).toBe(base);
+    expect(jevCacheKey("poolA", "datapi", 13, 5000)).not.toBe(base);
+    expect(jevCacheKey("poolA", "datapi", 7, 5001)).not.toBe(base);
+    expect(jevCacheKey("poolA", "geckoterminal", 7, 5000)).not.toBe(base);
+    expect(jevCacheKey("poolA", "datapi", null, 5000)).not.toBe(base);
+    expect(jevCacheKey("poolB", "datapi", 7, 5000)).not.toBe(base);
   });
 });

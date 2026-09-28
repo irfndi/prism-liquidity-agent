@@ -64,6 +64,7 @@ import {
   type ReturnSeries,
 } from "./regime-gate.js";
 import { consultJevJudgments, type JevJudgments, type JevPoolState } from "./jev-service.js";
+import { jevCacheKey, jevCachedVerdict, jevStoreVerdict } from "./jev-gate.js";
 import {
   activeShareEstimate,
   expectedNetProfitUsd,
@@ -570,6 +571,128 @@ function logJevShadowVerdict(
       binUtilization: metrics.binUtilization,
     },
     agrees: !disagrees,
+  });
+}
+
+/** Owner contract for one Jev consult's inputs (shadow path + ENTER-slot re-consult share it). */
+export interface JevFetchInput {
+  readonly poolAddress: string;
+  readonly pool: PoolState;
+  readonly metrics: PoolMetrics;
+  readonly volatilityStddev: number;
+  readonly netDriftBins: number;
+  readonly recentBinCount: number;
+  readonly jevApiKey: string | undefined;
+  readonly jevBaseUrl: string | undefined;
+  readonly jevModel: string | undefined;
+  readonly jevTimeoutMs: number | undefined;
+}
+
+/** Single Jev consult + cache store under the regime key. Shared by the
+ *  shadow path (observability) and the ENTER-slot fresh re-consult (the
+ *  validated halve gate). Returns null on any failure (fail-open). */
+export function fetchJevVerdict(input: JevFetchInput): Effect.Effect<JevJudgments | null, never> {
+  return Effect.promise(() =>
+    consultJevJudgments(
+      buildJevShadowState({
+        poolAddress: input.poolAddress,
+        pool: input.pool,
+        metrics: input.metrics,
+        volatilityStddev: input.volatilityStddev,
+        netDriftBins: input.netDriftBins,
+        recentBinCount: input.recentBinCount,
+      }),
+      {
+        jevEnabled: true,
+        jevApiKey: input.jevApiKey,
+        jevBaseUrl: input.jevBaseUrl,
+        jevModel: input.jevModel,
+        jevTimeoutMs: input.jevTimeoutMs,
+      },
+    ),
+  ).pipe(
+    Effect.catch(() => Effect.succeed(null)),
+    Effect.map((judgments) => {
+      if (judgments === null || !judgments.ok) return null;
+      jevStoreVerdict(
+        jevCacheKey(
+          input.poolAddress,
+          input.pool.statsSource,
+          input.netDriftBins,
+          input.pool.activeBinId,
+        ),
+        judgments,
+      );
+      return judgments;
+    }),
+  );
+}
+
+/** Owner contract for the normal-lane ENTER sizing inputs (halve gate). */
+export interface NormalEnterSizeInput {
+  readonly poolAddress: string;
+  readonly pool: PoolState;
+  readonly metrics: PoolMetrics;
+  readonly volatilityStddev: number;
+  readonly netDriftBins: number;
+  readonly recentBinCount: number;
+  readonly fullSizeUsd: number;
+  readonly jevConsult: { readonly fromCache: boolean };
+  readonly jevJudgments: JevJudgments | null;
+  readonly paperTrading: boolean | undefined;
+  readonly halveEnabled: boolean | undefined;
+  readonly threshold: number;
+  readonly jevApiKey: string | undefined;
+  readonly jevBaseUrl: string | undefined;
+  readonly jevModel: string | undefined;
+  readonly jevTimeoutMs: number | undefined;
+  readonly checkExpectedProfit: (sizeUsd: number) => Effect.Effect<boolean, never>;
+}
+
+/** Normal-lane ENTER sizing result: null = expected-profit blocked. */
+export interface NormalEnterSize {
+  readonly positionSizeUsd: number;
+  readonly halved: boolean;
+  readonly stress: number;
+}
+
+/** Normal-lane ENTER sizing: expected-profit on the FULL size (null = blocked),
+ *  then the paper-only Jev stress halve with a fresh re-consult when the
+ *  shadow verdict came from cache. Pure sequencing — the validated halve
+ *  keeps today's inputs while the shadow path rides the TTL cache. */
+export function resolveNormalEnterSize(
+  input: NormalEnterSizeInput,
+): Effect.Effect<NormalEnterSize | null, never> {
+  return Effect.gen(function* () {
+    if (yield* input.checkExpectedProfit(input.fullSizeUsd)) return null;
+    let halveJudgments = input.jevJudgments;
+    if (input.jevConsult.fromCache && input.jevJudgments !== null) {
+      const fresh = yield* fetchJevVerdict({
+        poolAddress: input.poolAddress,
+        pool: input.pool,
+        metrics: input.metrics,
+        volatilityStddev: input.volatilityStddev,
+        netDriftBins: input.netDriftBins,
+        recentBinCount: input.recentBinCount,
+        jevApiKey: input.jevApiKey,
+        jevBaseUrl: input.jevBaseUrl,
+        jevModel: input.jevModel,
+        jevTimeoutMs: input.jevTimeoutMs,
+      });
+      if (fresh !== null) halveJudgments = fresh;
+    }
+    const halve = resolveJevStressHalve({
+      paperTrading: input.paperTrading,
+      halveEnabled: input.halveEnabled,
+      threshold: input.threshold,
+      judgments: halveJudgments,
+      fullSizeUsd: input.fullSizeUsd,
+    });
+    return {
+      positionSizeUsd: halve.positionSizeUsd,
+      halved: halve.halved,
+      stress: halveJudgments?.regimeStressNoul ?? 0,
+    };
   });
 }
 
@@ -11068,12 +11191,33 @@ export const program = Effect.gen(function* () {
       // disabled without JEV_ENABLED + key; transport/parse failures return
       // ok:false (paced via jevFetch, no retry). Returns judgments for the
       // soft gate; memory logs disagreements only.
-      function runJevShadowLog(): Effect.Effect<JevJudgments | null, never> {
+      interface JevConsult {
+        readonly judgments: JevJudgments | null;
+        readonly fromCache: boolean;
+      }
+      // Module-scope fetch (below): consult + store under one cache key so
+      // the shadow path and the ENTER-slot fresh re-consult share it.
+      function runJevShadowLog(): Effect.Effect<JevConsult, never> {
         return Effect.gen(function* () {
-          if (config.jevEnabled !== true) return null;
-          if (!config.jevApiKey) return null;
-          if (!entryEligible) return null;
-          if (poolExitFired) return null;
+          if (config.jevEnabled !== true) return { judgments: null, fromCache: false };
+          if (!config.jevApiKey) return { judgments: null, fromCache: false };
+          if (!entryEligible) return { judgments: null, fromCache: false };
+          if (poolExitFired) return { judgments: null, fromCache: false };
+          // Full-book skip: at MAX_OPEN_POSITIONS no ENTER can execute, so
+          // the halve (the only behavioral consumer) cannot fire. Fail-open:
+          // a same-cycle exit frees a slot AFTER this read — the entering
+          // pool then consults fresh (no stale verdict), it just pays one
+          // call instead of riding a skip.
+          if (trackedPositions.size >= (config.maxOpenPositions ?? 3))
+            return { judgments: null, fromCache: false };
+          const cacheKey = jevCacheKey(
+            poolAddress,
+            pool.statsSource,
+            netDriftBins,
+            pool.activeBinId,
+          );
+          const cached = jevCachedVerdict(cacheKey);
+          if (cached !== null) return { judgments: cached, fromCache: true };
           const heuristic = buildJevShadowHeuristic({
             entryStrategyType: config.entryStrategyType,
             volatilityStddev,
@@ -11081,35 +11225,25 @@ export const program = Effect.gen(function* () {
             netDriftBins,
             maxNegativeDriftBins: config.marketScanMaxNegativeDriftBins,
           });
-          const judgments = yield* Effect.promise(() =>
-            consultJevJudgments(
-              buildJevShadowState({
-                poolAddress,
-                pool,
-                metrics,
-                volatilityStddev,
-                netDriftBins,
-                recentBinCount: recentBins.length,
-              }),
-              {
-                jevEnabled: config.jevEnabled,
-                jevApiKey: config.jevApiKey,
-                jevBaseUrl: config.jevBaseUrl,
-                jevModel: config.jevModel,
-                jevTimeoutMs: config.jevTimeoutMs,
-              },
-            ),
-          ).pipe(Effect.catch(() => Effect.succeed(null)));
-          if (judgments === null || !judgments.ok) {
-            logger.info("Jev shadow consult skipped/failed", {
-              pool: poolAddress,
-              failure: judgments?.failure ?? "error",
-            });
-            return null;
+          const judgments = yield* fetchJevVerdict({
+            poolAddress,
+            pool,
+            metrics,
+            volatilityStddev,
+            netDriftBins,
+            recentBinCount: recentBins.length,
+            jevApiKey: config.jevApiKey,
+            jevBaseUrl: config.jevBaseUrl,
+            jevModel: config.jevModel,
+            jevTimeoutMs: config.jevTimeoutMs,
+          });
+          if (judgments === null) {
+            logger.info("Jev shadow consult skipped/failed", { pool: poolAddress });
+            return { judgments: null, fromCache: false };
           }
           const disagrees = jevShadowDisagrees(judgments, heuristic);
           logJevShadowVerdict(poolAddress, judgments, heuristic, metrics, disagrees);
-          if (!disagrees) return judgments;
+          if (!disagrees) return { judgments, fromCache: false };
           yield* memory
             .upsert({
               category: "pattern",
@@ -11117,7 +11251,7 @@ export const program = Effect.gen(function* () {
               poolAddress,
             })
             .pipe(Effect.catch(() => Effect.void));
-          return judgments;
+          return { judgments, fromCache: false };
         });
       }
 
@@ -11176,8 +11310,11 @@ export const program = Effect.gen(function* () {
       // Jev shadow consult AFTER capital-protecting EXITs: poolExitFired is
       // now assigned, and advisory latency never delays an EXIT or W15
       // alert. ENTER-candidate pools only. Judgments feed the paper-only
-      // stress soft gate at the normal ENTER slot below.
-      const jevJudgments = yield* runJevShadowLog();
+      // stress soft gate at the normal ENTER slot below (fresh re-consult
+      // there when the shadow verdict came from cache — the validated gate
+      // keeps today's inputs).
+      const jevConsult = yield* runJevShadowLog();
+      const jevJudgments = jevConsult.judgments;
 
       const resolveExitCooldown = (
         exitDecision: AgentDecision,
@@ -13082,16 +13219,32 @@ export const program = Effect.gen(function* () {
               // after, floored at ENTRY_SIZE_FLOOR_USD. Flag-gated, paper
               // only, normal lane only; fail-open on !ok/null stress. A-tune→
               // B-validate: stress>=0.35 kept PF 3.53 vs base 1.74 (split B).
-              const fullSizeUsd = allocation.adjustedDepositUsd;
-              if (yield* checkExpectedProfit(fullSizeUsd)) return true;
-              const jevHalveResult = resolveJevStressHalve({
+              // Fresh re-consult when the shadow verdict came from cache: the
+              // halve is the ONLY behavioral consumer, so it alone gets
+              // today's inputs (a stress crossing inside the TTL window flips
+              // the halve exactly as a fresh shadow consult would). Fail-open:
+              // a failed re-consult keeps the cached verdict, never blocks.
+              const enterSize = yield* resolveNormalEnterSize({
+                poolAddress,
+                pool,
+                metrics,
+                volatilityStddev,
+                netDriftBins,
+                recentBinCount: recentBins.length,
+                fullSizeUsd: allocation.adjustedDepositUsd,
+                jevConsult,
+                jevJudgments,
                 paperTrading: config.paperTrading,
                 halveEnabled: config.jevStressHalveEnabled,
                 threshold: config.jevStressHalveThreshold ?? 0.35,
-                judgments: jevJudgments,
-                fullSizeUsd,
+                jevApiKey: config.jevApiKey,
+                jevBaseUrl: config.jevBaseUrl,
+                jevModel: config.jevModel,
+                jevTimeoutMs: config.jevTimeoutMs,
+                checkExpectedProfit,
               });
-              const positionSizeUsd = jevHalveResult.positionSizeUsd;
+              if (enterSize === null) return true;
+              const positionSizeUsd = enterSize.positionSizeUsd;
               // Halved sizes carry the [jev-stress-halve] reasoning tag below —
               // no separate log branch (keeps the generator under the
               // complexity gate; the audit record is the observability).
@@ -13118,9 +13271,9 @@ export const program = Effect.gen(function* () {
                   config.entryMomentumReferenceBins,
                   config.entryMomentumConfBoost,
                 ),
-                reasoning: jevHalveResult.halved
-                  ? `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL $${pool.tvlUsd.toFixed(0)} [jev-stress-halve stress=${(jevJudgments?.regimeStressNoul ?? 0).toFixed(2)}]`
-                  : `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL $${pool.tvlUsd.toFixed(0)}`,
+                reasoning: enterSize.halved
+                  ? `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL ${pool.tvlUsd.toFixed(0)} [jev-stress-halve stress=${enterSize.stress.toFixed(2)}]`
+                  : `Strong pool: Fee/IL ${feeIlRatio.toFixed(2)}, auth ${volumeAuth.toFixed(2)}, TVL ${pool.tvlUsd.toFixed(0)}`,
                 positionSizeUsd,
                 ...resolveTpLadderSpread(tpLadder),
               });

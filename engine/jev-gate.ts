@@ -1,3 +1,4 @@
+import type { JevJudgments } from "./jev-service.js";
 // ─── Jev API traffic gate ────────────────────────────────────────────────────
 // Numeric quota is UNKNOWN per docs (429/529 = backoff-retryable, SDK auto).
 // One systemOne per pool per cycle × TopK pools fans out fast, so ALL Jev
@@ -19,7 +20,6 @@ let nextJevSlotAt = 0;
 let breakerCooldownUntil = 0;
 let breakerFailures = 0;
 // Under the test environment (NODE_ENV=test / VITEST=true — repo precedent in
-// config-service) the interval defaults to 0: the suite injects fetchImpl
 // and must not pay the pacing wait per call.
 const TEST_ENV = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 const DEFAULT_TEST_INTERVAL_MS = TEST_ENV ? 0 : undefined;
@@ -132,4 +132,56 @@ export async function jevFetch(
   const response = await fetch(input, init);
   recordJevResponse(response);
   return response;
+}
+
+// ─── Verdict cache (token trim) ──────────────────────────────────────────────
+// Same 9 pools re-consulted every 2-min cycle; verdicts barely move
+// (stress p50 0.25 across 5k box rows). Cache per pool + regime bucket with
+// a 45-min TTL. STALE-READ CONTRACT: a cached verdict may feed the ENTER-slot
+// halve up to TTL old — a stress crossing inside the window flips the halve
+// vs a fresh consult. Accepted: the halve is a validated soft gate (PF 3.53
+// vs 1.74), not capital protection; the window only delays, never inverts.
+// Fail-open by deletion: a miss consults exactly as today.
+const JEV_VERDICT_TTL_MS = 45 * 60_000;
+interface JevCacheRow {
+  readonly at: number;
+  readonly judgments: JevJudgments;
+}
+const jevVerdictCache = new Map<string, JevCacheRow>();
+
+/** Regime bucket: statsSource + drift bucket + active bin. Same bucket =
+ *  same market shape the model judged; a regime move re-consults. */
+export function jevCacheKey(
+  poolAddress: string,
+  statsSource: string | undefined,
+  netDriftBins: number | null,
+  activeBinId: number,
+): string {
+  const drift =
+    netDriftBins === null
+      ? "cold"
+      : netDriftBins >= 0
+        ? `up${Math.floor(netDriftBins / 5)}`
+        : `dn${Math.floor(-netDriftBins / 5)}`;
+  return `${poolAddress}|${statsSource ?? "?"}|${drift}|${activeBinId}`;
+}
+
+export function jevCachedVerdict(key: string, nowMs = Date.now()): JevJudgments | null {
+  const row = jevVerdictCache.get(key);
+  if (row === undefined) return null;
+  if (nowMs - row.at >= JEV_VERDICT_TTL_MS) {
+    jevVerdictCache.delete(key);
+    return null;
+  }
+  return row.judgments;
+}
+
+export function jevStoreVerdict(key: string, judgments: JevJudgments, nowMs = Date.now()): void {
+  if (jevVerdictCache.size > 1000) jevVerdictCache.clear();
+  jevVerdictCache.set(key, { at: nowMs, judgments });
+}
+
+/** Test hook: clear the verdict cache. */
+export function resetJevVerdictCacheForTest(): void {
+  jevVerdictCache.clear();
 }
