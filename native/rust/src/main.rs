@@ -235,9 +235,11 @@ pub fn snapshot_price_drift(rows: &[(f64, i64)]) -> Option<(f64, i64)> {
     Some(anchor)
 }
 
-/// The host's fee-window price history (`prismd_pool_history`, wave 99) is
-/// TS's `pool_snapshots` for the drift anchor. Trailing 24h, oldest-first.
-/// Fail-open → empty (cold start → binStep proxy).
+/// TS's own price history (`pool_snapshots`: pool_address/timestamp/
+/// current_price, ms timestamps — engine/db.ts `add_pool_snapshots`) is the
+/// drift anchor: the same table `previousSnapshot` reads (program.ts:9006),
+/// source-blind like TS `getSnapshots`. Pure read-only, 24h trailing,
+/// oldest-first. Fail-open → empty (no history → binStep proxy).
 fn read_pool_price_window(sqlite_path: &str, pool_address: &str, now_ms: i64) -> Vec<(f64, i64)> {
     let conn = match rusqlite::Connection::open_with_flags(
         Path::new(sqlite_path),
@@ -251,7 +253,7 @@ fn read_pool_price_window(sqlite_path: &str, pool_address: &str, now_ms: i64) ->
     };
     let cutoff = now_ms.saturating_sub(MS_PER_DAY as i64);
     let mut stmt = match conn.prepare(
-        "SELECT current_price, timestamp FROM prismd_pool_history WHERE pool_address = ?1 AND timestamp >= ?2 ORDER BY timestamp ASC",
+        "SELECT current_price, timestamp FROM pool_snapshots WHERE pool_address = ?1 AND timestamp >= ?2 ORDER BY timestamp ASC",
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -3254,12 +3256,11 @@ struct FeeIlShadow {
     /// fall back, never acts) — measured, not the persisted latest row.
     pool_bin_step: Option<i64>,
     pool_current_price: Option<f64>,
-    /// TA-exhaustion shadow input: up to 35 newest HOST-history
-    /// `prismd_pool_history.current_price` closes, newest-first
-    /// (RSI/BB/MACD need ordered history; short/empty → TA no-vote,
-    /// fail-open like TS's TA_EXHAUSTION_MIN_POINTS floor). Host-owned
-    /// since wave 99 (PRISMD_HOST_LEDGER-gated writes) — the last builder
-    /// read of TS-written `pool_snapshots` retired here.
+    /// TA-exhaustion shadow input: up to 35 newest TS `pool_snapshots`
+    /// `current_price` closes, newest-first (RSI/BB/MACD need ordered
+    /// history; short/empty → TA no-vote, fail-open like TS's
+    /// TA_EXHAUSTION_MIN_POINTS floor). Pure read-only — the same rows TS's
+    /// own `readTaCloses` feeds its indicator (program.ts:10646).
     ta_closes_newest_first: Option<Vec<f64>>,
     /// Recovery-gate shadow input (F4): up to `oor_recovery_lookback` newest
     /// chain-sampled bins for the position's pool, newest-first → reversed to
@@ -3368,15 +3369,13 @@ fn fee_il_shadows_capped(
                 )
                 .unwrap_or((None, None, None, None));
             // Tolerant: empty on DB error → TA no-vote (fail-open).
-            // TA closes: the HOST's own price history since wave 99 (written
-            // under the PRISMD_HOST_LEDGER gate; a direct/unflagged run has
-            // no rows → None → TA no-vote, fail-open like TS's short-floor).
-            // Retired the last builder read of TS-written `pool_snapshots` —
-            // the flag-gated host ledger is the cutover-contract source.
+            // TA closes: TS's own `pool_snapshots.current_price` newest-first
+            // (program.ts:10646 `readTaCloses`: source-blind; short → None →
+            // TA no-vote, fail-open like TS's short-floor).
             let ta_closes_newest_first: Option<Vec<f64>> = (|| {
                 let mut stmt = conn
                     .prepare(
-                        "SELECT current_price FROM prismd_pool_history WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 35",
+                        "SELECT current_price FROM pool_snapshots WHERE pool_address = ?1 ORDER BY timestamp DESC LIMIT 35",
                     )
                     .ok()?;
                 let closes: Vec<f64> = stmt
@@ -3694,10 +3693,11 @@ fn tick(cfg: &config::Config, n: u64) {
         })
         .collect();
     // Fee/IL ratio is HOST-COMPUTED since wave 100 — chain BinArray
-    // (concentration) + stats map (tvl/fees/price) + the host's own price
-    // history (24h fee-window drift anchor). Runs BEFORE this tick's price
-    // row is written so the window ends at the PREVIOUS cycle, exactly TS's
-    // `previousSnapshot` (scan-set.ts:22). Cold inputs fall where TS does:
+    // (concentration) + stats map (tvl/fees/price) + TS's own `pool_snapshots`
+    // price history (24h fee-window drift anchor, read-only). The window ends
+    // at the PREVIOUS cycle — the host writes nothing; TS's per-cycle rows
+    // are the latest — exactly TS's `previousSnapshot` (scan-set.ts:22).
+    // Cold inputs fall where TS does:
     // no stats → no ratio; no bin array → concentration 1; window < 1h →
     // binStep proxy. The builder's last `signal_snapshots.fee_il_ratio`
     // read retires here (outcome rows stay TS-written for signal-lift).
@@ -6770,11 +6770,11 @@ mod tests {
         assert_eq!(mature.pool_bin_step, None, "absent pool → bin_step None");
         assert_eq!(fresh.ratio, None, "no map entry → cold ratio None");
         assert!(fresh.onchain, "non-NULL position_pubkey -> onchain");
-        // Wave 99: no host history table in this fixture → TA no-vote,
-        // fail-open (the builder's TA source is prismd_pool_history now).
+        // No price history in this fixture → TA no-vote, fail-open
+        // (the builder reads TS `pool_snapshots`, absent here).
         assert_eq!(
             fresh.ta_closes_newest_first, None,
-            "host history table absent → TA window None"
+            "no price history → TA window None"
         );
         assert_eq!(
             mature.net_drift_bins,
@@ -7997,12 +7997,11 @@ mod tests {
     }
 
     #[test]
-    fn pool_history_appends_and_windows_ta() {
-        // Wave 99: `write_pool_history` appends host-owned price rows (the
-        // cutover-contract table nothing in TS reads) and the builder's TA
-        // window reads 35 newest DESC from it — the retired pool_snapshots
-        // source. Direct inserts pin the window (one write call shares a
-        // single timestamp, so the window test needs distinct ones).
+    fn pool_history_snapshots_window_ta() {
+        // Builder TA window reads 35 newest `pool_snapshots.current_price`
+        // DESC — TS's own rows (`readTaCloses` source). Direct inserts pin
+        // the window; the `write_pool_history` writer half below stays
+        // covered for the flag-gated twin/compare path.
         let path = std::env::temp_dir().join(format!(
             "prismd-pool-history-test-{}.db",
             std::process::id()
@@ -8011,15 +8010,10 @@ mod tests {
         let path_str = path.to_str().unwrap().to_string();
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
+            // `make_shadow_test_db` already creates `pool_snapshots`;
+            // add the price column (TS migration v4 shape) for this test.
             conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS prismd_pool_history (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     pool_address TEXT NOT NULL,
-                     timestamp INTEGER NOT NULL,
-                     current_price REAL NOT NULL
-                 );
-                 CREATE INDEX IF NOT EXISTS idx_prismd_pool_history_pool_ts
-                     ON prismd_pool_history(pool_address, timestamp);",
+                "ALTER TABLE pool_snapshots ADD COLUMN current_price REAL NOT NULL DEFAULT 0.0;",
             )
             .unwrap();
             let now = std::time::SystemTime::now()
@@ -8034,7 +8028,7 @@ mod tests {
             // 40 ascending prices → the window keeps the newest 35 DESC.
             for (i, price) in (10..50).enumerate() {
                 conn.execute(
-                    "INSERT INTO prismd_pool_history (pool_address, timestamp, current_price) VALUES ('poolTA', ?1, ?2)",
+                    "INSERT INTO pool_snapshots (pool_address, timestamp, stats_source, current_price) VALUES ('poolTA', ?1, 'datapi', ?2)",
                     rusqlite::params![now - 40 + i as i64, price as f64],
                 )
                 .unwrap();
