@@ -32,8 +32,9 @@ Config: `.env` first, then optional profile env-file path arg (existing env wins
 Keys: `SQLITE_DB_PATH` (legacy `SQLITE_PATH` fallback; default `prism.db`),
 `SCAN_INTERVAL_MS` (default 600000, fail-closed outside [10000, 3600000]),
 `PAPER_PORTFOLIO_USD` (default 10000, fail-closed below 1),
-`JEV_ENABLED`, `BEND_BIN` (default `bend`), `SOLANA_RPC_URL` (default
-public mainnet-beta), `WALLET_PUBKEY` (empty = walletless), `SOL_PRICE_USD`
+`JEV_ENABLED`, `BEND_BIN` (default `bend`), `SOLANA_RPC_URL` (explicit wins;
+blank + `HELIUS_API_KEY` set → derived Helius URL, the `resolvePrimaryRpcUrl`
+twin; else public mainnet-beta), `WALLET_PUBKEY` (empty = walletless), `SOL_PRICE_USD`
 (default 150, [0,10000] — static price, now only the rebalance gas-cost
 input; the wallet itself is Jupiter-priced, see the `rpc` bullet).
 `METEORA_DATA_API_URL` (default `https://dlmm.datapi.meteora.ag`) and
@@ -43,16 +44,19 @@ the two stats tiers; `GECKO_TERMINAL_ENABLED` (default on — TS's
 means legs-None, never a gas verdict). `PRISMD_HOST_LEDGER` (default OFF;
 non-empty value required) is the write gate for EVERY host-owned ledger
 table — `prismd_shadow_log` decision rows and `prismd_pool_history` price
-rows (the TA window's source since wave 99); a plain `prismd --ticks N`
-stays byte-identical without it, and twin/compare runs set it to `1`.
-`SNAPSHOT_RETENTION_DAYS` (default 14, min 1 — mirror of TS's
-`validatedNumber(1, 14)`) bounds `prismd_pool_history`: the host prunes
-on every write (indexed no-op most ticks) where TS sweeps daily.
+rows; a plain `prismd --ticks N` stays byte-identical without it, and
+twin/compare runs set it to `1`. Since the drift anchor + TA window moved to
+read-only `pool_snapshots`, the price-history writer feeds nothing live —
+kept only for the flag-gated twin path. `SNAPSHOT_RETENTION_DAYS`
+(default 14, min 1 — mirror of TS's `validatedNumber(1, 14)`) bounds
+`prismd_pool_history`: the host prunes on every write (indexed no-op most
+ticks) where TS sweeps daily.
 `JUPITER_API_KEY` (optional —
 `x-api-key` on the primary price host; the
-keyless lite host is the fallback), `HELIUS_API_KEY`, `TYPESAFE_API_KEY`
-(`TYPESAFEAI_API` alias) are passthrough only — startup reports
-set/unset, never values. Garbage numbers exit 2, never guess.
+keyless lite host is the fallback), `HELIUS_API_KEY` (passthrough AND the
+`SOLANA_RPC_URL` derivation source above — startup reports set/unset, never
+values), `TYPESAFE_API_KEY` (`TYPESAFEAI_API` alias) is passthrough only —
+startup reports set/unset, never values. Garbage numbers exit 2, never guess.
 
 ## Test
 

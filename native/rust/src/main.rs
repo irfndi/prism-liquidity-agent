@@ -3083,9 +3083,10 @@ fn host_ledger_writes_enabled() -> bool {
     env::var_os("PRISMD_HOST_LEDGER").is_some_and(|v| !v.is_empty())
 }
 
-/// Append one tick's per-pool price rows — the host-owned price history the
-/// TA-exhaustion window reads (wave 99; until this wave TS wrote
-/// `pool_snapshots` for it). Host-owned table, additive, nothing in the TS
+/// Append one tick's per-pool price rows — the host-owned price history for
+/// the flag-gated twin/compare path only (wave 99; the live drift anchor +
+/// TA window read TS `pool_snapshots` since the read-only retarget, so this
+/// writer feeds nothing live). Host-owned table, additive, nothing in the TS
 /// engine reads it — the wave-88 cutover contract. Gated at the call site by
 /// `host_ledger_writes_enabled()`; fail-open like the shadow seam (a history
 /// that cannot write never fails the tick). Pools without a price this tick
@@ -3772,9 +3773,10 @@ fn tick(cfg: &config::Config, n: u64) {
         );
     }
     // Host-ledger writes (wave 99, flag-gated): append this tick's price
-    // rows BEFORE the builder reads them — the TA window's source since this
-    // wave. Gated so direct `prismd --ticks` stays byte-identical; pools
-    // without a price this tick produce no row (window tolerates gaps).
+    // rows for the twin/compare path only — the live drift anchor + TA
+    // window read TS `pool_snapshots` (read-only). Gated so direct
+    // `prismd --ticks` stays byte-identical; pools without a price this
+    // tick produce no row (window tolerates gaps).
     if host_ledger_writes_enabled() {
         let price_rows: Vec<(String, f64)> = stats_by_pool
             .iter()
