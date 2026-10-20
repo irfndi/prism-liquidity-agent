@@ -68,6 +68,8 @@ import { jevCacheKey, jevCachedVerdict, jevStoreVerdict } from "./jev-gate.js";
 import {
   activeShareEstimate,
   expectedNetProfitUsd,
+  liveCloseCostsUsd,
+  type LiveCloseCostsParams,
   paperCloseCostsUsd,
   runnerNetAprPct,
   runnerNetDailyPctAfterCosts,
@@ -3572,11 +3574,26 @@ interface LedgerExitRealized {
   readonly withdrawnUsd: number | null;
   readonly pricingUnresolved: boolean;
   readonly isEmptyReap: boolean;
+  /** Live close costs debited from realized PnL (0 on an empty reap). */
+  readonly modeledCostsUsd: number;
+}
+
+/** Live close-cost inputs from the execution knobs. Absent knobs debit 0 — the
+ *  program always supplies them, so only partial callers can be cost-free. */
+function liveCloseCostInput(deps: LiveExecDeps, pos: PositionRecord): LiveCloseCostsParams {
+  return {
+    positionSizeUsd: pos.depositedUsd,
+    ageDays: Math.max(Date.now() - pos.timestamp, 0) / DAY_MS,
+    swapCostPct: deps.runnerSwapCostPct ?? 0,
+    harvestCostUsd: deps.feeCaptureHarvestCostUsd ?? 0,
+    txCostUsd: deps.harvestTxCostUsdEst ?? 0,
+  };
 }
 
 function computeLedgerExitRealized(
   pos: PositionRecord,
   exitResultData: LiveExitResultData | null,
+  costs: LiveCloseCostsParams,
 ): LedgerExitRealized {
   // ── Locked realized-PnL ordering (Oracle-locked) ──────────────────
   // 1. finalValue = the adapter's mint-priced withdrawn USD (incl. the
@@ -3592,7 +3609,10 @@ function computeLedgerExitRealized(
   );
   const isEmptyReap = exitResultData?.isEmptyReap ?? false;
   // 2. Compute on the PRIOR cumulatives only — the exit sweep is credited
-  //    AFTER this (step 4) so it is never double-counted.
+  //    AFTER this (step 4) so it is never double-counted. Live close costs
+  //    (exit swap, entry/exit gas, claim txs) debit the gross figure: they
+  //    are spent on-chain but appear in no measured USD amount above.
+  const modeledCostsUsd = isEmptyReap ? 0 : liveCloseCostsUsd(costs);
   const realizedPnlUsd = isEmptyReap
     ? 0
     : pricingUnresolved
@@ -3602,8 +3622,15 @@ function computeLedgerExitRealized(
           pos.cumulativeFeesClaimedUsd,
           pos.depositedUsd,
           pos.cumulativeRewardsClaimedUsd + pricedSweptRewardUsd,
-        );
-  return { realizedPnlUsd, pricedSweptRewardUsd, withdrawnUsd, pricingUnresolved, isEmptyReap };
+        ) - modeledCostsUsd;
+  return {
+    realizedPnlUsd,
+    pricedSweptRewardUsd,
+    withdrawnUsd,
+    pricingUnresolved,
+    isEmptyReap,
+    modeledCostsUsd,
+  };
 }
 
 /** Swept-reward credit rollup: USD accrual plus an unpriced flag for the warn path. */
@@ -3801,12 +3828,14 @@ function buildExitMetadata(
   pricingUnresolved: boolean,
   currentValueUsd: number,
   exitResultData: LiveExitResultData | null,
+  modeledCostsUsd: number,
   exitReason?: string,
 ) {
   const reason = exitReasonField(exitReason);
-  if (!pricingUnresolved) return { realizedPnlUsd, ...reason };
+  if (!pricingUnresolved) return { realizedPnlUsd, modeledCostsUsd, ...reason };
   return {
     realizedPnlUsd,
+    modeledCostsUsd,
     pricing: "unresolved",
     lastMarkUsd: currentValueUsd,
     ...reason,
@@ -3861,6 +3890,7 @@ function finalizeLiveExitLedger(
   exitResultData: LiveExitResultData | null,
   realizedPnlUsd: number | null,
   pricingUnresolved: boolean,
+  modeledCostsUsd: number,
 ): Effect.Effect<void, never> {
   return Effect.gen(function* () {
     // Persist the credited cumulatives onto the (still-open) row, THEN
@@ -3891,6 +3921,7 @@ function finalizeLiveExitLedger(
       pricingUnresolved,
       pos.currentValueUsd,
       exitResultData,
+      modeledCostsUsd,
       decision.reasoning,
     );
     yield* deps.db
@@ -5397,7 +5428,7 @@ function executeLiveExit(
       }
       return { executed: true, error: undefined };
     }
-    const computed = computeLedgerExitRealized(pos, exitResultData);
+    const computed = computeLedgerExitRealized(pos, exitResultData, liveCloseCostInput(deps, pos));
     yield* creditExitSweep(deps, decision, pool, pos, exitResultData);
     yield* finalizeLiveExitLedger(
       deps,
@@ -5407,6 +5438,7 @@ function executeLiveExit(
       exitResultData,
       computed.realizedPnlUsd,
       computed.pricingUnresolved,
+      computed.modeledCostsUsd,
     );
     return { executed: true, error: undefined };
   });
@@ -5484,6 +5516,9 @@ export function executeLive(
     harvestMinNetUsd?: number;
     harvestMaxCostPct?: number;
     harvestTxCostUsdEst?: number;
+    /** Live close costs: exit-swap cost and per-claim tx cost. Absent → 0. */
+    runnerSwapCostPct?: number;
+    feeCaptureHarvestCostUsd?: number;
     /** Rug detection: arm `token_rug_block` on a catastrophic realized loss. */
     rugExitLossPct?: number;
     rugTokenBlockMs?: number;
@@ -6331,6 +6366,17 @@ export const program = Effect.gen(function* () {
       : undefined),
     ...(config.harvestTxCostUsdEst !== undefined
       ? { harvestTxCostUsdEst: config.harvestTxCostUsdEst }
+      : undefined),
+  });
+  // Live close costs (liveCloseCostsUsd): the exit-swap cost and the per-claim
+  // tx cost the live ledger previously never debited. Spread into every
+  // executeLive dispatch so paper and live price a close the same way.
+  const liveCostDispatchDeps = () => ({
+    ...(config.runnerSwapCostPct !== undefined
+      ? { runnerSwapCostPct: config.runnerSwapCostPct }
+      : undefined),
+    ...(config.feeCaptureHarvestCostUsd !== undefined
+      ? { feeCaptureHarvestCostUsd: config.feeCaptureHarvestCostUsd }
       : undefined),
   });
   const rugDispatchDeps = () => ({
@@ -7764,6 +7810,7 @@ export const program = Effect.gen(function* () {
                 unpricedExitWarnedPools,
                 ...runnerDispatchDeps(decision.poolAddress),
                 ...harvestDispatchDeps(),
+                ...liveCostDispatchDeps(),
                 ...rugDispatchDeps(),
                 ...(autonomousExecution ? { autonomous: autonomousExecution } : undefined),
               },
@@ -8305,6 +8352,16 @@ export const program = Effect.gen(function* () {
    * Returns the oldest stuck-settlement age for the cycle safety evaluation. */
   function runCycleSettlementPhase(): Effect.Effect<number, never> {
     if (!autonomousExecution) return Effect.succeed(0);
+    // Live close costs the settlement finalize debits (gas + claim txs). Built
+    // once here so the generator keeps its complexity budget.
+    const settlementCloseCosts = {
+      ...(config.harvestTxCostUsdEst !== undefined
+        ? { liveCloseTxCostUsd: config.harvestTxCostUsdEst }
+        : undefined),
+      ...(config.feeCaptureHarvestCostUsd !== undefined
+        ? { liveClaimTxCostUsd: config.feeCaptureHarvestCostUsd }
+        : undefined),
+    };
     return Effect.gen(function* () {
       const settlementNow = Date.now();
       const settlementJobs: SettlementJobRecord[] = [
@@ -8341,6 +8398,7 @@ export const program = Effect.gen(function* () {
         now: settlementNow,
         maxSwapSlippageBps: config.maxSwapSlippageBps,
         settlementDustUsd: autonomousExecution.settlementDustUsd,
+        ...settlementCloseCosts,
       });
       // Issue #196 (clock skew): evaluate the overdue age against the SAME
       // clock the retry scheduling used (settlementNow) — a retry stamped
@@ -14433,6 +14491,7 @@ export const program = Effect.gen(function* () {
                   unpricedExitWarnedPools,
                   ...runnerDispatchDeps(decision.poolAddress),
                   ...harvestDispatchDeps(),
+                  ...liveCostDispatchDeps(),
                   ...rugDispatchDeps(),
                   ...(autonomousCandidateId !== undefined
                     ? { candidateId: autonomousCandidateId }
@@ -14505,6 +14564,7 @@ export const program = Effect.gen(function* () {
                   unpricedExitWarnedPools,
                   ...runnerDispatchDeps(decision.poolAddress),
                   ...harvestDispatchDeps(),
+                  ...liveCostDispatchDeps(),
                   ...rugDispatchDeps(),
                   ...(autonomousCandidateId !== undefined
                     ? { candidateId: autonomousCandidateId }

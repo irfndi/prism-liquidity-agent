@@ -4,6 +4,7 @@ import {
   bandWidthPctFromBins,
   expectedIlCapturedPerExitUsd,
   expectedNetProfitUsd,
+  liveCloseCostsUsd,
   paperCloseCostsUsd,
   expectedOorExitsPerDay,
   FEE_CAPTURE_REFERENCE_SPAN_PCT,
@@ -609,5 +610,46 @@ describe("paperCloseCostsUsd", () => {
   it("floors at zero and fails closed on unmeasurable size", () => {
     expect(paperCloseCostsUsd({ ...base, positionSizeUsd: 0 })).toBe(0);
     expect(paperCloseCostsUsd({ ...base, positionSizeUsd: -5 })).toBe(0);
+  });
+});
+
+describe("liveCloseCostsUsd", () => {
+  const base = {
+    positionSizeUsd: 1000,
+    ageDays: 2,
+    swapCostPct: 0.005,
+    harvestCostUsd: 0.01,
+    txCostUsd: 0.005,
+  };
+
+  it("debits one exit-swap leg plus entry/exit gas and claim txs", () => {
+    // 0.005×1000 exit swap + 2×0.005 gas + 0.01×2 claims.
+    expect(liveCloseCostsUsd(base)).toBeCloseTo(5 + 0.01 + 0.02, 10);
+  });
+
+  it("omits the swap leg when the proceeds are already post-swap", () => {
+    expect(liveCloseCostsUsd({ ...base, swapCostPct: 0 })).toBeCloseTo(0.03, 10);
+  });
+
+  it("never charges the paper conversion haircut (live fees are not converted at close)", () => {
+    // The paper model charges 5% of gross fees; live carries no conversion leg.
+    expect(liveCloseCostsUsd(base)).toBeLessThan(
+      paperCloseCostsUsd({
+        ...base,
+        cumulativeGrossFeesUsd: 100,
+        conversionCostPct: 0.05,
+      }),
+    );
+  });
+
+  it("floors at zero and fails closed on unmeasurable size", () => {
+    expect(liveCloseCostsUsd({ ...base, positionSizeUsd: 0 })).toBe(0);
+    expect(liveCloseCostsUsd({ ...base, positionSizeUsd: -5 })).toBe(0);
+  });
+
+  it("ignores non-finite knobs instead of producing NaN", () => {
+    expect(
+      liveCloseCostsUsd({ ...base, swapCostPct: Number.NaN, harvestCostUsd: Number.NaN }),
+    ).toBeCloseTo(0.01, 10);
   });
 });

@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { Effect } from "effect";
 import { SOL_MINT } from "./constants.js";
+import { liveCloseCostsUsd } from "./fee-capture.js";
 import { createLogger } from "./logger.js";
 import { computeNetRealizedPnlUsd } from "./pnl.js";
 import type { AdapterApi, DbApi } from "./services.js";
@@ -263,6 +264,10 @@ export interface SettlementProcessorInput {
   readonly now: number;
   readonly maxSwapSlippageBps: number;
   readonly settlementDustUsd?: number;
+  /** Live close cost: per-transaction gas, USD (entry + exit = 2 txs). */
+  readonly liveCloseTxCostUsd?: number;
+  /** Live close cost: per-claim transaction cost, USD. */
+  readonly liveClaimTxCostUsd?: number;
 }
 
 export interface DailyEquityBaselineScope {
@@ -855,13 +860,23 @@ function finalizeSettlementGroups(
       if (!position) continue;
       const outputUsd = completeJobs.reduce((sum, job) => sum + job.outputUsd, 0);
       const executionCostUsd = completeJobs.reduce((sum, job) => sum + job.executionCostUsd, 0);
+      // `outputUsd` is post-swap proceeds, so the exit leg's slippage is already
+      // inside it (`settlementCostUsd`/`executionCostUsd` cancel below). What no
+      // measured figure carries is gas and the claim transactions — those debit.
+      const closeCostsUsd = liveCloseCostsUsd({
+        positionSizeUsd: position.depositedUsd,
+        ageDays: Math.max(input.now - position.timestamp, 0) / 86_400_000,
+        swapCostPct: 0,
+        harvestCostUsd: input.liveClaimTxCostUsd ?? 0,
+        txCostUsd: input.liveCloseTxCostUsd ?? 0,
+      });
       const realizedPnlUsd = computeNetRealizedPnlUsd({
         finalValueUsd: outputUsd + executionCostUsd,
         cumulativeFeesClaimedUsd: position.cumulativeFeesClaimedUsd,
         cumulativeRewardsClaimedUsd: position.cumulativeRewardsClaimedUsd,
         costBasisUsd: position.depositedUsd,
         settlementCostUsd: executionCostUsd,
-        executionCostUsd: 0,
+        executionCostUsd: closeCostsUsd,
       });
       // Issue #205: the exit's withdrawal-based realized PnL is authoritative
       // once resolved — never clobber it with a settlement-output-derived

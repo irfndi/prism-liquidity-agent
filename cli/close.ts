@@ -5,11 +5,13 @@ import { DbService, AdapterService, type DbApi } from "../engine/services.js";
 import { AdapterLive } from "../engine/adapter-service.js";
 import { ConfigLive, ConfigService } from "../engine/config-service.js";
 import { computeRealizedPnlUsd } from "../engine/pnl.js";
+import { liveCloseCostsUsd, type LiveCloseCostsParams } from "../engine/fee-capture.js";
 import { getPrismDbPath } from "../engine/paths.js";
 import { SOL_MINT } from "../engine/constants.js";
 import { createLogger } from "../engine/logger.js";
 
 const logger = createLogger("close-cli");
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Mirror of `rugBlockMints` in engine/program.ts (kept local so the CLI does
@@ -39,18 +41,40 @@ function computeClosePnl(
   withdrawnUsd: number | null,
   isEmptyReap: boolean | undefined,
   pos: PositionRecord,
+  costs: LiveCloseCostsParams,
 ): number | null {
   // An empty-reap (zero-liquidity on-chain account) realizes 0: there is
   // nothing to withdraw and the heuristic mark was phantom, so no loss
   // against the (suspect) deposited basis and no rug-block is booked.
   if (isEmptyReap) return 0;
   if (withdrawnUsd === null) return null;
-  return computeRealizedPnlUsd(
-    withdrawnUsd,
-    pos.cumulativeFeesClaimedUsd,
-    pos.depositedUsd,
-    pos.cumulativeRewardsClaimedUsd,
+  // Same close costs the engine's live path debits (exit swap, entry/exit gas,
+  // claim txs) so a manual close settles to the same net figure.
+  return (
+    computeRealizedPnlUsd(
+      withdrawnUsd,
+      pos.cumulativeFeesClaimedUsd,
+      pos.depositedUsd,
+      pos.cumulativeRewardsClaimedUsd,
+    ) - liveCloseCostsUsd(costs)
   );
+}
+
+function liveCloseCostsFor(
+  pos: PositionRecord,
+  config: {
+    readonly runnerSwapCostPct?: number;
+    readonly feeCaptureHarvestCostUsd?: number;
+    readonly harvestTxCostUsdEst?: number;
+  },
+): LiveCloseCostsParams {
+  return {
+    positionSizeUsd: pos.depositedUsd,
+    ageDays: Math.max(Date.now() - pos.timestamp, 0) / DAY_MS,
+    swapCostPct: config.runnerSwapCostPct ?? 0,
+    harvestCostUsd: config.feeCaptureHarvestCostUsd ?? 0,
+    txCostUsd: config.harvestTxCostUsdEst ?? 0,
+  };
 }
 
 function recordEmptyReap(db: DbApi, positionPubKey: string) {
@@ -131,7 +155,12 @@ closeCommand.action(async function (this: Command, positionId: string) {
       const result = yield* adapter.exitPosition(pos.poolAddress, pos.positionPubKey);
 
       const withdrawnUsd = result.withdrawnUsd ?? null;
-      const realizedPnlUsd = computeClosePnl(withdrawnUsd, result.isEmptyReap, pos);
+      const realizedPnlUsd = computeClosePnl(
+        withdrawnUsd,
+        result.isEmptyReap,
+        pos,
+        liveCloseCostsFor(pos, config),
+      );
 
       yield* db.closePosition(pos.positionId, realizedPnlUsd);
 

@@ -552,3 +552,45 @@ export function paperCloseCostsUsd(params: PaperCloseCostsParams): number {
   const roundTrip = 2 * swap * params.positionSizeUsd + 2 * tx;
   return Math.max(roundTrip + harvestRate * ageDays + conversion * grossFees, 0);
 }
+
+/**
+ * LIVE close costs. This is the paper model minus the parts that are already
+ * settled in live accounting, and it is the reason the live ledger was
+ * optimistic: `withdrawnUsd` is a mint-priced valuation of the tokens pulled
+ * out of the pool, so the exit swap back to quote, the entry/exit transactions
+ * and the periodic claim transactions were never debited anywhere.
+ *
+ * One swap leg only (the exit): entry slippage is already visible as a
+ * smaller position than the cash spent, so charging the entry leg again would
+ * double-count it. No conversion haircut: live fees are redeposited under
+ * `FEE_DESTINATION=compound` (never converted), and an accumulated conversion
+ * is physically reflected in the tokens the wallet holds. Floored at 0; 0 on
+ * non-positive size (unmeasurable, never negative costs).
+ *
+ * Callers pass `swapCostPct: 0` when the exit leg's cost is already measured
+ * in a post-swap proceeds figure (the settlement path), leaving only the gas
+ * and claim costs, which no measured figure includes.
+ */
+export interface LiveCloseCostsParams {
+  /** Deployed cost basis, USD (the exit swap scales with it). */
+  readonly positionSizeUsd: number;
+  /** Position age, in days (claim transactions accrue with time held). */
+  readonly ageDays: number;
+  /** Exit-swap cost as a fraction (0.005 = 0.5%); 0 when already measured. */
+  readonly swapCostPct: number;
+  /** Per-claim transaction cost, USD. */
+  readonly harvestCostUsd: number;
+  /** Per-transaction gas cost, USD (entry + exit = 2 txs). */
+  readonly txCostUsd: number;
+}
+
+export function liveCloseCostsUsd(params: LiveCloseCostsParams): number {
+  if (!finitePositive(params.positionSizeUsd)) return 0;
+  const swap = Number.isFinite(params.swapCostPct) ? clamp01(params.swapCostPct) : 0;
+  const tx = Number.isFinite(params.txCostUsd) ? Math.max(params.txCostUsd, 0) : 0;
+  const harvestRate = Number.isFinite(params.harvestCostUsd)
+    ? Math.max(params.harvestCostUsd, 0)
+    : 0;
+  const ageDays = Number.isFinite(params.ageDays) ? Math.max(params.ageDays, 0) : 0;
+  return Math.max(swap * params.positionSizeUsd + 2 * tx + harvestRate * ageDays, 0);
+}

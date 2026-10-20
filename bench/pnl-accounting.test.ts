@@ -1467,6 +1467,12 @@ describe("live lifecycle PnL accounting", () => {
   async function runLiveExitScenario(options: {
     exit: ExitResult;
     seed?: (pos: PositionRecord) => void;
+    /** Live close-cost knobs (absent = 0, the pre-fix behavior). */
+    costs?: {
+      runnerSwapCostPct?: number;
+      feeCaptureHarvestCostUsd?: number;
+      harvestTxCostUsdEst?: number;
+    };
   }) {
     const layer = DbLive(":memory:");
     const trackedPositions = new Map<string, PositionRecord>();
@@ -1489,6 +1495,7 @@ describe("live lifecycle PnL accounting", () => {
           entryPrep: liveEntryPrep,
           solPriceUsd: 150,
           entryStrategySpec: "spot" as const,
+          ...(options.costs ?? undefined),
         };
         const enter = yield* executeLive(
           deps,
@@ -1519,6 +1526,31 @@ describe("live lifecycle PnL accounting", () => {
       layer,
     );
   }
+
+  it("debits live close costs from realized PnL and records modeledCostsUsd", async () => {
+    // Flat GROSS close: withdrawn 1000 against a 1000 basis. The exit swap and
+    // the entry/exit transactions are spent on-chain but carried by no measured
+    // USD amount, so the ledger must book them as a loss — before this, the
+    // live figure was gross and REALIZED_PNL_HALT / the pool kill switch read
+    // an optimistic number.
+    const outcome = await runLiveExitScenario({
+      costs: {
+        runnerSwapCostPct: 0.005,
+        feeCaptureHarvestCostUsd: 0.01,
+        harvestTxCostUsdEst: 0.01,
+      },
+      exit: exitResult({ withdrawnUsd: 1000, withdrawnXAtomic: "5000000000", pendingFeeUsd: 0 }),
+    });
+
+    const closed = outcome.closed[0]!;
+    // 0.005 × 1000 exit swap + 2 × 0.01 gas (+ ~0 harvest accrual at age ~0).
+    const expectedCostsUsd = 5 + 0.02;
+    expect(closed.realizedPnlUsd).toBeCloseTo(-expectedCostsUsd, 6);
+
+    const exitEvent = outcome.events.find((e) => e.event === "EXIT")!;
+    const metadata = JSON.parse(exitEvent.metadata ?? "{}");
+    expect(metadata.modeledCostsUsd).toBeCloseTo(expectedCostsUsd, 6);
+  });
 
   it("exit before the claim gate sweeps unclaimed fees into realized PnL (the live-bug pin)", async () => {
     // Position accrued $25 of fees but was exited before the 24h claim gate,

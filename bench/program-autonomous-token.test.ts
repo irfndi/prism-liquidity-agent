@@ -884,6 +884,52 @@ describe("settlement job processing", () => {
     expect(finalizedPnl).toBeCloseTo(0.79, 2);
   });
 
+  it("debits live gas and claim costs from the settlement-derived realized PnL", async () => {
+    // Given a settlement whose `outputUsd` is already post-swap (slippage is
+    // inside it) and an exit left unresolved — the finalize must still book the
+    // costs no measured figure carries: entry + exit gas, and claim txs.
+    const job = settlementJob({
+      status: "confirmed",
+      outputUsd: 41.91,
+      executionCostUsd: 0,
+      confirmedOutputAtomic: "1",
+    });
+    const position = {
+      cumulativeFeesClaimedUsd: 0.51,
+      cumulativeRewardsClaimedUsd: 0,
+      depositedUsd: 41.63,
+      realizedPnlUsd: null,
+      entrySignalSnapshotId: null,
+    };
+    let finalizedPnl: number | null = null;
+    const db = makeDb({
+      saveSettlementJob: () => Effect.void,
+      getPosition: () => Effect.succeed(makePosition(position)),
+      finalizeSettlementGroup: (input: { readonly realizedPnlUsd: number | null }) =>
+        Effect.sync(() => {
+          finalizedPnl = input.realizedPnlUsd;
+        }),
+    });
+
+    // When
+    await Effect.runPromise(
+      processSettlementJobs({
+        // SAFETY: This test fixture is constructed to satisfy the asserted service/domain contract and is exercised by the surrounding test.
+        adapter: {} as AdapterApi,
+        db,
+        jobs: [job],
+        mode: "live",
+        now: 10_000,
+        maxSwapSlippageBps: 50,
+        liveCloseTxCostUsd: 0.01,
+        liveClaimTxCostUsd: 0.01,
+      }),
+    );
+
+    // Then 0.79 gross − 2 × 0.01 gas (age clamps to 0 → no claim accrual).
+    expect(finalizedPnl).toBeCloseTo(0.77, 2);
+  });
+
   it("reconciles confirmed swap output from transaction evidence when fields are missing", async () => {
     // Given
     const job = settlementJob({
