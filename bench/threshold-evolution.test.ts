@@ -4,6 +4,7 @@ import {
   computeSignalLift,
   evolveThresholds,
   clampThreshold,
+  clampEvolvedThresholds,
 } from "../engine/strategy-service.js";
 import type { EvolvableThresholds, OutcomeRecord } from "../engine/strategy-service.js";
 import {
@@ -11,7 +12,50 @@ import {
   MIN_FEE_IL_EVOLVED_MAX,
   VOLUME_AUTH_EVOLVED_MIN,
   VOLUME_AUTH_EVOLVED_MAX,
+  MIN_BIN_UTIL_EVOLVED_MIN,
 } from "../engine/strategy-service.js";
+
+// ─── clampEvolvedThresholds (persisted-state repair) ────────────────────────
+
+describe("clampEvolvedThresholds", () => {
+  it("bands the poisoned values the live database carried", () => {
+    // Real persisted rows: volumeAuth 1.01 is unsatisfiable (the score caps at
+    // 1.0), so every pool failed the entry pre-filter for weeks.
+    const repaired = clampEvolvedThresholds({
+      minFeeIlRatio: 5.2078488968299945,
+      volumeAuthThreshold: 1.0100459330097955,
+      minBinUtilization: 0.2707240533233575,
+    });
+    expect(repaired).toEqual({
+      minFeeIlRatio: MIN_FEE_IL_EVOLVED_MAX,
+      volumeAuthThreshold: VOLUME_AUTH_EVOLVED_MAX,
+      minBinUtilization: 0.2707240533233575,
+    });
+    // The repaired gate is now satisfiable: a perfect 1.0 score clears it.
+    expect(1).toBeGreaterThan(repaired.volumeAuthThreshold);
+  });
+
+  it("leaves in-band thresholds untouched", () => {
+    const stored = { minFeeIlRatio: 1.2, volumeAuthThreshold: 0.7, minBinUtilization: 0.3 };
+    expect(clampEvolvedThresholds(stored)).toEqual(stored);
+  });
+
+  it("falls back to the band floor for non-finite values", () => {
+    // clampThreshold returns the band MIN for non-finite input (existing
+    // semantics the write path already relies on): corrupt state must not be
+    // able to block every entry the way an unsatisfiable ceiling does.
+    const repaired = clampEvolvedThresholds({
+      minFeeIlRatio: Number.NaN,
+      volumeAuthThreshold: Number.POSITIVE_INFINITY,
+      minBinUtilization: Number.NEGATIVE_INFINITY,
+    });
+    expect(repaired).toEqual({
+      minFeeIlRatio: MIN_FEE_IL_EVOLVED_MIN,
+      volumeAuthThreshold: VOLUME_AUTH_EVOLVED_MIN,
+      minBinUtilization: MIN_BIN_UTIL_EVOLVED_MIN,
+    });
+  });
+});
 
 // ─── nudgeThreshold ─────────────────────────────────────────────────────────
 

@@ -594,6 +594,38 @@ export function clampThreshold(value: number, min: number, max: number): number 
 }
 
 /**
+ * Bands a threshold set back into its operating ranges on READ.
+ *
+ * The write path (`evolveThresholds`) clamps, but the persisted row is read
+ * back verbatim, so a value written before the bands existed survives every
+ * restart. Observed on the live database: `evolved_volume_auth_threshold =
+ * 1.0100` and `evolved_min_fee_il_ratio = 5.2078`. A volume-authenticity
+ * threshold above the score's 1.0 ceiling is unsatisfiable, so every pool is
+ * rejected at the entry pre-filter for the life of the database — the engine
+ * scanned pools and entered nothing for weeks while logging only a bare
+ * "failed entry pre-filter".
+ */
+export function clampEvolvedThresholds(thresholds: EvolvableThresholds): EvolvableThresholds {
+  return {
+    minFeeIlRatio: clampThreshold(
+      thresholds.minFeeIlRatio,
+      MIN_FEE_IL_EVOLVED_MIN,
+      MIN_FEE_IL_EVOLVED_MAX,
+    ),
+    volumeAuthThreshold: clampThreshold(
+      thresholds.volumeAuthThreshold,
+      VOLUME_AUTH_EVOLVED_MIN,
+      VOLUME_AUTH_EVOLVED_MAX,
+    ),
+    minBinUtilization: clampThreshold(
+      thresholds.minBinUtilization,
+      MIN_BIN_UTIL_EVOLVED_MIN,
+      MIN_BIN_UTIL_EVOLVED_MAX,
+    ),
+  };
+}
+
+/**
  * Clamp a threshold nudge to ±maxChangePct of the current value.
  * When target > current, nudge upward but never exceed current × (1 + maxChangePct).
  * When target < current, nudge downward but never go below current × (1 - maxChangePct).

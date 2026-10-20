@@ -32,6 +32,7 @@ import {
   weightedEntryScore,
   driftGateRejected,
   normalEntryConfidence,
+  clampEvolvedThresholds,
   preFilterFailures,
   DEFAULT_MOMENTUM_REFERENCE_BINS,
   DEFAULT_MOMENTUM_SCORE_WEIGHT,
@@ -6189,8 +6190,23 @@ export const program = Effect.gen(function* () {
 
   const loadEvolvedThresholds = Effect.gen(function* () {
     const stored = yield* db.getEvolvedThresholds().pipe(Effect.catch(() => Effect.succeed(null)));
-    if (stored) {
-      evolvedThresholds = stored;
+    if (!stored) return;
+    // Persisted thresholds are read verbatim, so a value written before the
+    // evolution bands existed (live DB carried volumeAuth 1.01 / feeIl 5.21)
+    // would wedge the gates forever: a volume-auth floor above the score's 1.0
+    // ceiling is unsatisfiable. Repair it at startup and write the repair back.
+    const bounded = clampEvolvedThresholds(stored);
+    evolvedThresholds = bounded;
+    if (
+      bounded.minFeeIlRatio !== stored.minFeeIlRatio ||
+      bounded.volumeAuthThreshold !== stored.volumeAuthThreshold ||
+      bounded.minBinUtilization !== stored.minBinUtilization
+    ) {
+      yield* db.saveEvolvedThresholds(bounded).pipe(Effect.catch(() => Effect.void));
+      console.warn("[threshold-evolution] Repaired out-of-band persisted thresholds", {
+        stored,
+        repaired: bounded,
+      });
     }
   });
 
