@@ -50,11 +50,19 @@ if (!/^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(version)) {
 }
 
 // Generate embedded sqlite-vec fallback for the current platform.
-if (fs.existsSync(vec0Path)) {
-  run(`bun run scripts/generate-vec-embed.ts ${platform} ${arch}`);
-} else {
-  console.warn(`⚠ sqlite-vec extension not found for ${platformKey}; skipping embed fallback`);
+// A bundle built without the native extension installs into a broken
+// vector-memory state: lib/vec0.<ext> is absent, PRISM_VEC0_PATH points at a
+// missing file, and `prism doctor` fails its memory check (exit 1). That is a
+// shipping defect, not a warning — fail the build and fix the dependency.
+if (!fs.existsSync(vec0Path)) {
+  console.error(
+    `✖ sqlite-vec extension not found for ${platformKey} (expected ${vec0Path}).\n` +
+      `  Install ${platformPackageName} before building — a release bundle without\n` +
+      `  lib/vec0.${extensionSuffix} cannot load vector memory on install.`,
+  );
+  process.exit(1);
 }
+run(`bun run scripts/generate-vec-embed.ts ${platform} ${arch}`);
 
 // Build the engine and CLI bundles.
 run("bun run build");
@@ -72,9 +80,7 @@ fs.cpSync(path.join(repoRoot, "dist"), path.join(stageDir, "dist"), { recursive:
 const libDir = path.join(stageDir, "lib");
 fs.mkdirSync(libDir, { recursive: true });
 
-if (fs.existsSync(vec0Path)) {
-  fs.copyFileSync(vec0Path, path.join(libDir, `vec0.${extensionSuffix}`));
-}
+fs.copyFileSync(vec0Path, path.join(libDir, `vec0.${extensionSuffix}`));
 
 // Prefer compiled binaries when present (fresh `bun build --compile` outputs
 // from scripts/compile-binary.ts); never fail a release when absent.
