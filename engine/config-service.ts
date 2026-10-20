@@ -923,6 +923,40 @@ function validatedNumber(name: string, min: number, fallback: number, max?: numb
 }
 
 /**
+ * Upper bound for an inline, fails-open advisory review (the agent veto).
+ *
+ * The veto runs inside the per-pool scan loop, so its budget is the wall-clock
+ * time every LATER pool — including a capital-protecting EXIT queued on one —
+ * waits behind it. A budget larger than the cycle cadence therefore lets one
+ * slow transport stall the whole scan: the live box ran a 150s veto budget on
+ * a 120s interval and a single unresponsive review stretched one cycle to 315s
+ * (`elapsedMs: 164108` against a 150s budget, zero verdicts returned). Cap the
+ * advisory overlay at a quarter of the cadence, never below 1s.
+ */
+export function capAdvisoryTimeoutMs(configuredMs: number, scanIntervalMs: number): number {
+  const floorMs = 1_000;
+  const bounded = Number.isFinite(configuredMs) ? configuredMs : floorMs;
+  const cadenceCap =
+    Number.isFinite(scanIntervalMs) && scanIntervalMs > 0
+      ? scanIntervalMs / 4
+      : Number.POSITIVE_INFINITY;
+  return Math.max(floorMs, Math.min(bounded, cadenceCap));
+}
+
+/** Applies the advisory cap and warns when the configured budget was truncated. */
+function resolveAdvisoryTimeoutMs(configuredMs: number, scanIntervalMs: number): number {
+  const applied = capAdvisoryTimeoutMs(configuredMs, scanIntervalMs);
+  if (applied < configuredMs) {
+    logger.warn("Advisory veto budget exceeds a quarter of the scan interval; capping", {
+      configured: configuredMs,
+      applied,
+      scanIntervalMs,
+    });
+  }
+  return applied;
+}
+
+/**
  * Coerce a raw string env value into one of an allowed literal union, falling
  * back when the value is not a member. Centralizes the includes-then-assert
  * pattern (agent runtime, proposal mode, entry strategy, update channel).
@@ -1642,14 +1676,16 @@ const loadConfig = Effect.gen(function* () {
     300_000,
   );
   // Veto runs inline in the per-pool scan loop, so it gets its own latency budget.
-  // Defaults to AGENT_PROMPT_TIMEOUT_MS when unset; clamped to the same [1s, 5min]
-  // band so an absurd value cannot stall scan cycles.
-  const agentVetoTimeoutMs = yield* validatedNumber(
+  // Defaults to AGENT_PROMPT_TIMEOUT_MS when unset; clamped to the [1s, 5min] band,
+  // then capped at a quarter of the scan interval so an advisory review can never
+  // outlast the cycle it sits inside (see capAdvisoryTimeoutMs).
+  const agentVetoTimeoutConfigured = yield* validatedNumber(
     "AGENT_VETO_TIMEOUT_MS",
     1_000,
     agentPromptTimeoutMs,
     300_000,
   );
+  const agentVetoTimeoutMs = resolveAdvisoryTimeoutMs(agentVetoTimeoutConfigured, scanIntervalMs);
   const agentCheckinIntervalMs = yield* validatedNumber(
     "AGENT_CHECKIN_INTERVAL_MS",
     0,

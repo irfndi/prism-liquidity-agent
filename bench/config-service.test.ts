@@ -3,6 +3,7 @@ import { Effect } from "effect";
 import {
   ConfigService,
   ConfigLive,
+  capAdvisoryTimeoutMs,
   resolveRpcFallbackUrl,
   PUBLIC_SOLANA_RPC_URL,
   KEYLESS_FALLBACK_RPC_URL,
@@ -46,6 +47,49 @@ describe("ConfigService MIN_REENTRY_COOLDOWN_MS (same-pool re-entry churn thrott
     vi.stubEnv("MIN_REENTRY_COOLDOWN_MS", "-1");
     const cfg = await loadConfig();
     expect(cfg.minReentryCooldownMs).toBe(0);
+  });
+});
+
+describe("capAdvisoryTimeoutMs", () => {
+  it("caps at a quarter of the cadence and never below 1s", () => {
+    expect(capAdvisoryTimeoutMs(150_000, 120_000)).toBe(30_000);
+    expect(capAdvisoryTimeoutMs(150_000, 600_000)).toBe(150_000);
+    expect(capAdvisoryTimeoutMs(1_000, 10_000)).toBe(1_000);
+  });
+
+  it("treats a missing cadence as unbounded and a non-finite budget as the floor", () => {
+    expect(capAdvisoryTimeoutMs(20_000, Number.NaN)).toBe(20_000);
+    expect(capAdvisoryTimeoutMs(Number.NaN, 120_000)).toBe(1_000);
+  });
+});
+
+describe("ConfigService AGENT_VETO_TIMEOUT_MS (advisory budget vs cycle cadence)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("caps a budget larger than the cadence (live: 150s budget on a 120s interval)", async () => {
+    // The veto runs inline per pool, so a 150s review delays every later pool
+    // and any EXIT queued behind it. Live cycle stretched to 315s.
+    vi.stubEnv("SCAN_INTERVAL_MS", "120000");
+    vi.stubEnv("AGENT_PROMPT_TIMEOUT_MS", "150000");
+    vi.stubEnv("AGENT_VETO_TIMEOUT_MS", "150000");
+    const cfg = await loadConfig();
+    expect(cfg.agentVetoTimeoutMs).toBe(30_000);
+  });
+
+  it("inherits AGENT_PROMPT_TIMEOUT_MS and caps it too", async () => {
+    vi.stubEnv("SCAN_INTERVAL_MS", "120000");
+    vi.stubEnv("AGENT_PROMPT_TIMEOUT_MS", "150000");
+    const cfg = await loadConfig();
+    expect(cfg.agentVetoTimeoutMs).toBe(30_000);
+  });
+
+  it("keeps a budget already inside the cadence", async () => {
+    vi.stubEnv("SCAN_INTERVAL_MS", "600000");
+    vi.stubEnv("AGENT_VETO_TIMEOUT_MS", "20000");
+    const cfg = await loadConfig();
+    expect(cfg.agentVetoTimeoutMs).toBe(20_000);
   });
 });
 
