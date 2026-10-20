@@ -212,6 +212,16 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Install platform sqlite-vec extension
+        # bunfig's isolated linker + shared global store do not reliably
+        # materialize the platform-specific optional dependency, so
+        # node_modules can end up with another platform's variant (or none).
+        # build-bundle.ts fails closed when lib/vec0.<ext> is absent, which is
+        # exactly what caught the canary shipping an empty lib/.
+        run: |
+          PLATFORM_KEY="${{ matrix.platform-key }}"
+          bun add --no-save "sqlite-vec-${PLATFORM_KEY%%-*}-${PLATFORM_KEY##*-}@0.1.9"
+
       - name: Stamp package.json canary version
         run: |
           node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.version=process.env.VERSION;fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n');"
