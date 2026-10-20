@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DLMMStrategy, recommendStrategy } from "../engine/strategy-service.js";
+import { DLMMStrategy, preFilterFailures, recommendStrategy } from "../engine/strategy-service.js";
 import type { PoolState, BinArray } from "../engine/types.js";
 
 function makePool(overrides: Partial<PoolState> = {}): PoolState {
@@ -177,6 +177,48 @@ describe("DLMMStrategy", () => {
       const pool = makePool({ tvlUsd: 100_000 });
       expect(DLMMStrategy.passesPreFilter(pool, 0.8, 0.5, 200_000, 0.7, 0.3)).toBe(false);
       expect(DLMMStrategy.passesPreFilter(pool, 0.6, 0.2, 50_000, 0.5, 0.1)).toBe(true);
+    });
+  });
+
+  describe("preFilterFailures", () => {
+    const base = {
+      tvlUsd: 100_000,
+      authScore: 0.8,
+      binUtilization: 0.5,
+      minTvlUsd: 10_000,
+      minAuthScore: 0.55,
+      minBinUtilization: 0.3,
+    };
+
+    it("names every failing condition, not just the first", () => {
+      expect(
+        preFilterFailures({ ...base, tvlUsd: 1_000, authScore: 0.2, binUtilization: 0.1 }),
+      ).toEqual([
+        `tvl-usd 1000.00 < min ${base.minTvlUsd}`,
+        `volume-auth 0.200 < min ${base.minAuthScore}`,
+        `bin-utilization 0.100 < min ${base.minBinUtilization}`,
+      ]);
+    });
+
+    it("is empty when the pool passes, so it can never disagree with the gate", () => {
+      expect(preFilterFailures(base)).toEqual([]);
+      expect(DLMMStrategy.passesPreFilter(makePool(), 0.8, 0.5, 10_000, 0.55, 0.3)).toBe(true);
+    });
+
+    it("reports an unmeasurable TVL distinctly from a below-threshold one", () => {
+      expect(preFilterFailures({ ...base, tvlUsd: 0 })).toEqual(["tvl-usd 0 is not measurable"]);
+    });
+
+    it("skips unknown metrics (they neither pass nor fail the gate)", () => {
+      expect(
+        preFilterFailures({
+          ...base,
+          authScore: 0,
+          binUtilization: 0,
+          authKnown: false,
+          binUtilizationKnown: false,
+        }),
+      ).toEqual([]);
     });
   });
 

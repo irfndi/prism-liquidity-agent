@@ -32,6 +32,7 @@ import {
   weightedEntryScore,
   driftGateRejected,
   normalEntryConfidence,
+  preFilterFailures,
   DEFAULT_MOMENTUM_REFERENCE_BINS,
   DEFAULT_MOMENTUM_SCORE_WEIGHT,
   DEFAULT_MOMENTUM_CONF_BOOST,
@@ -9658,7 +9659,19 @@ export const program = Effect.gen(function* () {
         metrics.binUtilizationKnown,
       );
       if (!entryEligible) {
-        logger.debug("Pool failed entry pre-filter", { pool: poolAddress });
+        logger.debug("Pool failed entry pre-filter", {
+          pool: poolAddress,
+          reasons: preFilterFailures({
+            tvlUsd: pool.tvlUsd,
+            authScore: metrics.volumeAuthenticity,
+            binUtilization: metrics.binUtilization,
+            minTvlUsd: config.minPoolTvlUsd,
+            minAuthScore: evolvedThresholds.volumeAuthThreshold,
+            minBinUtilization: evolvedThresholds.minBinUtilization,
+            authKnown: metrics.volumeAuthenticityKnown,
+            binUtilizationKnown: metrics.binUtilizationKnown,
+          }),
+        });
         // Deteriorating liquidity/volume must not suppress the very exits
         // that protect positions from that deterioration.
         if (!hotLaneOwnsPool && positionsForPool(trackedPositions, poolAddress).length === 0) {

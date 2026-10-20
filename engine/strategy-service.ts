@@ -278,15 +278,55 @@ export const DLMMStrategy: StrategyApi = {
     binUtilizationKnown = true,
   ): boolean {
     return (
-      pool.tvlUsd > 0 &&
-      pool.tvlUsd >= minTvlUsd &&
-      // Unknown metrics skip their gate (a warning is logged by the caller);
-      // they must neither auto-pass nor auto-fail the pre-filter.
-      (!authKnown || authScore >= minAuthScore) &&
-      (!binUtilizationKnown || binUtilization >= minBinUtilization)
+      preFilterFailures({
+        tvlUsd: pool.tvlUsd,
+        authScore,
+        binUtilization,
+        minTvlUsd,
+        minAuthScore,
+        minBinUtilization,
+        authKnown,
+        binUtilizationKnown,
+      }).length === 0
     );
   },
 };
+
+/**
+ * Every reason the entry pre-filter rejects a pool, in evaluation order (empty
+ * = the pool passes). `passesPreFilter` is derived from this, so the gate and
+ * its diagnostics can never disagree — a bare "failed entry pre-filter" log
+ * line left rejected pools undiagnosable, which is exactly what blocks tuning
+ * the opportunity set.
+ */
+export function preFilterFailures(input: {
+  readonly tvlUsd: number;
+  readonly authScore: number;
+  readonly binUtilization: number;
+  readonly minTvlUsd: number;
+  readonly minAuthScore: number;
+  readonly minBinUtilization: number;
+  readonly authKnown?: boolean | undefined;
+  readonly binUtilizationKnown?: boolean | undefined;
+}): string[] {
+  const reasons: string[] = [];
+  if (!(input.tvlUsd > 0)) {
+    reasons.push(`tvl-usd 0 is not measurable`);
+  } else if (input.tvlUsd < input.minTvlUsd) {
+    reasons.push(`tvl-usd ${input.tvlUsd.toFixed(2)} < min ${input.minTvlUsd}`);
+  }
+  // Unknown metrics skip their gate (a warning is logged by the caller); they
+  // must neither auto-pass nor auto-fail the pre-filter.
+  if (input.authKnown !== false && input.authScore < input.minAuthScore) {
+    reasons.push(`volume-auth ${input.authScore.toFixed(3)} < min ${input.minAuthScore}`);
+  }
+  if (input.binUtilizationKnown !== false && input.binUtilization < input.minBinUtilization) {
+    reasons.push(
+      `bin-utilization ${input.binUtilization.toFixed(3)} < min ${input.minBinUtilization}`,
+    );
+  }
+  return reasons;
+}
 
 export const StrategyLive = Layer.succeed(StrategyService, StrategyService.of(DLMMStrategy));
 
