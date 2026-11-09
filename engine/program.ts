@@ -6330,16 +6330,18 @@ export const program = Effect.gen(function* () {
   const autonomousCandidatePoolAddresses = new Set<string>();
 
   /**
-   * Persist `rejected` on this pool's candidate for a never-exempted safety
-   * verdict.
+   * Persist `rejected` on this pool's candidate for a safety verdict that no
+   * configuration can rehabilitate.
    *
    * `rejected` was unreachable from the engine: the only producer is a
    * `hard_safety_failure` scan verdict, and the discovery pass always builds
    * `{ kind: "safe" }`. A blacklisted pool's candidate therefore stayed
-   * `eligible` in SQL and kept being counted every cycle. The safety screen is
-   * the one place that actually knows, so it owns the verdict — but only for
-   * verdicts that can never be exempted: `rejected` has no outgoing edge, and
-   * a freeze-authority hold is a temporary adjudication, not a life sentence.
+   * `eligible` in SQL and kept being counted every cycle.
+   *
+   * Only the third-party Data-API blacklist uses this, because `rejected` has
+   * no outgoing edge: the operator-configurable gates (transfer-fee legs via
+   * ALLOW_TRANSFER_FEE_TOKENS, the operator-maintained token/deployer
+   * blacklist, freeze-authority adjudication) must stay re-evaluable instead.
    */
   function rejectCandidatesForPool(
     poolAddress: string,
@@ -9449,7 +9451,9 @@ export const program = Effect.gen(function* () {
     return Effect.gen(function* () {
       // 1. Meteora Data API flags: is_blacklisted, freeze_authority_disabled.
       if (datapiStats?.isBlacklisted === true) {
-        // Never exempted by design.
+        // The only verdict quarantined on the candidate: a third-party
+        // blacklist that is never exempted by any config flag, so there is no
+        // operator action that could legitimately rehabilitate it.
         yield* rejectCandidatesForPool(poolAddress, "Meteora Data API flags pool as blacklisted");
         return yield* rejectForSafety("Meteora Data API flags pool as blacklisted");
       }
@@ -9488,7 +9492,9 @@ export const program = Effect.gen(function* () {
 
       const feeReject = yield* checkTransferFeeLegs();
       if (feeReject) {
-        yield* rejectCandidatesForPool(poolAddress, feeReject);
+        // NOT a candidate quarantine: whether a transfer-fee leg is allowed is
+        // config-dependent (ALLOW_TRANSFER_FEE_TOKENS), so the verdict must stay
+        // re-evaluable. `rejected` has no outgoing edge.
         return yield* rejectForSafety(feeReject);
       }
       // ─── Hot-lane rug precondition — mint authority (market-scan/runner) ──
@@ -9549,7 +9555,9 @@ export const program = Effect.gen(function* () {
           }),
         );
       if (blacklistRejection !== null) {
-        yield* rejectCandidatesForPool(poolAddress, blacklistRejection);
+        // NOT a candidate quarantine: the token/deployer blacklist is
+        // operator-maintained, so a later correction must be able to recover
+        // the candidate. `rejected` has no outgoing edge.
         return yield* rejectForSafety(blacklistRejection);
       }
 

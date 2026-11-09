@@ -293,13 +293,18 @@ so `rejected` was unreachable from the engine while a real safety rejection
 was handled by the per-pool `HOLD` and never recorded on the candidate — a
 blacklisted candidate stayed `eligible` in SQL and was counted every cycle.
 
-Fix: `rejectCandidatesForPool` (`engine/program.ts`, inside
-`screenPoolSafety`) writes the hard-failure verdict onto the pool's candidate.
-It runs only for **permanent** rejections (`permanentlyUnsafePools`): transfer-tax
-legs, the token/deployer blacklist, and now the Meteora Data API blacklist,
-which is marked permanent because it is never exempted by design. A
-freeze-authority or verification gap is a hold that clears next cycle, and
-`rejected` has no outgoing edge, so those must not use it.
+Fix: `rejectCandidatesForPool` (`engine/program.ts`) writes the hard-failure
+verdict onto the pool's candidate — **only** for the third-party Meteora Data
+API `is_blacklisted` verdict, because `rejected` has no outgoing edge and no
+configuration can rehabilitate that one.
+
+Everything else stays re-evaluable and deliberately does **not** quarantine:
+
+- transfer-fee legs are gated by `ALLOW_TRANSFER_FEE_TOKENS`, so an operator
+  opting in must be able to recover the candidate;
+- the token/deployer blacklist is operator-maintained, so a later correction
+  must be able to recover it;
+- freeze-authority and verification gaps are holds that clear next cycle.
 
 ---
 
