@@ -256,7 +256,10 @@ function indexEnters(
 ): ReadonlyMap<string, readonly AttributionDecision[]> {
   const byPool = new Map<string, AttributionDecision[]>();
   for (const decision of decisions) {
-    if (decision.action !== "ENTER") continue;
+    // Only an EXECUTED enter created the position being attributed. A rejected
+    // or shadow-skipped ENTER is recorded in the same window and would
+    // otherwise be credited with a later close's PnL.
+    if (decision.action !== "ENTER" || decision.executed !== true) continue;
     const bucket = byPool.get(decision.poolAddress);
     if (bucket === undefined) {
       byPool.set(decision.poolAddress, [decision]);

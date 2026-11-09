@@ -7841,6 +7841,34 @@ export const program = Effect.gen(function* () {
     readonly executionError: string | undefined;
   }
 
+  /**
+   * Fits an idle-redeploy entry into the free SOL budget.
+   *
+   * Full size when it fits; otherwise the largest whole-dollar size the budget
+   * funds, never below the entry floor. Returns null when even the floor cannot
+   * be funded — the caller records a capacity-limited skip, never an error.
+   * Same resize-before-skip contract as the in-slot ENTER path.
+   */
+  function fitRedeployToSolBudget(
+    sizeUsd: number,
+    pool: PoolState,
+  ): { readonly sizeUsd: number; readonly lamports: bigint } | null {
+    if (!entrySolBudgetKnown) return null;
+    const neededLamports = estimateEntrySolLamports({
+      positionSizeUsd: sizeUsd,
+      solPriceUsd: entrySolPriceUsd,
+      poolHasSolLeg: hasNativeSolLeg(pool),
+      solFunded: true,
+    });
+    if (neededLamports <= entrySolBudgetLamports) return { sizeUsd, lamports: neededLamports };
+    return resizeEnterToFreeSol({
+      desiredSizeUsd: sizeUsd,
+      freeSolLamports: entrySolBudgetLamports,
+      solPriceUsd: entrySolPriceUsd,
+      poolHasSolLeg: hasNativeSolLeg(pool),
+    });
+  }
+
   function dispatchRedeployExecution(
     ctx: RedeployCandidateContext,
     decision: AgentDecision,
@@ -7928,17 +7956,21 @@ export const program = Effect.gen(function* () {
             if (solFundedEntryMode) {
               const redeploySizeUsd = decision.positionSizeUsd;
               if (redeploySizeUsd !== undefined) {
-                const neededLamports = estimateEntrySolLamports({
-                  positionSizeUsd: redeploySizeUsd,
-                  solPriceUsd: entrySolPriceUsd,
-                  poolHasSolLeg: hasNativeSolLeg(candidate.pool),
-                  solFunded: true,
-                });
-                if (!entrySolBudgetKnown || neededLamports > entrySolBudgetLamports) {
+                const fitted = fitRedeployToSolBudget(redeploySizeUsd, candidate.pool);
+                if (fitted === null) {
                   const budgetHuman = entrySolBudgetKnown
                     ? (Number(entrySolBudgetLamports) / 1e9).toFixed(4)
                     : "unknown";
-                  const neededHuman = (Number(neededLamports) / 1e9).toFixed(4);
+                  const neededHuman = (
+                    Number(
+                      estimateEntrySolLamports({
+                        positionSizeUsd: redeploySizeUsd,
+                        solPriceUsd: entrySolPriceUsd,
+                        poolHasSolLeg: hasNativeSolLeg(candidate.pool),
+                        solFunded: true,
+                      }),
+                    ) / 1e9
+                  ).toFixed(4);
                   idleRedeployLogger.info(
                     "Idle redeploy skipped — free SOL below entry estimate (wallet reserve)",
                     {
@@ -7956,7 +7988,18 @@ export const program = Effect.gen(function* () {
                   yield* finalizeAppliedProposal(agentState, undefined, false, decision.action);
                   return { verdict: "next", executed: false, executionError: undefined };
                 }
-                entrySolBudgetLamports -= neededLamports;
+                if (fitted.sizeUsd !== redeploySizeUsd) {
+                  decision.positionSizeUsd = fitted.sizeUsd;
+                  idleRedeployLogger.info(
+                    "[wallet-reserve] resized idle redeploy to fit free SOL",
+                    {
+                      pool: candidate.poolAddress,
+                      from: redeploySizeUsd,
+                      to: fitted.sizeUsd,
+                    },
+                  );
+                }
+                entrySolBudgetLamports -= fitted.lamports;
               }
             }
             const entryPrep = yield* EntryPrepService;

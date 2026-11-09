@@ -109,8 +109,12 @@ function settlementNetUsd(jobs: readonly JobRow[], positionId: string): number |
   let priced = false;
   for (const job of jobs) {
     if (job.position_id !== positionId) continue;
-    if (job.status !== "confirmed") continue;
-    if (job.output_usd === null || !Number.isFinite(job.output_usd)) continue;
+    // A PARTIAL group is not proceeds. Summing only the confirmed members books
+    // a fraction of the exit, and finalizeSettlementGroups later preserves the
+    // non-NULL realized value instead of correcting it. Stay unresolved until
+    // every job for this position has confirmed, priced output.
+    if (job.status !== "confirmed") return null;
+    if (job.output_usd === null || !Number.isFinite(job.output_usd)) return null;
     output += job.output_usd;
     cost += job.execution_cost_usd ?? 0;
     priced = true;
